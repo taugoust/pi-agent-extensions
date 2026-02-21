@@ -6,9 +6,8 @@
  *
  * - Write: stages the new file in /tmp, shows content for review.
  * - Edit: stages old/new files in /tmp, shows inline diff for review.
- * - Diffs are rendered with delta (if available) for enhanced syntax highlighting.
  * - Ctrl+E opens the new file in $VISUAL/$EDITOR for editing (edit operations).
- * - Ctrl+O opens the diff in an external viewer (delta/vim/diff).
+ * - Ctrl+O opens the diff in an external viewer (nvim/vim/diff).
  * - After editing, the diff is regenerated and shown again for approval.
  * - Toggle with /slow-mode command.
  * - Status bar shows "slow ■" when active.
@@ -23,7 +22,7 @@
  */
 
 import { mkdirSync, mkdtempSync, writeFileSync, unlinkSync, rmSync, readFileSync } from "node:fs";
-import { execFileSync, execSync } from "node:child_process";
+import { execFileSync } from "node:child_process";
 import { tmpdir } from "node:os";
 import { dirname, basename, join, resolve, relative, extname } from "node:path";
 import type {
@@ -278,13 +277,10 @@ export default function slowMode(pi: ExtensionAPI) {
       const currentOldText = readFileSync(oldPath, "utf-8");
       const currentNewText = readFileSync(newPath, "utf-8");
       const diff = generateUnifiedDiff(relPath, currentOldText, currentNewText);
-      
-      // Render diff through delta if available
-      const renderedDiff = renderWithDelta(diff);
 
       const decision = await showEditReview(ctx, {
         filePath: relPath,
-        body: renderedDiff,
+        body: diff,
         oldPath,
         newPath,
       });
@@ -356,7 +352,7 @@ export default function slowMode(pi: ExtensionAPI) {
    * Displays the proposed change with scrollable preview and key bindings:
    * - Enter: approve change
    * - Esc: reject change
-   * - Ctrl+O: open in external viewer/editor (delta/vim/diff for edits, $EDITOR for writes)
+   * - Ctrl+O: open in external viewer/editor (nvim/vim/diff for edits, $EDITOR for writes)
    * - k/↑: scroll up one line
    * - j/↓: scroll down one line
    * - u/PgUp: scroll up half page (15 lines)
@@ -410,7 +406,7 @@ export default function slowMode(pi: ExtensionAPI) {
 
       /**
        * Open staged files in external viewer/editor
-       * For edits: opens delta/vim diff
+       * For edits: opens nvim/vim diff
        * For writes: opens file in $VISUAL/$EDITOR
        * 
        * If allowEdit is true, reloads content after editing.
@@ -556,15 +552,9 @@ export default function slowMode(pi: ExtensionAPI) {
           scrollOffset + maxVisible,
         );
         
-        // Check if the diff contains ANSI escape codes (from delta)
-        const hasAnsiCodes = opts.operation === "EDIT" && /\x1b\[[0-9;]*m/.test(opts.body);
-        
         for (const line of visible) {
-          if (opts.operation === "EDIT" && hasAnsiCodes) {
-            // Delta has already colorized the diff, preserve ANSI codes
-            add(` ${line}`);
-          } else if (opts.operation === "EDIT") {
-            // Fallback: Manual syntax highlighting for unified diff format
+          if (opts.operation === "EDIT") {
+            // Manual syntax highlighting for unified diff format
             if (line.startsWith("---") || line.startsWith("+++")) {
               // File headers — dim
               add(` ${theme.fg("dim", line)}`);
@@ -648,7 +638,7 @@ export default function slowMode(pi: ExtensionAPI) {
    * - Enter: approve
    * - Esc: reject
    * - Ctrl+E: edit the new file in $VISUAL/$EDITOR
-   * - Ctrl+O: view diff in external viewer (delta/vim/diff)
+   * - Ctrl+O: view diff in external viewer (nvim/vim/diff)
    * - j/k/u/d/gg/G: scroll
    */
   async function showEditReview(
@@ -762,26 +752,18 @@ export default function slowMode(pi: ExtensionAPI) {
         // Scrollable diff window with syntax highlighting
         const visible = bodyLines.slice(scrollOffset, scrollOffset + maxVisible);
         
-        // Check if the diff contains ANSI escape codes (from delta)
-        const hasAnsiCodes = /\x1b\[[0-9;]*m/.test(opts.body);
-        
         for (const line of visible) {
-          if (hasAnsiCodes) {
-            // Delta has already colorized the diff, preserve ANSI codes
-            add(` ${line}`);
+          // Manual syntax highlighting for unified diff format
+          if (line.startsWith("---") || line.startsWith("+++")) {
+            add(` ${theme.fg("dim", line)}`);
+          } else if (line.startsWith("@@")) {
+            add(` ${theme.fg("accent", line)}`);
+          } else if (line.startsWith("+")) {
+            add(` ${theme.fg("success", line)}`);
+          } else if (line.startsWith("-")) {
+            add(` ${theme.fg("error", line)}`);
           } else {
-            // Fallback: Manual syntax highlighting for unified diff format
-            if (line.startsWith("---") || line.startsWith("+++")) {
-              add(` ${theme.fg("dim", line)}`);
-            } else if (line.startsWith("@@")) {
-              add(` ${theme.fg("accent", line)}`);
-            } else if (line.startsWith("+")) {
-              add(` ${theme.fg("success", line)}`);
-            } else if (line.startsWith("-")) {
-              add(` ${theme.fg("error", line)}`);
-            } else {
-              add(` ${theme.fg("text", line)}`);
-            }
+            add(` ${theme.fg("text", line)}`);
           }
         }
 
@@ -819,10 +801,9 @@ export default function slowMode(pi: ExtensionAPI) {
    * Open old/new files in an external diff viewer
    *
    * Discovery order:
-   * 1. delta (best terminal diff experience)
-   * 2. nvim -d (if nvim available)
-   * 3. vim -d (if vim available)
-   * 4. diff (fallback to plain diff)
+   * 1. nvim -d (if nvim available)
+   * 2. vim -d (if vim available)
+   * 3. diff (fallback to plain diff)
    *
    * If no diff tool found, falls back to opening just the new file.
    *
@@ -842,38 +823,7 @@ export default function slowMode(pi: ExtensionAPI) {
     const { cmd, args } = diffTool;
 
     // Configure tool-specific arguments
-    if (cmd === "delta") {
-      // delta: use diff and pipe to delta for proper syntax highlighting
-      // Generate diff with original filename so delta can detect file type
-      try {
-        const diff = execFileSync("diff", ["-u", oldPath, newPath], {
-          encoding: "utf-8",
-          stdio: ["pipe", "pipe", "pipe"],
-        });
-        // diff returns empty if files are identical (shouldn't happen, but handle it)
-        execFileSync(cmd, ["--paging", "always", "--side-by-side"], {
-          input: diff,
-          stdio: ["pipe", "inherit", "inherit"],
-        });
-      } catch (e: any) {
-        // diff exits with 1 when files differ, which is expected
-        if (e.stdout) {
-          // Replace temp paths with original filename in diff headers for syntax detection
-          let diff = e.stdout as string;
-          diff = diff.replace(/^--- .*$/m, `--- a/${label}`);
-          diff = diff.replace(/^\+\+\+ .*$/m, `+++ b/${label}`);
-          
-          execFileSync(cmd, ["--paging", "always", "--side-by-side"], {
-            input: diff,
-            stdio: ["pipe", "inherit", "inherit"],
-          });
-        } else {
-          // Fallback to direct file comparison
-          args.push("--paging", "always", "--side-by-side", oldPath, newPath);
-          execFileSync(cmd, args, { stdio: "inherit" });
-        }
-      }
-    } else if (cmd === "nvim" || cmd === "vim") {
+    if (cmd === "nvim" || cmd === "vim") {
       // vim/nvim: open in diff mode
       args.push("-d", oldPath, newPath);
       execFileSync(cmd, args, { stdio: "inherit" });
@@ -900,8 +850,7 @@ export default function slowMode(pi: ExtensionAPI) {
    * @returns { cmd, args } if found, null otherwise
    */
   function findDiffTool(): { cmd: string; args: string[] } | null {
-    // Prefer delta for nice terminal diff, then vimdiff, then plain diff
-    const candidates = ["delta", "nvim", "vim", "diff"];
+    const candidates = ["nvim", "vim", "diff"];
 
     for (const cmd of candidates) {
       try {
@@ -917,68 +866,6 @@ export default function slowMode(pi: ExtensionAPI) {
     // No diff tool found
     return null;
   }
-
-  ////----------------------------------------
-  ///     Delta diff rendering
-  //------------------------------------------
-  // Cache delta availability check
-  let deltaAvailable: boolean | null = null;
-
-  /**
-   * Check if delta is available on the system.
-   * Result is cached to avoid repeated process spawns.
-   */
-  function hasDelta(): boolean {
-    if (deltaAvailable !== null) {
-      return deltaAvailable;
-    }
-    try {
-      execSync("delta --version", { stdio: "pipe" });
-      deltaAvailable = true;
-      return true;
-    } catch {
-      deltaAvailable = false;
-      return false;
-    }
-  }
-
-  /**
-   * Render a unified diff with delta syntax highlighting.
-   * 
-   * Pipes the diff through `delta --color-only` to produce ANSI-colored output.
-   * Falls back to the original diff if delta is unavailable or fails.
-   *
-   * @param unifiedDiff - Standard unified diff string
-   * @returns ANSI-colored diff if delta is available, otherwise the original diff
-   */
-  function renderWithDelta(unifiedDiff: string): string {
-    if (!hasDelta()) {
-      return unifiedDiff;
-    }
-
-    const tmp = mkdtempSync(join(tmpdir(), "pi-slowmode-delta-"));
-    const tmpFile = join(tmp, "diff.patch");
-    try {
-      writeFileSync(tmpFile, unifiedDiff, "utf-8");
-      const result = execSync(`delta --no-gitconfig --color-only < "${tmpFile}"`, {
-        encoding: "utf-8",
-        stdio: ["pipe", "pipe", "pipe"],
-        timeout: 5000,
-      });
-      return result;
-    } catch {
-      // Delta failed, return original diff
-      return unifiedDiff;
-    } finally {
-      try {
-        unlinkSync(tmpFile);
-        rmSync(tmp, { recursive: true });
-      } catch {
-        // ignore cleanup errors
-      }
-    }
-  }
-
 
   ////----------------------------------------
   ///     Diff generation (Myers algorithm)
