@@ -393,8 +393,8 @@ direnv ✗
 - *License*: MIT
 - *Origin*: Based on [[https://github.com/badlogic/pi-mono/tree/main/packages/coding-agent/examples/extensions/sandbox][badlogic/pi-mono]]
 - *Type*: Extension (replaces bash tool with sandboxed variant)
-- *Toggle*: =--no-sandbox= flag to disable; configure =enabled: false= in config
-- *Command*: =/sandbox= to show current configuration
+- *Toggle*: =--no-sandbox= flag to disable; configure =enabled: false= in config; =/sandbox-control= to toggle within a session
+- *Command*: =/sandbox= to show current configuration; =/sandbox-control= to enable/disable
 - *Status bar*: =🔒 Sandbox: N domains, N write paths= (when active)
 - *Dependencies*: =@anthropic-ai/sandbox-runtime= (installed automatically at activation)
 - *Platform*: macOS and Linux only (sandbox-exec / bubblewrap)
