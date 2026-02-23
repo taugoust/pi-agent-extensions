@@ -4,12 +4,27 @@
  * Normal mode keybindings:
  *   Navigation:  h j k l   w e b   0 ^ $
  *   Insert:      i a I A   C s
- *   Editing:     x X   D   d(d|w|b)   p u
+ *   Editing:     x X   D   p u
+ *   Operators:   d(d|w|e|b|h|l|0|^|$)   c(c|w|e|b|h|l|0|^|$)
  *   Escape:      insert → normal, normal → abort agent
  */
 
 import { CustomEditor, type ExtensionAPI } from "@mariozechner/pi-coding-agent";
 import { matchesKey, truncateToWidth, visibleWidth } from "@mariozechner/pi-tui";
+
+// Sequences emitted by each delete motion (operator d or c)
+const DELETE_MOTION: Record<string, string[]> = {
+	d: ["\x01", "\x0b"],  // dd / cc — line start then delete to end
+	c: ["\x01", "\x0b"],  // alias
+	w: ["\x1bd"],         // alt+d: delete word forward
+	e: ["\x1bd"],         // same
+	b: ["\x1b\x7f"],      // alt+backspace: delete word backward
+	$: ["\x0b"],          // ctrl+k: delete to line end
+	"0": ["\x15"],        // ctrl+u: delete to line start
+	"^": ["\x15"],        // same
+	h: ["\x7f"],          // backspace: delete char backward
+	l: ["\x1b[3~"],       // delete char forward
+};
 
 class ModalEditor extends CustomEditor {
 	private mode: "normal" | "insert" = "insert";
@@ -36,28 +51,23 @@ class ModalEditor extends CustomEditor {
 
 		// --- Normal mode ---
 
-		// Resolve pending 'd' operator + motion
-		if (this.pendingOp === "d") {
+		// Resolve pending operator (d / c) + motion
+		if (this.pendingOp === "d" || this.pendingOp === "c") {
+			const op = this.pendingOp;
 			this.pendingOp = null;
-			switch (data) {
-				case "d": // dd — delete whole line
-					super.handleInput("\x01");     // ctrl+a: line start
-					super.handleInput("\x0b");     // ctrl+k: delete to line end
-					break;
-				case "w": // dw — delete word forward
-					super.handleInput("\x1bd");    // alt+d: delete word forward
-					break;
-				case "b": // db — delete word backward
-					super.handleInput("\x1b\x7f"); // alt+backspace: delete word backward
-					break;
-				// unknown motion: silently cancel
+			// Normalise: dd → "d", cc → "d" (same motion key)
+			const motionKey = data === op ? "d" : data;
+			const seqs = DELETE_MOTION[motionKey];
+			if (seqs) {
+				for (const s of seqs) super.handleInput(s);
+				if (op === "c") this.mode = "insert";
 			}
 			return;
 		}
 
-		// Operator that waits for a motion
-		if (data === "d") {
-			this.pendingOp = "d";
+		// Operators that wait for a motion
+		if (data === "d" || data === "c") {
+			this.pendingOp = data;
 			return;
 		}
 
