@@ -315,4 +315,36 @@ export default function (pi: ExtensionAPI) {
 			ctx.ui.notify(lines.join("\n"), "info");
 		},
 	});
+
+	pi.registerCommand("sandbox-control", {
+		description: "Toggle sandbox on/off for the current session",
+		handler: async (_args, ctx) => {
+			if (sandboxEnabled) {
+				// Disable: bash falls back to localBash (unconfined)
+				sandboxEnabled = false;
+				ctx.ui.setStatus("sandbox", ctx.ui.theme.fg("warning", "🔓 Sandbox: disabled"));
+				ctx.ui.notify("Sandbox disabled for this session — bash commands are now unconfined", "warning");
+			} else {
+				// Re-enable: only possible if SandboxManager was successfully initialized
+				if (!sandboxInitialized) {
+					ctx.ui.notify(
+						"Sandbox cannot be re-enabled — it was never successfully initialized this session " +
+						"(check --no-sandbox flag, config enabled:false, or initialization error)",
+						"error",
+					);
+					return;
+				}
+
+				sandboxEnabled = true;
+				const config = loadConfig(ctx.cwd);
+				const networkCount = config.network?.allowedDomains?.length ?? 0;
+				const writeCount = config.filesystem?.allowWrite?.length ?? 0;
+				ctx.ui.setStatus(
+					"sandbox",
+					ctx.ui.theme.fg("accent", `🔒 Sandbox: ${networkCount} domains, ${writeCount} write paths`),
+				);
+				ctx.ui.notify("Sandbox re-enabled", "info");
+			}
+		},
+	});
 }
