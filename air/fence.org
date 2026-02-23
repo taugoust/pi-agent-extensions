@@ -1,0 +1,75 @@
+#+title: Fence
+#+state: draft
+#+FILETAGS: :extension:feature:
+
+* Summary
+
+A pi extension that blocks ~write~ and ~edit~ tool calls targeting paths outside
+the current working directory. Complements the sandbox extension, which already
+restricts bash commands to ~cwd~ at the OS level, by closing the same gap for
+pi's native file tools.
+
+* Motivation
+
+The sandbox extension uses ~sandbox-exec~ (macOS) or bubblewrap (Linux) to
+confine bash to the session ~cwd~. However, pi's ~write~ and ~edit~ tools bypass
+bash entirely — the LLM can supply an absolute path and write anywhere on the
+filesystem without any restriction. Fence closes that gap.
+
+** Goals
+- Intercept ~write~ and ~edit~ tool calls.
+- Resolve the target path (absolute or relative) against ~ctx.cwd~.
+- Block any call whose resolved path falls outside ~ctx.cwd~.
+- Return a clear reason to the LLM so it understands the constraint.
+- Toggle on/off via a ~/fence~ command.
+- Show status bar indicator when active.
+
+** Non-Goals
+- Restricting bash commands (covered by sandbox).
+- Read restrictions (only writes are dangerous for cross-repo contamination).
+- Allowlist configuration per-project (keep it simple; if needed, use sandbox
+  config instead).
+
+* Proposal
+
+** Interception Mechanism
+
+Use the ~tool_call~ event. For both ~write~ and ~edit~, extract the ~path~
+parameter, resolve it to an absolute path, and check whether it is prefixed by
+~ctx.cwd~. If not, return:
+
+#+begin_src typescript
+{ block: true, reason: `Path is outside the working directory (${ctx.cwd}): ${resolved}` }
+#+end_src
+
+Otherwise return ~undefined~ to let the call proceed normally.
+
+** Path Resolution
+
+- If path is absolute: use as-is.
+- If path is relative: resolve against ~ctx.cwd~ (not ~process.cwd()~, which may
+  differ).
+- Normalise both paths (~path.resolve~, ~path.normalize~) before the prefix
+  check to handle ~..~ traversal attempts.
+
+** Toggle Command
+
+Register ~/fence~ command that toggles a boolean ~enabled~ flag, mirrors the
+pattern from slow-mode and permission-gate.
+
+** Status Bar
+
+Show ~fence ■~ (warning colour) when active. Clear when disabled.
+
+** Interaction with Other Extensions
+
+Fence and slow-mode are independent hooks on ~tool_call~ — both can be active
+simultaneously. Fence blocks silently (no UI needed); slow-mode shows a review
+gate for allowed writes. A write inside ~cwd~ passes fence, then optionally hits
+slow-mode for review.
+
+| Layer         | Tool       | Mechanism      |
+|---------------+------------+----------------|
+| fence         | write/edit | path check     |
+| slow-mode     | write/edit | user review    |
+| sandbox       | bash       | OS-level (cwd) |

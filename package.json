@@ -28,6 +28,7 @@
   "pi": {
     "extensions": [
       "direnv",
+      "fence",
       "fetch",
       "questionnaire", 
       "slow-mode",

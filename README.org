@@ -171,6 +171,34 @@ For writes (or if no external viewer), shows inline TUI diff:
 #+html:</details>
 
 #+html:<details>
+#+html:<summary><strong>fence</strong> - Block <code>write</code> and <code>edit</code> outside the working directory</summary>
+#+html:<br>
+
+- *Source*: [[https://github.com/rytswd/pi-agent-extensions/tree/main/fence][fence/]]
+- *License*: MIT
+- *Toggle*: =/fence=
+- *Status bar*: =fence ■= (when active)
+- *Dependencies*: none
+
+*Description*: Intercepts =write= and =edit= tool calls and blocks any that target a path outside the current working directory. Complements the =sandbox= extension, which restricts bash at the OS level, by closing the same gap for pi's native file tools.
+
+*How it works*:
+- Resolves the target path (absolute or relative) against =ctx.cwd=
+- Normalises both paths to prevent =..= traversal
+- Returns a clear block reason to the LLM when a path is outside =cwd=
+- No-op for all other tool calls (e.g., bash)
+
+*What it looks like* when a write is blocked:
+
+#+begin_example
+[tool blocked] Path is outside the working directory (/home/user/my-project):
+/etc/passwd. Only paths inside /home/user/my-project are allowed while
+fence is active.
+#+end_example
+
+#+html:</details>
+
+#+html:<details>
 #+html:<summary><strong>questionnaire</strong> - Interactive multi-question tool with tab navigation</summary>
 #+html:<br>
 
@@ -491,6 +519,8 @@ pi
 #+begin_example
 ~/.pi/agent/extensions/
 ├── direnv/             # Direnv integration
+│   └── index.ts
+├── fence/              # Block write/edit outside cwd
 │   └── index.ts
 ├── fetch/              # HTTP request tool
 │   └── index.ts
