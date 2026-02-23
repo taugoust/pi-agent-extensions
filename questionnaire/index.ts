@@ -149,6 +149,9 @@ export default function questionnaire(pi: ExtensionAPI) {
           }
 
           function submit(cancelled: boolean) {
+            if (cancelled) {
+              ctx.abort();
+            }
             done({
               questions,
               answers: Array.from(answers.values()),
@@ -265,13 +268,13 @@ export default function questionnaire(pi: ExtensionAPI) {
               return;
             }
 
-            // Option navigation
-            if (matchesKey(data, Key.up)) {
+            // Option navigation (arrow keys or vi-style j/k)
+            if (matchesKey(data, Key.up) || data === "k") {
               optionIndex = Math.max(0, optionIndex - 1);
               refresh();
               return;
             }
-            if (matchesKey(data, Key.down)) {
+            if (matchesKey(data, Key.down) || data === "j") {
               optionIndex = Math.min(opts.length - 1, optionIndex + 1);
               refresh();
               return;
@@ -402,8 +405,8 @@ export default function questionnaire(pi: ExtensionAPI) {
             lines.push("");
             if (!inputMode) {
               const help = isMulti
-                ? " Tab/←→ navigate • ↑↓ select • Enter confirm • Esc cancel"
-                : " ↑↓ navigate • Enter select • Esc cancel";
+                ? " Tab/←→ navigate • ↑↓/jk select • Enter confirm • Esc cancel"
+                : " ↑↓/jk navigate • Enter select • Esc cancel";
               add(theme.fg("dim", help));
             }
             add(theme.fg("accent", "─".repeat(width)));
