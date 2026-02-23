@@ -180,20 +180,27 @@ For writes (or if no external viewer), shows inline TUI diff:
 - *Status bar*: =fence ■= (when active)
 - *Dependencies*: none
 
-*Description*: Intercepts =write= and =edit= tool calls and blocks any that target a path outside the current working directory. Complements the =sandbox= extension, which restricts bash at the OS level, by closing the same gap for pi's native file tools.
+*Description*: Intercepts =write= and =edit= tool calls that target a path outside the current working directory and prompts the user to allow or block them. Complements the =sandbox= extension, which restricts bash at the OS level, by closing the same gap for pi's native file tools.
 
 *How it works*:
 - Resolves the target path (absolute or relative) against =ctx.cwd=
 - Normalises both paths to prevent =..= traversal
-- Returns a clear block reason to the LLM when a path is outside =cwd=
+- Prompts for confirmation when a path is outside =cwd=
+- Hard-blocks in headless mode (no UI available)
 - No-op for all other tool calls (e.g., bash)
 
-*What it looks like* when a write is blocked:
+*What it looks like* when a write outside cwd is intercepted:
 
 #+begin_example
-[tool blocked] Path is outside the working directory (/home/user/my-project):
-/etc/passwd. Only paths inside /home/user/my-project are allowed while
-fence is active.
+⚠️  Write outside working directory:
+
+  /home/user/nix-config/home/programs/pi/default.nix
+
+  (cwd: /home/user/pi-agent-extensions)
+
+Allow?
+  > Yes
+    No
 #+end_example
 
 #+html:</details>
