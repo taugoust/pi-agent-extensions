@@ -4,7 +4,8 @@
   "description": "A collection of pi coding agent extensions",
   "type": "module",
   "workspaces": [
-    "fetch"
+    "fetch",
+    "sandbox"
   ],
   "keywords": ["pi-package"],
   "author": "rytswd",

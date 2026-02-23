@@ -351,6 +351,50 @@ direnv ✗
 #+html:</details>
 
 #+html:<details>
+#+html:<summary><strong>sandbox</strong> - OS-level sandboxing for bash commands</summary>
+#+html:<br>
+
+- *Source*: [[https://github.com/rytswd/pi-agent-extensions/tree/main/sandbox][sandbox/]]
+- *License*: MIT
+- *Origin*: Based on [[https://github.com/badlogic/pi-mono/tree/main/packages/coding-agent/examples/extensions/sandbox][badlogic/pi-mono]]
+- *Type*: Extension (replaces bash tool with sandboxed variant)
+- *Toggle*: =--no-sandbox= flag to disable; configure =enabled: false= in config
+- *Command*: =/sandbox= to show current configuration
+- *Status bar*: =🔒 Sandbox: N domains, N write paths= (when active)
+- *Dependencies*: =@anthropic-ai/sandbox-runtime= (installed automatically at activation)
+- *Platform*: macOS and Linux only (sandbox-exec / bubblewrap)
+
+*Description*: Wraps bash commands with OS-level sandboxing via =@anthropic-ai/sandbox-runtime=, enforcing filesystem and network restrictions. On macOS it uses =sandbox-exec=; on Linux it uses =bubblewrap= (requires =bubblewrap=, =socat=, =ripgrep=).
+
+*Configuration* — merge of =~/.pi/agent/sandbox.json= (global) and =<cwd>/.pi/sandbox.json= (project-local):
+
+#+begin_src json
+{
+  "enabled": true,
+  "network": {
+    "allowedDomains": ["github.com", "*.github.com"],
+    "deniedDomains": []
+  },
+  "filesystem": {
+    "denyRead": ["~/.ssh", "~/.aws"],
+    "allowWrite": [".", "/tmp"],
+    "denyWrite": [".env"]
+  }
+}
+#+end_src
+
+*Default allowed domains*: =npmjs.org=, =registry.npmjs.org=, =pypi.org=, =github.com= (and common subdomains).
+
+*Features*:
+- Filesystem read/write restrictions
+- Network domain allow/deny lists
+- Per-project overrides via =.pi/sandbox.json=
+- Passes through to unconfined bash when sandbox is disabled
+- =user_bash= hook sandboxes REPL commands too
+
+#+html:</details>
+
+#+html:<details>
 #+html:<summary><strong>@marckrenn/pi-sub-core</strong> - Status bar core implementation</summary>
 #+html:<br>
 
@@ -452,6 +496,10 @@ pi
 │   └── index.ts
 ├── questionnaire/      # Multi-question tool
 │   └── index.ts
+├── sandbox/            # OS-level bash sandboxing
+│   ├── index.ts
+│   ├── package.json    # Dependencies (@anthropic-ai/sandbox-runtime)
+│   └── node_modules/   # npm packages (gitignored, installed by home-manager activation)
 ├── slow-mode/          # Review gate for write/edit
 │   ├── index.ts
 │   ├── package.json    # Dependencies (diff package)
