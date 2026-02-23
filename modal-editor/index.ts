@@ -4,15 +4,15 @@
  * Normal mode keybindings:
  *   Navigation:  h j k l   w e b   0 ^ $
  *   Insert:      i a I A   C s
- *   Editing:     x X   D   p u
- *   Operators:   d(d|w|e|b|h|l|0|^|$)   c(c|w|e|b|h|l|0|^|$)
+ *   Editing:     x X   D   p P   u
+ *   Operators:   d(d|w|e|b|h|l|0|^|$)   c(c|w|e|b|h|l|0|^|$)   y(y|w|e|b|h|l|0|^|$)   Y
  *   Escape:      insert → normal, normal → abort agent
  */
 
 import { CustomEditor, type ExtensionAPI } from "@mariozechner/pi-coding-agent";
 import { matchesKey, truncateToWidth, visibleWidth } from "@mariozechner/pi-tui";
 
-// Sequences emitted by each delete motion (operator d or c)
+// Sequences emitted by each delete motion (operators d and c)
 const DELETE_MOTION: Record<string, string[]> = {
 	d: ["\x01", "\x0b"],  // dd / cc — line start then delete to end
 	c: ["\x01", "\x0b"],  // alias
@@ -25,6 +25,12 @@ const DELETE_MOTION: Record<string, string[]> = {
 	h: ["\x7f"],          // backspace: delete char backward
 	l: ["\x1b[3~"],       // delete char forward
 };
+
+// Yank = phantom delete (loads kill ring) + immediate paste back (restores text)
+// After yy/yw/y$/… the kill ring holds the yanked text; p/P paste it.
+const YANK_MOTION: Record<string, string[]> = Object.fromEntries(
+	Object.entries(DELETE_MOTION).map(([k, seqs]) => [k, [...seqs, "\x19"]])
+);
 
 class ModalEditor extends CustomEditor {
 	private mode: "normal" | "insert" = "insert";
@@ -51,13 +57,14 @@ class ModalEditor extends CustomEditor {
 
 		// --- Normal mode ---
 
-		// Resolve pending operator (d / c) + motion
-		if (this.pendingOp === "d" || this.pendingOp === "c") {
+		// Resolve pending operator (d / c / y) + motion
+		if (this.pendingOp === "d" || this.pendingOp === "c" || this.pendingOp === "y") {
 			const op = this.pendingOp;
 			this.pendingOp = null;
-			// Normalise: dd → "d", cc → "d" (same motion key)
+			// Normalise: dd → "d", cc → "d", yy → "d" (same motion key)
 			const motionKey = data === op ? "d" : data;
-			const seqs = DELETE_MOTION[motionKey];
+			const table = op === "y" ? YANK_MOTION : DELETE_MOTION;
+			const seqs = table[motionKey];
 			if (seqs) {
 				for (const s of seqs) super.handleInput(s);
 				if (op === "c") this.mode = "insert";
@@ -66,7 +73,7 @@ class ModalEditor extends CustomEditor {
 		}
 
 		// Operators that wait for a motion
-		if (data === "d" || data === "c") {
+		if (data === "d" || data === "c" || data === "y") {
 			this.pendingOp = data;
 			return;
 		}
@@ -96,6 +103,9 @@ class ModalEditor extends CustomEditor {
 				super.handleInput("\x1b[3~"); // delete char forward
 				this.mode = "insert";
 				return;
+			case "Y": // yank whole line (shortcut for yy)
+				for (const s of YANK_MOTION["d"]!) super.handleInput(s);
+				return;
 		}
 
 		// Simple motion / edit mappings
@@ -116,7 +126,8 @@ class ModalEditor extends CustomEditor {
 			x:   "\x1b[3~",  // delete char forward
 			X:   "\x7f",     // delete char backward (backspace)
 			D:   "\x0b",     // delete to line end   (ctrl+k)
-			p:   "\x19",     // paste / yank         (ctrl+y)
+			p:   "\x19",     // paste after cursor   (ctrl+y)
+			P:   "\x19",     // paste before cursor  (ctrl+y — same in line editor)
 			u:   "\x1f",     // undo                 (ctrl+-)
 		};
 
