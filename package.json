@@ -30,6 +30,7 @@
       "direnv",
       "fence",
       "fetch",
+      "modal-editor",
       "questionnaire", 
       "slow-mode",
       "node_modules/@marckrenn/pi-sub-core",

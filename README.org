@@ -206,6 +206,43 @@ Allow?
 #+html:</details>
 
 #+html:<details>
+#+html:<summary><strong>modal-editor</strong> - Vim-style modal input editor</summary>
+#+html:<br>
+
+- *Source*: [[https://github.com/rytswd/pi-agent-extensions/tree/main/modal-editor][modal-editor/]]
+- *License*: MIT
+- *Origin*: Based on [[https://github.com/badlogic/pi-mono/tree/main/packages/coding-agent/examples/extensions/modal-editor.ts][badlogic/pi-mono]]
+
+*Description*: Replaces the default pi input editor with a vim-style modal editor. Adds an =INSERT= / =NORMAL= mode indicator to the bottom border of the editor.
+
+*Modes and key bindings*:
+| Key      | From    | Action                      |
+|----------+---------+-----------------------------|
+| =Escape= | insert  | Switch to normal mode       |
+| =i=      | normal  | Switch to insert mode       |
+| =a=      | normal  | Append (insert + move right)|
+| =h=      | normal  | Move left                   |
+| =j=      | normal  | Move down                   |
+| =k=      | normal  | Move up                     |
+| =l=      | normal  | Move right                  |
+| =0=      | normal  | Jump to line start          |
+| =$=      | normal  | Jump to line end            |
+| =x=      | normal  | Delete character            |
+| =Escape= | normal  | Abort agent (default pi)    |
+
+*What it looks like*:
+
+#+begin_example
+────────────────────────────────────────────────────────────────
+> hello world█
+
+                                                       NORMAL
+────────────────────────────────────────────────────────────────
+#+end_example
+
+#+html:</details>
+
+#+html:<details>
 #+html:<summary><strong>questionnaire</strong> - Interactive multi-question tool with tab navigation</summary>
 #+html:<br>
 
@@ -530,6 +567,8 @@ pi
 ├── fence/              # Block write/edit outside cwd
 │   └── index.ts
 ├── fetch/              # HTTP request tool
+│   └── index.ts
+├── modal-editor/       # Vim-style modal input editor
 │   └── index.ts
 ├── questionnaire/      # Multi-question tool
 │   └── index.ts
