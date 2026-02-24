@@ -8,13 +8,139 @@
  *   Operators:   d(d|w|e|b|h|l|0|^|$|f{c}|t{c}|F{c}|T{c})
  *                c(c|w|e|b|h|l|0|^|$|f{c}|t{c}|F{c}|T{c})
  *                y(y|w|e|b|h|l|0|^|$)   Y
+ *   Visual:      v → select with motions → d/c/x/y
  *   Escape:      insert → normal, normal → abort agent
  */
 
 import { CustomEditor, type ExtensionAPI } from "@mariozechner/pi-coding-agent";
 import { matchesKey, truncateToWidth, visibleWidth } from "@mariozechner/pi-tui";
 
-// Sequences emitted by each delete motion (operators d and c)
+// ---------------------------------------------------------------------------
+// Word-wrap helper (mirrors Editor's internal wordWrapLine, inlined for
+// independence from private API)
+// ---------------------------------------------------------------------------
+
+const _segmenter = new Intl.Segmenter();
+
+interface TextChunk {
+	text: string;
+	startIndex: number; // inclusive, byte index into the logical line
+	endIndex: number;   // exclusive
+}
+
+function computeWordWrap(line: string, maxWidth: number): TextChunk[] {
+	if (!line || maxWidth <= 0) return [{ text: "", startIndex: 0, endIndex: 0 }];
+	if (visibleWidth(line) <= maxWidth) return [{ text: line, startIndex: 0, endIndex: line.length }];
+
+	const chunks: TextChunk[] = [];
+	const segments = [..._segmenter.segment(line)];
+	let currentWidth = 0;
+	let chunkStart = 0;
+	let wrapOppIndex = -1;
+	let wrapOppWidth = 0;
+
+	for (let i = 0; i < segments.length; i++) {
+		const seg = segments[i]!;
+		const grapheme = seg.segment;
+		const gWidth = visibleWidth(grapheme);
+		const charIndex = seg.index;
+		const isWs = /\s/.test(grapheme);
+
+		if (currentWidth + gWidth > maxWidth) {
+			if (wrapOppIndex >= 0) {
+				chunks.push({ text: line.slice(chunkStart, wrapOppIndex), startIndex: chunkStart, endIndex: wrapOppIndex });
+				chunkStart = wrapOppIndex;
+				currentWidth -= wrapOppWidth;
+			} else if (chunkStart < charIndex) {
+				chunks.push({ text: line.slice(chunkStart, charIndex), startIndex: chunkStart, endIndex: charIndex });
+				chunkStart = charIndex;
+				currentWidth = 0;
+			}
+			wrapOppIndex = -1;
+		}
+
+		currentWidth += gWidth;
+		const next = segments[i + 1];
+		if (isWs && next && !/\s/.test(next.segment)) {
+			wrapOppIndex = next.index;
+			wrapOppWidth = currentWidth;
+		}
+	}
+
+	chunks.push({ text: line.slice(chunkStart), startIndex: chunkStart, endIndex: line.length });
+	return chunks;
+}
+
+// ---------------------------------------------------------------------------
+// Selection highlight renderer
+//
+// Inserts ANSI reverse-video (SGR 7 / SGR 27) around the visible column range
+// [startCol, endCol) in an already-rendered line (which may contain ANSI codes
+// and the CURSOR_MARKER).  Re-applies the highlight after any SGR reset so
+// that the cursor's own \x1b[7m…\x1b[0m doesn't prematurely close it.
+// ---------------------------------------------------------------------------
+
+function applyHighlight(line: string, startCol: number, endCol: number): string {
+	if (startCol >= endCol) return line;
+
+	const chars = [...line]; // iterate by Unicode code-point
+	let result = "";
+	let visCol = 0;
+	let inHL = false;
+	let i = 0;
+
+	const startHL = (): void => { result += "\x1b[7m"; inHL = true; };
+	const endHL   = (): void => { result += "\x1b[27m"; inHL = false; };
+
+	while (i < chars.length) {
+		// Toggle highlight at column boundaries
+		if (!inHL && visCol >= startCol && visCol < endCol) startHL();
+		if (inHL  && visCol >= endCol)                      endHL();
+
+		// ── ANSI escape sequence ──────────────────────────────────────────
+		if (chars[i] === "\x1b") {
+			let seq = chars[i]!;
+			i++;
+
+			if (i < chars.length && chars[i] === "[") {
+				// CSI sequence  (e.g. \x1b[0m, \x1b[7m, \x1b[C …)
+				seq += chars[i]!; i++;
+				while (i < chars.length && !/[A-Za-z]/.test(chars[i]!)) { seq += chars[i]!; i++; }
+				if (i < chars.length) { seq += chars[i]!; i++; }
+
+				// After a full SGR reset, re-open the highlight if we're still in range
+				if (seq === "\x1b[0m" && inHL) {
+					result += seq + "\x1b[7m"; // reset → keep highlight
+				} else {
+					result += seq;
+				}
+			} else if (i < chars.length && chars[i] === "_") {
+				// APC sequence – used for CURSOR_MARKER (\x1b_pi:c\x07)
+				seq += chars[i]!; i++;
+				while (i < chars.length && chars[i] !== "\x07") { seq += chars[i]!; i++; }
+				if (i < chars.length) { seq += chars[i]!; i++; }
+				result += seq;
+			} else {
+				result += seq;
+			}
+			continue;
+		}
+
+		// ── Visible character ─────────────────────────────────────────────
+		const ch = chars[i]!;
+		result += ch;
+		visCol += visibleWidth(ch);
+		i++;
+	}
+
+	if (inHL) endHL();
+	return result;
+}
+
+// ---------------------------------------------------------------------------
+// Delete / yank motion tables (used by normal-mode operators)
+// ---------------------------------------------------------------------------
+
 const DELETE_MOTION: Record<string, string[]> = {
 	d: ["\x01", "\x0b"],  // dd / cc — line start then delete to end
 	c: ["\x01", "\x0b"],  // alias
@@ -29,16 +155,108 @@ const DELETE_MOTION: Record<string, string[]> = {
 };
 
 // Yank = phantom delete (loads kill ring) + immediate paste back (restores text)
-// After yy/yw/y$/… the kill ring holds the yanked text; p/P paste it.
 const YANK_MOTION: Record<string, string[]> = Object.fromEntries(
 	Object.entries(DELETE_MOTION).map(([k, seqs]) => [k, [...seqs, "\x19"]])
 );
 
+// ---------------------------------------------------------------------------
+// ModalEditor
+// ---------------------------------------------------------------------------
+
 class ModalEditor extends CustomEditor {
-	private mode: "normal" | "insert" = "insert";
+	private mode: "normal" | "insert" | "visual" = "insert";
+
+	// Normal-mode operator state
 	private pendingOp: string | null = null;
 	/** Set when a char-motion (f/t/F/T) is pending its target character. */
 	private pendingMotion: string | null = null;
+
+	// Visual-mode state
+	private visualAnchor: { line: number; col: number } | null = null;
+
+	// ── helpers ─────────────────────────────────────────────────────────────
+
+	/**
+	 * Return the currently selected text (single-line selection only).
+	 * Multi-line selections return an empty string.
+	 */
+	private getSelectedText(): string {
+		if (!this.visualAnchor) return "";
+		const cursor = this.getCursor();
+		const anchor = this.visualAnchor;
+		if (cursor.line !== anchor.line) return "";
+		const line = this.getLines()[cursor.line] ?? "";
+		const s = Math.min(cursor.col, anchor.col);
+		const e = Math.max(cursor.col, anchor.col);
+		return line.slice(s, e + 1); // inclusive on both ends (vim behaviour)
+	}
+
+	/**
+	 * Delete the visual selection and clear visualAnchor.
+	 * Supports both single-line and multi-line selections.
+	 * After deletion the editor is in normal mode (caller switches to insert for `c`).
+	 */
+	private deleteSelection(): void {
+		if (!this.visualAnchor) return;
+
+		const cursor = this.getCursor();
+		const anchor = this.visualAnchor;
+		this.visualAnchor = null;
+
+		// ── Normalise to (startLine, startCol) … (endLine, endCol) ──────────
+		let startLine: number, startCol: number, endLine: number, endCol: number;
+		if (anchor.line < cursor.line || (anchor.line === cursor.line && anchor.col <= cursor.col)) {
+			startLine = anchor.line; startCol = anchor.col;
+			endLine   = cursor.line; endCol   = cursor.col;
+		} else {
+			startLine = cursor.line; startCol = cursor.col;
+			endLine   = anchor.line; endCol   = anchor.col;
+		}
+
+		// ── Move cursor to (startLine, startCol) ────────────────────────────
+		//
+		// Current cursor = getCursor() after movements in visual mode = one
+		// endpoint of the selection (the one the user moved to).
+		//
+		// Strategy:
+		//   1. Move to col 0 of the current logical line (ctrl+a).
+		//   2. Move up to startLine (up arrow = one visual line, but since we
+		//      are at col 0 the line is short, so one up-arrow per logical
+		//      line is usually correct – good enough for prompt editing).
+		//   3. Move right to startCol.
+		//
+		// This is approximate when word-wrapping is active on the lines above,
+		// but that is an uncommon case in a coding-agent prompt editor.
+
+		// Step 1: move to col 0 of current logical line
+		super.handleInput("\x01"); // ctrl+a
+
+		// Step 2: move up from cursor.line to startLine
+		for (let i = 0; i < cursor.line - startLine; i++) super.handleInput("\x1b[A");
+
+		// Step 3: move right to startCol
+		for (let i = 0; i < startCol; i++) super.handleInput("\x1b[C");
+
+		// ── Compute total characters to delete ───────────────────────────────
+		const lines = this.getLines();
+		let totalChars: number;
+		if (startLine === endLine) {
+			totalChars = endCol - startCol + 1;
+		} else {
+			// rest of start line
+			totalChars  = (lines[startLine]?.length ?? 0) - startCol;
+			totalChars += 1; // the \n after startLine
+			// full middle lines
+			for (let i = startLine + 1; i < endLine; i++) {
+				totalChars += (lines[i]?.length ?? 0) + 1;
+			}
+			// beginning of end line up to endCol, inclusive
+			totalChars += endCol + 1;
+		}
+
+		// ── Delete forward ────────────────────────────────────────────────────
+		for (let i = 0; i < totalChars; i++) super.handleInput("\x1b[3~");
+	}
 
 	/**
 	 * Execute a character-search motion (f/t/F/T), optionally under an operator.
@@ -81,14 +299,13 @@ class ModalEditor extends CustomEditor {
 		}
 
 		if (op === null) {
-			// Navigation only — move cursor
 			const arrow = isForward ? "\x1b[C" : "\x1b[D";
 			for (let i = 0; i < distance; i++) super.handleInput(arrow);
 		} else if (op === "d" || op === "c") {
 			if (isForward) {
-				for (let i = 0; i < distance; i++) super.handleInput("\x1b[3~"); // delete forward
+				for (let i = 0; i < distance; i++) super.handleInput("\x1b[3~");
 			} else {
-				for (let i = 0; i < distance; i++) super.handleInput("\x7f"); // backspace
+				for (let i = 0; i < distance; i++) super.handleInput("\x7f");
 			}
 			if (op === "c") this.mode = "insert";
 		}
@@ -96,14 +313,21 @@ class ModalEditor extends CustomEditor {
 		// so yt/yf/yT/yF are intentionally not supported.
 	}
 
+	// ── input handling ───────────────────────────────────────────────────────
+
 	handleInput(data: string): void {
-		// Escape: insert → normal, normal → pass through (abort agent, etc.)
+		// ── Escape ───────────────────────────────────────────────────────────
 		if (matchesKey(data, "escape")) {
 			if (this.mode === "insert") {
 				this.mode = "normal";
 				this.pendingOp = null;
 				this.pendingMotion = null;
+			} else if (this.mode === "visual") {
+				this.mode = "normal";
+				this.visualAnchor = null;
+				this.pendingMotion = null;
 			} else {
+				// normal mode → pass through (abort agent, etc.)
 				this.pendingOp = null;
 				this.pendingMotion = null;
 				super.handleInput(data);
@@ -111,15 +335,14 @@ class ModalEditor extends CustomEditor {
 			return;
 		}
 
-		// Insert mode: pass everything through unchanged
+		// ── Insert mode: pass everything through ─────────────────────────────
 		if (this.mode === "insert") {
 			super.handleInput(data);
 			return;
 		}
 
-		// --- Normal mode ---
-
-		// Stage 3: pending char-motion target character
+		// ── Stage 3: pending char-motion target character ─────────────────────
+		// Works for both normal and visual modes (in visual: op is always null)
 		if (this.pendingMotion !== null) {
 			const motion = this.pendingMotion;
 			const op = this.pendingOp;
@@ -129,6 +352,62 @@ class ModalEditor extends CustomEditor {
 			return;
 		}
 
+		// ── Visual mode ───────────────────────────────────────────────────────
+		if (this.mode === "visual") {
+			switch (data) {
+				// Exit visual mode
+				case "v":
+					this.mode = "normal";
+					this.visualAnchor = null;
+					return;
+
+				// Delete selection
+				case "d":
+				case "x":
+					this.deleteSelection();
+					this.mode = "normal";
+					return;
+
+				// Change selection (delete + insert)
+				case "c":
+					this.deleteSelection();
+					this.mode = "insert";
+					return;
+
+				// Yank selection — not yet supported.
+				// The kill ring is only populated by readline "kill" commands
+				// (ctrl+k, alt+d, …) so there is no clean way to push an
+				// arbitrary selection into it without direct API access.
+				// For now `y` in visual mode simply cancels the selection.
+				case "y":
+					this.mode = "normal";
+					this.visualAnchor = null;
+					return;
+
+				// Char-motions set pendingMotion (no operator)
+				case "f": case "t": case "F": case "T":
+					this.pendingMotion = data;
+					return;
+			}
+
+			// Movement keys: same sequences as normal mode — move cursor, selection follows
+			const visualMoveSeq: Record<string, string> = {
+				h: "\x1b[D", l: "\x1b[C",
+				j: "\x1b[B", k: "\x1b[A",
+				b: "\x1bb",  w: "\x1bf", e: "\x1bf",
+				"0": "\x01", "^": "\x01", $: "\x05",
+			};
+			if (data in visualMoveSeq) {
+				super.handleInput(visualMoveSeq[data]!);
+				return;
+			}
+
+			// Ignore everything else in visual mode
+			return;
+		}
+
+		// ── Normal mode ───────────────────────────────────────────────────────
+
 		// Resolve pending operator (d / c / y) + motion
 		if (this.pendingOp === "d" || this.pendingOp === "c" || this.pendingOp === "y") {
 			const op = this.pendingOp;
@@ -136,10 +415,7 @@ class ModalEditor extends CustomEditor {
 			// Char-motions need a second character — keep pendingOp and wait
 			if (data === "f" || data === "t" || data === "F" || data === "T") {
 				// y + char motions are not supported; silently drop
-				if (op === "y") {
-					this.pendingOp = null;
-					return;
-				}
+				if (op === "y") { this.pendingOp = null; return; }
 				this.pendingMotion = data;
 				return;
 			}
@@ -153,6 +429,13 @@ class ModalEditor extends CustomEditor {
 				for (const s of seqs) super.handleInput(s);
 				if (op === "c") this.mode = "insert";
 			}
+			return;
+		}
+
+		// Enter visual mode
+		if (data === "v") {
+			this.mode = "visual";
+			this.visualAnchor = this.getCursor();
 			return;
 		}
 
@@ -231,13 +514,83 @@ class ModalEditor extends CustomEditor {
 		super.handleInput(data);
 	}
 
+	// ── rendering ────────────────────────────────────────────────────────────
+
 	render(width: number): string[] {
-		const lines = super.render(width);
-		if (lines.length === 0) return lines;
+		const rendered = super.render(width);
+
+		// ── Visual selection highlight ────────────────────────────────────────
+		if (this.mode === "visual" && this.visualAnchor) {
+			const cursor = this.getCursor();
+			const anchor = this.visualAnchor;
+
+			// Normalise selection endpoints
+			let startLine: number, startCol: number, endLine: number, endCol: number;
+			if (anchor.line < cursor.line || (anchor.line === cursor.line && anchor.col <= cursor.col)) {
+				startLine = anchor.line; startCol = anchor.col;
+				endLine   = cursor.line; endCol   = cursor.col;
+			} else {
+				startLine = cursor.line; startCol = cursor.col;
+				endLine   = anchor.line; endCol   = anchor.col;
+			}
+
+			// layoutWidth used by the editor when paddingX=0 (default for this extension)
+			const layoutWidth = Math.max(1, width - 1);
+			const logicalLines = this.getLines();
+
+			// Walk through logical lines, compute the visual-line offset so we can
+			// locate the correct rendered content line (rendered[0] = top border).
+			let visualLineOffset = 0;
+
+			outer: for (let li = 0; li < logicalLines.length; li++) {
+				const logLine = logicalLines[li] ?? "";
+				const chunks = computeWordWrap(logLine, layoutWidth);
+
+				for (const chunk of chunks) {
+					const renderedIdx = 1 + visualLineOffset; // +1 for top border
+					if (renderedIdx >= rendered.length - 1) break outer; // past bottom border
+
+					if (li >= startLine && li <= endLine) {
+						// Is the entire chunk outside the selection?
+						const chunkBeforeStart = li === startLine && chunk.endIndex <= startCol;
+						const chunkAfterEnd    = li === endLine   && chunk.startIndex > endCol;
+
+						if (!chunkBeforeStart && !chunkAfterEnd) {
+							// Compute which visible columns within this rendered chunk to highlight.
+							// A chunk's first visible column corresponds to logical col chunk.startIndex,
+							// so the visible offset within the chunk = logicalCol - chunk.startIndex.
+							let hlStart = 0;
+							let hlEnd   = visibleWidth(chunk.text); // exclusive
+
+							if (li === startLine && startCol > chunk.startIndex) {
+								hlStart = visibleWidth(logLine.slice(chunk.startIndex, startCol));
+							}
+							if (li === endLine && endCol < chunk.endIndex - 1) {
+								hlEnd = visibleWidth(logLine.slice(chunk.startIndex, endCol + 1));
+							}
+
+							if (hlStart < hlEnd) {
+								rendered[renderedIdx] = applyHighlight(rendered[renderedIdx]!, hlStart, hlEnd);
+							}
+						}
+					}
+
+					visualLineOffset++;
+				}
+
+				// No need to process lines after the selection ends
+				if (li >= endLine) break;
+			}
+		}
+
+		// ── Status label ─────────────────────────────────────────────────────
+		if (rendered.length === 0) return rendered;
 
 		let label: string;
 		if (this.mode === "insert") {
 			label = " INSERT ";
+		} else if (this.mode === "visual") {
+			label = " VISUAL ";
 		} else if (this.pendingOp && this.pendingMotion) {
 			label = ` NORMAL [${this.pendingOp}${this.pendingMotion}] `;
 		} else if (this.pendingOp) {
@@ -248,11 +601,11 @@ class ModalEditor extends CustomEditor {
 			label = " NORMAL ";
 		}
 
-		const last = lines.length - 1;
-		if (visibleWidth(lines[last]!) >= label.length) {
-			lines[last] = truncateToWidth(lines[last]!, width - label.length, "") + label;
+		const last = rendered.length - 1;
+		if (visibleWidth(rendered[last]!) >= label.length) {
+			rendered[last] = truncateToWidth(rendered[last]!, width - label.length, "") + label;
 		}
-		return lines;
+		return rendered;
 	}
 }
 
