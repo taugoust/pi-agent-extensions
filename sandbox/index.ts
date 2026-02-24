@@ -63,12 +63,17 @@ const DEFAULT_CONFIG: SandboxConfig = {
 			"*.github.com",
 			"api.github.com",
 			"raw.githubusercontent.com",
+			"cache.nixos.org",
 		],
 		deniedDomains: [],
+		allowUnixSockets: [
+			"/nix/var/nix/daemon-socket/socket",
+			"/nix/var/nix/gc-socket/socket",
+		],
 	},
 	filesystem: {
 		denyRead: ["~/.ssh", "~/.aws", "~/.gnupg"],
-		allowWrite: [".", "/tmp"],
+		allowWrite: [".", "/tmp", "~/.cache/nix"],
 		denyWrite: [".env", ".env.*", "*.pem", "*.key"],
 	},
 };
