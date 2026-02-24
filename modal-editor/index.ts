@@ -2,10 +2,12 @@
  * Modal Editor - vim-like modal editing
  *
  * Normal mode keybindings:
- *   Navigation:  h j k l   w e b   0 ^ $
+ *   Navigation:  h j k l   w e b   0 ^ $   f{c} t{c} F{c} T{c}
  *   Insert:      i a I A   C s
  *   Editing:     x X   D   p P   u
- *   Operators:   d(d|w|e|b|h|l|0|^|$)   c(c|w|e|b|h|l|0|^|$)   y(y|w|e|b|h|l|0|^|$)   Y
+ *   Operators:   d(d|w|e|b|h|l|0|^|$|f{c}|t{c}|F{c}|T{c})
+ *                c(c|w|e|b|h|l|0|^|$|f{c}|t{c}|F{c}|T{c})
+ *                y(y|w|e|b|h|l|0|^|$)   Y
  *   Escape:      insert → normal, normal → abort agent
  */
 
@@ -35,6 +37,64 @@ const YANK_MOTION: Record<string, string[]> = Object.fromEntries(
 class ModalEditor extends CustomEditor {
 	private mode: "normal" | "insert" = "insert";
 	private pendingOp: string | null = null;
+	/** Set when a char-motion (f/t/F/T) is pending its target character. */
+	private pendingMotion: string | null = null;
+
+	/**
+	 * Execute a character-search motion (f/t/F/T), optionally under an operator.
+	 *
+	 * @param op    - "d" | "c" | null (null = navigation only; y is unsupported)
+	 * @param motion - "f" | "t" | "F" | "T"
+	 * @param char  - the target character to search for
+	 */
+	private executeCharMotion(op: string | null, motion: string, char: string): void {
+		const lines = this.getLines();
+		const cursor = this.getCursor();
+		const line = lines[cursor.line] ?? "";
+
+		let distance: number;
+		let isForward: boolean;
+
+		if (motion === "f") {
+			const idx = line.indexOf(char, cursor.col + 1);
+			if (idx === -1) return;
+			distance = idx - cursor.col;
+			isForward = true;
+		} else if (motion === "t") {
+			const idx = line.indexOf(char, cursor.col + 1);
+			if (idx === -1) return;
+			distance = idx - cursor.col - 1;
+			isForward = true;
+			if (distance <= 0) return;
+		} else if (motion === "F") {
+			const idx = line.lastIndexOf(char, cursor.col - 1);
+			if (idx === -1) return;
+			distance = cursor.col - idx;
+			isForward = false;
+		} else {
+			// "T"
+			const idx = line.lastIndexOf(char, cursor.col - 1);
+			if (idx === -1) return;
+			distance = cursor.col - idx - 1;
+			isForward = false;
+			if (distance <= 0) return;
+		}
+
+		if (op === null) {
+			// Navigation only — move cursor
+			const arrow = isForward ? "\x1b[C" : "\x1b[D";
+			for (let i = 0; i < distance; i++) super.handleInput(arrow);
+		} else if (op === "d" || op === "c") {
+			if (isForward) {
+				for (let i = 0; i < distance; i++) super.handleInput("\x1b[3~"); // delete forward
+			} else {
+				for (let i = 0; i < distance; i++) super.handleInput("\x7f"); // backspace
+			}
+			if (op === "c") this.mode = "insert";
+		}
+		// y + char motions: individual char-deletes don't populate the kill ring,
+		// so yt/yf/yT/yF are intentionally not supported.
+	}
 
 	handleInput(data: string): void {
 		// Escape: insert → normal, normal → pass through (abort agent, etc.)
@@ -42,8 +102,10 @@ class ModalEditor extends CustomEditor {
 			if (this.mode === "insert") {
 				this.mode = "normal";
 				this.pendingOp = null;
+				this.pendingMotion = null;
 			} else {
 				this.pendingOp = null;
+				this.pendingMotion = null;
 				super.handleInput(data);
 			}
 			return;
@@ -57,9 +119,31 @@ class ModalEditor extends CustomEditor {
 
 		// --- Normal mode ---
 
+		// Stage 3: pending char-motion target character
+		if (this.pendingMotion !== null) {
+			const motion = this.pendingMotion;
+			const op = this.pendingOp;
+			this.pendingMotion = null;
+			this.pendingOp = null;
+			this.executeCharMotion(op, motion, data);
+			return;
+		}
+
 		// Resolve pending operator (d / c / y) + motion
 		if (this.pendingOp === "d" || this.pendingOp === "c" || this.pendingOp === "y") {
 			const op = this.pendingOp;
+
+			// Char-motions need a second character — keep pendingOp and wait
+			if (data === "f" || data === "t" || data === "F" || data === "T") {
+				// y + char motions are not supported; silently drop
+				if (op === "y") {
+					this.pendingOp = null;
+					return;
+				}
+				this.pendingMotion = data;
+				return;
+			}
+
 			this.pendingOp = null;
 			// Normalise: dd → "d", cc → "d", yy → "d" (same motion key)
 			const motionKey = data === op ? "d" : data;
@@ -75,6 +159,12 @@ class ModalEditor extends CustomEditor {
 		// Operators that wait for a motion
 		if (data === "d" || data === "c" || data === "y") {
 			this.pendingOp = data;
+			return;
+		}
+
+		// Standalone char-motions (navigation)
+		if (data === "f" || data === "t" || data === "F" || data === "T") {
+			this.pendingMotion = data;
 			return;
 		}
 
@@ -145,11 +235,18 @@ class ModalEditor extends CustomEditor {
 		const lines = super.render(width);
 		if (lines.length === 0) return lines;
 
-		const label = this.mode === "insert"
-			? " INSERT "
-			: this.pendingOp
-				? ` NORMAL [${this.pendingOp}] `
-				: " NORMAL ";
+		let label: string;
+		if (this.mode === "insert") {
+			label = " INSERT ";
+		} else if (this.pendingOp && this.pendingMotion) {
+			label = ` NORMAL [${this.pendingOp}${this.pendingMotion}] `;
+		} else if (this.pendingOp) {
+			label = ` NORMAL [${this.pendingOp}] `;
+		} else if (this.pendingMotion) {
+			label = ` NORMAL [${this.pendingMotion}] `;
+		} else {
+			label = " NORMAL ";
+		}
 
 		const last = lines.length - 1;
 		if (visibleWidth(lines[last]!) >= label.length) {
