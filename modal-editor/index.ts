@@ -5,8 +5,8 @@
  *   Navigation:  h j k l   w e b   0 ^ $   f{c} t{c} F{c} T{c}
  *   Insert:      i a I A   C s
  *   Editing:     x X   D   p P   u
- *   Operators:   d(d|w|e|b|h|l|0|^|$|f{c}|t{c}|F{c}|T{c})
- *                c(c|w|e|b|h|l|0|^|$|f{c}|t{c}|F{c}|T{c})
+ *   Operators:   d(d|w|e|b|h|l|0|^|$|f{c}|t{c}|F{c}|T{c}|iw|iW|aw|aW)
+ *                c(c|w|e|b|h|l|0|^|$|f{c}|t{c}|F{c}|T{c}|iw|iW|aw|aW)
  *                y(y|w|e|b|h|l|0|^|$)   Y
  *   Visual:      v → select with motions → d/c/x/y
  *   Escape:      insert → normal, normal → abort agent
@@ -170,6 +170,8 @@ class ModalEditor extends CustomEditor {
 	private pendingOp: string | null = null;
 	/** Set when a char-motion (f/t/F/T) is pending its target character. */
 	private pendingMotion: string | null = null;
+	/** Set when a text-object prefix (i/a) is pending its object character (w/W). */
+	private pendingTextObject: string | null = null;
 
 	// Visual-mode state
 	private visualAnchor: { line: number; col: number } | null = null;
@@ -259,6 +261,74 @@ class ModalEditor extends CustomEditor {
 	}
 
 	/**
+	 * Execute a text-object operation (iw, iW, aw, aW) under an operator.
+	 *
+	 * @param op     - "d" | "c" (y is not supported — individual char-deletes
+	 *                 don't populate readline's kill ring)
+	 * @param prefix - "i" (inner) | "a" (around)
+	 * @param char   - "w" (word: [a-zA-Z0-9_]) | "W" (WORD: non-whitespace)
+	 */
+	private executeTextObject(op: string | null, prefix: string, char: string): void {
+		if (op === null || op === "y") return; // navigation / yank not supported
+		if (char !== "w" && char !== "W") return; // only word objects
+
+		const lines = this.getLines();
+		const cursor = this.getCursor();
+		const line = lines[cursor.line] ?? "";
+		const col = cursor.col;
+		const curChar = line[col] ?? "";
+
+		// Determine the character-class predicate for the object at the cursor.
+		let charClass: (c: string) => boolean;
+		if (char === "W") {
+			// WORD: any non-whitespace run (or whitespace run if cursor is on space)
+			if (/\s/.test(curChar)) {
+				charClass = (c) => /\s/.test(c);
+			} else {
+				charClass = (c) => !/\s/.test(c);
+			}
+		} else {
+			// word: depends on the character under the cursor
+			if (/\s/.test(curChar)) {
+				charClass = (c) => /\s/.test(c);
+			} else if (/[a-zA-Z0-9_]/.test(curChar)) {
+				charClass = (c) => /[a-zA-Z0-9_]/.test(c);
+			} else {
+				// punctuation / special characters form their own "word"
+				charClass = (c) => !/\s/.test(c) && !/[a-zA-Z0-9_]/.test(c);
+			}
+		}
+
+		// Extend left to the start of the word.
+		let start = col;
+		while (start > 0 && charClass(line[start - 1]!)) start--;
+
+		// Extend right to the end of the word.
+		let end = col;
+		while (end < line.length - 1 && charClass(line[end + 1]!)) end++;
+
+		// "around" (a): also consume adjacent whitespace.
+		// Prefer trailing whitespace; fall back to leading.
+		if (prefix === "a") {
+			if (end + 1 < line.length && /\s/.test(line[end + 1]!)) {
+				while (end + 1 < line.length && /\s/.test(line[end + 1]!)) end++;
+			} else if (start > 0 && /\s/.test(line[start - 1]!)) {
+				while (start > 0 && /\s/.test(line[start - 1]!)) start--;
+			}
+		}
+
+		// Move cursor left to the start of the selection.
+		const moveLeft = col - start;
+		for (let i = 0; i < moveLeft; i++) super.handleInput("\x1b[D");
+
+		// Delete the selection forward.
+		const deleteCount = end - start + 1;
+		for (let i = 0; i < deleteCount; i++) super.handleInput("\x1b[3~");
+
+		if (op === "c") this.mode = "insert";
+	}
+
+	/**
 	 * Execute a character-search motion (f/t/F/T), optionally under an operator.
 	 *
 	 * @param op    - "d" | "c" | null (null = navigation only; y is unsupported)
@@ -322,14 +392,17 @@ class ModalEditor extends CustomEditor {
 				this.mode = "normal";
 				this.pendingOp = null;
 				this.pendingMotion = null;
+				this.pendingTextObject = null;
 			} else if (this.mode === "visual") {
 				this.mode = "normal";
 				this.visualAnchor = null;
 				this.pendingMotion = null;
+				this.pendingTextObject = null;
 			} else {
 				// normal mode → pass through (abort agent, etc.)
 				this.pendingOp = null;
 				this.pendingMotion = null;
+				this.pendingTextObject = null;
 				super.handleInput(data);
 			}
 			return;
@@ -349,6 +422,16 @@ class ModalEditor extends CustomEditor {
 			this.pendingMotion = null;
 			this.pendingOp = null;
 			this.executeCharMotion(op, motion, data);
+			return;
+		}
+
+		// ── Stage 4: pending text-object character (e.g. "w" after "di") ─────
+		if (this.pendingTextObject !== null) {
+			const prefix = this.pendingTextObject;
+			const op = this.pendingOp;
+			this.pendingTextObject = null;
+			this.pendingOp = null;
+			this.executeTextObject(op, prefix, data);
 			return;
 		}
 
@@ -418,6 +501,14 @@ class ModalEditor extends CustomEditor {
 				if (op === "y") { this.pendingOp = null; return; }
 				this.pendingMotion = data;
 				return;
+			}
+
+			// Text-object prefix: i (inner) or a (around) — wait for the object char
+			if (data === "i" || data === "a") {
+				// y + text objects are not supported; silently drop
+				if (op === "y") { this.pendingOp = null; return; }
+				this.pendingTextObject = data;
+				return; // keep pendingOp set
 			}
 
 			this.pendingOp = null;
@@ -593,6 +684,8 @@ class ModalEditor extends CustomEditor {
 			label = " VISUAL ";
 		} else if (this.pendingOp && this.pendingMotion) {
 			label = ` NORMAL [${this.pendingOp}${this.pendingMotion}] `;
+		} else if (this.pendingOp && this.pendingTextObject) {
+			label = ` NORMAL [${this.pendingOp}${this.pendingTextObject}] `;
 		} else if (this.pendingOp) {
 			label = ` NORMAL [${this.pendingOp}] `;
 		} else if (this.pendingMotion) {
