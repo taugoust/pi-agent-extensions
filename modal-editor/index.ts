@@ -264,7 +264,7 @@ class ModalEditor extends CustomEditor {
 	 * Execute a text-object operation (iw, iW, aw, aW) under an operator.
 	 *
 	 * @param op     - "d" | "c" (y is not supported — individual char-deletes
-	 *                 don't populate readline's kill ring)
+	 *                 don't populate the editor's kill ring)
 	 * @param prefix - "i" (inner) | "a" (around)
 	 * @param char   - "w" (word: [a-zA-Z0-9_]) | "W" (WORD: non-whitespace)
 	 */
@@ -379,8 +379,8 @@ class ModalEditor extends CustomEditor {
 			}
 			if (op === "c") this.mode = "insert";
 		}
-		// y + char motions: individual char-deletes don't populate the kill ring,
-		// so yt/yf/yT/yF are intentionally not supported.
+		// y + char motions: individual char-deletes don't populate the editor's
+		// kill ring, so yt/yf/yT/yF are intentionally not supported.
 	}
 
 	// ── input handling ───────────────────────────────────────────────────────
@@ -458,9 +458,9 @@ class ModalEditor extends CustomEditor {
 					return;
 
 				// Yank selection — not yet supported.
-				// The kill ring is only populated by readline "kill" commands
-				// (ctrl+k, alt+d, …) so there is no clean way to push an
-				// arbitrary selection into it without direct API access.
+				// The kill ring is only populated by the editor's own "kill"
+				// commands (ctrl+k, alt+d, …) so there is no clean way to push
+				// an arbitrary selection into it without direct API access.
 				// For now `y` in visual mode simply cancels the selection.
 				case "y":
 					this.mode = "normal";
