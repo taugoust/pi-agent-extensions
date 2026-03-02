@@ -28,7 +28,15 @@
  * Usage:
  * - `pi -e ./sandbox` - sandbox enabled with default/config settings
  * - `pi -e ./sandbox --no-sandbox` - disable sandboxing
- * - `/sandbox` - show current sandbox configuration
+ * - `/sandbox` - show current (live) sandbox configuration
+ * - `/sandbox-control` - toggle sandbox on/off for this session
+ * - `/sandbox-allow <path>` - grant write access to a path for this session
+ * - `sandbox_allow_path` tool - agent can request write access (requires user approval)
+ *
+ * Dynamic path access:
+ *   Both `/sandbox-allow` and the `sandbox_allow_path` tool call
+ *   `SandboxManager.updateConfig()` which takes effect immediately for
+ *   the next sandboxed command — no reset/re-initialization required.
  *
  * Setup:
  * 1. Copy sandbox/ directory to ~/.pi/agent/extensions/
@@ -40,7 +48,8 @@
 import { spawn } from "node:child_process";
 import { existsSync, readFileSync } from "node:fs";
 import { homedir } from "node:os";
-import { join } from "node:path";
+import { isAbsolute, join, resolve } from "node:path";
+import { Type } from "@sinclair/typebox";
 import { SandboxManager, type SandboxRuntimeConfig } from "@anthropic-ai/sandbox-runtime";
 import type { ExtensionAPI } from "@mariozechner/pi-coding-agent";
 import { type BashOperations, createBashTool } from "@mariozechner/pi-coding-agent";
@@ -200,6 +209,30 @@ function createSandboxedBashOps(): BashOperations {
 	};
 }
 
+/** Expand ~ and resolve relative paths against cwd. */
+function normalizePath(inputPath: string, cwd: string): string {
+	if (inputPath.startsWith("~/") || inputPath === "~") {
+		return join(homedir(), inputPath.slice(1));
+	}
+	if (!isAbsolute(inputPath)) {
+		return resolve(cwd, inputPath);
+	}
+	return inputPath;
+}
+
+/** Update the sandbox footer status to reflect the current live config. */
+function refreshStatus(
+	config: SandboxRuntimeConfig,
+	ctx: { ui: { setStatus: (key: string, value: string | undefined) => void; theme: { fg: (color: string, text: string) => string } } },
+): void {
+	const networkCount = config.network?.allowedDomains?.length ?? 0;
+	const writeCount = config.filesystem?.allowWrite?.length ?? 0;
+	ctx.ui.setStatus(
+		"sandbox",
+		ctx.ui.theme.fg("accent", `🔒 Sandbox: ${networkCount} domains, ${writeCount} write paths`),
+	);
+}
+
 export default function (pi: ExtensionAPI) {
 	pi.registerFlag("no-sandbox", {
 		description: "Disable OS-level sandboxing for bash commands",
@@ -297,16 +330,17 @@ export default function (pi: ExtensionAPI) {
 	});
 
 	pi.registerCommand("sandbox", {
-		description: "Show sandbox configuration",
+		description: "Show current (live) sandbox configuration",
 		handler: async (_args, ctx) => {
 			if (!sandboxEnabled) {
 				ctx.ui.notify("Sandbox is disabled", "info");
 				return;
 			}
 
-			const config = loadConfig(ctx.cwd);
+			// Use the live config from SandboxManager so dynamic changes are reflected.
+			const config = SandboxManager.getConfig() ?? loadConfig(ctx.cwd);
 			const lines = [
-				"Sandbox Configuration:",
+				"Sandbox Configuration (live):",
 				"",
 				"Network:",
 				`  Allowed: ${config.network?.allowedDomains?.join(", ") || "(none)"}`,
@@ -341,15 +375,111 @@ export default function (pi: ExtensionAPI) {
 				}
 
 				sandboxEnabled = true;
-				const config = loadConfig(ctx.cwd);
-				const networkCount = config.network?.allowedDomains?.length ?? 0;
-				const writeCount = config.filesystem?.allowWrite?.length ?? 0;
-				ctx.ui.setStatus(
-					"sandbox",
-					ctx.ui.theme.fg("accent", `🔒 Sandbox: ${networkCount} domains, ${writeCount} write paths`),
-				);
+				const config = SandboxManager.getConfig() ?? loadConfig(ctx.cwd);
+				refreshStatus(config, ctx);
 				ctx.ui.notify("Sandbox re-enabled", "info");
 			}
+		},
+	});
+
+	pi.registerCommand("sandbox-allow", {
+		description: "Grant write access to a path for this session: /sandbox-allow <path>",
+		handler: async (args, ctx) => {
+			if (!sandboxEnabled || !sandboxInitialized) {
+				ctx.ui.notify("Sandbox is not active", "warning");
+				return;
+			}
+
+			const raw = args?.trim();
+			if (!raw) {
+				ctx.ui.notify("Usage: /sandbox-allow <path>", "warning");
+				return;
+			}
+
+			const normalized = normalizePath(raw, ctx.cwd);
+			const current = SandboxManager.getConfig();
+			if (!current) {
+				ctx.ui.notify("Sandbox config not available", "error");
+				return;
+			}
+
+			if (current.filesystem.allowWrite.includes(normalized)) {
+				ctx.ui.notify(`Already allowed: ${normalized}`, "info");
+				return;
+			}
+
+			const newConfig = {
+				...current,
+				filesystem: {
+					...current.filesystem,
+					allowWrite: [...current.filesystem.allowWrite, normalized],
+				},
+			};
+			SandboxManager.updateConfig(newConfig);
+			refreshStatus(newConfig, ctx);
+			ctx.ui.notify(`Write access granted: ${normalized}`, "info");
+		},
+	});
+
+	pi.registerTool({
+		name: "sandbox_allow_path",
+		label: "Request Sandbox Path Access",
+		description:
+			"Request write access to a filesystem path within the sandbox. " +
+			"Requires user approval. Use this when a command fails due to sandbox write restrictions.",
+		parameters: Type.Object({
+			path: Type.String({
+				description: "The filesystem path to allow write access to (absolute or relative to cwd)",
+			}),
+			reason: Type.String({
+				description: "Why write access to this path is needed",
+			}),
+		}),
+		async execute(_id, params, _signal, _onUpdate, ctx) {
+			if (!sandboxEnabled || !sandboxInitialized) {
+				return {
+					content: [{ type: "text", text: "Sandbox is not active; no permission change needed." }],
+				};
+			}
+
+			const normalized = normalizePath(params.path, ctx.cwd);
+			const current = SandboxManager.getConfig();
+			if (!current) {
+				return {
+					content: [{ type: "text", text: "Sandbox config not available." }],
+					isError: true,
+				};
+			}
+
+			if (current.filesystem.allowWrite.includes(normalized)) {
+				return {
+					content: [{ type: "text", text: `Write access to ${normalized} is already allowed.` }],
+				};
+			}
+
+			const approved = await ctx.ui.confirm(
+				"Sandbox: Allow write access?",
+				`The agent requests write access to:\n  ${normalized}\n\nReason: ${params.reason}`,
+			);
+
+			if (!approved) {
+				return {
+					content: [{ type: "text", text: `Write access to ${normalized} was denied.` }],
+				};
+			}
+
+			const newConfig = {
+				...current,
+				filesystem: {
+					...current.filesystem,
+					allowWrite: [...current.filesystem.allowWrite, normalized],
+				},
+			};
+			SandboxManager.updateConfig(newConfig);
+			refreshStatus(newConfig, ctx);
+			return {
+				content: [{ type: "text", text: `Write access granted: ${normalized}` }],
+			};
 		},
 	});
 }
