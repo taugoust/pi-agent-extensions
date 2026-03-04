@@ -43,6 +43,9 @@ pkgs.runCommand "pi-agent-extensions" { } ''
   cp ${self}/fetch/index.ts $out/fetch/
   cp ${self}/fetch/package.json $out/fetch/
 
+  # Skills
+  cp -r ${self}/skills $out/
+
   # package.json for pi package discovery
   cp ${self}/package.json $out/
 ''

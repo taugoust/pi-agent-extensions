@@ -38,12 +38,19 @@ in
 
       sandbox.enable = lib.mkEnableOption "sandbox extension — OS-level sandboxing for bash commands";
     };
+
+    skills = {
+      github-repo-search.enable = lib.mkEnableOption "github-repo-search skill — search GitHub repos via gh CLI without cloning";
+    };
   };
 
   config = lib.mkIf cfg.enable {
     home.packages = lib.mkIf (cfg.package != null) [ cfg.package ];
 
     home.file = lib.mkMerge [
+      (lib.mkIf cfg.skills.github-repo-search.enable {
+        ".pi/agent/skills/github-repo-search/SKILL.md".source = "${pkg}/skills/github-repo-search/SKILL.md";
+      })
       (lib.mkIf cfg.extensions.fence.enable {
         "${extDir}/fence/index.ts".source = "${pkg}/fence/index.ts";
       })
