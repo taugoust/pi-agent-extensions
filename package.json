@@ -30,8 +30,9 @@
       "direnv",
       "fence",
       "fetch",
+      "mac-system-theme",
       "modal-editor",
-      "questionnaire", 
+      "questionnaire",
       "slow-mode",
       "node_modules/@marckrenn/pi-sub-core",
       "node_modules/@marckrenn/pi-sub-bar"
