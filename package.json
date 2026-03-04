@@ -28,6 +28,7 @@
   "pi": {
     "extensions": [
       "fence",
+      "permission-gate",
       "fetch",
       "mac-system-theme",
       "modal-editor",
