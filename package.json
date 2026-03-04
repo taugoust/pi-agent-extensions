@@ -27,7 +27,6 @@
   },
   "pi": {
     "extensions": [
-      "direnv",
       "fence",
       "fetch",
       "mac-system-theme",
