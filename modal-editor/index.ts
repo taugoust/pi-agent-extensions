@@ -163,6 +163,58 @@ const YANK_MOTION: Record<string, string[]> = Object.fromEntries(
 // ModalEditor
 // ---------------------------------------------------------------------------
 
+// ---------------------------------------------------------------------------
+// Cursor shape helpers (DECSCUSR — works in all modern terminals)
+// ---------------------------------------------------------------------------
+
+/** The DECSCUSR sequence that was active before this extension took over. */
+let originalCursorShape: string | null = null;
+
+function setCursorShape(shape: "block" | "line"): void {
+	// 2 = steady block, 6 = steady bar (line)
+	process.stdout.write(shape === "block" ? "\x1b[2 q" : "\x1b[6 q");
+}
+
+function restoreOriginalCursorShape(): void {
+	if (originalCursorShape !== null) {
+		process.stdout.write(originalCursorShape);
+		originalCursorShape = null;
+	}
+}
+
+/**
+ * Query the terminal for its current cursor shape via DECRQSS and store it,
+ * so we can restore it exactly on exit.  Falls back to the standard
+ * "reset to terminal default" sequence (\x1b[0 q) if the terminal does not
+ * respond within 150 ms.
+ */
+function captureAndSetCursorShape(initialShape: "block" | "line"): void {
+	const FALLBACK = "\x1b[0 q"; // restore terminal's own default
+	let resolved = false;
+
+	const finish = (restoreSeq: string): void => {
+		if (resolved) return;
+		resolved = true;
+		process.stdin.off("data", onData);
+		clearTimeout(timer);
+		originalCursorShape = restoreSeq;
+		setCursorShape(initialShape);
+	};
+
+	const onData = (chunk: Buffer | string): void => {
+		const reply = typeof chunk === "string" ? chunk : chunk.toString("binary");
+		// DECRQSS response: \x1bP1$r<value>\x1b\\ where <value> is e.g. "2 q"
+		const match = reply.match(/\x1bP[01]\$r(\d* q)\x1b\\/);
+		if (match) finish(`\x1b[${match[1]}`);
+		// Ignore unrelated stdin data — timer handles non-responding terminals.
+	};
+
+	const timer = setTimeout(() => finish(FALLBACK), 150);
+	process.stdin.on("data", onData);
+	// Send the DECRQSS request for the cursor style parameter ("SP q")
+	process.stdout.write("\x1bP$q q\x1b\\");
+}
+
 class ModalEditor extends CustomEditor {
 	private mode: "normal" | "insert" | "visual" = "insert";
 
@@ -175,6 +227,18 @@ class ModalEditor extends CustomEditor {
 
 	// Visual-mode state
 	private visualAnchor: { line: number; col: number } | null = null;
+
+	// ── cursor-shape helpers ─────────────────────────────────────────────────
+
+	private enterInsertMode(): void {
+		this.mode = "insert";
+		setCursorShape("line");
+	}
+
+	private enterNormalMode(): void {
+		this.mode = "normal";
+		setCursorShape("block");
+	}
 
 	// ── helpers ─────────────────────────────────────────────────────────────
 
@@ -325,7 +389,7 @@ class ModalEditor extends CustomEditor {
 		const deleteCount = end - start + 1;
 		for (let i = 0; i < deleteCount; i++) super.handleInput("\x1b[3~");
 
-		if (op === "c") this.mode = "insert";
+		if (op === "c") this.enterInsertMode();
 	}
 
 	/**
@@ -377,7 +441,7 @@ class ModalEditor extends CustomEditor {
 			} else {
 				for (let i = 0; i < distance; i++) super.handleInput("\x7f");
 			}
-			if (op === "c") this.mode = "insert";
+			if (op === "c") this.enterInsertMode();
 		}
 		// y + char motions: individual char-deletes don't populate the editor's
 		// kill ring, so yt/yf/yT/yF are intentionally not supported.
@@ -389,12 +453,12 @@ class ModalEditor extends CustomEditor {
 		// ── Escape ───────────────────────────────────────────────────────────
 		if (matchesKey(data, "escape")) {
 			if (this.mode === "insert") {
-				this.mode = "normal";
+				this.enterNormalMode();
 				this.pendingOp = null;
 				this.pendingMotion = null;
 				this.pendingTextObject = null;
 			} else if (this.mode === "visual") {
-				this.mode = "normal";
+				this.enterNormalMode();
 				this.visualAnchor = null;
 				this.pendingMotion = null;
 				this.pendingTextObject = null;
@@ -440,7 +504,7 @@ class ModalEditor extends CustomEditor {
 			switch (data) {
 				// Exit visual mode
 				case "v":
-					this.mode = "normal";
+					this.enterNormalMode();
 					this.visualAnchor = null;
 					return;
 
@@ -448,13 +512,13 @@ class ModalEditor extends CustomEditor {
 				case "d":
 				case "x":
 					this.deleteSelection();
-					this.mode = "normal";
+					this.enterNormalMode();
 					return;
 
 				// Change selection (delete + insert)
 				case "c":
 					this.deleteSelection();
-					this.mode = "insert";
+					this.enterInsertMode();
 					return;
 
 				// Yank selection — not yet supported.
@@ -463,7 +527,7 @@ class ModalEditor extends CustomEditor {
 				// an arbitrary selection into it without direct API access.
 				// For now `y` in visual mode simply cancels the selection.
 				case "y":
-					this.mode = "normal";
+					this.enterNormalMode();
 					this.visualAnchor = null;
 					return;
 
@@ -518,7 +582,7 @@ class ModalEditor extends CustomEditor {
 			const seqs = table[motionKey];
 			if (seqs) {
 				for (const s of seqs) super.handleInput(s);
-				if (op === "c") this.mode = "insert";
+				if (op === "c") this.enterInsertMode();
 			}
 			return;
 		}
@@ -545,27 +609,27 @@ class ModalEditor extends CustomEditor {
 		// Mode-switching commands
 		switch (data) {
 			case "i": // insert before cursor
-				this.mode = "insert";
+				this.enterInsertMode();
 				return;
 			case "a": // append after cursor
-				this.mode = "insert";
+				this.enterInsertMode();
 				super.handleInput("\x1b[C");  // move right
 				return;
 			case "I": // insert at line start
 				super.handleInput("\x01");    // ctrl+a: line start
-				this.mode = "insert";
+				this.enterInsertMode();
 				return;
 			case "A": // append at line end
 				super.handleInput("\x05");    // ctrl+e: line end
-				this.mode = "insert";
+				this.enterInsertMode();
 				return;
 			case "C": // change to line end
 				super.handleInput("\x0b");    // ctrl+k: delete to line end
-				this.mode = "insert";
+				this.enterInsertMode();
 				return;
 			case "s": // substitute char
 				super.handleInput("\x1b[3~"); // delete char forward
-				this.mode = "insert";
+				this.enterInsertMode();
 				return;
 			case "Y": // yank whole line (shortcut for yy)
 				for (const s of YANK_MOTION["d"]!) super.handleInput(s);
@@ -609,6 +673,21 @@ class ModalEditor extends CustomEditor {
 
 	render(width: number): string[] {
 		const rendered = super.render(width);
+
+		// In INSERT mode, strip the fake block cursor (\x1b[7m...\x1b[0m) that
+		// the editor always renders. The hardware cursor (a line/bar via DECSCUSR)
+		// will show at the CURSOR_MARKER position instead, giving a visual line
+		// cursor. In NORMAL/VISUAL mode we keep the fake block as-is.
+		if (this.mode === "insert") {
+			for (let i = 0; i < rendered.length; i++) {
+				const line = rendered[i]!;
+				if (line.includes("\x1b[7m")) {
+					// Replace the fake cursor (reverse-video char + reset) with just the char.
+					// Pattern: CURSOR_MARKER? + \x1b[7m + <char(s)> + \x1b[0m
+					rendered[i] = line.replace(/\x1b\[7m([\s\S]*?)\x1b\[0m/, "$1");
+				}
+			}
+		}
 
 		// ── Visual selection highlight ────────────────────────────────────────
 		if (this.mode === "visual" && this.visualAnchor) {
@@ -698,6 +777,7 @@ class ModalEditor extends CustomEditor {
 		if (visibleWidth(rendered[last]!) >= label.length) {
 			rendered[last] = truncateToWidth(rendered[last]!, width - label.length, "") + label;
 		}
+
 		return rendered;
 	}
 }
@@ -705,5 +785,16 @@ class ModalEditor extends CustomEditor {
 export default function (pi: ExtensionAPI) {
 	pi.on("session_start", (_event, ctx) => {
 		ctx.ui.setEditorComponent((tui, theme, kb) => new ModalEditor(tui, theme, kb));
+
+		// Restore the original cursor shape on clean exit and on signals.
+		// Register these once, before the async capture, so they're in place early.
+		const cleanup = (): void => restoreOriginalCursorShape();
+		process.once("exit", cleanup);
+		process.once("SIGINT",  () => { cleanup(); process.exit(130); });
+		process.once("SIGTERM", () => { cleanup(); process.exit(143); });
+
+		// Defer the cursor capture + set until after ui.start() has run its full
+		// screen clear/redraw, which would otherwise overwrite our escape sequence.
+		setImmediate(() => captureAndSetCursorShape("line"));
 	});
 }
