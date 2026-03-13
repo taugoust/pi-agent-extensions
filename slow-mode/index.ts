@@ -9,6 +9,7 @@
  * - Ctrl+E opens the new file in $VISUAL/$EDITOR for editing (edit operations).
  * - Ctrl+O opens the diff in an external viewer (nvim/vim/diff).
  * - After editing, the diff is regenerated and shown again for approval.
+ * - Esc opens a rejection-reason prompt; type a message to send back to the model, or just press Enter to reject silently.
  * - Toggle with /slow-mode command.
  * - Status bar shows "slow ■" when active.
  *
@@ -158,7 +159,7 @@ export default function slowMode(pi: ExtensionAPI) {
    * 1. Stage the proposed content in tmpDir
    * 2. Show review UI with the full content
    * 3. User approves → return undefined (tool proceeds)
-   * 4. User rejects → return { block: true } (tool aborted)
+   * 4. User rejects with optional reason → return { block: true, reason } (tool aborted)
    * 5. Cleanup staged file
    * 
    * If user edits content in external editor, the modified content is used.
@@ -185,7 +186,7 @@ export default function slowMode(pi: ExtensionAPI) {
     // Show review UI — user decides to approve/reject
     // Emit event so other extensions can track when user approval is pending
     pi.events.emit("slow-mode:waiting");
-    const approved = await showReview(ctx, {
+    const rejection = await showReview(ctx, {
       operation: "WRITE",
       filePath: relPath,
       stagePath,
@@ -194,7 +195,7 @@ export default function slowMode(pi: ExtensionAPI) {
     });
     pi.events.emit("slow-mode:resolved");
 
-    if (approved) {
+    if (rejection === null) {
       // Read back the staged file in case user edited it
       try {
         const { readFileSync } = await import("node:fs");
@@ -216,8 +217,11 @@ export default function slowMode(pi: ExtensionAPI) {
     cleanup(stagePath);
 
     // Block the tool if user rejected
-    if (!approved) {
-      return { block: true, reason: "User rejected the write in slow mode review." };
+    if (rejection !== null) {
+      const reason = rejection.trim()
+        ? `User rejected the write in slow mode review. Reason: ${rejection.trim()}`
+        : "User rejected the write in slow mode review.";
+      return { block: true, reason };
     }
 
     // Approved: return undefined → tool proceeds with potentially modified content
@@ -229,7 +233,7 @@ export default function slowMode(pi: ExtensionAPI) {
    * Flow:
    * 1. Stage both old and new text as separate files
    * 2. Show inline diff review UI
-   * 3. User can: approve (Enter), reject (Esc), edit new file (Ctrl+E),
+   * 3. User can: approve (Enter), reject with reason (Esc), edit new file (Ctrl+E),
    *    or view diff externally (Ctrl+O)
    * 4. After editing, the diff is regenerated and shown again
    * 5. Loop continues until user approves or rejects
@@ -269,6 +273,7 @@ export default function slowMode(pi: ExtensionAPI) {
 
     // Review loop: show diff → user can approve, reject, or edit → repeat
     let approved = false;
+    let rejectionReason = "";
     const { readFileSync } = await import("node:fs");
 
     reviewLoop:
@@ -285,18 +290,19 @@ export default function slowMode(pi: ExtensionAPI) {
         newPath,
       });
 
-      switch (decision) {
-        case "approve":
-          approved = true;
-          break reviewLoop;
-        case "reject":
-          approved = false;
-          break reviewLoop;
-        case "edit":
-          // Open just the new file in the user's editor, then loop back
-          openExternalFile(newPath);
-          continue;
+      if (decision === "approve") {
+        approved = true;
+        break reviewLoop;
       }
+      if (decision === "edit") {
+        // Open just the new file in the user's editor, then loop back
+        openExternalFile(newPath);
+        continue;
+      }
+      // Rejection — decision is { type: "reject"; reason: string }
+      rejectionReason = decision.reason;
+      approved = false;
+      break reviewLoop;
     }
 
     if (approved) {
@@ -323,7 +329,10 @@ export default function slowMode(pi: ExtensionAPI) {
 
     // Block the tool if user rejected
     if (!approved) {
-      return { block: true, reason: "User rejected the edit in slow mode review." };
+      const reason = rejectionReason.trim()
+        ? `User rejected the edit in slow mode review. Reason: ${rejectionReason.trim()}`
+        : "User rejected the edit in slow mode review.";
+      return { block: true, reason };
     }
 
     // Approved: return undefined → tool proceeds with potentially modified content
@@ -351,7 +360,7 @@ export default function slowMode(pi: ExtensionAPI) {
    *
    * Displays the proposed change with scrollable preview and key bindings:
    * - Enter: approve change
-   * - Esc: reject change
+   * - Esc: open rejection-reason prompt (type reason, Enter to confirm, Esc to cancel)
    * - Ctrl+O: open in external viewer/editor (nvim/vim/diff for edits, $EDITOR for writes)
    * - k/↑: scroll up one line
    * - j/↓: scroll down one line
@@ -363,18 +372,22 @@ export default function slowMode(pi: ExtensionAPI) {
    * If allowEdit is true and user edits in external editor, the display is updated
    * to show the modified content/diff.
    *
-   * @returns Promise<boolean> - true if approved, false if rejected
+   * @returns Promise<string | null> - null if approved, string (possibly empty) if rejected
    */
   async function showReview(
     ctx: ExtensionContext,
     opts: ReviewOptions,
-  ): Promise<boolean> {
+  ): Promise<string | null> {
     const { matchesKey, Key } = await import("@mariozechner/pi-tui");
 
-    return ctx.ui.custom<boolean>((tui, theme, _kb, done) => {
+    return ctx.ui.custom<string | null>((tui, theme, _kb, done) => {
       // Scroll state
       let scrollOffset = 0;
       let cachedLines: string[] | undefined;
+
+      // Whether the user is currently typing a rejection reason
+      let typing = false;
+      let reasonBuffer = "";
 
       // Current body content (may be updated after external edit)
       let currentBody = opts.body;
@@ -454,15 +467,42 @@ export default function slowMode(pi: ExtensionAPI) {
        * Handle keyboard input
        */
       function handleInput(data: string) {
-        // Approve change
-        if (matchesKey(data, Key.enter)) {
-          done(true);
+        // While typing a rejection reason
+        if (typing) {
+          if (matchesKey(data, Key.enter)) {
+            done(reasonBuffer);
+            return;
+          }
+          if (matchesKey(data, Key.escape)) {
+            // Cancel — go back to reviewing
+            typing = false;
+            reasonBuffer = "";
+            refresh();
+            return;
+          }
+          if (data === "\x7f" || data === "\b") {
+            reasonBuffer = reasonBuffer.slice(0, -1);
+            refresh();
+            return;
+          }
+          if (data.length === 1 && data.charCodeAt(0) >= 32) {
+            reasonBuffer += data;
+            refresh();
+            return;
+          }
           return;
         }
 
-        // Reject change
+        // Approve change
+        if (matchesKey(data, Key.enter)) {
+          done(null);
+          return;
+        }
+
+        // Enter rejection-reason prompt
         if (matchesKey(data, Key.escape)) {
-          done(false);
+          typing = true;
+          refresh();
           return;
         }
 
@@ -591,11 +631,16 @@ export default function slowMode(pi: ExtensionAPI) {
 
         lines.push("");
 
-        // Key binding hints
-        const ctrlOHint = opts.allowEdit ? "Ctrl+O edit externally" : "Ctrl+O view externally";
-        add(
-          theme.fg("dim", ` Enter approve • Esc reject • ${ctrlOHint} • j/k u/d gg/G scroll`),
-        );
+        // Key binding hints / rejection reason input
+        if (typing) {
+          add(theme.fg("warning", ` Reject — type a reason and press Enter, or Esc to cancel:`));
+          add(theme.fg("text", ` > ${reasonBuffer}▌`));
+        } else {
+          const ctrlOHint = opts.allowEdit ? "Ctrl+O edit externally" : "Ctrl+O view externally";
+          add(
+            theme.fg("dim", ` Enter approve • Esc reject with reason • ${ctrlOHint} • j/k u/d gg/G scroll`),
+          );
+        }
 
         // Bottom separator
         add(theme.fg("accent", "─".repeat(width)));
@@ -631,12 +676,12 @@ export default function slowMode(pi: ExtensionAPI) {
    *
    * Like showReview, but returns a three-way decision:
    * - "approve": apply the change
-   * - "reject": block the change
+   * - { type: "reject"; reason: string }: block the change, with optional typed reason
    * - "edit": open the new file in an editor (caller should loop)
    *
    * Key bindings:
    * - Enter: approve
-   * - Esc: reject
+   * - Esc: open rejection-reason prompt (type reason, Enter to confirm, Esc to cancel)
    * - Ctrl+E: edit the new file in $VISUAL/$EDITOR
    * - Ctrl+O: view diff in external viewer (nvim/vim/diff)
    * - j/k/u/d/gg/G: scroll
@@ -644,13 +689,17 @@ export default function slowMode(pi: ExtensionAPI) {
   async function showEditReview(
     ctx: ExtensionContext,
     opts: EditReviewOptions,
-  ): Promise<"approve" | "reject" | "edit"> {
+  ): Promise<"approve" | "edit" | { type: "reject"; reason: string }> {
     const { matchesKey, Key } = await import("@mariozechner/pi-tui");
 
-    return ctx.ui.custom<"approve" | "reject" | "edit">((tui, theme, _kb, done) => {
+    return ctx.ui.custom<"approve" | "edit" | { type: "reject"; reason: string }>((tui, theme, _kb, done) => {
       // Scroll state
       let scrollOffset = 0;
       let cachedLines: string[] | undefined;
+
+      // Whether the user is currently typing a rejection reason
+      let typing = false;
+      let reasonBuffer = "";
 
       // Content split into lines for scrolling
       const bodyLines = opts.body.split("\n");
@@ -670,15 +719,42 @@ export default function slowMode(pi: ExtensionAPI) {
       }
 
       function handleInput(data: string) {
+        // While typing a rejection reason
+        if (typing) {
+          if (matchesKey(data, Key.enter)) {
+            done({ type: "reject", reason: reasonBuffer });
+            return;
+          }
+          if (matchesKey(data, Key.escape)) {
+            // Cancel — go back to reviewing
+            typing = false;
+            reasonBuffer = "";
+            refresh();
+            return;
+          }
+          if (data === "\x7f" || data === "\b") {
+            reasonBuffer = reasonBuffer.slice(0, -1);
+            refresh();
+            return;
+          }
+          if (data.length === 1 && data.charCodeAt(0) >= 32) {
+            reasonBuffer += data;
+            refresh();
+            return;
+          }
+          return;
+        }
+
         // Approve
         if (matchesKey(data, Key.enter)) {
           done("approve");
           return;
         }
 
-        // Reject
+        // Enter rejection-reason prompt
         if (matchesKey(data, Key.escape)) {
-          done("reject");
+          typing = true;
+          refresh();
           return;
         }
 
@@ -776,9 +852,14 @@ export default function slowMode(pi: ExtensionAPI) {
         }
 
         lines.push("");
-        add(
-          theme.fg("dim", ` Enter approve • Esc reject • Ctrl+E edit • Ctrl+O view diff • j/k u/d gg/G scroll`),
-        );
+        if (typing) {
+          add(theme.fg("warning", ` Reject — type a reason and press Enter, or Esc to cancel:`));
+          add(theme.fg("text", ` > ${reasonBuffer}▌`));
+        } else {
+          add(
+            theme.fg("dim", ` Enter approve • Esc reject with reason • Ctrl+E edit • Ctrl+O view diff • j/k u/d gg/G scroll`),
+          );
+        }
         add(theme.fg("accent", "─".repeat(width)));
 
         cachedLines = lines;
