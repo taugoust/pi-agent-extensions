@@ -2,13 +2,14 @@
  * Modal Editor - vim-like modal editing
  *
  * Normal mode keybindings:
- *   Navigation:  h j k l   w e b   0 ^ $   f{c} t{c} F{c} T{c}
+ *   Navigation:  h j k l   w e b   0 ^ $   f{c} t{c} F{c} T{c}   gg G
  *   Insert:      i a I A   C s
  *   Editing:     x X   D   p P   u
- *   Operators:   d(d|w|e|b|h|l|0|^|$|f{c}|t{c}|F{c}|T{c}|iw|iW|aw|aW)
- *                c(c|w|e|b|h|l|0|^|$|f{c}|t{c}|F{c}|T{c}|iw|iW|aw|aW)
+ *   Operators:   d(d|w|e|b|h|l|0|^|$|f{c}|t{c}|F{c}|T{c}|iw|iW|aw|aW|gg|G)
+ *                c(c|w|e|b|h|l|0|^|$|f{c}|t{c}|F{c}|T{c}|iw|iW|aw|aW|gg|G)
  *                y(y|w|e|b|h|l|0|^|$)   Y
  *   Visual:      v → select with motions → d/c/x/y
+ *   Visual-line: V → select lines with j/k → d/c/x/y
  *   Escape:      insert → normal, normal → abort agent
  */
 
@@ -224,6 +225,8 @@ class ModalEditor extends CustomEditor {
 	private pendingMotion: string | null = null;
 	/** Set when a text-object prefix (i/a) is pending its object character (w/W). */
 	private pendingTextObject: string | null = null;
+	/** Set when `g` has been pressed, waiting for the second key (e.g. `g` for `gg`). */
+	private pendingG: boolean = false;
 
 	// Visual-mode state
 	private visualAnchor: { line: number; col: number } | null = null;
@@ -238,6 +241,42 @@ class ModalEditor extends CustomEditor {
 	private enterNormalMode(): void {
 		this.mode = "normal";
 		setCursorShape("block");
+	}
+
+	/**
+	 * Move cursor to the first or last logical line.
+	 * Moves to column 0 of the target line.
+	 */
+	private goToLine(target: "first" | "last"): void {
+		const cursor = this.getCursor();
+		const lines = this.getLines();
+
+		if (target === "first") {
+			// Move to col 0 of current line, then up to line 0
+			super.handleInput("\x01"); // ctrl+a
+			for (let i = 0; i < cursor.line; i++) super.handleInput("\x1b[A");
+		} else {
+			// Move to col 0 of current line, then down to last line
+			super.handleInput("\x01"); // ctrl+a
+			const lastLine = lines.length - 1;
+			for (let i = 0; i < lastLine - cursor.line; i++) super.handleInput("\x1b[B");
+		}
+	}
+
+	/**
+	 * Execute a line-wise operator (d/c) from the current line to the first or last line.
+	 * Temporarily enters visual-line mode, moves to the target, then performs the operation.
+	 */
+	private executeLinewiseOp(op: string, target: "first" | "last"): void {
+		// Set up a temporary visual-line selection from the current line
+		this.visualAnchor = this.getCursor();
+		this.goToLine(target);
+		this.deleteLineSelection();
+		if (op === "c") {
+			this.enterInsertMode();
+		} else {
+			this.enterNormalMode();
+		}
 	}
 
 	// ── helpers ─────────────────────────────────────────────────────────────
@@ -504,16 +543,19 @@ class ModalEditor extends CustomEditor {
 				this.pendingOp = null;
 				this.pendingMotion = null;
 				this.pendingTextObject = null;
+				this.pendingG = false;
 			} else if (this.mode === "visual" || this.mode === "visual-line") {
 				this.enterNormalMode();
 				this.visualAnchor = null;
 				this.pendingMotion = null;
 				this.pendingTextObject = null;
+				this.pendingG = false;
 			} else {
 				// normal mode → pass through (abort agent, etc.)
 				this.pendingOp = null;
 				this.pendingMotion = null;
 				this.pendingTextObject = null;
+				this.pendingG = false;
 				super.handleInput(data);
 			}
 			return;
@@ -543,6 +585,25 @@ class ModalEditor extends CustomEditor {
 			this.pendingTextObject = null;
 			this.pendingOp = null;
 			this.executeTextObject(op, prefix, data);
+			return;
+		}
+
+		// ── Stage 5: pending `g` — waiting for second key ─────────────────────
+		if (this.pendingG) {
+			this.pendingG = false;
+			if (data === "g") {
+				// gg (or dgg/cgg): go to first line
+				if (this.pendingOp) {
+					const op = this.pendingOp;
+					this.pendingOp = null;
+					if (op !== "y") this.executeLinewiseOp(op, "first");
+				} else {
+					this.goToLine("first");
+				}
+				return;
+			}
+			// Unknown g-sequence: clear pending operator too
+			this.pendingOp = null;
 			return;
 		}
 
@@ -588,6 +649,17 @@ class ModalEditor extends CustomEditor {
 				case "f": case "t": case "F": case "T":
 					this.pendingMotion = data;
 					return;
+			}
+
+			// G: jump to last line
+			if (data === "G") {
+				this.goToLine("last");
+				return;
+			}
+			// g: start gg sequence
+			if (data === "g") {
+				this.pendingG = true;
+				return;
 			}
 
 			// Movement keys: same sequences as normal mode — move cursor, selection follows
@@ -641,6 +713,17 @@ class ModalEditor extends CustomEditor {
 					return;
 			}
 
+			// G: jump to last line
+			if (data === "G") {
+				this.goToLine("last");
+				return;
+			}
+			// g: start gg sequence
+			if (data === "g") {
+				this.pendingG = true;
+				return;
+			}
+
 			// Movement keys: only vertical movement matters for line selection,
 			// but horizontal is allowed too (cursor moves, selection stays line-based)
 			const vlMoveSeq: Record<string, string> = {
@@ -680,6 +763,20 @@ class ModalEditor extends CustomEditor {
 				return; // keep pendingOp set
 			}
 
+			// G: line-wise motion to last line (dG, cG)
+			if (data === "G") {
+				this.pendingOp = null;
+				if (op === "y") return; // yank not supported
+				this.executeLinewiseOp(op, "last");
+				return;
+			}
+
+			// g: start gg sequence under operator (dgg, cgg)
+			if (data === "g") {
+				this.pendingG = true;
+				return; // keep pendingOp set
+			}
+
 			this.pendingOp = null;
 			// Normalise: dd → "d", cc → "d", yy → "d" (same motion key)
 			const motionKey = data === op ? "d" : data;
@@ -709,6 +806,18 @@ class ModalEditor extends CustomEditor {
 		// Operators that wait for a motion
 		if (data === "d" || data === "c" || data === "y") {
 			this.pendingOp = data;
+			return;
+		}
+
+		// G: jump to last line
+		if (data === "G") {
+			this.goToLine("last");
+			return;
+		}
+
+		// g: start gg sequence (navigation only)
+		if (data === "g") {
+			this.pendingG = true;
 			return;
 		}
 
@@ -883,12 +992,16 @@ class ModalEditor extends CustomEditor {
 			label = " V-LINE ";
 		} else if (this.mode === "visual") {
 			label = " VISUAL ";
+		} else if (this.pendingOp && this.pendingG) {
+			label = ` NORMAL [${this.pendingOp}g] `;
 		} else if (this.pendingOp && this.pendingMotion) {
 			label = ` NORMAL [${this.pendingOp}${this.pendingMotion}] `;
 		} else if (this.pendingOp && this.pendingTextObject) {
 			label = ` NORMAL [${this.pendingOp}${this.pendingTextObject}] `;
 		} else if (this.pendingOp) {
 			label = ` NORMAL [${this.pendingOp}] `;
+		} else if (this.pendingG) {
+			label = ` NORMAL [g] `;
 		} else if (this.pendingMotion) {
 			label = ` NORMAL [${this.pendingMotion}] `;
 		} else {
