@@ -216,7 +216,7 @@ function captureAndSetCursorShape(initialShape: "block" | "line"): void {
 }
 
 class ModalEditor extends CustomEditor {
-	private mode: "normal" | "insert" | "visual" = "insert";
+	private mode: "normal" | "insert" | "visual" | "visual-line" = "insert";
 
 	// Normal-mode operator state
 	private pendingOp: string | null = null;
@@ -321,6 +321,53 @@ class ModalEditor extends CustomEditor {
 		}
 
 		// ── Delete forward ────────────────────────────────────────────────────
+		for (let i = 0; i < totalChars; i++) super.handleInput("\x1b[3~");
+	}
+
+	/**
+	 * Delete the visual-line selection (entire lines from anchor to cursor).
+	 * Clears visualAnchor. After deletion, editor is in normal mode.
+	 */
+	private deleteLineSelection(): void {
+		if (!this.visualAnchor) return;
+
+		const cursor = this.getCursor();
+		const anchor = this.visualAnchor;
+		this.visualAnchor = null;
+
+		const startLine = Math.min(anchor.line, cursor.line);
+		const endLine = Math.max(anchor.line, cursor.line);
+		const lines = this.getLines();
+
+		// Move cursor to the beginning of startLine
+		// First go to col 0 of current line
+		super.handleInput("\x01"); // ctrl+a
+
+		// Move up/down to startLine from cursor.line
+		if (cursor.line > startLine) {
+			for (let i = 0; i < cursor.line - startLine; i++) super.handleInput("\x1b[A");
+		} else if (cursor.line < startLine) {
+			for (let i = 0; i < startLine - cursor.line; i++) super.handleInput("\x1b[B");
+		}
+
+		// Compute total characters to delete (all chars on lines + newlines between them)
+		let totalChars = 0;
+		for (let i = startLine; i <= endLine; i++) {
+			totalChars += (lines[i]?.length ?? 0);
+			if (i < endLine) totalChars += 1; // newline between lines
+		}
+
+		// If there's a line after the selection, also delete the newline before it
+		// (so we consume the line break that separated these lines from the next)
+		if (endLine < lines.length - 1) {
+			totalChars += 1; // trailing newline
+		} else if (startLine > 0) {
+			// If deleting the last line(s), consume the newline before startLine
+			super.handleInput("\x1b[D"); // move left into the newline of previous line
+			totalChars += 1; // leading newline
+		}
+
+		// Delete forward
 		for (let i = 0; i < totalChars; i++) super.handleInput("\x1b[3~");
 	}
 
@@ -457,7 +504,7 @@ class ModalEditor extends CustomEditor {
 				this.pendingOp = null;
 				this.pendingMotion = null;
 				this.pendingTextObject = null;
-			} else if (this.mode === "visual") {
+			} else if (this.mode === "visual" || this.mode === "visual-line") {
 				this.enterNormalMode();
 				this.visualAnchor = null;
 				this.pendingMotion = null;
@@ -499,13 +546,19 @@ class ModalEditor extends CustomEditor {
 			return;
 		}
 
-		// ── Visual mode ───────────────────────────────────────────────────────
+		// ── Visual mode (character-wise) ──────────────────────────────────────
 		if (this.mode === "visual") {
 			switch (data) {
 				// Exit visual mode
 				case "v":
 					this.enterNormalMode();
 					this.visualAnchor = null;
+					return;
+
+				// Switch to visual-line mode
+				case "V":
+					this.mode = "visual-line";
+					// Keep the same anchor but ignore col for line selection
 					return;
 
 				// Delete selection
@@ -553,6 +606,58 @@ class ModalEditor extends CustomEditor {
 			return;
 		}
 
+		// ── Visual-line mode ──────────────────────────────────────────────────
+		if (this.mode === "visual-line") {
+			switch (data) {
+				// Exit visual-line mode
+				case "V":
+					this.enterNormalMode();
+					this.visualAnchor = null;
+					return;
+
+				// Switch to character-wise visual mode
+				case "v":
+					this.mode = "visual";
+					// Keep anchor, now col matters again
+					return;
+
+				// Delete entire selected lines
+				case "d":
+				case "x":
+					this.deleteLineSelection();
+					this.enterNormalMode();
+					return;
+
+				// Change entire selected lines (delete + insert)
+				case "c":
+					this.deleteLineSelection();
+					this.enterInsertMode();
+					return;
+
+				// Yank — not yet supported (same as character visual)
+				case "y":
+					this.enterNormalMode();
+					this.visualAnchor = null;
+					return;
+			}
+
+			// Movement keys: only vertical movement matters for line selection,
+			// but horizontal is allowed too (cursor moves, selection stays line-based)
+			const vlMoveSeq: Record<string, string> = {
+				j: "\x1b[B", k: "\x1b[A",
+				h: "\x1b[D", l: "\x1b[C",
+				"0": "\x01", "^": "\x01", $: "\x05",
+				w: "\x1bf",  b: "\x1bb",  e: "\x1bf",
+			};
+			if (data in vlMoveSeq) {
+				super.handleInput(vlMoveSeq[data]!);
+				return;
+			}
+
+			// Ignore everything else in visual-line mode
+			return;
+		}
+
 		// ── Normal mode ───────────────────────────────────────────────────────
 
 		// Resolve pending operator (d / c / y) + motion
@@ -590,6 +695,13 @@ class ModalEditor extends CustomEditor {
 		// Enter visual mode
 		if (data === "v") {
 			this.mode = "visual";
+			this.visualAnchor = this.getCursor();
+			return;
+		}
+
+		// Enter visual-line mode
+		if (data === "V") {
+			this.mode = "visual-line";
 			this.visualAnchor = this.getCursor();
 			return;
 		}
@@ -690,13 +802,21 @@ class ModalEditor extends CustomEditor {
 		}
 
 		// ── Visual selection highlight ────────────────────────────────────────
-		if (this.mode === "visual" && this.visualAnchor) {
+		if ((this.mode === "visual" || this.mode === "visual-line") && this.visualAnchor) {
 			const cursor = this.getCursor();
 			const anchor = this.visualAnchor;
 
 			// Normalise selection endpoints
 			let startLine: number, startCol: number, endLine: number, endCol: number;
-			if (anchor.line < cursor.line || (anchor.line === cursor.line && anchor.col <= cursor.col)) {
+			if (this.mode === "visual-line") {
+				// Line-wise: always select full lines
+				startLine = Math.min(anchor.line, cursor.line);
+				startCol = 0;
+				endLine = Math.max(anchor.line, cursor.line);
+				const logLines = this.getLines();
+				endCol = (logLines[endLine]?.length ?? 1) - 1;
+				if (endCol < 0) endCol = 0;
+			} else if (anchor.line < cursor.line || (anchor.line === cursor.line && anchor.col <= cursor.col)) {
 				startLine = anchor.line; startCol = anchor.col;
 				endLine   = cursor.line; endCol   = cursor.col;
 			} else {
@@ -759,6 +879,8 @@ class ModalEditor extends CustomEditor {
 		let label: string;
 		if (this.mode === "insert") {
 			label = " INSERT ";
+		} else if (this.mode === "visual-line") {
+			label = " V-LINE ";
 		} else if (this.mode === "visual") {
 			label = " VISUAL ";
 		} else if (this.pendingOp && this.pendingMotion) {
