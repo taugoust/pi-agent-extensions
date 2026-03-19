@@ -41,6 +41,7 @@ in
 
     skills = {
       github-repo-search.enable = lib.mkEnableOption "github-repo-search skill — search GitHub repos via gh CLI without cloning";
+      remindctl.enable = lib.mkEnableOption "remindctl skill — manage Apple Reminders via the remindctl CLI";
     };
   };
 
@@ -50,6 +51,9 @@ in
     home.file = lib.mkMerge [
       (lib.mkIf cfg.skills.github-repo-search.enable {
         ".pi/agent/skills/github-repo-search/SKILL.md".source = "${pkg}/skills/github-repo-search/SKILL.md";
+      })
+      (lib.mkIf cfg.skills.remindctl.enable {
+        ".pi/agent/skills/remindctl/SKILL.md".source = "${pkg}/skills/remindctl/SKILL.md";
       })
       (lib.mkIf cfg.extensions.fence.enable {
         "${extDir}/fence/index.ts".source = "${pkg}/fence/index.ts";
