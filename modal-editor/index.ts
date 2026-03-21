@@ -3,13 +3,13 @@
  *
  * Normal mode keybindings:
  *   Navigation:  h j k l   w e b   0 ^ $   f{c} t{c} F{c} T{c}   gg G
- *   Insert:      i a I A   C s
+ *   Insert:      i a I A   o O   C s
  *   Editing:     x X   D   p P   u
  *   Operators:   d(d|w|e|b|h|l|0|^|$|f{c}|t{c}|F{c}|T{c}|iw|iW|aw|aW|gg|G)
  *                c(c|w|e|b|h|l|0|^|$|f{c}|t{c}|F{c}|T{c}|iw|iW|aw|aW|gg|G)
  *                y(y|w|e|b|h|l|0|^|$)   Y
- *   Visual:      v → select with motions → d/c/x/y
- *   Visual-line: V → select lines with j/k → d/c/x/y
+ *   Visual:      v → select with motions → d/c/x/y/o (o swaps endpoint)
+ *   Visual-line: V → select lines with j/k → d/c/x/y/o (o swaps endpoint)
  *   Escape:      insert → normal, normal → abort agent
  */
 
@@ -411,6 +411,40 @@ class ModalEditor extends CustomEditor {
 	}
 
 	/**
+	 * Swap the cursor and the visual anchor (vim `o` / `O` in visual mode).
+	 * After the swap the user can extend the selection from the opposite end.
+	 */
+	private swapVisualEndpoint(): void {
+		if (!this.visualAnchor) return;
+
+		const cursor = this.getCursor();
+		const anchor = this.visualAnchor;
+
+		// Nothing to do if cursor and anchor are identical
+		if (cursor.line === anchor.line && cursor.col === anchor.col) return;
+
+		// Navigate the cursor to the anchor position.
+		// Strategy (same as deleteSelection): go to col 0 of current line,
+		// move vertically, then right to the target column.
+
+		// Step 1: col 0 of current logical line
+		super.handleInput("\x01"); // ctrl+a
+
+		// Step 2: move vertically to anchor.line
+		if (cursor.line > anchor.line) {
+			for (let i = 0; i < cursor.line - anchor.line; i++) super.handleInput("\x1b[A");
+		} else if (cursor.line < anchor.line) {
+			for (let i = 0; i < anchor.line - cursor.line; i++) super.handleInput("\x1b[B");
+		}
+
+		// Step 3: move right to anchor.col
+		for (let i = 0; i < anchor.col; i++) super.handleInput("\x1b[C");
+
+		// Swap: old cursor becomes new anchor
+		this.visualAnchor = cursor;
+	}
+
+	/**
 	 * Execute a text-object operation (iw, iW, aw, aW) under an operator.
 	 *
 	 * @param op     - "d" | "c" (y is not supported — individual char-deletes
@@ -645,6 +679,12 @@ class ModalEditor extends CustomEditor {
 					this.visualAnchor = null;
 					return;
 
+				// Swap cursor ↔ anchor (go to Other end of selection)
+				case "o":
+				case "O":
+					this.swapVisualEndpoint();
+					return;
+
 				// Char-motions set pendingMotion (no operator)
 				case "f": case "t": case "F": case "T":
 					this.pendingMotion = data;
@@ -710,6 +750,12 @@ class ModalEditor extends CustomEditor {
 				case "y":
 					this.enterNormalMode();
 					this.visualAnchor = null;
+					return;
+
+				// Swap cursor ↔ anchor (go to Other end of selection)
+				case "o":
+				case "O":
+					this.swapVisualEndpoint();
 					return;
 			}
 
@@ -842,6 +888,17 @@ class ModalEditor extends CustomEditor {
 				return;
 			case "A": // append at line end
 				super.handleInput("\x05");    // ctrl+e: line end
+				this.enterInsertMode();
+				return;
+			case "o": // open line below
+				super.handleInput("\x05");    // ctrl+e: line end
+				super.handleInput("\n");      // newline: creates new line below
+				this.enterInsertMode();
+				return;
+			case "O": // open line above
+				super.handleInput("\x01");    // ctrl+a: line start
+				super.handleInput("\n");      // newline: splits, cursor moves to next line
+				super.handleInput("\x1b[A");  // up: back to the new empty line
 				this.enterInsertMode();
 				return;
 			case "C": // change to line end
