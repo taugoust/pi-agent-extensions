@@ -12,7 +12,7 @@ import { execSync, spawnSync } from "child_process";
 import { writeFileSync, unlinkSync } from "fs";
 import { tmpdir, platform } from "os";
 import { join } from "path";
-import type { ExtensionAPI, ExtensionContext } from "@mariozechner/pi-coding-agent";
+import { SettingsManager, type ExtensionAPI, type ExtensionContext } from "@mariozechner/pi-coding-agent";
 import type { TUI } from "@mariozechner/pi-tui";
 
 // ---------------------------------------------------------------------------
@@ -22,8 +22,11 @@ import type { TUI } from "@mariozechner/pi-tui";
 /**
  * Walk the current session branch and produce a plain-text / light-markdown
  * representation of the conversation.
+ *
+ * @param hideThinking  When true, thinking blocks are omitted from the output
+ *                      (mirrors the Ctrl+T toggle in the interactive UI).
  */
-function extractConversation(ctx: ExtensionContext): string {
+function extractConversation(ctx: ExtensionContext, hideThinking: boolean): string {
 	const entries = ctx.sessionManager.getBranch();
 	const parts: string[] = [];
 
@@ -53,7 +56,9 @@ function extractConversation(ctx: ExtensionContext): string {
 					if (btype === "text") {
 						parts.push((block as { text: string }).text);
 					} else if (btype === "thinking") {
-						parts.push("<thinking>\n" + (block as { thinking: string }).thinking + "\n</thinking>");
+						if (!hideThinking) {
+							parts.push("<thinking>\n" + (block as { thinking: string }).thinking + "\n</thinking>");
+						}
 					} else if (btype === "toolCall") {
 						const tc = block as { name: string; arguments: Record<string, unknown> };
 						parts.push(`### Tool call: ${tc.name}\n`);
@@ -116,7 +121,8 @@ function findPager(): { cmd: string; args: string[] } {
  * and the non-forced differential render triggered by tui.start() is a no-op.
  */
 function openPager(tui: TUI, ctx: ExtensionContext): void {
-	const text = extractConversation(ctx);
+	const hideThinking = SettingsManager.create().getHideThinkingBlock();
+	const text = extractConversation(ctx, hideThinking);
 	if (!text.trim()) {
 		ctx.ui.notify("Nothing to page — conversation is empty.", "info");
 		return;
