@@ -25,6 +25,7 @@ in
       questionnaire.enable = lib.mkEnableOption "questionnaire extension — LLM-driven multi-question UI tool";
       modal-editor.enable = lib.mkEnableOption "modal-editor extension — vim-style modal input";
       mac-system-theme.enable = lib.mkEnableOption "mac-system-theme extension — syncs pi theme to macOS system appearance";
+      pager.enable = lib.mkEnableOption "pager extension — open conversation in an external pager (bat/less)";
       permission-gate.enable = lib.mkEnableOption "permission-gate extension — confirms dangerous bash commands";
 
       slow-mode = {
@@ -69,6 +70,10 @@ in
 
       (lib.mkIf cfg.extensions.mac-system-theme.enable {
         "${extDir}/mac-system-theme/index.ts".source = "${pkg}/mac-system-theme/index.ts";
+      })
+
+      (lib.mkIf cfg.extensions.pager.enable {
+        "${extDir}/pager/index.ts".source = "${pkg}/pager/index.ts";
       })
 
       (lib.mkIf cfg.extensions.permission-gate.enable {

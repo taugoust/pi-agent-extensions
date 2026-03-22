@@ -9,6 +9,7 @@
  *                c(c|w|e|b|h|l|0|^|$|f{c}|t{c}|F{c}|T{c}|iw|iW|aw|aW|gg|G)
  *                y(y|w|e|b|h|l|0|^|$|f{c}|t{c}|F{c}|T{c}|iw|iW|aw|aW|gg|G)   Y
  *   Clipboard:  y/p/P use the system clipboard.  Cmd+V (bracketed paste) still works.
+ *   Pager:      K emits pager:open event (opens pager if pager extension is loaded).
  *   Visual:      v → select with motions → d/c/x/y/o (o swaps endpoint)
  *   Visual-line: V → select lines with j/k → d/c/x/y/o (o swaps endpoint)
  *   Escape:      insert → normal, normal → abort agent
@@ -263,6 +264,9 @@ class ModalEditor extends CustomEditor {
 	// Clipboard yank tracking — used to distinguish line-wise vs char-wise paste
 	private lastYankText: string | null = null;
 	private lastYankLinewise: boolean = false;
+
+	// Normal-mode K handler (wired to pager:open event by the extension entry point)
+	onNormalK?: () => void;
 
 	// Visual-mode state
 	private visualAnchor: { line: number; col: number } | null = null;
@@ -1175,6 +1179,13 @@ class ModalEditor extends CustomEditor {
 			return;
 		}
 
+		// Open conversation pager (K — vim uses K for "look up")
+		// Emits an event so the pager extension handles it if loaded.
+		if (data === "K") {
+			this.onNormalK?.();
+			return;
+		}
+
 		// Replace single character (r{c})
 		if (data === "r") {
 			this.pendingReplace = true;
@@ -1396,7 +1407,11 @@ class ModalEditor extends CustomEditor {
 
 export default function (pi: ExtensionAPI) {
 	pi.on("session_start", (_event, ctx) => {
-		ctx.ui.setEditorComponent((tui, theme, kb) => new ModalEditor(tui, theme, kb));
+		ctx.ui.setEditorComponent((tui, theme, kb) => {
+			const editor = new ModalEditor(tui, theme, kb);
+			editor.onNormalK = () => pi.events.emit("pager:open");
+			return editor;
+		});
 
 		// Restore the original cursor shape on clean exit and on signals.
 		// Register these once, before the async capture, so they're in place early.
