@@ -4,7 +4,7 @@
  * Normal mode keybindings:
  *   Navigation:  h j k l   w e b   0 ^ $   f{c} t{c} F{c} T{c}   gg G
  *   Insert:      i a I A   o O   C s
- *   Editing:     x X   D   p P   u
+ *   Editing:     x X   D   r{c}   p P   u
  *   Operators:   d(d|w|e|b|h|l|0|^|$|f{c}|t{c}|F{c}|T{c}|iw|iW|aw|aW|gg|G)
  *                c(c|w|e|b|h|l|0|^|$|f{c}|t{c}|F{c}|T{c}|iw|iW|aw|aW|gg|G)
  *                y(y|w|e|b|h|l|0|^|$|f{c}|t{c}|F{c}|T{c}|iw|iW|aw|aW|gg|G)   Y
@@ -257,6 +257,8 @@ class ModalEditor extends CustomEditor {
 	private pendingTextObject: string | null = null;
 	/** Set when `g` has been pressed, waiting for the second key (e.g. `g` for `gg`). */
 	private pendingG: boolean = false;
+	/** Set when `r` has been pressed, waiting for the replacement character. */
+	private pendingReplace: boolean = false;
 
 	// Clipboard yank tracking — used to distinguish line-wise vs char-wise paste
 	private lastYankText: string | null = null;
@@ -856,18 +858,21 @@ class ModalEditor extends CustomEditor {
 				this.pendingMotion = null;
 				this.pendingTextObject = null;
 				this.pendingG = false;
+				this.pendingReplace = false;
 			} else if (this.mode === "visual" || this.mode === "visual-line") {
 				this.enterNormalMode();
 				this.visualAnchor = null;
 				this.pendingMotion = null;
 				this.pendingTextObject = null;
 				this.pendingG = false;
+				this.pendingReplace = false;
 			} else {
 				// normal mode → pass through (abort agent, etc.)
 				this.pendingOp = null;
 				this.pendingMotion = null;
 				this.pendingTextObject = null;
 				this.pendingG = false;
+				this.pendingReplace = false;
 				super.handleInput(data);
 			}
 			return;
@@ -887,6 +892,18 @@ class ModalEditor extends CustomEditor {
 			this.pendingMotion = null;
 			this.pendingOp = null;
 			this.executeCharMotion(op, motion, data);
+			return;
+		}
+
+		// ── Stage 3b: pending replace character (r{c}) ───────────────────────
+		if (this.pendingReplace) {
+			this.pendingReplace = false;
+			// Replace the character under the cursor, stay in normal mode
+			if (data.length === 1 && data.charCodeAt(0) >= 32) {
+				super.handleInput("\x1b[3~"); // delete char forward
+				super.handleInput(data);      // insert replacement
+				super.handleInput("\x1b[D");  // move back (cursor stays on replaced char)
+			}
 			return;
 		}
 
@@ -1158,6 +1175,12 @@ class ModalEditor extends CustomEditor {
 			return;
 		}
 
+		// Replace single character (r{c})
+		if (data === "r") {
+			this.pendingReplace = true;
+			return;
+		}
+
 		// Standalone char-motions (navigation)
 		if (data === "f" || data === "t" || data === "F" || data === "T") {
 			this.pendingMotion = data;
@@ -1354,6 +1377,8 @@ class ModalEditor extends CustomEditor {
 			label = ` NORMAL [${this.pendingOp}] `;
 		} else if (this.pendingG) {
 			label = ` NORMAL [g] `;
+		} else if (this.pendingReplace) {
+			label = ` NORMAL [r] `;
 		} else if (this.pendingMotion) {
 			label = ` NORMAL [${this.pendingMotion}] `;
 		} else {
