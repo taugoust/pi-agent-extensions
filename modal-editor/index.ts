@@ -7,13 +7,16 @@
  *   Editing:     x X   D   p P   u
  *   Operators:   d(d|w|e|b|h|l|0|^|$|f{c}|t{c}|F{c}|T{c}|iw|iW|aw|aW|gg|G)
  *                c(c|w|e|b|h|l|0|^|$|f{c}|t{c}|F{c}|T{c}|iw|iW|aw|aW|gg|G)
- *                y(y|w|e|b|h|l|0|^|$)   Y
+ *                y(y|w|e|b|h|l|0|^|$|f{c}|t{c}|F{c}|T{c}|iw|iW|aw|aW|gg|G)   Y
+ *   Clipboard:  y/p/P use the system clipboard.  Cmd+V (bracketed paste) still works.
  *   Visual:      v → select with motions → d/c/x/y/o (o swaps endpoint)
  *   Visual-line: V → select lines with j/k → d/c/x/y/o (o swaps endpoint)
  *   Escape:      insert → normal, normal → abort agent
  */
 
-import { CustomEditor, type ExtensionAPI } from "@mariozechner/pi-coding-agent";
+import { execSync } from "child_process";
+import { platform } from "os";
+import { copyToClipboard, CustomEditor, type ExtensionAPI } from "@mariozechner/pi-coding-agent";
 import { matchesKey, truncateToWidth, visibleWidth } from "@mariozechner/pi-tui";
 
 // ---------------------------------------------------------------------------
@@ -161,6 +164,33 @@ const YANK_MOTION: Record<string, string[]> = Object.fromEntries(
 );
 
 // ---------------------------------------------------------------------------
+// System clipboard helpers
+// ---------------------------------------------------------------------------
+
+function readFromClipboard(): string {
+	try {
+		const p = platform();
+		if (p === "darwin") {
+			return execSync("pbpaste", { timeout: 5000 }).toString();
+		} else if (p === "win32") {
+			return execSync("powershell.exe -command Get-Clipboard", { timeout: 5000 }).toString();
+		} else {
+			try {
+				return execSync("wl-paste --no-newline", { timeout: 5000 }).toString();
+			} catch {
+				try {
+					return execSync("xclip -selection clipboard -o", { timeout: 5000 }).toString();
+				} catch {
+					return execSync("xsel --clipboard --output", { timeout: 5000 }).toString();
+				}
+			}
+		}
+	} catch {
+		return "";
+	}
+}
+
+// ---------------------------------------------------------------------------
 // ModalEditor
 // ---------------------------------------------------------------------------
 
@@ -227,6 +257,10 @@ class ModalEditor extends CustomEditor {
 	private pendingTextObject: string | null = null;
 	/** Set when `g` has been pressed, waiting for the second key (e.g. `g` for `gg`). */
 	private pendingG: boolean = false;
+
+	// Clipboard yank tracking — used to distinguish line-wise vs char-wise paste
+	private lastYankText: string | null = null;
+	private lastYankLinewise: boolean = false;
 
 	// Visual-mode state
 	private visualAnchor: { line: number; col: number } | null = null;
@@ -444,6 +478,242 @@ class ModalEditor extends CustomEditor {
 		this.visualAnchor = cursor;
 	}
 
+	// ── Clipboard yank / paste helpers ───────────────────────────────────────
+
+	/**
+	 * Copy text to the system clipboard and remember whether the yank was
+	 * line-wise so that `p`/`P` can decide how to paste.
+	 */
+	private yankToClipboard(text: string, linewise: boolean): void {
+		this.lastYankText = text;
+		this.lastYankLinewise = linewise;
+		copyToClipboard(text);
+	}
+
+	/**
+	 * Compute the text that a normal-mode yank motion would select, purely
+	 * from cursor position + buffer contents (no editor state mutation).
+	 */
+	private computeYankText(motionKey: string): { text: string; linewise: boolean } | null {
+		const lines = this.getLines();
+		const cursor = this.getCursor();
+		const line = lines[cursor.line] ?? "";
+
+		switch (motionKey) {
+			case "d": // yy — whole line
+				return { text: line + "\n", linewise: true };
+			case "$":
+				return cursor.col < line.length
+					? { text: line.slice(cursor.col), linewise: false }
+					: null;
+			case "0":
+			case "^":
+				return cursor.col > 0
+					? { text: line.slice(0, cursor.col), linewise: false }
+					: null;
+			case "h":
+				return cursor.col > 0
+					? { text: line[cursor.col - 1]!, linewise: false }
+					: null;
+			case "l":
+				return cursor.col < line.length
+					? { text: line[cursor.col]!, linewise: false }
+					: null;
+			case "w": {
+				let end = cursor.col;
+				if (end >= line.length) return null;
+				const ch = line[end]!;
+				if (/[a-zA-Z0-9_]/.test(ch)) {
+					while (end < line.length && /[a-zA-Z0-9_]/.test(line[end]!)) end++;
+				} else if (!/\s/.test(ch)) {
+					while (end < line.length && !/\s/.test(line[end]!) && !/[a-zA-Z0-9_]/.test(line[end]!)) end++;
+				}
+				// include trailing whitespace (vim `yw` behaviour)
+				while (end < line.length && /\s/.test(line[end]!)) end++;
+				return end > cursor.col ? { text: line.slice(cursor.col, end), linewise: false } : null;
+			}
+			case "e": {
+				if (cursor.col >= line.length) return null;
+				let end = cursor.col + 1;
+				while (end < line.length && /\s/.test(line[end]!)) end++;
+				if (end < line.length) {
+					const ch = line[end]!;
+					if (/[a-zA-Z0-9_]/.test(ch)) {
+						while (end < line.length && /[a-zA-Z0-9_]/.test(line[end]!)) end++;
+					} else {
+						while (end < line.length && !/\s/.test(line[end]!) && !/[a-zA-Z0-9_]/.test(line[end]!)) end++;
+					}
+				}
+				return end > cursor.col ? { text: line.slice(cursor.col, end), linewise: false } : null;
+			}
+			case "b": {
+				let start = cursor.col;
+				if (start <= 0) return null;
+				start--;
+				while (start > 0 && /\s/.test(line[start]!)) start--;
+				const ch = line[start]!;
+				if (/[a-zA-Z0-9_]/.test(ch)) {
+					while (start > 0 && /[a-zA-Z0-9_]/.test(line[start - 1]!)) start--;
+				} else if (!/\s/.test(ch)) {
+					while (start > 0 && !/\s/.test(line[start - 1]!) && !/[a-zA-Z0-9_]/.test(line[start - 1]!)) start--;
+				}
+				return { text: line.slice(start, cursor.col), linewise: false };
+			}
+			default:
+				return null;
+		}
+	}
+
+	/**
+	 * Compute the text that a char-motion yank (yf/yt/yF/yT) would select.
+	 */
+	private computeCharMotionYankText(motion: string, char: string): { text: string; linewise: boolean } | null {
+		const line = (this.getLines()[this.getCursor().line]) ?? "";
+		const col = this.getCursor().col;
+
+		if (motion === "f") {
+			const idx = line.indexOf(char, col + 1);
+			if (idx === -1) return null;
+			return { text: line.slice(col, idx + 1), linewise: false };
+		} else if (motion === "t") {
+			const idx = line.indexOf(char, col + 1);
+			if (idx === -1 || idx === col + 1) return null;
+			return { text: line.slice(col, idx), linewise: false };
+		} else if (motion === "F") {
+			const idx = line.lastIndexOf(char, col - 1);
+			if (idx === -1) return null;
+			return { text: line.slice(idx, col + 1), linewise: false };
+		} else { // "T"
+			const idx = line.lastIndexOf(char, col - 1);
+			if (idx === -1 || idx === col - 1) return null;
+			return { text: line.slice(idx + 1, col + 1), linewise: false };
+		}
+	}
+
+	/**
+	 * Compute the text that a text-object yank (yiw/yiW/yaw/yaW) would select.
+	 */
+	private computeTextObjectYankText(prefix: string, obj: string): { text: string; linewise: boolean } | null {
+		if (obj !== "w" && obj !== "W") return null;
+
+		const line = (this.getLines()[this.getCursor().line]) ?? "";
+		const col = this.getCursor().col;
+		const curChar = line[col] ?? "";
+
+		let charClass: (c: string) => boolean;
+		if (obj === "W") {
+			charClass = /\s/.test(curChar) ? (c) => /\s/.test(c) : (c) => !/\s/.test(c);
+		} else {
+			if (/\s/.test(curChar)) charClass = (c) => /\s/.test(c);
+			else if (/[a-zA-Z0-9_]/.test(curChar)) charClass = (c) => /[a-zA-Z0-9_]/.test(c);
+			else charClass = (c) => !/\s/.test(c) && !/[a-zA-Z0-9_]/.test(c);
+		}
+
+		let start = col;
+		while (start > 0 && charClass(line[start - 1]!)) start--;
+		let end = col;
+		while (end < line.length - 1 && charClass(line[end + 1]!)) end++;
+
+		if (prefix === "a") {
+			if (end + 1 < line.length && /\s/.test(line[end + 1]!)) {
+				while (end + 1 < line.length && /\s/.test(line[end + 1]!)) end++;
+			} else if (start > 0 && /\s/.test(line[start - 1]!)) {
+				while (start > 0 && /\s/.test(line[start - 1]!)) start--;
+			}
+		}
+
+		return { text: line.slice(start, end + 1), linewise: false };
+	}
+
+	/**
+	 * Compute text for a line-wise yank to the first or last line (ygg / yG).
+	 */
+	private computeLinewiseYankText(target: "first" | "last"): { text: string; linewise: boolean } {
+		const lines = this.getLines();
+		const cursor = this.getCursor();
+		const selected = target === "first"
+			? lines.slice(0, cursor.line + 1)
+			: lines.slice(cursor.line);
+		return { text: selected.join("\n") + "\n", linewise: true };
+	}
+
+	/**
+	 * Get the text of the current visual (or visual-line) selection.
+	 */
+	private getVisualSelectionText(): { text: string; linewise: boolean } {
+		if (!this.visualAnchor) return { text: "", linewise: false };
+
+		const cursor = this.getCursor();
+		const anchor = this.visualAnchor;
+		const lines = this.getLines();
+
+		if (this.mode === "visual-line") {
+			const startLine = Math.min(anchor.line, cursor.line);
+			const endLine = Math.max(anchor.line, cursor.line);
+			return { text: lines.slice(startLine, endLine + 1).join("\n") + "\n", linewise: true };
+		}
+
+		// Character-wise visual mode
+		let startLine: number, startCol: number, endLine: number, endCol: number;
+		if (anchor.line < cursor.line || (anchor.line === cursor.line && anchor.col <= cursor.col)) {
+			startLine = anchor.line; startCol = anchor.col;
+			endLine   = cursor.line; endCol   = cursor.col;
+		} else {
+			startLine = cursor.line; startCol = cursor.col;
+			endLine   = anchor.line; endCol   = anchor.col;
+		}
+
+		if (startLine === endLine) {
+			return { text: (lines[startLine] ?? "").slice(startCol, endCol + 1), linewise: false };
+		}
+
+		let text = (lines[startLine] ?? "").slice(startCol);
+		for (let i = startLine + 1; i < endLine; i++) text += "\n" + (lines[i] ?? "");
+		text += "\n" + (lines[endLine] ?? "").slice(0, endCol + 1);
+		return { text, linewise: false };
+	}
+
+	/**
+	 * Paste text from the system clipboard.
+	 *
+	 * If the clipboard contents match the last yank AND that yank was line-wise,
+	 * paste as a new line below (`p`) or above (`P`).  Otherwise paste inline.
+	 *
+	 * Cmd+V (bracketed paste) is unaffected — it is handled by the underlying
+	 * editor before this code runs.
+	 */
+	private pasteFromClipboard(after: boolean): void {
+		const text = readFromClipboard();
+		if (!text) return;
+
+		const isLinewise = this.lastYankLinewise && text === this.lastYankText;
+
+		if (isLinewise) {
+			const pasteText = text.endsWith("\n") ? text.slice(0, -1) : text;
+			if (after) {
+				super.handleInput("\x05"); // ctrl+e  → end of line
+				super.handleInput("\n");   // newline → open line below
+				this.insertTextAtCursor(pasteText);
+			} else {
+				super.handleInput("\x01"); // ctrl+a → start of line
+				this.insertTextAtCursor(pasteText + "\n");
+				// Move cursor back up to the first pasted line
+				const n = pasteText.split("\n").length;
+				for (let i = 0; i < n; i++) super.handleInput("\x1b[A");
+				super.handleInput("\x01"); // start of line
+			}
+		} else {
+			if (after) {
+				const cursor = this.getCursor();
+				const line = this.getLines()[cursor.line] ?? "";
+				if (line.length > 0 && cursor.col < line.length) {
+					super.handleInput("\x1b[C"); // move right one char
+				}
+			}
+			this.insertTextAtCursor(text);
+		}
+	}
+
 	/**
 	 * Execute a text-object operation (iw, iW, aw, aW) under an operator.
 	 *
@@ -453,8 +723,14 @@ class ModalEditor extends CustomEditor {
 	 * @param char   - "w" (word: [a-zA-Z0-9_]) | "W" (WORD: non-whitespace)
 	 */
 	private executeTextObject(op: string | null, prefix: string, char: string): void {
-		if (op === null || op === "y") return; // navigation / yank not supported
+		if (op === null) return; // navigation not supported
 		if (char !== "w" && char !== "W") return; // only word objects
+
+		if (op === "y") {
+			const result = this.computeTextObjectYankText(prefix, char);
+			if (result) this.yankToClipboard(result.text, result.linewise);
+			return;
+		}
 
 		const lines = this.getLines();
 		const cursor = this.getCursor();
@@ -563,8 +839,10 @@ class ModalEditor extends CustomEditor {
 			}
 			if (op === "c") this.enterInsertMode();
 		}
-		// y + char motions: individual char-deletes don't populate the editor's
-		// kill ring, so yt/yf/yT/yF are intentionally not supported.
+		if (op === "y") {
+			const result = this.computeCharMotionYankText(motion, char);
+			if (result) this.yankToClipboard(result.text, result.linewise);
+		}
 	}
 
 	// ── input handling ───────────────────────────────────────────────────────
@@ -626,11 +904,16 @@ class ModalEditor extends CustomEditor {
 		if (this.pendingG) {
 			this.pendingG = false;
 			if (data === "g") {
-				// gg (or dgg/cgg): go to first line
+				// gg (or dgg/cgg/ygg): go to first line
 				if (this.pendingOp) {
 					const op = this.pendingOp;
 					this.pendingOp = null;
-					if (op !== "y") this.executeLinewiseOp(op, "first");
+					if (op === "y") {
+						const result = this.computeLinewiseYankText("first");
+						this.yankToClipboard(result.text, result.linewise);
+					} else {
+						this.executeLinewiseOp(op, "first");
+					}
 				} else {
 					this.goToLine("first");
 				}
@@ -669,15 +952,14 @@ class ModalEditor extends CustomEditor {
 					this.enterInsertMode();
 					return;
 
-				// Yank selection — not yet supported.
-				// The kill ring is only populated by the editor's own "kill"
-				// commands (ctrl+k, alt+d, …) so there is no clean way to push
-				// an arbitrary selection into it without direct API access.
-				// For now `y` in visual mode simply cancels the selection.
-				case "y":
+				// Yank selection to system clipboard
+				case "y": {
+					const sel = this.getVisualSelectionText();
+					if (sel.text) this.yankToClipboard(sel.text, sel.linewise);
 					this.enterNormalMode();
 					this.visualAnchor = null;
 					return;
+				}
 
 				// Swap cursor ↔ anchor (go to Other end of selection)
 				case "o":
@@ -746,11 +1028,14 @@ class ModalEditor extends CustomEditor {
 					this.enterInsertMode();
 					return;
 
-				// Yank — not yet supported (same as character visual)
-				case "y":
+				// Yank selected lines to system clipboard
+				case "y": {
+					const sel = this.getVisualSelectionText();
+					if (sel.text) this.yankToClipboard(sel.text, sel.linewise);
 					this.enterNormalMode();
 					this.visualAnchor = null;
 					return;
+				}
 
 				// Swap cursor ↔ anchor (go to Other end of selection)
 				case "o":
@@ -795,24 +1080,24 @@ class ModalEditor extends CustomEditor {
 
 			// Char-motions need a second character — keep pendingOp and wait
 			if (data === "f" || data === "t" || data === "F" || data === "T") {
-				// y + char motions are not supported; silently drop
-				if (op === "y") { this.pendingOp = null; return; }
 				this.pendingMotion = data;
 				return;
 			}
 
 			// Text-object prefix: i (inner) or a (around) — wait for the object char
 			if (data === "i" || data === "a") {
-				// y + text objects are not supported; silently drop
-				if (op === "y") { this.pendingOp = null; return; }
 				this.pendingTextObject = data;
 				return; // keep pendingOp set
 			}
 
-			// G: line-wise motion to last line (dG, cG)
+			// G: line-wise motion to last line (dG, cG, yG)
 			if (data === "G") {
 				this.pendingOp = null;
-				if (op === "y") return; // yank not supported
+				if (op === "y") {
+					const result = this.computeLinewiseYankText("last");
+					this.yankToClipboard(result.text, result.linewise);
+					return;
+				}
 				this.executeLinewiseOp(op, "last");
 				return;
 			}
@@ -826,11 +1111,17 @@ class ModalEditor extends CustomEditor {
 			this.pendingOp = null;
 			// Normalise: dd → "d", cc → "d", yy → "d" (same motion key)
 			const motionKey = data === op ? "d" : data;
-			const table = op === "y" ? YANK_MOTION : DELETE_MOTION;
-			const seqs = table[motionKey];
-			if (seqs) {
-				for (const s of seqs) super.handleInput(s);
-				if (op === "c") this.enterInsertMode();
+
+			if (op === "y") {
+				// Yank → compute text and copy to system clipboard (no editor mutation)
+				const result = this.computeYankText(motionKey);
+				if (result) this.yankToClipboard(result.text, result.linewise);
+			} else {
+				const seqs = DELETE_MOTION[motionKey];
+				if (seqs) {
+					for (const s of seqs) super.handleInput(s);
+					if (op === "c") this.enterInsertMode();
+				}
 			}
 			return;
 		}
@@ -909,10 +1200,16 @@ class ModalEditor extends CustomEditor {
 				super.handleInput("\x1b[3~"); // delete char forward
 				this.enterInsertMode();
 				return;
-			case "Y": // yank whole line (shortcut for yy)
-				for (const s of YANK_MOTION["d"]!) super.handleInput(s);
+			case "Y": { // yank whole line to system clipboard
+				const result = this.computeYankText("d");
+				if (result) this.yankToClipboard(result.text, result.linewise);
 				return;
+			}
 		}
+
+		// Paste from system clipboard
+		if (data === "p") { this.pasteFromClipboard(true);  return; }
+		if (data === "P") { this.pasteFromClipboard(false); return; }
 
 		// Simple motion / edit mappings
 		const seq: Record<string, string> = {
@@ -932,8 +1229,6 @@ class ModalEditor extends CustomEditor {
 			x:   "\x1b[3~",  // delete char forward
 			X:   "\x7f",     // delete char backward (backspace)
 			D:   "\x0b",     // delete to line end   (ctrl+k)
-			p:   "\x19",     // paste after cursor   (ctrl+y)
-			P:   "\x19",     // paste before cursor  (ctrl+y — same in line editor)
 			u:   "\x1f",     // undo                 (ctrl+-)
 		};
 
