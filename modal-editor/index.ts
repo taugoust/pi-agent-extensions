@@ -8,6 +8,8 @@
  *   Operators:   d(d|w|e|b|h|l|0|^|$|f{c}|t{c}|F{c}|T{c}|iw|iW|aw|aW|gg|G)
  *                c(c|w|e|b|h|l|0|^|$|f{c}|t{c}|F{c}|T{c}|iw|iW|aw|aW|gg|G)
  *                y(y|w|e|b|h|l|0|^|$|f{c}|t{c}|F{c}|T{c}|iw|iW|aw|aW|gg|G)   Y
+ *   Reflow:     gq(q|j|k|G|gg)   Q (reflow entire buffer)
+ *               In visual/V-line: gq reflows selected lines.
  *   Clipboard:  y/p/P use the system clipboard.  Cmd+V (bracketed paste) still works.
  *   Pager:      K emits pager:open event (opens pager if pager extension is loaded).
  *   Visual:      v → select with motions → d/c/x/y/o (o swaps endpoint)
@@ -395,6 +397,74 @@ class ModalEditor extends CustomEditor {
 
 		// the new (second) line may itself be too long — wrap again
 		this.autoWrap();
+	}
+
+	// ── reflow (gq / Q) ────────────────────────────────────────────────
+
+	/**
+	 * Reflow (re-wrap) a range of logical lines to fit within `autoWrapWidth`.
+	 *
+	 * Paragraphs (runs of non-empty lines) within the range are joined and
+	 * re-wrapped independently; empty lines (paragraph separators) are preserved.
+	 * After reformatting, the cursor is placed at the beginning of the range.
+	 */
+	private reflowLines(startLine: number, endLine: number): void {
+		if (this.autoWrapWidth <= 0) return;
+
+		const lines  = this.getLines();
+		const cursor = this.getCursor();
+
+		startLine = Math.max(0, startLine);
+		endLine   = Math.min(lines.length - 1, endLine);
+		if (startLine > endLine) return;
+
+		// ── Build new text, reflowing each paragraph independently ────────
+		const newLines: string[] = [];
+		let i = startLine;
+		while (i <= endLine) {
+			const line = lines[i] ?? "";
+			if (line.trim() === "") {
+				newLines.push("");
+				i++;
+				continue;
+			}
+			// Collect consecutive non-empty lines (one paragraph)
+			const paraLines: string[] = [];
+			while (i <= endLine && (lines[i] ?? "").trim() !== "") {
+				paraLines.push(lines[i]!);
+				i++;
+			}
+			// Join, collapse whitespace, re-wrap
+			const joined = paraLines.join(" ").replace(/\s+/g, " ").trim();
+			const chunks = computeWordWrap(joined, this.autoWrapWidth);
+			for (const chunk of chunks) newLines.push(chunk.text);
+		}
+
+		const newText = newLines.join("\n");
+
+		// ── Navigate to col 0 of startLine ───────────────────────────────
+		super.handleInput("\x01"); // start of current line
+		if (cursor.line > startLine) {
+			for (let n = 0; n < cursor.line - startLine; n++) super.handleInput("\x1b[A");
+		} else if (cursor.line < startLine) {
+			for (let n = 0; n < startLine - cursor.line; n++) super.handleInput("\x1b[B");
+		}
+
+		// ── Delete old text (all chars + newlines in range) ──────────────
+		let totalChars = 0;
+		for (let n = startLine; n <= endLine; n++) {
+			totalChars += (lines[n]?.length ?? 0);
+			if (n < endLine) totalChars += 1; // newline between lines
+		}
+		for (let n = 0; n < totalChars; n++) super.handleInput("\x1b[3~");
+
+		// ── Insert reformatted text ──────────────────────────────────────
+		this.insertTextAtCursor(newText);
+
+		// ── Move cursor back to start of the reflowed region ─────────────
+		const afterCursor = this.getCursor();
+		super.handleInput("\x01"); // start of current line
+		for (let n = 0; n < afterCursor.line - startLine; n++) super.handleInput("\x1b[A");
 	}
 
 	/**
@@ -1039,8 +1109,42 @@ class ModalEditor extends CustomEditor {
 		// ── Stage 5: pending `g` — waiting for second key ─────────────────────
 		if (this.pendingG) {
 			this.pendingG = false;
+
+			// gq — start the reflow operator (or handle gqgg / visual gq)
+			if (data === "q") {
+				// In visual / visual-line: reflow the selected line range
+				if ((this.mode === "visual" || this.mode === "visual-line") && this.visualAnchor) {
+					const cur = this.getCursor();
+					const anc = this.visualAnchor;
+					const sl  = Math.min(anc.line, cur.line);
+					const el  = Math.max(anc.line, cur.line);
+					this.visualAnchor = null;
+					this.enterNormalMode();
+					this.reflowLines(sl, el);
+					return;
+				}
+
+				// gqgg completion (pendingOp is already "gq" from earlier)
+				if (this.pendingOp === "gq") {
+					// This can't happen (gqg sets pendingG, then "g" not "q"),
+					// but guard for safety.
+					this.pendingOp = null;
+					return;
+				}
+
+				// Normal mode: start gq operator — wait for motion
+				this.pendingOp = "gq";
+				return;
+			}
+
 			if (data === "g") {
-				// gg (or dgg/cgg/ygg): go to first line
+				// gg (or dgg/cgg/ygg/gqgg): go to first line
+				if (this.pendingOp === "gq") {
+					// gqgg: reflow from first line to current line
+					this.pendingOp = null;
+					this.reflowLines(0, this.getCursor().line);
+					return;
+				}
 				if (this.pendingOp) {
 					const op = this.pendingOp;
 					this.pendingOp = null;
@@ -1210,6 +1314,36 @@ class ModalEditor extends CustomEditor {
 
 		// ── Normal mode ───────────────────────────────────────────────────────
 
+		// Resolve pending gq operator + motion
+		if (this.pendingOp === "gq") {
+			// g: start gg sequence under gq operator (gqgg)
+			if (data === "g") {
+				this.pendingG = true;
+				return; // keep pendingOp set
+			}
+
+			this.pendingOp = null;
+			const gqCursor = this.getCursor();
+			const gqLines  = this.getLines();
+
+			if (data === "q") {
+				// gqq — reflow current paragraph (consecutive non-empty lines)
+				let sl = gqCursor.line;
+				let el = gqCursor.line;
+				while (sl > 0 && (gqLines[sl - 1]?.trim() ?? "") !== "") sl--;
+				while (el < gqLines.length - 1 && (gqLines[el + 1]?.trim() ?? "") !== "") el++;
+				this.reflowLines(sl, el);
+			} else if (data === "j") {
+				this.reflowLines(gqCursor.line, Math.min(gqCursor.line + 1, gqLines.length - 1));
+			} else if (data === "k") {
+				this.reflowLines(Math.max(gqCursor.line - 1, 0), gqCursor.line);
+			} else if (data === "G") {
+				this.reflowLines(gqCursor.line, gqLines.length - 1);
+			}
+			// else: unsupported motion — silently ignore
+			return;
+		}
+
 		// Resolve pending operator (d / c / y) + motion
 		if (this.pendingOp === "d" || this.pendingOp === "c" || this.pendingOp === "y") {
 			const op = this.pendingOp;
@@ -1279,6 +1413,13 @@ class ModalEditor extends CustomEditor {
 		// Operators that wait for a motion
 		if (data === "d" || data === "c" || data === "y") {
 			this.pendingOp = data;
+			return;
+		}
+
+		// Q: reflow entire buffer
+		if (data === "Q") {
+			const allLines = this.getLines();
+			if (allLines.length > 0) this.reflowLines(0, allLines.length - 1);
 			return;
 		}
 
