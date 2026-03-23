@@ -182,7 +182,8 @@ function openPager(tui: TUI, ctx: ExtensionContext, full: boolean): void {
 		return;
 	}
 
-	const width = process.stdout.columns || 80;
+	const rawWidth = (process.stdout.columns || 80) - 5;
+	const width = rawWidth > 0 ? rawWidth : 80;
 	const wrapped = wrapText(text, width);
 
 	const tmpFile = join(tmpdir(), `pi-pager-${Date.now()}.md`);
