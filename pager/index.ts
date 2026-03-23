@@ -1,8 +1,8 @@
 /**
  * Pager — open the conversation in an external pager (bat or less).
  *
- * - `/pager` command:      truncated tool output (10 lines), colored
- * - `/pager-full` command: full tool output, colored
+ * - `/pager` command:      tool output truncated to 10 lines
+ * - `/pager-full` command: full tool output
  * - Ctrl+Shift+K shortcut (truncated mode)
  * - K in modal-editor normal mode via the `pager:open` event (truncated mode)
  *
@@ -18,34 +18,21 @@ import { SettingsManager, type ExtensionAPI, type ExtensionContext } from "@mari
 import type { TUI } from "@mariozechner/pi-tui";
 
 // ---------------------------------------------------------------------------
-// ANSI helpers
+// Helpers
 // ---------------------------------------------------------------------------
 
-// Tool success bg: dark green (#283228) approximated in 256-color
-const TOOL_BG  = "\x1b[48;5;22m";
-// Tool error bg: dark red (#3c2828) approximated in 256-color
-const TOOL_ERR_BG = "\x1b[48;5;52m";
-const RESET     = "\x1b[0m";
-const DIM       = "\x1b[2m";
-const BOLD      = "\x1b[1m";
+const TOOL_OUTPUT_MAX_LINES = 10;
 
-/** Wrap every line in `text` with `open` / RESET so the background spans full lines. */
-function wrapLines(text: string, open: string): string {
-	return text.split("\n").map(l => `${open}${l}${RESET}`).join("\n");
-}
-
-/** Cap text to `maxLines` lines; append a dim "..." indicator if truncated. */
-function truncateLines(text: string, maxLines: number): { text: string; truncated: boolean } {
+/** Cap text to `maxLines` lines; append "..." if truncated. */
+function truncateLines(text: string, maxLines: number): string {
 	const lines = text.split("\n");
-	if (lines.length <= maxLines) return { text, truncated: false };
-	return { text: lines.slice(0, maxLines).join("\n"), truncated: true };
+	if (lines.length <= maxLines) return text;
+	return lines.slice(0, maxLines).join("\n") + "\n...";
 }
 
 // ---------------------------------------------------------------------------
 // Conversation extraction
 // ---------------------------------------------------------------------------
-
-const TOOL_OUTPUT_MAX_LINES = 10;
 
 interface ExtractOptions {
 	hideThinking: boolean;
@@ -54,8 +41,8 @@ interface ExtractOptions {
 }
 
 /**
- * Walk the current session branch and produce an ANSI-colored plain-text
- * representation of the conversation.
+ * Walk the current session branch and produce a markdown representation
+ * of the conversation.
  */
 function extractConversation(ctx: ExtensionContext, opts: ExtractOptions): string {
 	const { hideThinking, full } = opts;
@@ -68,7 +55,7 @@ function extractConversation(ctx: ExtensionContext, opts: ExtractOptions): strin
 		const role = msg.role as string;
 
 		if (role === "user") {
-			parts.push(`${BOLD}## User${RESET}\n`);
+			parts.push("## User\n");
 			const content = msg.content;
 			if (typeof content === "string") {
 				parts.push(content);
@@ -81,7 +68,7 @@ function extractConversation(ctx: ExtensionContext, opts: ExtractOptions): strin
 			parts.push("\n");
 
 		} else if (role === "assistant") {
-			parts.push(`${BOLD}## Assistant${RESET}\n`);
+			parts.push("## Assistant\n");
 			const content = msg.content;
 			if (Array.isArray(content)) {
 				for (const block of content) {
@@ -90,18 +77,14 @@ function extractConversation(ctx: ExtensionContext, opts: ExtractOptions): strin
 						parts.push((block as { text: string }).text);
 					} else if (btype === "thinking") {
 						if (!hideThinking) {
-							parts.push(`${DIM}<thinking>\n` + (block as { thinking: string }).thinking + `\n</thinking>${RESET}`);
+							parts.push("<thinking>\n" + (block as { thinking: string }).thinking + "\n</thinking>");
 						}
 					} else if (btype === "toolCall") {
 						const tc = block as { name: string; arguments: Record<string, unknown> };
 						let body: string;
 						try { body = JSON.stringify(tc.arguments, null, 2); } catch { body = "{}"; }
-						if (!full) {
-							const t = truncateLines(body, TOOL_OUTPUT_MAX_LINES);
-							body = t.text;
-							if (t.truncated) body += `\n${DIM}...${RESET}`;
-						}
-						parts.push(wrapLines(`### Tool call: ${tc.name}\n${body}`, TOOL_BG));
+						if (!full) body = truncateLines(body, TOOL_OUTPUT_MAX_LINES);
+						parts.push(`### Tool call: ${tc.name}\n\`\`\`json\n${body}\n\`\`\``);
 					}
 				}
 			}
@@ -110,9 +93,6 @@ function extractConversation(ctx: ExtensionContext, opts: ExtractOptions): strin
 		} else if (role === "toolResult") {
 			const toolName = msg.toolName as string;
 			const isError = msg.isError as boolean;
-			const bg = isError ? TOOL_ERR_BG : TOOL_BG;
-			const header = `### Tool result: ${toolName}${isError ? " (error)" : ""}`;
-
 			let body = "";
 			const content = msg.content;
 			if (Array.isArray(content)) {
@@ -122,36 +102,24 @@ function extractConversation(ctx: ExtensionContext, opts: ExtractOptions): strin
 				}
 				body = texts.join("\n");
 			}
-
-			if (!full) {
-				const t = truncateLines(body, TOOL_OUTPUT_MAX_LINES);
-				body = t.text;
-				if (t.truncated) body += `\n${DIM}...${RESET}`;
-			}
-
-			parts.push(wrapLines(`${header}\n${body}`, bg));
-			parts.push("\n");
+			if (!full) body = truncateLines(body, TOOL_OUTPUT_MAX_LINES);
+			parts.push(`### Tool result: ${toolName}${isError ? " (error)" : ""}\n${body}\n`);
 
 		} else if (role === "bashExecution") {
 			const cmd = msg.command as string;
 			const output = msg.output as string;
 			let body = output;
-			if (!full) {
-				const t = truncateLines(body, TOOL_OUTPUT_MAX_LINES);
-				body = t.text;
-				if (t.truncated) body += `\n${DIM}...${RESET}`;
-			}
-			parts.push(wrapLines(`## Shell\n$ ${cmd}\n${body}`, TOOL_BG));
-			parts.push("\n");
+			if (!full) body = truncateLines(body, TOOL_OUTPUT_MAX_LINES);
+			parts.push(`## Shell\n\`\`\`\n$ ${cmd}\n${body}\n\`\`\`\n`);
 
 		} else if (role === "compactionSummary") {
-			parts.push(`${DIM}## Compaction summary${RESET}\n`);
-			parts.push(`${DIM}${(msg.summary as string) ?? ""}${RESET}`);
+			parts.push("## Compaction summary\n");
+			parts.push((msg.summary as string) ?? "");
 			parts.push("\n");
 
 		} else if (role === "branchSummary") {
-			parts.push(`${DIM}## Branch summary${RESET}\n`);
-			parts.push(`${DIM}${(msg.summary as string) ?? ""}${RESET}`);
+			parts.push("## Branch summary\n");
+			parts.push((msg.summary as string) ?? "");
 			parts.push("\n");
 		}
 	}
@@ -160,11 +128,11 @@ function extractConversation(ctx: ExtensionContext, opts: ExtractOptions): strin
 }
 
 // ---------------------------------------------------------------------------
-// Pager selection
+// Pager selection & launch
 // ---------------------------------------------------------------------------
 
 /**
- * Pick the best available pager.  Prefers `bat` (with ANSI pass-through)
+ * Pick the best available pager.  Prefers `bat` (syntax-highlighted markdown)
  * then falls back to `less -R`.
  */
 function findPager(): { cmd: string; args: string[] } {
@@ -175,14 +143,10 @@ function findPager(): { cmd: string; args: string[] } {
 	return { cmd: "less", args: ["-R"] };
 }
 
-// ---------------------------------------------------------------------------
-// Pager launch
-// ---------------------------------------------------------------------------
-
 /**
  * Open the conversation in an external pager.
  *
- * Uses the alternate screen buffer (via less) so the terminal restores
+ * Uses the alternate screen buffer (via less/bat) so the terminal restores
  * pi's output when the pager exits.  We intentionally skip a forced
  * re-render — the screen is already correct after alternate-screen restore
  * and the non-forced differential render triggered by tui.start() is a no-op.
@@ -195,10 +159,9 @@ function openPager(tui: TUI, ctx: ExtensionContext, full: boolean): void {
 		return;
 	}
 
-	const tmpFile = join(tmpdir(), `pi-pager-${Date.now()}.txt`);
+	const tmpFile = join(tmpdir(), `pi-pager-${Date.now()}.md`);
 	try {
 		writeFileSync(tmpFile, text, "utf-8");
-
 		const pager = findPager();
 
 		tui.stop();
