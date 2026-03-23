@@ -343,6 +343,56 @@ class ModalEditor extends CustomEditor {
 			for (let i = 0; i < savedCol; i++) super.handleInput("\x1b[C");
 		}
 
+		// ── forward reflow: merge overflow line with the next line ───────────
+		// After the split, the overflow text sits on a short new line.  If a
+		// next line exists, join them so the recursive autoWrap() can re-split
+		// at the correct word boundary, preventing orphaned short lines.
+		const updatedCursor = this.getCursor();
+		const updatedLines  = this.getLines();
+		const overflowLine  = cursor.line + 1; // line index of the overflow text
+
+		if (overflowLine + 1 < updatedLines.length) {
+			// Save cursor position, navigate to end of overflow line, delete
+			// the newline to merge with the following line, then restore cursor.
+			const savedLine2 = updatedCursor.line;
+			const savedCol2  = updatedCursor.col;
+
+			// Go to end of overflow line
+			super.handleInput("\x01"); // start of current line
+			if (savedLine2 < overflowLine) {
+				for (let i = 0; i < overflowLine - savedLine2; i++) super.handleInput("\x1b[B");
+			} else if (savedLine2 > overflowLine) {
+				for (let i = 0; i < savedLine2 - overflowLine; i++) super.handleInput("\x1b[A");
+			}
+			super.handleInput("\x05"); // end of line (ctrl+e)
+
+			// Delete the newline between overflow line and next line
+			super.handleInput("\x1b[3~"); // forward-delete
+
+			// Insert a space to separate the merged text (unless overflow line
+			// already ends with whitespace or the next line starts with it)
+			const overflowText = updatedLines[overflowLine] ?? "";
+			const nextLineText = updatedLines[overflowLine + 1] ?? "";
+			if (overflowText.length > 0 && nextLineText.length > 0
+				&& !/\s$/.test(overflowText) && !/^\s/.test(nextLineText)) {
+				super.handleInput(" ");
+			}
+
+			// Restore cursor position
+			// After the merge, lines shifted: if cursor was below overflow,
+			// its line index decreased by 1.
+			const restoredLine = savedLine2 > overflowLine ? savedLine2 - 1 : savedLine2;
+			const currentLine  = overflowLine; // cursor is on overflow line after the merge
+			super.handleInput("\x01"); // start of line
+			if (currentLine > restoredLine) {
+				for (let i = 0; i < currentLine - restoredLine; i++) super.handleInput("\x1b[A");
+			} else if (currentLine < restoredLine) {
+				for (let i = 0; i < restoredLine - currentLine; i++) super.handleInput("\x1b[B");
+			}
+			// Restore column
+			for (let i = 0; i < savedCol2; i++) super.handleInput("\x1b[C");
+		}
+
 		// the new (second) line may itself be too long — wrap again
 		this.autoWrap();
 	}
