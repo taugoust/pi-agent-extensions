@@ -250,6 +250,9 @@ function captureAndSetCursorShape(initialShape: "block" | "line"): void {
 class ModalEditor extends CustomEditor {
 	private mode: "normal" | "insert" | "visual" | "visual-line" = "insert";
 
+	/** Layout width used for auto hard-wrapping (updated on each render). */
+	private autoWrapWidth = 0;
+
 	// Normal-mode operator state
 	private pendingOp: string | null = null;
 	/** Set when a char-motion (f/t/F/T) is pending its target character. */
@@ -281,6 +284,67 @@ class ModalEditor extends CustomEditor {
 	private enterNormalMode(): void {
 		this.mode = "normal";
 		setCursorShape("block");
+	}
+
+	// ── auto hard-wrap ──────────────────────────────────────────────────────
+
+	/**
+	 * If the current logical line exceeds the layout width, insert a real
+	 * newline at the nearest word boundary so each display line becomes its
+	 * own logical line.  Called after every insert-mode input.
+	 *
+	 * Recurses so that a single paste that produces a very long line is
+	 * broken into as many lines as needed.
+	 */
+	private autoWrap(): void {
+		if (this.autoWrapWidth <= 0) return;
+
+		const cursor = this.getCursor();
+		const lines  = this.getLines();
+		const line   = lines[cursor.line] ?? "";
+
+		if (visibleWidth(line) <= this.autoWrapWidth) return;
+
+		const chunks = computeWordWrap(line, this.autoWrapWidth);
+		if (chunks.length <= 1) return;
+
+		const breakCol = chunks[0]!.endIndex;   // index of first char of next word
+		if (breakCol <= 0 || breakCol >= line.length) return;
+
+		const savedCol = cursor.col;
+
+		// ── navigate cursor to breakCol ──────────────────────────────────────
+		if (savedCol > breakCol) {
+			for (let i = 0; i < savedCol - breakCol; i++) super.handleInput("\x1b[D");
+		} else if (savedCol < breakCol) {
+			for (let i = 0; i < breakCol - savedCol; i++) super.handleInput("\x1b[C");
+		}
+
+		// ── delete trailing whitespace immediately before breakCol ───────────
+		let spacesRemoved = 0;
+		for (let i = breakCol - 1; i >= 0 && /\s/.test(line[i]!); i--) {
+			super.handleInput("\x7f");   // backspace
+			spacesRemoved++;
+		}
+
+		// ── insert real newline ──────────────────────────────────────────────
+		super.handleInput("\n");
+		// cursor is now at col 0 of the new (second) line
+
+		// ── restore cursor position ──────────────────────────────────────────
+		if (savedCol >= breakCol) {
+			// cursor was on or after the break → stays on the new line
+			const targetCol = savedCol - breakCol;
+			for (let i = 0; i < targetCol; i++) super.handleInput("\x1b[C");
+		} else {
+			// cursor was before the break → move back to original line
+			super.handleInput("\x1b[A");   // up
+			super.handleInput("\x01");     // start of line
+			for (let i = 0; i < savedCol; i++) super.handleInput("\x1b[C");
+		}
+
+		// the new (second) line may itself be too long — wrap again
+		this.autoWrap();
 	}
 
 	/**
@@ -885,6 +949,7 @@ class ModalEditor extends CustomEditor {
 		// ── Insert mode: pass everything through ─────────────────────────────
 		if (this.mode === "insert") {
 			super.handleInput(data);
+			this.autoWrap();
 			return;
 		}
 
@@ -1279,6 +1344,11 @@ class ModalEditor extends CustomEditor {
 	// ── rendering ────────────────────────────────────────────────────────────
 
 	render(width: number): string[] {
+		// Update auto-wrap width (must match the base Editor's layout width)
+		const paddingX = this.getPaddingX();
+		const contentWidth = Math.max(1, width - paddingX * 2);
+		this.autoWrapWidth = Math.max(1, contentWidth - (paddingX ? 0 : 1));
+
 		const rendered = super.render(width);
 
 		// In INSERT mode, strip the fake block cursor (\x1b[7m...\x1b[0m) that
