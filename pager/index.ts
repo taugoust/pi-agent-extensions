@@ -30,6 +30,29 @@ function truncateLines(text: string, maxLines: number): string {
 	return lines.slice(0, maxLines).join("\n") + "\n...";
 }
 
+/** Hard-wrap every line in `text` to `width` columns. */
+function wrapText(text: string, width: number): string {
+	if (width <= 0) return text;
+	const lines = text.split("\n");
+	const result: string[] = [];
+	for (const line of lines) {
+		if (line.length <= width) {
+			result.push(line);
+		} else {
+			let remaining = line;
+			while (remaining.length > width) {
+				// Try to break at a space within the last 20% of the width
+				let breakAt = remaining.lastIndexOf(" ", width);
+				if (breakAt <= width * 0.8 || breakAt === -1) breakAt = width;
+				result.push(remaining.slice(0, breakAt));
+				remaining = remaining.slice(breakAt).replace(/^ /, "");
+			}
+			if (remaining) result.push(remaining);
+		}
+	}
+	return result.join("\n");
+}
+
 // ---------------------------------------------------------------------------
 // Conversation extraction
 // ---------------------------------------------------------------------------
@@ -159,9 +182,12 @@ function openPager(tui: TUI, ctx: ExtensionContext, full: boolean): void {
 		return;
 	}
 
+	const width = process.stdout.columns || 80;
+	const wrapped = wrapText(text, width);
+
 	const tmpFile = join(tmpdir(), `pi-pager-${Date.now()}.md`);
 	try {
-		writeFileSync(tmpFile, text, "utf-8");
+		writeFileSync(tmpFile, wrapped, "utf-8");
 		const pager = findPager();
 
 		tui.stop();
