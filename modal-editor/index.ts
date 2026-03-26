@@ -1386,6 +1386,10 @@ class ModalEditor extends CustomEditor {
 				// Yank → compute text and copy to system clipboard (no editor mutation)
 				const result = this.computeYankText(motionKey);
 				if (result) this.yankToClipboard(result.text, result.linewise);
+			} else if (op === "d" && motionKey === "d") {
+				// dd — delete entire line including newline (line-wise)
+				this.visualAnchor = this.getCursor();
+				this.deleteLineSelection();
 			} else {
 				const seqs = DELETE_MOTION[motionKey];
 				if (seqs) {
