@@ -394,10 +394,19 @@ export default function slowMode(pi: ExtensionAPI) {
 
       // Content split into lines for scrolling
       let bodyLines = currentBody.split("\n");
-      const maxVisible = 30;  // Show up to 30 lines at once
+
+      // Max visible content lines — adapt to terminal height.
+      // The component output + TUI footer/widgets must fit within the
+      // terminal viewport, otherwise the TUI triggers expensive full
+      // redraws on every interaction.  Overhead breakdown:
+      //   Component chrome (borders, label, path, hints, etc.): ~10 lines
+      //   TUI footer: ~3 lines
+      //   TUI widget spacer above editor: 1 line
+      //   Extra buffer for status/pending messages: 2 lines
+      const maxVisible = Math.max(3, tui.terminal.rows - 16);
 
       // Max scroll position (clamp to avoid scrolling past content)
-      let maxScroll = Math.max(0, bodyLines.length - 5);
+      let maxScroll = Math.max(0, bodyLines.length - maxVisible);
 
       // Track last 'g' press for gg binding
       let lastGPress = 0;
@@ -450,7 +459,7 @@ export default function slowMode(pi: ExtensionAPI) {
               
               // Update bodyLines and scroll bounds
               bodyLines = currentBody.split("\n");
-              maxScroll = Math.max(0, bodyLines.length - 5);
+              maxScroll = Math.max(0, bodyLines.length - maxVisible);
               scrollOffset = Math.min(scrollOffset, maxScroll);
             } catch (err) {
               // If reload fails, keep showing original content
@@ -703,8 +712,10 @@ export default function slowMode(pi: ExtensionAPI) {
 
       // Content split into lines for scrolling
       const bodyLines = opts.body.split("\n");
-      const maxVisible = 30;
-      let maxScroll = Math.max(0, bodyLines.length - 5);
+
+      // Max visible content lines — adapt to terminal height (see showReview).
+      const maxVisible = Math.max(3, tui.terminal.rows - 16);
+      let maxScroll = Math.max(0, bodyLines.length - maxVisible);
 
       // Track last 'g' press for gg binding
       let lastGPress = 0;
