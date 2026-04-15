@@ -471,4 +471,478 @@ in
     mkdir -p "$out"
     touch "$out/passed"
   '';
+
+  sandbox = pkgs.runCommand "sandbox-check" {
+    nativeBuildInputs = [
+      pkgs.nodejs
+      pkgs.typescript
+    ];
+  } ''
+    set -euo pipefail
+
+    workdir="$TMPDIR/sandbox-check"
+    srcdir="$workdir/src"
+    outdir="$workdir/out"
+    mkdir -p "$srcdir" "$outdir"
+
+    cp -r ${self}/sandbox "$srcdir/"
+
+    mkdir -p "$outdir/node_modules/@anthropic-ai/sandbox-runtime"
+    cat > "$outdir/node_modules/@anthropic-ai/sandbox-runtime/package.json" <<'EOF'
+    {
+      "name": "@anthropic-ai/sandbox-runtime",
+      "type": "module",
+      "main": "./index.js"
+    }
+    EOF
+
+    cat > "$outdir/node_modules/@anthropic-ai/sandbox-runtime/index.js" <<'EOF'
+    let currentConfig;
+    let askCallback;
+
+    export const SandboxManager = {
+      async initialize(config, callback) {
+        currentConfig = structuredClone(config);
+        askCallback = callback;
+      },
+      async reset() {
+        currentConfig = undefined;
+        askCallback = undefined;
+      },
+      getConfig() {
+        return currentConfig;
+      },
+      updateConfig(config) {
+        currentConfig = structuredClone(config);
+      },
+      async wrapWithSandbox(command) {
+        return command;
+      },
+      async askNetwork(host, port) {
+        if (!askCallback) {
+          return false;
+        }
+        return await askCallback({ host, port });
+      },
+    };
+    EOF
+
+    mkdir -p "$outdir/node_modules/@sinclair/typebox"
+    cat > "$outdir/node_modules/@sinclair/typebox/package.json" <<'EOF'
+    {
+      "name": "@sinclair/typebox",
+      "type": "module",
+      "main": "./index.js"
+    }
+    EOF
+
+    cat > "$outdir/node_modules/@sinclair/typebox/index.js" <<'EOF'
+    export const Type = {
+      String(options = {}) {
+        return { type: "string", ...options };
+      },
+      Number(options = {}) {
+        return { type: "number", ...options };
+      },
+      Boolean(options = {}) {
+        return { type: "boolean", ...options };
+      },
+      Optional(schema) {
+        return { ...schema, optional: true };
+      },
+      Object(properties) {
+        return { type: "object", properties };
+      },
+    };
+    EOF
+
+    mkdir -p "$outdir/node_modules/@mariozechner/pi-coding-agent"
+    cat > "$outdir/node_modules/@mariozechner/pi-coding-agent/package.json" <<'EOF'
+    {
+      "name": "@mariozechner/pi-coding-agent",
+      "type": "module",
+      "main": "./index.js"
+    }
+    EOF
+
+    cat > "$outdir/node_modules/@mariozechner/pi-coding-agent/index.js" <<'EOF'
+    export function createBashTool(cwd, options = {}) {
+      return {
+        name: "bash",
+        label: "bash",
+        description: "bash",
+        parameters: {},
+        async execute(_id, params) {
+          return {
+            content: [{ type: "text", text: `bash:''${cwd}:''${params?.command ?? ""}` }],
+            details: options,
+          };
+        },
+      };
+    }
+    EOF
+
+    tsc \
+      --noCheck \
+      --skipLibCheck \
+      --module nodenext \
+      --moduleResolution nodenext \
+      --target es2022 \
+      --rootDir "$srcdir" \
+      --outDir "$outdir" \
+      "$srcdir/sandbox/index.ts"
+
+    cat > "$workdir/test.mjs" <<'EOF'
+    import fs from "node:fs";
+    import os from "node:os";
+    import path from "node:path";
+    import { pathToFileURL } from "node:url";
+
+    function assert(condition, message) {
+      if (!condition) {
+        throw new Error(message);
+      }
+    }
+
+    function createPi() {
+      const handlers = new Map();
+      const commands = new Map();
+      const tools = new Map();
+      const flags = new Map();
+
+      return {
+        handlers,
+        commands,
+        tools,
+        registerFlag(name, options) {
+          flags.set(name, options.default);
+        },
+        getFlag(name) {
+          return flags.get(name);
+        },
+        registerCommand(name, definition) {
+          commands.set(name, definition);
+        },
+        registerTool(definition) {
+          tools.set(definition.name, definition);
+        },
+        on(event, handler) {
+          const list = handlers.get(event) ?? [];
+          list.push(handler);
+          handlers.set(event, list);
+        },
+        events: {
+          emit() {},
+        },
+      };
+    }
+
+    function createContext(cwd, choices = [], hasUI = true) {
+      let choiceIndex = 0;
+      const selectCalls = [];
+
+      return {
+        cwd,
+        hasUI,
+        selectCalls,
+        ui: {
+          theme: {
+            fg: (_color, text) => text,
+          },
+          setStatus() {},
+          notify() {},
+          async select(title, items) {
+            selectCalls.push(title);
+            const choice = choices[choiceIndex] ?? items[0];
+            choiceIndex += 1;
+            return choice;
+          },
+        },
+      };
+    }
+
+    async function startSession(pi, ctx) {
+      const handlers = pi.handlers.get("session_start") ?? [];
+      for (const handler of handlers) {
+        await handler({ type: "session_start", reason: "startup" }, ctx);
+      }
+    }
+
+    function getToolCallHandler(pi) {
+      const handlers = pi.handlers.get("tool_call") ?? [];
+      assert(handlers.length === 1, `expected exactly one tool_call handler, got ''${handlers.length}`);
+      return handlers[0];
+    }
+
+    async function makeProject(tempRoot, name, config) {
+      const cwd = path.join(tempRoot, name);
+      fs.mkdirSync(path.join(cwd, ".pi"), { recursive: true });
+      fs.writeFileSync(path.join(cwd, ".pi", "sandbox.json"), JSON.stringify(config, null, 2));
+      return cwd;
+    }
+
+    async function main() {
+      const compiledRoot = process.argv[2];
+      const tempRoot = fs.mkdtempSync(path.join(os.tmpdir(), "sandbox-check-"));
+      process.env.HOME = tempRoot;
+
+      const runtimeModule = await import(
+        pathToFileURL(path.join(compiledRoot, "node_modules/@anthropic-ai/sandbox-runtime/index.js")).href
+      );
+      const { SandboxManager } = runtimeModule;
+      const moduleUrl = pathToFileURL(path.join(compiledRoot, "sandbox/index.js")).href;
+      const importedModule = await import(moduleUrl);
+      const sandbox = importedModule.default?.default ?? importedModule.default ?? importedModule;
+      assert(typeof sandbox === "function", "sandbox module did not export a function");
+
+      fs.mkdirSync(path.join(tempRoot, ".ssh"), { recursive: true });
+      const sockDir = path.join(tempRoot, "sock");
+      fs.mkdirSync(sockDir, { recursive: true });
+      process.env.SSH_AUTH_SOCK = path.join(sockDir, "agent.sock");
+      const expectedSocketPath = path.join(fs.realpathSync(sockDir), path.basename(process.env.SSH_AUTH_SOCK));
+
+      const baseConfig = {
+        enabled: true,
+        network: {
+          allowedDomains: [],
+          deniedDomains: [],
+        },
+        filesystem: {
+          allowRead: [],
+          denyRead: ["~/.ssh"],
+          allowWrite: ["."],
+          denyWrite: [".env"],
+        },
+      };
+
+      // Test 1: protected native reads prompt and session grants relax runtime denyRead.
+      {
+        const pi = createPi();
+        sandbox(pi);
+
+        const cwd = await makeProject(tempRoot, "read-project", baseConfig);
+        const ctx = createContext(cwd, ["Allow for this session"]);
+        await startSession(pi, ctx);
+
+        const event = {
+          toolName: "read",
+          toolCallId: "read-1",
+          input: {
+            path: "~/.ssh/config",
+          },
+        };
+
+        const result = await getToolCallHandler(pi)(event, ctx);
+        assert(result === undefined, "sandbox did not allow the read after approval");
+        assert(!SandboxManager.getConfig().filesystem.denyRead.includes("~/.ssh"), "read grant did not relax runtime denyRead");
+      }
+
+      // Test 2: writes outside allowWrite prompt and project grants persist to .pi/sandbox.json.
+      {
+        const pi = createPi();
+        sandbox(pi);
+
+        const cwd = await makeProject(tempRoot, "write-project", baseConfig);
+        const ctx = createContext(cwd, ["Allow for this project"]);
+        await startSession(pi, ctx);
+
+        const event = {
+          toolName: "write",
+          toolCallId: "write-1",
+          input: {
+            path: "../outside.txt",
+            content: "hello\n",
+          },
+        };
+
+        const result = await getToolCallHandler(pi)(event, ctx);
+        assert(result === undefined, "sandbox did not allow the write after approval");
+
+        const projectConfig = JSON.parse(fs.readFileSync(path.join(cwd, ".pi", "sandbox.json"), "utf-8"));
+        assert(
+          projectConfig.filesystem.allowWrite.some((entry) => String(entry).includes("outside.txt")),
+          "sandbox did not persist the project write grant",
+        );
+      }
+
+      // Test 3: denyWrite remains a hard block.
+      {
+        const pi = createPi();
+        sandbox(pi);
+
+        const cwd = await makeProject(tempRoot, "deny-project", baseConfig);
+        const ctx = createContext(cwd, []);
+        await startSession(pi, ctx);
+
+        const event = {
+          toolName: "write",
+          toolCallId: "write-2",
+          input: {
+            path: ".env",
+            content: "SECRET=1\n",
+          },
+        };
+
+        const result = await getToolCallHandler(pi)(event, ctx);
+        assert(result && result.block === true, "sandbox did not hard-block denyWrite target");
+      }
+
+      // Test 4: ssh-style bash commands prompt once and grant domain, ~/.ssh, and SSH_AUTH_SOCK together.
+      {
+        const pi = createPi();
+        sandbox(pi);
+
+        const cwd = await makeProject(tempRoot, "ssh-project", baseConfig);
+        const ctx = createContext(cwd, ["Allow for this session"]);
+        await startSession(pi, ctx);
+
+        const event = {
+          toolName: "bash",
+          toolCallId: "bash-1",
+          input: {
+            command: "ssh matebook.tailf44e66.ts.net true",
+          },
+        };
+
+        const result = await getToolCallHandler(pi)(event, ctx);
+        assert(result === undefined, "sandbox did not allow ssh after approval");
+        assert(ctx.selectCalls.length === 1, `expected one SSH approval prompt, got ''${ctx.selectCalls.length}`);
+        assert(String(ctx.selectCalls[0]).includes("Sandbox blocked SSH access"), "SSH approval prompt title was not bundled");
+
+        const config = SandboxManager.getConfig();
+        assert(
+          config.network.allowedDomains.includes("matebook.tailf44e66.ts.net"),
+          "sandbox did not add the ssh host to allowedDomains",
+        );
+        assert(!config.filesystem.denyRead.includes("~/.ssh"), "sandbox did not relax denyRead for ~/.ssh");
+        assert(
+          (config.network.allowUnixSockets ?? []).includes(expectedSocketPath),
+          "sandbox did not add SSH_AUTH_SOCK to allowUnixSockets",
+        );
+      }
+
+      // Test 5: headless mode hard-blocks protected reads with a clear reason.
+      {
+        const pi = createPi();
+        sandbox(pi);
+
+        const cwd = await makeProject(tempRoot, "headless-project", baseConfig);
+        const ctx = createContext(cwd, [], false);
+        await startSession(pi, ctx);
+
+        const event = {
+          toolName: "read",
+          toolCallId: "read-2",
+          input: {
+            path: "~/.ssh/config",
+          },
+        };
+
+        const result = await getToolCallHandler(pi)(event, ctx);
+        assert(result && result.block === true, "sandbox did not hard-block protected reads in headless mode");
+        assert(String(result.reason).includes("Blocked in headless mode"), "sandbox headless read reason was not clear");
+      }
+
+      // Test 6: shell builtins mentioning ssh do not trigger SSH capability prompts.
+      {
+        const pi = createPi();
+        sandbox(pi);
+
+        const cwd = await makeProject(tempRoot, "builtin-project", baseConfig);
+        const ctx = createContext(cwd, [], true);
+        await startSession(pi, ctx);
+
+        const event = {
+          toolName: "bash",
+          toolCallId: "bash-2",
+          input: {
+            command: "command -v ssh || true",
+          },
+        };
+
+        const result = await getToolCallHandler(pi)(event, ctx);
+        assert(result === undefined, "shell builtin lookup for ssh should not be blocked");
+        const config = SandboxManager.getConfig();
+        assert((config.network.allowedDomains ?? []).length === 0, "ssh lookup unexpectedly granted a network domain");
+        assert((config.filesystem.denyRead ?? []).includes("~/.ssh"), "ssh lookup unexpectedly relaxed ~/.ssh read policy");
+      }
+
+      // Test 7: harmless URL-like literals do not trigger generic network preflight.
+      {
+        const pi = createPi();
+        sandbox(pi);
+
+        const cwd = await makeProject(tempRoot, "printf-project", baseConfig);
+        const ctx = createContext(cwd, [], true);
+        await startSession(pi, ctx);
+
+        const event = {
+          toolName: "bash",
+          toolCallId: "bash-3",
+          input: {
+            command: "printf 'https://foo.invalid\\n'",
+          },
+        };
+
+        const result = await getToolCallHandler(pi)(event, ctx);
+        assert(result === undefined, "printf with a URL literal should not be blocked");
+        assert(ctx.selectCalls.length === 0, `printf unexpectedly prompted ''${ctx.selectCalls.length} times`);
+        const config = SandboxManager.getConfig();
+        assert(!(config.network.allowedDomains ?? []).includes("foo.invalid"), "printf unexpectedly granted a network domain");
+      }
+
+      // Test 8: generic network approvals come from the runtime ask callback, not bash preflight.
+      {
+        const pi = createPi();
+        sandbox(pi);
+
+        const cwd = await makeProject(tempRoot, "runtime-network-project", baseConfig);
+        const ctx = createContext(cwd, ["Allow for this session"], true);
+        await startSession(pi, ctx);
+
+        const event = {
+          toolName: "bash",
+          toolCallId: "bash-4",
+          input: {
+            command: "curl -I https://example.com",
+          },
+        };
+
+        const result = await getToolCallHandler(pi)(event, ctx);
+        assert(result === undefined, "curl preflight should not block before the runtime callback");
+        assert(ctx.selectCalls.length === 0, `curl unexpectedly prompted during bash preflight ''${ctx.selectCalls.length} times`);
+
+        const allowed = await SandboxManager.askNetwork("example.com", 443);
+        assert(allowed === true, "runtime network callback did not allow the host after approval");
+        assert(ctx.selectCalls.length === 1, `expected one runtime network prompt, got ''${ctx.selectCalls.length}`);
+        assert(String(ctx.selectCalls[0]).includes("Sandbox blocked network access"), "runtime network prompt title was not shown");
+
+        const config = SandboxManager.getConfig();
+        assert((config.network.allowedDomains ?? []).includes("example.com"), "runtime network approval did not update allowedDomains");
+      }
+
+      // Test 9: headless runtime network requests remain blocked.
+      {
+        const pi = createPi();
+        sandbox(pi);
+
+        const cwd = await makeProject(tempRoot, "runtime-headless-project", baseConfig);
+        const ctx = createContext(cwd, [], false);
+        await startSession(pi, ctx);
+
+        const allowed = await SandboxManager.askNetwork("example.net", 443);
+        assert(allowed === false, "headless runtime network approval should stay blocked");
+        const config = SandboxManager.getConfig();
+        assert(!(config.network.allowedDomains ?? []).includes("example.net"), "headless runtime network request unexpectedly granted a domain");
+      }
+    }
+
+    await main();
+    EOF
+
+    node "$workdir/test.mjs" "$outdir"
+
+    mkdir -p "$out"
+    touch "$out/passed"
+  '';
 }

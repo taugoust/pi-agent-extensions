@@ -34,6 +34,7 @@
       "modal-editor",
       "pager",
       "questionnaire",
+      "sandbox",
       "slow-mode",
       "node_modules/@marckrenn/pi-sub-core",
       "node_modules/@marckrenn/pi-sub-bar"

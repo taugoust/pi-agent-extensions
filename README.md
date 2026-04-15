@@ -416,31 +416,46 @@ Errors show with red background:
 
 </details>
 <details>
-<summary><strong>sandbox</strong> - OS-level sandboxing for bash commands</summary>
+<summary><strong>sandbox</strong> - Merged sandbox + approval gate for bash and file tools</summary>
 <br>
 
 - **Source**:
   [sandbox/](https://github.com/rytswd/pi-agent-extensions/tree/main/sandbox)
 - **License**: MIT
-- **Origin**: Based on
-  [badlogic/pi-mono](https://github.com/badlogic/pi-mono/tree/main/packages/coding-agent/examples/extensions/sandbox)
-- **Type**: Extension (replaces bash tool with sandboxed variant)
+- **Origin**: Based on the upstream pi sandbox example and the approval
+  model used by `carderne/pi-sandbox`
+- **Type**: Extension (replaces bash tool and intercepts native file
+  tools)
 - **Toggle**: `--no-sandbox`{.verbatim} flag to disable; configure
   `enabled: false`{.verbatim} in config; `/sandbox-control`{.verbatim}
   to toggle within a session
-- **Command**: `/sandbox`{.verbatim} to show current configuration;
-  `/sandbox-control`{.verbatim} to enable/disable
-- **Status bar**: `🔒 Sandbox: N domains, N write paths`{.verbatim}
+- **Commands**: `/sandbox`{.verbatim} to show effective config + session
+  grants; `/sandbox-control`{.verbatim} to enable/disable;
+  `/sandbox-allow <path>`{.verbatim} to grant a write path for the
+  session
+- **Status bar**: `🔒 Sandbox: N domains, N write, N read`{.verbatim}
   (when active)
 - **Dependencies**: `@anthropic-ai/sandbox-runtime`{.verbatim}
-  (installed automatically at activation)
 - **Platform**: macOS and Linux only (sandbox-exec / bubblewrap)
 
-**Description**: Wraps bash commands with OS-level sandboxing via
-`@anthropic-ai/sandbox-runtime`{.verbatim}, enforcing filesystem and
-network restrictions. On macOS it uses `sandbox-exec`{.verbatim}; on
-Linux it uses `bubblewrap`{.verbatim} (requires `bubblewrap`{.verbatim},
-`socat`{.verbatim}, `ripgrep`{.verbatim}).
+**Description**: Combines OS-level sandboxing for `bash`{.verbatim} with
+interactive capability prompts for protected file access and SSH-related
+capabilities. Generic network approvals come from the sandbox runtime’s
+actual host callback rather than shell-text URL guessing. It also
+intercepts native `read`{.verbatim}, `write`{.verbatim}, and
+`edit`{.verbatim} tool calls, so the same policy applies outside bash
+too.
+
+**Approval choices**:
+
+- Abort
+- Allow for this session
+- Allow for this project
+- Allow for all projects
+
+Session grants stay in memory. Persistent grants are written to
+`<cwd>/.pi/sandbox.json`{.verbatim} or
+`~/.pi/agent/sandbox.json`{.verbatim}.
 
 **Configuration** --- merge of `~/.pi/agent/sandbox.json`{.verbatim}
 (global) and `<cwd>/.pi/sandbox.json`{.verbatim} (project-local):
@@ -450,9 +465,11 @@ Linux it uses `bubblewrap`{.verbatim} (requires `bubblewrap`{.verbatim},
   "enabled": true,
   "network": {
     "allowedDomains": ["github.com", "*.github.com"],
-    "deniedDomains": []
+    "deniedDomains": [],
+    "allowUnixSockets": []
   },
   "filesystem": {
+    "allowRead": ["~/.ssh"],
     "denyRead": ["~/.ssh", "~/.aws"],
     "allowWrite": [".", "/tmp"],
     "denyWrite": [".env"]
@@ -460,16 +477,20 @@ Linux it uses `bubblewrap`{.verbatim} (requires `bubblewrap`{.verbatim},
 }
 ```
 
-**Default allowed domains**: `npmjs.org`{.verbatim},
-`registry.npmjs.org`{.verbatim}, `pypi.org`{.verbatim},
-`github.com`{.verbatim} (and common subdomains).
-
 **Features**:
 
-- Filesystem read/write restrictions
-- Network domain allow/deny lists
+- OS-level sandboxing for bash via
+  `@anthropic-ai/sandbox-runtime`{.verbatim}
+- Capability-based prompts instead of regex-only danger heuristics
+- Generic network prompts driven by the runtime’s actual outbound host
+  callback
+- Native `read`{.verbatim}, `write`{.verbatim}, `edit`{.verbatim}
+  policy enforcement
+- Session / project / global grants
+- Bundled SSH-oriented prompts for hosts, `~/.ssh`{.verbatim}, and
+  `SSH_AUTH_SOCK`{.verbatim}
 - Per-project overrides via `.pi/sandbox.json`{.verbatim}
-- Passes through to unconfined bash when sandbox is disabled
+- Pass-through to unconfined bash when sandbox is disabled
 - `user_bash`{.verbatim} hook sandboxes REPL commands too
 
 </details>
@@ -583,7 +604,7 @@ pi
 │   └── index.ts
 ├── questionnaire/      # Multi-question tool
 │   └── index.ts
-├── sandbox/            # OS-level bash sandboxing
+├── sandbox/            # Merged sandbox + approval gate
 │   ├── index.ts
 │   ├── package.json    # Dependencies (@anthropic-ai/sandbox-runtime)
 │   └── node_modules/   # npm packages (gitignored, installed by home-manager activation)

@@ -26,7 +26,7 @@ in
       modal-editor.enable = lib.mkEnableOption "modal-editor extension — vim-style modal input";
       mac-system-theme.enable = lib.mkEnableOption "mac-system-theme extension — syncs pi theme to macOS system appearance";
       pager.enable = lib.mkEnableOption "pager extension — open conversation in an external pager (bat/less)";
-      permission-gate.enable = lib.mkEnableOption "permission-gate extension — confirms dangerous bash commands";
+      permission-gate.enable = lib.mkEnableOption "permission-gate extension — legacy regex gate for dangerous bash commands";
 
       slow-mode = {
         enable = lib.mkEnableOption "slow-mode extension — review gate for write/edit tool calls";
@@ -37,7 +37,7 @@ in
         };
       };
 
-      sandbox.enable = lib.mkEnableOption "sandbox extension — OS-level sandboxing for bash commands";
+      sandbox.enable = lib.mkEnableOption "sandbox extension — merged sandbox + approval gate for bash/read/write/edit";
     };
 
     skills = {

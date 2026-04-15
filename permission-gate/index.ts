@@ -12,6 +12,12 @@
 
 import type { ExtensionAPI } from "@mariozechner/pi-coding-agent";
 
+const CAPABILITY_GATE_MARKER = "__paeSandboxCapabilityGateActive";
+
+function isSuppressedBySandbox(): boolean {
+  return (globalThis as Record<string, unknown>)[CAPABILITY_GATE_MARKER] === true;
+}
+
 export default function (pi: ExtensionAPI) {
   let enabled = true;
 
@@ -74,14 +80,22 @@ export default function (pi: ExtensionAPI) {
 
       enabled = !enabled;
       if (enabled) {
-        ctx.ui.setStatus(
-          "permission-gate",
-          ctx.ui.theme.fg("warning", "gate ■"),
-        );
-        ctx.ui.notify(
-          "Permission gate enabled — dangerous commands require approval",
-          "info",
-        );
+        if (!isSuppressedBySandbox()) {
+          ctx.ui.setStatus(
+            "permission-gate",
+            ctx.ui.theme.fg("warning", "gate ■"),
+          );
+          ctx.ui.notify(
+            "Permission gate enabled — dangerous commands require approval",
+            "info",
+          );
+        } else {
+          ctx.ui.setStatus("permission-gate", undefined);
+          ctx.ui.notify(
+            "Permission gate enabled, but suppressed because sandbox now handles capability approvals",
+            "info",
+          );
+        }
       } else {
         ctx.ui.setStatus("permission-gate", undefined);
         ctx.ui.notify("Permission gate disabled", "info");
@@ -91,13 +105,21 @@ export default function (pi: ExtensionAPI) {
 
   // Show status on startup
   pi.on("session_start", async (_event, ctx) => {
-    if (enabled && ctx.hasUI) {
+    if (!ctx.hasUI) return;
+
+    if (enabled && !isSuppressedBySandbox()) {
       ctx.ui.setStatus("permission-gate", ctx.ui.theme.fg("warning", "gate ■"));
+    } else {
+      ctx.ui.setStatus("permission-gate", undefined);
     }
   });
 
   pi.on("tool_call", async (event, ctx) => {
     if (!enabled) return undefined;
+    if (isSuppressedBySandbox()) {
+      if (ctx.hasUI) ctx.ui.setStatus("permission-gate", undefined);
+      return undefined;
+    }
     if (event.toolName !== "bash") return undefined;
 
     const command = event.input.command as string;
