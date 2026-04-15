@@ -31,6 +31,13 @@
         }
       );
 
+      checks = forAllSystems (system:
+        let
+          pkgs = nixpkgs.legacyPackages.${system};
+        in
+        import ./nix/checks.nix { inherit self bun2nix pkgs; }
+      );
+
       homeManagerModules.default = import ./nix/module.nix { inherit self bun2nix; };
     };
 }
