@@ -24,13 +24,13 @@
 
 import { mkdirSync, mkdtempSync, writeFileSync, unlinkSync, rmSync, readFileSync } from "node:fs";
 import { execFileSync } from "node:child_process";
-import { tmpdir } from "node:os";
-import { dirname, basename, join, resolve, relative, extname } from "node:path";
+import { homedir, tmpdir } from "node:os";
+import { basename, join, resolve, relative, extname, isAbsolute } from "node:path";
 import type {
   ExtensionAPI,
   ExtensionContext,
 } from "@mariozechner/pi-coding-agent";
-import { Text, truncateToWidth } from "@mariozechner/pi-tui";
+import { truncateToWidth } from "@mariozechner/pi-tui";
 
 export default function slowMode(pi: ExtensionAPI) {
   // State: whether slow mode is currently enabled
@@ -39,10 +39,6 @@ export default function slowMode(pi: ExtensionAPI) {
   // Track tool calls where content was edited
   // Maps toolCallId -> { originalContent, editedContent }
   const editedCalls = new Map<string, { original: string; edited: string }>();
-
-  // Track the current tool call being processed for rendering
-  // This allows renderCall to access edited content during the same call
-  let currentToolCallId: string | null = null;
 
   // Staging directory: stores proposed file changes for review
   // Uses mkdtempSync for secure, unpredictable temp directory creation
@@ -132,7 +128,7 @@ export default function slowMode(pi: ExtensionAPI) {
     // Add a note to the result indicating content was edited
     const note = {
       type: "text" as const,
-      text: `\n\n**Note:** Content was modified in slow mode review before writing (${lineDiffText}).`,
+      text: `\n\n**Note:** Content was modified in slow mode review before applying (${lineDiffText}).`,
     };
 
     return {
@@ -144,147 +140,360 @@ export default function slowMode(pi: ExtensionAPI) {
   ///     Write & edit review
   //------------------------------------------
 
-  /**
-   * Resolves file path to be relative to cwd
-   * This normalizes absolute/relative paths for consistent staging
-   */
-  function resolvePath(ctx: ExtensionContext, filePath: string) {
-    return relative(ctx.cwd, resolve(ctx.cwd, filePath));
+  interface ReplacementEdit {
+    oldText: string;
+    newText: string;
   }
 
   /**
-   * Review handler for write tool calls (new files / overwrites)
+   * Resolve a tool path the same way pi's native file tools do:
+   * absolute paths pass through, ~/ expands to $HOME, everything else is
+   * resolved relative to ctx.cwd.
+   */
+  function resolveToolPath(ctx: ExtensionContext, filePath: string) {
+    if (filePath === "~" || filePath.startsWith("~/")) {
+      return join(homedir(), filePath.slice(1));
+    }
+    if (isAbsolute(filePath)) {
+      return filePath;
+    }
+    return resolve(ctx.cwd, filePath);
+  }
+
+  /**
+   * Return true when targetPath stays within baseDir.
+   */
+  function isPathInside(baseDir: string, targetPath: string) {
+    const rel = relative(baseDir, targetPath);
+    return rel === "" || (!rel.startsWith("..") && !isAbsolute(rel));
+  }
+
+  /**
+   * Prefer a cwd-relative display path for in-repo files, otherwise show the
+   * absolute path so outside-cwd reviews are obvious.
+   */
+  function getDisplayPath(ctx: ExtensionContext, filePath: string) {
+    const absolutePath = resolveToolPath(ctx, filePath);
+    if (isPathInside(ctx.cwd, absolutePath)) {
+      const relPath = relative(ctx.cwd, absolutePath);
+      return relPath || absolutePath;
+    }
+    return absolutePath;
+  }
+
+  /**
+   * Create a safe temporary staging path inside tmpDir.
    *
-   * Flow:
-   * 1. Stage the proposed content in tmpDir
-   * 2. Show review UI with the full content
-   * 3. User approves → return undefined (tool proceeds)
-   * 4. User rejects with optional reason → return { block: true, reason } (tool aborted)
-   * 5. Cleanup staged file
-   * 
-   * If user edits content in external editor, the modified content is used.
+   * Never mirror the target path with ../ segments — staging must stay inside
+   * the temp directory even when the reviewed file is outside ctx.cwd.
+   */
+  function createStagePath(targetPath: string, tag: string) {
+    const base = basename(targetPath) || "file";
+    const ext = extname(base);
+    const stem = (ext ? base.slice(0, -ext.length) : base) || "file";
+    const safeStem = stem.replace(/[^a-zA-Z0-9._-]+/g, "-") || "file";
+    const safeTag = tag.replace(/[^a-zA-Z0-9._-]+/g, "-") || "stage";
+    ensureDir(tmpDir);
+    return join(tmpDir, `${safeStem}-${safeTag}${ext}`);
+  }
+
+  /** Strip UTF-8 BOM if present. */
+  function stripBom(content: string): { bom: string; text: string } {
+    return content.startsWith("\uFEFF")
+      ? { bom: "\uFEFF", text: content.slice(1) }
+      : { bom: "", text: content };
+  }
+
+  function normalizeToLF(text: string): string {
+    return text.replace(/\r\n/g, "\n").replace(/\r/g, "\n");
+  }
+
+  /**
+   * Match the edit tool's fuzzy normalization so slow-mode previews behave the
+   * same way as the real edit tool.
+   */
+  function normalizeForFuzzyMatch(text: string): string {
+    return (
+      text
+        .normalize("NFKC")
+        .split("\n")
+        .map((line) => line.trimEnd())
+        .join("\n")
+        .replace(/[\u2018\u2019\u201A\u201B]/g, "'")
+        .replace(/[\u201C\u201D\u201E\u201F]/g, '"')
+        .replace(/[\u2010\u2011\u2012\u2013\u2014\u2015\u2212]/g, "-")
+        .replace(/[\u00A0\u2002-\u200A\u202F\u205F\u3000]/g, " ")
+    );
+  }
+
+  function countOccurrences(content: string, oldText: string): number {
+    const normalizedContent = normalizeForFuzzyMatch(content);
+    const normalizedOldText = normalizeForFuzzyMatch(oldText);
+    return normalizedContent.split(normalizedOldText).length - 1;
+  }
+
+  function findEditMatch(content: string, oldText: string) {
+    const exactIndex = content.indexOf(oldText);
+    if (exactIndex !== -1) {
+      return {
+        found: true,
+        index: exactIndex,
+        matchLength: oldText.length,
+        usedFuzzyMatch: false,
+      };
+    }
+
+    const fuzzyContent = normalizeForFuzzyMatch(content);
+    const fuzzyOldText = normalizeForFuzzyMatch(oldText);
+    const fuzzyIndex = fuzzyContent.indexOf(fuzzyOldText);
+    if (fuzzyIndex === -1) {
+      return {
+        found: false,
+        index: -1,
+        matchLength: 0,
+        usedFuzzyMatch: false,
+      };
+    }
+
+    return {
+      found: true,
+      index: fuzzyIndex,
+      matchLength: fuzzyOldText.length,
+      usedFuzzyMatch: true,
+    };
+  }
+
+  /**
+   * Normalize edit input the same way the core edit tool does.
+   * Supports both legacy oldText/newText and modern edits[].
+   */
+  function collectEditReplacements(input: Record<string, unknown>): ReplacementEdit[] {
+    const edits: ReplacementEdit[] = [];
+
+    if (Array.isArray(input.edits)) {
+      for (const candidate of input.edits) {
+        if (!candidate || typeof candidate !== "object") continue;
+        const oldText = (candidate as Record<string, unknown>).oldText;
+        const newText = (candidate as Record<string, unknown>).newText;
+        if (typeof oldText === "string" && typeof newText === "string") {
+          edits.push({ oldText, newText });
+        }
+      }
+    }
+
+    if (typeof input.oldText === "string" && typeof input.newText === "string") {
+      edits.push({ oldText: input.oldText, newText: input.newText });
+    }
+
+    return edits;
+  }
+
+  /**
+   * Apply edit-tool replacements against LF-normalized content.
+   * All matches are found on the original content and then applied in reverse
+   * order to keep offsets stable.
+   */
+  function applyEditsToNormalizedContent(
+    normalizedContent: string,
+    edits: ReplacementEdit[],
+    path: string,
+  ) {
+    const normalizedEdits = edits.map((edit) => ({
+      oldText: normalizeToLF(edit.oldText),
+      newText: normalizeToLF(edit.newText),
+    }));
+
+    for (let i = 0; i < normalizedEdits.length; i++) {
+      if (normalizedEdits[i].oldText.length === 0) {
+        throw new Error(
+          normalizedEdits.length === 1
+            ? `oldText must not be empty in ${path}.`
+            : `edits[${i}].oldText must not be empty in ${path}.`,
+        );
+      }
+    }
+
+    const baseContent = normalizedEdits.some((edit) => findEditMatch(normalizedContent, edit.oldText).usedFuzzyMatch)
+      ? normalizeForFuzzyMatch(normalizedContent)
+      : normalizedContent;
+
+    const matchedEdits: Array<{
+      editIndex: number;
+      matchIndex: number;
+      matchLength: number;
+      newText: string;
+    }> = [];
+
+    for (let i = 0; i < normalizedEdits.length; i++) {
+      const edit = normalizedEdits[i];
+      const match = findEditMatch(baseContent, edit.oldText);
+      if (!match.found) {
+        throw new Error(
+          normalizedEdits.length === 1
+            ? `Could not find the exact text in ${path}. The old text must match exactly including all whitespace and newlines.`
+            : `Could not find edits[${i}] in ${path}. The oldText must match exactly including all whitespace and newlines.`,
+        );
+      }
+
+      const occurrences = countOccurrences(baseContent, edit.oldText);
+      if (occurrences > 1) {
+        throw new Error(
+          normalizedEdits.length === 1
+            ? `Found ${occurrences} occurrences of the text in ${path}. The text must be unique. Please provide more context to make it unique.`
+            : `Found ${occurrences} occurrences of edits[${i}] in ${path}. Each oldText must be unique. Please provide more context to make it unique.`,
+        );
+      }
+
+      matchedEdits.push({
+        editIndex: i,
+        matchIndex: match.index,
+        matchLength: match.matchLength,
+        newText: edit.newText,
+      });
+    }
+
+    matchedEdits.sort((a, b) => a.matchIndex - b.matchIndex);
+    for (let i = 1; i < matchedEdits.length; i++) {
+      const previous = matchedEdits[i - 1];
+      const current = matchedEdits[i];
+      if (previous.matchIndex + previous.matchLength > current.matchIndex) {
+        throw new Error(
+          `edits[${previous.editIndex}] and edits[${current.editIndex}] overlap in ${path}. ` +
+          "Merge them into one edit or target disjoint regions.",
+        );
+      }
+    }
+
+    let newContent = baseContent;
+    for (let i = matchedEdits.length - 1; i >= 0; i--) {
+      const edit = matchedEdits[i];
+      newContent =
+        newContent.substring(0, edit.matchIndex) +
+        edit.newText +
+        newContent.substring(edit.matchIndex + edit.matchLength);
+    }
+
+    if (baseContent === newContent) {
+      throw new Error(
+        normalizedEdits.length === 1
+          ? `No changes made to ${path}. The replacement produced identical content. This might indicate an issue with special characters or the text not existing as expected.`
+          : `No changes made to ${path}. The replacements produced identical content.`,
+      );
+    }
+
+    return { baseContent, newContent };
+  }
+
+  /**
+   * Review handler for write tool calls (new files / overwrites).
    */
   async function reviewWrite(
     toolCallId: string,
     input: Record<string, unknown>,
     ctx: ExtensionContext,
   ) {
-    const filePath = input.path as string;
-    const content = input.content as string;
+    const filePath = input.path;
+    const content = input.content;
 
-    // Skip if input is malformed
-    if (!filePath || content == null) return;
+    if (typeof filePath !== "string" || typeof content !== "string") return;
 
-    // Resolve to relative path for staging
-    const relPath = resolvePath(ctx, filePath);
-    const stagePath = join(tmpDir, relPath);
+    const absolutePath = resolveToolPath(ctx, filePath);
+    const displayPath = getDisplayPath(ctx, filePath);
+    const stagePath = createStagePath(absolutePath, `${toolCallId}-write`);
 
-    // Write proposed content to staging directory
-    ensureDir(dirname(stagePath));
     writeFileSync(stagePath, content, "utf-8");
 
-    // Show review UI — user decides to approve/reject
-    // Emit event so other extensions can track when user approval is pending
-    pi.events.emit("slow-mode:waiting");
+    pi.events.emit("slow-mode:waiting", undefined);
     const rejection = await showReview(ctx, {
       operation: "WRITE",
-      filePath: relPath,
+      filePath: displayPath,
       stagePath,
       body: content,
       allowEdit: true,
     });
-    pi.events.emit("slow-mode:resolved");
+    pi.events.emit("slow-mode:resolved", undefined);
 
     if (rejection === null) {
-      // Read back the staged file in case user edited it
       try {
-        const { readFileSync } = await import("node:fs");
         const editedContent = readFileSync(stagePath, "utf-8");
-        
-        // If content changed, update the input parameter and track the edit
         if (editedContent !== content) {
           input.content = editedContent;
           editedCalls.set(toolCallId, { original: content, edited: editedContent });
           ctx.ui.notify("Using edited content", "info");
         }
-      } catch (err) {
-        // If we can't read the file, use original content
-        // (file might have been deleted, which is fine)
+      } catch {
+        // If we can't read the file, fall back to the original content.
       }
     }
 
-    // Clean up staged file after decision
     cleanup(stagePath);
 
-    // Block the tool if user rejected
     if (rejection !== null) {
       const reason = rejection.trim()
         ? `User rejected the write in slow mode review. Reason: ${rejection.trim()}`
         : "User rejected the write in slow mode review.";
       return { block: true, reason };
     }
-
-    // Approved: return undefined → tool proceeds with potentially modified content
   }
 
   /**
-   * Review handler for edit tool calls (modifications to existing files)
+   * Review handler for edit tool calls (modifications to existing files).
    *
-   * Flow:
-   * 1. Stage both old and new text as separate files
-   * 2. Show inline diff review UI
-   * 3. User can: approve (Enter), reject with reason (Esc), edit new file (Ctrl+E),
-   *    or view diff externally (Ctrl+O)
-   * 4. After editing, the diff is regenerated and shown again
-   * 5. Loop continues until user approves or rejects
-   * 6. Cleanup staged files
-   * 
-   * If user edits the new file, the modified content is used.
+   * Supports both legacy oldText/newText inputs and the current edits[] form.
+   * When the user edits the staged result, the tool input is rewritten to a
+   * single full-file replacement so the edited review result is what gets
+   * applied.
    */
   async function reviewEdit(
     toolCallId: string,
     input: Record<string, unknown>,
     ctx: ExtensionContext,
   ) {
-    const filePath = input.path as string;
-    const oldText = input.oldText as string;
-    const newText = input.newText as string;
+    const filePath = input.path;
+    if (typeof filePath !== "string") return;
 
-    // Skip if input is malformed
-    if (!filePath || oldText == null || newText == null) return;
+    const edits = collectEditReplacements(input);
+    if (edits.length === 0) return;
 
-    const relPath = resolvePath(ctx, filePath);
+    const absolutePath = resolveToolPath(ctx, filePath);
+    const displayPath = getDisplayPath(ctx, filePath);
 
-    // Stage old and new files for diff viewing and editing
-    // Timestamped to avoid conflicts if multiple edits happen
-    // Preserve original file extension so editors can detect file type
-    const base = basename(relPath);
-    const ext = extname(base);
-    const nameWithoutExt = base.slice(0, -ext.length || undefined);
-    const ts = Date.now();
-    const oldPath = join(tmpDir, `${nameWithoutExt}-${ts}.old${ext}`);
-    const newPath = join(tmpDir, `${nameWithoutExt}-${ts}.new${ext}`);
-    ensureDir(tmpDir);
-    writeFileSync(oldPath, oldText, "utf-8");
-    writeFileSync(newPath, newText, "utf-8");
+    let normalizedOriginalContent: string;
+    let proposedNewContent: string;
 
-    // Emit event so other extensions can track when user approval is pending
-    pi.events.emit("slow-mode:waiting");
+    try {
+      const rawContent = readFileSync(absolutePath, "utf-8");
+      const { text: contentWithoutBom } = stripBom(rawContent);
+      const { baseContent, newContent } = applyEditsToNormalizedContent(
+        normalizeToLF(contentWithoutBom),
+        edits,
+        filePath,
+      );
+      normalizedOriginalContent = baseContent;
+      proposedNewContent = newContent;
+    } catch {
+      // Fall back to the real edit tool's own validation/error handling.
+      return;
+    }
 
-    // Review loop: show diff → user can approve, reject, or edit → repeat
+    const oldPath = createStagePath(absolutePath, `${toolCallId}-old`);
+    const newPath = createStagePath(absolutePath, `${toolCallId}-new`);
+    writeFileSync(oldPath, normalizedOriginalContent, "utf-8");
+    writeFileSync(newPath, proposedNewContent, "utf-8");
+
+    pi.events.emit("slow-mode:waiting", undefined);
+
     let approved = false;
     let rejectionReason = "";
-    const { readFileSync } = await import("node:fs");
 
     reviewLoop:
     while (true) {
-      // Read current content (may have been edited in a previous iteration)
       const currentOldText = readFileSync(oldPath, "utf-8");
       const currentNewText = readFileSync(newPath, "utf-8");
-      const diff = generateUnifiedDiff(relPath, currentOldText, currentNewText);
+      const diff = generateUnifiedDiff(displayPath, currentOldText, currentNewText);
 
       const decision = await showEditReview(ctx, {
-        filePath: relPath,
+        filePath: displayPath,
         body: diff,
         oldPath,
         newPath,
@@ -295,47 +504,41 @@ export default function slowMode(pi: ExtensionAPI) {
         break reviewLoop;
       }
       if (decision === "edit") {
-        // Open just the new file in the user's editor, then loop back
         openExternalFile(newPath);
         continue;
       }
-      // Rejection — decision is { type: "reject"; reason: string }
+
       rejectionReason = decision.reason;
       approved = false;
       break reviewLoop;
     }
 
     if (approved) {
-      // Read back the new file in case user edited it
       try {
-        const editedNewText = readFileSync(newPath, "utf-8");
-        
-        // If content changed, update the input parameter and track the edit
-        if (editedNewText !== newText) {
-          input.newText = editedNewText;
-          editedCalls.set(toolCallId, { original: newText, edited: editedNewText });
+        const editedNewContent = readFileSync(newPath, "utf-8");
+        if (editedNewContent !== proposedNewContent) {
+          input.edits = [{ oldText: normalizedOriginalContent, newText: editedNewContent }];
+          delete input.oldText;
+          delete input.newText;
+          editedCalls.set(toolCallId, { original: proposedNewContent, edited: editedNewContent });
           ctx.ui.notify("Using edited content", "info");
         }
-      } catch (err) {
-        // If we can't read the file, use original content
+      } catch {
+        // If we can't read the file, fall back to the original tool input.
       }
     }
 
-    pi.events.emit("slow-mode:resolved");
+    pi.events.emit("slow-mode:resolved", undefined);
 
-    // Clean up staged files after decision
     cleanup(oldPath);
     cleanup(newPath);
 
-    // Block the tool if user rejected
     if (!approved) {
       const reason = rejectionReason.trim()
         ? `User rejected the edit in slow mode review. Reason: ${rejectionReason.trim()}`
         : "User rejected the edit in slow mode review.";
       return { block: true, reason };
     }
-
-    // Approved: return undefined → tool proceeds with potentially modified content
   }
 
   ////----------------------------------------
@@ -444,8 +647,6 @@ export default function slowMode(pi: ExtensionAPI) {
           // If editing is allowed, reload and display the updated content
           if (opts.allowEdit) {
             try {
-              const { readFileSync } = require("node:fs");
-              
               if (opts.operation === "WRITE") {
                 // Reload the edited file content
                 const editedContent = readFileSync(opts.stagePath, "utf-8");
@@ -456,12 +657,12 @@ export default function slowMode(pi: ExtensionAPI) {
                 const editedNewText = readFileSync(opts.newPath, "utf-8");
                 currentBody = generateUnifiedDiff(opts.filePath, editedOldText, editedNewText);
               }
-              
+
               // Update bodyLines and scroll bounds
               bodyLines = currentBody.split("\n");
               maxScroll = Math.max(0, bodyLines.length - maxVisible);
               scrollOffset = Math.min(scrollOffset, maxScroll);
-            } catch (err) {
+            } catch {
               // If reload fails, keep showing original content
             }
           }
@@ -1221,10 +1422,14 @@ export default function slowMode(pi: ExtensionAPI) {
   }
 
   /**
-   * Delete a file, ignoring errors
-   * (Used for cleaning up staged files after review)
+   * Delete a staged file, ignoring errors.
+   * Refuses to unlink anything outside the slow-mode temp directory.
    */
   function cleanup(path: string) {
+    if (!isPathInside(tmpDir, path)) {
+      return;
+    }
+
     try {
       unlinkSync(path);
     } catch {
