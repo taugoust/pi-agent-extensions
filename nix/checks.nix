@@ -674,6 +674,13 @@ in
       return handlers[0];
     }
 
+    async function emitToolResult(pi, event, ctx) {
+      const handlers = pi.handlers.get("tool_result") ?? [];
+      for (const handler of handlers) {
+        await handler(event, ctx);
+      }
+    }
+
     async function makeProject(tempRoot, name, config) {
       const cwd = path.join(tempRoot, name);
       fs.mkdirSync(path.join(cwd, ".pi"), { recursive: true });
@@ -737,7 +744,41 @@ in
         assert(!SandboxManager.getConfig().filesystem.denyRead.includes("~/.ssh"), "read grant did not relax runtime denyRead");
       }
 
-      // Test 2: writes outside allowWrite prompt and project grants persist to .pi/sandbox.json.
+      // Test 2: allow-once for protected native reads does not persist.
+      {
+        const pi = createPi();
+        sandbox(pi);
+
+        const cwd = await makeProject(tempRoot, "read-once-project", baseConfig);
+        const ctx = createContext(cwd, ["Allow once", "Abort"]);
+        await startSession(pi, ctx);
+
+        const firstEvent = {
+          toolName: "read",
+          toolCallId: "read-once-1",
+          input: {
+            path: "~/.ssh/config",
+          },
+        };
+
+        const firstResult = await getToolCallHandler(pi)(firstEvent, ctx);
+        assert(firstResult === undefined, "sandbox did not allow the protected read once");
+        assert(SandboxManager.getConfig().filesystem.denyRead.includes("~/.ssh"), "allow-once unexpectedly relaxed runtime denyRead");
+
+        const secondEvent = {
+          toolName: "read",
+          toolCallId: "read-once-2",
+          input: {
+            path: "~/.ssh/config",
+          },
+        };
+
+        const secondResult = await getToolCallHandler(pi)(secondEvent, ctx);
+        assert(secondResult && secondResult.block === true, "allow-once read should prompt again on the next call");
+        assert(ctx.selectCalls.length === 2, `expected two read prompts, got ''${ctx.selectCalls.length}`);
+      }
+
+      // Test 3: writes outside allowWrite prompt and project grants persist to .pi/sandbox.json.
       {
         const pi = createPi();
         sandbox(pi);
@@ -765,7 +806,7 @@ in
         );
       }
 
-      // Test 3: denyWrite remains a hard block.
+      // Test 4: denyWrite remains a hard block.
       {
         const pi = createPi();
         sandbox(pi);
@@ -787,7 +828,64 @@ in
         assert(result && result.block === true, "sandbox did not hard-block denyWrite target");
       }
 
-      // Test 4: ssh-style bash commands prompt once and grant domain, ~/.ssh, and SSH_AUTH_SOCK together.
+      // Test 5: SSH allow-once grants are temporary and cleaned up after the tool result.
+      {
+        const pi = createPi();
+        sandbox(pi);
+
+        const cwd = await makeProject(tempRoot, "ssh-once-project", baseConfig);
+        const ctx = createContext(cwd, ["Allow once"]);
+        await startSession(pi, ctx);
+
+        const event = {
+          toolName: "bash",
+          toolCallId: "bash-once-1",
+          input: {
+            command: "ssh matebook.tailf44e66.ts.net true",
+          },
+        };
+
+        const result = await getToolCallHandler(pi)(event, ctx);
+        assert(result === undefined, "sandbox did not allow ssh after allow-once approval");
+
+        const duringConfig = SandboxManager.getConfig();
+        assert(
+          duringConfig.network.allowedDomains.includes("matebook.tailf44e66.ts.net"),
+          "allow-once ssh did not temporarily add the ssh host to allowedDomains",
+        );
+        assert(!duringConfig.filesystem.denyRead.includes("~/.ssh"), "allow-once ssh did not temporarily relax denyRead for ~/.ssh");
+        assert(
+          (duringConfig.network.allowUnixSockets ?? []).includes(expectedSocketPath),
+          "allow-once ssh did not temporarily add SSH_AUTH_SOCK to allowUnixSockets",
+        );
+
+        await emitToolResult(
+          pi,
+          {
+            type: "tool_result",
+            toolName: "bash",
+            toolCallId: "bash-once-1",
+            input: event.input,
+            content: [],
+            details: undefined,
+            isError: false,
+          },
+          ctx,
+        );
+
+        const afterConfig = SandboxManager.getConfig();
+        assert(
+          !(afterConfig.network.allowedDomains ?? []).includes("matebook.tailf44e66.ts.net"),
+          "allow-once ssh did not clean up the temporary domain grant",
+        );
+        assert((afterConfig.filesystem.denyRead ?? []).includes("~/.ssh"), "allow-once ssh did not restore denyRead for ~/.ssh");
+        assert(
+          !((afterConfig.network.allowUnixSockets ?? []).includes(expectedSocketPath)),
+          "allow-once ssh did not remove the temporary SSH_AUTH_SOCK grant",
+        );
+      }
+
+      // Test 6: ssh-style bash commands prompt once and grant domain, ~/.ssh, and SSH_AUTH_SOCK together.
       {
         const pi = createPi();
         sandbox(pi);
@@ -821,7 +919,7 @@ in
         );
       }
 
-      // Test 5: headless mode hard-blocks protected reads with a clear reason.
+      // Test 7: headless mode hard-blocks protected reads with a clear reason.
       {
         const pi = createPi();
         sandbox(pi);
@@ -843,7 +941,7 @@ in
         assert(String(result.reason).includes("Blocked in headless mode"), "sandbox headless read reason was not clear");
       }
 
-      // Test 6: shell builtins mentioning ssh do not trigger SSH capability prompts.
+      // Test 8: shell builtins mentioning ssh do not trigger SSH capability prompts.
       {
         const pi = createPi();
         sandbox(pi);
@@ -867,7 +965,7 @@ in
         assert((config.filesystem.denyRead ?? []).includes("~/.ssh"), "ssh lookup unexpectedly relaxed ~/.ssh read policy");
       }
 
-      // Test 7: harmless URL-like literals do not trigger generic network preflight.
+      // Test 9: harmless URL-like literals do not trigger generic network preflight.
       {
         const pi = createPi();
         sandbox(pi);
@@ -891,7 +989,7 @@ in
         assert(!(config.network.allowedDomains ?? []).includes("foo.invalid"), "printf unexpectedly granted a network domain");
       }
 
-      // Test 8: generic network approvals come from the runtime ask callback, not bash preflight.
+      // Test 10: generic network approvals come from the runtime ask callback, not bash preflight.
       {
         const pi = createPi();
         sandbox(pi);
@@ -921,7 +1019,7 @@ in
         assert((config.network.allowedDomains ?? []).includes("example.com"), "runtime network approval did not update allowedDomains");
       }
 
-      // Test 9: headless runtime network requests remain blocked.
+      // Test 11: headless runtime network requests remain blocked.
       {
         const pi = createPi();
         sandbox(pi);

@@ -53,6 +53,7 @@ import type { ExtensionAPI } from "@mariozechner/pi-coding-agent";
 import { type BashOperations, createBashTool } from "@mariozechner/pi-coding-agent";
 
 type GrantScope = "session" | "project" | "global";
+type GrantChoice = "once" | GrantScope;
 type SandboxConfigFile = Partial<SandboxConfig>;
 type FilesystemConfig = SandboxRuntimeConfig["filesystem"] & { allowRead: string[] };
 type NetworkConfig = SandboxRuntimeConfig["network"];
@@ -61,6 +62,12 @@ interface SandboxConfig extends Omit<SandboxRuntimeConfig, "filesystem" | "netwo
 	enabled?: boolean;
 	network: NetworkConfig;
 	filesystem: FilesystemConfig;
+}
+
+interface ActiveOnceGrantBundle {
+	domains: string[];
+	readPaths: string[];
+	unixSockets: string[];
 }
 
 interface SandboxState {
@@ -72,6 +79,7 @@ interface SandboxState {
 	sessionReadPaths: Set<string>;
 	sessionWritePaths: Set<string>;
 	sessionUnixSockets: Set<string>;
+	onceGrantBundlesByToolCall: Map<string, ActiveOnceGrantBundle>;
 	updateQueue: Promise<void>;
 }
 
@@ -163,6 +171,7 @@ const DEFAULT_CONFIG: SandboxConfig = {
 };
 
 const grantScopeOptions = ["Abort", "Allow for this session", "Allow for this project", "Allow for all projects"];
+const grantChoiceOptions = ["Abort", "Allow once", "Allow for this session", "Allow for this project", "Allow for all projects"];
 
 function setCapabilityGateActive(active: boolean): void {
 	(globalThis as Record<string, unknown>)[CAPABILITY_GATE_MARKER] = active;
@@ -249,6 +258,18 @@ function uniqueStrings(values: Iterable<string>): string[] {
 	}
 
 	return result;
+}
+
+function getActiveOnceDomains(state: SandboxState): string[] {
+	return uniqueStrings(Array.from(state.onceGrantBundlesByToolCall.values()).flatMap((bundle) => bundle.domains));
+}
+
+function getActiveOnceReadPaths(state: SandboxState): string[] {
+	return uniqueStrings(Array.from(state.onceGrantBundlesByToolCall.values()).flatMap((bundle) => bundle.readPaths));
+}
+
+function getActiveOnceUnixSockets(state: SandboxState): string[] {
+	return uniqueStrings(Array.from(state.onceGrantBundlesByToolCall.values()).flatMap((bundle) => bundle.unixSockets));
 }
 
 function loadConfigFile(path: string): SandboxConfigFile {
@@ -759,15 +780,32 @@ function formatScope(scope: GrantScope): string {
 	return "all projects";
 }
 
-async function promptForGrant(pi: ExtensionAPI, ctx: SandboxPromptContext, title: string): Promise<GrantScope | undefined> {
+function formatGrantChoice(choice: GrantChoice): string {
+	if (choice === "once") {
+		return "once";
+	}
+	return `for ${formatScope(choice)}`;
+}
+
+interface GrantPromptOptions {
+	includeAllowOnce?: boolean;
+}
+
+async function promptForGrant(
+	pi: ExtensionAPI,
+	ctx: SandboxPromptContext,
+	title: string,
+	options: GrantPromptOptions = {},
+): Promise<GrantChoice | undefined> {
 	if (!ctx.hasUI) {
 		return undefined;
 	}
 
 	pi.events.emit("sandbox:waiting", undefined);
-	const choice = await ctx.ui.select(title, grantScopeOptions);
+	const choice = await ctx.ui.select(title, options.includeAllowOnce ? grantChoiceOptions : grantScopeOptions);
 	pi.events.emit("sandbox:resolved", undefined);
 
+	if (choice === "Allow once") return "once";
 	if (choice === "Allow for this session") return "session";
 	if (choice === "Allow for this project") return "project";
 	if (choice === "Allow for all projects") return "global";
@@ -801,6 +839,9 @@ async function buildRuntimeConfig(state: SandboxState): Promise<SandboxRuntimeCo
 	for (const sessionPath of state.sessionReadPaths) {
 		allowReadEntries.push(sessionPath);
 	}
+	for (const oncePath of getActiveOnceReadPaths(state)) {
+		allowReadEntries.push(oncePath);
+	}
 
 	const denyRead: string[] = [];
 	for (const entry of state.diskConfig.filesystem.denyRead) {
@@ -826,11 +867,16 @@ async function buildRuntimeConfig(state: SandboxState): Promise<SandboxRuntimeCo
 		...runtimeBase,
 		network: {
 			...state.diskConfig.network,
-			allowedDomains: uniqueStrings([...state.diskConfig.network.allowedDomains, ...state.sessionDomains]),
+			allowedDomains: uniqueStrings([
+				...state.diskConfig.network.allowedDomains,
+				...state.sessionDomains,
+				...getActiveOnceDomains(state),
+			]),
 			deniedDomains: uniqueStrings(state.diskConfig.network.deniedDomains),
 			allowUnixSockets: uniqueStrings([
 				...(state.diskConfig.network.allowUnixSockets ?? []),
 				...state.sessionUnixSockets,
+				...getActiveOnceUnixSockets(state),
 			]),
 		},
 		filesystem: {
@@ -1040,6 +1086,28 @@ async function grantSshGrantBundle(state: SandboxState, scope: GrantScope, bundl
 	await applyRuntimeConfig(state);
 }
 
+async function grantSshGrantBundleOnce(state: SandboxState, toolCallId: string, bundle: PendingSshGrantBundle): Promise<void> {
+	if (!hasPendingSshGrantBundle(bundle)) {
+		return;
+	}
+
+	state.onceGrantBundlesByToolCall.set(toolCallId, {
+		domains: uniqueStrings(bundle.domains),
+		readPaths: bundle.readPath ? [bundle.readPath.sessionPath] : [],
+		unixSockets: bundle.unixSocket ? [bundle.unixSocket.sessionPath] : [],
+	});
+	await applyRuntimeConfig(state);
+}
+
+async function clearOnceGrantBundle(state: SandboxState, toolCallId: string): Promise<void> {
+	if (!state.onceGrantBundlesByToolCall.has(toolCallId)) {
+		return;
+	}
+
+	state.onceGrantBundlesByToolCall.delete(toolCallId);
+	await applyRuntimeConfig(state);
+}
+
 async function isDomainAllowed(state: SandboxState, domain: string): Promise<boolean> {
 	const normalizedDomain = normalizeDomain(domain);
 
@@ -1050,6 +1118,12 @@ async function isDomainAllowed(state: SandboxState, domain: string): Promise<boo
 	}
 
 	for (const allowedDomain of state.sessionDomains) {
+		if (matchesDomainPattern(allowedDomain, normalizedDomain)) {
+			return true;
+		}
+	}
+
+	for (const allowedDomain of getActiveOnceDomains(state)) {
 		if (matchesDomainPattern(allowedDomain, normalizedDomain)) {
 			return true;
 		}
@@ -1099,24 +1173,36 @@ async function handleRuntimeNetworkGrant(
 
 	const target = formatNetworkTarget(domain, port);
 	const portLine = port === undefined ? "" : `\nPort:\n  ${port}\n`;
-	const scope = await promptForGrant(
+	const choice = await promptForGrant(
 		pi,
 		ctx,
 		`🔒 Sandbox blocked network access\n\nHost:\n  ${domain}${portLine}\nAllow access to ${target}?`,
+		{ includeAllowOnce: true },
 	);
-	if (!scope) {
+	if (!choice) {
 		return false;
 	}
 
-	await enqueueStateUpdate(state, () => grantDomain(state, scope, domain));
+	if (choice === "once") {
+		notify(ctx, `Network access granted once: ${domain}`, "info");
+		return true;
+	}
+
+	await enqueueStateUpdate(state, () => grantDomain(state, choice, domain));
 	refreshStatus(state, ctx);
-	notify(ctx, `Network access granted for ${formatScope(scope)}: ${domain}`, "info");
+	notify(ctx, `Network access granted ${formatGrantChoice(choice)}: ${domain}`, "info");
 	return true;
 }
 
 async function isUnixSocketAllowed(state: SandboxState, socketPath: string): Promise<boolean> {
 	const resolvedSocketPath = (await resolvePolicyPath(state.cwd, socketPath)).resolvedPath;
 	for (const grantedSocket of state.sessionUnixSockets) {
+		if (isPathInside(grantedSocket, resolvedSocketPath)) {
+			return true;
+		}
+	}
+
+	for (const grantedSocket of getActiveOnceUnixSockets(state)) {
 		if (isPathInside(grantedSocket, resolvedSocketPath)) {
 			return true;
 		}
@@ -1133,6 +1219,10 @@ async function isUnixSocketAllowed(state: SandboxState, socketPath: string): Pro
 
 async function isReadAllowed(state: SandboxState, targetResolvedPath: string): Promise<boolean> {
 	if (await isPathGranted(targetResolvedPath, state.sessionReadPaths)) {
+		return true;
+	}
+
+	if (await isPathGranted(targetResolvedPath, getActiveOnceReadPaths(state))) {
 		return true;
 	}
 
@@ -1204,6 +1294,7 @@ export default function sandbox(pi: ExtensionAPI) {
 		sessionReadPaths: new Set(),
 		sessionWritePaths: new Set(),
 		sessionUnixSockets: new Set(),
+		onceGrantBundlesByToolCall: new Map(),
 		updateQueue: Promise.resolve(),
 	};
 	let promptContext: SandboxPromptContext | undefined;
@@ -1237,6 +1328,7 @@ export default function sandbox(pi: ExtensionAPI) {
 		state.sessionReadPaths.clear();
 		state.sessionWritePaths.clear();
 		state.sessionUnixSockets.clear();
+		state.onceGrantBundlesByToolCall.clear();
 		setCapabilityGateActive(false);
 
 		if (state.initialized) {
@@ -1301,6 +1393,7 @@ export default function sandbox(pi: ExtensionAPI) {
 		promptContext = undefined;
 		setCapabilityGateActive(false);
 		state.enabled = false;
+		state.onceGrantBundlesByToolCall.clear();
 		if (!state.initialized) {
 			return;
 		}
@@ -1310,6 +1403,16 @@ export default function sandbox(pi: ExtensionAPI) {
 		} catch {
 			// Ignore cleanup errors.
 		}
+	});
+
+	pi.on("tool_result", async (event, ctx) => {
+		if (!state.onceGrantBundlesByToolCall.has(event.toolCallId)) {
+			return undefined;
+		}
+
+		await enqueueStateUpdate(state, () => clearOnceGrantBundle(state, event.toolCallId));
+		refreshStatus(state, ctx);
+		return undefined;
 	});
 
 	pi.registerCommand("sandbox", {
@@ -1426,6 +1529,12 @@ export default function sandbox(pi: ExtensionAPI) {
 			if (!scope) {
 				return { content: [{ type: "text", text: `Write access was denied: ${displayPath}` }] };
 			}
+			if (scope === "once") {
+				return {
+					content: [{ type: "text", text: "Allow once is only available when approving the blocked operation directly. Retry the original write to allow it once." }],
+					isError: true,
+				};
+			}
 
 			await enqueueStateUpdate(state, () => grantWritePath(state, scope, scope === "session" ? resolvedPath : storedPath));
 			refreshStatus(state, ctx);
@@ -1477,6 +1586,12 @@ export default function sandbox(pi: ExtensionAPI) {
 			if (!scope) {
 				return { content: [{ type: "text", text: `Read access was denied: ${displayPath}` }] };
 			}
+			if (scope === "once") {
+				return {
+					content: [{ type: "text", text: "Allow once is only available when approving the blocked operation directly. Retry the original read to allow it once." }],
+					isError: true,
+				};
+			}
 
 			await enqueueStateUpdate(state, () => grantReadPath(state, scope, scope === "session" ? resolvedPath : storedPath));
 			refreshStatus(state, ctx);
@@ -1518,6 +1633,12 @@ export default function sandbox(pi: ExtensionAPI) {
 			);
 			if (!scope) {
 				return { content: [{ type: "text", text: `Network access was denied: ${domain}` }] };
+			}
+			if (scope === "once") {
+				return {
+					content: [{ type: "text", text: "Allow once is only available when approving the blocked operation directly. Retry the original network operation to allow it once." }],
+					isError: true,
+				};
 			}
 
 			await enqueueStateUpdate(state, () => grantDomain(state, scope, domain));
@@ -1564,6 +1685,12 @@ export default function sandbox(pi: ExtensionAPI) {
 			);
 			if (!scope) {
 				return { content: [{ type: "text", text: `Unix socket access was denied: ${storedPath}` }] };
+			}
+			if (scope === "once") {
+				return {
+					content: [{ type: "text", text: "Allow once is only available when approving the blocked operation directly. Retry the original socket operation to allow it once." }],
+					isError: true,
+				};
 			}
 
 			await enqueueStateUpdate(state, () => grantUnixSocket(state, scope, scope === "session" ? resolvedPath : storedPath));
@@ -1613,18 +1740,24 @@ export default function sandbox(pi: ExtensionAPI) {
 				return { block: true, reason: getHeadlessReason("read", displayTarget) };
 			}
 
-			const scope = await promptForGrant(
+			const choice = await promptForGrant(
 				pi,
 				ctx,
 				`🔒 Sandbox blocked read access\n\nTarget:\n  ${displayTarget}\n\nGrant read access to:\n  ${grantPath}\n\nAllow?`,
+				{ includeAllowOnce: true },
 			);
-			if (!scope) {
+			if (!choice) {
 				return { block: true, reason: `Blocked by user — read access denied: ${displayTarget}` };
 			}
 
-			await enqueueStateUpdate(state, () => grantReadPath(state, scope, scope === "session" ? grantRoot : grantPath));
+			if (choice === "once") {
+				notify(ctx, `Read access granted once: ${displayTarget}`, "info");
+				return undefined;
+			}
+
+			await enqueueStateUpdate(state, () => grantReadPath(state, choice, choice === "session" ? grantRoot : grantPath));
 			refreshStatus(state, ctx);
-			notify(ctx, `Read access granted for ${formatScope(scope)}: ${grantPath}`, "info");
+			notify(ctx, `Read access granted ${formatGrantChoice(choice)}: ${grantPath}`, "info");
 			return undefined;
 		}
 
@@ -1666,18 +1799,24 @@ export default function sandbox(pi: ExtensionAPI) {
 				return { block: true, reason: getHeadlessReason("write", displayTarget) };
 			}
 
-			const scope = await promptForGrant(
+			const choice = await promptForGrant(
 				pi,
 				ctx,
 				`🔒 Sandbox blocked write access\n\nTarget:\n  ${displayTarget}\n\nAllow?`,
+				{ includeAllowOnce: true },
 			);
-			if (!scope) {
+			if (!choice) {
 				return { block: true, reason: `Blocked by user — write access denied: ${displayTarget}` };
 			}
 
-			await enqueueStateUpdate(state, () => grantWritePath(state, scope, scope === "session" ? resolvedTarget : storedPath));
+			if (choice === "once") {
+				notify(ctx, `Write access granted once: ${displayTarget}`, "info");
+				return undefined;
+			}
+
+			await enqueueStateUpdate(state, () => grantWritePath(state, choice, choice === "session" ? resolvedTarget : storedPath));
 			refreshStatus(state, ctx);
-			notify(ctx, `Write access granted for ${formatScope(scope)}: ${storedPath}`, "info");
+			notify(ctx, `Write access granted ${formatGrantChoice(choice)}: ${storedPath}`, "info");
 			return undefined;
 		}
 
@@ -1707,18 +1846,26 @@ export default function sandbox(pi: ExtensionAPI) {
 			const requestedAccess = describeSshGrantBundle(sshGrantBundle)
 				.map((detail) => `  • ${detail}`)
 				.join("\n");
-			const scope = await promptForGrant(
+			const choice = await promptForGrant(
 				pi,
 				ctx,
 				`🔒 Sandbox blocked SSH access\n\nCommand:\n  ${command}\n\nThis command needs:\n${requestedAccess}\n\nAllow all of the above?`,
+				{ includeAllowOnce: true },
 			);
-			if (!scope) {
+			if (!choice) {
 				return { block: true, reason: `Blocked by user — SSH access denied: ${formatSshGrantBundle(sshGrantBundle)}` };
 			}
 
-			await enqueueStateUpdate(state, () => grantSshGrantBundle(state, scope, sshGrantBundle));
+			if (choice === "once") {
+				await enqueueStateUpdate(state, () => grantSshGrantBundleOnce(state, event.toolCallId, sshGrantBundle));
+				refreshStatus(state, ctx);
+				notify(ctx, `SSH access granted once: ${formatSshGrantBundle(sshGrantBundle)}`, "info");
+				return undefined;
+			}
+
+			await enqueueStateUpdate(state, () => grantSshGrantBundle(state, choice, sshGrantBundle));
 			refreshStatus(state, ctx);
-			notify(ctx, `SSH access granted for ${formatScope(scope)}: ${formatSshGrantBundle(sshGrantBundle)}`, "info");
+			notify(ctx, `SSH access granted ${formatGrantChoice(choice)}: ${formatSshGrantBundle(sshGrantBundle)}`, "info");
 		}
 
 		return undefined;
