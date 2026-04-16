@@ -919,7 +919,191 @@ in
         );
       }
 
-      // Test 7: headless mode hard-blocks protected reads with a clear reason.
+      // Test 7: dangerous git allow-once does not persist across bash tool calls.
+      {
+        const pi = createPi();
+        sandbox(pi);
+
+        const cwd = await makeProject(tempRoot, "git-once-project", baseConfig);
+        const ctx = createContext(cwd, ["Allow once", "Abort"]);
+        await startSession(pi, ctx);
+
+        const firstEvent = {
+          toolName: "bash",
+          toolCallId: "git-once-1",
+          input: {
+            command: "git push origin main --force",
+          },
+        };
+
+        const firstResult = await getToolCallHandler(pi)(firstEvent, ctx);
+        assert(firstResult === undefined, "sandbox did not allow the dangerous git command once");
+        assert(ctx.selectCalls.length === 1, `expected one dangerous git prompt, got ''${ctx.selectCalls.length}`);
+        assert(String(ctx.selectCalls[0]).includes("dangerous git command"), "dangerous git prompt title was not shown");
+
+        const secondEvent = {
+          toolName: "bash",
+          toolCallId: "git-once-2",
+          input: {
+            command: "git push origin main --force",
+          },
+        };
+
+        const secondResult = await getToolCallHandler(pi)(secondEvent, ctx);
+        assert(secondResult && secondResult.block === true, "allow-once dangerous git approval should not persist");
+        assert(ctx.selectCalls.length === 2, `expected two dangerous git prompts, got ''${ctx.selectCalls.length}`);
+      }
+
+      // Test 8: dangerous git session grants persist for the rest of the session.
+      {
+        const pi = createPi();
+        sandbox(pi);
+
+        const cwd = await makeProject(tempRoot, "git-session-project", baseConfig);
+        const ctx = createContext(cwd, ["Allow for this session"]);
+        await startSession(pi, ctx);
+
+        const firstEvent = {
+          toolName: "bash",
+          toolCallId: "git-session-1",
+          input: {
+            command: "git push origin main --force",
+          },
+        };
+
+        const firstResult = await getToolCallHandler(pi)(firstEvent, ctx);
+        assert(firstResult === undefined, "sandbox did not allow the dangerous git command after a session grant");
+
+        const secondEvent = {
+          toolName: "bash",
+          toolCallId: "git-session-2",
+          input: {
+            command: "git push origin other-branch --force",
+          },
+        };
+
+        const secondResult = await getToolCallHandler(pi)(secondEvent, ctx);
+        assert(secondResult === undefined, "session dangerous git grant did not persist across calls");
+        assert(ctx.selectCalls.length === 1, `session dangerous git grant unexpectedly re-prompted ''${ctx.selectCalls.length} times`);
+      }
+
+      // Test 9: dangerous git project grants persist to .pi/sandbox.json and survive a new session.
+      {
+        const pi = createPi();
+        sandbox(pi);
+
+        const cwd = await makeProject(tempRoot, "git-project-grant", baseConfig);
+        const ctx = createContext(cwd, ["Allow for this project"]);
+        await startSession(pi, ctx);
+
+        const event = {
+          toolName: "bash",
+          toolCallId: "git-project-1",
+          input: {
+            command: "git reset --hard && git clean -fd",
+          },
+        };
+
+        const result = await getToolCallHandler(pi)(event, ctx);
+        assert(result === undefined, "sandbox did not allow the dangerous git command after a project grant");
+
+        const projectConfig = JSON.parse(fs.readFileSync(path.join(cwd, ".pi", "sandbox.json"), "utf-8"));
+        assert(
+          projectConfig.git.allowedDangerousCommands.includes("hard-reset"),
+          "sandbox did not persist the hard-reset project git grant",
+        );
+        assert(
+          projectConfig.git.allowedDangerousCommands.includes("clean"),
+          "sandbox did not persist the git-clean project git grant",
+        );
+
+        const piReloaded = createPi();
+        sandbox(piReloaded);
+        const ctxReloaded = createContext(cwd, [], true);
+        await startSession(piReloaded, ctxReloaded);
+
+        const followupEvent = {
+          toolName: "bash",
+          toolCallId: "git-project-2",
+          input: {
+            command: "git clean -fd",
+          },
+        };
+
+        const followupResult = await getToolCallHandler(piReloaded)(followupEvent, ctxReloaded);
+        assert(followupResult === undefined, "project dangerous git grant did not persist across sessions");
+        assert(ctxReloaded.selectCalls.length === 0, `project dangerous git grant unexpectedly re-prompted ''${ctxReloaded.selectCalls.length} times`);
+      }
+
+      // Test 10: dangerous git global grants persist to ~/.pi/agent/sandbox.json and apply in other projects.
+      {
+        const pi = createPi();
+        sandbox(pi);
+
+        const cwd = await makeProject(tempRoot, "git-global-project", baseConfig);
+        const ctx = createContext(cwd, ["Allow for all projects"]);
+        await startSession(pi, ctx);
+
+        const event = {
+          toolName: "bash",
+          toolCallId: "git-global-1",
+          input: {
+            command: "git restore --staged README.md",
+          },
+        };
+
+        const result = await getToolCallHandler(pi)(event, ctx);
+        assert(result === undefined, "sandbox did not allow the dangerous git command after a global grant");
+
+        const globalConfig = JSON.parse(fs.readFileSync(path.join(tempRoot, ".pi", "agent", "sandbox.json"), "utf-8"));
+        assert(
+          globalConfig.git.allowedDangerousCommands.includes("restore"),
+          "sandbox did not persist the global git restore grant",
+        );
+
+        const otherCwd = await makeProject(tempRoot, "git-global-other-project", baseConfig);
+        const piReloaded = createPi();
+        sandbox(piReloaded);
+        const ctxReloaded = createContext(otherCwd, [], true);
+        await startSession(piReloaded, ctxReloaded);
+
+        const followupEvent = {
+          toolName: "bash",
+          toolCallId: "git-global-2",
+          input: {
+            command: "git restore README.md",
+          },
+        };
+
+        const followupResult = await getToolCallHandler(piReloaded)(followupEvent, ctxReloaded);
+        assert(followupResult === undefined, "global dangerous git grant did not apply in another project");
+        assert(ctxReloaded.selectCalls.length === 0, `global dangerous git grant unexpectedly re-prompted ''${ctxReloaded.selectCalls.length} times`);
+      }
+
+      // Test 11: headless dangerous git commands are blocked with a clear reason.
+      {
+        const pi = createPi();
+        sandbox(pi);
+
+        const cwd = await makeProject(tempRoot, "git-headless-project", baseConfig);
+        const ctx = createContext(cwd, [], false);
+        await startSession(pi, ctx);
+
+        const event = {
+          toolName: "bash",
+          toolCallId: "git-headless-1",
+          input: {
+            command: "git checkout -- README.md",
+          },
+        };
+
+        const result = await getToolCallHandler(pi)(event, ctx);
+        assert(result && result.block === true, "sandbox did not hard-block dangerous git commands in headless mode");
+        assert(String(result.reason).includes("dangerous git command"), "headless dangerous git reason did not mention the command class");
+        assert(String(result.reason).includes("git.allowedDangerousCommands"), "headless dangerous git reason did not mention the config key");
+      }
+
+      // Test 12: headless mode hard-blocks protected reads with a clear reason.
       {
         const pi = createPi();
         sandbox(pi);
@@ -941,7 +1125,7 @@ in
         assert(String(result.reason).includes("Blocked in headless mode"), "sandbox headless read reason was not clear");
       }
 
-      // Test 8: shell builtins mentioning ssh do not trigger SSH capability prompts.
+      // Test 13: shell builtins mentioning ssh do not trigger SSH capability prompts.
       {
         const pi = createPi();
         sandbox(pi);
@@ -965,7 +1149,7 @@ in
         assert((config.filesystem.denyRead ?? []).includes("~/.ssh"), "ssh lookup unexpectedly relaxed ~/.ssh read policy");
       }
 
-      // Test 9: harmless URL-like literals do not trigger generic network preflight.
+      // Test 14: harmless URL-like literals do not trigger generic network preflight.
       {
         const pi = createPi();
         sandbox(pi);
@@ -989,7 +1173,7 @@ in
         assert(!(config.network.allowedDomains ?? []).includes("foo.invalid"), "printf unexpectedly granted a network domain");
       }
 
-      // Test 10: generic network approvals come from the runtime ask callback, not bash preflight.
+      // Test 15: generic network approvals come from the runtime ask callback, not bash preflight.
       {
         const pi = createPi();
         sandbox(pi);
@@ -1019,7 +1203,7 @@ in
         assert((config.network.allowedDomains ?? []).includes("example.com"), "runtime network approval did not update allowedDomains");
       }
 
-      // Test 11: headless runtime network requests remain blocked.
+      // Test 16: headless runtime network requests remain blocked.
       {
         const pi = createPi();
         sandbox(pi);

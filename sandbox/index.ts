@@ -24,6 +24,9 @@
  *     "denyRead": ["~/.ssh", "~/.aws"],
  *     "allowWrite": [".", "/tmp"],
  *     "denyWrite": [".env"]
+ *   },
+ *   "git": {
+ *     "allowedDangerousCommands": ["force-push"]
  *   }
  * }
  * ```
@@ -54,14 +57,32 @@ import { type BashOperations, createBashTool } from "@mariozechner/pi-coding-age
 
 type GrantScope = "session" | "project" | "global";
 type GrantChoice = "once" | GrantScope;
+type DangerousGitCommandId =
+	| "force-push"
+	| "hard-reset"
+	| "clean"
+	| "checkout-reset-files"
+	| "checkout-reset-all"
+	| "restore";
 type SandboxConfigFile = Partial<SandboxConfig>;
 type FilesystemConfig = SandboxRuntimeConfig["filesystem"] & { allowRead: string[] };
 type NetworkConfig = SandboxRuntimeConfig["network"];
+
+interface GitConfig {
+	allowedDangerousCommands: DangerousGitCommandId[];
+}
 
 interface SandboxConfig extends Omit<SandboxRuntimeConfig, "filesystem" | "network"> {
 	enabled?: boolean;
 	network: NetworkConfig;
 	filesystem: FilesystemConfig;
+	git: GitConfig;
+}
+
+interface DangerousGitRule {
+	id: DangerousGitCommandId;
+	label: string;
+	pattern: RegExp;
 }
 
 interface ActiveOnceGrantBundle {
@@ -79,6 +100,7 @@ interface SandboxState {
 	sessionReadPaths: Set<string>;
 	sessionWritePaths: Set<string>;
 	sessionUnixSockets: Set<string>;
+	sessionDangerousGitCommands: Set<DangerousGitCommandId>;
 	onceGrantBundlesByToolCall: Map<string, ActiveOnceGrantBundle>;
 	updateQueue: Promise<void>;
 }
@@ -143,6 +165,15 @@ const SSH_VALUE_FLAGS = new Set([
 	"--port",
 ]);
 
+const DANGEROUS_GIT_RULES: DangerousGitRule[] = [
+	{ id: "force-push", pattern: /\bgit\s+push\s+.*(-f\b|--force\b)/, label: "force push" },
+	{ id: "hard-reset", pattern: /\bgit\s+reset\s+--hard\b/, label: "hard reset" },
+	{ id: "clean", pattern: /\bgit\s+clean\s+-[^\s]*f/, label: "git clean" },
+	{ id: "checkout-reset-files", pattern: /\bgit\s+checkout\s+(\S+\s+)?--\s/, label: "git checkout (reset files)" },
+	{ id: "checkout-reset-all", pattern: /\bgit\s+checkout\s+\.\s*($|[;&|])/, label: "git checkout (reset all files)" },
+	{ id: "restore", pattern: /\bgit\s+restore\b/, label: "git restore" },
+];
+
 const DEFAULT_CONFIG: SandboxConfig = {
 	enabled: true,
 	network: {
@@ -167,6 +198,9 @@ const DEFAULT_CONFIG: SandboxConfig = {
 		denyRead: ["~/.ssh", "~/.aws", "~/.gnupg"],
 		allowWrite: [".", "/tmp", "~/.cache/nix"],
 		denyWrite: [".env", ".env.*", "*.pem", "*.key"],
+	},
+	git: {
+		allowedDangerousCommands: [],
 	},
 };
 
@@ -246,9 +280,9 @@ function formatResolvedPath(rawPath: string, absolutePath: string, resolvedPath:
 	return `${rawPath} → ${resolvedPath}`;
 }
 
-function uniqueStrings(values: Iterable<string>): string[] {
-	const result: string[] = [];
-	const seen = new Set<string>();
+function uniqueStrings<T extends string>(values: Iterable<T>): T[] {
+	const result: T[] = [];
+	const seen = new Set<T>();
 
 	for (const value of values) {
 		if (!seen.has(value)) {
@@ -270,6 +304,22 @@ function getActiveOnceReadPaths(state: SandboxState): string[] {
 
 function getActiveOnceUnixSockets(state: SandboxState): string[] {
 	return uniqueStrings(Array.from(state.onceGrantBundlesByToolCall.values()).flatMap((bundle) => bundle.unixSockets));
+}
+
+function getDangerousGitRule(ruleId: DangerousGitCommandId): DangerousGitRule | undefined {
+	return DANGEROUS_GIT_RULES.find((rule) => rule.id === ruleId);
+}
+
+function describeDangerousGitCommandId(ruleId: DangerousGitCommandId): string {
+	return getDangerousGitRule(ruleId)?.label ?? ruleId;
+}
+
+function describeDangerousGitCommandIds(ruleIds: Iterable<DangerousGitCommandId>): string[] {
+	return uniqueStrings(Array.from(ruleIds)).map((ruleId) => describeDangerousGitCommandId(ruleId));
+}
+
+function findDangerousGitRules(command: string): DangerousGitRule[] {
+	return DANGEROUS_GIT_RULES.filter((rule) => rule.pattern.test(command));
 }
 
 function loadConfigFile(path: string): SandboxConfigFile {
@@ -296,6 +346,14 @@ function deepMerge(base: SandboxConfig, overrides: SandboxConfigFile): SandboxCo
 			...base.filesystem,
 			...(overrides.filesystem ?? {}),
 			allowRead: overrides.filesystem?.allowRead ?? base.filesystem.allowRead,
+		},
+		git: {
+			...base.git,
+			...(overrides.git ?? {}),
+			allowedDangerousCommands: uniqueStrings([
+				...base.git.allowedDangerousCommands,
+				...(overrides.git?.allowedDangerousCommands ?? []),
+			]),
 		},
 	};
 
@@ -860,7 +918,7 @@ async function buildRuntimeConfig(state: SandboxState): Promise<SandboxRuntimeCo
 		}
 	}
 
-	const { enabled: _enabled, filesystem, ...runtimeBase } = state.diskConfig;
+	const { enabled: _enabled, filesystem, git: _git, ...runtimeBase } = state.diskConfig;
 	const { allowRead: _allowRead, ...runtimeFilesystemBase } = filesystem;
 
 	return {
@@ -979,6 +1037,53 @@ async function grantUnixSocket(state: SandboxState, scope: GrantScope, socketPat
 	}));
 	state.diskConfig = loadConfig(state.cwd);
 	await applyRuntimeConfig(state);
+}
+
+function isDangerousGitCommandAllowed(state: SandboxState, commandId: DangerousGitCommandId): boolean {
+	return state.sessionDangerousGitCommands.has(commandId) || state.diskConfig.git.allowedDangerousCommands.includes(commandId);
+}
+
+function getPendingDangerousGitRules(state: SandboxState, command: string): DangerousGitRule[] {
+	return findDangerousGitRules(command).filter((rule) => !isDangerousGitCommandAllowed(state, rule.id));
+}
+
+async function grantDangerousGitCommands(
+	state: SandboxState,
+	scope: GrantScope,
+	commandIds: DangerousGitCommandId[],
+): Promise<void> {
+	const uniqueCommandIds = uniqueStrings(commandIds);
+	if (uniqueCommandIds.length === 0) {
+		return;
+	}
+
+	if (scope === "session") {
+		for (const commandId of uniqueCommandIds) {
+			state.sessionDangerousGitCommands.add(commandId);
+		}
+		return;
+	}
+
+	const filePath = scope === "project" ? getProjectConfigPath(state.cwd) : GLOBAL_CONFIG_PATH;
+	await writeGrantToConfigFile(filePath, (config) => ({
+		...config,
+		git: {
+			...(config.git ?? {}),
+			allowedDangerousCommands: uniqueStrings([...(config.git?.allowedDangerousCommands ?? []), ...uniqueCommandIds]),
+		},
+	}));
+	state.diskConfig = loadConfig(state.cwd);
+}
+
+function formatDangerousGitRules(rules: DangerousGitRule[]): string {
+	return rules.map((rule) => rule.label).join(", ");
+}
+
+function getHeadlessDangerousGitReason(command: string, rules: DangerousGitRule[]): string {
+	const ids = rules
+		.map((rule) => `- ${rule.id} (${rule.label})`)
+		.join("\n");
+	return `Sandbox blocked dangerous git command (${formatDangerousGitRules(rules)}): ${command}. Blocked in headless mode — add the matching ids to git.allowedDangerousCommands in .pi/sandbox.json or ~/.pi/agent/sandbox.json:\n${ids}`;
 }
 
 function hasPendingSshGrantBundle(bundle: PendingSshGrantBundle): boolean {
@@ -1266,11 +1371,15 @@ function buildSandboxSummary(state: SandboxState): string {
 		`  Allow write: ${formatList(state.diskConfig.filesystem.allowWrite)}`,
 		`  Deny write: ${formatList(state.diskConfig.filesystem.denyWrite)}`,
 		"",
+		"Git:",
+		`  Allowed dangerous commands: ${formatList(describeDangerousGitCommandIds(state.diskConfig.git.allowedDangerousCommands))}`,
+		"",
 		"Session grants:",
 		`  Domains: ${formatList(Array.from(state.sessionDomains))}`,
 		`  Read paths: ${formatList(Array.from(state.sessionReadPaths))}`,
 		`  Write paths: ${formatList(Array.from(state.sessionWritePaths))}`,
 		`  Unix sockets: ${formatList(Array.from(state.sessionUnixSockets))}`,
+		`  Dangerous git commands: ${formatList(describeDangerousGitCommandIds(state.sessionDangerousGitCommands))}`,
 	].join("\n");
 }
 
@@ -1294,6 +1403,7 @@ export default function sandbox(pi: ExtensionAPI) {
 		sessionReadPaths: new Set(),
 		sessionWritePaths: new Set(),
 		sessionUnixSockets: new Set(),
+		sessionDangerousGitCommands: new Set(),
 		onceGrantBundlesByToolCall: new Map(),
 		updateQueue: Promise.resolve(),
 	};
@@ -1328,6 +1438,7 @@ export default function sandbox(pi: ExtensionAPI) {
 		state.sessionReadPaths.clear();
 		state.sessionWritePaths.clear();
 		state.sessionUnixSockets.clear();
+		state.sessionDangerousGitCommands.clear();
 		state.onceGrantBundlesByToolCall.clear();
 		setCapabilityGateActive(false);
 
@@ -1393,6 +1504,7 @@ export default function sandbox(pi: ExtensionAPI) {
 		promptContext = undefined;
 		setCapabilityGateActive(false);
 		state.enabled = false;
+		state.sessionDangerousGitCommands.clear();
 		state.onceGrantBundlesByToolCall.clear();
 		if (!state.initialized) {
 			return;
@@ -1827,6 +1939,44 @@ export default function sandbox(pi: ExtensionAPI) {
 		const command = typeof event.input.command === "string" ? event.input.command : "";
 		if (command.length === 0) {
 			return undefined;
+		}
+
+		const pendingDangerousGitRules = getPendingDangerousGitRules(state, command);
+		if (pendingDangerousGitRules.length > 0) {
+			if (!ctx.hasUI) {
+				return { block: true, reason: getHeadlessDangerousGitReason(command, pendingDangerousGitRules) };
+			}
+
+			const choice = await promptForGrant(
+				pi,
+				ctx,
+				`⚠️ Sandbox blocked dangerous git command (${formatDangerousGitRules(pendingDangerousGitRules)})\n\nCommand:\n  ${command}\n\nAllow?`,
+				{ includeAllowOnce: true },
+			);
+			if (!choice) {
+				return {
+					block: true,
+					reason: `Blocked by user — dangerous git command denied (${formatDangerousGitRules(pendingDangerousGitRules)})`,
+				};
+			}
+
+			if (choice === "once") {
+				notify(ctx, `Dangerous git command granted once: ${formatDangerousGitRules(pendingDangerousGitRules)}`, "info");
+			} else {
+				await enqueueStateUpdate(state, () =>
+					grantDangerousGitCommands(
+						state,
+						choice,
+						pendingDangerousGitRules.map((rule) => rule.id),
+					),
+				);
+				refreshStatus(state, ctx);
+				notify(
+					ctx,
+					`Dangerous git command granted ${formatGrantChoice(choice)}: ${formatDangerousGitRules(pendingDangerousGitRules)}`,
+					"info",
+				);
+			}
 		}
 
 		const capabilities = extractCommandCapabilities(command);
