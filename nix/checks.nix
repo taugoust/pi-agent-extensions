@@ -182,7 +182,7 @@ in
       process.env.EDITOR = editorScript;
       process.env.EDITOR_LOG = editorLog;
 
-      // Test 1: write review stages outside-cwd writes inside the tmp staging dir.
+      // Test: write review stages outside-cwd writes inside the tmp staging dir.
       {
         const pi = createPi();
         slowMode(pi);
@@ -218,7 +218,7 @@ in
         assert(loggedPaths[0] !== targetPath, "write review opened the real target path instead of a staged file");
       }
 
-      // Test 2: edit review handles modern edits[] input and rewrites edited reviews.
+      // Test: edit review handles modern edits[] input and rewrites edited reviews.
       {
         const pi = createPi();
         slowMode(pi);
@@ -372,7 +372,7 @@ in
 
       const tempRoot = fs.mkdtempSync(path.join(os.tmpdir(), "fence-check-"));
 
-      // Test 1: a symlinked directory inside cwd must not bypass the fence.
+      // Test: a symlinked directory inside cwd must not bypass the fence.
       {
         const pi = createPi();
         fence(pi);
@@ -400,7 +400,7 @@ in
         assert(String(result.reason).includes(path.join(outsideDir, "new.txt")), "fence reason did not mention the resolved outside path");
       }
 
-      // Test 2: a symlinked cwd still allows writes that stay inside the real cwd.
+      // Test: a symlinked cwd still allows writes that stay inside the real cwd.
       {
         const pi = createPi();
         fence(pi);
@@ -426,7 +426,7 @@ in
         assert(result === undefined, "fence incorrectly blocked a path inside a symlinked cwd");
       }
 
-      // Test 3: an existing symlinked file inside cwd must not bypass the fence.
+      // Test: an existing symlinked file inside cwd must not bypass the fence.
       {
         const pi = createPi();
         fence(pi);
@@ -722,7 +722,7 @@ in
         },
       };
 
-      // Test 1: protected native reads prompt and session grants relax runtime denyRead.
+      // Test: protected native reads prompt and session grants relax runtime denyRead.
       {
         const pi = createPi();
         sandbox(pi);
@@ -744,7 +744,7 @@ in
         assert(!SandboxManager.getConfig().filesystem.denyRead.includes("~/.ssh"), "read grant did not relax runtime denyRead");
       }
 
-      // Test 2: allow-once for protected native reads does not persist.
+      // Test: allow-once for protected native reads does not persist.
       {
         const pi = createPi();
         sandbox(pi);
@@ -778,7 +778,7 @@ in
         assert(ctx.selectCalls.length === 2, `expected two read prompts, got ''${ctx.selectCalls.length}`);
       }
 
-      // Test 3: writes outside allowWrite prompt and project grants persist to .pi/sandbox.json.
+      // Test: writes outside allowWrite prompt and project grants persist to .pi/sandbox.json.
       {
         const pi = createPi();
         sandbox(pi);
@@ -806,7 +806,7 @@ in
         );
       }
 
-      // Test 4: denyWrite remains a hard block.
+      // Test: denyWrite remains a hard block.
       {
         const pi = createPi();
         sandbox(pi);
@@ -828,7 +828,7 @@ in
         assert(result && result.block === true, "sandbox did not hard-block denyWrite target");
       }
 
-      // Test 5: SSH allow-once grants are temporary and cleaned up after the tool result.
+      // Test: SSH allow-once grants are temporary and cleaned up after the tool result.
       {
         const pi = createPi();
         sandbox(pi);
@@ -885,7 +885,7 @@ in
         );
       }
 
-      // Test 6: ssh-style bash commands prompt once and grant domain, ~/.ssh, and SSH_AUTH_SOCK together.
+      // Test: ssh-style bash commands prompt once and grant domain, ~/.ssh, and SSH_AUTH_SOCK together.
       {
         const pi = createPi();
         sandbox(pi);
@@ -919,7 +919,7 @@ in
         );
       }
 
-      // Test 7: dangerous git allow-once does not persist across bash tool calls.
+      // Test: dangerous git allow-once does not persist across bash tool calls.
       {
         const pi = createPi();
         sandbox(pi);
@@ -954,7 +954,7 @@ in
         assert(ctx.selectCalls.length === 2, `expected two dangerous git prompts, got ''${ctx.selectCalls.length}`);
       }
 
-      // Test 8: dangerous git session grants persist for the rest of the session.
+      // Test: dangerous git session grants persist for the rest of the session.
       {
         const pi = createPi();
         sandbox(pi);
@@ -987,7 +987,7 @@ in
         assert(ctx.selectCalls.length === 1, `session dangerous git grant unexpectedly re-prompted ''${ctx.selectCalls.length} times`);
       }
 
-      // Test 9: dangerous git project grants persist to .pi/sandbox.json and survive a new session.
+      // Test: dangerous git project grants persist to .pi/sandbox.json and survive a new session.
       {
         const pi = createPi();
         sandbox(pi);
@@ -1035,7 +1035,7 @@ in
         assert(ctxReloaded.selectCalls.length === 0, `project dangerous git grant unexpectedly re-prompted ''${ctxReloaded.selectCalls.length} times`);
       }
 
-      // Test 10: dangerous git global grants persist to ~/.pi/agent/sandbox.json and apply in other projects.
+      // Test: dangerous git global grants persist to ~/.pi/agent/sandbox.json and apply in other projects.
       {
         const pi = createPi();
         sandbox(pi);
@@ -1080,7 +1080,7 @@ in
         assert(ctxReloaded.selectCalls.length === 0, `global dangerous git grant unexpectedly re-prompted ''${ctxReloaded.selectCalls.length} times`);
       }
 
-      // Test 11: headless dangerous git commands are blocked with a clear reason.
+      // Test: headless dangerous git commands are blocked with a clear reason.
       {
         const pi = createPi();
         sandbox(pi);
@@ -1103,7 +1103,7 @@ in
         assert(String(result.reason).includes("git.allowedDangerousCommands"), "headless dangerous git reason did not mention the config key");
       }
 
-      // Test 12: GitHub allow-once does not persist across bash tool calls.
+      // Test: GitHub allow-once does not persist across bash tool calls.
       {
         const pi = createPi();
         sandbox(pi);
@@ -1138,7 +1138,7 @@ in
         assert(ctx.selectCalls.length === 2, `expected two GitHub command prompts, got ''${ctx.selectCalls.length}`);
       }
 
-      // Test 13: GitHub session grants persist for the rest of the session.
+      // Test: GitHub session grants persist for the rest of the session.
       {
         const pi = createPi();
         sandbox(pi);
@@ -1171,7 +1171,7 @@ in
         assert(ctx.selectCalls.length === 1, `session GitHub grant unexpectedly re-prompted ''${ctx.selectCalls.length} times`);
       }
 
-      // Test 14: GitHub project grants persist to .pi/sandbox.json and survive a new session.
+      // Test: GitHub project grants persist to .pi/sandbox.json and survive a new session.
       {
         const pi = createPi();
         sandbox(pi);
@@ -1215,7 +1215,7 @@ in
         assert(ctxReloaded.selectCalls.length === 0, `project GitHub grant unexpectedly re-prompted ''${ctxReloaded.selectCalls.length} times`);
       }
 
-      // Test 15: GitHub global grants persist to ~/.pi/agent/sandbox.json and apply in other projects.
+      // Test: GitHub global grants persist to ~/.pi/agent/sandbox.json and apply in other projects.
       {
         const pi = createPi();
         sandbox(pi);
@@ -1260,7 +1260,7 @@ in
         assert(ctxReloaded.selectCalls.length === 0, `global GitHub grant unexpectedly re-prompted ''${ctxReloaded.selectCalls.length} times`);
       }
 
-      // Test 16: headless GitHub commands are blocked with a clear reason.
+      // Test: headless GitHub commands are blocked with a clear reason.
       {
         const pi = createPi();
         sandbox(pi);
@@ -1283,7 +1283,7 @@ in
         assert(String(result.reason).includes("github.allowedCommands"), "headless GitHub reason did not mention the config key");
       }
 
-      // Test 17: Nix flake mutation allow-once does not persist across bash tool calls.
+      // Test: Nix flake mutation allow-once does not persist across bash tool calls.
       {
         const pi = createPi();
         sandbox(pi);
@@ -1318,7 +1318,7 @@ in
         assert(ctx.selectCalls.length === 2, `expected two Nix flake mutation prompts, got ''${ctx.selectCalls.length}`);
       }
 
-      // Test 18: Nix flake mutation session grants persist for the rest of the session and stay sandboxed.
+      // Test: Nix flake mutation session grants persist for the rest of the session and stay sandboxed.
       {
         const pi = createPi();
         sandbox(pi);
@@ -1356,7 +1356,7 @@ in
         assert(ctx.selectCalls.length === 1, `session Nix flake mutation grant unexpectedly re-prompted ''${ctx.selectCalls.length} times`);
       }
 
-      // Test 19: Nix flake mutation project grants persist to .pi/sandbox.json and survive a new session.
+      // Test: Nix flake mutation project grants persist to .pi/sandbox.json and survive a new session.
       {
         const pi = createPi();
         sandbox(pi);
@@ -1404,7 +1404,7 @@ in
         assert(ctxReloaded.selectCalls.length === 0, `project Nix flake mutation grant unexpectedly re-prompted ''${ctxReloaded.selectCalls.length} times`);
       }
 
-      // Test 20: Nix flake mutation global grants persist to ~/.pi/agent/sandbox.json and apply in other projects.
+      // Test: Nix flake mutation global grants persist to ~/.pi/agent/sandbox.json and apply in other projects.
       {
         const pi = createPi();
         sandbox(pi);
@@ -1449,7 +1449,7 @@ in
         assert(ctxReloaded.selectCalls.length === 0, `global Nix flake mutation grant unexpectedly re-prompted ''${ctxReloaded.selectCalls.length} times`);
       }
 
-      // Test 21: headless Nix flake mutation commands are blocked with a clear reason.
+      // Test: headless Nix flake mutation commands are blocked with a clear reason.
       {
         const pi = createPi();
         sandbox(pi);
@@ -1472,7 +1472,7 @@ in
         assert(String(result.reason).includes("nix.allowedCommands"), "headless Nix flake mutation reason did not mention the config key");
       }
 
-      // Test 22: configuration apply allow-once does not persist across bash tool calls.
+      // Test: configuration apply allow-once does not persist across bash tool calls.
       {
         const pi = createPi();
         sandbox(pi);
@@ -1507,7 +1507,7 @@ in
         assert(ctx.selectCalls.length === 2, `expected two configuration apply prompts, got ''${ctx.selectCalls.length}`);
       }
 
-      // Test 23: configuration apply session grants persist for the rest of the session.
+      // Test: configuration apply session grants persist for the rest of the session.
       {
         const pi = createPi();
         sandbox(pi);
@@ -1545,7 +1545,7 @@ in
         assert(ctx.selectCalls.length === 1, `session configuration apply grant unexpectedly re-prompted ''${ctx.selectCalls.length} times`);
       }
 
-      // Test 24: configuration apply project grants persist to .pi/sandbox.json and survive a new session.
+      // Test: configuration apply project grants persist to .pi/sandbox.json and survive a new session.
       {
         const pi = createPi();
         sandbox(pi);
@@ -1589,7 +1589,7 @@ in
         assert(ctxReloaded.selectCalls.length === 0, `project configuration apply grant unexpectedly re-prompted ''${ctxReloaded.selectCalls.length} times`);
       }
 
-      // Test 25: configuration apply global grants persist to ~/.pi/agent/sandbox.json and apply in other projects.
+      // Test: configuration apply global grants persist to ~/.pi/agent/sandbox.json and apply in other projects.
       {
         const pi = createPi();
         sandbox(pi);
@@ -1634,7 +1634,7 @@ in
         assert(ctxReloaded.selectCalls.length === 0, `global configuration apply grant unexpectedly re-prompted ''${ctxReloaded.selectCalls.length} times`);
       }
 
-      // Test 26: headless configuration apply commands are blocked with a clear reason.
+      // Test: headless configuration apply commands are blocked with a clear reason.
       {
         const pi = createPi();
         sandbox(pi);
@@ -1657,7 +1657,7 @@ in
         assert(String(result.reason).includes("configApply.allowedCommands"), "headless configuration apply reason did not mention the config key");
       }
 
-      // Test 27: headless mode hard-blocks protected reads with a clear reason.
+      // Test: headless mode hard-blocks protected reads with a clear reason.
       {
         const pi = createPi();
         sandbox(pi);
@@ -1679,7 +1679,7 @@ in
         assert(String(result.reason).includes("Blocked in headless mode"), "sandbox headless read reason was not clear");
       }
 
-      // Test 28: shell builtins mentioning ssh do not trigger SSH capability prompts.
+      // Test: shell builtins mentioning ssh do not trigger SSH capability prompts.
       {
         const pi = createPi();
         sandbox(pi);
@@ -1703,7 +1703,7 @@ in
         assert((config.filesystem.denyRead ?? []).includes("~/.ssh"), "ssh lookup unexpectedly relaxed ~/.ssh read policy");
       }
 
-      // Test 29: harmless URL-like literals do not trigger generic network preflight.
+      // Test: harmless URL-like literals do not trigger generic network preflight.
       {
         const pi = createPi();
         sandbox(pi);
@@ -1727,7 +1727,7 @@ in
         assert(!(config.network.allowedDomains ?? []).includes("foo.invalid"), "printf unexpectedly granted a network domain");
       }
 
-      // Test 30: generic network approvals come from the runtime ask callback, not bash preflight.
+      // Test: generic network approvals come from the runtime ask callback, not bash preflight.
       {
         const pi = createPi();
         sandbox(pi);
@@ -1757,7 +1757,7 @@ in
         assert((config.network.allowedDomains ?? []).includes("example.com"), "runtime network approval did not update allowedDomains");
       }
 
-      // Test 31: headless runtime network requests remain blocked.
+      // Test: headless runtime network requests remain blocked.
       {
         const pi = createPi();
         sandbox(pi);
