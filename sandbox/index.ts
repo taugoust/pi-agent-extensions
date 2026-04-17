@@ -30,6 +30,9 @@
  *   },
  *   "github": {
  *     "allowedCommands": ["pr-create"]
+ *   },
+ *   "configApply": {
+ *     "allowedCommands": ["darwin-rebuild"]
  *   }
  * }
  * ```
@@ -74,6 +77,7 @@ type GitHubCommandId =
 	| "pr-modify"
 	| "repo-modify"
 	| "release-modify";
+type ConfigApplyCommandId = "darwin-rebuild" | "nixos-rebuild" | "home-manager";
 type SandboxConfigFile = Partial<SandboxConfig>;
 type FilesystemConfig = SandboxRuntimeConfig["filesystem"] & { allowRead: string[] };
 type NetworkConfig = SandboxRuntimeConfig["network"];
@@ -86,12 +90,17 @@ interface GitHubConfig {
 	allowedCommands: GitHubCommandId[];
 }
 
+interface ConfigApplyConfig {
+	allowedCommands: ConfigApplyCommandId[];
+}
+
 interface SandboxConfig extends Omit<SandboxRuntimeConfig, "filesystem" | "network"> {
 	enabled?: boolean;
 	network: NetworkConfig;
 	filesystem: FilesystemConfig;
 	git: GitConfig;
 	github: GitHubConfig;
+	configApply: ConfigApplyConfig;
 }
 
 interface DangerousGitRule {
@@ -104,6 +113,12 @@ interface GitHubCommandRule {
 	id: GitHubCommandId;
 	label: string;
 	pattern: RegExp;
+}
+
+interface ConfigApplyCommandRule {
+	id: ConfigApplyCommandId;
+	label: string;
+	commandName: string;
 }
 
 interface ActiveOnceGrantBundle {
@@ -123,6 +138,8 @@ interface SandboxState {
 	sessionUnixSockets: Set<string>;
 	sessionDangerousGitCommands: Set<DangerousGitCommandId>;
 	sessionGitHubCommands: Set<GitHubCommandId>;
+	sessionConfigApplyCommands: Set<ConfigApplyCommandId>;
+	unconfinedToolCallIds: Set<string>;
 	onceGrantBundlesByToolCall: Map<string, ActiveOnceGrantBundle>;
 	updateQueue: Promise<void>;
 }
@@ -205,6 +222,12 @@ const GITHUB_COMMAND_RULES: GitHubCommandRule[] = [
 	{ id: "release-modify", pattern: /\bgh\s+release\s+(create|delete|edit)\b/, label: "modify GitHub release" },
 ];
 
+const CONFIG_APPLY_COMMAND_RULES: ConfigApplyCommandRule[] = [
+	{ id: "darwin-rebuild", commandName: "darwin-rebuild", label: "darwin-rebuild" },
+	{ id: "nixos-rebuild", commandName: "nixos-rebuild", label: "nixos-rebuild" },
+	{ id: "home-manager", commandName: "home-manager", label: "home-manager" },
+];
+
 const DEFAULT_CONFIG: SandboxConfig = {
 	enabled: true,
 	network: {
@@ -234,6 +257,9 @@ const DEFAULT_CONFIG: SandboxConfig = {
 		allowedDangerousCommands: [],
 	},
 	github: {
+		allowedCommands: [],
+	},
+	configApply: {
 		allowedCommands: [],
 	},
 };
@@ -372,6 +398,31 @@ function findGitHubCommandRules(command: string): GitHubCommandRule[] {
 	return GITHUB_COMMAND_RULES.filter((rule) => rule.pattern.test(command));
 }
 
+function getConfigApplyCommandRule(ruleId: ConfigApplyCommandId): ConfigApplyCommandRule | undefined {
+	return CONFIG_APPLY_COMMAND_RULES.find((rule) => rule.id === ruleId);
+}
+
+function describeConfigApplyCommandId(ruleId: ConfigApplyCommandId): string {
+	return getConfigApplyCommandRule(ruleId)?.label ?? ruleId;
+}
+
+function describeConfigApplyCommandIds(ruleIds: Iterable<ConfigApplyCommandId>): string[] {
+	return uniqueStrings(Array.from(ruleIds)).map((ruleId) => describeConfigApplyCommandId(ruleId));
+}
+
+function findConfigApplyCommandRules(command: string): ConfigApplyCommandRule[] {
+	const matchedRuleIds = new Set<ConfigApplyCommandId>();
+	for (const token of tokenizeCommand(command)) {
+		for (const candidate of getCommandTokenCandidates(token)) {
+			const matchedRule = CONFIG_APPLY_COMMAND_RULES.find((rule) => candidate === rule.commandName);
+			if (matchedRule) {
+				matchedRuleIds.add(matchedRule.id);
+			}
+		}
+	}
+	return CONFIG_APPLY_COMMAND_RULES.filter((rule) => matchedRuleIds.has(rule.id));
+}
+
 function loadConfigFile(path: string): SandboxConfigFile {
 	if (!existsSync(path)) {
 		return {};
@@ -409,6 +460,11 @@ function deepMerge(base: SandboxConfig, overrides: SandboxConfigFile): SandboxCo
 			...base.github,
 			...(overrides.github ?? {}),
 			allowedCommands: uniqueStrings([...base.github.allowedCommands, ...(overrides.github?.allowedCommands ?? [])]),
+		},
+		configApply: {
+			...base.configApply,
+			...(overrides.configApply ?? {}),
+			allowedCommands: uniqueStrings([...base.configApply.allowedCommands, ...(overrides.configApply?.allowedCommands ?? [])]),
 		},
 	};
 
@@ -678,6 +734,26 @@ function tokenizeCommand(command: string): string[] {
 
 function isShellControlOperator(token: string): boolean {
 	return SHELL_CONTROL_OPERATORS.has(token);
+}
+
+function getCommandTokenCandidates(token: string): string[] {
+	const candidates = [token, basename(token)];
+
+	if (token.includes("#")) {
+		candidates.push(token.slice(token.lastIndexOf("#") + 1));
+	}
+
+	if (token.includes("=")) {
+		const value = token.slice(token.lastIndexOf("=") + 1);
+		if (value.length > 0) {
+			candidates.push(value, basename(value));
+			if (value.includes("#")) {
+				candidates.push(value.slice(value.lastIndexOf("#") + 1));
+			}
+		}
+	}
+
+	return uniqueStrings(candidates.filter((candidate) => candidate.length > 0));
 }
 
 function extractSshHost(target: string): string | undefined {
@@ -973,7 +1049,7 @@ async function buildRuntimeConfig(state: SandboxState): Promise<SandboxRuntimeCo
 		}
 	}
 
-	const { enabled: _enabled, filesystem, git: _git, github: _github, ...runtimeBase } = state.diskConfig;
+	const { enabled: _enabled, filesystem, git: _git, github: _github, configApply: _configApply, ...runtimeBase } = state.diskConfig;
 	const { allowRead: _allowRead, ...runtimeFilesystemBase } = filesystem;
 
 	return {
@@ -1182,6 +1258,57 @@ function getHeadlessGitHubCommandReason(command: string, rules: GitHubCommandRul
 		.map((rule) => `- ${rule.id} (${rule.label})`)
 		.join("\n");
 	return `Sandbox blocked GitHub command (${formatGitHubCommandRules(rules)}): ${command}. Blocked in headless mode — add the matching ids to github.allowedCommands in .pi/sandbox.json or ~/.pi/agent/sandbox.json:\n${ids}`;
+}
+
+function isConfigApplyCommandAllowed(state: SandboxState, commandId: ConfigApplyCommandId): boolean {
+	return state.sessionConfigApplyCommands.has(commandId) || state.diskConfig.configApply.allowedCommands.includes(commandId);
+}
+
+async function grantConfigApplyCommands(
+	state: SandboxState,
+	scope: GrantScope,
+	commandIds: ConfigApplyCommandId[],
+): Promise<void> {
+	const uniqueCommandIds = uniqueStrings(commandIds);
+	if (uniqueCommandIds.length === 0) {
+		return;
+	}
+
+	if (scope === "session") {
+		for (const commandId of uniqueCommandIds) {
+			state.sessionConfigApplyCommands.add(commandId);
+		}
+		return;
+	}
+
+	const filePath = scope === "project" ? getProjectConfigPath(state.cwd) : GLOBAL_CONFIG_PATH;
+	await writeGrantToConfigFile(filePath, (config) => ({
+		...config,
+		configApply: {
+			...(config.configApply ?? {}),
+			allowedCommands: uniqueStrings([...(config.configApply?.allowedCommands ?? []), ...uniqueCommandIds]),
+		},
+	}));
+	state.diskConfig = loadConfig(state.cwd);
+}
+
+function formatConfigApplyCommandRules(rules: ConfigApplyCommandRule[]): string {
+	return rules.map((rule) => rule.label).join(", ");
+}
+
+function getHeadlessConfigApplyCommandReason(command: string, rules: ConfigApplyCommandRule[]): string {
+	const ids = rules
+		.map((rule) => `- ${rule.id} (${rule.label})`)
+		.join("\n");
+	return `Sandbox blocked configuration apply command (${formatConfigApplyCommandRules(rules)}): ${command}. Blocked in headless mode — add the matching ids to configApply.allowedCommands in .pi/sandbox.json or ~/.pi/agent/sandbox.json:\n${ids}`;
+}
+
+function markToolCallUnconfined(state: SandboxState, toolCallId: string): void {
+	state.unconfinedToolCallIds.add(toolCallId);
+}
+
+function clearUnconfinedToolCall(state: SandboxState, toolCallId: string): void {
+	state.unconfinedToolCallIds.delete(toolCallId);
 }
 
 function hasPendingSshGrantBundle(bundle: PendingSshGrantBundle): boolean {
@@ -1475,6 +1602,9 @@ function buildSandboxSummary(state: SandboxState): string {
 		"GitHub:",
 		`  Allowed commands: ${formatList(describeGitHubCommandIds(state.diskConfig.github.allowedCommands))}`,
 		"",
+		"Configuration apply:",
+		`  Allowed commands: ${formatList(describeConfigApplyCommandIds(state.diskConfig.configApply.allowedCommands))}`,
+		"",
 		"Session grants:",
 		`  Domains: ${formatList(Array.from(state.sessionDomains))}`,
 		`  Read paths: ${formatList(Array.from(state.sessionReadPaths))}`,
@@ -1482,6 +1612,7 @@ function buildSandboxSummary(state: SandboxState): string {
 		`  Unix sockets: ${formatList(Array.from(state.sessionUnixSockets))}`,
 		`  Dangerous git commands: ${formatList(describeDangerousGitCommandIds(state.sessionDangerousGitCommands))}`,
 		`  GitHub commands: ${formatList(describeGitHubCommandIds(state.sessionGitHubCommands))}`,
+		`  Configuration apply commands: ${formatList(describeConfigApplyCommandIds(state.sessionConfigApplyCommands))}`,
 	].join("\n");
 }
 
@@ -1507,6 +1638,8 @@ export default function sandbox(pi: ExtensionAPI) {
 		sessionUnixSockets: new Set(),
 		sessionDangerousGitCommands: new Set(),
 		sessionGitHubCommands: new Set(),
+		sessionConfigApplyCommands: new Set(),
+		unconfinedToolCallIds: new Set(),
 		onceGrantBundlesByToolCall: new Map(),
 		updateQueue: Promise.resolve(),
 	};
@@ -1516,8 +1649,15 @@ export default function sandbox(pi: ExtensionAPI) {
 		...localBash,
 		label: "bash (sandboxed)",
 		async execute(id, params, signal, onUpdate) {
-			if (!state.enabled || !state.initialized) {
-				return localBash.execute(id, params, signal, onUpdate);
+			const shouldRunUnconfined = state.unconfinedToolCallIds.has(id);
+			if (!state.enabled || !state.initialized || shouldRunUnconfined) {
+				try {
+					return await localBash.execute(id, params, signal, onUpdate);
+				} finally {
+					if (shouldRunUnconfined) {
+						clearUnconfinedToolCall(state, id);
+					}
+				}
 			}
 
 			const sandboxedBash = createBashTool(localCwd, {
@@ -1543,6 +1683,8 @@ export default function sandbox(pi: ExtensionAPI) {
 		state.sessionUnixSockets.clear();
 		state.sessionDangerousGitCommands.clear();
 		state.sessionGitHubCommands.clear();
+		state.sessionConfigApplyCommands.clear();
+		state.unconfinedToolCallIds.clear();
 		state.onceGrantBundlesByToolCall.clear();
 		setCapabilityGateActive(false);
 
@@ -1610,6 +1752,8 @@ export default function sandbox(pi: ExtensionAPI) {
 		state.enabled = false;
 		state.sessionDangerousGitCommands.clear();
 		state.sessionGitHubCommands.clear();
+		state.sessionConfigApplyCommands.clear();
+		state.unconfinedToolCallIds.clear();
 		state.onceGrantBundlesByToolCall.clear();
 		if (!state.initialized) {
 			return;
@@ -2120,6 +2264,52 @@ export default function sandbox(pi: ExtensionAPI) {
 					"info",
 				);
 			}
+		}
+
+		const matchedConfigApplyCommandRules = findConfigApplyCommandRules(command);
+		if (matchedConfigApplyCommandRules.length > 0) {
+			const pendingConfigApplyCommandRules = matchedConfigApplyCommandRules.filter(
+				(rule) => !isConfigApplyCommandAllowed(state, rule.id),
+			);
+			if (pendingConfigApplyCommandRules.length > 0) {
+				if (!ctx.hasUI) {
+					return { block: true, reason: getHeadlessConfigApplyCommandReason(command, pendingConfigApplyCommandRules) };
+				}
+
+				const choice = await promptForGrant(
+					pi,
+					ctx,
+					`⚠️ Sandbox blocked configuration apply command (${formatConfigApplyCommandRules(pendingConfigApplyCommandRules)})\n\nCommand:\n  ${command}\n\nAllow?`,
+					{ includeAllowOnce: true },
+				);
+				if (!choice) {
+					return {
+						block: true,
+						reason: `Blocked by user — configuration apply command denied (${formatConfigApplyCommandRules(pendingConfigApplyCommandRules)})`,
+					};
+				}
+
+				if (choice === "once") {
+					notify(ctx, `Configuration apply command granted once: ${formatConfigApplyCommandRules(pendingConfigApplyCommandRules)}`, "info");
+				} else {
+					await enqueueStateUpdate(state, () =>
+						grantConfigApplyCommands(
+							state,
+							choice,
+							pendingConfigApplyCommandRules.map((rule) => rule.id),
+						),
+					);
+					refreshStatus(state, ctx);
+					notify(
+						ctx,
+						`Configuration apply command granted ${formatGrantChoice(choice)}: ${formatConfigApplyCommandRules(pendingConfigApplyCommandRules)}`,
+						"info",
+					);
+				}
+			}
+
+			markToolCallUnconfined(state, event.toolCallId);
+			return undefined;
 		}
 
 		const capabilities = extractCommandCapabilities(command);

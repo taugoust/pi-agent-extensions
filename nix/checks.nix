@@ -1283,7 +1283,192 @@ in
         assert(String(result.reason).includes("github.allowedCommands"), "headless GitHub reason did not mention the config key");
       }
 
-      // Test 17: headless mode hard-blocks protected reads with a clear reason.
+      // Test 17: configuration apply allow-once does not persist across bash tool calls.
+      {
+        const pi = createPi();
+        sandbox(pi);
+
+        const cwd = await makeProject(tempRoot, "config-apply-once-project", baseConfig);
+        const ctx = createContext(cwd, ["Allow once", "Abort"]);
+        await startSession(pi, ctx);
+
+        const firstEvent = {
+          toolName: "bash",
+          toolCallId: "config-apply-once-1",
+          input: {
+            command: "sudo darwin-rebuild switch --flake /tmp/nix-config",
+          },
+        };
+
+        const firstResult = await getToolCallHandler(pi)(firstEvent, ctx);
+        assert(firstResult === undefined, "sandbox did not allow the configuration apply command once");
+        assert(ctx.selectCalls.length === 1, `expected one configuration apply prompt, got ''${ctx.selectCalls.length}`);
+        assert(String(ctx.selectCalls[0]).includes("configuration apply command"), "configuration apply prompt title was not shown");
+
+        const secondEvent = {
+          toolName: "bash",
+          toolCallId: "config-apply-once-2",
+          input: {
+            command: "darwin-rebuild switch --flake /tmp/nix-config",
+          },
+        };
+
+        const secondResult = await getToolCallHandler(pi)(secondEvent, ctx);
+        assert(secondResult && secondResult.block === true, "allow-once configuration apply approval should not persist");
+        assert(ctx.selectCalls.length === 2, `expected two configuration apply prompts, got ''${ctx.selectCalls.length}`);
+      }
+
+      // Test 18: configuration apply session grants persist for the rest of the session.
+      {
+        const pi = createPi();
+        sandbox(pi);
+
+        const cwd = await makeProject(tempRoot, "config-apply-session-project", baseConfig);
+        const ctx = createContext(cwd, ["Allow for this session"]);
+        await startSession(pi, ctx);
+
+        const firstEvent = {
+          toolName: "bash",
+          toolCallId: "config-apply-session-1",
+          input: {
+            command: "nix run nixpkgs#home-manager -- generations",
+          },
+        };
+
+        const firstResult = await getToolCallHandler(pi)(firstEvent, ctx);
+        assert(firstResult === undefined, "sandbox did not allow the configuration apply command after a session grant");
+
+        const bashTool = pi.tools.get("bash");
+        assert(bashTool, "sandbox did not register the bash tool");
+        const firstExecution = await bashTool.execute(firstEvent.toolCallId, firstEvent.input);
+        assert(firstExecution.details.operations === undefined, "approved configuration apply command should run outside the filesystem sandbox");
+
+        const secondEvent = {
+          toolName: "bash",
+          toolCallId: "config-apply-session-2",
+          input: {
+            command: "nix run nixpkgs#home-manager -- news",
+          },
+        };
+
+        const secondResult = await getToolCallHandler(pi)(secondEvent, ctx);
+        assert(secondResult === undefined, "session configuration apply grant did not persist across calls");
+        assert(ctx.selectCalls.length === 1, `session configuration apply grant unexpectedly re-prompted ''${ctx.selectCalls.length} times`);
+      }
+
+      // Test 19: configuration apply project grants persist to .pi/sandbox.json and survive a new session.
+      {
+        const pi = createPi();
+        sandbox(pi);
+
+        const cwd = await makeProject(tempRoot, "config-apply-project-grant", baseConfig);
+        const ctx = createContext(cwd, ["Allow for this project"]);
+        await startSession(pi, ctx);
+
+        const event = {
+          toolName: "bash",
+          toolCallId: "config-apply-project-1",
+          input: {
+            command: "sudo nixos-rebuild dry-build --flake ~/Workspace/nix-config/.#homecontrol",
+          },
+        };
+
+        const result = await getToolCallHandler(pi)(event, ctx);
+        assert(result === undefined, "sandbox did not allow the configuration apply command after a project grant");
+
+        const projectConfig = JSON.parse(fs.readFileSync(path.join(cwd, ".pi", "sandbox.json"), "utf-8"));
+        assert(
+          projectConfig.configApply.allowedCommands.includes("nixos-rebuild"),
+          "sandbox did not persist the project configuration apply grant",
+        );
+
+        const piReloaded = createPi();
+        sandbox(piReloaded);
+        const ctxReloaded = createContext(cwd, [], true);
+        await startSession(piReloaded, ctxReloaded);
+
+        const followupEvent = {
+          toolName: "bash",
+          toolCallId: "config-apply-project-2",
+          input: {
+            command: "nixos-rebuild test --flake ~/Workspace/nix-config/.#homecontrol",
+          },
+        };
+
+        const followupResult = await getToolCallHandler(piReloaded)(followupEvent, ctxReloaded);
+        assert(followupResult === undefined, "project configuration apply grant did not persist across sessions");
+        assert(ctxReloaded.selectCalls.length === 0, `project configuration apply grant unexpectedly re-prompted ''${ctxReloaded.selectCalls.length} times`);
+      }
+
+      // Test 20: configuration apply global grants persist to ~/.pi/agent/sandbox.json and apply in other projects.
+      {
+        const pi = createPi();
+        sandbox(pi);
+
+        const cwd = await makeProject(tempRoot, "config-apply-global-project", baseConfig);
+        const ctx = createContext(cwd, ["Allow for all projects"]);
+        await startSession(pi, ctx);
+
+        const event = {
+          toolName: "bash",
+          toolCallId: "config-apply-global-1",
+          input: {
+            command: "darwin-rebuild build --flake /Users/taugoust/Workspace/nix-config",
+          },
+        };
+
+        const result = await getToolCallHandler(pi)(event, ctx);
+        assert(result === undefined, "sandbox did not allow the configuration apply command after a global grant");
+
+        const globalConfig = JSON.parse(fs.readFileSync(path.join(tempRoot, ".pi", "agent", "sandbox.json"), "utf-8"));
+        assert(
+          globalConfig.configApply.allowedCommands.includes("darwin-rebuild"),
+          "sandbox did not persist the global configuration apply grant",
+        );
+
+        const otherCwd = await makeProject(tempRoot, "config-apply-global-other-project", baseConfig);
+        const piReloaded = createPi();
+        sandbox(piReloaded);
+        const ctxReloaded = createContext(otherCwd, [], true);
+        await startSession(piReloaded, ctxReloaded);
+
+        const followupEvent = {
+          toolName: "bash",
+          toolCallId: "config-apply-global-2",
+          input: {
+            command: "darwin-rebuild changelog --flake /Users/taugoust/Workspace/nix-config/.#macos-work",
+          },
+        };
+
+        const followupResult = await getToolCallHandler(piReloaded)(followupEvent, ctxReloaded);
+        assert(followupResult === undefined, "global configuration apply grant did not apply in another project");
+        assert(ctxReloaded.selectCalls.length === 0, `global configuration apply grant unexpectedly re-prompted ''${ctxReloaded.selectCalls.length} times`);
+      }
+
+      // Test 21: headless configuration apply commands are blocked with a clear reason.
+      {
+        const pi = createPi();
+        sandbox(pi);
+
+        const cwd = await makeProject(tempRoot, "config-apply-headless-project", baseConfig);
+        const ctx = createContext(cwd, [], false);
+        await startSession(pi, ctx);
+
+        const event = {
+          toolName: "bash",
+          toolCallId: "config-apply-headless-1",
+          input: {
+            command: "nix run nixpkgs#nixos-rebuild -- .",
+          },
+        };
+
+        const result = await getToolCallHandler(pi)(event, ctx);
+        assert(result && result.block === true, "sandbox did not hard-block configuration apply commands in headless mode");
+        assert(String(result.reason).includes("configuration apply command"), "headless configuration apply reason did not mention the command class");
+        assert(String(result.reason).includes("configApply.allowedCommands"), "headless configuration apply reason did not mention the config key");
+      }
+
+      // Test 22: headless mode hard-blocks protected reads with a clear reason.
       {
         const pi = createPi();
         sandbox(pi);
@@ -1305,7 +1490,7 @@ in
         assert(String(result.reason).includes("Blocked in headless mode"), "sandbox headless read reason was not clear");
       }
 
-      // Test 18: shell builtins mentioning ssh do not trigger SSH capability prompts.
+      // Test 23: shell builtins mentioning ssh do not trigger SSH capability prompts.
       {
         const pi = createPi();
         sandbox(pi);
@@ -1329,7 +1514,7 @@ in
         assert((config.filesystem.denyRead ?? []).includes("~/.ssh"), "ssh lookup unexpectedly relaxed ~/.ssh read policy");
       }
 
-      // Test 19: harmless URL-like literals do not trigger generic network preflight.
+      // Test 24: harmless URL-like literals do not trigger generic network preflight.
       {
         const pi = createPi();
         sandbox(pi);
@@ -1353,7 +1538,7 @@ in
         assert(!(config.network.allowedDomains ?? []).includes("foo.invalid"), "printf unexpectedly granted a network domain");
       }
 
-      // Test 20: generic network approvals come from the runtime ask callback, not bash preflight.
+      // Test 25: generic network approvals come from the runtime ask callback, not bash preflight.
       {
         const pi = createPi();
         sandbox(pi);
@@ -1383,7 +1568,7 @@ in
         assert((config.network.allowedDomains ?? []).includes("example.com"), "runtime network approval did not update allowedDomains");
       }
 
-      // Test 21: headless runtime network requests remain blocked.
+      // Test 26: headless runtime network requests remain blocked.
       {
         const pi = createPi();
         sandbox(pi);
