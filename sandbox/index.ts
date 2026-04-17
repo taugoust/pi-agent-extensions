@@ -82,6 +82,8 @@ type GitHubCommandId =
 	| "release-modify";
 type NixCommandId = "flake-update" | "flake-lock-update-input";
 type ConfigApplyCommandId = "darwin-rebuild" | "nixos-rebuild" | "home-manager";
+type GuardedCommandFamilyKey = "git" | "github" | "nix" | "configApply";
+type GuardedCommandId = DangerousGitCommandId | GitHubCommandId | NixCommandId | ConfigApplyCommandId;
 type SandboxConfigFile = Partial<SandboxConfig>;
 type FilesystemConfig = SandboxRuntimeConfig["filesystem"] & { allowRead: string[] };
 type NetworkConfig = SandboxRuntimeConfig["network"];
@@ -112,28 +114,36 @@ interface SandboxConfig extends Omit<SandboxRuntimeConfig, "filesystem" | "netwo
 	configApply: ConfigApplyConfig;
 }
 
-interface DangerousGitRule {
-	id: DangerousGitCommandId;
+interface GuardedCommandRule {
+	id: GuardedCommandId;
 	label: string;
+}
+
+interface RegexGuardedCommandRule<Id extends GuardedCommandId = GuardedCommandId> extends GuardedCommandRule {
+	id: Id;
 	pattern: RegExp;
 }
 
-interface GitHubCommandRule {
-	id: GitHubCommandId;
-	label: string;
-	pattern: RegExp;
-}
-
-interface NixCommandRule {
-	id: NixCommandId;
-	label: string;
-}
-
-interface ConfigApplyCommandRule {
-	id: ConfigApplyCommandId;
-	label: string;
+interface CommandNameGuardedCommandRule<Id extends GuardedCommandId = GuardedCommandId> extends GuardedCommandRule {
+	id: Id;
 	commandName: string;
 }
+
+interface GuardedCommandFamily {
+	key: GuardedCommandFamilyKey;
+	summaryTitle: string;
+	allowedListLabel: string;
+	sessionListLabel: string;
+	blockedLabel: string;
+	configPathLabel: string;
+	rules: GuardedCommandRule[];
+	matchCommand: (command: string) => GuardedCommandId[];
+	getAllowedIds: (config: SandboxConfig | SandboxConfigFile) => GuardedCommandId[];
+	setAllowedIds: (config: SandboxConfig | SandboxConfigFile, ids: GuardedCommandId[]) => void;
+	onMatchedToolCall?: (state: SandboxState, toolCallId: string) => void;
+}
+
+type SessionGuardedCommands = Record<GuardedCommandFamilyKey, Set<GuardedCommandId>>;
 
 interface ActiveOnceGrantBundle {
 	domains: string[];
@@ -150,10 +160,7 @@ interface SandboxState {
 	sessionReadPaths: Set<string>;
 	sessionWritePaths: Set<string>;
 	sessionUnixSockets: Set<string>;
-	sessionDangerousGitCommands: Set<DangerousGitCommandId>;
-	sessionGitHubCommands: Set<GitHubCommandId>;
-	sessionNixCommands: Set<NixCommandId>;
-	sessionConfigApplyCommands: Set<ConfigApplyCommandId>;
+	sessionGuardedCommands: SessionGuardedCommands;
 	unconfinedToolCallIds: Set<string>;
 	onceGrantBundlesByToolCall: Map<string, ActiveOnceGrantBundle>;
 	updateQueue: Promise<void>;
@@ -219,7 +226,7 @@ const SSH_VALUE_FLAGS = new Set([
 	"--port",
 ]);
 
-const DANGEROUS_GIT_RULES: DangerousGitRule[] = [
+const DANGEROUS_GIT_RULES: RegexGuardedCommandRule<DangerousGitCommandId>[] = [
 	{ id: "force-push", pattern: /\bgit\s+push\s+.*(-f\b|--force\b)/, label: "force push" },
 	{ id: "hard-reset", pattern: /\bgit\s+reset\s+--hard\b/, label: "hard reset" },
 	{ id: "clean", pattern: /\bgit\s+clean\s+-[^\s]*f/, label: "git clean" },
@@ -228,7 +235,7 @@ const DANGEROUS_GIT_RULES: DangerousGitRule[] = [
 	{ id: "restore", pattern: /\bgit\s+restore\b/, label: "git restore" },
 ];
 
-const GITHUB_COMMAND_RULES: GitHubCommandRule[] = [
+const GITHUB_COMMAND_RULES: RegexGuardedCommandRule<GitHubCommandId>[] = [
 	{ id: "issue-create", pattern: /\bgh\s+issue\s+create\b/, label: "create GitHub issue" },
 	{ id: "issue-modify", pattern: /\bgh\s+issue\s+(close|delete|edit|comment)\b/, label: "modify GitHub issue" },
 	{ id: "pr-create", pattern: /\bgh\s+pr\s+create\b/, label: "create GitHub PR" },
@@ -237,15 +244,87 @@ const GITHUB_COMMAND_RULES: GitHubCommandRule[] = [
 	{ id: "release-modify", pattern: /\bgh\s+release\s+(create|delete|edit)\b/, label: "modify GitHub release" },
 ];
 
-const NIX_COMMAND_RULES: NixCommandRule[] = [
+const NIX_COMMAND_RULES: GuardedCommandRule[] = [
 	{ id: "flake-update", label: "nix flake update" },
 	{ id: "flake-lock-update-input", label: "nix flake lock --update-input" },
 ];
 
-const CONFIG_APPLY_COMMAND_RULES: ConfigApplyCommandRule[] = [
+const CONFIG_APPLY_COMMAND_RULES: CommandNameGuardedCommandRule<ConfigApplyCommandId>[] = [
 	{ id: "darwin-rebuild", commandName: "darwin-rebuild", label: "darwin-rebuild" },
 	{ id: "nixos-rebuild", commandName: "nixos-rebuild", label: "nixos-rebuild" },
 	{ id: "home-manager", commandName: "home-manager", label: "home-manager" },
+];
+
+const GUARDED_COMMAND_FAMILIES: GuardedCommandFamily[] = [
+	{
+		key: "git",
+		summaryTitle: "Git",
+		allowedListLabel: "Allowed dangerous commands",
+		sessionListLabel: "Dangerous git commands",
+		blockedLabel: "dangerous git command",
+		configPathLabel: "git.allowedDangerousCommands",
+		rules: DANGEROUS_GIT_RULES.map(({ id, label }) => ({ id, label })),
+		matchCommand: (command) => matchRegexGuardedCommandIds(DANGEROUS_GIT_RULES, command),
+		getAllowedIds: (config) => config.git?.allowedDangerousCommands ?? [],
+		setAllowedIds: (config, ids) => {
+			config.git = {
+				...(config.git ?? {}),
+				allowedDangerousCommands: ids as DangerousGitCommandId[],
+			};
+		},
+	},
+	{
+		key: "github",
+		summaryTitle: "GitHub",
+		allowedListLabel: "Allowed commands",
+		sessionListLabel: "GitHub commands",
+		blockedLabel: "GitHub command",
+		configPathLabel: "github.allowedCommands",
+		rules: GITHUB_COMMAND_RULES.map(({ id, label }) => ({ id, label })),
+		matchCommand: (command) => matchRegexGuardedCommandIds(GITHUB_COMMAND_RULES, command),
+		getAllowedIds: (config) => config.github?.allowedCommands ?? [],
+		setAllowedIds: (config, ids) => {
+			config.github = {
+				...(config.github ?? {}),
+				allowedCommands: ids as GitHubCommandId[],
+			};
+		},
+	},
+	{
+		key: "nix",
+		summaryTitle: "Nix",
+		allowedListLabel: "Allowed commands",
+		sessionListLabel: "Nix commands",
+		blockedLabel: "Nix flake mutation command",
+		configPathLabel: "nix.allowedCommands",
+		rules: NIX_COMMAND_RULES,
+		matchCommand: (command) => matchNixCommandIds(command),
+		getAllowedIds: (config) => config.nix?.allowedCommands ?? [],
+		setAllowedIds: (config, ids) => {
+			config.nix = {
+				...(config.nix ?? {}),
+				allowedCommands: ids as NixCommandId[],
+			};
+		},
+	},
+	{
+		key: "configApply",
+		summaryTitle: "Configuration apply",
+		allowedListLabel: "Allowed commands",
+		sessionListLabel: "Configuration apply commands",
+		blockedLabel: "configuration apply command",
+		configPathLabel: "configApply.allowedCommands",
+		rules: CONFIG_APPLY_COMMAND_RULES.map(({ id, label }) => ({ id, label })),
+		matchCommand: (command) => matchConfigApplyCommandIds(command),
+		getAllowedIds: (config) => config.configApply?.allowedCommands ?? [],
+		setAllowedIds: (config, ids) => {
+			config.configApply = {
+				...(config.configApply ?? {}),
+				allowedCommands: ids as ConfigApplyCommandId[],
+			};
+		},
+		onMatchedToolCall: (state, toolCallId) => markToolCallUnconfined(state, toolCallId),
+	},
 ];
 
 const DEFAULT_CONFIG: SandboxConfig = {
@@ -389,55 +468,46 @@ function getActiveOnceUnixSockets(state: SandboxState): string[] {
 	return uniqueStrings(Array.from(state.onceGrantBundlesByToolCall.values()).flatMap((bundle) => bundle.unixSockets));
 }
 
-function getDangerousGitRule(ruleId: DangerousGitCommandId): DangerousGitRule | undefined {
-	return DANGEROUS_GIT_RULES.find((rule) => rule.id === ruleId);
+function createSessionGuardedCommands(): SessionGuardedCommands {
+	return Object.fromEntries(GUARDED_COMMAND_FAMILIES.map((family) => [family.key, new Set<GuardedCommandId>()])) as SessionGuardedCommands;
 }
 
-function describeDangerousGitCommandId(ruleId: DangerousGitCommandId): string {
-	return getDangerousGitRule(ruleId)?.label ?? ruleId;
+function clearSessionGuardedCommands(state: SandboxState): void {
+	for (const family of GUARDED_COMMAND_FAMILIES) {
+		state.sessionGuardedCommands[family.key].clear();
+	}
 }
 
-function describeDangerousGitCommandIds(ruleIds: Iterable<DangerousGitCommandId>): string[] {
-	return uniqueStrings(Array.from(ruleIds)).map((ruleId) => describeDangerousGitCommandId(ruleId));
+function getSessionGuardedCommandIds(state: SandboxState, family: GuardedCommandFamily): Set<GuardedCommandId> {
+	return state.sessionGuardedCommands[family.key];
 }
 
-function findDangerousGitRules(command: string): DangerousGitRule[] {
-	return DANGEROUS_GIT_RULES.filter((rule) => rule.pattern.test(command));
+function getGuardedCommandRule(family: GuardedCommandFamily, ruleId: GuardedCommandId): GuardedCommandRule | undefined {
+	return family.rules.find((rule) => rule.id === ruleId);
 }
 
-function getGitHubCommandRule(ruleId: GitHubCommandId): GitHubCommandRule | undefined {
-	return GITHUB_COMMAND_RULES.find((rule) => rule.id === ruleId);
+function describeGuardedCommandId(family: GuardedCommandFamily, ruleId: GuardedCommandId): string {
+	return getGuardedCommandRule(family, ruleId)?.label ?? ruleId;
 }
 
-function describeGitHubCommandId(ruleId: GitHubCommandId): string {
-	return getGitHubCommandRule(ruleId)?.label ?? ruleId;
+function describeGuardedCommandIds(family: GuardedCommandFamily, ruleIds: Iterable<GuardedCommandId>): string[] {
+	return uniqueStrings(Array.from(ruleIds)).map((ruleId) => describeGuardedCommandId(family, ruleId));
 }
 
-function describeGitHubCommandIds(ruleIds: Iterable<GitHubCommandId>): string[] {
-	return uniqueStrings(Array.from(ruleIds)).map((ruleId) => describeGitHubCommandId(ruleId));
+function matchRegexGuardedCommandIds<Id extends GuardedCommandId>(rules: RegexGuardedCommandRule<Id>[], command: string): Id[] {
+	return rules.filter((rule) => rule.pattern.test(command)).map((rule) => rule.id);
 }
 
-function findGitHubCommandRules(command: string): GitHubCommandRule[] {
-	return GITHUB_COMMAND_RULES.filter((rule) => rule.pattern.test(command));
-}
-
-function getNixCommandRule(ruleId: NixCommandId): NixCommandRule | undefined {
-	return NIX_COMMAND_RULES.find((rule) => rule.id === ruleId);
-}
-
-function describeNixCommandId(ruleId: NixCommandId): string {
-	return getNixCommandRule(ruleId)?.label ?? ruleId;
-}
-
-function describeNixCommandIds(ruleIds: Iterable<NixCommandId>): string[] {
-	return uniqueStrings(Array.from(ruleIds)).map((ruleId) => describeNixCommandId(ruleId));
+function findGuardedCommandRules(family: GuardedCommandFamily, command: string): GuardedCommandRule[] {
+	const matchedRuleIds = new Set(family.matchCommand(command));
+	return family.rules.filter((rule) => matchedRuleIds.has(rule.id));
 }
 
 function tokenHasCandidate(token: string, candidate: string): boolean {
 	return getCommandTokenCandidates(token).includes(candidate);
 }
 
-function findNixCommandRules(command: string): NixCommandRule[] {
+function matchNixCommandIds(command: string): NixCommandId[] {
 	const matchedRuleIds = new Set<NixCommandId>();
 	const tokens = tokenizeCommand(command);
 
@@ -473,24 +543,17 @@ function findNixCommandRules(command: string): NixCommandRule[] {
 		}
 	}
 
-	return NIX_COMMAND_RULES.filter((rule) => matchedRuleIds.has(rule.id));
+	return NIX_COMMAND_RULES.filter((rule) => matchedRuleIds.has(rule.id)).map((rule) => rule.id as NixCommandId);
 }
 
-function getConfigApplyCommandRule(ruleId: ConfigApplyCommandId): ConfigApplyCommandRule | undefined {
-	return CONFIG_APPLY_COMMAND_RULES.find((rule) => rule.id === ruleId);
-}
-
-function describeConfigApplyCommandId(ruleId: ConfigApplyCommandId): string {
-	return getConfigApplyCommandRule(ruleId)?.label ?? ruleId;
-}
-
-function describeConfigApplyCommandIds(ruleIds: Iterable<ConfigApplyCommandId>): string[] {
-	return uniqueStrings(Array.from(ruleIds)).map((ruleId) => describeConfigApplyCommandId(ruleId));
-}
-
-function findConfigApplyCommandRules(command: string): ConfigApplyCommandRule[] {
+function matchConfigApplyCommandIds(command: string): ConfigApplyCommandId[] {
 	const matchedRuleIds = new Set<ConfigApplyCommandId>();
-	for (const token of tokenizeCommand(command)) {
+	const tokens = tokenizeCommand(command);
+	for (let index = 0; index < tokens.length; index += 1) {
+		const token = tokens[index];
+		if (!token || token.startsWith("--update-input=") || tokens[index - 1] === "--update-input") {
+			continue;
+		}
 		for (const candidate of getCommandTokenCandidates(token)) {
 			const matchedRule = CONFIG_APPLY_COMMAND_RULES.find((rule) => candidate === rule.commandName);
 			if (matchedRule) {
@@ -498,7 +561,7 @@ function findConfigApplyCommandRules(command: string): ConfigApplyCommandRule[] 
 			}
 		}
 	}
-	return CONFIG_APPLY_COMMAND_RULES.filter((rule) => matchedRuleIds.has(rule.id));
+	return CONFIG_APPLY_COMMAND_RULES.filter((rule) => matchedRuleIds.has(rule.id)).map((rule) => rule.id);
 }
 
 function loadConfigFile(path: string): SandboxConfigFile {
@@ -526,30 +589,11 @@ function deepMerge(base: SandboxConfig, overrides: SandboxConfigFile): SandboxCo
 			...(overrides.filesystem ?? {}),
 			allowRead: overrides.filesystem?.allowRead ?? base.filesystem.allowRead,
 		},
-		git: {
-			...base.git,
-			...(overrides.git ?? {}),
-			allowedDangerousCommands: uniqueStrings([
-				...base.git.allowedDangerousCommands,
-				...(overrides.git?.allowedDangerousCommands ?? []),
-			]),
-		},
-		github: {
-			...base.github,
-			...(overrides.github ?? {}),
-			allowedCommands: uniqueStrings([...base.github.allowedCommands, ...(overrides.github?.allowedCommands ?? [])]),
-		},
-		nix: {
-			...base.nix,
-			...(overrides.nix ?? {}),
-			allowedCommands: uniqueStrings([...base.nix.allowedCommands, ...(overrides.nix?.allowedCommands ?? [])]),
-		},
-		configApply: {
-			...base.configApply,
-			...(overrides.configApply ?? {}),
-			allowedCommands: uniqueStrings([...base.configApply.allowedCommands, ...(overrides.configApply?.allowedCommands ?? [])]),
-		},
 	};
+
+	for (const family of GUARDED_COMMAND_FAMILIES) {
+		family.setAllowedIds(result, uniqueStrings([...family.getAllowedIds(base), ...family.getAllowedIds(overrides)]));
+	}
 
 	if (overrides.enabled !== undefined) {
 		result.enabled = overrides.enabled;
@@ -1106,6 +1150,17 @@ function enqueueStateUpdate<T>(state: SandboxState, task: () => Promise<T>): Pro
 	return next;
 }
 
+function getRuntimeBaseConfig(config: SandboxConfig): Omit<SandboxRuntimeConfig, "filesystem" | "network"> {
+	const runtimeBase = { ...config } as Record<string, unknown>;
+	delete runtimeBase.enabled;
+	delete runtimeBase.network;
+	delete runtimeBase.filesystem;
+	for (const family of GUARDED_COMMAND_FAMILIES) {
+		delete runtimeBase[family.key];
+	}
+	return runtimeBase as Omit<SandboxRuntimeConfig, "filesystem" | "network">;
+}
+
 async function buildRuntimeConfig(state: SandboxState): Promise<SandboxRuntimeConfig> {
 	const allowReadEntries = [...state.diskConfig.filesystem.allowRead];
 	for (const sessionPath of state.sessionReadPaths) {
@@ -1132,8 +1187,8 @@ async function buildRuntimeConfig(state: SandboxState): Promise<SandboxRuntimeCo
 		}
 	}
 
-	const { enabled: _enabled, filesystem, git: _git, github: _github, nix: _nix, configApply: _configApply, ...runtimeBase } = state.diskConfig;
-	const { allowRead: _allowRead, ...runtimeFilesystemBase } = filesystem;
+	const runtimeBase = getRuntimeBaseConfig(state.diskConfig);
+	const { allowRead: _allowRead, ...runtimeFilesystemBase } = state.diskConfig.filesystem;
 
 	return {
 		...runtimeBase,
@@ -1253,18 +1308,19 @@ async function grantUnixSocket(state: SandboxState, scope: GrantScope, socketPat
 	await applyRuntimeConfig(state);
 }
 
-function isDangerousGitCommandAllowed(state: SandboxState, commandId: DangerousGitCommandId): boolean {
-	return state.sessionDangerousGitCommands.has(commandId) || state.diskConfig.git.allowedDangerousCommands.includes(commandId);
+function capitalizeFirst(text: string): string {
+	return text.length > 0 ? `${text[0].toUpperCase()}${text.slice(1)}` : text;
 }
 
-function getPendingDangerousGitRules(state: SandboxState, command: string): DangerousGitRule[] {
-	return findDangerousGitRules(command).filter((rule) => !isDangerousGitCommandAllowed(state, rule.id));
+function isGuardedCommandAllowed(state: SandboxState, family: GuardedCommandFamily, commandId: GuardedCommandId): boolean {
+	return getSessionGuardedCommandIds(state, family).has(commandId) || family.getAllowedIds(state.diskConfig).includes(commandId);
 }
 
-async function grantDangerousGitCommands(
+async function grantGuardedCommands(
 	state: SandboxState,
+	family: GuardedCommandFamily,
 	scope: GrantScope,
-	commandIds: DangerousGitCommandId[],
+	commandIds: GuardedCommandId[],
 ): Promise<void> {
 	const uniqueCommandIds = uniqueStrings(commandIds);
 	if (uniqueCommandIds.length === 0) {
@@ -1273,160 +1329,83 @@ async function grantDangerousGitCommands(
 
 	if (scope === "session") {
 		for (const commandId of uniqueCommandIds) {
-			state.sessionDangerousGitCommands.add(commandId);
+			getSessionGuardedCommandIds(state, family).add(commandId);
 		}
 		return;
 	}
 
 	const filePath = scope === "project" ? getProjectConfigPath(state.cwd) : GLOBAL_CONFIG_PATH;
-	await writeGrantToConfigFile(filePath, (config) => ({
-		...config,
-		git: {
-			...(config.git ?? {}),
-			allowedDangerousCommands: uniqueStrings([...(config.git?.allowedDangerousCommands ?? []), ...uniqueCommandIds]),
-		},
-	}));
+	await writeGrantToConfigFile(filePath, (config) => {
+		const updatedConfig = { ...config };
+		family.setAllowedIds(updatedConfig, uniqueStrings([...family.getAllowedIds(config), ...uniqueCommandIds]));
+		return updatedConfig;
+	});
 	state.diskConfig = loadConfig(state.cwd);
 }
 
-function formatDangerousGitRules(rules: DangerousGitRule[]): string {
+function formatGuardedCommandRules(rules: GuardedCommandRule[]): string {
 	return rules.map((rule) => rule.label).join(", ");
 }
 
-function getHeadlessDangerousGitReason(command: string, rules: DangerousGitRule[]): string {
+function getHeadlessGuardedCommandReason(family: GuardedCommandFamily, command: string, rules: GuardedCommandRule[]): string {
 	const ids = rules
 		.map((rule) => `- ${rule.id} (${rule.label})`)
 		.join("\n");
-	return `Sandbox blocked dangerous git command (${formatDangerousGitRules(rules)}): ${command}. Blocked in headless mode — add the matching ids to git.allowedDangerousCommands in .pi/sandbox.json or ~/.pi/agent/sandbox.json:\n${ids}`;
+	return `Sandbox blocked ${family.blockedLabel} (${formatGuardedCommandRules(rules)}): ${command}. Blocked in headless mode — add the matching ids to ${family.configPathLabel} in .pi/sandbox.json or ~/.pi/agent/sandbox.json:\n${ids}`;
 }
 
-function isGitHubCommandAllowed(state: SandboxState, commandId: GitHubCommandId): boolean {
-	return state.sessionGitHubCommands.has(commandId) || state.diskConfig.github.allowedCommands.includes(commandId);
-}
-
-function getPendingGitHubCommandRules(state: SandboxState, command: string): GitHubCommandRule[] {
-	return findGitHubCommandRules(command).filter((rule) => !isGitHubCommandAllowed(state, rule.id));
-}
-
-async function grantGitHubCommands(state: SandboxState, scope: GrantScope, commandIds: GitHubCommandId[]): Promise<void> {
-	const uniqueCommandIds = uniqueStrings(commandIds);
-	if (uniqueCommandIds.length === 0) {
-		return;
-	}
-
-	if (scope === "session") {
-		for (const commandId of uniqueCommandIds) {
-			state.sessionGitHubCommands.add(commandId);
-		}
-		return;
-	}
-
-	const filePath = scope === "project" ? getProjectConfigPath(state.cwd) : GLOBAL_CONFIG_PATH;
-	await writeGrantToConfigFile(filePath, (config) => ({
-		...config,
-		github: {
-			...(config.github ?? {}),
-			allowedCommands: uniqueStrings([...(config.github?.allowedCommands ?? []), ...uniqueCommandIds]),
-		},
-	}));
-	state.diskConfig = loadConfig(state.cwd);
-}
-
-function formatGitHubCommandRules(rules: GitHubCommandRule[]): string {
-	return rules.map((rule) => rule.label).join(", ");
-}
-
-function getHeadlessGitHubCommandReason(command: string, rules: GitHubCommandRule[]): string {
-	const ids = rules
-		.map((rule) => `- ${rule.id} (${rule.label})`)
-		.join("\n");
-	return `Sandbox blocked GitHub command (${formatGitHubCommandRules(rules)}): ${command}. Blocked in headless mode — add the matching ids to github.allowedCommands in .pi/sandbox.json or ~/.pi/agent/sandbox.json:\n${ids}`;
-}
-
-function isNixCommandAllowed(state: SandboxState, commandId: NixCommandId): boolean {
-	return state.sessionNixCommands.has(commandId) || state.diskConfig.nix.allowedCommands.includes(commandId);
-}
-
-function getPendingNixCommandRules(state: SandboxState, command: string): NixCommandRule[] {
-	return findNixCommandRules(command).filter((rule) => !isNixCommandAllowed(state, rule.id));
-}
-
-async function grantNixCommands(state: SandboxState, scope: GrantScope, commandIds: NixCommandId[]): Promise<void> {
-	const uniqueCommandIds = uniqueStrings(commandIds);
-	if (uniqueCommandIds.length === 0) {
-		return;
-	}
-
-	if (scope === "session") {
-		for (const commandId of uniqueCommandIds) {
-			state.sessionNixCommands.add(commandId);
-		}
-		return;
-	}
-
-	const filePath = scope === "project" ? getProjectConfigPath(state.cwd) : GLOBAL_CONFIG_PATH;
-	await writeGrantToConfigFile(filePath, (config) => ({
-		...config,
-		nix: {
-			...(config.nix ?? {}),
-			allowedCommands: uniqueStrings([...(config.nix?.allowedCommands ?? []), ...uniqueCommandIds]),
-		},
-	}));
-	state.diskConfig = loadConfig(state.cwd);
-}
-
-function formatNixCommandRules(rules: NixCommandRule[]): string {
-	return rules.map((rule) => rule.label).join(", ");
-}
-
-function getHeadlessNixCommandReason(command: string, rules: NixCommandRule[]): string {
-	const ids = rules
-		.map((rule) => `- ${rule.id} (${rule.label})`)
-		.join("\n");
-	return `Sandbox blocked Nix flake mutation command (${formatNixCommandRules(rules)}): ${command}. Blocked in headless mode — add the matching ids to nix.allowedCommands in .pi/sandbox.json or ~/.pi/agent/sandbox.json:\n${ids}`;
-}
-
-function isConfigApplyCommandAllowed(state: SandboxState, commandId: ConfigApplyCommandId): boolean {
-	return state.sessionConfigApplyCommands.has(commandId) || state.diskConfig.configApply.allowedCommands.includes(commandId);
-}
-
-async function grantConfigApplyCommands(
+async function handleGuardedCommandPreflight(
+	pi: ExtensionAPI,
 	state: SandboxState,
-	scope: GrantScope,
-	commandIds: ConfigApplyCommandId[],
-): Promise<void> {
-	const uniqueCommandIds = uniqueStrings(commandIds);
-	if (uniqueCommandIds.length === 0) {
-		return;
-	}
-
-	if (scope === "session") {
-		for (const commandId of uniqueCommandIds) {
-			state.sessionConfigApplyCommands.add(commandId);
+	ctx: SandboxPromptContext,
+	event: { toolCallId: string },
+	command: string,
+): Promise<{ handled: boolean; result?: { block: true; reason: string } }> {
+	for (const family of GUARDED_COMMAND_FAMILIES) {
+		const matchedRules = findGuardedCommandRules(family, command);
+		if (matchedRules.length === 0) {
+			continue;
 		}
-		return;
+
+		const pendingRules = matchedRules.filter((rule) => !isGuardedCommandAllowed(state, family, rule.id));
+		if (pendingRules.length > 0) {
+			if (!ctx.hasUI) {
+				return { handled: true, result: { block: true, reason: getHeadlessGuardedCommandReason(family, command, pendingRules) } };
+			}
+
+			const choice = await promptForGrant(
+				pi,
+				ctx,
+				`⚠️ Sandbox blocked ${family.blockedLabel} (${formatGuardedCommandRules(pendingRules)})\n\nCommand:\n  ${command}\n\nAllow?`,
+				{ includeAllowOnce: true },
+			);
+			if (!choice) {
+				return {
+					handled: true,
+					result: {
+						block: true,
+						reason: `Blocked by user — ${family.blockedLabel} denied (${formatGuardedCommandRules(pendingRules)})`,
+					},
+				};
+			}
+
+			const grantedLabel = capitalizeFirst(family.blockedLabel);
+			if (choice === "once") {
+				notify(ctx, `${grantedLabel} granted once: ${formatGuardedCommandRules(pendingRules)}`, "info");
+			} else {
+				await enqueueStateUpdate(state, () => grantGuardedCommands(state, family, choice, pendingRules.map((rule) => rule.id)));
+				refreshStatus(state, ctx);
+				notify(ctx, `${grantedLabel} granted ${formatGrantChoice(choice)}: ${formatGuardedCommandRules(pendingRules)}`, "info");
+			}
+		}
+
+		if (family.onMatchedToolCall) {
+			family.onMatchedToolCall(state, event.toolCallId);
+			return { handled: true, result: undefined };
+		}
 	}
 
-	const filePath = scope === "project" ? getProjectConfigPath(state.cwd) : GLOBAL_CONFIG_PATH;
-	await writeGrantToConfigFile(filePath, (config) => ({
-		...config,
-		configApply: {
-			...(config.configApply ?? {}),
-			allowedCommands: uniqueStrings([...(config.configApply?.allowedCommands ?? []), ...uniqueCommandIds]),
-		},
-	}));
-	state.diskConfig = loadConfig(state.cwd);
-}
-
-function formatConfigApplyCommandRules(rules: ConfigApplyCommandRule[]): string {
-	return rules.map((rule) => rule.label).join(", ");
-}
-
-function getHeadlessConfigApplyCommandReason(command: string, rules: ConfigApplyCommandRule[]): string {
-	const ids = rules
-		.map((rule) => `- ${rule.id} (${rule.label})`)
-		.join("\n");
-	return `Sandbox blocked configuration apply command (${formatConfigApplyCommandRules(rules)}): ${command}. Blocked in headless mode — add the matching ids to configApply.allowedCommands in .pi/sandbox.json or ~/.pi/agent/sandbox.json:\n${ids}`;
+	return { handled: false };
 }
 
 function markToolCallUnconfined(state: SandboxState, toolCallId: string): void {
@@ -1722,27 +1701,20 @@ function buildSandboxSummary(state: SandboxState): string {
 		`  Allow write: ${formatList(state.diskConfig.filesystem.allowWrite)}`,
 		`  Deny write: ${formatList(state.diskConfig.filesystem.denyWrite)}`,
 		"",
-		"Git:",
-		`  Allowed dangerous commands: ${formatList(describeDangerousGitCommandIds(state.diskConfig.git.allowedDangerousCommands))}`,
-		"",
-		"GitHub:",
-		`  Allowed commands: ${formatList(describeGitHubCommandIds(state.diskConfig.github.allowedCommands))}`,
-		"",
-		"Nix:",
-		`  Allowed commands: ${formatList(describeNixCommandIds(state.diskConfig.nix.allowedCommands))}`,
-		"",
-		"Configuration apply:",
-		`  Allowed commands: ${formatList(describeConfigApplyCommandIds(state.diskConfig.configApply.allowedCommands))}`,
-		"",
+		...GUARDED_COMMAND_FAMILIES.flatMap((family) => [
+			`${family.summaryTitle}:`,
+			`  ${family.allowedListLabel}: ${formatList(describeGuardedCommandIds(family, family.getAllowedIds(state.diskConfig)))}`,
+			"",
+		]),
 		"Session grants:",
 		`  Domains: ${formatList(Array.from(state.sessionDomains))}`,
 		`  Read paths: ${formatList(Array.from(state.sessionReadPaths))}`,
 		`  Write paths: ${formatList(Array.from(state.sessionWritePaths))}`,
 		`  Unix sockets: ${formatList(Array.from(state.sessionUnixSockets))}`,
-		`  Dangerous git commands: ${formatList(describeDangerousGitCommandIds(state.sessionDangerousGitCommands))}`,
-		`  GitHub commands: ${formatList(describeGitHubCommandIds(state.sessionGitHubCommands))}`,
-		`  Nix commands: ${formatList(describeNixCommandIds(state.sessionNixCommands))}`,
-		`  Configuration apply commands: ${formatList(describeConfigApplyCommandIds(state.sessionConfigApplyCommands))}`,
+		...GUARDED_COMMAND_FAMILIES.map(
+			(family) =>
+				`  ${family.sessionListLabel}: ${formatList(describeGuardedCommandIds(family, getSessionGuardedCommandIds(state, family)))}`,
+		),
 	].join("\n");
 }
 
@@ -1766,10 +1738,7 @@ export default function sandbox(pi: ExtensionAPI) {
 		sessionReadPaths: new Set(),
 		sessionWritePaths: new Set(),
 		sessionUnixSockets: new Set(),
-		sessionDangerousGitCommands: new Set(),
-		sessionGitHubCommands: new Set(),
-		sessionNixCommands: new Set(),
-		sessionConfigApplyCommands: new Set(),
+		sessionGuardedCommands: createSessionGuardedCommands(),
 		unconfinedToolCallIds: new Set(),
 		onceGrantBundlesByToolCall: new Map(),
 		updateQueue: Promise.resolve(),
@@ -1812,10 +1781,7 @@ export default function sandbox(pi: ExtensionAPI) {
 		state.sessionReadPaths.clear();
 		state.sessionWritePaths.clear();
 		state.sessionUnixSockets.clear();
-		state.sessionDangerousGitCommands.clear();
-		state.sessionGitHubCommands.clear();
-		state.sessionNixCommands.clear();
-		state.sessionConfigApplyCommands.clear();
+		clearSessionGuardedCommands(state);
 		state.unconfinedToolCallIds.clear();
 		state.onceGrantBundlesByToolCall.clear();
 		setCapabilityGateActive(false);
@@ -1882,10 +1848,7 @@ export default function sandbox(pi: ExtensionAPI) {
 		promptContext = undefined;
 		setCapabilityGateActive(false);
 		state.enabled = false;
-		state.sessionDangerousGitCommands.clear();
-		state.sessionGitHubCommands.clear();
-		state.sessionNixCommands.clear();
-		state.sessionConfigApplyCommands.clear();
+		clearSessionGuardedCommands(state);
 		state.unconfinedToolCallIds.clear();
 		state.onceGrantBundlesByToolCall.clear();
 		if (!state.initialized) {
@@ -2323,164 +2286,9 @@ export default function sandbox(pi: ExtensionAPI) {
 			return undefined;
 		}
 
-		const pendingDangerousGitRules = getPendingDangerousGitRules(state, command);
-		if (pendingDangerousGitRules.length > 0) {
-			if (!ctx.hasUI) {
-				return { block: true, reason: getHeadlessDangerousGitReason(command, pendingDangerousGitRules) };
-			}
-
-			const choice = await promptForGrant(
-				pi,
-				ctx,
-				`⚠️ Sandbox blocked dangerous git command (${formatDangerousGitRules(pendingDangerousGitRules)})\n\nCommand:\n  ${command}\n\nAllow?`,
-				{ includeAllowOnce: true },
-			);
-			if (!choice) {
-				return {
-					block: true,
-					reason: `Blocked by user — dangerous git command denied (${formatDangerousGitRules(pendingDangerousGitRules)})`,
-				};
-			}
-
-			if (choice === "once") {
-				notify(ctx, `Dangerous git command granted once: ${formatDangerousGitRules(pendingDangerousGitRules)}`, "info");
-			} else {
-				await enqueueStateUpdate(state, () =>
-					grantDangerousGitCommands(
-						state,
-						choice,
-						pendingDangerousGitRules.map((rule) => rule.id),
-					),
-				);
-				refreshStatus(state, ctx);
-				notify(
-					ctx,
-					`Dangerous git command granted ${formatGrantChoice(choice)}: ${formatDangerousGitRules(pendingDangerousGitRules)}`,
-					"info",
-				);
-			}
-		}
-
-		const pendingGitHubCommandRules = getPendingGitHubCommandRules(state, command);
-		if (pendingGitHubCommandRules.length > 0) {
-			if (!ctx.hasUI) {
-				return { block: true, reason: getHeadlessGitHubCommandReason(command, pendingGitHubCommandRules) };
-			}
-
-			const choice = await promptForGrant(
-				pi,
-				ctx,
-				`⚠️ Sandbox blocked GitHub command (${formatGitHubCommandRules(pendingGitHubCommandRules)})\n\nCommand:\n  ${command}\n\nAllow?`,
-				{ includeAllowOnce: true },
-			);
-			if (!choice) {
-				return {
-					block: true,
-					reason: `Blocked by user — GitHub command denied (${formatGitHubCommandRules(pendingGitHubCommandRules)})`,
-				};
-			}
-
-			if (choice === "once") {
-				notify(ctx, `GitHub command granted once: ${formatGitHubCommandRules(pendingGitHubCommandRules)}`, "info");
-			} else {
-				await enqueueStateUpdate(state, () =>
-					grantGitHubCommands(
-						state,
-						choice,
-						pendingGitHubCommandRules.map((rule) => rule.id),
-					),
-				);
-				refreshStatus(state, ctx);
-				notify(
-					ctx,
-					`GitHub command granted ${formatGrantChoice(choice)}: ${formatGitHubCommandRules(pendingGitHubCommandRules)}`,
-					"info",
-				);
-			}
-		}
-
-		const pendingNixCommandRules = getPendingNixCommandRules(state, command);
-		if (pendingNixCommandRules.length > 0) {
-			if (!ctx.hasUI) {
-				return { block: true, reason: getHeadlessNixCommandReason(command, pendingNixCommandRules) };
-			}
-
-			const choice = await promptForGrant(
-				pi,
-				ctx,
-				`⚠️ Sandbox blocked Nix flake mutation command (${formatNixCommandRules(pendingNixCommandRules)})\n\nCommand:\n  ${command}\n\nAllow?`,
-				{ includeAllowOnce: true },
-			);
-			if (!choice) {
-				return {
-					block: true,
-					reason: `Blocked by user — Nix flake mutation command denied (${formatNixCommandRules(pendingNixCommandRules)})`,
-				};
-			}
-
-			if (choice === "once") {
-				notify(ctx, `Nix flake mutation command granted once: ${formatNixCommandRules(pendingNixCommandRules)}`, "info");
-			} else {
-				await enqueueStateUpdate(state, () =>
-					grantNixCommands(
-						state,
-						choice,
-						pendingNixCommandRules.map((rule) => rule.id),
-					),
-				);
-				refreshStatus(state, ctx);
-				notify(
-					ctx,
-					`Nix flake mutation command granted ${formatGrantChoice(choice)}: ${formatNixCommandRules(pendingNixCommandRules)}`,
-					"info",
-				);
-			}
-		}
-
-		const matchedConfigApplyCommandRules = findConfigApplyCommandRules(command);
-		if (matchedConfigApplyCommandRules.length > 0) {
-			const pendingConfigApplyCommandRules = matchedConfigApplyCommandRules.filter(
-				(rule) => !isConfigApplyCommandAllowed(state, rule.id),
-			);
-			if (pendingConfigApplyCommandRules.length > 0) {
-				if (!ctx.hasUI) {
-					return { block: true, reason: getHeadlessConfigApplyCommandReason(command, pendingConfigApplyCommandRules) };
-				}
-
-				const choice = await promptForGrant(
-					pi,
-					ctx,
-					`⚠️ Sandbox blocked configuration apply command (${formatConfigApplyCommandRules(pendingConfigApplyCommandRules)})\n\nCommand:\n  ${command}\n\nAllow?`,
-					{ includeAllowOnce: true },
-				);
-				if (!choice) {
-					return {
-						block: true,
-						reason: `Blocked by user — configuration apply command denied (${formatConfigApplyCommandRules(pendingConfigApplyCommandRules)})`,
-					};
-				}
-
-				if (choice === "once") {
-					notify(ctx, `Configuration apply command granted once: ${formatConfigApplyCommandRules(pendingConfigApplyCommandRules)}`, "info");
-				} else {
-					await enqueueStateUpdate(state, () =>
-						grantConfigApplyCommands(
-							state,
-							choice,
-							pendingConfigApplyCommandRules.map((rule) => rule.id),
-						),
-					);
-					refreshStatus(state, ctx);
-					notify(
-						ctx,
-						`Configuration apply command granted ${formatGrantChoice(choice)}: ${formatConfigApplyCommandRules(pendingConfigApplyCommandRules)}`,
-						"info",
-					);
-				}
-			}
-
-			markToolCallUnconfined(state, event.toolCallId);
-			return undefined;
+		const guardedCommandResult = await handleGuardedCommandPreflight(pi, state, ctx, event, command);
+		if (guardedCommandResult.handled) {
+			return guardedCommandResult.result;
 		}
 
 		const capabilities = extractCommandCapabilities(command);
