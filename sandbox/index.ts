@@ -31,6 +31,9 @@
  *   "github": {
  *     "allowedCommands": ["pr-create"]
  *   },
+ *   "nix": {
+ *     "allowedCommands": ["flake-update"]
+ *   },
  *   "configApply": {
  *     "allowedCommands": ["darwin-rebuild"]
  *   }
@@ -77,6 +80,7 @@ type GitHubCommandId =
 	| "pr-modify"
 	| "repo-modify"
 	| "release-modify";
+type NixCommandId = "flake-update" | "flake-lock-update-input";
 type ConfigApplyCommandId = "darwin-rebuild" | "nixos-rebuild" | "home-manager";
 type SandboxConfigFile = Partial<SandboxConfig>;
 type FilesystemConfig = SandboxRuntimeConfig["filesystem"] & { allowRead: string[] };
@@ -90,6 +94,10 @@ interface GitHubConfig {
 	allowedCommands: GitHubCommandId[];
 }
 
+interface NixConfig {
+	allowedCommands: NixCommandId[];
+}
+
 interface ConfigApplyConfig {
 	allowedCommands: ConfigApplyCommandId[];
 }
@@ -100,6 +108,7 @@ interface SandboxConfig extends Omit<SandboxRuntimeConfig, "filesystem" | "netwo
 	filesystem: FilesystemConfig;
 	git: GitConfig;
 	github: GitHubConfig;
+	nix: NixConfig;
 	configApply: ConfigApplyConfig;
 }
 
@@ -113,6 +122,11 @@ interface GitHubCommandRule {
 	id: GitHubCommandId;
 	label: string;
 	pattern: RegExp;
+}
+
+interface NixCommandRule {
+	id: NixCommandId;
+	label: string;
 }
 
 interface ConfigApplyCommandRule {
@@ -138,6 +152,7 @@ interface SandboxState {
 	sessionUnixSockets: Set<string>;
 	sessionDangerousGitCommands: Set<DangerousGitCommandId>;
 	sessionGitHubCommands: Set<GitHubCommandId>;
+	sessionNixCommands: Set<NixCommandId>;
 	sessionConfigApplyCommands: Set<ConfigApplyCommandId>;
 	unconfinedToolCallIds: Set<string>;
 	onceGrantBundlesByToolCall: Map<string, ActiveOnceGrantBundle>;
@@ -222,6 +237,11 @@ const GITHUB_COMMAND_RULES: GitHubCommandRule[] = [
 	{ id: "release-modify", pattern: /\bgh\s+release\s+(create|delete|edit)\b/, label: "modify GitHub release" },
 ];
 
+const NIX_COMMAND_RULES: NixCommandRule[] = [
+	{ id: "flake-update", label: "nix flake update" },
+	{ id: "flake-lock-update-input", label: "nix flake lock --update-input" },
+];
+
 const CONFIG_APPLY_COMMAND_RULES: ConfigApplyCommandRule[] = [
 	{ id: "darwin-rebuild", commandName: "darwin-rebuild", label: "darwin-rebuild" },
 	{ id: "nixos-rebuild", commandName: "nixos-rebuild", label: "nixos-rebuild" },
@@ -257,6 +277,9 @@ const DEFAULT_CONFIG: SandboxConfig = {
 		allowedDangerousCommands: [],
 	},
 	github: {
+		allowedCommands: [],
+	},
+	nix: {
 		allowedCommands: [],
 	},
 	configApply: {
@@ -398,6 +421,61 @@ function findGitHubCommandRules(command: string): GitHubCommandRule[] {
 	return GITHUB_COMMAND_RULES.filter((rule) => rule.pattern.test(command));
 }
 
+function getNixCommandRule(ruleId: NixCommandId): NixCommandRule | undefined {
+	return NIX_COMMAND_RULES.find((rule) => rule.id === ruleId);
+}
+
+function describeNixCommandId(ruleId: NixCommandId): string {
+	return getNixCommandRule(ruleId)?.label ?? ruleId;
+}
+
+function describeNixCommandIds(ruleIds: Iterable<NixCommandId>): string[] {
+	return uniqueStrings(Array.from(ruleIds)).map((ruleId) => describeNixCommandId(ruleId));
+}
+
+function tokenHasCandidate(token: string, candidate: string): boolean {
+	return getCommandTokenCandidates(token).includes(candidate);
+}
+
+function findNixCommandRules(command: string): NixCommandRule[] {
+	const matchedRuleIds = new Set<NixCommandId>();
+	const tokens = tokenizeCommand(command);
+
+	for (let index = 0; index < tokens.length; index += 1) {
+		if (!tokenHasCandidate(tokens[index] ?? "", "nix")) {
+			continue;
+		}
+		if (!tokenHasCandidate(tokens[index + 1] ?? "", "flake")) {
+			continue;
+		}
+
+		if (tokenHasCandidate(tokens[index + 2] ?? "", "update")) {
+			matchedRuleIds.add("flake-update");
+			continue;
+		}
+
+		if (!tokenHasCandidate(tokens[index + 2] ?? "", "lock")) {
+			continue;
+		}
+
+		for (let offset = index + 3; offset < tokens.length; offset += 1) {
+			const token = tokens[offset];
+			if (!token) {
+				continue;
+			}
+			if (isShellControlOperator(token)) {
+				break;
+			}
+			if (token === "--update-input") {
+				matchedRuleIds.add("flake-lock-update-input");
+				break;
+			}
+		}
+	}
+
+	return NIX_COMMAND_RULES.filter((rule) => matchedRuleIds.has(rule.id));
+}
+
 function getConfigApplyCommandRule(ruleId: ConfigApplyCommandId): ConfigApplyCommandRule | undefined {
 	return CONFIG_APPLY_COMMAND_RULES.find((rule) => rule.id === ruleId);
 }
@@ -460,6 +538,11 @@ function deepMerge(base: SandboxConfig, overrides: SandboxConfigFile): SandboxCo
 			...base.github,
 			...(overrides.github ?? {}),
 			allowedCommands: uniqueStrings([...base.github.allowedCommands, ...(overrides.github?.allowedCommands ?? [])]),
+		},
+		nix: {
+			...base.nix,
+			...(overrides.nix ?? {}),
+			allowedCommands: uniqueStrings([...base.nix.allowedCommands, ...(overrides.nix?.allowedCommands ?? [])]),
 		},
 		configApply: {
 			...base.configApply,
@@ -1049,7 +1132,7 @@ async function buildRuntimeConfig(state: SandboxState): Promise<SandboxRuntimeCo
 		}
 	}
 
-	const { enabled: _enabled, filesystem, git: _git, github: _github, configApply: _configApply, ...runtimeBase } = state.diskConfig;
+	const { enabled: _enabled, filesystem, git: _git, github: _github, nix: _nix, configApply: _configApply, ...runtimeBase } = state.diskConfig;
 	const { allowRead: _allowRead, ...runtimeFilesystemBase } = filesystem;
 
 	return {
@@ -1258,6 +1341,49 @@ function getHeadlessGitHubCommandReason(command: string, rules: GitHubCommandRul
 		.map((rule) => `- ${rule.id} (${rule.label})`)
 		.join("\n");
 	return `Sandbox blocked GitHub command (${formatGitHubCommandRules(rules)}): ${command}. Blocked in headless mode — add the matching ids to github.allowedCommands in .pi/sandbox.json or ~/.pi/agent/sandbox.json:\n${ids}`;
+}
+
+function isNixCommandAllowed(state: SandboxState, commandId: NixCommandId): boolean {
+	return state.sessionNixCommands.has(commandId) || state.diskConfig.nix.allowedCommands.includes(commandId);
+}
+
+function getPendingNixCommandRules(state: SandboxState, command: string): NixCommandRule[] {
+	return findNixCommandRules(command).filter((rule) => !isNixCommandAllowed(state, rule.id));
+}
+
+async function grantNixCommands(state: SandboxState, scope: GrantScope, commandIds: NixCommandId[]): Promise<void> {
+	const uniqueCommandIds = uniqueStrings(commandIds);
+	if (uniqueCommandIds.length === 0) {
+		return;
+	}
+
+	if (scope === "session") {
+		for (const commandId of uniqueCommandIds) {
+			state.sessionNixCommands.add(commandId);
+		}
+		return;
+	}
+
+	const filePath = scope === "project" ? getProjectConfigPath(state.cwd) : GLOBAL_CONFIG_PATH;
+	await writeGrantToConfigFile(filePath, (config) => ({
+		...config,
+		nix: {
+			...(config.nix ?? {}),
+			allowedCommands: uniqueStrings([...(config.nix?.allowedCommands ?? []), ...uniqueCommandIds]),
+		},
+	}));
+	state.diskConfig = loadConfig(state.cwd);
+}
+
+function formatNixCommandRules(rules: NixCommandRule[]): string {
+	return rules.map((rule) => rule.label).join(", ");
+}
+
+function getHeadlessNixCommandReason(command: string, rules: NixCommandRule[]): string {
+	const ids = rules
+		.map((rule) => `- ${rule.id} (${rule.label})`)
+		.join("\n");
+	return `Sandbox blocked Nix flake mutation command (${formatNixCommandRules(rules)}): ${command}. Blocked in headless mode — add the matching ids to nix.allowedCommands in .pi/sandbox.json or ~/.pi/agent/sandbox.json:\n${ids}`;
 }
 
 function isConfigApplyCommandAllowed(state: SandboxState, commandId: ConfigApplyCommandId): boolean {
@@ -1602,6 +1728,9 @@ function buildSandboxSummary(state: SandboxState): string {
 		"GitHub:",
 		`  Allowed commands: ${formatList(describeGitHubCommandIds(state.diskConfig.github.allowedCommands))}`,
 		"",
+		"Nix:",
+		`  Allowed commands: ${formatList(describeNixCommandIds(state.diskConfig.nix.allowedCommands))}`,
+		"",
 		"Configuration apply:",
 		`  Allowed commands: ${formatList(describeConfigApplyCommandIds(state.diskConfig.configApply.allowedCommands))}`,
 		"",
@@ -1612,6 +1741,7 @@ function buildSandboxSummary(state: SandboxState): string {
 		`  Unix sockets: ${formatList(Array.from(state.sessionUnixSockets))}`,
 		`  Dangerous git commands: ${formatList(describeDangerousGitCommandIds(state.sessionDangerousGitCommands))}`,
 		`  GitHub commands: ${formatList(describeGitHubCommandIds(state.sessionGitHubCommands))}`,
+		`  Nix commands: ${formatList(describeNixCommandIds(state.sessionNixCommands))}`,
 		`  Configuration apply commands: ${formatList(describeConfigApplyCommandIds(state.sessionConfigApplyCommands))}`,
 	].join("\n");
 }
@@ -1638,6 +1768,7 @@ export default function sandbox(pi: ExtensionAPI) {
 		sessionUnixSockets: new Set(),
 		sessionDangerousGitCommands: new Set(),
 		sessionGitHubCommands: new Set(),
+		sessionNixCommands: new Set(),
 		sessionConfigApplyCommands: new Set(),
 		unconfinedToolCallIds: new Set(),
 		onceGrantBundlesByToolCall: new Map(),
@@ -1683,6 +1814,7 @@ export default function sandbox(pi: ExtensionAPI) {
 		state.sessionUnixSockets.clear();
 		state.sessionDangerousGitCommands.clear();
 		state.sessionGitHubCommands.clear();
+		state.sessionNixCommands.clear();
 		state.sessionConfigApplyCommands.clear();
 		state.unconfinedToolCallIds.clear();
 		state.onceGrantBundlesByToolCall.clear();
@@ -1752,6 +1884,7 @@ export default function sandbox(pi: ExtensionAPI) {
 		state.enabled = false;
 		state.sessionDangerousGitCommands.clear();
 		state.sessionGitHubCommands.clear();
+		state.sessionNixCommands.clear();
 		state.sessionConfigApplyCommands.clear();
 		state.unconfinedToolCallIds.clear();
 		state.onceGrantBundlesByToolCall.clear();
@@ -2261,6 +2394,44 @@ export default function sandbox(pi: ExtensionAPI) {
 				notify(
 					ctx,
 					`GitHub command granted ${formatGrantChoice(choice)}: ${formatGitHubCommandRules(pendingGitHubCommandRules)}`,
+					"info",
+				);
+			}
+		}
+
+		const pendingNixCommandRules = getPendingNixCommandRules(state, command);
+		if (pendingNixCommandRules.length > 0) {
+			if (!ctx.hasUI) {
+				return { block: true, reason: getHeadlessNixCommandReason(command, pendingNixCommandRules) };
+			}
+
+			const choice = await promptForGrant(
+				pi,
+				ctx,
+				`⚠️ Sandbox blocked Nix flake mutation command (${formatNixCommandRules(pendingNixCommandRules)})\n\nCommand:\n  ${command}\n\nAllow?`,
+				{ includeAllowOnce: true },
+			);
+			if (!choice) {
+				return {
+					block: true,
+					reason: `Blocked by user — Nix flake mutation command denied (${formatNixCommandRules(pendingNixCommandRules)})`,
+				};
+			}
+
+			if (choice === "once") {
+				notify(ctx, `Nix flake mutation command granted once: ${formatNixCommandRules(pendingNixCommandRules)}`, "info");
+			} else {
+				await enqueueStateUpdate(state, () =>
+					grantNixCommands(
+						state,
+						choice,
+						pendingNixCommandRules.map((rule) => rule.id),
+					),
+				);
+				refreshStatus(state, ctx);
+				notify(
+					ctx,
+					`Nix flake mutation command granted ${formatGrantChoice(choice)}: ${formatNixCommandRules(pendingNixCommandRules)}`,
 					"info",
 				);
 			}

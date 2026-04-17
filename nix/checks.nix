@@ -1283,7 +1283,196 @@ in
         assert(String(result.reason).includes("github.allowedCommands"), "headless GitHub reason did not mention the config key");
       }
 
-      // Test 17: configuration apply allow-once does not persist across bash tool calls.
+      // Test 17: Nix flake mutation allow-once does not persist across bash tool calls.
+      {
+        const pi = createPi();
+        sandbox(pi);
+
+        const cwd = await makeProject(tempRoot, "nix-once-project", baseConfig);
+        const ctx = createContext(cwd, ["Allow once", "Abort"]);
+        await startSession(pi, ctx);
+
+        const firstEvent = {
+          toolName: "bash",
+          toolCallId: "nix-once-1",
+          input: {
+            command: "nix flake update",
+          },
+        };
+
+        const firstResult = await getToolCallHandler(pi)(firstEvent, ctx);
+        assert(firstResult === undefined, "sandbox did not allow the Nix flake mutation command once");
+        assert(ctx.selectCalls.length === 1, `expected one Nix flake mutation prompt, got ''${ctx.selectCalls.length}`);
+        assert(String(ctx.selectCalls[0]).includes("Nix flake mutation command"), "Nix flake mutation prompt title was not shown");
+
+        const secondEvent = {
+          toolName: "bash",
+          toolCallId: "nix-once-2",
+          input: {
+            command: "nix flake update",
+          },
+        };
+
+        const secondResult = await getToolCallHandler(pi)(secondEvent, ctx);
+        assert(secondResult && secondResult.block === true, "allow-once Nix flake mutation approval should not persist");
+        assert(ctx.selectCalls.length === 2, `expected two Nix flake mutation prompts, got ''${ctx.selectCalls.length}`);
+      }
+
+      // Test 18: Nix flake mutation session grants persist for the rest of the session and stay sandboxed.
+      {
+        const pi = createPi();
+        sandbox(pi);
+
+        const cwd = await makeProject(tempRoot, "nix-session-project", baseConfig);
+        const ctx = createContext(cwd, ["Allow for this session"]);
+        await startSession(pi, ctx);
+
+        const firstEvent = {
+          toolName: "bash",
+          toolCallId: "nix-session-1",
+          input: {
+            command: "nix flake lock --update-input nixpkgs",
+          },
+        };
+
+        const firstResult = await getToolCallHandler(pi)(firstEvent, ctx);
+        assert(firstResult === undefined, "sandbox did not allow the Nix flake mutation command after a session grant");
+
+        const bashTool = pi.tools.get("bash");
+        assert(bashTool, "sandbox did not register the bash tool");
+        const firstExecution = await bashTool.execute(firstEvent.toolCallId, firstEvent.input);
+        assert(firstExecution.details.operations !== undefined, "approved Nix flake mutation command should stay inside the filesystem sandbox");
+
+        const secondEvent = {
+          toolName: "bash",
+          toolCallId: "nix-session-2",
+          input: {
+            command: "nix flake lock --update-input home-manager",
+          },
+        };
+
+        const secondResult = await getToolCallHandler(pi)(secondEvent, ctx);
+        assert(secondResult === undefined, "session Nix flake mutation grant did not persist across calls");
+        assert(ctx.selectCalls.length === 1, `session Nix flake mutation grant unexpectedly re-prompted ''${ctx.selectCalls.length} times`);
+      }
+
+      // Test 19: Nix flake mutation project grants persist to .pi/sandbox.json and survive a new session.
+      {
+        const pi = createPi();
+        sandbox(pi);
+
+        const cwd = await makeProject(tempRoot, "nix-project-grant", baseConfig);
+        const ctx = createContext(cwd, ["Allow for this project"]);
+        await startSession(pi, ctx);
+
+        const event = {
+          toolName: "bash",
+          toolCallId: "nix-project-1",
+          input: {
+            command: "nix flake update && nix flake lock --update-input nixpkgs",
+          },
+        };
+
+        const result = await getToolCallHandler(pi)(event, ctx);
+        assert(result === undefined, "sandbox did not allow the Nix flake mutation command after a project grant");
+
+        const projectConfig = JSON.parse(fs.readFileSync(path.join(cwd, ".pi", "sandbox.json"), "utf-8"));
+        assert(
+          projectConfig.nix.allowedCommands.includes("flake-update"),
+          "sandbox did not persist the flake-update project grant",
+        );
+        assert(
+          projectConfig.nix.allowedCommands.includes("flake-lock-update-input"),
+          "sandbox did not persist the flake-lock-update-input project grant",
+        );
+
+        const piReloaded = createPi();
+        sandbox(piReloaded);
+        const ctxReloaded = createContext(cwd, [], true);
+        await startSession(piReloaded, ctxReloaded);
+
+        const followupEvent = {
+          toolName: "bash",
+          toolCallId: "nix-project-2",
+          input: {
+            command: "nix flake lock --update-input home-manager",
+          },
+        };
+
+        const followupResult = await getToolCallHandler(piReloaded)(followupEvent, ctxReloaded);
+        assert(followupResult === undefined, "project Nix flake mutation grant did not persist across sessions");
+        assert(ctxReloaded.selectCalls.length === 0, `project Nix flake mutation grant unexpectedly re-prompted ''${ctxReloaded.selectCalls.length} times`);
+      }
+
+      // Test 20: Nix flake mutation global grants persist to ~/.pi/agent/sandbox.json and apply in other projects.
+      {
+        const pi = createPi();
+        sandbox(pi);
+
+        const cwd = await makeProject(tempRoot, "nix-global-project", baseConfig);
+        const ctx = createContext(cwd, ["Allow for all projects"]);
+        await startSession(pi, ctx);
+
+        const event = {
+          toolName: "bash",
+          toolCallId: "nix-global-1",
+          input: {
+            command: "nix flake update",
+          },
+        };
+
+        const result = await getToolCallHandler(pi)(event, ctx);
+        assert(result === undefined, "sandbox did not allow the Nix flake mutation command after a global grant");
+
+        const globalConfig = JSON.parse(fs.readFileSync(path.join(tempRoot, ".pi", "agent", "sandbox.json"), "utf-8"));
+        assert(
+          globalConfig.nix.allowedCommands.includes("flake-update"),
+          "sandbox did not persist the global Nix flake mutation grant",
+        );
+
+        const otherCwd = await makeProject(tempRoot, "nix-global-other-project", baseConfig);
+        const piReloaded = createPi();
+        sandbox(piReloaded);
+        const ctxReloaded = createContext(otherCwd, [], true);
+        await startSession(piReloaded, ctxReloaded);
+
+        const followupEvent = {
+          toolName: "bash",
+          toolCallId: "nix-global-2",
+          input: {
+            command: "nix flake update",
+          },
+        };
+
+        const followupResult = await getToolCallHandler(piReloaded)(followupEvent, ctxReloaded);
+        assert(followupResult === undefined, "global Nix flake mutation grant did not apply in another project");
+        assert(ctxReloaded.selectCalls.length === 0, `global Nix flake mutation grant unexpectedly re-prompted ''${ctxReloaded.selectCalls.length} times`);
+      }
+
+      // Test 21: headless Nix flake mutation commands are blocked with a clear reason.
+      {
+        const pi = createPi();
+        sandbox(pi);
+
+        const cwd = await makeProject(tempRoot, "nix-headless-project", baseConfig);
+        const ctx = createContext(cwd, [], false);
+        await startSession(pi, ctx);
+
+        const event = {
+          toolName: "bash",
+          toolCallId: "nix-headless-1",
+          input: {
+            command: "nix flake lock --update-input nixpkgs",
+          },
+        };
+
+        const result = await getToolCallHandler(pi)(event, ctx);
+        assert(result && result.block === true, "sandbox did not hard-block Nix flake mutation commands in headless mode");
+        assert(String(result.reason).includes("Nix flake mutation command"), "headless Nix flake mutation reason did not mention the command class");
+        assert(String(result.reason).includes("nix.allowedCommands"), "headless Nix flake mutation reason did not mention the config key");
+      }
+
+      // Test 22: configuration apply allow-once does not persist across bash tool calls.
       {
         const pi = createPi();
         sandbox(pi);
@@ -1318,7 +1507,7 @@ in
         assert(ctx.selectCalls.length === 2, `expected two configuration apply prompts, got ''${ctx.selectCalls.length}`);
       }
 
-      // Test 18: configuration apply session grants persist for the rest of the session.
+      // Test 23: configuration apply session grants persist for the rest of the session.
       {
         const pi = createPi();
         sandbox(pi);
@@ -1356,7 +1545,7 @@ in
         assert(ctx.selectCalls.length === 1, `session configuration apply grant unexpectedly re-prompted ''${ctx.selectCalls.length} times`);
       }
 
-      // Test 19: configuration apply project grants persist to .pi/sandbox.json and survive a new session.
+      // Test 24: configuration apply project grants persist to .pi/sandbox.json and survive a new session.
       {
         const pi = createPi();
         sandbox(pi);
@@ -1400,7 +1589,7 @@ in
         assert(ctxReloaded.selectCalls.length === 0, `project configuration apply grant unexpectedly re-prompted ''${ctxReloaded.selectCalls.length} times`);
       }
 
-      // Test 20: configuration apply global grants persist to ~/.pi/agent/sandbox.json and apply in other projects.
+      // Test 25: configuration apply global grants persist to ~/.pi/agent/sandbox.json and apply in other projects.
       {
         const pi = createPi();
         sandbox(pi);
@@ -1445,7 +1634,7 @@ in
         assert(ctxReloaded.selectCalls.length === 0, `global configuration apply grant unexpectedly re-prompted ''${ctxReloaded.selectCalls.length} times`);
       }
 
-      // Test 21: headless configuration apply commands are blocked with a clear reason.
+      // Test 26: headless configuration apply commands are blocked with a clear reason.
       {
         const pi = createPi();
         sandbox(pi);
@@ -1468,7 +1657,7 @@ in
         assert(String(result.reason).includes("configApply.allowedCommands"), "headless configuration apply reason did not mention the config key");
       }
 
-      // Test 22: headless mode hard-blocks protected reads with a clear reason.
+      // Test 27: headless mode hard-blocks protected reads with a clear reason.
       {
         const pi = createPi();
         sandbox(pi);
@@ -1490,7 +1679,7 @@ in
         assert(String(result.reason).includes("Blocked in headless mode"), "sandbox headless read reason was not clear");
       }
 
-      // Test 23: shell builtins mentioning ssh do not trigger SSH capability prompts.
+      // Test 28: shell builtins mentioning ssh do not trigger SSH capability prompts.
       {
         const pi = createPi();
         sandbox(pi);
@@ -1514,7 +1703,7 @@ in
         assert((config.filesystem.denyRead ?? []).includes("~/.ssh"), "ssh lookup unexpectedly relaxed ~/.ssh read policy");
       }
 
-      // Test 24: harmless URL-like literals do not trigger generic network preflight.
+      // Test 29: harmless URL-like literals do not trigger generic network preflight.
       {
         const pi = createPi();
         sandbox(pi);
@@ -1538,7 +1727,7 @@ in
         assert(!(config.network.allowedDomains ?? []).includes("foo.invalid"), "printf unexpectedly granted a network domain");
       }
 
-      // Test 25: generic network approvals come from the runtime ask callback, not bash preflight.
+      // Test 30: generic network approvals come from the runtime ask callback, not bash preflight.
       {
         const pi = createPi();
         sandbox(pi);
@@ -1568,7 +1757,7 @@ in
         assert((config.network.allowedDomains ?? []).includes("example.com"), "runtime network approval did not update allowedDomains");
       }
 
-      // Test 26: headless runtime network requests remain blocked.
+      // Test 31: headless runtime network requests remain blocked.
       {
         const pi = createPi();
         sandbox(pi);
