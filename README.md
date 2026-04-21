@@ -104,6 +104,21 @@ in subdirectories.
 ## ✨ Extensions
 
 <details>
+<summary><strong>direnv</strong> - Refresh environment from <code>.envrc</code></summary>
+<br>
+
+- **Source**:
+  [direnv/](https://github.com/rytswd/pi-agent-extensions/tree/main/direnv)
+- **License**: MIT
+- **Status bar**: `direnv …` / `direnv ✓` / `direnv ✗`
+- **Dependencies**: `direnv` binary in `PATH`
+
+**Description**: Runs `direnv export json` on session start and after each
+`bash` tool call, then applies environment variable updates to the running
+agent process.
+
+</details>
+<details>
 <summary><strong>slow-mode</strong> - Review gate for <code>write</code> and <code>edit</code> tool calls</summary>
 <br>
 

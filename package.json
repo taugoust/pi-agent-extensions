@@ -27,6 +27,7 @@
   },
   "pi": {
     "extensions": [
+      "direnv",
       "fence",
       "permission-gate",
       "fetch",

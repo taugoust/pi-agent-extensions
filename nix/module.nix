@@ -21,6 +21,7 @@ in
     };
 
     extensions = {
+      direnv.enable = lib.mkEnableOption "direnv extension — refreshes environment via direnv export";
       fence.enable = lib.mkEnableOption "fence extension — blocks write/edit outside cwd";
       questionnaire.enable = lib.mkEnableOption "questionnaire extension — LLM-driven multi-question UI tool";
       modal-editor.enable = lib.mkEnableOption "modal-editor extension — vim-style modal input";
@@ -56,6 +57,10 @@ in
       (lib.mkIf cfg.skills.remindctl.enable {
         ".pi/agent/skills/remindctl/SKILL.md".source = "${pkg}/skills/remindctl/SKILL.md";
       })
+      (lib.mkIf cfg.extensions.direnv.enable {
+        "${extDir}/direnv/index.ts".source = "${pkg}/direnv/index.ts";
+      })
+
       (lib.mkIf cfg.extensions.fence.enable {
         "${extDir}/fence/index.ts".source = "${pkg}/fence/index.ts";
       })
