@@ -12,8 +12,8 @@
  *               In visual/V-line: gq reflows selected lines.
  *   Clipboard:  y/p/P use the system clipboard.  Cmd+V (bracketed paste) still works.
  *   Pager:      K emits pager:open event (opens pager if pager extension is loaded).
- *   Visual:      v → select with motions → d/c/x/y/o (o swaps endpoint)
- *   Visual-line: V → select lines with j/k → d/c/x/y/o (o swaps endpoint)
+ *   Visual:      v → select with motions → d/c/x/y/o/</> (o swaps endpoint)
+ *   Visual-line: V → select lines with j/k → d/c/x/y/o/</> (o swaps endpoint)
  *   Escape:      insert → normal, normal → abort agent
  */
 
@@ -165,6 +165,9 @@ const DELETE_MOTION: Record<string, string[]> = {
 const YANK_MOTION: Record<string, string[]> = Object.fromEntries(
 	Object.entries(DELETE_MOTION).map(([k, seqs]) => [k, [...seqs, "\x19"]])
 );
+
+const SHIFT_WIDTH = 4;
+const SHIFT_TEXT = " ".repeat(SHIFT_WIDTH);
 
 // ---------------------------------------------------------------------------
 // System clipboard helpers
@@ -501,6 +504,104 @@ class ModalEditor extends CustomEditor {
 		} else {
 			this.enterNormalMode();
 		}
+	}
+
+	/**
+	 * Move cursor to a specific logical line/column.
+	 *
+	 * Uses editor key sequences (col 0 + vertical movement + horizontal movement),
+	 * mirroring the approach used in other modal helpers.
+	 */
+	private moveCursorTo(line: number, col: number): void {
+		const lines = this.getLines();
+		if (lines.length === 0) return;
+
+		const targetLine = Math.max(0, Math.min(line, lines.length - 1));
+		const cursor = this.getCursor();
+
+		super.handleInput("\x01"); // col 0
+		if (cursor.line > targetLine) {
+			for (let i = 0; i < cursor.line - targetLine; i++) super.handleInput("\x1b[A");
+		} else if (cursor.line < targetLine) {
+			for (let i = 0; i < targetLine - cursor.line; i++) super.handleInput("\x1b[B");
+		}
+
+		const targetCol = Math.max(0, Math.min(col, (this.getLines()[targetLine] ?? "").length));
+		for (let i = 0; i < targetCol; i++) super.handleInput("\x1b[C");
+	}
+
+	/**
+	 * Compute how many leading characters to remove for one left shift.
+	 *
+	 * Rules:
+	 * - leading tab: remove one tab
+	 * - leading spaces: remove up to SHIFT_WIDTH spaces
+	 * - mixed leading whitespace: consume up to one shift unit, where a tab
+	 *   consumes the remaining width immediately
+	 */
+	private computeLeftShiftRemoval(line: string): number {
+		let removeChars = 0;
+		let consumed = 0;
+
+		while (removeChars < line.length && consumed < SHIFT_WIDTH) {
+			const ch = line[removeChars]!;
+			if (ch === " ") {
+				removeChars++;
+				consumed++;
+				continue;
+			}
+			if (ch === "\t") {
+				removeChars++;
+				consumed = SHIFT_WIDTH;
+				break;
+			}
+			break;
+		}
+
+		return removeChars;
+	}
+
+	/**
+	 * Shift selected lines in visual/visual-line mode.
+	 *
+	 * Like vim visual shift, this is line-wise even for character-wise visual mode.
+	 * After shifting, the editor returns to normal mode.
+	 */
+	private shiftVisualSelection(direction: "left" | "right"): void {
+		if (!this.visualAnchor) return;
+
+		const cursor = this.getCursor();
+		const anchor = this.visualAnchor;
+		const startLine = Math.min(anchor.line, cursor.line);
+		const endLine = Math.max(anchor.line, cursor.line);
+
+		let targetLine = cursor.line;
+		let targetCol = cursor.col;
+
+		this.moveCursorTo(startLine, 0);
+
+		for (let line = startLine; line <= endLine; line++) {
+			if (direction === "right") {
+				for (const ch of SHIFT_TEXT) super.handleInput(ch);
+				if (line === targetLine) targetCol += SHIFT_WIDTH;
+			} else {
+				const removeCount = this.computeLeftShiftRemoval(this.getLines()[line] ?? "");
+				for (let i = 0; i < removeCount; i++) super.handleInput("\x1b[3~");
+				if (line === targetLine) targetCol = Math.max(0, targetCol - removeCount);
+			}
+
+			if (line < endLine) {
+				super.handleInput("\x01");   // col 0
+				super.handleInput("\x1b[B"); // down
+				super.handleInput("\x01");   // col 0 again
+			}
+		}
+
+		targetCol = Math.min(targetCol, (this.getLines()[targetLine] ?? "").length);
+
+		this.enterNormalMode();
+		this.visualAnchor = null;
+		this.moveCursorTo(targetLine, targetCol);
 	}
 
 	// ── helpers ─────────────────────────────────────────────────────────────
@@ -1201,6 +1302,14 @@ class ModalEditor extends CustomEditor {
 					return;
 				}
 
+				// Shift selected lines right / left
+				case ">":
+					this.shiftVisualSelection("right");
+					return;
+				case "<":
+					this.shiftVisualSelection("left");
+					return;
+
 				// Swap cursor ↔ anchor (go to Other end of selection)
 				case "o":
 				case "O":
@@ -1276,6 +1385,14 @@ class ModalEditor extends CustomEditor {
 					this.visualAnchor = null;
 					return;
 				}
+
+				// Shift selected lines right / left
+				case ">":
+					this.shiftVisualSelection("right");
+					return;
+				case "<":
+					this.shiftVisualSelection("left");
+					return;
 
 				// Swap cursor ↔ anchor (go to Other end of selection)
 				case "o":
