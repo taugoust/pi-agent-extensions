@@ -48,9 +48,11 @@ in
   };
 
   config = lib.mkIf cfg.enable {
+    programs.pi.package = lib.mkForce self.packages.${pkgs.stdenv.hostPlatform.system}.pi;
+
     home.packages = lib.mkIf (cfg.package != null) [ cfg.package ];
 
-    home.file = lib.mkMerge [
+      home.file = lib.mkMerge [
       (lib.mkIf cfg.skills.github-repo-search.enable {
         ".pi/agent/skills/github-repo-search/SKILL.md".source = "${pkg}/skills/github-repo-search/SKILL.md";
       })
@@ -107,9 +109,9 @@ in
         );
       })
 
-      (lib.mkIf cfg.extensions.sandbox.enable {
-        "${extDir}/sandbox".source = "${pkg}/sandbox";
-      })
-    ];
+        (lib.mkIf cfg.extensions.sandbox.enable {
+          "${extDir}/sandbox".source = "${pkg}/sandbox";
+        })
+      ];
   };
 }

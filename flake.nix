@@ -8,6 +8,11 @@
       url = "github:nix-community/bun2nix";
       inputs.nixpkgs.follows = "nixpkgs";
     };
+
+    llm-agents-nix = {
+      url = "github:numtide/llm-agents.nix";
+      inputs.nixpkgs.follows = "nixpkgs";
+    };
   };
 
   outputs =
@@ -15,6 +20,7 @@
       self,
       nixpkgs,
       bun2nix,
+      llm-agents-nix,
       ...
     }:
     let
@@ -24,16 +30,23 @@
     {
       packages = forAllSystems (system:
         let
-          pkgs = nixpkgs.legacyPackages.${system};
+          pkgs = import nixpkgs {
+            inherit system;
+            overlays = [ llm-agents-nix.overlays.default ];
+          };
         in
         {
           default = import ./nix/package.nix { inherit self bun2nix pkgs; };
+          pi = pkgs.llm-agents.pi;
         }
       );
 
       checks = forAllSystems (system:
         let
-          pkgs = nixpkgs.legacyPackages.${system};
+          pkgs = import nixpkgs {
+            inherit system;
+            overlays = [ llm-agents-nix.overlays.default ];
+          };
         in
         import ./nix/checks.nix { inherit self bun2nix pkgs; }
       );
