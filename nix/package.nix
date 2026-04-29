@@ -30,7 +30,7 @@ pkgs.runCommand "pi-agent-extensions" { } ''
   mkdir -p $out
 
   # Simple single-file extensions
-  for ext in direnv fence mac-system-theme modal-editor pager permission-gate questionnaire slow-mode; do
+  for ext in direnv fence mac-system-theme modal-editor pager permission-gate questionnaire slow-mode ssh; do
     mkdir -p $out/$ext
     cp ${self}/$ext/index.ts $out/$ext/
   done

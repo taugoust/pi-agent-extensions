@@ -28,6 +28,7 @@ in
       mac-system-theme.enable = lib.mkEnableOption "mac-system-theme extension — syncs pi theme to macOS system appearance";
       pager.enable = lib.mkEnableOption "pager extension — open conversation in an external pager (bat/less)";
       permission-gate.enable = lib.mkEnableOption "permission-gate extension — legacy regex gate for dangerous bash commands";
+      ssh.enable = lib.mkEnableOption "ssh extension — run read/write/edit/bash tools on a remote host via --ssh";
 
       slow-mode = {
         enable = lib.mkEnableOption "slow-mode extension — review gate for write/edit tool calls";
@@ -85,6 +86,10 @@ in
 
       (lib.mkIf cfg.extensions.permission-gate.enable {
         "${extDir}/permission-gate/index.ts".source = "${pkg}/permission-gate/index.ts";
+      })
+
+      (lib.mkIf cfg.extensions.ssh.enable {
+        "${extDir}/ssh/index.ts".source = "${pkg}/ssh/index.ts";
       })
 
       (lib.mkIf cfg.extensions.slow-mode.enable {
