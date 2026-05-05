@@ -1,8 +1,12 @@
 /**
  * SSH Remote Execution Extension
  *
- * Delegates read/write/edit/bash operations to a remote machine over SSH
+ * Delegates read/write/edit operations to a remote machine over SSH
  * when --ssh is provided.
+ *
+ * Bash is handled without re-registering the bash tool:
+ * - LLM bash tool calls are rewritten in tool_call to run via ssh
+ * - user "!" commands are delegated via user_bash operations
  *
  * Usage:
  *   pi --ssh user@host
@@ -13,7 +17,6 @@ import { spawn } from "node:child_process";
 import type { ExtensionAPI } from "@mariozechner/pi-coding-agent";
 import {
 	type BashOperations,
-	createBashTool,
 	createEditTool,
 	createReadTool,
 	createWriteTool,
@@ -107,6 +110,15 @@ function createRemoteBashOps(remote: string, remoteCwd: string, localCwd: string
 	};
 }
 
+function shellSingleQuote(value: string): string {
+	return `'${value.replace(/'/g, `'"'"'`)}'`;
+}
+
+function wrapBashCommandForSsh(command: string, remote: string, remoteCwd: string): string {
+	const remoteCommand = `cd ${shellSingleQuote(remoteCwd)} && ${command}`;
+	return `ssh ${shellSingleQuote(remote)} ${shellSingleQuote(remoteCommand)}`;
+}
+
 export default function (pi: ExtensionAPI) {
 	pi.registerFlag("ssh", { description: "SSH remote: user@host or user@host:/path", type: "string" });
 
@@ -114,7 +126,6 @@ export default function (pi: ExtensionAPI) {
 	const localRead = createReadTool(localCwd);
 	const localWrite = createWriteTool(localCwd);
 	const localEdit = createEditTool(localCwd);
-	const localBash = createBashTool(localCwd);
 
 	let resolvedSsh: { remote: string; remoteCwd: string } | null = null;
 
@@ -162,18 +173,14 @@ export default function (pi: ExtensionAPI) {
 		},
 	});
 
-	pi.registerTool({
-		...localBash,
-		async execute(id, params, signal, onUpdate) {
-			const ssh = getSsh();
-			if (ssh) {
-				const tool = createBashTool(localCwd, {
-					operations: createRemoteBashOps(ssh.remote, ssh.remoteCwd, localCwd),
-				});
-				return tool.execute(id, params, signal, onUpdate);
-			}
-			return localBash.execute(id, params, signal, onUpdate);
-		},
+	pi.on("tool_call", async (event) => {
+		const ssh = getSsh();
+		if (!ssh || event.toolName !== "bash") return;
+
+		const command = event.input.command;
+		if (typeof command !== "string" || command.length === 0) return;
+
+		event.input.command = wrapBashCommandForSsh(command, ssh.remote, ssh.remoteCwd);
 	});
 
 	pi.on("session_start", async (_event, ctx) => {
