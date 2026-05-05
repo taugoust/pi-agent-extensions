@@ -1,6 +1,6 @@
-{ self, bun2nix, pkgs }:
+{ self, bun2nix, pkgs, pi-mcp-adapter ? null }:
 let
-  package = import ./package.nix { inherit self bun2nix pkgs; };
+  package = import ./package.nix { inherit self bun2nix pkgs pi-mcp-adapter; };
 in
 {
   package = package;

@@ -1,4 +1,4 @@
-{ self, bun2nix }:
+{ self, bun2nix, pi-mcp-adapter ? null }:
 {
   config,
   lib,
@@ -8,7 +8,7 @@
 let
   cfg = config.programs.pi;
   extDir = ".pi/agent/extensions";
-  pkg = import ./package.nix { inherit self bun2nix pkgs; };
+  pkg = import ./package.nix { inherit self bun2nix pkgs pi-mcp-adapter; };
 in
 {
   options.programs.pi = {
@@ -40,6 +40,7 @@ in
       };
 
       sandbox.enable = lib.mkEnableOption "sandbox extension — merged sandbox + approval gate for bash/read/write/edit";
+      mcp-adapter.enable = lib.mkEnableOption "pi-mcp-adapter extension — MCP proxy/direct-tools integration";
     };
 
     skills = {
@@ -116,6 +117,10 @@ in
 
         (lib.mkIf cfg.extensions.sandbox.enable {
           "${extDir}/sandbox".source = "${pkg}/sandbox";
+        })
+
+        (lib.mkIf cfg.extensions.mcp-adapter.enable {
+          "${extDir}/pi-mcp-adapter".source = "${pkg}/node_modules/pi-mcp-adapter";
         })
       ];
   };

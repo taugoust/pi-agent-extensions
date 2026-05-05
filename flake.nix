@@ -13,6 +13,11 @@
       url = "github:numtide/llm-agents.nix";
       inputs.nixpkgs.follows = "nixpkgs";
     };
+
+    pi-mcp-adapter = {
+      url = "github:nicobailon/pi-mcp-adapter";
+      flake = false;
+    };
   };
 
   outputs =
@@ -21,6 +26,7 @@
       nixpkgs,
       bun2nix,
       llm-agents-nix,
+      pi-mcp-adapter,
       ...
     }:
     let
@@ -36,8 +42,9 @@
           };
         in
         {
-          default = import ./nix/package.nix { inherit self bun2nix pkgs; };
+          default = import ./nix/package.nix { inherit self bun2nix pkgs pi-mcp-adapter; };
           pi = pkgs.llm-agents.pi;
+          pi-mcp-adapter-src = pi-mcp-adapter;
         }
       );
 
@@ -48,9 +55,9 @@
             overlays = [ llm-agents-nix.overlays.default ];
           };
         in
-        import ./nix/checks.nix { inherit self bun2nix pkgs; }
+        import ./nix/checks.nix { inherit self bun2nix pkgs pi-mcp-adapter; }
       );
 
-      homeManagerModules.default = import ./nix/module.nix { inherit self bun2nix; };
+      homeManagerModules.default = import ./nix/module.nix { inherit self bun2nix pi-mcp-adapter; };
     };
 }

@@ -1,4 +1,4 @@
-{ self, bun2nix, pkgs }:
+{ self, bun2nix, pkgs, pi-mcp-adapter ? null }:
 let
   pkgsWithBun2nix = pkgs.extend bun2nix.overlays.default;
 
@@ -48,4 +48,11 @@ pkgs.runCommand "pi-agent-extensions" { } ''
 
   # package.json for pi package discovery
   cp ${self}/package.json $out/
+
+  # Optional: expose pi-mcp-adapter from flake input as a bundled extension source.
+  # Note: this is source-only and still expects its runtime JS deps to be resolvable.
+  ${if pi-mcp-adapter != null then ''
+    mkdir -p $out/node_modules
+    cp -r ${pi-mcp-adapter} $out/node_modules/pi-mcp-adapter
+  '' else ""}
 ''
