@@ -41,6 +41,7 @@ type RelayState = {
 };
 
 const POLL_INTERVAL_MS = Number(process.env.AGENTSH_APPROVAL_POLL_MS || "1500");
+const PROMPT_WATCH_INTERVAL_MS = Number(process.env.AGENTSH_APPROVAL_PROMPT_WATCH_MS || "750");
 
 function env(name: string) {
   const value = process.env[name];
@@ -170,6 +171,35 @@ async function resolveApproval(state: RelayState, id: string, approve: boolean, 
   });
 }
 
+function watchApprovalUntilGone(state: RelayState, approvalId: string, onGone: () => void) {
+  let stopped = false;
+  let inFlight = false;
+  const stop = () => {
+    stopped = true;
+    clearInterval(timer);
+  };
+  const check = async () => {
+    if (stopped || inFlight) return;
+    inFlight = true;
+    try {
+      const approvals = await listApprovals(state);
+      const stillPending = approvals.some((approval) => approval.id === approvalId);
+      if (!stillPending && !stopped) {
+        onGone();
+        stop();
+      }
+    } catch {
+      // The main poll loop will surface connection errors. Do not break an
+      // active approval prompt just because one watcher poll failed.
+    } finally {
+      inFlight = false;
+    }
+  };
+  const timer = setInterval(() => { void check(); }, PROMPT_WATCH_INTERVAL_MS);
+  void check();
+  return stop;
+}
+
 async function promptApproval(state: RelayState, approval: ApprovalRequest) {
   const ctx = state.ctx;
   if (!ctx?.hasUI) return;
@@ -177,11 +207,31 @@ async function promptApproval(state: RelayState, approval: ApprovalRequest) {
   state.resolving.add(approval.id);
   try {
     const detail = formatApproval(approval);
-    const choice = await ctx.ui.select(detail, [
-      `Approve ${approvalTitle(approval)}`,
-      `Deny ${approvalTitle(approval)}`,
-    ]);
-    const approve = choice.startsWith("Approve");
+    const abortController = new AbortController();
+    let externallyResolved = false;
+    const stopWatching = watchApprovalUntilGone(state, approval.id, () => {
+      externallyResolved = true;
+      abortController.abort();
+    });
+    let choice: string | undefined;
+    try {
+      choice = await ctx.ui.select(detail, [
+        `Approve ${approvalTitle(approval)}`,
+        `Deny ${approvalTitle(approval)}`,
+      ], { signal: abortController.signal });
+    } finally {
+      stopWatching();
+    }
+
+    if (externallyResolved) {
+      state.seen.add(approval.id);
+      state.lastError = "";
+      state.status = "connected";
+      notify(ctx, `Approval already handled externally: ${approvalTitle(approval)}`, "info");
+      return;
+    }
+
+    const approve = choice?.startsWith("Approve") ?? false;
     try {
       await resolveApproval(state, approval.id, approve, approve ? "approved in Pi" : "denied in Pi");
       state.seen.add(approval.id);
