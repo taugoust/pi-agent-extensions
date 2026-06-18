@@ -156,6 +156,11 @@ async function listApprovals(state: RelayState) {
   return response.approvals || [];
 }
 
+function isApprovalNotFound(error: unknown) {
+  const message = error instanceof Error ? error.message : String(error);
+  return /approval not found/i.test(message);
+}
+
 async function resolveApproval(state: RelayState, id: string, approve: boolean, reason: string) {
   await approvalUIRequest<unknown>(state, {
     op: "resolve",
@@ -177,10 +182,28 @@ async function promptApproval(state: RelayState, approval: ApprovalRequest) {
       `Deny ${approvalTitle(approval)}`,
     ]);
     const approve = choice.startsWith("Approve");
-    await resolveApproval(state, approval.id, approve, approve ? "approved in Pi" : "denied in Pi");
-    state.seen.add(approval.id);
-    notify(ctx, `${approve ? "Approved" : "Denied"}: ${approvalTitle(approval)}`, approve ? "info" : "warning");
+    try {
+      await resolveApproval(state, approval.id, approve, approve ? "approved in Pi" : "denied in Pi");
+      state.seen.add(approval.id);
+      notify(ctx, `${approve ? "Approved" : "Denied"}: ${approvalTitle(approval)}`, approve ? "info" : "warning");
+    } catch (error) {
+      if (isApprovalNotFound(error)) {
+        state.seen.add(approval.id);
+        state.lastError = "";
+        state.status = "connected";
+        notify(ctx, `Approval already handled externally: ${approvalTitle(approval)}`, "info");
+        return;
+      }
+      throw error;
+    }
   } catch (error) {
+    if (isApprovalNotFound(error)) {
+      state.seen.add(approval.id);
+      state.lastError = "";
+      state.status = "connected";
+      notify(ctx, `Approval already handled externally: ${approvalTitle(approval)}`, "info");
+      return;
+    }
     state.status = "error";
     state.lastError = error instanceof Error ? error.message : String(error);
     notify(ctx, `AgentSH approval relay failed: ${state.lastError}`, "error");
