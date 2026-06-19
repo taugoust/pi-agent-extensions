@@ -49,7 +49,7 @@ in
   };
 
   config = lib.mkIf cfg.enable {
-    programs.pi.package = lib.mkForce self.packages.${pkgs.stdenv.hostPlatform.system}.pi;
+    programs.pi.package = lib.mkDefault self.packages.${pkgs.stdenv.hostPlatform.system}.pi;
 
     home.packages = lib.mkIf (cfg.package != null) [ cfg.package ];
 
