@@ -20,6 +20,7 @@ in
     };
 
     extensions = {
+      agent-events.enable = lib.mkEnableOption "agent-events extension — publish AgentSH session events for external notifications";
       direnv.enable = lib.mkEnableOption "direnv extension — refreshes environment via direnv export";
       fence.enable = lib.mkEnableOption "fence extension — blocks write/edit outside cwd";
       questionnaire.enable = lib.mkEnableOption "questionnaire extension — LLM-driven multi-question UI tool";
@@ -59,6 +60,9 @@ in
       })
       (lib.mkIf cfg.skills.remindctl.enable {
         ".pi/agent/skills/remindctl/SKILL.md".source = "${self}/skills/remindctl/SKILL.md";
+      })
+      (lib.mkIf cfg.extensions.agent-events.enable {
+        "${extDir}/agent-events/index.ts".source = "${self}/agent-events/index.ts";
       })
       (lib.mkIf cfg.extensions.direnv.enable {
         "${extDir}/direnv/index.ts".source = "${self}/direnv/index.ts";
