@@ -8,7 +8,6 @@
  */
 
 import { createConnection } from "node:net";
-import { Type } from "@sinclair/typebox";
 import type { ExtensionAPI, ExtensionContext } from "@mariozechner/pi-coding-agent";
 
 type AgentEvent = {
@@ -215,25 +214,4 @@ export default function agentEvents(pi: ExtensionAPI) {
     },
   });
 
-  pi.registerTool({
-    name: "agent_publish_event",
-    label: "Publish AgentSH session event",
-    description: "Publish a session-scoped event for external notification clients. AgentSH owns delivery and acknowledgement.",
-    parameters: Type.Object({
-      type: Type.String({ description: "Event type, e.g. agent.question.pending or agent.turn.completed" }),
-      title: Type.String({ description: "Short notification title" }),
-      message: Type.String({ description: "Notification body" }),
-    }),
-    async execute(_id, params) {
-      const ok = await publishEvent(state, params.type, params.title, params.message);
-      return {
-        content: [{
-          type: "text",
-          text: ok
-            ? `Published AgentSH session event: ${params.type}`
-            : `AgentSH session event was not published: ${state.lastError || "publisher inactive"}`,
-        }],
-      };
-    },
-  });
 }
