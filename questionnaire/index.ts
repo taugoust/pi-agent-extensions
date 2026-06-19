@@ -47,6 +47,17 @@ interface QuestionnaireResult {
   cancelled: boolean;
 }
 
+type AgentEventPublisher = (
+  type: string,
+  title: string,
+  message: string,
+  fields?: Record<string, unknown>,
+) => Promise<boolean>;
+
+declare global {
+  var __PI_AGENTSH_PUBLISH_EVENT__: AgentEventPublisher | undefined;
+}
+
 // Schema
 const QuestionOptionSchema = Type.Object({
   value: Type.String({ description: "The value returned when selected" }),
@@ -91,12 +102,52 @@ function errorResult(
   };
 }
 
+function summarizeQuestions(questions: Question[]) {
+  return questions.map((q, i) => `${i + 1}. ${q.prompt}`).join("\n");
+}
+
+function summarizeAnswers(result: QuestionnaireResult) {
+  if (result.cancelled) return "User cancelled the questionnaire.";
+  return result.answers
+    .map((answer) => {
+      const question = result.questions.find((q) => q.id === answer.id);
+      const label = question?.label || answer.id;
+      return answer.wasCustom
+        ? `${label}: user wrote: ${answer.label}`
+        : `${label}: user selected: ${answer.index}. ${answer.label}`;
+    })
+    .join("\n");
+}
+
+async function publishQuestionnaireEvent(
+  type: "agent.question.pending" | "agent.question.answered",
+  title: string,
+  message: string,
+  fields: Record<string, unknown>,
+) {
+  const publish = globalThis.__PI_AGENTSH_PUBLISH_EVENT__;
+  if (!publish) return false;
+  try {
+    return await publish(type, title, message, fields);
+  } catch {
+    return false;
+  }
+}
+
 export default function questionnaire(pi: ExtensionAPI) {
   pi.registerTool({
     name: "questionnaire",
     label: "Questionnaire",
     description:
-      "Ask the user one or more questions. Use for clarifying requirements, getting preferences, or confirming decisions. For single questions, shows a simple option list. For multiple questions, shows a tab-based interface.",
+      "Ask the user one or more explicit questions instead of guessing. Use this whenever missing information could materially affect correctness, implementation, scope, risk, user preference, or whether to proceed. For single questions, shows a simple option list. For multiple questions, shows a tab-based interface.",
+    promptSnippet:
+      "questionnaire: Ask the user structured questions when assumptions would affect correctness or scope.",
+    promptGuidelines: [
+      "Use questionnaire instead of guessing when requirements, preferences, risk tolerance, or go/no-go decisions are unclear.",
+      "Prefer a short questionnaire before irreversible, broad, destructive, expensive, or highly opinionated work.",
+      "Do not ask questions just to avoid routine work; ask only when the answer would change the result.",
+      "Offer clear options and include an 'other' option when the user may need to provide a custom answer.",
+    ],
     parameters: QuestionnaireParams,
 
     async execute(_toolCallId, params, _signal, _onUpdate, ctx) {
@@ -118,6 +169,29 @@ export default function questionnaire(pi: ExtensionAPI) {
 
       const isMulti = questions.length > 1;
       const totalTabs = questions.length + 1; // questions + Submit
+      const questionnaireId = `questionnaire-${Date.now()}-${Math.random().toString(36).slice(2, 10)}`;
+
+      await publishQuestionnaireEvent(
+        "agent.question.pending",
+        questions.length === 1 ? "Pi has a question" : `Pi has ${questions.length} questions`,
+        summarizeQuestions(questions),
+        {
+          questionnaire_id: questionnaireId,
+          question_count: questions.length,
+          questions: questions.map((q) => ({
+            id: q.id,
+            label: q.label,
+            prompt: q.prompt,
+            options: q.options.map((option) => ({
+              value: option.value,
+              label: option.label,
+              description: option.description,
+            })),
+            allow_other: q.allowOther,
+          })),
+          cwd: ctx.cwd,
+        },
+      );
 
       const result = await ctx.ui.custom<QuestionnaireResult>(
         (tui, theme, _kb, done) => {
@@ -422,6 +496,20 @@ export default function questionnaire(pi: ExtensionAPI) {
             },
             handleInput,
           };
+        },
+      );
+
+      await publishQuestionnaireEvent(
+        "agent.question.answered",
+        result.cancelled ? "Questionnaire cancelled" : "Questionnaire answered",
+        summarizeAnswers(result),
+        {
+          questionnaire_id: questionnaireId,
+          cancelled: result.cancelled,
+          question_count: questions.length,
+          answer_count: result.answers.length,
+          answers: result.answers,
+          cwd: ctx.cwd,
         },
       );
 

@@ -31,6 +31,17 @@ type EventState = {
   ctx?: ExtensionContext;
 };
 
+type AgentEventPublisher = (
+  type: string,
+  title: string,
+  message: string,
+  fields?: Record<string, unknown>,
+) => Promise<boolean>;
+
+declare global {
+  var __PI_AGENTSH_PUBLISH_EVENT__: AgentEventPublisher | undefined;
+}
+
 const TURN_COMPLETED_DEBOUNCE_MS = Number(process.env.AGENTSH_EVENT_TURN_DEBOUNCE_MS || "3000");
 
 function env(name: string) {
@@ -183,11 +194,16 @@ export default function agentEvents(pi: ExtensionAPI) {
     state.socketPath = getSocketPath();
     state.lastError = "";
     state.active = Boolean(state.sessionId && state.socketPath);
+    globalThis.__PI_AGENTSH_PUBLISH_EVENT__ = (type, title, message, fields = {}) =>
+      publishEvent(state, type, title, message, fields);
     setStatus(state, ctx);
   });
 
   pi.on("session_shutdown", async () => {
     if (state.ctx?.hasUI) state.ctx.ui.setStatus("agent-events", undefined);
+    if (globalThis.__PI_AGENTSH_PUBLISH_EVENT__) {
+      globalThis.__PI_AGENTSH_PUBLISH_EVENT__ = undefined;
+    }
     state.active = false;
     state.ctx = undefined;
   });
