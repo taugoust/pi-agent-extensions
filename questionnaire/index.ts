@@ -54,8 +54,17 @@ type AgentEventPublisher = (
   fields?: Record<string, unknown>,
 ) => Promise<boolean>;
 
+type QuestionAnswerGetter = (questionnaireId: string) => Promise<unknown | undefined>;
+
+type ExternalQuestionAnswer = {
+  questionnaire_id?: string;
+  cancelled?: boolean;
+  answers?: Answer[];
+};
+
 declare global {
   var __PI_AGENTSH_PUBLISH_EVENT__: AgentEventPublisher | undefined;
+  var __PI_AGENTSH_GET_QUESTION_ANSWER__: QuestionAnswerGetter | undefined;
 }
 
 // Schema
@@ -106,17 +115,44 @@ function summarizeQuestions(questions: Question[]) {
   return questions.map((q, i) => `${i + 1}. ${q.prompt}`).join("\n");
 }
 
-function summarizeAnswers(result: QuestionnaireResult) {
-  if (result.cancelled) return "User cancelled the questionnaire.";
-  return result.answers
-    .map((answer) => {
-      const question = result.questions.find((q) => q.id === answer.id);
-      const label = question?.label || answer.id;
-      return answer.wasCustom
-        ? `${label}: user wrote: ${answer.label}`
-        : `${label}: user selected: ${answer.index}. ${answer.label}`;
-    })
-    .join("\n");
+function sleep(ms: number) {
+  return new Promise((resolve) => setTimeout(resolve, ms));
+}
+
+function normalizeExternalAnswer(
+  answer: unknown,
+  questions: Question[],
+): QuestionnaireResult | undefined {
+  if (!answer || typeof answer !== "object") return undefined;
+  const candidate = answer as ExternalQuestionAnswer;
+  if (!Array.isArray(candidate.answers)) return undefined;
+  const validIds = new Set(questions.map((q) => q.id));
+  const answers = candidate.answers
+    .filter((a) => a && validIds.has(a.id))
+    .map((a) => ({
+      id: String(a.id),
+      value: String(a.value ?? a.label ?? ""),
+      label: String(a.label ?? a.value ?? ""),
+      wasCustom: Boolean(a.wasCustom),
+      index: typeof a.index === "number" ? a.index : undefined,
+    }));
+  if (!candidate.cancelled && answers.length === 0) return undefined;
+  return { questions, answers, cancelled: Boolean(candidate.cancelled) };
+}
+
+async function pollExternalAnswer(
+  questionnaireId: string,
+  questions: Question[],
+  isDone: () => boolean,
+) {
+  const getAnswer = globalThis.__PI_AGENTSH_GET_QUESTION_ANSWER__;
+  if (!getAnswer) return undefined;
+  while (!isDone()) {
+    const answer = normalizeExternalAnswer(await getAnswer(questionnaireId), questions);
+    if (answer) return answer;
+    await sleep(1000);
+  }
+  return undefined;
 }
 
 async function publishQuestionnaireEvent(
@@ -193,7 +229,10 @@ export default function questionnaire(pi: ExtensionAPI) {
         },
       );
 
-      const result = await ctx.ui.custom<QuestionnaireResult>(
+      let completed = false;
+      let completeFromExternal: ((answer: QuestionnaireResult) => void) | undefined;
+
+      const uiResult = ctx.ui.custom<QuestionnaireResult>(
         (tui, theme, _kb, done) => {
           // State
           let currentTab = 0;
@@ -222,15 +261,26 @@ export default function questionnaire(pi: ExtensionAPI) {
             tui.requestRender();
           }
 
-          function submit(cancelled: boolean) {
-            if (cancelled) {
+          function finish(result: QuestionnaireResult, abort = false) {
+            if (completed) return;
+            completed = true;
+            if (abort) {
               ctx.abort();
             }
-            done({
-              questions,
-              answers: Array.from(answers.values()),
+            done(result);
+          }
+
+          completeFromExternal = (answer) => finish(answer);
+
+          function submit(cancelled: boolean) {
+            finish(
+              {
+                questions,
+                answers: Array.from(answers.values()),
+                cancelled,
+              },
               cancelled,
-            });
+            );
           }
 
           function currentQuestion(): Question | undefined {
@@ -499,16 +549,28 @@ export default function questionnaire(pi: ExtensionAPI) {
         },
       );
 
+      void pollExternalAnswer(questionnaireId, questions, () => completed).then(
+        (answer) => {
+          if (answer && completeFromExternal) {
+            completeFromExternal(answer);
+          }
+        },
+      );
+
+      const result = await uiResult;
+      completed = true;
+
       await publishQuestionnaireEvent(
         "agent.question.answered",
         result.cancelled ? "Questionnaire cancelled" : "Questionnaire answered",
-        summarizeAnswers(result),
+        result.cancelled
+          ? "The questionnaire was cancelled."
+          : "The questionnaire was answered in Pi.",
         {
           questionnaire_id: questionnaireId,
           cancelled: result.cancelled,
           question_count: questions.length,
           answer_count: result.answers.length,
-          answers: result.answers,
           cwd: ctx.cwd,
         },
       );

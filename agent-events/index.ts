@@ -38,8 +38,11 @@ type AgentEventPublisher = (
   fields?: Record<string, unknown>,
 ) => Promise<boolean>;
 
+type QuestionAnswerGetter = (questionnaireId: string) => Promise<unknown | undefined>;
+
 declare global {
   var __PI_AGENTSH_PUBLISH_EVENT__: AgentEventPublisher | undefined;
+  var __PI_AGENTSH_GET_QUESTION_ANSWER__: QuestionAnswerGetter | undefined;
 }
 
 const TURN_COMPLETED_DEBOUNCE_MS = Number(process.env.AGENTSH_EVENT_TURN_DEBOUNCE_MS || "3000");
@@ -111,6 +114,25 @@ async function uiRequest<T>(state: EventState, request: Record<string, unknown>)
 function isUnsupported(error: unknown) {
   const message = error instanceof Error ? error.message : String(error);
   return /unknown op|unsupported|not implemented/i.test(message);
+}
+
+async function getQuestionAnswer(state: EventState, questionnaireId: string) {
+  if (!state.active) return undefined;
+  try {
+    const response = await uiRequest<{ answer?: unknown }>(state, {
+      op: "get_question_answer",
+      questionnaire_id: questionnaireId,
+    });
+    state.lastError = "";
+    return response.answer;
+  } catch (error) {
+    if (isUnsupported(error)) {
+      state.lastError = "AgentSH questionnaire answers unsupported by server";
+      return undefined;
+    }
+    state.lastError = error instanceof Error ? error.message : String(error);
+    return undefined;
+  }
 }
 
 async function publishEvent(
@@ -196,6 +218,8 @@ export default function agentEvents(pi: ExtensionAPI) {
     state.active = Boolean(state.sessionId && state.socketPath);
     globalThis.__PI_AGENTSH_PUBLISH_EVENT__ = (type, title, message, fields = {}) =>
       publishEvent(state, type, title, message, fields);
+    globalThis.__PI_AGENTSH_GET_QUESTION_ANSWER__ = (questionnaireId) =>
+      getQuestionAnswer(state, questionnaireId);
     setStatus(state, ctx);
   });
 
@@ -203,6 +227,9 @@ export default function agentEvents(pi: ExtensionAPI) {
     if (state.ctx?.hasUI) state.ctx.ui.setStatus("agent-events", undefined);
     if (globalThis.__PI_AGENTSH_PUBLISH_EVENT__) {
       globalThis.__PI_AGENTSH_PUBLISH_EVENT__ = undefined;
+    }
+    if (globalThis.__PI_AGENTSH_GET_QUESTION_ANSWER__) {
+      globalThis.__PI_AGENTSH_GET_QUESTION_ANSWER__ = undefined;
     }
     state.active = false;
     state.ctx = undefined;
