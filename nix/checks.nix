@@ -1,6 +1,6 @@
-{ self, bun2nix, pkgs, pi-mcp-adapter ? null }:
+{ self, pkgs, pi-mcp-adapter ? null }:
 let
-  package = import ./package.nix { inherit self bun2nix pkgs pi-mcp-adapter; };
+  package = import ./package.nix { inherit self pkgs pi-mcp-adapter; };
 in
 {
   package = package;
@@ -487,46 +487,6 @@ in
 
     cp -r ${self}/sandbox "$srcdir/"
 
-    mkdir -p "$outdir/node_modules/@anthropic-ai/sandbox-runtime"
-    cat > "$outdir/node_modules/@anthropic-ai/sandbox-runtime/package.json" <<'EOF'
-    {
-      "name": "@anthropic-ai/sandbox-runtime",
-      "type": "module",
-      "main": "./index.js"
-    }
-    EOF
-
-    cat > "$outdir/node_modules/@anthropic-ai/sandbox-runtime/index.js" <<'EOF'
-    let currentConfig;
-    let askCallback;
-
-    export const SandboxManager = {
-      async initialize(config, callback) {
-        currentConfig = structuredClone(config);
-        askCallback = callback;
-      },
-      async reset() {
-        currentConfig = undefined;
-        askCallback = undefined;
-      },
-      getConfig() {
-        return currentConfig;
-      },
-      updateConfig(config) {
-        currentConfig = structuredClone(config);
-      },
-      async wrapWithSandbox(command) {
-        return command;
-      },
-      async askNetwork(host, port) {
-        if (!askCallback) {
-          return false;
-        }
-        return await askCallback({ host, port });
-      },
-    };
-    EOF
-
     mkdir -p "$outdir/node_modules/@sinclair/typebox"
     cat > "$outdir/node_modules/@sinclair/typebox/package.json" <<'EOF'
     {
@@ -540,15 +500,6 @@ in
     export const Type = {
       String(options = {}) {
         return { type: "string", ...options };
-      },
-      Number(options = {}) {
-        return { type: "number", ...options };
-      },
-      Boolean(options = {}) {
-        return { type: "boolean", ...options };
-      },
-      Optional(schema) {
-        return { ...schema, optional: true };
       },
       Object(properties) {
         return { type: "object", properties };
@@ -564,23 +515,7 @@ in
       "main": "./index.js"
     }
     EOF
-
-    cat > "$outdir/node_modules/@mariozechner/pi-coding-agent/index.js" <<'EOF'
-    export function createBashTool(cwd, options = {}) {
-      return {
-        name: "bash",
-        label: "bash",
-        description: "bash",
-        parameters: {},
-        async execute(_id, params) {
-          return {
-            content: [{ type: "text", text: `bash:''${cwd}:''${params?.command ?? ""}` }],
-            details: options,
-          };
-        },
-      };
-    }
-    EOF
+    echo 'export {};' > "$outdir/node_modules/@mariozechner/pi-coding-agent/index.js"
 
     tsc \
       --noCheck \
@@ -594,32 +529,32 @@ in
 
     cat > "$workdir/test.mjs" <<'EOF'
     import fs from "node:fs";
+    import net from "node:net";
     import os from "node:os";
     import path from "node:path";
     import { pathToFileURL } from "node:url";
 
     function assert(condition, message) {
-      if (!condition) {
-        throw new Error(message);
+      if (!condition) throw new Error(message);
+    }
+
+    async function waitFor(predicate, message, timeoutMs = 2000) {
+      const deadline = Date.now() + timeoutMs;
+      while (Date.now() < deadline) {
+        if (await predicate()) return;
+        await new Promise((resolve) => setTimeout(resolve, 10));
       }
+      throw new Error(message);
     }
 
     function createPi() {
       const handlers = new Map();
       const commands = new Map();
       const tools = new Map();
-      const flags = new Map();
-
       return {
         handlers,
         commands,
         tools,
-        registerFlag(name, options) {
-          flags.set(name, options.default);
-        },
-        getFlag(name) {
-          return flags.get(name);
-        },
         registerCommand(name, definition) {
           commands.set(name, definition);
         },
@@ -631,30 +566,42 @@ in
           list.push(handler);
           handlers.set(event, list);
         },
-        events: {
-          emit() {},
-        },
       };
     }
 
-    function createContext(cwd, choices = [], hasUI = true) {
-      let choiceIndex = 0;
+    function createContext({ choices = [], hasUI = true } = {}) {
+      const statuses = [];
+      const notifications = [];
       const selectCalls = [];
-
+      let choiceIndex = 0;
       return {
-        cwd,
+        cwd: process.cwd(),
         hasUI,
+        statuses,
+        notifications,
         selectCalls,
         ui: {
           theme: {
             fg: (_color, text) => text,
           },
-          setStatus() {},
-          notify() {},
-          async select(title, items) {
-            selectCalls.push(title);
-            const choice = choices[choiceIndex] ?? items[0];
-            choiceIndex += 1;
+          setStatus(name, value) {
+            statuses.push({ name, value });
+          },
+          notify(message, level) {
+            notifications.push({ message, level });
+          },
+          async select(title, items, options = {}) {
+            selectCalls.push({ title, items, options });
+            const choice = choices[choiceIndex++] ?? items[0];
+            if (choice === "__wait_for_abort__") {
+              return await new Promise((resolve) => {
+                if (options.signal?.aborted) {
+                  resolve(undefined);
+                  return;
+                }
+                options.signal?.addEventListener("abort", () => resolve(undefined), { once: true });
+              });
+            }
             return choice;
           },
         },
@@ -668,1108 +615,245 @@ in
       }
     }
 
-    function getToolCallHandler(pi) {
-      const handlers = pi.handlers.get("tool_call") ?? [];
-      assert(handlers.length === 1, `expected exactly one tool_call handler, got ''${handlers.length}`);
-      return handlers[0];
-    }
-
-    async function emitToolResult(pi, event, ctx) {
-      const handlers = pi.handlers.get("tool_result") ?? [];
+    async function shutdownSession(pi) {
+      const handlers = pi.handlers.get("session_shutdown") ?? [];
       for (const handler of handlers) {
-        await handler(event, ctx);
+        await handler({ type: "session_shutdown" }, {});
       }
     }
 
-    async function makeProject(tempRoot, name, config) {
-      const cwd = path.join(tempRoot, name);
-      fs.mkdirSync(path.join(cwd, ".pi"), { recursive: true });
-      fs.writeFileSync(path.join(cwd, ".pi", "sandbox.json"), JSON.stringify(config, null, 2));
-      return cwd;
+    async function withApprovalServer(handler) {
+      const dir = fs.mkdtempSync(path.join(os.tmpdir(), "agentsh-approval-ui-"));
+      const socketPath = path.join(dir, "approval.sock");
+      const requests = [];
+      const server = net.createServer((socket) => {
+        let buffer = "";
+        socket.setEncoding("utf8");
+        socket.on("data", async (chunk) => {
+          buffer += chunk;
+          let nl;
+          while ((nl = buffer.indexOf("\n")) !== -1) {
+            const line = buffer.slice(0, nl).trim();
+            buffer = buffer.slice(nl + 1);
+            if (!line) continue;
+            const request = JSON.parse(line);
+            requests.push(request);
+            try {
+              const response = await handler(request, requests);
+              socket.write(JSON.stringify(response) + "\n");
+            } catch (error) {
+              socket.write(JSON.stringify({ ok: false, error: error instanceof Error ? error.message : String(error) }) + "\n");
+            }
+          }
+        });
+      });
+      await new Promise((resolve, reject) => {
+        server.once("error", reject);
+        server.listen(socketPath, () => {
+          server.off("error", reject);
+          resolve();
+        });
+      });
+      return {
+        socketPath,
+        requests,
+        async close() {
+          await new Promise((resolve) => server.close(resolve));
+        },
+      };
+    }
+
+    function setAgentSHEnv(socketPath = "") {
+      process.env.AGENTSH_SESSION_ID = socketPath ? "sess-test" : "";
+      process.env.AGENTSH_APPROVAL_UI_SOCKET = socketPath;
+    }
+
+    function clearAgentSHEnv() {
+      delete process.env.AGENTSH_SESSION_ID;
+      delete process.env.PI_AUTO_SESSION_ID;
+      delete process.env.AGENTSH_APPROVAL_UI_SOCKET;
+      delete process.env.AGENTSH_API_KEY;
+      delete process.env.AGENTSH_APPROVER_API_KEY;
+      delete process.env.AGENTSH_ADMIN_TOKEN;
+      delete process.env.AUTHORIZATION;
+    }
+
+    function assertNoBearerCredentialFields(requests) {
+      for (const request of requests) {
+        for (const key of Object.keys(request)) {
+          assert(!/api[_-]?key|token|bearer|authorization/i.test(key), "approval UI request leaked credential-like field: " + key);
+        }
+      }
     }
 
     async function main() {
-      const compiledRoot = process.argv[2];
-      const tempRoot = fs.mkdtempSync(path.join(os.tmpdir(), "sandbox-check-"));
-      process.env.HOME = tempRoot;
+      process.env.AGENTSH_APPROVAL_POLL_MS = "60000";
+      process.env.AGENTSH_APPROVAL_PROMPT_WATCH_MS = "10";
 
-      const runtimeModule = await import(
-        pathToFileURL(path.join(compiledRoot, "node_modules/@anthropic-ai/sandbox-runtime/index.js")).href
-      );
-      const { SandboxManager } = runtimeModule;
+      const compiledRoot = process.argv[2];
       const moduleUrl = pathToFileURL(path.join(compiledRoot, "sandbox/index.js")).href;
       const importedModule = await import(moduleUrl);
       const sandbox = importedModule.default?.default ?? importedModule.default ?? importedModule;
       assert(typeof sandbox === "function", "sandbox module did not export a function");
 
-      fs.mkdirSync(path.join(tempRoot, ".ssh"), { recursive: true });
-      const sockDir = path.join(tempRoot, "sock");
-      fs.mkdirSync(sockDir, { recursive: true });
-      process.env.SSH_AUTH_SOCK = path.join(sockDir, "agent.sock");
-      const expectedSocketPath = path.join(fs.realpathSync(sockDir), path.basename(process.env.SSH_AUTH_SOCK));
-
-      const baseConfig = {
-        enabled: true,
-        network: {
-          allowedDomains: [],
-          deniedDomains: [],
-        },
-        filesystem: {
-          allowRead: [],
-          denyRead: ["~/.ssh"],
-          allowWrite: ["."],
-          denyWrite: [".env"],
-        },
-      };
-
-      // Test: protected native reads prompt and session grants relax runtime denyRead.
+      // Missing AgentSH env leaves the relay inactive and does not need credentials.
       {
+        clearAgentSHEnv();
+        process.env.AGENTSH_API_KEY = "must-not-matter";
+        process.env.AGENTSH_APPROVER_API_KEY = "must-not-matter";
         const pi = createPi();
         sandbox(pi);
-
-        const cwd = await makeProject(tempRoot, "read-project", baseConfig);
-        const ctx = createContext(cwd, ["Allow for this session"]);
+        const ctx = createContext();
         await startSession(pi, ctx);
 
-        const event = {
-          toolName: "read",
-          toolCallId: "read-1",
-          input: {
-            path: "~/.ssh/config",
-          },
-        };
-
-        const result = await getToolCallHandler(pi)(event, ctx);
-        assert(result === undefined, "sandbox did not allow the read after approval");
-        assert(!SandboxManager.getConfig().filesystem.denyRead.includes("~/.ssh"), "read grant did not relax runtime denyRead");
+        assert(ctx.statuses.some((entry) => entry.name === "sandbox" && entry.value === "agentsh inactive"), "missing env did not mark relay inactive");
+        assert(ctx.notifications.some((entry) => String(entry.message).includes("approval relay inactive")), "missing env did not notify inactive relay");
+        assert(ctx.selectCalls.length === 0, "inactive relay should not prompt");
+        await shutdownSession(pi);
       }
 
-      // Test: allow-once for protected native reads does not persist.
+      // List polling, approve resolve, and no bearer/API credential relay.
       {
+        clearAgentSHEnv();
+        process.env.AGENTSH_API_KEY = "server-api-key-should-not-be-sent";
+        process.env.AGENTSH_APPROVER_API_KEY = "approver-key-should-not-be-sent";
+        let approvals = [{ id: "appr-1", kind: "network", target: "example.com:443", rule: "unknown_https" }];
+        let resolved;
+        const server = await withApprovalServer(async (request) => {
+          if (request.op === "list") return { ok: true, approvals };
+          if (request.op === "resolve") {
+            resolved = request;
+            approvals = [];
+            return { ok: true };
+          }
+          return { ok: false, error: "unknown op" };
+        });
+        setAgentSHEnv(server.socketPath);
         const pi = createPi();
         sandbox(pi);
-
-        const cwd = await makeProject(tempRoot, "read-once-project", baseConfig);
-        const ctx = createContext(cwd, ["Allow once", "Abort"]);
+        const ctx = createContext();
         await startSession(pi, ctx);
+        await waitFor(() => Boolean(resolved), "approval was not resolved");
 
-        const firstEvent = {
-          toolName: "read",
-          toolCallId: "read-once-1",
-          input: {
-            path: "~/.ssh/config",
-          },
-        };
-
-        const firstResult = await getToolCallHandler(pi)(firstEvent, ctx);
-        assert(firstResult === undefined, "sandbox did not allow the protected read once");
-        assert(SandboxManager.getConfig().filesystem.denyRead.includes("~/.ssh"), "allow-once unexpectedly relaxed runtime denyRead");
-
-        const secondEvent = {
-          toolName: "read",
-          toolCallId: "read-once-2",
-          input: {
-            path: "~/.ssh/config",
-          },
-        };
-
-        const secondResult = await getToolCallHandler(pi)(secondEvent, ctx);
-        assert(secondResult && secondResult.block === true, "allow-once read should prompt again on the next call");
-        assert(ctx.selectCalls.length === 2, `expected two read prompts, got ''${ctx.selectCalls.length}`);
+        assert(server.requests.some((request) => request.op === "list"), "approval list was not polled");
+        assert(resolved.op === "resolve", "approval resolve op was not sent");
+        assert(resolved.id === "appr-1", "resolved wrong approval id");
+        assert(resolved.decision === "approve", "approval was not approved");
+        assertNoBearerCredentialFields(server.requests);
+        await shutdownSession(pi);
+        await server.close();
       }
 
-      // Test: writes outside allowWrite prompt and project grants persist to .pi/sandbox.json.
+      // Deny resolve path.
       {
+        clearAgentSHEnv();
+        let approvals = [{ id: "appr-deny", kind: "file", target: "/private/key" }];
+        let resolved;
+        const server = await withApprovalServer(async (request) => {
+          if (request.op === "list") return { ok: true, approvals };
+          if (request.op === "resolve") {
+            resolved = request;
+            approvals = [];
+            return { ok: true };
+          }
+          return { ok: false, error: "unknown op" };
+        });
+        setAgentSHEnv(server.socketPath);
         const pi = createPi();
         sandbox(pi);
-
-        const cwd = await makeProject(tempRoot, "write-project", baseConfig);
-        const ctx = createContext(cwd, ["Allow for this project"]);
+        const ctx = createContext({ choices: ["Deny file: /private/key"] });
         await startSession(pi, ctx);
+        await waitFor(() => Boolean(resolved), "deny approval was not resolved");
 
-        const event = {
-          toolName: "write",
-          toolCallId: "write-1",
-          input: {
-            path: "../outside.txt",
-            content: "hello\n",
-          },
-        };
-
-        const result = await getToolCallHandler(pi)(event, ctx);
-        assert(result === undefined, "sandbox did not allow the write after approval");
-
-        const projectConfig = JSON.parse(fs.readFileSync(path.join(cwd, ".pi", "sandbox.json"), "utf-8"));
-        assert(
-          projectConfig.filesystem.allowWrite.some((entry) => String(entry).includes("outside.txt")),
-          "sandbox did not persist the project write grant",
-        );
+        assert(resolved.id === "appr-deny", "denied wrong approval id");
+        assert(resolved.decision === "deny", "approval was not denied");
+        await shutdownSession(pi);
+        await server.close();
       }
 
-      // Test: denyWrite remains a hard block.
+      // A stale approval-not-found response is treated as externally resolved, not as task failure.
       {
+        clearAgentSHEnv();
+        const server = await withApprovalServer(async (request) => {
+          if (request.op === "list") return { ok: true, approvals: [{ id: "stale-1", kind: "network", target: "stale.example:443" }] };
+          if (request.op === "resolve") return { ok: false, error: "approval not found for session" };
+          return { ok: false, error: "unknown op" };
+        });
+        setAgentSHEnv(server.socketPath);
         const pi = createPi();
         sandbox(pi);
-
-        const cwd = await makeProject(tempRoot, "deny-project", baseConfig);
-        const ctx = createContext(cwd, []);
+        const ctx = createContext();
         await startSession(pi, ctx);
-
-        const event = {
-          toolName: "write",
-          toolCallId: "write-2",
-          input: {
-            path: ".env",
-            content: "SECRET=1\n",
-          },
-        };
-
-        const result = await getToolCallHandler(pi)(event, ctx);
-        assert(result && result.block === true, "sandbox did not hard-block denyWrite target");
-      }
-
-      // Test: SSH allow-once grants are temporary and cleaned up after the tool result.
-      {
-        const pi = createPi();
-        sandbox(pi);
-
-        const cwd = await makeProject(tempRoot, "ssh-once-project", baseConfig);
-        const ctx = createContext(cwd, ["Allow once"]);
-        await startSession(pi, ctx);
-
-        const event = {
-          toolName: "bash",
-          toolCallId: "bash-once-1",
-          input: {
-            command: "ssh matebook.tailf44e66.ts.net true",
-          },
-        };
-
-        const result = await getToolCallHandler(pi)(event, ctx);
-        assert(result === undefined, "sandbox did not allow ssh after allow-once approval");
-
-        const duringConfig = SandboxManager.getConfig();
-        assert(
-          duringConfig.network.allowedDomains.includes("matebook.tailf44e66.ts.net"),
-          "allow-once ssh did not temporarily add the ssh host to allowedDomains",
-        );
-        assert(!duringConfig.filesystem.denyRead.includes("~/.ssh"), "allow-once ssh did not temporarily relax denyRead for ~/.ssh");
-        assert(
-          (duringConfig.network.allowUnixSockets ?? []).includes(expectedSocketPath),
-          "allow-once ssh did not temporarily add SSH_AUTH_SOCK to allowUnixSockets",
+        await waitFor(
+          () => ctx.notifications.some((entry) => String(entry.message).includes("already handled externally")),
+          "stale approval was not treated as externally resolved",
         );
 
-        await emitToolResult(
-          pi,
-          {
-            type: "tool_result",
-            toolName: "bash",
-            toolCallId: "bash-once-1",
-            input: event.input,
-            content: [],
-            details: undefined,
-            isError: false,
-          },
-          ctx,
+        assert(!ctx.notifications.some((entry) => String(entry.message).includes("approval relay failed")), "stale approval surfaced as relay failure");
+        await shutdownSession(pi);
+        await server.close();
+      }
+
+      // Active prompt aborts when the approval disappears from AgentSH state.
+      {
+        clearAgentSHEnv();
+        let listCount = 0;
+        const server = await withApprovalServer(async (request) => {
+          if (request.op === "list") {
+            listCount += 1;
+            return { ok: true, approvals: listCount === 1 ? [{ id: "gone-1", kind: "network", target: "gone.example:443" }] : [] };
+          }
+          if (request.op === "resolve") return { ok: false, error: "resolve should not be called for externally handled approval" };
+          return { ok: false, error: "unknown op" };
+        });
+        setAgentSHEnv(server.socketPath);
+        const pi = createPi();
+        sandbox(pi);
+        const ctx = createContext({ choices: ["__wait_for_abort__"] });
+        await startSession(pi, ctx);
+        await waitFor(
+          () => ctx.notifications.some((entry) => String(entry.message).includes("already handled externally")),
+          "disappearing approval did not abort active prompt",
         );
 
-        const afterConfig = SandboxManager.getConfig();
-        assert(
-          !(afterConfig.network.allowedDomains ?? []).includes("matebook.tailf44e66.ts.net"),
-          "allow-once ssh did not clean up the temporary domain grant",
-        );
-        assert((afterConfig.filesystem.denyRead ?? []).includes("~/.ssh"), "allow-once ssh did not restore denyRead for ~/.ssh");
-        assert(
-          !((afterConfig.network.allowUnixSockets ?? []).includes(expectedSocketPath)),
-          "allow-once ssh did not remove the temporary SSH_AUTH_SOCK grant",
-        );
+        assert(ctx.selectCalls.length === 1, "disappearing approval did not open exactly one prompt");
+        assert(ctx.selectCalls[0].options.signal instanceof AbortSignal, "approval prompt was not given an AbortSignal");
+        assert(!server.requests.some((request) => request.op === "resolve"), "externally handled approval should not be resolved by Pi");
+        await shutdownSession(pi);
+        await server.close();
       }
 
-      // Test: ssh-style bash commands prompt once and grant domain, ~/.ssh, and SSH_AUTH_SOCK together.
+      // Guidance tools only explain AgentSH-owned grants and do not mutate local Pi policy or call the socket.
       {
+        clearAgentSHEnv();
+        const server = await withApprovalServer(async () => ({ ok: true, approvals: [] }));
+        setAgentSHEnv(server.socketPath);
         const pi = createPi();
         sandbox(pi);
-
-        const cwd = await makeProject(tempRoot, "ssh-project", baseConfig);
-        const ctx = createContext(cwd, ["Allow for this session"]);
+        const ctx = createContext();
         await startSession(pi, ctx);
-
-        const event = {
-          toolName: "bash",
-          toolCallId: "bash-1",
-          input: {
-            command: "ssh matebook.tailf44e66.ts.net true",
-          },
-        };
-
-        const result = await getToolCallHandler(pi)(event, ctx);
-        assert(result === undefined, "sandbox did not allow ssh after approval");
-        assert(ctx.selectCalls.length === 1, `expected one SSH approval prompt, got ''${ctx.selectCalls.length}`);
-        assert(String(ctx.selectCalls[0]).includes("Sandbox blocked SSH access"), "SSH approval prompt title was not bundled");
-
-        const config = SandboxManager.getConfig();
-        assert(
-          config.network.allowedDomains.includes("matebook.tailf44e66.ts.net"),
-          "sandbox did not add the ssh host to allowedDomains",
-        );
-        assert(!config.filesystem.denyRead.includes("~/.ssh"), "sandbox did not relax denyRead for ~/.ssh");
-        assert(
-          (config.network.allowUnixSockets ?? []).includes(expectedSocketPath),
-          "sandbox did not add SSH_AUTH_SOCK to allowUnixSockets",
-        );
-      }
-
-      // Test: dangerous git allow-once does not persist across bash tool calls.
-      {
-        const pi = createPi();
-        sandbox(pi);
-
-        const cwd = await makeProject(tempRoot, "git-once-project", baseConfig);
-        const ctx = createContext(cwd, ["Allow once", "Abort"]);
-        await startSession(pi, ctx);
-
-        const firstEvent = {
-          toolName: "bash",
-          toolCallId: "git-once-1",
-          input: {
-            command: "git push origin main --force",
-          },
-        };
-
-        const firstResult = await getToolCallHandler(pi)(firstEvent, ctx);
-        assert(firstResult === undefined, "sandbox did not allow the dangerous git command once");
-        assert(ctx.selectCalls.length === 1, `expected one dangerous git prompt, got ''${ctx.selectCalls.length}`);
-        assert(String(ctx.selectCalls[0]).includes("dangerous git command"), "dangerous git prompt title was not shown");
-
-        const secondEvent = {
-          toolName: "bash",
-          toolCallId: "git-once-2",
-          input: {
-            command: "git push origin main --force",
-          },
-        };
-
-        const secondResult = await getToolCallHandler(pi)(secondEvent, ctx);
-        assert(secondResult && secondResult.block === true, "allow-once dangerous git approval should not persist");
-        assert(ctx.selectCalls.length === 2, `expected two dangerous git prompts, got ''${ctx.selectCalls.length}`);
-      }
-
-      // Test: dangerous git session grants persist for the rest of the session.
-      {
-        const pi = createPi();
-        sandbox(pi);
-
-        const cwd = await makeProject(tempRoot, "git-session-project", baseConfig);
-        const ctx = createContext(cwd, ["Allow for this session"]);
-        await startSession(pi, ctx);
-
-        const firstEvent = {
-          toolName: "bash",
-          toolCallId: "git-session-1",
-          input: {
-            command: "git push origin main --force",
-          },
-        };
-
-        const firstResult = await getToolCallHandler(pi)(firstEvent, ctx);
-        assert(firstResult === undefined, "sandbox did not allow the dangerous git command after a session grant");
-
-        const secondEvent = {
-          toolName: "bash",
-          toolCallId: "git-session-2",
-          input: {
-            command: "git push origin other-branch --force",
-          },
-        };
-
-        const secondResult = await getToolCallHandler(pi)(secondEvent, ctx);
-        assert(secondResult === undefined, "session dangerous git grant did not persist across calls");
-        assert(ctx.selectCalls.length === 1, `session dangerous git grant unexpectedly re-prompted ''${ctx.selectCalls.length} times`);
-      }
-
-      // Test: dangerous git project grants persist to .pi/sandbox.json and survive a new session.
-      {
-        const pi = createPi();
-        sandbox(pi);
-
-        const cwd = await makeProject(tempRoot, "git-project-grant", baseConfig);
-        const ctx = createContext(cwd, ["Allow for this project"]);
-        await startSession(pi, ctx);
-
-        const event = {
-          toolName: "bash",
-          toolCallId: "git-project-1",
-          input: {
-            command: "git reset --hard && git clean -fd",
-          },
-        };
-
-        const result = await getToolCallHandler(pi)(event, ctx);
-        assert(result === undefined, "sandbox did not allow the dangerous git command after a project grant");
-
-        const projectConfig = JSON.parse(fs.readFileSync(path.join(cwd, ".pi", "sandbox.json"), "utf-8"));
-        assert(
-          projectConfig.git.allowedDangerousCommands.includes("hard-reset"),
-          "sandbox did not persist the hard-reset project git grant",
-        );
-        assert(
-          projectConfig.git.allowedDangerousCommands.includes("clean"),
-          "sandbox did not persist the git-clean project git grant",
-        );
-
-        const piReloaded = createPi();
-        sandbox(piReloaded);
-        const ctxReloaded = createContext(cwd, [], true);
-        await startSession(piReloaded, ctxReloaded);
-
-        const followupEvent = {
-          toolName: "bash",
-          toolCallId: "git-project-2",
-          input: {
-            command: "git clean -fd",
-          },
-        };
-
-        const followupResult = await getToolCallHandler(piReloaded)(followupEvent, ctxReloaded);
-        assert(followupResult === undefined, "project dangerous git grant did not persist across sessions");
-        assert(ctxReloaded.selectCalls.length === 0, `project dangerous git grant unexpectedly re-prompted ''${ctxReloaded.selectCalls.length} times`);
-      }
-
-      // Test: dangerous git global grants persist to ~/.pi/agent/sandbox.json and apply in other projects.
-      {
-        const pi = createPi();
-        sandbox(pi);
-
-        const cwd = await makeProject(tempRoot, "git-global-project", baseConfig);
-        const ctx = createContext(cwd, ["Allow for all projects"]);
-        await startSession(pi, ctx);
-
-        const event = {
-          toolName: "bash",
-          toolCallId: "git-global-1",
-          input: {
-            command: "git restore --staged README.md",
-          },
-        };
-
-        const result = await getToolCallHandler(pi)(event, ctx);
-        assert(result === undefined, "sandbox did not allow the dangerous git command after a global grant");
-
-        const globalConfig = JSON.parse(fs.readFileSync(path.join(tempRoot, ".pi", "agent", "sandbox.json"), "utf-8"));
-        assert(
-          globalConfig.git.allowedDangerousCommands.includes("restore"),
-          "sandbox did not persist the global git restore grant",
-        );
-
-        const otherCwd = await makeProject(tempRoot, "git-global-other-project", baseConfig);
-        const piReloaded = createPi();
-        sandbox(piReloaded);
-        const ctxReloaded = createContext(otherCwd, [], true);
-        await startSession(piReloaded, ctxReloaded);
-
-        const followupEvent = {
-          toolName: "bash",
-          toolCallId: "git-global-2",
-          input: {
-            command: "git restore README.md",
-          },
-        };
-
-        const followupResult = await getToolCallHandler(piReloaded)(followupEvent, ctxReloaded);
-        assert(followupResult === undefined, "global dangerous git grant did not apply in another project");
-        assert(ctxReloaded.selectCalls.length === 0, `global dangerous git grant unexpectedly re-prompted ''${ctxReloaded.selectCalls.length} times`);
-      }
-
-      // Test: headless dangerous git commands are blocked with a clear reason.
-      {
-        const pi = createPi();
-        sandbox(pi);
-
-        const cwd = await makeProject(tempRoot, "git-headless-project", baseConfig);
-        const ctx = createContext(cwd, [], false);
-        await startSession(pi, ctx);
-
-        const event = {
-          toolName: "bash",
-          toolCallId: "git-headless-1",
-          input: {
-            command: "git checkout -- README.md",
-          },
-        };
-
-        const result = await getToolCallHandler(pi)(event, ctx);
-        assert(result && result.block === true, "sandbox did not hard-block dangerous git commands in headless mode");
-        assert(String(result.reason).includes("dangerous git command"), "headless dangerous git reason did not mention the command class");
-        assert(String(result.reason).includes("git.allowedDangerousCommands"), "headless dangerous git reason did not mention the config key");
-      }
-
-      // Test: GitHub allow-once does not persist across bash tool calls.
-      {
-        const pi = createPi();
-        sandbox(pi);
-
-        const cwd = await makeProject(tempRoot, "github-once-project", baseConfig);
-        const ctx = createContext(cwd, ["Allow once", "Abort"]);
-        await startSession(pi, ctx);
-
-        const firstEvent = {
-          toolName: "bash",
-          toolCallId: "github-once-1",
-          input: {
-            command: "gh pr create --title test --body hello",
-          },
-        };
-
-        const firstResult = await getToolCallHandler(pi)(firstEvent, ctx);
-        assert(firstResult === undefined, "sandbox did not allow the GitHub command once");
-        assert(ctx.selectCalls.length === 1, `expected one GitHub command prompt, got ''${ctx.selectCalls.length}`);
-        assert(String(ctx.selectCalls[0]).includes("GitHub command"), "GitHub command prompt title was not shown");
-
-        const secondEvent = {
-          toolName: "bash",
-          toolCallId: "github-once-2",
-          input: {
-            command: "gh pr create --title test2 --body hello",
-          },
-        };
-
-        const secondResult = await getToolCallHandler(pi)(secondEvent, ctx);
-        assert(secondResult && secondResult.block === true, "allow-once GitHub approval should not persist");
-        assert(ctx.selectCalls.length === 2, `expected two GitHub command prompts, got ''${ctx.selectCalls.length}`);
-      }
-
-      // Test: GitHub session grants persist for the rest of the session.
-      {
-        const pi = createPi();
-        sandbox(pi);
-
-        const cwd = await makeProject(tempRoot, "github-session-project", baseConfig);
-        const ctx = createContext(cwd, ["Allow for this session"]);
-        await startSession(pi, ctx);
-
-        const firstEvent = {
-          toolName: "bash",
-          toolCallId: "github-session-1",
-          input: {
-            command: "gh pr merge 123 --delete-branch",
-          },
-        };
-
-        const firstResult = await getToolCallHandler(pi)(firstEvent, ctx);
-        assert(firstResult === undefined, "sandbox did not allow the GitHub command after a session grant");
-
-        const secondEvent = {
-          toolName: "bash",
-          toolCallId: "github-session-2",
-          input: {
-            command: "gh pr review 123 --approve",
-          },
-        };
-
-        const secondResult = await getToolCallHandler(pi)(secondEvent, ctx);
-        assert(secondResult === undefined, "session GitHub grant did not persist across calls");
-        assert(ctx.selectCalls.length === 1, `session GitHub grant unexpectedly re-prompted ''${ctx.selectCalls.length} times`);
-      }
-
-      // Test: GitHub project grants persist to .pi/sandbox.json and survive a new session.
-      {
-        const pi = createPi();
-        sandbox(pi);
-
-        const cwd = await makeProject(tempRoot, "github-project-grant", baseConfig);
-        const ctx = createContext(cwd, ["Allow for this project"]);
-        await startSession(pi, ctx);
-
-        const event = {
-          toolName: "bash",
-          toolCallId: "github-project-1",
-          input: {
-            command: "gh issue create --title bug --body details",
-          },
-        };
-
-        const result = await getToolCallHandler(pi)(event, ctx);
-        assert(result === undefined, "sandbox did not allow the GitHub command after a project grant");
-
-        const projectConfig = JSON.parse(fs.readFileSync(path.join(cwd, ".pi", "sandbox.json"), "utf-8"));
-        assert(
-          projectConfig.github.allowedCommands.includes("issue-create"),
-          "sandbox did not persist the project GitHub grant",
-        );
-
-        const piReloaded = createPi();
-        sandbox(piReloaded);
-        const ctxReloaded = createContext(cwd, [], true);
-        await startSession(piReloaded, ctxReloaded);
-
-        const followupEvent = {
-          toolName: "bash",
-          toolCallId: "github-project-2",
-          input: {
-            command: "gh issue create --title bug2 --body more",
-          },
-        };
-
-        const followupResult = await getToolCallHandler(piReloaded)(followupEvent, ctxReloaded);
-        assert(followupResult === undefined, "project GitHub grant did not persist across sessions");
-        assert(ctxReloaded.selectCalls.length === 0, `project GitHub grant unexpectedly re-prompted ''${ctxReloaded.selectCalls.length} times`);
-      }
-
-      // Test: GitHub global grants persist to ~/.pi/agent/sandbox.json and apply in other projects.
-      {
-        const pi = createPi();
-        sandbox(pi);
-
-        const cwd = await makeProject(tempRoot, "github-global-project", baseConfig);
-        const ctx = createContext(cwd, ["Allow for all projects"]);
-        await startSession(pi, ctx);
-
-        const event = {
-          toolName: "bash",
-          toolCallId: "github-global-1",
-          input: {
-            command: "gh repo archive owner/repo",
-          },
-        };
-
-        const result = await getToolCallHandler(pi)(event, ctx);
-        assert(result === undefined, "sandbox did not allow the GitHub command after a global grant");
-
-        const globalConfig = JSON.parse(fs.readFileSync(path.join(tempRoot, ".pi", "agent", "sandbox.json"), "utf-8"));
-        assert(
-          globalConfig.github.allowedCommands.includes("repo-modify"),
-          "sandbox did not persist the global GitHub grant",
-        );
-
-        const otherCwd = await makeProject(tempRoot, "github-global-other-project", baseConfig);
-        const piReloaded = createPi();
-        sandbox(piReloaded);
-        const ctxReloaded = createContext(otherCwd, [], true);
-        await startSession(piReloaded, ctxReloaded);
-
-        const followupEvent = {
-          toolName: "bash",
-          toolCallId: "github-global-2",
-          input: {
-            command: "gh repo rename owner/repo new-name",
-          },
-        };
-
-        const followupResult = await getToolCallHandler(piReloaded)(followupEvent, ctxReloaded);
-        assert(followupResult === undefined, "global GitHub grant did not apply in another project");
-        assert(ctxReloaded.selectCalls.length === 0, `global GitHub grant unexpectedly re-prompted ''${ctxReloaded.selectCalls.length} times`);
-      }
-
-      // Test: headless GitHub commands are blocked with a clear reason.
-      {
-        const pi = createPi();
-        sandbox(pi);
-
-        const cwd = await makeProject(tempRoot, "github-headless-project", baseConfig);
-        const ctx = createContext(cwd, [], false);
-        await startSession(pi, ctx);
-
-        const event = {
-          toolName: "bash",
-          toolCallId: "github-headless-1",
-          input: {
-            command: "gh release delete v1.0.0 --yes",
-          },
-        };
-
-        const result = await getToolCallHandler(pi)(event, ctx);
-        assert(result && result.block === true, "sandbox did not hard-block GitHub commands in headless mode");
-        assert(String(result.reason).includes("GitHub command"), "headless GitHub reason did not mention the command class");
-        assert(String(result.reason).includes("github.allowedCommands"), "headless GitHub reason did not mention the config key");
-      }
-
-      // Test: Nix flake mutation allow-once does not persist across bash tool calls.
-      {
-        const pi = createPi();
-        sandbox(pi);
-
-        const cwd = await makeProject(tempRoot, "nix-once-project", baseConfig);
-        const ctx = createContext(cwd, ["Allow once", "Abort"]);
-        await startSession(pi, ctx);
-
-        const firstEvent = {
-          toolName: "bash",
-          toolCallId: "nix-once-1",
-          input: {
-            command: "nix flake update",
-          },
-        };
-
-        const firstResult = await getToolCallHandler(pi)(firstEvent, ctx);
-        assert(firstResult === undefined, "sandbox did not allow the Nix flake mutation command once");
-        assert(ctx.selectCalls.length === 1, `expected one Nix flake mutation prompt, got ''${ctx.selectCalls.length}`);
-        assert(String(ctx.selectCalls[0]).includes("Nix flake mutation command"), "Nix flake mutation prompt title was not shown");
-
-        const secondEvent = {
-          toolName: "bash",
-          toolCallId: "nix-once-2",
-          input: {
-            command: "nix flake update",
-          },
-        };
-
-        const secondResult = await getToolCallHandler(pi)(secondEvent, ctx);
-        assert(secondResult && secondResult.block === true, "allow-once Nix flake mutation approval should not persist");
-        assert(ctx.selectCalls.length === 2, `expected two Nix flake mutation prompts, got ''${ctx.selectCalls.length}`);
-      }
-
-      // Test: Nix flake mutation session grants persist for the rest of the session and stay sandboxed.
-      {
-        const pi = createPi();
-        sandbox(pi);
-
-        const cwd = await makeProject(tempRoot, "nix-session-project", baseConfig);
-        const ctx = createContext(cwd, ["Allow for this session"]);
-        await startSession(pi, ctx);
-
-        const firstEvent = {
-          toolName: "bash",
-          toolCallId: "nix-session-1",
-          input: {
-            command: "nix flake lock --update-input nixpkgs",
-          },
-        };
-
-        const firstResult = await getToolCallHandler(pi)(firstEvent, ctx);
-        assert(firstResult === undefined, "sandbox did not allow the Nix flake mutation command after a session grant");
-
-        const bashTool = pi.tools.get("bash");
-        assert(bashTool, "sandbox did not register the bash tool");
-        const firstExecution = await bashTool.execute(firstEvent.toolCallId, firstEvent.input);
-        assert(firstExecution.details.operations !== undefined, "approved Nix flake mutation command should stay inside the filesystem sandbox");
-
-        const secondEvent = {
-          toolName: "bash",
-          toolCallId: "nix-session-2",
-          input: {
-            command: "nix flake lock --update-input home-manager",
-          },
-        };
-
-        const secondResult = await getToolCallHandler(pi)(secondEvent, ctx);
-        assert(secondResult === undefined, "session Nix flake mutation grant did not persist across calls");
-        assert(ctx.selectCalls.length === 1, `session Nix flake mutation grant unexpectedly re-prompted ''${ctx.selectCalls.length} times`);
-      }
-
-      // Test: Nix flake mutation project grants persist to .pi/sandbox.json and survive a new session.
-      {
-        const pi = createPi();
-        sandbox(pi);
-
-        const cwd = await makeProject(tempRoot, "nix-project-grant", baseConfig);
-        const ctx = createContext(cwd, ["Allow for this project"]);
-        await startSession(pi, ctx);
-
-        const event = {
-          toolName: "bash",
-          toolCallId: "nix-project-1",
-          input: {
-            command: "nix flake update && nix flake lock --update-input nixpkgs",
-          },
-        };
-
-        const result = await getToolCallHandler(pi)(event, ctx);
-        assert(result === undefined, "sandbox did not allow the Nix flake mutation command after a project grant");
-
-        const projectConfig = JSON.parse(fs.readFileSync(path.join(cwd, ".pi", "sandbox.json"), "utf-8"));
-        assert(
-          projectConfig.nix.allowedCommands.includes("flake-update"),
-          "sandbox did not persist the flake-update project grant",
-        );
-        assert(
-          projectConfig.nix.allowedCommands.includes("flake-lock-update-input"),
-          "sandbox did not persist the flake-lock-update-input project grant",
-        );
-
-        const piReloaded = createPi();
-        sandbox(piReloaded);
-        const ctxReloaded = createContext(cwd, [], true);
-        await startSession(piReloaded, ctxReloaded);
-
-        const followupEvent = {
-          toolName: "bash",
-          toolCallId: "nix-project-2",
-          input: {
-            command: "nix flake lock --update-input home-manager",
-          },
-        };
-
-        const followupResult = await getToolCallHandler(piReloaded)(followupEvent, ctxReloaded);
-        assert(followupResult === undefined, "project Nix flake mutation grant did not persist across sessions");
-        assert(ctxReloaded.selectCalls.length === 0, `project Nix flake mutation grant unexpectedly re-prompted ''${ctxReloaded.selectCalls.length} times`);
-      }
-
-      // Test: Nix flake mutation global grants persist to ~/.pi/agent/sandbox.json and apply in other projects.
-      {
-        const pi = createPi();
-        sandbox(pi);
-
-        const cwd = await makeProject(tempRoot, "nix-global-project", baseConfig);
-        const ctx = createContext(cwd, ["Allow for all projects"]);
-        await startSession(pi, ctx);
-
-        const event = {
-          toolName: "bash",
-          toolCallId: "nix-global-1",
-          input: {
-            command: "nix flake update",
-          },
-        };
-
-        const result = await getToolCallHandler(pi)(event, ctx);
-        assert(result === undefined, "sandbox did not allow the Nix flake mutation command after a global grant");
-
-        const globalConfig = JSON.parse(fs.readFileSync(path.join(tempRoot, ".pi", "agent", "sandbox.json"), "utf-8"));
-        assert(
-          globalConfig.nix.allowedCommands.includes("flake-update"),
-          "sandbox did not persist the global Nix flake mutation grant",
-        );
-
-        const otherCwd = await makeProject(tempRoot, "nix-global-other-project", baseConfig);
-        const piReloaded = createPi();
-        sandbox(piReloaded);
-        const ctxReloaded = createContext(otherCwd, [], true);
-        await startSession(piReloaded, ctxReloaded);
-
-        const followupEvent = {
-          toolName: "bash",
-          toolCallId: "nix-global-2",
-          input: {
-            command: "nix flake update",
-          },
-        };
-
-        const followupResult = await getToolCallHandler(piReloaded)(followupEvent, ctxReloaded);
-        assert(followupResult === undefined, "global Nix flake mutation grant did not apply in another project");
-        assert(ctxReloaded.selectCalls.length === 0, `global Nix flake mutation grant unexpectedly re-prompted ''${ctxReloaded.selectCalls.length} times`);
-      }
-
-      // Test: headless Nix flake mutation commands are blocked with a clear reason.
-      {
-        const pi = createPi();
-        sandbox(pi);
-
-        const cwd = await makeProject(tempRoot, "nix-headless-project", baseConfig);
-        const ctx = createContext(cwd, [], false);
-        await startSession(pi, ctx);
-
-        const event = {
-          toolName: "bash",
-          toolCallId: "nix-headless-1",
-          input: {
-            command: "nix flake lock --update-input nixpkgs",
-          },
-        };
-
-        const result = await getToolCallHandler(pi)(event, ctx);
-        assert(result && result.block === true, "sandbox did not hard-block Nix flake mutation commands in headless mode");
-        assert(String(result.reason).includes("Nix flake mutation command"), "headless Nix flake mutation reason did not mention the command class");
-        assert(String(result.reason).includes("nix.allowedCommands"), "headless Nix flake mutation reason did not mention the config key");
-      }
-
-      // Test: configuration apply allow-once does not persist across bash tool calls.
-      {
-        const pi = createPi();
-        sandbox(pi);
-
-        const cwd = await makeProject(tempRoot, "config-apply-once-project", baseConfig);
-        const ctx = createContext(cwd, ["Allow once", "Abort"]);
-        await startSession(pi, ctx);
-
-        const firstEvent = {
-          toolName: "bash",
-          toolCallId: "config-apply-once-1",
-          input: {
-            command: "sudo darwin-rebuild switch --flake /tmp/nix-config",
-          },
-        };
-
-        const firstResult = await getToolCallHandler(pi)(firstEvent, ctx);
-        assert(firstResult === undefined, "sandbox did not allow the configuration apply command once");
-        assert(ctx.selectCalls.length === 1, `expected one configuration apply prompt, got ''${ctx.selectCalls.length}`);
-        assert(String(ctx.selectCalls[0]).includes("configuration apply command"), "configuration apply prompt title was not shown");
-
-        const secondEvent = {
-          toolName: "bash",
-          toolCallId: "config-apply-once-2",
-          input: {
-            command: "darwin-rebuild switch --flake /tmp/nix-config",
-          },
-        };
-
-        const secondResult = await getToolCallHandler(pi)(secondEvent, ctx);
-        assert(secondResult && secondResult.block === true, "allow-once configuration apply approval should not persist");
-        assert(ctx.selectCalls.length === 2, `expected two configuration apply prompts, got ''${ctx.selectCalls.length}`);
-      }
-
-      // Test: configuration apply session grants persist for the rest of the session.
-      {
-        const pi = createPi();
-        sandbox(pi);
-
-        const cwd = await makeProject(tempRoot, "config-apply-session-project", baseConfig);
-        const ctx = createContext(cwd, ["Allow for this session"]);
-        await startSession(pi, ctx);
-
-        const firstEvent = {
-          toolName: "bash",
-          toolCallId: "config-apply-session-1",
-          input: {
-            command: "nix run nixpkgs#home-manager -- generations",
-          },
-        };
-
-        const firstResult = await getToolCallHandler(pi)(firstEvent, ctx);
-        assert(firstResult === undefined, "sandbox did not allow the configuration apply command after a session grant");
-
-        const bashTool = pi.tools.get("bash");
-        assert(bashTool, "sandbox did not register the bash tool");
-        const firstExecution = await bashTool.execute(firstEvent.toolCallId, firstEvent.input);
-        assert(firstExecution.details.operations === undefined, "approved configuration apply command should run outside the filesystem sandbox");
-
-        const secondEvent = {
-          toolName: "bash",
-          toolCallId: "config-apply-session-2",
-          input: {
-            command: "nix run nixpkgs#home-manager -- news",
-          },
-        };
-
-        const secondResult = await getToolCallHandler(pi)(secondEvent, ctx);
-        assert(secondResult === undefined, "session configuration apply grant did not persist across calls");
-        assert(ctx.selectCalls.length === 1, `session configuration apply grant unexpectedly re-prompted ''${ctx.selectCalls.length} times`);
-      }
-
-      // Test: configuration apply project grants persist to .pi/sandbox.json and survive a new session.
-      {
-        const pi = createPi();
-        sandbox(pi);
-
-        const cwd = await makeProject(tempRoot, "config-apply-project-grant", baseConfig);
-        const ctx = createContext(cwd, ["Allow for this project"]);
-        await startSession(pi, ctx);
-
-        const event = {
-          toolName: "bash",
-          toolCallId: "config-apply-project-1",
-          input: {
-            command: "sudo nixos-rebuild dry-build --flake ~/Workspace/nix-config/.#homecontrol",
-          },
-        };
-
-        const result = await getToolCallHandler(pi)(event, ctx);
-        assert(result === undefined, "sandbox did not allow the configuration apply command after a project grant");
-
-        const projectConfig = JSON.parse(fs.readFileSync(path.join(cwd, ".pi", "sandbox.json"), "utf-8"));
-        assert(
-          projectConfig.configApply.allowedCommands.includes("nixos-rebuild"),
-          "sandbox did not persist the project configuration apply grant",
-        );
-
-        const piReloaded = createPi();
-        sandbox(piReloaded);
-        const ctxReloaded = createContext(cwd, [], true);
-        await startSession(piReloaded, ctxReloaded);
-
-        const followupEvent = {
-          toolName: "bash",
-          toolCallId: "config-apply-project-2",
-          input: {
-            command: "nixos-rebuild test --flake ~/Workspace/nix-config/.#homecontrol",
-          },
-        };
-
-        const followupResult = await getToolCallHandler(piReloaded)(followupEvent, ctxReloaded);
-        assert(followupResult === undefined, "project configuration apply grant did not persist across sessions");
-        assert(ctxReloaded.selectCalls.length === 0, `project configuration apply grant unexpectedly re-prompted ''${ctxReloaded.selectCalls.length} times`);
-      }
-
-      // Test: configuration apply global grants persist to ~/.pi/agent/sandbox.json and apply in other projects.
-      {
-        const pi = createPi();
-        sandbox(pi);
-
-        const cwd = await makeProject(tempRoot, "config-apply-global-project", baseConfig);
-        const ctx = createContext(cwd, ["Allow for all projects"]);
-        await startSession(pi, ctx);
-
-        const event = {
-          toolName: "bash",
-          toolCallId: "config-apply-global-1",
-          input: {
-            command: "darwin-rebuild build --flake /Users/taugoust/Workspace/nix-config",
-          },
-        };
-
-        const result = await getToolCallHandler(pi)(event, ctx);
-        assert(result === undefined, "sandbox did not allow the configuration apply command after a global grant");
-
-        const globalConfig = JSON.parse(fs.readFileSync(path.join(tempRoot, ".pi", "agent", "sandbox.json"), "utf-8"));
-        assert(
-          globalConfig.configApply.allowedCommands.includes("darwin-rebuild"),
-          "sandbox did not persist the global configuration apply grant",
-        );
-
-        const otherCwd = await makeProject(tempRoot, "config-apply-global-other-project", baseConfig);
-        const piReloaded = createPi();
-        sandbox(piReloaded);
-        const ctxReloaded = createContext(otherCwd, [], true);
-        await startSession(piReloaded, ctxReloaded);
-
-        const followupEvent = {
-          toolName: "bash",
-          toolCallId: "config-apply-global-2",
-          input: {
-            command: "darwin-rebuild changelog --flake /Users/taugoust/Workspace/nix-config/.#macos-work",
-          },
-        };
-
-        const followupResult = await getToolCallHandler(piReloaded)(followupEvent, ctxReloaded);
-        assert(followupResult === undefined, "global configuration apply grant did not apply in another project");
-        assert(ctxReloaded.selectCalls.length === 0, `global configuration apply grant unexpectedly re-prompted ''${ctxReloaded.selectCalls.length} times`);
-      }
-
-      // Test: headless configuration apply commands are blocked with a clear reason.
-      {
-        const pi = createPi();
-        sandbox(pi);
-
-        const cwd = await makeProject(tempRoot, "config-apply-headless-project", baseConfig);
-        const ctx = createContext(cwd, [], false);
-        await startSession(pi, ctx);
-
-        const event = {
-          toolName: "bash",
-          toolCallId: "config-apply-headless-1",
-          input: {
-            command: "nix run nixpkgs#nixos-rebuild -- .",
-          },
-        };
-
-        const result = await getToolCallHandler(pi)(event, ctx);
-        assert(result && result.block === true, "sandbox did not hard-block configuration apply commands in headless mode");
-        assert(String(result.reason).includes("configuration apply command"), "headless configuration apply reason did not mention the command class");
-        assert(String(result.reason).includes("configApply.allowedCommands"), "headless configuration apply reason did not mention the config key");
-      }
-
-      // Test: headless mode hard-blocks protected reads with a clear reason.
-      {
-        const pi = createPi();
-        sandbox(pi);
-
-        const cwd = await makeProject(tempRoot, "headless-project", baseConfig);
-        const ctx = createContext(cwd, [], false);
-        await startSession(pi, ctx);
-
-        const event = {
-          toolName: "read",
-          toolCallId: "read-2",
-          input: {
-            path: "~/.ssh/config",
-          },
-        };
-
-        const result = await getToolCallHandler(pi)(event, ctx);
-        assert(result && result.block === true, "sandbox did not hard-block protected reads in headless mode");
-        assert(String(result.reason).includes("Blocked in headless mode"), "sandbox headless read reason was not clear");
-      }
-
-      // Test: shell builtins mentioning ssh do not trigger SSH capability prompts.
-      {
-        const pi = createPi();
-        sandbox(pi);
-
-        const cwd = await makeProject(tempRoot, "builtin-project", baseConfig);
-        const ctx = createContext(cwd, [], true);
-        await startSession(pi, ctx);
-
-        const event = {
-          toolName: "bash",
-          toolCallId: "bash-2",
-          input: {
-            command: "command -v ssh || true",
-          },
-        };
-
-        const result = await getToolCallHandler(pi)(event, ctx);
-        assert(result === undefined, "shell builtin lookup for ssh should not be blocked");
-        const config = SandboxManager.getConfig();
-        assert((config.network.allowedDomains ?? []).length === 0, "ssh lookup unexpectedly granted a network domain");
-        assert((config.filesystem.denyRead ?? []).includes("~/.ssh"), "ssh lookup unexpectedly relaxed ~/.ssh read policy");
-      }
-
-      // Test: harmless URL-like literals do not trigger generic network preflight.
-      {
-        const pi = createPi();
-        sandbox(pi);
-
-        const cwd = await makeProject(tempRoot, "printf-project", baseConfig);
-        const ctx = createContext(cwd, [], true);
-        await startSession(pi, ctx);
-
-        const event = {
-          toolName: "bash",
-          toolCallId: "bash-3",
-          input: {
-            command: "printf 'https://foo.invalid\\n'",
-          },
-        };
-
-        const result = await getToolCallHandler(pi)(event, ctx);
-        assert(result === undefined, "printf with a URL literal should not be blocked");
-        assert(ctx.selectCalls.length === 0, `printf unexpectedly prompted ''${ctx.selectCalls.length} times`);
-        const config = SandboxManager.getConfig();
-        assert(!(config.network.allowedDomains ?? []).includes("foo.invalid"), "printf unexpectedly granted a network domain");
-      }
-
-      // Test: generic network approvals come from the runtime ask callback, not bash preflight.
-      {
-        const pi = createPi();
-        sandbox(pi);
-
-        const cwd = await makeProject(tempRoot, "runtime-network-project", baseConfig);
-        const ctx = createContext(cwd, ["Allow for this session"], true);
-        await startSession(pi, ctx);
-
-        const event = {
-          toolName: "bash",
-          toolCallId: "bash-4",
-          input: {
-            command: "curl -I https://example.com",
-          },
-        };
-
-        const result = await getToolCallHandler(pi)(event, ctx);
-        assert(result === undefined, "curl preflight should not block before the runtime callback");
-        assert(ctx.selectCalls.length === 0, `curl unexpectedly prompted during bash preflight ''${ctx.selectCalls.length} times`);
-
-        const allowed = await SandboxManager.askNetwork("example.com", 443);
-        assert(allowed === true, "runtime network callback did not allow the host after approval");
-        assert(ctx.selectCalls.length === 1, `expected one runtime network prompt, got ''${ctx.selectCalls.length}`);
-        assert(String(ctx.selectCalls[0]).includes("Sandbox blocked network access"), "runtime network prompt title was not shown");
-
-        const config = SandboxManager.getConfig();
-        assert((config.network.allowedDomains ?? []).includes("example.com"), "runtime network approval did not update allowedDomains");
-      }
-
-      // Test: headless runtime network requests remain blocked.
-      {
-        const pi = createPi();
-        sandbox(pi);
-
-        const cwd = await makeProject(tempRoot, "runtime-headless-project", baseConfig);
-        const ctx = createContext(cwd, [], false);
-        await startSession(pi, ctx);
-
-        const allowed = await SandboxManager.askNetwork("example.net", 443);
-        assert(allowed === false, "headless runtime network approval should stay blocked");
-        const config = SandboxManager.getConfig();
-        assert(!(config.network.allowedDomains ?? []).includes("example.net"), "headless runtime network request unexpectedly granted a domain");
+        const requestCountAfterStartup = server.requests.length;
+
+        const toolInputs = new Map([
+          ["sandbox_allow_path", { path: "/tmp/out.txt", reason: "write test" }],
+          ["sandbox_allow_read_path", { path: "/tmp/in.txt", reason: "read test" }],
+          ["sandbox_allow_domain", { domain: "example.org", reason: "network test" }],
+          ["sandbox_allow_unix_socket", { path: "/tmp/sock", reason: "socket test" }],
+        ]);
+        for (const [name, params] of toolInputs) {
+          const tool = pi.tools.get(name);
+          assert(tool, "missing registered guidance tool: " + name);
+          const result = await tool.execute("tool-call", params);
+          const text = result.content?.[0]?.text ?? "";
+          assert(text.includes("AgentSH owns"), name + " did not explain AgentSH-owned enforcement");
+          assert(text.includes("does not mutate local sandbox policy"), name + " did not say local policy is untouched");
+          assert(text.includes("Retry the blocked operation"), name + " did not guide retry flow");
+        }
+
+        assert(server.requests.length === requestCountAfterStartup, "guidance tools unexpectedly called approval socket");
+        assert(!fs.existsSync(path.join(process.cwd(), ".pi", "sandbox.json")), "guidance tools unexpectedly wrote .pi/sandbox.json");
+        await shutdownSession(pi);
+        await server.close();
       }
     }
 

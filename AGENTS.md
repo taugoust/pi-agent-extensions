@@ -12,14 +12,15 @@ This is **pi-agent-extensions** — a collection of [pi](https://github.com/mari
 
 | File | Description |
 |------|-------------|
-| `fetch.ts` | HTTP request tool — fetches URLs, downloads files, shows curl equivalent |
-| `questionnaire.ts` | Multi-question tool for LLM-driven user input |
-| `slow-mode.ts` | Review gate for write/edit tool calls — toggle with `/slowmode` |
+| `fetch/` | HTTP request tool — fetches URLs, downloads files, shows curl equivalent |
+| `questionnaire/` | Multi-question tool for LLM-driven user input |
+| `sandbox/` | AgentSH approval relay UI — prompts for AgentSH-owned pending approvals |
+| `slow-mode/` | Review gate for write/edit tool calls — toggle with `/slowmode` |
 
 ## Before Implementation
 
 1. Follow patterns established in existing extensions (see `direnv.ts`)
-2. Update `README.org` when adding new extensions
+2. Update `README.md` when adding new extensions
 
 ## Key Patterns
 

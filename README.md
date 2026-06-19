@@ -203,9 +203,9 @@ For writes (or if no external viewer), shows inline TUI diff:
 
 **Description**: Intercepts `write`{.verbatim} and `edit`{.verbatim}
 tool calls that target a path outside the current working directory and
-prompts the user to allow or block them. Complements the
-`sandbox`{.verbatim} extension, which restricts bash at the OS level, by
-closing the same gap for pi\'s native file tools.
+prompts the user to allow or block them. This is a local Pi guardrail;
+it is separate from the `sandbox`{.verbatim} AgentSH approval relay,
+where AgentSH owns enforcement.
 
 **How it works**:
 
@@ -431,82 +431,76 @@ Errors show with red background:
 
 </details>
 <details>
-<summary><strong>sandbox</strong> - Merged sandbox + approval gate for bash and file tools</summary>
+<summary><strong>sandbox</strong> - AgentSH approval relay UI</summary>
 <br>
 
 - **Source**:
   [sandbox/](https://github.com/rytswd/pi-agent-extensions/tree/main/sandbox)
 - **License**: MIT
-- **Origin**: Based on the upstream pi sandbox example and the approval
-  model used by `carderne/pi-sandbox`
-- **Type**: Extension (replaces bash tool and intercepts native file
-  tools)
-- **Toggle**: `--no-sandbox`{.verbatim} flag to disable; configure
-  `enabled: false`{.verbatim} in config; `/sandbox-control`{.verbatim}
-  to toggle within a session
-- **Commands**: `/sandbox`{.verbatim} to show effective config + session
-  grants; `/sandbox-control`{.verbatim} to enable/disable;
-  `/sandbox-allow <path>`{.verbatim} to grant a write path for the
-  session
-- **Status bar**: `🔒 Sandbox: N domains, N write, N read`{.verbatim}
-  (when active)
-- **Dependencies**: `@anthropic-ai/sandbox-runtime`{.verbatim}
-- **Platform**: macOS and Linux only (sandbox-exec / bubblewrap)
+- **Type**: Extension and LLM-callable guidance tools
+- **Commands**: `/sandbox`{.verbatim} to show relay status;
+  `/sandbox-control`{.verbatim} to explain that enforcement is controlled
+  by AgentSH; `/sandbox-allow <target>`{.verbatim} to print retry guidance
+- **Status bar**: `agentsh inactive`{.verbatim}, `agentsh ✓`{.verbatim},
+  `agentsh ? N`{.verbatim}, or `agentsh ✗`{.verbatim}
+- **Dependencies**: Node.js built-in networking, Pi extension APIs, and
+  `@sinclair/typebox`{.verbatim}; no sandbox runtime package
+- **Security model**: AgentSH owns enforcement, approval state, and policy
+  mutation. Pi only shows prompts and relays approve/deny decisions.
 
-**Description**: Combines OS-level sandboxing for `bash`{.verbatim} with
-interactive capability prompts for protected file access and SSH-related
-capabilities. Generic network approvals come from the sandbox runtime’s
-actual host callback rather than shell-text URL guessing. It also
-intercepts native `read`{.verbatim}, `write`{.verbatim}, and
-`edit`{.verbatim} tool calls, so the same policy applies outside bash
-too.
+**Description**: This extension keeps the historical `sandbox` name for
+compatibility, but it no longer implements a local Pi sandbox. It is an
+AgentSH approval relay. When Pi runs inside an AgentSH session, AgentSH
+may create session-scoped pending approvals for blocked file, command,
+network, or Unix socket operations. The extension polls AgentSH's
+approval UI Unix socket, displays those requests in Pi, and sends the
+selected approve/deny decision back to AgentSH.
 
-**Approval choices**:
+Pi does **not** receive AgentSH approver/admin API keys. The only AgentSH
+runtime inputs are:
 
-- Abort
-- Allow for this session
-- Allow for this project
-- Allow for all projects
-
-Session grants stay in memory. Persistent grants are written to
-`<cwd>/.pi/sandbox.json`{.verbatim} or
-`~/.pi/agent/sandbox.json`{.verbatim}.
-
-**Configuration** --- merge of `~/.pi/agent/sandbox.json`{.verbatim}
-(global) and `<cwd>/.pi/sandbox.json`{.verbatim} (project-local):
-
-``` json
-{
-  "enabled": true,
-  "network": {
-    "allowedDomains": ["github.com", "*.github.com"],
-    "deniedDomains": [],
-    "allowUnixSockets": []
-  },
-  "filesystem": {
-    "allowRead": ["~/.ssh"],
-    "denyRead": ["~/.ssh", "~/.aws"],
-    "allowWrite": [".", "/tmp"],
-    "denyWrite": [".env"]
-  }
-}
+``` sh
+AGENTSH_SESSION_ID=<session id>
+AGENTSH_APPROVAL_UI_SOCKET=<peer-authorized AgentSH approval UI socket>
 ```
 
-**Features**:
+If either variable is missing, the relay stays inactive and does not
+prompt.
 
-- OS-level sandboxing for bash via
-  `@anthropic-ai/sandbox-runtime`{.verbatim}
-- Capability-based prompts instead of regex-only danger heuristics
-- Generic network prompts driven by the runtime’s actual outbound host
-  callback
-- Native `read`{.verbatim}, `write`{.verbatim}, `edit`{.verbatim}
-  policy enforcement
-- Session / project / global grants
-- Bundled SSH-oriented prompts for hosts, `~/.ssh`{.verbatim}, and
-  `SSH_AUTH_SOCK`{.verbatim}
-- Per-project overrides via `.pi/sandbox.json`{.verbatim}
-- Pass-through to unconfined bash when sandbox is disabled
-- `user_bash`{.verbatim} hook sandboxes REPL commands too
+**Approval flow**:
+
+1. A Pi tool retries or performs an operation.
+2. AgentSH enforces policy and, if configured, creates a pending approval.
+3. The extension polls the approval UI socket with `list`.
+4. Pi displays an approve/deny prompt.
+5. The extension sends `resolve` with the selected decision.
+6. The blocked operation should be retried if AgentSH policy requires it.
+
+If another client resolves the same approval first, the Pi prompt is
+aborted via `AbortSignal` and the stale approval is treated as already
+handled. `approval not found for session` is not surfaced as a task
+failure.
+
+**Guidance tools**:
+
+- `sandbox_allow_path`{.verbatim}
+- `sandbox_allow_read_path`{.verbatim}
+- `sandbox_allow_domain`{.verbatim}
+- `sandbox_allow_unix_socket`{.verbatim}
+
+These tools do not grant access and do not write local policy files. They
+only explain that AgentSH owns grants and that the blocked operation
+should be retried to trigger an AgentSH approval prompt.
+
+**What this extension does not do**:
+
+- no local OS sandboxing;
+- no replacement of the `bash`{.verbatim} tool;
+- no interception of native `read`{.verbatim}, `write`{.verbatim}, or
+  `edit`{.verbatim} tools;
+- no `.pi/sandbox.json`{.verbatim} project/global grant persistence;
+- no use of `@anthropic-ai/sandbox-runtime`{.verbatim};
+- no approver/admin bearer credential handling inside Pi.
 
 </details>
 <details>
@@ -619,10 +613,8 @@ pi
 │   └── index.ts
 ├── questionnaire/      # Multi-question tool
 │   └── index.ts
-├── sandbox/            # Merged sandbox + approval gate
-│   ├── index.ts
-│   ├── package.json    # Dependencies (@anthropic-ai/sandbox-runtime)
-│   └── node_modules/   # npm packages (gitignored, installed by home-manager activation)
+├── sandbox/            # AgentSH approval relay UI
+│   └── index.ts
 ├── slow-mode/          # Review gate for write/edit
 │   ├── index.ts
 │   ├── package.json    # Dependencies (diff package)

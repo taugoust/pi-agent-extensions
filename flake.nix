@@ -4,11 +4,6 @@
   inputs = {
     nixpkgs.url = "github:NixOS/nixpkgs/nixpkgs-25.11-darwin";
 
-    bun2nix = {
-      url = "github:nix-community/bun2nix";
-      inputs.nixpkgs.follows = "nixpkgs";
-    };
-
     llm-agents-nix = {
       url = "github:numtide/llm-agents.nix";
       inputs.nixpkgs.follows = "nixpkgs";
@@ -24,7 +19,6 @@
     {
       self,
       nixpkgs,
-      bun2nix,
       llm-agents-nix,
       pi-mcp-adapter,
       ...
@@ -42,7 +36,7 @@
           };
         in
         {
-          default = import ./nix/package.nix { inherit self bun2nix pkgs pi-mcp-adapter; };
+          default = import ./nix/package.nix { inherit self pkgs pi-mcp-adapter; };
           pi = pkgs.llm-agents.pi;
           pi-mcp-adapter-src = pi-mcp-adapter;
         }
@@ -55,9 +49,9 @@
             overlays = [ llm-agents-nix.overlays.default ];
           };
         in
-        import ./nix/checks.nix { inherit self bun2nix pkgs pi-mcp-adapter; }
+        import ./nix/checks.nix { inherit self pkgs pi-mcp-adapter; }
       );
 
-      homeManagerModules.default = import ./nix/module.nix { inherit self bun2nix pi-mcp-adapter; };
+      homeManagerModules.default = import ./nix/module.nix { inherit self pi-mcp-adapter; };
     };
 }
