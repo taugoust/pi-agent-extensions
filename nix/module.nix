@@ -8,7 +8,6 @@
 let
   cfg = config.programs.pi;
   extDir = ".pi/agent/extensions";
-  pkg = import ./package.nix { inherit self pkgs pi-mcp-adapter; };
 in
 {
   options.programs.pi = {
@@ -56,45 +55,45 @@ in
 
       home.file = lib.mkMerge [
       (lib.mkIf cfg.skills.github-repo-search.enable {
-        ".pi/agent/skills/github-repo-search/SKILL.md".source = "${pkg}/skills/github-repo-search/SKILL.md";
+        ".pi/agent/skills/github-repo-search/SKILL.md".source = "${self}/skills/github-repo-search/SKILL.md";
       })
       (lib.mkIf cfg.skills.remindctl.enable {
-        ".pi/agent/skills/remindctl/SKILL.md".source = "${pkg}/skills/remindctl/SKILL.md";
+        ".pi/agent/skills/remindctl/SKILL.md".source = "${self}/skills/remindctl/SKILL.md";
       })
       (lib.mkIf cfg.extensions.direnv.enable {
-        "${extDir}/direnv/index.ts".source = "${pkg}/direnv/index.ts";
+        "${extDir}/direnv/index.ts".source = "${self}/direnv/index.ts";
       })
 
       (lib.mkIf cfg.extensions.fence.enable {
-        "${extDir}/fence/index.ts".source = "${pkg}/fence/index.ts";
+        "${extDir}/fence/index.ts".source = "${self}/fence/index.ts";
       })
 
       (lib.mkIf cfg.extensions.questionnaire.enable {
-        "${extDir}/questionnaire/index.ts".source = "${pkg}/questionnaire/index.ts";
+        "${extDir}/questionnaire/index.ts".source = "${self}/questionnaire/index.ts";
       })
 
       (lib.mkIf cfg.extensions.modal-editor.enable {
-        "${extDir}/modal-editor/index.ts".source = "${pkg}/modal-editor/index.ts";
+        "${extDir}/modal-editor/index.ts".source = "${self}/modal-editor/index.ts";
       })
 
       (lib.mkIf cfg.extensions.mac-system-theme.enable {
-        "${extDir}/mac-system-theme/index.ts".source = "${pkg}/mac-system-theme/index.ts";
+        "${extDir}/mac-system-theme/index.ts".source = "${self}/mac-system-theme/index.ts";
       })
 
       (lib.mkIf cfg.extensions.pager.enable {
-        "${extDir}/pager/index.ts".source = "${pkg}/pager/index.ts";
+        "${extDir}/pager/index.ts".source = "${self}/pager/index.ts";
       })
 
       (lib.mkIf cfg.extensions.permission-gate.enable {
-        "${extDir}/permission-gate/index.ts".source = "${pkg}/permission-gate/index.ts";
+        "${extDir}/permission-gate/index.ts".source = "${self}/permission-gate/index.ts";
       })
 
       (lib.mkIf cfg.extensions.ssh.enable {
-        "${extDir}/ssh/index.ts".source = "${pkg}/ssh/index.ts";
+        "${extDir}/ssh/index.ts".source = "${self}/ssh/index.ts";
       })
 
       (lib.mkIf cfg.extensions.slow-mode.enable {
-        "${extDir}/slow-mode/index.ts".source = pkgs.writeText "index.ts" (
+        "${extDir}/slow-mode/index.ts".text =
           builtins.replaceStrings
             [ "rmdirSync" "let enabled = false;" ]
             [
@@ -111,16 +110,19 @@ in
                   "let enabled = false;"
               )
             ]
-            (builtins.readFile "${pkg}/slow-mode/index.ts")
-        );
+            (builtins.readFile "${self}/slow-mode/index.ts");
       })
 
         (lib.mkIf cfg.extensions.sandbox.enable {
-          "${extDir}/sandbox".source = "${pkg}/sandbox";
+          "${extDir}/sandbox".source = "${self}/sandbox";
         })
 
         (lib.mkIf cfg.extensions.mcp-adapter.enable {
-          "${extDir}/pi-mcp-adapter".source = "${pkg}/node_modules/pi-mcp-adapter";
+          "${extDir}/pi-mcp-adapter".source =
+            if pi-mcp-adapter != null then
+              pi-mcp-adapter
+            else
+              throw "programs.pi.extensions.mcp-adapter.enable requires pi-mcp-adapter input";
         })
       ];
   };
