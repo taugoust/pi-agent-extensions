@@ -445,8 +445,9 @@ Errors show with red background:
   `agentsh ? N`{.verbatim}, or `agentsh ✗`{.verbatim}
 - **Dependencies**: Node.js built-in networking, Pi extension APIs, and
   `@sinclair/typebox`{.verbatim}; no sandbox runtime package
-- **Security model**: AgentSH owns enforcement, approval state, and policy
-  mutation. Pi only shows prompts and relays approve/deny decisions.
+- **Security model**: AgentSH owns enforcement, approval state, scoped
+  approval caching, and policy mutation. Pi only shows prompts and relays
+  approve/deny plus once/session scope decisions.
 
 **Description**: This extension keeps the historical `sandbox` name for
 compatibility, but it no longer implements a local Pi sandbox. It is an
@@ -454,7 +455,8 @@ AgentSH approval relay. When Pi runs inside an AgentSH session, AgentSH
 may create session-scoped pending approvals for blocked file, command,
 network, or Unix socket operations. The extension polls AgentSH's
 approval UI Unix socket, displays those requests in Pi, and sends the
-selected approve/deny decision back to AgentSH.
+selected approve/deny decision and once/session resolution scope back to
+AgentSH.
 
 Pi does **not** receive AgentSH approver/admin API keys. The only AgentSH
 runtime inputs are:
@@ -472,9 +474,11 @@ prompt.
 1. A Pi tool retries or performs an operation.
 2. AgentSH enforces policy and, if configured, creates a pending approval.
 3. The extension polls the approval UI socket with `list`.
-4. Pi displays an approve/deny prompt.
-5. The extension sends `resolve` with the selected decision.
-6. The blocked operation should be retried if AgentSH policy requires it.
+4. Pi displays an approve/deny prompt. When AgentSH includes a canonical
+   `scope_key`, Pi also offers `Approve for session` and `Deny for session`.
+5. The extension sends `resolve` with the selected decision and `scope`.
+6. AgentSH caches session-scoped choices for the current AgentSH session only.
+   Pi does not cache approval decisions.
 
 If another client resolves the same approval first, the Pi prompt is
 aborted via `AbortSignal` and the stale approval is treated as already
@@ -500,7 +504,8 @@ should be retried to trigger an AgentSH approval prompt.
   `edit`{.verbatim} tools;
 - no `.pi/sandbox.json`{.verbatim} project/global grant persistence;
 - no use of `@anthropic-ai/sandbox-runtime`{.verbatim};
-- no approver/admin bearer credential handling inside Pi.
+- no approver/admin bearer credential handling inside Pi;
+- no local caching of session-scoped approvals.
 
 </details>
 <details>

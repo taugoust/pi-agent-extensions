@@ -739,6 +739,9 @@ in
         assert(resolved.op === "resolve", "approval resolve op was not sent");
         assert(resolved.id === "appr-1", "resolved wrong approval id");
         assert(resolved.decision === "approve", "approval was not approved");
+        assert(resolved.scope === "once", "approval should default to once scope");
+        assert(ctx.selectCalls[0].items.length === 2, "unscoped approval should only show once approve/deny choices");
+        assert(!ctx.selectCalls[0].items.some((item) => item.includes("for session")), "unscoped approval unexpectedly showed session choices");
         assertNoBearerCredentialFields(server.requests);
         await shutdownSession(pi);
         await server.close();
@@ -767,6 +770,79 @@ in
 
         assert(resolved.id === "appr-deny", "denied wrong approval id");
         assert(resolved.decision === "deny", "approval was not denied");
+        assert(resolved.scope === "once", "deny approval should default to once scope");
+        await shutdownSession(pi);
+        await server.close();
+      }
+
+      // Session-scoped approvals expose four choices and relay scope=session.
+      {
+        clearAgentSHEnv();
+        let approvals = [{
+          id: "appr-session",
+          kind: "network",
+          target: "example.com:443",
+          rule: "approve-unknown-https",
+          fields: { scope_kind: "network", scope_key: "network:example.com:443", scope_label: "example.com:443" },
+        }];
+        let resolved;
+        const server = await withApprovalServer(async (request) => {
+          if (request.op === "list") return { ok: true, approvals };
+          if (request.op === "resolve") {
+            resolved = request;
+            approvals = [];
+            return { ok: true };
+          }
+          return { ok: false, error: "unknown op" };
+        });
+        setAgentSHEnv(server.socketPath);
+        const pi = createPi();
+        sandbox(pi);
+        const ctx = createContext({ choices: ["Approve for session network: example.com:443"] });
+        await startSession(pi, ctx);
+        await waitFor(() => Boolean(resolved), "session approval was not resolved");
+
+        assert(ctx.selectCalls[0].items.length === 4, "scoped approval should show four choices");
+        assert(ctx.selectCalls[0].items.includes("Approve for session network: example.com:443"), "missing approve-for-session choice");
+        assert(ctx.selectCalls[0].items.includes("Deny for session network: example.com:443"), "missing deny-for-session choice");
+        assert(resolved.id === "appr-session", "resolved wrong session approval id");
+        assert(resolved.decision === "approve", "session approval was not approved");
+        assert(resolved.scope === "session", "session approval did not relay scope=session");
+        assert(/approved for session/i.test(resolved.reason), "session approval reason did not mention session");
+        await shutdownSession(pi);
+        await server.close();
+      }
+
+      // Deny-for-session relays decision=deny with scope=session.
+      {
+        clearAgentSHEnv();
+        let approvals = [{
+          id: "appr-deny-session",
+          kind: "network",
+          target: "deny.example:443",
+          fields: { scope_kind: "network", scope_key: "network:deny.example:443", scope_label: "deny.example:443" },
+        }];
+        let resolved;
+        const server = await withApprovalServer(async (request) => {
+          if (request.op === "list") return { ok: true, approvals };
+          if (request.op === "resolve") {
+            resolved = request;
+            approvals = [];
+            return { ok: true };
+          }
+          return { ok: false, error: "unknown op" };
+        });
+        setAgentSHEnv(server.socketPath);
+        const pi = createPi();
+        sandbox(pi);
+        const ctx = createContext({ choices: ["Deny for session network: deny.example:443"] });
+        await startSession(pi, ctx);
+        await waitFor(() => Boolean(resolved), "deny-for-session approval was not resolved");
+
+        assert(resolved.id === "appr-deny-session", "resolved wrong deny-session approval id");
+        assert(resolved.decision === "deny", "deny-for-session approval was not denied");
+        assert(resolved.scope === "session", "deny-for-session did not relay scope=session");
+        assert(/denied for session/i.test(resolved.reason), "deny-for-session reason did not mention session");
         await shutdownSession(pi);
         await server.close();
       }

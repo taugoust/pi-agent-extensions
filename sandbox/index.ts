@@ -162,12 +162,47 @@ function isApprovalNotFound(error: unknown) {
   return /approval not found/i.test(message);
 }
 
-async function resolveApproval(state: RelayState, id: string, approve: boolean, reason: string) {
+type ApprovalResolution = {
+  decision: "approve" | "deny";
+  scope: "once" | "session";
+  reason: string;
+};
+
+function hasSessionScope(approval: ApprovalRequest) {
+  const fields = approval.fields || {};
+  return typeof fields.scope_kind === "string" && fields.scope_kind.trim() !== "" &&
+    typeof fields.scope_key === "string" && fields.scope_key.trim() !== "";
+}
+
+function approvalChoices(approval: ApprovalRequest) {
+  const title = approvalTitle(approval);
+  const choices = [
+    { label: `Approve ${title}`, decision: "approve", scope: "once", reason: "approved in Pi" },
+    { label: `Deny ${title}`, decision: "deny", scope: "once", reason: "denied in Pi" },
+  ] satisfies Array<{ label: string } & ApprovalResolution>;
+  if (!hasSessionScope(approval)) return choices;
+  return [
+    choices[0],
+    { label: `Approve for session ${title}`, decision: "approve", scope: "session", reason: "approved for session in Pi" },
+    choices[1],
+    { label: `Deny for session ${title}`, decision: "deny", scope: "session", reason: "denied for session in Pi" },
+  ] satisfies Array<{ label: string } & ApprovalResolution>;
+}
+
+function resolveChoice(choices: Array<{ label: string } & ApprovalResolution>, choice: string | undefined): ApprovalResolution {
+  const selected = choices.find((candidate) => candidate.label === choice);
+  if (selected) return selected;
+  // If the UI returns no choice without an external resolution/abort, fail closed.
+  return { decision: "deny", scope: "once", reason: "denied in Pi" };
+}
+
+async function resolveApproval(state: RelayState, id: string, resolution: ApprovalResolution) {
   await approvalUIRequest<unknown>(state, {
     op: "resolve",
     id,
-    decision: approve ? "approve" : "deny",
-    reason,
+    decision: resolution.decision,
+    scope: resolution.scope,
+    reason: resolution.reason,
   });
 }
 
@@ -213,12 +248,10 @@ async function promptApproval(state: RelayState, approval: ApprovalRequest) {
       externallyResolved = true;
       abortController.abort();
     });
+    const choices = approvalChoices(approval);
     let choice: string | undefined;
     try {
-      choice = await ctx.ui.select(detail, [
-        `Approve ${approvalTitle(approval)}`,
-        `Deny ${approvalTitle(approval)}`,
-      ], { signal: abortController.signal });
+      choice = await ctx.ui.select(detail, choices.map((candidate) => candidate.label), { signal: abortController.signal });
     } finally {
       stopWatching();
     }
@@ -231,11 +264,12 @@ async function promptApproval(state: RelayState, approval: ApprovalRequest) {
       return;
     }
 
-    const approve = choice?.startsWith("Approve") ?? false;
+    const resolution = resolveChoice(choices, choice);
+    const approve = resolution.decision === "approve";
     try {
-      await resolveApproval(state, approval.id, approve, approve ? "approved in Pi" : "denied in Pi");
+      await resolveApproval(state, approval.id, resolution);
       state.seen.add(approval.id);
-      notify(ctx, `${approve ? "Approved" : "Denied"}: ${approvalTitle(approval)}`, approve ? "info" : "warning");
+      notify(ctx, `${approve ? "Approved" : "Denied"}${resolution.scope === "session" ? " for session" : ""}: ${approvalTitle(approval)}`, approve ? "info" : "warning");
     } catch (error) {
       if (isApprovalNotFound(error)) {
         state.seen.add(approval.id);
