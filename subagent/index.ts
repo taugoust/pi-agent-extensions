@@ -42,6 +42,8 @@ type UsageStats = {
   turns: number;
 };
 
+type StopReason = "completed" | "error" | "aborted" | "timeout" | string;
+
 type SingleResult = {
   label: string;
   task: string;
@@ -53,13 +55,19 @@ type SingleResult = {
   tools?: string[];
   systemPrompt?: string;
   cwd?: string;
-  stopReason?: string;
+  stopReason?: StopReason;
   errorMessage?: string;
   step?: number;
   command?: string;
   args?: string[];
   childAgentDir?: string;
   warning?: string;
+  lastEvent?: unknown;
+  lastToolCall?: {
+    name: string;
+    args: Record<string, unknown>;
+  };
+  lastToolResult?: string;
 };
 
 type SubagentDetails = {
@@ -170,6 +178,65 @@ function getFinalOutput(messages: Message[]): string {
     }
   }
   return "";
+}
+
+function getLastAssistantText(messages: Message[]): string {
+  for (let i = messages.length - 1; i >= 0; i--) {
+    const msg = messages[i];
+    if (msg.role !== "assistant") continue;
+    for (let j = msg.content.length - 1; j >= 0; j--) {
+      const part = msg.content[j];
+      if (part.type === "text" && part.text.trim()) return part.text;
+    }
+  }
+  return "";
+}
+
+function getToolResultText(value: any): string {
+  const content = Array.isArray(value?.content) ? value.content : Array.isArray(value) ? value : undefined;
+  if (!content) return typeof value === "string" ? value : value === undefined ? "" : JSON.stringify(value);
+  return content
+    .map((part: any) => {
+      if (part?.type === "text") return String(part.text ?? "");
+      if (part?.type === "image") return `[image: ${part.mimeType ?? "unknown"}]`;
+      return JSON.stringify(part);
+    })
+    .filter(Boolean)
+    .join("\n");
+}
+
+function stderrTail(stderr: string, maxLines = 8): string {
+  return stderr.trim().split("\n").filter(Boolean).slice(-maxLines).join("\n");
+}
+
+function resultStatus(result: SingleResult): string {
+  if (result.exitCode === -1) return "running";
+  if (result.stopReason === "aborted") return "aborted";
+  if (result.stopReason === "timeout") return "timed out";
+  if (isFailure(result)) return "failed";
+  return "completed";
+}
+
+function compactResultSummary(result: SingleResult): string {
+  const lines: string[] = [];
+  const status = resultStatus(result);
+  lines.push(`Subagent ${status}.`);
+  lines.push(`Task: ${result.task}`);
+  if (result.model) lines.push(`Model: ${result.model}`);
+  if (result.tools?.length) lines.push(`Tools: ${result.tools.join(", ")}`);
+  const lastAssistant = getLastAssistantText(result.messages).trim();
+  if (lastAssistant) lines.push(`Last assistant text:\n${truncateByBytes(lastAssistant).split("\n").slice(-8).join("\n")}`);
+  if (result.lastToolCall) {
+    lines.push(`Last tool call: ${result.lastToolCall.name} ${JSON.stringify(result.lastToolCall.args)}`);
+  }
+  if (result.lastToolResult) {
+    lines.push(`Last tool result:\n${truncateByBytes(result.lastToolResult).split("\n").slice(-6).join("\n")}`);
+  }
+  const tail = stderrTail(result.stderr);
+  if (tail) lines.push(`stderr:\n${tail}`);
+  if (result.errorMessage) lines.push(`Error: ${result.errorMessage}`);
+  lines.push(`Exit: ${result.exitCode}${result.stopReason ? ` (${result.stopReason})` : ""}`);
+  return truncateByBytes(lines.join("\n"));
 }
 
 function getDisplayItems(messages: Message[]): DisplayItem[] {
@@ -325,8 +392,8 @@ async function runSingleSubagent(
   let tmpPromptDir: string | null = null;
   let tmpPromptPath: string | null = null;
   const subagentId = makeSubagentId(label);
-  const childAgentDir = await prepareChildAgentDir(subagentId);
-  const childSessionDir = path.join(childAgentDir, "sessions");
+  let childAgentDir: string | undefined;
+  let childSessionDir: string | undefined;
 
   const currentResult: SingleResult = {
     label,
@@ -340,7 +407,6 @@ async function runSingleSubagent(
     systemPrompt: spec.systemPrompt,
     cwd: spec.cwd,
     step,
-    childAgentDir,
   };
 
   const emitUpdate = () => {
@@ -351,6 +417,10 @@ async function runSingleSubagent(
   };
 
   try {
+    childAgentDir = await prepareChildAgentDir(subagentId);
+    childSessionDir = path.join(childAgentDir, "sessions");
+    currentResult.childAgentDir = childAgentDir;
+
     if (spec.systemPrompt?.trim()) {
       const tmp = await writePromptToTempFile(label, spec.systemPrompt);
       tmpPromptDir = tmp.dir;
@@ -381,11 +451,53 @@ async function runSingleSubagent(
       });
       let buffer = "";
       let settled = false;
+      let activeMessageIndex: number | undefined;
 
       const finish = (code: number) => {
         if (settled) return;
         settled = true;
         resolve(code);
+      };
+
+      const rememberToolCallFromMessage = (msg: Message) => {
+        if (msg.role !== "assistant") return;
+        for (const part of msg.content) {
+          if (part.type === "toolCall") currentResult.lastToolCall = { name: part.name, args: part.arguments };
+        }
+      };
+
+      const rememberFinalAssistantMetadata = (msg: Message) => {
+        if (msg.role !== "assistant") return;
+        currentResult.usage.turns++;
+        const usage = (msg as any).usage;
+        if (usage) {
+          currentResult.usage.input += usage.input || 0;
+          currentResult.usage.output += usage.output || 0;
+          currentResult.usage.cacheRead += usage.cacheRead || 0;
+          currentResult.usage.cacheWrite += usage.cacheWrite || 0;
+          currentResult.usage.cost += usage.cost?.total || 0;
+          currentResult.usage.contextTokens = usage.totalTokens || 0;
+        }
+        if (!currentResult.model && (msg as any).model) currentResult.model = (msg as any).model;
+        if ((msg as any).stopReason) currentResult.stopReason = (msg as any).stopReason;
+        if ((msg as any).errorMessage) currentResult.errorMessage = (msg as any).errorMessage;
+      };
+
+      const upsertActiveMessage = (msg: Message, final: boolean) => {
+        rememberToolCallFromMessage(msg);
+        if (msg.role === "toolResult") currentResult.lastToolResult = getToolResultText(msg.content);
+
+        if (activeMessageIndex !== undefined && currentResult.messages[activeMessageIndex]) {
+          currentResult.messages[activeMessageIndex] = msg;
+        } else {
+          currentResult.messages.push(msg);
+          activeMessageIndex = currentResult.messages.length - 1;
+        }
+
+        if (final) {
+          rememberFinalAssistantMetadata(msg);
+          activeMessageIndex = undefined;
+        }
       };
 
       const processLine = (line: string) => {
@@ -394,32 +506,58 @@ async function runSingleSubagent(
         try {
           event = JSON.parse(line);
         } catch {
+          currentResult.stderr += `Non-JSON stdout: ${line}\n`;
+          return;
+        }
+
+        currentResult.lastEvent = event;
+
+        if (event.type === "message_start" && event.message) {
+          upsertActiveMessage(event.message as Message, false);
+          emitUpdate();
+          return;
+        }
+
+        if (event.type === "message_update" && event.message) {
+          upsertActiveMessage(event.message as Message, false);
+          emitUpdate();
           return;
         }
 
         if (event.type === "message_end" && event.message) {
-          const msg = event.message as Message;
-          currentResult.messages.push(msg);
-          if (msg.role === "assistant") {
-            currentResult.usage.turns++;
-            const usage = (msg as any).usage;
-            if (usage) {
-              currentResult.usage.input += usage.input || 0;
-              currentResult.usage.output += usage.output || 0;
-              currentResult.usage.cacheRead += usage.cacheRead || 0;
-              currentResult.usage.cacheWrite += usage.cacheWrite || 0;
-              currentResult.usage.cost += usage.cost?.total || 0;
-              currentResult.usage.contextTokens = usage.totalTokens || 0;
-            }
-            if (!currentResult.model && (msg as any).model) currentResult.model = (msg as any).model;
-            if ((msg as any).stopReason) currentResult.stopReason = (msg as any).stopReason;
-            if ((msg as any).errorMessage) currentResult.errorMessage = (msg as any).errorMessage;
-          }
+          upsertActiveMessage(event.message as Message, true);
           emitUpdate();
+          return;
         }
 
+        if (event.type === "tool_execution_start") {
+          currentResult.lastToolCall = { name: String(event.toolName ?? "unknown"), args: event.args ?? {} };
+          emitUpdate();
+          return;
+        }
+
+        if (event.type === "tool_execution_update" && event.partialResult) {
+          const text = getToolResultText(event.partialResult);
+          if (text) currentResult.lastToolResult = text;
+          emitUpdate();
+          return;
+        }
+
+        if (event.type === "tool_execution_end") {
+          const toolName = String(event.toolName ?? currentResult.lastToolCall?.name ?? "unknown");
+          currentResult.lastToolCall = {
+            name: toolName,
+            args: event.args ?? (currentResult.lastToolCall?.name === toolName ? currentResult.lastToolCall.args : {}),
+          };
+          const text = getToolResultText(event.result);
+          if (text) currentResult.lastToolResult = text;
+          emitUpdate();
+          return;
+        }
+
+        // Compatibility with older/alternate JSON event names.
         if (event.type === "tool_result_end" && event.message) {
-          currentResult.messages.push(event.message as Message);
+          upsertActiveMessage(event.message as Message, true);
           emitUpdate();
         }
       };
@@ -435,30 +573,52 @@ async function runSingleSubagent(
         currentResult.stderr += data.toString();
       });
 
-      proc.on("close", (code) => {
+      proc.on("close", (code, closeSignal) => {
         if (buffer.trim()) processLine(buffer);
         if (abortHandler && signal) signal.removeEventListener("abort", abortHandler);
-        finish(code ?? 0);
+        if (code !== null && code !== undefined) finish(code);
+        else if (closeSignal === "SIGTERM") finish(143);
+        else if (closeSignal === "SIGKILL") finish(137);
+        else finish(0);
       });
 
       proc.on("error", (error) => {
-        currentResult.stderr += `${error instanceof Error ? error.message : String(error)}\n`;
+        const message = error instanceof Error ? error.message : String(error);
+        currentResult.stderr += `${message}\n`;
+        currentResult.stopReason = wasAborted ? "aborted" : "error";
+        currentResult.errorMessage = wasAborted ? "Subagent aborted by user." : message;
         if (abortHandler && signal) signal.removeEventListener("abort", abortHandler);
-        finish(1);
+        finish(wasAborted ? 130 : 1);
       });
 
       const abortHandler = () => {
         wasAborted = true;
         currentResult.stopReason = "aborted";
-        currentResult.errorMessage = "Subagent was aborted";
+        currentResult.errorMessage = "Subagent aborted by user.";
+        emitUpdate();
         killProcessTree(proc);
       };
       if (signal?.aborted) abortHandler();
       else signal?.addEventListener("abort", abortHandler, { once: true });
     });
 
-    currentResult.exitCode = exitCode;
-    if (wasAborted) currentResult.exitCode = exitCode || 130;
+    currentResult.exitCode = wasAborted ? exitCode || 130 : exitCode;
+    if (wasAborted) {
+      currentResult.stopReason = "aborted";
+      currentResult.errorMessage = currentResult.errorMessage || "Subagent aborted by user.";
+    } else if (currentResult.exitCode !== 0) {
+      currentResult.stopReason = currentResult.stopReason === "aborted" ? "aborted" : "error";
+      currentResult.errorMessage = currentResult.errorMessage || `Subagent exited with code ${currentResult.exitCode}.`;
+    } else if (!currentResult.stopReason || currentResult.stopReason === "stop") {
+      currentResult.stopReason = "completed";
+    }
+    return currentResult;
+  } catch (error) {
+    const message = error instanceof Error ? error.message : String(error);
+    currentResult.exitCode = signal?.aborted ? 130 : currentResult.exitCode || 1;
+    currentResult.stopReason = signal?.aborted ? "aborted" : "error";
+    currentResult.errorMessage = signal?.aborted ? "Subagent aborted by user." : message;
+    currentResult.stderr += `${message}\n`;
     return currentResult;
   } finally {
     if (tmpPromptPath) await fs.promises.unlink(tmpPromptPath).catch(() => undefined);
@@ -482,10 +642,11 @@ function specFromParams(params: any): SubagentSpec {
 }
 
 function isFailure(result: SingleResult): boolean {
-  return result.exitCode !== 0 || result.stopReason === "error" || result.stopReason === "aborted";
+  return result.exitCode !== 0 || result.stopReason === "error" || result.stopReason === "aborted" || result.stopReason === "timeout";
 }
 
 function resultErrorText(result: SingleResult): string {
+  if (isFailure(result)) return compactResultSummary(result);
   return result.errorMessage || result.stderr || getFinalOutput(result.messages) || "(no output)";
 }
 
@@ -624,9 +785,10 @@ export default function (pi: ExtensionAPI) {
 
         const successCount = results.filter((r) => !isFailure(r)).length;
         const summaries = results.map((r) => {
+          if (isFailure(r)) return `[${r.label}] ${compactResultSummary(r)}`;
           const output = getFinalOutput(r.messages);
           const preview = output.slice(0, 100) + (output.length > 100 ? "..." : "");
-          return `[${r.label}] ${isFailure(r) ? "failed" : "completed"}: ${preview || "(no output)"}`;
+          return `[${r.label}] completed: ${preview || "(no output)"}`;
         });
         return {
           content: [{ type: "text", text: truncateByBytes(`Parallel: ${successCount}/${results.length} succeeded\n\n${summaries.join("\n\n")}`) }],
@@ -705,12 +867,19 @@ export default function (pi: ExtensionAPI) {
         const failed = isFailure(r);
         const icon = failed ? theme.fg("error", "✗") : r.exitCode === -1 ? theme.fg("warning", "⏳") : theme.fg("success", "✓");
         container.addChild(new Text(`${icon} ${theme.fg("toolTitle", theme.bold(title))}`, 0, 0));
+        container.addChild(new Text(theme.fg("muted", "Status: ") + theme.fg(failed ? "error" : "dim", `${resultStatus(r)} (exit ${r.exitCode})`), 0, 0));
         container.addChild(new Text(theme.fg("muted", "Task: ") + theme.fg("dim", r.task), 0, 0));
         if (r.model) container.addChild(new Text(theme.fg("muted", "Model: ") + theme.fg("dim", r.model), 0, 0));
         if (r.tools?.length) container.addChild(new Text(theme.fg("muted", "Tools: ") + theme.fg("dim", r.tools.join(", ")), 0, 0));
         if (r.cwd) container.addChild(new Text(theme.fg("muted", "Cwd: ") + theme.fg("dim", r.cwd), 0, 0));
         if (r.warning) container.addChild(new Text(theme.fg("warning", `Warning: ${r.warning}`), 0, 0));
         if (failed && r.errorMessage) container.addChild(new Text(theme.fg("error", `Error: ${r.errorMessage}`), 0, 0));
+        if (r.lastToolCall) {
+          container.addChild(new Text(theme.fg("muted", "Last tool call: ") + formatToolCall(r.lastToolCall.name, r.lastToolCall.args, theme.fg.bind(theme)), 0, 0));
+        }
+        if (r.lastToolResult) {
+          container.addChild(new Text(theme.fg("muted", `Last tool result:\n${truncateByBytes(r.lastToolResult).split("\n").slice(-8).join("\n")}`), 0, 0));
+        }
 
         const displayItems = getDisplayItems(r.messages);
         for (const item of displayItems) {
@@ -755,12 +924,12 @@ export default function (pi: ExtensionAPI) {
         const icon = failed ? theme.fg("error", "✗") : theme.fg("success", "✓");
         const displayItems = getDisplayItems(r.messages);
         let text = `${icon} ${theme.fg("toolTitle", theme.bold("subagent"))}`;
-        if (failed && r.errorMessage) text += `\n${theme.fg("error", `Error: ${r.errorMessage}`)}`;
-        else if (displayItems.length === 0) text += `\n${theme.fg("muted", "(no output)")}`;
+        if (failed) {
+          text += `\n${theme.fg("error", compactResultSummary(r).split("\n").slice(0, 14).join("\n"))}`;
+        } else if (displayItems.length === 0) text += `\n${theme.fg("muted", "(no output)")}`;
         else text += `\n${renderDisplayItems(displayItems, COLLAPSED_ITEM_COUNT)}`;
         const usageStr = formatUsageStats(r.usage, r.model);
         if (usageStr) text += `\n${theme.fg("dim", usageStr)}`;
-        if (r.stderr.trim() && failed) text += `\n${theme.fg("error", truncateByBytes(r.stderr.trim()).split("\n").slice(0, 3).join("\n"))}`;
         return new Text(text, 0, 0);
       }
 
@@ -791,7 +960,8 @@ export default function (pi: ExtensionAPI) {
         const rIcon = r.exitCode === -1 ? theme.fg("warning", "⏳") : isFailure(r) ? theme.fg("error", "✗") : theme.fg("success", "✓");
         const displayItems = getDisplayItems(r.messages);
         text += `\n\n${theme.fg("muted", "─── ")}${theme.fg("accent", details.mode === "chain" ? `step ${r.step ?? "?"}` : r.label)} ${rIcon}`;
-        if (displayItems.length === 0) text += `\n${theme.fg("muted", r.exitCode === -1 ? "(running...)" : "(no output)")}`;
+        if (isFailure(r)) text += `\n${theme.fg("error", compactResultSummary(r).split("\n").slice(0, 10).join("\n"))}`;
+        else if (displayItems.length === 0) text += `\n${theme.fg("muted", r.exitCode === -1 ? "(running...)" : "(no output)")}`;
         else text += `\n${renderDisplayItems(displayItems, 5)}`;
       }
       if (running === 0) {
