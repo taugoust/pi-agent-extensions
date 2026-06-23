@@ -431,6 +431,39 @@ Errors show with red background:
 
 </details>
 <details>
+<summary><strong>subagent</strong> - Same-session dynamic child Pi processes</summary>
+<br>
+
+- **Source**:
+  [subagent/](https://github.com/rytswd/pi-agent-extensions/tree/main/subagent)
+- **License**: MIT
+- **Type**: Tool (LLM-callable)
+- **Security model**: Child Pi processes are ordinary descendants of the
+  parent Pi process. Under AgentSH they inherit the same session, sandbox,
+  approvals, network/file policy, and shadow workspace. The extension does
+  **not** spawn `pi-auto`, `pi-supervised`, `agentsh wrap`, or nested AgentSH
+  sessions.
+
+**Description**: Registers a `subagent` tool for delegating focused work to
+raw child Pi processes in JSON print mode. Subagents are dynamic per call: the
+parent supplies the task plus optional `systemPrompt`, `model`, `tools`, and
+`cwd`. Child Pi state is isolated under `$PI_CODING_AGENT_DIR/subagents/...` and
+only minimal config/auth files are copied.
+
+**Modes**:
+
+``` json
+{ "task": "Review README.md", "tools": ["read"] }
+{ "tasks": [{ "task": "Find model code", "tools": ["read", "grep", "find"] }] }
+{ "chain": [{ "task": "Find files" }, { "task": "Plan from: {previous}" }] }
+```
+
+Set `PI_SUBAGENT_BIN` to the raw Pi executable selected by your wrapper, e.g.
+`/nix/store/.../bin/pi` or `pi-unsafe`. If unset, the extension tries source/dev
+execution, then `pi-unsafe`, and only falls back to `pi` with a warning.
+
+</details>
+<details>
 <summary><strong>sandbox</strong> - AgentSH approval relay UI</summary>
 <br>
 
@@ -619,6 +652,8 @@ pi
 ├── questionnaire/      # Multi-question tool
 │   └── index.ts
 ├── sandbox/            # AgentSH approval relay UI
+│   └── index.ts
+├── subagent/           # Dynamic same-session child Pi processes
 │   └── index.ts
 ├── slow-mode/          # Review gate for write/edit
 │   ├── index.ts
