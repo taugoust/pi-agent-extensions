@@ -27,6 +27,7 @@ in
       modal-editor.enable = lib.mkEnableOption "modal-editor extension — vim-style modal input";
       mac-system-theme.enable = lib.mkEnableOption "mac-system-theme extension — syncs pi theme to macOS system appearance";
       pager.enable = lib.mkEnableOption "pager extension — open conversation in an external pager (bat/less)";
+      pdf.enable = lib.mkEnableOption "pdf extension — inspect local PDFs via Poppler and ImageMagick tools";
       permission-gate.enable = lib.mkEnableOption "permission-gate extension — legacy regex gate for dangerous bash commands";
       ssh.enable = lib.mkEnableOption "ssh extension — run read/write/edit/bash tools on a remote host via --ssh";
 
@@ -47,13 +48,17 @@ in
     skills = {
       github-repo-search.enable = lib.mkEnableOption "github-repo-search skill — search GitHub repos via gh CLI without cloning";
       remindctl.enable = lib.mkEnableOption "remindctl skill — manage Apple Reminders via the remindctl CLI";
+      drawio.enable = lib.mkEnableOption "drawio skill — generate native draw.io diagrams and optional exports";
     };
   };
 
   config = lib.mkIf cfg.enable {
     programs.pi.package = lib.mkDefault self.packages.${pkgs.stdenv.hostPlatform.system}.pi;
 
-    home.packages = lib.mkIf (cfg.package != null) [ cfg.package ];
+    home.packages = lib.mkMerge [
+      (lib.mkIf (cfg.package != null) [ cfg.package ])
+      (lib.mkIf cfg.extensions.pdf.enable [ pkgs.poppler-utils pkgs.imagemagick ])
+    ];
 
       home.file = lib.mkMerge [
       (lib.mkIf cfg.skills.github-repo-search.enable {
@@ -61,6 +66,9 @@ in
       })
       (lib.mkIf cfg.skills.remindctl.enable {
         ".pi/agent/skills/remindctl/SKILL.md".source = "${self}/skills/remindctl/SKILL.md";
+      })
+      (lib.mkIf cfg.skills.drawio.enable {
+        ".pi/agent/skills/drawio".source = "${self}/skills/drawio";
       })
       (lib.mkIf cfg.extensions.agent-events.enable {
         "${extDir}/agent-events/index.ts".source = "${self}/agent-events/index.ts";
@@ -87,6 +95,10 @@ in
 
       (lib.mkIf cfg.extensions.pager.enable {
         "${extDir}/pager/index.ts".source = "${self}/pager/index.ts";
+      })
+
+      (lib.mkIf cfg.extensions.pdf.enable {
+        "${extDir}/pdf/index.ts".source = "${self}/pdf/index.ts";
       })
 
       (lib.mkIf cfg.extensions.permission-gate.enable {

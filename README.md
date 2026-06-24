@@ -431,6 +431,41 @@ Errors show with red background:
 
 </details>
 <details>
+<summary><strong>pdf</strong> - Local PDF inspection beyond text extraction</summary>
+<br>
+
+- **Source**:
+  [pdf/](https://github.com/rytswd/pi-agent-extensions/tree/main/pdf)
+- **License**: MIT
+- **Type**: Tools (LLM-callable)
+- **Dependencies**: Poppler (`pdfinfo`, `pdftoppm`, `pdftotext`,
+  `pdfimages`) and ImageMagick (`magick`)
+
+**Description**: Registers local-only PDF inspection tools that complement
+plain `pdftotext` workflows. The tools can inspect metadata, render pages to
+PNG images, crop rendered regions, extract text in multiple modes, and extract
+embedded bitmap images. Outputs are written only to explicitly requested paths
+or directories and generated image/text artifacts get JSON metadata sidecars.
+
+**Nix usage**:
+
+``` bash
+nix shell nixpkgs#poppler_utils nixpkgs#imagemagick
+```
+
+The Home Manager module installs these packages automatically when
+`programs.pi.extensions.pdf.enable = true;` is set.
+
+**Tools**:
+
+- `pdf_info`{.verbatim}: document metadata and page count
+- `pdf_render_pages`{.verbatim}: render selected pages like `1,3-5` to PNG
+- `pdf_crop_image`{.verbatim}: crop a pixel rectangle from a rendered page
+- `pdf_extract_text`{.verbatim}: plain, layout, raw, bbox, or bbox-layout text
+- `pdf_extract_images`{.verbatim}: extract embedded raster images
+
+</details>
+<details>
 <summary><strong>subagent</strong> - Same-session dynamic child Pi processes</summary>
 <br>
 
@@ -635,6 +670,8 @@ pi
 - **slow-mode:** Type `/slow-mode`{.verbatim} to toggle the review gate
 - **fetch:** The LLM will use it for HTTP requests --- try asking it to
   fetch a URL
+- **pdf:** Ask the LLM to inspect a local PDF, render pages, or crop a page
+  region for visual review
 - **questionnaire:** The LLM will call it automatically when needed
 - **subscription tools:** Use `sub_get_usage`{.verbatim} and
   `sub_get_all_usage`{.verbatim} tools, see status in the bar
@@ -648,6 +685,8 @@ pi
 ├── fetch/              # HTTP request tool
 │   └── index.ts
 ├── modal-editor/       # Vim-style modal input editor
+│   └── index.ts
+├── pdf/                # Local PDF inspection tools
 │   └── index.ts
 ├── questionnaire/      # Multi-question tool
 │   └── index.ts
