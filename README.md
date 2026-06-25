@@ -604,6 +604,21 @@ information in the pi terminal interface.
 
 </details>
 
+## Skills
+
+<details>
+<summary><strong>drawio</strong> - Generate native draw.io diagrams and optional exports</summary>
+<br>
+
+- **Source**: [skills/drawio/](./skills/drawio/)
+- **License**: Apache-2.0 reference material from official draw.io MCP skill; repository license remains MIT unless otherwise noted
+- **Outputs**: `.drawio`, `.drawio.png`, `.drawio.svg`, `.drawio.pdf`, or browser URL
+- **Dependencies**: none for `.drawio` files or URL mode; draw.io Desktop CLI for PNG/SVG/PDF export
+
+**Description**: Guides agents to create editable draw.io XML files, open them in draw.io, or export them locally with embedded diagram XML. Intended for durable project figures and paper diagrams rather than broad MCP access.
+
+</details>
+
 ## Configuration
 
 Once installed, pi can use **all** of the extensions listed in this
@@ -672,6 +687,8 @@ pi
   fetch a URL
 - **pdf:** Ask the LLM to inspect a local PDF, render pages, or crop a page
   region for visual review
+- **drawio:** Ask the LLM to create a diagram or paper figure as a native
+  `.drawio` file, optionally exported to PNG/SVG/PDF
 - **questionnaire:** The LLM will call it automatically when needed
 - **subscription tools:** Use `sub_get_usage`{.verbatim} and
   `sub_get_all_usage`{.verbatim} tools, see status in the bar
@@ -700,10 +717,12 @@ pi
 │   ├── package-lock.json
 │   ├── bun.lock
 │   └── node_modules/   # npm packages (gitignored)
+├── skills/             # Pi skills
+│   └── drawio/         # Native draw.io diagram generation guidance
 ├── package.json        # Package metadata and extension list
 ├── .gitignore          # Ignores node_modules, logs
 ├── AGENTS.md           # Agent context for AI assistants
-└── README.org          # This file
+└── README.md           # This file
 ```
 
 ## 🔧 Adding New Extensions
