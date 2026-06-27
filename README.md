@@ -204,8 +204,8 @@ For writes (or if no external viewer), shows inline TUI diff:
 **Description**: Intercepts `write`{.verbatim} and `edit`{.verbatim}
 tool calls that target a path outside the current working directory and
 prompts the user to allow or block them. This is a local Pi guardrail;
-it is separate from the `sandbox`{.verbatim} AgentSH approval relay,
-where AgentSH owns enforcement.
+it is separate from the `sandbox`{.verbatim} AgentSH supervisor-client mode,
+where AgentSH owns enforcement and approval state.
 
 **How it works**:
 
@@ -499,81 +499,146 @@ execution, then `pi-unsafe`, and only falls back to `pi` with a warning.
 
 </details>
 <details>
-<summary><strong>sandbox</strong> - AgentSH approval relay UI</summary>
+<summary><strong>sandbox</strong> - AgentSH supervisor client, approval UI, and AgentSH-backed tools</summary>
 <br>
 
 - **Source**:
   [sandbox/](https://github.com/rytswd/pi-agent-extensions/tree/main/sandbox)
 - **License**: MIT
-- **Type**: Extension and LLM-callable guidance tools
-- **Commands**: `/sandbox`{.verbatim} to show relay status;
-  `/sandbox-control`{.verbatim} to explain that enforcement is controlled
-  by AgentSH; `/sandbox-allow <target>`{.verbatim} to print retry guidance
-- **Status bar**: `agentsh inactive`{.verbatim}, `agentsh ✓`{.verbatim},
-  `agentsh ? N`{.verbatim}, or `agentsh ✗`{.verbatim}
-- **Dependencies**: Node.js built-in networking, Pi extension APIs, and
-  `@sinclair/typebox`{.verbatim}; no sandbox runtime package
-- **Security model**: AgentSH owns enforcement, approval state, scoped
-  approval caching, and policy mutation. Pi only shows prompts and relays
-  approve/deny plus once/session scope decisions.
+- **Type**: AgentSH supervisor client (mock NDJSON test protocol and real Stage 1 REST)
+- **Commands**: `/sandbox`{.verbatim} for status/debug;
+  `/sandbox-control reconnect|start|stop|status`{.verbatim};
+  `/sandbox-allow <target>`{.verbatim} for retry guidance
+- **Tool overrides**: only registered when an AgentSH integration env var is set.
+  Mock NDJSON can handle `bash`{.verbatim}, `write`{.verbatim},
+  `edit`{.verbatim}, `subagent`{.verbatim}, and optional `read`{.verbatim};
+  real AgentSH REST handles `bash`{.verbatim}, `write`{.verbatim},
+  `edit`{.verbatim}, and optional supervised `read`{.verbatim} through
+  `/api/v1/sessions/{id}/tools/*` endpoints. `subagent`{.verbatim} is still
+  mock/future-only.
+- **Status bar**: `agentsh inactive`{.verbatim}, `agentsh start…`{.verbatim},
+  `agentsh …`{.verbatim}, `agentsh ✓`{.verbatim}, `agentsh ? N`{.verbatim},
+  or `agentsh ✗`{.verbatim}
+- **Mock helper/check**: `sandbox/mock-supervisor.mjs`{.verbatim} and
+  `sandbox/mock-supervisor-check.mjs`{.verbatim}
+- **Security model**: in real AgentSH REST mode, AgentSH owns session state,
+  approvals, and tool side effects over a local Unix socket. Commands use the
+  supervisor exec path; file tools are workspace-confined and policy checked.
 
-**Description**: This extension keeps the historical `sandbox` name for
-compatibility, but it no longer implements a local Pi sandbox. It is an
-AgentSH approval relay. When Pi runs inside an AgentSH session, AgentSH
-may create session-scoped pending approvals for blocked file, command,
-network, or Unix socket operations. The extension polls AgentSH's
-approval UI Unix socket, displays those requests in Pi, and sends the
-selected approve/deny decision and once/session resolution scope back to
-AgentSH.
+**Description**: The old passive `AGENTSH_APPROVAL_UI_SOCKET` relay has
+been retired. `sandbox` now has two explicit protocol modes:
 
-Pi does **not** receive AgentSH approver/admin API keys. The only AgentSH
-runtime inputs are:
+1. **Mock NDJSON** when `PI_AGENTSH_MOCK_SUPERVISOR` is set. This is the
+   planned/Stage 2 protocol used by `sandbox/mock-supervisor.mjs`.
+2. **Real Stage 1 REST** when `AGENTSH_SESSION_SUPERVISOR` is set or
+   `PI_AGENTSH_ENABLE=1`. This uses HTTP JSON over the AgentSH Unix socket.
+
+With no supervisor/enable env var, the extension stays inactive and does not
+register `bash`/`write`/`edit`/`subagent` overrides, so normal Pi tools are not
+broken. On `session_start`, it attaches to the mock socket first if present;
+otherwise it attaches to the real REST socket, or starts one with
+`agentsh session start --detach --policy <policy> --workspace <cwd> --workspace-mode <mode> --json`.
+
+**Environment**:
 
 ``` sh
-AGENTSH_SESSION_ID=<session id>
-AGENTSH_APPROVAL_UI_SOCKET=<peer-authorized AgentSH approval UI socket>
+PI_AGENTSH_MOCK_SUPERVISOR=/path/to/mock.sock         # mock NDJSON mode
+AGENTSH_SESSION_SUPERVISOR=unix:///path/to/supervisor.sock # real Stage 1 REST mode
+AGENTSH_SESSION_ID=session-...                         # recommended with real attach
+PI_AGENTSH_ENABLE=1                                    # start detached REST supervisor if no socket env
+PI_AGENTSH_POLICY=pi-autonomous|pi-supervised          # default: pi-autonomous
+PI_AGENTSH_WORKSPACE_MODE=shadow|direct                # Stage 1 only; default: shadow
+PI_AGENTSH_BIN=agentsh                                 # default: agentsh
+PI_AGENTSH_READ_MODE=supervised                        # optional read override (mock and real REST)
 ```
 
-If either variable is missing, the relay stays inactive and does not
-prompt.
+**Mock NDJSON protocol**: newline-delimited JSON over a Unix socket. Requests
+have `id`, `op`, and `params`; final responses are
+`{"id":"...","ok":true,"result":...}` or `{"id":"...","ok":false,"error":"..."}`.
+Streaming ops may emit `stdout`, `stderr`, `tool_update`, `subagent_update`, or
+`message` events before the final response. The mock/planned operations are
+`hello`, `exec_bash`, `read_file`, `write_file`, `edit_file`,
+`spawn_subagent`, `watch_approvals`, `resolve_approval`, and optional `stop`.
 
-**Approval flow**:
+**Real AgentSH REST protocol**: HTTP JSON over the Unix socket
+(`unix:///absolute/path/to/supervisor.sock`). The extension currently uses:
 
-1. A Pi tool retries or performs an operation.
-2. AgentSH enforces policy and, if configured, creates a pending approval.
-3. The extension polls the approval UI socket with `list`.
-4. Pi displays an approve/deny prompt. When AgentSH includes a canonical
-   `scope_key`, Pi also offers `Approve for session` and `Deny for session`.
-5. The extension sends `resolve` with the selected decision and `scope`.
-6. AgentSH caches session-scoped choices for the current AgentSH session only.
-   Pi does not cache approval decisions.
+- `GET /api/v1/sessions` and `GET /api/v1/sessions/{id}` to discover metadata
+  when possible;
+- `GET /api/v1/approvals` on a polling interval to find pending approvals;
+- `POST /api/v1/approvals/{id}` to approve/deny with `scope` and `reason`;
+- `POST /api/v1/sessions/{id}/tools/exec_bash` for `bash`{.verbatim};
+- `POST /api/v1/sessions/{id}/tools/read_file` for optional supervised
+  `read`{.verbatim};
+- `POST /api/v1/sessions/{id}/tools/write_file` for `write`{.verbatim};
+- `POST /api/v1/sessions/{id}/tools/edit_file` for `edit`{.verbatim};
+- `DELETE /api/v1/sessions/{id}` best-effort for `/sandbox-control stop`.
 
-If another client resolves the same approval first, the Pi prompt is
-aborted via `AbortSignal` and the stale approval is treated as already
-handled. `approval not found for session` is not surfaced as a task
-failure.
+The REST `exec_bash` response is buffered, not streamed. Multiple Pi `edit`
+replacements are applied as sequential single-replacement REST calls.
+`spawn_subagent` is not implemented in real REST mode yet. Approvals are polled
+rather than streamed. If `fields.scope_kind` and `fields.scope_key` are present,
+Pi offers once/session approve/deny choices.
 
-**Guidance tools**:
+The extension exposes `globalThis.__AGENTSH_PI__` for owned extensions:
 
-- `sandbox_allow_path`{.verbatim}
-- `sandbox_allow_read_path`{.verbatim}
-- `sandbox_allow_domain`{.verbatim}
-- `sandbox_allow_unix_socket`{.verbatim}
+- `exec(...)`, `readFile(...)`, `writeFile(...)`, `editFile(...)`,
+  `spawnSubagent(...)`;
+- `resolveApproval(...)`;
+- `getSupervisorMetadata()` / `getSupervisorState()`.
 
-These tools do not grant access and do not write local policy files. They
-only explain that AgentSH owns grants and that the blocked operation
-should be retried to trigger an AgentSH approval prompt.
+**Run with only this extension and the mock supervisor**:
 
-**What this extension does not do**:
+``` sh
+SOCK=${TMPDIR:-/tmp}/pi-agentsh-mock.sock
+nix shell nixpkgs#nodejs --command node sandbox/mock-supervisor.mjs --socket "$SOCK" --fake-approval &
+PI_AGENTSH_MOCK_SUPERVISOR="$SOCK" PI_AGENTSH_READ_MODE=supervised \
+  pi --no-extensions -e ./sandbox/index.ts
+```
 
-- no local OS sandboxing;
-- no replacement of the `bash`{.verbatim} tool;
-- no interception of native `read`{.verbatim}, `write`{.verbatim}, or
-  `edit`{.verbatim} tools;
-- no `.pi/sandbox.json`{.verbatim} project/global grant persistence;
-- no use of `@anthropic-ai/sandbox-runtime`{.verbatim};
-- no approver/admin bearer credential handling inside Pi;
-- no local caching of session-scoped approvals.
+(`-e` is short for `--extension`; `--no-extensions` disables normal discovery
+so only this extension is loaded.)
+
+**Manual real-AgentSH Stage 1 run**:
+
+``` sh
+PI_AGENTSH_ENABLE=1 \
+PI_AGENTSH_POLICY=pi-autonomous \
+PI_AGENTSH_WORKSPACE_MODE=shadow \
+  pi --no-extensions -e ./sandbox/index.ts
+```
+
+This starts/attaches a detached REST supervisor and enables AgentSH-backed
+`bash`, `write`, `edit`, and optional supervised `read` tool execution.
+`subagent` remains unavailable in real REST mode.
+
+Or attach to a supervisor started externally:
+
+``` sh
+AGENTSH_SESSION_ID=session-... \
+AGENTSH_SESSION_SUPERVISOR=unix:///path/to/sessions/<id>/supervisor.sock \
+  pi --no-extensions -e ./sandbox/index.ts
+```
+
+**Mock-driven protocol check**:
+
+``` sh
+nix shell nixpkgs#nodejs --command node sandbox/mock-supervisor-check.mjs
+```
+
+**Current real REST limitations**:
+
+- no real `subagent` endpoint yet;
+- command output is buffered, not streamed live;
+- file tools are native supervisor filesystem operations, workspace-confined and
+  policy checked, but not child-process syscall-supervised writes;
+- approval watching is REST polling, not a long-lived socket stream;
+- detached supervisors support `shadow` and `direct` workspace modes here;
+  `overlay`/`auto` are intentionally not used by this extension for Stage 1.
+
+The guidance tools (`sandbox_allow_path`, `sandbox_allow_read_path`,
+`sandbox_allow_domain`, and `sandbox_allow_unix_socket`) remain as explanations
+only; they do not grant access or write local policy files.
 
 </details>
 <details>
@@ -707,8 +772,10 @@ pi
 │   └── index.ts
 ├── questionnaire/      # Multi-question tool
 │   └── index.ts
-├── sandbox/            # AgentSH approval relay UI
-│   └── index.ts
+├── sandbox/            # AgentSH supervisor client and approval UI
+│   ├── index.ts
+│   ├── mock-supervisor.mjs
+│   └── mock-supervisor-check.mjs
 ├── subagent/           # Dynamic same-session child Pi processes
 │   └── index.ts
 ├── slow-mode/          # Review gate for write/edit

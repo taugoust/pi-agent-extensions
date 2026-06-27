@@ -7,6 +7,7 @@
  * use AgentSH approver/admin API keys.
  */
 
+import * as http from "node:http";
 import { createConnection } from "node:net";
 import type { ExtensionAPI, ExtensionContext } from "@mariozechner/pi-coding-agent";
 
@@ -22,8 +23,11 @@ type AgentEvent = {
   fields?: Record<string, unknown>;
 };
 
+type EventMode = "legacy-ui" | "rest" | "";
+
 type EventState = {
   active: boolean;
+  mode: EventMode;
   sessionId: string;
   socketPath: string;
   lastError: string;
@@ -56,8 +60,19 @@ function getSessionId() {
   return env("AGENTSH_SESSION_ID") || env("PI_AUTO_SESSION_ID") || "";
 }
 
+function normalizeSocketPath(value: string) {
+  if (!value) return "";
+  return value.startsWith("unix://") ? value.slice("unix://".length) : value;
+}
+
 function getSocketPath() {
-  return env("AGENTSH_APPROVAL_UI_SOCKET") || env("AGENTSH_SESSION_UI_SOCKET") || "";
+  return normalizeSocketPath(env("AGENTSH_APPROVAL_UI_SOCKET") || env("AGENTSH_SESSION_UI_SOCKET") || env("AGENTSH_SESSION_SUPERVISOR"));
+}
+
+function getEventMode(): EventMode {
+  if (env("AGENTSH_APPROVAL_UI_SOCKET") || env("AGENTSH_SESSION_UI_SOCKET")) return "legacy-ui";
+  if (env("AGENTSH_SESSION_SUPERVISOR")) return "rest";
+  return "";
 }
 
 function makeEventId(type: string) {
@@ -111,6 +126,49 @@ async function uiRequest<T>(state: EventState, request: Record<string, unknown>)
   });
 }
 
+async function restRequest<T>(state: EventState, method: string, path: string, body?: unknown): Promise<T> {
+  if (!state.socketPath) throw new Error("AgentSH supervisor socket not configured");
+  return await new Promise<T>((resolve, reject) => {
+    const payload = body === undefined ? undefined : JSON.stringify(body);
+    const req = http.request({
+      socketPath: state.socketPath,
+      host: "unix",
+      method,
+      path,
+      headers: payload === undefined ? { Accept: "application/json" } : {
+        Accept: "application/json",
+        "Content-Type": "application/json",
+        "Content-Length": Buffer.byteLength(payload),
+      },
+    }, (res) => {
+      const chunks: Buffer[] = [];
+      res.on("data", (chunk) => chunks.push(Buffer.isBuffer(chunk) ? chunk : Buffer.from(chunk)));
+      res.on("end", () => {
+        const text = Buffer.concat(chunks).toString("utf8");
+        if ((res.statusCode || 0) < 200 || (res.statusCode || 0) >= 300) {
+          reject(new Error(`${method} ${path}: HTTP ${res.statusCode}${text.trim() ? `: ${truncate(text.trim(), 1000)}` : ""}`));
+          return;
+        }
+        if (!text.trim()) {
+          resolve(undefined as T);
+          return;
+        }
+        try {
+          const parsed = JSON.parse(text) as { ok?: boolean; error?: string } & T;
+          if (parsed.ok === false) reject(new Error(parsed.error || "AgentSH REST request failed"));
+          else resolve(parsed as T);
+        } catch (error) {
+          reject(error instanceof Error ? error : new Error(String(error)));
+        }
+      });
+    });
+    req.on("error", (error) => reject(error));
+    req.setTimeout(10_000, () => req.destroy(new Error("AgentSH supervisor socket timeout")));
+    if (payload !== undefined) req.write(payload);
+    req.end();
+  });
+}
+
 function isUnsupported(error: unknown) {
   const message = error instanceof Error ? error.message : String(error);
   return /unknown op|unsupported|not implemented/i.test(message);
@@ -119,10 +177,16 @@ function isUnsupported(error: unknown) {
 async function getQuestionAnswer(state: EventState, questionnaireId: string) {
   if (!state.active) return undefined;
   try {
-    const response = await uiRequest<{ answer?: unknown }>(state, {
-      op: "get_question_answer",
-      questionnaire_id: questionnaireId,
-    });
+    const response = state.mode === "rest"
+      ? await restRequest<{ answer?: unknown }>(
+        state,
+        "GET",
+        `/api/v1/sessions/${encodeURIComponent(state.sessionId)}/session-events/question-answers/${encodeURIComponent(questionnaireId)}`,
+      )
+      : await uiRequest<{ answer?: unknown }>(state, {
+        op: "get_question_answer",
+        questionnaire_id: questionnaireId,
+      });
     state.lastError = "";
     return response.answer;
   } catch (error) {
@@ -156,7 +220,16 @@ async function publishEvent(
   };
 
   try {
-    await uiRequest<unknown>(state, { op: "publish_event", event });
+    if (state.mode === "rest") {
+      await restRequest<unknown>(
+        state,
+        "POST",
+        `/api/v1/sessions/${encodeURIComponent(state.sessionId)}/session-events`,
+        event,
+      );
+    } else {
+      await uiRequest<unknown>(state, { op: "publish_event", event });
+    }
     state.lastError = "";
     return true;
   } catch (error) {
@@ -189,6 +262,8 @@ function helpText(state: EventState) {
       "",
       "Required environment:",
       "  AGENTSH_SESSION_ID=<session>",
+      "  AGENTSH_SESSION_SUPERVISOR=unix://<AgentSH supervisor socket>",
+      "or legacy:",
       "  AGENTSH_APPROVAL_UI_SOCKET=<AgentSH peer-authorized UI socket>",
     ].join("\n");
   }
@@ -196,6 +271,7 @@ function helpText(state: EventState) {
     "AgentSH session events are active.",
     "",
     `Session: ${state.sessionId}`,
+    `Mode:    ${state.mode}`,
     `Socket:  ${state.socketPath}`,
     state.lastError ? `Last error: ${state.lastError}` : "Last error: -",
   ].join("\n");
@@ -204,6 +280,7 @@ function helpText(state: EventState) {
 export default function agentEvents(pi: ExtensionAPI) {
   const state: EventState = {
     active: false,
+    mode: "",
     sessionId: "",
     socketPath: "",
     lastError: "",
@@ -214,8 +291,9 @@ export default function agentEvents(pi: ExtensionAPI) {
     state.ctx = ctx;
     state.sessionId = getSessionId();
     state.socketPath = getSocketPath();
+    state.mode = getEventMode();
     state.lastError = "";
-    state.active = Boolean(state.sessionId && state.socketPath);
+    state.active = Boolean(state.sessionId && state.socketPath && state.mode);
     globalThis.__PI_AGENTSH_PUBLISH_EVENT__ = (type, title, message, fields = {}) =>
       publishEvent(state, type, title, message, fields);
     globalThis.__PI_AGENTSH_GET_QUESTION_ANSWER__ = (questionnaireId) =>
@@ -232,6 +310,7 @@ export default function agentEvents(pi: ExtensionAPI) {
       globalThis.__PI_AGENTSH_GET_QUESTION_ANSWER__ = undefined;
     }
     state.active = false;
+    state.mode = "";
     state.ctx = undefined;
   });
 
