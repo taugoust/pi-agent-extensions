@@ -10,6 +10,7 @@
 import { spawn } from "node:child_process";
 import * as http from "node:http";
 import { createConnection, type Socket } from "node:net";
+import { posix as posixPath } from "node:path";
 import { Type } from "@sinclair/typebox";
 import type { ExtensionAPI, ExtensionContext } from "@mariozechner/pi-coding-agent";
 
@@ -26,6 +27,12 @@ type Actor = {
   task?: string;
 };
 
+type WorkspaceRoot = {
+  name?: string;
+  real?: string;
+  work?: string;
+};
+
 type SupervisorMetadata = {
   session_id?: string;
   sessionId?: string;
@@ -35,6 +42,8 @@ type SupervisorMetadata = {
   worktree?: string;
   real_workspace?: string;
   workspace_mode?: string;
+  virtual_root?: string;
+  workspace_roots?: WorkspaceRoot[];
   runtime_home?: string;
   runtime_tmp?: string;
   policy?: string;
@@ -71,7 +80,16 @@ type ApprovalResolution = {
   decision: "approve" | "deny";
   scope?: "once" | "session";
   reason?: string;
+  scope_kind?: string;
+  scope_key?: string;
+  scope_label?: string;
+  scope_operation?: string;
+  scope_path?: string;
+  scope_rule?: string;
+  scope_prefix?: boolean;
 };
+
+type ApprovalChoice = { label: string } & ApprovalResolution;
 
 type ExecOptions = {
   cwd?: string;
@@ -374,28 +392,49 @@ function formatApproval(a: ApprovalRequest) {
   return lines.join("\n");
 }
 
-function hasSessionScope(approval: ApprovalRequest) {
+function scopeFromObject(value: unknown): ApprovalResolution | undefined {
+  if (!value || typeof value !== "object") return undefined;
+  const obj = value as Record<string, unknown>;
+  const kind = typeof obj.scope_kind === "string" ? obj.scope_kind.trim() : "";
+  const key = typeof obj.scope_key === "string" ? obj.scope_key.trim() : "";
+  if (!kind || !key) return undefined;
+  return {
+    decision: "approve",
+    scope: "session",
+    reason: "approved for session in parent Pi",
+    scope_kind: kind,
+    scope_key: key,
+    scope_label: typeof obj.scope_label === "string" ? obj.scope_label : undefined,
+    scope_operation: typeof obj.scope_operation === "string" ? obj.scope_operation : undefined,
+    scope_path: typeof obj.scope_path === "string" ? obj.scope_path : undefined,
+    scope_rule: typeof obj.scope_rule === "string" ? obj.scope_rule : undefined,
+    scope_prefix: typeof obj.scope_prefix === "boolean" ? obj.scope_prefix : undefined,
+  };
+}
+
+function sessionScopeOptions(approval: ApprovalRequest): ApprovalResolution[] {
   const fields = approval.fields || {};
-  return typeof fields.scope_kind === "string" && fields.scope_kind.trim() !== "" &&
-    typeof fields.scope_key === "string" && fields.scope_key.trim() !== "";
+  const rawOptions = Array.isArray(fields.scope_options) ? fields.scope_options : [];
+  const options = rawOptions.map(scopeFromObject).filter((value): value is ApprovalResolution => Boolean(value));
+  if (options.length > 0) return options;
+  const fallback = scopeFromObject(fields);
+  return fallback ? [fallback] : [];
 }
 
-function approvalChoices(approval: ApprovalRequest) {
+function approvalChoices(approval: ApprovalRequest): ApprovalChoice[] {
   const title = approvalTitle(approval);
-  const choices = [
-    { label: `Approve ${title}`, decision: "approve", scope: "once", reason: "approved in parent Pi" },
-    { label: `Deny ${title}`, decision: "deny", scope: "once", reason: "denied in parent Pi" },
-  ] satisfies Array<{ label: string } & Required<ApprovalResolution>>;
-  if (!hasSessionScope(approval)) return choices;
-  return [
-    choices[0],
-    { label: `Approve for session ${title}`, decision: "approve", scope: "session", reason: "approved for session in parent Pi" },
-    choices[1],
-    { label: `Deny for session ${title}`, decision: "deny", scope: "session", reason: "denied for session in parent Pi" },
-  ] satisfies Array<{ label: string } & Required<ApprovalResolution>>;
+  const approveOnce: ApprovalChoice = { label: `Approve ${title}`, decision: "approve", scope: "once", reason: "approved in parent Pi" };
+  const denyOnce: ApprovalChoice = { label: `Deny ${title}`, decision: "deny", scope: "once", reason: "denied in parent Pi" };
+  const choices: ApprovalChoice[] = [approveOnce];
+  for (const option of sessionScopeOptions(approval)) {
+    const label = option.scope_label || option.scope_key || title;
+    choices.push({ ...option, decision: "approve", scope: "session", reason: `approved ${label} for session in parent Pi`, label: `Approve for session: ${label}` });
+  }
+  choices.push(denyOnce);
+  return choices;
 }
 
-function resolveChoice(choices: Array<{ label: string } & Required<ApprovalResolution>>, choice: string | undefined): Required<ApprovalResolution> {
+function resolveChoice(choices: ApprovalChoice[], choice: string | undefined): ApprovalResolution {
   const selected = choices.find((candidate) => candidate.label === choice);
   return selected || { decision: "deny", scope: "once", reason: "denied in parent Pi" };
 }
@@ -535,6 +574,13 @@ class MockSupervisorClient {
       decision: resolution.decision,
       scope: resolution.scope || "once",
       reason: resolution.reason || `${resolution.decision}d in parent Pi`,
+      scope_kind: resolution.scope_kind,
+      scope_key: resolution.scope_key,
+      scope_label: resolution.scope_label,
+      scope_operation: resolution.scope_operation,
+      scope_path: resolution.scope_path,
+      scope_rule: resolution.scope_rule,
+      scope_prefix: resolution.scope_prefix,
     });
   }
 
@@ -650,10 +696,104 @@ function lineWindow(content: string, offset?: number, limit?: number) {
   return selected.join("\n");
 }
 
+function toSlashPath(path: string) {
+  return path.replace(/\\/g, "/");
+}
+
+function cleanPosix(path: string) {
+  const cleaned = posixPath.normalize(toSlashPath(path));
+  return cleaned === "." ? "" : cleaned;
+}
+
+function isUnderPath(path: string, root: string) {
+  const cleanPath = cleanPosix(path);
+  const cleanRoot = cleanPosix(root);
+  return cleanPath === cleanRoot || cleanPath.startsWith(`${cleanRoot}/`);
+}
+
+function relativeToRoot(path: string, root: string) {
+  const cleanPath = cleanPosix(path);
+  const cleanRoot = cleanPosix(root);
+  if (cleanPath === cleanRoot) return "";
+  return cleanPath.slice(cleanRoot.length + 1);
+}
+
+function stringField(value: unknown) {
+  return typeof value === "string" && value.trim() ? value : undefined;
+}
+
+function normalizeWorkspaceRoots(value: unknown): WorkspaceRoot[] {
+  if (!Array.isArray(value)) return [];
+  return value.flatMap((candidate) => {
+    if (!candidate || typeof candidate !== "object") return [];
+    const obj = candidate as JsonObject;
+    const root: WorkspaceRoot = {
+      name: stringField(obj.name),
+      real: stringField(obj.real),
+      work: stringField(obj.work),
+    };
+    return root.name || root.real || root.work ? [root] : [];
+  });
+}
+
+function metadataVirtualRoot(metadata?: SupervisorMetadata) {
+  return stringField(metadata?.virtual_root) || "/workspace";
+}
+
+function virtualForRoot(vroot: string, root: WorkspaceRoot, rel: string) {
+  const parts = [vroot, root.name || "", rel].filter(Boolean);
+  return cleanPosix(parts.join("/"));
+}
+
+function absoluteToVirtual(metadata: SupervisorMetadata | undefined, path: string) {
+  if (!path.startsWith("/")) return undefined;
+  const abs = cleanPosix(path);
+  const vroot = metadataVirtualRoot(metadata);
+  if (isUnderPath(abs, vroot)) return abs;
+
+  for (const root of metadata?.workspace_roots || []) {
+    for (const candidate of [root.work, root.real]) {
+      if (candidate && isUnderPath(abs, candidate)) {
+        return virtualForRoot(vroot, root, relativeToRoot(abs, candidate));
+      }
+    }
+  }
+
+  if (metadata?.worktree && isUnderPath(abs, metadata.worktree)) {
+    return cleanPosix(`${vroot}/${relativeToRoot(abs, metadata.worktree)}`);
+  }
+  if (metadata?.real_workspace && isUnderPath(abs, metadata.real_workspace)) {
+    return cleanPosix(`${vroot}/${relativeToRoot(abs, metadata.real_workspace)}`);
+  }
+  return undefined;
+}
+
+function firstPathComponent(path: string) {
+  return cleanPosix(path).split("/").find(Boolean) || "";
+}
+
+function restFileRequest(metadata: SupervisorMetadata | undefined, path: string) {
+  const directVirtual = absoluteToVirtual(metadata, toSlashPath(path));
+  if (directVirtual) return { path: directVirtual };
+
+  const cwd = toSlashPath(process.cwd());
+  const virtualCwd = absoluteToVirtual(metadata, cwd);
+  if (virtualCwd) return { path, cwd: virtualCwd };
+
+  const first = firstPathComponent(path);
+  if (first && (metadata?.workspace_roots || []).some((root) => root.name === first)) {
+    return { path, cwd: metadataVirtualRoot(metadata) };
+  }
+
+  return { path };
+}
+
 function sessionMetadataFromRest(raw: unknown, socketPath: string, seed?: SupervisorMetadata): SupervisorMetadata {
   const obj = (raw && typeof raw === "object" ? raw : {}) as JsonObject;
   const session = (obj.session && typeof obj.session === "object" ? obj.session : obj) as JsonObject;
+  const shadow = (session.shadow && typeof session.shadow === "object" ? session.shadow : {}) as JsonObject;
   const sessionId = String(obj.session_id || obj.id || session.id || seed?.session_id || seed?.sessionId || env("AGENTSH_SESSION_ID") || "");
+  const roots = normalizeWorkspaceRoots(obj.workspace_roots || session.workspace_roots || shadow.roots || seed?.workspace_roots);
   const metadata: SupervisorMetadata = {
     ...seed,
     session_id: sessionId || undefined,
@@ -663,6 +803,8 @@ function sessionMetadataFromRest(raw: unknown, socketPath: string, seed?: Superv
     policy: String(obj.policy || session.policy || seed?.policy || "") || undefined,
     real_workspace: String(obj.real_workspace || session.workspace || seed?.real_workspace || "") || undefined,
     workspace_mode: String(obj.workspace_mode || session.workspace_mode || seed?.workspace_mode || "") || undefined,
+    virtual_root: String(obj.virtual_root || session.virtual_root || seed?.virtual_root || "") || undefined,
+    workspace_roots: roots.length ? roots : seed?.workspace_roots,
     runtime_home: String(obj.runtime_home || session.runtime_home || seed?.runtime_home || "") || undefined,
     runtime_tmp: String(obj.runtime_tmp || session.runtime_tmp || seed?.runtime_tmp || "") || undefined,
     worktree: String(obj.worktree || session.workspace_mount || session.project_root || seed?.worktree || "") || undefined,
@@ -785,9 +927,9 @@ class RestSupervisorClient {
   }
 
   async readFile(path: string, options: ReadFileOptions = {}) {
+    const file = restFileRequest(this.#metadata, path);
     const raw = await this.request("POST", this.toolPath("read_file"), {
-      path,
-      cwd: process.cwd(),
+      ...file,
       actor: options.actor || parentActor(undefined, "Pi read tool"),
     }, { signal: options.signal, timeoutMs: TOOL_REQUEST_TIMEOUT_MS });
     const result = unwrapRestToolResponse<JsonObject>("read_file", raw);
@@ -798,9 +940,9 @@ class RestSupervisorClient {
   }
 
   async writeFile(path: string, content: string, options: WriteFileOptions = {}) {
+    const file = restFileRequest(this.#metadata, path);
     const raw = await this.request("POST", this.toolPath("write_file"), {
-      path,
-      cwd: process.cwd(),
+      ...file,
       content,
       encoding: "utf-8",
       create_dirs: true,
@@ -813,9 +955,9 @@ class RestSupervisorClient {
     if (!edits.length) throw new Error("edit_file requires at least one edit");
     const results: unknown[] = [];
     for (const edit of edits) {
+      const file = restFileRequest(this.#metadata, path);
       const raw = await this.request("POST", this.toolPath("edit_file"), {
-        path,
-        cwd: process.cwd(),
+        ...file,
         oldText: edit.oldText,
         newText: edit.newText,
         actor: options.actor || parentActor(undefined, "Pi edit tool"),
@@ -833,6 +975,13 @@ class RestSupervisorClient {
       decision: resolution.decision,
       scope: resolution.scope || "once",
       reason: resolution.reason || `${resolution.decision}d in parent Pi`,
+      scope_kind: resolution.scope_kind,
+      scope_key: resolution.scope_key,
+      scope_label: resolution.scope_label,
+      scope_operation: resolution.scope_operation,
+      scope_path: resolution.scope_path,
+      scope_rule: resolution.scope_rule,
+      scope_prefix: resolution.scope_prefix,
     });
   }
 
@@ -912,6 +1061,13 @@ class LegacyApprovalUIClient {
       decision: resolution.decision,
       scope: resolution.scope || "once",
       reason: resolution.reason || `${resolution.decision}d in parent Pi`,
+      scope_kind: resolution.scope_kind,
+      scope_key: resolution.scope_key,
+      scope_label: resolution.scope_label,
+      scope_operation: resolution.scope_operation,
+      scope_path: resolution.scope_path,
+      scope_rule: resolution.scope_rule,
+      scope_prefix: resolution.scope_prefix,
     });
   }
 
