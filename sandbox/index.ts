@@ -35,6 +35,8 @@ type SupervisorMetadata = {
   worktree?: string;
   real_workspace?: string;
   workspace_mode?: string;
+  runtime_home?: string;
+  runtime_tmp?: string;
   policy?: string;
   supported_ops?: string[];
   [key: string]: unknown;
@@ -661,6 +663,8 @@ function sessionMetadataFromRest(raw: unknown, socketPath: string, seed?: Superv
     policy: String(obj.policy || session.policy || seed?.policy || "") || undefined,
     real_workspace: String(obj.real_workspace || session.workspace || seed?.real_workspace || "") || undefined,
     workspace_mode: String(obj.workspace_mode || session.workspace_mode || seed?.workspace_mode || "") || undefined,
+    runtime_home: String(obj.runtime_home || session.runtime_home || seed?.runtime_home || "") || undefined,
+    runtime_tmp: String(obj.runtime_tmp || session.runtime_tmp || seed?.runtime_tmp || "") || undefined,
     worktree: String(obj.worktree || session.workspace_mount || session.project_root || seed?.worktree || "") || undefined,
     supported_ops: [
       "REST /api/v1/sessions",
