@@ -109,6 +109,10 @@ type WriteFileOptions = { cwd?: string; actor?: Actor; signal?: AbortSignal };
 type Edit = { oldText: string; newText: string };
 type EditFileOptions = { cwd?: string; actor?: Actor; signal?: AbortSignal };
 type SpawnSubagentOptions = { actor?: Actor; signal?: AbortSignal; onUpdate?: (message: SupervisorMessage) => void };
+type ApprovalClient = {
+  listApprovals(): Promise<ApprovalRequest[]>;
+  resolveApproval(approvalId: string, resolution: ApprovalResolution): Promise<unknown>;
+};
 type SupervisorClient = MockSupervisorClient | RestSupervisorClient | LegacyApprovalUIClient;
 type ApprovalWatcher = MockApprovalWatcher | RestApprovalWatcher;
 type RestToolResponse<T = unknown> = { ok?: boolean; result?: T; error?: string };
@@ -155,6 +159,7 @@ type SupervisorState = {
   resolving: Set<string>;
   promptChain: Promise<void>;
   client?: SupervisorClient;
+  approvalClient?: ApprovalClient;
   watcher?: ApprovalWatcher;
   ctx?: ExtensionContext;
   attachInFlight?: Promise<void>;
@@ -235,8 +240,16 @@ function workspaceModeEnv() {
   return VALID_STAGE1_WORKSPACE_MODES.has(value) ? value : "shadow";
 }
 
+function centralApprovalBridgeURL() {
+  return (env("AGENTSH_SESSION_EVENT_URL") || env("AGENTSH_DETACHED_EVENT_URL")).replace(/\/+$/, "");
+}
+
+function centralApprovalBridgeToken() {
+  return env("AGENTSH_SESSION_EVENT_TOKEN") || env("AGENTSH_DETACHED_EVENT_TOKEN");
+}
+
 function centralApprovalBridgeEnabled() {
-  return Boolean((env("AGENTSH_SESSION_EVENT_URL") || env("AGENTSH_DETACHED_EVENT_URL")) && (env("AGENTSH_SESSION_EVENT_TOKEN") || env("AGENTSH_DETACHED_EVENT_TOKEN")));
+  return Boolean(centralApprovalBridgeURL() && centralApprovalBridgeToken());
 }
 
 function protocolModeFromEnv(): ProtocolMode {
@@ -980,24 +993,78 @@ class RestSupervisorClient {
   async spawnSubagent(_params: JsonObject, _options: SpawnSubagentOptions = {}) { return restUnsupported("spawn_subagent"); }
 
   async resolveApproval(approvalId: string, resolution: ApprovalResolution) {
-    return await this.request("POST", `/api/v1/approvals/${encodeURIComponent(approvalId)}`, {
-      decision: resolution.decision,
-      scope: resolution.scope || "once",
-      reason: resolution.reason || `${resolution.decision}d in parent Pi`,
-      scope_kind: resolution.scope_kind,
-      scope_key: resolution.scope_key,
-      scope_label: resolution.scope_label,
-      scope_operation: resolution.scope_operation,
-      scope_path: resolution.scope_path,
-      scope_rule: resolution.scope_rule,
-      scope_prefix: resolution.scope_prefix,
-    });
+    return await this.request("POST", `/api/v1/approvals/${encodeURIComponent(approvalId)}`, approvalResolutionBody(resolution));
   }
 
   async stop() {
     const id = this.#sessionId;
     if (!id) return undefined;
     return await this.request("DELETE", `/api/v1/sessions/${encodeURIComponent(id)}`, undefined).catch(() => undefined);
+  }
+}
+
+function approvalResolutionBody(resolution: ApprovalResolution) {
+  return {
+    decision: resolution.decision,
+    scope: resolution.scope || "once",
+    reason: resolution.reason || `${resolution.decision}d in parent Pi`,
+    scope_kind: resolution.scope_kind,
+    scope_key: resolution.scope_key,
+    scope_label: resolution.scope_label,
+    scope_operation: resolution.scope_operation,
+    scope_path: resolution.scope_path,
+    scope_rule: resolution.scope_rule,
+    scope_prefix: resolution.scope_prefix,
+  };
+}
+
+class CentralApprovalClient implements ApprovalClient {
+  constructor(readonly baseURL: string, readonly sessionId: string, readonly token: string) {}
+
+  async request<T = unknown>(method: string, path: string, body?: unknown): Promise<T> {
+    const { signal, cleanup } = abortSignalFrom(undefined, CONNECT_TIMEOUT_MS);
+    return await new Promise<T>((resolve, reject) => {
+      const payload = body === undefined ? undefined : JSON.stringify(body);
+      const url = new URL(path, `${this.baseURL}/`);
+      const req = http.request(url, {
+        method,
+        signal,
+        headers: payload === undefined ? {
+          Accept: "application/json",
+          "X-AgentSH-Session-Event-Token": this.token,
+        } : {
+          Accept: "application/json",
+          "Content-Type": "application/json",
+          "Content-Length": Buffer.byteLength(payload),
+          "X-AgentSH-Session-Event-Token": this.token,
+        },
+      }, (res) => {
+        const chunks: Buffer[] = [];
+        res.on("data", (chunk) => chunks.push(Buffer.isBuffer(chunk) ? chunk : Buffer.from(chunk)));
+        res.on("end", () => {
+          cleanup();
+          const text = Buffer.concat(chunks).toString("utf8");
+          if ((res.statusCode || 0) < 200 || (res.statusCode || 0) >= 300) {
+            reject(new Error(`${method} ${url.pathname}: HTTP ${res.statusCode}${text.trim() ? `: ${truncate(text.trim(), 1000)}` : ""}`));
+            return;
+          }
+          if (!text.trim()) { resolve(undefined as T); return; }
+          try { resolve(JSON.parse(text) as T); } catch (error) { reject(asError(error)); }
+        });
+      });
+      req.on("error", (error) => { cleanup(); reject(error); });
+      req.setTimeout(CONNECT_TIMEOUT_MS, () => req.destroy(new Error(`Timed out connecting to AgentSH central approvals at ${this.baseURL}`)));
+      if (payload !== undefined) req.write(payload);
+      req.end();
+    });
+  }
+
+  async listApprovals() {
+    return await this.request<ApprovalRequest[]>("GET", `/api/v1/detached-sessions/${encodeURIComponent(this.sessionId)}/approvals`);
+  }
+
+  async resolveApproval(approvalId: string, resolution: ApprovalResolution) {
+    return await this.request("POST", `/api/v1/detached-sessions/${encodeURIComponent(this.sessionId)}/approvals/${encodeURIComponent(approvalId)}/resolution`, approvalResolutionBody(resolution));
   }
 }
 
@@ -1067,16 +1134,7 @@ class LegacyApprovalUIClient {
     return await this.request({
       op: "resolve",
       id: approvalId,
-      decision: resolution.decision,
-      scope: resolution.scope || "once",
-      reason: resolution.reason || `${resolution.decision}d in parent Pi`,
-      scope_kind: resolution.scope_kind,
-      scope_key: resolution.scope_key,
-      scope_label: resolution.scope_label,
-      scope_operation: resolution.scope_operation,
-      scope_path: resolution.scope_path,
-      scope_rule: resolution.scope_rule,
-      scope_prefix: resolution.scope_prefix,
+      ...approvalResolutionBody(resolution),
     });
   }
 
@@ -1092,7 +1150,7 @@ class RestApprovalWatcher {
   #stopped = false;
   #timer?: ReturnType<typeof setTimeout>;
 
-  constructor(private readonly client: RestSupervisorClient | LegacyApprovalUIClient, private readonly onApprovals: (approvals: ApprovalRequest[]) => void, private readonly onError: (error: Error) => void) {}
+  constructor(private readonly client: ApprovalClient, private readonly onApprovals: (approvals: ApprovalRequest[]) => void, private readonly onError: (error: Error) => void) {}
 
   start() { this.#stopped = false; void this.#poll(); }
   stop() {
@@ -1113,6 +1171,11 @@ class RestApprovalWatcher {
 function requireClient(state: SupervisorState) {
   if (!state.client || !state.active) throw new Error("AgentSH supervisor is not attached. Set PI_AGENTSH_MOCK_SUPERVISOR for mock NDJSON, or AGENTSH_SESSION_SUPERVISOR/PI_AGENTSH_ENABLE=1 for real Stage 1 REST before starting Pi.");
   return state.client;
+}
+
+function requireApprovalClient(state: SupervisorState) {
+  if (!state.approvalClient || !state.active) throw new Error("AgentSH approval client is not attached.");
+  return state.approvalClient;
 }
 
 function updatePending(state: SupervisorState, delta: number) {
@@ -1141,7 +1204,7 @@ async function promptApproval(state: SupervisorState, approval: ApprovalRequest)
     const choices = approvalChoices(approval);
     const choice = await ctx.ui.select(formatApproval(approval), choices.map((candidate) => candidate.label));
     const resolution = resolveChoice(choices, choice);
-    await requireClient(state).resolveApproval(approval.id, resolution);
+    await requireApprovalClient(state).resolveApproval(approval.id, resolution);
     const approved = resolution.decision === "approve";
     notify(ctx, `${approved ? "Approved" : "Denied"}${resolution.scope === "session" ? " for session" : ""}: ${approvalTitle(approval)}`, approved ? "info" : "warning");
     removePending(state, approval.id);
@@ -1172,6 +1235,7 @@ function resetConnection(state: SupervisorState) {
   state.watcher?.stop();
   state.watcher = undefined;
   state.client = undefined;
+  state.approvalClient = undefined;
   state.metadata = undefined;
   state.active = false;
   state.activeMode = "";
@@ -1201,16 +1265,15 @@ async function attachToSocket(state: SupervisorState, mode: ProtocolMode, source
       ? new LegacyApprovalUIClient(socketPath)
       : new RestSupervisorClient(socketPath, seedMetadata);
   state.client = client;
+  state.approvalClient = client;
   const metadata = await client.hello();
   state.metadata = { ...seedMetadata, ...metadata, supervisor_sock: socketPath };
   state.sessionId = metadataSessionId(state.metadata);
   state.status = "connected";
   setStatus(state, ctx);
 
-  if (mode === "rest" && centralApprovalBridgeEnabled()) {
-    // Detached supervisors push approvals to the central daemon; the macOS
-    // approver watches that daemon. Do not poll supervisor.sock from Pi too.
-    return;
+  if (mode === "rest" && centralApprovalBridgeEnabled() && state.sessionId) {
+    state.approvalClient = new CentralApprovalClient(centralApprovalBridgeURL(), state.sessionId, centralApprovalBridgeToken());
   }
 
   state.watcher = mode === "mock-ndjson"
@@ -1337,7 +1400,7 @@ function createGlobalAPI(state: SupervisorState): AgentSHPiAPI {
     async writeFile(path, content, options = {}) { return await requireClient(state).writeFile(path, content, options); },
     async editFile(path, edits, options = {}) { return await requireClient(state).editFile(path, edits, options); },
     async spawnSubagent(params, options = {}) { return await requireClient(state).spawnSubagent(params, options); },
-    async resolveApproval(approvalId, resolution) { return await requireClient(state).resolveApproval(approvalId, resolution); },
+    async resolveApproval(approvalId, resolution) { return await requireApprovalClient(state).resolveApproval(approvalId, resolution); },
     getSupervisorMetadata() { return state.metadata; },
     getSupervisorState() {
       return { active: state.active, status: state.status, source: state.source, socketPath: state.socketPath, sessionId: state.sessionId, metadata: state.metadata, lastError: state.lastError || undefined };
