@@ -13,6 +13,7 @@ import { createConnection, type Socket } from "node:net";
 import { posix as posixPath } from "node:path";
 import { Type } from "@sinclair/typebox";
 import type { ExtensionAPI, ExtensionContext } from "@mariozechner/pi-coding-agent";
+import { Text } from "@mariozechner/pi-tui";
 
 type JsonObject = Record<string, unknown>;
 type ProtocolMode = "mock-ndjson" | "rest" | "legacy-approval-ui" | "";
@@ -172,7 +173,6 @@ const START_TIMEOUT_MS = Number(process.env.PI_AGENTSH_START_TIMEOUT_MS || "3000
 const WATCH_RECONNECT_MS = Number(process.env.PI_AGENTSH_WATCH_RECONNECT_MS || "1500");
 const APPROVAL_POLL_MS = Number(process.env.PI_AGENTSH_APPROVAL_POLL_MS || "1500");
 const TOOL_REQUEST_TIMEOUT_MS = Number(process.env.PI_AGENTSH_TOOL_REQUEST_TIMEOUT_MS || "600000");
-const SUBAGENT_REQUEST_TIMEOUT_MS = Number(process.env.PI_AGENTSH_SUBAGENT_REQUEST_TIMEOUT_MS || "1800000");
 const SUBAGENT_REQUEST_TIMEOUT_MS = Number(process.env.PI_AGENTSH_SUBAGENT_REQUEST_TIMEOUT_MS || "1800000");
 const VALID_POLICIES = new Set(["pi-autonomous", "pi-supervised"]);
 const VALID_STAGE1_WORKSPACE_MODES = new Set(["shadow", "direct"]);
@@ -1000,7 +1000,11 @@ class RestSupervisorClient {
       results.push(unwrapRestToolResponse("edit_file", raw));
     }
     if (results.length === 1) return results[0];
-    return { path, replacements: results.length, results };
+    const diff = results
+      .map((result: any) => typeof result?.details?.diff === "string" ? result.details.diff : typeof result?.diff === "string" ? result.diff : "")
+      .filter(Boolean)
+      .join("\n");
+    return { path, replacements: results.length, results, ...(diff ? { diff, details: { diff } } : {}) };
   }
 
   async spawnSubagent(params: JsonObject, options: SpawnSubagentOptions = {}) {
@@ -1457,6 +1461,19 @@ function contentFromReadResult(result: any) {
   return [{ type: "text", text: textFromResult(result, "") }];
 }
 
+function renderSandboxFileToolCall(toolName: string, args: any, theme: any) {
+  const path = typeof args?.path === "string" && args.path ? args.path : "(unknown path)";
+  return new Text(`${theme.fg("toolTitle", toolName)} ${theme.fg("accent", path)}`, 0, 0);
+}
+
+function renderSandboxFileToolResult(result: any, _options: any, theme: any) {
+  const details = result?.details && typeof result.details === "object" ? result.details : {};
+  const diff = typeof details.diff === "string" && details.diff ? details.diff : undefined;
+  const text = textFromResult(result, "");
+  const output = diff ? `${text ? `${text}\n\n` : ""}${diff}` : text;
+  return new Text(theme.fg("toolOutput", output || "(no output)"), 0, 0);
+}
+
 function subagentText(result: any) {
   return textFromResult(result, result?.final || result?.summary || result?.stdout || JSON.stringify(result ?? {}, null, 2));
 }
@@ -1585,6 +1602,12 @@ export default function sandbox(pi: ExtensionAPI) {
     label: "edit",
     description: "Edit a file through the AgentSH session supervisor using exact text replacements.",
     parameters: EditParams,
+    renderCall(args, theme) {
+      return renderSandboxFileToolCall("edit", args, theme);
+    },
+    renderResult(result, options, theme) {
+      return renderSandboxFileToolResult(result, options, theme);
+    },
     async execute(toolCallId, params, signal, _onUpdate, ctx) {
       const result = await requireClient(state).editFile(params.path, params.edits, { cwd: effectiveSupervisorCwd(ctx), actor: parentActor(toolCallId, "Pi edit tool"), signal });
       return { content: [{ type: "text", text: textFromResult(result, `Edited ${params.path}`) }], details: (result as any)?.details || { diff: (result as any)?.diff } };

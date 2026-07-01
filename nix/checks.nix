@@ -526,6 +526,27 @@ in
     EOF
     echo 'export {};' > "$outdir/node_modules/@mariozechner/pi-coding-agent/index.js"
 
+    mkdir -p "$outdir/node_modules/@mariozechner/pi-tui"
+    cat > "$outdir/node_modules/@mariozechner/pi-tui/package.json" <<'EOF'
+    {
+      "name": "@mariozechner/pi-tui",
+      "type": "module",
+      "main": "./index.js"
+    }
+    EOF
+    cat > "$outdir/node_modules/@mariozechner/pi-tui/index.js" <<'EOF'
+    export class Text {
+      constructor(text, x = 0, y = 0) {
+        this.text = text;
+        this.x = x;
+        this.y = y;
+      }
+      render() {
+        return String(this.text || "").split("\n");
+      }
+    }
+    EOF
+
     tsc \
       --noCheck \
       --skipLibCheck \
@@ -860,6 +881,15 @@ in
         const ctx = createContext();
         await startSession(pi, ctx);
         await waitFor(() => Boolean(resolved), "REST supervisor approval was not resolved through supervisor socket");
+
+        const editTool = pi.tools.get("edit");
+        assert(editTool, "REST mode did not register AgentSH-backed edit tool");
+        assert(typeof editTool.renderCall === "function", "AgentSH-backed edit tool must provide its own renderCall to avoid local preview reads");
+        assert(typeof editTool.renderResult === "function", "AgentSH-backed edit tool must provide its own renderResult");
+        const renderedCall = editTool.renderCall({ path: "hw/src/file.cpp", edits: [{ oldText: "a", newText: "b" }] }, ctx.ui.theme).render().join("\n");
+        assert(renderedCall.includes("edit") && renderedCall.includes("hw/src/file.cpp"), "edit renderCall did not render path without built-in preview");
+        const renderedResult = editTool.renderResult({ content: [{ type: "text", text: "Edited hw/src/file.cpp" }], details: { diff: "--- a\n+++ b\n@@\n-a\n+b" } }, {}, ctx.ui.theme).render().join("\n");
+        assert(renderedResult.includes("Edited hw/src/file.cpp") && renderedResult.includes("@@"), "edit renderResult did not include result text and diff");
 
         assert(resolved.body.decision === "approve", "REST supervisor approval was not approved");
         assert(central.requests.length === 0, "central approval bridge was used without explicit opt-in");
