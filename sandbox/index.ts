@@ -157,6 +157,7 @@ type SupervisorState = {
   pendingIds: Set<string>;
   seenApprovals: Set<string>;
   resolving: Set<string>;
+  promptAbortControllers: Map<string, AbortController>;
   promptChain: Promise<void>;
   client?: SupervisorClient;
   approvalClient?: ApprovalClient;
@@ -171,6 +172,8 @@ const START_TIMEOUT_MS = Number(process.env.PI_AGENTSH_START_TIMEOUT_MS || "3000
 const WATCH_RECONNECT_MS = Number(process.env.PI_AGENTSH_WATCH_RECONNECT_MS || "1500");
 const APPROVAL_POLL_MS = Number(process.env.PI_AGENTSH_APPROVAL_POLL_MS || "1500");
 const TOOL_REQUEST_TIMEOUT_MS = Number(process.env.PI_AGENTSH_TOOL_REQUEST_TIMEOUT_MS || "600000");
+const SUBAGENT_REQUEST_TIMEOUT_MS = Number(process.env.PI_AGENTSH_SUBAGENT_REQUEST_TIMEOUT_MS || "1800000");
+const SUBAGENT_REQUEST_TIMEOUT_MS = Number(process.env.PI_AGENTSH_SUBAGENT_REQUEST_TIMEOUT_MS || "1800000");
 const VALID_POLICIES = new Set(["pi-autonomous", "pi-supervised"]);
 const VALID_STAGE1_WORKSPACE_MODES = new Set(["shadow", "direct"]);
 
@@ -250,6 +253,10 @@ function centralApprovalBridgeToken() {
 
 function centralApprovalBridgeEnabled() {
   return Boolean(centralApprovalBridgeURL() && centralApprovalBridgeToken());
+}
+
+function centralApprovalBridgeRequested() {
+  return env("PI_AGENTSH_APPROVAL_CLIENT").toLowerCase() === "central";
 }
 
 function protocolModeFromEnv(): ProtocolMode {
@@ -448,10 +455,16 @@ function approvalChoices(approval: ApprovalRequest): ApprovalChoice[] {
   const denyOnce: ApprovalChoice = { label: `Deny ${title}`, decision: "deny", scope: "once", reason: "denied in parent Pi" };
   const choices: ApprovalChoice[] = [approveOnce];
   for (const option of sessionScopeOptions(approval)) {
-    const label = option.scope_label || option.scope_key || title;
-    choices.push({ ...option, decision: "approve", scope: "session", reason: `approved ${label} for session in parent Pi`, label: `Approve for session: ${label}` });
+    const scopeTarget = option.scope_label || option.scope_key || title;
+    const label = option.scope_kind ? `${option.scope_kind}: ${scopeTarget}` : scopeTarget;
+    choices.push({ ...option, decision: "approve", scope: "session", reason: `approved for session ${label} in parent Pi`, label: `Approve for session ${label}` });
   }
   choices.push(denyOnce);
+  for (const option of sessionScopeOptions(approval)) {
+    const scopeTarget = option.scope_label || option.scope_key || title;
+    const label = option.scope_kind ? `${option.scope_kind}: ${scopeTarget}` : scopeTarget;
+    choices.push({ ...option, decision: "deny", scope: "session", reason: `denied for session ${label} in parent Pi`, label: `Deny for session ${label}` });
+  }
   return choices;
 }
 
@@ -990,7 +1003,16 @@ class RestSupervisorClient {
     return { path, replacements: results.length, results };
   }
 
-  async spawnSubagent(_params: JsonObject, _options: SpawnSubagentOptions = {}) { return restUnsupported("spawn_subagent"); }
+  async spawnSubagent(params: JsonObject, options: SpawnSubagentOptions = {}) {
+    try {
+      const raw = await this.request("POST", this.toolPath("spawn_subagent"), params, { signal: options.signal, timeoutMs: SUBAGENT_REQUEST_TIMEOUT_MS });
+      return unwrapRestToolResponse("spawn_subagent", raw);
+    } catch (error) {
+      const message = asError(error).message;
+      if (message.includes("HTTP 404")) throw new Error("AgentSH supervisor does not support spawn_subagent; rebuild/deploy a newer AgentSH or disable sandbox subagent registration.");
+      throw error;
+    }
+  }
 
   async resolveApproval(approvalId: string, resolution: ApprovalResolution) {
     return await this.request("POST", `/api/v1/approvals/${encodeURIComponent(approvalId)}`, approvalResolutionBody(resolution));
@@ -1191,7 +1213,11 @@ function removePending(state: SupervisorState, approvalId: string) {
 function syncPendingApprovals(state: SupervisorState, approvals: ApprovalRequest[]) {
   const current = new Set(approvals.map((approval) => approval.id).filter(Boolean));
   for (const id of Array.from(state.pendingIds)) {
-    if (!current.has(id) && !state.resolving.has(id)) removePending(state, id);
+    if (!current.has(id)) {
+      state.promptAbortControllers.get(id)?.abort();
+      notify(state.ctx, `AgentSH approval already handled externally: ${id}`, "info");
+      removePending(state, id);
+    }
   }
   for (const approval of approvals) enqueueApproval(state, approval);
 }
@@ -1200,9 +1226,12 @@ async function promptApproval(state: SupervisorState, approval: ApprovalRequest)
   const ctx = state.ctx;
   if (!ctx?.hasUI || state.resolving.has(approval.id)) return;
   state.resolving.add(approval.id);
+  const controller = new AbortController();
+  state.promptAbortControllers.set(approval.id, controller);
   try {
     const choices = approvalChoices(approval);
-    const choice = await ctx.ui.select(formatApproval(approval), choices.map((candidate) => candidate.label));
+    const choice = await ctx.ui.select(formatApproval(approval), choices.map((candidate) => candidate.label), { signal: controller.signal });
+    if (controller.signal.aborted) return;
     const resolution = resolveChoice(choices, choice);
     await requireApprovalClient(state).resolveApproval(approval.id, resolution);
     const approved = resolution.decision === "approve";
@@ -1210,6 +1239,7 @@ async function promptApproval(state: SupervisorState, approval: ApprovalRequest)
     removePending(state, approval.id);
   } catch (error) {
     if (/approval not found|HTTP 404/i.test(asError(error).message)) {
+      notify(ctx, `AgentSH approval already handled externally: ${approvalTitle(approval)}`, "info");
       removePending(state, approval.id);
       return;
     }
@@ -1218,6 +1248,7 @@ async function promptApproval(state: SupervisorState, approval: ApprovalRequest)
     notify(ctx, `AgentSH approval handling failed: ${state.lastError}`, "error");
     setStatus(state);
   } finally {
+    state.promptAbortControllers.delete(approval.id);
     state.resolving.delete(approval.id);
   }
 }
@@ -1246,6 +1277,8 @@ function resetConnection(state: SupervisorState) {
   state.pendingCount = 0;
   state.pendingIds.clear();
   state.seenApprovals.clear();
+  for (const controller of state.promptAbortControllers.values()) controller.abort();
+  state.promptAbortControllers.clear();
   state.resolving.clear();
 }
 
@@ -1272,7 +1305,7 @@ async function attachToSocket(state: SupervisorState, mode: ProtocolMode, source
   state.status = "connected";
   setStatus(state, ctx);
 
-  if (mode === "rest" && centralApprovalBridgeEnabled() && state.sessionId) {
+  if (mode === "rest" && centralApprovalBridgeRequested() && centralApprovalBridgeEnabled() && state.sessionId) {
     state.approvalClient = new CentralApprovalClient(centralApprovalBridgeURL(), state.sessionId, centralApprovalBridgeToken());
   }
 
@@ -1442,6 +1475,7 @@ export default function sandbox(pi: ExtensionAPI) {
     pendingIds: new Set(),
     seenApprovals: new Set(),
     resolving: new Set(),
+    promptAbortControllers: new Map(),
     promptChain: Promise.resolve(),
   };
 

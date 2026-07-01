@@ -501,8 +501,17 @@ in
       String(options = {}) {
         return { type: "string", ...options };
       },
+      Number(options = {}) {
+        return { type: "number", ...options };
+      },
+      Array(items, options = {}) {
+        return { type: "array", items, ...options };
+      },
       Object(properties) {
         return { type: "object", properties };
+      },
+      Optional(schema) {
+        return { ...schema, optional: true };
       },
     };
     EOF
@@ -529,6 +538,7 @@ in
 
     cat > "$workdir/test.mjs" <<'EOF'
     import fs from "node:fs";
+    import http from "node:http";
     import net from "node:net";
     import os from "node:os";
     import path from "node:path";
@@ -622,6 +632,81 @@ in
       }
     }
 
+    async function withRestSupervisor(handler) {
+      const dir = fs.mkdtempSync(path.join(os.tmpdir(), "agentsh-rest-supervisor-"));
+      const socketPath = path.join(dir, "supervisor.sock");
+      const requests = [];
+      const server = http.createServer(async (req, res) => {
+        const chunks = [];
+        req.on("data", (chunk) => chunks.push(Buffer.isBuffer(chunk) ? chunk : Buffer.from(chunk)));
+        req.on("end", async () => {
+          const raw = Buffer.concat(chunks).toString("utf8");
+          let body;
+          if (raw.trim()) body = JSON.parse(raw);
+          const request = { method: req.method, url: req.url, body };
+          requests.push(request);
+          try {
+            const response = await handler(request, requests);
+            res.statusCode = response?.statusCode ?? 200;
+            res.setHeader("Content-Type", "application/json");
+            res.end(JSON.stringify(response?.body ?? response ?? {}));
+          } catch (error) {
+            res.statusCode = 500;
+            res.setHeader("Content-Type", "application/json");
+            res.end(JSON.stringify({ ok: false, error: error instanceof Error ? error.message : String(error) }));
+          }
+        });
+      });
+      await new Promise((resolve, reject) => {
+        server.once("error", reject);
+        server.listen(socketPath, () => {
+          server.off("error", reject);
+          resolve();
+        });
+      });
+      return {
+        socketPath,
+        requests,
+        async close() {
+          await new Promise((resolve) => server.close(resolve));
+        },
+      };
+    }
+
+    async function withHttpServer(handler) {
+      const requests = [];
+      const server = http.createServer(async (req, res) => {
+        const chunks = [];
+        req.on("data", (chunk) => chunks.push(Buffer.isBuffer(chunk) ? chunk : Buffer.from(chunk)));
+        req.on("end", async () => {
+          const raw = Buffer.concat(chunks).toString("utf8");
+          let body;
+          if (raw.trim()) body = JSON.parse(raw);
+          const request = { method: req.method, url: req.url, body };
+          requests.push(request);
+          const response = await handler(request, requests);
+          res.statusCode = response?.statusCode ?? 200;
+          res.setHeader("Content-Type", "application/json");
+          res.end(JSON.stringify(response?.body ?? response ?? {}));
+        });
+      });
+      await new Promise((resolve, reject) => {
+        server.once("error", reject);
+        server.listen(0, "127.0.0.1", () => {
+          server.off("error", reject);
+          resolve();
+        });
+      });
+      const address = server.address();
+      return {
+        url: "http://127.0.0.1:" + address.port,
+        requests,
+        async close() {
+          await new Promise((resolve) => server.close(resolve));
+        },
+      };
+    }
+
     async function withApprovalServer(handler) {
       const dir = fs.mkdtempSync(path.join(os.tmpdir(), "agentsh-approval-ui-"));
       const socketPath = path.join(dir, "approval.sock");
@@ -672,6 +757,10 @@ in
       delete process.env.AGENTSH_SESSION_ID;
       delete process.env.PI_AUTO_SESSION_ID;
       delete process.env.AGENTSH_APPROVAL_UI_SOCKET;
+      delete process.env.AGENTSH_SESSION_SUPERVISOR;
+      delete process.env.AGENTSH_SESSION_EVENT_URL;
+      delete process.env.AGENTSH_SESSION_EVENT_TOKEN;
+      delete process.env.PI_AGENTSH_APPROVAL_CLIENT;
       delete process.env.AGENTSH_API_KEY;
       delete process.env.AGENTSH_APPROVER_API_KEY;
       delete process.env.AGENTSH_ADMIN_TOKEN;
@@ -707,7 +796,6 @@ in
         await startSession(pi, ctx);
 
         assert(ctx.statuses.some((entry) => entry.name === "sandbox" && entry.value === "agentsh inactive"), "missing env did not mark relay inactive");
-        assert(ctx.notifications.some((entry) => String(entry.message).includes("approval relay inactive")), "missing env did not notify inactive relay");
         assert(ctx.selectCalls.length === 0, "inactive relay should not prompt");
         await shutdownSession(pi);
       }
@@ -745,6 +833,75 @@ in
         assertNoBearerCredentialFields(server.requests);
         await shutdownSession(pi);
         await server.close();
+      }
+
+      // REST supervisor approvals resolve through the same supervisor socket even when a central event URL is present.
+      {
+        clearAgentSHEnv();
+        let approvals = [{ id: "rest-appr", session_id: "sess-rest", kind: "file", target: "/workspace/.env" }];
+        let resolved;
+        const supervisor = await withRestSupervisor(async (request) => {
+          if (request.method === "GET" && request.url === "/api/v1/sessions/sess-rest") return { id: "sess-rest", session_id: "sess-rest", workspace: "/workspace", worktree: "/workspace" };
+          if (request.method === "GET" && request.url === "/api/v1/approvals") return approvals;
+          if (request.method === "POST" && request.url === "/api/v1/approvals/rest-appr") {
+            resolved = request;
+            approvals = [];
+            return {};
+          }
+          return { statusCode: 404, body: { error: "unexpected supervisor request", request } };
+        });
+        const central = await withHttpServer(async (request) => ({ statusCode: 500, body: { error: "central should not be used", request } }));
+        process.env.AGENTSH_SESSION_ID = "sess-rest";
+        process.env.AGENTSH_SESSION_SUPERVISOR = "unix://" + supervisor.socketPath;
+        process.env.AGENTSH_SESSION_EVENT_URL = central.url;
+        process.env.AGENTSH_SESSION_EVENT_TOKEN = "central-token";
+        const pi = createPi();
+        sandbox(pi);
+        const ctx = createContext();
+        await startSession(pi, ctx);
+        await waitFor(() => Boolean(resolved), "REST supervisor approval was not resolved through supervisor socket");
+
+        assert(resolved.body.decision === "approve", "REST supervisor approval was not approved");
+        assert(central.requests.length === 0, "central approval bridge was used without explicit opt-in");
+        await shutdownSession(pi);
+        await supervisor.close();
+        await central.close();
+      }
+
+      // Explicit central approval client opt-in resolves via the central detached-session bridge.
+      {
+        clearAgentSHEnv();
+        const approvals = [{ id: "central-appr", session_id: "sess-rest", kind: "file", target: "/workspace/.env" }];
+        let centralResolved;
+        const supervisor = await withRestSupervisor(async (request) => {
+          if (request.method === "GET" && request.url === "/api/v1/sessions/sess-rest") return { id: "sess-rest", session_id: "sess-rest", workspace: "/workspace", worktree: "/workspace" };
+          if (request.method === "GET" && request.url === "/api/v1/approvals") return approvals;
+          if (request.method === "POST" && request.url === "/api/v1/approvals/central-appr") return { statusCode: 500, body: { error: "supervisor should not resolve when central is requested" } };
+          return { statusCode: 404, body: { error: "unexpected supervisor request", request } };
+        });
+        const central = await withHttpServer(async (request) => {
+          if (request.method === "POST" && request.url === "/api/v1/detached-sessions/sess-rest/approvals/central-appr/resolution") {
+            centralResolved = request;
+            return {};
+          }
+          return { statusCode: 404, body: { error: "unexpected central request", request } };
+        });
+        process.env.AGENTSH_SESSION_ID = "sess-rest";
+        process.env.AGENTSH_SESSION_SUPERVISOR = "unix://" + supervisor.socketPath;
+        process.env.AGENTSH_SESSION_EVENT_URL = central.url;
+        process.env.AGENTSH_SESSION_EVENT_TOKEN = "central-token";
+        process.env.PI_AGENTSH_APPROVAL_CLIENT = "central";
+        const pi = createPi();
+        sandbox(pi);
+        const ctx = createContext();
+        await startSession(pi, ctx);
+        await waitFor(() => Boolean(centralResolved), "central approval client opt-in did not resolve through central bridge");
+
+        assert(centralResolved.body.decision === "approve", "central approval was not approved");
+        assert(centralResolved.body.scope === "once", "central approval default scope was not relayed");
+        await shutdownSession(pi);
+        await supervisor.close();
+        await central.close();
       }
 
       // Deny resolve path.

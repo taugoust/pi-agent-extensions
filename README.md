@@ -550,6 +550,7 @@ PI_AGENTSH_POLICY=pi-autonomous|pi-supervised          # default: pi-autonomous
 PI_AGENTSH_WORKSPACE_MODE=shadow|direct                # Stage 1 only; default: shadow
 PI_AGENTSH_BIN=agentsh                                 # default: agentsh
 PI_AGENTSH_READ_MODE=supervised                        # optional read override (mock and real REST)
+PI_AGENTSH_APPROVAL_CLIENT=central                     # opt into central detached approval bridge
 ```
 
 **Mock NDJSON protocol**: newline-delimited JSON over a Unix socket. Requests
@@ -567,6 +568,8 @@ Streaming ops may emit `stdout`, `stderr`, `tool_update`, `subagent_update`, or
   when possible;
 - `GET /api/v1/approvals` on a polling interval to find pending approvals;
 - `POST /api/v1/approvals/{id}` to approve/deny with `scope` and `reason`;
+  central detached-session approval resolution is used only when explicitly
+  requested with `PI_AGENTSH_APPROVAL_CLIENT=central`;
 - `POST /api/v1/sessions/{id}/tools/exec_bash` for `bash`{.verbatim};
 - `POST /api/v1/sessions/{id}/tools/read_file` for optional supervised
   `read`{.verbatim};
