@@ -303,6 +303,12 @@ async function getImageMagickVersion(signal?: AbortSignal): Promise<string | und
   }
 }
 
+function assertNotRemoteSshMode() {
+  if (process.env.PI_AGENTSH_REMOTE === "ssh") {
+    throw new Error("pdf tools are disabled in remote AgentSH SSH mode until they can be routed through the remote supervisor");
+  }
+}
+
 export default function pdfExtension(pi: ExtensionAPI) {
   pi.registerTool({
     name: "pdf_info",
@@ -316,6 +322,7 @@ export default function pdfExtension(pi: ExtensionAPI) {
       ),
     }),
     async execute(_toolCallId, params, signal, _onUpdate, ctx) {
+      assertNotRemoteSshMode();
       const pdfPath = resolveLocalPath(ctx.cwd, params.pdfPath, "pdfPath");
       await requireReadableFile(pdfPath, "pdfPath");
 
@@ -365,6 +372,7 @@ export default function pdfExtension(pi: ExtensionAPI) {
       timeoutMs: Type.Optional(Type.Number({ description: `Timeout per page in milliseconds (default: ${DEFAULT_TIMEOUT_MS})` })),
     }),
     async execute(_toolCallId, params, signal, onUpdate, ctx) {
+      assertNotRemoteSshMode();
       const pdfPath = resolveLocalPath(ctx.cwd, params.pdfPath, "pdfPath");
       const outputDir = resolveLocalPath(ctx.cwd, params.outputDir, "outputDir");
       await requireReadableFile(pdfPath, "pdfPath");
@@ -485,6 +493,7 @@ export default function pdfExtension(pi: ExtensionAPI) {
       timeoutMs: Type.Optional(Type.Number({ description: `Timeout in milliseconds (default: ${DEFAULT_TIMEOUT_MS})` })),
     }),
     async execute(_toolCallId, params, signal, _onUpdate, ctx) {
+      assertNotRemoteSshMode();
       const sourceImagePath = resolveLocalPath(ctx.cwd, params.sourceImagePath, "sourceImagePath");
       await requireReadableFile(sourceImagePath, "sourceImagePath");
       const crop = params.crop as CropRect;
@@ -583,6 +592,7 @@ export default function pdfExtension(pi: ExtensionAPI) {
       timeoutMs: Type.Optional(Type.Number({ description: `Timeout in milliseconds (default: ${DEFAULT_TIMEOUT_MS})` })),
     }),
     async execute(_toolCallId, params, signal, _onUpdate, ctx) {
+      assertNotRemoteSshMode();
       const pdfPath = resolveLocalPath(ctx.cwd, params.pdfPath, "pdfPath");
       await requireReadableFile(pdfPath, "pdfPath");
       const outputPath = params.outputPath ? resolveLocalPath(ctx.cwd, params.outputPath, "outputPath") : undefined;
@@ -663,6 +673,7 @@ export default function pdfExtension(pi: ExtensionAPI) {
       timeoutMs: Type.Optional(Type.Number({ description: `Timeout in milliseconds (default: ${DEFAULT_TIMEOUT_MS})` })),
     }),
     async execute(_toolCallId, params, signal, _onUpdate, ctx) {
+      assertNotRemoteSshMode();
       const pdfPath = resolveLocalPath(ctx.cwd, params.pdfPath, "pdfPath");
       const outputDir = resolveLocalPath(ctx.cwd, params.outputDir, "outputDir");
       await requireReadableFile(pdfPath, "pdfPath");

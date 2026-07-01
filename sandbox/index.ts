@@ -104,10 +104,10 @@ type ExecOptions = {
 };
 
 type ExecResult = { exitCode?: number | null; signal?: string | null; stdout?: string; stderr?: string; [key: string]: unknown };
-type ReadFileOptions = { offset?: number; limit?: number; actor?: Actor; signal?: AbortSignal };
-type WriteFileOptions = { actor?: Actor; signal?: AbortSignal };
+type ReadFileOptions = { offset?: number; limit?: number; cwd?: string; actor?: Actor; signal?: AbortSignal };
+type WriteFileOptions = { cwd?: string; actor?: Actor; signal?: AbortSignal };
 type Edit = { oldText: string; newText: string };
-type EditFileOptions = { actor?: Actor; signal?: AbortSignal };
+type EditFileOptions = { cwd?: string; actor?: Actor; signal?: AbortSignal };
 type SpawnSubagentOptions = { actor?: Actor; signal?: AbortSignal; onUpdate?: (message: SupervisorMessage) => void };
 type SupervisorClient = MockSupervisorClient | RestSupervisorClient | LegacyApprovalUIClient;
 type ApprovalWatcher = MockApprovalWatcher | RestApprovalWatcher;
@@ -216,6 +216,10 @@ function env(name: string) {
   return value && value.trim() ? value.trim() : "";
 }
 
+function effectiveSupervisorCwd(ctx?: ExtensionContext) {
+  return env("PI_AGENTSH_REMOTE_CWD") || ctx?.cwd || process.cwd();
+}
+
 function normalizeSocketPath(value: string) {
   if (!value) return "";
   return value.startsWith("unix://") ? value.slice("unix://".length) : value;
@@ -318,14 +322,14 @@ async function runAgentSHSessionStart(ctx: ExtensionContext) {
     "session", "start",
     "--detach",
     "--policy", policy,
-    "--workspace", ctx.cwd || process.cwd(),
+    "--workspace", effectiveSupervisorCwd(ctx),
     "--workspace-mode", workspaceMode,
     "--json",
   ];
 
   return await new Promise<SupervisorMetadata>((resolve, reject) => {
     const child = spawn(bin, args, {
-      cwd: ctx.cwd || process.cwd(),
+      cwd: effectiveSupervisorCwd(ctx),
       env: process.env,
       stdio: ["ignore", "pipe", "pipe"],
     });
@@ -527,7 +531,7 @@ class MockSupervisorClient {
     const timeoutMs = options.timeout_ms ?? (options.timeout ? Math.max(0, options.timeout) * 1000 : undefined);
     return await this.request<ExecResult>("exec_bash", {
       command,
-      cwd: options.cwd || process.cwd(),
+      cwd: options.cwd || effectiveSupervisorCwd(),
       timeout_ms: timeoutMs,
       actor: options.actor || parentActor(options.tool_call_id, "Pi bash tool"),
     }, {
@@ -543,17 +547,18 @@ class MockSupervisorClient {
   }
 
   async readFile(path: string, options: ReadFileOptions = {}) {
-    return await this.request("read_file", { path, offset: options.offset, limit: options.limit, actor: options.actor || parentActor(undefined, "Pi read tool") }, { signal: options.signal });
+    return await this.request("read_file", { path, cwd: options.cwd, offset: options.offset, limit: options.limit, actor: options.actor || parentActor(undefined, "Pi read tool") }, { signal: options.signal });
   }
 
   async writeFile(path: string, content: string, options: WriteFileOptions = {}) {
-    return await this.request("write_file", { path, content, actor: options.actor || parentActor(undefined, "Pi write tool") }, { signal: options.signal });
+    return await this.request("write_file", { path, cwd: options.cwd, content, actor: options.actor || parentActor(undefined, "Pi write tool") }, { signal: options.signal });
   }
 
   async editFile(path: string, edits: Edit[], options: EditFileOptions = {}) {
     const first = edits[0];
     return await this.request("edit_file", {
       path,
+      cwd: options.cwd,
       edits,
       oldText: edits.length === 1 ? first?.oldText : undefined,
       newText: edits.length === 1 ? first?.newText : undefined,
@@ -772,11 +777,11 @@ function firstPathComponent(path: string) {
   return cleanPosix(path).split("/").find(Boolean) || "";
 }
 
-function restFileRequest(metadata: SupervisorMetadata | undefined, path: string) {
+function restFileRequest(metadata: SupervisorMetadata | undefined, path: string, cwd = effectiveSupervisorCwd()) {
   const directVirtual = absoluteToVirtual(metadata, toSlashPath(path));
   if (directVirtual) return { path: directVirtual };
 
-  const cwd = toSlashPath(process.cwd());
+  cwd = toSlashPath(cwd);
   const virtualCwd = absoluteToVirtual(metadata, cwd);
   if (virtualCwd) return { path, cwd: virtualCwd };
 
@@ -907,7 +912,7 @@ class RestSupervisorClient {
     const timeoutMs = options.timeout_ms ?? (options.timeout ? Math.max(0, options.timeout) * 1000 : undefined);
     const raw = await this.request("POST", this.toolPath("exec_bash"), {
       command,
-      cwd: options.cwd || process.cwd(),
+      cwd: options.cwd || effectiveSupervisorCwd(),
       timeout_ms: timeoutMs,
       actor: options.actor || parentActor(options.tool_call_id, "Pi bash tool"),
     }, { signal: options.signal, timeoutMs: timeoutMs ? Math.max(TOOL_REQUEST_TIMEOUT_MS, timeoutMs + CONNECT_TIMEOUT_MS) : TOOL_REQUEST_TIMEOUT_MS });
@@ -927,7 +932,7 @@ class RestSupervisorClient {
   }
 
   async readFile(path: string, options: ReadFileOptions = {}) {
-    const file = restFileRequest(this.#metadata, path);
+    const file = restFileRequest(this.#metadata, path, options.cwd);
     const raw = await this.request("POST", this.toolPath("read_file"), {
       ...file,
       actor: options.actor || parentActor(undefined, "Pi read tool"),
@@ -940,7 +945,7 @@ class RestSupervisorClient {
   }
 
   async writeFile(path: string, content: string, options: WriteFileOptions = {}) {
-    const file = restFileRequest(this.#metadata, path);
+    const file = restFileRequest(this.#metadata, path, options.cwd);
     const raw = await this.request("POST", this.toolPath("write_file"), {
       ...file,
       content,
@@ -955,7 +960,7 @@ class RestSupervisorClient {
     if (!edits.length) throw new Error("edit_file requires at least one edit");
     const results: unknown[] = [];
     for (const edit of edits) {
-      const file = restFileRequest(this.#metadata, path);
+      const file = restFileRequest(this.#metadata, path, options.cwd);
       const raw = await this.request("POST", this.toolPath("edit_file"), {
         ...file,
         oldText: edit.oldText,
@@ -1436,7 +1441,7 @@ export default function sandbox(pi: ExtensionAPI) {
       let output = "";
       const emit = () => onUpdate?.({ content: output ? [{ type: "text", text: output }] : [], details: undefined });
       onUpdate?.({ content: [], details: undefined });
-      const result = await client.exec(params.command, { cwd: ctx.cwd || process.cwd(), timeout: params.timeout, tool_call_id: toolCallId, signal, onOutput: (chunk) => { output += chunk; emit(); } });
+      const result = await client.exec(params.command, { cwd: effectiveSupervisorCwd(ctx), timeout: params.timeout, tool_call_id: toolCallId, signal, onOutput: (chunk) => { output += chunk; emit(); } });
       const exitCode = typeof result.exitCode === "number" ? result.exitCode : 0;
       const finalText = output || "(no output)";
       if (exitCode !== 0) throw new Error(`${finalText}\n\nCommand exited with code ${exitCode}`);
@@ -1450,8 +1455,8 @@ export default function sandbox(pi: ExtensionAPI) {
       label: "read",
       description: "Read a file through the AgentSH session supervisor. Ordinary project reads are native unless PI_AGENTSH_READ_MODE=supervised.",
       parameters: ReadParams,
-      async execute(toolCallId, params, signal) {
-        const result = await requireClient(state).readFile(params.path, { offset: params.offset, limit: params.limit, actor: parentActor(toolCallId, "Pi read tool"), signal });
+      async execute(toolCallId, params, signal, _onUpdate, ctx) {
+        const result = await requireClient(state).readFile(params.path, { cwd: effectiveSupervisorCwd(ctx), offset: params.offset, limit: params.limit, actor: parentActor(toolCallId, "Pi read tool"), signal });
         return { content: contentFromReadResult(result), details: (result as any)?.details };
       },
     });
@@ -1462,8 +1467,8 @@ export default function sandbox(pi: ExtensionAPI) {
     label: "write",
     description: "Write content to a file through the AgentSH session supervisor.",
     parameters: WriteParams,
-    async execute(toolCallId, params, signal) {
-      const result = await requireClient(state).writeFile(params.path, params.content, { actor: parentActor(toolCallId, "Pi write tool"), signal });
+    async execute(toolCallId, params, signal, _onUpdate, ctx) {
+      const result = await requireClient(state).writeFile(params.path, params.content, { cwd: effectiveSupervisorCwd(ctx), actor: parentActor(toolCallId, "Pi write tool"), signal });
       return { content: [{ type: "text", text: textFromResult(result, `Wrote ${params.path}`) }], details: undefined };
     },
   });
@@ -1473,8 +1478,8 @@ export default function sandbox(pi: ExtensionAPI) {
     label: "edit",
     description: "Edit a file through the AgentSH session supervisor using exact text replacements.",
     parameters: EditParams,
-    async execute(toolCallId, params, signal) {
-      const result = await requireClient(state).editFile(params.path, params.edits, { actor: parentActor(toolCallId, "Pi edit tool"), signal });
+    async execute(toolCallId, params, signal, _onUpdate, ctx) {
+      const result = await requireClient(state).editFile(params.path, params.edits, { cwd: effectiveSupervisorCwd(ctx), actor: parentActor(toolCallId, "Pi edit tool"), signal });
       return { content: [{ type: "text", text: textFromResult(result, `Edited ${params.path}`) }], details: (result as any)?.details || { diff: (result as any)?.diff } };
     },
   });
@@ -1492,7 +1497,7 @@ export default function sandbox(pi: ExtensionAPI) {
         throw new Error("Invalid parameters. Provide exactly one mode: task, non-empty tasks, or non-empty chain.");
       }
       let latest = "";
-      const result = await requireClient(state).spawnSubagent({ ...params, cwd: params.cwd || ctx.cwd, actor: parentActor(toolCallId, "Pi subagent tool") }, {
+      const result = await requireClient(state).spawnSubagent({ ...params, cwd: params.cwd || effectiveSupervisorCwd(ctx), actor: parentActor(toolCallId, "Pi subagent tool") }, {
         signal,
         onUpdate: (message) => {
           if (message.event === "stdout" || message.event === "stderr" || message.event === "message" || message.event === "subagent_update") {

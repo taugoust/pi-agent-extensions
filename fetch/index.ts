@@ -36,6 +36,12 @@ const DEFAULT_MAX_BODY_BYTES = 5 * 1024 * 1024; // 5MB (download / outputPath)
 const DEFAULT_MAX_RESPONSE_TEXT = 100 * 1024; // 100KB text returned to LLM
 const MIN_READABILITY_CONTENT_LENGTH = 200; // Minimum chars for readability to be considered successful
 
+function assertNotRemoteSshMode() {
+  if (process.env.PI_AGENTSH_REMOTE === "ssh") {
+    throw new Error("fetch is disabled in remote AgentSH SSH mode until it can be routed through the remote supervisor");
+  }
+}
+
 interface FetchDetails {
   url: string;
   method: string;
@@ -283,6 +289,7 @@ export default function fetchExtension(pi: ExtensionAPI) {
     }),
 
     async execute(_toolCallId, params, signal, _onUpdate, ctx) {
+      assertNotRemoteSshMode();
       const method = params.method ?? "GET";
       const timeout = params.timeoutMs ?? DEFAULT_TIMEOUT_MS;
       const maxBody = params.maxBodyBytes ?? DEFAULT_MAX_BODY_BYTES;

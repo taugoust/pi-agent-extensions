@@ -1,16 +1,11 @@
 /**
  * SSH Remote Execution Extension
  *
- * Delegates read/write/edit operations to a remote machine over SSH
- * when --ssh is provided.
- *
- * Bash is handled without re-registering the bash tool:
- * - LLM bash tool calls are rewritten in tool_call to run via ssh
- * - user "!" commands are delegated via user_bash operations
- *
- * Usage:
- *   pi --ssh user@host
- *   pi --ssh user@host:/remote/path
+ * Dual-mode SSH support:
+ * - legacy mode (pi-unsafe --ssh ...): direct raw SSH read/write/edit/bash.
+ * - supervised mode (pi/pi-auto --ssh ... wrappers): local Pi talks to a
+ *   remote AgentSH supervisor through AGENTSH_SESSION_SUPERVISOR. No tool
+ *   calls are sent over raw SSH in this mode.
  */
 
 import { spawn } from "node:child_process";
@@ -24,6 +19,15 @@ import {
 	type ReadOperations,
 	type WriteOperations,
 } from "@mariozechner/pi-coding-agent";
+
+function env(name: string) {
+	const value = process.env[name];
+	return value && value.trim() ? value.trim() : "";
+}
+
+function supervisedSshMode() {
+	return env("PI_AGENTSH_REMOTE") === "ssh";
+}
 
 function sshExec(remote: string, command: string): Promise<Buffer> {
 	return new Promise((resolve, reject) => {
@@ -110,6 +114,23 @@ function createRemoteBashOps(remote: string, remoteCwd: string, localCwd: string
 	};
 }
 
+function createSupervisorBashOps(remoteCwd: string): BashOperations {
+	return {
+		exec: async (command, _cwd, opts) => {
+			const api = (globalThis as any).__AGENTSH_PI__;
+			if (!api) throw new Error("AgentSH supervisor API unavailable");
+			const result = await api.exec(
+				{ command, cwd: remoteCwd, timeout_ms: opts.timeout ? opts.timeout * 1000 : undefined },
+				{
+					signal: opts.signal,
+					onOutput: (chunk: string) => opts.onData(Buffer.from(chunk)),
+				},
+			);
+			return { exitCode: result.exitCode ?? 0 };
+		},
+	};
+}
+
 function shellSingleQuote(value: string): string {
 	return `'${value.replace(/'/g, `'"'"'`)}'`;
 }
@@ -119,61 +140,73 @@ function wrapBashCommandForSsh(command: string, remote: string, remoteCwd: strin
 	return `ssh ${shellSingleQuote(remote)} ${shellSingleQuote(remoteCommand)}`;
 }
 
+function parseSshArg(arg: string) {
+	const colon = arg.indexOf(":");
+	if (colon >= 0) return { remote: arg.slice(0, colon), remoteCwd: arg.slice(colon + 1) };
+	return { remote: arg, remoteCwd: "" };
+}
+
 export default function (pi: ExtensionAPI) {
 	pi.registerFlag("ssh", { description: "SSH remote: user@host or user@host:/path", type: "string" });
 
 	const localCwd = process.cwd();
-	const localRead = createReadTool(localCwd);
-	const localWrite = createWriteTool(localCwd);
-	const localEdit = createEditTool(localCwd);
-
 	let resolvedSsh: { remote: string; remoteCwd: string } | null = null;
+	let legacyToolsRegistered = false;
 
 	const getSsh = () => resolvedSsh;
 
-	pi.registerTool({
-		...localRead,
-		async execute(id, params, signal, onUpdate) {
-			const ssh = getSsh();
-			if (ssh) {
-				const tool = createReadTool(localCwd, {
-					operations: createRemoteReadOps(ssh.remote, ssh.remoteCwd, localCwd),
-				});
-				return tool.execute(id, params, signal, onUpdate);
-			}
-			return localRead.execute(id, params, signal, onUpdate);
-		},
-	});
+	function registerLegacyTools() {
+		if (legacyToolsRegistered) return;
+		legacyToolsRegistered = true;
+		const localRead = createReadTool(localCwd);
+		const localWrite = createWriteTool(localCwd);
+		const localEdit = createEditTool(localCwd);
 
-	pi.registerTool({
-		...localWrite,
-		async execute(id, params, signal, onUpdate) {
-			const ssh = getSsh();
-			if (ssh) {
-				const tool = createWriteTool(localCwd, {
-					operations: createRemoteWriteOps(ssh.remote, ssh.remoteCwd, localCwd),
-				});
-				return tool.execute(id, params, signal, onUpdate);
-			}
-			return localWrite.execute(id, params, signal, onUpdate);
-		},
-	});
+		pi.registerTool({
+			...localRead,
+			async execute(id, params, signal, onUpdate) {
+				const ssh = getSsh();
+				if (ssh) {
+					const tool = createReadTool(localCwd, {
+						operations: createRemoteReadOps(ssh.remote, ssh.remoteCwd, localCwd),
+					});
+					return tool.execute(id, params, signal, onUpdate);
+				}
+				return localRead.execute(id, params, signal, onUpdate);
+			},
+		});
 
-	pi.registerTool({
-		...localEdit,
-		async execute(id, params, signal, onUpdate) {
-			const ssh = getSsh();
-			if (ssh) {
-				const tool = createEditTool(localCwd, {
-					operations: createRemoteEditOps(ssh.remote, ssh.remoteCwd, localCwd),
-				});
-				return tool.execute(id, params, signal, onUpdate);
-			}
-			return localEdit.execute(id, params, signal, onUpdate);
-		},
-	});
+		pi.registerTool({
+			...localWrite,
+			async execute(id, params, signal, onUpdate) {
+				const ssh = getSsh();
+				if (ssh) {
+					const tool = createWriteTool(localCwd, {
+						operations: createRemoteWriteOps(ssh.remote, ssh.remoteCwd, localCwd),
+					});
+					return tool.execute(id, params, signal, onUpdate);
+				}
+				return localWrite.execute(id, params, signal, onUpdate);
+			},
+		});
+
+		pi.registerTool({
+			...localEdit,
+			async execute(id, params, signal, onUpdate) {
+				const ssh = getSsh();
+				if (ssh) {
+					const tool = createEditTool(localCwd, {
+						operations: createRemoteEditOps(ssh.remote, ssh.remoteCwd, localCwd),
+					});
+					return tool.execute(id, params, signal, onUpdate);
+				}
+				return localEdit.execute(id, params, signal, onUpdate);
+			},
+		});
+	}
 
 	pi.on("tool_call", async (event) => {
+		if (supervisedSshMode()) return;
 		const ssh = getSsh();
 		if (!ssh || event.toolName !== "bash") return;
 
@@ -184,17 +217,28 @@ export default function (pi: ExtensionAPI) {
 	});
 
 	pi.on("session_start", async (_event, ctx) => {
+		if (supervisedSshMode()) {
+			const remote = env("PI_AGENTSH_REMOTE_TARGET") || "remote";
+			const remoteCwd = env("PI_AGENTSH_REMOTE_CWD") || "/workspace";
+			resolvedSsh = { remote, remoteCwd };
+			if (ctx.hasUI) {
+				ctx.ui.setStatus("ssh", ctx.ui.theme.fg("accent", `SSH+AgentSH: ${remote}:${remoteCwd}`));
+				ctx.ui.notify(`SSH+AgentSH mode: ${remote}:${remoteCwd}`, "info");
+			}
+			return;
+		}
+
 		const arg = pi.getFlag("ssh") as string | undefined;
 		if (!arg) return;
 
-		if (arg.includes(":")) {
-			const [remote, path] = arg.split(":");
-			resolvedSsh = { remote, remoteCwd: path };
+		const parsed = parseSshArg(arg);
+		if (parsed.remoteCwd) {
+			resolvedSsh = parsed;
 		} else {
-			const remote = arg;
-			const pwd = (await sshExec(remote, "pwd")).toString().trim();
-			resolvedSsh = { remote, remoteCwd: pwd };
+			const pwd = (await sshExec(parsed.remote, "pwd")).toString().trim();
+			resolvedSsh = { remote: parsed.remote, remoteCwd: pwd };
 		}
+		registerLegacyTools();
 
 		if (ctx.hasUI) {
 			ctx.ui.setStatus("ssh", ctx.ui.theme.fg("accent", `SSH: ${resolvedSsh.remote}:${resolvedSsh.remoteCwd}`));
@@ -205,15 +249,19 @@ export default function (pi: ExtensionAPI) {
 	pi.on("user_bash", () => {
 		const ssh = getSsh();
 		if (!ssh) return;
+		if (supervisedSshMode()) return { operations: createSupervisorBashOps(ssh.remoteCwd) };
 		return { operations: createRemoteBashOps(ssh.remote, ssh.remoteCwd, localCwd) };
 	});
 
 	pi.on("before_agent_start", async (event) => {
 		const ssh = getSsh();
 		if (!ssh) return;
+		const replacement = supervisedSshMode()
+			? `Current working directory: ${ssh.remoteCwd} (remote AgentSH over SSH: ${ssh.remote})`
+			: `Current working directory: ${ssh.remoteCwd} (via SSH: ${ssh.remote})`;
 		const modified = event.systemPrompt.replace(
 			`Current working directory: ${localCwd}`,
-			`Current working directory: ${ssh.remoteCwd} (via SSH: ${ssh.remote})`,
+			replacement,
 		);
 		return { systemPrompt: modified };
 	});
