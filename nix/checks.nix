@@ -898,6 +898,45 @@ in
         await central.close();
       }
 
+      // Single-root shadow sessions expose workspace_roots for review metadata, but the REST
+      // file tools still resolve /workspace/<rel> directly against the flat worktree. Do not
+      // rewrite absolute real/work paths to /workspace/<root-name>/<rel> unless this is a true
+      // multi-root worktree, or edits like /real/helios/.gitignore resolve to work/helios/.gitignore.
+      {
+        clearAgentSHEnv();
+        let editRequest;
+        const supervisor = await withRestSupervisor(async (request) => {
+          if (request.method === "GET" && request.url === "/api/v1/sessions/sess-single-root") {
+            return {
+              id: "sess-single-root",
+              session_id: "sess-single-root",
+              workspace: "/real/helios",
+              worktree: "/shadow/work",
+              virtual_root: "/workspace",
+              workspace_roots: [{ name: "helios", real: "/real/helios", work: "/shadow/work" }],
+            };
+          }
+          if (request.method === "GET" && request.url === "/api/v1/approvals") return [];
+          if (request.method === "POST" && request.url === "/api/v1/sessions/sess-single-root/tools/edit_file") {
+            editRequest = request;
+            return { ok: true, result: { text: "Edited /workspace/.gitignore" } };
+          }
+          return { statusCode: 404, body: { error: "unexpected supervisor request", request } };
+        });
+        process.env.AGENTSH_SESSION_ID = "sess-single-root";
+        process.env.AGENTSH_SESSION_SUPERVISOR = "unix://" + supervisor.socketPath;
+        const pi = createPi();
+        sandbox(pi);
+        const ctx = createContext();
+        await startSession(pi, ctx);
+        const editTool = pi.tools.get("edit");
+        assert(editTool, "REST mode did not register edit tool for single-root path test");
+        await editTool.execute("edit-single-root", { path: "/real/helios/.gitignore", edits: [{ oldText: "old", newText: "new" }] }, undefined, undefined, ctx);
+        assert(editRequest?.body?.path === "/workspace/.gitignore", "single-root absolute path mapped to wrong virtual path: " + JSON.stringify(editRequest?.body));
+        await shutdownSession(pi);
+        await supervisor.close();
+      }
+
       // Explicit central approval client opt-in resolves via the central detached-session bridge.
       {
         clearAgentSHEnv();

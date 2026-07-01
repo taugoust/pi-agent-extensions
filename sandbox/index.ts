@@ -791,7 +791,18 @@ function absoluteToVirtual(metadata: SupervisorMetadata | undefined, path: strin
   const vroot = metadataVirtualRoot(metadata);
   if (isUnderPath(abs, vroot)) return abs;
 
-  for (const root of metadata?.workspace_roots || []) {
+  const roots = metadata?.workspace_roots || [];
+  const singleFlatRoot = roots.length === 1 && roots[0].work && metadata?.worktree && cleanPosix(roots[0].work) === cleanPosix(metadata.worktree);
+  if (singleFlatRoot) {
+    const root = roots[0];
+    for (const candidate of [root.work, root.real]) {
+      if (candidate && isUnderPath(abs, candidate)) {
+        return cleanPosix(`${vroot}/${relativeToRoot(abs, candidate)}`);
+      }
+    }
+  }
+
+  for (const root of roots) {
     for (const candidate of [root.work, root.real]) {
       if (candidate && isUnderPath(abs, candidate)) {
         return virtualForRoot(vroot, root, relativeToRoot(abs, candidate));
