@@ -513,9 +513,9 @@ execution, then `pi-unsafe`, and only falls back to `pi` with a warning.
   Mock NDJSON can handle `bash`{.verbatim}, `write`{.verbatim},
   `edit`{.verbatim}, `subagent`{.verbatim}, and optional `read`{.verbatim};
   real AgentSH REST handles `bash`{.verbatim}, `write`{.verbatim},
-  `edit`{.verbatim}, and optional supervised `read`{.verbatim} through
-  `/api/v1/sessions/{id}/tools/*` endpoints. `subagent`{.verbatim} is still
-  mock/future-only.
+  `edit`{.verbatim}, optional supervised `read`{.verbatim}, and
+  `subagent`{.verbatim} through `/api/v1/sessions/{id}/tools/*` endpoints when
+  the AgentSH supervisor has a generic subagent runtime configured.
 - **Status bar**: `agentsh inactive`{.verbatim}, `agentsh start…`{.verbatim},
   `agentsh …`{.verbatim}, `agentsh ✓`{.verbatim}, `agentsh ? N`{.verbatim},
   or `agentsh ✗`{.verbatim}
@@ -575,13 +575,13 @@ Streaming ops may emit `stdout`, `stderr`, `tool_update`, `subagent_update`, or
   `read`{.verbatim};
 - `POST /api/v1/sessions/{id}/tools/write_file` for `write`{.verbatim};
 - `POST /api/v1/sessions/{id}/tools/edit_file` for `edit`{.verbatim};
+- `POST /api/v1/sessions/{id}/tools/spawn_subagent` for `subagent`{.verbatim};
 - `DELETE /api/v1/sessions/{id}` best-effort for `/sandbox-control stop`.
 
-The REST `exec_bash` response is buffered, not streamed. Multiple Pi `edit`
-replacements are applied as sequential single-replacement REST calls.
-`spawn_subagent` is not implemented in real REST mode yet. Approvals are polled
-rather than streamed. If `fields.scope_kind` and `fields.scope_key` are present,
-Pi offers once/session approve/deny choices.
+The REST `exec_bash` and `spawn_subagent` responses are buffered, not streamed.
+Multiple Pi `edit` replacements are applied as sequential single-replacement
+REST calls. Approvals are polled rather than streamed. If `fields.scope_kind`
+and `fields.scope_key` are present, Pi offers once/session approve/deny choices.
 
 The extension exposes `globalThis.__AGENTSH_PI__` for owned extensions:
 

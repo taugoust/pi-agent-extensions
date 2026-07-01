@@ -24,6 +24,7 @@ type Actor = {
   kind: "parent" | "subagent" | "tool";
   label?: string;
   subagent_id?: string;
+  subagent_depth?: number;
   tool_call_id?: string;
   task?: string;
 };
@@ -299,9 +300,13 @@ function stringifyData(data: unknown) {
 }
 
 function parentActor(toolCallId?: string, label?: string): Actor {
+  const subagentId = env("AGENTSH_SUBAGENT_ID");
+  const depth = Number(env("AGENTSH_SUBAGENT_DEPTH") || "0");
   return {
-    kind: toolCallId ? "tool" : "parent",
-    label: label || (toolCallId ? "Pi supervised tool" : "top-level Pi"),
+    kind: subagentId && !toolCallId ? "subagent" : toolCallId ? "tool" : "parent",
+    label: label || (toolCallId ? "Pi supervised tool" : subagentId ? "Pi subagent" : "top-level Pi"),
+    subagent_id: subagentId || undefined,
+    subagent_depth: Number.isFinite(depth) && depth > 0 ? depth : undefined,
     tool_call_id: toolCallId,
   };
 }
@@ -850,6 +855,7 @@ function sessionMetadataFromRest(raw: unknown, socketPath: string, seed?: Superv
       "REST /api/v1/sessions/{id}/tools/read_file",
       "REST /api/v1/sessions/{id}/tools/write_file",
       "REST /api/v1/sessions/{id}/tools/edit_file",
+      "REST /api/v1/sessions/{id}/tools/spawn_subagent",
     ],
   };
   return metadata;
