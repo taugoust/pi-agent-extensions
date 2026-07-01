@@ -1015,7 +1015,21 @@ class RestSupervisorClient {
 
   async spawnSubagent(params: JsonObject, options: SpawnSubagentOptions = {}) {
     try {
-      const raw = await this.request("POST", this.toolPath("spawn_subagent"), params, { signal: options.signal, timeoutMs: SUBAGENT_REQUEST_TIMEOUT_MS });
+      const body: JsonObject = { ...params };
+      const normalizeCwd = (item: JsonObject) => {
+        const cwd = typeof item.cwd === "string" ? item.cwd : "";
+        const virtualCwd = cwd ? absoluteToVirtual(this.#metadata, toSlashPath(cwd)) : undefined;
+        if (virtualCwd) item.cwd = virtualCwd;
+      };
+      normalizeCwd(body);
+      for (const key of ["tasks", "chain"]) {
+        if (Array.isArray(body[key])) body[key] = (body[key] as unknown[]).map((item) => {
+          const obj = item && typeof item === "object" ? { ...(item as JsonObject) } : item;
+          if (obj && typeof obj === "object") normalizeCwd(obj as JsonObject);
+          return obj;
+        });
+      }
+      const raw = await this.request("POST", this.toolPath("spawn_subagent"), body, { signal: options.signal, timeoutMs: SUBAGENT_REQUEST_TIMEOUT_MS });
       return unwrapRestToolResponse("spawn_subagent", raw);
     } catch (error) {
       const message = asError(error).message;
