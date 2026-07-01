@@ -235,6 +235,10 @@ function workspaceModeEnv() {
   return VALID_STAGE1_WORKSPACE_MODES.has(value) ? value : "shadow";
 }
 
+function centralApprovalBridgeEnabled() {
+  return Boolean((env("AGENTSH_SESSION_EVENT_URL") || env("AGENTSH_DETACHED_EVENT_URL")) && (env("AGENTSH_SESSION_EVENT_TOKEN") || env("AGENTSH_DETACHED_EVENT_TOKEN")));
+}
+
 function protocolModeFromEnv(): ProtocolMode {
   if (env("PI_AGENTSH_MOCK_SUPERVISOR")) return "mock-ndjson";
   if (env("AGENTSH_SESSION_SUPERVISOR") || shouldStartSupervisor()) return "rest";
@@ -1202,6 +1206,12 @@ async function attachToSocket(state: SupervisorState, mode: ProtocolMode, source
   state.sessionId = metadataSessionId(state.metadata);
   state.status = "connected";
   setStatus(state, ctx);
+
+  if (mode === "rest" && centralApprovalBridgeEnabled()) {
+    // Detached supervisors push approvals to the central daemon; the macOS
+    // approver watches that daemon. Do not poll supervisor.sock from Pi too.
+    return;
+  }
 
   state.watcher = mode === "mock-ndjson"
     ? new MockApprovalWatcher(client as MockSupervisorClient, (approval) => enqueueApproval(state, approval), (error) => {

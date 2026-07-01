@@ -23,13 +23,15 @@ type AgentEvent = {
   fields?: Record<string, unknown>;
 };
 
-type EventMode = "legacy-ui" | "rest" | "";
+type EventMode = "legacy-ui" | "rest" | "central-rest" | "";
 
 type EventState = {
   active: boolean;
   mode: EventMode;
   sessionId: string;
   socketPath: string;
+  centralURL: string;
+  eventToken: string;
   lastError: string;
   lastPublishedAt: number;
   ctx?: ExtensionContext;
@@ -69,7 +71,16 @@ function getSocketPath() {
   return normalizeSocketPath(env("AGENTSH_APPROVAL_UI_SOCKET") || env("AGENTSH_SESSION_UI_SOCKET") || env("AGENTSH_SESSION_SUPERVISOR"));
 }
 
+function getCentralURL() {
+  return (env("AGENTSH_SESSION_EVENT_URL") || env("AGENTSH_DETACHED_EVENT_URL")).replace(/\/+$/, "");
+}
+
+function getEventToken() {
+  return env("AGENTSH_SESSION_EVENT_TOKEN") || env("AGENTSH_DETACHED_EVENT_TOKEN");
+}
+
 function getEventMode(): EventMode {
+  if (getCentralURL() && getEventToken()) return "central-rest";
   if (env("AGENTSH_APPROVAL_UI_SOCKET") || env("AGENTSH_SESSION_UI_SOCKET")) return "legacy-ui";
   if (env("AGENTSH_SESSION_SUPERVISOR")) return "rest";
   return "";
@@ -169,6 +180,51 @@ async function restRequest<T>(state: EventState, method: string, path: string, b
   });
 }
 
+async function centralRequest<T>(state: EventState, method: string, path: string, body?: unknown): Promise<T> {
+  if (!state.centralURL || !state.eventToken) throw new Error("AgentSH central event endpoint not configured");
+  return await new Promise<T>((resolve, reject) => {
+    const payload = body === undefined ? undefined : JSON.stringify(body);
+    const url = new URL(path, `${state.centralURL}/`);
+    const req = http.request(url, {
+      method,
+      headers: payload === undefined ? {
+        Accept: "application/json",
+        "X-AgentSH-Session-Event-Token": state.eventToken,
+      } : {
+        Accept: "application/json",
+        "Content-Type": "application/json",
+        "Content-Length": Buffer.byteLength(payload),
+        "X-AgentSH-Session-Event-Token": state.eventToken,
+      },
+    }, (res) => {
+      const chunks: Buffer[] = [];
+      res.on("data", (chunk) => chunks.push(Buffer.isBuffer(chunk) ? chunk : Buffer.from(chunk)));
+      res.on("end", () => {
+        const text = Buffer.concat(chunks).toString("utf8");
+        if ((res.statusCode || 0) < 200 || (res.statusCode || 0) >= 300) {
+          reject(new Error(`${method} ${url.pathname}: HTTP ${res.statusCode}${text.trim() ? `: ${truncate(text.trim(), 1000)}` : ""}`));
+          return;
+        }
+        if (!text.trim()) {
+          resolve(undefined as T);
+          return;
+        }
+        try {
+          const parsed = JSON.parse(text) as { ok?: boolean; error?: string } & T;
+          if (parsed.ok === false) reject(new Error(parsed.error || "AgentSH central event request failed"));
+          else resolve(parsed as T);
+        } catch (error) {
+          reject(error instanceof Error ? error : new Error(String(error)));
+        }
+      });
+    });
+    req.on("error", (error) => reject(error));
+    req.setTimeout(10_000, () => req.destroy(new Error("AgentSH central event request timeout")));
+    if (payload !== undefined) req.write(payload);
+    req.end();
+  });
+}
+
 function isUnsupported(error: unknown) {
   const message = error instanceof Error ? error.message : String(error);
   return /unknown op|unsupported|not implemented/i.test(message);
@@ -177,16 +233,22 @@ function isUnsupported(error: unknown) {
 async function getQuestionAnswer(state: EventState, questionnaireId: string) {
   if (!state.active) return undefined;
   try {
-    const response = state.mode === "rest"
-      ? await restRequest<{ answer?: unknown }>(
+    const response = state.mode === "central-rest"
+      ? await centralRequest<{ answer?: unknown }>(
         state,
         "GET",
-        `/api/v1/sessions/${encodeURIComponent(state.sessionId)}/session-events/question-answers/${encodeURIComponent(questionnaireId)}`,
+        `/api/v1/detached-sessions/${encodeURIComponent(state.sessionId)}/session-events/question-answers/${encodeURIComponent(questionnaireId)}`,
       )
-      : await uiRequest<{ answer?: unknown }>(state, {
-        op: "get_question_answer",
-        questionnaire_id: questionnaireId,
-      });
+      : state.mode === "rest"
+        ? await restRequest<{ answer?: unknown }>(
+          state,
+          "GET",
+          `/api/v1/sessions/${encodeURIComponent(state.sessionId)}/session-events/question-answers/${encodeURIComponent(questionnaireId)}`,
+        )
+        : await uiRequest<{ answer?: unknown }>(state, {
+          op: "get_question_answer",
+          questionnaire_id: questionnaireId,
+        });
     state.lastError = "";
     return response.answer;
   } catch (error) {
@@ -220,7 +282,14 @@ async function publishEvent(
   };
 
   try {
-    if (state.mode === "rest") {
+    if (state.mode === "central-rest") {
+      await centralRequest<unknown>(
+        state,
+        "POST",
+        `/api/v1/detached-sessions/${encodeURIComponent(state.sessionId)}/session-events`,
+        event,
+      );
+    } else if (state.mode === "rest") {
       await restRequest<unknown>(
         state,
         "POST",
@@ -263,6 +332,9 @@ function helpText(state: EventState) {
       "Required environment:",
       "  AGENTSH_SESSION_ID=<session>",
       "  AGENTSH_SESSION_SUPERVISOR=unix://<AgentSH supervisor socket>",
+      "or central push:",
+      "  AGENTSH_SESSION_EVENT_URL=http://127.0.0.1:18080",
+      "  AGENTSH_SESSION_EVENT_TOKEN=<per-session token>",
       "or legacy:",
       "  AGENTSH_APPROVAL_UI_SOCKET=<AgentSH peer-authorized UI socket>",
     ].join("\n");
@@ -272,7 +344,8 @@ function helpText(state: EventState) {
     "",
     `Session: ${state.sessionId}`,
     `Mode:    ${state.mode}`,
-    `Socket:  ${state.socketPath}`,
+    `Socket:  ${state.socketPath || "-"}`,
+    `Central: ${state.centralURL || "-"}`,
     state.lastError ? `Last error: ${state.lastError}` : "Last error: -",
   ].join("\n");
 }
@@ -283,6 +356,8 @@ export default function agentEvents(pi: ExtensionAPI) {
     mode: "",
     sessionId: "",
     socketPath: "",
+    centralURL: "",
+    eventToken: "",
     lastError: "",
     lastPublishedAt: 0,
   };
@@ -291,9 +366,11 @@ export default function agentEvents(pi: ExtensionAPI) {
     state.ctx = ctx;
     state.sessionId = getSessionId();
     state.socketPath = getSocketPath();
+    state.centralURL = getCentralURL();
+    state.eventToken = getEventToken();
     state.mode = getEventMode();
     state.lastError = "";
-    state.active = Boolean(state.sessionId && state.socketPath && state.mode);
+    state.active = Boolean(state.sessionId && state.mode && (state.mode === "central-rest" ? state.centralURL && state.eventToken : state.socketPath));
     globalThis.__PI_AGENTSH_PUBLISH_EVENT__ = (type, title, message, fields = {}) =>
       publishEvent(state, type, title, message, fields);
     globalThis.__PI_AGENTSH_GET_QUESTION_ANSWER__ = (questionnaireId) =>
@@ -311,6 +388,8 @@ export default function agentEvents(pi: ExtensionAPI) {
     }
     state.active = false;
     state.mode = "";
+    state.centralURL = "";
+    state.eventToken = "";
     state.ctx = undefined;
   });
 
