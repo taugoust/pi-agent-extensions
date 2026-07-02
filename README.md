@@ -552,6 +552,7 @@ PI_AGENTSH_BIN=agentsh                                 # default: agentsh
 PI_AGENTSH_READ_MODE=supervised                        # optional read override (mock and real REST)
 PI_AGENTSH_APPROVAL_CLIENT=central                     # opt into central detached approval bridge
 PI_AGENTSH_TOOL_REQUEST_TIMEOUT_MS=1800000             # REST tool request cap; keep above approval timeout
+PI_AGENTSH_APPROVAL_TIMEOUT_SLACK_MS=300000            # extra REST wait budget for approval delays
 ```
 
 **Mock NDJSON protocol**: newline-delimited JSON over a Unix socket. Requests

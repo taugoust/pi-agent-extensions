@@ -177,6 +177,7 @@ const START_TIMEOUT_MS = Number(process.env.PI_AGENTSH_START_TIMEOUT_MS || "3000
 const WATCH_RECONNECT_MS = Number(process.env.PI_AGENTSH_WATCH_RECONNECT_MS || "1500");
 const APPROVAL_POLL_MS = Number(process.env.PI_AGENTSH_APPROVAL_POLL_MS || "1500");
 const TOOL_REQUEST_TIMEOUT_MS = Number(process.env.PI_AGENTSH_TOOL_REQUEST_TIMEOUT_MS || "600000");
+const APPROVAL_REQUEST_TIMEOUT_SLACK_MS = Number(process.env.PI_AGENTSH_APPROVAL_TIMEOUT_SLACK_MS || "300000");
 const SUBAGENT_REQUEST_TIMEOUT_MS = Number(process.env.PI_AGENTSH_SUBAGENT_REQUEST_TIMEOUT_MS || "1800000");
 const VALID_POLICIES = new Set(["pi-autonomous", "pi-supervised"]);
 const VALID_STAGE1_WORKSPACE_MODES = new Set(["shadow", "direct"]);
@@ -1166,12 +1167,15 @@ class RestSupervisorClient {
 
   async exec(command: string, options: ExecOptions = {}) {
     const timeoutMs = options.timeout_ms ?? (options.timeout ? Math.max(0, options.timeout) * 1000 : undefined);
+    const requestTimeoutMs = timeoutMs
+      ? Math.max(TOOL_REQUEST_TIMEOUT_MS, timeoutMs + APPROVAL_REQUEST_TIMEOUT_SLACK_MS + CONNECT_TIMEOUT_MS)
+      : TOOL_REQUEST_TIMEOUT_MS + APPROVAL_REQUEST_TIMEOUT_SLACK_MS;
     const raw = await this.request("POST", this.toolPath("exec_bash"), {
       command,
       cwd: options.cwd || effectiveSupervisorCwd(),
       timeout_ms: timeoutMs,
       actor: options.actor || parentActor(options.tool_call_id, "Pi bash tool"),
-    }, { signal: options.signal, timeoutMs: timeoutMs ? Math.max(TOOL_REQUEST_TIMEOUT_MS, timeoutMs + CONNECT_TIMEOUT_MS) : TOOL_REQUEST_TIMEOUT_MS });
+    }, { signal: options.signal, timeoutMs: requestTimeoutMs });
     const result = unwrapRestToolResponse<JsonObject>("exec_bash", raw);
     const stdout = String(result.stdout ?? "");
     const stderr = String(result.stderr ?? "");
