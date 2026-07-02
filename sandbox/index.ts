@@ -8,11 +8,14 @@
  */
 
 import { spawn } from "node:child_process";
+import { randomBytes } from "node:crypto";
+import { createWriteStream, type WriteStream } from "node:fs";
 import * as http from "node:http";
 import { createConnection, type Socket } from "node:net";
-import { posix as posixPath } from "node:path";
+import { tmpdir } from "node:os";
+import { join, posix as posixPath } from "node:path";
 import { Type } from "@sinclair/typebox";
-import type { ExtensionAPI, ExtensionContext } from "@mariozechner/pi-coding-agent";
+import { DEFAULT_MAX_BYTES, DEFAULT_MAX_LINES, formatSize, truncateTail, type ExtensionAPI, type ExtensionContext, type TruncationResult } from "@mariozechner/pi-coding-agent";
 import { Text } from "@mariozechner/pi-tui";
 
 type JsonObject = Record<string, unknown>;
@@ -297,6 +300,212 @@ function stringifyData(data: unknown) {
   if (data instanceof Uint8Array) return Buffer.from(data).toString("utf8");
   if (data === undefined || data === null) return "";
   return String(data);
+}
+
+type OutputSnapshot = {
+  content: string;
+  truncation: TruncationResult;
+  fullOutputPath?: string;
+};
+
+function defaultTempFilePath(prefix: string) {
+  return join(tmpdir(), `${prefix}-${randomBytes(8).toString("hex")}.log`);
+}
+
+function byteLength(text: string) {
+  return Buffer.byteLength(text, "utf-8");
+}
+
+class StringOutputAccumulator {
+  private readonly decoder = new TextDecoder();
+  private rawChunks: Buffer[] = [];
+  private tailText = "";
+  private tailBytes = 0;
+  private tailStartsAtLineBoundary = true;
+  private totalRawBytes = 0;
+  private totalDecodedBytes = 0;
+  private completedLines = 0;
+  private totalLines = 0;
+  private currentLineBytes = 0;
+  private hasOpenLine = false;
+  private finished = false;
+  private tempFilePath: string | undefined;
+  private tempFileStream: WriteStream | undefined;
+
+  append(text: string): void {
+    if (this.finished) throw new Error("Cannot append to a finished output accumulator");
+    if (!text) return;
+
+    const data = Buffer.from(text, "utf-8");
+    this.totalRawBytes += data.length;
+    this.appendDecodedText(this.decoder.decode(data, { stream: true }));
+
+    if (this.tempFileStream || this.shouldUseTempFile()) {
+      this.ensureTempFile();
+      this.tempFileStream?.write(data);
+    } else {
+      this.rawChunks.push(data);
+    }
+  }
+
+  finish(): void {
+    if (this.finished) return;
+    this.finished = true;
+    this.appendDecodedText(this.decoder.decode());
+    if (this.shouldUseTempFile()) this.ensureTempFile();
+  }
+
+  snapshot(options: { persistIfTruncated?: boolean } = {}): OutputSnapshot {
+    const tailTruncation = truncateTail(this.getSnapshotText(), {
+      maxLines: DEFAULT_MAX_LINES,
+      maxBytes: DEFAULT_MAX_BYTES,
+    });
+    const truncated = this.totalLines > DEFAULT_MAX_LINES || this.totalDecodedBytes > DEFAULT_MAX_BYTES;
+    const truncation: TruncationResult = {
+      ...tailTruncation,
+      truncated,
+      truncatedBy: truncated ? (tailTruncation.truncatedBy ?? (this.totalDecodedBytes > DEFAULT_MAX_BYTES ? "bytes" : "lines")) : null,
+      totalLines: this.totalLines,
+      totalBytes: this.totalDecodedBytes,
+      maxLines: DEFAULT_MAX_LINES,
+      maxBytes: DEFAULT_MAX_BYTES,
+    };
+
+    if (options.persistIfTruncated && truncation.truncated) this.ensureTempFile();
+
+    return {
+      content: truncation.content,
+      truncation,
+      fullOutputPath: this.tempFilePath,
+    };
+  }
+
+  async closeTempFile(): Promise<void> {
+    if (!this.tempFileStream) return;
+    const stream = this.tempFileStream;
+    this.tempFileStream = undefined;
+    await new Promise<void>((resolve, reject) => {
+      const onError = (error: Error) => {
+        stream.off("finish", onFinish);
+        reject(error);
+      };
+      const onFinish = () => {
+        stream.off("error", onError);
+        resolve();
+      };
+      stream.once("error", onError);
+      stream.once("finish", onFinish);
+      stream.end();
+    });
+  }
+
+  getLastLineBytes(): number {
+    return this.currentLineBytes;
+  }
+
+  private appendDecodedText(text: string): void {
+    if (!text) return;
+
+    const bytes = byteLength(text);
+    this.totalDecodedBytes += bytes;
+    this.tailText += text;
+    this.tailBytes += bytes;
+    if (this.tailBytes > DEFAULT_MAX_BYTES * 4) this.trimTail();
+
+    let newlines = 0;
+    let lastNewline = -1;
+    for (let i = text.indexOf("\n"); i !== -1; i = text.indexOf("\n", i + 1)) {
+      newlines++;
+      lastNewline = i;
+    }
+    if (newlines === 0) {
+      this.currentLineBytes += bytes;
+      this.hasOpenLine = true;
+    } else {
+      this.completedLines += newlines;
+      const tail = text.slice(lastNewline + 1);
+      this.currentLineBytes = byteLength(tail);
+      this.hasOpenLine = tail.length > 0;
+    }
+    this.totalLines = this.completedLines + (this.hasOpenLine ? 1 : 0);
+  }
+
+  private trimTail(): void {
+    const buffer = Buffer.from(this.tailText, "utf-8");
+    const maxRollingBytes = DEFAULT_MAX_BYTES * 2;
+    if (buffer.length <= maxRollingBytes) {
+      this.tailBytes = buffer.length;
+      return;
+    }
+
+    let start = buffer.length - maxRollingBytes;
+    while (start < buffer.length && (buffer[start] & 0xc0) === 0x80) start++;
+
+    this.tailStartsAtLineBoundary = start === 0 ? this.tailStartsAtLineBoundary : buffer[start - 1] === 0x0a;
+    this.tailText = buffer.subarray(start).toString("utf-8");
+    this.tailBytes = byteLength(this.tailText);
+  }
+
+  private getSnapshotText(): string {
+    if (this.tailStartsAtLineBoundary) return this.tailText;
+    const firstNewline = this.tailText.indexOf("\n");
+    return firstNewline === -1 ? this.tailText : this.tailText.slice(firstNewline + 1);
+  }
+
+  private shouldUseTempFile(): boolean {
+    return this.totalRawBytes > DEFAULT_MAX_BYTES || this.totalDecodedBytes > DEFAULT_MAX_BYTES || this.totalLines > DEFAULT_MAX_LINES;
+  }
+
+  private ensureTempFile(): void {
+    if (this.tempFilePath) return;
+    this.tempFilePath = defaultTempFilePath("pi-agentsh-bash");
+    this.tempFileStream = createWriteStream(this.tempFilePath);
+    for (const chunk of this.rawChunks) this.tempFileStream.write(chunk);
+    this.rawChunks = [];
+  }
+}
+
+function execResultBoolean(result: ExecResult | undefined, key: string) {
+  return result?.[key] === true;
+}
+
+function execResultNumber(result: ExecResult | undefined, key: string) {
+  const value = result?.[key];
+  return typeof value === "number" && Number.isFinite(value) ? value : undefined;
+}
+
+function agentSHOutputWarnings(result: ExecResult | undefined) {
+  const warnings: string[] = [];
+  const sessionID = typeof result?.session_id === "string" ? result.session_id : "";
+  const commandID = typeof result?.command_id === "string" ? result.command_id : "";
+  for (const stream of ["stdout", "stderr"] as const) {
+    if (!execResultBoolean(result, `${stream}_truncated`)) continue;
+    const total = execResultNumber(result, `${stream}_total_bytes`);
+    const totalText = total === undefined ? "" : ` at ${formatSize(total)}`;
+    const hint = sessionID && commandID ? ` Use: agentsh output ${sessionID} ${commandID} --stream ${stream}` : "";
+    warnings.push(`AgentSH truncated ${stream}${totalText}.${hint}`);
+  }
+  return warnings;
+}
+
+function formatAccumulatedOutput(snapshot: OutputSnapshot, output: StringOutputAccumulator, result?: ExecResult, emptyText = "(no output)") {
+  const truncation = snapshot.truncation;
+  let text = snapshot.content || emptyText;
+  const warnings = agentSHOutputWarnings(result);
+  if (truncation.truncated) {
+    const startLine = truncation.totalLines - truncation.outputLines + 1;
+    const endLine = truncation.totalLines;
+    if (truncation.lastLinePartial) {
+      const lastLineSize = formatSize(output.getLastLineBytes());
+      warnings.unshift(`Showing last ${formatSize(truncation.outputBytes)} of line ${endLine} (line is ${lastLineSize}). Full output: ${snapshot.fullOutputPath}`);
+    } else if (truncation.truncatedBy === "lines") {
+      warnings.unshift(`Showing lines ${startLine}-${endLine} of ${truncation.totalLines}. Full output: ${snapshot.fullOutputPath}`);
+    } else {
+      warnings.unshift(`Showing lines ${startLine}-${endLine} of ${truncation.totalLines} (${formatSize(DEFAULT_MAX_BYTES)} limit). Full output: ${snapshot.fullOutputPath}`);
+    }
+  }
+  if (warnings.length > 0) text += `\n\n[${warnings.join(" ")}]`;
+  return text;
 }
 
 function parentActor(toolCallId?: string, label?: string): Actor {
@@ -1593,14 +1802,44 @@ export default function sandbox(pi: ExtensionAPI) {
     parameters: BashParams,
     async execute(toolCallId, params, signal, onUpdate, ctx) {
       const client = requireClient(state);
-      let output = "";
-      const emit = () => onUpdate?.({ content: output ? [{ type: "text", text: output }] : [], details: undefined });
+      const output = new StringOutputAccumulator();
+      const emit = () => {
+        const snapshot = output.snapshot({ persistIfTruncated: true });
+        onUpdate?.({
+          content: snapshot.content ? [{ type: "text", text: formatAccumulatedOutput(snapshot, output) }] : [],
+          details: {
+            truncation: snapshot.truncation.truncated ? snapshot.truncation : undefined,
+            fullOutputPath: snapshot.fullOutputPath,
+          },
+        });
+      };
       onUpdate?.({ content: [], details: undefined });
-      const result = await client.exec(params.command, { cwd: effectiveSupervisorCwd(ctx), timeout: params.timeout, tool_call_id: toolCallId, signal, onOutput: (chunk) => { output += chunk; emit(); } });
-      const exitCode = typeof result.exitCode === "number" ? result.exitCode : 0;
-      const finalText = output || "(no output)";
-      if (exitCode !== 0) throw new Error(`${finalText}\n\nCommand exited with code ${exitCode}`);
-      return { content: [{ type: "text", text: finalText }], details: { exitCode } };
+      try {
+        const result = await client.exec(params.command, {
+          cwd: effectiveSupervisorCwd(ctx),
+          timeout: params.timeout,
+          tool_call_id: toolCallId,
+          signal,
+          onOutput: (chunk) => {
+            output.append(chunk);
+            emit();
+          },
+        });
+        output.finish();
+        const snapshot = output.snapshot({ persistIfTruncated: true });
+        const exitCode = typeof result.exitCode === "number" ? result.exitCode : 0;
+        const finalText = formatAccumulatedOutput(snapshot, output, result);
+        const details = {
+          exitCode,
+          truncation: snapshot.truncation.truncated ? snapshot.truncation : undefined,
+          fullOutputPath: snapshot.fullOutputPath,
+        };
+        if (exitCode !== 0) throw new Error(`${finalText}\n\nCommand exited with code ${exitCode}`);
+        return { content: [{ type: "text", text: finalText }], details };
+      } finally {
+        output.finish();
+        await output.closeTempFile();
+      }
     },
   });
 

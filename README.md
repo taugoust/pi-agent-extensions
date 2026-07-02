@@ -551,6 +551,7 @@ PI_AGENTSH_WORKSPACE_MODE=shadow|direct                # Stage 1 only; default: 
 PI_AGENTSH_BIN=agentsh                                 # default: agentsh
 PI_AGENTSH_READ_MODE=supervised                        # optional read override (mock and real REST)
 PI_AGENTSH_APPROVAL_CLIENT=central                     # opt into central detached approval bridge
+PI_AGENTSH_TOOL_REQUEST_TIMEOUT_MS=1800000             # REST tool request cap; keep above approval timeout
 ```
 
 **Mock NDJSON protocol**: newline-delimited JSON over a Unix socket. Requests
