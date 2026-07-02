@@ -689,6 +689,18 @@ information in the pi terminal interface.
 
 </details>
 
+<details>
+<summary><strong>tikz-figure-recreation</strong> - Recreate paper figures as TikZ</summary>
+<br>
+
+- **Source**: [skills/tikz-figure-recreation/](./skills/tikz-figure-recreation/)
+- **Outputs**: bare `.tikz` source, standalone preview `.tex`, compiled PDF, optional PNG preview
+- **Dependencies**: project LaTeX environment; `tectonic` or equivalent for standalone previews; PDF rendering/cropping tools when inspecting source papers
+
+**Description**: Guides agents through visually recreating existing PDF/image/draw.io paper figures in TikZ. The workflow emphasizes rendering and cropping the reference, creating a standalone TikZ preview harness, compiling and rendering the generated figure, and iterating on visual details such as boundaries, typography, and hand-routed arrows.
+
+</details>
+
 ## Configuration
 
 Once installed, pi can use **all** of the extensions listed in this

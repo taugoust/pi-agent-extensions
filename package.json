@@ -43,6 +43,12 @@
       "node_modules/@marckrenn/pi-sub-core",
       "node_modules/@marckrenn/pi-sub-bar",
       "node_modules/pi-mcp-adapter"
+    ],
+    "skills": [
+      "skills/drawio",
+      "skills/github-repo-search",
+      "skills/remindctl",
+      "skills/tikz-figure-recreation"
     ]
   }
 }

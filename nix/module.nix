@@ -49,6 +49,7 @@ in
       github-repo-search.enable = lib.mkEnableOption "github-repo-search skill — search GitHub repos via gh CLI without cloning";
       remindctl.enable = lib.mkEnableOption "remindctl skill — manage Apple Reminders via the remindctl CLI";
       drawio.enable = lib.mkEnableOption "drawio skill — generate native draw.io diagrams and optional exports";
+      tikz-figure-recreation.enable = lib.mkEnableOption "tikz-figure-recreation skill — recreate paper/PDF/image/draw.io figures as TikZ";
     };
   };
 
@@ -69,6 +70,9 @@ in
       })
       (lib.mkIf cfg.skills.drawio.enable {
         ".pi/agent/skills/drawio".source = "${self}/skills/drawio";
+      })
+      (lib.mkIf cfg.skills.tikz-figure-recreation.enable {
+        ".pi/agent/skills/tikz-figure-recreation/SKILL.md".source = "${self}/skills/tikz-figure-recreation/SKILL.md";
       })
       (lib.mkIf cfg.extensions.agent-events.enable {
         "${extDir}/agent-events/index.ts".source = "${self}/agent-events/index.ts";

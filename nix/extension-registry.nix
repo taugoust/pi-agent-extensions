@@ -38,6 +38,7 @@ let
     "drawio"
     "github-repo-search"
     "remindctl"
+    "tikz-figure-recreation"
   ];
 
   skills = builtins.listToAttrs (map (name: {
