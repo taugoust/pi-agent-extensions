@@ -1130,6 +1130,50 @@ in
         await server.close();
       }
 
+      // Parent directory scope_options from AgentSH are shown and relayed exactly.
+      {
+        clearAgentSHEnv();
+        let approvals = [{
+          id: "appr-parent-directory",
+          kind: "file",
+          target: "/workspace/dir/subdir/file.txt",
+          fields: {
+            scope_options: [
+              { scope_kind: "file", scope_key: "file:read:/workspace/dir/subdir/file.txt", scope_label: "read /workspace/dir/subdir/file.txt", scope_operation: "read", scope_path: "/workspace/dir/subdir/file.txt" },
+              { scope_kind: "file-tree", scope_key: "file-tree:read:outside-read:/workspace/dir/subdir", scope_label: "read directory recursively /workspace/dir/subdir", scope_operation: "read", scope_path: "/workspace/dir/subdir", scope_rule: "outside-read", scope_prefix: true },
+              { scope_kind: "file-tree", scope_key: "file-tree:read:outside-read:/workspace/dir", scope_label: "read directory recursively /workspace/dir", scope_operation: "read", scope_path: "/workspace/dir", scope_rule: "outside-read", scope_prefix: true },
+            ],
+          },
+        }];
+        let resolved;
+        const server = await withApprovalServer(async (request) => {
+          if (request.op === "list") return { ok: true, approvals };
+          if (request.op === "resolve") {
+            resolved = request;
+            approvals = [];
+            return { ok: true };
+          }
+          return { ok: false, error: "unknown op" };
+        });
+        setAgentSHEnv(server.socketPath);
+        const pi = createPi();
+        sandbox(pi);
+        const ctx = createContext({ customActions: ["<down>", "<down>", "<down>", "<enter>"] });
+        await startSession(pi, ctx);
+        await waitFor(() => Boolean(resolved), "parent directory approval was not resolved");
+
+        assert(resolved.id === "appr-parent-directory", "resolved wrong parent-directory approval id");
+        assert(resolved.decision === "approve", "parent-directory approval was not approved");
+        assert(resolved.scope === "session", "parent-directory approval did not relay scope=session");
+        assert(resolved.scope_kind === "file-tree", "parent-directory approval did not relay scope_kind");
+        assert(resolved.scope_key === "file-tree:read:outside-read:/workspace/dir", "parent-directory approval did not relay scope_key");
+        assert(resolved.scope_path === "/workspace/dir", "parent-directory approval did not relay scope_path");
+        assert(resolved.scope_rule === "outside-read", "parent-directory approval did not relay scope_rule");
+        assert(resolved.scope_prefix === true, "parent-directory approval did not relay scope_prefix");
+        await shutdownSession(pi);
+        await server.close();
+      }
+
       // Deny-for-session relays decision=deny with scope=session.
       {
         clearAgentSHEnv();
