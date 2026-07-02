@@ -524,7 +524,15 @@ in
       "main": "./index.js"
     }
     EOF
-    echo 'export {};' > "$outdir/node_modules/@mariozechner/pi-coding-agent/index.js"
+    cat > "$outdir/node_modules/@mariozechner/pi-coding-agent/index.js" <<'EOF'
+    export const DEFAULT_MAX_BYTES = 20000;
+    export const DEFAULT_MAX_LINES = 2000;
+    export function formatSize(bytes) { return String(bytes) + "B"; }
+    export function truncateTail(text) {
+      return { content: String(text), truncated: false, truncatedBy: null, totalLines: String(text).split("\n").length, totalBytes: Buffer.byteLength(String(text)), outputLines: String(text).split("\n").length, outputBytes: Buffer.byteLength(String(text)), maxLines: 2000, maxBytes: 20000, lastLinePartial: false };
+    }
+    export function renderDiff(text) { return String(text); }
+    EOF
 
     mkdir -p "$outdir/node_modules/@mariozechner/pi-tui"
     cat > "$outdir/node_modules/@mariozechner/pi-tui/package.json" <<'EOF'
@@ -535,6 +543,21 @@ in
     }
     EOF
     cat > "$outdir/node_modules/@mariozechner/pi-tui/index.js" <<'EOF'
+    export class Container {
+      constructor() { this.children = []; }
+      addChild(child) { this.children.push(child); }
+      clear() { this.children = []; }
+      render(width) { return this.children.flatMap((child) => child.render ? child.render(width) : []); }
+    }
+    export class Box extends Container {
+      constructor(_x = 0, _y = 0, bgFn = (text) => text) { super(); this.bgFn = bgFn; }
+      setBgFn(bgFn) { this.bgFn = bgFn; }
+      render(width) { return super.render(width).map((line) => this.bgFn(line)); }
+    }
+    export class Spacer {
+      constructor(lines = 1) { this.lines = lines; }
+      render() { return Array(this.lines).fill(""); }
+    }
     export class Text {
       constructor(text, x = 0, y = 0) {
         this.text = text;
@@ -545,6 +568,9 @@ in
         return String(this.text || "").split("\n");
       }
     }
+    export const Key = { enter: "<enter>", escape: "<escape>", up: "<up>", down: "<down>", pageUp: "<page-up>", pageDown: "<page-down>" };
+    export function matchesKey(data, key) { return data === key; }
+    export function truncateToWidth(text) { return String(text); }
     EOF
 
     tsc \
@@ -600,42 +626,61 @@ in
       };
     }
 
-    function createContext({ choices = [], hasUI = true } = {}) {
+    function createContext({ choices = [], hasUI = true, customActions } = {}) {
       const statuses = [];
       const notifications = [];
       const selectCalls = [];
+      const customCalls = [];
       let choiceIndex = 0;
+      const theme = {
+        fg: (_color, text) => text,
+        bg: (_color, text) => text,
+        bold: (text) => text,
+      };
+      const ui = {
+        theme,
+        setStatus(name, value) {
+          statuses.push({ name, value });
+        },
+        notify(message, level) {
+          notifications.push({ message, level });
+        },
+        async select(title, items, options = {}) {
+          selectCalls.push({ title, items, options });
+          const choice = choices[choiceIndex++] ?? items[0];
+          if (choice === "__wait_for_abort__") {
+            return await new Promise((resolve) => {
+              if (options.signal?.aborted) {
+                resolve(undefined);
+                return;
+              }
+              options.signal?.addEventListener("abort", () => resolve(undefined), { once: true });
+            });
+          }
+          return choice;
+        },
+      };
+      if (customActions) {
+        ui.custom = async (factory, options = {}) => {
+          customCalls.push({ options });
+          let resolveResult;
+          const result = new Promise((resolve) => { resolveResult = resolve; });
+          const component = factory({ terminal: { rows: 40 }, requestRender() {} }, theme, {}, (value) => resolveResult(value));
+          // Render at two widths to catch stale-width cache regressions in the approval overlay.
+          component.render?.(80);
+          component.render?.(100);
+          for (const action of customActions) component.handleInput?.(action);
+          return await result;
+        };
+      }
       return {
         cwd: process.cwd(),
         hasUI,
         statuses,
         notifications,
         selectCalls,
-        ui: {
-          theme: {
-            fg: (_color, text) => text,
-          },
-          setStatus(name, value) {
-            statuses.push({ name, value });
-          },
-          notify(message, level) {
-            notifications.push({ message, level });
-          },
-          async select(title, items, options = {}) {
-            selectCalls.push({ title, items, options });
-            const choice = choices[choiceIndex++] ?? items[0];
-            if (choice === "__wait_for_abort__") {
-              return await new Promise((resolve) => {
-                if (options.signal?.aborted) {
-                  resolve(undefined);
-                  return;
-                }
-                options.signal?.addEventListener("abort", () => resolve(undefined), { once: true });
-              });
-            }
-            return choice;
-          },
-        },
+        customCalls,
+        ui,
       };
     }
 
@@ -1035,6 +1080,52 @@ in
         assert(resolved.decision === "approve", "session approval was not approved");
         assert(resolved.scope === "session", "session approval did not relay scope=session");
         assert(/approved for session/i.test(resolved.reason), "session approval reason did not mention session");
+        await shutdownSession(pi);
+        await server.close();
+      }
+
+      // File/directory scope_options use the custom overlay prompt and relay the selected directory grant exactly.
+      {
+        clearAgentSHEnv();
+        let approvals = [{
+          id: "appr-directory",
+          kind: "file",
+          target: "/workspace/src/secret.txt",
+          fields: {
+            scope_options: [
+              { scope_kind: "file", scope_key: "file:/workspace/src/secret.txt", scope_label: "/workspace/src/secret.txt", scope_operation: "read", scope_path: "/workspace/src/secret.txt", scope_prefix: false },
+              { scope_kind: "directory", scope_key: "dir:/workspace/src", scope_label: "/workspace/src", scope_operation: "read", scope_path: "/workspace/src", scope_prefix: true },
+            ],
+          },
+        }];
+        let resolved;
+        const server = await withApprovalServer(async (request) => {
+          if (request.op === "list") return { ok: true, approvals };
+          if (request.op === "resolve") {
+            resolved = request;
+            approvals = [];
+            return { ok: true };
+          }
+          return { ok: false, error: "unknown op" };
+        });
+        setAgentSHEnv(server.socketPath);
+        const pi = createPi();
+        sandbox(pi);
+        const ctx = createContext({ customActions: ["<down>", "<down>", "<enter>"] });
+        await startSession(pi, ctx);
+        await waitFor(() => Boolean(resolved), "directory approval was not resolved");
+
+        assert(ctx.customCalls.length === 1, "directory approval did not use the custom overlay prompt");
+        assert(ctx.customCalls[0].options.overlay === true, "approval prompt was not an overlay");
+        assert(ctx.customCalls[0].options.overlayOptions?.width === "100%", "approval overlay was not full width");
+        assert(ctx.customCalls[0].options.overlayOptions?.anchor === "bottom-center", "approval overlay anchor regressed");
+        assert(resolved.id === "appr-directory", "resolved wrong directory approval id");
+        assert(resolved.decision === "approve", "directory approval was not approved");
+        assert(resolved.scope === "session", "directory approval did not relay scope=session");
+        assert(resolved.scope_kind === "directory", "directory approval did not relay scope_kind");
+        assert(resolved.scope_key === "dir:/workspace/src", "directory approval did not relay scope_key");
+        assert(resolved.scope_path === "/workspace/src", "directory approval did not relay scope_path");
+        assert(resolved.scope_prefix === true, "directory approval did not relay scope_prefix");
         await shutdownSession(pi);
         await server.close();
       }

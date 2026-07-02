@@ -15,8 +15,8 @@ import { createConnection, type Socket } from "node:net";
 import { tmpdir } from "node:os";
 import { join, posix as posixPath } from "node:path";
 import { Type } from "@sinclair/typebox";
-import { DEFAULT_MAX_BYTES, DEFAULT_MAX_LINES, formatSize, truncateTail, type ExtensionAPI, type ExtensionContext, type TruncationResult } from "@mariozechner/pi-coding-agent";
-import { Key, matchesKey, Text, truncateToWidth, type Component } from "@mariozechner/pi-tui";
+import { DEFAULT_MAX_BYTES, DEFAULT_MAX_LINES, formatSize, renderDiff, truncateTail, type ExtensionAPI, type ExtensionContext, type TruncationResult } from "@mariozechner/pi-coding-agent";
+import { Box, Container, Key, matchesKey, Spacer, Text, truncateToWidth, type Component } from "@mariozechner/pi-tui";
 
 type JsonObject = Record<string, unknown>;
 type ProtocolMode = "mock-ndjson" | "rest" | "legacy-approval-ui" | "";
@@ -1817,17 +1817,88 @@ function contentFromReadResult(result: any) {
   return [{ type: "text", text: textFromResult(result, "") }];
 }
 
-function renderSandboxFileToolCall(toolName: string, args: any, theme: any) {
-  const path = typeof args?.path === "string" && args.path ? args.path : "(unknown path)";
-  return new Text(`${theme.fg("toolTitle", toolName)} ${theme.fg("accent", path)}`, 0, 0);
+type SandboxEditRenderState = {
+  callComponent?: Box;
+  output?: string;
+  isError?: boolean;
+};
+
+type SandboxEditRenderContext = {
+  args?: any;
+  state?: SandboxEditRenderState;
+  lastComponent?: Component;
+  isError?: boolean;
+};
+
+function sandboxEditPath(args: any) {
+  return typeof args?.path === "string" && args.path ? args.path : "(unknown path)";
 }
 
-function renderSandboxFileToolResult(result: any, _options: any, theme: any) {
+function getSandboxEditCallComponent(context: SandboxEditRenderContext | undefined) {
+  const state = context?.state;
+  if (context?.lastComponent instanceof Box) {
+    if (state) state.callComponent = context.lastComponent;
+    return context.lastComponent;
+  }
+  if (state?.callComponent) return state.callComponent;
+  const component = new Box(1, 1, (text: string) => text);
+  if (state) state.callComponent = component;
+  return component;
+}
+
+function themeBg(theme: any, color: string, text: string) {
+  return typeof theme?.bg === "function" ? theme.bg(color, text) : text;
+}
+
+function themeBold(theme: any, text: string) {
+  return typeof theme?.bold === "function" ? theme.bold(text) : text;
+}
+
+function renderSandboxEditCallInto(component: Box, args: any, theme: any, state?: SandboxEditRenderState) {
+  component.setBgFn(
+    state?.isError
+      ? (text: string) => themeBg(theme, "toolErrorBg", text)
+      : state?.output
+        ? (text: string) => themeBg(theme, "toolSuccessBg", text)
+        : (text: string) => themeBg(theme, "toolPendingBg", text),
+  );
+  component.clear();
+  component.addChild(new Text(`${theme.fg("toolTitle", themeBold(theme, "edit"))} ${theme.fg("accent", sandboxEditPath(args))}`, 0, 0));
+  if (state?.output) {
+    component.addChild(new Spacer(1));
+    component.addChild(new Text(state.output, 0, 0));
+  }
+  return component;
+}
+
+function renderSandboxEditToolCall(args: any, theme: any, context?: SandboxEditRenderContext) {
+  const component = getSandboxEditCallComponent(context);
+  return renderSandboxEditCallInto(component, args, theme, context?.state);
+}
+
+function formatSandboxEditResult(result: any, args: any, theme: any, isError: boolean | undefined) {
   const details = result?.details && typeof result.details === "object" ? result.details : {};
-  const diff = typeof details.diff === "string" && details.diff ? details.diff : undefined;
-  const text = textFromResult(result, "");
-  const output = diff ? `${text ? `${text}\n\n` : ""}${diff}` : text;
-  return new Text(theme.fg("toolOutput", output || "(no output)"), 0, 0);
+  const diff = typeof details.diff === "string" && details.diff ? details.diff : typeof result?.details?.patch === "string" ? result.details.patch : typeof result?.diff === "string" ? result.diff : undefined;
+  const text = textFromResult(result, "").trim();
+  if (isError) return text ? theme.fg("error", text) : undefined;
+  if (diff) return renderDiff(diff, { filePath: sandboxEditPath(args) });
+  return text ? theme.fg("toolOutput", text) : undefined;
+}
+
+function renderSandboxEditToolResult(result: any, _options: any, theme: any, context?: SandboxEditRenderContext) {
+  const state = context?.state;
+  const output = formatSandboxEditResult(result, context?.args, theme, context?.isError);
+  if (state) {
+    state.output = output;
+    state.isError = context?.isError;
+    if (state.callComponent) renderSandboxEditCallInto(state.callComponent, context?.args, theme, state);
+  }
+  const component = new Container();
+  if (!state && output) {
+    const text = textFromResult(result, "").trim();
+    component.addChild(new Text(text && !output.includes(text) ? `${theme.fg("toolOutput", text)}\n\n${output}` : output, 0, 0));
+  }
+  return component;
 }
 
 function subagentText(result: any) {
@@ -1988,11 +2059,12 @@ export default function sandbox(pi: ExtensionAPI) {
     label: "edit",
     description: "Edit a file through the AgentSH session supervisor using exact text replacements.",
     parameters: EditParams,
-    renderCall(args, theme) {
-      return renderSandboxFileToolCall("edit", args, theme);
+    renderShell: "self",
+    renderCall(args, theme, context) {
+      return renderSandboxEditToolCall(args, theme, context);
     },
-    renderResult(result, options, theme) {
-      return renderSandboxFileToolResult(result, options, theme);
+    renderResult(result, options, theme, context) {
+      return renderSandboxEditToolResult(result, options, theme, context);
     },
     async execute(toolCallId, params, signal, _onUpdate, ctx) {
       const result = await requireClient(state).editFile(params.path, params.edits, { cwd: effectiveSupervisorCwd(ctx), actor: parentActor(toolCallId, "Pi edit tool"), signal });
