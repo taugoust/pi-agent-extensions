@@ -689,10 +689,12 @@ function resolveChoice(choices: ApprovalChoice[], choice: string | undefined): A
 }
 
 function showApprovalPrompt(ctx: ExtensionContext, approval: ApprovalRequest, choices: ApprovalChoice[], signal: AbortSignal): Promise<string | undefined> {
+  if (typeof ctx.ui.custom !== "function") return ctx.ui.select(formatApproval(approval), choices.map((candidate) => candidate.label), { signal });
   return ctx.ui.custom<string | undefined>((tui, theme, _kb, done) => {
     let selectedIndex = 0;
     let scrollOffset = 0;
     let cachedLines: string[] | undefined;
+    let cachedWidth = 0;
     let lastGPress = 0;
     const detailLines = formatApproval(approval).split(/\r?\n/);
 
@@ -761,7 +763,7 @@ function showApprovalPrompt(ctx: ExtensionContext, approval: ApprovalRequest, ch
         }
       },
       render(width: number) {
-        if (cachedLines) return cachedLines;
+        if (cachedLines && cachedWidth === width) return cachedLines;
         clampScroll(scrollOffset);
         const lines: string[] = [];
         const add = (line: string) => lines.push(truncateToWidth(line, width, ""));
@@ -785,12 +787,16 @@ function showApprovalPrompt(ctx: ExtensionContext, approval: ApprovalRequest, ch
         lines.push("");
         add(theme.fg("dim", " ↑↓/j/k select • Enter choose • Esc deny once • u/d/PgUp/PgDn scroll"));
         add(theme.fg("accent", "─".repeat(width)));
+        cachedWidth = width;
         cachedLines = lines;
         return lines;
       },
     };
 
     return component;
+  }, {
+    overlay: true,
+    overlayOptions: { width: "100%", anchor: "bottom-center" },
   });
 }
 
@@ -1584,7 +1590,6 @@ async function promptApproval(state: SupervisorState, approval: ApprovalRequest)
   state.promptAbortControllers.set(approval.id, controller);
   try {
     const choices = approvalChoices(approval);
-    ctx.ui.setWorkingVisible(false);
     const choice = await showApprovalPrompt(ctx, approval, choices, controller.signal);
     if (controller.signal.aborted) return;
     const resolution = resolveChoice(choices, choice);
@@ -1603,7 +1608,6 @@ async function promptApproval(state: SupervisorState, approval: ApprovalRequest)
     notify(ctx, `AgentSH approval handling failed: ${state.lastError}`, "error");
     setStatus(state);
   } finally {
-    ctx.ui.setWorkingVisible(true);
     state.promptAbortControllers.delete(approval.id);
     state.resolving.delete(approval.id);
   }
