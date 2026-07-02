@@ -16,7 +16,7 @@ import { tmpdir } from "node:os";
 import { join, posix as posixPath } from "node:path";
 import { Type } from "@sinclair/typebox";
 import { DEFAULT_MAX_BYTES, DEFAULT_MAX_LINES, formatSize, truncateTail, type ExtensionAPI, type ExtensionContext, type TruncationResult } from "@mariozechner/pi-coding-agent";
-import { Text } from "@mariozechner/pi-tui";
+import { Key, matchesKey, Text, truncateToWidth, type Component } from "@mariozechner/pi-tui";
 
 type JsonObject = Record<string, unknown>;
 type ProtocolMode = "mock-ndjson" | "rest" | "legacy-approval-ui" | "";
@@ -686,6 +686,112 @@ function approvalChoices(approval: ApprovalRequest): ApprovalChoice[] {
 function resolveChoice(choices: ApprovalChoice[], choice: string | undefined): ApprovalResolution {
   const selected = choices.find((candidate) => candidate.label === choice);
   return selected || { decision: "deny", scope: "once", reason: "denied in parent Pi" };
+}
+
+function showApprovalPrompt(ctx: ExtensionContext, approval: ApprovalRequest, choices: ApprovalChoice[], signal: AbortSignal): Promise<string | undefined> {
+  return ctx.ui.custom<string | undefined>((tui, theme, _kb, done) => {
+    let selectedIndex = 0;
+    let scrollOffset = 0;
+    let cachedLines: string[] | undefined;
+    let lastGPress = 0;
+    const detailLines = formatApproval(approval).split(/\r?\n/);
+
+    const visibleDetailLines = () => Math.max(3, tui.terminal.rows - choices.length - 12);
+    const maxScroll = () => Math.max(0, detailLines.length - visibleDetailLines());
+    const clampScroll = (offset: number) => {
+      scrollOffset = Math.max(0, Math.min(maxScroll(), offset));
+    };
+    const refresh = () => {
+      cachedLines = undefined;
+      tui.requestRender();
+    };
+    const abort = () => done(undefined);
+    signal.addEventListener("abort", abort, { once: true });
+
+    const component: Component & { dispose(): void } = {
+      dispose() {
+        signal.removeEventListener("abort", abort);
+      },
+      invalidate() {
+        cachedLines = undefined;
+      },
+      handleInput(data: string) {
+        if (matchesKey(data, Key.enter)) {
+          done(choices[selectedIndex]?.label);
+          return;
+        }
+        if (matchesKey(data, Key.escape)) {
+          done(undefined);
+          return;
+        }
+        if (matchesKey(data, Key.up) || data === "k") {
+          selectedIndex = Math.max(0, selectedIndex - 1);
+          refresh();
+          return;
+        }
+        if (matchesKey(data, Key.down) || data === "j") {
+          selectedIndex = Math.min(choices.length - 1, selectedIndex + 1);
+          refresh();
+          return;
+        }
+        if (matchesKey(data, Key.pageUp) || data === "u") {
+          clampScroll(scrollOffset - Math.max(1, Math.floor(visibleDetailLines() / 2)));
+          refresh();
+          return;
+        }
+        if (matchesKey(data, Key.pageDown) || data === "d") {
+          clampScroll(scrollOffset + Math.max(1, Math.floor(visibleDetailLines() / 2)));
+          refresh();
+          return;
+        }
+        if (data === "g") {
+          const now = Date.now();
+          if (now - lastGPress < 500) {
+            scrollOffset = 0;
+            lastGPress = 0;
+            refresh();
+          } else {
+            lastGPress = now;
+          }
+          return;
+        }
+        if (data === "G") {
+          scrollOffset = maxScroll();
+          refresh();
+        }
+      },
+      render(width: number) {
+        if (cachedLines) return cachedLines;
+        clampScroll(scrollOffset);
+        const lines: string[] = [];
+        const add = (line: string) => lines.push(truncateToWidth(line, width, ""));
+        const detailVisible = visibleDetailLines();
+        const visible = detailLines.slice(scrollOffset, scrollOffset + detailVisible);
+
+        add(theme.fg("accent", "─".repeat(width)));
+        add(theme.fg("accent", theme.bold(" AgentSH approval requested")));
+        lines.push("");
+        for (const line of visible) add(line ? ` ${theme.fg("text", line)}` : "");
+        if (detailLines.length > detailVisible) {
+          const end = Math.min(scrollOffset + detailVisible, detailLines.length);
+          add(theme.fg("dim", ` lines ${scrollOffset + 1}–${end} of ${detailLines.length} • PgUp/PgDn scroll`));
+        }
+        lines.push("");
+        for (let i = 0; i < choices.length; i++) {
+          const prefix = i === selectedIndex ? theme.fg("accent", "→ ") : "  ";
+          const color = choices[i]?.decision === "deny" ? "warning" : "success";
+          add(`${prefix}${theme.fg(color, choices[i]?.label || "")}`);
+        }
+        lines.push("");
+        add(theme.fg("dim", " ↑↓/j/k select • Enter choose • Esc deny once • u/d/PgUp/PgDn scroll"));
+        add(theme.fg("accent", "─".repeat(width)));
+        cachedLines = lines;
+        return lines;
+      },
+    };
+
+    return component;
+  });
 }
 
 function setStatus(state: SupervisorState, ctx = state.ctx) {
@@ -1478,7 +1584,8 @@ async function promptApproval(state: SupervisorState, approval: ApprovalRequest)
   state.promptAbortControllers.set(approval.id, controller);
   try {
     const choices = approvalChoices(approval);
-    const choice = await ctx.ui.select(formatApproval(approval), choices.map((candidate) => candidate.label), { signal: controller.signal });
+    ctx.ui.setWorkingVisible(false);
+    const choice = await showApprovalPrompt(ctx, approval, choices, controller.signal);
     if (controller.signal.aborted) return;
     const resolution = resolveChoice(choices, choice);
     await requireApprovalClient(state).resolveApproval(approval.id, resolution);
@@ -1496,6 +1603,7 @@ async function promptApproval(state: SupervisorState, approval: ApprovalRequest)
     notify(ctx, `AgentSH approval handling failed: ${state.lastError}`, "error");
     setStatus(state);
   } finally {
+    ctx.ui.setWorkingVisible(true);
     state.promptAbortControllers.delete(approval.id);
     state.resolving.delete(approval.id);
   }
