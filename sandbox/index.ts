@@ -12,11 +12,11 @@ import { randomBytes } from "node:crypto";
 import { createWriteStream, type WriteStream } from "node:fs";
 import * as http from "node:http";
 import { createConnection, type Socket } from "node:net";
-import { tmpdir } from "node:os";
+import { homedir, tmpdir } from "node:os";
 import { join, posix as posixPath } from "node:path";
 import { Type } from "@sinclair/typebox";
-import { DEFAULT_MAX_BYTES, DEFAULT_MAX_LINES, formatSize, renderDiff, truncateTail, type ExtensionAPI, type ExtensionContext, type TruncationResult } from "@mariozechner/pi-coding-agent";
-import { Box, Container, Key, matchesKey, Spacer, Text, truncateToWidth, type Component } from "@mariozechner/pi-tui";
+import { DEFAULT_MAX_BYTES, DEFAULT_MAX_LINES, formatSize, getMarkdownTheme, renderDiff, truncateTail, type ExtensionAPI, type ExtensionContext, type TruncationResult } from "@mariozechner/pi-coding-agent";
+import { Box, Container, Key, Markdown, matchesKey, Spacer, Text, truncateToWidth, type Component } from "@mariozechner/pi-tui";
 
 type JsonObject = Record<string, unknown>;
 type ProtocolMode = "mock-ndjson" | "rest" | "legacy-approval-ui" | "";
@@ -1982,8 +1982,159 @@ function renderSandboxEditToolResult(result: any, _options: any, theme: any, con
   return component;
 }
 
+const MAX_SUBAGENT_RESULT_BYTES = Number(process.env.PI_AGENTSH_SUBAGENT_RESULT_MAX_BYTES || String(50 * 1024));
+
+function truncateByBytes(text: string, maxBytes = MAX_SUBAGENT_RESULT_BYTES): string {
+  if (maxBytes <= 0) return "";
+  const bytes = byteLength(text);
+  if (bytes <= maxBytes) return text;
+  let lo = 0;
+  let hi = text.length;
+  while (lo < hi) {
+    const mid = Math.ceil((lo + hi) / 2);
+    if (byteLength(text.slice(0, mid)) <= maxBytes) lo = mid;
+    else hi = mid - 1;
+  }
+  return `${text.slice(0, lo)}\n\n… truncated at ${formatSize(maxBytes)} (${formatSize(bytes)} total)`;
+}
+
+function usageZero() {
+  return { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, cost: 0, contextTokens: 0, turns: 0 };
+}
+
+function toolResultText(value: any): string {
+  const content = Array.isArray(value?.content) ? value.content : Array.isArray(value) ? value : undefined;
+  if (!content) return typeof value === "string" ? value : value === undefined ? "" : JSON.stringify(value);
+  return content
+    .map((part: any) => {
+      if (part?.type === "text") return String(part.text ?? "");
+      if (part?.type === "image") return `[image: ${part.mimeType ?? part.source?.media_type ?? "unknown"}]`;
+      return JSON.stringify(part);
+    })
+    .filter(Boolean)
+    .join("\n");
+}
+
+function parseSubagentPiJsonStdout(stdout: string) {
+  const messages: any[] = [];
+  const usage = usageZero();
+  let activeMessageIndex: number | undefined;
+  let lastEvent: unknown;
+  let lastToolCall: { name: string; args: Record<string, unknown> } | undefined;
+  let lastToolResult: string | undefined;
+
+  const rememberAssistantMetadata = (msg: any) => {
+    if (!msg || msg.role !== "assistant") return;
+    usage.turns++;
+    const msgUsage = msg.usage;
+    if (msgUsage) {
+      usage.input += msgUsage.input || 0;
+      usage.output += msgUsage.output || 0;
+      usage.cacheRead += msgUsage.cacheRead || 0;
+      usage.cacheWrite += msgUsage.cacheWrite || 0;
+      usage.cost += msgUsage.cost?.total || 0;
+      usage.contextTokens = msgUsage.totalTokens || usage.contextTokens;
+    }
+  };
+
+  const rememberToolCallFromMessage = (msg: any) => {
+    if (!msg || msg.role !== "assistant" || !Array.isArray(msg.content)) return;
+    for (const part of msg.content) {
+      if (part?.type === "toolCall") lastToolCall = { name: String(part.name || "unknown"), args: part.arguments || {} };
+    }
+  };
+
+  const upsertMessage = (msg: any, final: boolean) => {
+    rememberToolCallFromMessage(msg);
+    if (msg?.role === "toolResult") lastToolResult = toolResultText(msg.content);
+    if (activeMessageIndex !== undefined && messages[activeMessageIndex]) {
+      messages[activeMessageIndex] = msg;
+    } else {
+      messages.push(msg);
+      activeMessageIndex = messages.length - 1;
+    }
+    if (final) {
+      rememberAssistantMetadata(msg);
+      activeMessageIndex = undefined;
+    }
+  };
+
+  for (const line of stdout.split(/\r?\n/)) {
+    const trimmed = line.trim();
+    if (!trimmed) continue;
+    let event: any;
+    try { event = JSON.parse(trimmed); } catch { continue; }
+    lastEvent = event;
+
+    if ((event.type === "message_start" || event.type === "message_update" || event.type === "message_end") && event.message) {
+      upsertMessage(event.message, event.type === "message_end");
+    } else if (event.type === "tool_execution_start") {
+      lastToolCall = { name: String(event.toolName ?? "unknown"), args: event.args ?? {} };
+    } else if (event.type === "tool_execution_update" && event.partialResult) {
+      const text = toolResultText(event.partialResult);
+      if (text) lastToolResult = text;
+    } else if (event.type === "tool_execution_end") {
+      const toolName = String(event.toolName ?? lastToolCall?.name ?? "unknown");
+      lastToolCall = { name: toolName, args: event.args ?? (lastToolCall?.name === toolName ? lastToolCall.args : {}) };
+      const text = toolResultText(event.result);
+      if (text) lastToolResult = text;
+    } else if (event.type === "tool_result_end" && event.message) {
+      upsertMessage(event.message, true);
+    }
+  }
+
+  return { messages, usage, lastEvent, lastToolCall, lastToolResult };
+}
+
+function subagentParentDetails(result: any) {
+  const detailResult = (item: any) => {
+    const parsed = typeof item?.stdout === "string" ? parseSubagentPiJsonStdout(item.stdout) : undefined;
+    return {
+      label: item?.label,
+      task: item?.task,
+      exitCode: item?.exit_code ?? item?.exitCode,
+      stopReason: item?.stop_reason ?? item?.stopReason,
+      final: item?.final,
+      errorMessage: item?.error,
+      stderr: item?.stderr,
+      usage: parsed?.usage ?? usageZero(),
+      messages: parsed?.messages ?? [],
+      model: item?.model,
+      tools: item?.tools,
+      cwd: item?.cwd,
+      runtime: item?.runtime,
+      command: item?.command,
+      args: item?.args,
+      durationMS: item?.duration_ms ?? item?.durationMS,
+      lastEvent: parsed?.lastEvent,
+      lastToolCall: parsed?.lastToolCall,
+      lastToolResult: parsed?.lastToolResult,
+      stdoutBytes: typeof item?.stdout === "string" ? byteLength(item.stdout) : undefined,
+      stderrBytes: typeof item?.stderr === "string" ? byteLength(item.stderr) : undefined,
+    };
+  };
+  const results = Array.isArray(result?.results) ? result.results.map(detailResult) : [];
+  return { mode: result?.mode || (results.length > 1 ? "parallel" : "single"), results, final: result?.final, summary: result?.summary, error: result?.error };
+}
+
+function resultLine(result: any) {
+  const label = stringifyData(result?.label || "subagent");
+  const text = stringifyData(result?.final || result?.summary || result?.error || result?.stop_reason || result?.stopReason || "").trim();
+  return text ? `[${label}] ${truncateByBytes(text)}` : `[${label}] ${result?.exit_code ?? result?.exitCode ?? "completed"}`;
+}
+
 function subagentText(result: any) {
-  return textFromResult(result, result?.final || result?.summary || result?.stdout || JSON.stringify(result ?? {}, null, 2));
+  const direct = textFromResult(result, "").trim();
+  if (direct) return direct;
+  if (typeof result?.final === "string" && result.final.trim()) return result.final;
+  if (typeof result?.summary === "string" && result.summary.trim()) return result.summary;
+  if (Array.isArray(result?.results) && result.results.length > 0) return result.results.map(resultLine).join("\n\n");
+  return JSON.stringify(subagentParentDetails(result) ?? {}, null, 2);
+}
+
+function appendSubagentRawText(state: SubagentStreamState, text: string) {
+  if (!text) return;
+  state.rawText = truncateByBytes(state.rawText + text, MAX_SUBAGENT_RESULT_BYTES);
 }
 
 type SubagentStreamState = {
@@ -2049,7 +2200,7 @@ function renderSubagentStream(state: SubagentStreamState) {
 function processSubagentStdoutLine(state: SubagentStreamState, line: string) {
   const trimmed = line.trim();
   if (!trimmed) {
-    if (!state.sawPiJsonStdout) state.rawText += "\n";
+    if (!state.sawPiJsonStdout) appendSubagentRawText(state, "\n");
     return;
   }
 
@@ -2057,13 +2208,13 @@ function processSubagentStdoutLine(state: SubagentStreamState, line: string) {
   try {
     event = JSON.parse(trimmed);
   } catch {
-    state.rawText += `${line}\n`;
+    appendSubagentRawText(state, `${line}\n`);
     return;
   }
 
   const eventType = typeof event?.type === "string" ? event.type : "";
   if (!PI_JSON_EVENT_TYPES.has(eventType)) {
-    state.rawText += `${line}\n`;
+    appendSubagentRawText(state, `${line}\n`);
     return;
   }
 
@@ -2084,6 +2235,127 @@ function flushSubagentStdout(state: SubagentStreamState) {
   if (!state.stdoutBuffer) return;
   processSubagentStdoutLine(state, state.stdoutBuffer);
   state.stdoutBuffer = "";
+}
+
+function formatTokenCount(count: number): string {
+  if (count < 1000) return count.toString();
+  if (count < 10000) return `${(count / 1000).toFixed(1)}k`;
+  if (count < 1000000) return `${Math.round(count / 1000)}k`;
+  return `${(count / 1000000).toFixed(1)}M`;
+}
+
+function formatSubagentUsage(usage: any, model?: string): string {
+  const parts: string[] = [];
+  if (usage?.turns) parts.push(`${usage.turns} turn${usage.turns > 1 ? "s" : ""}`);
+  if (usage?.input) parts.push(`↑${formatTokenCount(usage.input)}`);
+  if (usage?.output) parts.push(`↓${formatTokenCount(usage.output)}`);
+  if (usage?.cacheRead) parts.push(`R${formatTokenCount(usage.cacheRead)}`);
+  if (usage?.cacheWrite) parts.push(`W${formatTokenCount(usage.cacheWrite)}`);
+  if (usage?.cost) parts.push(`$${usage.cost.toFixed(4)}`);
+  if (usage?.contextTokens) parts.push(`ctx:${formatTokenCount(usage.contextTokens)}`);
+  if (model) parts.push(model);
+  return parts.join(" ");
+}
+
+function subagentFinalOutput(messages: any[]): string {
+  for (let i = messages.length - 1; i >= 0; i--) {
+    const msg = messages[i];
+    if (msg?.role !== "assistant" || !Array.isArray(msg.content)) continue;
+    for (const part of msg.content) if (part?.type === "text") return String(part.text || "");
+  }
+  return "";
+}
+
+function subagentDisplayItems(messages: any[]): Array<{ type: "text"; text: string } | { type: "toolCall"; name: string; args: Record<string, any> }> {
+  const items: Array<{ type: "text"; text: string } | { type: "toolCall"; name: string; args: Record<string, any> }> = [];
+  for (const msg of messages) {
+    if (msg?.role !== "assistant" || !Array.isArray(msg.content)) continue;
+    for (const part of msg.content) {
+      if (part?.type === "text") items.push({ type: "text", text: String(part.text || "") });
+      else if (part?.type === "toolCall") items.push({ type: "toolCall", name: String(part.name || "unknown"), args: part.arguments || {} });
+    }
+  }
+  return items;
+}
+
+function formatSubagentToolCall(toolName: string, args: Record<string, unknown>, themeFg: (color: any, text: string) => string): string {
+  const shortenPath = (p: string) => {
+    const home = homedir();
+    return p.startsWith(home) ? `~${p.slice(home.length)}` : p;
+  };
+  if (toolName === "bash") return themeFg("muted", "$ ") + themeFg("toolOutput", String(args.command || "...").slice(0, 80));
+  if (toolName === "read") return themeFg("muted", "read ") + themeFg("accent", shortenPath(String(args.path || args.file_path || "...")));
+  if (toolName === "write") return themeFg("muted", "write ") + themeFg("accent", shortenPath(String(args.path || args.file_path || "...")));
+  if (toolName === "edit") return themeFg("muted", "edit ") + themeFg("accent", shortenPath(String(args.path || args.file_path || "...")));
+  const argsStr = JSON.stringify(args || {});
+  return themeFg("accent", toolName) + themeFg("dim", ` ${argsStr.length > 50 ? `${argsStr.slice(0, 50)}...` : argsStr}`);
+}
+
+function isSubagentFailure(result: any): boolean {
+  return result?.exitCode !== 0 || result?.stopReason === "error" || result?.stopReason === "aborted" || result?.stopReason === "timeout";
+}
+
+function renderSubagentCall(args: any, theme: any) {
+  if (args.chain?.length) return new Text(`${theme.fg("toolTitle", theme.bold("subagent "))}${theme.fg("accent", `chain (${args.chain.length} steps)`)}`, 0, 0);
+  if (args.tasks?.length) return new Text(`${theme.fg("toolTitle", theme.bold("subagent "))}${theme.fg("accent", `parallel (${args.tasks.length} tasks)`)}`, 0, 0);
+  const task = String(args.task ?? "...");
+  return new Text(`${theme.fg("toolTitle", theme.bold("subagent single"))}\n  ${theme.fg("dim", task.length > 70 ? `${task.slice(0, 70)}...` : task)}`, 0, 0);
+}
+
+function renderSubagentResult(result: any, options: any, theme: any) {
+  const details = result.details as any | undefined;
+  if (!details?.results?.length) return new Text(result.content?.[0]?.type === "text" ? result.content[0].text : "(no output)", 0, 0);
+  const expanded = Boolean(options?.expanded);
+  const mdTheme = getMarkdownTheme();
+  const renderOne = (container: Container, r: any, title: string) => {
+    const failed = isSubagentFailure(r);
+    const icon = failed ? theme.fg("error", "✗") : r.exitCode === -1 ? theme.fg("warning", "⏳") : theme.fg("success", "✓");
+    container.addChild(new Text(`${icon} ${theme.fg("toolTitle", theme.bold(title))}`, 0, 0));
+    container.addChild(new Text(theme.fg("muted", "Status: ") + theme.fg(failed ? "error" : "dim", `${r.stopReason || "completed"} (exit ${r.exitCode ?? 0})`), 0, 0));
+    if (r.task) container.addChild(new Text(theme.fg("muted", "Task: ") + theme.fg("dim", r.task), 0, 0));
+    if (r.model) container.addChild(new Text(theme.fg("muted", "Model: ") + theme.fg("dim", r.model), 0, 0));
+    if (r.tools?.length) container.addChild(new Text(theme.fg("muted", "Tools: ") + theme.fg("dim", r.tools.join(", ")), 0, 0));
+    if (r.cwd) container.addChild(new Text(theme.fg("muted", "Cwd: ") + theme.fg("dim", r.cwd), 0, 0));
+    if (r.lastToolCall) container.addChild(new Text(theme.fg("muted", "Last tool call: ") + formatSubagentToolCall(r.lastToolCall.name, r.lastToolCall.args, theme.fg.bind(theme)), 0, 0));
+    if (r.lastToolResult) container.addChild(new Text(theme.fg("muted", `Last tool result:\n${truncateByBytes(r.lastToolResult).split("\n").slice(-8).join("\n")}`), 0, 0));
+    if (expanded) {
+      for (const item of subagentDisplayItems(r.messages || [])) {
+        if (item.type === "toolCall") container.addChild(new Text(theme.fg("muted", "→ ") + formatSubagentToolCall(item.name, item.args, theme.fg.bind(theme)), 0, 0));
+      }
+    }
+    const finalOutput = r.final || subagentFinalOutput(r.messages || []);
+    container.addChild(new Spacer(1));
+    container.addChild(new Text(theme.fg("muted", "─── Output ───"), 0, 0));
+    if (finalOutput) container.addChild(new Markdown(truncateByBytes(finalOutput.trim()), 0, 0, mdTheme));
+    else container.addChild(new Text(theme.fg("muted", "(no output)"), 0, 0));
+    const usage = formatSubagentUsage(r.usage, r.model);
+    if (usage) container.addChild(new Text(theme.fg("dim", usage), 0, 0));
+    if (r.stderr?.trim()) {
+      container.addChild(new Spacer(1));
+      container.addChild(new Text(theme.fg(failed ? "error" : "dim", `stderr:\n${truncateByBytes(r.stderr.trim())}`), 0, 0));
+    }
+  };
+
+  const mode = details.mode || (details.results.length > 1 ? "parallel" : "single");
+  if (expanded || details.results.length === 1) {
+    const container = new Container();
+    if (details.results.length > 1) container.addChild(new Text(theme.fg("toolTitle", theme.bold(`${mode} `)) + theme.fg("accent", `${details.results.length} results`), 0, 0));
+    for (const r of details.results) {
+      if (container.children.length) container.addChild(new Spacer(1));
+      renderOne(container, r, r.label || "subagent");
+    }
+    return container;
+  }
+
+  const successCount = details.results.filter((r: any) => !isSubagentFailure(r)).length;
+  let text = `${theme.fg(successCount === details.results.length ? "success" : "warning", successCount === details.results.length ? "✓" : "◐")} ${theme.fg("toolTitle", theme.bold(`${mode} `))}${theme.fg("accent", `${successCount}/${details.results.length} results`)}`;
+  for (const r of details.results) {
+    const icon = isSubagentFailure(r) ? theme.fg("error", "✗") : theme.fg("success", "✓");
+    const output = r.final || subagentFinalOutput(r.messages || []) || r.errorMessage || "(no output)";
+    text += `\n\n${theme.fg("muted", "─── ")}${theme.fg("accent", r.label || "subagent")} ${icon}\n${theme.fg(isSubagentFailure(r) ? "error" : "toolOutput", truncateByBytes(output).split("\n").slice(0, 5).join("\n"))}`;
+  }
+  text += `\n${theme.fg("muted", "(Ctrl+O to expand)")}`;
+  return new Text(text, 0, 0);
 }
 
 export default function sandbox(pi: ExtensionAPI) {
@@ -2258,6 +2530,12 @@ export default function sandbox(pi: ExtensionAPI) {
     label: "Subagent",
     description: "Delegate focused work to an AgentSH-supervised sandboxed subagent in the same detached supervisor session.",
     parameters: SubagentParams,
+    renderCall(args, theme) {
+      return renderSubagentCall(args, theme);
+    },
+    renderResult(result, options, theme) {
+      return renderSubagentResult(result, options, theme);
+    },
     async execute(toolCallId, params: any, signal, onUpdate, ctx) {
       const hasSingle = typeof params.task === "string" && params.task.trim().length > 0;
       const hasTasks = Array.isArray(params.tasks) && params.tasks.length > 0;
@@ -2291,7 +2569,7 @@ export default function sandbox(pi: ExtensionAPI) {
             appendSubagentStdoutChunk(childState, stringifyData(message.data || ""));
             emitSubagentUpdate(message);
           } else if (message.event === "stderr" || message.event === "message" || message.event === "subagent_update") {
-            childState.rawText += stringifyData(message.data || message.result || "");
+            appendSubagentRawText(childState, stringifyData(message.data || message.result || ""));
             emitSubagentUpdate(message);
           } else if (message.event === "subagent_child_start") {
             const label = stringifyData((message as any).label || "subagent");
@@ -2303,7 +2581,7 @@ export default function sandbox(pi: ExtensionAPI) {
             const final = stringifyData(result?.final || result?.error || "");
             if (final) {
               if (childState.liveText.trim() === final.trim()) childState.liveText = "";
-              appendSubagentPrefix(childState, `[${stringifyData((message as any).label || result?.label || "subagent")}] ${final}`);
+              appendSubagentPrefix(childState, `[${stringifyData((message as any).label || result?.label || "subagent")}] ${truncateByBytes(final)}`);
             }
             emitSubagentUpdate(message);
           } else if (message.event === "tool_update" || message.event === "subagent_start" || message.event === "done") {
@@ -2312,8 +2590,8 @@ export default function sandbox(pi: ExtensionAPI) {
           }
         },
       });
-      const text = subagentText(result);
-      return { content: [{ type: "text", text }], details: result as any, isError: Boolean((result as any)?.error) };
+      const text = truncateByBytes(subagentText(result));
+      return { content: [{ type: "text", text }], details: subagentParentDetails(result) as any, isError: Boolean((result as any)?.error) };
     },
   });
 
