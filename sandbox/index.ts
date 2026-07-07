@@ -1999,7 +1999,25 @@ function truncateByBytes(text: string, maxBytes = MAX_SUBAGENT_RESULT_BYTES): st
 }
 
 function usageZero() {
-  return { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, cost: 0, contextTokens: 0, turns: 0 };
+  return { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, cost: 0, contextTokens: 0, contextWindow: 0, turns: 0 };
+}
+
+function usageNumber(value: unknown) {
+  return typeof value === "number" && Number.isFinite(value) ? value : 0;
+}
+
+function updateUsageFromAssistantMessage(usage: ReturnType<typeof usageZero>, msg: any) {
+  if (!msg || msg.role !== "assistant") return;
+  usage.turns++;
+  const msgUsage = msg.usage;
+  if (msgUsage) {
+    usage.input += usageNumber(msgUsage.input);
+    usage.output += usageNumber(msgUsage.output);
+    usage.cacheRead += usageNumber(msgUsage.cacheRead);
+    usage.cacheWrite += usageNumber(msgUsage.cacheWrite);
+    usage.cost += usageNumber(msgUsage.cost?.total);
+    usage.contextTokens = usageNumber(msgUsage.totalTokens) || usage.contextTokens;
+  }
 }
 
 function toolResultText(value: any): string {
@@ -2022,19 +2040,12 @@ function parseSubagentPiJsonStdout(stdout: string) {
   let lastEvent: unknown;
   let lastToolCall: { name: string; args: Record<string, unknown> } | undefined;
   let lastToolResult: string | undefined;
+  let model: string | undefined;
 
   const rememberAssistantMetadata = (msg: any) => {
     if (!msg || msg.role !== "assistant") return;
-    usage.turns++;
-    const msgUsage = msg.usage;
-    if (msgUsage) {
-      usage.input += msgUsage.input || 0;
-      usage.output += msgUsage.output || 0;
-      usage.cacheRead += msgUsage.cacheRead || 0;
-      usage.cacheWrite += msgUsage.cacheWrite || 0;
-      usage.cost += msgUsage.cost?.total || 0;
-      usage.contextTokens = msgUsage.totalTokens || usage.contextTokens;
-    }
+    updateUsageFromAssistantMessage(usage, msg);
+    if (typeof msg.model === "string" && msg.model.trim()) model = msg.model;
   };
 
   const rememberToolCallFromMessage = (msg: any) => {
@@ -2083,12 +2094,36 @@ function parseSubagentPiJsonStdout(stdout: string) {
     }
   }
 
-  return { messages, usage, lastEvent, lastToolCall, lastToolResult };
+  return { messages, usage, model, lastEvent, lastToolCall, lastToolResult };
 }
 
-function subagentParentDetails(result: any) {
+function modelMatches(candidate: any, requested: string) {
+  const value = requested.trim();
+  if (!value) return false;
+  return candidate?.id === value || candidate?.name === value || `${candidate?.provider}/${candidate?.id}` === value || `${candidate?.provider}:${candidate?.id}` === value;
+}
+
+function contextWindowForModel(ctx: ExtensionContext | undefined, model?: string): number {
+  const requested = typeof model === "string" ? model.trim() : "";
+  if (requested) {
+    const allModels = ctx?.modelRegistry?.getAll?.() ?? [];
+    const match = allModels.find((candidate: any) => modelMatches(candidate, requested));
+    if (typeof match?.contextWindow === "number" && Number.isFinite(match.contextWindow) && match.contextWindow > 0) return match.contextWindow;
+  }
+  const current = ctx?.model;
+  if (!requested || modelMatches(current, requested)) {
+    const contextWindow = current?.contextWindow;
+    if (typeof contextWindow === "number" && Number.isFinite(contextWindow) && contextWindow > 0) return contextWindow;
+  }
+  return 0;
+}
+
+function subagentParentDetails(result: any, ctx?: ExtensionContext) {
   const detailResult = (item: any) => {
     const parsed = typeof item?.stdout === "string" ? parseSubagentPiJsonStdout(item.stdout) : undefined;
+    const model = item?.model || parsed?.model;
+    const usage = parsed?.usage ?? usageZero();
+    usage.contextWindow = usageNumber(item?.context_window ?? item?.contextWindow) || contextWindowForModel(ctx, model);
     return {
       label: item?.label,
       task: item?.task,
@@ -2097,9 +2132,9 @@ function subagentParentDetails(result: any) {
       final: item?.final,
       errorMessage: item?.error,
       stderr: item?.stderr,
-      usage: parsed?.usage ?? usageZero(),
+      usage,
       messages: parsed?.messages ?? [],
-      model: item?.model,
+      model,
       tools: item?.tools,
       cwd: item?.cwd,
       runtime: item?.runtime,
@@ -2138,11 +2173,27 @@ function appendSubagentRawText(state: SubagentStreamState, text: string) {
 }
 
 type SubagentStreamState = {
+  label: string;
+  task?: string;
+  cwd?: string;
+  tools?: string[];
   prefix: string;
   liveText: string;
   rawText: string;
   stdoutBuffer: string;
   sawPiJsonStdout: boolean;
+  usage: ReturnType<typeof usageZero>;
+  model?: string;
+  messages: any[];
+  activeMessageIndex?: number;
+  lastEvent?: unknown;
+  lastToolCall?: { name: string; args: Record<string, unknown> };
+  lastToolResult?: string;
+  exitCode: number;
+  stopReason?: string;
+  final?: string;
+  errorMessage?: string;
+  stderr?: string;
 };
 
 const PI_JSON_EVENT_TYPES = new Set([
@@ -2194,7 +2245,56 @@ function renderSubagentStream(state: SubagentStreamState) {
   };
   appendBlock(state.liveText);
   appendBlock(state.rawText);
+  const usage = formatSubagentUsage(state.usage, state.model);
+  if (usage) appendBlock(`[${usage}]`);
   return text.trimEnd();
+}
+
+function rememberSubagentToolCallFromMessage(state: SubagentStreamState, msg: any) {
+  if (!msg || msg.role !== "assistant" || !Array.isArray(msg.content)) return;
+  for (const part of msg.content) {
+    if (part?.type === "toolCall") state.lastToolCall = { name: String(part.name || "unknown"), args: part.arguments || {} };
+  }
+}
+
+function upsertSubagentStreamMessage(state: SubagentStreamState, msg: any, final: boolean) {
+  rememberSubagentToolCallFromMessage(state, msg);
+  if (msg?.role === "toolResult") state.lastToolResult = toolResultText(msg.content);
+  if (state.activeMessageIndex !== undefined && state.messages[state.activeMessageIndex]) {
+    state.messages[state.activeMessageIndex] = msg;
+  } else {
+    state.messages.push(msg);
+    state.activeMessageIndex = state.messages.length - 1;
+  }
+  if (final) {
+    if (msg?.role === "assistant") {
+      updateUsageFromAssistantMessage(state.usage, msg);
+      if (typeof msg.model === "string" && msg.model.trim()) state.model = msg.model;
+      if (typeof msg.stopReason === "string") state.stopReason = msg.stopReason;
+      if (typeof msg.errorMessage === "string") state.errorMessage = msg.errorMessage;
+    }
+    state.activeMessageIndex = undefined;
+  }
+}
+
+function subagentStreamResult(state: SubagentStreamState) {
+  return {
+    label: state.label,
+    task: state.task,
+    exitCode: state.exitCode,
+    stopReason: state.stopReason || (state.exitCode === -1 ? "running" : "completed"),
+    final: state.final,
+    errorMessage: state.errorMessage,
+    stderr: state.stderr,
+    usage: state.usage,
+    messages: state.messages,
+    model: state.model,
+    tools: state.tools,
+    cwd: state.cwd,
+    lastEvent: state.lastEvent,
+    lastToolCall: state.lastToolCall,
+    lastToolResult: state.lastToolResult,
+  };
 }
 
 function processSubagentStdoutLine(state: SubagentStreamState, line: string) {
@@ -2219,6 +2319,22 @@ function processSubagentStdoutLine(state: SubagentStreamState, line: string) {
   }
 
   state.sawPiJsonStdout = true;
+  state.lastEvent = event;
+  if ((eventType === "message_start" || eventType === "message_update" || eventType === "message_end") && event.message) {
+    upsertSubagentStreamMessage(state, event.message, eventType === "message_end");
+  } else if (eventType === "tool_execution_start") {
+    state.lastToolCall = { name: String(event.toolName ?? "unknown"), args: event.args ?? {} };
+  } else if (eventType === "tool_execution_update" && event.partialResult) {
+    const text = toolResultText(event.partialResult);
+    if (text) state.lastToolResult = text;
+  } else if (eventType === "tool_execution_end") {
+    const toolName = String(event.toolName ?? state.lastToolCall?.name ?? "unknown");
+    state.lastToolCall = { name: toolName, args: event.args ?? (state.lastToolCall?.name === toolName ? state.lastToolCall.args : {}) };
+    const text = toolResultText(event.result);
+    if (text) state.lastToolResult = text;
+  } else if (eventType === "tool_result_end" && event.message) {
+    upsertSubagentStreamMessage(state, event.message, true);
+  }
   const assistantText = assistantTextFromPiJsonEvent(event);
   if (assistantText !== undefined) state.liveText = assistantText;
 }
@@ -2246,13 +2362,20 @@ function formatTokenCount(count: number): string {
 
 function formatSubagentUsage(usage: any, model?: string): string {
   const parts: string[] = [];
+  const contextTokens = usageNumber(usage?.contextTokens);
+  const contextWindow = usageNumber(usage?.contextWindow);
   if (usage?.turns) parts.push(`${usage.turns} turn${usage.turns > 1 ? "s" : ""}`);
   if (usage?.input) parts.push(`↑${formatTokenCount(usage.input)}`);
   if (usage?.output) parts.push(`↓${formatTokenCount(usage.output)}`);
   if (usage?.cacheRead) parts.push(`R${formatTokenCount(usage.cacheRead)}`);
   if (usage?.cacheWrite) parts.push(`W${formatTokenCount(usage.cacheWrite)}`);
   if (usage?.cost) parts.push(`$${usage.cost.toFixed(4)}`);
-  if (usage?.contextTokens) parts.push(`ctx:${formatTokenCount(usage.contextTokens)}`);
+  if (contextTokens && contextWindow) {
+    const pct = Math.min(999, Math.round((contextTokens / contextWindow) * 100));
+    parts.push(`ctx:${formatTokenCount(contextTokens)}/${formatTokenCount(contextWindow)} (${pct}%)`);
+  } else if (contextTokens) {
+    parts.push(`ctx:${formatTokenCount(contextTokens)}`);
+  }
   if (model) parts.push(model);
   return parts.join(" ");
 }
@@ -2292,7 +2415,57 @@ function formatSubagentToolCall(toolName: string, args: Record<string, unknown>,
 }
 
 function isSubagentFailure(result: any): boolean {
-  return result?.exitCode !== 0 || result?.stopReason === "error" || result?.stopReason === "aborted" || result?.stopReason === "timeout";
+  return result?.exitCode !== -1 && (result?.exitCode !== 0 || result?.stopReason === "error" || result?.stopReason === "aborted" || result?.stopReason === "timeout");
+}
+
+function aggregateSubagentUsage(results: any[]) {
+  const total = usageZero();
+  for (const r of results) {
+    total.input += usageNumber(r?.usage?.input);
+    total.output += usageNumber(r?.usage?.output);
+    total.cacheRead += usageNumber(r?.usage?.cacheRead);
+    total.cacheWrite += usageNumber(r?.usage?.cacheWrite);
+    total.cost += usageNumber(r?.usage?.cost);
+    total.turns += usageNumber(r?.usage?.turns);
+  }
+  return total;
+}
+
+function subagentResultStatus(result: any): string {
+  if (result?.exitCode === -1) return "running";
+  if (result?.stopReason === "aborted") return "aborted";
+  if (result?.stopReason === "timeout") return "timed out";
+  if (isSubagentFailure(result)) return "failed";
+  return "completed";
+}
+
+function subagentLastAssistantText(messages: any[]): string {
+  for (let i = messages.length - 1; i >= 0; i--) {
+    const msg = messages[i];
+    if (msg?.role !== "assistant" || !Array.isArray(msg.content)) continue;
+    for (let j = msg.content.length - 1; j >= 0; j--) {
+      const part = msg.content[j];
+      if (part?.type === "text" && String(part.text || "").trim()) return String(part.text || "");
+    }
+  }
+  return "";
+}
+
+function compactSubagentResultSummary(result: any): string {
+  const lines: string[] = [];
+  lines.push(`Subagent ${subagentResultStatus(result)}.`);
+  if (result?.task) lines.push(`Task: ${result.task}`);
+  if (result?.model) lines.push(`Model: ${result.model}`);
+  if (result?.tools?.length) lines.push(`Tools: ${result.tools.join(", ")}`);
+  const lastAssistant = subagentLastAssistantText(result?.messages || []).trim();
+  if (lastAssistant) lines.push(`Last assistant text:\n${truncateByBytes(lastAssistant).split("\n").slice(-8).join("\n")}`);
+  if (result?.lastToolCall) lines.push(`Last tool call: ${result.lastToolCall.name} ${JSON.stringify(result.lastToolCall.args)}`);
+  if (result?.lastToolResult) lines.push(`Last tool result:\n${truncateByBytes(result.lastToolResult).split("\n").slice(-6).join("\n")}`);
+  const stderr = String(result?.stderr || "").trim().split("\n").filter(Boolean).slice(-8).join("\n");
+  if (stderr) lines.push(`stderr:\n${stderr}`);
+  if (result?.errorMessage) lines.push(`Error: ${result.errorMessage}`);
+  lines.push(`Exit: ${result?.exitCode ?? 0}${result?.stopReason ? ` (${result.stopReason})` : ""}`);
+  return truncateByBytes(lines.join("\n"));
 }
 
 function renderSubagentCall(args: any, theme: any) {
@@ -2307,27 +2480,46 @@ function renderSubagentResult(result: any, options: any, theme: any) {
   if (!details?.results?.length) return new Text(result.content?.[0]?.type === "text" ? result.content[0].text : "(no output)", 0, 0);
   const expanded = Boolean(options?.expanded);
   const mdTheme = getMarkdownTheme();
-  const renderOne = (container: Container, r: any, title: string) => {
+
+  const renderDisplayItems = (items: ReturnType<typeof subagentDisplayItems>, limit?: number) => {
+    const toShow = limit ? items.slice(-limit) : items;
+    const skipped = limit && items.length > limit ? items.length - limit : 0;
+    let text = "";
+    if (skipped > 0) text += theme.fg("muted", `... ${skipped} earlier items\n`);
+    for (const item of toShow) {
+      if (item.type === "text") {
+        const preview = expanded ? truncateByBytes(item.text) : truncateByBytes(item.text).split("\n").slice(0, 3).join("\n");
+        text += `${theme.fg("toolOutput", preview)}\n`;
+      } else {
+        text += `${theme.fg("muted", "→ ") + formatSubagentToolCall(item.name, item.args, theme.fg.bind(theme))}\n`;
+      }
+    }
+    return text.trimEnd();
+  };
+
+  const renderOneExpanded = (container: Container, r: any, title: string) => {
     const failed = isSubagentFailure(r);
     const icon = failed ? theme.fg("error", "✗") : r.exitCode === -1 ? theme.fg("warning", "⏳") : theme.fg("success", "✓");
     container.addChild(new Text(`${icon} ${theme.fg("toolTitle", theme.bold(title))}`, 0, 0));
-    container.addChild(new Text(theme.fg("muted", "Status: ") + theme.fg(failed ? "error" : "dim", `${r.stopReason || "completed"} (exit ${r.exitCode ?? 0})`), 0, 0));
+    container.addChild(new Text(theme.fg("muted", "Status: ") + theme.fg(failed ? "error" : "dim", `${subagentResultStatus(r)} (exit ${r.exitCode ?? 0})`), 0, 0));
     if (r.task) container.addChild(new Text(theme.fg("muted", "Task: ") + theme.fg("dim", r.task), 0, 0));
     if (r.model) container.addChild(new Text(theme.fg("muted", "Model: ") + theme.fg("dim", r.model), 0, 0));
     if (r.tools?.length) container.addChild(new Text(theme.fg("muted", "Tools: ") + theme.fg("dim", r.tools.join(", ")), 0, 0));
     if (r.cwd) container.addChild(new Text(theme.fg("muted", "Cwd: ") + theme.fg("dim", r.cwd), 0, 0));
+    if (failed && r.errorMessage) container.addChild(new Text(theme.fg("error", `Error: ${r.errorMessage}`), 0, 0));
     if (r.lastToolCall) container.addChild(new Text(theme.fg("muted", "Last tool call: ") + formatSubagentToolCall(r.lastToolCall.name, r.lastToolCall.args, theme.fg.bind(theme)), 0, 0));
     if (r.lastToolResult) container.addChild(new Text(theme.fg("muted", `Last tool result:\n${truncateByBytes(r.lastToolResult).split("\n").slice(-8).join("\n")}`), 0, 0));
-    if (expanded) {
-      for (const item of subagentDisplayItems(r.messages || [])) {
-        if (item.type === "toolCall") container.addChild(new Text(theme.fg("muted", "→ ") + formatSubagentToolCall(item.name, item.args, theme.fg.bind(theme)), 0, 0));
-      }
+
+    for (const item of subagentDisplayItems(r.messages || [])) {
+      if (item.type === "toolCall") container.addChild(new Text(theme.fg("muted", "→ ") + formatSubagentToolCall(item.name, item.args, theme.fg.bind(theme)), 0, 0));
     }
+
     const finalOutput = r.final || subagentFinalOutput(r.messages || []);
     container.addChild(new Spacer(1));
     container.addChild(new Text(theme.fg("muted", "─── Output ───"), 0, 0));
     if (finalOutput) container.addChild(new Markdown(truncateByBytes(finalOutput.trim()), 0, 0, mdTheme));
-    else container.addChild(new Text(theme.fg("muted", "(no output)"), 0, 0));
+    else container.addChild(new Text(theme.fg("muted", r.exitCode === -1 ? "(running...)" : "(no output)"), 0, 0));
+
     const usage = formatSubagentUsage(r.usage, r.model);
     if (usage) container.addChild(new Text(theme.fg("dim", usage), 0, 0));
     if (r.stderr?.trim()) {
@@ -2337,24 +2529,67 @@ function renderSubagentResult(result: any, options: any, theme: any) {
   };
 
   const mode = details.mode || (details.results.length > 1 ? "parallel" : "single");
-  if (expanded || details.results.length === 1) {
+  if (mode === "single" && details.results.length === 1) {
+    const r = details.results[0];
+    if (expanded) {
+      const container = new Container();
+      renderOneExpanded(container, r, r.label || "subagent");
+      return container;
+    }
+    const failed = isSubagentFailure(r);
+    const icon = r.exitCode === -1 ? theme.fg("warning", "⏳") : failed ? theme.fg("error", "✗") : theme.fg("success", "✓");
+    const displayItems = subagentDisplayItems(r.messages || []);
+    let text = `${icon} ${theme.fg("toolTitle", theme.bold("subagent"))}`;
+    if (failed) text += `\n${theme.fg("error", compactSubagentResultSummary(r).split("\n").slice(0, 14).join("\n"))}`;
+    else if (displayItems.length === 0) {
+      const fallback = String(r.final || r.errorMessage || "").trim();
+      text += fallback ? `\n${theme.fg("toolOutput", truncateByBytes(fallback).split("\n").slice(0, 8).join("\n"))}` : `\n${theme.fg("muted", r.exitCode === -1 ? "(running...)" : "(no output)")}`;
+    } else text += `\n${renderDisplayItems(displayItems, 10)}`;
+    const usage = formatSubagentUsage(r.usage, r.model);
+    if (usage) text += `\n${theme.fg("dim", usage)}`;
+    return new Text(text, 0, 0);
+  }
+
+  const running = details.results.filter((r: any) => r.exitCode === -1).length;
+  const successCount = details.results.filter((r: any) => r.exitCode !== -1 && !isSubagentFailure(r)).length;
+  const failCount = details.results.filter((r: any) => r.exitCode !== -1 && isSubagentFailure(r)).length;
+  const icon = running > 0 ? theme.fg("warning", "⏳") : failCount > 0 ? theme.fg("warning", "◐") : theme.fg("success", "✓");
+  const noun = mode === "chain" ? "steps" : "tasks";
+  const status = running > 0 ? `${successCount + failCount}/${details.results.length} done, ${running} running` : `${successCount}/${details.results.length} ${noun}`;
+
+  if (expanded && running === 0) {
     const container = new Container();
-    if (details.results.length > 1) container.addChild(new Text(theme.fg("toolTitle", theme.bold(`${mode} `)) + theme.fg("accent", `${details.results.length} results`), 0, 0));
+    container.addChild(new Text(`${icon} ${theme.fg("toolTitle", theme.bold(`${mode} `))}${theme.fg("accent", status)}`, 0, 0));
     for (const r of details.results) {
-      if (container.children.length) container.addChild(new Spacer(1));
-      renderOne(container, r, r.label || "subagent");
+      container.addChild(new Spacer(1));
+      renderOneExpanded(container, r, mode === "chain" ? `step ${r.step ?? "?"}` : r.label || "subagent");
+    }
+    const totalUsage = formatSubagentUsage(aggregateSubagentUsage(details.results));
+    if (totalUsage) {
+      container.addChild(new Spacer(1));
+      container.addChild(new Text(theme.fg("dim", `Total: ${totalUsage}`), 0, 0));
     }
     return container;
   }
 
-  const successCount = details.results.filter((r: any) => !isSubagentFailure(r)).length;
-  let text = `${theme.fg(successCount === details.results.length ? "success" : "warning", successCount === details.results.length ? "✓" : "◐")} ${theme.fg("toolTitle", theme.bold(`${mode} `))}${theme.fg("accent", `${successCount}/${details.results.length} results`)}`;
+  let text = `${icon} ${theme.fg("toolTitle", theme.bold(`${mode} `))}${theme.fg("accent", status)}`;
   for (const r of details.results) {
-    const icon = isSubagentFailure(r) ? theme.fg("error", "✗") : theme.fg("success", "✓");
-    const output = r.final || subagentFinalOutput(r.messages || []) || r.errorMessage || "(no output)";
-    text += `\n\n${theme.fg("muted", "─── ")}${theme.fg("accent", r.label || "subagent")} ${icon}\n${theme.fg(isSubagentFailure(r) ? "error" : "toolOutput", truncateByBytes(output).split("\n").slice(0, 5).join("\n"))}`;
+    const rIcon = r.exitCode === -1 ? theme.fg("warning", "⏳") : isSubagentFailure(r) ? theme.fg("error", "✗") : theme.fg("success", "✓");
+    const displayItems = subagentDisplayItems(r.messages || []);
+    text += `\n\n${theme.fg("muted", "─── ")}${theme.fg("accent", mode === "chain" ? `step ${r.step ?? "?"}` : r.label || "subagent")} ${rIcon}`;
+    if (isSubagentFailure(r)) text += `\n${theme.fg("error", compactSubagentResultSummary(r).split("\n").slice(0, 10).join("\n"))}`;
+    else if (displayItems.length === 0) {
+      const fallback = String(r.final || r.errorMessage || "").trim();
+      text += fallback ? `\n${theme.fg("toolOutput", truncateByBytes(fallback).split("\n").slice(0, 5).join("\n"))}` : `\n${theme.fg("muted", r.exitCode === -1 ? "(running...)" : "(no output)")}`;
+    } else text += `\n${renderDisplayItems(displayItems, 5)}`;
+    const usage = formatSubagentUsage(r.usage, r.model);
+    if (usage) text += `\n${theme.fg("dim", usage)}`;
   }
-  text += `\n${theme.fg("muted", "(Ctrl+O to expand)")}`;
+  if (running === 0) {
+    const totalUsage = formatSubagentUsage(aggregateSubagentUsage(details.results));
+    if (totalUsage) text += `\n\n${theme.fg("dim", `Total: ${totalUsage}`)}`;
+  }
+  if (!expanded) text += `\n${theme.fg("muted", "(Ctrl+O to expand)")}`;
   return new Text(text, 0, 0);
 }
 
@@ -2550,48 +2785,91 @@ export default function sandbox(pi: ExtensionAPI) {
         const key = streamKey(message);
         let childState = streamStates.get(key);
         if (!childState) {
-          childState = { prefix: "", liveText: "", rawText: "", stdoutBuffer: "", sawPiJsonStdout: false };
+          const model = typeof (message as any).model === "string" ? (message as any).model : typeof params.model === "string" ? params.model : undefined;
+          const usage = usageZero();
+          usage.contextWindow = contextWindowForModel(ctx, model);
+          childState = {
+            label: key,
+            task: typeof (message as any).task === "string" ? (message as any).task : typeof params.task === "string" ? params.task : undefined,
+            cwd: typeof (message as any).cwd === "string" ? (message as any).cwd : typeof params.cwd === "string" ? params.cwd : undefined,
+            tools: Array.isArray((message as any).tools) ? (message as any).tools : Array.isArray(params.tools) ? params.tools : undefined,
+            prefix: "",
+            liveText: "",
+            rawText: "",
+            stdoutBuffer: "",
+            sawPiJsonStdout: false,
+            usage,
+            model,
+            messages: [],
+            exitCode: -1,
+          };
           streamStates.set(key, childState);
           streamOrder.push(key);
         }
         return childState;
       };
       const renderSubagentStreams = () => streamOrder.map((key) => renderSubagentStream(streamStates.get(key)!)).filter(Boolean).join("\n\n");
+      const streamDetails = () => ({
+        mode: hasChain ? "chain" : hasTasks ? "parallel" : "single",
+        results: streamOrder.map((key) => subagentStreamResult(streamStates.get(key)!)),
+      });
       const emitSubagentUpdate = (message: SupervisorMessage) => {
         const latest = renderSubagentStreams();
-        onUpdate?.({ content: latest ? [{ type: "text", text: latest }] : [], details: { lastEvent: message } });
+        onUpdate?.({ content: latest ? [{ type: "text", text: latest }] : [], details: streamDetails() });
       };
       const result = await requireClient(state).spawnSubagent({ ...params, cwd: params.cwd || effectiveSupervisorCwd(ctx), actor: parentActor(toolCallId, "Pi subagent tool") }, {
         signal,
         onUpdate: (message) => {
+          if (message.event === "subagent_start") {
+            emitSubagentUpdate(message);
+            return;
+          }
+          if (message.event === "done") {
+            for (const state of streamStates.values()) flushSubagentStdout(state);
+            emitSubagentUpdate(message);
+            return;
+          }
           const childState = streamStateFor(message);
           if (message.event === "stdout") {
             appendSubagentStdoutChunk(childState, stringifyData(message.data || ""));
             emitSubagentUpdate(message);
           } else if (message.event === "stderr" || message.event === "message" || message.event === "subagent_update") {
-            appendSubagentRawText(childState, stringifyData(message.data || message.result || ""));
+            const text = stringifyData(message.data || message.result || "");
+            if (message.event === "stderr") childState.stderr = truncateByBytes((childState.stderr || "") + text);
+            appendSubagentRawText(childState, text);
             emitSubagentUpdate(message);
           } else if (message.event === "subagent_child_start") {
             const label = stringifyData((message as any).label || "subagent");
+            childState.label = label;
+            if (typeof (message as any).task === "string") childState.task = (message as any).task;
+            if (typeof (message as any).cwd === "string") childState.cwd = (message as any).cwd;
+            if (Array.isArray((message as any).tools)) childState.tools = (message as any).tools;
+            const model = typeof (message as any).model === "string" ? (message as any).model : undefined;
+            if (model) childState.model = model;
+            childState.usage.contextWindow = contextWindowForModel(ctx, childState.model || (typeof params.model === "string" ? params.model : undefined));
             appendSubagentPrefix(childState, `[${label} started]`);
             emitSubagentUpdate(message);
           } else if (message.event === "subagent_result") {
             flushSubagentStdout(childState);
             const result: any = (message as any).result;
+            childState.exitCode = usageNumber(result?.exit_code ?? result?.exitCode);
+            childState.stopReason = stringifyData(result?.stop_reason || result?.stopReason || (childState.exitCode === 0 ? "completed" : "error"));
+            childState.final = typeof result?.final === "string" ? result.final : childState.final;
+            childState.errorMessage = typeof result?.error === "string" ? result.error : childState.errorMessage;
+            childState.stderr = typeof result?.stderr === "string" ? result.stderr : childState.stderr;
             const final = stringifyData(result?.final || result?.error || "");
             if (final) {
               if (childState.liveText.trim() === final.trim()) childState.liveText = "";
               appendSubagentPrefix(childState, `[${stringifyData((message as any).label || result?.label || "subagent")}] ${truncateByBytes(final)}`);
             }
             emitSubagentUpdate(message);
-          } else if (message.event === "tool_update" || message.event === "subagent_start" || message.event === "done") {
-            if (message.event === "done") for (const state of streamStates.values()) flushSubagentStdout(state);
+          } else if (message.event === "tool_update") {
             emitSubagentUpdate(message);
           }
         },
       });
       const text = truncateByBytes(subagentText(result));
-      return { content: [{ type: "text", text }], details: subagentParentDetails(result) as any, isError: Boolean((result as any)?.error) };
+      return { content: [{ type: "text", text }], details: subagentParentDetails(result, ctx) as any, isError: Boolean((result as any)?.error) };
     },
   });
 
