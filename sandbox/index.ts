@@ -1986,6 +1986,106 @@ function subagentText(result: any) {
   return textFromResult(result, result?.final || result?.summary || result?.stdout || JSON.stringify(result ?? {}, null, 2));
 }
 
+type SubagentStreamState = {
+  prefix: string;
+  liveText: string;
+  rawText: string;
+  stdoutBuffer: string;
+  sawPiJsonStdout: boolean;
+};
+
+const PI_JSON_EVENT_TYPES = new Set([
+  "session",
+  "agent_start",
+  "turn_start",
+  "turn_end",
+  "message_start",
+  "message_update",
+  "message_end",
+  "tool_execution_start",
+  "tool_execution_update",
+  "tool_execution_end",
+  "tool_result_end",
+]);
+
+function textFromPiMessageContent(content: any): string {
+  if (typeof content === "string") return content;
+  if (!Array.isArray(content)) return "";
+  return content
+    .map((part) => {
+      if (!part || typeof part !== "object") return "";
+      const type = String(part.type || "");
+      if (type === "text" || type === "markdown" || type === "text_delta") return String(part.text ?? part.delta ?? "");
+      return "";
+    })
+    .join("");
+}
+
+function assistantTextFromPiJsonEvent(event: any): string | undefined {
+  const message = event?.message || event?.assistantMessageEvent?.partial;
+  if (!message || typeof message !== "object" || message.role !== "assistant") return undefined;
+  return textFromPiMessageContent(message.content);
+}
+
+function appendSubagentPrefix(state: SubagentStreamState, text: string) {
+  if (!text) return;
+  if (state.prefix && !state.prefix.endsWith("\n")) state.prefix += "\n";
+  state.prefix += text.endsWith("\n") ? text : `${text}\n`;
+}
+
+function renderSubagentStream(state: SubagentStreamState) {
+  let text = state.prefix;
+  const appendBlock = (block: string) => {
+    if (!block) return;
+    if (text && !text.endsWith("\n")) text += "\n";
+    text += block;
+    if (!text.endsWith("\n")) text += "\n";
+  };
+  appendBlock(state.liveText);
+  appendBlock(state.rawText);
+  return text.trimEnd();
+}
+
+function processSubagentStdoutLine(state: SubagentStreamState, line: string) {
+  const trimmed = line.trim();
+  if (!trimmed) {
+    if (!state.sawPiJsonStdout) state.rawText += "\n";
+    return;
+  }
+
+  let event: any;
+  try {
+    event = JSON.parse(trimmed);
+  } catch {
+    state.rawText += `${line}\n`;
+    return;
+  }
+
+  const eventType = typeof event?.type === "string" ? event.type : "";
+  if (!PI_JSON_EVENT_TYPES.has(eventType)) {
+    state.rawText += `${line}\n`;
+    return;
+  }
+
+  state.sawPiJsonStdout = true;
+  const assistantText = assistantTextFromPiJsonEvent(event);
+  if (assistantText !== undefined) state.liveText = assistantText;
+}
+
+function appendSubagentStdoutChunk(state: SubagentStreamState, chunk: string) {
+  if (!chunk) return;
+  state.stdoutBuffer += chunk;
+  const lines = state.stdoutBuffer.split(/\r?\n/);
+  state.stdoutBuffer = lines.pop() || "";
+  for (const line of lines) processSubagentStdoutLine(state, line);
+}
+
+function flushSubagentStdout(state: SubagentStreamState) {
+  if (!state.stdoutBuffer) return;
+  processSubagentStdoutLine(state, state.stdoutBuffer);
+  state.stdoutBuffer = "";
+}
+
 export default function sandbox(pi: ExtensionAPI) {
   const state: SupervisorState = {
     active: false,
@@ -2165,24 +2265,50 @@ export default function sandbox(pi: ExtensionAPI) {
       if (Number(hasSingle) + Number(hasTasks) + Number(hasChain) !== 1) {
         throw new Error("Invalid parameters. Provide exactly one mode: task, non-empty tasks, or non-empty chain.");
       }
-      let latest = "";
+      const streamStates = new Map<string, SubagentStreamState>();
+      const streamOrder: string[] = [];
+      const streamKey = (message: SupervisorMessage) => stringifyData((message as any).label || (message as any).subagent_id || "subagent") || "subagent";
+      const streamStateFor = (message: SupervisorMessage) => {
+        const key = streamKey(message);
+        let childState = streamStates.get(key);
+        if (!childState) {
+          childState = { prefix: "", liveText: "", rawText: "", stdoutBuffer: "", sawPiJsonStdout: false };
+          streamStates.set(key, childState);
+          streamOrder.push(key);
+        }
+        return childState;
+      };
+      const renderSubagentStreams = () => streamOrder.map((key) => renderSubagentStream(streamStates.get(key)!)).filter(Boolean).join("\n\n");
+      const emitSubagentUpdate = (message: SupervisorMessage) => {
+        const latest = renderSubagentStreams();
+        onUpdate?.({ content: latest ? [{ type: "text", text: latest }] : [], details: { lastEvent: message } });
+      };
       const result = await requireClient(state).spawnSubagent({ ...params, cwd: params.cwd || effectiveSupervisorCwd(ctx), actor: parentActor(toolCallId, "Pi subagent tool") }, {
         signal,
         onUpdate: (message) => {
-          if (message.event === "stdout" || message.event === "stderr" || message.event === "message" || message.event === "subagent_update") {
-            latest += stringifyData(message.data || message.result || "");
-            if (latest) onUpdate?.({ content: [{ type: "text", text: latest }], details: { lastEvent: message } });
+          const childState = streamStateFor(message);
+          if (message.event === "stdout") {
+            appendSubagentStdoutChunk(childState, stringifyData(message.data || ""));
+            emitSubagentUpdate(message);
+          } else if (message.event === "stderr" || message.event === "message" || message.event === "subagent_update") {
+            childState.rawText += stringifyData(message.data || message.result || "");
+            emitSubagentUpdate(message);
           } else if (message.event === "subagent_child_start") {
             const label = stringifyData((message as any).label || "subagent");
-            latest += latest ? `\n[${label} started]\n` : `[${label} started]\n`;
-            onUpdate?.({ content: [{ type: "text", text: latest }], details: { lastEvent: message } });
+            appendSubagentPrefix(childState, `[${label} started]`);
+            emitSubagentUpdate(message);
           } else if (message.event === "subagent_result") {
+            flushSubagentStdout(childState);
             const result: any = (message as any).result;
             const final = stringifyData(result?.final || result?.error || "");
-            if (final) latest += `${latest ? "\n" : ""}[${stringifyData((message as any).label || result?.label || "subagent")}] ${final}\n`;
-            onUpdate?.({ content: latest ? [{ type: "text", text: latest }] : [], details: { lastEvent: message } });
+            if (final) {
+              if (childState.liveText.trim() === final.trim()) childState.liveText = "";
+              appendSubagentPrefix(childState, `[${stringifyData((message as any).label || result?.label || "subagent")}] ${final}`);
+            }
+            emitSubagentUpdate(message);
           } else if (message.event === "tool_update" || message.event === "subagent_start" || message.event === "done") {
-            onUpdate?.({ content: latest ? [{ type: "text", text: latest }] : [], details: { lastEvent: message } });
+            if (message.event === "done") for (const state of streamStates.values()) flushSubagentStdout(state);
+            emitSubagentUpdate(message);
           }
         },
       });
