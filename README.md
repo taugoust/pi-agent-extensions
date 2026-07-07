@@ -580,9 +580,10 @@ Streaming ops may emit `stdout`, `stderr`, `tool_update`, `subagent_update`, or
 - `POST /api/v1/sessions/{id}/tools/spawn_subagent` for `subagent`{.verbatim};
 - `DELETE /api/v1/sessions/{id}` best-effort for `/sandbox-control stop`.
 
-The REST `exec_bash` and `spawn_subagent` responses are buffered, not streamed.
-Multiple Pi `edit` replacements are applied as sequential single-replacement
-REST calls. Approvals are polled rather than streamed. If `fields.scope_kind`
+The REST `exec_bash` response is buffered, while `spawn_subagent` uses an
+NDJSON streaming response for stdout/stderr and child result events. Multiple Pi
+`edit` replacements are applied as sequential single-replacement REST calls.
+Approvals are polled rather than streamed. If `fields.scope_kind`
 and `fields.scope_key` are present, Pi offers once/session approve/deny choices.
 
 The extension exposes `globalThis.__AGENTSH_PI__` for owned extensions:
@@ -614,8 +615,8 @@ PI_AGENTSH_WORKSPACE_MODE=shadow \
 ```
 
 This starts/attaches a detached REST supervisor and enables AgentSH-backed
-`bash`, `write`, `edit`, and optional supervised `read` tool execution.
-`subagent` remains unavailable in real REST mode.
+`bash`, `write`, `edit`, `subagent`, and optional supervised `read` tool
+execution when the supervisor has a generic subagent runtime configured.
 
 Or attach to a supervisor started externally:
 
@@ -633,7 +634,7 @@ nix shell nixpkgs#nodejs --command node sandbox/mock-supervisor-check.mjs
 
 **Current real REST limitations**:
 
-- no real `subagent` endpoint yet;
+- `subagent` requires `AGENTSH_SUBAGENT_COMMAND` runtime configuration and streams over REST NDJSON rather than the future full supervisor NDJSON protocol;
 - command output is buffered, not streamed live;
 - file tools are native supervisor filesystem operations, workspace-confined and
   policy checked, but not child-process syscall-supervised writes;

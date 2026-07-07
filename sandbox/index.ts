@@ -1044,6 +1044,16 @@ function unwrapRestToolResponse<T>(op: string, raw: unknown): T {
   return obj.result as T;
 }
 
+function unwrapRestSubagentResponse(raw: unknown): unknown {
+  const obj = (raw && typeof raw === "object" ? raw : undefined) as RestToolResponse<any> | undefined;
+  if (!obj || typeof obj.ok !== "boolean") return raw;
+  if (!obj.ok && obj.result && typeof obj.result === "object") {
+    return { ...obj.result, error: obj.error || "spawn_subagent failed" };
+  }
+  if (!obj.ok) throw new Error(obj.error || "spawn_subagent failed");
+  return obj.result;
+}
+
 function numericField(value: unknown) {
   return typeof value === "number" && Number.isFinite(value) ? value : undefined;
 }
@@ -1242,6 +1252,76 @@ class RestSupervisorClient {
     });
   }
 
+  async requestNDJSON(method: string, path: string, body: unknown, options: { signal?: AbortSignal; timeoutMs?: number; onEvent?: (message: SupervisorMessage) => void } = {}): Promise<unknown> {
+    const { signal, cleanup } = abortSignalFrom(options.signal, options.timeoutMs || CONNECT_TIMEOUT_MS);
+    return await new Promise<unknown>((resolve, reject) => {
+      const payload = JSON.stringify(body);
+      let settled = false;
+      let buffer = "";
+      let finalResponse: unknown;
+      const settle = (fn: () => void) => {
+        if (settled) return;
+        settled = true;
+        cleanup();
+        fn();
+      };
+      const processLine = (line: string) => {
+        const trimmed = line.trim();
+        if (!trimmed) return;
+        let message: SupervisorMessage;
+        try { message = JSON.parse(trimmed); } catch { return; }
+        if (message.event === "done") {
+          finalResponse = { ok: Boolean(message.ok), result: message.result, error: typeof message.error === "string" ? message.error : "" };
+          options.onEvent?.(message);
+          return;
+        }
+        options.onEvent?.(message);
+      };
+      const req = http.request({
+        socketPath: this.socketPath,
+        host: "unix",
+        method,
+        path,
+        signal,
+        headers: {
+          Accept: "application/x-ndjson",
+          "Content-Type": "application/json",
+          "Content-Length": Buffer.byteLength(payload),
+        },
+      }, (res) => {
+        const errorChunks: Buffer[] = [];
+        res.on("data", (chunk) => {
+          const text = Buffer.isBuffer(chunk) ? chunk.toString("utf8") : Buffer.from(chunk).toString("utf8");
+          if ((res.statusCode || 0) < 200 || (res.statusCode || 0) >= 300) {
+            errorChunks.push(Buffer.from(text));
+            return;
+          }
+          buffer += text;
+          const lines = buffer.split("\n");
+          buffer = lines.pop() || "";
+          for (const line of lines) processLine(line);
+        });
+        res.on("end", () => {
+          if ((res.statusCode || 0) < 200 || (res.statusCode || 0) >= 300) {
+            const text = Buffer.concat(errorChunks).toString("utf8");
+            settle(() => reject(new Error(`${method} ${path}: HTTP ${res.statusCode}${text.trim() ? `: ${truncate(text.trim(), 1000)}` : ""}`)));
+            return;
+          }
+          if (buffer.trim()) processLine(buffer);
+          if (finalResponse === undefined) {
+            settle(() => reject(new Error(`${method} ${path}: stream ended without final done event`)));
+            return;
+          }
+          settle(() => resolve(finalResponse));
+        });
+      });
+      req.on("error", (error) => settle(() => reject(error)));
+      req.setTimeout(options.timeoutMs || CONNECT_TIMEOUT_MS, () => req.destroy(new Error(`Timed out streaming from AgentSH REST supervisor socket ${this.socketPath}`)));
+      req.write(payload);
+      req.end();
+    });
+  }
+
   async hello() {
     let metadata: SupervisorMetadata | undefined;
     let lastError: Error | undefined;
@@ -1365,8 +1445,9 @@ class RestSupervisorClient {
           return obj;
         });
       }
-      const raw = await this.request("POST", this.toolPath("spawn_subagent"), body, { signal: options.signal, timeoutMs: SUBAGENT_REQUEST_TIMEOUT_MS });
-      return unwrapRestToolResponse("spawn_subagent", raw);
+      body.stream = true;
+      const raw = await this.requestNDJSON("POST", this.toolPath("spawn_subagent"), body, { signal: options.signal, timeoutMs: SUBAGENT_REQUEST_TIMEOUT_MS, onEvent: options.onUpdate });
+      return unwrapRestSubagentResponse(raw);
     } catch (error) {
       const message = asError(error).message;
       if (message.includes("HTTP 404")) throw new Error("AgentSH supervisor does not support spawn_subagent; rebuild/deploy a newer AgentSH or disable sandbox subagent registration.");
@@ -2091,13 +2172,22 @@ export default function sandbox(pi: ExtensionAPI) {
           if (message.event === "stdout" || message.event === "stderr" || message.event === "message" || message.event === "subagent_update") {
             latest += stringifyData(message.data || message.result || "");
             if (latest) onUpdate?.({ content: [{ type: "text", text: latest }], details: { lastEvent: message } });
-          } else if (message.event === "tool_update") {
+          } else if (message.event === "subagent_child_start") {
+            const label = stringifyData((message as any).label || "subagent");
+            latest += latest ? `\n[${label} started]\n` : `[${label} started]\n`;
+            onUpdate?.({ content: [{ type: "text", text: latest }], details: { lastEvent: message } });
+          } else if (message.event === "subagent_result") {
+            const result: any = (message as any).result;
+            const final = stringifyData(result?.final || result?.error || "");
+            if (final) latest += `${latest ? "\n" : ""}[${stringifyData((message as any).label || result?.label || "subagent")}] ${final}\n`;
+            onUpdate?.({ content: latest ? [{ type: "text", text: latest }] : [], details: { lastEvent: message } });
+          } else if (message.event === "tool_update" || message.event === "subagent_start" || message.event === "done") {
             onUpdate?.({ content: latest ? [{ type: "text", text: latest }] : [], details: { lastEvent: message } });
           }
         },
       });
       const text = subagentText(result);
-      return { content: [{ type: "text", text }], details: result as any };
+      return { content: [{ type: "text", text }], details: result as any, isError: Boolean((result as any)?.error) };
     },
   });
 
