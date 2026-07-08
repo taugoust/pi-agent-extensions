@@ -1259,25 +1259,38 @@ class RestSupervisorClient {
       let settled = false;
       let buffer = "";
       let finalResponse: unknown;
+      let req: http.ClientRequest | undefined;
       const settle = (fn: () => void) => {
         if (settled) return;
         settled = true;
         cleanup();
         fn();
       };
+      const emitEvent = (message: SupervisorMessage) => {
+        if (!options.onEvent) return true;
+        try {
+          options.onEvent(message);
+          return true;
+        } catch (error) {
+          const err = asError(error);
+          settle(() => reject(err));
+          req?.destroy(err);
+          return false;
+        }
+      };
       const processLine = (line: string) => {
         const trimmed = line.trim();
-        if (!trimmed) return;
+        if (!trimmed || settled) return;
         let message: SupervisorMessage;
         try { message = JSON.parse(trimmed); } catch { return; }
         if (message.event === "done") {
           finalResponse = { ok: Boolean(message.ok), result: message.result, error: typeof message.error === "string" ? message.error : "" };
-          options.onEvent?.(message);
+          emitEvent(message);
           return;
         }
-        options.onEvent?.(message);
+        emitEvent(message);
       };
-      const req = http.request({
+      req = http.request({
         socketPath: this.socketPath,
         host: "unix",
         method,
@@ -2189,6 +2202,7 @@ type SubagentStreamState = {
   lastEvent?: unknown;
   lastToolCall?: { name: string; args: Record<string, unknown> };
   lastToolResult?: string;
+  toolStatus?: string;
   exitCode: number;
   stopReason?: string;
   final?: string;
@@ -2244,10 +2258,20 @@ function renderSubagentStream(state: SubagentStreamState) {
     if (!text.endsWith("\n")) text += "\n";
   };
   appendBlock(state.liveText);
+  appendBlock(state.toolStatus || "");
   appendBlock(state.rawText);
   const usage = formatSubagentUsage(state.usage, state.model);
   if (usage) appendBlock(`[${usage}]`);
   return text.trimEnd();
+}
+
+function summarizeSubagentToolCall(toolName: string, args: Record<string, unknown>) {
+  if (toolName === "bash") return `$ ${String(args.command || "...")}`;
+  if (toolName === "read") return `read ${String(args.path || args.file_path || "...")}`;
+  if (toolName === "write") return `write ${String(args.path || args.file_path || "...")}`;
+  if (toolName === "edit") return `edit ${String(args.path || args.file_path || "...")}`;
+  const argsText = JSON.stringify(args || {});
+  return `${toolName} ${argsText}`;
 }
 
 function rememberSubagentToolCallFromMessage(state: SubagentStreamState, msg: any) {
@@ -2323,15 +2347,24 @@ function processSubagentStdoutLine(state: SubagentStreamState, line: string) {
   if ((eventType === "message_start" || eventType === "message_update" || eventType === "message_end") && event.message) {
     upsertSubagentStreamMessage(state, event.message, eventType === "message_end");
   } else if (eventType === "tool_execution_start") {
-    state.lastToolCall = { name: String(event.toolName ?? "unknown"), args: event.args ?? {} };
+    const toolName = String(event.toolName ?? "unknown");
+    const args = event.args ?? {};
+    state.lastToolCall = { name: toolName, args };
+    state.toolStatus = `[running ${toolName}] ${truncateByBytes(summarizeSubagentToolCall(toolName, args), 500)}`;
   } else if (eventType === "tool_execution_update" && event.partialResult) {
     const text = toolResultText(event.partialResult);
     if (text) state.lastToolResult = text;
   } else if (eventType === "tool_execution_end") {
     const toolName = String(event.toolName ?? state.lastToolCall?.name ?? "unknown");
-    state.lastToolCall = { name: toolName, args: event.args ?? (state.lastToolCall?.name === toolName ? state.lastToolCall.args : {}) };
+    const args = event.args ?? (state.lastToolCall?.name === toolName ? state.lastToolCall.args : {});
+    state.lastToolCall = { name: toolName, args };
     const text = toolResultText(event.result);
     if (text) state.lastToolResult = text;
+    state.toolStatus = undefined;
+    if (event.isError === true) {
+      const summary = text || "tool returned an error";
+      appendSubagentPrefix(state, `[tool failed: ${toolName}] ${truncateByBytes(summary, 1200)}`);
+    }
   } else if (eventType === "tool_result_end" && event.message) {
     upsertSubagentStreamMessage(state, event.message, true);
   }
