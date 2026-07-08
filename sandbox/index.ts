@@ -2817,9 +2817,11 @@ export default function sandbox(pi: ExtensionAPI) {
         const latest = renderSubagentStreams();
         onUpdate?.({ content: latest ? [{ type: "text", text: latest }] : [], details: streamDetails() });
       };
-      const result = await requireClient(state).spawnSubagent({ ...params, cwd: params.cwd || effectiveSupervisorCwd(ctx), actor: parentActor(toolCallId, "Pi subagent tool") }, {
-        signal,
-        onUpdate: (message) => {
+      let result: unknown;
+      try {
+        result = await requireClient(state).spawnSubagent({ ...params, cwd: params.cwd || effectiveSupervisorCwd(ctx), actor: parentActor(toolCallId, "Pi subagent tool") }, {
+          signal,
+          onUpdate: (message) => {
           if (message.event === "subagent_start") {
             emitSubagentUpdate(message);
             return;
@@ -2866,8 +2868,33 @@ export default function sandbox(pi: ExtensionAPI) {
           } else if (message.event === "tool_update") {
             emitSubagentUpdate(message);
           }
-        },
-      });
+          },
+        });
+      } catch (error) {
+        const message = asError(error).message || "spawn_subagent failed";
+        for (const childState of streamStates.values()) {
+          flushSubagentStdout(childState);
+          if (childState.exitCode === -1) childState.exitCode = 1;
+          childState.stopReason ||= "error";
+          childState.errorMessage ||= message;
+        }
+        const mode = hasChain ? "chain" : hasTasks ? "parallel" : "single";
+        const results = streamOrder.length
+          ? streamOrder.map((key) => {
+              const child = subagentStreamResult(streamStates.get(key)!);
+              return { ...child, error: child.errorMessage || message };
+            })
+          : [{ label: "subagent", exitCode: 1, stopReason: "error", final: message, error: message }];
+        result = {
+          mode,
+          final: `subagent failed: ${message}`,
+          summary: `subagent failed: ${message}`,
+          error: message,
+          results,
+        };
+        const text = truncateByBytes(subagentText(result));
+        return { content: [{ type: "text", text }], details: subagentParentDetails(result, ctx) as any, isError: true };
+      }
       const text = truncateByBytes(subagentText(result));
       return { content: [{ type: "text", text }], details: subagentParentDetails(result, ctx) as any, isError: Boolean((result as any)?.error) };
     },
