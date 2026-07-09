@@ -29,3 +29,9 @@ This is **pi-agent-extensions** — a collection of [pi](https://github.com/mari
 - Serialise concurrent access to shared resources
 - Implement timeouts for external processes
 - Handle errors gracefully — never throw from event handlers
+
+## Issue Tracking
+
+- Track open work in `issues/*.md`; move completed issues to `issues/resolved/*.md`.
+- When resolving an issue, update `## Status` to `Resolved.` and add a brief `## Resolution` section with the commit hash(es) that fixed it.
+- Keep implementation plans out of tracked issues unless explicitly requested. Local/planning notes belong under ignored plan paths such as `plans/` or `issues/plans/`.

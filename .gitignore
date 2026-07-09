@@ -5,3 +5,8 @@ package-lock.json
 # Temporary files
 *.log
 *.tmp
+
+# Local agent planning notes
+/plans/
+/plan.md
+/issues/plans/
