@@ -1084,6 +1084,53 @@ in
         await server.close();
       }
 
+      // Command scope_options distinguish executable/session from exact-invocation/session approvals.
+      {
+        clearAgentSHEnv();
+        let approvals = [{
+          id: "appr-command-scopes",
+          kind: "command",
+          target: "bash -lc 'echo hi'",
+          fields: {
+            scope_options: [
+              { scope_kind: "command", scope_key: "command-executable:bash", scope_label: "bash" },
+              { scope_kind: "command", scope_key: "command-invocation:bash -lc 'echo hi'", scope_label: "bash -lc 'echo hi'" },
+            ],
+          },
+        }];
+        let resolved;
+        const server = await withApprovalServer(async (request) => {
+          if (request.op === "list") return { ok: true, approvals };
+          if (request.op === "resolve") {
+            resolved = request;
+            approvals = [];
+            return { ok: true };
+          }
+          return { ok: false, error: "unknown op" };
+        });
+        setAgentSHEnv(server.socketPath);
+        const pi = createPi();
+        sandbox(pi);
+        const ctx = createContext({ choices: ["Approve this exact invocation for session: bash -lc 'echo hi'"] });
+        await startSession(pi, ctx);
+        await waitFor(() => Boolean(resolved), "command scope approval was not resolved");
+
+        assert(ctx.selectCalls[0].items.length === 6, "command scope_options should show approve/deny choices for both session scopes");
+        assert(ctx.selectCalls[0].items.includes("Approve this command for session: bash"), "missing executable/session approve choice");
+        assert(ctx.selectCalls[0].items.includes("Approve this exact invocation for session: bash -lc 'echo hi'"), "missing exact-invocation/session approve choice");
+        assert(ctx.selectCalls[0].items.includes("Deny this command for session: bash"), "missing executable/session deny choice");
+        assert(ctx.selectCalls[0].items.includes("Deny this exact invocation for session: bash -lc 'echo hi'"), "missing exact-invocation/session deny choice");
+        assert(!ctx.selectCalls[0].items.includes("Approve for session command: bash"), "command executable choice used the ambiguous legacy label");
+        assert(resolved.id === "appr-command-scopes", "resolved wrong command approval id");
+        assert(resolved.decision === "approve", "command scope approval was not approved");
+        assert(resolved.scope === "session", "command scope approval did not relay scope=session");
+        assert(resolved.scope_kind === "command", "command approval did not relay scope_kind");
+        assert(resolved.scope_key === "command-invocation:bash -lc 'echo hi'", "command approval did not relay exact invocation scope_key");
+        assert(resolved.scope_label === "bash -lc 'echo hi'", "command approval did not relay scope_label");
+        await shutdownSession(pi);
+        await server.close();
+      }
+
       // File/directory scope_options use the custom overlay prompt and relay the selected directory grant exactly.
       {
         clearAgentSHEnv();

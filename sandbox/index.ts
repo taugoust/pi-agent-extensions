@@ -664,21 +664,48 @@ function sessionScopeOptions(approval: ApprovalRequest): ApprovalResolution[] {
   return fallback ? [fallback] : [];
 }
 
+function commandScopeTarget(option: ApprovalResolution, fallback: string) {
+  if (option.scope_label) return option.scope_label;
+  const key = option.scope_key || "";
+  for (const prefix of ["command-executable:", "command-invocation:"]) {
+    if (key.startsWith(prefix)) return key.slice(prefix.length) || key;
+  }
+  return key || fallback;
+}
+
+function sessionScopeLabels(option: ApprovalResolution, fallback: string) {
+  const scopeTarget = option.scope_label || option.scope_key || fallback;
+  const reasonLabel = option.scope_kind ? `${option.scope_kind}: ${scopeTarget}` : scopeTarget;
+  if (option.scope_kind === "command") {
+    const target = commandScopeTarget(option, fallback);
+    const subject = option.scope_key?.startsWith("command-invocation:") ? "this exact invocation" : "this command";
+    return {
+      reasonLabel,
+      approveLabel: `Approve ${subject} for session: ${target}`,
+      denyLabel: `Deny ${subject} for session: ${target}`,
+    };
+  }
+  return {
+    reasonLabel,
+    approveLabel: `Approve for session ${reasonLabel}`,
+    denyLabel: `Deny for session ${reasonLabel}`,
+  };
+}
+
 function approvalChoices(approval: ApprovalRequest): ApprovalChoice[] {
   const title = approvalTitle(approval);
   const approveOnce: ApprovalChoice = { label: `Approve ${title}`, decision: "approve", scope: "once", reason: "approved in parent Pi" };
   const denyOnce: ApprovalChoice = { label: `Deny ${title}`, decision: "deny", scope: "once", reason: "denied in parent Pi" };
+  const sessionOptions = sessionScopeOptions(approval);
   const choices: ApprovalChoice[] = [approveOnce];
-  for (const option of sessionScopeOptions(approval)) {
-    const scopeTarget = option.scope_label || option.scope_key || title;
-    const label = option.scope_kind ? `${option.scope_kind}: ${scopeTarget}` : scopeTarget;
-    choices.push({ ...option, decision: "approve", scope: "session", reason: `approved for session ${label} in parent Pi`, label: `Approve for session ${label}` });
+  for (const option of sessionOptions) {
+    const labels = sessionScopeLabels(option, title);
+    choices.push({ ...option, decision: "approve", scope: "session", reason: `approved for session ${labels.reasonLabel} in parent Pi`, label: labels.approveLabel });
   }
   choices.push(denyOnce);
-  for (const option of sessionScopeOptions(approval)) {
-    const scopeTarget = option.scope_label || option.scope_key || title;
-    const label = option.scope_kind ? `${option.scope_kind}: ${scopeTarget}` : scopeTarget;
-    choices.push({ ...option, decision: "deny", scope: "session", reason: `denied for session ${label} in parent Pi`, label: `Deny for session ${label}` });
+  for (const option of sessionOptions) {
+    const labels = sessionScopeLabels(option, title);
+    choices.push({ ...option, decision: "deny", scope: "session", reason: `denied for session ${labels.reasonLabel} in parent Pi`, label: labels.denyLabel });
   }
   return choices;
 }
