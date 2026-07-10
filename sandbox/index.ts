@@ -38,6 +38,18 @@ type WorkspaceRoot = {
   work?: string;
 };
 
+type NetworkEnforcement = {
+  requested?: "none" | "best-effort" | "strict" | string;
+  readiness?: "none" | "degraded" | "ready" | "active" | "failed" | string;
+  status?: "none" | "degraded" | "ready" | "active" | "failed" | string;
+  tier?: string;
+  network_policy_enforced?: boolean;
+  checked_at?: string;
+  detail?: string;
+  warning?: string;
+  [key: string]: unknown;
+};
+
 type SupervisorMetadata = {
   session_id?: string;
   sessionId?: string;
@@ -53,6 +65,10 @@ type SupervisorMetadata = {
   runtime_tmp?: string;
   policy?: string;
   supported_ops?: string[];
+  network_enforcement?: NetworkEnforcement;
+  networkEnforcement?: NetworkEnforcement;
+  network_enforcement_live?: boolean;
+  network_enforcement_error?: string;
   [key: string]: unknown;
 };
 
@@ -286,6 +302,42 @@ function agentshBinEnv() {
 
 function shouldStartSupervisor() {
   return env("PI_AGENTSH_ENABLE") === "1";
+}
+
+function strictNetworkEvidenceRequired() {
+  return ["1", "true", "yes", "strict"].includes(env("PI_AGENTSH_REQUIRE_NETWORK_ENFORCEMENT").toLowerCase());
+}
+
+function metadataNetworkEnforcement(metadata?: SupervisorMetadata) {
+  return metadata?.network_enforcement || metadata?.networkEnforcement;
+}
+
+function networkEnforcementProven(report?: NetworkEnforcement) {
+  return Boolean(
+    report?.network_policy_enforced === true
+    && report.readiness === "ready"
+    && (report.status === "ready" || report.status === "active")
+    && report.tier === "helper-ebpf-proxy-required",
+  );
+}
+
+function networkEnforcementRequirement(metadata?: SupervisorMetadata) {
+  const report = metadataNetworkEnforcement(metadata);
+  return strictNetworkEvidenceRequired() || report?.requested === "strict";
+}
+
+function assertNetworkEnforcementReady(metadata?: SupervisorMetadata) {
+  if (!networkEnforcementRequirement(metadata)) return;
+  const report = metadataNetworkEnforcement(metadata);
+  if (metadata?.network_enforcement_live !== true) {
+    throw new Error(`AgentSH strict network enforcement requires live supervisor evidence${metadata?.network_enforcement_error ? `: ${metadata.network_enforcement_error}` : ""}`);
+  }
+  if (!networkEnforcementProven(report)) {
+    const status = report?.status || report?.readiness || "unknown";
+    const tier = report?.tier || "unknown";
+    const detail = report?.detail || report?.warning || "runtime evidence is incomplete";
+    throw new Error(`AgentSH strict network enforcement is not ready (status=${status}, tier=${tier}): ${detail}`);
+  }
 }
 
 function truncate(text: string, max = 1800) {
@@ -835,6 +887,12 @@ function setStatus(state: SupervisorState, ctx = state.ctx) {
   if (state.status === "connecting") return ctx.ui.setStatus("sandbox", theme.fg("muted", "agentsh …"));
   if (state.status === "error") return ctx.ui.setStatus("sandbox", theme.fg("error", "agentsh ✗"));
   if (state.pendingCount > 0) return ctx.ui.setStatus("sandbox", theme.fg("warning", `agentsh ? ${state.pendingCount}`));
+  if (networkEnforcementProven(metadataNetworkEnforcement(state.metadata)) && state.metadata?.network_enforcement_live) {
+    return ctx.ui.setStatus("sandbox", theme.fg("success", "agentsh net ✓"));
+  }
+  if (metadataNetworkEnforcement(state.metadata)?.requested && metadataNetworkEnforcement(state.metadata)?.requested !== "none") {
+    return ctx.ui.setStatus("sandbox", theme.fg("warning", "agentsh net ?"));
+  }
   ctx.ui.setStatus("sandbox", theme.fg("success", "agentsh ✓"));
 }
 
@@ -1204,6 +1262,7 @@ function sessionMetadataFromRest(raw: unknown, socketPath: string, seed?: Superv
   const shadow = (session.shadow && typeof session.shadow === "object" ? session.shadow : {}) as JsonObject;
   const sessionId = String(obj.session_id || obj.id || session.id || seed?.session_id || seed?.sessionId || env("AGENTSH_SESSION_ID") || "");
   const roots = normalizeWorkspaceRoots(obj.workspace_roots || session.workspace_roots || shadow.roots || seed?.workspace_roots);
+  const networkEnforcement = (obj.network_enforcement || session.network_enforcement || seed?.network_enforcement || seed?.networkEnforcement) as NetworkEnforcement | undefined;
   const metadata: SupervisorMetadata = {
     ...seed,
     session_id: sessionId || undefined,
@@ -1218,6 +1277,7 @@ function sessionMetadataFromRest(raw: unknown, socketPath: string, seed?: Superv
     runtime_home: String(obj.runtime_home || session.runtime_home || seed?.runtime_home || "") || undefined,
     runtime_tmp: String(obj.runtime_tmp || session.runtime_tmp || seed?.runtime_tmp || "") || undefined,
     worktree: String(obj.worktree || session.workspace_mount || session.project_root || seed?.worktree || "") || undefined,
+    network_enforcement: networkEnforcement,
     supported_ops: [
       "REST /api/v1/sessions",
       "REST /api/v1/approvals",
@@ -1383,6 +1443,20 @@ class RestSupervisorClient {
     metadata ||= sessionMetadataFromRest(this.#metadata || {}, this.socketPath, this.#metadata);
     this.#metadata = metadata;
     this.#sessionId = metadataSessionId(metadata);
+    if (this.#sessionId) {
+      try {
+        metadata.network_enforcement = await this.request<NetworkEnforcement>(
+          "GET",
+          `/api/v1/sessions/${encodeURIComponent(this.#sessionId)}/network-enforcement`,
+        );
+        metadata.network_enforcement_live = true;
+        metadata.network_enforcement_error = undefined;
+      } catch (error) {
+        metadata.network_enforcement_live = false;
+        metadata.network_enforcement_error = asError(error).message;
+      }
+    }
+    assertNetworkEnforcementReady(metadata);
     return metadata;
   }
 
@@ -1672,12 +1746,14 @@ class RestApprovalWatcher {
 }
 
 function requireClient(state: SupervisorState) {
-  if (!state.client || !state.active) throw new Error("AgentSH supervisor is not attached. Set PI_AGENTSH_MOCK_SUPERVISOR for mock NDJSON, or AGENTSH_SESSION_SUPERVISOR/PI_AGENTSH_ENABLE=1 for real Stage 1 REST before starting Pi.");
+  if (!state.client || !state.active || (state.status !== "connected" && state.status !== "pending")) {
+    throw new Error(`AgentSH supervisor is not ready${state.lastError ? `: ${state.lastError}` : ". Set PI_AGENTSH_MOCK_SUPERVISOR for mock NDJSON, or AGENTSH_SESSION_SUPERVISOR/PI_AGENTSH_ENABLE=1 for real Stage 1 REST before starting Pi."}`);
+  }
   return state.client;
 }
 
 function requireApprovalClient(state: SupervisorState) {
-  if (!state.approvalClient || !state.active) throw new Error("AgentSH approval client is not attached.");
+  if (!state.approvalClient || !state.active || (state.status !== "connected" && state.status !== "pending")) throw new Error("AgentSH approval client is not attached.");
   return state.approvalClient;
 }
 
@@ -1782,6 +1858,7 @@ async function attachToSocket(state: SupervisorState, mode: ProtocolMode, source
   state.approvalClient = client;
   const metadata = await client.hello();
   state.metadata = { ...seedMetadata, ...metadata, supervisor_sock: socketPath };
+  assertNetworkEnforcementReady(state.metadata);
   state.sessionId = metadataSessionId(state.metadata);
   state.status = "connected";
   setStatus(state, ctx);
@@ -1852,6 +1929,10 @@ async function attachOrStart(state: SupervisorState, ctx: ExtensionContext, opti
     state.active = false;
     setStatus(state, ctx);
   })().catch((error) => {
+    state.watcher?.stop();
+    state.watcher = undefined;
+    state.client = undefined;
+    state.approvalClient = undefined;
     state.active = true;
     state.status = "error";
     state.lastError = asError(error).message;
@@ -1886,6 +1967,9 @@ function helpText(state: SupervisorState) {
     state.metadata?.worktree ? `Worktree: ${state.metadata.worktree}` : "",
     state.metadata?.real_workspace ? `Real:     ${state.metadata.real_workspace}` : "",
     state.metadata?.protocol_version ? `Protocol: ${state.metadata.protocol_version}` : `Protocol: ${PROTOCOL_VERSION}`,
+    metadataNetworkEnforcement(state.metadata)?.requested ? `Network:  ${metadataNetworkEnforcement(state.metadata)?.requested} / ${metadataNetworkEnforcement(state.metadata)?.status || "unknown"} / ${metadataNetworkEnforcement(state.metadata)?.tier || "unknown"}${state.metadata?.network_enforcement_live ? " (live)" : " (not live)"}` : "",
+    metadataNetworkEnforcement(state.metadata)?.detail ? `Net detail: ${metadataNetworkEnforcement(state.metadata)?.detail}` : "",
+    state.metadata?.network_enforcement_error ? `Net error: ${state.metadata.network_enforcement_error}` : "",
     Array.isArray(state.metadata?.supported_ops) ? `Ops:      ${state.metadata.supported_ops.join(", ")}` : "",
     state.lastError ? `Error:    ${state.lastError}` : "",
   ].filter(Boolean).join("\n");

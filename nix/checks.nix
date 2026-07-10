@@ -827,6 +827,7 @@ in
       delete process.env.AGENTSH_SESSION_EVENT_URL;
       delete process.env.AGENTSH_SESSION_EVENT_TOKEN;
       delete process.env.PI_AGENTSH_APPROVAL_CLIENT;
+      delete process.env.PI_AGENTSH_REQUIRE_NETWORK_ENFORCEMENT;
       delete process.env.AGENTSH_API_KEY;
       delete process.env.AGENTSH_APPROVER_API_KEY;
       delete process.env.AGENTSH_ADMIN_TOKEN;
@@ -941,6 +942,79 @@ in
         await shutdownSession(pi);
         await supervisor.close();
         await central.close();
+      }
+
+      // Strict REST attachment requires fresh, proven network-enforcement evidence.
+      {
+        clearAgentSHEnv();
+        const network = {
+          requested: "strict",
+          readiness: "ready",
+          status: "ready",
+          tier: "helper-ebpf-proxy-required",
+          network_policy_enforced: true,
+          detail: "strict preflight passed",
+        };
+        const supervisor = await withRestSupervisor(async (request) => {
+          if (request.method === "GET" && request.url === "/api/v1/sessions/sess-network-ready") {
+            return { id: "sess-network-ready", session_id: "sess-network-ready", workspace: "/workspace", worktree: "/workspace", network_enforcement: network };
+          }
+          if (request.method === "GET" && request.url === "/api/v1/sessions/sess-network-ready/network-enforcement") return network;
+          if (request.method === "GET" && request.url === "/api/v1/approvals") return [];
+          return { statusCode: 404, body: { error: "unexpected supervisor request", request } };
+        });
+        process.env.AGENTSH_SESSION_ID = "sess-network-ready";
+        process.env.AGENTSH_SESSION_SUPERVISOR = "unix://" + supervisor.socketPath;
+        const pi = createPi();
+        sandbox(pi);
+        const ctx = createContext();
+        await startSession(pi, ctx);
+
+        assert(supervisor.requests.some((request) => request.url === "/api/v1/sessions/sess-network-ready/network-enforcement"), "sandbox did not query live network enforcement");
+        assert(ctx.statuses.some((entry) => entry.name === "sandbox" && entry.value === "agentsh net ✓"), "proven strict network enforcement was not shown in status");
+        await pi.commands.get("sandbox").handler("", ctx);
+        assert(ctx.notifications.some((entry) => String(entry.message).includes("Network:  strict / ready / helper-ebpf-proxy-required (live)")), "sandbox status omitted live network evidence");
+        await shutdownSession(pi);
+        await supervisor.close();
+      }
+
+      // A strict report that is degraded must leave AgentSH-backed tools unusable.
+      {
+        clearAgentSHEnv();
+        const network = {
+          requested: "strict",
+          readiness: "failed",
+          status: "failed",
+          tier: "helper-ebpf-proxy-required",
+          network_policy_enforced: false,
+          detail: "helper attachment unavailable",
+        };
+        const supervisor = await withRestSupervisor(async (request) => {
+          if (request.method === "GET" && request.url === "/api/v1/sessions/sess-network-failed") {
+            return { id: "sess-network-failed", session_id: "sess-network-failed", workspace: "/workspace", worktree: "/workspace", network_enforcement: network };
+          }
+          if (request.method === "GET" && request.url === "/api/v1/sessions/sess-network-failed/network-enforcement") return network;
+          return { statusCode: 404, body: { error: "unexpected supervisor request", request } };
+        });
+        process.env.AGENTSH_SESSION_ID = "sess-network-failed";
+        process.env.AGENTSH_SESSION_SUPERVISOR = "unix://" + supervisor.socketPath;
+        const pi = createPi();
+        sandbox(pi);
+        const ctx = createContext();
+        await startSession(pi, ctx);
+
+        assert(ctx.statuses.some((entry) => entry.name === "sandbox" && entry.value === "agentsh ✗"), "failed strict network enforcement did not set error status");
+        const bashTool = pi.tools.get("bash");
+        assert(bashTool, "strict failure test did not register AgentSH-backed bash");
+        let rejected = false;
+        try {
+          await bashTool.execute("network-failed", { command: "true" }, undefined, undefined, ctx);
+        } catch (error) {
+          rejected = String(error).includes("strict network enforcement is not ready");
+        }
+        assert(rejected, "AgentSH-backed bash remained usable after strict network evidence failed");
+        await shutdownSession(pi);
+        await supervisor.close();
       }
 
       // Single-root shadow sessions expose workspace_roots for review metadata, but the REST

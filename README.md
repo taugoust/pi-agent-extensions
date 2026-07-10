@@ -517,8 +517,8 @@ execution, then `pi-unsafe`, and only falls back to `pi` with a warning.
   `subagent`{.verbatim} through `/api/v1/sessions/{id}/tools/*` endpoints when
   the AgentSH supervisor has a generic subagent runtime configured.
 - **Status bar**: `agentsh inactive`{.verbatim}, `agentsh start…`{.verbatim},
-  `agentsh …`{.verbatim}, `agentsh ✓`{.verbatim}, `agentsh ? N`{.verbatim},
-  or `agentsh ✗`{.verbatim}
+  `agentsh …`{.verbatim}, `agentsh ✓`{.verbatim}, `agentsh net ✓`{.verbatim},
+  `agentsh net ?`{.verbatim}, `agentsh ? N`{.verbatim}, or `agentsh ✗`{.verbatim}
 - **Mock helper/check**: `sandbox/mock-supervisor.mjs`{.verbatim} and
   `sandbox/mock-supervisor-check.mjs`{.verbatim}
 - **Security model**: in real AgentSH REST mode, AgentSH owns session state,
@@ -551,6 +551,7 @@ PI_AGENTSH_WORKSPACE_MODE=shadow|direct                # Stage 1 only; default: 
 PI_AGENTSH_BIN=agentsh                                 # default: agentsh
 PI_AGENTSH_READ_MODE=supervised                        # optional read override (mock and real REST)
 PI_AGENTSH_APPROVAL_CLIENT=central                     # opt into central detached approval bridge
+PI_AGENTSH_REQUIRE_NETWORK_ENFORCEMENT=strict           # refuse tools without live strict runtime evidence
 PI_AGENTSH_TOOL_REQUEST_TIMEOUT_MS=1800000             # REST tool request cap; keep above approval timeout
 PI_AGENTSH_APPROVAL_TIMEOUT_SLACK_MS=300000            # extra REST wait budget for approval delays
 ```
@@ -568,6 +569,7 @@ Streaming ops may emit `stdout`, `stderr`, `tool_update`, `subagent_update`, or
 
 - `GET /api/v1/sessions` and `GET /api/v1/sessions/{id}` to discover metadata
   when possible;
+- `GET /api/v1/sessions/{id}/network-enforcement` for live runtime evidence;
 - `GET /api/v1/approvals` on a polling interval to find pending approvals;
 - `POST /api/v1/approvals/{id}` to approve/deny with `scope` and `reason`;
   central detached-session approval resolution is used only when explicitly
@@ -585,6 +587,9 @@ NDJSON streaming response for stdout/stderr and child result events. Multiple Pi
 `edit` replacements are applied as sequential single-replacement REST calls.
 Approvals are polled rather than streamed. If `fields.scope_kind`
 and `fields.scope_key` are present, Pi offers once/session approve/deny choices.
+When the supervisor reports `requested=strict`, the extension refuses all
+AgentSH-backed tools unless the live report proves the
+`helper-ebpf-proxy-required` tier is ready and `network_policy_enforced=true`.
 
 The extension exposes `globalThis.__AGENTSH_PI__` for owned extensions:
 
