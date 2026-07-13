@@ -1,5 +1,5 @@
 import { cloneSubagentTerminal, normalizeSubagentTerminal, type SubagentTerminal } from "./subagent-terminal.js";
-import { truncateByBytes, usageNumber, type RetainedSubagentMessage, type SubagentCompletedTool, type SubagentCompactionState, type SubagentProtocolDiagnostic, type SubagentStreamState, type SubagentUsage } from "./subagent-stream.js";
+import { sanitizeSubagentToolArgs, truncateByBytes, usageNumber, type RetainedSubagentMessage, type SubagentCompletedTool, type SubagentCompactionState, type SubagentProtocolDiagnostic, type SubagentStreamState, type SubagentUsage } from "./subagent-stream.js";
 import { stripSubagentTerminalControls } from "./subagent-text.js";
 
 export const MAX_SUBAGENT_CAPSULE_BYTES = 12 * 1024;
@@ -84,7 +84,11 @@ function boundedMessages(messages: RetainedSubagentMessage[] | undefined): Retai
       role: "assistant",
       content: message.content
         .filter((part) => part.type === "text" || part.type === "toolCall")
-        .map((part) => ({ ...part, ...(part.type === "text" ? { text: sanitizeCapsuleText(String(part.text ?? "")) } : {}), ...(part.arguments && typeof part.arguments === "object" ? { arguments: { ...(part.arguments as Record<string, unknown>) } } : {}) })),
+        .map((part) => {
+          if (part.type === "text") return { type: "text", text: sanitizeCapsuleText(String(part.text ?? "")) };
+          const name = truncateByBytes(String(part.name || "unknown"), 128);
+          return { type: "toolCall", name, arguments: sanitizeSubagentToolArgs(name, part.arguments) };
+        }),
       model: message.model,
       stopReason: message.stopReason,
       errorMessage: message.errorMessage ? truncateByBytes(sanitizeCapsuleText(message.errorMessage), MAX_CAPSULE_ERROR_BYTES) : undefined,
@@ -99,15 +103,9 @@ function boundedMessages(messages: RetainedSubagentMessage[] | undefined): Retai
 }
 
 function boundedCompletedToolArgs(tool: SubagentCompletedTool): Record<string, unknown> {
-  const args = tool.args && typeof tool.args === "object" && !Array.isArray(tool.args) ? tool.args : {};
-  if (tool.name === "bash" && typeof args.command === "string") {
-    return { command: truncateByBytes(sanitizeCapsuleText(args.command).replace(/\s+/g, " "), 500) };
-  }
-  if (tool.name === "read" || tool.name === "write" || tool.name === "edit") {
-    const path = typeof args.path === "string" ? args.path : typeof tool.path === "string" ? tool.path : undefined;
-    return path ? { path: truncateByBytes(stripSubagentTerminalControls(path), 1024) } : {};
-  }
-  return {};
+  const source = tool.args && typeof tool.args === "object" && !Array.isArray(tool.args) ? { ...tool.args } : {};
+  if (source.path === undefined && typeof tool.path === "string") source.path = tool.path;
+  return sanitizeSubagentToolArgs(tool.name, source);
 }
 
 function boundedUsage(value: Partial<SubagentUsage> | undefined): SubagentUsage {
@@ -143,6 +141,12 @@ export function createSubagentProgressCapsule(source: CapsuleSource): SubagentPr
   const terminal = normalizeSubagentTerminal(source.terminal, { exitCode, stopReason, error: source.errorMessage });
   const messages = boundedMessages(source.messages);
   const assistantText = lastAssistantText(source.messages);
+  const activeTool = source.toolStatus && source.lastToolCall
+    ? {
+        name: truncateByBytes(source.lastToolCall.name, 128),
+        args: sanitizeSubagentToolArgs(source.lastToolCall.name, source.lastToolCall.args),
+      }
+    : undefined;
   const capsule: SubagentProgressCapsule = {
     label: truncateByBytes(String(source.label || "subagent"), 256),
     task: source.task ? truncateByBytes(source.task, 1024) : undefined,
@@ -158,14 +162,17 @@ export function createSubagentProgressCapsule(source: CapsuleSource): SubagentPr
     cwd: source.cwd ? truncateByBytes(source.cwd, 1024) : undefined,
     lastAssistantText: assistantText,
     messages,
-    completedTools: (source.completedTools ?? []).slice(-MAX_CAPSULE_TOOLS).map((tool) => ({
-      name: truncateByBytes(tool.name, 128),
-      args: boundedCompletedToolArgs(tool),
-      isError: tool.isError === true,
-      path: tool.path ? truncateByBytes(tool.path, 1024) : undefined,
-      resultPreview: tool.resultPreview ? truncateByBytes(sanitizeCapsuleText(tool.resultPreview), 256) : undefined,
-    })),
-    activeTool: source.toolStatus && source.lastToolCall ? { name: truncateByBytes(source.lastToolCall.name, 128), args: { ...source.lastToolCall.args } } : undefined,
+    completedTools: (source.completedTools ?? []).slice(-MAX_CAPSULE_TOOLS).map((tool) => {
+      const args = boundedCompletedToolArgs(tool);
+      return {
+        name: truncateByBytes(tool.name, 128),
+        args,
+        isError: tool.isError === true,
+        path: typeof args.path === "string" ? args.path : undefined,
+        resultPreview: tool.resultPreview ? truncateByBytes(sanitizeCapsuleText(tool.resultPreview), 256) : undefined,
+      };
+    }),
+    activeTool,
     readFiles: (source.readFiles ?? []).slice(-MAX_CAPSULE_PATHS).map((path) => truncateByBytes(path, 1024)),
     modifiedFiles: (source.modifiedFiles ?? []).slice(-MAX_CAPSULE_PATHS).map((path) => truncateByBytes(path, 1024)),
     compaction: cloneCompaction(source.compaction),

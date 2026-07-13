@@ -200,16 +200,54 @@ function sanitizeUsage(value: unknown): Record<string, unknown> | undefined {
   return Object.keys(usage).length ? usage : undefined;
 }
 
-function sanitizeToolArgs(toolName: string, value: unknown): Record<string, unknown> {
+export function sanitizeSubagentToolArgs(toolName: string, value: unknown): Record<string, unknown> {
   if (!value || typeof value !== "object" || Array.isArray(value)) return {};
   const args = value as Record<string, unknown>;
+  const safeText = (input: unknown, maxBytes = MAX_METADATA_BYTES): string | undefined => {
+    const text = sanitizedDiagnostic(boundedString(input, maxBytes));
+    return text ? truncateByBytes(text.replace(/\s+/g, " "), maxBytes) : undefined;
+  };
+  const safeNumber = (input: unknown): number | undefined =>
+    typeof input === "number" && Number.isSafeInteger(input) && input >= 0 ? input : undefined;
+  const withDefined = (entries: Array<[string, unknown]>): Record<string, unknown> =>
+    Object.fromEntries(entries.filter((entry) => entry[1] !== undefined));
+
   if (toolName === "bash") {
-    const command = sanitizedDiagnostic(boundedString(args.command, MAX_LIVE_TOOL_STATUS_BYTES));
-    return command ? { command: truncateByBytes(command.replace(/\s+/g, " "), MAX_LIVE_TOOL_STATUS_BYTES) } : {};
+    return withDefined([["command", safeText(args.command, MAX_LIVE_TOOL_STATUS_BYTES)]]);
   }
-  if (toolName === "read" || toolName === "write" || toolName === "edit") {
-    const path = boundedString(args.path ?? args.file_path);
-    return path ? { path } : {};
+  if (toolName === "read") {
+    return withDefined([
+      ["path", safeText(args.path ?? args.file_path)],
+      ["offset", safeNumber(args.offset)],
+      ["limit", safeNumber(args.limit)],
+    ]);
+  }
+  if (toolName === "write" || toolName === "edit") {
+    return withDefined([["path", safeText(args.path ?? args.file_path)]]);
+  }
+  if (toolName === "ls") {
+    return withDefined([
+      ["path", safeText(args.path)],
+      ["limit", safeNumber(args.limit)],
+    ]);
+  }
+  if (toolName === "find") {
+    return withDefined([
+      ["pattern", safeText(args.pattern, 256)],
+      ["path", safeText(args.path)],
+      ["limit", safeNumber(args.limit)],
+    ]);
+  }
+  if (toolName === "grep") {
+    return withDefined([
+      ["pattern", safeText(args.pattern, 256)],
+      ["path", safeText(args.path)],
+      ["glob", safeText(args.glob, 256)],
+      ["ignoreCase", typeof args.ignoreCase === "boolean" ? args.ignoreCase : undefined],
+      ["literal", typeof args.literal === "boolean" ? args.literal : undefined],
+      ["context", safeNumber(args.context)],
+      ["limit", safeNumber(args.limit)],
+    ]);
   }
   // Unknown arguments may contain credentials and are not copied into
   // parent-facing progress state.
@@ -218,7 +256,7 @@ function sanitizeToolArgs(toolName: string, value: unknown): Record<string, unkn
 
 function sanitizeToolCall(toolNameValue: unknown, argsValue: unknown): RetainedSubagentToolCall {
   const name = boundedString(toolNameValue, 128) ?? "unknown";
-  return { name, args: sanitizeToolArgs(name, argsValue) };
+  return { name, args: sanitizeSubagentToolArgs(name, argsValue) };
 }
 
 function sanitizeCompletedTool(value: unknown): SubagentCompletedTool | undefined {
@@ -227,7 +265,7 @@ function sanitizeCompletedTool(value: unknown): SubagentCompletedTool | undefine
   const name = boundedString(source.name, 128);
   if (!name) return undefined;
   const path = boundedString(source.path, MAX_METADATA_BYTES);
-  const args = sanitizeToolArgs(name, source.args ?? (path ? { path } : undefined));
+  const args = sanitizeSubagentToolArgs(name, source.args ?? (path ? { path } : undefined));
   const resultPreview = sanitizedDiagnostic(source.resultPreview);
   return {
     name,
@@ -550,6 +588,9 @@ function summarizeLiveSubagentToolCall(toolName: string, value: unknown): string
   if (toolName === "read") return `read ${liveArgument(args.path ?? args.file_path)}`;
   if (toolName === "write") return `write ${liveArgument(args.path ?? args.file_path)}`;
   if (toolName === "edit") return `edit ${liveArgument(args.path ?? args.file_path)}`;
+  if (toolName === "ls") return `ls ${liveArgument(args.path) === "..." ? "." : liveArgument(args.path)}`;
+  if (toolName === "find") return `find ${liveArgument(args.pattern) === "..." ? "*" : liveArgument(args.pattern)} in ${liveArgument(args.path) === "..." ? "." : liveArgument(args.path)}`;
+  if (toolName === "grep") return `grep /${liveArgument(args.pattern) === "..." ? "" : liveArgument(args.pattern)}/ in ${liveArgument(args.path) === "..." ? "." : liveArgument(args.path)}`;
   return toolName;
 }
 
@@ -682,7 +723,7 @@ export function processSubagentStdoutLine(state: SubagentStreamState, line: stri
     const call = sanitizeToolCall(source.toolName, source.args);
     state.lastToolCall = call;
     state.toolStatus = `[running ${call.name}]`;
-    liveToolStatuses.set(state, `${state.toolStatus} ${truncateByBytes(summarizeLiveSubagentToolCall(call.name, source.args), MAX_LIVE_TOOL_STATUS_BYTES)}`);
+    liveToolStatuses.set(state, `${state.toolStatus} ${truncateByBytes(summarizeLiveSubagentToolCall(call.name, call.args), MAX_LIVE_TOOL_STATUS_BYTES)}`);
   } else if (eventType === "tool_execution_update" && source.partialResult) {
     const text = toolResultText(source.partialResult);
     if (text) state.lastToolResult = text;

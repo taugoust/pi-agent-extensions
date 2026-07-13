@@ -135,6 +135,86 @@ function newState(label = "child"): SubagentStreamState {
 }
 
 {
+  const state = newState("known-read-only-tools");
+  const droppedSecret = "unknown-argument-secret-sentinel";
+  appendSubagentStdoutChunk(state, line({
+    type: "tool_execution_start",
+    toolName: "ls",
+    args: { path: "/workspace/\u001b[31msrc\u001b[0m", limit: 500, ignored: droppedSecret },
+  }));
+  assert.deepEqual(state.lastToolCall, { name: "ls", args: { path: "/workspace/src", limit: 500 } });
+  assert.equal(subagentLiveToolStatus(state), "[running ls] ls /workspace/src");
+  appendSubagentStdoutChunk(state, line({ type: "tool_execution_end", toolName: "ls", result: { content: [{ type: "text", text: "listed" }] } }));
+
+  appendSubagentStdoutChunk(state, line({
+    type: "tool_execution_start",
+    toolName: "find",
+    args: { pattern: "**/*.ts", path: "/workspace", limit: 1000, ignored: droppedSecret },
+  }));
+  assert.deepEqual(state.lastToolCall, { name: "find", args: { pattern: "**/*.ts", path: "/workspace", limit: 1000 } });
+  assert.equal(subagentLiveToolStatus(state), "[running find] find **/*.ts in /workspace");
+  appendSubagentStdoutChunk(state, line({ type: "tool_execution_end", toolName: "find", result: { content: [{ type: "text", text: "found" }] } }));
+
+  appendSubagentStdoutChunk(state, line({
+    type: "tool_execution_start",
+    toolName: "grep",
+    args: {
+      pattern: "password=credential-sentinel",
+      path: "/workspace",
+      glob: "*.ts",
+      ignoreCase: true,
+      literal: false,
+      context: 2,
+      limit: 100,
+      authorization: droppedSecret,
+    },
+  }));
+  assert.deepEqual(state.lastToolCall, {
+    name: "grep",
+    args: {
+      pattern: "password=[redacted]",
+      path: "/workspace",
+      glob: "*.ts",
+      ignoreCase: true,
+      literal: false,
+      context: 2,
+      limit: 100,
+    },
+  });
+  assert.equal(subagentLiveToolStatus(state), "[running grep] grep /password=[redacted]/ in /workspace");
+  appendSubagentStdoutChunk(state, line({ type: "tool_execution_end", toolName: "grep", result: { content: [{ type: "text", text: "matched" }] } }));
+
+  assert.deepEqual(state.completedTools.map((tool) => ({ name: tool.name, args: tool.args })), [
+    { name: "ls", args: { path: "/workspace/src", limit: 500 } },
+    { name: "find", args: { pattern: "**/*.ts", path: "/workspace", limit: 1000 } },
+    {
+      name: "grep",
+      args: {
+        pattern: "password=[redacted]",
+        path: "/workspace",
+        glob: "*.ts",
+        ignoreCase: true,
+        literal: false,
+        context: 2,
+        limit: 100,
+      },
+    },
+  ]);
+  assert.equal(JSON.stringify(state).includes(droppedSecret), false);
+  assert.equal(JSON.stringify(state).includes("credential-sentinel"), false);
+  assert.equal(JSON.stringify(state).includes("\u001b"), false);
+}
+
+{
+  const state = newState("unknown-tool-args");
+  const secret = "unknown-tool-secret-sentinel";
+  appendSubagentStdoutChunk(state, line({ type: "tool_execution_start", toolName: "custom", args: { path: "/workspace", password: secret } }));
+  assert.deepEqual(state.lastToolCall, { name: "custom", args: {} });
+  assert.equal(subagentLiveToolStatus(state), "[running custom] custom");
+  assert.equal(JSON.stringify(state).includes(secret), false);
+}
+
+{
   const state = newState("tool-failure-recovery");
   appendSubagentStdoutChunk(state, line({ type: "tool_execution_start", toolName: "read", args: { path: "/missing", ignored: "not-parent-facing" } }));
   assert.deepEqual(state.lastToolCall, { name: "read", args: { path: "/missing" } });

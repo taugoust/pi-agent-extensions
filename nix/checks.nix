@@ -569,6 +569,7 @@ in
         return String(this.text || "").split("\n");
       }
     }
+    export class Markdown extends Text {}
     export const Key = { enter: "<enter>", escape: "<escape>", up: "<up>", down: "<down>", pageUp: "<page-up>", pageDown: "<page-down>" };
     export function matchesKey(data, key) { return data === key; }
     export function truncateToWidth(text) { return String(text); }
@@ -1111,6 +1112,58 @@ in
         }, { expanded: false }, ctx.ui.theme).render(120).join("\n");
         assert(renderedRunning.includes(retainedCommand), "collapsed running result lost the last completed command summary");
         assert(!renderedRunning.includes("(running...)"), "collapsed running result regressed to a generic running placeholder despite completed progress");
+
+        const mixedRunningDetails = {
+          mode: "parallel",
+          results: [
+            {
+              label: "active child",
+              task: "inspect sources",
+              exitCode: -1,
+              stopReason: "running",
+              model: "test/model",
+              tools: ["ls", "grep"],
+              cwd: "/workspace",
+              messages: [],
+              activeTool: { name: "grep", args: { pattern: "needle", path: "/workspace" } },
+              completedTools: [{ name: "ls", args: { path: "/workspace/src", limit: 500 }, isError: false }],
+              usage: { input: 10, output: 2 },
+            },
+            {
+              label: "completed child",
+              task: "find TypeScript",
+              exitCode: 0,
+              stopReason: "completed",
+              messages: [],
+              completedTools: [{ name: "find", args: { pattern: "**/*.ts", path: "/workspace", limit: 1000 }, isError: false }],
+              usage: { input: 5, output: 1 },
+            },
+            {
+              label: "failed child",
+              task: "search sources",
+              exitCode: 1,
+              stopReason: "error",
+              errorMessage: "search failed",
+              messages: [],
+              completedTools: [{ name: "grep", args: { pattern: "needle", path: "/workspace", glob: "*.ts" }, isError: true }],
+              usage: { input: 3, output: 1 },
+            },
+          ],
+        };
+        const collapsedMixed = subagentTool.renderResult({ content: [], details: mixedRunningDetails }, { expanded: false }, ctx.ui.theme).render(120).join("\n");
+        const expandedMixed = subagentTool.renderResult({ content: [], details: mixedRunningDetails }, { expanded: true }, ctx.ui.theme).render(120).join("\n");
+        assert(collapsedMixed.includes("ls /workspace/src"), "collapsed running result lost the canonical ls summary");
+        assert(collapsedMixed.includes("find **/*.ts in /workspace"), "collapsed result lost the canonical find summary");
+        assert(collapsedMixed.includes("grep /needle/ in /workspace"), "collapsed failed result lost the canonical grep summary");
+        assert(!collapsedMixed.includes("ls {}") && !collapsedMixed.includes("find {}") && !collapsedMixed.includes("grep {}"), "known tools regressed to empty generic argument objects");
+        assert(collapsedMixed.includes("(Ctrl+O to expand)"), "collapsed running result omitted the expansion hint");
+        assert(expandedMixed.includes("Status: running (exit -1)"), "expanded running result did not render truthful active state");
+        assert(expandedMixed.includes("Active tool: grep /needle/ in /workspace"), "expanded running result omitted the active tool");
+        assert(expandedMixed.includes("Last completed tool: ls /workspace/src"), "expanded running result omitted retained completed progress");
+        assert(expandedMixed.includes("Last completed tool: find **/*.ts in /workspace"), "expanded result omitted completed child details");
+        assert(expandedMixed.includes("Last completed tool: grep /needle/ in /workspace (failed)"), "expanded result omitted failed child details");
+        assert(!expandedMixed.includes("(Ctrl+O to expand)"), "expanded running result still advertised expansion");
+        assert(expandedMixed !== collapsedMixed, "Ctrl+O expansion produced no visible running-state change");
         await shutdownSession(pi);
         await supervisor.close();
       }

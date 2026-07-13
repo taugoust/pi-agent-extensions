@@ -87,6 +87,44 @@ function line(event: unknown): string {
 }
 
 {
+  const secret = "capsule-tool-argument-secret";
+  const capsule = createSubagentProgressCapsule({
+    label: "known-tool-args",
+    exitCode: -1,
+    stopReason: "running",
+    toolStatus: "[running grep]",
+    lastToolCall: { name: "grep", args: { pattern: "needle", path: "/workspace", authorization: secret } },
+    messages: [{
+      role: "assistant",
+      content: [
+        { type: "toolCall", name: "find", arguments: { pattern: "**/*.ts", path: "/workspace", limit: 1000, password: secret } },
+        { type: "toolCall", name: "custom", arguments: { path: "/workspace", password: secret } },
+      ],
+    }],
+    completedTools: [
+      { name: "ls", args: { path: "/workspace/\u001b[31msrc\u001b[0m", limit: 500, ignored: secret }, isError: false },
+      { name: "find", args: { pattern: "**/*.ts", path: "/workspace", limit: 1000, ignored: secret }, isError: false },
+      { name: "grep", args: { pattern: "password=credential", path: "/workspace", glob: "*.ts", ignoreCase: true, context: 2, limit: 100, ignored: secret }, isError: true },
+      { name: "custom", args: { path: "/workspace", password: secret }, isError: false },
+    ],
+  });
+  assert.deepEqual(capsule.activeTool, { name: "grep", args: { pattern: "needle", path: "/workspace" } });
+  assert.deepEqual(capsule.completedTools.map((tool) => ({ name: tool.name, args: tool.args })), [
+    { name: "ls", args: { path: "/workspace/src", limit: 500 } },
+    { name: "find", args: { pattern: "**/*.ts", path: "/workspace", limit: 1000 } },
+    { name: "grep", args: { pattern: "password=[redacted]", path: "/workspace", glob: "*.ts", ignoreCase: true, context: 2, limit: 100 } },
+    { name: "custom", args: {} },
+  ]);
+  assert.deepEqual(capsule.messages[0].content, [
+    { type: "toolCall", name: "find", arguments: { pattern: "**/*.ts", path: "/workspace", limit: 1000 } },
+    { type: "toolCall", name: "custom", arguments: {} },
+  ]);
+  assert.equal(JSON.stringify(capsule).includes(secret), false);
+  assert.equal(JSON.stringify(capsule).includes("credential"), false);
+  assert.equal(JSON.stringify(capsule).includes("\u001b"), false);
+}
+
+{
   const state = createSubagentStreamState({ label: "snapshot" });
   appendSubagentStdoutChunk(state, line({ type: "message_end", message: { role: "assistant", content: [{ type: "text", text: "stable" }] } }));
   const capsule = createSubagentProgressCapsule(state);

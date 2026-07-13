@@ -2245,9 +2245,16 @@ function formatSubagentToolCall(toolName: string, args: Record<string, unknown>,
     return p.startsWith(home) ? `~${p.slice(home.length)}` : p;
   };
   if (toolName === "bash") return themeFg("muted", "$ ") + themeFg("toolOutput", String(args.command || "...").slice(0, 80));
-  if (toolName === "read") return themeFg("muted", "read ") + themeFg("accent", shortenPath(String(args.path || args.file_path || "...")));
+  if (toolName === "read") {
+    const path = shortenPath(String(args.path || args.file_path || "..."));
+    const lineInfo = args.offset ? `:${args.offset}${args.limit ? `-${Number(args.offset) + Number(args.limit) - 1}` : ""}` : "";
+    return themeFg("muted", "read ") + themeFg("accent", path + lineInfo);
+  }
   if (toolName === "write") return themeFg("muted", "write ") + themeFg("accent", shortenPath(String(args.path || args.file_path || "...")));
   if (toolName === "edit") return themeFg("muted", "edit ") + themeFg("accent", shortenPath(String(args.path || args.file_path || "...")));
+  if (toolName === "ls") return themeFg("muted", "ls ") + themeFg("accent", shortenPath(String(args.path || ".")));
+  if (toolName === "find") return themeFg("muted", "find ") + themeFg("accent", String(args.pattern || "*")) + themeFg("dim", ` in ${shortenPath(String(args.path || "."))}`);
+  if (toolName === "grep") return themeFg("muted", "grep ") + themeFg("accent", `/${String(args.pattern || "")}/`) + themeFg("dim", ` in ${shortenPath(String(args.path || "."))}`);
   const argsStr = JSON.stringify(args || {});
   return themeFg("accent", toolName) + themeFg("dim", ` ${argsStr.length > 50 ? `${argsStr.slice(0, 50)}...` : argsStr}`);
 }
@@ -2417,7 +2424,7 @@ function renderSubagentResult(result: any, options: any, theme: any) {
   const noun = mode === "chain" ? "steps" : "tasks";
   const status = running > 0 ? `${successCount + failCount}/${details.results.length} done, ${running} running` : `${successCount}/${details.results.length} ${noun}`;
 
-  if (expanded && running === 0) {
+  if (expanded) {
     const container = new Container();
     container.addChild(new Text(`${icon} ${theme.fg("toolTitle", theme.bold(`${mode} `))}${theme.fg("accent", status)}`, 0, 0));
     for (const r of details.results) {
