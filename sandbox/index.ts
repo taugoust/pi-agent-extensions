@@ -17,6 +17,7 @@ import { join, posix as posixPath } from "node:path";
 import { Type } from "@sinclair/typebox";
 import { DEFAULT_MAX_BYTES, DEFAULT_MAX_LINES, formatSize, getMarkdownTheme, renderDiff, truncateTail, type ExtensionAPI, type ExtensionContext, type TruncationResult } from "@mariozechner/pi-coding-agent";
 import { Box, Container, Key, Markdown, matchesKey, Spacer, Text, truncateToWidth, type Component } from "@mariozechner/pi-tui";
+import { inheritSubagentModels } from "./subagent-model.js";
 
 type JsonObject = Record<string, unknown>;
 type ProtocolMode = "mock-ndjson" | "rest" | "legacy-approval-ui" | "";
@@ -2916,9 +2917,10 @@ export default function sandbox(pi: ExtensionAPI) {
       return renderSubagentResult(result, options, theme);
     },
     async execute(toolCallId, params: any, signal, onUpdate, ctx) {
-      const hasSingle = typeof params.task === "string" && params.task.trim().length > 0;
-      const hasTasks = Array.isArray(params.tasks) && params.tasks.length > 0;
-      const hasChain = Array.isArray(params.chain) && params.chain.length > 0;
+      const effectiveParams = inheritSubagentModels(params, ctx.model);
+      const hasSingle = typeof effectiveParams.task === "string" && effectiveParams.task.trim().length > 0;
+      const hasTasks = Array.isArray(effectiveParams.tasks) && effectiveParams.tasks.length > 0;
+      const hasChain = Array.isArray(effectiveParams.chain) && effectiveParams.chain.length > 0;
       if (Number(hasSingle) + Number(hasTasks) + Number(hasChain) !== 1) {
         throw new Error("Invalid parameters. Provide exactly one mode: task, non-empty tasks, or non-empty chain.");
       }
@@ -2929,14 +2931,14 @@ export default function sandbox(pi: ExtensionAPI) {
         const key = streamKey(message);
         let childState = streamStates.get(key);
         if (!childState) {
-          const model = typeof (message as any).model === "string" ? (message as any).model : typeof params.model === "string" ? params.model : undefined;
+          const model = typeof (message as any).model === "string" ? (message as any).model : typeof effectiveParams.model === "string" ? effectiveParams.model : undefined;
           const usage = usageZero();
           usage.contextWindow = contextWindowForModel(ctx, model);
           childState = {
             label: key,
-            task: typeof (message as any).task === "string" ? (message as any).task : typeof params.task === "string" ? params.task : undefined,
-            cwd: typeof (message as any).cwd === "string" ? (message as any).cwd : typeof params.cwd === "string" ? params.cwd : undefined,
-            tools: Array.isArray((message as any).tools) ? (message as any).tools : Array.isArray(params.tools) ? params.tools : undefined,
+            task: typeof (message as any).task === "string" ? (message as any).task : typeof effectiveParams.task === "string" ? effectiveParams.task : undefined,
+            cwd: typeof (message as any).cwd === "string" ? (message as any).cwd : typeof effectiveParams.cwd === "string" ? effectiveParams.cwd : undefined,
+            tools: Array.isArray((message as any).tools) ? (message as any).tools : Array.isArray(effectiveParams.tools) ? effectiveParams.tools : undefined,
             prefix: "",
             liveText: "",
             rawText: "",
@@ -2963,7 +2965,7 @@ export default function sandbox(pi: ExtensionAPI) {
       };
       let result: unknown;
       try {
-        result = await requireClient(state).spawnSubagent({ ...params, cwd: params.cwd || effectiveSupervisorCwd(ctx), actor: parentActor(toolCallId, "Pi subagent tool") }, {
+        result = await requireClient(state).spawnSubagent({ ...effectiveParams, cwd: effectiveParams.cwd || effectiveSupervisorCwd(ctx), actor: parentActor(toolCallId, "Pi subagent tool") }, {
           signal,
           onUpdate: (message) => {
           if (message.event === "subagent_start") {
@@ -2992,7 +2994,7 @@ export default function sandbox(pi: ExtensionAPI) {
             if (Array.isArray((message as any).tools)) childState.tools = (message as any).tools;
             const model = typeof (message as any).model === "string" ? (message as any).model : undefined;
             if (model) childState.model = model;
-            childState.usage.contextWindow = contextWindowForModel(ctx, childState.model || (typeof params.model === "string" ? params.model : undefined));
+            childState.usage.contextWindow = contextWindowForModel(ctx, childState.model || (typeof effectiveParams.model === "string" ? effectiveParams.model : undefined));
             appendSubagentPrefix(childState, `[${label} started]`);
             emitSubagentUpdate(message);
           } else if (message.event === "subagent_result") {

@@ -581,7 +581,10 @@ in
       --target es2022 \
       --rootDir "$srcdir" \
       --outDir "$outdir" \
-      "$srcdir/sandbox/index.ts"
+      "$srcdir/sandbox/index.ts" \
+      "$srcdir/sandbox/subagent-model.test.ts"
+
+    node "$outdir/sandbox/subagent-model.test.js"
 
     cat > "$workdir/test.mjs" <<'EOF'
     import fs from "node:fs";
@@ -626,7 +629,7 @@ in
       };
     }
 
-    function createContext({ choices = [], hasUI = true, customActions } = {}) {
+    function createContext({ choices = [], hasUI = true, customActions, model } = {}) {
       const statuses = [];
       const notifications = [];
       const selectCalls = [];
@@ -676,6 +679,7 @@ in
       return {
         cwd: process.cwd(),
         hasUI,
+        model,
         statuses,
         notifications,
         selectCalls,
@@ -942,6 +946,46 @@ in
         await shutdownSession(pi);
         await supervisor.close();
         await central.close();
+      }
+
+      // Subagents inherit the trusted parent's active model unless a child selects one explicitly.
+      {
+        clearAgentSHEnv();
+        const supervisor = await withRestSupervisor(async (request) => {
+          if (request.method === "GET" && request.url === "/api/v1/sessions/sess-subagent-model") {
+            return { id: "sess-subagent-model", session_id: "sess-subagent-model", workspace: "/workspace", worktree: "/workspace" };
+          }
+          if (request.method === "GET" && request.url === "/api/v1/approvals") return [];
+          if (request.method === "POST" && request.url === "/api/v1/sessions/sess-subagent-model/tools/spawn_subagent") {
+            return {
+              event: "done",
+              ok: true,
+              result: { mode: "single", final: "ok", results: [{ label: "subagent", task: "ok", exit_code: 0, stop_reason: "completed", final: "ok" }] },
+            };
+          }
+          return { statusCode: 404, body: { error: "unexpected supervisor request", request } };
+        });
+        process.env.AGENTSH_SESSION_ID = "sess-subagent-model";
+        process.env.AGENTSH_SESSION_SUPERVISOR = "unix://" + supervisor.socketPath;
+        const pi = createPi();
+        sandbox(pi);
+        const ctx = createContext({ model: { provider: "openai-codex", id: "gpt-5.5", contextWindow: 200000 } });
+        await startSession(pi, ctx);
+        const subagentTool = pi.tools.get("subagent");
+        assert(subagentTool, "REST mode did not register subagent tool");
+
+        await subagentTool.execute("inherit-model", { task: "ok" }, undefined, undefined, ctx);
+        await subagentTool.execute("explicit-model", { task: "ok", model: "google/gemini-pro" }, undefined, undefined, ctx);
+        await subagentTool.execute("parallel-model", { tasks: [{ task: "one" }, { task: "two", model: "anthropic/claude-sonnet" }] }, undefined, undefined, ctx);
+
+        const spawnRequests = supervisor.requests.filter((request) => request.method === "POST" && request.url.endsWith("/tools/spawn_subagent"));
+        assert(spawnRequests.length === 3, "unexpected subagent request count");
+        assert(spawnRequests[0].body.model === "openai-codex/gpt-5.5", "single child did not inherit parent model");
+        assert(spawnRequests[1].body.model === "google/gemini-pro", "explicit child model was overwritten");
+        assert(spawnRequests[2].body.tasks[0].model === "openai-codex/gpt-5.5", "parallel child did not inherit parent model");
+        assert(spawnRequests[2].body.tasks[1].model === "anthropic/claude-sonnet", "parallel explicit model was overwritten");
+        await shutdownSession(pi);
+        await supervisor.close();
       }
 
       // Strict REST attachment requires fresh, proven network-enforcement evidence.
