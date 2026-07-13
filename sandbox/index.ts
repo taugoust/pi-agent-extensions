@@ -18,7 +18,8 @@ import { Type } from "@sinclair/typebox";
 import { DEFAULT_MAX_BYTES, DEFAULT_MAX_LINES, formatSize, getMarkdownTheme, renderDiff, truncateTail, type ExtensionAPI, type ExtensionContext, type TruncationResult } from "@mariozechner/pi-coding-agent";
 import { Box, Container, Key, Markdown, matchesKey, Spacer, Text, truncateToWidth, type Component } from "@mariozechner/pi-tui";
 import { inheritSubagentModels } from "./subagent-model.js";
-import { appendSubagentPrefix, appendSubagentRawText, appendSubagentStdoutChunk, appendUtf8LineChunk, createSubagentStreamState, flushSubagentStdout, flushUtf8LineChunk, parseSubagentPiJsonStdout, subagentStreamResult, truncateByBytes, usageNumber, usageZero, type SubagentStreamState } from "./subagent-stream.js";
+import { abortSubagentProtocolStream, appendSubagentProtocolChunk, createSubagentProtocolState, finishSubagentProtocolStream } from "./subagent-protocol.js";
+import { appendSubagentPrefix, appendSubagentRawText, appendSubagentStdoutChunk, createSubagentStreamState, flushSubagentStdout, parseSubagentPiJsonStdout, subagentStreamResult, truncateByBytes, usageNumber, usageZero, type SubagentStreamState } from "./subagent-stream.js";
 
 type JsonObject = Record<string, unknown>;
 type ProtocolMode = "mock-ndjson" | "rest" | "legacy-approval-ui" | "";
@@ -1346,9 +1347,7 @@ class RestSupervisorClient {
     return await new Promise<unknown>((resolve, reject) => {
       const payload = JSON.stringify(body);
       let settled = false;
-      let buffer = "";
-      let decoder: TextDecoder | undefined;
-      let finalResponse: unknown;
+      const protocol = createSubagentProtocolState();
       let req: http.ClientRequest | undefined;
       const settle = (fn: () => void) => {
         if (settled) return;
@@ -1367,18 +1366,6 @@ class RestSupervisorClient {
           req?.destroy(err);
           return false;
         }
-      };
-      const processLine = (line: string) => {
-        const trimmed = line.trim();
-        if (!trimmed || settled) return;
-        let message: SupervisorMessage;
-        try { message = JSON.parse(trimmed); } catch { return; }
-        if (message.event === "done") {
-          finalResponse = { ok: Boolean(message.ok), result: message.result, error: typeof message.error === "string" ? message.error : "" };
-          emitEvent(message);
-          return;
-        }
-        emitEvent(message);
       };
       req = http.request({
         socketPath: this.socketPath,
@@ -1399,10 +1386,7 @@ class RestSupervisorClient {
             errorChunks.push(bytes);
             return;
           }
-          const decoded = appendUtf8LineChunk(buffer, decoder, bytes);
-          buffer = decoded.buffer;
-          decoder = decoded.decoder;
-          for (const line of decoded.lines) processLine(line);
+          for (const message of appendSubagentProtocolChunk(protocol, bytes)) emitEvent(message as SupervisorMessage);
         });
         res.on("end", () => {
           if ((res.statusCode || 0) < 200 || (res.statusCode || 0) >= 300) {
@@ -1410,18 +1394,19 @@ class RestSupervisorClient {
             settle(() => reject(new Error(`${method} ${path}: HTTP ${res.statusCode}${text.trim() ? `: ${truncate(text.trim(), 1000)}` : ""}`)));
             return;
           }
-          const decoded = flushUtf8LineChunk(buffer, decoder);
-          buffer = decoded.buffer;
-          decoder = decoded.decoder;
-          for (const line of decoded.lines) processLine(line);
-          if (finalResponse === undefined) {
-            settle(() => reject(new Error(`${method} ${path}: stream ended without final done event`)));
+          const finished = finishSubagentProtocolStream(protocol);
+          for (const message of finished.events) emitEvent(message as SupervisorMessage);
+          if (finished.error || !finished.finalResponse) {
+            settle(() => reject(new Error(`${method} ${path}: ${finished.error || "stream ended without final done event"}`)));
             return;
           }
-          settle(() => resolve(finalResponse));
+          settle(() => resolve(finished.finalResponse));
         });
       });
-      req.on("error", (error) => settle(() => reject(error)));
+      req.on("error", (error) => {
+        abortSubagentProtocolStream(protocol, asError(error).message);
+        settle(() => reject(error));
+      });
       req.setTimeout(options.timeoutMs || CONNECT_TIMEOUT_MS, () => req.destroy(new Error(`Timed out streaming from AgentSH REST supervisor socket ${this.socketPath}`)));
       req.write(payload);
       req.end();

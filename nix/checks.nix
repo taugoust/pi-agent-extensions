@@ -583,9 +583,11 @@ in
       --outDir "$outdir" \
       "$srcdir/sandbox/index.ts" \
       "$srcdir/sandbox/subagent-model.test.ts" \
+      "$srcdir/sandbox/subagent-protocol.test.ts" \
       "$srcdir/sandbox/subagent-stream.test.ts"
 
     node "$outdir/sandbox/subagent-model.test.js"
+    node "$outdir/sandbox/subagent-protocol.test.js"
     node "$outdir/sandbox/subagent-stream.test.js"
 
     cat > "$workdir/test.mjs" <<'EOF'
