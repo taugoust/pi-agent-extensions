@@ -1789,6 +1789,8 @@ class ModalEditor extends CustomEditor {
 
 export default function (pi: ExtensionAPI) {
 	pi.on("session_start", (_event, ctx) => {
+		if (!ctx.hasUI) return;
+
 		ctx.ui.setEditorComponent((tui, theme, kb) => {
 			const editor = new ModalEditor(tui, theme, kb);
 			editor.onNormalK = () => pi.events.emit("pager:open");

@@ -76,7 +76,10 @@
         let
           pkgs = import nixpkgs { inherit system; };
         in
-        import ./nix/checks.nix { inherit self pkgs pi-mcp-adapter; }
+        (import ./nix/checks.nix { inherit self pkgs pi-mcp-adapter; })
+        // {
+          modal-editor = import ./nix/modal-editor-check.nix { inherit self pkgs; };
+        }
       );
 
       homeManagerModules.default = import ./nix/module.nix { inherit self pi-mcp-adapter; };
