@@ -20,7 +20,7 @@ import { Box, Container, Key, Markdown, matchesKey, Spacer, Text, truncateToWidt
 import { inheritSubagentModels } from "./subagent-model.js";
 import { abortSubagentProtocolStream, appendSubagentProtocolChunk, createSubagentProtocolState, finishSubagentProtocolStream } from "./subagent-protocol.js";
 import { boundSubagentProgressCapsules, createSubagentProgressCapsule, sanitizeSubagentParentText } from "./subagent-result.js";
-import { appendSubagentPrefix, appendSubagentRawText, appendSubagentStdoutChunk, createSubagentStreamState, flushSubagentStdout, parseSubagentPiJsonStdout, truncateByBytes, usageNumber, usageZero, type SubagentStreamState } from "./subagent-stream.js";
+import { appendSubagentPrefix, appendSubagentRawText, appendSubagentStdoutChunk, createSubagentStreamState, flushSubagentStdout, parseSubagentPiJsonStdout, subagentLiveToolStatus, truncateByBytes, usageNumber, usageZero, type SubagentStreamState } from "./subagent-stream.js";
 import { normalizeSubagentTerminal, subagentTerminalFailed } from "./subagent-terminal.js";
 
 type JsonObject = Record<string, unknown>;
@@ -2184,7 +2184,7 @@ function renderSubagentStream(state: SubagentStreamState) {
     if (!text.endsWith("\n")) text += "\n";
   };
   appendBlock(state.liveText);
-  appendBlock(state.toolStatus || "");
+  appendBlock(subagentLiveToolStatus(state) || "");
   appendBlock(state.rawText);
   const usage = formatSubagentUsage(state.usage, state.model);
   if (usage) appendBlock(`[${usage}]`);

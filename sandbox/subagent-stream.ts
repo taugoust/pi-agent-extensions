@@ -1,3 +1,4 @@
+import { stripSubagentTerminalControls } from "./subagent-text.js";
 import { cloneSubagentTerminal, normalizeSubagentTerminal, type SubagentTerminal } from "./subagent-terminal.js";
 
 export type SubagentUsage = {
@@ -128,6 +129,8 @@ const MAX_PROTOCOL_DIAGNOSTICS = 8;
 const MAX_TOOL_PREVIEW_BYTES = 512;
 const MAX_DIAGNOSTIC_BYTES = 2 * 1024;
 const MAX_METADATA_BYTES = 1024;
+const MAX_LIVE_TOOL_STATUS_BYTES = 500;
+const liveToolStatuses = new WeakMap<SubagentStreamState, string>();
 
 export function usageZero(): SubagentUsage {
   return { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, cost: 0, contextTokens: 0, contextWindow: 0, turns: 0 };
@@ -171,7 +174,7 @@ function boundedString(value: unknown, maxBytes = MAX_METADATA_BYTES): string | 
 }
 
 function sanitizedDiagnostic(value: unknown): string | undefined {
-  const text = boundedString(value, MAX_DIAGNOSTIC_BYTES);
+  const text = boundedString(typeof value === "string" ? stripSubagentTerminalControls(value) : value, MAX_DIAGNOSTIC_BYTES);
   if (!text) return undefined;
   return text
     .replace(/\bBearer\s+[A-Za-z0-9._~+/=-]+/gi, "Bearer [redacted]")
@@ -246,7 +249,7 @@ function sanitizeAssistantPart(part: unknown): Record<string, unknown> | undefin
   const source = part as Record<string, unknown>;
   const type = String(source.type ?? "");
   if (type === "text" || type === "markdown" || type === "text_delta") {
-    const text = truncateByBytes(String(source.text ?? source.delta ?? ""), MAX_RETAINED_TEXT_BYTES);
+    const text = truncateByBytes(stripSubagentTerminalControls(String(source.text ?? source.delta ?? "")), MAX_RETAINED_TEXT_BYTES);
     return text ? { type: "text", text } : undefined;
   }
   if (type === "toolCall") {
@@ -478,8 +481,9 @@ export function parseSubagentPiJsonStdout(stdout: string) {
 }
 
 export function appendSubagentRawText(state: SubagentStreamState, text: string) {
-  if (!text) return;
-  state.rawText = truncateByBytes(state.rawText + text, MAX_SUBAGENT_RESULT_BYTES);
+  const visible = stripSubagentTerminalControls(text);
+  if (!visible.trim()) return;
+  state.rawText = truncateByBytes(state.rawText + visible, MAX_SUBAGENT_RESULT_BYTES);
 }
 
 const PI_JSON_EVENT_TYPES = new Set([
@@ -517,19 +521,32 @@ function assistantTextFromPiJsonEvent(event: unknown): string | undefined {
 }
 
 export function appendSubagentPrefix(state: SubagentStreamState, text: string) {
-  if (!text) return;
+  const visible = stripSubagentTerminalControls(text);
+  if (!visible) return;
   let prefix = state.prefix;
   if (prefix && !prefix.endsWith("\n")) prefix += "\n";
-  prefix += text.endsWith("\n") ? text : `${text}\n`;
+  prefix += visible.endsWith("\n") ? visible : `${visible}\n`;
   state.prefix = truncateByBytes(prefix, MAX_SUBAGENT_RESULT_BYTES);
 }
 
-function summarizeSubagentToolCall(toolName: string, args: Record<string, unknown>): string {
-  if (toolName === "bash") return "$ bash";
-  if (toolName === "read") return `read ${String(args.path || "...")}`;
-  if (toolName === "write") return `write ${String(args.path || "...")}`;
-  if (toolName === "edit") return `edit ${String(args.path || "...")}`;
+function summarizeLiveSubagentToolCall(toolName: string, value: unknown): string {
+  const args = value && typeof value === "object" && !Array.isArray(value) ? value as Record<string, unknown> : {};
+  const liveArgument = (argument: unknown): string => {
+    const bounded = boundedString(argument, MAX_LIVE_TOOL_STATUS_BYTES);
+    return sanitizedDiagnostic(bounded)?.replace(/\s+/g, " ") ?? "...";
+  };
+  if (toolName === "bash") {
+    const command = liveArgument(args.command);
+    return command === "..." ? "$ bash" : `$ ${truncateByBytes(command, MAX_LIVE_TOOL_STATUS_BYTES)}`;
+  }
+  if (toolName === "read") return `read ${liveArgument(args.path ?? args.file_path)}`;
+  if (toolName === "write") return `write ${liveArgument(args.path ?? args.file_path)}`;
+  if (toolName === "edit") return `edit ${liveArgument(args.path ?? args.file_path)}`;
   return toolName;
+}
+
+export function subagentLiveToolStatus(state: SubagentStreamState): string | undefined {
+  return liveToolStatuses.get(state) ?? state.toolStatus;
 }
 
 function rememberSubagentToolCallFromMessage(state: SubagentStreamState, msg: unknown) {
@@ -656,7 +673,8 @@ export function processSubagentStdoutLine(state: SubagentStreamState, line: stri
   } else if (eventType === "tool_execution_start") {
     const call = sanitizeToolCall(source.toolName, source.args);
     state.lastToolCall = call;
-    state.toolStatus = `[running ${call.name}] ${truncateByBytes(summarizeSubagentToolCall(call.name, call.args), 500)}`;
+    state.toolStatus = `[running ${call.name}]`;
+    liveToolStatuses.set(state, `${state.toolStatus} ${truncateByBytes(summarizeLiveSubagentToolCall(call.name, source.args), MAX_LIVE_TOOL_STATUS_BYTES)}`);
   } else if (eventType === "tool_execution_update" && source.partialResult) {
     const text = toolResultText(source.partialResult);
     if (text) state.lastToolResult = text;
@@ -672,6 +690,7 @@ export function processSubagentStdoutLine(state: SubagentStreamState, line: stri
     if (toolName === "read") rememberPath(state.readFiles, path);
     if (toolName === "write" || toolName === "edit") rememberPath(state.modifiedFiles, path);
     state.toolStatus = undefined;
+    liveToolStatuses.delete(state);
     if (source.isError === true) {
       const summary = sanitizedDiagnostic(text) || "tool returned an error";
       appendSubagentPrefix(state, `[tool failed: ${toolName}] ${truncateByBytes(summary, 1200)}`);

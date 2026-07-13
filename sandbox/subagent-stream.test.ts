@@ -7,6 +7,7 @@ import {
   flushSubagentStdout,
   flushUtf8LineChunk,
   parseSubagentPiJsonStdout,
+  subagentLiveToolStatus,
   subagentStreamResult,
   type SubagentStreamState,
 } from "./subagent-stream.js";
@@ -98,16 +99,32 @@ function newState(label = "child"): SubagentStreamState {
 }
 
 {
+  const state = newState("terminal-controls");
+  appendSubagentStdoutChunk(state, "\u001bP$q q\u001b\\\u001b[6 q\n");
+  assert.equal(state.rawText, "");
+  assert.equal(JSON.stringify(state).includes("\u001b"), false);
+  assert.equal(state.protocolDiagnostics.at(-1)?.kind, "malformed_line");
+  appendSubagentStdoutChunk(state, "\u001b[31mvisible raw text\u001b[0m\n");
+  assert.equal(state.rawText, "visible raw text\n");
+}
+
+{
   const state = newState("tool-success");
-  appendSubagentStdoutChunk(state, line({ type: "tool_execution_start", toolName: "bash", args: { command: "echo credential-like-value" } }));
+  const secret = "live-command-secret-sentinel";
+  const command = `echo visible-summary API_KEY=${secret}`;
+  appendSubagentStdoutChunk(state, line({ type: "tool_execution_start", toolName: "bash", args: { command } }));
   assert.deepEqual(state.lastToolCall, { name: "bash", args: {} });
-  assert.equal(state.toolStatus, "[running bash] $ bash");
-  assert.equal(JSON.stringify(state).includes("credential-like-value"), false);
+  assert.equal(state.toolStatus, "[running bash]");
+  assert.match(subagentLiveToolStatus(state) ?? "", /^\[running bash\] \$ echo visible-summary API_KEY=\[redacted\]$/);
+  assert.equal((subagentLiveToolStatus(state) ?? "").includes(secret), false);
+  assert.equal(JSON.stringify(state).includes(command), false);
+  assert.equal(JSON.stringify(subagentStreamResult(state)).includes(command), false);
   appendSubagentStdoutChunk(state, line({ type: "tool_execution_update", partialResult: { content: [{ type: "text", text: "o" }] } }));
   assert.equal(state.lastToolResult, "o");
-  assert.equal(state.toolStatus, "[running bash] $ bash");
+  assert.match(subagentLiveToolStatus(state) ?? "", /echo visible-summary/);
   appendSubagentStdoutChunk(state, line({ type: "tool_execution_end", toolName: "bash", result: { content: [{ type: "text", text: "ok" }] } }));
   assert.equal(state.toolStatus, undefined);
+  assert.equal(subagentLiveToolStatus(state), undefined);
   assert.equal(state.lastToolResult, "ok");
 }
 
@@ -115,7 +132,8 @@ function newState(label = "child"): SubagentStreamState {
   const state = newState("tool-failure-recovery");
   appendSubagentStdoutChunk(state, line({ type: "tool_execution_start", toolName: "read", args: { path: "/missing", ignored: "not-parent-facing" } }));
   assert.deepEqual(state.lastToolCall, { name: "read", args: { path: "/missing" } });
-  assert.equal(state.toolStatus, "[running read] read /missing");
+  assert.equal(state.toolStatus, "[running read]");
+  assert.equal(subagentLiveToolStatus(state), "[running read] read /missing");
   appendSubagentStdoutChunk(state, line({ type: "tool_execution_end", toolName: "read", isError: true, result: { content: [{ type: "text", text: "ENOENT" }] } }));
   assert.equal(state.toolStatus, undefined);
   assert.match(state.prefix, /\[tool failed: read\] ENOENT/);

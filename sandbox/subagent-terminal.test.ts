@@ -45,6 +45,12 @@ import { normalizeSubagentTerminal, subagentTerminalFailed } from "./subagent-te
 }
 
 {
+  const terminal = normalizeSubagentTerminal({ state: "failed", failure_kind: "protocol", retryable: true, message: "\u001bP$q q\u001b\\visible\u001b[6 q" });
+  assert.equal(terminal?.message, "visible");
+  assert.equal(JSON.stringify(terminal).includes("\u001b"), false);
+}
+
+{
   assert.equal(normalizeSubagentTerminal({ state: "invented" }), undefined);
   assert.equal(normalizeSubagentTerminal(undefined, { exitCode: -1, stopReason: "running" }), undefined);
 }

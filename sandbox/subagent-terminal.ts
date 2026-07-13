@@ -1,3 +1,5 @@
+import { stripSubagentTerminalControls } from "./subagent-text.js";
+
 export type SubagentTerminalState = "completed" | "failed" | "cancelled" | "timed_out";
 export type SubagentFailureKind = "auth" | "model" | "compaction" | "protocol" | "transport" | "process" | "configuration" | "unknown";
 export type SubagentCancellationCause = "user_cancelled" | "child_timeout" | "request_timeout" | "parent_cancelled" | "client_disconnected" | "supervisor_shutdown";
@@ -27,8 +29,10 @@ function truncateUTF8(value: string, maxBytes: number): string {
 }
 
 function sanitizedMessage(value: unknown): string | undefined {
-  if (typeof value !== "string" || !value.trim()) return undefined;
-  return truncateUTF8(value.trim(), MAX_TERMINAL_MESSAGE_BYTES)
+  if (typeof value !== "string") return undefined;
+  const visible = stripSubagentTerminalControls(value).trim();
+  if (!visible) return undefined;
+  return truncateUTF8(visible, MAX_TERMINAL_MESSAGE_BYTES)
     .replace(/\bBearer\s+[A-Za-z0-9._~+/=-]+/gi, "Bearer [redacted]")
     .replace(/\b(api[_-]?key|access[_-]?token|refresh[_-]?token|authorization|cookie|password|passwd|secret)\b\s*[:=]\s*[^\s,;]+/gi, "$1=[redacted]");
 }

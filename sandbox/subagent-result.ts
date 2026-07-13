@@ -1,5 +1,6 @@
 import { cloneSubagentTerminal, normalizeSubagentTerminal, type SubagentTerminal } from "./subagent-terminal.js";
 import { truncateByBytes, usageNumber, type RetainedSubagentMessage, type SubagentCompletedTool, type SubagentCompactionState, type SubagentProtocolDiagnostic, type SubagentStreamState, type SubagentUsage } from "./subagent-stream.js";
+import { stripSubagentTerminalControls } from "./subagent-text.js";
 
 export const MAX_SUBAGENT_CAPSULE_BYTES = 12 * 1024;
 const MAX_CAPSULE_TEXT_BYTES = 2 * 1024;
@@ -45,7 +46,7 @@ function byteLength(value: unknown): number {
 }
 
 function sanitizeCapsuleText(value: string): string {
-  return value
+  return stripSubagentTerminalControls(value)
     .replace(/\bBearer\s+[A-Za-z0-9._~+/=-]+/gi, "Bearer [redacted]")
     .replace(/\b(api[_-]?key|access[_-]?token|refresh[_-]?token|authorization|cookie|password|passwd|secret)\b\s*[:=]\s*[^\s,;]+/gi, "$1=[redacted]")
     .replace(/-----BEGIN [^-\n]*PRIVATE KEY-----[\s\S]*?-----END [^-\n]*PRIVATE KEY-----/g, "[private key redacted]");

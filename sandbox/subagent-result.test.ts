@@ -68,6 +68,21 @@ function line(event: unknown): string {
 }
 
 {
+  const capsule = createSubagentProgressCapsule({
+    label: "terminal-controls",
+    exitCode: 1,
+    stopReason: "error",
+    final: "\u001b[31mvisible final\u001b[0m",
+    errorMessage: "\u001bP$q q\u001b\\visible error\u001b[6 q",
+    terminal: { state: "failed", failure_kind: "protocol", retryable: true, message: "\u001b[31mvisible terminal\u001b[0m" },
+  });
+  assert.equal(capsule.final, "visible final");
+  assert.equal(capsule.errorMessage, "visible error");
+  assert.equal(capsule.terminal?.message, "visible terminal");
+  assert.equal(JSON.stringify(capsule).includes("\u001b"), false);
+}
+
+{
   const state = createSubagentStreamState({ label: "snapshot" });
   appendSubagentStdoutChunk(state, line({ type: "message_end", message: { role: "assistant", content: [{ type: "text", text: "stable" }] } }));
   const capsule = createSubagentProgressCapsule(state);
