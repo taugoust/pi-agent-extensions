@@ -2162,7 +2162,7 @@ function subagentParentDetails(result: any, ctx?: ExtensionContext) {
 
 function resultLine(result: any) {
   const label = stringifyData(result?.label || "subagent");
-  const text = stringifyData(result?.final || result?.summary || result?.error || result?.stop_reason || result?.stopReason || "").trim();
+  const text = stringifyData(result?.final || result?.summary || result?.error || result?.errorMessage || result?.terminal?.message || result?.stop_reason || result?.stopReason || "").trim();
   return text ? `[${label}] ${truncateByBytes(text)}` : `[${label}] ${result?.exit_code ?? result?.exitCode ?? "completed"}`;
 }
 

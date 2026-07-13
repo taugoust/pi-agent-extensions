@@ -1041,7 +1041,7 @@ in
             if (request.body.task === "typed-failure") {
               const failedTerminal = { state: "failed", failure_kind: "model", exit_code: 1, termination: "natural", retryable: false, message: "model failed" };
               const failedChild = { label: "child", task: "typed-failure", exit_code: 1, stop_reason: "error", terminal: failedTerminal, error: "model failed" };
-              const failedResult = { mode: "single", final: "model failed", terminal: failedTerminal, results: [failedChild] };
+              const failedResult = { mode: "single", final: "", terminal: failedTerminal, results: [failedChild] };
               return { ndjsonChunks: [Buffer.from([
                 JSON.stringify({ event: "subagent_child_start", label: "child", task: "typed-failure" }),
                 JSON.stringify({ event: "subagent_result", label: "child", result: failedChild }),
@@ -1078,6 +1078,7 @@ in
         const failedToolResult = await subagentTool.execute("stream-failure", { task: "typed-failure" }, undefined, undefined, ctx);
         assert(failedToolResult.details.terminal.state === "failed", "typed failed terminal was not preserved");
         assert(failedToolResult.details.results[0].terminal.failureKind === "model", "child failure kind was not normalized");
+        assert(failedToolResult.content[0].text.includes("model failed"), "typed failure diagnostic was reduced to a generic stop reason");
         assert(failedToolResult.isError === true, "failed child task was not marked as an error");
         await shutdownSession(pi);
         await supervisor.close();
