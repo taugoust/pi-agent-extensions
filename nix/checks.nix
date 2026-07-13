@@ -584,11 +584,15 @@ in
       "$srcdir/sandbox/index.ts" \
       "$srcdir/sandbox/subagent-model.test.ts" \
       "$srcdir/sandbox/subagent-protocol.test.ts" \
-      "$srcdir/sandbox/subagent-stream.test.ts"
+      "$srcdir/sandbox/subagent-result.test.ts" \
+      "$srcdir/sandbox/subagent-stream.test.ts" \
+      "$srcdir/sandbox/subagent-terminal.test.ts"
 
     node "$outdir/sandbox/subagent-model.test.js"
     node "$outdir/sandbox/subagent-protocol.test.js"
+    node "$outdir/sandbox/subagent-result.test.js"
     node "$outdir/sandbox/subagent-stream.test.js"
+    node "$outdir/sandbox/subagent-terminal.test.js"
 
     cat > "$workdir/test.mjs" <<'EOF'
     import fs from "node:fs";
@@ -1016,7 +1020,8 @@ in
             ],
           },
         }) + "\n";
-        const terminalResult = { mode: "single", final: visible, results: [{ label: "child", task: "utf8", exit_code: 0, stop_reason: "completed", final: visible }] };
+        const completedTerminal = { state: "completed", exit_code: 0, termination: "natural", retryable: false };
+        const terminalResult = { mode: "single", final: visible, terminal: completedTerminal, results: [{ label: "child", task: "utf8", exit_code: 0, stop_reason: "completed", terminal: completedTerminal, final: visible }] };
         const outerStream = [
           { event: "subagent_child_start", label: "child", task: "utf8" },
           { event: "stdout", label: "child", data: childStdout },
@@ -1033,6 +1038,16 @@ in
           }
           if (request.method === "GET" && request.url === "/api/v1/approvals") return [];
           if (request.method === "POST" && request.url === "/api/v1/sessions/sess-subagent-stream/tools/spawn_subagent") {
+            if (request.body.task === "typed-failure") {
+              const failedTerminal = { state: "failed", failure_kind: "model", exit_code: 1, termination: "natural", retryable: false, message: "model failed" };
+              const failedChild = { label: "child", task: "typed-failure", exit_code: 1, stop_reason: "error", terminal: failedTerminal, error: "model failed" };
+              const failedResult = { mode: "single", final: "model failed", terminal: failedTerminal, results: [failedChild] };
+              return { ndjsonChunks: [Buffer.from([
+                JSON.stringify({ event: "subagent_child_start", label: "child", task: "typed-failure" }),
+                JSON.stringify({ event: "subagent_result", label: "child", result: failedChild }),
+                JSON.stringify({ event: "done", ok: true, result: failedResult, error: "child task failed" }),
+              ].join("\n"), "utf8")] };
+            }
             return {
               ndjsonChunks: [
                 bytes.subarray(0, emojiOffset + 1),
@@ -1057,6 +1072,13 @@ in
         assert(!serializedUpdates.includes("�"), "split UTF-8 introduced a replacement character");
         assert(!serializedUpdates.includes(hidden), "child thinking leaked into parent streamed updates");
         assert(!JSON.stringify(toolResult).includes(hidden), "child thinking leaked into the final parent tool result");
+        assert(toolResult.details.terminal.state === "completed", "typed completed terminal was not preserved");
+        assert(toolResult.isError === false, "completed typed terminal was marked as an error");
+
+        const failedToolResult = await subagentTool.execute("stream-failure", { task: "typed-failure" }, undefined, undefined, ctx);
+        assert(failedToolResult.details.terminal.state === "failed", "typed failed terminal was not preserved");
+        assert(failedToolResult.details.results[0].terminal.failureKind === "model", "child failure kind was not normalized");
+        assert(failedToolResult.isError === true, "failed child task was not marked as an error");
         await shutdownSession(pi);
         await supervisor.close();
       }

@@ -19,7 +19,9 @@ import { DEFAULT_MAX_BYTES, DEFAULT_MAX_LINES, formatSize, getMarkdownTheme, ren
 import { Box, Container, Key, Markdown, matchesKey, Spacer, Text, truncateToWidth, type Component } from "@mariozechner/pi-tui";
 import { inheritSubagentModels } from "./subagent-model.js";
 import { abortSubagentProtocolStream, appendSubagentProtocolChunk, createSubagentProtocolState, finishSubagentProtocolStream } from "./subagent-protocol.js";
-import { appendSubagentPrefix, appendSubagentRawText, appendSubagentStdoutChunk, createSubagentStreamState, flushSubagentStdout, parseSubagentPiJsonStdout, subagentStreamResult, truncateByBytes, usageNumber, usageZero, type SubagentStreamState } from "./subagent-stream.js";
+import { boundSubagentProgressCapsules, createSubagentProgressCapsule, sanitizeSubagentParentText } from "./subagent-result.js";
+import { appendSubagentPrefix, appendSubagentRawText, appendSubagentStdoutChunk, createSubagentStreamState, flushSubagentStdout, parseSubagentPiJsonStdout, truncateByBytes, usageNumber, usageZero, type SubagentStreamState } from "./subagent-stream.js";
+import { normalizeSubagentTerminal, subagentTerminalFailed } from "./subagent-terminal.js";
 
 type JsonObject = Record<string, unknown>;
 type ProtocolMode = "mock-ndjson" | "rest" | "legacy-approval-ui" | "";
@@ -2122,35 +2124,40 @@ function subagentParentDetails(result: any, ctx?: ExtensionContext) {
   const detailResult = (item: any) => {
     const parsed = typeof item?.stdout === "string" ? parseSubagentPiJsonStdout(item.stdout) : undefined;
     const model = item?.model || parsed?.model;
-    const usage = parsed?.usage ?? usageZero();
+    const usage = { ...(parsed?.usage ?? item?.usage ?? usageZero()) };
     usage.contextWindow = usageNumber(item?.context_window ?? item?.contextWindow) || contextWindowForModel(ctx, model);
-    return {
+    return createSubagentProgressCapsule({
       label: item?.label,
       task: item?.task,
       exitCode: item?.exit_code ?? item?.exitCode,
       stopReason: item?.stop_reason ?? item?.stopReason,
+      terminal: item?.terminal,
       final: item?.final,
-      errorMessage: item?.error,
-      stderr: item?.stderr,
+      errorMessage: item?.error ?? item?.errorMessage,
+      stderr: item?.stderr ?? item?.stderrTail,
       usage,
-      messages: parsed?.messages ?? [],
+      messages: parsed?.messages ?? item?.messages ?? [],
       model,
       tools: item?.tools,
       cwd: item?.cwd,
-      runtime: item?.runtime,
-      command: item?.command,
-      args: item?.args,
-      durationMS: item?.duration_ms ?? item?.durationMS,
-      lastEvent: parsed?.lastEvent,
-      lastToolCall: parsed?.lastToolCall,
-      lastToolResult: parsed?.lastToolResult,
-      compaction: parsed?.compaction,
-      stdoutBytes: typeof item?.stdout === "string" ? byteLength(item.stdout) : undefined,
-      stderrBytes: typeof item?.stderr === "string" ? byteLength(item.stderr) : undefined,
-    };
+      lastToolCall: parsed?.lastToolCall ?? item?.activeTool,
+      completedTools: parsed?.completedTools ?? item?.completedTools ?? [],
+      readFiles: parsed?.readFiles ?? item?.readFiles ?? [],
+      modifiedFiles: parsed?.modifiedFiles ?? item?.modifiedFiles ?? [],
+      protocolDiagnostics: parsed?.protocolDiagnostics ?? item?.protocolDiagnostics ?? [],
+      compaction: parsed?.compaction ?? item?.compaction,
+    });
   };
-  const results = Array.isArray(result?.results) ? result.results.map(detailResult) : [];
-  return { mode: result?.mode || (results.length > 1 ? "parallel" : "single"), results, final: result?.final, summary: result?.summary, error: result?.error };
+  const results = boundSubagentProgressCapsules(Array.isArray(result?.results) ? result.results.map(detailResult) : []);
+  const terminal = normalizeSubagentTerminal(result?.terminal);
+  return {
+    mode: result?.mode || (results.length > 1 ? "parallel" : "single"),
+    results,
+    terminal,
+    final: typeof result?.final === "string" ? sanitizeSubagentParentText(result.final, 4 * 1024) : undefined,
+    summary: typeof result?.summary === "string" ? sanitizeSubagentParentText(result.summary, 4 * 1024) : undefined,
+    error: terminal?.message || (typeof result?.error === "string" ? sanitizeSubagentParentText(result.error, 1024) : undefined),
+  };
 }
 
 function resultLine(result: any) {
@@ -2246,6 +2253,8 @@ function formatSubagentToolCall(toolName: string, args: Record<string, unknown>,
 }
 
 function isSubagentFailure(result: any): boolean {
+  const terminal = normalizeSubagentTerminal(result?.terminal, { exitCode: result?.exitCode, stopReason: result?.stopReason, error: result?.errorMessage });
+  if (terminal) return subagentTerminalFailed(terminal);
   return result?.exitCode !== -1 && (result?.exitCode !== 0 || result?.stopReason === "error" || result?.stopReason === "aborted" || result?.stopReason === "timeout");
 }
 
@@ -2264,6 +2273,11 @@ function aggregateSubagentUsage(results: any[]) {
 
 function subagentResultStatus(result: any): string {
   if (result?.exitCode === -1) return "running";
+  const terminal = normalizeSubagentTerminal(result?.terminal, { exitCode: result?.exitCode, stopReason: result?.stopReason, error: result?.errorMessage });
+  if (terminal?.state === "timed_out") return "timed out";
+  if (terminal?.state === "cancelled") return "cancelled";
+  if (terminal?.state === "failed") return "failed";
+  if (terminal?.state === "completed") return "completed";
   if (result?.stopReason === "aborted") return "aborted";
   if (result?.stopReason === "timeout") return "timed out";
   if (isSubagentFailure(result)) return "failed";
@@ -2288,11 +2302,12 @@ function compactSubagentResultSummary(result: any): string {
   if (result?.task) lines.push(`Task: ${result.task}`);
   if (result?.model) lines.push(`Model: ${result.model}`);
   if (result?.tools?.length) lines.push(`Tools: ${result.tools.join(", ")}`);
-  const lastAssistant = subagentLastAssistantText(result?.messages || []).trim();
+  const lastAssistant = String(result?.lastAssistantText || subagentLastAssistantText(result?.messages || [])).trim();
   if (lastAssistant) lines.push(`Last assistant text:\n${truncateByBytes(lastAssistant).split("\n").slice(-8).join("\n")}`);
-  if (result?.lastToolCall) lines.push(`Last tool call: ${result.lastToolCall.name} ${JSON.stringify(result.lastToolCall.args)}`);
-  if (result?.lastToolResult) lines.push(`Last tool result:\n${truncateByBytes(result.lastToolResult).split("\n").slice(-6).join("\n")}`);
-  const stderr = String(result?.stderr || "").trim().split("\n").filter(Boolean).slice(-8).join("\n");
+  if (result?.activeTool) lines.push(`Active tool: ${result.activeTool.name} ${JSON.stringify(result.activeTool.args)}`);
+  const lastTool = Array.isArray(result?.completedTools) ? result.completedTools.at(-1) : undefined;
+  if (lastTool) lines.push(`Last completed tool: ${lastTool.name}${lastTool.isError ? " (failed)" : ""}${lastTool.resultPreview ? `\n${lastTool.resultPreview}` : ""}`);
+  const stderr = String(result?.stderrTail || result?.stderr || "").trim().split("\n").filter(Boolean).slice(-8).join("\n");
   if (stderr) lines.push(`stderr:\n${stderr}`);
   if (result?.errorMessage) lines.push(`Error: ${result.errorMessage}`);
   lines.push(`Exit: ${result?.exitCode ?? 0}${result?.stopReason ? ` (${result.stopReason})` : ""}`);
@@ -2338,8 +2353,9 @@ function renderSubagentResult(result: any, options: any, theme: any) {
     if (r.tools?.length) container.addChild(new Text(theme.fg("muted", "Tools: ") + theme.fg("dim", r.tools.join(", ")), 0, 0));
     if (r.cwd) container.addChild(new Text(theme.fg("muted", "Cwd: ") + theme.fg("dim", r.cwd), 0, 0));
     if (failed && r.errorMessage) container.addChild(new Text(theme.fg("error", `Error: ${r.errorMessage}`), 0, 0));
-    if (r.lastToolCall) container.addChild(new Text(theme.fg("muted", "Last tool call: ") + formatSubagentToolCall(r.lastToolCall.name, r.lastToolCall.args, theme.fg.bind(theme)), 0, 0));
-    if (r.lastToolResult) container.addChild(new Text(theme.fg("muted", `Last tool result:\n${truncateByBytes(r.lastToolResult).split("\n").slice(-8).join("\n")}`), 0, 0));
+    if (r.activeTool) container.addChild(new Text(theme.fg("muted", "Active tool: ") + formatSubagentToolCall(r.activeTool.name, r.activeTool.args, theme.fg.bind(theme)), 0, 0));
+    const lastTool = Array.isArray(r.completedTools) ? r.completedTools.at(-1) : undefined;
+    if (lastTool) container.addChild(new Text(theme.fg("muted", `Last completed tool: ${lastTool.name}${lastTool.isError ? " (failed)" : ""}${lastTool.resultPreview ? `\n${lastTool.resultPreview}` : ""}`), 0, 0));
 
     for (const item of subagentDisplayItems(r.messages || [])) {
       if (item.type === "toolCall") container.addChild(new Text(theme.fg("muted", "→ ") + formatSubagentToolCall(item.name, item.args, theme.fg.bind(theme)), 0, 0));
@@ -2353,9 +2369,9 @@ function renderSubagentResult(result: any, options: any, theme: any) {
 
     const usage = formatSubagentUsage(r.usage, r.model);
     if (usage) container.addChild(new Text(theme.fg("dim", usage), 0, 0));
-    if (r.stderr?.trim()) {
+    if ((r.stderrTail || r.stderr)?.trim()) {
       container.addChild(new Spacer(1));
-      container.addChild(new Text(theme.fg(failed ? "error" : "dim", `stderr:\n${truncateByBytes(r.stderr.trim())}`), 0, 0));
+      container.addChild(new Text(theme.fg(failed ? "error" : "dim", `stderr:\n${truncateByBytes((r.stderrTail || r.stderr).trim())}`), 0, 0));
     }
   };
 
@@ -2636,7 +2652,7 @@ export default function sandbox(pi: ExtensionAPI) {
       const renderSubagentStreams = () => streamOrder.map((key) => renderSubagentStream(streamStates.get(key)!)).filter(Boolean).join("\n\n");
       const streamDetails = () => ({
         mode: hasChain ? "chain" : hasTasks ? "parallel" : "single",
-        results: streamOrder.map((key) => subagentStreamResult(streamStates.get(key)!)),
+        results: boundSubagentProgressCapsules(streamOrder.map((key) => createSubagentProgressCapsule(streamStates.get(key)!))),
       });
       const emitSubagentUpdate = (message: SupervisorMessage) => {
         const latest = renderSubagentStreams();
@@ -2679,10 +2695,12 @@ export default function sandbox(pi: ExtensionAPI) {
           } else if (message.event === "subagent_result") {
             flushSubagentStdout(childState);
             const result: any = (message as any).result;
-            childState.exitCode = usageNumber(result?.exit_code ?? result?.exitCode);
+            const rawExitCode = result?.exit_code ?? result?.exitCode;
+            childState.exitCode = typeof rawExitCode === "number" && Number.isFinite(rawExitCode) ? rawExitCode : 1;
             childState.stopReason = stringifyData(result?.stop_reason || result?.stopReason || (childState.exitCode === 0 ? "completed" : "error"));
+            childState.terminal = normalizeSubagentTerminal(result?.terminal, { exitCode: childState.exitCode, stopReason: childState.stopReason, error: result?.error });
             childState.final = typeof result?.final === "string" ? truncateByBytes(result.final) : childState.final;
-            childState.errorMessage = typeof result?.error === "string" ? truncateByBytes(result.error, 2 * 1024) : childState.errorMessage;
+            childState.errorMessage = childState.terminal?.message || (typeof result?.error === "string" ? truncateByBytes(result.error, 2 * 1024) : childState.errorMessage);
             childState.stderr = typeof result?.stderr === "string" ? truncateByBytes(result.stderr) : childState.stderr;
             const final = stringifyData(result?.final || result?.error || "");
             if (final) {
@@ -2696,32 +2714,38 @@ export default function sandbox(pi: ExtensionAPI) {
           },
         });
       } catch (error) {
-        const message = asError(error).message || "spawn_subagent failed";
+        const rawMessage = asError(error).message || "spawn_subagent failed";
+        const terminal = normalizeSubagentTerminal(signal?.aborted
+          ? { state: "cancelled", cancellation_cause: "user_cancelled", exit_code: 130, termination: "graceful", retryable: true, message: rawMessage }
+          : { state: "failed", failure_kind: "transport", exit_code: 1, termination: "natural", retryable: true, message: rawMessage });
+        const message = terminal?.message || "spawn_subagent failed";
         for (const childState of streamStates.values()) {
           flushSubagentStdout(childState);
-          if (childState.exitCode === -1) childState.exitCode = 1;
-          childState.stopReason ||= "error";
+          if (childState.exitCode === -1) childState.exitCode = terminal?.exitCode ?? 1;
+          childState.stopReason ||= terminal?.state === "cancelled" ? "cancelled" : "error";
+          childState.terminal ||= terminal;
           childState.errorMessage ||= message;
         }
         const mode = hasChain ? "chain" : hasTasks ? "parallel" : "single";
         const results = streamOrder.length
-          ? streamOrder.map((key) => {
-              const child = subagentStreamResult(streamStates.get(key)!);
-              return { ...child, error: child.errorMessage || message };
-            })
-          : [{ label: "subagent", exitCode: 1, stopReason: "error", final: message, error: message }];
+          ? streamOrder.map((key) => createSubagentProgressCapsule(streamStates.get(key)!))
+          : [createSubagentProgressCapsule({ label: "subagent", exitCode: terminal?.exitCode ?? 1, stopReason: terminal?.state === "cancelled" ? "cancelled" : "error", terminal, final: message, errorMessage: message })];
         result = {
           mode,
+          terminal,
           final: `subagent failed: ${message}`,
           summary: `subagent failed: ${message}`,
           error: message,
           results,
         };
-        const text = truncateByBytes(subagentText(result));
-        return { content: [{ type: "text", text }], details: subagentParentDetails(result, ctx) as any, isError: true };
+        const details = subagentParentDetails(result, ctx) as any;
+        const text = truncateByBytes(subagentText(details));
+        return { content: [{ type: "text", text }], details, isError: true };
       }
-      const text = truncateByBytes(subagentText(result));
-      return { content: [{ type: "text", text }], details: subagentParentDetails(result, ctx) as any, isError: Boolean((result as any)?.error) };
+      const details = subagentParentDetails(result, ctx) as any;
+      const text = truncateByBytes(subagentText(details));
+      const isError = subagentTerminalFailed(details?.terminal) || details?.results?.some((child: any) => subagentTerminalFailed(child?.terminal)) || Boolean((result as any)?.error);
+      return { content: [{ type: "text", text }], details, isError };
     },
   });
 
