@@ -18,6 +18,7 @@ import { Type } from "@sinclair/typebox";
 import { DEFAULT_MAX_BYTES, DEFAULT_MAX_LINES, formatSize, getMarkdownTheme, renderDiff, truncateTail, type ExtensionAPI, type ExtensionContext, type TruncationResult } from "@mariozechner/pi-coding-agent";
 import { Box, Container, Key, Markdown, matchesKey, Spacer, Text, truncateToWidth, type Component } from "@mariozechner/pi-tui";
 import { inheritSubagentModels } from "./subagent-model.js";
+import { appendSubagentPrefix, appendSubagentRawText, appendSubagentStdoutChunk, appendUtf8LineChunk, createSubagentStreamState, flushSubagentStdout, flushUtf8LineChunk, parseSubagentPiJsonStdout, subagentStreamResult, truncateByBytes, usageNumber, usageZero, type SubagentStreamState } from "./subagent-stream.js";
 
 type JsonObject = Record<string, unknown>;
 type ProtocolMode = "mock-ndjson" | "rest" | "legacy-approval-ui" | "";
@@ -1346,6 +1347,7 @@ class RestSupervisorClient {
       const payload = JSON.stringify(body);
       let settled = false;
       let buffer = "";
+      let decoder: TextDecoder | undefined;
       let finalResponse: unknown;
       let req: http.ClientRequest | undefined;
       const settle = (fn: () => void) => {
@@ -1392,15 +1394,15 @@ class RestSupervisorClient {
       }, (res) => {
         const errorChunks: Buffer[] = [];
         res.on("data", (chunk) => {
-          const text = Buffer.isBuffer(chunk) ? chunk.toString("utf8") : Buffer.from(chunk).toString("utf8");
+          const bytes = Buffer.isBuffer(chunk) ? chunk : Buffer.from(chunk);
           if ((res.statusCode || 0) < 200 || (res.statusCode || 0) >= 300) {
-            errorChunks.push(Buffer.from(text));
+            errorChunks.push(bytes);
             return;
           }
-          buffer += text;
-          const lines = buffer.split("\n");
-          buffer = lines.pop() || "";
-          for (const line of lines) processLine(line);
+          const decoded = appendUtf8LineChunk(buffer, decoder, bytes);
+          buffer = decoded.buffer;
+          decoder = decoded.decoder;
+          for (const line of decoded.lines) processLine(line);
         });
         res.on("end", () => {
           if ((res.statusCode || 0) < 200 || (res.statusCode || 0) >= 300) {
@@ -1408,7 +1410,10 @@ class RestSupervisorClient {
             settle(() => reject(new Error(`${method} ${path}: HTTP ${res.statusCode}${text.trim() ? `: ${truncate(text.trim(), 1000)}` : ""}`)));
             return;
           }
-          if (buffer.trim()) processLine(buffer);
+          const decoded = flushUtf8LineChunk(buffer, decoder);
+          buffer = decoded.buffer;
+          decoder = decoded.decoder;
+          for (const line of decoded.lines) processLine(line);
           if (finalResponse === undefined) {
             settle(() => reject(new Error(`${method} ${path}: stream ended without final done event`)));
             return;
@@ -2107,121 +2112,6 @@ function renderSandboxEditToolResult(result: any, _options: any, theme: any, con
   return component;
 }
 
-const MAX_SUBAGENT_RESULT_BYTES = Number(process.env.PI_AGENTSH_SUBAGENT_RESULT_MAX_BYTES || String(50 * 1024));
-
-function truncateByBytes(text: string, maxBytes = MAX_SUBAGENT_RESULT_BYTES): string {
-  if (maxBytes <= 0) return "";
-  const bytes = byteLength(text);
-  if (bytes <= maxBytes) return text;
-  let lo = 0;
-  let hi = text.length;
-  while (lo < hi) {
-    const mid = Math.ceil((lo + hi) / 2);
-    if (byteLength(text.slice(0, mid)) <= maxBytes) lo = mid;
-    else hi = mid - 1;
-  }
-  return `${text.slice(0, lo)}\n\n… truncated at ${formatSize(maxBytes)} (${formatSize(bytes)} total)`;
-}
-
-function usageZero() {
-  return { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, cost: 0, contextTokens: 0, contextWindow: 0, turns: 0 };
-}
-
-function usageNumber(value: unknown) {
-  return typeof value === "number" && Number.isFinite(value) ? value : 0;
-}
-
-function updateUsageFromAssistantMessage(usage: ReturnType<typeof usageZero>, msg: any) {
-  if (!msg || msg.role !== "assistant") return;
-  usage.turns++;
-  const msgUsage = msg.usage;
-  if (msgUsage) {
-    usage.input += usageNumber(msgUsage.input);
-    usage.output += usageNumber(msgUsage.output);
-    usage.cacheRead += usageNumber(msgUsage.cacheRead);
-    usage.cacheWrite += usageNumber(msgUsage.cacheWrite);
-    usage.cost += usageNumber(msgUsage.cost?.total);
-    usage.contextTokens = usageNumber(msgUsage.totalTokens) || usage.contextTokens;
-  }
-}
-
-function toolResultText(value: any): string {
-  const content = Array.isArray(value?.content) ? value.content : Array.isArray(value) ? value : undefined;
-  if (!content) return typeof value === "string" ? value : value === undefined ? "" : JSON.stringify(value);
-  return content
-    .map((part: any) => {
-      if (part?.type === "text") return String(part.text ?? "");
-      if (part?.type === "image") return `[image: ${part.mimeType ?? part.source?.media_type ?? "unknown"}]`;
-      return JSON.stringify(part);
-    })
-    .filter(Boolean)
-    .join("\n");
-}
-
-function parseSubagentPiJsonStdout(stdout: string) {
-  const messages: any[] = [];
-  const usage = usageZero();
-  let activeMessageIndex: number | undefined;
-  let lastEvent: unknown;
-  let lastToolCall: { name: string; args: Record<string, unknown> } | undefined;
-  let lastToolResult: string | undefined;
-  let model: string | undefined;
-
-  const rememberAssistantMetadata = (msg: any) => {
-    if (!msg || msg.role !== "assistant") return;
-    updateUsageFromAssistantMessage(usage, msg);
-    if (typeof msg.model === "string" && msg.model.trim()) model = msg.model;
-  };
-
-  const rememberToolCallFromMessage = (msg: any) => {
-    if (!msg || msg.role !== "assistant" || !Array.isArray(msg.content)) return;
-    for (const part of msg.content) {
-      if (part?.type === "toolCall") lastToolCall = { name: String(part.name || "unknown"), args: part.arguments || {} };
-    }
-  };
-
-  const upsertMessage = (msg: any, final: boolean) => {
-    rememberToolCallFromMessage(msg);
-    if (msg?.role === "toolResult") lastToolResult = toolResultText(msg.content);
-    if (activeMessageIndex !== undefined && messages[activeMessageIndex]) {
-      messages[activeMessageIndex] = msg;
-    } else {
-      messages.push(msg);
-      activeMessageIndex = messages.length - 1;
-    }
-    if (final) {
-      rememberAssistantMetadata(msg);
-      activeMessageIndex = undefined;
-    }
-  };
-
-  for (const line of stdout.split(/\r?\n/)) {
-    const trimmed = line.trim();
-    if (!trimmed) continue;
-    let event: any;
-    try { event = JSON.parse(trimmed); } catch { continue; }
-    lastEvent = event;
-
-    if ((event.type === "message_start" || event.type === "message_update" || event.type === "message_end") && event.message) {
-      upsertMessage(event.message, event.type === "message_end");
-    } else if (event.type === "tool_execution_start") {
-      lastToolCall = { name: String(event.toolName ?? "unknown"), args: event.args ?? {} };
-    } else if (event.type === "tool_execution_update" && event.partialResult) {
-      const text = toolResultText(event.partialResult);
-      if (text) lastToolResult = text;
-    } else if (event.type === "tool_execution_end") {
-      const toolName = String(event.toolName ?? lastToolCall?.name ?? "unknown");
-      lastToolCall = { name: toolName, args: event.args ?? (lastToolCall?.name === toolName ? lastToolCall.args : {}) };
-      const text = toolResultText(event.result);
-      if (text) lastToolResult = text;
-    } else if (event.type === "tool_result_end" && event.message) {
-      upsertMessage(event.message, true);
-    }
-  }
-
-  return { messages, usage, model, lastEvent, lastToolCall, lastToolResult };
-}
-
 function modelMatches(candidate: any, requested: string) {
   const value = requested.trim();
   if (!value) return false;
@@ -2269,6 +2159,7 @@ function subagentParentDetails(result: any, ctx?: ExtensionContext) {
       lastEvent: parsed?.lastEvent,
       lastToolCall: parsed?.lastToolCall,
       lastToolResult: parsed?.lastToolResult,
+      compaction: parsed?.compaction,
       stdoutBytes: typeof item?.stdout === "string" ? byteLength(item.stdout) : undefined,
       stderrBytes: typeof item?.stderr === "string" ? byteLength(item.stderr) : undefined,
     };
@@ -2292,75 +2183,6 @@ function subagentText(result: any) {
   return JSON.stringify(subagentParentDetails(result) ?? {}, null, 2);
 }
 
-function appendSubagentRawText(state: SubagentStreamState, text: string) {
-  if (!text) return;
-  state.rawText = truncateByBytes(state.rawText + text, MAX_SUBAGENT_RESULT_BYTES);
-}
-
-type SubagentStreamState = {
-  label: string;
-  task?: string;
-  cwd?: string;
-  tools?: string[];
-  prefix: string;
-  liveText: string;
-  rawText: string;
-  stdoutBuffer: string;
-  sawPiJsonStdout: boolean;
-  usage: ReturnType<typeof usageZero>;
-  model?: string;
-  messages: any[];
-  activeMessageIndex?: number;
-  lastEvent?: unknown;
-  lastToolCall?: { name: string; args: Record<string, unknown> };
-  lastToolResult?: string;
-  toolStatus?: string;
-  exitCode: number;
-  stopReason?: string;
-  final?: string;
-  errorMessage?: string;
-  stderr?: string;
-};
-
-const PI_JSON_EVENT_TYPES = new Set([
-  "session",
-  "agent_start",
-  "turn_start",
-  "turn_end",
-  "message_start",
-  "message_update",
-  "message_end",
-  "tool_execution_start",
-  "tool_execution_update",
-  "tool_execution_end",
-  "tool_result_end",
-]);
-
-function textFromPiMessageContent(content: any): string {
-  if (typeof content === "string") return content;
-  if (!Array.isArray(content)) return "";
-  return content
-    .map((part) => {
-      if (!part || typeof part !== "object") return "";
-      const type = String(part.type || "");
-      if (type === "text" || type === "markdown" || type === "text_delta") return String(part.text ?? part.delta ?? "");
-      return "";
-    })
-    .join("");
-}
-
-function assistantTextFromPiJsonEvent(event: any): string | undefined {
-  const message = event?.message || event?.assistantMessageEvent?.partial;
-  if (!message || typeof message !== "object" || message.role !== "assistant") return undefined;
-  return textFromPiMessageContent(message.content);
-}
-
-function appendSubagentPrefix(state: SubagentStreamState, text: string) {
-  if (!text) return;
-  if (state.prefix && !state.prefix.endsWith("\n")) state.prefix += "\n";
-  state.prefix += text.endsWith("\n") ? text : `${text}\n`;
-}
-
 function renderSubagentStream(state: SubagentStreamState) {
   let text = state.prefix;
   const appendBlock = (block: string) => {
@@ -2375,127 +2197,6 @@ function renderSubagentStream(state: SubagentStreamState) {
   const usage = formatSubagentUsage(state.usage, state.model);
   if (usage) appendBlock(`[${usage}]`);
   return text.trimEnd();
-}
-
-function summarizeSubagentToolCall(toolName: string, args: Record<string, unknown>) {
-  if (toolName === "bash") return `$ ${String(args.command || "...")}`;
-  if (toolName === "read") return `read ${String(args.path || args.file_path || "...")}`;
-  if (toolName === "write") return `write ${String(args.path || args.file_path || "...")}`;
-  if (toolName === "edit") return `edit ${String(args.path || args.file_path || "...")}`;
-  const argsText = JSON.stringify(args || {});
-  return `${toolName} ${argsText}`;
-}
-
-function rememberSubagentToolCallFromMessage(state: SubagentStreamState, msg: any) {
-  if (!msg || msg.role !== "assistant" || !Array.isArray(msg.content)) return;
-  for (const part of msg.content) {
-    if (part?.type === "toolCall") state.lastToolCall = { name: String(part.name || "unknown"), args: part.arguments || {} };
-  }
-}
-
-function upsertSubagentStreamMessage(state: SubagentStreamState, msg: any, final: boolean) {
-  rememberSubagentToolCallFromMessage(state, msg);
-  if (msg?.role === "toolResult") state.lastToolResult = toolResultText(msg.content);
-  if (state.activeMessageIndex !== undefined && state.messages[state.activeMessageIndex]) {
-    state.messages[state.activeMessageIndex] = msg;
-  } else {
-    state.messages.push(msg);
-    state.activeMessageIndex = state.messages.length - 1;
-  }
-  if (final) {
-    if (msg?.role === "assistant") {
-      updateUsageFromAssistantMessage(state.usage, msg);
-      if (typeof msg.model === "string" && msg.model.trim()) state.model = msg.model;
-      if (typeof msg.stopReason === "string") state.stopReason = msg.stopReason;
-      if (typeof msg.errorMessage === "string") state.errorMessage = msg.errorMessage;
-    }
-    state.activeMessageIndex = undefined;
-  }
-}
-
-function subagentStreamResult(state: SubagentStreamState) {
-  return {
-    label: state.label,
-    task: state.task,
-    exitCode: state.exitCode,
-    stopReason: state.stopReason || (state.exitCode === -1 ? "running" : "completed"),
-    final: state.final,
-    errorMessage: state.errorMessage,
-    stderr: state.stderr,
-    usage: state.usage,
-    messages: state.messages,
-    model: state.model,
-    tools: state.tools,
-    cwd: state.cwd,
-    lastEvent: state.lastEvent,
-    lastToolCall: state.lastToolCall,
-    lastToolResult: state.lastToolResult,
-  };
-}
-
-function processSubagentStdoutLine(state: SubagentStreamState, line: string) {
-  const trimmed = line.trim();
-  if (!trimmed) {
-    if (!state.sawPiJsonStdout) appendSubagentRawText(state, "\n");
-    return;
-  }
-
-  let event: any;
-  try {
-    event = JSON.parse(trimmed);
-  } catch {
-    appendSubagentRawText(state, `${line}\n`);
-    return;
-  }
-
-  const eventType = typeof event?.type === "string" ? event.type : "";
-  if (!PI_JSON_EVENT_TYPES.has(eventType)) {
-    appendSubagentRawText(state, `${line}\n`);
-    return;
-  }
-
-  state.sawPiJsonStdout = true;
-  state.lastEvent = event;
-  if ((eventType === "message_start" || eventType === "message_update" || eventType === "message_end") && event.message) {
-    upsertSubagentStreamMessage(state, event.message, eventType === "message_end");
-  } else if (eventType === "tool_execution_start") {
-    const toolName = String(event.toolName ?? "unknown");
-    const args = event.args ?? {};
-    state.lastToolCall = { name: toolName, args };
-    state.toolStatus = `[running ${toolName}] ${truncateByBytes(summarizeSubagentToolCall(toolName, args), 500)}`;
-  } else if (eventType === "tool_execution_update" && event.partialResult) {
-    const text = toolResultText(event.partialResult);
-    if (text) state.lastToolResult = text;
-  } else if (eventType === "tool_execution_end") {
-    const toolName = String(event.toolName ?? state.lastToolCall?.name ?? "unknown");
-    const args = event.args ?? (state.lastToolCall?.name === toolName ? state.lastToolCall.args : {});
-    state.lastToolCall = { name: toolName, args };
-    const text = toolResultText(event.result);
-    if (text) state.lastToolResult = text;
-    state.toolStatus = undefined;
-    if (event.isError === true) {
-      const summary = text || "tool returned an error";
-      appendSubagentPrefix(state, `[tool failed: ${toolName}] ${truncateByBytes(summary, 1200)}`);
-    }
-  } else if (eventType === "tool_result_end" && event.message) {
-    upsertSubagentStreamMessage(state, event.message, true);
-  }
-  const assistantText = assistantTextFromPiJsonEvent(event);
-  if (assistantText !== undefined) state.liveText = assistantText;
-}
-
-function appendSubagentStdoutChunk(state: SubagentStreamState, chunk: string) {
-  if (!chunk) return;
-  state.stdoutBuffer += chunk;
-  const lines = state.stdoutBuffer.split(/\r?\n/);
-  state.stdoutBuffer = lines.pop() || "";
-  for (const line of lines) processSubagentStdoutLine(state, line);
-}
-
-function flushSubagentStdout(state: SubagentStreamState) {
-  if (!state.stdoutBuffer) return;
-  processSubagentStdoutLine(state, state.stdoutBuffer);
-  state.stdoutBuffer = "";
 }
 
 function formatTokenCount(count: number): string {
@@ -2934,21 +2635,14 @@ export default function sandbox(pi: ExtensionAPI) {
           const model = typeof (message as any).model === "string" ? (message as any).model : typeof effectiveParams.model === "string" ? effectiveParams.model : undefined;
           const usage = usageZero();
           usage.contextWindow = contextWindowForModel(ctx, model);
-          childState = {
+          childState = createSubagentStreamState({
             label: key,
             task: typeof (message as any).task === "string" ? (message as any).task : typeof effectiveParams.task === "string" ? effectiveParams.task : undefined,
             cwd: typeof (message as any).cwd === "string" ? (message as any).cwd : typeof effectiveParams.cwd === "string" ? effectiveParams.cwd : undefined,
             tools: Array.isArray((message as any).tools) ? (message as any).tools : Array.isArray(effectiveParams.tools) ? effectiveParams.tools : undefined,
-            prefix: "",
-            liveText: "",
-            rawText: "",
-            stdoutBuffer: "",
-            sawPiJsonStdout: false,
             usage,
             model,
-            messages: [],
-            exitCode: -1,
-          };
+          });
           streamStates.set(key, childState);
           streamOrder.push(key);
         }
@@ -3002,9 +2696,9 @@ export default function sandbox(pi: ExtensionAPI) {
             const result: any = (message as any).result;
             childState.exitCode = usageNumber(result?.exit_code ?? result?.exitCode);
             childState.stopReason = stringifyData(result?.stop_reason || result?.stopReason || (childState.exitCode === 0 ? "completed" : "error"));
-            childState.final = typeof result?.final === "string" ? result.final : childState.final;
-            childState.errorMessage = typeof result?.error === "string" ? result.error : childState.errorMessage;
-            childState.stderr = typeof result?.stderr === "string" ? result.stderr : childState.stderr;
+            childState.final = typeof result?.final === "string" ? truncateByBytes(result.final) : childState.final;
+            childState.errorMessage = typeof result?.error === "string" ? truncateByBytes(result.error, 2 * 1024) : childState.errorMessage;
+            childState.stderr = typeof result?.stderr === "string" ? truncateByBytes(result.stderr) : childState.stderr;
             const final = stringifyData(result?.final || result?.error || "");
             if (final) {
               if (childState.liveText.trim() === final.trim()) childState.liveText = "";

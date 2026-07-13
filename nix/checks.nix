@@ -582,9 +582,11 @@ in
       --rootDir "$srcdir" \
       --outDir "$outdir" \
       "$srcdir/sandbox/index.ts" \
-      "$srcdir/sandbox/subagent-model.test.ts"
+      "$srcdir/sandbox/subagent-model.test.ts" \
+      "$srcdir/sandbox/subagent-stream.test.ts"
 
     node "$outdir/sandbox/subagent-model.test.js"
+    node "$outdir/sandbox/subagent-stream.test.js"
 
     cat > "$workdir/test.mjs" <<'EOF'
     import fs from "node:fs";
@@ -718,6 +720,15 @@ in
           try {
             const response = await handler(request, requests);
             res.statusCode = response?.statusCode ?? 200;
+            if (Array.isArray(response?.ndjsonChunks)) {
+              res.setHeader("Content-Type", "application/x-ndjson");
+              for (const chunk of response.ndjsonChunks) {
+                res.write(chunk);
+                await new Promise((resolve) => setImmediate(resolve));
+              }
+              res.end();
+              return;
+            }
             res.setHeader("Content-Type", "application/json");
             res.end(JSON.stringify(response?.body ?? response ?? {}));
           } catch (error) {
@@ -984,6 +995,66 @@ in
         assert(spawnRequests[1].body.model === "google/gemini-pro", "explicit child model was overwritten");
         assert(spawnRequests[2].body.tasks[0].model === "openai-codex/gpt-5.5", "parallel child did not inherit parent model");
         assert(spawnRequests[2].body.tasks[1].model === "anthropic/claude-sonnet", "parallel explicit model was overwritten");
+        await shutdownSession(pi);
+        await supervisor.close();
+      }
+
+      // REST NDJSON preserves split UTF-8 and never copies child thinking into parent updates.
+      {
+        clearAgentSHEnv();
+        const visible = "streamed 🌍 answer";
+        const hidden = "streamed-hidden-thinking-sentinel";
+        const childStdout = JSON.stringify({
+          type: "message_end",
+          message: {
+            role: "assistant",
+            content: [
+              { type: "thinking", thinking: hidden },
+              { type: "text", text: visible },
+            ],
+          },
+        }) + "\n";
+        const terminalResult = { mode: "single", final: visible, results: [{ label: "child", task: "utf8", exit_code: 0, stop_reason: "completed", final: visible }] };
+        const outerStream = [
+          { event: "subagent_child_start", label: "child", task: "utf8" },
+          { event: "stdout", label: "child", data: childStdout },
+          { event: "subagent_result", label: "child", result: terminalResult.results[0] },
+          { event: "done", ok: true, result: terminalResult },
+        ].map((event) => JSON.stringify(event)).join("\n");
+        const bytes = Buffer.from(outerStream, "utf8");
+        const emojiOffset = bytes.indexOf(Buffer.from("🌍", "utf8"));
+        assert(emojiOffset >= 0, "UTF-8 fixture did not contain the expected emoji");
+
+        const supervisor = await withRestSupervisor(async (request) => {
+          if (request.method === "GET" && request.url === "/api/v1/sessions/sess-subagent-stream") {
+            return { id: "sess-subagent-stream", session_id: "sess-subagent-stream", workspace: "/workspace", worktree: "/workspace" };
+          }
+          if (request.method === "GET" && request.url === "/api/v1/approvals") return [];
+          if (request.method === "POST" && request.url === "/api/v1/sessions/sess-subagent-stream/tools/spawn_subagent") {
+            return {
+              ndjsonChunks: [
+                bytes.subarray(0, emojiOffset + 1),
+                bytes.subarray(emojiOffset + 1, emojiOffset + 3),
+                bytes.subarray(emojiOffset + 3),
+              ],
+            };
+          }
+          return { statusCode: 404, body: { error: "unexpected supervisor request", request } };
+        });
+        process.env.AGENTSH_SESSION_ID = "sess-subagent-stream";
+        process.env.AGENTSH_SESSION_SUPERVISOR = "unix://" + supervisor.socketPath;
+        const pi = createPi();
+        sandbox(pi);
+        const ctx = createContext();
+        await startSession(pi, ctx);
+        const subagentTool = pi.tools.get("subagent");
+        const updates = [];
+        const toolResult = await subagentTool.execute("stream-utf8", { task: "utf8" }, undefined, (update) => updates.push(update), ctx);
+        const serializedUpdates = JSON.stringify(updates);
+        assert(serializedUpdates.includes(visible), "split UTF-8 child answer was not preserved in streamed updates");
+        assert(!serializedUpdates.includes("�"), "split UTF-8 introduced a replacement character");
+        assert(!serializedUpdates.includes(hidden), "child thinking leaked into parent streamed updates");
+        assert(!JSON.stringify(toolResult).includes(hidden), "child thinking leaked into the final parent tool result");
         await shutdownSession(pi);
         await supervisor.close();
       }
