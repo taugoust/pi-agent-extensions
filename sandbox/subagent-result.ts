@@ -98,6 +98,18 @@ function boundedMessages(messages: RetainedSubagentMessage[] | undefined): Retai
   return retained;
 }
 
+function boundedCompletedToolArgs(tool: SubagentCompletedTool): Record<string, unknown> {
+  const args = tool.args && typeof tool.args === "object" && !Array.isArray(tool.args) ? tool.args : {};
+  if (tool.name === "bash" && typeof args.command === "string") {
+    return { command: truncateByBytes(sanitizeCapsuleText(args.command).replace(/\s+/g, " "), 500) };
+  }
+  if (tool.name === "read" || tool.name === "write" || tool.name === "edit") {
+    const path = typeof args.path === "string" ? args.path : typeof tool.path === "string" ? tool.path : undefined;
+    return path ? { path: truncateByBytes(stripSubagentTerminalControls(path), 1024) } : {};
+  }
+  return {};
+}
+
 function boundedUsage(value: Partial<SubagentUsage> | undefined): SubagentUsage {
   return {
     input: usageNumber(value?.input),
@@ -148,6 +160,7 @@ export function createSubagentProgressCapsule(source: CapsuleSource): SubagentPr
     messages,
     completedTools: (source.completedTools ?? []).slice(-MAX_CAPSULE_TOOLS).map((tool) => ({
       name: truncateByBytes(tool.name, 128),
+      args: boundedCompletedToolArgs(tool),
       isError: tool.isError === true,
       path: tool.path ? truncateByBytes(tool.path, 1024) : undefined,
       resultPreview: tool.resultPreview ? truncateByBytes(sanitizeCapsuleText(tool.resultPreview), 256) : undefined,
@@ -192,7 +205,7 @@ export function boundSubagentProgressCapsules(capsules: SubagentProgressCapsule[
     terminal: cloneSubagentTerminal(capsule.terminal),
     usage: { ...capsule.usage },
     messages: capsule.messages.map((message) => ({ ...message, content: message.content.map((part) => ({ ...part })) })),
-    completedTools: capsule.completedTools.map((tool) => ({ ...tool })),
+    completedTools: capsule.completedTools.map((tool) => ({ ...tool, args: { ...tool.args } })),
     activeTool: capsule.activeTool ? { name: capsule.activeTool.name, args: { ...capsule.activeTool.args } } : undefined,
     readFiles: [...capsule.readFiles],
     modifiedFiles: [...capsule.modifiedFiles],
@@ -209,7 +222,7 @@ export function boundSubagentProgressCapsules(capsules: SubagentProgressCapsule[
     capsule.errorMessage = capsule.errorMessage ? truncateByBytes(capsule.errorMessage, 256) : undefined;
     capsule.stderrTail = capsule.stderrTail ? tailByBytes(capsule.stderrTail, 512) : undefined;
     capsule.messages = [];
-    capsule.completedTools = capsule.completedTools.slice(-2).map((tool) => ({ name: tool.name, isError: tool.isError, path: tool.path ? truncateByBytes(tool.path, 256) : undefined }));
+    capsule.completedTools = capsule.completedTools.slice(-2).map((tool) => ({ name: tool.name, args: { ...tool.args }, isError: tool.isError, path: tool.path ? truncateByBytes(tool.path, 256) : undefined }));
     capsule.readFiles = capsule.readFiles.slice(-4).map((path) => truncateByBytes(path, 256));
     capsule.modifiedFiles = capsule.modifiedFiles.slice(-4).map((path) => truncateByBytes(path, 256));
     capsule.protocolDiagnostics = capsule.protocolDiagnostics.slice(-2);

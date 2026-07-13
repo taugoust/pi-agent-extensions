@@ -528,6 +528,7 @@ in
     export const DEFAULT_MAX_BYTES = 20000;
     export const DEFAULT_MAX_LINES = 2000;
     export function formatSize(bytes) { return String(bytes) + "B"; }
+    export function getMarkdownTheme() { return {}; }
     export function truncateTail(text) {
       return { content: String(text), truncated: false, truncatedBy: null, totalLines: String(text).split("\n").length, totalBytes: Buffer.byteLength(String(text)), outputLines: String(text).split("\n").length, outputBytes: Buffer.byteLength(String(text)), maxLines: 2000, maxBytes: 20000, lastLinePartial: false };
     }
@@ -1092,6 +1093,24 @@ in
         assert(cancelledToolResult.details.terminal.state === "cancelled", "aborted request did not produce a cancelled terminal");
         assert(cancelledToolResult.details.terminal.cancellationCause === "user_cancelled", "aborted request lost its user cancellation cause");
         assert(cancelledToolResult.content[0].text.includes("subagent cancelled"), "cancelled request was rendered as a generic failure");
+
+        const retainedCommand = "printf 'retained-progress-smoke\\n'";
+        const renderedRunning = subagentTool.renderResult({
+          content: [],
+          details: {
+            mode: "parallel",
+            results: [{
+              label: "task 1",
+              exitCode: -1,
+              stopReason: "running",
+              messages: [],
+              completedTools: [{ name: "bash", args: { command: retainedCommand }, isError: false }],
+              usage: {},
+            }],
+          },
+        }, { expanded: false }, ctx.ui.theme).render(120).join("\n");
+        assert(renderedRunning.includes(retainedCommand), "collapsed running result lost the last completed command summary");
+        assert(!renderedRunning.includes("(running...)"), "collapsed running result regressed to a generic running placeholder despite completed progress");
         await shutdownSession(pi);
         await supervisor.close();
       }

@@ -2252,6 +2252,11 @@ function formatSubagentToolCall(toolName: string, args: Record<string, unknown>,
   return themeFg("accent", toolName) + themeFg("dim", ` ${argsStr.length > 50 ? `${argsStr.slice(0, 50)}...` : argsStr}`);
 }
 
+function completedSubagentToolArgs(tool: any): Record<string, unknown> {
+  if (tool?.args && typeof tool.args === "object" && !Array.isArray(tool.args)) return tool.args;
+  return tool?.path ? { path: tool.path } : {};
+}
+
 function isSubagentFailure(result: any): boolean {
   const terminal = normalizeSubagentTerminal(result?.terminal, { exitCode: result?.exitCode, stopReason: result?.stopReason, error: result?.errorMessage });
   if (terminal) return subagentTerminalFailed(terminal);
@@ -2306,7 +2311,10 @@ function compactSubagentResultSummary(result: any): string {
   if (lastAssistant) lines.push(`Last assistant text:\n${truncateByBytes(lastAssistant).split("\n").slice(-8).join("\n")}`);
   if (result?.activeTool) lines.push(`Active tool: ${result.activeTool.name} ${JSON.stringify(result.activeTool.args)}`);
   const lastTool = Array.isArray(result?.completedTools) ? result.completedTools.at(-1) : undefined;
-  if (lastTool) lines.push(`Last completed tool: ${lastTool.name}${lastTool.isError ? " (failed)" : ""}${lastTool.resultPreview ? `\n${lastTool.resultPreview}` : ""}`);
+  if (lastTool) {
+    const summary = formatSubagentToolCall(lastTool.name, completedSubagentToolArgs(lastTool), (_color, text) => text);
+    lines.push(`Last completed tool: ${summary}${lastTool.isError ? " (failed)" : ""}${lastTool.resultPreview ? `\n${lastTool.resultPreview}` : ""}`);
+  }
   const stderr = String(result?.stderrTail || result?.stderr || "").trim().split("\n").filter(Boolean).slice(-8).join("\n");
   if (stderr) lines.push(`stderr:\n${stderr}`);
   if (result?.errorMessage) lines.push(`Error: ${result.errorMessage}`);
@@ -2355,7 +2363,10 @@ function renderSubagentResult(result: any, options: any, theme: any) {
     if (failed && r.errorMessage) container.addChild(new Text(theme.fg("error", `Error: ${r.errorMessage}`), 0, 0));
     if (r.activeTool) container.addChild(new Text(theme.fg("muted", "Active tool: ") + formatSubagentToolCall(r.activeTool.name, r.activeTool.args, theme.fg.bind(theme)), 0, 0));
     const lastTool = Array.isArray(r.completedTools) ? r.completedTools.at(-1) : undefined;
-    if (lastTool) container.addChild(new Text(theme.fg("muted", `Last completed tool: ${lastTool.name}${lastTool.isError ? " (failed)" : ""}${lastTool.resultPreview ? `\n${lastTool.resultPreview}` : ""}`), 0, 0));
+    if (lastTool) {
+      const summary = formatSubagentToolCall(lastTool.name, completedSubagentToolArgs(lastTool), theme.fg.bind(theme));
+      container.addChild(new Text(theme.fg("muted", "Last completed tool: ") + summary + theme.fg("muted", `${lastTool.isError ? " (failed)" : ""}${lastTool.resultPreview ? `\n${lastTool.resultPreview}` : ""}`), 0, 0));
+    }
 
     for (const item of subagentDisplayItems(r.messages || [])) {
       if (item.type === "toolCall") container.addChild(new Text(theme.fg("muted", "→ ") + formatSubagentToolCall(item.name, item.args, theme.fg.bind(theme)), 0, 0));
@@ -2389,8 +2400,10 @@ function renderSubagentResult(result: any, options: any, theme: any) {
     let text = `${icon} ${theme.fg("toolTitle", theme.bold("subagent"))}`;
     if (failed) text += `\n${theme.fg("error", compactSubagentResultSummary(r).split("\n").slice(0, 14).join("\n"))}`;
     else if (displayItems.length === 0) {
+      const lastTool = Array.isArray(r.completedTools) ? r.completedTools.at(-1) : undefined;
       const fallback = String(r.final || r.errorMessage || "").trim();
-      text += fallback ? `\n${theme.fg("toolOutput", truncateByBytes(fallback).split("\n").slice(0, 8).join("\n"))}` : `\n${theme.fg("muted", r.exitCode === -1 ? "(running...)" : "(no output)")}`;
+      if (lastTool) text += `\n${theme.fg("muted", "→ ")}${formatSubagentToolCall(lastTool.name, completedSubagentToolArgs(lastTool), theme.fg.bind(theme))}`;
+      else text += fallback ? `\n${theme.fg("toolOutput", truncateByBytes(fallback).split("\n").slice(0, 8).join("\n"))}` : `\n${theme.fg("muted", r.exitCode === -1 ? "(running...)" : "(no output)")}`;
     } else text += `\n${renderDisplayItems(displayItems, 10)}`;
     const usage = formatSubagentUsage(r.usage, r.model);
     if (usage) text += `\n${theme.fg("dim", usage)}`;
@@ -2426,8 +2439,10 @@ function renderSubagentResult(result: any, options: any, theme: any) {
     text += `\n\n${theme.fg("muted", "─── ")}${theme.fg("accent", mode === "chain" ? `step ${r.step ?? "?"}` : r.label || "subagent")} ${rIcon}`;
     if (isSubagentFailure(r)) text += `\n${theme.fg("error", compactSubagentResultSummary(r).split("\n").slice(0, 10).join("\n"))}`;
     else if (displayItems.length === 0) {
+      const lastTool = Array.isArray(r.completedTools) ? r.completedTools.at(-1) : undefined;
       const fallback = String(r.final || r.errorMessage || "").trim();
-      text += fallback ? `\n${theme.fg("toolOutput", truncateByBytes(fallback).split("\n").slice(0, 5).join("\n"))}` : `\n${theme.fg("muted", r.exitCode === -1 ? "(running...)" : "(no output)")}`;
+      if (lastTool) text += `\n${theme.fg("muted", "→ ")}${formatSubagentToolCall(lastTool.name, completedSubagentToolArgs(lastTool), theme.fg.bind(theme))}`;
+      else text += fallback ? `\n${theme.fg("toolOutput", truncateByBytes(fallback).split("\n").slice(0, 5).join("\n"))}` : `\n${theme.fg("muted", r.exitCode === -1 ? "(running...)" : "(no output)")}`;
     } else text += `\n${renderDisplayItems(displayItems, 5)}`;
     const usage = formatSubagentUsage(r.usage, r.model);
     if (usage) text += `\n${theme.fg("dim", usage)}`;

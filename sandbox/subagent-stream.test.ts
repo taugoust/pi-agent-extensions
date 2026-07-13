@@ -127,6 +127,8 @@ function newState(label = "child"): SubagentStreamState {
   assert.equal(state.toolStatus, undefined);
   assert.match(subagentLiveToolStatus(state) ?? "", /^\[completed bash\] \$ echo visible-summary API_KEY=\[redacted\]$/);
   assert.equal((subagentLiveToolStatus(state) ?? "").includes(secret), false);
+  assert.deepEqual(state.completedTools.at(-1)?.args, { command: "echo visible-summary API_KEY=[redacted]" });
+  assert.equal(JSON.stringify(state.completedTools).includes(secret), false);
   assert.equal(state.lastToolResult, "ok");
   appendSubagentStdoutChunk(state, line({ type: "message_update", message: assistant("visible follow-up") }));
   assert.equal(subagentLiveToolStatus(state), undefined);

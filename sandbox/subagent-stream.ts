@@ -19,6 +19,7 @@ export type RetainedSubagentToolCall = {
 
 export type SubagentCompletedTool = {
   name: string;
+  args: Record<string, unknown>;
   isError: boolean;
   path?: string;
   resultPreview?: string;
@@ -225,11 +226,14 @@ function sanitizeCompletedTool(value: unknown): SubagentCompletedTool | undefine
   const source = value as Record<string, unknown>;
   const name = boundedString(source.name, 128);
   if (!name) return undefined;
+  const path = boundedString(source.path, MAX_METADATA_BYTES);
+  const args = sanitizeToolArgs(name, source.args ?? (path ? { path } : undefined));
   const resultPreview = sanitizedDiagnostic(source.resultPreview);
   return {
     name,
+    args,
     isError: source.isError === true,
-    path: boundedString(source.path, MAX_METADATA_BYTES),
+    path,
     resultPreview: resultPreview ? truncateByBytes(resultPreview, MAX_TOOL_PREVIEW_BYTES) : undefined,
   };
 }
@@ -476,7 +480,7 @@ export function parseSubagentPiJsonStdout(stdout: string) {
     lastEvent: state.lastEvent ? { ...state.lastEvent } : undefined,
     lastToolCall: state.lastToolCall ? { name: state.lastToolCall.name, args: { ...state.lastToolCall.args } } : undefined,
     lastToolResult: state.lastToolResult,
-    completedTools: state.completedTools.map((tool) => ({ ...tool })),
+    completedTools: state.completedTools.map((tool) => ({ ...tool, args: { ...tool.args } })),
     readFiles: [...state.readFiles],
     modifiedFiles: [...state.modifiedFiles],
     protocolDiagnostics: state.protocolDiagnostics.map((diagnostic) => ({ ...diagnostic })),
@@ -631,7 +635,7 @@ export function subagentStreamResult(state: SubagentStreamState) {
     lastEvent: state.lastEvent ? { ...state.lastEvent } : undefined,
     lastToolCall: state.lastToolCall ? { name: state.lastToolCall.name, args: { ...state.lastToolCall.args } } : undefined,
     lastToolResult: state.lastToolResult,
-    completedTools: state.completedTools.map((tool) => ({ ...tool })),
+    completedTools: state.completedTools.map((tool) => ({ ...tool, args: { ...tool.args } })),
     readFiles: [...state.readFiles],
     modifiedFiles: [...state.modifiedFiles],
     protocolDiagnostics: state.protocolDiagnostics.map((diagnostic) => ({ ...diagnostic })),
@@ -689,7 +693,7 @@ export function processSubagentStdoutLine(state: SubagentStreamState, line: stri
     const text = toolResultText(source.result);
     if (text) state.lastToolResult = text;
     const path = typeof state.lastToolCall.args.path === "string" ? state.lastToolCall.args.path : undefined;
-    state.completedTools.push({ name: toolName, isError: source.isError === true, path, resultPreview: text ? truncateByBytes(sanitizedDiagnostic(text) ?? "", MAX_TOOL_PREVIEW_BYTES) || undefined : undefined });
+    state.completedTools.push({ name: toolName, args: { ...state.lastToolCall.args }, isError: source.isError === true, path, resultPreview: text ? truncateByBytes(sanitizedDiagnostic(text) ?? "", MAX_TOOL_PREVIEW_BYTES) || undefined : undefined });
     if (state.completedTools.length > MAX_RETAINED_TOOLS) state.completedTools.splice(0, state.completedTools.length - MAX_RETAINED_TOOLS);
     if (toolName === "read") rememberPath(state.readFiles, path);
     if (toolName === "write" || toolName === "edit") rememberPath(state.modifiedFiles, path);

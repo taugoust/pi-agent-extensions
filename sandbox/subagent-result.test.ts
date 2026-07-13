@@ -47,7 +47,8 @@ function line(event: unknown): string {
   assert.equal(serialized.includes("hidden-reasoning-sentinel"), false);
   assert.equal(serialized.includes("terminal-secret"), false);
   assert.equal(serialized.includes("secret-value"), false);
-  assert.equal(serialized.includes("echo authorization"), false);
+  assert.equal(serialized.includes("authorization=secret-"), false);
+  assert.equal(serialized.includes("echo authorization=[redacted]"), true);
 }
 
 {
@@ -75,10 +76,13 @@ function line(event: unknown): string {
     final: "\u001b[31mvisible final\u001b[0m",
     errorMessage: "\u001bP$q q\u001b\\visible error\u001b[6 q",
     terminal: { state: "failed", failure_kind: "protocol", retryable: true, message: "\u001b[31mvisible terminal\u001b[0m" },
+    completedTools: [{ name: "bash", args: { command: "\u001b[31mecho API_KEY=completed-secret\u001b[0m" }, isError: false }],
   });
   assert.equal(capsule.final, "visible final");
   assert.equal(capsule.errorMessage, "visible error");
   assert.equal(capsule.terminal?.message, "visible terminal");
+  assert.deepEqual(capsule.completedTools[0].args, { command: "echo API_KEY=[redacted]" });
+  assert.equal(JSON.stringify(capsule).includes("completed-secret"), false);
   assert.equal(JSON.stringify(capsule).includes("\u001b"), false);
 }
 
