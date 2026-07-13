@@ -202,12 +202,16 @@ function sanitizeUsage(value: unknown): Record<string, unknown> | undefined {
 function sanitizeToolArgs(toolName: string, value: unknown): Record<string, unknown> {
   if (!value || typeof value !== "object" || Array.isArray(value)) return {};
   const args = value as Record<string, unknown>;
+  if (toolName === "bash") {
+    const command = sanitizedDiagnostic(boundedString(args.command, MAX_LIVE_TOOL_STATUS_BYTES));
+    return command ? { command: truncateByBytes(command.replace(/\s+/g, " "), MAX_LIVE_TOOL_STATUS_BYTES) } : {};
+  }
   if (toolName === "read" || toolName === "write" || toolName === "edit") {
     const path = boundedString(args.path ?? args.file_path);
     return path ? { path } : {};
   }
-  // Shell commands and unknown arguments may contain credentials. They are used
-  // by the child but are not copied into parent-facing progress state.
+  // Unknown arguments may contain credentials and are not copied into
+  // parent-facing progress state.
   return {};
 }
 

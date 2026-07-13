@@ -113,12 +113,13 @@ function newState(label = "child"): SubagentStreamState {
   const secret = "live-command-secret-sentinel";
   const command = `echo visible-summary API_KEY=${secret}`;
   appendSubagentStdoutChunk(state, line({ type: "tool_execution_start", toolName: "bash", args: { command } }));
-  assert.deepEqual(state.lastToolCall, { name: "bash", args: {} });
+  assert.deepEqual(state.lastToolCall, { name: "bash", args: { command: "echo visible-summary API_KEY=[redacted]" } });
   assert.equal(state.toolStatus, "[running bash]");
   assert.match(subagentLiveToolStatus(state) ?? "", /^\[running bash\] \$ echo visible-summary API_KEY=\[redacted\]$/);
   assert.equal((subagentLiveToolStatus(state) ?? "").includes(secret), false);
-  assert.equal(JSON.stringify(state).includes(command), false);
-  assert.equal(JSON.stringify(subagentStreamResult(state)).includes(command), false);
+  assert.equal(JSON.stringify(state).includes(secret), false);
+  assert.equal(JSON.stringify(subagentStreamResult(state)).includes(secret), false);
+  assert.equal(JSON.stringify(subagentStreamResult(state)).includes("echo visible-summary"), true);
   appendSubagentStdoutChunk(state, line({ type: "tool_execution_update", partialResult: { content: [{ type: "text", text: "o" }] } }));
   assert.equal(state.lastToolResult, "o");
   assert.match(subagentLiveToolStatus(state) ?? "", /echo visible-summary/);
