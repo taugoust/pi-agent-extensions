@@ -694,10 +694,14 @@ export function processSubagentStdoutLine(state: SubagentStreamState, line: stri
     if (toolName === "read") rememberPath(state.readFiles, path);
     if (toolName === "write" || toolName === "edit") rememberPath(state.modifiedFiles, path);
     state.toolStatus = undefined;
-    liveToolStatuses.delete(state);
+    const runningStatus = liveToolStatuses.get(state);
     if (source.isError === true) {
+      liveToolStatuses.delete(state);
       const summary = sanitizedDiagnostic(text) || "tool returned an error";
       appendSubagentPrefix(state, `[tool failed: ${toolName}] ${truncateByBytes(summary, 1200)}`);
+    } else if (runningStatus) {
+      const summary = runningStatus.replace(/^\[running [^\]]+\]\s*/, "");
+      liveToolStatuses.set(state, `[completed ${toolName}]${summary ? ` ${summary}` : ""}`);
     }
   } else if (eventType === "tool_result_end" && source.message) {
     upsertSubagentStreamMessage(state, source.message, true);
@@ -705,7 +709,10 @@ export function processSubagentStdoutLine(state: SubagentStreamState, line: stri
     recordCompactionEvent(state, event, eventType);
   }
   const assistantText = assistantTextFromPiJsonEvent(event);
-  if (assistantText !== undefined) state.liveText = assistantText;
+  if (assistantText !== undefined) {
+    state.liveText = assistantText;
+    if (assistantText) liveToolStatuses.delete(state);
+  }
 }
 
 export function appendSubagentStdoutChunk(state: SubagentStreamState, chunk: string | Uint8Array) {

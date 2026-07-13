@@ -125,8 +125,11 @@ function newState(label = "child"): SubagentStreamState {
   assert.match(subagentLiveToolStatus(state) ?? "", /echo visible-summary/);
   appendSubagentStdoutChunk(state, line({ type: "tool_execution_end", toolName: "bash", result: { content: [{ type: "text", text: "ok" }] } }));
   assert.equal(state.toolStatus, undefined);
-  assert.equal(subagentLiveToolStatus(state), undefined);
+  assert.match(subagentLiveToolStatus(state) ?? "", /^\[completed bash\] \$ echo visible-summary API_KEY=\[redacted\]$/);
+  assert.equal((subagentLiveToolStatus(state) ?? "").includes(secret), false);
   assert.equal(state.lastToolResult, "ok");
+  appendSubagentStdoutChunk(state, line({ type: "message_update", message: assistant("visible follow-up") }));
+  assert.equal(subagentLiveToolStatus(state), undefined);
 }
 
 {
@@ -137,6 +140,7 @@ function newState(label = "child"): SubagentStreamState {
   assert.equal(subagentLiveToolStatus(state), "[running read] read /missing");
   appendSubagentStdoutChunk(state, line({ type: "tool_execution_end", toolName: "read", isError: true, result: { content: [{ type: "text", text: "ENOENT" }] } }));
   assert.equal(state.toolStatus, undefined);
+  assert.equal(subagentLiveToolStatus(state), undefined);
   assert.match(state.prefix, /\[tool failed: read\] ENOENT/);
   appendSubagentStdoutChunk(state, line({ type: "message_end", message: assistant("Recovered and final.", { stopReason: "completed" }) }));
   assert.equal(state.liveText, "Recovered and final.");
