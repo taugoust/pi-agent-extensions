@@ -2730,11 +2730,12 @@ export default function sandbox(pi: ExtensionAPI) {
         const results = streamOrder.length
           ? streamOrder.map((key) => createSubagentProgressCapsule(streamStates.get(key)!))
           : [createSubagentProgressCapsule({ label: "subagent", exitCode: terminal?.exitCode ?? 1, stopReason: terminal?.state === "cancelled" ? "cancelled" : "error", terminal, final: message, errorMessage: message })];
+        const outcomeLabel = terminal?.state === "cancelled" ? "subagent cancelled" : terminal?.state === "timed_out" ? "subagent timed out" : "subagent failed";
         result = {
           mode,
           terminal,
-          final: `subagent failed: ${message}`,
-          summary: `subagent failed: ${message}`,
+          final: `${outcomeLabel}: ${message}`,
+          summary: `${outcomeLabel}: ${message}`,
           error: message,
           results,
         };

@@ -1038,6 +1038,10 @@ in
           }
           if (request.method === "GET" && request.url === "/api/v1/approvals") return [];
           if (request.method === "POST" && request.url === "/api/v1/sessions/sess-subagent-stream/tools/spawn_subagent") {
+            if (request.body.task === "cancel-stream") {
+              await new Promise((resolve) => setTimeout(resolve, 250));
+              return { event: "done", ok: true, result: { mode: "single", final: "too late", results: [] } };
+            }
             if (request.body.task === "typed-failure") {
               const failedTerminal = { state: "failed", failure_kind: "model", exit_code: 1, termination: "natural", retryable: false, message: "model failed" };
               const failedChild = { label: "child", task: "typed-failure", exit_code: 1, stop_reason: "error", terminal: failedTerminal, error: "model failed" };
@@ -1080,6 +1084,14 @@ in
         assert(failedToolResult.details.results[0].terminal.failureKind === "model", "child failure kind was not normalized");
         assert(failedToolResult.content[0].text.includes("model failed"), "typed failure diagnostic was reduced to a generic stop reason");
         assert(failedToolResult.isError === true, "failed child task was not marked as an error");
+
+        const abortController = new AbortController();
+        const abortTimer = setTimeout(() => abortController.abort(), 20);
+        const cancelledToolResult = await subagentTool.execute("stream-cancel", { task: "cancel-stream" }, abortController.signal, undefined, ctx);
+        clearTimeout(abortTimer);
+        assert(cancelledToolResult.details.terminal.state === "cancelled", "aborted request did not produce a cancelled terminal");
+        assert(cancelledToolResult.details.terminal.cancellationCause === "user_cancelled", "aborted request lost its user cancellation cause");
+        assert(cancelledToolResult.content[0].text.includes("subagent cancelled"), "cancelled request was rendered as a generic failure");
         await shutdownSession(pi);
         await supervisor.close();
       }
