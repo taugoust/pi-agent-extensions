@@ -495,7 +495,31 @@ only minimal config/auth files are copied.
 
 Set `PI_SUBAGENT_BIN` to the raw Pi executable selected by your wrapper, e.g.
 `/nix/store/.../bin/pi` or `pi-unsafe`. If unset, the extension tries source/dev
-execution, then `pi-unsafe`, and only falls back to `pi` with a warning.
+execution, then `pi-unsafe`, and only falls back to `pi` with a warning. Native
+children are marked with `PI_SUBAGENT_ID` so child-only extensions can identify
+them reliably.
+
+</details>
+<details>
+<summary><strong>subagent-finalizer</strong> - Finish child tasks before context compaction</summary>
+<br>
+
+- **Source**:
+  [subagent-finalizer/](https://github.com/rytswd/pi-agent-extensions/tree/main/subagent-finalizer)
+- **License**: MIT
+- **Activation**: Only child Pi processes marked by `AGENTSH_SUBAGENT_ID` or
+  `PI_SUBAGENT_ID`; top-level sessions remain inert.
+
+**Description**: After a continuing subagent turn (`toolUse` or `length`), this
+extension checks Pi's current context usage. Once usage exceeds 90%, it sends one
+urgent steering message telling the child to stop using tools and return its best
+answer to the original task immediately. Steering is delivered before the next
+model call, giving the child a final response turn before threshold compaction can
+discard detailed task context.
+
+The Home Manager module installs this guard automatically when
+`programs.pi.extensions.subagent.enable` is enabled. It can also be enabled on
+its own with `programs.pi.extensions.subagent-finalizer.enable`.
 
 </details>
 <details>
@@ -800,6 +824,8 @@ pi
 │   ├── mock-supervisor.mjs
 │   └── mock-supervisor-check.mjs
 ├── subagent/           # Dynamic same-session child Pi processes
+│   └── index.ts
+├── subagent-finalizer/ # Finish subagents before context compaction
 │   └── index.ts
 ├── slow-mode/          # Review gate for write/edit
 │   ├── index.ts

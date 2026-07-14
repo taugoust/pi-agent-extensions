@@ -67,6 +67,7 @@
               "slow-mode"
               "ssh"
               "sandbox"
+              "subagent-finalizer"
             ];
           };
         }
@@ -79,6 +80,7 @@
         (import ./nix/checks.nix { inherit self pkgs pi-mcp-adapter; })
         // {
           modal-editor = import ./nix/modal-editor-check.nix { inherit self pkgs; };
+          subagent-finalizer = import ./nix/subagent-finalizer-check.nix { inherit self pkgs; };
         }
       );
 

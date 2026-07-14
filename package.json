@@ -40,6 +40,7 @@
       "sandbox",
       "slow-mode",
       "subagent",
+      "subagent-finalizer",
       "node_modules/@marckrenn/pi-sub-core",
       "node_modules/@marckrenn/pi-sub-bar",
       "node_modules/pi-mcp-adapter"

@@ -16,6 +16,7 @@ let
     "slow-mode"
     "ssh"
     "subagent"
+    "subagent-finalizer"
   ];
 
   localExtensions = builtins.listToAttrs (map (name: {

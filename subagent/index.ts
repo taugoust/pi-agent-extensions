@@ -441,6 +441,7 @@ async function runSingleSubagent(
         ...process.env,
         PI_CODING_AGENT_DIR: childAgentDir,
         PI_CODING_AGENT_SESSION_DIR: childSessionDir,
+        PI_SUBAGENT_ID: subagentId,
       };
       const proc = spawn(invocation.command, invocation.args, {
         cwd: spec.cwd ?? defaultCwd,

@@ -16,6 +16,7 @@ This is **pi-agent-extensions** — a collection of [pi](https://github.com/mari
 | `questionnaire/` | Multi-question tool for LLM-driven user input |
 | `sandbox/` | AgentSH approval relay UI — prompts for AgentSH-owned pending approvals |
 | `slow-mode/` | Review gate for write/edit tool calls — toggle with `/slowmode` |
+| `subagent-finalizer/` | Urgently steers >90%-context subagents to return before compaction |
 
 ## Before Implementation
 
