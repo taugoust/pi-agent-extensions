@@ -9,6 +9,7 @@ import {
   parseSubagentPiJsonStdout,
   subagentLiveToolStatus,
   subagentStreamResult,
+  tailByBytes,
   type SubagentStreamState,
 } from "./subagent-stream.js";
 
@@ -25,9 +26,17 @@ function newState(label = "child"): SubagentStreamState {
 }
 
 {
+  assert.equal(tailByBytes("abcdef", 4), "cdef");
+  assert.equal(tailByBytes("ab🌍cd", 5), "cd");
+  assert.equal(tailByBytes("ab🌍cd", 6), "🌍cd");
+  assert.equal(tailByBytes("abcdef", 0), "");
+}
+
+{
   const state = newState("success");
   const success = line({ type: "message_end", message: assistant("done", { model: "test/model", usage: { input: 3, output: 4, cacheRead: 1, cacheWrite: 2, cost: { total: 0.01 }, totalTokens: 7 } }) });
   appendSubagentStdoutChunk(state, success);
+  appendSubagentStdoutChunk(state, line({ type: "agent_settled" }));
   assert.equal(state.liveText, "done");
   assert.equal(state.messages.length, 1);
   assert.equal(state.model, "test/model");
@@ -35,6 +44,7 @@ function newState(label = "child"): SubagentStreamState {
   assert.equal(state.usage.input, 3);
   assert.equal(state.usage.output, 4);
   assert.equal(state.usage.contextTokens, 7);
+  assert.equal(state.protocolSettled, true);
   assert.equal(subagentStreamResult(state).stopReason, "running");
 }
 
@@ -326,6 +336,30 @@ function newState(label = "child"): SubagentStreamState {
   assert.equal(state.stdoutDiscardingOversizeLine, false);
   assert.equal(state.liveText, "after oversized line");
   assert.ok(Buffer.byteLength(state.rawText) < MAX_SUBAGENT_LINE_BYTES);
+}
+
+{
+  const state = newState("large-relevant-and-aggregate-events");
+  const finalText = `final-${"v".repeat(MAX_SUBAGENT_LINE_BYTES + 1024)}`;
+  appendSubagentStdoutChunk(state, line({ type: "message_end", message: assistant(finalText, { stopReason: "stop" }) }));
+  assert.match(state.liveText, /^final-v+/);
+  assert.equal(state.protocolDiagnostics.some((diagnostic) => diagnostic.kind === "oversized_line"), false);
+  appendSubagentStdoutChunk(state, line({ type: "agent_end", messages: "a".repeat(MAX_SUBAGENT_LINE_BYTES + 1024) }));
+  appendSubagentStdoutChunk(state, line({ type: "agent_settled" }));
+  assert.equal(state.protocolSettled, true);
+  assert.match(state.liveText, /^final-v+/);
+  assert.equal(state.protocolDiagnostics.length, 0);
+}
+
+{
+  const state = newState("tool-use-is-not-a-final-response");
+  appendSubagentStdoutChunk(state, line({ type: "message_end", message: assistant("stale answer", { stopReason: "stop" }) }));
+  appendSubagentStdoutChunk(state, line({ type: "message_end", message: { role: "assistant", content: [{ type: "toolCall", name: "read", arguments: { path: "/tmp/x" } }], stopReason: "toolUse" } }));
+  appendSubagentStdoutChunk(state, line({ type: "agent_settled" }));
+  assert.equal(state.liveText, "");
+  assert.equal(state.stopReason, "toolUse");
+  assert.equal(state.modelStopReason, "toolUse");
+  assert.equal(state.protocolSettled, true);
 }
 
 {

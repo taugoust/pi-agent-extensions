@@ -22,6 +22,7 @@ export type SubagentProgressCapsule = {
   stderrTail?: string;
   usage: SubagentUsage;
   model?: string;
+  modelStopReason?: string;
   tools?: string[];
   cwd?: string;
   lastAssistantText?: string;
@@ -31,6 +32,9 @@ export type SubagentProgressCapsule = {
   readFiles: string[];
   modifiedFiles: string[];
   compaction?: SubagentCompactionState;
+  protocolSettled: boolean;
+  stdoutTruncated: boolean;
+  stdoutTotalBytes: number;
   protocolDiagnostics: SubagentProtocolDiagnostic[];
 };
 
@@ -67,8 +71,8 @@ function lastAssistantText(messages: RetainedSubagentMessage[] | undefined): str
   for (let index = messages.length - 1; index >= 0; index--) {
     const message = messages[index];
     if (message?.role !== "assistant") continue;
-    const text = message.content.filter((part) => part.type === "text").map((part) => String(part.text ?? "")).join("");
-    if (text.trim()) return truncateByBytes(sanitizeCapsuleText(text.trim()), MAX_CAPSULE_TEXT_BYTES);
+    const text = message.content.filter((part) => part.type === "text").map((part) => String(part.text ?? "")).join("").trim();
+    return text ? truncateByBytes(sanitizeCapsuleText(text), MAX_CAPSULE_TEXT_BYTES) : undefined;
   }
   return undefined;
 }
@@ -158,6 +162,7 @@ export function createSubagentProgressCapsule(source: CapsuleSource): SubagentPr
     stderrTail: source.stderr ? sanitizeCapsuleText(tailByBytes(source.stderr, MAX_CAPSULE_STDERR_BYTES)) : undefined,
     usage: boundedUsage(source.usage),
     model: source.model ? truncateByBytes(source.model, 256) : undefined,
+    modelStopReason: source.modelStopReason ? truncateByBytes(source.modelStopReason, 128) : undefined,
     tools: source.tools?.slice(0, 32).map((tool) => truncateByBytes(tool, 128)),
     cwd: source.cwd ? truncateByBytes(source.cwd, 1024) : undefined,
     lastAssistantText: assistantText,
@@ -176,6 +181,9 @@ export function createSubagentProgressCapsule(source: CapsuleSource): SubagentPr
     readFiles: (source.readFiles ?? []).slice(-MAX_CAPSULE_PATHS).map((path) => truncateByBytes(path, 1024)),
     modifiedFiles: (source.modifiedFiles ?? []).slice(-MAX_CAPSULE_PATHS).map((path) => truncateByBytes(path, 1024)),
     compaction: cloneCompaction(source.compaction),
+    protocolSettled: source.protocolSettled === true,
+    stdoutTruncated: source.stdoutTruncated === true,
+    stdoutTotalBytes: usageNumber(source.stdoutTotalBytes),
     protocolDiagnostics: (source.protocolDiagnostics ?? []).slice(-MAX_CAPSULE_DIAGNOSTICS).map((diagnostic) => ({ ...diagnostic, detail: diagnostic.detail ? truncateByBytes(diagnostic.detail, 256) : undefined })),
   };
 

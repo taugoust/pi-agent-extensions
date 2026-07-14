@@ -26,7 +26,7 @@ export type SubagentCompletedTool = {
 };
 
 export type SubagentProtocolDiagnostic = {
-  kind: "malformed_line" | "unknown_event" | "oversized_line";
+  kind: "malformed_line" | "unknown_event" | "oversized_line" | "missing_event_type";
   detail?: string;
 };
 
@@ -77,10 +77,13 @@ export type SubagentStreamState = {
   rawText: string;
   stdoutBuffer: string;
   stdoutDecoder?: TextDecoder;
+  stdoutTruncated: boolean;
+  stdoutTotalBytes: number;
   stdoutDiscardingOversizeLine: boolean;
   sawPiJsonStdout: boolean;
   usage: SubagentUsage;
   model?: string;
+  modelStopReason?: string;
   messages: RetainedSubagentMessage[];
   activeMessageIndex?: number;
   lastEvent?: Record<string, unknown>;
@@ -92,6 +95,7 @@ export type SubagentStreamState = {
   modifiedFiles: string[];
   protocolDiagnostics: SubagentProtocolDiagnostic[];
   compaction?: SubagentCompactionState;
+  protocolSettled: boolean;
   terminal?: SubagentTerminal;
   exitCode: number;
   stopReason?: string;
@@ -119,6 +123,7 @@ function configuredPositiveInteger(value: string | undefined, fallback: number):
 
 export const MAX_SUBAGENT_RESULT_BYTES = configuredPositiveInteger(process.env.PI_AGENTSH_SUBAGENT_RESULT_MAX_BYTES, 50 * 1024);
 export const MAX_SUBAGENT_LINE_BYTES = 64 * 1024;
+export const MAX_SUBAGENT_RELEVANT_LINE_BYTES = 4 * 1024 * 1024;
 const MAX_RETAINED_MESSAGES = 16;
 const MAX_RETAINED_CONTENT_PARTS = 16;
 const MAX_RETAINED_TEXT_BYTES = 4 * 1024;
@@ -149,6 +154,24 @@ function formatByteCount(bytes: number): string {
   if (bytes < 1024) return `${bytes} B`;
   if (bytes < 1024 * 1024) return `${(bytes / 1024).toFixed(1)} KiB`;
   return `${(bytes / (1024 * 1024)).toFixed(1)} MiB`;
+}
+
+export function tailByBytes(text: string, maxBytes = MAX_SUBAGENT_RESULT_BYTES): string {
+  if (maxBytes <= 0) return "";
+  if (byteLength(text) <= maxBytes) return text;
+  let lo = 0;
+  let hi = text.length;
+  while (lo < hi) {
+    const mid = Math.floor((lo + hi) / 2);
+    if (byteLength(text.slice(mid)) > maxBytes) lo = mid + 1;
+    else hi = mid;
+  }
+  if (lo > 0) {
+    const current = text.charCodeAt(lo);
+    const previous = text.charCodeAt(lo - 1);
+    if (current >= 0xdc00 && current <= 0xdfff && previous >= 0xd800 && previous <= 0xdbff) lo++;
+  }
+  return text.slice(lo);
 }
 
 export function truncateByBytes(text: string, maxBytes = MAX_SUBAGENT_RESULT_BYTES): string {
@@ -466,10 +489,13 @@ export function createSubagentStreamState(initial: SubagentStreamInitialState): 
     liveText: truncateByBytes(initial.liveText ?? "", MAX_RETAINED_TEXT_BYTES),
     rawText: truncateByBytes(initial.rawText ?? "", MAX_SUBAGENT_RESULT_BYTES),
     stdoutBuffer: truncateByBytes(initial.stdoutBuffer ?? "", MAX_SUBAGENT_LINE_BYTES),
+    stdoutTruncated: initial.stdoutTruncated === true,
+    stdoutTotalBytes: usageNumber(initial.stdoutTotalBytes),
     stdoutDiscardingOversizeLine: initial.stdoutDiscardingOversizeLine === true,
     sawPiJsonStdout: initial.sawPiJsonStdout ?? false,
     usage,
     model: boundedString(initial.model, 256),
+    modelStopReason: boundedString(initial.modelStopReason, 128),
     messages,
     activeMessageIndex: initial.activeMessageIndex !== undefined && initial.activeMessageIndex >= 0 && initial.activeMessageIndex < messages.length ? initial.activeMessageIndex : undefined,
     lastEvent: initial.lastEvent && typeof initial.lastEvent === "object" ? safeEventSummary(initial.lastEvent, String((initial.lastEvent as Record<string, unknown>).type ?? "unknown")) : undefined,
@@ -481,6 +507,7 @@ export function createSubagentStreamState(initial: SubagentStreamInitialState): 
     modifiedFiles: (initial.modifiedFiles ?? []).map((path) => boundedString(path, MAX_METADATA_BYTES)).filter((path): path is string => path !== undefined).slice(-MAX_RETAINED_PATHS),
     protocolDiagnostics: (initial.protocolDiagnostics ?? []).slice(-MAX_PROTOCOL_DIAGNOSTICS).map((diagnostic) => ({ kind: diagnostic.kind, detail: boundedString(diagnostic.detail, 256) })),
     compaction: cloneCompactionState(initial.compaction),
+    protocolSettled: initial.protocolSettled === true,
     terminal: normalizeSubagentTerminal(initial.terminal, { exitCode: initial.exitCode, stopReason: initial.stopReason, error: initial.errorMessage }),
     exitCode: usageNumber(initial.exitCode ?? -1),
     stopReason: boundedString(initial.stopReason, 128),
@@ -515,6 +542,7 @@ export function parseSubagentPiJsonStdout(stdout: string) {
     messages: state.messages.map(cloneMessage),
     usage: { ...state.usage },
     model: state.model,
+    modelStopReason: state.modelStopReason,
     lastEvent: state.lastEvent ? { ...state.lastEvent } : undefined,
     lastToolCall: state.lastToolCall ? { name: state.lastToolCall.name, args: { ...state.lastToolCall.args } } : undefined,
     lastToolResult: state.lastToolResult,
@@ -523,6 +551,7 @@ export function parseSubagentPiJsonStdout(stdout: string) {
     modifiedFiles: [...state.modifiedFiles],
     protocolDiagnostics: state.protocolDiagnostics.map((diagnostic) => ({ ...diagnostic })),
     compaction: cloneCompactionState(state.compaction),
+    protocolSettled: state.protocolSettled,
   };
 }
 
@@ -535,6 +564,8 @@ export function appendSubagentRawText(state: SubagentStreamState, text: string) 
 const PI_JSON_EVENT_TYPES = new Set([
   "session",
   "agent_start",
+  "agent_end",
+  "agent_settled",
   "turn_start",
   "turn_end",
   "message_start",
@@ -628,7 +659,8 @@ function upsertSubagentStreamMessage(state: SubagentStreamState, msg: unknown, f
     if (source?.role === "assistant") {
       updateUsageFromAssistantMessage(state.usage, source);
       state.model = boundedString(source.model, 256) ?? state.model;
-      state.stopReason = boundedString(source.stopReason, 128) ?? state.stopReason;
+      state.modelStopReason = boundedString(source.stopReason, 128) ?? state.modelStopReason;
+      state.stopReason = state.modelStopReason ?? state.stopReason;
       state.errorMessage = sanitizedDiagnostic(source.errorMessage) ?? state.errorMessage;
     }
     state.activeMessageIndex = undefined;
@@ -671,6 +703,7 @@ export function subagentStreamResult(state: SubagentStreamState) {
     usage: { ...state.usage },
     messages: state.messages.map(cloneMessage),
     model: state.model,
+    modelStopReason: state.modelStopReason,
     tools: state.tools ? [...state.tools] : undefined,
     cwd: state.cwd,
     lastEvent: state.lastEvent ? { ...state.lastEvent } : undefined,
@@ -681,8 +714,22 @@ export function subagentStreamResult(state: SubagentStreamState) {
     modifiedFiles: [...state.modifiedFiles],
     protocolDiagnostics: state.protocolDiagnostics.map((diagnostic) => ({ ...diagnostic })),
     compaction: cloneCompactionState(state.compaction),
+    protocolSettled: state.protocolSettled,
+    stdoutTruncated: state.stdoutTruncated,
+    stdoutTotalBytes: state.stdoutTotalBytes,
     terminal: cloneSubagentTerminal(state.terminal),
   };
+}
+
+const PI_JSON_AGGREGATE_EVENT_TYPES = new Set(["agent_end", "turn_end"]);
+const PI_JSON_RELEVANT_LARGE_EVENT_TYPES = new Set(["message_end", "compaction_end", "agent_settled"]);
+
+function piJsonEventTypePrefix(line: string): string {
+  return /"type"\s*:\s*"([^"\\]+)"/.exec(line.slice(0, 4096))?.[1] ?? "";
+}
+
+function piJsonLineLimit(eventType: string): number {
+  return PI_JSON_RELEVANT_LARGE_EVENT_TYPES.has(eventType) ? MAX_SUBAGENT_RELEVANT_LINE_BYTES : MAX_SUBAGENT_LINE_BYTES;
 }
 
 export function processSubagentStdoutLine(state: SubagentStreamState, line: string) {
@@ -691,9 +738,12 @@ export function processSubagentStdoutLine(state: SubagentStreamState, line: stri
     if (!state.sawPiJsonStdout) appendSubagentRawText(state, "\n");
     return;
   }
-  if (byteLength(trimmed) > MAX_SUBAGENT_LINE_BYTES) {
-    appendSubagentRawText(state, `[oversized child output line omitted: ${formatByteCount(byteLength(trimmed))}]\n`);
-    recordProtocolDiagnostic(state, "oversized_line", formatByteCount(byteLength(trimmed)));
+  const prefixedEventType = piJsonEventTypePrefix(trimmed);
+  const lineBytes = byteLength(trimmed);
+  if (lineBytes > piJsonLineLimit(prefixedEventType)) {
+    if (PI_JSON_AGGREGATE_EVENT_TYPES.has(prefixedEventType)) return;
+    appendSubagentRawText(state, `[oversized child output line omitted: ${formatByteCount(lineBytes)}]\n`);
+    recordProtocolDiagnostic(state, "oversized_line", `${prefixedEventType ? `${prefixedEventType}: ` : ""}${formatByteCount(lineBytes)}`);
     return;
   }
 
@@ -752,6 +802,8 @@ export function processSubagentStdoutLine(state: SubagentStreamState, line: stri
     upsertSubagentStreamMessage(state, source.message, true);
   } else if (eventType === "compaction_start" || eventType === "compaction_end") {
     recordCompactionEvent(state, event, eventType);
+  } else if (eventType === "agent_settled") {
+    state.protocolSettled = true;
   }
   const assistantText = assistantTextFromPiJsonEvent(event);
   if (assistantText !== undefined) {
@@ -775,9 +827,13 @@ export function appendSubagentStdoutChunk(state: SubagentStreamState, chunk: str
   }
   for (const line of lines) processSubagentStdoutLine(state, line);
   state.stdoutBuffer = decoded.buffer;
-  if (byteLength(state.stdoutBuffer) > MAX_SUBAGENT_LINE_BYTES) {
-    appendSubagentRawText(state, `[oversized child output line omitted: more than ${formatByteCount(MAX_SUBAGENT_LINE_BYTES)}]\n`);
-    recordProtocolDiagnostic(state, "oversized_line", `more than ${formatByteCount(MAX_SUBAGENT_LINE_BYTES)}`);
+  const bufferedEventType = piJsonEventTypePrefix(state.stdoutBuffer);
+  const bufferedLimit = piJsonLineLimit(bufferedEventType);
+  if (byteLength(state.stdoutBuffer) > bufferedLimit) {
+    if (!PI_JSON_AGGREGATE_EVENT_TYPES.has(bufferedEventType)) {
+      appendSubagentRawText(state, `[oversized child output line omitted: more than ${formatByteCount(bufferedLimit)}]\n`);
+      recordProtocolDiagnostic(state, "oversized_line", `${bufferedEventType ? `${bufferedEventType}: ` : ""}more than ${formatByteCount(bufferedLimit)}`);
+    }
     state.stdoutBuffer = "";
     state.stdoutDiscardingOversizeLine = true;
   }

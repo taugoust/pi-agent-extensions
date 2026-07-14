@@ -734,6 +734,7 @@ in
                 res.write(chunk);
                 await new Promise((resolve) => setImmediate(resolve));
               }
+              if (response.keepOpenMs) await new Promise((resolve) => setTimeout(resolve, response.keepOpenMs));
               res.end();
               return;
             }
@@ -1345,9 +1346,11 @@ in
               { type: "text", text: visible },
             ],
           },
-        }) + "\n";
+        }) + "\n" + JSON.stringify({ type: "agent_settled" }) + "\n";
         const completedTerminal = { state: "completed", exit_code: 0, termination: "natural", retryable: false };
-        const terminalResult = { mode: "single", final: visible, terminal: completedTerminal, results: [{ label: "child", task: "utf8", exit_code: 0, stop_reason: "completed", terminal: completedTerminal, final: visible }] };
+        // Reproduce an older/truncated AgentSH result: the live stream observed
+        // the answer, but the terminal item does not repeat stdout or final.
+        const terminalResult = { mode: "single", final: "", terminal: completedTerminal, results: [{ label: "child", task: "utf8", exit_code: 0, stop_reason: "completed", model_stop_reason: "stop", terminal: completedTerminal, final: "", protocol_settled: true, stdout_truncated: true, stdout_total_bytes: 3145728 }] };
         const outerStream = [
           { event: "subagent_child_start", label: "child", task: "utf8" },
           { event: "stdout", label: "child", data: childStdout },
@@ -1364,9 +1367,18 @@ in
           }
           if (request.method === "GET" && request.url === "/api/v1/approvals") return [];
           if (request.method === "POST" && request.url === "/api/v1/sessions/sess-subagent-stream/tools/spawn_subagent") {
-            if (request.body.task === "cancel-stream") {
-              await new Promise((resolve) => setTimeout(resolve, 250));
-              return { event: "done", ok: true, result: { mode: "single", final: "too late", results: [] } };
+            if (request.body.tasks?.some((task) => task.task === "cancel-stream")) {
+              const retained = "completed-before-user-cancellation";
+              const completedChild = { label: "task 1", task: "cancel-stream", exit_code: 0, stop_reason: "completed", terminal: { state: "completed", exit_code: 0, termination: "natural", retryable: false }, final: retained, protocol_settled: true };
+              return {
+                ndjsonChunks: [Buffer.from([
+                  JSON.stringify({ event: "subagent_child_start", label: "task 1", task: "cancel-stream" }),
+                  JSON.stringify({ event: "stdout", label: "task 1", data: JSON.stringify({ type: "message_end", message: { role: "assistant", content: [{ type: "text", text: retained }], stopReason: "stop" } }) + "\n" + JSON.stringify({ type: "agent_settled" }) + "\n" }),
+                  JSON.stringify({ event: "subagent_result", label: "task 1", result: completedChild }),
+                  JSON.stringify({ event: "subagent_child_start", label: "task 2", task: "wait-for-cancel" }),
+                ].join("\n") + "\n", "utf8")],
+                keepOpenMs: 250,
+              };
             }
             if (request.body.task === "typed-failure") {
               const failedTerminal = { state: "failed", failure_kind: "model", exit_code: 1, termination: "natural", retryable: false, message: "model failed" };
@@ -1377,6 +1389,29 @@ in
                 JSON.stringify({ event: "subagent_result", label: "child", result: failedChild }),
                 JSON.stringify({ event: "done", ok: true, result: failedResult, error: "child task failed" }),
               ].join("\n"), "utf8")] };
+            }
+            if (request.body.task === "dishonest-tool-use") {
+              const completedTerminal = { state: "completed", exit_code: 0, termination: "natural", retryable: false };
+              const child = { label: "child", task: "dishonest-tool-use", exit_code: 0, stop_reason: "completed", model_stop_reason: "toolUse", terminal: completedTerminal, final: "stale-earlier-answer", protocol_settled: true };
+              const stdout = [
+                { type: "message_end", message: { role: "assistant", content: [{ type: "text", text: "stale-earlier-answer" }], stopReason: "stop" } },
+                { type: "message_end", message: { role: "assistant", content: [{ type: "toolCall", name: "read", arguments: { path: "/tmp/x" } }], stopReason: "toolUse" } },
+                { type: "agent_settled" },
+              ].map((event) => JSON.stringify(event)).join("\n") + "\n";
+              return { ndjsonChunks: [Buffer.from([
+                JSON.stringify({ event: "subagent_child_start", label: "child", task: "dishonest-tool-use" }),
+                JSON.stringify({ event: "stdout", label: "child", data: stdout }),
+                JSON.stringify({ event: "subagent_result", label: "child", result: child }),
+                JSON.stringify({ event: "done", ok: true, result: { mode: "single", final: "stale-earlier-answer", terminal: completedTerminal, results: [child] } }),
+              ].join("\n") + "\n", "utf8")] };
+            }
+            if (request.body.task === "partial-transport") {
+              const retained = "completed-before-transport-failure";
+              return { ndjsonChunks: [Buffer.from([
+                JSON.stringify({ event: "subagent_child_start", label: "task 1", task: "finished" }),
+                JSON.stringify({ event: "stdout", label: "task 1", data: JSON.stringify({ type: "message_end", message: { role: "assistant", content: [{ type: "text", text: retained }], stopReason: "stop" } }) + "\n" + JSON.stringify({ type: "agent_settled" }) + "\n" }),
+                JSON.stringify({ event: "subagent_child_start", label: "task 2", task: "interrupted" }),
+              ].join("\n") + "\n", "utf8")] };
             }
             return {
               ndjsonChunks: [
@@ -1403,6 +1438,12 @@ in
         assert(!serializedUpdates.includes(hidden), "child thinking leaked into parent streamed updates");
         assert(!JSON.stringify(toolResult).includes(hidden), "child thinking leaked into the final parent tool result");
         assert(toolResult.details.terminal.state === "completed", "typed completed terminal was not preserved");
+        assert(toolResult.details.final === visible, "live final answer was overwritten by an empty bounded terminal result");
+        assert(toolResult.details.results[0].lastAssistantText === visible, "live child message state was not retained through terminal reduction");
+        assert(toolResult.details.results[0].protocolSettled === true, "agent_settled lifecycle state was lost");
+        assert(toolResult.details.results[0].modelStopReason === "stop", "last assistant model stop reason was lost");
+        assert(toolResult.details.results[0].stdoutTruncated === true, "raw diagnostic truncation metadata was lost");
+        assert(toolResult.content[0].text.includes(visible), "parent-facing result omitted the retained live final answer");
         assert(toolResult.isError === false, "completed typed terminal was marked as an error");
 
         const failedToolResult = await subagentTool.execute("stream-failure", { task: "typed-failure" }, undefined, undefined, ctx);
@@ -1411,12 +1452,35 @@ in
         assert(failedToolResult.content[0].text.includes("model failed"), "typed failure diagnostic was reduced to a generic stop reason");
         assert(failedToolResult.isError === true, "failed child task was not marked as an error");
 
+        const dishonestToolUseResult = await subagentTool.execute("stream-dishonest-tool-use", { task: "dishonest-tool-use" }, undefined, undefined, ctx);
+        assert(dishonestToolUseResult.details.terminal.state === "failed", "tool-use message_end was accepted as completed parent result");
+        assert(dishonestToolUseResult.details.results[0].terminal.failureKind === "protocol", "tool-use completion was not classified as a protocol failure");
+        assert(dishonestToolUseResult.details.results[0].modelStopReason === "toolUse", "tool-use model stop reason was lost");
+        assert(!dishonestToolUseResult.content[0].text.includes("stale-earlier-answer"), "an earlier assistant message was reused as the final answer after tool use");
+        assert(dishonestToolUseResult.content[0].text.includes("tool-use"), "tool-use protocol failure diagnostic was not parent-visible");
+        assert(dishonestToolUseResult.isError === true, "dishonest tool-use completion was not marked as an error");
+
+        const partialTransportResult = await subagentTool.execute("stream-partial-transport", { task: "partial-transport" }, undefined, undefined, ctx);
+        assert(partialTransportResult.details.terminal.state === "failed", "missing terminal stream event was not reported as transport failure");
+        assert(partialTransportResult.details.results[0].terminal.state === "completed", "outer transport failure overwrote an already-completed parallel child");
+        assert(partialTransportResult.details.results[0].lastAssistantText === "completed-before-transport-failure", "completed child answer was lost during parallel cancellation reduction");
+        assert(!partialTransportResult.details.results[0].errorMessage, "outer transport failure was copied onto an already-completed child");
+        assert(partialTransportResult.details.results[1].terminal.state === "failed", "interrupted parallel child was not marked failed");
+        assert(partialTransportResult.isError === true, "partial transport failure was not marked as an error");
+
         const abortController = new AbortController();
-        const abortTimer = setTimeout(() => abortController.abort(), 20);
-        const cancelledToolResult = await subagentTool.execute("stream-cancel", { task: "cancel-stream" }, abortController.signal, undefined, ctx);
+        const abortTimer = setTimeout(() => abortController.abort(), 500);
+        const cancelledToolResult = await subagentTool.execute("stream-cancel", { tasks: [{ task: "cancel-stream" }, { task: "wait-for-cancel" }] }, abortController.signal, (update) => {
+          const children = update?.details?.results ?? [];
+          if (children.some((child) => child.label === "task 1" && child.terminal?.state === "completed") && children.some((child) => child.label === "task 2")) abortController.abort();
+        }, ctx);
         clearTimeout(abortTimer);
         assert(cancelledToolResult.details.terminal.state === "cancelled", "aborted request did not produce a cancelled terminal");
         assert(cancelledToolResult.details.terminal.cancellationCause === "user_cancelled", "aborted request lost its user cancellation cause");
+        assert(cancelledToolResult.details.results[0].terminal.state === "completed", "parallel cancellation overwrote an already-completed child");
+        assert(cancelledToolResult.details.results[0].lastAssistantText === "completed-before-user-cancellation", "parallel cancellation lost the completed child answer");
+        assert(!cancelledToolResult.details.results[0].errorMessage, "parallel cancellation copied its error onto an already-completed child");
+        assert(cancelledToolResult.details.results[1].terminal.state === "cancelled", "active parallel sibling was not marked cancelled");
         assert(cancelledToolResult.content[0].text.includes("subagent cancelled"), "cancelled request was rendered as a generic failure");
 
         const retainedCommand = "printf 'retained-progress-smoke\\n'";

@@ -125,6 +125,22 @@ function line(event: unknown): string {
 }
 
 {
+  const capsule = createSubagentProgressCapsule({
+    label: "latest-tool-use",
+    exitCode: 1,
+    stopReason: "error",
+    modelStopReason: "toolUse",
+    protocolSettled: true,
+    messages: [
+      { role: "assistant", content: [{ type: "text", text: "stale earlier text" }], stopReason: "stop" },
+      { role: "assistant", content: [{ type: "toolCall", name: "read", arguments: { path: "/tmp/x" } }], stopReason: "toolUse" },
+    ],
+  });
+  assert.equal(capsule.lastAssistantText, undefined, "an earlier assistant message was misreported as the latest final text");
+  assert.equal(capsule.modelStopReason, "toolUse");
+}
+
+{
   const state = createSubagentStreamState({ label: "snapshot" });
   appendSubagentStdoutChunk(state, line({ type: "message_end", message: { role: "assistant", content: [{ type: "text", text: "stable" }] } }));
   const capsule = createSubagentProgressCapsule(state);

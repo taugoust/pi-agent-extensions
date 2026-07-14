@@ -20,7 +20,7 @@ import { Box, Container, Key, Markdown, matchesKey, Spacer, Text, truncateToWidt
 import { inheritSubagentModels } from "./subagent-model.js";
 import { abortSubagentProtocolStream, appendSubagentProtocolChunk, createSubagentProtocolState, finishSubagentProtocolStream } from "./subagent-protocol.js";
 import { boundSubagentProgressCapsules, createSubagentProgressCapsule, sanitizeSubagentParentText } from "./subagent-result.js";
-import { appendSubagentPrefix, appendSubagentRawText, appendSubagentStdoutChunk, createSubagentStreamState, flushSubagentStdout, parseSubagentPiJsonStdout, subagentLiveToolStatus, truncateByBytes, usageNumber, usageZero, type SubagentStreamState } from "./subagent-stream.js";
+import { appendSubagentPrefix, appendSubagentRawText, appendSubagentStdoutChunk, createSubagentStreamState, flushSubagentStdout, parseSubagentPiJsonStdout, subagentLiveToolStatus, tailByBytes, truncateByBytes, usageNumber, usageZero, type SubagentStreamState } from "./subagent-stream.js";
 import { normalizeSubagentTerminal, subagentTerminalFailed } from "./subagent-terminal.js";
 
 type JsonObject = Record<string, unknown>;
@@ -2465,41 +2465,95 @@ function contextWindowForModel(ctx: ExtensionContext | undefined, model?: string
   return 0;
 }
 
-function subagentParentDetails(result: any, ctx?: ExtensionContext) {
+function latestSubagentAssistantMessage(state: SubagentStreamState) {
+  return [...state.messages].reverse().find((message) => message.role === "assistant");
+}
+
+function latestSubagentAssistantText(state: SubagentStreamState): string {
+  const latestAssistant = latestSubagentAssistantMessage(state);
+  return latestAssistant?.content.filter((part) => part.type === "text").map((part) => String(part.text || "")).join("").trim() || "";
+}
+
+function piProtocolFailure(state: SubagentStreamState): { failureKind: "model" | "protocol"; message: string; retryable: boolean } | undefined {
+  const hasProtocolEvidence = state.sawPiJsonStdout || state.protocolSettled || Boolean(state.modelStopReason);
+  if (!hasProtocolEvidence) return undefined;
+  const latestAssistant = latestSubagentAssistantMessage(state);
+  const modelStopReason = String(state.modelStopReason || latestAssistant?.stopReason || "").trim();
+  const normalizedStopReason = modelStopReason.toLowerCase().replace(/[_-]/g, "");
+  if (["error", "aborted", "cancelled", "canceled"].includes(normalizedStopReason)) {
+    return { failureKind: "model", message: latestAssistant?.errorMessage || `child model stopped: ${modelStopReason || "error"}`, retryable: false };
+  }
+  if (!state.protocolSettled) return { failureKind: "protocol", message: "child Pi stream ended before agent_settled", retryable: true };
+  if (normalizedStopReason === "tooluse") {
+    return { failureKind: "protocol", message: "child Pi settled after a tool-use turn without a final assistant response", retryable: true };
+  }
+  if (!state.final?.trim() && !latestSubagentAssistantText(state)) {
+    return { failureKind: "protocol", message: "child Pi settled without visible final assistant text", retryable: true };
+  }
+  return undefined;
+}
+
+function subagentParentDetails(result: any, ctx?: ExtensionContext, streamedStates?: Map<string, SubagentStreamState>) {
   const detailResult = (item: any) => {
+    const label = stringifyData(item?.label || "subagent") || "subagent";
+    const streamed = streamedStates?.get(label);
     const parsed = typeof item?.stdout === "string" ? parseSubagentPiJsonStdout(item.stdout) : undefined;
-    const model = item?.model || parsed?.model;
-    const usage = { ...(parsed?.usage ?? item?.usage ?? usageZero()) };
-    usage.contextWindow = usageNumber(item?.context_window ?? item?.contextWindow) || contextWindowForModel(ctx, model);
+    const model = item?.model || streamed?.model || parsed?.model;
+    const usageCandidates = [streamed?.usage, parsed?.usage, item?.usage].filter((candidate): candidate is any => Boolean(candidate));
+    const mostCompleteUsage = usageCandidates.sort((a, b) => usageNumber(b?.turns) - usageNumber(a?.turns))[0] ?? usageZero();
+    const usage = { ...mostCompleteUsage };
+    usage.contextWindow = usageNumber(item?.context_window ?? item?.contextWindow) || usageNumber(streamed?.usage.contextWindow) || contextWindowForModel(ctx, model);
+    const serverDiagnostics = !streamed && Array.isArray(item?.protocol_diagnostics ?? item?.protocolDiagnostics)
+      ? (item.protocol_diagnostics ?? item.protocolDiagnostics).map((diagnostic: any) => ({
+          kind: stringifyData(diagnostic?.kind || "unknown_event") as any,
+          detail: [diagnostic?.event, diagnostic?.bytes ? `${diagnostic.bytes} B` : ""].filter(Boolean).join(": ") || undefined,
+        }))
+      : [];
+    const protocolDiagnostics = [
+      ...(streamed?.protocolDiagnostics ?? parsed?.protocolDiagnostics ?? item?.protocolDiagnostics ?? []),
+      ...serverDiagnostics,
+    ];
+    const itemTerminal = normalizeSubagentTerminal(item?.terminal, { exitCode: item?.exit_code ?? item?.exitCode, stopReason: item?.stop_reason ?? item?.stopReason, error: item?.error ?? item?.errorMessage });
+    const terminalWasDowngraded = itemTerminal?.state === "completed" && streamed?.terminal?.state === "failed";
+    const serverFinal = !terminalWasDowngraded && typeof item?.final === "string" && item.final.trim() ? item.final : undefined;
     return createSubagentProgressCapsule({
-      label: item?.label,
-      task: item?.task,
-      exitCode: item?.exit_code ?? item?.exitCode,
-      stopReason: item?.stop_reason ?? item?.stopReason,
-      terminal: item?.terminal,
-      final: item?.final,
-      errorMessage: item?.error ?? item?.errorMessage,
-      stderr: item?.stderr ?? item?.stderrTail,
+      label,
+      task: item?.task ?? streamed?.task,
+      exitCode: item?.exit_code ?? item?.exitCode ?? streamed?.exitCode,
+      stopReason: item?.stop_reason ?? item?.stopReason ?? streamed?.stopReason,
+      terminal: streamed?.terminal ?? itemTerminal,
+      final: serverFinal ?? (terminalWasDowngraded ? undefined : streamed?.final),
+      errorMessage: item?.error ?? item?.errorMessage ?? streamed?.errorMessage,
+      stderr: item?.stderr ?? item?.stderrTail ?? streamed?.stderr,
       usage,
-      messages: parsed?.messages ?? item?.messages ?? [],
+      messages: streamed?.messages?.length ? streamed.messages : parsed?.messages ?? item?.messages ?? [],
       model,
-      tools: item?.tools,
-      cwd: item?.cwd,
-      lastToolCall: parsed?.lastToolCall ?? item?.activeTool,
-      completedTools: parsed?.completedTools ?? item?.completedTools ?? [],
-      readFiles: parsed?.readFiles ?? item?.readFiles ?? [],
-      modifiedFiles: parsed?.modifiedFiles ?? item?.modifiedFiles ?? [],
-      protocolDiagnostics: parsed?.protocolDiagnostics ?? item?.protocolDiagnostics ?? [],
-      compaction: parsed?.compaction ?? item?.compaction,
+      modelStopReason: item?.model_stop_reason ?? item?.modelStopReason ?? streamed?.modelStopReason ?? parsed?.modelStopReason,
+      tools: item?.tools ?? streamed?.tools,
+      cwd: item?.cwd ?? streamed?.cwd,
+      lastToolCall: streamed?.lastToolCall ?? parsed?.lastToolCall ?? item?.activeTool,
+      completedTools: streamed?.completedTools?.length ? streamed.completedTools : parsed?.completedTools ?? item?.completedTools ?? [],
+      readFiles: streamed?.readFiles?.length ? streamed.readFiles : parsed?.readFiles ?? item?.readFiles ?? [],
+      modifiedFiles: streamed?.modifiedFiles?.length ? streamed.modifiedFiles : parsed?.modifiedFiles ?? item?.modifiedFiles ?? [],
+      protocolDiagnostics,
+      protocolSettled: item?.protocol_settled === true || item?.protocolSettled === true || streamed?.protocolSettled === true || parsed?.protocolSettled === true,
+      stdoutTruncated: item?.stdout_truncated === true || item?.stdoutTruncated === true || streamed?.stdoutTruncated === true,
+      stdoutTotalBytes: Math.max(usageNumber(item?.stdout_total_bytes ?? item?.stdoutTotalBytes), usageNumber(streamed?.stdoutTotalBytes)),
+      compaction: streamed?.compaction ?? parsed?.compaction ?? item?.compaction,
     });
   };
   const results = boundSubagentProgressCapsules(Array.isArray(result?.results) ? result.results.map(detailResult) : []);
-  const terminal = normalizeSubagentTerminal(result?.terminal);
+  let terminal = normalizeSubagentTerminal(result?.terminal);
+  if (terminal?.state === "completed") {
+    const failedChild = results.find((child) => subagentTerminalFailed(child.terminal));
+    if (failedChild?.terminal) terminal = { ...failedChild.terminal, message: failedChild.terminal.message || failedChild.errorMessage };
+  }
+  const serverParentFinal = terminal?.state === "completed" && typeof result?.final === "string" && result.final.trim() ? sanitizeSubagentParentText(result.final, 4 * 1024) : undefined;
   return {
     mode: result?.mode || (results.length > 1 ? "parallel" : "single"),
     results,
     terminal,
-    final: typeof result?.final === "string" ? sanitizeSubagentParentText(result.final, 4 * 1024) : undefined,
+    final: serverParentFinal ?? (results.length === 1 && results[0].terminal?.state === "completed" ? results[0].final ?? results[0].lastAssistantText : undefined),
     summary: typeof result?.summary === "string" ? sanitizeSubagentParentText(result.summary, 4 * 1024) : undefined,
     error: terminal?.message || (typeof result?.error === "string" ? sanitizeSubagentParentText(result.error, 1024) : undefined),
   };
@@ -2507,7 +2561,10 @@ function subagentParentDetails(result: any, ctx?: ExtensionContext) {
 
 function resultLine(result: any) {
   const label = stringifyData(result?.label || "subagent");
-  const text = stringifyData(result?.final || result?.summary || result?.error || result?.errorMessage || result?.terminal?.message || result?.stop_reason || result?.stopReason || "").trim();
+  const failed = subagentTerminalFailed(result?.terminal);
+  const text = stringifyData(failed
+    ? result?.error || result?.errorMessage || result?.terminal?.message || result?.stop_reason || result?.stopReason || result?.final || result?.lastAssistantText || ""
+    : result?.final || result?.lastAssistantText || result?.summary || result?.error || result?.errorMessage || result?.terminal?.message || result?.stop_reason || result?.stopReason || "").trim();
   return text ? `[${label}] ${truncateByBytes(text)}` : `[${label}] ${result?.exit_code ?? result?.exitCode ?? "completed"}`;
 }
 
@@ -2645,10 +2702,7 @@ function subagentLastAssistantText(messages: any[]): string {
   for (let i = messages.length - 1; i >= 0; i--) {
     const msg = messages[i];
     if (msg?.role !== "assistant" || !Array.isArray(msg.content)) continue;
-    for (let j = msg.content.length - 1; j >= 0; j--) {
-      const part = msg.content[j];
-      if (part?.type === "text" && String(part.text || "").trim()) return String(part.text || "");
-    }
+    return msg.content.filter((part: any) => part?.type === "text").map((part: any) => String(part.text || "")).join("").trim();
   }
   return "";
 }
@@ -3046,7 +3100,7 @@ export default function sandbox(pi: ExtensionAPI) {
             emitSubagentUpdate(message);
           } else if (message.event === "stderr" || message.event === "message" || message.event === "subagent_update") {
             const text = stringifyData(message.data || message.result || "");
-            if (message.event === "stderr") childState.stderr = truncateByBytes((childState.stderr || "") + text);
+            if (message.event === "stderr") childState.stderr = tailByBytes((childState.stderr || "") + text);
             appendSubagentRawText(childState, text);
             emitSubagentUpdate(message);
           } else if (message.event === "subagent_child_start") {
@@ -3067,9 +3121,36 @@ export default function sandbox(pi: ExtensionAPI) {
             childState.exitCode = typeof rawExitCode === "number" && Number.isFinite(rawExitCode) ? rawExitCode : 1;
             childState.stopReason = stringifyData(result?.stop_reason || result?.stopReason || (childState.exitCode === 0 ? "completed" : "error"));
             childState.terminal = normalizeSubagentTerminal(result?.terminal, { exitCode: childState.exitCode, stopReason: childState.stopReason, error: result?.error });
-            childState.final = typeof result?.final === "string" ? truncateByBytes(result.final) : childState.final;
+            if (typeof result?.final === "string" && result.final.trim()) childState.final = truncateByBytes(result.final);
+            const modelStopReason = stringifyData(result?.model_stop_reason ?? result?.modelStopReason ?? "").trim();
+            if (modelStopReason) childState.modelStopReason = truncateByBytes(modelStopReason, 128);
+            childState.protocolSettled ||= result?.protocol_settled === true || result?.protocolSettled === true;
+            childState.stdoutTruncated ||= result?.stdout_truncated === true || result?.stdoutTruncated === true;
+            childState.stdoutTotalBytes = Math.max(childState.stdoutTotalBytes, usageNumber(result?.stdout_total_bytes ?? result?.stdoutTotalBytes));
+            const protocolFailure = childState.terminal?.state === "completed" ? piProtocolFailure(childState) : undefined;
+            if (protocolFailure) {
+              childState.final = undefined;
+              childState.exitCode = 1;
+              childState.stopReason = "error";
+              childState.terminal = {
+                state: "failed",
+                failureKind: protocolFailure.failureKind,
+                exitCode: 1,
+                termination: "natural",
+                retryable: protocolFailure.retryable,
+                message: protocolFailure.message,
+              };
+            }
+            if (Array.isArray(result?.protocol_diagnostics ?? result?.protocolDiagnostics)) {
+              for (const diagnostic of result.protocol_diagnostics ?? result.protocolDiagnostics) {
+                childState.protocolDiagnostics.push({
+                  kind: stringifyData(diagnostic?.kind || "unknown_event") as any,
+                  detail: [diagnostic?.event, diagnostic?.bytes ? `${diagnostic.bytes} B` : ""].filter(Boolean).join(": ") || undefined,
+                });
+              }
+            }
             childState.errorMessage = childState.terminal?.message || (typeof result?.error === "string" ? truncateByBytes(result.error, 2 * 1024) : childState.errorMessage);
-            childState.stderr = typeof result?.stderr === "string" ? truncateByBytes(result.stderr) : childState.stderr;
+            childState.stderr = typeof result?.stderr === "string" ? tailByBytes(result.stderr) : childState.stderr;
             const final = stringifyData(result?.final || result?.error || "");
             if (final) {
               if (childState.liveText.trim() === final.trim()) childState.liveText = "";
@@ -3089,10 +3170,27 @@ export default function sandbox(pi: ExtensionAPI) {
         const message = terminal?.message || "spawn_subagent failed";
         for (const childState of streamStates.values()) {
           flushSubagentStdout(childState);
-          if (childState.exitCode === -1) childState.exitCode = terminal?.exitCode ?? 1;
-          childState.stopReason ||= terminal?.state === "cancelled" ? "cancelled" : "error";
-          childState.terminal ||= terminal;
-          childState.errorMessage ||= message;
+          if (childState.exitCode === -1) {
+            const protocolFailure = piProtocolFailure(childState);
+            const retainedFinal = latestSubagentAssistantText(childState);
+            if (childState.protocolSettled && !protocolFailure && retainedFinal) {
+              childState.exitCode = 0;
+              childState.stopReason = "completed";
+              childState.final ||= retainedFinal;
+              childState.terminal = { state: "completed", exitCode: 0, termination: "natural", retryable: false };
+            } else if (protocolFailure) {
+              childState.final = undefined;
+              childState.exitCode = 1;
+              childState.stopReason = "error";
+              childState.terminal = { state: "failed", failureKind: protocolFailure.failureKind, exitCode: 1, termination: "natural", retryable: protocolFailure.retryable, message: protocolFailure.message };
+              childState.errorMessage ||= protocolFailure.message;
+            } else {
+              childState.exitCode = terminal?.exitCode ?? 1;
+              childState.stopReason ||= terminal?.state === "cancelled" ? "cancelled" : "error";
+              childState.terminal ||= terminal;
+              childState.errorMessage ||= message;
+            }
+          }
         }
         const mode = hasChain ? "chain" : hasTasks ? "parallel" : "single";
         const results = streamOrder.length
@@ -3107,11 +3205,11 @@ export default function sandbox(pi: ExtensionAPI) {
           error: message,
           results,
         };
-        const details = subagentParentDetails(result, ctx) as any;
+        const details = subagentParentDetails(result, ctx, streamStates) as any;
         const text = truncateByBytes(subagentText(details));
         return { content: [{ type: "text", text }], details, isError: true };
       }
-      const details = subagentParentDetails(result, ctx) as any;
+      const details = subagentParentDetails(result, ctx, streamStates) as any;
       const text = truncateByBytes(subagentText(details));
       const isError = subagentTerminalFailed(details?.terminal) || details?.results?.some((child: any) => subagentTerminalFailed(child?.terminal)) || Boolean((result as any)?.error);
       return { content: [{ type: "text", text }], details, isError };
