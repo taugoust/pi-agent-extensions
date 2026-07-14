@@ -762,6 +762,74 @@ in
       };
     }
 
+    async function withRestartableRestSupervisor(handler) {
+      const dir = fs.mkdtempSync(path.join(os.tmpdir(), "agentsh-restartable-rest-"));
+      const socketPath = path.join(dir, "supervisor.sock");
+      const requests = [];
+      let server;
+      let generation = 0;
+
+      async function start() {
+        assert(!server, "restartable supervisor is already listening");
+        fs.rmSync(socketPath, { force: true });
+        generation += 1;
+        const currentGeneration = generation;
+        server = http.createServer((req, res) => {
+          const chunks = [];
+          req.on("data", (chunk) => chunks.push(Buffer.isBuffer(chunk) ? chunk : Buffer.from(chunk)));
+          req.on("end", async () => {
+            const raw = Buffer.concat(chunks).toString("utf8");
+            let body;
+            if (raw.trim()) body = JSON.parse(raw);
+            const request = { method: req.method, url: req.url, body, generation: currentGeneration };
+            requests.push(request);
+            try {
+              const response = await handler(request, requests);
+              if (response?.destroySocket) {
+                req.socket.destroy();
+                return;
+              }
+              res.statusCode = response?.statusCode ?? 200;
+              res.setHeader("Content-Type", "application/json");
+              res.end(JSON.stringify(response?.body ?? response ?? {}));
+            } catch (error) {
+              if (req.socket.destroyed) return;
+              res.statusCode = 500;
+              res.setHeader("Content-Type", "application/json");
+              res.end(JSON.stringify({ ok: false, error: error instanceof Error ? error.message : String(error) }));
+            }
+          });
+        });
+        await new Promise((resolve, reject) => {
+          server.once("error", reject);
+          server.listen(socketPath, () => {
+            server.off("error", reject);
+            resolve();
+          });
+        });
+      }
+
+      async function stop() {
+        if (!server) return;
+        const closing = server;
+        server = undefined;
+        await new Promise((resolve) => closing.close(resolve));
+      }
+
+      await start();
+      return {
+        socketPath,
+        requests,
+        get generation() { return generation; },
+        start,
+        stop,
+        async close() {
+          await stop();
+          fs.rmSync(dir, { recursive: true, force: true });
+        },
+      };
+    }
+
     async function withHttpServer(handler) {
       const requests = [];
       const server = http.createServer(async (req, res) => {
@@ -866,8 +934,11 @@ in
     }
 
     async function main() {
-      process.env.AGENTSH_APPROVAL_POLL_MS = "60000";
+      delete process.env.PI_AGENTSH_APPROVAL_POLL_MS;
       process.env.AGENTSH_APPROVAL_PROMPT_WATCH_MS = "10";
+      process.env.PI_AGENTSH_RECONNECT_TIMEOUT_MS = "300";
+      process.env.PI_AGENTSH_RECONNECT_INITIAL_MS = "10";
+      process.env.PI_AGENTSH_WATCH_RECONNECT_MS = "25";
 
       const compiledRoot = process.argv[2];
       const moduleUrl = pathToFileURL(path.join(compiledRoot, "sandbox/index.js")).href;
@@ -965,6 +1036,259 @@ in
         await shutdownSession(pi);
         await supervisor.close();
         await central.close();
+      }
+
+      // A missing watcher socket enters reconnecting, tools wait for the same
+      // session at the same path, and a mutating request is dispatched once.
+      {
+        clearAgentSHEnv();
+        process.env.PI_AGENTSH_APPROVAL_POLL_MS = "15";
+        const expectedSession = "sess-reconnect";
+        let returnedSession = expectedSession;
+        let mutatingRequests = 0;
+        const supervisor = await withRestartableRestSupervisor(async (request) => {
+          if (request.method === "GET" && request.url === "/api/v1/sessions/" + expectedSession) {
+            return { id: returnedSession, session_id: returnedSession, workspace: "/workspace", worktree: "/workspace" };
+          }
+          if (request.method === "GET" && request.url === "/api/v1/approvals") return [];
+          if (request.method === "POST" && request.url === "/api/v1/sessions/" + expectedSession + "/tools/write_file") {
+            mutatingRequests += 1;
+            return { ok: true, result: { text: "reconnected write completed" } };
+          }
+          return { statusCode: 404, body: { error: "unexpected supervisor request", request } };
+        });
+        process.env.AGENTSH_SESSION_ID = expectedSession;
+        process.env.AGENTSH_SESSION_SUPERVISOR = "unix://" + supervisor.socketPath;
+        const pi = createPi();
+        sandbox(pi);
+        const ctx = createContext();
+        await startSession(pi, ctx);
+        const writeTool = pi.tools.get("write");
+        assert(writeTool, "reconnect test did not register write tool");
+        const initialConnectedIndex = ctx.statuses.findIndex((entry) => entry.name === "sandbox" && entry.value === "agentsh ✓");
+        assert(initialConnectedIndex >= 0, "REST client never reached initial connected state");
+
+        await supervisor.stop();
+        assert(!fs.existsSync(supervisor.socketPath), "stopped supervisor left a socket path instead of producing ENOENT");
+        await waitFor(
+          () => ctx.statuses.some((entry, index) => index > initialConnectedIndex && entry.name === "sandbox" && entry.value === "agentsh …"),
+          "approval watcher socket loss did not transition to connecting; state=" + JSON.stringify(globalThis.__AGENTSH_PI__.getSupervisorState()) + " statuses=" + JSON.stringify(ctx.statuses),
+          1000,
+        );
+        const reconnectingIndex = ctx.statuses.findIndex((entry, index) => index > initialConnectedIndex && entry.name === "sandbox" && entry.value === "agentsh …");
+        assert(reconnectingIndex > initialConnectedIndex, "status history did not record connected -> connecting");
+
+        const restart = (async () => {
+          await new Promise((resolve) => setTimeout(resolve, 70));
+          await supervisor.start();
+        })();
+        const result = await writeTool.execute("reconnect-write", { path: "/workspace/reconnected.txt", content: "once\n" }, undefined, undefined, ctx);
+        await restart;
+        assert(result.content[0].text.includes("reconnected write completed"), "tool did not complete after delayed socket return");
+        assert(mutatingRequests === 1, "mutating request was dispatched more than once: " + mutatingRequests);
+        assert(globalThis.__AGENTSH_PI__.getSupervisorState().sessionId === expectedSession, "reconnect changed the attached session ID");
+        assert(globalThis.__AGENTSH_PI__.getSupervisorState().status === "connected", "successful reconnect did not restore connected state");
+        assert(supervisor.requests.some((request) => request.generation === 2 && request.method === "GET" && request.url === "/api/v1/sessions/" + expectedSession), "reconnect did not poll the exact original session");
+        const recoveredIndex = ctx.statuses.findIndex((entry, index) => index > reconnectingIndex && entry.name === "sandbox" && entry.value === "agentsh ✓");
+        assert(recoveredIndex > reconnectingIndex, "status history did not record connecting -> connected");
+
+        delete process.env.PI_AGENTSH_APPROVAL_POLL_MS;
+        await shutdownSession(pi);
+        await supervisor.close();
+      }
+
+      // Cancelling during reconnect interrupts the caller's backoff and never
+      // dispatches the abandoned mutation after the shared poll recovers.
+      {
+        clearAgentSHEnv();
+        delete process.env.PI_AGENTSH_APPROVAL_POLL_MS;
+        const expectedSession = "sess-reconnect-abort";
+        let mutatingRequests = 0;
+        const supervisor = await withRestartableRestSupervisor(async (request) => {
+          if (request.method === "GET" && request.url === "/api/v1/sessions/" + expectedSession) return { id: expectedSession, session_id: expectedSession, workspace: "/workspace", worktree: "/workspace" };
+          if (request.method === "GET" && request.url === "/api/v1/approvals") return [];
+          if (request.method === "POST" && request.url.endsWith("/tools/write_file")) {
+            mutatingRequests += 1;
+            return { ok: true, result: { text: "must not run" } };
+          }
+          return { statusCode: 404, body: { error: "unexpected supervisor request", request } };
+        });
+        process.env.AGENTSH_SESSION_ID = expectedSession;
+        process.env.AGENTSH_SESSION_SUPERVISOR = "unix://" + supervisor.socketPath;
+        const pi = createPi();
+        sandbox(pi);
+        const ctx = createContext();
+        await startSession(pi, ctx);
+        await supervisor.stop();
+
+        const controller = new AbortController();
+        const startedAt = Date.now();
+        const abortTimer = setTimeout(() => controller.abort(), 35);
+        let abortError;
+        try {
+          await pi.tools.get("write").execute("aborted-reconnect", { path: "/workspace/aborted.txt", content: "no\n" }, controller.signal, undefined, ctx);
+        } catch (error) {
+          abortError = error;
+        }
+        clearTimeout(abortTimer);
+        assert(abortError?.name === "AbortError", "reconnect cancellation did not preserve AbortError");
+        assert(Date.now() - startedAt < 220, "reconnect cancellation did not interrupt backoff promptly");
+        assert(mutatingRequests === 0, "aborted mutation reached the server");
+
+        await supervisor.start();
+        await waitFor(() => globalThis.__AGENTSH_PI__.getSupervisorState().status === "connected", "shared reconnect poll did not recover after caller abort");
+        await new Promise((resolve) => setTimeout(resolve, 40));
+        assert(mutatingRequests === 0, "aborted mutation was replayed after reconnect");
+        await shutdownSession(pi);
+        await supervisor.close();
+      }
+
+      // A missing listener has a deterministic bounded reconnect timeout and
+      // does not dispatch the pending mutation.
+      {
+        clearAgentSHEnv();
+        delete process.env.PI_AGENTSH_APPROVAL_POLL_MS;
+        const expectedSession = "sess-reconnect-timeout";
+        let mutatingRequests = 0;
+        const supervisor = await withRestartableRestSupervisor(async (request) => {
+          if (request.method === "GET" && request.url === "/api/v1/sessions/" + expectedSession) return { id: expectedSession, session_id: expectedSession, workspace: "/workspace", worktree: "/workspace" };
+          if (request.method === "GET" && request.url === "/api/v1/approvals") return [];
+          if (request.method === "POST" && request.url.endsWith("/tools/write_file")) mutatingRequests += 1;
+          return { ok: true, result: { text: "unexpected" } };
+        });
+        process.env.AGENTSH_SESSION_ID = expectedSession;
+        process.env.AGENTSH_SESSION_SUPERVISOR = "unix://" + supervisor.socketPath;
+        const pi = createPi();
+        sandbox(pi);
+        const ctx = createContext();
+        await startSession(pi, ctx);
+        await supervisor.stop();
+
+        const startedAt = Date.now();
+        let timeoutError;
+        try {
+          await pi.tools.get("write").execute("timed-reconnect", { path: "/workspace/timeout.txt", content: "no\n" }, undefined, undefined, ctx);
+        } catch (error) {
+          timeoutError = error;
+        }
+        const elapsed = Date.now() - startedAt;
+        assert(String(timeoutError).includes("Timed out waiting 300ms"), "reconnect timeout was not actionable: " + timeoutError);
+        assert(elapsed >= 240 && elapsed < 1200, "reconnect timeout was not bounded near its configured deadline: " + elapsed + "ms");
+        assert(mutatingRequests === 0, "timed-out mutation reached the server");
+        await shutdownSession(pi);
+        await supervisor.close();
+      }
+
+      // A 404 session loss is terminal and an ambiguous post-dispatch reset is
+      // surfaced without replaying either request.
+      {
+        clearAgentSHEnv();
+        delete process.env.PI_AGENTSH_APPROVAL_POLL_MS;
+        const expectedSession = "sess-terminal-404";
+        let mutatingRequests = 0;
+        const supervisor = await withRestartableRestSupervisor(async (request) => {
+          if (request.method === "GET" && request.url === "/api/v1/sessions/" + expectedSession) return { id: expectedSession, session_id: expectedSession, workspace: "/workspace", worktree: "/workspace" };
+          if (request.method === "GET" && request.url === "/api/v1/approvals") return [];
+          if (request.method === "POST" && request.url.endsWith("/tools/write_file")) {
+            mutatingRequests += 1;
+            return { statusCode: 404, body: { error: "session_not_found" } };
+          }
+          return { statusCode: 404, body: { error: "unexpected supervisor request", request } };
+        });
+        process.env.AGENTSH_SESSION_ID = expectedSession;
+        process.env.AGENTSH_SESSION_SUPERVISOR = "unix://" + supervisor.socketPath;
+        const pi = createPi();
+        sandbox(pi);
+        const ctx = createContext();
+        await startSession(pi, ctx);
+        let terminalError;
+        try {
+          await pi.tools.get("write").execute("terminal-404", { path: "/workspace/missing.txt", content: "once\n" }, undefined, undefined, ctx);
+        } catch (error) {
+          terminalError = error;
+        }
+        await new Promise((resolve) => setTimeout(resolve, 350));
+        assert(String(terminalError).includes("was not found or changed"), "session 404 did not produce a terminal diagnostic: " + terminalError);
+        assert(mutatingRequests === 1, "HTTP 404 mutation was retried: " + mutatingRequests);
+        assert(globalThis.__AGENTSH_PI__.getSupervisorState().status === "error", "session 404 did not leave terminal error state");
+        await shutdownSession(pi);
+        await supervisor.close();
+      }
+
+      {
+        clearAgentSHEnv();
+        delete process.env.PI_AGENTSH_APPROVAL_POLL_MS;
+        const expectedSession = "sess-ambiguous-reset";
+        let mutatingRequests = 0;
+        const supervisor = await withRestartableRestSupervisor(async (request) => {
+          if (request.method === "GET" && request.url === "/api/v1/sessions/" + expectedSession) return { id: expectedSession, session_id: expectedSession, workspace: "/workspace", worktree: "/workspace" };
+          if (request.method === "GET" && request.url === "/api/v1/approvals") return [];
+          if (request.method === "POST" && request.url.endsWith("/tools/write_file")) {
+            mutatingRequests += 1;
+            return { destroySocket: true };
+          }
+          return { statusCode: 404, body: { error: "unexpected supervisor request", request } };
+        });
+        process.env.AGENTSH_SESSION_ID = expectedSession;
+        process.env.AGENTSH_SESSION_SUPERVISOR = "unix://" + supervisor.socketPath;
+        const pi = createPi();
+        sandbox(pi);
+        const ctx = createContext();
+        await startSession(pi, ctx);
+        let resetError;
+        try {
+          await pi.tools.get("write").execute("ambiguous-reset", { path: "/workspace/ambiguous.txt", content: "once\n" }, undefined, undefined, ctx);
+        } catch (error) {
+          resetError = error;
+        }
+        await new Promise((resolve) => setTimeout(resolve, 350));
+        assert(resetError, "ambiguous post-dispatch reset unexpectedly succeeded");
+        assert(mutatingRequests === 1, "ambiguous post-dispatch mutation was replayed: " + mutatingRequests);
+        await shutdownSession(pi);
+        await supervisor.close();
+      }
+
+      // Reconnection refuses a listener that returns a different session ID;
+      // the original mutation is never dispatched to that listener.
+      {
+        clearAgentSHEnv();
+        delete process.env.PI_AGENTSH_APPROVAL_POLL_MS;
+        const expectedSession = "sess-exact-original";
+        let returnedSession = expectedSession;
+        let mutatingRequests = 0;
+        const supervisor = await withRestartableRestSupervisor(async (request) => {
+          if (request.method === "GET" && request.url === "/api/v1/sessions/" + expectedSession) return { id: returnedSession, session_id: returnedSession, workspace: "/workspace", worktree: "/workspace" };
+          if (request.method === "GET" && request.url === "/api/v1/approvals") return [];
+          if (request.method === "POST" && request.url.endsWith("/tools/write_file")) {
+            mutatingRequests += 1;
+            return { ok: true, result: { text: "wrong session write" } };
+          }
+          return { statusCode: 404, body: { error: "unexpected supervisor request", request } };
+        });
+        process.env.AGENTSH_SESSION_ID = expectedSession;
+        process.env.AGENTSH_SESSION_SUPERVISOR = "unix://" + supervisor.socketPath;
+        const pi = createPi();
+        sandbox(pi);
+        const ctx = createContext();
+        await startSession(pi, ctx);
+        await supervisor.stop();
+        returnedSession = "sess-wrong-listener";
+        const restart = (async () => {
+          await new Promise((resolve) => setTimeout(resolve, 50));
+          await supervisor.start();
+        })();
+        let mismatchError;
+        try {
+          await pi.tools.get("write").execute("wrong-session", { path: "/workspace/wrong.txt", content: "no\n" }, undefined, undefined, ctx);
+        } catch (error) {
+          mismatchError = error;
+        }
+        await restart;
+        assert(String(mismatchError).includes("Expected " + expectedSession), "session mismatch was not actionable: " + mismatchError);
+        assert(mutatingRequests === 0, "mutation reached a listener for the wrong session");
+        assert(globalThis.__AGENTSH_PI__.getSupervisorState().status === "error", "session mismatch did not become terminal");
+        await shutdownSession(pi);
+        await supervisor.close();
       }
 
       // Subagents inherit the trusted parent's active model unless a child selects one explicitly.

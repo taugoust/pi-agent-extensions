@@ -142,6 +142,12 @@ type ApprovalClient = {
 type SupervisorClient = MockSupervisorClient | RestSupervisorClient | LegacyApprovalUIClient;
 type ApprovalWatcher = MockApprovalWatcher | RestApprovalWatcher;
 type RestToolResponse<T = unknown> = { ok?: boolean; result?: T; error?: string };
+type RestConnectionEvents = {
+  onReconnecting?(error: Error, deadline: number): void;
+  onReconnected?(metadata: SupervisorMetadata): void;
+  onReconnectFailed?(error: Error): void;
+  onSessionLost?(error: Error): void;
+};
 
 type AgentSHPiAPI = {
   exec(command: string | { command: string; cwd?: string; timeout_ms?: number; actor?: Actor }, options?: ExecOptions): Promise<ExecResult>;
@@ -190,18 +196,117 @@ type SupervisorState = {
   watcher?: ApprovalWatcher;
   ctx?: ExtensionContext;
   attachInFlight?: Promise<void>;
+  terminalError: boolean;
 };
 
 const PROTOCOL_VERSION = 1;
 const CONNECT_TIMEOUT_MS = Number(process.env.PI_AGENTSH_CONNECT_TIMEOUT_MS || "10000");
 const START_TIMEOUT_MS = Number(process.env.PI_AGENTSH_START_TIMEOUT_MS || "30000");
 const WATCH_RECONNECT_MS = Number(process.env.PI_AGENTSH_WATCH_RECONNECT_MS || "1500");
+const SUPERVISOR_RECONNECT_TIMEOUT_MS = Number(process.env.PI_AGENTSH_RECONNECT_TIMEOUT_MS || "30000");
+const SUPERVISOR_RECONNECT_INITIAL_MS = Number(process.env.PI_AGENTSH_RECONNECT_INITIAL_MS || "100");
 const APPROVAL_POLL_MS = Number(process.env.PI_AGENTSH_APPROVAL_POLL_MS || "1500");
 const TOOL_REQUEST_TIMEOUT_MS = Number(process.env.PI_AGENTSH_TOOL_REQUEST_TIMEOUT_MS || "600000");
 const APPROVAL_REQUEST_TIMEOUT_SLACK_MS = Number(process.env.PI_AGENTSH_APPROVAL_TIMEOUT_SLACK_MS || "300000");
 const SUBAGENT_REQUEST_TIMEOUT_MS = Number(process.env.PI_AGENTSH_SUBAGENT_REQUEST_TIMEOUT_MS || "1800000");
 const VALID_POLICIES = new Set(["pi-autonomous", "pi-supervised"]);
 const VALID_STAGE1_WORKSPACE_MODES = new Set(["shadow", "direct"]);
+
+function supervisorErrorCode(error: unknown) {
+  const candidate = error && typeof error === "object" ? error as { code?: unknown } : undefined;
+  return typeof candidate?.code === "string" ? candidate.code : "";
+}
+
+// These connect(2) failures prove that no request reached the Unix listener.
+// Do not broaden this to message matching: HTTP bodies and post-dispatch errors
+// can contain the same words without being safe to replay.
+function supervisorSocketUnavailable(error: unknown) {
+  const code = supervisorErrorCode(error);
+  return code === "ECONNREFUSED" || code === "ENOENT";
+}
+
+class SafeSupervisorConnectError extends Error {
+  readonly code: "ECONNREFUSED" | "ENOENT";
+
+  constructor(error: unknown) {
+    const cause = asError(error);
+    super(cause.message);
+    this.name = "SafeSupervisorConnectError";
+    this.code = supervisorErrorCode(error) as "ECONNREFUSED" | "ENOENT";
+  }
+}
+
+class RestHTTPError extends Error {
+  constructor(
+    readonly method: string,
+    readonly path: string,
+    readonly statusCode: number,
+    readonly body: string,
+  ) {
+    super(`${method} ${path}: HTTP ${statusCode}${body.trim() ? `: ${truncate(body.trim(), 1000)}` : ""}`);
+    this.name = "RestHTTPError";
+  }
+}
+
+class SupervisorSessionLostError extends Error {
+  constructor(readonly sessionId: string, detail: string) {
+    super(`AgentSH session ${sessionId || "(unknown)"} was not found or changed while reconnecting. The detached remote session is no longer safe to use. ${detail}`);
+    this.name = "SupervisorSessionLostError";
+  }
+}
+
+function supervisorRequestAborted() {
+  const error = new Error("AgentSH supervisor request aborted");
+  error.name = "AbortError";
+  return error;
+}
+
+function supervisorRequestWasAborted(error: unknown, signal?: AbortSignal) {
+  return Boolean(signal?.aborted || (error instanceof Error && error.name === "AbortError"));
+}
+
+async function reconnectDelay(ms: number, signal?: AbortSignal) {
+  if (signal?.aborted) throw supervisorRequestAborted();
+  await new Promise<void>((resolve, reject) => {
+    const timer = setTimeout(done, Math.max(0, ms));
+    const onAbort = () => {
+      clearTimeout(timer);
+      signal?.removeEventListener("abort", onAbort);
+      reject(supervisorRequestAborted());
+    };
+    function done() {
+      signal?.removeEventListener("abort", onAbort);
+      resolve();
+    }
+    signal?.addEventListener("abort", onAbort, { once: true });
+  });
+}
+
+async function awaitReconnectForCaller<T>(promise: Promise<T>, signal: AbortSignal | undefined, deadline: number): Promise<T> {
+  if (signal?.aborted) throw supervisorRequestAborted();
+  const remaining = deadline - Date.now();
+  if (remaining <= 0) throw new Error(`Timed out waiting ${SUPERVISOR_RECONNECT_TIMEOUT_MS}ms for the AgentSH supervisor tunnel to reconnect`);
+  return await new Promise<T>((resolve, reject) => {
+    let settled = false;
+    const finish = (callback: () => void) => {
+      if (settled) return;
+      settled = true;
+      clearTimeout(timer);
+      signal?.removeEventListener("abort", onAbort);
+      callback();
+    };
+    const timer = setTimeout(
+      () => finish(() => reject(new Error(`Timed out waiting ${SUPERVISOR_RECONNECT_TIMEOUT_MS}ms for the AgentSH supervisor tunnel to reconnect`))),
+      remaining,
+    );
+    const onAbort = () => finish(() => reject(supervisorRequestAborted()));
+    signal?.addEventListener("abort", onAbort, { once: true });
+    promise.then(
+      (value) => finish(() => resolve(value)),
+      (error) => finish(() => reject(error)),
+    );
+  });
+}
 
 const BashParams = Type.Object({
   command: Type.String({ description: "Bash command to execute" }),
@@ -1047,7 +1152,12 @@ class MockApprovalWatcher {
   #reconnectTimer?: ReturnType<typeof setTimeout>;
   #requestId = `watch-${process.pid}-${Date.now()}`;
 
-  constructor(private readonly client: MockSupervisorClient, private readonly onApproval: (approval: ApprovalRequest) => void, private readonly onError: (error: Error) => void) {}
+  constructor(
+    private readonly client: MockSupervisorClient,
+    private readonly onApproval: (approval: ApprovalRequest) => void,
+    private readonly onError: (error: Error) => void,
+    private readonly onConnected: () => void,
+  ) {}
 
   start() { this.#stopped = false; this.#connect(); }
   stop() {
@@ -1082,6 +1192,7 @@ class MockApprovalWatcher {
     socket.on("connect", () => {
       connected = true;
       clearTimeout(connectTimer);
+      this.onConnected();
       socket.write(JSON.stringify({ id: this.#requestId, op: "watch_approvals", params: { include_existing: true } }) + "\n");
     });
     socket.on("data", (chunk) => {
@@ -1299,19 +1410,136 @@ function sessionMetadataFromRest(raw: unknown, socketPath: string, seed?: Superv
 class RestSupervisorClient {
   readonly mode = "rest" as const;
   #sessionId: string;
+  #expectedSessionId: string;
   #metadata?: SupervisorMetadata;
+  #reconnectInFlight?: Promise<SupervisorMetadata>;
 
-  constructor(readonly socketPath: string, seedMetadata?: SupervisorMetadata) {
+  constructor(readonly socketPath: string, seedMetadata?: SupervisorMetadata, private readonly connectionEvents: RestConnectionEvents = {}) {
     this.#metadata = seedMetadata;
     this.#sessionId = metadataSessionId(seedMetadata);
+    this.#expectedSessionId = this.#sessionId;
   }
 
   get sessionId() { return this.#sessionId; }
 
-  async request<T = unknown>(method: string, path: string, body?: unknown, options: { signal?: AbortSignal; timeoutMs?: number } = {}): Promise<T> {
+  #sessionPath(sessionId = this.#expectedSessionId) {
+    return `/api/v1/sessions/${encodeURIComponent(sessionId)}`;
+  }
+
+  #sessionLost(detail: string) {
+    const error = new SupervisorSessionLostError(this.#expectedSessionId, detail);
+    this.connectionEvents.onSessionLost?.(error);
+    return error;
+  }
+
+  #validateExpectedSession(raw: unknown) {
+    const obj = (raw && typeof raw === "object" ? raw : {}) as JsonObject;
+    const session = (obj.session && typeof obj.session === "object" ? obj.session : obj) as JsonObject;
+    const actual = String(obj.session_id || obj.id || session.session_id || session.id || "");
+    if (!this.#expectedSessionId) {
+      if (!actual) throw this.#sessionLost("The supervisor response did not include a session ID.");
+      this.#expectedSessionId = actual;
+    }
+    if (actual !== this.#expectedSessionId) {
+      throw this.#sessionLost(`Expected ${this.#expectedSessionId}, but the supervisor returned ${actual || "no session ID"}.`);
+    }
+    const metadata = sessionMetadataFromRest(raw, this.socketPath, this.#metadata);
+    metadata.session_id = actual;
+    metadata.id = actual;
+    this.#metadata = metadata;
+    this.#sessionId = actual;
+    return metadata;
+  }
+
+  async #pollForExpectedSession(deadline: number, initialError: SafeSupervisorConnectError) {
+    if (!this.#expectedSessionId) {
+      throw this.#sessionLost("AGENTSH_SESSION_ID was not available, so the client cannot verify a safe reattachment.");
+    }
+    let delayMs = Math.max(1, SUPERVISOR_RECONNECT_INITIAL_MS);
+    let lastError: Error = initialError;
+    try {
+      for (;;) {
+        const remaining = deadline - Date.now();
+        if (remaining <= 0) {
+          throw new Error(`Timed out waiting ${SUPERVISOR_RECONNECT_TIMEOUT_MS}ms for AgentSH session ${this.#expectedSessionId} at ${this.socketPath}: ${lastError.message}`);
+        }
+        try {
+          const raw = await this.#requestOnce(
+            "GET",
+            this.#sessionPath(),
+            undefined,
+            { timeoutMs: Math.max(1, Math.min(CONNECT_TIMEOUT_MS, remaining)) },
+          );
+          const metadata = this.#validateExpectedSession(raw);
+          this.connectionEvents.onReconnected?.(metadata);
+          return metadata;
+        } catch (error) {
+          if (error instanceof RestHTTPError && error.statusCode === 404) {
+            throw this.#sessionLost(`The supervisor returned HTTP 404 for ${this.#sessionPath()}.`);
+          }
+          if (!(error instanceof SafeSupervisorConnectError)) throw error;
+          lastError = error;
+          const waitMs = Math.min(delayMs, Math.max(1, deadline - Date.now()));
+          await reconnectDelay(waitMs);
+          delayMs = Math.min(Math.max(delayMs * 2, 1), Math.max(WATCH_RECONNECT_MS, 1));
+        }
+      }
+    } catch (error) {
+      if (!(error instanceof SupervisorSessionLostError)) this.connectionEvents.onReconnectFailed?.(asError(error));
+      throw error;
+    }
+  }
+
+  #ensureReconnect(deadline: number, error: SafeSupervisorConnectError) {
+    this.connectionEvents.onReconnecting?.(error, deadline);
+    if (!this.#reconnectInFlight) {
+      const reconnect = this.#pollForExpectedSession(deadline, error);
+      this.#reconnectInFlight = reconnect;
+      reconnect.then(
+        () => { if (this.#reconnectInFlight === reconnect) this.#reconnectInFlight = undefined; },
+        () => { if (this.#reconnectInFlight === reconnect) this.#reconnectInFlight = undefined; },
+      );
+    }
+    return this.#reconnectInFlight;
+  }
+
+  async #withReconnect<T>(operation: () => Promise<T>, signal?: AbortSignal): Promise<T> {
+    const deadline = Date.now() + Math.max(0, SUPERVISOR_RECONNECT_TIMEOUT_MS);
+    for (;;) {
+      if (signal?.aborted) throw supervisorRequestAborted();
+      try {
+        return await operation();
+      } catch (error) {
+        if (!(error instanceof SafeSupervisorConnectError) || SUPERVISOR_RECONNECT_TIMEOUT_MS <= 0) throw error;
+        if (Date.now() >= deadline) {
+          const timeout = new Error(`Timed out waiting ${SUPERVISOR_RECONNECT_TIMEOUT_MS}ms for the AgentSH supervisor tunnel at ${this.socketPath}: ${error.message}`);
+          this.connectionEvents.onReconnectFailed?.(timeout);
+          throw timeout;
+        }
+        try {
+          await awaitReconnectForCaller(this.#ensureReconnect(deadline, error), signal, deadline);
+        } catch (reconnectError) {
+          if (supervisorRequestWasAborted(reconnectError, signal)) throw supervisorRequestAborted();
+          throw reconnectError;
+        }
+        // The failed connect never reached the server. Create a fresh HTTP
+        // request only after the exact original session has been verified.
+      }
+    }
+  }
+
+  async #requestOnce<T = unknown>(method: string, path: string, body?: unknown, options: { signal?: AbortSignal; timeoutMs?: number } = {}): Promise<T> {
     const { signal, cleanup } = abortSignalFrom(options.signal, options.timeoutMs || CONNECT_TIMEOUT_MS);
     return await new Promise<T>((resolve, reject) => {
       const payload = body === undefined ? undefined : JSON.stringify(body);
+      let responseStarted = false;
+      let settled = false;
+      const finish = (callback: () => void) => {
+        if (settled) return;
+        settled = true;
+        cleanup();
+        callback();
+      };
       const req = http.request({
         socketPath: this.socketPath,
         host: "unix",
@@ -1324,31 +1552,55 @@ class RestSupervisorClient {
           "Content-Length": Buffer.byteLength(payload),
         },
       }, (res) => {
+        responseStarted = true;
         const chunks: Buffer[] = [];
         res.on("data", (chunk) => chunks.push(Buffer.isBuffer(chunk) ? chunk : Buffer.from(chunk)));
-        res.on("end", () => {
-          cleanup();
+        res.on("aborted", () => finish(() => reject(new Error(`${method} ${path}: supervisor response was aborted after dispatch`))));
+        res.on("error", (error) => finish(() => reject(error)));
+        res.on("end", () => finish(() => {
           const text = Buffer.concat(chunks).toString("utf8");
-          if ((res.statusCode || 0) < 200 || (res.statusCode || 0) >= 300) {
-            reject(new Error(`${method} ${path}: HTTP ${res.statusCode}${text.trim() ? `: ${truncate(text.trim(), 1000)}` : ""}`));
+          const statusCode = res.statusCode || 0;
+          if (statusCode < 200 || statusCode >= 300) {
+            reject(new RestHTTPError(method, path, statusCode, text));
             return;
           }
           if (!text.trim()) { resolve(undefined as T); return; }
           try { resolve(JSON.parse(text) as T); } catch (error) { reject(asError(error)); }
+        }));
+        res.on("close", () => {
+          if (!settled && !res.complete) finish(() => reject(new Error(`${method} ${path}: supervisor response closed before completion after dispatch`)));
         });
       });
-      req.on("error", (error) => { cleanup(); reject(error); });
-      req.setTimeout(options.timeoutMs || CONNECT_TIMEOUT_MS, () => req.destroy(new Error(`Timed out connecting to AgentSH REST supervisor socket ${this.socketPath}`)));
+      req.on("error", (error) => finish(() => {
+        if (!responseStarted && supervisorSocketUnavailable(error)) reject(new SafeSupervisorConnectError(error));
+        else reject(error);
+      }));
+      req.setTimeout(options.timeoutMs || CONNECT_TIMEOUT_MS, () => req.destroy(new Error(`Timed out waiting for AgentSH REST supervisor socket ${this.socketPath}`)));
       if (payload !== undefined) req.write(payload);
       req.end();
     });
   }
 
-  async requestNDJSON(method: string, path: string, body: unknown, options: { signal?: AbortSignal; timeoutMs?: number; onEvent?: (message: SupervisorMessage) => void } = {}): Promise<unknown> {
+  async request<T = unknown>(method: string, path: string, body?: unknown, options: { signal?: AbortSignal; timeoutMs?: number } = {}): Promise<T> {
+    try {
+      return await this.#withReconnect(
+        () => this.#requestOnce<T>(method, path, body, options),
+        options.signal,
+      );
+    } catch (error) {
+      if (error instanceof RestHTTPError && error.statusCode === 404 && /session[_ -]?(?:not[_ -]?found|missing)|(?:not[_ -]?found|missing).*session/i.test(error.body)) {
+        throw this.#sessionLost(`The supervisor reported that session ${this.#expectedSessionId} no longer exists.`);
+      }
+      throw error;
+    }
+  }
+
+  async #requestNDJSONOnce(method: string, path: string, body: unknown, options: { signal?: AbortSignal; timeoutMs?: number; onEvent?: (message: SupervisorMessage) => void } = {}): Promise<unknown> {
     const { signal, cleanup } = abortSignalFrom(options.signal, options.timeoutMs || CONNECT_TIMEOUT_MS);
     return await new Promise<unknown>((resolve, reject) => {
       const payload = JSON.stringify(body);
       let settled = false;
+      let responseStarted = false;
       const protocol = createSubagentProtocolState();
       let req: http.ClientRequest | undefined;
       const settle = (fn: () => void) => {
@@ -1381,6 +1633,7 @@ class RestSupervisorClient {
           "Content-Length": Buffer.byteLength(payload),
         },
       }, (res) => {
+        responseStarted = true;
         const errorChunks: Buffer[] = [];
         res.on("data", (chunk) => {
           const bytes = Buffer.isBuffer(chunk) ? chunk : Buffer.from(chunk);
@@ -1390,10 +1643,19 @@ class RestSupervisorClient {
           }
           for (const message of appendSubagentProtocolChunk(protocol, bytes)) emitEvent(message as SupervisorMessage);
         });
+        res.on("aborted", () => {
+          abortSubagentProtocolStream(protocol, "supervisor response was aborted after dispatch");
+          settle(() => reject(new Error(`${method} ${path}: supervisor response was aborted after dispatch`)));
+        });
+        res.on("error", (error) => {
+          abortSubagentProtocolStream(protocol, asError(error).message);
+          settle(() => reject(error));
+        });
         res.on("end", () => {
-          if ((res.statusCode || 0) < 200 || (res.statusCode || 0) >= 300) {
+          const statusCode = res.statusCode || 0;
+          if (statusCode < 200 || statusCode >= 300) {
             const text = Buffer.concat(errorChunks).toString("utf8");
-            settle(() => reject(new Error(`${method} ${path}: HTTP ${res.statusCode}${text.trim() ? `: ${truncate(text.trim(), 1000)}` : ""}`)));
+            settle(() => reject(new RestHTTPError(method, path, statusCode, text)));
             return;
           }
           const finished = finishSubagentProtocolStream(protocol);
@@ -1404,43 +1666,64 @@ class RestSupervisorClient {
           }
           settle(() => resolve(finished.finalResponse));
         });
+        res.on("close", () => {
+          if (!settled && !res.complete) {
+            abortSubagentProtocolStream(protocol, "supervisor response closed before completion after dispatch");
+            settle(() => reject(new Error(`${method} ${path}: supervisor response closed before completion after dispatch`)));
+          }
+        });
       });
       req.on("error", (error) => {
         abortSubagentProtocolStream(protocol, asError(error).message);
-        settle(() => reject(error));
+        settle(() => {
+          if (!responseStarted && supervisorSocketUnavailable(error)) reject(new SafeSupervisorConnectError(error));
+          else reject(error);
+        });
       });
-      req.setTimeout(options.timeoutMs || CONNECT_TIMEOUT_MS, () => req.destroy(new Error(`Timed out streaming from AgentSH REST supervisor socket ${this.socketPath}`)));
+      req.setTimeout(options.timeoutMs || CONNECT_TIMEOUT_MS, () => req?.destroy(new Error(`Timed out streaming from AgentSH REST supervisor socket ${this.socketPath}`)));
       req.write(payload);
       req.end();
     });
   }
 
+  async requestNDJSON(method: string, path: string, body: unknown, options: { signal?: AbortSignal; timeoutMs?: number; onEvent?: (message: SupervisorMessage) => void } = {}): Promise<unknown> {
+    try {
+      return await this.#withReconnect(
+        () => this.#requestNDJSONOnce(method, path, body, options),
+        options.signal,
+      );
+    } catch (error) {
+      if (error instanceof RestHTTPError && error.statusCode === 404 && /session[_ -]?(?:not[_ -]?found|missing)|(?:not[_ -]?found|missing).*session/i.test(error.body)) {
+        throw this.#sessionLost(`The supervisor reported that session ${this.#expectedSessionId} no longer exists.`);
+      }
+      throw error;
+    }
+  }
+
   async hello() {
-    let metadata: SupervisorMetadata | undefined;
-    let lastError: Error | undefined;
-    const sessionId = this.#sessionId || env("AGENTSH_SESSION_ID");
-    if (sessionId) {
-      try { metadata = sessionMetadataFromRest(await this.request("GET", `/api/v1/sessions/${encodeURIComponent(sessionId)}`), this.socketPath, this.#metadata); } catch (error) { lastError = asError(error); }
-    }
-    if (!metadata) {
+    let metadata: SupervisorMetadata;
+    if (this.#expectedSessionId) {
+      let raw: unknown;
       try {
-        const sessions = await this.request<unknown[]>("GET", "/api/v1/sessions");
-        const match = sessions.find((candidate) => {
-          const obj = (candidate && typeof candidate === "object" ? candidate : {}) as JsonObject;
-          return sessionId ? String(obj.id || obj.session_id || "") === sessionId : true;
-        });
-        if (match) metadata = sessionMetadataFromRest(match, this.socketPath, this.#metadata);
-      } catch (error) { lastError = asError(error); }
+        raw = await this.request("GET", this.#sessionPath());
+      } catch (error) {
+        if (error instanceof RestHTTPError && error.statusCode === 404) {
+          throw this.#sessionLost(`The supervisor returned HTTP 404 for ${this.#sessionPath()}.`);
+        }
+        throw error;
+      }
+      metadata = this.#validateExpectedSession(raw);
+    } else {
+      const sessions = await this.request<unknown[]>("GET", "/api/v1/sessions");
+      const first = sessions[0];
+      if (!first) throw this.#sessionLost("The supervisor listed no sessions to attach to.");
+      metadata = this.#validateExpectedSession(first);
     }
-    if (!metadata && lastError) throw lastError;
-    metadata ||= sessionMetadataFromRest(this.#metadata || {}, this.socketPath, this.#metadata);
-    this.#metadata = metadata;
-    this.#sessionId = metadataSessionId(metadata);
     if (this.#sessionId) {
       try {
         metadata.network_enforcement = await this.request<NetworkEnforcement>(
           "GET",
-          `/api/v1/sessions/${encodeURIComponent(this.#sessionId)}/network-enforcement`,
+          `${this.#sessionPath(this.#sessionId)}/network-enforcement`,
         );
         metadata.network_enforcement_live = true;
         metadata.network_enforcement_error = undefined;
@@ -1720,7 +2003,12 @@ class RestApprovalWatcher {
   #stopped = false;
   #timer?: ReturnType<typeof setTimeout>;
 
-  constructor(private readonly client: ApprovalClient, private readonly onApprovals: (approvals: ApprovalRequest[]) => void, private readonly onError: (error: Error) => void) {}
+  constructor(
+    private readonly client: ApprovalClient,
+    private readonly onApprovals: (approvals: ApprovalRequest[]) => void,
+    private readonly onError: (error: Error) => void,
+    private readonly onConnected: () => void,
+  ) {}
 
   start() { this.#stopped = false; void this.#poll(); }
   stop() {
@@ -1730,29 +2018,48 @@ class RestApprovalWatcher {
   }
   async #poll() {
     if (this.#stopped) return;
-    try { this.onApprovals(await this.client.listApprovals()); }
-    catch (error) { this.onError(asError(error)); }
+    try {
+      this.onApprovals(await this.client.listApprovals());
+      this.onConnected();
+    } catch (error) { this.onError(asError(error)); }
     finally {
-      if (!this.#stopped) this.#timer = setTimeout(() => void this.#poll(), APPROVAL_POLL_MS);
+      const pollMs = Number(process.env.PI_AGENTSH_APPROVAL_POLL_MS || APPROVAL_POLL_MS);
+      if (!this.#stopped) this.#timer = setTimeout(() => void this.#poll(), Number.isFinite(pollMs) ? Math.max(1, pollMs) : APPROVAL_POLL_MS);
     }
   }
 }
 
 function requireClient(state: SupervisorState) {
-  if (!state.client || !state.active || (state.status !== "connected" && state.status !== "pending")) {
+  if (!state.client || !state.active || !["connecting", "connected", "pending"].includes(state.status)) {
     throw new Error(`AgentSH supervisor is not ready${state.lastError ? `: ${state.lastError}` : ". Set PI_AGENTSH_MOCK_SUPERVISOR for mock NDJSON, or AGENTSH_SESSION_SUPERVISOR/PI_AGENTSH_ENABLE=1 for real Stage 1 REST before starting Pi."}`);
   }
   return state.client;
 }
 
 function requireApprovalClient(state: SupervisorState) {
-  if (!state.approvalClient || !state.active || (state.status !== "connected" && state.status !== "pending")) throw new Error("AgentSH approval client is not attached.");
+  if (!state.approvalClient || !state.active || !["connecting", "connected", "pending"].includes(state.status)) throw new Error("AgentSH approval client is not attached.");
   return state.approvalClient;
+}
+
+function restoreConnectedState(state: SupervisorState) {
+  if (state.terminalError) return;
+  state.lastError = "";
+  state.status = state.pendingCount > 0 ? "pending" : "connected";
+  setStatus(state);
+}
+
+function watcherConnectionError(state: SupervisorState, error: Error) {
+  if (state.terminalError) return;
+  state.lastError = error.message;
+  state.status = supervisorSocketUnavailable(error) || error instanceof SafeSupervisorConnectError ? "connecting" : "error";
+  setStatus(state);
 }
 
 function updatePending(state: SupervisorState, delta: number) {
   state.pendingCount = Math.max(0, state.pendingCount + delta);
-  if (state.status !== "error") state.status = state.pendingCount > 0 ? "pending" : "connected";
+  if (state.status !== "error" && state.status !== "connecting" && state.status !== "starting") {
+    state.status = state.pendingCount > 0 ? "pending" : "connected";
+  }
   setStatus(state);
 }
 
@@ -1830,6 +2137,7 @@ function resetConnection(state: SupervisorState) {
   for (const controller of state.promptAbortControllers.values()) controller.abort();
   state.promptAbortControllers.clear();
   state.resolving.clear();
+  state.terminalError = false;
 }
 
 async function attachToSocket(state: SupervisorState, mode: ProtocolMode, source: SupervisorSource, socketPath: string, ctx: ExtensionContext, seedMetadata?: SupervisorMetadata) {
@@ -1840,37 +2148,73 @@ async function attachToSocket(state: SupervisorState, mode: ProtocolMode, source
   state.metadata = seedMetadata;
   state.sessionId = metadataSessionId(seedMetadata);
   state.status = "connecting";
+  state.terminalError = false;
   setStatus(state, ctx);
 
-  const client: SupervisorClient = mode === "mock-ndjson"
+  let client: SupervisorClient;
+  const connectionEvents: RestConnectionEvents = {
+    onReconnecting(error, deadline) {
+      if (state.client !== client || state.terminalError) return;
+      state.status = "connecting";
+      state.lastError = `Supervisor tunnel unavailable (${supervisorErrorCode(error) || error.name}); retrying until ${new Date(deadline).toISOString()}`;
+      setStatus(state);
+    },
+    onReconnected(metadata) {
+      if (state.client !== client || state.terminalError) return;
+      state.metadata = { ...state.metadata, ...metadata, supervisor_sock: socketPath };
+      state.sessionId = metadataSessionId(state.metadata);
+      restoreConnectedState(state);
+    },
+    onReconnectFailed(error) {
+      if (state.client !== client || state.terminalError) return;
+      state.status = "error";
+      state.lastError = error.message;
+      setStatus(state);
+    },
+    onSessionLost(error) {
+      if (state.client !== client) return;
+      state.terminalError = true;
+      state.status = "error";
+      state.lastError = error.message;
+      state.watcher?.stop();
+      setStatus(state);
+    },
+  };
+  client = mode === "mock-ndjson"
     ? new MockSupervisorClient(socketPath)
     : mode === "legacy-approval-ui"
       ? new LegacyApprovalUIClient(socketPath)
-      : new RestSupervisorClient(socketPath, seedMetadata);
+      : new RestSupervisorClient(socketPath, seedMetadata, connectionEvents);
   state.client = client;
   state.approvalClient = client;
   const metadata = await client.hello();
   state.metadata = { ...seedMetadata, ...metadata, supervisor_sock: socketPath };
   assertNetworkEnforcementReady(state.metadata);
   state.sessionId = metadataSessionId(state.metadata);
-  state.status = "connected";
-  setStatus(state, ctx);
+  const expectedSessionId = env("AGENTSH_SESSION_ID");
+  if (expectedSessionId && state.sessionId !== expectedSessionId) {
+    throw new SupervisorSessionLostError(expectedSessionId, `The attached supervisor returned ${state.sessionId || "no session ID"}.`);
+  }
+  state.terminalError = false;
+  restoreConnectedState(state);
 
   if (mode === "rest" && centralApprovalBridgeRequested() && centralApprovalBridgeEnabled() && state.sessionId) {
     state.approvalClient = new CentralApprovalClient(centralApprovalBridgeURL(), state.sessionId, centralApprovalBridgeToken());
   }
 
   state.watcher = mode === "mock-ndjson"
-    ? new MockApprovalWatcher(client as MockSupervisorClient, (approval) => enqueueApproval(state, approval), (error) => {
-      state.lastError = error.message;
-      if (state.status !== "pending") state.status = "error";
-      setStatus(state);
-    })
-    : new RestApprovalWatcher(client as RestSupervisorClient | LegacyApprovalUIClient, (approvals) => syncPendingApprovals(state, approvals), (error) => {
-      state.lastError = error.message;
-      if (state.status !== "pending") state.status = "error";
-      setStatus(state);
-    });
+    ? new MockApprovalWatcher(
+      client as MockSupervisorClient,
+      (approval) => enqueueApproval(state, approval),
+      (error) => watcherConnectionError(state, error),
+      () => restoreConnectedState(state),
+    )
+    : new RestApprovalWatcher(
+      client as RestSupervisorClient | LegacyApprovalUIClient,
+      (approvals) => syncPendingApprovals(state, approvals),
+      (error) => watcherConnectionError(state, error),
+      () => restoreConnectedState(state),
+    );
   state.watcher.start();
 }
 
@@ -1928,6 +2272,7 @@ async function attachOrStart(state: SupervisorState, ctx: ExtensionContext, opti
     state.approvalClient = undefined;
     state.active = true;
     state.status = "error";
+    state.terminalError = error instanceof SupervisorSessionLostError;
     state.lastError = asError(error).message;
     setStatus(state, ctx);
     throw error;
@@ -2478,6 +2823,7 @@ export default function sandbox(pi: ExtensionAPI) {
     resolving: new Set(),
     promptAbortControllers: new Map(),
     promptChain: Promise.resolve(),
+    terminalError: false,
   };
 
   globalThis.__AGENTSH_PI__ = createGlobalAPI(state);
