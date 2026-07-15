@@ -578,8 +578,11 @@ PI_AGENTSH_BIN=agentsh                                 # default: agentsh
 PI_AGENTSH_READ_MODE=supervised                        # optional read override (mock and real REST)
 PI_AGENTSH_APPROVAL_CLIENT=central                     # opt into central detached approval bridge
 PI_AGENTSH_REQUIRE_NETWORK_ENFORCEMENT=strict           # refuse tools without live strict runtime evidence
-PI_AGENTSH_TOOL_REQUEST_TIMEOUT_MS=1800000             # REST tool request cap; keep above approval timeout
+PI_AGENTSH_TOOL_REQUEST_TIMEOUT_MS=1800000             # non-subagent REST tool request cap
 PI_AGENTSH_APPROVAL_TIMEOUT_SLACK_MS=300000            # extra REST wait budget for approval delays
+PI_AGENTSH_SUBAGENT_EXECUTION_TIMEOUT_MS=7200000       # default/maximum AgentSH child deadline (2h)
+PI_AGENTSH_SUBAGENT_TRANSPORT_SLACK_MS=300000          # NDJSON deadline slack after child execution (5m)
+PI_AGENTSH_SUBAGENT_TRANSPORT_TIMEOUT_MS=7500000       # optional transport floor; never shortens execution + slack
 ```
 
 **Mock NDJSON protocol**: newline-delimited JSON over a Unix socket. Requests
@@ -609,8 +612,16 @@ Streaming ops may emit `stdout`, `stderr`, `tool_update`, `subagent_update`, or
 - `DELETE /api/v1/sessions/{id}` best-effort for `/sandbox-control stop`.
 
 The REST `exec_bash` response is buffered, while `spawn_subagent` uses an
-NDJSON streaming response for stdout/stderr and child result events. Multiple Pi
-`edit` replacements are applied as sequential single-replacement REST calls.
+NDJSON streaming response for stdout/stderr and child result events. AgentSH owns
+the subagent execution deadline. The extension sends a two-hour `timeout_ms` by
+default and keeps its NDJSON transport open for that deadline plus five minutes,
+so process-tree cleanup and the typed terminal result can arrive before the
+client closes. A tool-call `timeout_ms` can select a shorter execution window
+but cannot raise the configured ceiling. `PI_AGENTSH_SUBAGENT_REQUEST_TIMEOUT_MS` remains a compatibility alias
+for the default execution timeout; it no longer creates an independent matching
+transport deadline. Caller aborts remain distinct from execution/transport
+timeouts. Multiple Pi `edit` replacements are applied as sequential
+single-replacement REST calls.
 When bounded model-facing `bash` output or a completed subagent final overflows,
 new AgentSH supervisors retain a capped artifact in the remote session runtime
 and return `full_output_path` or `full_result_path`. The extension shows that

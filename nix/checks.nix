@@ -992,6 +992,9 @@ in
       process.env.PI_AGENTSH_RECONNECT_TIMEOUT_MS = "300";
       process.env.PI_AGENTSH_RECONNECT_INITIAL_MS = "10";
       process.env.PI_AGENTSH_WATCH_RECONNECT_MS = "25";
+      // Keep deadline tests fast while preserving the production default
+      // execution timeout loaded by the extension.
+      process.env.PI_AGENTSH_SUBAGENT_TRANSPORT_SLACK_MS = "100";
 
       const compiledRoot = process.argv[2];
       const moduleUrl = pathToFileURL(path.join(compiledRoot, "sandbox/index.js")).href;
@@ -1373,13 +1376,18 @@ in
         await subagentTool.execute("inherit-model", { task: "ok" }, undefined, undefined, ctx);
         await subagentTool.execute("explicit-model", { task: "ok", model: "google/gemini-pro" }, undefined, undefined, ctx);
         await subagentTool.execute("parallel-model", { tasks: [{ task: "one" }, { task: "two", model: "anthropic/claude-sonnet" }] }, undefined, undefined, ctx);
+        await subagentTool.execute("short-timeout", { task: "ok", timeout_ms: 1234 }, undefined, undefined, ctx);
+        await subagentTool.execute("long-timeout", { task: "ok", timeout_ms: 10800000 }, undefined, undefined, ctx);
 
         const spawnRequests = supervisor.requests.filter((request) => request.method === "POST" && request.url.endsWith("/tools/spawn_subagent"));
-        assert(spawnRequests.length === 3, "unexpected subagent request count");
+        assert(spawnRequests.length === 5, "unexpected subagent request count");
         assert(spawnRequests[0].body.model === "openai-codex/gpt-5.5", "single child did not inherit parent model");
         assert(spawnRequests[1].body.model === "google/gemini-pro", "explicit child model was overwritten");
         assert(spawnRequests[2].body.tasks[0].model === "openai-codex/gpt-5.5", "parallel child did not inherit parent model");
         assert(spawnRequests[2].body.tasks[1].model === "anthropic/claude-sonnet", "parallel explicit model was overwritten");
+        assert(spawnRequests[0].body.timeout_ms === 7200000, "default subagent execution timeout was not two hours");
+        assert(spawnRequests[3].body.timeout_ms === 1234, "explicit shorter subagent timeout was overwritten");
+        assert(spawnRequests[4].body.timeout_ms === 7200000, "explicit timeout bypassed the configured execution ceiling");
         assert(spawnRequests[0].body.result_artifact_threshold_bytes === 4096, "single subagent artifact threshold did not match parent inline budget");
         assert(spawnRequests[2].body.result_artifact_threshold_bytes === 2048, "parallel subagent artifact threshold did not match per-child capsule budget");
         await shutdownSession(pi);
@@ -1448,6 +1456,33 @@ in
             return { ok: true, result: { path: request.body.path, real_path: request.body.path, encoding: "utf-8", content, size: Buffer.byteLength(content), truncated: false } };
           }
           if (request.method === "POST" && request.url === "/api/v1/sessions/sess-subagent-stream/tools/spawn_subagent") {
+            if (request.body.task === "typed-timeout") {
+              await new Promise((resolve) => setTimeout(resolve, 80));
+              const timedOutTerminal = { state: "timed_out", failure_kind: "process", cancellation_cause: "request_timeout", exit_code: 124, termination: "graceful", retryable: true, message: "subagent request timed out" };
+              const timedOutChild = { label: "child", task: "typed-timeout", exit_code: 124, stop_reason: "timeout", terminal: timedOutTerminal, error: "subagent request timed out" };
+              return {
+                ndjsonChunks: [Buffer.from([
+                  JSON.stringify({ event: "subagent_child_start", label: "child", task: "typed-timeout" }),
+                  JSON.stringify({ event: "subagent_result", label: "child", result: timedOutChild }),
+                  JSON.stringify({ event: "done", ok: true, result: { mode: "single", final: "subagent request timed out", terminal: timedOutTerminal, results: [timedOutChild] }, error: "subagent request timed out" }),
+                ].join("\n") + "\n", "utf8")],
+                keepOpenMs: 200,
+              };
+            }
+            if (request.body.tasks?.some((task) => task.task === "client-timeout")) {
+              const retained = "completed-before-client-timeout";
+              const completedChild = { label: "task 1", task: "completed", exit_code: 0, stop_reason: "completed", terminal: { state: "completed", exit_code: 0, termination: "natural", retryable: false }, final: retained, protocol_settled: true };
+              return {
+                ndjsonChunks: [Buffer.from([
+                  JSON.stringify({ event: "subagent_child_start", label: "task 1", task: "completed" }),
+                  JSON.stringify({ event: "stdout", label: "task 1", data: JSON.stringify({ type: "message_end", message: { role: "assistant", content: [{ type: "text", text: retained }], stopReason: "stop" } }) + "\n" + JSON.stringify({ type: "agent_settled" }) + "\n" }),
+                  JSON.stringify({ event: "subagent_result", label: "task 1", result: completedChild }),
+                  JSON.stringify({ event: "subagent_child_start", label: "task 2", task: "client-timeout" }),
+                  JSON.stringify({ event: "stdout", label: "task 2", data: JSON.stringify({ type: "message_end", message: { role: "assistant", content: [{ type: "toolCall", name: "bash", arguments: { command: "sleep forever" } }], stopReason: "toolUse" } }) + "\n" }),
+                ].join("\n") + "\n", "utf8")],
+                keepOpenMs: 200,
+              };
+            }
             if (request.body.task === "artifact-overflow") {
               const child = {
                 label: "child",
@@ -1480,6 +1515,7 @@ in
                   JSON.stringify({ event: "stdout", label: "task 1", data: JSON.stringify({ type: "message_end", message: { role: "assistant", content: [{ type: "text", text: retained }], stopReason: "stop" } }) + "\n" + JSON.stringify({ type: "agent_settled" }) + "\n" }),
                   JSON.stringify({ event: "subagent_result", label: "task 1", result: completedChild }),
                   JSON.stringify({ event: "subagent_child_start", label: "task 2", task: "wait-for-cancel" }),
+                  JSON.stringify({ event: "stdout", label: "task 2", data: JSON.stringify({ type: "message_end", message: { role: "assistant", content: [{ type: "toolCall", name: "bash", arguments: { command: "wait" } }], stopReason: "toolUse" } }) + "\n" }),
                 ].join("\n") + "\n", "utf8")],
                 keepOpenMs: 250,
               };
@@ -1583,6 +1619,26 @@ in
         assert(failedToolResult.details.results[0].terminal.failureKind === "model", "child failure kind was not normalized");
         assert(failedToolResult.content[0].text.includes("model failed"), "typed failure diagnostic was reduced to a generic stop reason");
         assert(failedToolResult.isError === true, "failed child task was not marked as an error");
+
+        const typedTimeoutResult = await subagentTool.execute("stream-typed-timeout", { task: "typed-timeout", timeout_ms: 40 }, undefined, undefined, ctx);
+        assert(typedTimeoutResult.details.terminal.state === "timed_out", "server execution deadline was not preserved as a typed timeout");
+        assert(typedTimeoutResult.details.terminal.failureKind === "process", "server execution timeout was replaced by a client transport timeout while awaiting HTTP EOF");
+        assert(typedTimeoutResult.details.terminal.cancellationCause === "request_timeout", "server timeout lost its cancellation cause");
+        assert(typedTimeoutResult.details.results[0].terminal.state === "timed_out", "timed-out child was reduced to a protocol failure");
+        assert(!typedTimeoutResult.content[0].text.includes("child Pi stream ended before agent_settled"), "typed timeout was misreported as an unsettled protocol");
+        assert(typedTimeoutResult.isError === true, "typed timeout was not marked as an error");
+        const typedTimeoutRequest = supervisor.requests.find((request) => request.method === "POST" && request.url.endsWith("/tools/spawn_subagent") && request.body.task === "typed-timeout");
+        assert(typedTimeoutRequest?.body.timeout_ms === 40, "explicit execution deadline was not sent to AgentSH");
+
+        const clientTimeoutResult = await subagentTool.execute("stream-client-timeout", { tasks: [{ task: "completed" }, { task: "client-timeout" }], timeout_ms: 40 }, undefined, undefined, ctx);
+        assert(clientTimeoutResult.details.terminal.state === "timed_out", "client transport deadline was reported as a generic failure");
+        assert(clientTimeoutResult.details.terminal.failureKind === "transport", "client transport timeout lost its fallback classification");
+        assert(clientTimeoutResult.details.terminal.cancellationCause === "request_timeout", "client transport timeout lost its deadline cause");
+        assert(clientTimeoutResult.details.results[0].terminal.state === "completed", "client timeout overwrote an already-completed parallel child");
+        assert(clientTimeoutResult.details.results[0].lastAssistantText === "completed-before-client-timeout", "client timeout lost completed child progress");
+        assert(clientTimeoutResult.details.results[1].terminal.state === "timed_out", "active sibling was not reduced to a typed timeout");
+        assert(!clientTimeoutResult.content[0].text.includes("The operation was aborted"), "client timeout regressed to an untyped AbortError");
+        assert(clientTimeoutResult.content[0].text.includes("subagent timed out"), "client timeout was rendered as a generic transport failure");
 
         const dishonestToolUseResult = await subagentTool.execute("stream-dishonest-tool-use", { task: "dishonest-tool-use" }, undefined, undefined, ctx);
         assert(dishonestToolUseResult.details.terminal.state === "failed", "tool-use message_end was accepted as completed parent result");

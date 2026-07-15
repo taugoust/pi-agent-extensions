@@ -208,7 +208,14 @@ const SUPERVISOR_RECONNECT_INITIAL_MS = Number(process.env.PI_AGENTSH_RECONNECT_
 const APPROVAL_POLL_MS = Number(process.env.PI_AGENTSH_APPROVAL_POLL_MS || "1500");
 const TOOL_REQUEST_TIMEOUT_MS = Number(process.env.PI_AGENTSH_TOOL_REQUEST_TIMEOUT_MS || "600000");
 const APPROVAL_REQUEST_TIMEOUT_SLACK_MS = Number(process.env.PI_AGENTSH_APPROVAL_TIMEOUT_SLACK_MS || "300000");
-const SUBAGENT_REQUEST_TIMEOUT_MS = Number(process.env.PI_AGENTSH_SUBAGENT_REQUEST_TIMEOUT_MS || "1800000");
+const CONFIGURED_SUBAGENT_EXECUTION_TIMEOUT_MS = optionalPositiveTimeoutEnv("PI_AGENTSH_SUBAGENT_EXECUTION_TIMEOUT_MS");
+const LEGACY_SUBAGENT_EXECUTION_TIMEOUT_MS = CONFIGURED_SUBAGENT_EXECUTION_TIMEOUT_MS === undefined
+  ? optionalPositiveTimeoutEnv("PI_AGENTSH_SUBAGENT_REQUEST_TIMEOUT_MS")
+  : undefined;
+const SUBAGENT_EXECUTION_TIMEOUT_MS = CONFIGURED_SUBAGENT_EXECUTION_TIMEOUT_MS ?? LEGACY_SUBAGENT_EXECUTION_TIMEOUT_MS ?? 7_200_000;
+const SUBAGENT_TRANSPORT_SLACK_MS = optionalPositiveTimeoutEnv("PI_AGENTSH_SUBAGENT_TRANSPORT_SLACK_MS") ?? 300_000;
+const SUBAGENT_TRANSPORT_TIMEOUT_FLOOR_MS = optionalPositiveTimeoutEnv("PI_AGENTSH_SUBAGENT_TRANSPORT_TIMEOUT_MS");
+const MAX_NODE_TIMEOUT_MS = 2_147_483_647;
 const VALID_POLICIES = new Set(["pi-autonomous", "pi-supervised"]);
 const VALID_STAGE1_WORKSPACE_MODES = new Set(["shadow", "direct"]);
 
@@ -245,6 +252,20 @@ class RestHTTPError extends Error {
   ) {
     super(`${method} ${path}: HTTP ${statusCode}${body.trim() ? `: ${truncate(body.trim(), 1000)}` : ""}`);
     this.name = "RestHTTPError";
+  }
+}
+
+class SupervisorRequestTimeoutError extends Error {
+  constructor(readonly timeoutMs: number, operation: string) {
+    super(`${operation} timed out after ${timeoutMs}ms`);
+    this.name = "SupervisorRequestTimeoutError";
+  }
+}
+
+class SubagentTransportTimeoutError extends Error {
+  constructor(readonly executionTimeoutMs: number, readonly transportTimeoutMs: number) {
+    super(`AgentSH subagent transport timed out after ${transportTimeoutMs}ms while waiting for the server terminal event (execution deadline ${executionTimeoutMs}ms)`);
+    this.name = "SubagentTransportTimeoutError";
   }
 }
 
@@ -348,7 +369,42 @@ const SubagentParams = Type.Object({
   cwd: Type.Optional(Type.String({ description: "Optional working directory (single mode)" })),
   tasks: Type.Optional(Type.Array(SubagentItem, { description: "Parallel subagent tasks. Max 8, up to 4 run concurrently." })),
   chain: Type.Optional(Type.Array(SubagentItem, { description: "Sequential subagent steps. Each task may use {previous}." })),
+  timeout_ms: Type.Optional(Type.Number({ minimum: 1, description: "Optional shorter execution timeout in milliseconds; defaults to the two-hour configured ceiling" })),
 });
+
+function optionalPositiveTimeoutEnv(name: string): number | undefined {
+  const raw = process.env[name]?.trim();
+  if (!raw) return undefined;
+  const value = Number(raw);
+  if (!Number.isSafeInteger(value) || value <= 0) {
+    throw new Error(`${name} must be a positive integer number of milliseconds`);
+  }
+  return value;
+}
+
+function effectiveSubagentExecutionTimeoutMs(value: unknown): number {
+  const maxExecutionTimeout = MAX_NODE_TIMEOUT_MS - SUBAGENT_TRANSPORT_SLACK_MS;
+  if (!Number.isSafeInteger(SUBAGENT_EXECUTION_TIMEOUT_MS) || SUBAGENT_EXECUTION_TIMEOUT_MS < 1 || SUBAGENT_EXECUTION_TIMEOUT_MS > maxExecutionTimeout) {
+    throw new Error(`configured subagent execution timeout must be between 1 and ${maxExecutionTimeout}ms`);
+  }
+  if (value === undefined || value === null || value === 0) return SUBAGENT_EXECUTION_TIMEOUT_MS;
+  if (typeof value !== "number" || !Number.isSafeInteger(value) || value < 1) {
+    throw new Error("spawn_subagent timeout_ms must be a positive integer");
+  }
+  if (value > maxExecutionTimeout) {
+    throw new Error(`spawn_subagent timeout_ms must not exceed ${maxExecutionTimeout}`);
+  }
+  return Math.min(value, SUBAGENT_EXECUTION_TIMEOUT_MS);
+}
+
+function subagentTransportTimeoutMs(executionTimeoutMs: number): number {
+  const derived = executionTimeoutMs + SUBAGENT_TRANSPORT_SLACK_MS;
+  const timeout = Math.max(derived, SUBAGENT_TRANSPORT_TIMEOUT_FLOOR_MS ?? 0);
+  if (!Number.isSafeInteger(timeout) || timeout > MAX_NODE_TIMEOUT_MS) {
+    throw new Error(`spawn_subagent transport timeout must not exceed ${MAX_NODE_TIMEOUT_MS}`);
+  }
+  return timeout;
+}
 
 function env(name: string) {
   const value = process.env[name];
@@ -1115,8 +1171,10 @@ class MockSupervisorClient {
   }
 
   async spawnSubagent(params: JsonObject, options: SpawnSubagentOptions = {}) {
-    return await this.request("spawn_subagent", { ...params, actor: options.actor || params.actor || parentActor(undefined, "Pi subagent tool") }, {
+    const executionTimeoutMs = effectiveSubagentExecutionTimeoutMs(params.timeout_ms);
+    return await this.request("spawn_subagent", { ...params, timeout_ms: executionTimeoutMs, actor: options.actor || params.actor || parentActor(undefined, "Pi subagent tool") }, {
       signal: options.signal,
+      timeoutMs: subagentTransportTimeoutMs(executionTimeoutMs),
       onEvent: options.onUpdate,
     });
   }
@@ -1214,7 +1272,11 @@ class MockApprovalWatcher {
 
 function abortSignalFrom(optionsSignal?: AbortSignal, timeoutMs = CONNECT_TIMEOUT_MS) {
   const controller = new AbortController();
-  let timeout: ReturnType<typeof setTimeout> | undefined = setTimeout(() => controller.abort(), timeoutMs);
+  let timedOut = false;
+  let timeout: ReturnType<typeof setTimeout> | undefined = setTimeout(() => {
+    timedOut = true;
+    controller.abort();
+  }, timeoutMs);
   const onAbort = () => controller.abort();
   if (optionsSignal) {
     if (optionsSignal.aborted) controller.abort();
@@ -1222,6 +1284,7 @@ function abortSignalFrom(optionsSignal?: AbortSignal, timeoutMs = CONNECT_TIMEOU
   }
   return {
     signal: controller.signal,
+    didTimeout: () => timedOut,
     cleanup() {
       if (timeout) clearTimeout(timeout);
       timeout = undefined;
@@ -1582,7 +1645,15 @@ class RestSupervisorClient {
   }
 
   async #requestNDJSONOnce(method: string, path: string, body: unknown, options: { signal?: AbortSignal; timeoutMs?: number; onEvent?: (message: SupervisorMessage) => void } = {}): Promise<unknown> {
-    const { signal, cleanup } = abortSignalFrom(options.signal, options.timeoutMs || CONNECT_TIMEOUT_MS);
+    const timeoutMs = options.timeoutMs || CONNECT_TIMEOUT_MS;
+    const { signal, cleanup, didTimeout } = abortSignalFrom(options.signal, timeoutMs);
+    let socketTimedOut = false;
+    const timeoutError = () => {
+      socketTimedOut = true;
+      return new SupervisorRequestTimeoutError(timeoutMs, `Streaming ${method} ${path}`);
+    };
+    const requestTimedOut = () => didTimeout() || socketTimedOut;
+    const normalizeRequestError = (error: unknown) => requestTimedOut() ? timeoutError() : asError(error);
     return await new Promise<unknown>((resolve, reject) => {
       const payload = JSON.stringify(body);
       let settled = false;
@@ -1627,15 +1698,27 @@ class RestSupervisorClient {
             errorChunks.push(bytes);
             return;
           }
-          for (const message of appendSubagentProtocolChunk(protocol, bytes)) emitEvent(message as SupervisorMessage);
+          for (const message of appendSubagentProtocolChunk(protocol, bytes)) {
+            if (!emitEvent(message as SupervisorMessage)) return;
+          }
+          if (protocol.finalResponse && !settled) {
+            const finalResponse = protocol.finalResponse;
+            settle(() => resolve(finalResponse));
+            // `done` is the protocol terminal event. Do not let a peer that
+            // keeps the HTTP response open turn a valid result into a later
+            // transport timeout.
+            res.destroy();
+          }
         });
         res.on("aborted", () => {
-          abortSubagentProtocolStream(protocol, "supervisor response was aborted after dispatch");
-          settle(() => reject(new Error(`${method} ${path}: supervisor response was aborted after dispatch`)));
+          const error = requestTimedOut() ? timeoutError() : new Error(`${method} ${path}: supervisor response was aborted after dispatch`);
+          abortSubagentProtocolStream(protocol, error.message);
+          settle(() => reject(error));
         });
         res.on("error", (error) => {
-          abortSubagentProtocolStream(protocol, asError(error).message);
-          settle(() => reject(error));
+          const normalized = normalizeRequestError(error);
+          abortSubagentProtocolStream(protocol, normalized.message);
+          settle(() => reject(normalized));
         });
         res.on("end", () => {
           const statusCode = res.statusCode || 0;
@@ -1654,19 +1737,21 @@ class RestSupervisorClient {
         });
         res.on("close", () => {
           if (!settled && !res.complete) {
-            abortSubagentProtocolStream(protocol, "supervisor response closed before completion after dispatch");
-            settle(() => reject(new Error(`${method} ${path}: supervisor response closed before completion after dispatch`)));
+            const error = requestTimedOut() ? timeoutError() : new Error(`${method} ${path}: supervisor response closed before completion after dispatch`);
+            abortSubagentProtocolStream(protocol, error.message);
+            settle(() => reject(error));
           }
         });
       });
       req.on("error", (error) => {
-        abortSubagentProtocolStream(protocol, asError(error).message);
+        const normalized = normalizeRequestError(error);
+        abortSubagentProtocolStream(protocol, normalized.message);
         settle(() => {
           if (!responseStarted && supervisorSocketUnavailable(error)) reject(new SafeSupervisorConnectError(error));
-          else reject(error);
+          else reject(normalized);
         });
       });
-      req.setTimeout(options.timeoutMs || CONNECT_TIMEOUT_MS, () => req?.destroy(new Error(`Timed out streaming from AgentSH REST supervisor socket ${this.socketPath}`)));
+      req.setTimeout(timeoutMs, () => req?.destroy(timeoutError()));
       req.write(payload);
       req.end();
     });
@@ -1823,8 +1908,18 @@ class RestSupervisorClient {
         });
       }
       body.stream = true;
-      const raw = await this.requestNDJSON("POST", this.toolPath("spawn_subagent"), body, { signal: options.signal, timeoutMs: SUBAGENT_REQUEST_TIMEOUT_MS, onEvent: options.onUpdate });
-      return unwrapRestSubagentResponse(raw);
+      const executionTimeoutMs = effectiveSubagentExecutionTimeoutMs(body.timeout_ms);
+      const transportTimeoutMs = subagentTransportTimeoutMs(executionTimeoutMs);
+      body.timeout_ms = executionTimeoutMs;
+      try {
+        const raw = await this.requestNDJSON("POST", this.toolPath("spawn_subagent"), body, { signal: options.signal, timeoutMs: transportTimeoutMs, onEvent: options.onUpdate });
+        return unwrapRestSubagentResponse(raw);
+      } catch (error) {
+        if (error instanceof SupervisorRequestTimeoutError && !options.signal?.aborted) {
+          throw new SubagentTransportTimeoutError(executionTimeoutMs, transportTimeoutMs);
+        }
+        throw error;
+      }
     } catch (error) {
       const message = asError(error).message;
       if (message.includes("HTTP 404")) throw new Error("AgentSH supervisor does not support spawn_subagent; rebuild/deploy a newer AgentSH or disable sandbox subagent registration.");
@@ -3227,14 +3322,20 @@ export default function sandbox(pi: ExtensionAPI) {
         });
       } catch (error) {
         const rawMessage = asError(error).message || "spawn_subagent failed";
-        const terminal = normalizeSubagentTerminal(signal?.aborted
-          ? { state: "cancelled", cancellation_cause: "user_cancelled", exit_code: 130, termination: "graceful", retryable: true, message: rawMessage }
-          : { state: "failed", failure_kind: "transport", exit_code: 1, termination: "natural", retryable: true, message: rawMessage });
+        const terminal = normalizeSubagentTerminal(error instanceof SubagentTransportTimeoutError
+          ? { state: "timed_out", failure_kind: "transport", cancellation_cause: "request_timeout", exit_code: 124, termination: "natural", retryable: true, message: rawMessage }
+          : signal?.aborted
+            ? { state: "cancelled", cancellation_cause: "user_cancelled", exit_code: 130, termination: "graceful", retryable: true, message: rawMessage }
+            : { state: "failed", failure_kind: "transport", exit_code: 1, termination: "natural", retryable: true, message: rawMessage });
         const message = terminal?.message || "spawn_subagent failed";
         for (const childState of streamStates.values()) {
           flushSubagentStdout(childState);
           if (childState.exitCode === -1) {
-            const protocolFailure = piProtocolFailure(childState);
+            const inferredProtocolFailure = piProtocolFailure(childState);
+            const interrupted = terminal?.state === "cancelled" || terminal?.state === "timed_out";
+            const protocolFailure = interrupted && inferredProtocolFailure?.failureKind === "protocol" && !childState.protocolSettled
+              ? undefined
+              : inferredProtocolFailure;
             const retainedFinal = latestSubagentAssistantText(childState);
             if (childState.protocolSettled && !protocolFailure && retainedFinal) {
               childState.exitCode = 0;
@@ -3247,9 +3348,14 @@ export default function sandbox(pi: ExtensionAPI) {
               childState.stopReason = "error";
               childState.terminal = { state: "failed", failureKind: protocolFailure.failureKind, exitCode: 1, termination: "natural", retryable: protocolFailure.retryable, message: protocolFailure.message };
               childState.errorMessage ||= protocolFailure.message;
+            } else if (interrupted) {
+              childState.exitCode = terminal?.exitCode ?? 1;
+              childState.stopReason = terminal?.state === "cancelled" ? "cancelled" : "timeout";
+              childState.terminal = terminal;
+              childState.errorMessage ||= message;
             } else {
               childState.exitCode = terminal?.exitCode ?? 1;
-              childState.stopReason ||= terminal?.state === "cancelled" ? "cancelled" : "error";
+              childState.stopReason ||= terminal?.state === "cancelled" ? "cancelled" : terminal?.state === "timed_out" ? "timeout" : "error";
               childState.terminal ||= terminal;
               childState.errorMessage ||= message;
             }
@@ -3258,7 +3364,7 @@ export default function sandbox(pi: ExtensionAPI) {
         const mode = hasChain ? "chain" : hasTasks ? "parallel" : "single";
         const results = streamOrder.length
           ? streamOrder.map((key) => createSubagentProgressCapsule(streamStates.get(key)!))
-          : [createSubagentProgressCapsule({ label: "subagent", exitCode: terminal?.exitCode ?? 1, stopReason: terminal?.state === "cancelled" ? "cancelled" : "error", terminal, final: message, errorMessage: message })];
+          : [createSubagentProgressCapsule({ label: "subagent", exitCode: terminal?.exitCode ?? 1, stopReason: terminal?.state === "cancelled" ? "cancelled" : terminal?.state === "timed_out" ? "timeout" : "error", terminal, final: message, errorMessage: message })];
         const outcomeLabel = terminal?.state === "cancelled" ? "subagent cancelled" : terminal?.state === "timed_out" ? "subagent timed out" : "subagent failed";
         result = {
           mode,
