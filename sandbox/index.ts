@@ -8,14 +8,12 @@
  */
 
 import { spawn } from "node:child_process";
-import { randomBytes } from "node:crypto";
-import { createWriteStream, type WriteStream } from "node:fs";
 import * as http from "node:http";
 import { createConnection, type Socket } from "node:net";
-import { homedir, tmpdir } from "node:os";
-import { join, posix as posixPath } from "node:path";
+import { homedir } from "node:os";
+import { posix as posixPath } from "node:path";
 import { Type } from "@sinclair/typebox";
-import { DEFAULT_MAX_BYTES, DEFAULT_MAX_LINES, formatSize, getMarkdownTheme, renderDiff, truncateTail, type ExtensionAPI, type ExtensionContext, type TruncationResult } from "@mariozechner/pi-coding-agent";
+import { DEFAULT_MAX_BYTES, DEFAULT_MAX_LINES, formatSize, getMarkdownTheme, renderDiff, truncateHead, truncateTail, type ExtensionAPI, type ExtensionContext, type TruncationResult } from "@mariozechner/pi-coding-agent";
 import { Box, Container, Key, Markdown, matchesKey, Spacer, Text, truncateToWidth, type Component } from "@mariozechner/pi-tui";
 import { inheritSubagentModels } from "./subagent-model.js";
 import { abortSubagentProtocolStream, appendSubagentProtocolChunk, createSubagentProtocolState, finishSubagentProtocolStream } from "./subagent-protocol.js";
@@ -121,6 +119,8 @@ type ExecOptions = {
   cwd?: string;
   timeout?: number;
   timeout_ms?: number;
+  persist_output_over_bytes?: number;
+  persist_output_over_lines?: number;
   actor?: Actor;
   tool_call_id?: string;
   onStdout?: (chunk: string) => void;
@@ -150,7 +150,7 @@ type RestConnectionEvents = {
 };
 
 type AgentSHPiAPI = {
-  exec(command: string | { command: string; cwd?: string; timeout_ms?: number; actor?: Actor }, options?: ExecOptions): Promise<ExecResult>;
+  exec(command: string | { command: string; cwd?: string; timeout_ms?: number; persist_output_over_bytes?: number; persist_output_over_lines?: number; actor?: Actor }, options?: ExecOptions): Promise<ExecResult>;
   readFile(path: string, options?: ReadFileOptions): Promise<unknown>;
   writeFile(path: string, content: string, options?: WriteFileOptions): Promise<unknown>;
   editFile(path: string, edits: Edit[], options?: EditFileOptions): Promise<unknown>;
@@ -471,54 +471,37 @@ type OutputSnapshot = {
   fullOutputPath?: string;
 };
 
-function defaultTempFilePath(prefix: string) {
-  return join(tmpdir(), `${prefix}-${randomBytes(8).toString("hex")}.log`);
-}
-
 function byteLength(text: string) {
   return Buffer.byteLength(text, "utf-8");
 }
 
 class StringOutputAccumulator {
   private readonly decoder = new TextDecoder();
-  private rawChunks: Buffer[] = [];
   private tailText = "";
   private tailBytes = 0;
   private tailStartsAtLineBoundary = true;
-  private totalRawBytes = 0;
   private totalDecodedBytes = 0;
   private completedLines = 0;
   private totalLines = 0;
   private currentLineBytes = 0;
   private hasOpenLine = false;
   private finished = false;
-  private tempFilePath: string | undefined;
-  private tempFileStream: WriteStream | undefined;
 
   append(text: string): void {
     if (this.finished) throw new Error("Cannot append to a finished output accumulator");
     if (!text) return;
 
     const data = Buffer.from(text, "utf-8");
-    this.totalRawBytes += data.length;
     this.appendDecodedText(this.decoder.decode(data, { stream: true }));
-
-    if (this.tempFileStream || this.shouldUseTempFile()) {
-      this.ensureTempFile();
-      this.tempFileStream?.write(data);
-    } else {
-      this.rawChunks.push(data);
-    }
   }
 
   finish(): void {
     if (this.finished) return;
     this.finished = true;
     this.appendDecodedText(this.decoder.decode());
-    if (this.shouldUseTempFile()) this.ensureTempFile();
   }
 
-  snapshot(options: { persistIfTruncated?: boolean } = {}): OutputSnapshot {
+  snapshot(_options: { persistIfTruncated?: boolean } = {}): OutputSnapshot {
     const tailTruncation = truncateTail(this.getSnapshotText(), {
       maxLines: DEFAULT_MAX_LINES,
       maxBytes: DEFAULT_MAX_BYTES,
@@ -534,32 +517,16 @@ class StringOutputAccumulator {
       maxBytes: DEFAULT_MAX_BYTES,
     };
 
-    if (options.persistIfTruncated && truncation.truncated) this.ensureTempFile();
-
     return {
       content: truncation.content,
       truncation,
-      fullOutputPath: this.tempFilePath,
     };
   }
 
   async closeTempFile(): Promise<void> {
-    if (!this.tempFileStream) return;
-    const stream = this.tempFileStream;
-    this.tempFileStream = undefined;
-    await new Promise<void>((resolve, reject) => {
-      const onError = (error: Error) => {
-        stream.off("finish", onFinish);
-        reject(error);
-      };
-      const onFinish = () => {
-        stream.off("error", onError);
-        resolve();
-      };
-      stream.once("error", onError);
-      stream.once("finish", onFinish);
-      stream.end();
-    });
+    // Supervised overflow artifacts are owned by remote AgentSH. Retain this
+    // no-op during the compatibility transition so existing finally blocks do
+    // not create local-Pi filesystem capabilities.
   }
 
   getLastLineBytes(): number {
@@ -615,17 +582,6 @@ class StringOutputAccumulator {
     return firstNewline === -1 ? this.tailText : this.tailText.slice(firstNewline + 1);
   }
 
-  private shouldUseTempFile(): boolean {
-    return this.totalRawBytes > DEFAULT_MAX_BYTES || this.totalDecodedBytes > DEFAULT_MAX_BYTES || this.totalLines > DEFAULT_MAX_LINES;
-  }
-
-  private ensureTempFile(): void {
-    if (this.tempFilePath) return;
-    this.tempFilePath = defaultTempFilePath("pi-agentsh-bash");
-    this.tempFileStream = createWriteStream(this.tempFilePath);
-    for (const chunk of this.rawChunks) this.tempFileStream.write(chunk);
-    this.rawChunks = [];
-  }
 }
 
 function execResultBoolean(result: ExecResult | undefined, key: string) {
@@ -637,7 +593,27 @@ function execResultNumber(result: ExecResult | undefined, key: string) {
   return typeof value === "number" && Number.isFinite(value) ? value : undefined;
 }
 
-function agentSHOutputWarnings(result: ExecResult | undefined) {
+type RemoteOutputArtifact = {
+  path?: string;
+  bytes?: number;
+  totalBytes?: number;
+  complete?: boolean;
+  error?: string;
+};
+
+function remoteOutputArtifact(result: ExecResult | undefined): RemoteOutputArtifact | undefined {
+  if (!result) return undefined;
+  const nested = result.output_artifact && typeof result.output_artifact === "object" ? result.output_artifact as JsonObject : undefined;
+  const path = typeof result.full_output_path === "string" ? result.full_output_path : typeof nested?.path === "string" ? nested.path : undefined;
+  const bytes = execResultNumber(result, "artifact_bytes") ?? numericField(nested?.bytes);
+  const totalBytes = execResultNumber(result, "artifact_total_bytes") ?? numericField(nested?.total_bytes);
+  const completeValue = typeof result.artifact_complete === "boolean" ? result.artifact_complete : nested?.complete;
+  const error = typeof result.artifact_error === "string" ? result.artifact_error : typeof nested?.error === "string" ? nested.error : undefined;
+  if (!path && !error && bytes === undefined && totalBytes === undefined) return undefined;
+  return { path, bytes, totalBytes, complete: typeof completeValue === "boolean" ? completeValue : undefined, error };
+}
+
+function agentSHOutputWarnings(result: ExecResult | undefined, artifact?: RemoteOutputArtifact) {
   const warnings: string[] = [];
   const sessionID = typeof result?.session_id === "string" ? result.session_id : "";
   const commandID = typeof result?.command_id === "string" ? result.command_id : "";
@@ -645,8 +621,11 @@ function agentSHOutputWarnings(result: ExecResult | undefined) {
     if (!execResultBoolean(result, `${stream}_truncated`)) continue;
     const total = execResultNumber(result, `${stream}_total_bytes`);
     const totalText = total === undefined ? "" : ` at ${formatSize(total)}`;
-    const hint = sessionID && commandID ? ` Use: agentsh output ${sessionID} ${commandID} --stream ${stream}` : "";
-    warnings.push(`AgentSH truncated ${stream}${totalText}.${hint}`);
+    let hint = "";
+    if (artifact?.path && artifact.complete) hint = " Complete output is available in the remote artifact.";
+    else if (artifact?.path) hint = " The remote artifact is also bounded; its byte counts are shown above.";
+    else if (sessionID && commandID) hint = ` The retained AgentSH prefix can be paged with: agentsh output ${sessionID} ${commandID} --stream ${stream}`;
+    warnings.push(`AgentSH response truncated ${stream}${totalText}.${hint}`);
   }
   return warnings;
 }
@@ -654,18 +633,33 @@ function agentSHOutputWarnings(result: ExecResult | undefined) {
 function formatAccumulatedOutput(snapshot: OutputSnapshot, output: StringOutputAccumulator, result?: ExecResult, emptyText = "(no output)") {
   const truncation = snapshot.truncation;
   let text = snapshot.content || emptyText;
-  const warnings = agentSHOutputWarnings(result);
+  const artifact = remoteOutputArtifact(result);
+  const warnings = agentSHOutputWarnings(result, artifact);
   if (truncation.truncated) {
     const startLine = truncation.totalLines - truncation.outputLines + 1;
     const endLine = truncation.totalLines;
+    let shown: string;
     if (truncation.lastLinePartial) {
       const lastLineSize = formatSize(output.getLastLineBytes());
-      warnings.unshift(`Showing last ${formatSize(truncation.outputBytes)} of line ${endLine} (line is ${lastLineSize}). Full output: ${snapshot.fullOutputPath}`);
+      shown = `Showing last ${formatSize(truncation.outputBytes)} of line ${endLine} (line is ${lastLineSize}).`;
     } else if (truncation.truncatedBy === "lines") {
-      warnings.unshift(`Showing lines ${startLine}-${endLine} of ${truncation.totalLines}. Full output: ${snapshot.fullOutputPath}`);
+      shown = `Showing lines ${startLine}-${endLine} of ${truncation.totalLines}.`;
     } else {
-      warnings.unshift(`Showing lines ${startLine}-${endLine} of ${truncation.totalLines} (${formatSize(DEFAULT_MAX_BYTES)} limit). Full output: ${snapshot.fullOutputPath}`);
+      shown = `Showing lines ${startLine}-${endLine} of ${truncation.totalLines} (${formatSize(DEFAULT_MAX_BYTES)} limit).`;
     }
+    if (artifact?.path) {
+      const retained = artifact.complete === false
+        ? ` Retained remote output: ${artifact.path} (${formatSize(artifact.bytes ?? 0)} of ${formatSize(artifact.totalBytes ?? 0)}).`
+        : ` Full output: ${artifact.path}`;
+      shown += retained;
+    } else if (artifact?.error) {
+      shown += ` Remote output artifact unavailable: ${artifact.error}`;
+    } else if (result) {
+      shown += " Remote output artifact unavailable from this supervisor.";
+    } else {
+      shown += " Remote output artifact pending command completion.";
+    }
+    warnings.unshift(shown);
   }
   if (warnings.length > 0) text += `\n\n[${warnings.join(" ")}]`;
   return text;
@@ -1085,6 +1079,8 @@ class MockSupervisorClient {
       command,
       cwd: options.cwd || effectiveSupervisorCwd(),
       timeout_ms: timeoutMs,
+      persist_output_over_bytes: options.persist_output_over_bytes,
+      persist_output_over_lines: options.persist_output_over_lines,
       actor: options.actor || parentActor(options.tool_call_id, "Pi bash tool"),
     }, {
       signal: options.signal,
@@ -1257,16 +1253,6 @@ function unwrapRestSubagentResponse(raw: unknown): unknown {
 
 function numericField(value: unknown) {
   return typeof value === "number" && Number.isFinite(value) ? value : undefined;
-}
-
-function lineWindow(content: string, offset?: number, limit?: number) {
-  const normalizedOffset = typeof offset === "number" && offset > 0 ? Math.floor(offset) : 1;
-  const normalizedLimit = typeof limit === "number" && limit >= 0 ? Math.floor(limit) : undefined;
-  if (normalizedOffset === 1 && normalizedLimit === undefined) return content;
-  const lines = content.split(/\r?\n/);
-  const start = Math.max(0, normalizedOffset - 1);
-  const selected = normalizedLimit === undefined ? lines.slice(start) : lines.slice(start, start + normalizedLimit);
-  return selected.join("\n");
 }
 
 function toSlashPath(path: string) {
@@ -1756,6 +1742,8 @@ class RestSupervisorClient {
       command,
       cwd: options.cwd || effectiveSupervisorCwd(),
       timeout_ms: timeoutMs,
+      persist_output_over_bytes: options.persist_output_over_bytes,
+      persist_output_over_lines: options.persist_output_over_lines,
       actor: options.actor || parentActor(options.tool_call_id, "Pi bash tool"),
     }, { signal: options.signal, timeoutMs: requestTimeoutMs });
     const result = unwrapRestToolResponse<JsonObject>("exec_bash", raw);
@@ -1777,13 +1765,12 @@ class RestSupervisorClient {
     const file = restFileRequest(this.#metadata, path, options.cwd);
     const raw = await this.request("POST", this.toolPath("read_file"), {
       ...file,
+      offset: options.offset,
+      limit: options.limit,
+      max_bytes: DEFAULT_MAX_BYTES,
       actor: options.actor || parentActor(undefined, "Pi read tool"),
     }, { signal: options.signal, timeoutMs: TOOL_REQUEST_TIMEOUT_MS });
-    const result = unwrapRestToolResponse<JsonObject>("read_file", raw);
-    if (result.encoding === "utf-8" && typeof result.content === "string") {
-      return { ...result, content: lineWindow(result.content, options.offset, options.limit) };
-    }
-    return result;
+    return unwrapRestToolResponse<JsonObject>("read_file", raw);
   }
 
   async writeFile(path: string, content: string, options: WriteFileOptions = {}) {
@@ -2330,7 +2317,14 @@ function createGlobalAPI(state: SupervisorState): AgentSHPiAPI {
     async exec(commandOrParams, options = {}) {
       const client = requireClient(state);
       if (typeof commandOrParams === "string") return await client.exec(commandOrParams, options);
-      return await client.exec(commandOrParams.command, { ...options, cwd: commandOrParams.cwd ?? options.cwd, timeout_ms: commandOrParams.timeout_ms ?? options.timeout_ms, actor: commandOrParams.actor ?? options.actor });
+      return await client.exec(commandOrParams.command, {
+        ...options,
+        cwd: commandOrParams.cwd ?? options.cwd,
+        timeout_ms: commandOrParams.timeout_ms ?? options.timeout_ms,
+        persist_output_over_bytes: commandOrParams.persist_output_over_bytes ?? options.persist_output_over_bytes,
+        persist_output_over_lines: commandOrParams.persist_output_over_lines ?? options.persist_output_over_lines,
+        actor: commandOrParams.actor ?? options.actor,
+      });
     },
     async readFile(path, options = {}) { return await requireClient(state).readFile(path, options); },
     async writeFile(path, content, options = {}) { return await requireClient(state).writeFile(path, content, options); },
@@ -2357,7 +2351,22 @@ function contentFromReadResult(result: any) {
   if (typeof result?.base64 === "string" && typeof result?.mimeType === "string" && result.mimeType.startsWith("image/")) {
     return [{ type: "image", source: { type: "base64", media_type: result.mimeType, data: result.base64 } }];
   }
-  return [{ type: "text", text: textFromResult(result, "") }];
+  const rawText = textFromResult(result, "");
+  const localWindow = truncateHead(rawText, { maxLines: DEFAULT_MAX_LINES, maxBytes: DEFAULT_MAX_BYTES });
+  let text = localWindow.content;
+  const remotelyTruncated = result?.truncated === true;
+  if (remotelyTruncated || localWindow.truncated) {
+    const startLine = numericField(result?.start_line) ?? 1;
+    const endLine = numericField(result?.end_line) ?? (startLine + localWindow.outputLines - 1);
+    const nextOffset = numericField(result?.next_offset) ?? (!localWindow.firstLineExceedsLimit && localWindow.outputLines > 0 ? endLine + 1 : undefined);
+    if (nextOffset) {
+      const range = endLine >= startLine ? `Showing lines ${startLine}-${endLine}. ` : "";
+      text += `\n\n[${range}Use offset=${nextOffset} to continue.]`;
+    } else if (result?.byte_truncated === true || localWindow.firstLineExceedsLimit) {
+      text += `\n\n[Current line exceeds the ${formatSize(numericField(result?.max_bytes) ?? DEFAULT_MAX_BYTES)} read limit. Use supervised bash with a byte-range command to inspect the remainder.]`;
+    }
+  }
+  return [{ type: "text", text }];
 }
 
 type SandboxEditRenderState = {
@@ -2540,6 +2549,13 @@ function subagentParentDetails(result: any, ctx?: ExtensionContext, streamedStat
       stdoutTruncated: item?.stdout_truncated === true || item?.stdoutTruncated === true || streamed?.stdoutTruncated === true,
       stdoutTotalBytes: Math.max(usageNumber(item?.stdout_total_bytes ?? item?.stdoutTotalBytes), usageNumber(streamed?.stdoutTotalBytes)),
       compaction: streamed?.compaction ?? parsed?.compaction ?? item?.compaction,
+      fullResultPath: item?.full_result_path ?? item?.fullResultPath,
+      finalTruncated: item?.final_truncated === true || item?.finalTruncated === true,
+      finalTotalBytes: item?.final_total_bytes ?? item?.finalTotalBytes,
+      finalInlineBytes: item?.final_inline_bytes ?? item?.finalInlineBytes,
+      artifactBytes: item?.artifact_bytes ?? item?.artifactBytes,
+      artifactComplete: typeof item?.artifact_complete === "boolean" ? item.artifact_complete : item?.artifactComplete,
+      artifactError: item?.artifact_error ?? item?.artifactError,
     });
   };
   const results = boundSubagentProgressCapsules(Array.isArray(result?.results) ? result.results.map(detailResult) : []);
@@ -2549,6 +2565,7 @@ function subagentParentDetails(result: any, ctx?: ExtensionContext, streamedStat
     if (failedChild?.terminal) terminal = { ...failedChild.terminal, message: failedChild.terminal.message || failedChild.errorMessage };
   }
   const serverParentFinal = terminal?.state === "completed" && typeof result?.final === "string" && result.final.trim() ? sanitizeSubagentParentText(result.final, 4 * 1024) : undefined;
+  const singleArtifact = results.length === 1 ? results[0] : undefined;
   return {
     mode: result?.mode || (results.length > 1 ? "parallel" : "single"),
     results,
@@ -2556,6 +2573,12 @@ function subagentParentDetails(result: any, ctx?: ExtensionContext, streamedStat
     final: serverParentFinal ?? (results.length === 1 && results[0].terminal?.state === "completed" ? results[0].final ?? results[0].lastAssistantText : undefined),
     summary: typeof result?.summary === "string" ? sanitizeSubagentParentText(result.summary, 4 * 1024) : undefined,
     error: terminal?.message || (typeof result?.error === "string" ? sanitizeSubagentParentText(result.error, 1024) : undefined),
+    fullResultPath: singleArtifact?.fullResultPath,
+    finalTruncated: singleArtifact?.finalTruncated,
+    finalTotalBytes: singleArtifact?.finalTotalBytes,
+    artifactBytes: singleArtifact?.artifactBytes,
+    artifactComplete: singleArtifact?.artifactComplete,
+    artifactError: singleArtifact?.artifactError,
   };
 }
 
@@ -2575,6 +2598,33 @@ function subagentText(result: any) {
   if (typeof result?.summary === "string" && result.summary.trim()) return result.summary;
   if (Array.isArray(result?.results) && result.results.length > 0) return result.results.map(resultLine).join("\n\n");
   return JSON.stringify(subagentParentDetails(result) ?? {}, null, 2);
+}
+
+function subagentArtifactHints(result: any): string {
+  if (!Array.isArray(result?.results)) return "";
+  const hints = result.results.flatMap((child: any) => {
+    const label = stringifyData(child?.label || "subagent");
+    const path = typeof child?.fullResultPath === "string" ? child.fullResultPath : "";
+    if (path) {
+      const bytes = usageNumber(child?.artifactBytes);
+      const total = usageNumber(child?.finalTotalBytes);
+      const completeness = child?.artifactComplete === false && total
+        ? ` (${formatSize(bytes)} of ${formatSize(total)} retained)`
+        : "";
+      return [`Full subagent result [${label}]: ${path}${completeness}`];
+    }
+    if (typeof child?.artifactError === "string" && child.artifactError) {
+      return [`Subagent result artifact unavailable [${label}]: ${child.artifactError}`];
+    }
+    return [];
+  });
+  return truncateByBytes(hints.join("\n"), 4 * 1024);
+}
+
+function boundedSubagentParentOutput(result: any): string {
+  const inline = truncateByBytes(subagentText(result));
+  const hints = subagentArtifactHints(result);
+  return hints ? `${inline}\n\n${hints}` : inline;
 }
 
 function renderSubagentStream(state: SubagentStreamState) {
@@ -2724,6 +2774,8 @@ function compactSubagentResultSummary(result: any): string {
   const stderr = String(result?.stderrTail || result?.stderr || "").trim().split("\n").filter(Boolean).slice(-8).join("\n");
   if (stderr) lines.push(`stderr:\n${stderr}`);
   if (result?.errorMessage) lines.push(`Error: ${result.errorMessage}`);
+  if (result?.fullResultPath) lines.push(`Full result: ${result.fullResultPath}`);
+  if (result?.artifactError) lines.push(`Result artifact unavailable: ${result.artifactError}`);
   lines.push(`Exit: ${result?.exitCode ?? 0}${result?.stopReason ? ` (${result.stopReason})` : ""}`);
   return truncateByBytes(lines.join("\n"));
 }
@@ -2783,6 +2835,8 @@ function renderSubagentResult(result: any, options: any, theme: any) {
     container.addChild(new Text(theme.fg("muted", "─── Output ───"), 0, 0));
     if (finalOutput) container.addChild(new Markdown(truncateByBytes(finalOutput.trim()), 0, 0, mdTheme));
     else container.addChild(new Text(theme.fg("muted", r.exitCode === -1 ? "(running...)" : "(no output)"), 0, 0));
+    if (r.fullResultPath) container.addChild(new Text(theme.fg("dim", `Full result: ${r.fullResultPath}`), 0, 0));
+    else if (r.artifactError) container.addChild(new Text(theme.fg("warning", `Result artifact unavailable: ${r.artifactError}`), 0, 0));
 
     const usage = formatSubagentUsage(r.usage, r.model);
     if (usage) container.addChild(new Text(theme.fg("dim", usage), 0, 0));
@@ -2811,6 +2865,8 @@ function renderSubagentResult(result: any, options: any, theme: any) {
       if (lastTool) text += `\n${theme.fg("muted", "→ ")}${formatSubagentToolCall(lastTool.name, completedSubagentToolArgs(lastTool), theme.fg.bind(theme))}`;
       else text += fallback ? `\n${theme.fg("toolOutput", truncateByBytes(fallback).split("\n").slice(0, 8).join("\n"))}` : `\n${theme.fg("muted", r.exitCode === -1 ? "(running...)" : "(no output)")}`;
     } else text += `\n${renderDisplayItems(displayItems, 10)}`;
+    if (r.fullResultPath) text += `\n${theme.fg("dim", `Full result: ${r.fullResultPath}`)}`;
+    else if (r.artifactError) text += `\n${theme.fg("warning", `Result artifact unavailable: ${r.artifactError}`)}`;
     const usage = formatSubagentUsage(r.usage, r.model);
     if (usage) text += `\n${theme.fg("dim", usage)}`;
     return new Text(text, 0, 0);
@@ -2850,6 +2906,8 @@ function renderSubagentResult(result: any, options: any, theme: any) {
       if (lastTool) text += `\n${theme.fg("muted", "→ ")}${formatSubagentToolCall(lastTool.name, completedSubagentToolArgs(lastTool), theme.fg.bind(theme))}`;
       else text += fallback ? `\n${theme.fg("toolOutput", truncateByBytes(fallback).split("\n").slice(0, 5).join("\n"))}` : `\n${theme.fg("muted", r.exitCode === -1 ? "(running...)" : "(no output)")}`;
     } else text += `\n${renderDisplayItems(displayItems, 5)}`;
+    if (r.fullResultPath) text += `\n${theme.fg("dim", `Full result: ${r.fullResultPath}`)}`;
+    else if (r.artifactError) text += `\n${theme.fg("warning", `Result artifact unavailable: ${r.artifactError}`)}`;
     const usage = formatSubagentUsage(r.usage, r.model);
     if (usage) text += `\n${theme.fg("dim", usage)}`;
   }
@@ -2963,6 +3021,8 @@ export default function sandbox(pi: ExtensionAPI) {
           cwd: effectiveSupervisorCwd(ctx),
           timeout: params.timeout,
           tool_call_id: toolCallId,
+          persist_output_over_bytes: DEFAULT_MAX_BYTES,
+          persist_output_over_lines: DEFAULT_MAX_LINES,
           signal,
           onOutput: (chunk) => {
             output.append(chunk);
@@ -2973,10 +3033,12 @@ export default function sandbox(pi: ExtensionAPI) {
         const snapshot = output.snapshot({ persistIfTruncated: true });
         const exitCode = typeof result.exitCode === "number" ? result.exitCode : 0;
         const finalText = formatAccumulatedOutput(snapshot, output, result);
+        const artifact = remoteOutputArtifact(result);
         const details = {
           exitCode,
           truncation: snapshot.truncation.truncated ? snapshot.truncation : undefined,
-          fullOutputPath: snapshot.fullOutputPath,
+          fullOutputPath: artifact?.path,
+          outputArtifact: artifact,
         };
         if (exitCode !== 0) throw new Error(`${finalText}\n\nCommand exited with code ${exitCode}`);
         return { content: [{ type: "text", text: finalText }], details };
@@ -3080,9 +3142,10 @@ export default function sandbox(pi: ExtensionAPI) {
         const latest = renderSubagentStreams();
         onUpdate?.({ content: latest ? [{ type: "text", text: latest }] : [], details: streamDetails() });
       };
+      const resultArtifactThresholdBytes = hasSingle ? 4 * 1024 : 2 * 1024;
       let result: unknown;
       try {
-        result = await requireClient(state).spawnSubagent({ ...effectiveParams, cwd: effectiveParams.cwd || effectiveSupervisorCwd(ctx), actor: parentActor(toolCallId, "Pi subagent tool") }, {
+        result = await requireClient(state).spawnSubagent({ ...effectiveParams, cwd: effectiveParams.cwd || effectiveSupervisorCwd(ctx), result_artifact_threshold_bytes: resultArtifactThresholdBytes, actor: parentActor(toolCallId, "Pi subagent tool") }, {
           signal,
           onUpdate: (message) => {
           if (message.event === "subagent_start") {
@@ -3206,11 +3269,11 @@ export default function sandbox(pi: ExtensionAPI) {
           results,
         };
         const details = subagentParentDetails(result, ctx, streamStates) as any;
-        const text = truncateByBytes(subagentText(details));
+        const text = boundedSubagentParentOutput(details);
         return { content: [{ type: "text", text }], details, isError: true };
       }
       const details = subagentParentDetails(result, ctx, streamStates) as any;
-      const text = truncateByBytes(subagentText(details));
+      const text = boundedSubagentParentOutput(details);
       const isError = subagentTerminalFailed(details?.terminal) || details?.results?.some((child: any) => subagentTerminalFailed(child?.terminal)) || Boolean((result as any)?.error);
       return { content: [{ type: "text", text }], details, isError };
     },

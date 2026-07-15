@@ -69,6 +69,30 @@ function line(event: unknown): string {
 }
 
 {
+  const fullResultPath = "/remote/session/tmp/output-artifacts/subagent-result.md";
+  const capsules = Array.from({ length: 8 }, (_, index) => createSubagentProgressCapsule({
+    label: `artifact ${index}`,
+    task: "large task ".repeat(1000),
+    exitCode: 0,
+    stopReason: "completed",
+    final: "answer ".repeat(1000),
+    fullResultPath: `${fullResultPath}-${index}`,
+    finalTruncated: true,
+    finalTotalBytes: 8192,
+    finalInlineBytes: 4096,
+    artifactBytes: 8192,
+    artifactComplete: true,
+  }));
+  const bounded = boundSubagentProgressCapsules(capsules, 4 * 1024);
+  assert.equal(bounded.length, 8);
+  for (let index = 0; index < bounded.length; index++) {
+    assert.equal(bounded[index].fullResultPath, `${fullResultPath}-${index}`, "artifact path was lost during capsule bounding");
+    assert.equal(bounded[index].artifactComplete, true);
+    assert.equal(bounded[index].finalTotalBytes, 8192);
+  }
+}
+
+{
   const capsule = createSubagentProgressCapsule({
     label: "terminal-controls",
     exitCode: 1,

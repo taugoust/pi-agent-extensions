@@ -36,6 +36,13 @@ export type SubagentProgressCapsule = {
   stdoutTruncated: boolean;
   stdoutTotalBytes: number;
   protocolDiagnostics: SubagentProtocolDiagnostic[];
+  fullResultPath?: string;
+  finalTruncated?: boolean;
+  finalTotalBytes?: number;
+  finalInlineBytes?: number;
+  artifactBytes?: number;
+  artifactComplete?: boolean;
+  artifactError?: string;
 };
 
 type CapsuleSource = Partial<Omit<SubagentStreamState, "terminal">> & {
@@ -43,6 +50,13 @@ type CapsuleSource = Partial<Omit<SubagentStreamState, "terminal">> & {
   exitCode?: number;
   stopReason?: string;
   terminal?: unknown;
+  fullResultPath?: string;
+  finalTruncated?: boolean;
+  finalTotalBytes?: number;
+  finalInlineBytes?: number;
+  artifactBytes?: number;
+  artifactComplete?: boolean;
+  artifactError?: string;
 };
 
 function byteLength(value: unknown): number {
@@ -185,6 +199,13 @@ export function createSubagentProgressCapsule(source: CapsuleSource): SubagentPr
     stdoutTruncated: source.stdoutTruncated === true,
     stdoutTotalBytes: usageNumber(source.stdoutTotalBytes),
     protocolDiagnostics: (source.protocolDiagnostics ?? []).slice(-MAX_CAPSULE_DIAGNOSTICS).map((diagnostic) => ({ ...diagnostic, detail: diagnostic.detail ? truncateByBytes(diagnostic.detail, 256) : undefined })),
+    fullResultPath: source.fullResultPath ? truncateByBytes(stripSubagentTerminalControls(source.fullResultPath), 512) : undefined,
+    finalTruncated: source.finalTruncated === true || undefined,
+    finalTotalBytes: usageNumber(source.finalTotalBytes) || undefined,
+    finalInlineBytes: usageNumber(source.finalInlineBytes) || undefined,
+    artifactBytes: usageNumber(source.artifactBytes) || undefined,
+    artifactComplete: typeof source.artifactComplete === "boolean" ? source.artifactComplete : undefined,
+    artifactError: source.artifactError ? truncateByBytes(sanitizeCapsuleText(source.artifactError), 512) : undefined,
   };
 
   if (byteLength(capsule) > MAX_SUBAGENT_CAPSULE_BYTES) capsule.messages = [];
@@ -210,6 +231,7 @@ export function createSubagentProgressCapsule(source: CapsuleSource): SubagentPr
     capsule.task = undefined;
     capsule.cwd = undefined;
     capsule.errorMessage = capsule.errorMessage ? truncateByBytes(capsule.errorMessage, 256) : undefined;
+    capsule.artifactError = capsule.artifactError ? truncateByBytes(capsule.artifactError, 256) : undefined;
   }
   return capsule;
 }
@@ -235,6 +257,7 @@ export function boundSubagentProgressCapsules(capsules: SubagentProgressCapsule[
     capsule.final = capsule.final ? truncateByBytes(capsule.final, 512) : undefined;
     capsule.lastAssistantText = capsule.lastAssistantText ? truncateByBytes(capsule.lastAssistantText, 512) : undefined;
     capsule.errorMessage = capsule.errorMessage ? truncateByBytes(capsule.errorMessage, 256) : undefined;
+    capsule.artifactError = capsule.artifactError ? truncateByBytes(capsule.artifactError, 256) : undefined;
     capsule.stderrTail = capsule.stderrTail ? tailByBytes(capsule.stderrTail, 512) : undefined;
     capsule.messages = [];
     capsule.completedTools = capsule.completedTools.slice(-2).map((tool) => ({ name: tool.name, args: { ...tool.args }, isError: tool.isError, path: tool.path ? truncateByBytes(tool.path, 256) : undefined }));
@@ -264,6 +287,7 @@ export function boundSubagentProgressCapsules(capsules: SubagentProgressCapsule[
     capsule.label = truncateByBytes(capsule.label, 64);
     capsule.model = capsule.model ? truncateByBytes(capsule.model, 128) : undefined;
     capsule.errorMessage = capsule.errorMessage ? truncateByBytes(capsule.errorMessage, 128) : undefined;
+    capsule.artifactError = capsule.artifactError ? truncateByBytes(capsule.artifactError, 128) : undefined;
     if (capsule.terminal?.message) capsule.terminal.message = truncateByBytes(capsule.terminal.message, 128);
   }
   return bounded;

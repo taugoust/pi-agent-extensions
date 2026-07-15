@@ -548,6 +548,8 @@ its own with `programs.pi.extensions.subagent-finalizer.enable`.
 - **Security model**: in real AgentSH REST mode, AgentSH owns session state,
   approvals, and tool side effects over a local Unix socket. Commands use the
   supervisor exec path; file tools are workspace-confined and policy checked.
+  The only outside-workspace read exception is an exact, session-owned output
+  artifact capability returned by AgentSH itself.
 
 **Description**: The old passive `AGENTSH_APPROVAL_UI_SOCKET` relay has
 been retired. `sandbox` now has two explicit protocol modes:
@@ -609,6 +611,11 @@ Streaming ops may emit `stdout`, `stderr`, `tool_update`, `subagent_update`, or
 The REST `exec_bash` response is buffered, while `spawn_subagent` uses an
 NDJSON streaming response for stdout/stderr and child result events. Multiple Pi
 `edit` replacements are applied as sequential single-replacement REST calls.
+When bounded model-facing `bash` output or a completed subagent final overflows,
+new AgentSH supervisors retain a capped artifact in the remote session runtime
+and return `full_output_path` or `full_result_path`. The extension shows that
+path without reading it automatically; supervised `read` can page it on demand.
+No supervised overflow file is created in the local parent-Pi temp directory.
 Approvals are polled rather than streamed. If `fields.scope_kind`
 and `fields.scope_key` are present, Pi offers once/session approve/deny choices.
 When the supervisor reports `requested=strict`, the extension refuses all

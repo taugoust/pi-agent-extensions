@@ -525,12 +525,64 @@ in
     }
     EOF
     cat > "$outdir/node_modules/@mariozechner/pi-coding-agent/index.js" <<'EOF'
-    export const DEFAULT_MAX_BYTES = 20000;
+    export const DEFAULT_MAX_BYTES = 50 * 1024;
     export const DEFAULT_MAX_LINES = 2000;
     export function formatSize(bytes) { return String(bytes) + "B"; }
     export function getMarkdownTheme() { return {}; }
-    export function truncateTail(text) {
-      return { content: String(text), truncated: false, truncatedBy: null, totalLines: String(text).split("\n").length, totalBytes: Buffer.byteLength(String(text)), outputLines: String(text).split("\n").length, outputBytes: Buffer.byteLength(String(text)), maxLines: 2000, maxBytes: 20000, lastLinePartial: false };
+    export function truncateHead(value, options = {}) {
+      const text = String(value);
+      const maxLines = options.maxLines ?? DEFAULT_MAX_LINES;
+      const maxBytes = options.maxBytes ?? DEFAULT_MAX_BYTES;
+      const lines = text.split("\n");
+      const totalBytes = Buffer.byteLength(text);
+      if (lines.length <= maxLines && totalBytes <= maxBytes) {
+        return { content: text, truncated: false, truncatedBy: null, totalLines: lines.length, totalBytes, outputLines: lines.length, outputBytes: totalBytes, maxLines, maxBytes, firstLineExceedsLimit: false };
+      }
+      if (Buffer.byteLength(lines[0]) > maxBytes) {
+        return { content: "", truncated: true, truncatedBy: "bytes", totalLines: lines.length, totalBytes, outputLines: 0, outputBytes: 0, maxLines, maxBytes, firstLineExceedsLimit: true };
+      }
+      const selected = [];
+      let selectedBytes = 0;
+      for (let index = 0; index < lines.length && selected.length < maxLines; index++) {
+        const lineBytes = Buffer.byteLength(lines[index]) + (selected.length ? 1 : 0);
+        if (selectedBytes + lineBytes > maxBytes) break;
+        selected.push(lines[index]);
+        selectedBytes += lineBytes;
+      }
+      const content = selected.join("\n");
+      return { content, truncated: true, truncatedBy: selected.length >= maxLines ? "lines" : "bytes", totalLines: lines.length, totalBytes, outputLines: selected.length, outputBytes: Buffer.byteLength(content), maxLines, maxBytes, firstLineExceedsLimit: false };
+    }
+    export function truncateTail(value, options = {}) {
+      const text = String(value);
+      const maxLines = options.maxLines ?? DEFAULT_MAX_LINES;
+      const maxBytes = options.maxBytes ?? DEFAULT_MAX_BYTES;
+      const lines = text.split("\n");
+      const totalBytes = Buffer.byteLength(text);
+      if (lines.length <= maxLines && totalBytes <= maxBytes) {
+        return { content: text, truncated: false, truncatedBy: null, totalLines: lines.length, totalBytes, outputLines: lines.length, outputBytes: totalBytes, maxLines, maxBytes, lastLinePartial: false };
+      }
+      const selected = [];
+      let selectedBytes = 0;
+      let lastLinePartial = false;
+      let truncatedBy = lines.length > maxLines ? "lines" : "bytes";
+      for (let index = lines.length - 1; index >= 0 && selected.length < maxLines; index--) {
+        const line = lines[index];
+        const lineBytes = Buffer.byteLength(line) + (selected.length ? 1 : 0);
+        if (selectedBytes + lineBytes > maxBytes) {
+          truncatedBy = "bytes";
+          if (selected.length === 0) {
+            const bytes = Buffer.from(line);
+            selected.unshift(bytes.subarray(Math.max(0, bytes.length - maxBytes)).toString("utf8"));
+            selectedBytes = Buffer.byteLength(selected[0]);
+            lastLinePartial = true;
+          }
+          break;
+        }
+        selected.unshift(line);
+        selectedBytes += lineBytes;
+      }
+      const content = selected.join("\n");
+      return { content, truncated: true, truncatedBy, totalLines: lines.length, totalBytes, outputLines: selected.length, outputBytes: Buffer.byteLength(content), maxLines, maxBytes, lastLinePartial };
     }
     export function renderDiff(text) { return String(text); }
     EOF
@@ -1328,6 +1380,8 @@ in
         assert(spawnRequests[1].body.model === "google/gemini-pro", "explicit child model was overwritten");
         assert(spawnRequests[2].body.tasks[0].model === "openai-codex/gpt-5.5", "parallel child did not inherit parent model");
         assert(spawnRequests[2].body.tasks[1].model === "anthropic/claude-sonnet", "parallel explicit model was overwritten");
+        assert(spawnRequests[0].body.result_artifact_threshold_bytes === 4096, "single subagent artifact threshold did not match parent inline budget");
+        assert(spawnRequests[2].body.result_artifact_threshold_bytes === 2048, "parallel subagent artifact threshold did not match per-child capsule budget");
         await shutdownSession(pi);
         await supervisor.close();
       }
@@ -1351,6 +1405,13 @@ in
         // Reproduce an older/truncated AgentSH result: the live stream observed
         // the answer, but the terminal item does not repeat stdout or final.
         const terminalResult = { mode: "single", final: "", terminal: completedTerminal, results: [{ label: "child", task: "utf8", exit_code: 0, stop_reason: "completed", model_stop_reason: "stop", terminal: completedTerminal, final: "", protocol_settled: true, stdout_truncated: true, stdout_total_bytes: 3145728 }] };
+        const artifactPath = "/remote/session/tmp/output-artifacts/subagent-long-result.md";
+        const artifactTail = "REMOTE-SUBAGENT-TAIL-SENTINEL";
+        const artifactFinal = "Long result start\n" + "visible detail ".repeat(600) + "\n" + artifactTail;
+        const bashArtifactPath = "/remote/session/tmp/output-artifacts/bash-long-output.log";
+        const bashHead = "REMOTE-BASH-HEAD-SENTINEL";
+        const bashTail = "REMOTE-BASH-TAIL-SENTINEL";
+        const bashOutput = bashHead + "\n" + "remote bash detail\n".repeat(5000) + bashTail + "\n";
         const outerStream = [
           { event: "subagent_child_start", label: "child", task: "utf8" },
           { event: "stdout", label: "child", data: childStdout },
@@ -1366,7 +1427,50 @@ in
             return { id: "sess-subagent-stream", session_id: "sess-subagent-stream", workspace: "/workspace", worktree: "/workspace" };
           }
           if (request.method === "GET" && request.url === "/api/v1/approvals") return [];
+          if (request.method === "POST" && request.url === "/api/v1/sessions/sess-subagent-stream/tools/exec_bash") {
+            return { ok: true, result: {
+              command_id: "cmd-artifact",
+              session_id: "sess-subagent-stream",
+              exit_code: 0,
+              stdout: bashOutput,
+              stderr: "",
+              stdout_truncated: false,
+              stdout_total_bytes: Buffer.byteLength(bashOutput),
+              full_output_path: bashArtifactPath,
+              artifact_bytes: Buffer.byteLength(bashOutput),
+              artifact_total_bytes: Buffer.byteLength(bashOutput),
+              artifact_complete: true,
+            } };
+          }
+          if (request.method === "POST" && request.url === "/api/v1/sessions/sess-subagent-stream/tools/read_file") {
+            const content = request.body.path === artifactPath ? artifactFinal : request.body.path === bashArtifactPath ? bashOutput : undefined;
+            if (content === undefined) return { statusCode: 403, body: { ok: false, error: "unowned artifact path" } };
+            return { ok: true, result: { path: request.body.path, real_path: request.body.path, encoding: "utf-8", content, size: Buffer.byteLength(content), truncated: false } };
+          }
           if (request.method === "POST" && request.url === "/api/v1/sessions/sess-subagent-stream/tools/spawn_subagent") {
+            if (request.body.task === "artifact-overflow") {
+              const child = {
+                label: "child",
+                task: "artifact-overflow",
+                exit_code: 0,
+                stop_reason: "completed",
+                model_stop_reason: "stop",
+                terminal: completedTerminal,
+                final: artifactFinal,
+                protocol_settled: true,
+                full_result_path: artifactPath,
+                final_truncated: true,
+                final_total_bytes: Buffer.byteLength(artifactFinal),
+                final_inline_bytes: 4096,
+                artifact_bytes: Buffer.byteLength(artifactFinal),
+                artifact_complete: true,
+              };
+              return { ndjsonChunks: [Buffer.from([
+                JSON.stringify({ event: "subagent_child_start", label: "child", task: "artifact-overflow" }),
+                JSON.stringify({ event: "subagent_result", label: "child", result: child }),
+                JSON.stringify({ event: "done", ok: true, result: { mode: "single", final: artifactFinal, terminal: completedTerminal, results: [child] } }),
+              ].join("\n") + "\n", "utf8")] };
+            }
             if (request.body.tasks?.some((task) => task.task === "cancel-stream")) {
               const retained = "completed-before-user-cancellation";
               const completedChild = { label: "task 1", task: "cancel-stream", exit_code: 0, stop_reason: "completed", terminal: { state: "completed", exit_code: 0, termination: "natural", retryable: false }, final: retained, protocol_settled: true };
@@ -1425,10 +1529,21 @@ in
         });
         process.env.AGENTSH_SESSION_ID = "sess-subagent-stream";
         process.env.AGENTSH_SESSION_SUPERVISOR = "unix://" + supervisor.socketPath;
+        process.env.PI_AGENTSH_READ_MODE = "supervised";
         const pi = createPi();
         sandbox(pi);
         const ctx = createContext();
         await startSession(pi, ctx);
+        const bashTool = pi.tools.get("bash");
+        const bashArtifactResult = await bashTool.execute("bash-artifact", { command: "emit-long-output" }, undefined, undefined, ctx);
+        assert(bashArtifactResult.details.fullOutputPath === bashArtifactPath, "bash result did not retain remote artifact path");
+        assert(bashArtifactResult.content[0].text.includes(bashArtifactPath), "bash result omitted remote artifact path");
+        assert(!bashArtifactResult.content[0].text.includes(bashHead), "bash overflow prefix was injected into bounded model context");
+        assert(bashArtifactResult.content[0].text.includes(bashTail), "bash bounded tail omitted the actual command suffix");
+        const bashRequest = supervisor.requests.find((request) => request.method === "POST" && request.url.endsWith("/tools/exec_bash"));
+        assert(bashRequest?.body.persist_output_over_bytes === 50 * 1024, "bash did not request the 50 KiB remote artifact threshold: " + JSON.stringify(bashRequest));
+        assert(bashRequest?.body.persist_output_over_lines === 2000, "bash did not request the Pi line threshold");
+
         const subagentTool = pi.tools.get("subagent");
         const updates = [];
         const toolResult = await subagentTool.execute("stream-utf8", { task: "utf8" }, undefined, (update) => updates.push(update), ctx);
@@ -1445,6 +1560,23 @@ in
         assert(toolResult.details.results[0].stdoutTruncated === true, "raw diagnostic truncation metadata was lost");
         assert(toolResult.content[0].text.includes(visible), "parent-facing result omitted the retained live final answer");
         assert(toolResult.isError === false, "completed typed terminal was marked as an error");
+
+        const artifactToolResult = await subagentTool.execute("stream-artifact", { task: "artifact-overflow" }, undefined, undefined, ctx);
+        assert(artifactToolResult.details.results[0].fullResultPath === artifactPath, "remote subagent artifact path was not retained");
+        assert(artifactToolResult.details.fullResultPath === artifactPath, "single-result top-level artifact path was not mirrored");
+        assert(artifactToolResult.content[0].text.includes(artifactPath), "parent-facing result omitted remote artifact path");
+        assert(!artifactToolResult.content[0].text.includes(artifactTail), "long artifact tail was injected into bounded parent context");
+        const artifactSpawnRequest = supervisor.requests.find((request) => request.method === "POST" && request.url.endsWith("/tools/spawn_subagent") && request.body.task === "artifact-overflow");
+        assert(artifactSpawnRequest?.body.result_artifact_threshold_bytes === 4096, "extension did not request the 4 KiB remote artifact threshold");
+        const readTool = pi.tools.get("read");
+        assert(readTool, "supervised read tool was not registered");
+        const readBashArtifactResult = await readTool.execute("read-bash-artifact", { path: bashArtifactPath }, undefined, undefined, ctx);
+        assert(readBashArtifactResult.content[0].text.includes(bashHead), "supervised read did not retrieve remote bash overflow prefix");
+        assert(!readBashArtifactResult.content[0].text.includes(bashTail), "supervised read injected an ignored supervisor's unbounded response");
+        assert(readBashArtifactResult.content[0].text.includes("Use offset="), "locally bounded supervised read omitted continuation guidance");
+        assert(Buffer.byteLength(readBashArtifactResult.content[0].text) < 55 * 1024, "supervised read exceeded its bounded model-context budget");
+        const readArtifactResult = await readTool.execute("read-artifact", { path: artifactPath }, undefined, undefined, ctx);
+        assert(readArtifactResult.content[0].text.includes(artifactTail), "supervised read did not retrieve remote artifact tail");
 
         const failedToolResult = await subagentTool.execute("stream-failure", { task: "typed-failure" }, undefined, undefined, ctx);
         assert(failedToolResult.details.terminal.state === "failed", "typed failed terminal was not preserved");
@@ -1553,6 +1685,7 @@ in
         assert(!expandedMixed.includes("(Ctrl+O to expand)"), "expanded running result still advertised expansion");
         assert(expandedMixed !== collapsedMixed, "Ctrl+O expansion produced no visible running-state change");
         await shutdownSession(pi);
+        delete process.env.PI_AGENTSH_READ_MODE;
         await supervisor.close();
       }
 
