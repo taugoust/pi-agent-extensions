@@ -806,12 +806,14 @@ in
       --rootDir "$srcdir" \
       --outDir "$outdir" \
       "$srcdir/sandbox/index.ts" \
+      "$srcdir/sandbox/command-timeout.test.ts" \
       "$srcdir/sandbox/subagent-model.test.ts" \
       "$srcdir/sandbox/subagent-protocol.test.ts" \
       "$srcdir/sandbox/subagent-result.test.ts" \
       "$srcdir/sandbox/subagent-stream.test.ts" \
       "$srcdir/sandbox/subagent-terminal.test.ts"
 
+    node "$outdir/sandbox/command-timeout.test.js"
     node "$outdir/sandbox/subagent-model.test.js"
     node "$outdir/sandbox/subagent-protocol.test.js"
     node "$outdir/sandbox/subagent-result.test.js"
@@ -1163,8 +1165,14 @@ in
       process.env.PI_AGENTSH_RECONNECT_TIMEOUT_MS = "300";
       process.env.PI_AGENTSH_RECONNECT_INITIAL_MS = "10";
       process.env.PI_AGENTSH_WATCH_RECONNECT_MS = "25";
-      // Keep deadline tests fast while preserving the production default
-      // execution timeout loaded by the extension.
+      // Keep deadline tests fast while preserving the production defaults in
+      // pure-module coverage. Ordinary commands deliberately get a separate,
+      // longer budget than the generic REST tool fixture.
+      process.env.PI_AGENTSH_TOOL_REQUEST_TIMEOUT_MS = "100";
+      process.env.PI_AGENTSH_APPROVAL_TIMEOUT_SLACK_MS = "20";
+      process.env.PI_AGENTSH_CONNECT_TIMEOUT_MS = "100";
+      process.env.PI_AGENTSH_COMMAND_EXECUTION_TIMEOUT_MS = "300";
+      process.env.PI_AGENTSH_COMMAND_TRANSPORT_SLACK_MS = "80";
       process.env.PI_AGENTSH_SUBAGENT_TRANSPORT_SLACK_MS = "100";
 
       const compiledRoot = process.argv[2];
@@ -1263,6 +1271,312 @@ in
         await shutdownSession(pi);
         await supervisor.close();
         await central.close();
+      }
+
+      // Present malformed live timeout metadata fails closed; only omission by
+      // an older supervisor enters compatibility mode.
+      {
+        clearAgentSHEnv();
+        const sessionId = "sess-malformed-command-timeout";
+        const supervisor = await withRestSupervisor(async (request) => {
+          if (request.method === "GET" && request.url === "/api/v1/sessions/" + sessionId) {
+            return { id: sessionId, session_id: sessionId, workspace: "/workspace", worktree: "/workspace", command_timeout: { default_ms: 200, maximum_ms: 240, approval_extension_ms: -1, source: "policy" } };
+          }
+          return [];
+        });
+        process.env.AGENTSH_SESSION_ID = sessionId;
+        process.env.AGENTSH_SESSION_SUPERVISOR = "unix://" + supervisor.socketPath;
+        const pi = createPi();
+        sandbox(pi);
+        const ctx = createContext();
+        await startSession(pi, ctx);
+        const state = globalThis.__AGENTSH_PI__.getSupervisorState();
+        assert(state.status === "error", "malformed live command_timeout metadata did not fail attachment");
+        assert(String(state.lastError).includes("command_timeout metadata is malformed") && String(state.lastError).includes("approval_extension_ms"), "malformed approval extension metadata error was not actionable: " + state.lastError);
+        await shutdownSession(pi);
+        await supervisor.close();
+      }
+
+      // Ordinary buffered REST Bash derives execution/transport budgets from
+      // live metadata, never from the deliberately smaller generic tool budget.
+      // Explicit values retain their original request body while known policy
+      // maxima shorten the client lifetime.
+      {
+        clearAgentSHEnv();
+        const sessionId = "sess-command-timeouts";
+        const commandTimeout = { default_ms: 200, maximum_ms: 240, source: "policy" };
+        const supervisor = await withRestSupervisor(async (request) => {
+          if (request.method === "GET" && request.url === "/api/v1/sessions/" + sessionId) {
+            return { id: sessionId, session_id: sessionId, workspace: "/workspace", worktree: "/workspace", workspace_mode: "shadow", command_timeout: commandTimeout };
+          }
+          if (request.method === "GET" && request.url === "/api/v1/approvals") return [];
+          if (request.method === "POST" && request.url === "/api/v1/sessions/" + sessionId + "/tools/exec_bash") {
+            const command = request.body.command;
+            if (command === "omitted-outlives-generic") {
+              await new Promise((resolve) => setTimeout(resolve, 160));
+              return { ok: true, result: { exit_code: 0, stdout: "omitted-ok", stderr: "" } };
+            }
+            if (command === "execution-timeout") {
+              return { ok: true, result: {
+                exit_code: 124,
+                stdout: "partial execution stdout\n",
+                stderr: "partial execution stderr",
+                stdout_truncated: true,
+                stdout_total_bytes: 4096,
+                termination_reason: "command_timeout",
+                command_timeout: { effective_ms: 200, source: "policy_default" },
+                full_output_path: "/workspace/.agentsh/output/timeout.log",
+                artifact_bytes: 4096,
+                artifact_total_bytes: 4096,
+                artifact_complete: true,
+              } };
+            }
+            if (command === "legacy-effective-unavailable") {
+              return { ok: true, result: {
+                exit_code: 124,
+                stdout: "legacy partial output",
+                stderr: "",
+                termination_reason: "command_timeout",
+                timeout_ms: 200,
+                timeout_source: "policy_default",
+              } };
+            }
+            if (command === "execution-timeout-http") {
+              return { statusCode: 408, body: { ok: false, error: "command deadline", result: {
+                exit_code: 124,
+                termination_reason: "command_timeout",
+                effective_timeout_ms: 240,
+                timeout_source: "policy_cap",
+                error: { code: "E_COMMAND_TIMEOUT", message: "operator maximum reached" },
+              } } };
+            }
+            if (command === "metadata-preference-timeout") {
+              await new Promise((resolve) => setTimeout(resolve, 330));
+              return { ok: true, result: { exit_code: 0, stdout: "fallback would be too long", stderr: "" } };
+            }
+            if (command === "above-cap-budget") {
+              await new Promise((resolve) => setTimeout(resolve, 360));
+              return { ok: true, result: { exit_code: 0, stdout: "uncapped client would wait", stderr: "" } };
+            }
+            if (command === "transport-timeout" || command === "caller-abort") {
+              await new Promise((resolve) => setTimeout(resolve, 180));
+              return { ok: true, result: { exit_code: 0, stdout: "too late", stderr: "" } };
+            }
+            if (command === "child-exit-124") return { ok: true, result: { exit_code: 124, stdout: "ordinary child", stderr: "" } };
+            return { ok: true, result: { exit_code: 0, stdout: command + "-ok", stderr: "" } };
+          }
+          return { statusCode: 404, body: { error: "unexpected supervisor request", request } };
+        });
+        process.env.AGENTSH_SESSION_ID = sessionId;
+        process.env.AGENTSH_SESSION_SUPERVISOR = "unix://" + supervisor.socketPath;
+        const pi = createPi();
+        sandbox(pi);
+        const ctx = createContext();
+        await startSession(pi, ctx);
+        const bashTool = pi.tools.get("bash");
+        assert(bashTool, "command timeout fixture did not register bash");
+        assert(bashTool.parameters.properties.timeout.exclusiveMinimum === 0, "bash schema did not require positive seconds");
+        assert(bashTool.parameters.properties.timeout.description.includes("operator default/maximum"), "bash timeout help omitted operator semantics");
+        assert(bashTool.description.includes("buffered") && !bashTool.description.includes("Streams stdout"), "REST bash still claimed live streaming");
+        assert(globalThis.__AGENTSH_PI__.getSupervisorMetadata().command_timeout.default_ms === 200, "live command timeout metadata was not retained");
+
+        const omitted = await bashTool.execute("omitted-timeout", { command: "omitted-outlives-generic" }, undefined, undefined, ctx);
+        assert(omitted.content[0].text.includes("omitted-ok"), "omitted command was killed by the 100ms generic tool budget");
+        const omittedRequest = supervisor.requests.find((request) => request.body?.command === "omitted-outlives-generic");
+        assert(omittedRequest && !("timeout_ms" in omittedRequest.body), "omitted bash timeout_ms was serialized instead of left to AgentSH");
+
+        await bashTool.execute("short-timeout", { command: "explicit-short", timeout: 0.02 }, undefined, undefined, ctx);
+        const shortRequest = supervisor.requests.find((request) => request.body?.command === "explicit-short");
+        assert(shortRequest?.body.timeout_ms === 20, "positive seconds were not sent as exact integer milliseconds");
+
+        let metadataPreferenceError;
+        try {
+          await globalThis.__AGENTSH_PI__.exec("metadata-preference-timeout");
+        } catch (error) {
+          metadataPreferenceError = error;
+        }
+        assert(metadataPreferenceError?.name === "CommandTransportTimeoutError", "live metadata default did not beat the longer wrapper fallback");
+        assert(metadataPreferenceError?.executionTimeoutMs === 200 && metadataPreferenceError?.transportTimeoutMs === 280, "metadata-preferred transport budget was incorrect");
+
+        let cappedTransportError;
+        try {
+          await globalThis.__AGENTSH_PI__.exec({ command: "above-cap-budget", timeout_ms: 500 });
+        } catch (error) {
+          cappedTransportError = error;
+        }
+        const cappedRequest = supervisor.requests.find((request) => request.body?.command === "above-cap-budget");
+        assert(cappedRequest?.body.timeout_ms === 500, "global/SSH API pre-capped the requested timeout instead of preserving policy_cap reporting");
+        assert(cappedTransportError?.name === "CommandTransportTimeoutError", "above-cap request did not use the known maximum for client lifetime");
+        assert(cappedTransportError?.executionTimeoutMs === 240 && cappedTransportError?.transportTimeoutMs === 320, "above-cap request used the wrong derived budgets");
+
+        let executionError;
+        try {
+          await bashTool.execute("execution-timeout", { command: "execution-timeout" }, undefined, undefined, ctx);
+        } catch (error) {
+          executionError = error;
+        }
+        assert(executionError?.name === "CommandExecutionTimeoutError", "structured termination_reason was not a typed execution timeout: " + executionError);
+        assert(executionError?.code === "E_COMMAND_TIMEOUT" && executionError?.exitCode === 124, "execution timeout lost code 124 semantics");
+        assert(executionError?.effectiveTimeoutMs === 200 && executionError?.timeoutSource === "policy_default", "execution timeout lost exact AgentSH command_timeout effective/source fields");
+        assert(executionError?.clientExecutionTimeoutMs === 200 && executionError?.clientExecutionTimeoutSource === "policy", "execution timeout lost the separate client-derived budget/source");
+        assert(String(executionError).includes("partial execution stdout") && String(executionError).includes("partial execution stderr"), "model-visible execution timeout lost buffered partial stdout/stderr: " + executionError);
+        assert(String(executionError).includes("AgentSH response truncated stdout"), "model-visible execution timeout lost the remote truncation warning: " + executionError);
+        assert(String(executionError).includes("/workspace/.agentsh/output/timeout.log"), "model-visible execution timeout lost the remote output artifact path: " + executionError);
+        assert(executionError?.result?.stdout === "partial execution stdout\n", "typed execution timeout lost its raw buffered result");
+        assert(executionError?.toolDetails?.fullOutputPath === "/workspace/.agentsh/output/timeout.log", "typed execution timeout lost model-facing artifact details");
+
+        let legacyExecutionError;
+        try {
+          await globalThis.__AGENTSH_PI__.exec("legacy-effective-unavailable");
+        } catch (error) {
+          legacyExecutionError = error;
+        }
+        assert(legacyExecutionError?.name === "CommandExecutionTimeoutError", "legacy structured timeout lost typed classification: " + legacyExecutionError);
+        assert(legacyExecutionError?.effectiveTimeoutMs === undefined && legacyExecutionError?.timeoutSource === undefined, "generic legacy timeout_ms fabricated server-effective reporting");
+        assert(String(legacyExecutionError).includes("effective server timeout unavailable"), "legacy timeout did not disclose unavailable effective reporting: " + legacyExecutionError);
+        assert(String(legacyExecutionError).includes("client-derived execution budget 200ms (source: policy)"), "legacy timeout omitted the separate client-derived budget/source: " + legacyExecutionError);
+        assert(legacyExecutionError?.result?.stdout === "legacy partial output", "global API did not retain the raw legacy timeout result");
+
+        let httpExecutionError;
+        try {
+          await globalThis.__AGENTSH_PI__.exec({ command: "execution-timeout-http", timeout_ms: 500 });
+        } catch (error) {
+          httpExecutionError = error;
+        }
+        assert(httpExecutionError?.name === "CommandExecutionTimeoutError", "structured HTTP E_COMMAND_TIMEOUT was reduced to RestHTTPError: " + httpExecutionError);
+        assert(httpExecutionError?.effectiveTimeoutMs === 240 && httpExecutionError?.timeoutSource === "policy_cap", "HTTP execution timeout lost cap details");
+
+        let transportError;
+        try {
+          await globalThis.__AGENTSH_PI__.exec({ command: "transport-timeout", timeout_ms: 20 });
+        } catch (error) {
+          transportError = error;
+        }
+        assert(transportError?.name === "CommandTransportTimeoutError", "internal REST deadline was not a typed transport timeout: " + transportError);
+        assert(transportError?.executionTimeoutMs === 20 && transportError?.transportSlackMs === 80 && transportError?.transportTimeoutMs === 100, "transport timeout lost derived budgets/slack");
+
+        const controller = new AbortController();
+        const abortTimer = setTimeout(() => controller.abort(), 20);
+        let abortError;
+        try {
+          await globalThis.__AGENTSH_PI__.exec("caller-abort", { signal: controller.signal });
+        } catch (error) {
+          abortError = error;
+        }
+        clearTimeout(abortTimer);
+        assert(abortError?.name === "AbortError", "caller cancellation was confused with command transport timeout: " + abortError);
+
+        let child124Error;
+        try {
+          await bashTool.execute("child-exit-124", { command: "child-exit-124" }, undefined, undefined, ctx);
+        } catch (error) {
+          child124Error = error;
+        }
+        assert(child124Error?.name === "Error" && String(child124Error).includes("Command exited with code 124"), "ordinary child exit 124 was inferred to be command timeout: " + child124Error);
+
+        await shutdownSession(pi);
+        await supervisor.close();
+      }
+
+      // A producer allowance larger than configured command slack raises the
+      // dispatched REST lifetime to approval_extension_ms + the bounded
+      // connect-timeout terminal/cleanup margin. The response arrives after
+      // both the generic and old configured-slack deadlines, proving there is
+      // no hidden earlier transport timer.
+      {
+        clearAgentSHEnv();
+        const sessionId = "sess-command-approval-extension";
+        let responseReleased = false;
+        const supervisor = await withRestSupervisor(async (request) => {
+          if (request.method === "GET" && request.url === "/api/v1/sessions/" + sessionId) {
+            return {
+              id: sessionId,
+              session_id: sessionId,
+              workspace: "/workspace",
+              worktree: "/workspace",
+              command_timeout: {
+                default_ms: 30,
+                maximum_ms: 30,
+                approval_extension_ms: 300,
+                source: "policy",
+              },
+            };
+          }
+          if (request.method === "GET" && request.url === "/api/v1/approvals") return [];
+          if (request.method === "POST" && request.url === "/api/v1/sessions/" + sessionId + "/tools/exec_bash") {
+            await new Promise((resolve) => setTimeout(resolve, 180));
+            responseReleased = true;
+            return { ok: true, result: { exit_code: 0, stdout: "approval-extension-ok", stderr: "" } };
+          }
+          return { statusCode: 404, body: { error: "unexpected supervisor request", request } };
+        });
+        process.env.AGENTSH_SESSION_ID = sessionId;
+        process.env.AGENTSH_SESSION_SUPERVISOR = "unix://" + supervisor.socketPath;
+        const pi = createPi();
+        sandbox(pi);
+        const ctx = createContext();
+        await startSession(pi, ctx);
+
+        const metadata = globalThis.__AGENTSH_PI__.getSupervisorMetadata().command_timeout;
+        assert(metadata.approval_extension_ms === 300, "producer approval extension metadata was not retained");
+        const result = await globalThis.__AGENTSH_PI__.exec("server-approval-extension-outlives-configured-slack");
+        assert(responseReleased && result.stdout === "approval-extension-ok", "server approval allowance did not prevent a hidden earlier command transport deadline");
+        const request = supervisor.requests.find((candidate) => candidate.body?.command === "server-approval-extension-outlives-configured-slack");
+        assert(request && !("timeout_ms" in request.body), "approval-extension fixture serialized an omitted command timeout");
+
+        await shutdownSession(pi);
+        await supervisor.close();
+      }
+
+      // Safe pre-dispatch reconnect keeps its established reconnect lifetime,
+      // then re-derives the omitted command budget from refreshed metadata and
+      // gives the dispatched command a fresh full transport lifetime.
+      {
+        clearAgentSHEnv();
+        const sessionId = "sess-command-timeout-reconnect";
+        let execRequests = 0;
+        const supervisor = await withRestartableRestSupervisor(async (request) => {
+          if (request.method === "GET" && request.url === "/api/v1/sessions/" + sessionId) {
+            const commandTimeout = request.generation === 1
+              ? { default_ms: 10, maximum_ms: 10, source: "policy" }
+              : { default_ms: 180, maximum_ms: 180, source: "policy" };
+            return { id: sessionId, session_id: sessionId, workspace: "/workspace", worktree: "/workspace", command_timeout: commandTimeout };
+          }
+          if (request.method === "GET" && request.url === "/api/v1/approvals") return [];
+          if (request.method === "POST" && request.url === "/api/v1/sessions/" + sessionId + "/tools/exec_bash") {
+            execRequests += 1;
+            await new Promise((resolve) => setTimeout(resolve, 120));
+            return { ok: true, result: { exit_code: 0, stdout: "reconnected command completed", stderr: "" } };
+          }
+          return { statusCode: 404, body: { error: "unexpected supervisor request", request } };
+        });
+        process.env.AGENTSH_SESSION_ID = sessionId;
+        process.env.AGENTSH_SESSION_SUPERVISOR = "unix://" + supervisor.socketPath;
+        const pi = createPi();
+        sandbox(pi);
+        const ctx = createContext();
+        await startSession(pi, ctx);
+        assert(globalThis.__AGENTSH_PI__.getSupervisorMetadata().command_timeout.default_ms === 10, "reconnect fixture did not retain initial timeout metadata");
+
+        await supervisor.stop();
+        const restart = (async () => {
+          await new Promise((resolve) => setTimeout(resolve, 130));
+          await supervisor.start();
+        })();
+        const startedAt = Date.now();
+        const result = await globalThis.__AGENTSH_PI__.exec("reconnect-with-refreshed-timeout");
+        await restart;
+        const elapsed = Date.now() - startedAt;
+        assert(result.stdout === "reconnected command completed", "command did not complete after timeout-policy reconnect");
+        assert(elapsed >= 210, "command reused an outer pre-reconnect transport lifetime: " + elapsed + "ms");
+        assert(execRequests === 1, "reconnected command was dispatched more than once: " + execRequests);
+        const execRequest = supervisor.requests.find((request) => request.method === "POST" && request.url.endsWith("/tools/exec_bash"));
+        assert(execRequest?.generation === 2, "command was not dispatched through the reconnected supervisor generation");
+        assert(!("timeout_ms" in execRequest.body), "reconnected omitted command serialized timeout_ms");
+        assert(globalThis.__AGENTSH_PI__.getSupervisorMetadata().command_timeout.default_ms === 180, "reconnect did not refresh command_timeout metadata before dispatch");
+
+        await shutdownSession(pi);
+        await supervisor.close();
       }
 
       // The typed direnv API targets the exact REST session, uses the effective
@@ -1453,18 +1767,24 @@ in
         await supervisor.close();
       }
 
-      // A missing listener has a deterministic bounded reconnect timeout and
-      // does not dispatch the pending mutation.
+      // A missing listener has the established bounded reconnect timeout, not
+      // the shorter command budget, and does not dispatch the pending command.
       {
         clearAgentSHEnv();
         delete process.env.PI_AGENTSH_APPROVAL_POLL_MS;
         const expectedSession = "sess-reconnect-timeout";
-        let mutatingRequests = 0;
+        let execRequests = 0;
         const supervisor = await withRestartableRestSupervisor(async (request) => {
-          if (request.method === "GET" && request.url === "/api/v1/sessions/" + expectedSession) return { id: expectedSession, session_id: expectedSession, workspace: "/workspace", worktree: "/workspace" };
+          if (request.method === "GET" && request.url === "/api/v1/sessions/" + expectedSession) return {
+            id: expectedSession,
+            session_id: expectedSession,
+            workspace: "/workspace",
+            worktree: "/workspace",
+            command_timeout: { default_ms: 10, maximum_ms: 10, source: "policy" },
+          };
           if (request.method === "GET" && request.url === "/api/v1/approvals") return [];
-          if (request.method === "POST" && request.url.endsWith("/tools/write_file")) mutatingRequests += 1;
-          return { ok: true, result: { text: "unexpected" } };
+          if (request.method === "POST" && request.url.endsWith("/tools/exec_bash")) execRequests += 1;
+          return { ok: true, result: { exit_code: 0, stdout: "unexpected", stderr: "" } };
         });
         process.env.AGENTSH_SESSION_ID = expectedSession;
         process.env.AGENTSH_SESSION_SUPERVISOR = "unix://" + supervisor.socketPath;
@@ -1477,14 +1797,15 @@ in
         const startedAt = Date.now();
         let timeoutError;
         try {
-          await pi.tools.get("write").execute("timed-reconnect", { path: "/workspace/timeout.txt", content: "no\n" }, undefined, undefined, ctx);
+          await globalThis.__AGENTSH_PI__.exec("timed-reconnect-command");
         } catch (error) {
           timeoutError = error;
         }
         const elapsed = Date.now() - startedAt;
+        assert(timeoutError?.name !== "CommandTransportTimeoutError", "safe reconnect timeout was misclassified as command transport timeout: " + timeoutError);
         assert(String(timeoutError).includes("Timed out waiting 300ms"), "reconnect timeout was not actionable: " + timeoutError);
         assert(elapsed >= 240 && elapsed < 1200, "reconnect timeout was not bounded near its configured deadline: " + elapsed + "ms");
-        assert(mutatingRequests === 0, "timed-out mutation reached the server");
+        assert(execRequests === 0, "timed-out command reached the server");
         await shutdownSession(pi);
         await supervisor.close();
       }

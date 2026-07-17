@@ -21,6 +21,16 @@ import { boundSubagentProgressCapsules, createSubagentProgressCapsule, sanitizeS
 import { appendSubagentPrefix, appendSubagentRawText, appendSubagentStdoutChunk, createSubagentStreamState, flushSubagentStdout, parseSubagentPiJsonStdout, subagentLiveToolStatus, tailByBytes, truncateByBytes, usageNumber, usageZero, type SubagentStreamState } from "./subagent-stream.js";
 import { normalizeSubagentTerminal, subagentTerminalFailed } from "./subagent-terminal.js";
 import type { AgentSHDirenvAPI, DirenvRefreshOptions, DirenvRefreshResult, DirenvRefreshState } from "./api.js";
+import {
+  CommandExecutionTimeoutError,
+  CommandTransportTimeoutError,
+  commandExecutionTimeoutDetails,
+  configuredCommandExecutionTimeout,
+  configuredCommandTransportSlack,
+  deriveCommandTimeoutBudget,
+  parseCommandTimeoutMetadata,
+  type CommandTimeoutBudget,
+} from "./command-timeout.js";
 
 type JsonObject = Record<string, unknown>;
 type ProtocolMode = "mock-ndjson" | "rest" | "legacy-approval-ui" | "";
@@ -73,6 +83,7 @@ type SupervisorMetadata = {
   networkEnforcement?: NetworkEnforcement;
   network_enforcement_live?: boolean;
   network_enforcement_error?: string;
+  command_timeout?: unknown;
   [key: string]: unknown;
 };
 
@@ -202,6 +213,12 @@ const SUPERVISOR_RECONNECT_INITIAL_MS = Number(process.env.PI_AGENTSH_RECONNECT_
 const APPROVAL_POLL_MS = Number(process.env.PI_AGENTSH_APPROVAL_POLL_MS || "1500");
 const TOOL_REQUEST_TIMEOUT_MS = Number(process.env.PI_AGENTSH_TOOL_REQUEST_TIMEOUT_MS || "600000");
 const APPROVAL_REQUEST_TIMEOUT_SLACK_MS = Number(process.env.PI_AGENTSH_APPROVAL_TIMEOUT_SLACK_MS || "300000");
+const COMMAND_EXECUTION_TIMEOUT_FALLBACK = configuredCommandExecutionTimeout(process.env.PI_AGENTSH_COMMAND_EXECUTION_TIMEOUT_MS);
+const CONFIGURED_COMMAND_TRANSPORT_SLACK_MS = configuredCommandTransportSlack(
+  process.env.PI_AGENTSH_COMMAND_TRANSPORT_SLACK_MS,
+  APPROVAL_REQUEST_TIMEOUT_SLACK_MS,
+  CONNECT_TIMEOUT_MS,
+);
 const CONFIGURED_SUBAGENT_EXECUTION_TIMEOUT_MS = optionalPositiveTimeoutEnv("PI_AGENTSH_SUBAGENT_EXECUTION_TIMEOUT_MS");
 const LEGACY_SUBAGENT_EXECUTION_TIMEOUT_MS = CONFIGURED_SUBAGENT_EXECUTION_TIMEOUT_MS === undefined
   ? optionalPositiveTimeoutEnv("PI_AGENTSH_SUBAGENT_REQUEST_TIMEOUT_MS")
@@ -325,7 +342,7 @@ async function awaitReconnectForCaller<T>(promise: Promise<T>, signal: AbortSign
 
 const BashParams = Type.Object({
   command: Type.String({ description: "Bash command to execute" }),
-  timeout: Type.Optional(Type.Number({ description: "Timeout in seconds (optional, no default timeout)" })),
+  timeout: Type.Optional(Type.Number({ exclusiveMinimum: 0, description: "Positive timeout in seconds. Omit it to use the AgentSH operator default/maximum." })),
 });
 
 const ReadParams = Type.Object({
@@ -1302,6 +1319,44 @@ function unwrapRestToolResponse<T>(op: string, raw: unknown): T {
   return obj.result as T;
 }
 
+function bufferedExecResult(raw: unknown): JsonObject {
+  const envelope = (raw && typeof raw === "object" ? raw : undefined) as RestToolResponse<unknown> | undefined;
+  const candidate = envelope && typeof envelope.ok === "boolean" ? envelope.result : raw;
+  return candidate && typeof candidate === "object" && !Array.isArray(candidate) ? candidate as JsonObject : {};
+}
+
+function parseRestHTTPErrorBody(error: RestHTTPError): unknown {
+  if (!error.body.trim()) return undefined;
+  try { return JSON.parse(error.body); } catch { return undefined; }
+}
+
+function commandExecutionTimeoutError(raw: unknown, budget: CommandTimeoutBudget): CommandExecutionTimeoutError | undefined {
+  const timeout = commandExecutionTimeoutDetails(raw, budget);
+  if (!timeout) return undefined;
+  return new CommandExecutionTimeoutError({
+    effectiveTimeoutMs: timeout.effectiveTimeoutMs,
+    timeoutSource: timeout.source,
+    clientExecutionTimeoutMs: budget.executionTimeoutMs,
+    clientExecutionTimeoutSource: budget.executionTimeoutSource,
+    result: bufferedExecResult(raw),
+    serverMessage: timeout.serverMessage,
+  });
+}
+
+function emitBufferedExecOutput(result: JsonObject, options: ExecOptions) {
+  const stdout = String(result.stdout ?? "");
+  const stderr = String(result.stderr ?? "");
+  if (stdout) {
+    options.onStdout?.(stdout);
+    options.onOutput?.(stdout, "stdout");
+  }
+  if (stderr) {
+    options.onStderr?.(stderr);
+    options.onOutput?.(stderr, "stderr");
+  }
+  return { stdout, stderr };
+}
+
 function unwrapDirenvRefreshResponse(raw: unknown): DirenvRefreshResult {
   const envelope = (raw && typeof raw === "object" ? raw : undefined) as RestToolResponse<unknown> | undefined;
   const candidate = envelope && typeof envelope.ok === "boolean" ? envelope.result : raw;
@@ -1438,6 +1493,15 @@ function restFileRequest(metadata: SupervisorMetadata | undefined, path: string,
   return { path };
 }
 
+function commandTimeoutFieldFromRest(...objects: JsonObject[]) {
+  for (const object of objects) {
+    if (Object.prototype.hasOwnProperty.call(object, "command_timeout")) {
+      return { present: true as const, value: object.command_timeout };
+    }
+  }
+  return { present: false as const };
+}
+
 function sessionMetadataFromRest(raw: unknown, socketPath: string, seed?: SupervisorMetadata): SupervisorMetadata {
   const obj = (raw && typeof raw === "object" ? raw : {}) as JsonObject;
   const session = (obj.session && typeof obj.session === "object" ? obj.session : obj) as JsonObject;
@@ -1445,6 +1509,12 @@ function sessionMetadataFromRest(raw: unknown, socketPath: string, seed?: Superv
   const sessionId = String(obj.session_id || obj.id || session.id || seed?.session_id || seed?.sessionId || env("AGENTSH_SESSION_ID") || "");
   const roots = normalizeWorkspaceRoots(obj.workspace_roots || session.workspace_roots || shadow.roots || seed?.workspace_roots);
   const networkEnforcement = (obj.network_enforcement || session.network_enforcement || seed?.network_enforcement || seed?.networkEnforcement) as NetworkEnforcement | undefined;
+  // This field must come from the live hello/reconnect response. Preserve a
+  // present malformed value for fail-closed validation, and do not retain a
+  // stale start/attachment seed when an older supervisor omits the field.
+  const responseMetadata = (obj.metadata && typeof obj.metadata === "object" ? obj.metadata : {}) as JsonObject;
+  const sessionMetadata = (session.metadata && typeof session.metadata === "object" ? session.metadata : {}) as JsonObject;
+  const commandTimeout = commandTimeoutFieldFromRest(obj, session, responseMetadata, sessionMetadata);
   const metadata: SupervisorMetadata = {
     ...seed,
     session_id: sessionId || undefined,
@@ -1471,6 +1541,8 @@ function sessionMetadataFromRest(raw: unknown, socketPath: string, seed?: Superv
       "REST /api/v1/sessions/{id}/tools/spawn_subagent",
     ],
   };
+  if (commandTimeout.present) metadata.command_timeout = commandTimeout.value;
+  else delete metadata.command_timeout;
   return metadata;
 }
 
@@ -1511,6 +1583,9 @@ class RestSupervisorClient {
       throw this.#sessionLost(`Expected ${this.#expectedSessionId}, but the supervisor returned ${actual || "no session ID"}.`);
     }
     const metadata = sessionMetadataFromRest(raw, this.socketPath, this.#metadata);
+    // Older supervisors may omit this field. Once present, malformed policy
+    // metadata is a protocol/config failure rather than a silent fallback.
+    parseCommandTimeoutMetadata(metadata);
     metadata.session_id = actual;
     metadata.id = actual;
     this.#metadata = metadata;
@@ -1596,7 +1671,16 @@ class RestSupervisorClient {
   }
 
   async #requestOnce<T = unknown>(method: string, path: string, body?: unknown, options: { signal?: AbortSignal; timeoutMs?: number } = {}): Promise<T> {
-    const { signal, cleanup } = abortSignalFrom(options.signal, options.timeoutMs || CONNECT_TIMEOUT_MS);
+    const timeoutMs = options.timeoutMs || CONNECT_TIMEOUT_MS;
+    const { signal, cleanup, didTimeout } = abortSignalFrom(options.signal, timeoutMs);
+    let socketTimedOut = false;
+    const timeoutError = () => new SupervisorRequestTimeoutError(timeoutMs, `${method} ${path}`);
+    const requestTimedOut = () => didTimeout() || socketTimedOut;
+    const normalizeRequestError = (error: unknown) => {
+      // The caller's signal always wins a race with either internal deadline.
+      if (options.signal?.aborted) return supervisorRequestAborted();
+      return requestTimedOut() ? timeoutError() : asError(error);
+    };
     return await new Promise<T>((resolve, reject) => {
       const payload = body === undefined ? undefined : JSON.stringify(body);
       let responseStarted = false;
@@ -1622,8 +1706,8 @@ class RestSupervisorClient {
         responseStarted = true;
         const chunks: Buffer[] = [];
         res.on("data", (chunk) => chunks.push(Buffer.isBuffer(chunk) ? chunk : Buffer.from(chunk)));
-        res.on("aborted", () => finish(() => reject(new Error(`${method} ${path}: supervisor response was aborted after dispatch`))));
-        res.on("error", (error) => finish(() => reject(error)));
+        res.on("aborted", () => finish(() => reject(normalizeRequestError(new Error(`${method} ${path}: supervisor response was aborted after dispatch`)))));
+        res.on("error", (error) => finish(() => reject(normalizeRequestError(error))));
         res.on("end", () => finish(() => {
           const text = Buffer.concat(chunks).toString("utf8");
           const statusCode = res.statusCode || 0;
@@ -1635,14 +1719,18 @@ class RestSupervisorClient {
           try { resolve(JSON.parse(text) as T); } catch (error) { reject(asError(error)); }
         }));
         res.on("close", () => {
-          if (!settled && !res.complete) finish(() => reject(new Error(`${method} ${path}: supervisor response closed before completion after dispatch`)));
+          if (!settled && !res.complete) finish(() => reject(normalizeRequestError(new Error(`${method} ${path}: supervisor response closed before completion after dispatch`))));
         });
       });
       req.on("error", (error) => finish(() => {
-        if (!responseStarted && supervisorSocketUnavailable(error)) reject(new SafeSupervisorConnectError(error));
-        else reject(error);
+        const normalized = normalizeRequestError(error);
+        if (!responseStarted && !requestTimedOut() && !options.signal?.aborted && supervisorSocketUnavailable(error)) reject(new SafeSupervisorConnectError(error));
+        else reject(normalized);
       }));
-      req.setTimeout(options.timeoutMs || CONNECT_TIMEOUT_MS, () => req.destroy(new Error(`Timed out waiting for AgentSH REST supervisor socket ${this.socketPath}`)));
+      req.setTimeout(timeoutMs, () => {
+        socketTimedOut = true;
+        req.destroy(timeoutError());
+      });
       if (payload !== undefined) req.write(payload);
       req.end();
     });
@@ -1837,29 +1925,79 @@ class RestSupervisorClient {
   }
 
   async exec(command: string, options: ExecOptions = {}) {
-    const timeoutMs = options.timeout_ms ?? (options.timeout ? Math.max(0, options.timeout) * 1000 : undefined);
-    const requestTimeoutMs = timeoutMs
-      ? Math.max(TOOL_REQUEST_TIMEOUT_MS, timeoutMs + APPROVAL_REQUEST_TIMEOUT_SLACK_MS + CONNECT_TIMEOUT_MS)
-      : TOOL_REQUEST_TIMEOUT_MS + APPROVAL_REQUEST_TIMEOUT_SLACK_MS;
-    const raw = await this.request("POST", this.toolPath("exec_bash"), {
-      command,
-      cwd: options.cwd || effectiveSupervisorCwd(),
-      timeout_ms: timeoutMs,
-      persist_output_over_bytes: options.persist_output_over_bytes,
-      persist_output_over_lines: options.persist_output_over_lines,
-      actor: options.actor || parentActor(options.tool_call_id, "Pi bash tool"),
-    }, { signal: options.signal, timeoutMs: requestTimeoutMs });
+    let budget: CommandTimeoutBudget | undefined;
+    let raw: unknown;
+    try {
+      raw = await this.#withReconnect(async () => {
+        // A safe connect failure has not dispatched the command. After the
+        // existing reconnect lifetime verifies the exact session, this closure
+        // runs again against refreshed metadata and starts a fresh, full
+        // command-response transport lifetime.
+        const attemptBudget = deriveCommandTimeoutBudget({
+          metadata: this.#metadata,
+          fallback: COMMAND_EXECUTION_TIMEOUT_FALLBACK,
+          transportSlackMs: CONFIGURED_COMMAND_TRANSPORT_SLACK_MS,
+          terminalResponseMarginMs: CONNECT_TIMEOUT_MS,
+          timeoutSeconds: options.timeout,
+          timeoutMs: options.timeout_ms,
+        });
+        budget = attemptBudget;
+        const body: JsonObject = {
+          command,
+          cwd: options.cwd || effectiveSupervisorCwd(),
+          persist_output_over_bytes: options.persist_output_over_bytes,
+          persist_output_over_lines: options.persist_output_over_lines,
+          actor: options.actor || parentActor(options.tool_call_id, "Pi bash tool"),
+        };
+        // Omission is semantically meaningful: AgentSH must select and report
+        // its operator policy default/fallback. Explicit values are sent
+        // uncapped so AgentSH can report policy_cap when appropriate.
+        if (attemptBudget.requestedTimeoutMs !== undefined) body.timeout_ms = attemptBudget.requestedTimeoutMs;
+
+        try {
+          return await this.#requestOnce("POST", this.toolPath("exec_bash"), body, {
+            signal: options.signal,
+            timeoutMs: attemptBudget.transportTimeoutMs,
+          });
+        } catch (error) {
+          if (options.signal?.aborted) throw supervisorRequestAborted();
+          // Classify only this dispatched/socket-response lifetime. Errors from
+          // the separate safe reconnect poll retain reconnect diagnostics.
+          if (error instanceof SupervisorRequestTimeoutError) {
+            throw new CommandTransportTimeoutError(
+              attemptBudget.executionTimeoutMs,
+              attemptBudget.transportTimeoutMs,
+              attemptBudget.transportSlackMs,
+            );
+          }
+          throw error;
+        }
+      }, options.signal);
+    } catch (error) {
+      if (options.signal?.aborted) throw supervisorRequestAborted();
+      if (error instanceof RestHTTPError && error.statusCode === 404 && /session[_ -]?(?:not[_ -]?found|missing)|(?:not[_ -]?found|missing).*session/i.test(error.body)) {
+        throw this.#sessionLost(`The supervisor reported that session ${this.#expectedSessionId} no longer exists.`);
+      }
+      if (error instanceof RestHTTPError && budget) {
+        const parsed = parseRestHTTPErrorBody(error);
+        const executionTimeout = commandExecutionTimeoutError(parsed, budget);
+        if (executionTimeout) {
+          emitBufferedExecOutput(bufferedExecResult(parsed), options);
+          throw executionTimeout;
+        }
+      }
+      throw error;
+    }
+
+    if (!budget) throw new Error("AgentSH exec_bash completed without a command timeout budget");
+    const executionTimeout = commandExecutionTimeoutError(raw, budget);
+    if (executionTimeout) {
+      emitBufferedExecOutput(bufferedExecResult(raw), options);
+      throw executionTimeout;
+    }
+
     const result = unwrapRestToolResponse<JsonObject>("exec_bash", raw);
-    const stdout = String(result.stdout ?? "");
-    const stderr = String(result.stderr ?? "");
-    if (stdout) {
-      options.onStdout?.(stdout);
-      options.onOutput?.(stdout, "stdout");
-    }
-    if (stderr) {
-      options.onStderr?.(stderr);
-      options.onOutput?.(stderr, "stderr");
-    }
+    const { stdout, stderr } = emitBufferedExecOutput(result, options);
     const exitCode = numericField(result.exitCode) ?? numericField(result.exit_code) ?? 0;
     return { ...result, exitCode, stdout, stderr } as ExecResult;
   }
@@ -2262,6 +2400,12 @@ function resetConnection(state: SupervisorState) {
   state.terminalError = false;
 }
 
+function mergeLiveSupervisorMetadata(previous: SupervisorMetadata | undefined, live: SupervisorMetadata, socketPath: string) {
+  const metadata: SupervisorMetadata = { ...previous, ...live, supervisor_sock: socketPath };
+  if (!Object.prototype.hasOwnProperty.call(live, "command_timeout")) delete metadata.command_timeout;
+  return metadata;
+}
+
 async function attachToSocket(state: SupervisorState, mode: ProtocolMode, source: SupervisorSource, socketPath: string, ctx: ExtensionContext, seedMetadata?: SupervisorMetadata) {
   state.active = true;
   state.activeMode = mode;
@@ -2283,7 +2427,7 @@ async function attachToSocket(state: SupervisorState, mode: ProtocolMode, source
     },
     onReconnected(metadata) {
       if (state.client !== client || state.terminalError) return;
-      state.metadata = { ...state.metadata, ...metadata, supervisor_sock: socketPath };
+      state.metadata = mergeLiveSupervisorMetadata(state.metadata, metadata, socketPath);
       state.sessionId = metadataSessionId(state.metadata);
       restoreConnectedState(state);
     },
@@ -2310,7 +2454,7 @@ async function attachToSocket(state: SupervisorState, mode: ProtocolMode, source
   state.client = client;
   state.approvalClient = client;
   const metadata = await client.hello();
-  state.metadata = { ...seedMetadata, ...metadata, supervisor_sock: socketPath };
+  state.metadata = mergeLiveSupervisorMetadata(seedMetadata, metadata, socketPath);
   assertNetworkEnforcementReady(state.metadata);
   state.sessionId = metadataSessionId(state.metadata);
   const expectedSessionId = env("AGENTSH_SESSION_ID");
@@ -2403,6 +2547,7 @@ async function attachOrStart(state: SupervisorState, ctx: ExtensionContext, opti
 }
 
 function helpText(state: SupervisorState) {
+  const commandTimeout = parseCommandTimeoutMetadata(state.metadata);
   if (!state.active) {
     return [
       "AgentSH supervisor client is inactive.",
@@ -2427,6 +2572,7 @@ function helpText(state: SupervisorState) {
     state.metadata?.worktree ? `Worktree: ${state.metadata.worktree}` : "",
     state.metadata?.real_workspace ? `Real:     ${state.metadata.real_workspace}` : "",
     state.metadata?.protocol_version ? `Protocol: ${state.metadata.protocol_version}` : `Protocol: ${PROTOCOL_VERSION}`,
+    commandTimeout ? `Command timeout: default ${commandTimeout.defaultMs}ms${commandTimeout.maximumMs !== undefined ? `, maximum ${commandTimeout.maximumMs}ms` : ""}${commandTimeout.approvalExtensionMs !== undefined ? `, approval extension ${commandTimeout.approvalExtensionMs}ms` : ""} (${commandTimeout.source})` : `Command timeout: compatibility default/ceiling ${COMMAND_EXECUTION_TIMEOUT_FALLBACK.defaultMs}ms (${COMMAND_EXECUTION_TIMEOUT_FALLBACK.source})`,
     metadataNetworkEnforcement(state.metadata)?.requested ? `Network:  ${metadataNetworkEnforcement(state.metadata)?.requested} / ${metadataNetworkEnforcement(state.metadata)?.status || "unknown"} / ${metadataNetworkEnforcement(state.metadata)?.tier || "unknown"}${state.metadata?.network_enforcement_live ? " (live)" : " (not live)"}` : "",
     metadataNetworkEnforcement(state.metadata)?.detail ? `Net detail: ${metadataNetworkEnforcement(state.metadata)?.detail}` : "",
     state.metadata?.network_enforcement_error ? `Net error: ${state.metadata.network_enforcement_error}` : "",
@@ -2455,7 +2601,7 @@ function createGlobalAPI(state: SupervisorState): AgentSHPiAPI {
       return await client.exec(commandOrParams.command, {
         ...options,
         cwd: commandOrParams.cwd ?? options.cwd,
-        timeout_ms: commandOrParams.timeout_ms ?? options.timeout_ms,
+        timeout_ms: commandOrParams.timeout_ms !== undefined ? commandOrParams.timeout_ms : options.timeout_ms,
         persist_output_over_bytes: commandOrParams.persist_output_over_bytes ?? options.persist_output_over_bytes,
         persist_output_over_lines: commandOrParams.persist_output_over_lines ?? options.persist_output_over_lines,
         actor: commandOrParams.actor ?? options.actor,
@@ -3141,7 +3287,7 @@ export default function sandbox(pi: ExtensionAPI) {
     pi.registerTool({
       name: "bash",
     label: "bash",
-    description: "Execute a bash command through the AgentSH session supervisor. Streams stdout/stderr and returns the final exit code.",
+    description: "Execute a bash command through the AgentSH session supervisor. A positive timeout is in seconds; omission uses the AgentSH operator default/maximum. Real REST exec_bash is buffered, not live-streamed.",
     parameters: BashParams,
     async execute(toolCallId, params, signal, onUpdate, ctx) {
       const client = requireClient(state);
@@ -3183,6 +3329,29 @@ export default function sandbox(pi: ExtensionAPI) {
         };
         if (exitCode !== 0) throw new Error(`${finalText}\n\nCommand exited with code ${exitCode}`);
         return { content: [{ type: "text", text: finalText }], details };
+      } catch (error) {
+        if (error instanceof CommandExecutionTimeoutError) {
+          output.finish();
+          const result = error.result && typeof error.result === "object" && !Array.isArray(error.result)
+            ? error.result as ExecResult
+            : undefined;
+          const snapshot = output.snapshot({ persistIfTruncated: true });
+          let finalText = formatAccumulatedOutput(snapshot, output, result);
+          const artifact = remoteOutputArtifact(result);
+          // A remotely truncated response can fit inside Pi's local window, in
+          // which case the generic warning describes the artifact but does not
+          // otherwise print its path. Keep that path model-visible on timeout.
+          if (artifact?.path && !finalText.includes(artifact.path)) {
+            finalText += `\n\n[Remote output artifact: ${artifact.path}]`;
+          }
+          error.withToolOutput(finalText, {
+            exitCode: error.exitCode,
+            truncation: snapshot.truncation.truncated ? snapshot.truncation : undefined,
+            fullOutputPath: artifact?.path,
+            outputArtifact: artifact,
+          });
+        }
+        throw error;
       } finally {
         output.finish();
         await output.closeTempFile();
