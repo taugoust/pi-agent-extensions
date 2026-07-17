@@ -21,6 +21,7 @@ import { abortSubagentProtocolStream, appendSubagentProtocolChunk, createSubagen
 import { boundSubagentProgressCapsules, createSubagentProgressCapsule, sanitizeSubagentParentText } from "./subagent-result.js";
 import { appendSubagentPrefix, appendSubagentRawText, appendSubagentStdoutChunk, createSubagentStreamState, flushSubagentStdout, parseSubagentPiJsonStdout, subagentLiveToolStatus, tailByBytes, truncateByBytes, usageNumber, usageZero, type SubagentStreamState } from "./subagent-stream.js";
 import { normalizeSubagentTerminal, subagentTerminalFailed } from "./subagent-terminal.js";
+import type { AgentSHDirenvAPI, DirenvRefreshOptions, DirenvRefreshResult, DirenvRefreshState } from "./api.js";
 
 type JsonObject = Record<string, unknown>;
 type ProtocolMode = "mock-ndjson" | "rest" | "legacy-approval-ui" | "";
@@ -28,7 +29,7 @@ type SupervisorSource = "agentsh-env" | "agentsh-started" | "agentsh-approval-ui
 type SupervisorStatus = "inactive" | "starting" | "connecting" | "connected" | "pending" | "error";
 
 type Actor = {
-  kind: "parent" | "subagent" | "tool";
+  kind: "parent" | "subagent" | "tool" | "extension";
   label?: string;
   subagent_id?: string;
   subagent_depth?: number;
@@ -194,7 +195,7 @@ type RestConnectionEvents = {
   onSessionLost?(error: Error): void;
 };
 
-type AgentSHPiAPI = {
+export type AgentSHPiAPI = AgentSHDirenvAPI & {
   exec(command: string | { command: string; cwd?: string; timeout_ms?: number; persist_output_over_bytes?: number; persist_output_over_lines?: number; actor?: Actor }, options?: ExecOptions): Promise<ExecResult>;
   readFile(path: string, options?: ReadFileOptions): Promise<unknown>;
   writeFile(path: string, content: string, options?: WriteFileOptions): Promise<unknown>;
@@ -212,13 +213,6 @@ type AgentSHPiAPI = {
     lastError?: string;
   };
 };
-
-declare global {
-  // Shared convention for owned Pi extensions. This is discipline-based; trusted
-  // parent-Pi extensions must use this for side effects.
-  // eslint-disable-next-line no-var
-  var __AGENTSH_PI__: AgentSHPiAPI | undefined;
-}
 
 type SupervisorState = {
   active: boolean;
@@ -1203,6 +1197,10 @@ class MockSupervisorClient {
     });
   }
 
+  async refreshDirenv(_options: DirenvRefreshOptions) {
+    return restUnsupported("refresh_direnv");
+  }
+
   async readFile(path: string, options: ReadFileOptions = {}) {
     return await this.request("read_file", { path, cwd: options.cwd, offset: options.offset, limit: options.limit, actor: options.actor || parentActor(undefined, "Pi read tool") }, { signal: options.signal });
   }
@@ -1355,6 +1353,25 @@ function unwrapRestToolResponse<T>(op: string, raw: unknown): T {
   if (!obj || typeof obj.ok !== "boolean") return raw as T;
   if (!obj.ok) throw new Error(obj.error || `${op} failed`);
   return obj.result as T;
+}
+
+function unwrapDirenvRefreshResponse(raw: unknown): DirenvRefreshResult {
+  const envelope = (raw && typeof raw === "object" ? raw : undefined) as RestToolResponse<unknown> | undefined;
+  const candidate = envelope && typeof envelope.ok === "boolean" ? envelope.result : raw;
+  const result = (candidate && typeof candidate === "object" ? candidate : undefined) as Partial<DirenvRefreshResult> | undefined;
+  const states = new Set<DirenvRefreshState>(["no_envrc", "not_allowed", "loaded", "unchanged", "policy_denied", "timed_out", "invalid_output", "unavailable"]);
+  if (!result || !states.has(result.state as DirenvRefreshState)) {
+    throw new Error("AgentSH refresh_direnv returned an invalid value-free result");
+  }
+  const number = (value: unknown) => typeof value === "number" && Number.isSafeInteger(value) && value >= 0 ? value : 0;
+  return {
+    state: result.state as DirenvRefreshState,
+    set_count: number(result.set_count),
+    unset_count: number(result.unset_count),
+    rejected_count: number(result.rejected_count),
+    generation: number(result.generation),
+    duration_ms: number(result.duration_ms),
+  };
 }
 
 function unwrapRestSubagentResponse(raw: unknown): unknown {
@@ -1591,6 +1608,7 @@ function sessionMetadataFromRest(raw: unknown, socketPath: string, seed?: Superv
       "REST /api/v1/sessions",
       "REST /api/v1/approvals",
       "REST /api/v1/sessions/{id}/tools/exec_bash",
+      "REST /api/v1/sessions/{id}/tools/refresh_direnv",
       "REST /api/v1/sessions/{id}/tools/read_file",
       "REST /api/v1/sessions/{id}/tools/write_file",
       "REST /api/v1/sessions/{id}/tools/edit_file",
@@ -2011,6 +2029,27 @@ class RestSupervisorClient {
     return { ...result, stdout, stderr } as ExecResult;
   }
 
+  async refreshDirenv(options: DirenvRefreshOptions) {
+    const body = {
+      cwd: env("PI_AGENTSH_REMOTE_CWD") || options.cwd || effectiveSupervisorCwd(),
+      actor: options.actor || { kind: "extension", label: "Pi direnv refresh" },
+    };
+    try {
+      const raw = await this.request("POST", this.toolPath("refresh_direnv"), body, {
+        signal: options.signal,
+        timeoutMs: TOOL_REQUEST_TIMEOUT_MS + APPROVAL_REQUEST_TIMEOUT_SLACK_MS,
+      });
+      return unwrapDirenvRefreshResponse(raw);
+    } catch (error) {
+      // AgentSH returns policy-disabled refreshes as a typed 403. Preserve that
+      // value-free state while leaving all other HTTP/transport failures intact.
+      if (error instanceof RestHTTPError && error.statusCode === 403) {
+        try { return unwrapDirenvRefreshResponse(JSON.parse(error.body)); } catch { /* use original error */ }
+      }
+      throw error;
+    }
+  }
+
   async readFile(path: string, options: ReadFileOptions = {}) {
     const file = restFileRequest(this.#metadata, path, options.cwd);
     const raw = await this.request("POST", this.toolPath("read_file"), {
@@ -2239,6 +2278,7 @@ class LegacyApprovalUIClient {
   }
 
   async exec(_command: string, _options: ExecOptions = {}) { return restUnsupported("exec_bash"); }
+  async refreshDirenv(_options: DirenvRefreshOptions) { return restUnsupported("refresh_direnv"); }
   async readFile(_path: string, _options: ReadFileOptions = {}) { return restUnsupported("read_file"); }
   async writeFile(_path: string, _content: string, _options: WriteFileOptions = {}) { return restUnsupported("write_file"); }
   async editFile(_path: string, _edits: Edit[], _options: EditFileOptions = {}) { return restUnsupported("edit_file"); }
@@ -2904,6 +2944,12 @@ function createGlobalAPI(state: SupervisorState): AgentSHPiAPI {
         persist_output_over_bytes: commandOrParams.persist_output_over_bytes ?? options.persist_output_over_bytes,
         persist_output_over_lines: commandOrParams.persist_output_over_lines ?? options.persist_output_over_lines,
         actor: commandOrParams.actor ?? options.actor,
+      });
+    },
+    async refreshDirenv(options) {
+      return await requireClient(state).refreshDirenv({
+        ...options,
+        cwd: env("PI_AGENTSH_REMOTE_CWD") || options.cwd || effectiveSupervisorCwd(state.ctx),
       });
     },
     async readFile(path, options = {}) { return await requireClient(state).readFile(path, options); },

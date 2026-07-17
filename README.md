@@ -113,9 +113,16 @@ in subdirectories.
 - **Status bar**: `direnv …` / `direnv ✓` / `direnv ✗`
 - **Dependencies**: `direnv` binary in `PATH`
 
-**Description**: Runs `direnv export json` on session start and after each
-`bash` tool call, then applies environment variable updates to the running
-agent process.
+**Description**: Refreshes direnv on session start and after each `bash` tool
+call. In ordinary/`pi-unsafe` sessions it preserves the shell-hook behaviour of
+running `direnv export json` locally and updating the Pi process environment. In
+supervised sessions (`PI_SUPERVISED=1`) it requires the sandbox extension and
+uses AgentSH's exact-session `refresh_direnv` endpoint instead: `.envrc` code
+runs in the supervised execution workspace, values remain server-side for later
+commands, and the trusted parent Pi environment is never mutated. There is no
+local fallback when AgentSH is unavailable. Supervised use therefore requires
+an AgentSH release that implements `refresh_direnv`; older supervisors fail
+closed with an actionable diagnostic.
 
 </details>
 <details>
@@ -607,6 +614,8 @@ Streaming ops may emit `stdout`, `stderr`, `tool_update`, `subagent_update`, or
   central detached-session approval resolution is used only when explicitly
   requested with `PI_AGENTSH_APPROVAL_CLIENT=central`;
 - `POST /api/v1/sessions/{id}/tools/exec_bash` for `bash`{.verbatim};
+- `POST /api/v1/sessions/{id}/tools/refresh_direnv` for a value-free,
+  server-owned supervised direnv environment refresh;
 - `POST /api/v1/sessions/{id}/tools/read_file` for optional supervised
   `read`{.verbatim};
 - `POST /api/v1/sessions/{id}/tools/write_file` for `write`{.verbatim};
@@ -668,8 +677,8 @@ wrapper-owned, and the failed command is never replayed.
 
 The extension exposes `globalThis.__AGENTSH_PI__` for owned extensions:
 
-- `exec(...)`, `readFile(...)`, `writeFile(...)`, `editFile(...)`,
-  `spawnSubagent(...)`;
+- `exec(...)`, `refreshDirenv(...)`, `readFile(...)`, `writeFile(...)`,
+  `editFile(...)`, `spawnSubagent(...)`;
 - `resolveApproval(...)`;
 - `getSupervisorMetadata()` / `getSupervisorState()`.
 
