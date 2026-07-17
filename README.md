@@ -534,7 +534,7 @@ its own with `programs.pi.extensions.subagent-finalizer.enable`.
 <br>
 
 - **Source**:
-  [sandbox/](https://github.com/rytswd/pi-agent-extensions/tree/main/sandbox)
+  [sandbox/](https://github.com/taugoust/pi-agent-extensions/tree/main/sandbox)
 - **License**: MIT
 - **Type**: AgentSH supervisor client (mock NDJSON test protocol and real Stage 1 REST)
 - **Commands**: `/sandbox`{.verbatim} for status/debug;
@@ -588,8 +588,12 @@ PI_AGENTSH_REQUIRE_NETWORK_ENFORCEMENT=strict           # refuse tools without l
 PI_AGENTSH_RECOVERY_COMMAND=/nix/store/.../bin/recover  # optional immutable wrapper-owned recovery executable
 PI_AGENTSH_LIFECYCLE_STATE=/private/.../state.json      # optional private canonical wrapper-owned state
 PI_AGENTSH_RECOVERY_TIMEOUT_MS=300000                   # bounded explicit recovery request
-PI_AGENTSH_TOOL_REQUEST_TIMEOUT_MS=1800000             # non-subagent REST tool request cap
-PI_AGENTSH_APPROVAL_TIMEOUT_SLACK_MS=300000            # extra REST wait budget for approval delays
+PI_AGENTSH_TOOL_REQUEST_TIMEOUT_MS=600000               # generic non-command REST tool request cap (default: 10m)
+PI_AGENTSH_APPROVAL_TIMEOUT_SLACK_MS=300000             # legacy command-slack default / direnv approval allowance
+PI_AGENTSH_CONNECT_TIMEOUT_MS=10000                     # connect timeout and modern terminal/cleanup margin
+PI_AGENTSH_COMMAND_EXECUTION_TIMEOUT_MS=14400000        # compatibility default/ceiling when metadata is absent (4h)
+PI_AGENTSH_COMMAND_TRANSPORT_SLACK_MS=310000             # command response slack baseline; modern server metadata may raise it
+
 PI_AGENTSH_SUBAGENT_EXECUTION_TIMEOUT_MS=7200000       # default/maximum AgentSH child deadline (2h)
 PI_AGENTSH_SUBAGENT_TRANSPORT_SLACK_MS=300000          # NDJSON deadline slack after child execution (5m)
 PI_AGENTSH_SUBAGENT_TRANSPORT_TIMEOUT_MS=7500000       # optional transport floor; never shortens execution + slack
@@ -623,17 +627,83 @@ Streaming ops may emit `stdout`, `stderr`, `tool_update`, `subagent_update`, or
 - `POST /api/v1/sessions/{id}/tools/spawn_subagent` for `subagent`{.verbatim};
 - `DELETE /api/v1/sessions/{id}` best-effort for `/sandbox-control stop`.
 
-The REST `exec_bash` response is buffered, while `spawn_subagent` uses an
-NDJSON streaming response for stdout/stderr and child result events. AgentSH owns
-the subagent execution deadline. The extension sends a two-hour `timeout_ms` by
-default and keeps its NDJSON transport open for that deadline plus five minutes,
-so process-tree cleanup and the typed terminal result can arrive before the
-client closes. A tool-call `timeout_ms` can select a shorter execution window
-but cannot raise the configured ceiling. `PI_AGENTSH_SUBAGENT_REQUEST_TIMEOUT_MS` remains a compatibility alias
-for the default execution timeout; it no longer creates an independent matching
-transport deadline. Caller aborts remain distinct from execution/transport
-timeouts. Multiple Pi `edit` replacements are applied as sequential
-single-replacement REST calls.
+The REST `exec_bash` response is buffered; it does not stream command output
+while the command runs. Ordinary Bash execution and HTTP transport use separate
+budgets. On REST hello and every verified reconnect, the extension reads live
+session metadata
+`command_timeout: { default_ms, maximum_ms?, approval_extension_ms?, source }`,
+where AgentSH reports metadata source `policy` or `fallback`.
+`approval_extension_ms`, when present, is a non-negative safe integer number of
+milliseconds within the AgentSH/Go `time.Duration` range. It is the
+server-enforced maximum cumulative approval-wait extension for one ordinary
+command—one bounded allowance for the
+command, not a new allowance per approval. Valid live metadata is
+authoritative. Execution-budget compatibility applies only when an older
+supervisor omits the entire `command_timeout` field: the client then uses the
+trusted-wrapper value `PI_AGENTSH_COMMAND_EXECUTION_TIMEOUT_MS`, or the built-in
+four-hour default, as both its default and client-side ceiling. A present but
+malformed `command_timeout` field—including an invalid
+`approval_extension_ms`—fails as a protocol/config error instead of silently
+falling back. The environment fallback is captured when the trusted extension
+loads; values from supervised direnv stay server-side and are never a
+command-timeout source. The selected AgentSH policy metadata—not an unrelated
+top-level server sample setting or project environment—is the operative source
+when available.
+
+When Bash omits `timeout`, the extension derives its client execution budget
+from that metadata/default but leaves `timeout_ms` out of the request so AgentSH
+can report command source `policy_default` or `fallback`. A positive explicit
+timeout is converted to exact integer milliseconds and sent unchanged, up to
+AgentSH/Go's `time.Duration` wire maximum of 9,223,372,036,854ms. If live
+metadata contains `maximum_ms`, or compatibility mode supplies its mirrored
+ceiling, only the client lifetime is based on `min(request, maximum)`;
+preserving an above-cap original request lets AgentSH report `policy_cap`.
+Transport stays open for the derived execution budget plus the selected actual
+command slack. If live metadata includes `approval_extension_ms`, actual slack
+is at least that one server allowance plus `PI_AGENTSH_CONNECT_TIMEOUT_MS` as a
+bounded terminal/cleanup response margin:
+`max(PI_AGENTSH_COMMAND_TRANSPORT_SLACK_MS, approval_extension_ms +
+PI_AGENTSH_CONNECT_TIMEOUT_MS)`. Thus a shorter configured command slack cannot
+expire while AgentSH is still within its advertised approval allowance or the
+fixed response margin. If the producer field is absent (including older live
+`command_timeout` metadata), the configured command slack is used unchanged.
+For supervisors that omit all command-timeout metadata, compatibility likewise
+uses that configured slack; its default already contains the legacy approval
+allowance plus the connect margin. The execution-plus-slack sum must fit
+JavaScript safe-integer arithmetic and the Node.js timer limit. A safe
+pre-dispatch socket failure uses the separate supervisor reconnect lifetime;
+after verified reconnect the client re-reads metadata, rebuilds the body, and
+starts a full command transport lifetime.
+Reconnect timeout diagnostics are not command transport timeouts.
+`PI_AGENTSH_TOOL_REQUEST_TIMEOUT_MS` remains the 600000ms generic budget for
+non-command REST tools and is never a Bash default or floor. Thus an explicit
+shorter timeout shortens both execution and transport.
+
+A structured AgentSH `E_COMMAND_TIMEOUT` or
+`termination_reason=command_timeout` becomes a distinct command execution
+timeout with code/exit code 124. Explicit effective fields, including new
+AgentSH `command_timeout: { effective_ms, source }`, are retained exactly;
+generic `timeout_ms` is not treated as server-effective reporting. If an older
+structured response lacks an explicit effective field, the error says the
+effective server timeout is unavailable and separately reports the
+client-derived execution budget/source. Partial buffered stdout/stderr,
+truncation warnings, and any remote output artifact path remain visible in Bash
+tool errors. A dispatched socket/response deadline is a distinct command
+transport timeout carrying the derived execution/transport budgets and selected
+actual slack, while caller abort remains `AbortError`. Exit code 124 alone is
+not interpreted as a timeout, because a normal child may return it.
+
+`spawn_subagent` separately uses an NDJSON streaming response for stdout/stderr
+and child result events. AgentSH owns the subagent execution deadline. The
+extension sends a two-hour `timeout_ms` by default and keeps its NDJSON transport
+open for that deadline plus five minutes, so process-tree cleanup and the typed
+terminal result can arrive before the client closes. A subagent tool-call
+`timeout_ms` can select a shorter execution window but cannot raise the
+configured ceiling. `PI_AGENTSH_SUBAGENT_REQUEST_TIMEOUT_MS` remains a
+compatibility alias for the default execution timeout; it no longer creates an
+independent matching transport deadline. Caller aborts remain distinct from
+execution/transport timeouts. Multiple Pi `edit` replacements are applied as
+sequential single-replacement REST calls.
 When bounded model-facing `bash` output or a completed subagent final overflows,
 new AgentSH supervisors retain a capped artifact in the remote session runtime
 and return `full_output_path` or `full_result_path`. The extension shows that
