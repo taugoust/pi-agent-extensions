@@ -2499,7 +2499,7 @@ function syncPendingApprovals(state: SupervisorState, approvals: ApprovalRequest
 
 async function promptApproval(state: SupervisorState, approval: ApprovalRequest) {
   const ctx = state.ctx;
-  if (!ctx?.hasUI || state.resolving.has(approval.id)) return;
+  if (!ctx?.hasUI || state.resolving.has(approval.id) || !state.pendingIds.has(approval.id)) return;
   state.resolving.add(approval.id);
   const controller = new AbortController();
   state.promptAbortControllers.set(approval.id, controller);
@@ -2508,7 +2508,16 @@ async function promptApproval(state: SupervisorState, approval: ApprovalRequest)
     const choice = await showApprovalPrompt(ctx, approval, choices, controller.signal);
     if (controller.signal.aborted) return;
     const resolution = resolveChoice(choices, choice);
-    await requireApprovalClient(state).resolveApproval(approval.id, resolution);
+    const approvalClient = requireApprovalClient(state);
+    await approvalClient.resolveApproval(approval.id, resolution);
+    if (resolution.scope === "session") {
+      removePending(state, approval.id);
+      try {
+        syncPendingApprovals(state, await approvalClient.listApprovals());
+      } catch {
+        // The background watcher will retry polling.
+      }
+    }
     const approved = resolution.decision === "approve";
     notify(ctx, `${approved ? "Approved" : "Denied"}${resolution.scope === "session" ? " for session" : ""}: ${approvalTitle(approval)}`, approved ? "info" : "warning");
     removePending(state, approval.id);
