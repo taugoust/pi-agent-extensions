@@ -2896,6 +2896,110 @@ in
         await server.close();
       }
 
+      // A queued approval that disappears while another prompt is active is skipped when its turn reaches the UI.
+      {
+        clearAgentSHEnv();
+        process.env.PI_AGENTSH_APPROVAL_POLL_MS = "10";
+        let listCount = 0;
+        const initialApprovals = [
+          { id: "appr-active-before-stale", kind: "network", target: "active.example:443" },
+          { id: "appr-stale-queued", kind: "network", target: "stale.example:443" },
+        ];
+        const server = await withApprovalServer(async (request) => {
+          if (request.op === "list") {
+            listCount += 1;
+            return { ok: true, approvals: listCount === 1 ? initialApprovals : [] };
+          }
+          if (request.op === "resolve") return { ok: false, error: "externally handled approvals must not be resolved by Pi" };
+          return { ok: false, error: "unknown op" };
+        });
+        setAgentSHEnv(server.socketPath);
+        const pi = createPi();
+        sandbox(pi);
+        const ctx = createContext({ choices: ["__wait_for_abort__", "__wait_for_abort__"] });
+        await startSession(pi, ctx);
+        await waitFor(
+          () => listCount >= 2 && ctx.notifications.some((entry) => String(entry.message).includes("appr-stale-queued")),
+          "queued approval did not disappear from pending state",
+        );
+        await new Promise((resolve) => setImmediate(resolve));
+        await new Promise((resolve) => setImmediate(resolve));
+
+        const promptCount = ctx.selectCalls.length;
+        const resolveSent = server.requests.some((request) => request.op === "resolve");
+        await shutdownSession(pi);
+        delete process.env.PI_AGENTSH_APPROVAL_POLL_MS;
+        await server.close();
+
+        assert(promptCount === 1, "stale queued approval opened a second prompt");
+        assert(!resolveSent, "externally handled queued approval was resolved by Pi");
+      }
+
+      // Session-scoped command approval refreshes and dismisses covered sibling prompts immediately.
+      {
+        clearAgentSHEnv();
+        process.env.PI_AGENTSH_APPROVAL_POLL_MS = "60000";
+        let approvals = [
+          {
+            id: "appr-sqlite-1",
+            kind: "command",
+            target: "sqlite3",
+            fields: {
+              scope_options: [
+                { scope_kind: "command", scope_key: "command-executable:sqlite", scope_label: "/nix/store/abc-sqlite/bin/sqlite3" },
+                { scope_kind: "command", scope_key: "command-invocation:sqlite-1", scope_label: "/nix/store/abc-sqlite/bin/sqlite3 events.db 'select 1'" },
+              ],
+            },
+          },
+          {
+            id: "appr-sqlite-2",
+            kind: "command",
+            target: "sqlite3",
+            fields: {
+              scope_options: [
+                { scope_kind: "command", scope_key: "command-executable:sqlite", scope_label: "/nix/store/abc-sqlite/bin/sqlite3" },
+                { scope_kind: "command", scope_key: "command-invocation:sqlite-2", scope_label: "/nix/store/abc-sqlite/bin/sqlite3 events.db 'select 2'" },
+              ],
+            },
+          },
+        ];
+        const resolved = [];
+        const server = await withApprovalServer(async (request) => {
+          if (request.op === "list") return { ok: true, approvals };
+          if (request.op === "resolve") {
+            resolved.push(request);
+            approvals = [];
+            return { ok: true };
+          }
+          return { ok: false, error: "unknown op" };
+        });
+        setAgentSHEnv(server.socketPath);
+        const pi = createPi();
+        sandbox(pi);
+        const ctx = createContext({ choices: ["Approve this command for session: /nix/store/abc-sqlite/bin/sqlite3"] });
+        await startSession(pi, ctx);
+        await waitFor(
+          () => resolved.length >= 1 && server.requests.filter((request) => request.op === "list").length >= 2,
+          "session-scoped command approval did not refresh pending approvals",
+        );
+        await new Promise((resolve) => setImmediate(resolve));
+        await new Promise((resolve) => setImmediate(resolve));
+
+        const operations = server.requests.map((request) => request.op);
+        const resolveIndex = operations.indexOf("resolve");
+        const refreshedAfterResolve = resolveIndex >= 0 && operations.slice(resolveIndex + 1).includes("list");
+        const resolvedSnapshot = resolved.slice();
+        const promptCount = ctx.selectCalls.length;
+        await shutdownSession(pi);
+        delete process.env.PI_AGENTSH_APPROVAL_POLL_MS;
+        await server.close();
+
+        assert(refreshedAfterResolve, "session-scoped resolution did not list pending approvals afterward");
+        assert(resolvedSnapshot.length === 1, "covered queued command approval was prompted/resolved again");
+        assert(resolvedSnapshot[0].id === "appr-sqlite-1", "resolved wrong initial command approval");
+        assert(promptCount === 1, "covered queued command approval opened a second prompt");
+      }
+
       // File/directory scope_options use the custom overlay prompt and relay the selected directory grant exactly.
       {
         clearAgentSHEnv();
