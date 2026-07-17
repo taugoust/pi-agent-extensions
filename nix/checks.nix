@@ -477,6 +477,36 @@ in
       pkgs.nodejs
       pkgs.typescript
     ];
+    recoverySuccess = pkgs.writeShellScript "pi-agentsh-recovery-success" ''
+      test "$PI_AGENTSH_RECOVERY_CONTRACT_VERSION" = 1
+      test "$(${pkgs.jq}/bin/jq -r .schema_version "$PI_AGENTSH_LIFECYCLE_STATE")" = 1
+      test "$(${pkgs.jq}/bin/jq -r .session_id "$PI_AGENTSH_LIFECYCLE_STATE")" = "$PI_AGENTSH_RECOVERY_EXPECTED_SESSION"
+      test -z "''${AGENTSH_SESSION_EVENT_TOKEN-}''${OPENAI_API_KEY-}''${AUTHORIZATION-}"
+    '';
+    recoveryFailure = pkgs.writeShellScript "pi-agentsh-recovery-failure" ''
+      echo 'token=wrapper-secret sk-live-outputsecret' >&2
+      exit 7
+    '';
+    recoverySwap = pkgs.writeShellScript "pi-agentsh-recovery-swap" ''
+      ${pkgs.coreutils}/bin/mv "$PI_AGENTSH_LIFECYCLE_STATE" "$PI_AGENTSH_LIFECYCLE_STATE.old"
+      ${pkgs.coreutils}/bin/ln -s "$PI_AGENTSH_LIFECYCLE_STATE.old" "$PI_AGENTSH_LIFECYCLE_STATE"
+    '';
+    localStart = pkgs.writeShellScript "pi-agentsh-local-start" ''
+      printf '{"session_id":"sess-local-start","supervisor_sock":"unix://%s"}\n' "$LOCAL_START_SOCKET"
+    '';
+    recoverySlow = pkgs.writeShellScript "pi-agentsh-recovery-slow" ''
+      # The leader exits promptly on TERM, while this same-process-group
+      # descendant ignores TERM and closes inherited stdio. Node can therefore
+      # emit child close even though the descendant still requires group KILL.
+      (
+        trap "" TERM
+        exec ${pkgs.coreutils}/bin/sleep 30
+      ) </dev/null >/dev/null 2>&1 &
+      child=$!
+      printf '%s\n' "$child" > "$(${pkgs.coreutils}/bin/dirname "$PI_AGENTSH_LIFECYCLE_STATE")/descendant.pid"
+      trap 'exit 0' TERM
+      wait "$child"
+    '';
   } ''
     set -euo pipefail
 
@@ -667,6 +697,16 @@ in
         await new Promise((resolve) => setTimeout(resolve, 10));
       }
       throw new Error(message);
+    }
+
+    function processIsAlive(pid) {
+      try {
+        process.kill(pid, 0);
+        return true;
+      } catch (error) {
+        if (error?.code === "ESRCH") return false;
+        throw error;
+      }
     }
 
     function createPi() {
@@ -972,6 +1012,13 @@ in
       delete process.env.AGENTSH_SESSION_EVENT_TOKEN;
       delete process.env.PI_AGENTSH_APPROVAL_CLIENT;
       delete process.env.PI_AGENTSH_REQUIRE_NETWORK_ENFORCEMENT;
+      delete process.env.PI_AGENTSH_REMOTE;
+      delete process.env.PI_AGENTSH_RECOVERY_COMMAND;
+      delete process.env.PI_AGENTSH_LIFECYCLE_STATE;
+      delete process.env.PI_AGENTSH_RECOVERY_TIMEOUT_MS;
+      delete process.env.PI_AGENTSH_BIN;
+      delete process.env.PI_AGENTSH_ENABLE;
+      delete process.env.LOCAL_START_SOCKET;
       delete process.env.AGENTSH_API_KEY;
       delete process.env.AGENTSH_APPROVER_API_KEY;
       delete process.env.AGENTSH_ADMIN_TOKEN;
@@ -1742,6 +1789,272 @@ in
         assert(expandedMixed !== collapsedMixed, "Ctrl+O expansion produced no visible running-state change");
         await shutdownSession(pi);
         delete process.env.PI_AGENTSH_READ_MODE;
+        await supervisor.close();
+      }
+
+      // AgentSH bash outcomes prefer promoted typed fields, retain old nested
+      // errors, distinguish terminal classes, and do not confuse a real 127.
+      {
+        clearAgentSHEnv();
+        const sessionId = "sess-exec-outcomes";
+        const supervisor = await withRestSupervisor(async (request) => {
+          if (request.method === "GET" && request.url === "/api/v1/sessions/" + sessionId) {
+            return { id: sessionId, session_id: sessionId, workspace: "/workspace", worktree: "/workspace" };
+          }
+          if (request.method === "GET" && request.url === "/api/v1/approvals") return [];
+          if (request.method === "POST" && request.url.endsWith("/tools/exec_bash")) {
+            const command = request.body.command;
+            const base = { command_id: "cmd-" + command, session_id: sessionId, stdout: "", stderr: "", duration_ms: 1 };
+            if (command === "typed-preexec") return { statusCode: 503, body: { ok: false, error: "generic", result: { ...base, exit_code: 127, command_started: false, outcome: { command_started: false, dispatch_state: "not_dispatched", failure_kind: "pre_exec_enforcement", retryable: false, code: "E_NETHELPER_UNAVAILABLE", message: "helper expired token=top-secret {\"api_key\":\"json-secret\"} ?access_token=query-secret Authorization: Bearer bearer-secret sk-live-providersecret ghp_githubsecret123456" }, error: { code: "E_NETHELPER_UNAVAILABLE", message: "typed helper failure" }, exec_response: { result: { outcome: { command_started: true, failure_kind: "child_exit", message: "wrong nested outcome" }, error: { code: "WRONG", message: "wrong nested error" } } } } } };
+            if (command === "legacy-preexec") return { ok: true, result: { ...base, exit_code: 127, exec_response: { result: { exit_code: 127, error: { code: "E_COMMAND_FAILED", message: "legacy child returned 127" } } } } };
+            if (command === "legacy-explicit-preexec") return { ok: true, result: { ...base, exit_code: 127, exec_response: { result: { exit_code: 127, error: { code: "E_COMMAND_START_FAILED", message: "legacy helper setup failed" } } } } };
+            if (command === "mixed-fields") return { ok: true, result: { ...base, exit_code: 1, error: { code: "E_COMMAND_FAILED", message: "promoted message" }, exec_response: { result: { outcome: { command_started: true, dispatch_state: "started", failure_kind: "child_exit", retryable: false, execution_duration_ms: 9 } } } } };
+            if (command === "malformed-500") return { statusCode: 503, body: { result: { stdout: "partial" } } };
+            if (command === "partial-ok-false") return { statusCode: 500, body: { ok: false, result: { stdout: "partial" } } };
+            if (command === "exit-127") return { ok: true, result: { ...base, exit_code: 127, command_started: true, outcome: { command_started: true, dispatch_state: "started", failure_kind: "child_exit", retryable: false } } };
+            const kinds = {
+              "queue-timeout": ["queue_timeout", false],
+              "cancelled": ["caller_cancellation", false],
+              "command-timeout": ["command_timeout", true],
+              "denied": ["policy_or_approval_denial", false],
+            };
+            const fixture = kinds[command];
+            if (fixture) return { ok: true, result: { ...base, exit_code: 1, outcome: { command_started: fixture[1], dispatch_state: fixture[1] ? "started" : "not_dispatched", failure_kind: fixture[0], retryable: false, code: "E_" + fixture[0].toUpperCase(), message: command + " semantic message", queue_duration_ms: 12, execution_duration_ms: fixture[1] ? 34 : 0 } } };
+          }
+          return { statusCode: 404, body: { error: "unexpected supervisor request", request } };
+        });
+        process.env.AGENTSH_SESSION_ID = sessionId;
+        process.env.AGENTSH_SESSION_SUPERVISOR = "unix://" + supervisor.socketPath;
+        const pi = createPi();
+        sandbox(pi);
+        const ctx = createContext();
+        await startSession(pi, ctx);
+        const bashTool = pi.tools.get("bash");
+        const typed = await bashTool.execute("typed-preexec", { command: "typed-preexec" }, undefined, undefined, ctx);
+        assert(typed.isError === true && typed.details.commandStarted === false, "typed pre-exec failure lost non-started evidence");
+        assert(typed.details.normalizationSource === "top-level" && typed.details.failureKind === "pre_exec_enforcement", "top-level typed outcome did not beat nested fields");
+        assert(typed.content[0].text.includes("Command was not executed") && typed.content[0].text.includes("helper expired"), "typed helper failure was not rendered semantically");
+        for (const secret of ["top-secret", "json-secret", "query-secret", "bearer-secret", "providersecret", "githubsecret", "wrong nested"]) assert(!JSON.stringify(typed).includes(secret), "typed diagnostics leaked secret/lower-priority text: " + secret);
+        const legacy = await bashTool.execute("legacy-preexec", { command: "legacy-preexec" }, undefined, undefined, ctx);
+        assert(legacy.isError === true && legacy.details.normalizationSource === "legacy" && legacy.details.commandStarted === undefined, "generic legacy failure falsely proved non-dispatch");
+        assert(!legacy.content[0].text.includes("was not executed") && legacy.content[0].text.includes("legacy child returned 127"), "legacy child exit 127 was misreported");
+        const legacyExplicit = await bashTool.execute("legacy-explicit-preexec", { command: "legacy-explicit-preexec" }, undefined, undefined, ctx);
+        assert(legacyExplicit.details.commandStarted === false && legacyExplicit.content[0].text.includes("was not executed"), "narrow legacy pre-exec code was not retained");
+        const mixed = await bashTool.execute("mixed-fields", { command: "mixed-fields" }, undefined, undefined, ctx);
+        assert(mixed.details.commandStarted === true && mixed.details.failureKind === "child_exit" && mixed.details.executionDurationMs === 9 && mixed.content[0].text.includes("promoted message"), "promoted and nested typed fields were not merged individually");
+        for (const command of ["malformed-500", "partial-ok-false"]) {
+          const transport = await bashTool.execute(command, { command }, undefined, undefined, ctx);
+          assert(transport.isError === true && transport.details.failureKind === "transport_ambiguity" && transport.details.commandStarted === undefined && transport.content[0].text.includes("not replayed"), command + " was accepted as semantic exit 0");
+        }
+        const exit127 = await bashTool.execute("exit-127", { command: "exit-127" }, undefined, undefined, ctx);
+        assert(exit127.isError === true && exit127.details.commandStarted === true && exit127.details.failureKind === "child_exit", "genuine child exit 127 was confused with infrastructure failure");
+        assert(exit127.content[0].text.includes("Command exited with code 127") && !exit127.content[0].text.includes("was not executed"), "genuine exit 127 rendered as pre-exec refusal");
+        for (const [command, expected] of [["queue-timeout", "execution queue"], ["cancelled", "queued request was cancelled"], ["command-timeout", "timed out after it started"], ["denied", "policy or approval denied"]]) {
+          const result = await bashTool.execute(command, { command }, undefined, undefined, ctx);
+          assert(result.isError === true && result.content[0].text.includes(expected), command + " was not rendered distinctly: " + JSON.stringify(result));
+          assert(result.details.queueDurationMs === 12, command + " lost structured duration details");
+        }
+        await shutdownSession(pi);
+        await supervisor.close();
+      }
+
+      // With no env-provided supervisor, start remains extension-owned and may
+      // create/attach a local session.
+      {
+        clearAgentSHEnv();
+        const sessionId = "sess-local-start";
+        const supervisor = await withRestSupervisor(async (request) => {
+          if (request.method === "GET" && request.url === "/api/v1/sessions/" + sessionId) return { id: sessionId, session_id: sessionId };
+          if (request.method === "GET" && request.url.endsWith("/network-enforcement")) return { requested: "none", readiness: "none", status: "none" };
+          if (request.method === "GET" && request.url === "/api/v1/approvals") return [];
+          return { statusCode: 404, body: {} };
+        });
+        process.env.PI_AGENTSH_ENABLE = "1";
+        process.env.PI_AGENTSH_BIN = process.env.localStart;
+        process.env.LOCAL_START_SOCKET = supervisor.socketPath;
+        const pi = createPi(); sandbox(pi); const ctx = createContext(); await startSession(pi, ctx);
+        await pi.commands.get("sandbox-control").handler("start", ctx);
+        assert(globalThis.__AGENTSH_PI__.getSupervisorState().source === "agentsh-started" && globalThis.__AGENTSH_PI__.getSupervisorState().sessionId === sessionId, "local extension-owned start did not attach its created session");
+        assert(ctx.notifications.some((entry) => String(entry.message).includes("supervisor started")), "local start success was not reported");
+        await shutdownSession(pi); await supervisor.close();
+      }
+
+      // Lifecycle status is non-secret and distinct from supervisor transport.
+      {
+        clearAgentSHEnv();
+        const sessionId = "sess-helper-lifecycle";
+        const network = {
+          requested: "strict", readiness: "ready", status: "ready", tier: "helper-ebpf-proxy-required", network_policy_enforced: true,
+          helper_lifecycle: {
+            schema_version: 1, helper_kind: "ephemeral", lease_id: "lease-visible", unit_name: "agentsh-nethelper-visible.service",
+            soft_expires_at: "2026-07-19T12:00:00Z", hard_expires_at: "2026-07-24T12:00:00Z", soft_remaining_seconds: 0, hard_remaining_seconds: 432000,
+            binding_generation: 2, renewal_generation: 4, credential_source_live: false, status: "expired", terminal_reason: "soft lease expired",
+          },
+        };
+        const supervisor = await withRestSupervisor(async (request) => {
+          if (request.method === "GET" && request.url === "/api/v1/sessions/" + sessionId) return { id: sessionId, session_id: sessionId, network_enforcement: network };
+          if (request.method === "GET" && request.url.endsWith("/network-enforcement")) return network;
+          if (request.method === "GET" && request.url === "/api/v1/approvals") return [];
+          return { statusCode: 404, body: {} };
+        });
+        process.env.AGENTSH_SESSION_ID = sessionId;
+        process.env.AGENTSH_SESSION_SUPERVISOR = "unix://" + supervisor.socketPath;
+        process.env.PI_AGENTSH_REMOTE = "ssh";
+        const pi = createPi(); sandbox(pi); const ctx = createContext(); await startSession(pi, ctx);
+        await pi.commands.get("sandbox").handler("", ctx);
+        const statusText = String(ctx.notifications.at(-1).message);
+        for (const expected of ["Supervisor: connected (wrapper-owned SSH transport)", "Helper:   expired", "lease-visible", "agentsh-nethelper-visible.service", "soft 2026", "0s remaining", "binding 2", "renewal 4", "socket unknown", "credential source not live", "soft lease expired"]) assert(statusText.includes(expected), "helper lifecycle status omitted " + expected + ": " + statusText);
+        assert(!/credential\s*[:=]|token\s*[:=]/i.test(statusText), "helper lifecycle status rendered secret-shaped data");
+        network.helper_lifecycle = { schema_version: 999, status: "invented", socket_live: "yes", lease_id: "x".repeat(1000) };
+        await pi.commands.get("sandbox-control").handler("reconnect", ctx);
+        await pi.commands.get("sandbox").handler("", ctx);
+        assert(String(ctx.notifications.at(-1).message).includes("invalid/unsupported lifecycle evidence"), "invalid helper lifecycle schema/status/types were rendered as trusted");
+        await shutdownSession(pi); await supervisor.close();
+      }
+
+      // Wrapper-owned remote sessions refuse local start without spawning, and
+      // recovery is available only through validated wrapper contracts.
+      {
+        clearAgentSHEnv();
+        const sessionId = "sess-wrapper-recovery";
+        const privateDir = fs.mkdtempSync(path.join(os.tmpdir(), "agentsh-lifecycle-state-"));
+        fs.chmodSync(privateDir, 0o700);
+        const statePath = path.join(privateDir, "state.json");
+        fs.writeFileSync(statePath, JSON.stringify({ schema_version: 1, session_id: sessionId, status: "active" }), { mode: 0o600 });
+        let returnedSession = sessionId;
+        let execRequests = 0;
+        let network = { requested: "strict", readiness: "ready", status: "ready", tier: "helper-ebpf-proxy-required", network_policy_enforced: true, helper_lifecycle: { schema_version: 1, status: "active", binding_generation: 2, socket_live: true, credential_source_live: true } };
+        const supervisor = await withRestSupervisor(async (request) => {
+          if (request.method === "GET" && request.url === "/api/v1/sessions/" + sessionId) return { id: returnedSession, session_id: returnedSession, network_enforcement: network };
+          if (request.method === "GET" && request.url.endsWith("/network-enforcement")) return network;
+          if (request.method === "GET" && request.url === "/api/v1/approvals") return [];
+          if (request.method === "POST" && request.url.endsWith("/tools/exec_bash")) { execRequests += 1; return { destroySocket: true }; }
+          return { statusCode: 404, body: {} };
+        });
+        process.env.AGENTSH_SESSION_ID = sessionId;
+        process.env.AGENTSH_SESSION_SUPERVISOR = "unix://" + supervisor.socketPath;
+        process.env.PI_AGENTSH_REMOTE = "ssh";
+        process.env.PI_AGENTSH_BIN = path.join(privateDir, "must-not-spawn");
+        const pi = createPi(); sandbox(pi); const ctx = createContext(); await startSession(pi, ctx);
+        await pi.commands.get("sandbox-control").handler("start", ctx);
+        assert(ctx.notifications.some((entry) => String(entry.message).includes("unrelated local session")), "remote start refusal was not actionable");
+        assert(!fs.existsSync(process.env.PI_AGENTSH_BIN), "remote start spawned a local AgentSH process");
+        delete process.env.PI_AGENTSH_REMOTE;
+        const refusalCount = ctx.notifications.length;
+        await pi.commands.get("sandbox-control").handler("start", ctx);
+        assert(ctx.notifications.length === refusalCount + 1 && String(ctx.notifications.at(-1).message).includes("wrapper-owned"), "env-provided non-SSH session did not refuse local start");
+        assert(!fs.existsSync(process.env.PI_AGENTSH_BIN), "env-provided start refusal spawned AgentSH");
+        process.env.PI_AGENTSH_REMOTE = "ssh";
+
+        delete process.env.PI_AGENTSH_RECOVERY_COMMAND;
+        delete process.env.PI_AGENTSH_LIFECYCLE_STATE;
+        await pi.commands.get("sandbox-control").handler("recover", ctx);
+        assert(ctx.notifications.some((entry) => String(entry.message).includes("recovery is unavailable")), "absent recovery contract was not refused");
+
+        process.env.PI_AGENTSH_RECOVERY_COMMAND = process.env.recoveryFailure;
+        process.env.PI_AGENTSH_LIFECYCLE_STATE = statePath;
+        const validState = fs.readFileSync(statePath, "utf8");
+        fs.writeFileSync(statePath, JSON.stringify({ schema_version: 1, session_id: "wrong-session", status: "active" }), { mode: 0o600 });
+        await pi.commands.get("sandbox-control").handler("recover", ctx);
+        assert(String(ctx.notifications.at(-1).message).includes("unavailable"), "wrong-session lifecycle state was accepted");
+        fs.writeFileSync(statePath, validState, { mode: 0o600 });
+        fs.chmodSync(statePath, 0o644);
+        await pi.commands.get("sandbox-control").handler("recover", ctx);
+        assert(String(ctx.notifications.at(-1).message).includes("unavailable"), "public lifecycle state mode was accepted");
+        fs.chmodSync(statePath, 0o600);
+        fs.chmodSync(privateDir, 0o777);
+        await pi.commands.get("sandbox-control").handler("recover", ctx);
+        assert(String(ctx.notifications.at(-1).message).includes("unavailable"), "writable lifecycle parent was accepted");
+        fs.chmodSync(privateDir, 0o700);
+        const stateLink = path.join(privateDir, "state-link.json");
+        fs.symlinkSync(statePath, stateLink);
+        process.env.PI_AGENTSH_LIFECYCLE_STATE = stateLink;
+        await pi.commands.get("sandbox-control").handler("recover", ctx);
+        assert(String(ctx.notifications.at(-1).message).includes("unavailable"), "symlink lifecycle state was accepted");
+        process.env.PI_AGENTSH_LIFECYCLE_STATE = statePath;
+        process.env.PI_AGENTSH_RECOVERY_COMMAND = "/nix/store/00000000000000000000000000000000-missing/bin/recover";
+        await pi.commands.get("sandbox-control").handler("recover", ctx);
+        assert(String(ctx.notifications.at(-1).message).includes("unavailable"), "missing recovery executable was not diagnosed safely");
+        process.env.PI_AGENTSH_RECOVERY_COMMAND = process.env.recoveryFailure;
+        await pi.commands.get("sandbox-control").handler("recover", ctx);
+        assert(ctx.notifications.some((entry) => String(entry.message).includes("failed with code 7")), "wrapper recovery failure was hidden: command=" + process.env.recoveryFailure + " notifications=" + JSON.stringify(ctx.notifications));
+        assert(!JSON.stringify(ctx.notifications).includes("wrapper-secret") && !JSON.stringify(ctx.notifications).includes("outputsecret"), "captured recovery output leaked credentials");
+
+        process.env.PI_AGENTSH_RECOVERY_COMMAND = process.env.recoverySwap;
+        await pi.commands.get("sandbox-control").handler("recover", ctx);
+        assert(globalThis.__AGENTSH_PI__.getSupervisorState().status === "error" && !globalThis.__AGENTSH_PI__.getSupervisorState().sessionId, "lifecycle state symlink swap was accepted");
+        fs.unlinkSync(statePath);
+        fs.renameSync(statePath + ".old", statePath);
+        await pi.commands.get("sandbox-control").handler("reconnect", ctx);
+
+        process.env.PI_AGENTSH_RECOVERY_COMMAND = process.env.recoverySuccess;
+        process.env.AGENTSH_SESSION_EVENT_TOKEN = "must-not-reach-wrapper";
+        process.env.OPENAI_API_KEY = "sk-live-environmentsecret";
+        await pi.commands.get("sandbox-control").handler("recover", ctx);
+        assert(globalThis.__AGENTSH_PI__.getSupervisorState().sessionId === sessionId, "successful recovery changed the exact session");
+        delete process.env.AGENTSH_SESSION_EVENT_TOKEN;
+        delete process.env.OPENAI_API_KEY;
+        assert(ctx.notifications.some((entry) => String(entry.message).includes("failed command was not replayed")), "successful recovery omitted no-replay guidance");
+        assert(execRequests === 0, "recovery replayed a failed command");
+
+        // Recovery may use the already-proven captured identity when wrappers do
+        // not export AGENTSH_SESSION_ID, but must never list/adopt a session.
+        delete process.env.AGENTSH_SESSION_ID;
+        const requestCount = supervisor.requests.length;
+        await pi.commands.get("sandbox-control").handler("recover", ctx);
+        assert(globalThis.__AGENTSH_PI__.getSupervisorState().sessionId === sessionId, "captured-identity recovery failed without AGENTSH_SESSION_ID");
+        assert(!supervisor.requests.slice(requestCount).some((request) => request.url === "/api/v1/sessions"), "recovery listed and adopted an arbitrary session");
+        process.env.AGENTSH_SESSION_ID = sessionId;
+
+        network = { ...network, readiness: "failed", status: "failed", network_policy_enforced: false };
+        await pi.commands.get("sandbox-control").handler("recover", ctx);
+        assert(globalThis.__AGENTSH_PI__.getSupervisorState().status === "error" && !globalThis.__AGENTSH_PI__.getSupervisorState().sessionId, "strict-evidence recovery failure left a client installed");
+        assert(execRequests === 0, "strict-evidence failure replayed a command");
+        network = { ...network, readiness: "ready", status: "ready", network_policy_enforced: true };
+        await pi.commands.get("sandbox-control").handler("reconnect", ctx);
+
+        returnedSession = "sess-wrong-after-recovery";
+        await pi.commands.get("sandbox-control").handler("recover", ctx);
+        assert(ctx.notifications.some((entry) => String(entry.message).includes("Expected " + sessionId)), "recovery accepted the wrong session ID");
+        assert(globalThis.__AGENTSH_PI__.getSupervisorState().status === "error" && !globalThis.__AGENTSH_PI__.getSupervisorState().sessionId, "wrong-session recovery left connected/client state installed");
+        assert(execRequests === 0, "wrong-session recovery replayed a command");
+        returnedSession = sessionId;
+
+        process.env.PI_AGENTSH_RECOVERY_COMMAND = process.env.recoverySlow;
+        process.env.PI_AGENTSH_RECOVERY_TIMEOUT_MS = "5000";
+        const descendantPath = path.join(privateDir, "descendant.pid");
+        fs.rmSync(descendantPath, { force: true });
+        const cancelling = pi.commands.get("sandbox-control").handler("recover", ctx);
+        await waitFor(() => fs.existsSync(descendantPath), "recovery descendant did not start");
+        const descendantPid = Number(fs.readFileSync(descendantPath, "utf8"));
+        const queuedReconnect = pi.commands.get("sandbox-control").handler("reconnect", ctx);
+        const stopping = pi.commands.get("sandbox-control").handler("stop", ctx);
+        await Promise.all([cancelling, queuedReconnect, stopping]);
+        assert(ctx.notifications.some((entry) => String(entry.message).includes("request aborted")), "wrapper recovery cancellation was not surfaced: " + JSON.stringify(ctx.notifications));
+        assert(globalThis.__AGENTSH_PI__.getSupervisorState().status === "inactive", "stop was undone by concurrent recovery");
+        await waitFor(() => !processIsAlive(descendantPid), "recovery descendant survived process-group cancellation");
+
+        await pi.commands.get("sandbox-control").handler("reconnect", ctx);
+        process.env.PI_AGENTSH_RECOVERY_TIMEOUT_MS = "200";
+        fs.rmSync(descendantPath, { force: true });
+        const timingOut = pi.commands.get("sandbox-control").handler("recover", ctx);
+        await waitFor(() => fs.existsSync(descendantPath), "timed recovery descendant did not start");
+        const timeoutPid = Number(fs.readFileSync(descendantPath, "utf8"));
+        await timingOut;
+        assert(ctx.notifications.some((entry) => String(entry.message).includes("timed out after 200ms")), "actual recovery timeout was not enforced");
+        await waitFor(() => !processIsAlive(timeoutPid), "recovery descendant survived timeout cleanup");
+        assert(execRequests === 0, "cancelled or timed-out recovery replayed a command");
+
+        await pi.commands.get("sandbox-control").handler("reconnect", ctx);
+        process.env.PI_AGENTSH_RECOVERY_TIMEOUT_MS = "5000";
+        fs.rmSync(descendantPath, { force: true });
+        const shutdownRecovery = pi.commands.get("sandbox-control").handler("recover", ctx);
+        await waitFor(() => fs.existsSync(descendantPath), "shutdown recovery descendant did not start");
+        const shutdownPid = Number(fs.readFileSync(descendantPath, "utf8"));
+        await shutdownSession(pi);
+        await shutdownRecovery;
+        await waitFor(() => !processIsAlive(shutdownPid), "session shutdown returned before recovery descendants were cleaned up");
+        assert(globalThis.__AGENTSH_PI__.getSupervisorState().status === "inactive", "recovery changed state after session shutdown");
         await supervisor.close();
       }
 

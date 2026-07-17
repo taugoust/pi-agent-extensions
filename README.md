@@ -531,7 +531,7 @@ its own with `programs.pi.extensions.subagent-finalizer.enable`.
 - **License**: MIT
 - **Type**: AgentSH supervisor client (mock NDJSON test protocol and real Stage 1 REST)
 - **Commands**: `/sandbox`{.verbatim} for status/debug;
-  `/sandbox-control reconnect|start|stop|status`{.verbatim};
+  `/sandbox-control reconnect|recover|start|stop|status`{.verbatim};
   `/sandbox-allow <target>`{.verbatim} for retry guidance
 - **Tool overrides**: only registered when an AgentSH integration env var is set.
   Mock NDJSON can handle `bash`{.verbatim}, `write`{.verbatim},
@@ -578,6 +578,9 @@ PI_AGENTSH_BIN=agentsh                                 # default: agentsh
 PI_AGENTSH_READ_MODE=supervised                        # optional read override (mock and real REST)
 PI_AGENTSH_APPROVAL_CLIENT=central                     # opt into central detached approval bridge
 PI_AGENTSH_REQUIRE_NETWORK_ENFORCEMENT=strict           # refuse tools without live strict runtime evidence
+PI_AGENTSH_RECOVERY_COMMAND=/nix/store/.../bin/recover  # optional immutable wrapper-owned recovery executable
+PI_AGENTSH_LIFECYCLE_STATE=/private/.../state.json      # optional private canonical wrapper-owned state
+PI_AGENTSH_RECOVERY_TIMEOUT_MS=300000                   # bounded explicit recovery request
 PI_AGENTSH_TOOL_REQUEST_TIMEOUT_MS=1800000             # non-subagent REST tool request cap
 PI_AGENTSH_APPROVAL_TIMEOUT_SLACK_MS=300000            # extra REST wait budget for approval delays
 PI_AGENTSH_SUBAGENT_EXECUTION_TIMEOUT_MS=7200000       # default/maximum AgentSH child deadline (2h)
@@ -632,6 +635,36 @@ and `fields.scope_key` are present, Pi offers once/session approve/deny choices.
 When the supervisor reports `requested=strict`, the extension refuses all
 AgentSH-backed tools unless the live report proves the
 `helper-ebpf-proxy-required` tier is ready and `network_policy_enforced=true`.
+Additive `helper_lifecycle` evidence is shown separately from supervisor/SSH
+transport state, including only non-secret status, lease/unit identity,
+soft/hard expiry and remaining time, generations, path liveness, and terminal
+reason. Credential and token values are neither expected nor rendered.
+
+Typed AgentSH execution outcomes are normalized from promoted top-level fields,
+then nested `exec_response.result` fields, with legacy nested errors retained as
+a fallback. Pre-exec/helper failures are reported as “command was not executed”;
+queue timeout, cancellation, command timeout, denial, transport ambiguity, and a
+genuine child exit 127 remain distinct. Diagnostic messages are bounded and
+redacted, and ambiguous mutations are never replayed.
+
+`/sandbox-control start` remains available for local extension-owned sessions,
+but is refused when `AGENTSH_SESSION_SUPERVISOR` is provided or
+`PI_AGENTSH_REMOTE=ssh`; starting there would leak an unrelated local session.
+`/sandbox-control recover` appears only when the wrapper supplies a protected,
+versioned lifecycle state file containing the exact expected session ID and an
+executable at an immutable `/nix/store` path. The wrapper contract must re-open
+and revalidate that stable state path immediately before mutation; the
+extension's no-follow/owner/mode/schema checks are defense in depth, not a claim
+that pathname TOCTOU is eliminated. Pi invokes the executable directly with no
+shell or arguments, a minimal allowlisted environment, an explicit local cwd,
+and captured bounded/redacted output. On POSIX it uses a separate process group
+and performs bounded TERM/KILL cleanup; group escalation survives direct-child
+close and is completed before cancellation, stop, timeout, or shutdown settles.
+Recovery and all start/reconnect/stop operations are serialized, shutdown awaits
+cleanup, and reattachment publishes no client/watcher state until the exact
+captured session ID and fresh proven
+strict evidence validate. SSH, sudo, helper credentials, and rebind remain
+wrapper-owned, and the failed command is never replayed.
 
 The extension exposes `globalThis.__AGENTSH_PI__` for owned extensions:
 

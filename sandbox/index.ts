@@ -8,6 +8,7 @@
  */
 
 import { spawn } from "node:child_process";
+import { accessSync, closeSync, constants as fsConstants, fstatSync, lstatSync, openSync, readSync, realpathSync, statSync } from "node:fs";
 import * as http from "node:http";
 import { createConnection, type Socket } from "node:net";
 import { homedir } from "node:os";
@@ -41,6 +42,25 @@ type WorkspaceRoot = {
   work?: string;
 };
 
+type NethelperLifecycle = {
+  schema_version?: number;
+  helper_kind?: string;
+  lease_id?: string;
+  unit_name?: string;
+  soft_expires_at?: string;
+  hard_expires_at?: string;
+  soft_remaining_seconds?: number;
+  hard_remaining_seconds?: number;
+  binding_generation?: number;
+  renewal_generation?: number;
+  socket_live?: boolean;
+  credential_source_live?: boolean;
+  status?: string;
+  terminal_reason?: string;
+  last_checked_at?: string;
+  [key: string]: unknown;
+};
+
 type NetworkEnforcement = {
   requested?: "none" | "best-effort" | "strict" | string;
   readiness?: "none" | "degraded" | "ready" | "active" | "failed" | string;
@@ -50,6 +70,7 @@ type NetworkEnforcement = {
   checked_at?: string;
   detail?: string;
   warning?: string;
+  helper_lifecycle?: NethelperLifecycle;
   [key: string]: unknown;
 };
 
@@ -129,7 +150,31 @@ type ExecOptions = {
   signal?: AbortSignal;
 };
 
-type ExecResult = { exitCode?: number | null; signal?: string | null; stdout?: string; stderr?: string; [key: string]: unknown };
+type ExecError = { code?: string; message?: string; policy_rule?: string; [key: string]: unknown };
+type ExecOutcome = {
+  command_started?: boolean;
+  dispatch_state?: string;
+  failure_kind?: string;
+  retryable?: boolean;
+  code?: string;
+  message?: string;
+  queue_duration_ms?: number;
+  execution_duration_ms?: number;
+  [key: string]: unknown;
+};
+type NormalizedExecFailure = {
+  commandStarted?: boolean;
+  dispatchState?: string;
+  failureKind?: string;
+  retryable?: boolean;
+  code?: string;
+  message?: string;
+  policyRule?: string;
+  queueDurationMs?: number;
+  executionDurationMs?: number;
+  source: "top-level" | "nested" | "legacy" | "transport";
+};
+type ExecResult = { exitCode?: number | null; signal?: string | null; stdout?: string; stderr?: string; normalizedFailure?: NormalizedExecFailure; [key: string]: unknown };
 type ReadFileOptions = { offset?: number; limit?: number; cwd?: string; actor?: Actor; signal?: AbortSignal };
 type WriteFileOptions = { cwd?: string; actor?: Actor; signal?: AbortSignal };
 type Edit = { oldText: string; newText: string };
@@ -195,7 +240,10 @@ type SupervisorState = {
   approvalClient?: ApprovalClient;
   watcher?: ApprovalWatcher;
   ctx?: ExtensionContext;
-  attachInFlight?: Promise<void>;
+  lifecycleTail: Promise<void>;
+  lifecycleBusy: boolean;
+  recoveryAbortControllers: Set<AbortController>;
+  shuttingDown: boolean;
   terminalError: boolean;
 };
 
@@ -218,6 +266,11 @@ const SUBAGENT_TRANSPORT_TIMEOUT_FLOOR_MS = optionalPositiveTimeoutEnv("PI_AGENT
 const MAX_NODE_TIMEOUT_MS = 2_147_483_647;
 const VALID_POLICIES = new Set(["pi-autonomous", "pi-supervised"]);
 const VALID_STAGE1_WORKSPACE_MODES = new Set(["shadow", "direct"]);
+const RECOVERY_STATE_VERSION = 1;
+const MAX_RECOVERY_STATE_BYTES = 16 * 1024;
+const MAX_RECOVERY_OUTPUT_BYTES = 64 * 1024;
+const LEGACY_PRE_EXEC_CODES = new Set(["E_COMMAND_NOT_STARTED", "E_COMMAND_START_FAILED", "E_PRE_EXEC_FAILED"]);
+const SEMANTIC_EXEC_CODES = /^(?:E_(?:COMMAND|EXEC|QUEUE|POLICY|APPROVAL|NETHELPER|PRE_EXEC|REQUEST|CANCEL|TIMEOUT)_[A-Z0-9_]+)$/;
 
 function supervisorErrorCode(error: unknown) {
   const candidate = error && typeof error === "object" ? error as { code?: unknown } : undefined;
@@ -1318,6 +1371,97 @@ function numericField(value: unknown) {
   return typeof value === "number" && Number.isFinite(value) ? value : undefined;
 }
 
+function objectField(value: unknown): JsonObject | undefined {
+  return value && typeof value === "object" && !Array.isArray(value) ? value as JsonObject : undefined;
+}
+
+function redactSensitiveText(value: string) {
+  return value
+    .replace(/\b(Bearer|Basic)\s+[A-Za-z0-9._~+\/-]+=*/gi, "$1 [REDACTED]")
+    .replace(/([?&](?:access_token|api[_-]?key|key|token|secret|signature|sig|password)=)[^&#\s]*/gi, "$1[REDACTED]")
+    .replace(/(["']?(?:authorization|api[_-]?key|access[_-]?token|refresh[_-]?token|token|secret|credential|password)["']?\s*[:=]\s*)(["'])[^"'\r\n]*\2/gi, "$1$2[REDACTED]$2")
+    .replace(/\b(authorization|api[_-]?key|access[_-]?token|refresh[_-]?token|token|secret|credential|password)\s*[:=]\s*[^\s,;}&]+/gi, "$1=[REDACTED]")
+    .replace(/\b(sk-(?:live|test|proj)-[A-Za-z0-9_-]+|sk-ant-[A-Za-z0-9_-]+|gh[opusr]_[A-Za-z0-9_]+|github_pat_[A-Za-z0-9_]+|AIza[0-9A-Za-z_-]{20,}|AKIA[0-9A-Z]{16})\b/g, "[REDACTED]");
+}
+
+function safeExecText(value: unknown, max = 1000) {
+  if (typeof value !== "string") return undefined;
+  const text = redactSensitiveText(value.replace(/[\u0000-\u0008\u000b\u000c\u000e-\u001f\u007f]/g, " ").trim());
+  return text ? truncate(text, max) : undefined;
+}
+
+function firstDefined(...values: unknown[]) {
+  return values.find((value) => value !== undefined);
+}
+
+function normalizeExecResult(result: JsonObject): ExecResult {
+  const nestedResult = objectField(objectField(result.exec_response)?.result);
+  const topOutcome = objectField(result.outcome);
+  const nestedOutcome = objectField(nestedResult?.outcome);
+  const topError = objectField(result.error);
+  const nestedError = objectField(nestedResult?.error);
+  const promoted = Boolean(topOutcome || topError || result.command_started !== undefined || result.error_code !== undefined || result.error_message !== undefined);
+  const typedNested = Boolean(nestedOutcome);
+
+  const code = safeExecText(firstDefined(topOutcome?.code, topError?.code, result.error_code, nestedOutcome?.code, nestedError?.code), 160);
+  const explicitCommandStarted = firstDefined(topOutcome?.command_started, result.command_started, nestedOutcome?.command_started);
+  const commandStartedValue = typeof explicitCommandStarted === "boolean"
+    ? explicitCommandStarted
+    : code && LEGACY_PRE_EXEC_CODES.has(code) ? false : undefined;
+  const failureKind = safeExecText(firstDefined(topOutcome?.failure_kind, result.failure_kind, nestedOutcome?.failure_kind), 80);
+  const message = safeExecText(firstDefined(topOutcome?.message, topError?.message, result.error_message, nestedOutcome?.message, nestedError?.message));
+  const dispatchState = safeExecText(firstDefined(topOutcome?.dispatch_state, result.dispatch_state, nestedOutcome?.dispatch_state), 80);
+  const retryableValue = firstDefined(topOutcome?.retryable, result.retryable, nestedOutcome?.retryable);
+  const policyRule = safeExecText(firstDefined(topError?.policy_rule, nestedError?.policy_rule), 240);
+  const hasFailure = Boolean(message || code || (failureKind && failureKind !== "none") || commandStartedValue === false);
+  const normalizedFailure: NormalizedExecFailure | undefined = hasFailure ? {
+    commandStarted: commandStartedValue,
+    dispatchState,
+    failureKind,
+    retryable: typeof retryableValue === "boolean" ? retryableValue : undefined,
+    code,
+    message,
+    policyRule,
+    queueDurationMs: numericField(firstDefined(topOutcome?.queue_duration_ms, result.queue_duration_ms, nestedOutcome?.queue_duration_ms)),
+    executionDurationMs: numericField(firstDefined(topOutcome?.execution_duration_ms, result.execution_duration_ms, nestedOutcome?.execution_duration_ms)),
+    source: promoted ? "top-level" : typedNested ? "nested" : "legacy",
+  } : undefined;
+
+  const stdout = String(result.stdout ?? nestedResult?.stdout ?? "");
+  const stderr = String(result.stderr ?? nestedResult?.stderr ?? "");
+  const explicitExit = numericField(result.exitCode) ?? numericField(result.exit_code) ?? numericField(nestedResult?.exit_code);
+  const exitCode = explicitExit ?? (normalizedFailure ? 1 : 0);
+  return { ...result, exitCode, stdout, stderr, normalizedFailure } as ExecResult;
+}
+
+function recognizedSemanticExecFailure(result: JsonObject) {
+  const nestedResult = objectField(objectField(result.exec_response)?.result);
+  const outcomes = [objectField(result.outcome), objectField(nestedResult?.outcome)].filter(Boolean) as JsonObject[];
+  if (outcomes.some((outcome) => typeof outcome.command_started === "boolean"
+    && typeof outcome.failure_kind === "string" && outcome.failure_kind.length > 0 && outcome.failure_kind.length <= 80)) return true;
+  const errors = [objectField(result.error), objectField(nestedResult?.error)].filter(Boolean) as JsonObject[];
+  return errors.some((error) => typeof error.code === "string" && SEMANTIC_EXEC_CODES.test(error.code));
+}
+
+function execFailureText(failure: NormalizedExecFailure, exitCode: number) {
+  const message = failure.message || failure.code || "AgentSH refused the command";
+  switch (failure.failureKind) {
+    case "queue_timeout": return `Command was not executed: it timed out waiting in the AgentSH execution queue. ${message}`;
+    case "caller_cancellation": return failure.commandStarted === false
+      ? `Command was not executed: the queued request was cancelled. ${message}`
+      : `Command was cancelled after it started. ${message}`;
+    case "command_timeout": return failure.commandStarted === false
+      ? `Command was not executed: its deadline expired before start. ${message}`
+      : `Command timed out after it started. ${message}`;
+    case "policy_or_approval_denial": return `Command was not executed: AgentSH policy or approval denied it. ${message}`;
+    case "pre_exec_enforcement": return `Command was not executed: AgentSH pre-execution/helper enforcement failed. ${message}`;
+    case "request_validation":
+    case "command_start": return `Command was not executed: ${message}`;
+    case "child_exit": return `Command exited with code ${exitCode}${failure.message ? `: ${failure.message}` : ""}`;
+    default: return failure.commandStarted === false ? `Command was not executed: ${message}` : message;
+  }
+}
+
 function toSlashPath(path: string) {
   return path.replace(/\\/g, "/");
 }
@@ -1823,15 +1967,37 @@ class RestSupervisorClient {
     const requestTimeoutMs = timeoutMs
       ? Math.max(TOOL_REQUEST_TIMEOUT_MS, timeoutMs + APPROVAL_REQUEST_TIMEOUT_SLACK_MS + CONNECT_TIMEOUT_MS)
       : TOOL_REQUEST_TIMEOUT_MS + APPROVAL_REQUEST_TIMEOUT_SLACK_MS;
-    const raw = await this.request("POST", this.toolPath("exec_bash"), {
-      command,
-      cwd: options.cwd || effectiveSupervisorCwd(),
-      timeout_ms: timeoutMs,
-      persist_output_over_bytes: options.persist_output_over_bytes,
-      persist_output_over_lines: options.persist_output_over_lines,
-      actor: options.actor || parentActor(options.tool_call_id, "Pi bash tool"),
-    }, { signal: options.signal, timeoutMs: requestTimeoutMs });
-    const result = unwrapRestToolResponse<JsonObject>("exec_bash", raw);
+    let raw: unknown;
+    try {
+      raw = await this.request("POST", this.toolPath("exec_bash"), {
+        command,
+        cwd: options.cwd || effectiveSupervisorCwd(),
+        timeout_ms: timeoutMs,
+        persist_output_over_bytes: options.persist_output_over_bytes,
+        persist_output_over_lines: options.persist_output_over_lines,
+        actor: options.actor || parentActor(options.tool_call_id, "Pi bash tool"),
+      }, { signal: options.signal, timeoutMs: requestTimeoutMs });
+    } catch (error) {
+      // New AgentSH versions retain typed semantic execution details in an
+      // ok:false body (and may preserve the historical non-2xx status). Consume
+      // that body without treating an ambiguous transport failure as semantic.
+      if (!(error instanceof RestHTTPError)) throw error;
+      let body: RestToolResponse<JsonObject>;
+      try {
+        body = JSON.parse(error.body) as RestToolResponse<JsonObject>;
+      } catch {
+        throw error;
+      }
+      const semanticResult = body.ok === false ? objectField(body.result) : undefined;
+      if (!semanticResult || !recognizedSemanticExecFailure(semanticResult)) throw error;
+      raw = body;
+    }
+    const envelope = objectField(raw);
+    const resultObject = envelope && typeof envelope.ok === "boolean"
+      ? objectField(envelope.result)
+      : objectField(raw);
+    if (!resultObject) throw new Error("exec_bash returned no structured result");
+    const result = normalizeExecResult(resultObject);
     const stdout = String(result.stdout ?? "");
     const stderr = String(result.stderr ?? "");
     if (stdout) {
@@ -1842,8 +2008,7 @@ class RestSupervisorClient {
       options.onStderr?.(stderr);
       options.onOutput?.(stderr, "stderr");
     }
-    const exitCode = numericField(result.exitCode) ?? numericField(result.exit_code) ?? 0;
-    return { ...result, exitCode, stdout, stderr } as ExecResult;
+    return { ...result, stdout, stderr } as ExecResult;
   }
 
   async readFile(path: string, options: ReadFileOptions = {}) {
@@ -2222,13 +2387,13 @@ function resetConnection(state: SupervisorState) {
   state.terminalError = false;
 }
 
-async function attachToSocket(state: SupervisorState, mode: ProtocolMode, source: SupervisorSource, socketPath: string, ctx: ExtensionContext, seedMetadata?: SupervisorMetadata) {
+async function attachToSocket(state: SupervisorState, mode: ProtocolMode, source: SupervisorSource, socketPath: string, ctx: ExtensionContext, seedMetadata?: SupervisorMetadata, expectedSessionId = "") {
   state.active = true;
   state.activeMode = mode;
   state.source = source;
   state.socketPath = socketPath;
-  state.metadata = seedMetadata;
-  state.sessionId = metadataSessionId(seedMetadata);
+  state.metadata = undefined;
+  state.sessionId = "";
   state.status = "connecting";
   state.terminalError = false;
   setStatus(state, ctx);
@@ -2266,17 +2431,21 @@ async function attachToSocket(state: SupervisorState, mode: ProtocolMode, source
     ? new MockSupervisorClient(socketPath)
     : mode === "legacy-approval-ui"
       ? new LegacyApprovalUIClient(socketPath)
-      : new RestSupervisorClient(socketPath, seedMetadata, connectionEvents);
+      : new RestSupervisorClient(socketPath, expectedSessionId ? { ...seedMetadata, session_id: expectedSessionId } : seedMetadata, connectionEvents);
+  const metadata = await client.hello();
+  const validatedMetadata = { ...seedMetadata, ...metadata, supervisor_sock: socketPath };
+  assertNetworkEnforcementReady(validatedMetadata);
+  const actualSessionId = metadataSessionId(validatedMetadata);
+  if (expectedSessionId && actualSessionId !== expectedSessionId) {
+    throw new SupervisorSessionLostError(expectedSessionId, `The attached supervisor returned ${actualSessionId || "no session ID"}.`);
+  }
+  // Publish capability-bearing state only after exact identity and fresh strict
+  // evidence have both passed. Before this point callbacks are inert because
+  // state.client is not this candidate.
   state.client = client;
   state.approvalClient = client;
-  const metadata = await client.hello();
-  state.metadata = { ...seedMetadata, ...metadata, supervisor_sock: socketPath };
-  assertNetworkEnforcementReady(state.metadata);
-  state.sessionId = metadataSessionId(state.metadata);
-  const expectedSessionId = env("AGENTSH_SESSION_ID");
-  if (expectedSessionId && state.sessionId !== expectedSessionId) {
-    throw new SupervisorSessionLostError(expectedSessionId, `The attached supervisor returned ${state.sessionId || "no session ID"}.`);
-  }
+  state.metadata = validatedMetadata;
+  state.sessionId = actualSessionId;
   state.terminalError = false;
   restoreConnectedState(state);
 
@@ -2300,33 +2469,32 @@ async function attachToSocket(state: SupervisorState, mode: ProtocolMode, source
   state.watcher.start();
 }
 
-async function attachOrStart(state: SupervisorState, ctx: ExtensionContext, options: { forceStart?: boolean; notifyOnSuccess?: boolean } = {}) {
-  if (state.attachInFlight) return await state.attachInFlight;
-  state.attachInFlight = (async () => {
+async function attachOrStartUnserialized(state: SupervisorState, ctx: ExtensionContext, options: { forceStart?: boolean; notifyOnSuccess?: boolean; expectedSessionId?: string } = {}) {
     state.ctx = ctx;
     state.mode = protocolModeFromEnv();
     resetConnection(state);
     state.ctx = ctx;
     state.mode = protocolModeFromEnv();
     state.lastError = "";
+    const expectedSessionId = options.expectedSessionId ?? env("AGENTSH_SESSION_ID");
 
     const mockSock = normalizeSocketPath(env("PI_AGENTSH_MOCK_SUPERVISOR"));
     if (mockSock && !options.forceStart) {
-      await attachToSocket(state, "mock-ndjson", "mock", mockSock, ctx);
+      await attachToSocket(state, "mock-ndjson", "mock", mockSock, ctx, undefined, expectedSessionId);
       if (options.notifyOnSuccess) notify(ctx, `AgentSH mock supervisor attached: ${state.sessionId || mockSock}`, "info");
       return;
     }
 
     const envSock = normalizeSocketPath(env("AGENTSH_SESSION_SUPERVISOR"));
     if (envSock && !options.forceStart) {
-      await attachToSocket(state, "rest", "agentsh-env", envSock, ctx);
+      await attachToSocket(state, "rest", "agentsh-env", envSock, ctx, undefined, expectedSessionId);
       if (options.notifyOnSuccess) notify(ctx, `AgentSH REST supervisor attached: ${state.sessionId || envSock}`, "info");
       return;
     }
 
     const approvalUISock = normalizeSocketPath(env("AGENTSH_APPROVAL_UI_SOCKET"));
     if (approvalUISock && !options.forceStart) {
-      await attachToSocket(state, "legacy-approval-ui", "agentsh-approval-ui", approvalUISock, ctx);
+      await attachToSocket(state, "legacy-approval-ui", "agentsh-approval-ui", approvalUISock, ctx, undefined, expectedSessionId);
       if (options.notifyOnSuccess) notify(ctx, `AgentSH approval UI socket attached: ${state.sessionId || approvalUISock}`, "info");
       return;
     }
@@ -2339,7 +2507,7 @@ async function attachOrStart(state: SupervisorState, ctx: ExtensionContext, opti
       const started = await runAgentSHSessionStart(ctx);
       const sock = metadataSocket(started);
       if (!sock) throw new Error("Started AgentSH session did not report supervisor_sock");
-      await attachToSocket(state, "rest", "agentsh-started", sock, ctx, started);
+      await attachToSocket(state, "rest", "agentsh-started", sock, ctx, started, expectedSessionId || metadataSessionId(started));
       if (options.notifyOnSuccess) notify(ctx, `AgentSH REST supervisor started: ${state.sessionId || sock}`, "info");
       return;
     }
@@ -2347,19 +2515,333 @@ async function attachOrStart(state: SupervisorState, ctx: ExtensionContext, opti
     state.status = "inactive";
     state.active = false;
     setStatus(state, ctx);
-  })().catch((error) => {
-    state.watcher?.stop();
-    state.watcher = undefined;
-    state.client = undefined;
-    state.approvalClient = undefined;
-    state.active = true;
-    state.status = "error";
-    state.terminalError = error instanceof SupervisorSessionLostError;
-    state.lastError = asError(error).message;
-    setStatus(state, ctx);
+}
+
+function queueLifecycle<T>(state: SupervisorState, operation: () => Promise<T>): Promise<T> {
+  const run = state.lifecycleTail.catch(() => undefined).then(async () => {
+    state.lifecycleBusy = true;
+    try { return await operation(); } finally { state.lifecycleBusy = false; }
+  });
+  state.lifecycleTail = run.then(() => undefined, () => undefined);
+  return run;
+}
+
+function attachFailure(state: SupervisorState, ctx: ExtensionContext, error: unknown) {
+  resetConnection(state);
+  state.active = true;
+  state.status = "error";
+  state.terminalError = error instanceof SupervisorSessionLostError;
+  state.lastError = safeExecText(asError(error).message) || "AgentSH attachment failed";
+  setStatus(state, ctx);
+}
+
+async function attachOrStart(state: SupervisorState, ctx: ExtensionContext, options: { forceStart?: boolean; notifyOnSuccess?: boolean; expectedSessionId?: string } = {}) {
+  return await queueLifecycle(state, async () => {
+    try {
+      await attachOrStartUnserialized(state, ctx, options);
+    } catch (error) {
+      attachFailure(state, ctx, error);
+      throw error;
+    }
+  });
+}
+
+function remoteStartRefusal() {
+  if (!env("AGENTSH_SESSION_SUPERVISOR") && env("PI_AGENTSH_REMOTE") !== "ssh") return "";
+  return "This AgentSH session is wrapper-owned. /sandbox-control start is refused because it would create an unrelated local session and cannot recover the remote session. Restore the wrapper tunnel with /sandbox-control reconnect, or use /sandbox-control recover when the wrapper exposes a validated recovery command.";
+}
+
+type RecoveryConfiguration = { command: string; statePath: string; expectedSession: string; cwd: string };
+
+function protectedLifecycleParent(statePath: string) {
+  const uid = typeof process.getuid === "function" ? process.getuid() : undefined;
+  let directory = posixPath.dirname(statePath);
+  let immediate = true;
+  for (;;) {
+    const info = lstatSync(directory);
+    if (!info.isDirectory() || info.isSymbolicLink()) return false;
+    const publiclyWritable = (info.mode & 0o022) !== 0;
+    const stickyProtectedDirectory = (info.mode & 0o1000) !== 0 && (info.uid === 0 || info.uid === uid);
+    if (publiclyWritable && !stickyProtectedDirectory) return false;
+    if (immediate && ((info.mode & 0o077) !== 0 || (uid !== undefined && info.uid !== uid))) return false;
+    const parent = posixPath.dirname(directory);
+    if (parent === directory) return true;
+    directory = parent;
+    immediate = false;
+  }
+}
+
+function readLifecycleState(statePath: string, expectedSession: string) {
+  const noFollow = typeof fsConstants.O_NOFOLLOW === "number" ? fsConstants.O_NOFOLLOW : 0;
+  const fd = openSync(statePath, fsConstants.O_RDONLY | noFollow);
+  try {
+    const info = fstatSync(fd);
+    if (!info.isFile() || info.size <= 0 || info.size > MAX_RECOVERY_STATE_BYTES || (info.mode & 0o077) !== 0) throw new Error("invalid lifecycle state permissions or size");
+    if (typeof process.getuid === "function" && info.uid !== process.getuid()) throw new Error("invalid lifecycle state owner");
+    const bytes = Buffer.alloc(Number(info.size));
+    let offset = 0;
+    while (offset < bytes.length) {
+      const count = readSync(fd, bytes, offset, bytes.length - offset, offset);
+      if (count === 0) break;
+      offset += count;
+    }
+    if (offset !== bytes.length) throw new Error("short lifecycle state read");
+    const value = JSON.parse(bytes.toString("utf8")) as JsonObject;
+    const keys = Object.keys(value);
+    if (!keys.every((key) => ["schema_version", "session_id", "status"].includes(key))) throw new Error("unsupported lifecycle state fields");
+    if (value.schema_version !== RECOVERY_STATE_VERSION || value.session_id !== expectedSession) throw new Error("lifecycle state identity mismatch");
+    if (value.status !== undefined && (typeof value.status !== "string" || !["active", "degraded", "recovering", "failed", "stopped"].includes(value.status))) throw new Error("invalid lifecycle state status");
+  } finally {
+    closeSync(fd);
+  }
+}
+
+function safeRecoveryCwd() {
+  for (const candidate of [homedir(), "/"]) {
+    try {
+      const info = statSync(candidate);
+      if (info.isDirectory() && realpathSync(candidate) === candidate) return candidate;
+    } catch { /* try the platform root */ }
+  }
+  throw new Error("No safe local recovery working directory is available");
+}
+
+function recoveryConfiguration(expectedSession = env("AGENTSH_SESSION_ID")): RecoveryConfiguration | undefined {
+  const command = env("PI_AGENTSH_RECOVERY_COMMAND");
+  const statePath = env("PI_AGENTSH_LIFECYCLE_STATE");
+  if (!command || !statePath || !expectedSession || expectedSession.length > 256) return undefined;
+  if (!posixPath.isAbsolute(command) || posixPath.normalize(command) !== command || !/^\/nix\/store\/[a-z0-9]{32}-[^/]+(?:\/.+)?$/.test(command)) return undefined;
+  if (!posixPath.isAbsolute(statePath) || posixPath.normalize(statePath) !== statePath || statePath.length > 4096) return undefined;
+  try {
+    const commandInfo = lstatSync(command);
+    if (!commandInfo.isFile() || commandInfo.isSymbolicLink() || realpathSync(command) !== command) return undefined;
+    accessSync(command, fsConstants.X_OK);
+    const stateInfo = lstatSync(statePath);
+    if (!stateInfo.isFile() || stateInfo.isSymbolicLink() || realpathSync(statePath) !== statePath || !protectedLifecycleParent(statePath)) return undefined;
+    readLifecycleState(statePath, expectedSession);
+    return { command, statePath, expectedSession, cwd: safeRecoveryCwd() };
+  } catch {
+    return undefined;
+  }
+}
+
+function recoveryTimeoutMs() {
+  const raw = env("PI_AGENTSH_RECOVERY_TIMEOUT_MS") || "300000";
+  const value = Number(raw);
+  return Number.isSafeInteger(value) && value > 0 && value <= MAX_NODE_TIMEOUT_MS ? value : 300000;
+}
+
+function recoveryEnvironment(config: RecoveryConfiguration) {
+  const result: Record<string, string> = {
+    PI_AGENTSH_LIFECYCLE_STATE: config.statePath,
+    PI_AGENTSH_RECOVERY_EXPECTED_SESSION: config.expectedSession,
+    PI_AGENTSH_RECOVERY_CONTRACT_VERSION: String(RECOVERY_STATE_VERSION),
+  };
+  for (const key of ["HOME", "LANG", "LC_ALL", "LC_CTYPE", "TMPDIR", "TZ"]) {
+    const value = process.env[key];
+    if (value && value.length <= 4096) result[key] = value;
+  }
+  return result;
+}
+
+function appendBoundedOutput(current: string, chunk: unknown) {
+  const combined = current + String(chunk);
+  return Buffer.byteLength(combined) <= MAX_RECOVERY_OUTPUT_BYTES
+    ? combined
+    : Buffer.from(combined).subarray(0, MAX_RECOVERY_OUTPUT_BYTES).toString("utf8");
+}
+
+async function spawnRecovery(config: RecoveryConfiguration, controller: AbortController, timeoutMs: number) {
+  await new Promise<void>((resolve, reject) => {
+    const usePosixGroup = process.platform !== "win32";
+    let stdout = "";
+    let stderr = "";
+    let child;
+    try {
+      child = spawn(config.command, [], {
+        cwd: config.cwd,
+        env: recoveryEnvironment(config),
+        detached: usePosixGroup,
+        stdio: ["ignore", "pipe", "pipe"],
+      });
+    } catch (error) {
+      throw new Error(`Wrapper recovery spawn failed (${supervisorErrorCode(error) || "unknown"}; executable validated; cwd validated)`);
+    }
+    // Capture the group identity once. Never re-read child.pid after close: on
+    // POSIX that numeric PID can already have been recycled for another child.
+    const processGroupId = usePosixGroup && Number.isSafeInteger(child.pid) && Number(child.pid) > 0
+      ? Number(child.pid)
+      : undefined;
+    child.stdout?.on("data", (chunk) => { stdout = appendBoundedOutput(stdout, chunk); });
+    child.stderr?.on("data", (chunk) => { stderr = appendBoundedOutput(stderr, chunk); });
+    let settled = false;
+    let leaderClosed = false;
+    let groupCleanupComplete = false;
+    let terminationError: Error | undefined;
+    let cleanupError: Error | undefined;
+    let killTimer: ReturnType<typeof setTimeout> | undefined;
+
+    const signalTree = (signal: NodeJS.Signals): "sent" | "missing" | "failed" => {
+      try {
+        if (processGroupId !== undefined) process.kill(-processGroupId, signal);
+        else child.kill(signal);
+        return "sent";
+      } catch (error) {
+        if (supervisorErrorCode(error) === "ESRCH") return "missing";
+        cleanupError = new Error(`Wrapper recovery cleanup failed while sending ${signal} (${supervisorErrorCode(error) || "unknown"})`);
+        return "failed";
+      }
+    };
+    const finish = (callback: () => void) => {
+      if (settled) return;
+      settled = true;
+      clearTimeout(timer);
+      if (killTimer) clearTimeout(killTimer);
+      controller.signal.removeEventListener("abort", onAbort);
+      callback();
+    };
+    const finishTerminationIfReady = () => {
+      if (!terminationError || !leaderClosed || (processGroupId !== undefined && !groupCleanupComplete)) return;
+      finish(() => reject(cleanupError || terminationError!));
+    };
+    const escalate = () => {
+      if (!terminationError || groupCleanupComplete) return;
+      if (killTimer) {
+        clearTimeout(killTimer);
+        killTimer = undefined;
+      }
+      // A successful negative-PGID kill signals every remaining member. ESRCH
+      // proves that the group no longer exists. In either case cleanup is done;
+      // importantly, no stale delayed signal remains that could hit a reused ID.
+      signalTree("SIGKILL");
+      groupCleanupComplete = true;
+      finishTerminationIfReady();
+    };
+    const terminate = (error: Error) => {
+      if (terminationError) return;
+      terminationError = error;
+      const termResult = signalTree("SIGTERM");
+      if (processGroupId === undefined) {
+        // Non-POSIX fallback can only control the direct child. Keep the KILL
+        // escalation until that child closes.
+        killTimer = setTimeout(() => signalTree("SIGKILL"), 2000);
+      } else if (termResult === "missing") {
+        groupCleanupComplete = true;
+      } else {
+        killTimer = setTimeout(escalate, 2000);
+      }
+      finishTerminationIfReady();
+    };
+    const onAbort = () => terminate(supervisorRequestAborted());
+    const timer = setTimeout(() => terminate(new Error(`Wrapper recovery timed out after ${timeoutMs}ms`)), timeoutMs);
+    controller.signal.addEventListener("abort", onAbort, { once: true });
+    if (controller.signal.aborted) onAbort();
+    child.on("error", (error) => finish(() => reject(terminationError || new Error(`Wrapper recovery spawn failed (${supervisorErrorCode(error) || "unknown"}; executable validated; cwd validated)`))));
+    child.on("close", (code, signal) => {
+      leaderClosed = true;
+      if (terminationError) {
+        if (processGroupId !== undefined && !groupCleanupComplete) {
+          // close only reaps the leader. Escalate now rather than cancelling the
+          // group cleanup or retaining a stale PGID until the grace timer.
+          escalate();
+        } else {
+          finishTerminationIfReady();
+        }
+        if (processGroupId === undefined) finish(() => reject(cleanupError || terminationError!));
+        return;
+      }
+      finish(() => {
+        if (code === 0) return resolve();
+        const diagnostic = safeExecText(stderr || stdout, 500);
+        reject(new Error(`Wrapper recovery failed${code === null ? ` from signal ${signal || "unknown"}` : ` with code ${code}`}${diagnostic ? `: ${diagnostic}` : ""}`));
+      });
+    });
+  });
+}
+
+async function runWrapperRecoveryUnserialized(state: SupervisorState, ctx: ExtensionContext, controller: AbortController) {
+  if (state.shuttingDown || controller.signal.aborted) throw supervisorRequestAborted();
+  const expectedSession = state.sessionId || env("AGENTSH_SESSION_ID");
+  if (!expectedSession) throw new Error("Wrapper recovery is unsafe because no captured exact session identity is available.");
+  if (env("AGENTSH_SESSION_ID") && env("AGENTSH_SESSION_ID") !== expectedSession) throw new Error("Wrapper recovery refused because the environment session ID differs from the captured session.");
+  const config = recoveryConfiguration(expectedSession);
+  if (!config) throw new Error("Wrapper recovery is unavailable because its immutable executable, protected versioned lifecycle state, exact session identity, or safe local cwd did not validate.");
+  try {
+    await spawnRecovery(config, controller, recoveryTimeoutMs());
+    // The wrapper owns pathname revalidation immediately before mutation. We
+    // re-read here as defense in depth and never infer that this closes its
+    // pathname race.
+    readLifecycleState(config.statePath, expectedSession);
+    await attachOrStartUnserialized(state, ctx, { notifyOnSuccess: false, expectedSessionId: expectedSession });
+    const report = metadataNetworkEnforcement(state.metadata);
+    if (state.sessionId !== expectedSession || state.metadata?.network_enforcement_live !== true || report?.requested !== "strict" || !networkEnforcementProven(report)) {
+      throw new Error("Wrapper recovery returned without fresh, live, proven strict evidence for the exact captured session.");
+    }
+    notify(ctx, `AgentSH wrapper recovery restored exact session ${expectedSession}; the failed command was not replayed.`, "info");
+  } catch (error) {
+    attachFailure(state, ctx, error);
     throw error;
-  }).finally(() => { state.attachInFlight = undefined; });
-  return await state.attachInFlight;
+  } finally {
+    // The caller removes the controller after the queued operation settles.
+  }
+}
+
+async function runWrapperRecovery(state: SupervisorState, ctx: ExtensionContext) {
+  const controller = new AbortController();
+  state.recoveryAbortControllers.add(controller);
+  try {
+    return await queueLifecycle(state, () => runWrapperRecoveryUnserialized(state, ctx, controller));
+  } finally {
+    state.recoveryAbortControllers.delete(controller);
+  }
+}
+
+function lifecycleIdentity(value: unknown) {
+  return safeExecText(value, 180) || "-";
+}
+
+function formatRemaining(value: unknown) {
+  if (typeof value !== "number" || !Number.isFinite(value)) return "unknown";
+  const seconds = Math.max(0, Math.floor(value));
+  if (seconds < 60) return `${seconds}s`;
+  if (seconds < 3600) return `${Math.floor(seconds / 60)}m`;
+  if (seconds < 86400) return `${Math.floor(seconds / 3600)}h`;
+  return `${Math.floor(seconds / 86400)}d ${Math.floor((seconds % 86400) / 3600)}h`;
+}
+
+function validatedHelperLifecycle(value: unknown): NethelperLifecycle | undefined {
+  const helper = objectField(value);
+  if (!helper || helper.schema_version !== 1) return undefined;
+  const boundedString = (field: string, max = 256) => helper[field] === undefined || (typeof helper[field] === "string" && (helper[field] as string).length <= max);
+  if (!["helper_kind", "lease_id", "unit_name", "soft_expires_at", "hard_expires_at", "terminal_reason", "last_checked_at"].every((field) => boundedString(field))) return undefined;
+  if (typeof helper.status !== "string" || !["active", "renewing", "degraded", "expired", "failed", "stopped", "unknown"].includes(helper.status)) return undefined;
+  for (const field of ["soft_remaining_seconds", "hard_remaining_seconds", "binding_generation", "renewal_generation"]) {
+    const value = helper[field];
+    if (value !== undefined && (!Number.isSafeInteger(value) || (value as number) < 0 || (value as number) > MAX_NODE_TIMEOUT_MS)) return undefined;
+  }
+  for (const field of ["socket_live", "credential_source_live"]) if (helper[field] !== undefined && typeof helper[field] !== "boolean") return undefined;
+  return helper as NethelperLifecycle;
+}
+
+function helperLifecycleLines(report?: NetworkEnforcement) {
+  const raw = report?.helper_lifecycle;
+  if (!raw) return [];
+  const helper = validatedHelperLifecycle(raw);
+  if (!helper) return ["Helper:   invalid/unsupported lifecycle evidence"];
+  const generations = [
+    typeof helper.binding_generation === "number" ? `binding ${helper.binding_generation}` : "",
+    typeof helper.renewal_generation === "number" ? `renewal ${helper.renewal_generation}` : "",
+  ].filter(Boolean).join(", ");
+  const liveText = (value: unknown) => value === true ? "live" : value === false ? "not live" : "unknown";
+  const liveness = `socket ${liveText(helper.socket_live)}, credential source ${liveText(helper.credential_source_live)}`;
+  const terminal = ["expired", "failed", "stopped"].includes(String(helper.status));
+  const remaining = (value: unknown) => value === undefined && terminal ? "0s" : formatRemaining(value);
+  return [
+    `Helper:   ${lifecycleIdentity(helper.status)} / ${lifecycleIdentity(helper.helper_kind || "unknown")} (${liveness})`,
+    `Lease:    ${lifecycleIdentity(helper.lease_id)}${helper.unit_name ? ` / unit ${lifecycleIdentity(helper.unit_name)}` : ""}${generations ? ` / ${generations}` : ""}`,
+    `Expiry:   soft ${lifecycleIdentity(helper.soft_expires_at)} (${remaining(helper.soft_remaining_seconds)} remaining); hard ${lifecycleIdentity(helper.hard_expires_at)} (${remaining(helper.hard_remaining_seconds)} remaining)`,
+    helper.terminal_reason ? `Helper reason: ${lifecycleIdentity(helper.terminal_reason)}` : "",
+  ].filter(Boolean);
 }
 
 function helpText(state: SupervisorState) {
@@ -2371,6 +2853,7 @@ function helpText(state: SupervisorState) {
       "test with PI_AGENTSH_MOCK_SUPERVISOR=<mock.sock>, or start a detached supervisor with PI_AGENTSH_ENABLE=1.",
       "",
       "Optional env: PI_AGENTSH_POLICY=pi-autonomous|pi-supervised, PI_AGENTSH_WORKSPACE_MODE=shadow|direct, PI_AGENTSH_BIN=agentsh.",
+      recoveryConfiguration() ? "Wrapper recovery: available with /sandbox-control recover." : "",
     ].join("\n");
   }
   return [
@@ -2380,7 +2863,7 @@ function helpText(state: SupervisorState) {
     `Mode:     ${state.activeMode || state.mode || "-"}`,
     `Socket:   ${state.socketPath}`,
     `Session:  ${state.sessionId || "-"}`,
-    `Status:   ${state.status}`,
+    `Supervisor: ${state.status}${env("PI_AGENTSH_REMOTE") === "ssh" ? " (wrapper-owned SSH transport)" : ""}`,
     `Pending:  ${state.pendingCount}`,
     state.metadata?.policy ? `Policy:   ${state.metadata.policy}` : "",
     state.metadata?.workspace_mode ? `Workspace: ${state.metadata.workspace_mode}` : "",
@@ -2389,8 +2872,10 @@ function helpText(state: SupervisorState) {
     state.metadata?.protocol_version ? `Protocol: ${state.metadata.protocol_version}` : `Protocol: ${PROTOCOL_VERSION}`,
     metadataNetworkEnforcement(state.metadata)?.requested ? `Network:  ${metadataNetworkEnforcement(state.metadata)?.requested} / ${metadataNetworkEnforcement(state.metadata)?.status || "unknown"} / ${metadataNetworkEnforcement(state.metadata)?.tier || "unknown"}${state.metadata?.network_enforcement_live ? " (live)" : " (not live)"}` : "",
     metadataNetworkEnforcement(state.metadata)?.detail ? `Net detail: ${metadataNetworkEnforcement(state.metadata)?.detail}` : "",
+    ...helperLifecycleLines(metadataNetworkEnforcement(state.metadata)),
     state.metadata?.network_enforcement_error ? `Net error: ${state.metadata.network_enforcement_error}` : "",
     Array.isArray(state.metadata?.supported_ops) ? `Ops:      ${state.metadata.supported_ops.join(", ")}` : "",
+    recoveryConfiguration() ? "Recovery: available (/sandbox-control recover)" : "Recovery: unavailable (wrapper did not provide validated recovery state)",
     state.lastError ? `Error:    ${state.lastError}` : "",
   ].filter(Boolean).join("\n");
 }
@@ -3030,6 +3515,10 @@ export default function sandbox(pi: ExtensionAPI) {
     resolving: new Set(),
     promptAbortControllers: new Map(),
     promptChain: Promise.resolve(),
+    lifecycleTail: Promise.resolve(),
+    lifecycleBusy: false,
+    recoveryAbortControllers: new Set(),
+    shuttingDown: false,
     terminalError: false,
   };
 
@@ -3044,9 +3533,13 @@ export default function sandbox(pi: ExtensionAPI) {
   });
 
   pi.on("session_shutdown", async () => {
-    resetConnection(state);
-    if (state.ctx?.hasUI) state.ctx.ui.setStatus("sandbox", undefined);
-    state.ctx = undefined;
+    state.shuttingDown = true;
+    for (const controller of state.recoveryAbortControllers) controller.abort();
+    await queueLifecycle(state, async () => {
+      resetConnection(state);
+      if (state.ctx?.hasUI) state.ctx.ui.setStatus("sandbox", undefined);
+      state.ctx = undefined;
+    });
   });
 
   pi.registerCommand("sandbox", {
@@ -3055,7 +3548,7 @@ export default function sandbox(pi: ExtensionAPI) {
   });
 
   pi.registerCommand("sandbox-control", {
-    description: "Control AgentSH supervisor client: status, reconnect, start, stop",
+    description: "Control AgentSH supervisor client: status, reconnect, recover, start, stop",
     handler: async (args, ctx) => {
       const action = (args || "status").trim() || "status";
       try {
@@ -3064,22 +3557,37 @@ export default function sandbox(pi: ExtensionAPI) {
           return;
         }
         if (action === "start") {
+          const refusal = remoteStartRefusal();
+          if (refusal) {
+            notify(ctx, refusal, "error");
+            return;
+          }
           await attachOrStart(state, ctx, { forceStart: true, notifyOnSuccess: true });
           return;
         }
+        if (action === "recover") {
+          await runWrapperRecovery(state, ctx);
+          return;
+        }
         if (action === "stop") {
-          if (state.client) {
-            try { await state.client.stop(); } catch { /* older/mock supervisors may not support stop */ }
-          }
-          resetConnection(state);
-          setStatus(state, ctx);
+          // Cancellation is immediate; cleanup/reset itself is ordered after the
+          // recovery child (including its POSIX process group) has been reaped.
+          for (const controller of state.recoveryAbortControllers) controller.abort();
+          await queueLifecycle(state, async () => {
+            if (state.client) {
+              try { await state.client.stop(); } catch { /* older/mock supervisors may not support stop */ }
+            }
+            resetConnection(state);
+            setStatus(state, ctx);
+          });
           notify(ctx, "AgentSH supervisor client stopped/detached", "info");
           return;
         }
         notify(ctx, helpText(state), state.status === "error" ? "error" : "info");
       } catch (error) {
+        if (state.shuttingDown) return;
         state.status = "error";
-        state.lastError = asError(error).message;
+        state.lastError = safeExecText(asError(error).message) || "lifecycle operation failed";
         setStatus(state, ctx);
         notify(ctx, `sandbox-control ${action} failed: ${state.lastError}`, "error");
       }
@@ -3129,14 +3637,42 @@ export default function sandbox(pi: ExtensionAPI) {
         const exitCode = typeof result.exitCode === "number" ? result.exitCode : 0;
         const finalText = formatAccumulatedOutput(snapshot, output, result);
         const artifact = remoteOutputArtifact(result);
+        const failure = result.normalizedFailure;
         const details = {
           exitCode,
+          commandStarted: failure?.commandStarted,
+          dispatchState: failure?.dispatchState,
+          failureKind: failure?.failureKind,
+          retryable: failure?.retryable,
+          code: failure?.code,
+          message: failure?.message,
+          policyRule: failure?.policyRule,
+          queueDurationMs: failure?.queueDurationMs,
+          executionDurationMs: failure?.executionDurationMs,
+          normalizationSource: failure?.source,
           truncation: snapshot.truncation.truncated ? snapshot.truncation : undefined,
           fullOutputPath: artifact?.path,
           outputArtifact: artifact,
         };
-        if (exitCode !== 0) throw new Error(`${finalText}\n\nCommand exited with code ${exitCode}`);
-        return { content: [{ type: "text", text: finalText }], details };
+        if (failure || exitCode !== 0) {
+          const semantic = failure ? execFailureText(failure, exitCode) : `Command exited with code ${exitCode}`;
+          return { content: [{ type: "text", text: `${finalText}\n\n${semantic}` }], details, isError: true };
+        }
+        return { content: [{ type: "text", text: finalText }], details, isError: false };
+      } catch (error) {
+        if (error instanceof SupervisorSessionLostError || (error instanceof Error && error.name === "AbortError")) throw error;
+        output.finish();
+        const snapshot = output.snapshot({ persistIfTruncated: true });
+        const message = safeExecText(asError(error).message) || "supervisor transport failed";
+        const safeBeforeDispatch = error instanceof SafeSupervisorConnectError;
+        const text = safeBeforeDispatch
+          ? `Command was not executed because the AgentSH supervisor transport was unavailable. ${message}`
+          : `Command outcome is ambiguous because the AgentSH supervisor transport failed after dispatch could not be excluded. The command was not replayed. ${message}`;
+        return {
+          content: [{ type: "text", text: `${formatAccumulatedOutput(snapshot, output)}\n\n${text}` }],
+          details: { commandStarted: undefined, failureKind: "transport_ambiguity", retryable: false, message, normalizationSource: "transport" },
+          isError: true,
+        };
       } finally {
         output.finish();
         await output.closeTempFile();
