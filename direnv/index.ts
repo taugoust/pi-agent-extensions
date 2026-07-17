@@ -1,19 +1,11 @@
 /**
  * Direnv Extension
  *
- * Loads direnv environment variables on session start and after each bash
- * command. This mimics how the shell hook works — it runs after every command
- * to pick up any .envrc changes from cd, git checkout, etc.
- *
- * - Only one direnv process runs at a time — subsequent requests wait for
- *   the current one to finish before spawning a new one.
- * - Blocks for up to 10s so fast completions are handled inline. If direnv
- *   takes longer, control returns and the process finishes in the background.
- * - Status bar shows: "direnv …" (running), "direnv ✓" (loaded), "direnv ✗" (error).
- *
- * Requirements:
- *   - direnv installed and in PATH
- *   - .envrc must be allowed (run `direnv allow` in your shell first)
+ * Unsupervised Pi retains the traditional shell-hook behaviour: run
+ * `direnv export json` locally and apply its result to the parent process.
+ * Supervised Pi instead asks the exact attached AgentSH session to refresh its
+ * server-owned environment. Project code and environment values never cross
+ * into the trusted parent process in that mode.
  */
 
 import { spawn } from "node:child_process";
@@ -21,22 +13,91 @@ import type {
   ExtensionAPI,
   ExtensionContext,
 } from "@mariozechner/pi-coding-agent";
+import type { DirenvRefreshResult } from "../sandbox/api.js";
+
+const DIAGNOSTIC_LIMIT = 500;
 
 export default function (pi: ExtensionAPI) {
   let pending: Promise<void> | null = null;
+  const supervised = process.env.PI_SUPERVISED === "1"
+    || Boolean(process.env.AGENTSH_SESSION_SUPERVISOR)
+    || process.env.PI_AGENTSH_ENABLE === "1"
+    || Boolean(process.env.PI_AGENTSH_MOCK_SUPERVISOR);
 
   async function loadDirenv(cwd: string, ctx: ExtensionContext) {
-    // Wait for any in-flight direnv process before starting a new one
-    if (pending) {
-      await pending;
+    // Chain before awaiting so any number of simultaneous tool_result handlers
+    // are serialized rather than all resuming behind the same predecessor.
+    const previous = pending;
+    const current = (async () => {
+      if (previous) await previous;
+      if (ctx.hasUI) {
+        ctx.ui.setStatus("direnv", ctx.ui.theme.fg("warning", "direnv …"));
+      }
+      await (supervised ? runSupervisedDirenv(cwd, ctx) : runDirenv(cwd, ctx));
+    })();
+    pending = current;
+    try {
+      await current;
+    } finally {
+      if (pending === current) pending = null;
+    }
+  }
+
+  async function runSupervisedDirenv(cwd: string, ctx: ExtensionContext) {
+    const api = globalThis.__AGENTSH_PI__;
+    if (!api?.refreshDirenv) {
+      reportFailure(ctx, "AgentSH direnv refresh is unavailable; supervised mode will not run direnv in the parent");
+      return;
     }
 
-    if (ctx.hasUI) {
-      ctx.ui.setStatus("direnv", ctx.ui.theme.fg("warning", "direnv …"));
+    try {
+      const result = await api.refreshDirenv({
+        cwd,
+        actor: { kind: "extension", label: "Pi direnv refresh" },
+      });
+      renderSupervisedResult(result, ctx);
+    } catch (error) {
+      reportFailure(ctx, `AgentSH direnv refresh failed: ${errorMessage(error)}`);
     }
-    pending = runDirenv(cwd, ctx);
-    await pending;
-    pending = null;
+  }
+
+  function renderSupervisedResult(result: DirenvRefreshResult, ctx: ExtensionContext) {
+    switch (result.state) {
+      case "no_envrc":
+        if (ctx.hasUI) ctx.ui.setStatus("direnv", undefined);
+        return;
+      case "loaded":
+      case "unchanged":
+        if (ctx.hasUI) ctx.ui.setStatus("direnv", ctx.ui.theme.fg("success", "direnv ✓"));
+        return;
+      case "not_allowed":
+        reportFailure(ctx, "direnv environment is not allowed; run `direnv allow` through bash in this supervised session", "warning");
+        return;
+      case "policy_denied":
+        reportFailure(ctx, "AgentSH policy denied direnv refresh");
+        return;
+      case "timed_out":
+        reportFailure(ctx, "AgentSH direnv refresh timed out");
+        return;
+      case "invalid_output":
+        reportFailure(ctx, "AgentSH rejected invalid or oversized direnv output");
+        return;
+      case "unavailable":
+        reportFailure(ctx, "direnv is unavailable in the AgentSH execution session");
+        return;
+      default:
+        reportFailure(ctx, "AgentSH returned an unknown direnv refresh state");
+    }
+  }
+
+  function reportFailure(ctx: ExtensionContext, message: string, level: "warning" | "error" = "error") {
+    const bounded = message.replace(/[\r\n]+/g, " ").slice(0, DIAGNOSTIC_LIMIT);
+    if (ctx.hasUI) {
+      ctx.ui.setStatus("direnv", ctx.ui.theme.fg(level === "warning" ? "warning" : "error", "direnv ✗"));
+      ctx.ui.notify(bounded, level);
+    } else {
+      process.stderr.write(`[direnv] ${bounded}\n`);
+    }
   }
 
   function runDirenv(cwd: string, ctx: ExtensionContext) {
@@ -79,9 +140,8 @@ export default function (pi: ExtensionAPI) {
       });
     });
 
-    // Block for up to 10s so fast completions are handled inline.
-    // If still running, return and let the process finish in the
-    // background — status will update when it exits.
+    // Preserve the existing unsupervised behaviour: wait up to ten seconds,
+    // then let a slow local direnv process complete in the background.
     const timeout = new Promise<void>((resolve) => setTimeout(resolve, 10_000));
     return Promise.race([done, timeout]);
   }
@@ -115,10 +175,12 @@ export default function (pi: ExtensionAPI) {
     await loadDirenv(ctx.cwd, ctx);
   });
 
-  // Run direnv after every bash command to pick up .envrc changes
-  // This handles: cd to new dir, git checkout, direnv allow, etc.
   pi.on("tool_result", async (event, ctx) => {
     if (event.toolName !== "bash") return;
     await loadDirenv(ctx.cwd, ctx);
   });
+}
+
+function errorMessage(error: unknown) {
+  return error instanceof Error ? error.message : String(error);
 }

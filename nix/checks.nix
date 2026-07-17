@@ -472,6 +472,176 @@ in
     touch "$out/passed"
   '';
 
+  direnv = pkgs.runCommand "direnv-check" {
+    nativeBuildInputs = [
+      pkgs.nodejs
+      pkgs.typescript
+    ];
+  } ''
+    set -euo pipefail
+
+    workdir="$TMPDIR/direnv-check"
+    srcdir="$workdir/src"
+    outdir="$workdir/out"
+    mkdir -p "$srcdir/direnv" "$srcdir/sandbox" "$outdir"
+    cp ${self}/direnv/index.ts "$srcdir/direnv/index.ts"
+    cp ${self}/sandbox/api.ts "$srcdir/sandbox/api.ts"
+
+    tsc \
+      --noCheck \
+      --skipLibCheck \
+      --module nodenext \
+      --moduleResolution nodenext \
+      --target es2022 \
+      --rootDir "$srcdir" \
+      --outDir "$outdir" \
+      "$srcdir/direnv/index.ts" \
+      "$srcdir/sandbox/api.ts"
+
+    cat > "$workdir/test.mjs" <<'EOF'
+    import fs from "node:fs";
+    import os from "node:os";
+    import path from "node:path";
+    import { pathToFileURL } from "node:url";
+
+    function assert(condition, message) {
+      if (!condition) throw new Error(message);
+    }
+
+    function createPi() {
+      const handlers = new Map();
+      return {
+        handlers,
+        on(event, handler) {
+          const list = handlers.get(event) ?? [];
+          list.push(handler);
+          handlers.set(event, list);
+        },
+      };
+    }
+
+    function createContext(cwd, hasUI = true) {
+      const statuses = [];
+      const notifications = [];
+      return {
+        cwd,
+        hasUI,
+        statuses,
+        notifications,
+        ui: {
+          theme: { fg: (_color, text) => text },
+          setStatus(name, value) { statuses.push({ name, value }); },
+          notify(message, level) { notifications.push({ message, level }); },
+        },
+      };
+    }
+
+    async function emit(pi, event, payload, ctx) {
+      for (const handler of pi.handlers.get(event) ?? []) await handler(payload, ctx);
+    }
+
+    async function main() {
+      const moduleUrl = pathToFileURL(path.join(process.argv[2], "direnv/index.js")).href;
+      const imported = await import(moduleUrl);
+      const direnv = imported.default?.default ?? imported.default ?? imported;
+      assert(typeof direnv === "function", "direnv module did not export a function");
+
+      const tempRoot = fs.mkdtempSync(path.join(os.tmpdir(), "direnv-check-"));
+      const bin = path.join(tempRoot, "bin");
+      const spawnMarker = path.join(tempRoot, "spawned.log");
+      fs.mkdirSync(bin);
+      fs.writeFileSync(path.join(bin, "direnv"), [
+        "#!/bin/sh",
+        "printf 'spawned\\n' >> \"$DIRENV_SPAWN_MARKER\"",
+        "printf '%s\\n' '{\"DIRENV_CHECK_SET\":\"from-local\",\"DIRENV_CHECK_UNSET\":null}'",
+      ].join("\n"), { mode: 0o755 });
+      process.env.PATH = bin + path.delimiter + process.env.PATH;
+      process.env.DIRENV_SPAWN_MARKER = spawnMarker;
+
+      // pi-unsafe/non-AgentSH behaviour remains the local process.env hook.
+      delete process.env.PI_SUPERVISED;
+      delete globalThis.__AGENTSH_PI__;
+      process.env.DIRENV_CHECK_UNSET = "remove-me";
+      {
+        const pi = createPi();
+        direnv(pi);
+        const ctx = createContext(tempRoot);
+        await emit(pi, "session_start", {}, ctx);
+        assert(process.env.DIRENV_CHECK_SET === "from-local", "unsupervised direnv did not set process.env");
+        assert(process.env.DIRENV_CHECK_UNSET === undefined, "unsupervised direnv did not unset process.env");
+        assert(fs.readFileSync(spawnMarker, "utf8").trim() === "spawned", "unsupervised direnv did not invoke the local binary");
+      }
+
+      // Supervised mode delegates session-start and post-bash refreshes, uses
+      // the supplied execution cwd, serializes calls, and never spawns locally.
+      process.env.PI_SUPERVISED = "1";
+      process.env.AGENTSH_SESSION_ID = "sess-direnv";
+      fs.writeFileSync(spawnMarker, "");
+      process.env.AGENTSH_CONTROL_SENTINEL = "parent-owned";
+      const calls = [];
+      let active = 0;
+      let maxActive = 0;
+      let nextState = "loaded";
+      globalThis.__AGENTSH_PI__ = {
+        async refreshDirenv(options) {
+          calls.push(options);
+          active += 1;
+          maxActive = Math.max(maxActive, active);
+          await new Promise((resolve) => setTimeout(resolve, 20));
+          active -= 1;
+          return { state: nextState, set_count: 1, unset_count: 0, rejected_count: 1, generation: calls.length, duration_ms: 1 };
+        },
+      };
+      {
+        const pi = createPi();
+        direnv(pi);
+        const ctx = createContext("/execution/workspace");
+        await emit(pi, "session_start", {}, ctx);
+        await Promise.all([
+          emit(pi, "tool_result", { toolName: "bash" }, ctx),
+          emit(pi, "tool_result", { toolName: "bash" }, ctx),
+        ]);
+        assert(calls.length === 3, "supervised direnv did not refresh on startup and both bash results");
+        assert(calls.every((call) => call.cwd === "/execution/workspace"), "supervised direnv sent the wrong cwd");
+        assert(calls.every((call) => call.actor?.kind === "extension"), "supervised direnv omitted its typed extension actor");
+        assert(maxActive === 1, "supervised direnv refreshes were not serialized");
+        assert(fs.readFileSync(spawnMarker, "utf8") === "", "supervised direnv spawned the local binary");
+        assert(process.env.AGENTSH_CONTROL_SENTINEL === "parent-owned", "supervised response mutated protected parent environment");
+
+        nextState = "no_envrc";
+        await emit(pi, "tool_result", { toolName: "bash" }, ctx);
+        assert(ctx.statuses.some((entry) => entry.name === "direnv" && entry.value === undefined), "no_envrc did not clear the status");
+
+        nextState = "not_allowed";
+        await emit(pi, "tool_result", { toolName: "bash" }, ctx);
+        assert(ctx.notifications.some((entry) => entry.level === "warning" && entry.message.includes("direnv allow")), "not_allowed was not actionable");
+
+        nextState = "policy_denied";
+        await emit(pi, "tool_result", { toolName: "bash" }, ctx);
+        assert(ctx.notifications.some((entry) => entry.level === "error" && entry.message.includes("policy denied")), "policy_denied was not clear and non-fatal");
+      }
+
+      // Missing/old sandbox integration fails closed: no trusted-parent fallback.
+      delete globalThis.__AGENTSH_PI__;
+      fs.writeFileSync(spawnMarker, "");
+      {
+        const pi = createPi();
+        direnv(pi);
+        const ctx = createContext(tempRoot);
+        await emit(pi, "session_start", {}, ctx);
+        assert(fs.readFileSync(spawnMarker, "utf8") === "", "missing AgentSH API fell back to local direnv");
+        assert(ctx.notifications.some((entry) => entry.message.includes("will not run direnv in the parent")), "missing AgentSH API diagnostic was not fail-closed");
+      }
+    }
+
+    await main();
+    EOF
+
+    node "$workdir/test.mjs" "$outdir"
+    mkdir -p "$out"
+    touch "$out/passed"
+  '';
+
   sandbox = pkgs.runCommand "sandbox-check" {
     nativeBuildInputs = [
       pkgs.nodejs
@@ -972,6 +1142,7 @@ in
       delete process.env.AGENTSH_SESSION_EVENT_TOKEN;
       delete process.env.PI_AGENTSH_APPROVAL_CLIENT;
       delete process.env.PI_AGENTSH_REQUIRE_NETWORK_ENFORCEMENT;
+      delete process.env.PI_AGENTSH_REMOTE_CWD;
       delete process.env.AGENTSH_API_KEY;
       delete process.env.AGENTSH_APPROVER_API_KEY;
       delete process.env.AGENTSH_ADMIN_TOKEN;
@@ -1092,6 +1263,89 @@ in
         await shutdownSession(pi);
         await supervisor.close();
         await central.close();
+      }
+
+      // The typed direnv API targets the exact REST session, uses the effective
+      // remote cwd, reconnects only before dispatch, supports cancellation, and
+      // never replays an ambiguous mutating refresh.
+      {
+        clearAgentSHEnv();
+        process.env.PI_AGENTSH_APPROVAL_POLL_MS = "15";
+        const expectedSession = "sess-direnv-refresh";
+        let refreshRequests = 0;
+        let destroyRefresh = false;
+        const supervisor = await withRestartableRestSupervisor(async (request) => {
+          if (request.method === "GET" && request.url === "/api/v1/sessions/" + expectedSession) {
+            return { id: expectedSession, session_id: expectedSession, workspace: "/real/project", worktree: "/shadow/work" };
+          }
+          if (request.method === "GET" && request.url === "/api/v1/approvals") return [];
+          if (request.method === "POST" && request.url === "/api/v1/sessions/" + expectedSession + "/tools/refresh_direnv") {
+            refreshRequests += 1;
+            if (destroyRefresh) return { destroySocket: true };
+            return { ok: true, result: { state: "loaded", set_count: 2, unset_count: 1, rejected_count: 3, generation: refreshRequests, duration_ms: 4 } };
+          }
+          return { statusCode: 404, body: { error: "unexpected supervisor request", request } };
+        });
+        process.env.AGENTSH_SESSION_ID = expectedSession;
+        process.env.AGENTSH_SESSION_SUPERVISOR = "unix://" + supervisor.socketPath;
+        process.env.PI_AGENTSH_REMOTE_CWD = "/workspace";
+        const pi = createPi();
+        sandbox(pi);
+        const ctx = createContext();
+        await startSession(pi, ctx);
+
+        const first = await globalThis.__AGENTSH_PI__.refreshDirenv({ cwd: "/local/control-plane", actor: { kind: "extension", label: "Pi direnv refresh" } });
+        assert(first.state === "loaded" && first.rejected_count === 3, "typed direnv result was not preserved");
+        const firstRequest = supervisor.requests.find((request) => request.method === "POST" && request.url.endsWith("/tools/refresh_direnv"));
+        assert(firstRequest?.url === "/api/v1/sessions/" + expectedSession + "/tools/refresh_direnv", "direnv refresh used the wrong session endpoint");
+        assert(firstRequest?.body.cwd === "/workspace", "direnv refresh used local cwd instead of effective remote cwd");
+        assert(firstRequest?.body.actor.kind === "extension", "direnv refresh omitted its typed actor");
+
+        await supervisor.stop();
+        assert(!fs.existsSync(supervisor.socketPath), "stopped direnv supervisor left its socket path");
+        await waitFor(() => globalThis.__AGENTSH_PI__.getSupervisorState().status === "connecting", "direnv watcher did not enter reconnecting state");
+        const restart = (async () => {
+          await new Promise((resolve) => setTimeout(resolve, 60));
+          await supervisor.start();
+        })();
+        const reconnected = await globalThis.__AGENTSH_PI__.refreshDirenv({ cwd: "/ignored" });
+        await restart;
+        assert(reconnected.state === "loaded", "direnv refresh did not recover before dispatch");
+        assert(refreshRequests === 2, "pre-dispatch reconnect sent direnv refresh more than once: " + refreshRequests);
+        assert(supervisor.requests.some((request) => request.generation === 2 && request.method === "GET" && request.url === "/api/v1/sessions/" + expectedSession), "direnv reconnect did not verify the exact session");
+
+        await supervisor.stop();
+        assert(!fs.existsSync(supervisor.socketPath), "stopped direnv cancellation supervisor left its socket path");
+        await waitFor(() => globalThis.__AGENTSH_PI__.getSupervisorState().status === "connecting", "direnv cancellation watcher did not enter reconnecting state");
+        const controller = new AbortController();
+        const abortTimer = setTimeout(() => controller.abort(), 30);
+        let abortError;
+        try {
+          await globalThis.__AGENTSH_PI__.refreshDirenv({ cwd: "/ignored", signal: controller.signal });
+        } catch (error) {
+          abortError = error;
+        }
+        clearTimeout(abortTimer);
+        assert(abortError?.name === "AbortError", "direnv reconnect cancellation did not preserve AbortError");
+        assert(refreshRequests === 2, "cancelled direnv refresh reached the server");
+
+        await supervisor.start();
+        await waitFor(() => globalThis.__AGENTSH_PI__.getSupervisorState().status === "connected", "direnv test supervisor did not reconnect after cancellation");
+        destroyRefresh = true;
+        let ambiguousError;
+        try {
+          await globalThis.__AGENTSH_PI__.refreshDirenv({ cwd: "/ignored" });
+        } catch (error) {
+          ambiguousError = error;
+        }
+        await new Promise((resolve) => setTimeout(resolve, 350));
+        assert(ambiguousError, "ambiguous direnv transport failure unexpectedly succeeded");
+        assert(refreshRequests === 3, "ambiguous direnv refresh was replayed: " + refreshRequests);
+
+        delete process.env.PI_AGENTSH_REMOTE_CWD;
+        delete process.env.PI_AGENTSH_APPROVAL_POLL_MS;
+        await shutdownSession(pi);
+        await supervisor.close();
       }
 
       // A missing watcher socket enters reconnecting, tools wait for the same
