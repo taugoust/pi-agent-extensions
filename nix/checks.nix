@@ -642,6 +642,8 @@ in
     touch "$out/passed"
   '';
 
+  pdf = import ./pdf-check.nix { inherit self pkgs; };
+
   sandbox = pkgs.runCommand "sandbox-check" {
     nativeBuildInputs = [
       pkgs.nodejs
@@ -1318,6 +1320,48 @@ in
         await shutdownSession(pi);
         await supervisor.close();
         await central.close();
+      }
+
+      // The shared API maps control-plane/real/shadow paths to virtual paths
+      // and forwards explicit bounded binary-read limits for sibling extensions.
+      {
+        clearAgentSHEnv();
+        const sessionId = "sess-shared-api";
+        const supervisor = await withRestSupervisor(async (request) => {
+          if (request.method === "GET" && request.url === "/api/v1/sessions/" + sessionId) {
+            return {
+              id: sessionId,
+              session_id: sessionId,
+              real_workspace: "/real/project",
+              worktree: "/shadow/project",
+              workspace_mode: "shadow",
+              virtual_root: "/workspace",
+              workspace_roots: [{ name: "project", real: "/real/project", work: "/shadow/project" }],
+            };
+          }
+          if (request.method === "GET" && request.url === "/api/v1/approvals") return [];
+          if (request.method === "POST" && request.url === "/api/v1/sessions/" + sessionId + "/tools/read_file") {
+            return { ok: true, result: { path: request.body.path, size: 4, max_bytes: request.body.max_bytes, encoding: "base64", content: "iVBORw==" } };
+          }
+          return { statusCode: 404, body: { error: "unexpected supervisor request", request } };
+        });
+        process.env.AGENTSH_SESSION_ID = sessionId;
+        process.env.AGENTSH_SESSION_SUPERVISOR = "unix://" + supervisor.socketPath;
+        const pi = createPi();
+        sandbox(pi);
+        const ctx = createContext();
+        await startSession(pi, ctx);
+
+        assert(globalThis.__AGENTSH_PI__.toSupervisorPath("/real/project/input.pdf") === "/workspace/input.pdf", "shared API did not map the real workspace");
+        assert(globalThis.__AGENTSH_PI__.toSupervisorPath("docs/input.pdf", "/shadow/project/nested") === "/workspace/nested/docs/input.pdf", "shared API did not map a relative shadow-worktree path");
+        const binary = await globalThis.__AGENTSH_PI__.readFile("/workspace/image.png", { maxBytes: 4194304, limit: 2147483647 });
+        assert(binary.encoding === "base64" && binary.content === "iVBORw==", "shared API did not retain a binary read response");
+        const readRequest = supervisor.requests.find((request) => request.url?.endsWith("/tools/read_file"));
+        assert(readRequest?.body.max_bytes === 4194304, "shared API did not forward maxBytes as max_bytes");
+        assert(readRequest?.body.limit === 2147483647, "shared API did not forward the binary line ceiling");
+
+        await shutdownSession(pi);
+        await supervisor.close();
       }
 
       // Present malformed live timeout metadata fails closed; only omission by

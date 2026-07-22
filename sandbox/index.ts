@@ -21,7 +21,7 @@ import { abortSubagentProtocolStream, appendSubagentProtocolChunk, createSubagen
 import { boundSubagentProgressCapsules, createSubagentProgressCapsule, sanitizeSubagentParentText } from "./subagent-result.js";
 import { appendSubagentPrefix, appendSubagentRawText, appendSubagentStdoutChunk, createSubagentStreamState, flushSubagentStdout, parseSubagentPiJsonStdout, subagentLiveToolStatus, tailByBytes, truncateByBytes, usageNumber, usageZero, type SubagentStreamState } from "./subagent-stream.js";
 import { normalizeSubagentTerminal, subagentTerminalFailed } from "./subagent-terminal.js";
-import type { AgentSHDirenvAPI, DirenvRefreshOptions, DirenvRefreshResult, DirenvRefreshState } from "./api.js";
+import type { AgentSHPiAPI, DirenvRefreshOptions, DirenvRefreshResult, DirenvRefreshState } from "./api.js";
 import {
   CommandExecutionTimeoutError,
   CommandTransportTimeoutError,
@@ -187,7 +187,7 @@ type NormalizedExecFailure = {
   source: "top-level" | "nested" | "legacy" | "transport";
 };
 type ExecResult = { exitCode?: number | null; signal?: string | null; stdout?: string; stderr?: string; normalizedFailure?: NormalizedExecFailure; [key: string]: unknown };
-type ReadFileOptions = { offset?: number; limit?: number; cwd?: string; actor?: Actor; signal?: AbortSignal };
+type ReadFileOptions = { offset?: number; limit?: number; maxBytes?: number; cwd?: string; actor?: Actor; signal?: AbortSignal };
 type WriteFileOptions = { cwd?: string; actor?: Actor; signal?: AbortSignal };
 type Edit = { oldText: string; newText: string };
 type EditFileOptions = { cwd?: string; actor?: Actor; signal?: AbortSignal };
@@ -204,25 +204,6 @@ type RestConnectionEvents = {
   onReconnected?(metadata: SupervisorMetadata): void;
   onReconnectFailed?(error: Error): void;
   onSessionLost?(error: Error): void;
-};
-
-export type AgentSHPiAPI = AgentSHDirenvAPI & {
-  exec(command: string | { command: string; cwd?: string; timeout_ms?: number; persist_output_over_bytes?: number; persist_output_over_lines?: number; actor?: Actor }, options?: ExecOptions): Promise<ExecResult>;
-  readFile(path: string, options?: ReadFileOptions): Promise<unknown>;
-  writeFile(path: string, content: string, options?: WriteFileOptions): Promise<unknown>;
-  editFile(path: string, edits: Edit[], options?: EditFileOptions): Promise<unknown>;
-  spawnSubagent(params: JsonObject, options?: SpawnSubagentOptions): Promise<unknown>;
-  resolveApproval(approvalId: string, resolution: ApprovalResolution): Promise<unknown>;
-  getSupervisorMetadata(): SupervisorMetadata | undefined;
-  getSupervisorState(): {
-    active: boolean;
-    status: SupervisorStatus;
-    source: SupervisorSource;
-    socketPath: string;
-    sessionId: string;
-    metadata?: SupervisorMetadata;
-    lastError?: string;
-  };
 };
 
 type SupervisorState = {
@@ -1219,7 +1200,7 @@ class MockSupervisorClient {
   }
 
   async readFile(path: string, options: ReadFileOptions = {}) {
-    return await this.request("read_file", { path, cwd: options.cwd, offset: options.offset, limit: options.limit, actor: options.actor || parentActor(undefined, "Pi read tool") }, { signal: options.signal });
+    return await this.request("read_file", { path, cwd: options.cwd, offset: options.offset, limit: options.limit, max_bytes: options.maxBytes, actor: options.actor || parentActor(undefined, "Pi read tool") }, { signal: options.signal });
   }
 
   async writeFile(path: string, content: string, options: WriteFileOptions = {}) {
@@ -1635,6 +1616,13 @@ function restFileRequest(metadata: SupervisorMetadata | undefined, path: string,
   }
 
   return { path };
+}
+
+function supervisorAbsolutePath(metadata: SupervisorMetadata | undefined, path: string, cwd = effectiveSupervisorCwd()) {
+  const file = restFileRequest(metadata, path, cwd);
+  if (posixPath.isAbsolute(file.path)) return cleanPosix(file.path);
+  const virtualCwd = file.cwd || absoluteToVirtual(metadata, toSlashPath(cwd)) || metadataVirtualRoot(metadata);
+  return cleanPosix(posixPath.resolve(virtualCwd, file.path));
 }
 
 function commandTimeoutFieldFromRest(...objects: JsonObject[]) {
@@ -2187,7 +2175,7 @@ class RestSupervisorClient {
       ...file,
       offset: options.offset,
       limit: options.limit,
-      max_bytes: DEFAULT_MAX_BYTES,
+      max_bytes: options.maxBytes ?? DEFAULT_MAX_BYTES,
       actor: options.actor || parentActor(undefined, "Pi read tool"),
     }, { signal: options.signal, timeoutMs: TOOL_REQUEST_TIMEOUT_MS });
     return unwrapRestToolResponse<JsonObject>("read_file", raw);
@@ -3109,6 +3097,9 @@ function createGlobalAPI(state: SupervisorState): AgentSHPiAPI {
     async editFile(path, edits, options = {}) { return await requireClient(state).editFile(path, edits, options); },
     async spawnSubagent(params, options = {}) { return await requireClient(state).spawnSubagent(params, options); },
     async resolveApproval(approvalId, resolution) { return await requireApprovalClient(state).resolveApproval(approvalId, resolution); },
+    toSupervisorPath(path, cwd = effectiveSupervisorCwd(state.ctx)) {
+      return supervisorAbsolutePath(state.metadata, path, cwd);
+    },
     getSupervisorMetadata() { return state.metadata; },
     getSupervisorState() {
       return { active: state.active, status: state.status, source: state.source, socketPath: state.socketPath, sessionId: state.sessionId, metadata: state.metadata, lastError: state.lastError || undefined };

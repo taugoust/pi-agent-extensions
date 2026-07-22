@@ -1,69 +1,32 @@
 /**
  * PDF Inspection Tool Extension
  *
- * Provides local, Nix-friendly PDF inspection tools beyond plain text
+ * Provides Nix-friendly local or AgentSH-supervised PDF inspection tools beyond plain text
  * extraction: document metadata, page rendering, image cropping, text
  * extraction, and embedded image extraction.
  */
 
-import { execFile } from "node:child_process";
-import { constants as fsConstants } from "node:fs";
-import {
-  access,
-  mkdir,
-  readFile,
-  readdir,
-  stat,
-  writeFile,
-} from "node:fs/promises";
-import { basename, dirname, extname, join, resolve } from "node:path";
+import { basename, dirname, extname, join } from "node:path";
 import type { ExtensionAPI } from "@mariozechner/pi-coding-agent";
 import { Type } from "@sinclair/typebox";
+import {
+  commandString,
+  createPdfBackend,
+  DEFAULT_MAX_ATTACH_BYTES,
+  DEFAULT_TIMEOUT_MS,
+  type PdfBackend,
+} from "./backend.js";
 
-const DEFAULT_TIMEOUT_MS = 60_000;
 const DEFAULT_RENDER_DPI = 150;
 const DEFAULT_MAX_TEXT_CHARS = 100 * 1024;
-const DEFAULT_MAX_ATTACH_BYTES = 4 * 1024 * 1024;
-const NIX_HINT =
-  "Install tools with Nix, for example: nix shell nixpkgs#poppler_utils nixpkgs#imagemagick";
 
 type ToolOutputContent = Array<Record<string, unknown>>;
-
-interface ExecResult {
-  stdout: string;
-  stderr: string;
-}
 
 interface CropRect {
   x: number;
   y: number;
   width: number;
   height: number;
-}
-
-function isUrlLike(value: string): boolean {
-  return /^[a-z][a-z0-9+.-]*:/i.test(value);
-}
-
-function resolveLocalPath(cwd: string, inputPath: string, label: string): string {
-  if (!inputPath || inputPath.trim() === "") {
-    throw new Error(`${label} is required.`);
-  }
-  if (isUrlLike(inputPath)) {
-    throw new Error(`${label} must be a local file path, not a URL: ${inputPath}`);
-  }
-  return resolve(cwd, inputPath);
-}
-
-async function requireReadableFile(path: string, label: string): Promise<void> {
-  try {
-    await access(path, fsConstants.R_OK);
-    const info = await stat(path);
-    if (!info.isFile()) throw new Error(`${label} is not a file: ${path}`);
-  } catch (error) {
-    if (error instanceof Error && error.message.includes("is not a file")) throw error;
-    throw new Error(`${label} is not readable: ${path}`);
-  }
 }
 
 function sanitizeName(value: string): string {
@@ -78,72 +41,21 @@ function padPage(page: number): string {
   return String(page).padStart(3, "0");
 }
 
-function shellQuote(value: string): string {
-  return "'" + value.replace(/'/g, "'\\''") + "'";
-}
-
-function commandString(command: string, args: string[]): string {
-  return [command, ...args.map(shellQuote)].join(" ");
-}
-
-function execFileAsync(
-  command: string,
-  args: string[],
-  options: { signal?: AbortSignal; timeoutMs?: number; cwd?: string } = {},
-): Promise<ExecResult> {
-  return new Promise((resolvePromise, reject) => {
-    execFile(
-      command,
-      args,
-      {
-        cwd: options.cwd,
-        signal: options.signal,
-        timeout: options.timeoutMs ?? DEFAULT_TIMEOUT_MS,
-        maxBuffer: 20 * 1024 * 1024,
-        encoding: "utf8",
-      },
-      (error, stdout, stderr) => {
-        if (error) {
-          const err = error as NodeJS.ErrnoException & {
-            code?: string | number;
-            killed?: boolean;
-            signal?: string;
-          };
-          if (err.code === "ENOENT") {
-            reject(
-              new Error(
-                `Missing required command: ${command}. ${NIX_HINT}`,
-              ),
-            );
-            return;
-          }
-          const message = [
-            `Command failed: ${commandString(command, args)}`,
-            err.signal ? `Signal: ${err.signal}` : undefined,
-            err.killed ? "Process was killed or timed out." : undefined,
-            stderr ? `stderr:\n${stderr.trim()}` : undefined,
-            stdout ? `stdout:\n${stdout.trim()}` : undefined,
-          ]
-            .filter(Boolean)
-            .join("\n");
-          reject(new Error(message));
-          return;
-        }
-        resolvePromise({ stdout: stdout ?? "", stderr: stderr ?? "" });
-      },
-    );
-  });
-}
-
-async function writeJson(path: string, data: unknown): Promise<void> {
-  await writeFile(path, JSON.stringify(data, null, 2) + "\n", "utf8");
+async function writeJson(
+  backend: PdfBackend,
+  path: string,
+  data: unknown,
+  signal?: AbortSignal,
+): Promise<void> {
+  await backend.writeText(path, JSON.stringify(data, null, 2) + "\n", signal);
 }
 
 async function getImageDimensions(
+  backend: PdfBackend,
   imagePath: string,
   signal?: AbortSignal,
 ): Promise<{ width: number; height: number }> {
-  const { stdout } = await execFileAsync(
+  const { stdout } = await backend.exec(
     "magick",
     ["identify", "-format", "%w %h", imagePath],
     { signal, timeoutMs: 30_000 },
@@ -165,25 +77,29 @@ function mimeTypeForPath(path: string): string {
 }
 
 async function maybeAttachImage(
+  backend: PdfBackend,
   content: ToolOutputContent,
   imagePath: string,
   attach: boolean | undefined,
   maxBytes: number | undefined,
+  signal?: AbortSignal,
 ): Promise<{ attached: boolean; skippedReason?: string }> {
   if (!attach) return { attached: false };
-  const limit = maxBytes ?? DEFAULT_MAX_ATTACH_BYTES;
-  const info = await stat(imagePath);
-  if (info.size > limit) {
+  const attachment = await backend.readAttachment(
+    imagePath,
+    maxBytes ?? DEFAULT_MAX_ATTACH_BYTES,
+    signal,
+  );
+  if (!attachment.data) {
     return {
       attached: false,
-      skippedReason: `Image is ${info.size} bytes, larger than maxAttachBytes=${limit}.`,
+      skippedReason: attachment.skippedReason ?? "Image attachment data was unavailable.",
     };
   }
-  const data = await readFile(imagePath, "base64");
   content.push({
     type: "image",
     mimeType: mimeTypeForPath(imagePath),
-    data,
+    data: attachment.data,
   });
   return { attached: true };
 }
@@ -279,33 +195,36 @@ function sidecarPath(outputPath: string): string {
   return `${outputPath}.json`;
 }
 
-async function getPopplerVersion(command: string, signal?: AbortSignal): Promise<string | undefined> {
+async function getPopplerVersion(
+  backend: PdfBackend,
+  command: string,
+  signal?: AbortSignal,
+): Promise<string | undefined> {
   try {
-    const { stderr, stdout } = await execFileAsync(command, ["-v"], {
+    const { stderr, stdout } = await backend.exec(command, ["-v"], {
       signal,
       timeoutMs: 10_000,
     });
     return (stderr || stdout).trim().split(/\r?\n/)[0];
-  } catch {
+  } catch (error) {
+    if (signal?.aborted || (error instanceof Error && error.name === "AbortError")) throw error;
     return undefined;
   }
 }
 
-async function getImageMagickVersion(signal?: AbortSignal): Promise<string | undefined> {
+async function getImageMagickVersion(
+  backend: PdfBackend,
+  signal?: AbortSignal,
+): Promise<string | undefined> {
   try {
-    const { stdout } = await execFileAsync("magick", ["-version"], {
+    const { stdout } = await backend.exec("magick", ["-version"], {
       signal,
       timeoutMs: 10_000,
     });
     return stdout.trim().split(/\r?\n/)[0];
-  } catch {
+  } catch (error) {
+    if (signal?.aborted || (error instanceof Error && error.name === "AbortError")) throw error;
     return undefined;
-  }
-}
-
-function assertNotRemoteSshMode() {
-  if (process.env.PI_AGENTSH_REMOTE === "ssh") {
-    throw new Error("pdf tools are disabled in remote AgentSH SSH mode until they can be routed through the remote supervisor");
   }
 }
 
@@ -314,24 +233,24 @@ export default function pdfExtension(pi: ExtensionAPI) {
     name: "pdf_info",
     label: "PDF Info",
     description:
-      "Inspect a local PDF's metadata and page information using Nix-packaged Poppler tools.",
+      "Inspect a PDF's metadata and page information using Nix-packaged Poppler tools in the active local or AgentSH workspace.",
     parameters: Type.Object({
-      pdfPath: Type.String({ description: "Local path to the PDF file" }),
+      pdfPath: Type.String({ description: "Path to the PDF file in the active workspace" }),
       timeoutMs: Type.Optional(
         Type.Number({ description: `Timeout in milliseconds (default: ${DEFAULT_TIMEOUT_MS})` }),
       ),
     }),
-    async execute(_toolCallId, params, signal, _onUpdate, ctx) {
-      assertNotRemoteSshMode();
-      const pdfPath = resolveLocalPath(ctx.cwd, params.pdfPath, "pdfPath");
-      await requireReadableFile(pdfPath, "pdfPath");
+    async execute(toolCallId, params, signal, _onUpdate, ctx) {
+      const backend = createPdfBackend(ctx.cwd, toolCallId, "pdf_info");
+      const pdfPath = backend.resolvePath(params.pdfPath, "pdfPath");
+      await backend.requireReadableFile(pdfPath, "pdfPath", signal);
 
-      const { stdout } = await execFileAsync("pdfinfo", [pdfPath], {
+      const { stdout } = await backend.exec("pdfinfo", [pdfPath], {
         signal,
         timeoutMs: params.timeoutMs,
       });
       const parsed = parsePdfInfo(stdout);
-      const version = await getPopplerVersion("pdfinfo", signal);
+      const version = await getPopplerVersion(backend, "pdfinfo", signal);
       const details = {
         sourcePdf: pdfPath,
         ...parsed,
@@ -359,9 +278,9 @@ export default function pdfExtension(pi: ExtensionAPI) {
     name: "pdf_render_pages",
     label: "Render PDF Pages",
     description:
-      "Render selected local PDF pages to PNG images for visual inspection. Writes only to the requested output directory and records JSON sidecars.",
+      "Render selected PDF pages to PNG images for visual inspection in the active local or AgentSH workspace. Writes only to the requested output directory and records JSON sidecars.",
     parameters: Type.Object({
-      pdfPath: Type.String({ description: "Local path to the PDF file" }),
+      pdfPath: Type.String({ description: "Path to the PDF file in the active workspace" }),
       pages: Type.String({ description: "Pages to render, e.g. '1', '1-3', or '1,3,5-7'" }),
       outputDir: Type.String({ description: "Directory where rendered page images and sidecars will be written" }),
       dpi: Type.Optional(Type.Number({ description: `Render DPI (default: ${DEFAULT_RENDER_DPI})` })),
@@ -371,14 +290,14 @@ export default function pdfExtension(pi: ExtensionAPI) {
       overwrite: Type.Optional(Type.Boolean({ description: "Overwrite existing output files (default: false)" })),
       timeoutMs: Type.Optional(Type.Number({ description: `Timeout per page in milliseconds (default: ${DEFAULT_TIMEOUT_MS})` })),
     }),
-    async execute(_toolCallId, params, signal, onUpdate, ctx) {
-      assertNotRemoteSshMode();
-      const pdfPath = resolveLocalPath(ctx.cwd, params.pdfPath, "pdfPath");
-      const outputDir = resolveLocalPath(ctx.cwd, params.outputDir, "outputDir");
-      await requireReadableFile(pdfPath, "pdfPath");
-      await mkdir(outputDir, { recursive: true });
+    async execute(toolCallId, params, signal, onUpdate, ctx) {
+      const backend = createPdfBackend(ctx.cwd, toolCallId, "pdf_render_pages");
+      const pdfPath = backend.resolvePath(params.pdfPath, "pdfPath");
+      const outputDir = backend.resolvePath(params.outputDir, "outputDir");
+      await backend.requireReadableFile(pdfPath, "pdfPath", signal);
+      await backend.mkdir(outputDir, signal);
 
-      const info = await execFileAsync("pdfinfo", [pdfPath], {
+      const info = await backend.exec("pdfinfo", [pdfPath], {
         signal,
         timeoutMs: params.timeoutMs,
       });
@@ -391,20 +310,15 @@ export default function pdfExtension(pi: ExtensionAPI) {
       const prefix = sanitizeName(params.prefix ?? basename(pdfPath));
       const rendered: Array<Record<string, unknown>> = [];
       const content: ToolOutputContent = [];
-      const pdftoppmVersion = await getPopplerVersion("pdftoppm", signal);
-      const imageMagickVersion = await getImageMagickVersion(signal);
+      const pdftoppmVersion = await getPopplerVersion(backend, "pdftoppm", signal);
+      const imageMagickVersion = await getImageMagickVersion(backend, signal);
 
       for (const page of pages) {
         const outputBase = join(outputDir, `${prefix}-page-${padPage(page)}`);
         const outputPath = `${outputBase}.png`;
         const metadataPath = sidecarPath(outputPath);
-        if (!params.overwrite) {
-          try {
-            await access(outputPath, fsConstants.F_OK);
-            throw new Error(`Output already exists: ${outputPath}. Set overwrite=true to replace it.`);
-          } catch (error) {
-            if (error instanceof Error && error.message.startsWith("Output already exists")) throw error;
-          }
+        if (!params.overwrite && await backend.exists(outputPath, signal)) {
+          throw new Error(`Output already exists: ${outputPath}. Set overwrite=true to replace it.`);
         }
 
         onUpdate?.({ content: [{ type: "text", text: `Rendering page ${page} → ${outputPath}` }] });
@@ -420,11 +334,11 @@ export default function pdfExtension(pi: ExtensionAPI) {
           pdfPath,
           outputBase,
         ];
-        await execFileAsync("pdftoppm", args, {
+        await backend.exec("pdftoppm", args, {
           signal,
           timeoutMs: params.timeoutMs,
         });
-        const dimensions = await getImageDimensions(outputPath, signal);
+        const dimensions = await getImageDimensions(backend, outputPath, signal);
         const metadata = {
           kind: "pdf-rendered-page",
           sourcePdf: pdfPath,
@@ -439,12 +353,14 @@ export default function pdfExtension(pi: ExtensionAPI) {
             imagemagick: imageMagickVersion,
           },
         };
-        await writeJson(metadataPath, metadata);
+        await writeJson(backend, metadataPath, metadata, signal);
         const attachment = await maybeAttachImage(
+          backend,
           content,
           outputPath,
           params.attachImages,
           params.maxAttachBytes,
+          signal,
         );
         rendered.push({ ...metadata, metadataPath, attachment });
       }
@@ -475,9 +391,9 @@ export default function pdfExtension(pi: ExtensionAPI) {
     name: "pdf_crop_image",
     label: "Crop PDF Image",
     description:
-      "Crop a rectangular pixel region from a rendered PDF page or other local image. Writes a normal image plus a JSON sidecar.",
+      "Crop a rectangular pixel region from a rendered PDF page or other workspace image. Writes a normal image plus a JSON sidecar.",
     parameters: Type.Object({
-      sourceImagePath: Type.String({ description: "Local path to the source image" }),
+      sourceImagePath: Type.String({ description: "Path to the source image in the active workspace" }),
       crop: Type.Object({
         x: Type.Number({ description: "Left coordinate in pixels" }),
         y: Type.Number({ description: "Top coordinate in pixels" }),
@@ -492,10 +408,10 @@ export default function pdfExtension(pi: ExtensionAPI) {
       overwrite: Type.Optional(Type.Boolean({ description: "Overwrite existing output file (default: false)" })),
       timeoutMs: Type.Optional(Type.Number({ description: `Timeout in milliseconds (default: ${DEFAULT_TIMEOUT_MS})` })),
     }),
-    async execute(_toolCallId, params, signal, _onUpdate, ctx) {
-      assertNotRemoteSshMode();
-      const sourceImagePath = resolveLocalPath(ctx.cwd, params.sourceImagePath, "sourceImagePath");
-      await requireReadableFile(sourceImagePath, "sourceImagePath");
+    async execute(toolCallId, params, signal, _onUpdate, ctx) {
+      const backend = createPdfBackend(ctx.cwd, toolCallId, "pdf_crop_image");
+      const sourceImagePath = backend.resolvePath(params.sourceImagePath, "sourceImagePath");
+      await backend.requireReadableFile(sourceImagePath, "sourceImagePath", signal);
       const crop = params.crop as CropRect;
       for (const [key, value] of Object.entries(crop)) {
         if (!Number.isFinite(value) || value < 0) throw new Error(`crop.${key} must be a non-negative number.`);
@@ -506,25 +422,20 @@ export default function pdfExtension(pi: ExtensionAPI) {
 
       const label = sanitizeName(params.label ?? "crop");
       const outputPath = params.outputPath
-        ? resolveLocalPath(ctx.cwd, params.outputPath, "outputPath")
+        ? backend.resolvePath(params.outputPath, "outputPath")
         : params.outputDir
           ? join(
-              resolveLocalPath(ctx.cwd, params.outputDir, "outputDir"),
+              backend.resolvePath(params.outputDir, "outputDir"),
               `${sanitizeName(basename(sourceImagePath))}-${label}.png`,
             )
           : undefined;
       if (!outputPath) throw new Error("Either outputPath or outputDir is required.");
-      await mkdir(dirname(outputPath), { recursive: true });
-      if (!params.overwrite) {
-        try {
-          await access(outputPath, fsConstants.F_OK);
-          throw new Error(`Output already exists: ${outputPath}. Set overwrite=true to replace it.`);
-        } catch (error) {
-          if (error instanceof Error && error.message.startsWith("Output already exists")) throw error;
-        }
+      await backend.mkdir(dirname(outputPath), signal);
+      if (!params.overwrite && await backend.exists(outputPath, signal)) {
+        throw new Error(`Output already exists: ${outputPath}. Set overwrite=true to replace it.`);
       }
 
-      const sourceDimensions = await getImageDimensions(sourceImagePath, signal);
+      const sourceDimensions = await getImageDimensions(backend, sourceImagePath, signal);
       if (crop.x + crop.width > sourceDimensions.width || crop.y + crop.height > sourceDimensions.height) {
         throw new Error(
           `Crop rectangle ${crop.width}x${crop.height}+${crop.x}+${crop.y} exceeds source dimensions ${sourceDimensions.width}x${sourceDimensions.height}.`,
@@ -533,9 +444,9 @@ export default function pdfExtension(pi: ExtensionAPI) {
 
       const geometry = `${Math.round(crop.width)}x${Math.round(crop.height)}+${Math.round(crop.x)}+${Math.round(crop.y)}`;
       const args = [sourceImagePath, "-crop", geometry, "+repage", outputPath];
-      await execFileAsync("magick", args, { signal, timeoutMs: params.timeoutMs });
-      const dimensions = await getImageDimensions(outputPath, signal);
-      const imageMagickVersion = await getImageMagickVersion(signal);
+      await backend.exec("magick", args, { signal, timeoutMs: params.timeoutMs });
+      const dimensions = await getImageDimensions(backend, outputPath, signal);
+      const imageMagickVersion = await getImageMagickVersion(backend, signal);
       const metadata = {
         kind: "pdf-image-crop",
         sourceImagePath,
@@ -553,7 +464,7 @@ export default function pdfExtension(pi: ExtensionAPI) {
         toolVersions: { imagemagick: imageMagickVersion },
       };
       const metadataPath = sidecarPath(outputPath);
-      await writeJson(metadataPath, metadata);
+      await writeJson(backend, metadataPath, metadata, signal);
 
       const content: ToolOutputContent = [
         {
@@ -561,7 +472,14 @@ export default function pdfExtension(pi: ExtensionAPI) {
           text: `Cropped ${sourceImagePath}\n→ ${outputPath} (${dimensions.width}×${dimensions.height})\nCrop: ${geometry}`,
         },
       ];
-      const attachment = await maybeAttachImage(content, outputPath, params.attachImage, params.maxAttachBytes);
+      const attachment = await maybeAttachImage(
+        backend,
+        content,
+        outputPath,
+        params.attachImage,
+        params.maxAttachBytes,
+        signal,
+      );
 
       return {
         content,
@@ -574,9 +492,9 @@ export default function pdfExtension(pi: ExtensionAPI) {
     name: "pdf_extract_text",
     label: "Extract PDF Text",
     description:
-      "Extract text from selected pages of a local PDF using Poppler pdftotext. Supports plain, layout-preserving, raw, and bbox modes.",
+      "Extract text from selected pages of a PDF using Poppler pdftotext in the active local or AgentSH workspace. Supports plain, layout-preserving, raw, and bbox modes.",
     parameters: Type.Object({
-      pdfPath: Type.String({ description: "Local path to the PDF file" }),
+      pdfPath: Type.String({ description: "Path to the PDF file in the active workspace" }),
       pages: Type.Optional(Type.String({ description: "Optional pages to extract, e.g. '1', '1-3', or '1,3,5-7'. pdftotext receives the min/max range." })),
       mode: Type.Optional(
         Type.Union([
@@ -591,16 +509,16 @@ export default function pdfExtension(pi: ExtensionAPI) {
       maxChars: Type.Optional(Type.Number({ description: `Maximum characters returned when outputPath is omitted (default: ${DEFAULT_MAX_TEXT_CHARS})` })),
       timeoutMs: Type.Optional(Type.Number({ description: `Timeout in milliseconds (default: ${DEFAULT_TIMEOUT_MS})` })),
     }),
-    async execute(_toolCallId, params, signal, _onUpdate, ctx) {
-      assertNotRemoteSshMode();
-      const pdfPath = resolveLocalPath(ctx.cwd, params.pdfPath, "pdfPath");
-      await requireReadableFile(pdfPath, "pdfPath");
-      const outputPath = params.outputPath ? resolveLocalPath(ctx.cwd, params.outputPath, "outputPath") : undefined;
-      if (outputPath) await mkdir(dirname(outputPath), { recursive: true });
+    async execute(toolCallId, params, signal, _onUpdate, ctx) {
+      const backend = createPdfBackend(ctx.cwd, toolCallId, "pdf_extract_text");
+      const pdfPath = backend.resolvePath(params.pdfPath, "pdfPath");
+      await backend.requireReadableFile(pdfPath, "pdfPath", signal);
+      const outputPath = params.outputPath ? backend.resolvePath(params.outputPath, "outputPath") : undefined;
+      if (outputPath) await backend.mkdir(dirname(outputPath), signal);
 
       let selectedPages: number[] | undefined;
       if (params.pages) {
-        const info = await execFileAsync("pdfinfo", [pdfPath], { signal, timeoutMs: params.timeoutMs });
+        const info = await backend.exec("pdfinfo", [pdfPath], { signal, timeoutMs: params.timeoutMs });
         const parsedInfo = parsePdfInfo(info.stdout);
         selectedPages = parsePageSpec(params.pages, typeof parsedInfo.pages === "number" ? parsedInfo.pages : undefined);
       }
@@ -616,11 +534,11 @@ export default function pdfExtension(pi: ExtensionAPI) {
       if (mode === "bbox-layout") args.push("-bbox-layout");
       args.push(pdfPath, outputPath ?? "-");
 
-      const result = await execFileAsync("pdftotext", args, {
+      const result = await backend.exec("pdftotext", args, {
         signal,
         timeoutMs: params.timeoutMs,
       });
-      const version = await getPopplerVersion("pdftotext", signal);
+      const version = await getPopplerVersion(backend, "pdftotext", signal);
       const metadata = {
         kind: "pdf-extracted-text",
         sourcePdf: pdfPath,
@@ -630,7 +548,7 @@ export default function pdfExtension(pi: ExtensionAPI) {
         command: commandString("pdftotext", args),
         toolVersions: { pdftotext: version },
       };
-      if (outputPath) await writeJson(sidecarPath(outputPath), metadata);
+      if (outputPath) await writeJson(backend, sidecarPath(outputPath), metadata, signal);
 
       if (outputPath) {
         return {
@@ -640,16 +558,34 @@ export default function pdfExtension(pi: ExtensionAPI) {
       }
 
       const limit = params.maxChars ?? DEFAULT_MAX_TEXT_CHARS;
+      if (!Number.isSafeInteger(limit) || limit <= 0) {
+        throw new Error("maxChars must be a positive integer.");
+      }
       const text = result.stdout;
-      const truncated = text.length > limit;
+      const locallyTruncated = text.length > limit;
+      const supervisorTruncated = result.stdoutTruncated === true;
+      const notices = [
+        locallyTruncated ? `truncated to ${limit} chars` : undefined,
+        supervisorTruncated
+          ? `AgentSH truncated command stdout${result.stdoutTotalBytes ? ` from ${result.stdoutTotalBytes} bytes` : ""}`
+          : undefined,
+      ].filter(Boolean);
       return {
         content: [
           {
             type: "text",
-            text: truncated ? text.slice(0, limit) + `\n\n[truncated to ${limit} chars]` : text,
+            text: notices.length > 0
+              ? text.slice(0, limit) + `\n\n[${notices.join("; ")}]`
+              : text,
           },
         ],
-        details: { ...metadata, length: text.length, truncated },
+        details: {
+          ...metadata,
+          length: text.length,
+          truncated: locallyTruncated || supervisorTruncated,
+          supervisorStdoutTruncated: supervisorTruncated,
+          supervisorStdoutTotalBytes: result.stdoutTotalBytes,
+        },
       };
     },
   });
@@ -658,9 +594,9 @@ export default function pdfExtension(pi: ExtensionAPI) {
     name: "pdf_extract_images",
     label: "Extract PDF Images",
     description:
-      "Extract embedded bitmap images from a local PDF using Poppler pdfimages. This complements page rendering and is useful when figures are embedded raster assets.",
+      "Extract embedded bitmap images from a PDF in the active local or AgentSH workspace using Poppler pdfimages. This complements page rendering and is useful when figures are embedded raster assets.",
     parameters: Type.Object({
-      pdfPath: Type.String({ description: "Local path to the PDF file" }),
+      pdfPath: Type.String({ description: "Path to the PDF file in the active workspace" }),
       outputDir: Type.String({ description: "Directory where extracted images and sidecar metadata will be written" }),
       pages: Type.Optional(Type.String({ description: "Optional pages to extract, e.g. '1', '1-3', or '1,3,5-7'. pdfimages receives the min/max range." })),
       prefix: Type.Optional(Type.String({ description: "Optional filename prefix (default: PDF basename + '-image')" })),
@@ -672,17 +608,19 @@ export default function pdfExtension(pi: ExtensionAPI) {
       overwrite: Type.Optional(Type.Boolean({ description: "Allow outputs with the same prefix to already exist (default: false)" })),
       timeoutMs: Type.Optional(Type.Number({ description: `Timeout in milliseconds (default: ${DEFAULT_TIMEOUT_MS})` })),
     }),
-    async execute(_toolCallId, params, signal, _onUpdate, ctx) {
-      assertNotRemoteSshMode();
-      const pdfPath = resolveLocalPath(ctx.cwd, params.pdfPath, "pdfPath");
-      const outputDir = resolveLocalPath(ctx.cwd, params.outputDir, "outputDir");
-      await requireReadableFile(pdfPath, "pdfPath");
-      await mkdir(outputDir, { recursive: true });
+    async execute(toolCallId, params, signal, _onUpdate, ctx) {
+      const backend = createPdfBackend(ctx.cwd, toolCallId, "pdf_extract_images");
+      const pdfPath = backend.resolvePath(params.pdfPath, "pdfPath");
+      const outputDir = backend.resolvePath(params.outputDir, "outputDir");
+      await backend.requireReadableFile(pdfPath, "pdfPath", signal);
+      await backend.mkdir(outputDir, signal);
 
-      const prefix = sanitizeName(params.prefix ?? `${basename(pdfPath)}-image`);
+      const prefix = params.prefix
+        ? sanitizeName(params.prefix)
+        : `${sanitizeName(basename(pdfPath))}-image`;
       const outputPrefix = join(outputDir, prefix);
       if (!params.overwrite) {
-        const existing = (await readdir(outputDir)).filter((entry) => entry.startsWith(`${prefix}-`));
+        const existing = (await backend.readdir(outputDir, signal)).filter((entry) => entry.startsWith(`${prefix}-`));
         if (existing.length > 0) {
           throw new Error(`Output files with prefix ${prefix}- already exist in ${outputDir}. Set overwrite=true or choose a different prefix.`);
         }
@@ -690,12 +628,12 @@ export default function pdfExtension(pi: ExtensionAPI) {
 
       let selectedPages: number[] | undefined;
       if (params.pages) {
-        const info = await execFileAsync("pdfinfo", [pdfPath], { signal, timeoutMs: params.timeoutMs });
+        const info = await backend.exec("pdfinfo", [pdfPath], { signal, timeoutMs: params.timeoutMs });
         const parsedInfo = parsePdfInfo(info.stdout);
         selectedPages = parsePageSpec(params.pages, typeof parsedInfo.pages === "number" ? parsedInfo.pages : undefined);
       }
 
-      const before = new Set(await readdir(outputDir));
+      const before = new Set(await backend.readdir(outputDir, signal));
       const args: string[] = [];
       if (selectedPages && selectedPages.length > 0) {
         args.push("-f", String(Math.min(...selectedPages)), "-l", String(Math.max(...selectedPages)));
@@ -704,20 +642,21 @@ export default function pdfExtension(pi: ExtensionAPI) {
       if (format === "all") args.push("-all");
       if (format === "png") args.push("-png");
       args.push(pdfPath, outputPrefix);
-      await execFileAsync("pdfimages", args, { signal, timeoutMs: params.timeoutMs });
-      const after = await readdir(outputDir);
+      await backend.exec("pdfimages", args, { signal, timeoutMs: params.timeoutMs });
+      const after = await backend.readdir(outputDir, signal);
       const generatedNames = after
         .filter((entry) => entry.startsWith(`${prefix}-`) && (params.overwrite || !before.has(entry)))
         .sort();
-      const version = await getPopplerVersion("pdfimages", signal);
-      const imageMagickVersion = await getImageMagickVersion(signal);
+      const version = await getPopplerVersion(backend, "pdfimages", signal);
+      const imageMagickVersion = await getImageMagickVersion(backend, signal);
       const images: Array<Record<string, unknown>> = [];
       for (const name of generatedNames) {
         const imagePath = join(outputDir, name);
         let dimensions: { width: number; height: number } | undefined;
         try {
-          dimensions = await getImageDimensions(imagePath, signal);
-        } catch {
+          dimensions = await getImageDimensions(backend, imagePath, signal);
+        } catch (error) {
+          if (signal?.aborted || (error instanceof Error && error.name === "AbortError")) throw error;
           dimensions = undefined;
         }
         images.push({ imagePath, dimensions, format: extname(imagePath).replace(/^\./, "") || undefined });
@@ -734,7 +673,7 @@ export default function pdfExtension(pi: ExtensionAPI) {
         toolVersions: { pdfimages: version, imagemagick: imageMagickVersion },
       };
       const metadataPath = join(outputDir, `${prefix}.images.json`);
-      await writeJson(metadataPath, metadata);
+      await writeJson(backend, metadataPath, metadata, signal);
 
       return {
         content: [

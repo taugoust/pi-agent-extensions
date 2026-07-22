@@ -438,7 +438,7 @@ Errors show with red background:
 
 </details>
 <details>
-<summary><strong>pdf</strong> - Local PDF inspection beyond text extraction</summary>
+<summary><strong>pdf</strong> - Local or AgentSH-supervised PDF inspection beyond text extraction</summary>
 <br>
 
 - **Source**:
@@ -448,11 +448,16 @@ Errors show with red background:
 - **Dependencies**: Poppler (`pdfinfo`, `pdftoppm`, `pdftotext`,
   `pdfimages`) and ImageMagick (`magick`)
 
-**Description**: Registers local-only PDF inspection tools that complement
-plain `pdftotext` workflows. The tools can inspect metadata, render pages to
-PNG images, crop rendered regions, extract text in multiple modes, and extract
-embedded bitmap images. Outputs are written only to explicitly requested paths
-or directories and generated image/text artifacts get JSON metadata sidecars.
+**Description**: Registers PDF inspection tools that complement plain
+`pdftotext` workflows. In ordinary unsupervised Pi sessions they use the local
+filesystem and process runtime. When the `sandbox` extension has an active
+AgentSH supervisor, every command, read, and sidecar write is routed through
+that supervisor, including forwarded `pi-auto --ssh` sessions; remote paths
+remain supervisor-visible `/workspace` paths. The tools can inspect metadata,
+render pages to PNG images, crop rendered regions, extract text in multiple
+modes, and extract embedded bitmap images. Outputs are written only to
+explicitly requested paths or directories and generated image/text artifacts
+get JSON metadata sidecars.
 
 **Nix usage**:
 
@@ -461,7 +466,9 @@ nix shell nixpkgs#poppler_utils nixpkgs#imagemagick
 ```
 
 The Home Manager module installs these packages automatically when
-`programs.pi.extensions.pdf.enable = true;` is set.
+`programs.pi.extensions.pdf.enable = true;` is set. Supervised sessions also
+require the packages on the AgentSH host; installing them only for a remote
+trusted Pi control plane is insufficient.
 
 **Tools**:
 
@@ -927,8 +934,8 @@ pi
 - **slow-mode:** Type `/slow-mode`{.verbatim} to toggle the review gate
 - **fetch:** The LLM will use it for HTTP requests --- try asking it to
   fetch a URL
-- **pdf:** Ask the LLM to inspect a local PDF, render pages, or crop a page
-  region for visual review
+- **pdf:** Ask the LLM to inspect a local or AgentSH-workspace PDF,
+  render pages, or crop a page region for visual review
 - **drawio:** Ask the LLM to create a diagram or paper figure as a native
   `.drawio` file, optionally exported to PNG/SVG/PDF
 - **questionnaire:** The LLM will call it automatically when needed
@@ -945,7 +952,8 @@ pi
 │   └── index.ts
 ├── modal-editor/       # Vim-style modal input editor
 │   └── index.ts
-├── pdf/                # Local PDF inspection tools
+├── pdf/                # Local or AgentSH-supervised PDF inspection tools
+│   ├── backend.ts
 │   └── index.ts
 ├── questionnaire/      # Multi-question tool
 │   └── index.ts

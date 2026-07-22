@@ -27,7 +27,7 @@ in
       modal-editor.enable = lib.mkEnableOption "modal-editor extension — vim-style modal input";
       mac-system-theme.enable = lib.mkEnableOption "mac-system-theme extension — syncs pi theme to macOS system appearance";
       pager.enable = lib.mkEnableOption "pager extension — open conversation in an external pager (bat/less)";
-      pdf.enable = lib.mkEnableOption "pdf extension — inspect local PDFs via Poppler and ImageMagick tools";
+      pdf.enable = lib.mkEnableOption "pdf extension — inspect PDFs locally or through an active AgentSH supervisor";
       permission-gate.enable = lib.mkEnableOption "permission-gate extension — legacy regex gate for dangerous bash commands";
       ssh.enable = lib.mkEnableOption "ssh extension — run read/write/edit/bash tools on a remote host via --ssh";
 
@@ -104,6 +104,7 @@ in
 
       (lib.mkIf cfg.extensions.pdf.enable {
         "${extDir}/pdf/index.ts".source = "${self}/pdf/index.ts";
+        "${extDir}/pdf/backend.ts".source = "${self}/pdf/backend.ts";
       })
 
       (lib.mkIf cfg.extensions.permission-gate.enable {
