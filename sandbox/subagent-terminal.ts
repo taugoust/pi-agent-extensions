@@ -2,7 +2,7 @@ import { stripSubagentTerminalControls } from "./subagent-text.js";
 
 export type SubagentTerminalState = "completed" | "failed" | "cancelled" | "timed_out";
 export type SubagentFailureKind = "auth" | "model" | "compaction" | "protocol" | "transport" | "process" | "configuration" | "unknown";
-export type SubagentCancellationCause = "user_cancelled" | "child_timeout" | "request_timeout" | "parent_cancelled" | "client_disconnected" | "supervisor_shutdown";
+export type SubagentCancellationCause = "user_cancelled" | "child_timeout" | "request_timeout" | "parent_cancelled" | "client_disconnected" | "supervisor_shutdown" | "supervisor_restart";
 export type SubagentTermination = "natural" | "graceful" | "forced";
 
 export type SubagentTerminal = {
@@ -13,12 +13,13 @@ export type SubagentTerminal = {
   signal?: string;
   termination?: SubagentTermination;
   retryable: boolean;
+  sideEffectsMayHaveOccurred?: boolean;
   message?: string;
 };
 
 const STATES = new Set<SubagentTerminalState>(["completed", "failed", "cancelled", "timed_out"]);
 const FAILURE_KINDS = new Set<SubagentFailureKind>(["auth", "model", "compaction", "protocol", "transport", "process", "configuration", "unknown"]);
-const CANCELLATION_CAUSES = new Set<SubagentCancellationCause>(["user_cancelled", "child_timeout", "request_timeout", "parent_cancelled", "client_disconnected", "supervisor_shutdown"]);
+const CANCELLATION_CAUSES = new Set<SubagentCancellationCause>(["user_cancelled", "child_timeout", "request_timeout", "parent_cancelled", "client_disconnected", "supervisor_shutdown", "supervisor_restart"]);
 const TERMINATIONS = new Set<SubagentTermination>(["natural", "graceful", "forced"]);
 const MAX_TERMINAL_MESSAGE_BYTES = 2 * 1024;
 
@@ -60,6 +61,7 @@ export function normalizeSubagentTerminal(value: unknown, legacy: { exitCode?: u
       signal: typeof source?.signal === "string" ? truncateUTF8(source.signal, 128) : undefined,
       termination,
       retryable: source?.retryable === true,
+      ...((source?.side_effects_may_have_occurred === true || source?.sideEffectsMayHaveOccurred === true) ? { sideEffectsMayHaveOccurred: true } : {}),
       message: sanitizedMessage(source?.message),
     };
   }

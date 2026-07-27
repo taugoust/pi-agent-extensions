@@ -8,6 +8,7 @@
  */
 
 import { spawn } from "node:child_process";
+import { randomUUID } from "node:crypto";
 import { accessSync, closeSync, constants as fsConstants, fstatSync, lstatSync, openSync, readSync, realpathSync, statSync } from "node:fs";
 import * as http from "node:http";
 import { createConnection, type Socket } from "node:net";
@@ -2410,15 +2411,48 @@ class RestSupervisorClient {
       body.stream = true;
       const executionTimeoutMs = effectiveSubagentExecutionTimeoutMs(body.timeout_ms);
       const transportTimeoutMs = subagentTransportTimeoutMs(executionTimeoutMs);
+      const requestId = `subagent-request-${randomUUID()}`;
       body.timeout_ms = executionTimeoutMs;
+      body.request_id = requestId;
+      if (options.signal?.aborted) throw supervisorRequestAborted();
+
+      // A caller abort is first propagated over an independent control request.
+      // Only if that request cannot be delivered do we close the result stream.
+      // This lets AgentSH durably distinguish user/parent cancellation from a
+      // genuine transport disconnect before it terminates the child process.
+      const streamController = new AbortController();
+      const actor = objectField(body.actor);
+      const cancellationCause = Number(actor?.subagent_depth || 0) > 0 ? "parent_cancelled" : "user_cancelled";
+      let cancellationStarted = false;
+      const propagateCancellation = async () => {
+        if (cancellationStarted) return;
+        cancellationStarted = true;
+        const path = `${this.toolPath("spawn_subagent")}/${encodeURIComponent(requestId)}/cancel`;
+        let lastError: unknown;
+        for (let attempt = 0; attempt < 4; attempt += 1) {
+          try {
+            await this.#requestOnce("POST", path, { cause: cancellationCause }, { timeoutMs: 2_000 });
+            return;
+          } catch (error) {
+            lastError = error;
+            if (!String(asError(error).message).includes("HTTP 409") || attempt === 3) break;
+            await reconnectDelay(25);
+          }
+        }
+        streamController.abort(lastError);
+      };
+      const onCallerAbort = () => { void propagateCancellation(); };
+      options.signal?.addEventListener("abort", onCallerAbort, { once: true });
       try {
-        const raw = await this.requestNDJSON("POST", this.toolPath("spawn_subagent"), body, { signal: options.signal, timeoutMs: transportTimeoutMs, onEvent: options.onUpdate });
+        const raw = await this.requestNDJSON("POST", this.toolPath("spawn_subagent"), body, { signal: streamController.signal, timeoutMs: transportTimeoutMs, onEvent: options.onUpdate });
         return unwrapRestSubagentResponse(raw);
       } catch (error) {
         if (error instanceof SupervisorRequestTimeoutError && !options.signal?.aborted) {
           throw new SubagentTransportTimeoutError(executionTimeoutMs, transportTimeoutMs);
         }
         throw error;
+      } finally {
+        options.signal?.removeEventListener("abort", onCallerAbort);
       }
     } catch (error) {
       const message = asError(error).message;
@@ -4243,10 +4277,10 @@ export default function sandbox(pi: ExtensionAPI) {
       } catch (error) {
         const rawMessage = asError(error).message || "spawn_subagent failed";
         const terminal = normalizeSubagentTerminal(error instanceof SubagentTransportTimeoutError
-          ? { state: "timed_out", failure_kind: "transport", cancellation_cause: "request_timeout", exit_code: 124, termination: "natural", retryable: true, message: rawMessage }
+          ? { state: "timed_out", failure_kind: "transport", cancellation_cause: "request_timeout", exit_code: 124, termination: "natural", retryable: false, side_effects_may_have_occurred: true, message: rawMessage }
           : signal?.aborted
-            ? { state: "cancelled", cancellation_cause: "user_cancelled", exit_code: 130, termination: "graceful", retryable: true, message: rawMessage }
-            : { state: "failed", failure_kind: "transport", exit_code: 1, termination: "natural", retryable: true, message: rawMessage });
+            ? { state: "cancelled", cancellation_cause: "user_cancelled", exit_code: 130, termination: "graceful", retryable: false, side_effects_may_have_occurred: true, message: rawMessage }
+            : { state: "failed", failure_kind: "transport", exit_code: 1, termination: "natural", retryable: false, side_effects_may_have_occurred: true, message: rawMessage });
         const message = terminal?.message || "spawn_subagent failed";
         for (const childState of streamStates.values()) {
           flushSubagentStdout(childState);

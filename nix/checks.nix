@@ -2127,6 +2127,9 @@ in
             if (content === undefined) return { statusCode: 403, body: { ok: false, error: "unowned artifact path" } };
             return { ok: true, result: { path: request.body.path, real_path: request.body.path, encoding: "utf-8", content, size: Buffer.byteLength(content), truncated: false } };
           }
+          if (request.method === "POST" && request.url.startsWith("/api/v1/sessions/sess-subagent-stream/tools/spawn_subagent/") && request.url.endsWith("/cancel")) {
+            return { statusCode: 202, body: { ok: true, result: { accepted: true, cause: request.body.cause } } };
+          }
           if (request.method === "POST" && request.url === "/api/v1/sessions/sess-subagent-stream/tools/spawn_subagent") {
             if (request.body.task === "typed-timeout") {
               await new Promise((resolve) => setTimeout(resolve, 80));
@@ -2342,6 +2345,12 @@ in
         assert(!cancelledToolResult.details.results[0].errorMessage, "parallel cancellation copied its error onto an already-completed child");
         assert(cancelledToolResult.details.results[1].terminal.state === "cancelled", "active parallel sibling was not marked cancelled");
         assert(cancelledToolResult.content[0].text.includes("subagent cancelled"), "cancelled request was rendered as a generic failure");
+        const cancelledSpawnIndex = supervisor.requests.findIndex((request) => request.method === "POST" && request.url.endsWith("/tools/spawn_subagent") && request.body.tasks?.some((task) => task.task === "cancel-stream"));
+        const cancelledSpawn = supervisor.requests[cancelledSpawnIndex];
+        const cancellationIndex = supervisor.requests.findIndex((request) => request.method === "POST" && request.url.endsWith("/" + cancelledSpawn?.body.request_id + "/cancel"));
+        const cancellationRequest = supervisor.requests[cancellationIndex];
+        assert(typeof cancelledSpawn?.body.request_id === "string" && cancelledSpawn.body.request_id.startsWith("subagent-request-"), "spawn request omitted its cancellation identity");
+        assert(cancellationIndex > cancelledSpawnIndex && cancellationRequest?.body.cause === "user_cancelled", "caller abort closed the stream before propagating typed cancellation: " + JSON.stringify({ cancelledSpawn, cancellationRequest }));
 
         const retainedCommand = "printf 'retained-progress-smoke\\n'";
         const renderedRunning = subagentTool.renderResult({
