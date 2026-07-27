@@ -2437,6 +2437,8 @@ in
             if (command === "malformed-500") return { statusCode: 503, body: { result: { stdout: "partial" } } };
             if (command === "partial-ok-false") return { statusCode: 500, body: { ok: false, result: { stdout: "partial" } } };
             if (command === "exit-127") return { ok: true, result: { ...base, exit_code: 127, command_started: true, outcome: { command_started: true, dispatch_state: "started", failure_kind: "child_exit", retryable: false } } };
+            if (command === "post-start-cleanup") return { ok: true, result: { ...base, exit_code: 0, outcome: { command_started: true, dispatch_state: "started", failure_kind: "post_start_cleanup", retryable: false, code: "E_POST_START_CLEANUP", message: "helper cleanup registration failed" } } };
+            if (command === "contradictory-preexec-started") return { ok: true, result: { ...base, exit_code: 0, outcome: { command_started: true, dispatch_state: "pre_exec_refused", failure_kind: "pre_exec_enforcement", retryable: false, code: "E_PRE_EXEC_ENFORCEMENT", message: "legacy contradictory cleanup result" } } };
             const kinds = {
               "queue-timeout": ["queue_timeout", false],
               "cancelled": ["caller_cancellation", false],
@@ -2474,6 +2476,11 @@ in
         const exit127 = await bashTool.execute("exit-127", { command: "exit-127" }, undefined, undefined, ctx);
         assert(exit127.isError === true && exit127.details.commandStarted === true && exit127.details.failureKind === "child_exit", "genuine child exit 127 was confused with infrastructure failure");
         assert(exit127.content[0].text.includes("Command exited with code 127") && !exit127.content[0].text.includes("was not executed"), "genuine exit 127 rendered as pre-exec refusal");
+        for (const command of ["post-start-cleanup", "contradictory-preexec-started"]) {
+          const cleanup = await bashTool.execute(command, { command }, undefined, undefined, ctx);
+          assert(cleanup.isError === true && cleanup.details.commandStarted === true, command + " lost authoritative start evidence");
+          assert(cleanup.content[0].text.includes("Command started") && cleanup.content[0].text.includes("must not be replayed automatically") && !cleanup.content[0].text.includes("was not executed"), command + " rendered a started cleanup failure as safe pre-exec refusal: " + JSON.stringify(cleanup));
+        }
         let typedTimeout;
         try {
           await bashTool.execute("command-timeout", { command: "command-timeout" }, undefined, undefined, ctx);
