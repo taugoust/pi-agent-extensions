@@ -655,6 +655,12 @@ in
       test "$(${pkgs.jq}/bin/jq -r .session_id "$PI_AGENTSH_LIFECYCLE_STATE")" = "$PI_AGENTSH_RECOVERY_EXPECTED_SESSION"
       test -z "''${AGENTSH_SESSION_EVENT_TOKEN-}''${OPENAI_API_KEY-}''${AUTHORIZATION-}"
     '';
+    recoveryAutomatic = pkgs.writeShellScript "pi-agentsh-recovery-automatic" ''
+      test "$PI_AGENTSH_RECOVERY_CONTRACT_VERSION" = 1
+      test "$(${pkgs.jq}/bin/jq -r .session_id "$PI_AGENTSH_LIFECYCLE_STATE")" = "$PI_AGENTSH_RECOVERY_EXPECTED_SESSION"
+      test -z "''${AGENTSH_SESSION_EVENT_TOKEN-}''${RECOVERY_CUSTOM_ENV-}''${RECOVERY_UNRELATED_SECRET-}"
+      printf '%s\n' "$PI_AGENTSH_RECOVERY_EXPECTED_SESSION" >>"$(${pkgs.coreutils}/bin/dirname "$PI_AGENTSH_LIFECYCLE_STATE")/automatic-recovery.requested"
+    '';
     recoveryFailure = pkgs.writeShellScript "pi-agentsh-recovery-failure" ''
       echo 'token=wrapper-secret sk-live-outputsecret' >&2
       exit 7
@@ -1182,6 +1188,8 @@ in
       delete process.env.PI_AUTO_SESSION_ID;
       delete process.env.AGENTSH_APPROVAL_UI_SOCKET;
       delete process.env.AGENTSH_SESSION_SUPERVISOR;
+      delete process.env.AGENTSH_SESSION_SUPERVISOR_GENERATION;
+      delete process.env.AGENTSH_SESSION_SUPERVISOR_INCARNATION;
       delete process.env.AGENTSH_SESSION_EVENT_URL;
       delete process.env.AGENTSH_SESSION_EVENT_TOKEN;
       delete process.env.PI_AGENTSH_APPROVAL_CLIENT;
@@ -1198,6 +1206,8 @@ in
       delete process.env.AGENTSH_APPROVER_API_KEY;
       delete process.env.AGENTSH_ADMIN_TOKEN;
       delete process.env.AUTHORIZATION;
+      delete process.env.RECOVERY_CUSTOM_ENV;
+      delete process.env.RECOVERY_UNRELATED_SECRET;
     }
 
     function assertNoBearerCredentialFields(requests) {
@@ -1213,6 +1223,7 @@ in
       process.env.AGENTSH_APPROVAL_PROMPT_WATCH_MS = "10";
       process.env.PI_AGENTSH_RECONNECT_TIMEOUT_MS = "300";
       process.env.PI_AGENTSH_RECONNECT_INITIAL_MS = "10";
+      process.env.PI_AGENTSH_RECOVERY_TRIGGER_MS = "20";
       process.env.PI_AGENTSH_WATCH_RECONNECT_MS = "25";
       // Keep deadline tests fast while preserving the production defaults in
       // pure-module coverage. Ordinary commands deliberately get a separate,
@@ -2497,6 +2508,141 @@ in
         await pi.commands.get("sandbox-control").handler("start", ctx);
         assert(globalThis.__AGENTSH_PI__.getSupervisorState().source === "agentsh-started" && globalThis.__AGENTSH_PI__.getSupervisorState().sessionId === sessionId, "local extension-owned start did not attach its created session");
         assert(ctx.notifications.some((entry) => String(entry.message).includes("supervisor started")), "local start success was not reported");
+        await shutdownSession(pi); await supervisor.close();
+      }
+
+      // Protocol-v2 crash recovery invokes the trusted wrapper exactly once,
+      // accepts only a monotonic incarnation, restores only explicitly requested
+      // environment names, refreshes direnv, and dispatches the waiting mutation once.
+      {
+        clearAgentSHEnv();
+        const sessionId = "sess-protocol-v2-recovery";
+        const privateDir = fs.mkdtempSync(path.join(os.tmpdir(), "agentsh-v2-recovery-"));
+        fs.chmodSync(privateDir, 0o700);
+        const statePath = path.join(privateDir, "state.json");
+        const recoveryMarker = path.join(privateDir, "automatic-recovery.requested");
+        fs.writeFileSync(statePath, JSON.stringify({ schema_version: 1, session_id: sessionId, status: "active" }), { mode: 0o600 });
+        let environmentRestored = false;
+        let direnvRestored = false;
+        let mutationRequests = 0;
+        const supervisor = await withRestartableRestSupervisor(async (request) => {
+          const durableGeneration = request.generation;
+          const incarnation = durableGeneration === 1 ? "11111111-1111-4111-8111-111111111111" : "22222222-2222-4222-8222-222222222222";
+          if (request.method === "GET" && request.url === "/api/v1/detached/status") {
+            const recoveredReady = durableGeneration === 1 || (environmentRestored && direnvRestored);
+            return {
+              protocol_version: 2,
+              session_id: sessionId,
+              lifecycle_state: recoveredReady ? "ready" : "degraded",
+              generation: durableGeneration,
+              incarnation_id: incarnation,
+              recoverable: true,
+              required_environment: durableGeneration === 2 && !environmentRestored ? ["RECOVERY_CUSTOM_ENV", "RECOVERY_MISSING_ENV"] : [],
+              direnv_refresh_required: durableGeneration === 2 && !direnvRestored,
+              network_enforcement: { requested: "none", readiness: "none", status: "none" },
+            };
+          }
+          if (request.method === "PATCH" && request.url === "/api/v1/sessions/" + sessionId) {
+            assert(request.body.env.RECOVERY_CUSTOM_ENV === "restore-this-value", "recovery omitted the requested parent environment value");
+            assert(request.body.unset.length === 1 && request.body.unset[0] === "RECOVERY_MISSING_ENV", "recovery did not explicitly unset an absent requested value");
+            assert(!JSON.stringify(request.body).includes("must-never-be-forwarded"), "recovery forwarded an unrequested parent secret");
+            environmentRestored = true;
+            return { id: sessionId, session_id: sessionId };
+          }
+          if (request.method === "POST" && request.url === "/api/v1/sessions/" + sessionId + "/tools/refresh_direnv") {
+            assert(request.body.cwd === "/workspace", "recovery direnv refresh used a local rather than effective remote cwd");
+            direnvRestored = true;
+            return { ok: true, result: { state: "loaded", set_count: 1, unset_count: 0, rejected_count: 0, generation: 2, duration_ms: 1 } };
+          }
+          if (request.method === "GET" && request.url === "/api/v1/sessions/" + sessionId) return { id: sessionId, session_id: sessionId, workspace: "/workspace", worktree: "/workspace" };
+          if (request.method === "GET" && request.url.endsWith("/network-enforcement")) return { requested: "none", readiness: "none", status: "none" };
+          if (request.method === "GET" && request.url === "/api/v1/approvals") return [];
+          if (request.method === "POST" && request.url.endsWith("/tools/write_file")) {
+            mutationRequests += 1;
+            return { ok: true, result: { text: "v2 recovered write" } };
+          }
+          return { statusCode: 404, body: { error: "unexpected protocol-v2 request", request } };
+        });
+        process.env.AGENTSH_SESSION_ID = sessionId;
+        process.env.AGENTSH_SESSION_SUPERVISOR = "unix://" + supervisor.socketPath;
+        process.env.AGENTSH_SESSION_SUPERVISOR_GENERATION = "1";
+        process.env.AGENTSH_SESSION_SUPERVISOR_INCARNATION = "11111111-1111-4111-8111-111111111111";
+        process.env.PI_AGENTSH_REMOTE_CWD = "/workspace";
+        process.env.PI_AGENTSH_RECOVERY_COMMAND = process.env.recoveryAutomatic;
+        process.env.PI_AGENTSH_LIFECYCLE_STATE = statePath;
+        process.env.RECOVERY_CUSTOM_ENV = "restore-this-value";
+        process.env.RECOVERY_UNRELATED_SECRET = "must-never-be-forwarded";
+        const pi = createPi(); sandbox(pi); const ctx = createContext(); await startSession(pi, ctx);
+
+        await supervisor.stop();
+        const restart = (async () => {
+          await waitFor(() => fs.existsSync(recoveryMarker), "automatic protocol-v2 recovery command was not invoked");
+          await supervisor.start();
+        })();
+        const result = await pi.tools.get("write").execute("v2-recovered-write", { path: "/workspace/recovered.txt", content: "once\n" }, undefined, undefined, ctx);
+        await restart;
+        assert(result.content[0].text.includes("v2 recovered write"), "protocol-v2 mutation did not complete after exact recovery");
+        assert(fs.readFileSync(recoveryMarker, "utf8").trim().split("\n").length === 1, "automatic wrapper recovery was invoked more than once");
+        assert(environmentRestored && direnvRestored, "recovery admitted a mutation before environment and direnv restoration");
+        assert(mutationRequests === 1, "protocol-v2 recovery replayed the waiting mutation");
+        const metadata = globalThis.__AGENTSH_PI__.getSupervisorMetadata();
+        assert(metadata.supervisor_generation === 2 && metadata.supervisor_incarnation_id === "22222222-2222-4222-8222-222222222222", "recovery did not retain the monotonic generation/incarnation identity");
+        await shutdownSession(pi); await supervisor.close();
+      }
+
+      // The same durable generation with a different incarnation is stale or
+      // replaced identity and is terminal; no mutation may reach that listener.
+      {
+        clearAgentSHEnv();
+        const sessionId = "sess-stale-incarnation";
+        let mutationRequests = 0;
+        const supervisor = await withRestartableRestSupervisor(async (request) => {
+          if (request.method === "GET" && request.url === "/api/v1/detached/status") return {
+            protocol_version: 2, session_id: sessionId, lifecycle_state: "ready", generation: 7,
+            incarnation_id: request.generation === 1 ? "77777777-7777-4777-8777-777777777771" : "77777777-7777-4777-8777-777777777772", recoverable: true,
+          };
+          if (request.method === "GET" && request.url === "/api/v1/sessions/" + sessionId) return { id: sessionId, session_id: sessionId, workspace: "/workspace", worktree: "/workspace" };
+          if (request.method === "GET" && request.url.endsWith("/network-enforcement")) return { requested: "none", readiness: "none", status: "none" };
+          if (request.method === "GET" && request.url === "/api/v1/approvals") return [];
+          if (request.method === "POST" && request.url.endsWith("/tools/write_file")) { mutationRequests += 1; return { ok: true, result: {} }; }
+          return { statusCode: 404, body: {} };
+        });
+        process.env.AGENTSH_SESSION_ID = sessionId;
+        process.env.AGENTSH_SESSION_SUPERVISOR = "unix://" + supervisor.socketPath;
+        process.env.AGENTSH_SESSION_SUPERVISOR_GENERATION = "7";
+        process.env.AGENTSH_SESSION_SUPERVISOR_INCARNATION = "77777777-7777-4777-8777-777777777771";
+        const pi = createPi(); sandbox(pi); const ctx = createContext(); await startSession(pi, ctx);
+        await supervisor.stop();
+        await waitFor(() => globalThis.__AGENTSH_PI__.getSupervisorState().status === "connecting", "stale-incarnation watcher did not enter reconnecting state");
+        await supervisor.start();
+        await waitFor(() => globalThis.__AGENTSH_PI__.getSupervisorState().status === "error", "stale incarnation did not become terminal");
+        const staleState = globalThis.__AGENTSH_PI__.getSupervisorState();
+        assert(String(staleState.lastError).includes("incarnation") || String(staleState.lastError).includes("not found or changed"), "stale incarnation rejection was not actionable: " + JSON.stringify(staleState));
+        assert(mutationRequests === 0, "mutation reached a same-generation replacement incarnation");
+        await shutdownSession(pi); await supervisor.close();
+      }
+
+      // Terminal protocol-v2 lifecycle states are rejected before session
+      // discovery and never trigger arbitrary replacement-session adoption.
+      {
+        clearAgentSHEnv();
+        const sessionId = "sess-terminal-v2";
+        let sessionQueries = 0;
+        const supervisor = await withRestSupervisor(async (request) => {
+          if (request.method === "GET" && request.url === "/api/v1/detached/status") return {
+            protocol_version: 2, session_id: sessionId, lifecycle_state: "finalized", generation: 3,
+            incarnation_id: "33333333-3333-4333-8333-333333333333", recoverable: false,
+          };
+          if (request.url === "/api/v1/sessions/" + sessionId || request.url === "/api/v1/sessions") sessionQueries += 1;
+          return { statusCode: 404, body: {} };
+        });
+        process.env.AGENTSH_SESSION_ID = sessionId;
+        process.env.AGENTSH_SESSION_SUPERVISOR = "unix://" + supervisor.socketPath;
+        process.env.AGENTSH_SESSION_SUPERVISOR_GENERATION = "3";
+        process.env.AGENTSH_SESSION_SUPERVISOR_INCARNATION = "33333333-3333-4333-8333-333333333333";
+        const pi = createPi(); sandbox(pi); const ctx = createContext(); await startSession(pi, ctx);
+        assert(globalThis.__AGENTSH_PI__.getSupervisorState().status === "error", "terminal protocol-v2 status remained connected");
+        assert(sessionQueries === 0, "terminal protocol-v2 status queried or adopted a session");
         await shutdownSession(pi); await supervisor.close();
       }
 

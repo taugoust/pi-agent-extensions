@@ -85,6 +85,23 @@ type NetworkEnforcement = {
   [key: string]: unknown;
 };
 
+type DetachedRuntimeStatus = {
+  protocol_version?: number;
+  session_id?: string;
+  lifecycle_state?: string;
+  generation?: number;
+  incarnation_id?: string;
+  owner_pid?: number;
+  owner_start_identity?: string;
+  boot_id?: string;
+  heartbeat_at?: string;
+  recoverable?: boolean;
+  last_error?: string;
+  required_environment?: string[];
+  direnv_refresh_required?: boolean;
+  network_enforcement?: NetworkEnforcement;
+};
+
 type SupervisorMetadata = {
   session_id?: string;
   sessionId?: string;
@@ -105,6 +122,9 @@ type SupervisorMetadata = {
   network_enforcement_live?: boolean;
   network_enforcement_error?: string;
   command_timeout?: unknown;
+  supervisor_generation?: number;
+  supervisor_incarnation_id?: string;
+  detached_runtime?: DetachedRuntimeStatus;
   [key: string]: unknown;
 };
 
@@ -239,6 +259,7 @@ const START_TIMEOUT_MS = Number(process.env.PI_AGENTSH_START_TIMEOUT_MS || "3000
 const WATCH_RECONNECT_MS = Number(process.env.PI_AGENTSH_WATCH_RECONNECT_MS || "1500");
 const SUPERVISOR_RECONNECT_TIMEOUT_MS = Number(process.env.PI_AGENTSH_RECONNECT_TIMEOUT_MS || "30000");
 const SUPERVISOR_RECONNECT_INITIAL_MS = Number(process.env.PI_AGENTSH_RECONNECT_INITIAL_MS || "100");
+const SUPERVISOR_RECOVERY_TRIGGER_MS = Number(process.env.PI_AGENTSH_RECOVERY_TRIGGER_MS || String(Math.min(2000, Math.max(0, Math.floor(SUPERVISOR_RECONNECT_TIMEOUT_MS / 3)))));
 const APPROVAL_POLL_MS = Number(process.env.PI_AGENTSH_APPROVAL_POLL_MS || "1500");
 const TOOL_REQUEST_TIMEOUT_MS = Number(process.env.PI_AGENTSH_TOOL_REQUEST_TIMEOUT_MS || "600000");
 const APPROVAL_REQUEST_TIMEOUT_SLACK_MS = Number(process.env.PI_AGENTSH_APPROVAL_TIMEOUT_SLACK_MS || "300000");
@@ -793,6 +814,10 @@ function normalizeStartMetadata(raw: unknown): SupervisorMetadata {
   const supervisorSock = metadataSocket(metadata) || normalizeSocketPath(String(obj.supervisor_sock || obj.supervisorSock || ""));
   if (supervisorSock) metadata.supervisor_sock = supervisorSock;
   if (!metadata.session_id && typeof obj.session_id === "string") metadata.session_id = obj.session_id;
+  const generation = Number(obj.generation || metadata.generation || 0);
+  const incarnation = String(obj.incarnation_id || metadata.incarnation_id || "");
+  if (Number.isSafeInteger(generation) && generation > 0) metadata.supervisor_generation = generation;
+  if (incarnation) metadata.supervisor_incarnation_id = incarnation;
   return metadata;
 }
 
@@ -1683,6 +1708,7 @@ class RestSupervisorClient {
   #sessionId: string;
   #expectedSessionId: string;
   #metadata?: SupervisorMetadata;
+  #detachedRuntime?: DetachedRuntimeStatus;
   #reconnectInFlight?: Promise<SupervisorMetadata>;
 
   constructor(readonly socketPath: string, seedMetadata?: SupervisorMetadata, private readonly connectionEvents: RestConnectionEvents = {}) {
@@ -1695,6 +1721,127 @@ class RestSupervisorClient {
 
   #sessionPath(sessionId = this.#expectedSessionId) {
     return `/api/v1/sessions/${encodeURIComponent(sessionId)}`;
+  }
+
+  async #observeDetachedRuntime(timeoutMs: number) {
+    let raw: unknown;
+    try {
+      raw = await this.#requestOnce("GET", "/api/v1/detached/status", undefined, { timeoutMs });
+    } catch (error) {
+      if (error instanceof RestHTTPError && error.statusCode === 404) return undefined;
+      throw error;
+    }
+    if (!raw || typeof raw !== "object") throw this.#sessionLost("The detached status response was not an object.");
+    const status = raw as DetachedRuntimeStatus;
+    // Compatibility fixtures and pre-v2 supervisors may route unknown paths to
+    // an empty/default JSON object instead of a literal 404.
+    if (Number(status.protocol_version || 0) < 2 && !status.lifecycle_state && !status.incarnation_id) return undefined;
+    const actual = String(status.session_id || "");
+    const generation = Number(status.generation || 0);
+    const incarnation = String(status.incarnation_id || "");
+    if (!this.#expectedSessionId || actual !== this.#expectedSessionId) {
+      throw this.#sessionLost(`Detached status returned ${actual || "no session ID"}, expected ${this.#expectedSessionId || "an exact captured identity"}.`);
+    }
+    if (!Number.isSafeInteger(generation) || generation <= 0 || !incarnation || Number(status.protocol_version || 0) < 2) {
+      throw this.#sessionLost("The detached status response omitted its durable incarnation identity.");
+    }
+    const previous = this.#detachedRuntime;
+    const seededGeneration = Number(this.#metadata?.supervisor_generation || 0);
+    const seededIncarnation = String(this.#metadata?.supervisor_incarnation_id || "");
+    if (seededGeneration > 0 && generation < seededGeneration) {
+      throw this.#sessionLost(`Detached generation regressed from captured ${seededGeneration} to ${generation}.`);
+    }
+    if (seededGeneration > 0 && generation === seededGeneration && seededIncarnation && incarnation !== seededIncarnation) {
+      throw this.#sessionLost("Detached incarnation disagrees with the wrapper-captured identity.");
+    }
+    if (previous) {
+      const previousGeneration = Number(previous.generation || 0);
+      const previousIncarnation = String(previous.incarnation_id || "");
+      if (generation < previousGeneration || (generation === previousGeneration && incarnation !== previousIncarnation)) {
+        throw this.#sessionLost("Detached supervisor incarnation changed without a monotonic recovery generation.");
+      }
+    }
+    const lifecycle = String(status.lifecycle_state || "");
+    if (["finalizing", "stopping", "stopped", "finalized"].includes(lifecycle) || status.recoverable === false) {
+      throw this.#sessionLost(`The exact detached session is ${lifecycle || "terminal"} and is not recoverable.`);
+    }
+    if (!["ready", "degraded", "recovering", "failed"].includes(lifecycle)) {
+      throw this.#sessionLost(`The detached supervisor returned unsupported lifecycle state ${lifecycle || "empty"}.`);
+    }
+    this.#detachedRuntime = status;
+    if (this.#metadata) {
+      this.#metadata.detached_runtime = status;
+      this.#metadata.supervisor_generation = generation;
+      this.#metadata.supervisor_incarnation_id = incarnation;
+    }
+    return status;
+  }
+
+  async #reprovisionDetachedRuntime(status: DetachedRuntimeStatus, timeoutMs: number, signal?: AbortSignal) {
+    const required = status.required_environment;
+    if (required !== undefined && !Array.isArray(required)) {
+      throw this.#sessionLost("The detached status returned malformed required_environment metadata.");
+    }
+    const names = Array.from(new Set((required || []).map((name) => String(name))));
+    if (names.length > 256 || names.some((name) => !/^[A-Za-z_][A-Za-z0-9_]*$/.test(name))) {
+      throw this.#sessionLost("The detached status returned unsafe required_environment names.");
+    }
+    if (names.length > 0) {
+      const values: Record<string, string> = {};
+      const unset: string[] = [];
+      for (const name of names) {
+        const value = process.env[name];
+        if (value === undefined) unset.push(name);
+        else values[name] = value;
+      }
+      // Send only names explicitly requested by the authenticated, exact local
+      // supervisor. AgentSH records names in audit/recovery state, never these
+      // values, and an absent parent value is acknowledged as an explicit unset.
+      await this.#requestOnce("PATCH", this.#sessionPath(), { env: values, unset }, { signal, timeoutMs });
+    }
+    if (status.direnv_refresh_required) {
+      const raw = await this.#requestOnce(
+        "POST",
+        `${this.#sessionPath()}/tools/refresh_direnv`,
+        { cwd: effectiveSupervisorCwd(), actor: { kind: "extension", label: "Pi detached recovery direnv refresh" } },
+        // Recovery is bounded by the caller's reconnect/recovery lifetime. Do
+        // not let the ordinary interactive direnv allowance outlive it.
+        { signal, timeoutMs: Math.max(1, timeoutMs) },
+      );
+      const envelope = objectField(raw);
+      if (envelope?.ok !== true) {
+        throw new Error("AgentSH could not restore the required direnv snapshot after supervisor recovery");
+      }
+    }
+    if (names.length === 0 && !status.direnv_refresh_required) return status;
+    const refreshed = await this.#observeDetachedRuntime(timeoutMs);
+    if (!refreshed) throw this.#sessionLost("The protocol-v2 detached status disappeared during environment recovery.");
+    return refreshed;
+  }
+
+  #runtimeNeedsSupervisorRecovery(status: DetachedRuntimeStatus) {
+    return status.lifecycle_state !== "ready";
+  }
+
+  async #recoverLiveDetachedRuntime(status: DetachedRuntimeStatus, timeoutMs: number, signal?: AbortSignal) {
+    let current = await this.#reprovisionDetachedRuntime(status, timeoutMs, signal);
+    if (!this.#runtimeNeedsSupervisorRecovery(current)) return current;
+    const config = recoveryConfiguration(this.#expectedSessionId);
+    if (!config) return current;
+    const controller = new AbortController();
+    const onAbort = () => controller.abort();
+    if (signal) {
+      if (signal.aborted) controller.abort();
+      else signal.addEventListener("abort", onAbort, { once: true });
+    }
+    try {
+      await spawnRecovery(config, controller, timeoutMs);
+    } finally {
+      signal?.removeEventListener("abort", onAbort);
+    }
+    const recovered = await this.#observeDetachedRuntime(timeoutMs);
+    if (!recovered) throw this.#sessionLost("The recovery command returned without a protocol-v2 detached status.");
+    return await this.#reprovisionDetachedRuntime(recovered, timeoutMs, signal);
   }
 
   #sessionLost(detail: string) {
@@ -1731,6 +1878,8 @@ class RestSupervisorClient {
     }
     let delayMs = Math.max(1, SUPERVISOR_RECONNECT_INITIAL_MS);
     let lastError: Error = initialError;
+    let recoveryAttempted = false;
+    const reconnectStartedAt = Date.now();
     try {
       for (;;) {
         const remaining = deadline - Date.now();
@@ -1738,11 +1887,17 @@ class RestSupervisorClient {
           throw new Error(`Timed out waiting ${SUPERVISOR_RECONNECT_TIMEOUT_MS}ms for AgentSH session ${this.#expectedSessionId} at ${this.socketPath}: ${lastError.message}`);
         }
         try {
+          const probeTimeout = Math.max(1, Math.min(CONNECT_TIMEOUT_MS, remaining));
+          let runtime = await this.#observeDetachedRuntime(probeTimeout);
+          if (runtime) runtime = await this.#reprovisionDetachedRuntime(runtime, probeTimeout);
+          if (runtime && this.#runtimeNeedsSupervisorRecovery(runtime)) {
+            throw new SafeSupervisorConnectError(new Error(`exact detached supervisor is ${runtime.lifecycle_state}: ${runtime.last_error || "recovery required"}`));
+          }
           const raw = await this.#requestOnce(
             "GET",
             this.#sessionPath(),
             undefined,
-            { timeoutMs: Math.max(1, Math.min(CONNECT_TIMEOUT_MS, remaining)) },
+            { timeoutMs: probeTimeout },
           );
           const metadata = this.#validateExpectedSession(raw);
           this.connectionEvents.onReconnected?.(metadata);
@@ -1753,6 +1908,20 @@ class RestSupervisorClient {
           }
           if (!(error instanceof SafeSupervisorConnectError)) throw error;
           lastError = error;
+          if (!recoveryAttempted && Date.now() - reconnectStartedAt >= SUPERVISOR_RECOVERY_TRIGGER_MS) {
+            const config = recoveryConfiguration(this.#expectedSessionId);
+            if (config) {
+              recoveryAttempted = true;
+              const controller = new AbortController();
+              try {
+                await spawnRecovery(config, controller, Math.max(1, Math.min(recoveryTimeoutMs(), deadline - Date.now())));
+                lastError = new Error("wrapper recovery completed; waiting for the exact supervisor incarnation");
+                continue;
+              } catch (recoveryError) {
+                lastError = asError(recoveryError);
+              }
+            }
+          }
           const waitMs = Math.min(delayMs, Math.max(1, deadline - Date.now()));
           await reconnectDelay(waitMs);
           delayMs = Math.min(Math.max(delayMs * 2, 1), Math.max(WATCH_RECONNECT_MS, 1));
@@ -2010,6 +2179,11 @@ class RestSupervisorClient {
   }
 
   async hello() {
+    let runtime = await this.#observeDetachedRuntime(CONNECT_TIMEOUT_MS);
+    if (runtime) runtime = await this.#recoverLiveDetachedRuntime(runtime, recoveryTimeoutMs());
+    if (runtime && runtime.lifecycle_state !== "ready") {
+      throw new Error(`Exact detached supervisor recovery is incomplete (${runtime.lifecycle_state}): ${runtime.last_error || "runtime prerequisites are not ready"}`);
+    }
     let metadata: SupervisorMetadata;
     if (this.#expectedSessionId) {
       let raw: unknown;
@@ -2647,6 +2821,16 @@ async function attachToSocket(state: SupervisorState, mode: ProtocolMode, source
   state.watcher.start();
 }
 
+function detachedIdentitySeed(expectedSessionId: string): SupervisorMetadata | undefined {
+  if (!expectedSessionId) return undefined;
+  const generation = Number(env("AGENTSH_SESSION_SUPERVISOR_GENERATION") || 0);
+  const incarnation = env("AGENTSH_SESSION_SUPERVISOR_INCARNATION");
+  const seed: SupervisorMetadata = { session_id: expectedSessionId };
+  if (Number.isSafeInteger(generation) && generation > 0) seed.supervisor_generation = generation;
+  if (incarnation) seed.supervisor_incarnation_id = incarnation;
+  return seed;
+}
+
 async function attachOrStartUnserialized(state: SupervisorState, ctx: ExtensionContext, options: { forceStart?: boolean; notifyOnSuccess?: boolean; expectedSessionId?: string } = {}) {
     state.ctx = ctx;
     state.mode = protocolModeFromEnv();
@@ -2665,7 +2849,7 @@ async function attachOrStartUnserialized(state: SupervisorState, ctx: ExtensionC
 
     const envSock = normalizeSocketPath(env("AGENTSH_SESSION_SUPERVISOR"));
     if (envSock && !options.forceStart) {
-      await attachToSocket(state, "rest", "agentsh-env", envSock, ctx, undefined, expectedSessionId);
+      await attachToSocket(state, "rest", "agentsh-env", envSock, ctx, detachedIdentitySeed(expectedSessionId), expectedSessionId);
       if (options.notifyOnSuccess) notify(ctx, `AgentSH REST supervisor attached: ${state.sessionId || envSock}`, "info");
       return;
     }
