@@ -2345,6 +2345,7 @@ in
         assert(!cancelledToolResult.details.results[0].errorMessage, "parallel cancellation copied its error onto an already-completed child");
         assert(cancelledToolResult.details.results[1].terminal.state === "cancelled", "active parallel sibling was not marked cancelled");
         assert(cancelledToolResult.content[0].text.includes("subagent cancelled"), "cancelled request was rendered as a generic failure");
+        assert(cancelledToolResult.content[0].text.includes("must not be replayed automatically"), "cancelled subagent omitted unknown-side-effect no-replay guidance");
         const cancelledSpawnIndex = supervisor.requests.findIndex((request) => request.method === "POST" && request.url.endsWith("/tools/spawn_subagent") && request.body.tasks?.some((task) => task.task === "cancel-stream"));
         const cancelledSpawn = supervisor.requests[cancelledSpawnIndex];
         const cancellationIndex = supervisor.requests.findIndex((request) => request.method === "POST" && request.url.endsWith("/" + cancelledSpawn?.body.request_id + "/cancel"));

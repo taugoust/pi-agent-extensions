@@ -3690,7 +3690,11 @@ function subagentArtifactHints(result: any): string {
 
 function boundedSubagentParentOutput(result: any): string {
   const inline = truncateByBytes(subagentText(result));
-  const hints = subagentArtifactHints(result);
+  const artifactHints = subagentArtifactHints(result);
+  const terminals = [result?.terminal, ...(Array.isArray(result?.results) ? result.results.map((child: any) => child?.terminal) : [])];
+  const sideEffectsUnknown = terminals.some((terminal) => terminal?.sideEffectsMayHaveOccurred === true && terminal?.retryable !== true);
+  const safetyHint = sideEffectsUnknown ? "The subagent may have produced side effects and must not be replayed automatically." : "";
+  const hints = [artifactHints, safetyHint].filter(Boolean).join("\n");
   return hints ? `${inline}\n\n${hints}` : inline;
 }
 
