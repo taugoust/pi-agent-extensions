@@ -301,24 +301,99 @@ function supervisorSocketUnavailable(error: unknown) {
 
 class SafeSupervisorConnectError extends Error {
   readonly code: "ECONNREFUSED" | "ENOENT";
+  readonly diagnostic: string;
 
   constructor(error: unknown) {
     const cause = asError(error);
-    super(cause.message);
+    super("AgentSH supervisor is unavailable");
     this.name = "SafeSupervisorConnectError";
     this.code = supervisorErrorCode(error) as "ECONNREFUSED" | "ENOENT";
+    this.diagnostic = cause.message;
+  }
+}
+
+type RestErrorPayload = {
+  code?: string;
+  error?: string;
+  path?: string;
+  error_id?: string;
+};
+
+const REST_DOMAIN_CODES = new Set([
+  "file_not_found", "file_permission_denied", "session_not_found", "policy_denied", "approval_denied",
+  "edit_conflict", "invalid_request", "unsupported_endpoint", "conflict",
+  "supervisor_not_ready", "internal_error",
+]);
+
+function parseRestErrorPayload(body: string): RestErrorPayload | undefined {
+  try {
+    const value = JSON.parse(body);
+    if (!value || typeof value !== "object" || Array.isArray(value)) return undefined;
+    const source = value as JsonObject;
+    const code = typeof source.code === "string" && REST_DOMAIN_CODES.has(source.code) ? source.code : undefined;
+    if (!code) return undefined;
+    return {
+      code,
+      error: safeExecText(source.error, 1000),
+      path: safeExecText(source.path, 4096),
+      error_id: safeExecText(source.error_id, 160),
+    };
+  } catch {
+    return undefined;
+  }
+}
+
+function restDomainErrorMessage(_statusCode: number, payload?: RestErrorPayload) {
+  if (!payload?.code) return "AgentSH request failed";
+  const path = payload.path ? `: ${payload.path}` : "";
+  const detail = payload.error ? `: ${payload.error}` : "";
+  switch (payload.code) {
+    case "file_not_found": return `File not found${path}`;
+    case "file_permission_denied": return `File access denied${path}`;
+    case "session_not_found": return "AgentSH session not found";
+    case "policy_denied": return `AgentSH policy denied the operation${path}${detail}`;
+    case "approval_denied": return `AgentSH approval denied the operation${path}${detail}`;
+    case "edit_conflict": return `Edit conflict${path}${detail}`;
+    case "invalid_request": return `Invalid AgentSH request${detail}`;
+    case "unsupported_endpoint": return "This AgentSH supervisor does not support the requested endpoint";
+    case "conflict": return `AgentSH request conflicted with current state${detail}`;
+    case "supervisor_not_ready": return `AgentSH supervisor is not ready${detail}`;
+    case "internal_error": return `AgentSH internal error${payload.error_id ? ` (reference ${payload.error_id})` : ""}`;
+    default: return "AgentSH request failed";
   }
 }
 
 class RestHTTPError extends Error {
+  readonly domainCode?: string;
+  readonly resourcePath?: string;
+  readonly errorId?: string;
+  readonly diagnostic: string;
+
   constructor(
     readonly method: string,
     readonly path: string,
     readonly statusCode: number,
     readonly body: string,
   ) {
-    super(`${method} ${path}: HTTP ${statusCode}${body.trim() ? `: ${truncate(body.trim(), 1000)}` : ""}`);
+    const payload = parseRestErrorPayload(body);
+    super(restDomainErrorMessage(statusCode, payload));
     this.name = "RestHTTPError";
+    this.domainCode = payload?.code;
+    this.resourcePath = payload?.path;
+    this.errorId = payload?.error_id;
+    this.diagnostic = `${method} ${path}: HTTP ${statusCode}${body.trim() ? `: ${truncate(body.trim(), 1000)}` : ""}`;
+    if (process.env.PI_AGENTSH_DEBUG_REST_ERRORS === "1") console.error(this.diagnostic);
+  }
+}
+
+class SupervisorUnavailableError extends Error {
+  readonly diagnostic: string;
+
+  constructor(detail: unknown) {
+    const cause = asError(detail);
+    super(`AgentSH supervisor is unavailable. Timed out waiting ${SUPERVISOR_RECONNECT_TIMEOUT_MS}ms for safe reconnection; the request was not completed`);
+    this.name = "SupervisorUnavailableError";
+    this.diagnostic = cause.message;
   }
 }
 
@@ -1888,7 +1963,7 @@ class RestSupervisorClient {
       for (;;) {
         const remaining = deadline - Date.now();
         if (remaining <= 0) {
-          throw new Error(`Timed out waiting ${SUPERVISOR_RECONNECT_TIMEOUT_MS}ms for AgentSH session ${this.#expectedSessionId} at ${this.socketPath}: ${lastError.message}`);
+          throw new SupervisorUnavailableError(`Timed out waiting ${SUPERVISOR_RECONNECT_TIMEOUT_MS}ms for AgentSH session ${this.#expectedSessionId} at ${this.socketPath}: ${lastError instanceof SafeSupervisorConnectError ? lastError.diagnostic : lastError.message}`);
         }
         try {
           const probeTimeout = Math.max(1, Math.min(CONNECT_TIMEOUT_MS, remaining));
@@ -1959,7 +2034,7 @@ class RestSupervisorClient {
       } catch (error) {
         if (!(error instanceof SafeSupervisorConnectError) || SUPERVISOR_RECONNECT_TIMEOUT_MS <= 0) throw error;
         if (Date.now() >= deadline) {
-          const timeout = new Error(`Timed out waiting ${SUPERVISOR_RECONNECT_TIMEOUT_MS}ms for the AgentSH supervisor tunnel at ${this.socketPath}: ${error.message}`);
+          const timeout = new SupervisorUnavailableError(`Timed out waiting ${SUPERVISOR_RECONNECT_TIMEOUT_MS}ms for the AgentSH supervisor tunnel at ${this.socketPath}: ${error.diagnostic}`);
           this.connectionEvents.onReconnectFailed?.(timeout);
           throw timeout;
         }
@@ -1967,7 +2042,8 @@ class RestSupervisorClient {
           await awaitReconnectForCaller(this.#ensureReconnect(deadline, error), signal, deadline);
         } catch (reconnectError) {
           if (supervisorRequestWasAborted(reconnectError, signal)) throw supervisorRequestAborted();
-          throw reconnectError;
+          if (reconnectError instanceof SupervisorSessionLostError || reconnectError instanceof SupervisorUnavailableError) throw reconnectError;
+          throw new SupervisorUnavailableError(reconnectError);
         }
         // The failed connect never reached the server. Create a fresh HTTP
         // request only after the exact original session has been verified.
@@ -2048,7 +2124,7 @@ class RestSupervisorClient {
         options.signal,
       );
     } catch (error) {
-      if (error instanceof RestHTTPError && error.statusCode === 404 && /session[_ -]?(?:not[_ -]?found|missing)|(?:not[_ -]?found|missing).*session/i.test(error.body)) {
+      if (error instanceof RestHTTPError && (error.domainCode === "session_not_found" || (error.statusCode === 404 && /session[_ -]?(?:not[_ -]?found|missing)|(?:not[_ -]?found|missing).*session/i.test(error.body)))) {
         throw this.#sessionLost(`The supervisor reported that session ${this.#expectedSessionId} no longer exists.`);
       }
       throw error;
@@ -2175,7 +2251,7 @@ class RestSupervisorClient {
         options.signal,
       );
     } catch (error) {
-      if (error instanceof RestHTTPError && error.statusCode === 404 && /session[_ -]?(?:not[_ -]?found|missing)|(?:not[_ -]?found|missing).*session/i.test(error.body)) {
+      if (error instanceof RestHTTPError && (error.domainCode === "session_not_found" || (error.statusCode === 404 && /session[_ -]?(?:not[_ -]?found|missing)|(?:not[_ -]?found|missing).*session/i.test(error.body)))) {
         throw this.#sessionLost(`The supervisor reported that session ${this.#expectedSessionId} no longer exists.`);
       }
       throw error;
@@ -2286,7 +2362,7 @@ class RestSupervisorClient {
       }, options.signal);
     } catch (error) {
       if (options.signal?.aborted) throw supervisorRequestAborted();
-      if (error instanceof RestHTTPError && error.statusCode === 404 && /session[_ -]?(?:not[_ -]?found|missing)|(?:not[_ -]?found|missing).*session/i.test(error.body)) {
+      if (error instanceof RestHTTPError && (error.domainCode === "session_not_found" || (error.statusCode === 404 && /session[_ -]?(?:not[_ -]?found|missing)|(?:not[_ -]?found|missing).*session/i.test(error.body)))) {
         throw this.#sessionLost(`The supervisor reported that session ${this.#expectedSessionId} no longer exists.`);
       }
       if (error instanceof RestHTTPError && budget) {
@@ -2435,7 +2511,7 @@ class RestSupervisorClient {
             return;
           } catch (error) {
             lastError = error;
-            if (!String(asError(error).message).includes("HTTP 409") || attempt === 3) break;
+            if (!(error instanceof RestHTTPError && error.statusCode === 409) || attempt === 3) break;
             await reconnectDelay(25);
           }
         }
@@ -2455,8 +2531,9 @@ class RestSupervisorClient {
         options.signal?.removeEventListener("abort", onCallerAbort);
       }
     } catch (error) {
-      const message = asError(error).message;
-      if (message.includes("HTTP 404")) throw new Error("AgentSH supervisor does not support spawn_subagent; rebuild/deploy a newer AgentSH or disable sandbox subagent registration.");
+      if (error instanceof RestHTTPError && error.domainCode === "unsupported_endpoint") {
+        throw new Error("AgentSH supervisor does not support spawn_subagent; rebuild/deploy a newer AgentSH or disable sandbox subagent registration.");
+      }
       throw error;
     }
   }

@@ -2506,6 +2506,69 @@ in
         await supervisor.close();
       }
 
+      // Typed AgentSH REST failures render as domain errors without exposing
+      // transport framing, internal paths, or raw response bodies.
+      {
+        clearAgentSHEnv();
+        const sessionId = "sess-domain-errors";
+        const supervisor = await withRestSupervisor(async (request) => {
+          if (request.method === "GET" && request.url === "/api/v1/sessions/" + sessionId) {
+            return { id: sessionId, session_id: sessionId, workspace: "/workspace", worktree: "/workspace" };
+          }
+          if (request.method === "GET" && request.url === "/api/v1/approvals") return [];
+          if (request.method === "POST" && request.url.endsWith("/tools/read_file")) {
+            const requested = String(request.body.path || "");
+            if (requested.endsWith("missing.txt")) return { statusCode: 404, body: { ok: false, code: "file_not_found", error: "File not found", path: "/workspace/missing.txt", error_id: "error-file", internal_debug: "/private/shadow/secret-path" } };
+            if (requested.endsWith("policy.txt")) return { statusCode: 403, body: { ok: false, code: "policy_denied", error: "operation denied by policy rule read-only", path: "/workspace/policy.txt", error_id: "error-policy" } };
+            if (requested.endsWith("approval.txt")) return { statusCode: 403, body: { ok: false, code: "approval_denied", error: "operation denied by approval", path: "/workspace/approval.txt", error_id: "error-approval" } };
+            if (requested.endsWith("malformed.txt")) return { statusCode: 500, body: "raw-internal-secret /private/shadow/path" };
+            if (requested.endsWith("ambiguous.txt")) return { statusCode: 404, body: { ok: false, error: "ambiguous legacy not found /private/shadow/path" } };
+            if (requested.endsWith("session.txt")) return { statusCode: 404, body: { ok: false, code: "session_not_found", error: "AgentSH session not found", error_id: "error-session" } };
+          }
+          if (request.method === "POST" && request.url.endsWith("/tools/edit_file")) {
+            return { statusCode: 409, body: { ok: false, code: "edit_conflict", error: "oldText is not unique", path: "/workspace/edit.txt", error_id: "error-edit" } };
+          }
+          if (request.method === "POST" && request.url.endsWith("/tools/spawn_subagent")) {
+            return { statusCode: 404, body: { ok: false, code: "unsupported_endpoint", error: "endpoint is not supported", error_id: "error-endpoint" } };
+          }
+          return { statusCode: 404, body: { ok: false, code: "unsupported_endpoint", error: "endpoint is not supported" } };
+        });
+        process.env.AGENTSH_SESSION_ID = sessionId;
+        process.env.AGENTSH_SESSION_SUPERVISOR = "unix://" + supervisor.socketPath;
+        process.env.PI_AGENTSH_READ_MODE = "supervised";
+        const pi = createPi();
+        sandbox(pi);
+        const ctx = createContext();
+        await startSession(pi, ctx);
+        const readTool = pi.tools.get("read");
+        const editTool = pi.tools.get("edit");
+        const subagentTool = pi.tools.get("subagent");
+        const capture = async (run) => {
+          try { await run(); throw new Error("expected domain failure"); }
+          catch (error) { return String(error); }
+        };
+        const missing = await capture(() => readTool.execute("domain-missing", { path: "/workspace/missing.txt" }, undefined, undefined, ctx));
+        assert(missing.includes("File not found: /workspace/missing.txt") && !missing.includes("HTTP 404") && !missing.includes("/api/v1/") && !missing.includes("private/shadow"), "missing file exposed REST framing: " + missing);
+        const policy = await capture(() => readTool.execute("domain-policy", { path: "/workspace/policy.txt" }, undefined, undefined, ctx));
+        assert(policy.includes("AgentSH policy denied") && policy.includes("/workspace/policy.txt") && !policy.includes("HTTP 403"), "policy denial was not normalized: " + policy);
+        const approval = await capture(() => readTool.execute("domain-approval", { path: "/workspace/approval.txt" }, undefined, undefined, ctx));
+        assert(approval.includes("AgentSH approval denied") && !approval.includes("HTTP 403"), "approval denial was not normalized: " + approval);
+        const edit = await capture(() => editTool.execute("domain-edit", { path: "/workspace/edit.txt", edits: [{ oldText: "x", newText: "y" }] }, undefined, undefined, ctx));
+        assert(edit.includes("Edit conflict: /workspace/edit.txt") && edit.includes("oldText is not unique") && !edit.includes("HTTP 409"), "edit conflict was not normalized: " + edit);
+        const malformed = await capture(() => readTool.execute("domain-malformed", { path: "/workspace/malformed.txt" }, undefined, undefined, ctx));
+        assert(malformed.includes("AgentSH request failed") && !malformed.includes("raw-internal-secret") && !malformed.includes("private/shadow") && !malformed.includes("HTTP 500"), "malformed response leaked raw diagnostics: " + malformed);
+        const ambiguous = await capture(() => readTool.execute("domain-ambiguous", { path: "/workspace/ambiguous.txt" }, undefined, undefined, ctx));
+        assert(ambiguous.includes("AgentSH request failed") && !ambiguous.includes("File not found") && !ambiguous.includes("does not support") && !ambiguous.includes("private/shadow"), "ambiguous legacy 404 was misclassified: " + ambiguous);
+        const unsupportedResult = await subagentTool.execute("domain-subagent", { task: "unsupported" }, undefined, undefined, ctx);
+        const unsupported = JSON.stringify(unsupportedResult);
+        assert(unsupportedResult.isError === true && unsupported.includes("does not support spawn_subagent") && !unsupported.includes("HTTP 404"), "typed unsupported endpoint was not actionable: " + unsupported);
+        const sessionLost = await capture(() => readTool.execute("domain-session", { path: "/workspace/session.txt" }, undefined, undefined, ctx));
+        assert(sessionLost.includes("session " + sessionId) && sessionLost.includes("no longer safe to use") && !sessionLost.includes("HTTP 404"), "session loss was not distinguished: " + sessionLost);
+        await shutdownSession(pi);
+        delete process.env.PI_AGENTSH_READ_MODE;
+        await supervisor.close();
+      }
+
       // With no env-provided supervisor, start remains extension-owned and may
       // create/attach a local session.
       {
