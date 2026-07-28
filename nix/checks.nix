@@ -995,7 +995,7 @@ in
           const raw = Buffer.concat(chunks).toString("utf8");
           let body;
           if (raw.trim()) body = JSON.parse(raw);
-          const request = { method: req.method, url: req.url, body };
+          const request = { method: req.method, url: req.url, body, headers: { ...req.headers } };
           requests.push(request);
           try {
             const response = await handler(request, requests);
@@ -1205,6 +1205,7 @@ in
       delete process.env.AGENTSH_API_KEY;
       delete process.env.AGENTSH_APPROVER_API_KEY;
       delete process.env.AGENTSH_ADMIN_TOKEN;
+      delete process.env.AGENTSH_CHILD_CAPABILITY;
       delete process.env.AUTHORIZATION;
       delete process.env.RECOVERY_CUSTOM_ENV;
       delete process.env.RECOVERY_UNRELATED_SECRET;
@@ -1239,7 +1240,15 @@ in
       const moduleUrl = pathToFileURL(path.join(compiledRoot, "sandbox/index.js")).href;
       const importedModule = await import(moduleUrl);
       const sandbox = importedModule.default?.default ?? importedModule.default ?? importedModule;
+      const childCapabilityHeaders = importedModule.childExecutionCapabilityHeaders ?? importedModule.default?.childExecutionCapabilityHeaders;
       assert(typeof sandbox === "function", "sandbox module did not export a function");
+      assert(typeof childCapabilityHeaders === "function", "sandbox module did not export child capability header derivation");
+      const fixtureCapability = "A".repeat(43);
+      assert(childCapabilityHeaders("/api/v1/sessions/s/tools/exec_bash", { AGENTSH_CHILD_CAPABILITY: fixtureCapability })["X-AgentSH-Child-Capability"] === fixtureCapability, "pure child capability derivation omitted exec_bash credential");
+      assert(Object.keys(childCapabilityHeaders("/api/v1/sessions/s/tools/read_file", { AGENTSH_CHILD_CAPABILITY: fixtureCapability })).length === 0, "pure child capability derivation leaked credential to read_file");
+      let malformedCapabilityError;
+      try { childCapabilityHeaders("/api/v1/sessions/s/tools/exec_bash", { AGENTSH_CHILD_CAPABILITY: "malformed" }); } catch (error) { malformedCapabilityError = error; }
+      assert(String(malformedCapabilityError).includes("AGENTSH_CHILD_CAPABILITY is malformed"), "malformed child capability was accepted");
 
       // Missing AgentSH env leaves the relay inactive and does not need credentials.
       {
@@ -1405,6 +1414,7 @@ in
       // maxima shorten the client lifetime.
       {
         clearAgentSHEnv();
+        process.env.AGENTSH_CHILD_CAPABILITY = fixtureCapability;
         const sessionId = "sess-command-timeouts";
         const commandTimeout = { default_ms: 200, maximum_ms: 240, source: "policy" };
         const supervisor = await withRestSupervisor(async (request) => {
@@ -1486,6 +1496,9 @@ in
         assert(omitted.content[0].text.includes("omitted-ok"), "omitted command was killed by the 100ms generic tool budget");
         const omittedRequest = supervisor.requests.find((request) => request.body?.command === "omitted-outlives-generic");
         assert(omittedRequest && !("timeout_ms" in omittedRequest.body), "omitted bash timeout_ms was serialized instead of left to AgentSH");
+        assert(omittedRequest.headers["x-agentsh-child-capability"] === fixtureCapability, "child execution capability was not attached to exec_bash");
+        const metadataRequest = supervisor.requests.find((request) => request.method === "GET" && request.url.endsWith("/" + sessionId));
+        assert(metadataRequest && metadataRequest.headers["x-agentsh-child-capability"] === undefined, "child execution capability leaked to session metadata request");
 
         await bashTool.execute("short-timeout", { command: "explicit-short", timeout: 0.02 }, undefined, undefined, ctx);
         const shortRequest = supervisor.requests.find((request) => request.body?.command === "explicit-short");

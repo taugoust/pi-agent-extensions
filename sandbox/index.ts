@@ -283,6 +283,8 @@ const VALID_STAGE1_WORKSPACE_MODES = new Set(["shadow", "direct"]);
 const RECOVERY_STATE_VERSION = 1;
 const MAX_RECOVERY_STATE_BYTES = 16 * 1024;
 const MAX_RECOVERY_OUTPUT_BYTES = 64 * 1024;
+const AGENTSH_CHILD_CAPABILITY_ENV = "AGENTSH_CHILD_CAPABILITY";
+const AGENTSH_CHILD_CAPABILITY_HEADER = "X-AgentSH-Child-Capability";
 const LEGACY_PRE_EXEC_CODES = new Set(["E_COMMAND_NOT_STARTED", "E_COMMAND_START_FAILED", "E_PRE_EXEC_FAILED"]);
 const SEMANTIC_EXEC_CODES = /^(?:E_(?:COMMAND|EXEC|QUEUE|POLICY|APPROVAL|NETHELPER|PRE_EXEC|REQUEST|CANCEL|TIMEOUT)_[A-Z0-9_]+)$/;
 
@@ -550,6 +552,16 @@ function subagentTransportTimeoutMs(executionTimeoutMs: number | undefined): num
     throw new Error(`spawn_subagent transport timeout must not exceed ${MAX_NODE_TIMEOUT_MS}`);
   }
   return timeout;
+}
+
+export function childExecutionCapabilityHeaders(path: string, processEnv: NodeJS.ProcessEnv = process.env): Record<string, string> {
+  if (!/\/tools\/exec_bash$/.test(path)) return {};
+  const token = processEnv[AGENTSH_CHILD_CAPABILITY_ENV]?.trim();
+  if (!token) return {};
+  if (!/^[A-Za-z0-9_-]{43}$/.test(token)) {
+    throw new Error(`${AGENTSH_CHILD_CAPABILITY_ENV} is malformed`);
+  }
+  return { [AGENTSH_CHILD_CAPABILITY_HEADER]: token };
 }
 
 function env(name: string) {
@@ -2079,16 +2091,18 @@ class RestSupervisorClient {
         cleanup();
         callback();
       };
+      const capabilityHeaders = childExecutionCapabilityHeaders(path);
       const req = http.request({
         socketPath: this.socketPath,
         host: "unix",
         method,
         path,
         signal,
-        headers: payload === undefined ? { Accept: "application/json" } : {
+        headers: payload === undefined ? { Accept: "application/json", ...capabilityHeaders } : {
           Accept: "application/json",
           "Content-Type": "application/json",
           "Content-Length": Buffer.byteLength(payload),
+          ...capabilityHeaders,
         },
       }, (res) => {
         responseStarted = true;

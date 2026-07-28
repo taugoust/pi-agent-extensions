@@ -711,7 +711,13 @@ and the typed terminal result. AgentSH still applies the policy ceiling.
 `PI_AGENTSH_SUBAGENT_EXECUTION_TIMEOUT_MS` and its legacy
 `PI_AGENTSH_SUBAGENT_REQUEST_TIMEOUT_MS` alias remain optional compatibility
 client ceilings for older deployments; neither is a built-in execution default.
-Caller aborts remain distinct from execution/transport timeouts. Multiple Pi `edit` replacements are applied as
+Caller aborts remain distinct from execution/transport timeouts. AgentSH-owned
+child Pi processes may receive an internal `AGENTSH_CHILD_CAPABILITY`. The
+extension validates that credential and sends it as
+`X-AgentSH-Child-Capability` only on Unix-socket `exec_bash` requests; it is not
+included in command environment payloads or unrelated supervisor operations.
+AgentSH binds it to the exact child process and uses it for authenticated
+per-child execution-lane admission. Multiple Pi `edit` replacements are applied as
 sequential single-replacement REST calls.
 When bounded model-facing `bash` output or a completed subagent final overflows,
 new AgentSH supervisors retain a capped artifact in the remote session runtime
