@@ -274,7 +274,7 @@ const CONFIGURED_SUBAGENT_EXECUTION_TIMEOUT_MS = optionalPositiveTimeoutEnv("PI_
 const LEGACY_SUBAGENT_EXECUTION_TIMEOUT_MS = CONFIGURED_SUBAGENT_EXECUTION_TIMEOUT_MS === undefined
   ? optionalPositiveTimeoutEnv("PI_AGENTSH_SUBAGENT_REQUEST_TIMEOUT_MS")
   : undefined;
-const SUBAGENT_EXECUTION_TIMEOUT_MS = CONFIGURED_SUBAGENT_EXECUTION_TIMEOUT_MS ?? LEGACY_SUBAGENT_EXECUTION_TIMEOUT_MS ?? 7_200_000;
+const SUBAGENT_EXECUTION_TIMEOUT_MS = CONFIGURED_SUBAGENT_EXECUTION_TIMEOUT_MS ?? LEGACY_SUBAGENT_EXECUTION_TIMEOUT_MS;
 const SUBAGENT_TRANSPORT_SLACK_MS = optionalPositiveTimeoutEnv("PI_AGENTSH_SUBAGENT_TRANSPORT_SLACK_MS") ?? 300_000;
 const SUBAGENT_TRANSPORT_TIMEOUT_FLOOR_MS = optionalPositiveTimeoutEnv("PI_AGENTSH_SUBAGENT_TRANSPORT_TIMEOUT_MS");
 const MAX_NODE_TIMEOUT_MS = 2_147_483_647;
@@ -405,8 +405,9 @@ class SupervisorRequestTimeoutError extends Error {
 }
 
 class SubagentTransportTimeoutError extends Error {
-  constructor(readonly executionTimeoutMs: number, readonly transportTimeoutMs: number) {
-    super(`AgentSH subagent transport timed out after ${transportTimeoutMs}ms while waiting for the server terminal event (execution deadline ${executionTimeoutMs}ms)`);
+  constructor(readonly executionTimeoutMs: number | undefined, readonly transportTimeoutMs: number) {
+    const executionDescription = executionTimeoutMs === undefined ? "policy-controlled execution deadline" : `execution deadline ${executionTimeoutMs}ms`;
+    super(`AgentSH subagent transport timed out after ${transportTimeoutMs}ms while waiting for the server terminal event (${executionDescription})`);
     this.name = "SubagentTransportTimeoutError";
   }
 }
@@ -511,7 +512,7 @@ const SubagentParams = Type.Object({
   cwd: Type.Optional(Type.String({ description: "Optional working directory (single mode)" })),
   tasks: Type.Optional(Type.Array(SubagentItem, { description: "Parallel subagent tasks. Max 8, up to 4 run concurrently." })),
   chain: Type.Optional(Type.Array(SubagentItem, { description: "Sequential subagent steps. Each task may use {previous}." })),
-  timeout_ms: Type.Optional(Type.Number({ minimum: 1, description: "Optional shorter execution timeout in milliseconds; defaults to the two-hour configured ceiling" })),
+  timeout_ms: Type.Optional(Type.Number({ minimum: 1, description: "Optional shorter execution timeout in milliseconds; otherwise AgentSH uses the effective policy ceiling" })),
 });
 
 function optionalPositiveTimeoutEnv(name: string): number | undefined {
@@ -524,9 +525,9 @@ function optionalPositiveTimeoutEnv(name: string): number | undefined {
   return value;
 }
 
-function effectiveSubagentExecutionTimeoutMs(value: unknown): number {
+function effectiveSubagentExecutionTimeoutMs(value: unknown): number | undefined {
   const maxExecutionTimeout = MAX_NODE_TIMEOUT_MS - SUBAGENT_TRANSPORT_SLACK_MS;
-  if (!Number.isSafeInteger(SUBAGENT_EXECUTION_TIMEOUT_MS) || SUBAGENT_EXECUTION_TIMEOUT_MS < 1 || SUBAGENT_EXECUTION_TIMEOUT_MS > maxExecutionTimeout) {
+  if (SUBAGENT_EXECUTION_TIMEOUT_MS !== undefined && (!Number.isSafeInteger(SUBAGENT_EXECUTION_TIMEOUT_MS) || SUBAGENT_EXECUTION_TIMEOUT_MS < 1 || SUBAGENT_EXECUTION_TIMEOUT_MS > maxExecutionTimeout)) {
     throw new Error(`configured subagent execution timeout must be between 1 and ${maxExecutionTimeout}ms`);
   }
   if (value === undefined || value === null || value === 0) return SUBAGENT_EXECUTION_TIMEOUT_MS;
@@ -536,10 +537,13 @@ function effectiveSubagentExecutionTimeoutMs(value: unknown): number {
   if (value > maxExecutionTimeout) {
     throw new Error(`spawn_subagent timeout_ms must not exceed ${maxExecutionTimeout}`);
   }
-  return Math.min(value, SUBAGENT_EXECUTION_TIMEOUT_MS);
+  return SUBAGENT_EXECUTION_TIMEOUT_MS === undefined ? value : Math.min(value, SUBAGENT_EXECUTION_TIMEOUT_MS);
 }
 
-function subagentTransportTimeoutMs(executionTimeoutMs: number): number {
+function subagentTransportTimeoutMs(executionTimeoutMs: number | undefined): number {
+  if (executionTimeoutMs === undefined) {
+    return SUBAGENT_TRANSPORT_TIMEOUT_FLOOR_MS ?? MAX_NODE_TIMEOUT_MS;
+  }
   const derived = executionTimeoutMs + SUBAGENT_TRANSPORT_SLACK_MS;
   const timeout = Math.max(derived, SUBAGENT_TRANSPORT_TIMEOUT_FLOOR_MS ?? 0);
   if (!Number.isSafeInteger(timeout) || timeout > MAX_NODE_TIMEOUT_MS) {
@@ -1322,7 +1326,10 @@ class MockSupervisorClient {
 
   async spawnSubagent(params: JsonObject, options: SpawnSubagentOptions = {}) {
     const executionTimeoutMs = effectiveSubagentExecutionTimeoutMs(params.timeout_ms);
-    return await this.request("spawn_subagent", { ...params, timeout_ms: executionTimeoutMs, actor: options.actor || params.actor || parentActor(undefined, "Pi subagent tool") }, {
+    const body: JsonObject = { ...params, actor: options.actor || params.actor || parentActor(undefined, "Pi subagent tool") };
+    if (executionTimeoutMs === undefined) delete body.timeout_ms;
+    else body.timeout_ms = executionTimeoutMs;
+    return await this.request("spawn_subagent", body, {
       signal: options.signal,
       timeoutMs: subagentTransportTimeoutMs(executionTimeoutMs),
       onEvent: options.onUpdate,
@@ -2488,7 +2495,8 @@ class RestSupervisorClient {
       const executionTimeoutMs = effectiveSubagentExecutionTimeoutMs(body.timeout_ms);
       const transportTimeoutMs = subagentTransportTimeoutMs(executionTimeoutMs);
       const requestId = `subagent-request-${randomUUID()}`;
-      body.timeout_ms = executionTimeoutMs;
+      if (executionTimeoutMs === undefined) delete body.timeout_ms;
+      else body.timeout_ms = executionTimeoutMs;
       body.request_id = requestId;
       if (options.signal?.aborted) throw supervisorRequestAborted();
 

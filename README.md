@@ -601,9 +601,9 @@ PI_AGENTSH_CONNECT_TIMEOUT_MS=10000                     # connect timeout and mo
 PI_AGENTSH_COMMAND_EXECUTION_TIMEOUT_MS=14400000        # compatibility default/ceiling when metadata is absent (4h)
 PI_AGENTSH_COMMAND_TRANSPORT_SLACK_MS=310000             # command response slack baseline; modern server metadata may raise it
 
-PI_AGENTSH_SUBAGENT_EXECUTION_TIMEOUT_MS=7200000       # default/maximum AgentSH child deadline (2h)
-PI_AGENTSH_SUBAGENT_TRANSPORT_SLACK_MS=300000          # NDJSON deadline slack after child execution (5m)
-PI_AGENTSH_SUBAGENT_TRANSPORT_TIMEOUT_MS=7500000       # optional transport floor; never shortens execution + slack
+PI_AGENTSH_SUBAGENT_EXECUTION_TIMEOUT_MS=7200000       # optional compatibility client ceiling; unset defers to AgentSH policy
+PI_AGENTSH_SUBAGENT_TRANSPORT_SLACK_MS=300000          # NDJSON deadline slack after an explicit child timeout (5m)
+PI_AGENTSH_SUBAGENT_TRANSPORT_TIMEOUT_MS=7500000       # optional transport floor; never shortens explicit execution + slack
 ```
 
 **Mock NDJSON protocol**: newline-delimited JSON over a Unix socket. Requests
@@ -701,15 +701,17 @@ actual slack, while caller abort remains `AbortError`. Exit code 124 alone is
 not interpreted as a timeout, because a normal child may return it.
 
 `spawn_subagent` separately uses an NDJSON streaming response for stdout/stderr
-and child result events. AgentSH owns the subagent execution deadline. The
-extension sends a two-hour `timeout_ms` by default and keeps its NDJSON transport
-open for that deadline plus five minutes, so process-tree cleanup and the typed
-terminal result can arrive before the client closes. A subagent tool-call
-`timeout_ms` can select a shorter execution window but cannot raise the
-configured ceiling. `PI_AGENTSH_SUBAGENT_REQUEST_TIMEOUT_MS` remains a
-compatibility alias for the default execution timeout; it no longer creates an
-independent matching transport deadline. Caller aborts remain distinct from
-execution/transport timeouts. Multiple Pi `edit` replacements are applied as
+and child result events. AgentSH owns the subagent execution deadline. When the
+call omits `timeout_ms`, the extension also omits it from the request so the
+effective session policy can select the deadline. The transport then remains
+open under server authority, bounded only by Node's maximum timer as a final
+client safety limit. An explicit `timeout_ms` selects a shorter requested window
+and gives the transport that duration plus five minutes for process-tree cleanup
+and the typed terminal result. AgentSH still applies the policy ceiling.
+`PI_AGENTSH_SUBAGENT_EXECUTION_TIMEOUT_MS` and its legacy
+`PI_AGENTSH_SUBAGENT_REQUEST_TIMEOUT_MS` alias remain optional compatibility
+client ceilings for older deployments; neither is a built-in execution default.
+Caller aborts remain distinct from execution/transport timeouts. Multiple Pi `edit` replacements are applied as
 sequential single-replacement REST calls.
 When bounded model-facing `bash` output or a completed subagent final overflows,
 new AgentSH supervisors retain a capped artifact in the remote session runtime

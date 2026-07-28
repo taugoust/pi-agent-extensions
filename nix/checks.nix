@@ -2057,9 +2057,9 @@ in
         assert(spawnRequests[1].body.model === "google/gemini-pro", "explicit child model was overwritten");
         assert(spawnRequests[2].body.tasks[0].model === "openai-codex/gpt-5.5", "parallel child did not inherit parent model");
         assert(spawnRequests[2].body.tasks[1].model === "anthropic/claude-sonnet", "parallel explicit model was overwritten");
-        assert(spawnRequests[0].body.timeout_ms === 7200000, "default subagent execution timeout was not two hours");
+        assert(spawnRequests[0].body.timeout_ms === undefined, "client overrode the policy-controlled subagent timeout");
         assert(spawnRequests[3].body.timeout_ms === 1234, "explicit shorter subagent timeout was overwritten");
-        assert(spawnRequests[4].body.timeout_ms === 7200000, "explicit timeout bypassed the configured execution ceiling");
+        assert(spawnRequests[4].body.timeout_ms === 10800000, "client capped a timeout that AgentSH policy must control");
         assert(spawnRequests[0].body.result_artifact_threshold_bytes === 4096, "single subagent artifact threshold did not match parent inline budget");
         assert(spawnRequests[2].body.result_artifact_threshold_bytes === 2048, "parallel subagent artifact threshold did not match per-child capsule budget");
         await shutdownSession(pi);
