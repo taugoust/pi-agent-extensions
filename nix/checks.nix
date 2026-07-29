@@ -947,13 +947,14 @@ in
       };
       if (customActions) {
         ui.custom = async (factory, options = {}) => {
-          customCalls.push({ options });
+          const customCall = { options, renders: [] };
+          customCalls.push(customCall);
           let resolveResult;
           const result = new Promise((resolve) => { resolveResult = resolve; });
           const component = factory({ terminal: { rows: 40 }, requestRender() {} }, theme, {}, (value) => resolveResult(value));
           // Render at two widths to catch stale-width cache regressions in the approval overlay.
-          component.render?.(80);
-          component.render?.(100);
+          customCall.renders.push(component.render?.(80) ?? []);
+          customCall.renders.push(component.render?.(100) ?? []);
           for (const action of customActions) component.handleInput?.(action);
           return await result;
         };
@@ -1322,7 +1323,7 @@ in
         process.env.AGENTSH_SESSION_EVENT_TOKEN = "central-token";
         const pi = createPi();
         sandbox(pi);
-        const ctx = createContext();
+        const ctx = createContext({ choices: ["Approve file: /workspace/.env"] });
         await startSession(pi, ctx);
         await waitFor(() => Boolean(resolved), "REST supervisor approval was not resolved through supervisor socket");
 
@@ -3055,7 +3056,7 @@ in
         process.env.PI_AGENTSH_APPROVAL_CLIENT = "central";
         const pi = createPi();
         sandbox(pi);
-        const ctx = createContext();
+        const ctx = createContext({ choices: ["Approve file: /workspace/.env"] });
         await startSession(pi, ctx);
         await waitFor(() => Boolean(centralResolved), "central approval client opt-in did not resolve through central bridge");
 
@@ -3083,10 +3084,11 @@ in
         setAgentSHEnv(server.socketPath);
         const pi = createPi();
         sandbox(pi);
-        const ctx = createContext({ choices: ["Deny file: /private/key"] });
+        const ctx = createContext({ choices: ["Deny"] });
         await startSession(pi, ctx);
         await waitFor(() => Boolean(resolved), "deny approval was not resolved");
 
+        assert(JSON.stringify(ctx.selectCalls[0].items) === JSON.stringify(["Deny", "Approve file: /private/key"]), "file approval fallback did not make the single deny choice the safe default");
         assert(resolved.id === "appr-deny", "denied wrong approval id");
         assert(resolved.decision === "deny", "approval was not denied");
         assert(resolved.scope === "once", "deny approval should default to once scope");
@@ -3310,7 +3312,7 @@ in
         setAgentSHEnv(server.socketPath);
         const pi = createPi();
         sandbox(pi);
-        const ctx = createContext({ customActions: ["<down>", "<down>", "<enter>"] });
+        const ctx = createContext({ customActions: ["<up>", "<enter>"] });
         await startSession(pi, ctx);
         await waitFor(() => Boolean(resolved), "directory approval was not resolved");
 
@@ -3318,6 +3320,12 @@ in
         assert(ctx.customCalls[0].options.overlay === true, "approval prompt was not an overlay");
         assert(ctx.customCalls[0].options.overlayOptions?.width === "100%", "approval overlay was not full width");
         assert(ctx.customCalls[0].options.overlayOptions?.anchor === "bottom-center", "approval overlay anchor regressed");
+        const renderedChoices = ctx.customCalls[0].renders[1].filter((line) => /^(?:→ |  )(?:Approve|Deny)/.test(line));
+        assert(renderedChoices.filter((line) => line.endsWith("Deny")).length === 1, "file approval did not collapse scoped denials into one Deny choice: " + JSON.stringify(renderedChoices));
+        assert(!renderedChoices.some((line) => line.includes("Deny for session")), "file approval still exposed a scoped denial: " + JSON.stringify(renderedChoices));
+        assert(renderedChoices.some((line) => line === "→ Deny"), "file approval did not select Deny by default: " + JSON.stringify(renderedChoices));
+        assert(renderedChoices.some((line) => line.includes("Approve for session file: /workspace/src/secret.txt")), "file approval lost its exact-file session choice");
+        assert(renderedChoices.some((line) => line.includes("Approve for session directory: /workspace/src")), "file approval lost its directory session choice");
         assert(resolved.id === "appr-directory", "resolved wrong directory approval id");
         assert(resolved.decision === "approve", "directory approval was not approved");
         assert(resolved.scope === "session", "directory approval did not relay scope=session");
@@ -3357,7 +3365,7 @@ in
         setAgentSHEnv(server.socketPath);
         const pi = createPi();
         sandbox(pi);
-        const ctx = createContext({ customActions: ["<down>", "<down>", "<down>", "<enter>"] });
+        const ctx = createContext({ customActions: ["<up>", "<enter>"] });
         await startSession(pi, ctx);
         await waitFor(() => Boolean(resolved), "parent directory approval was not resolved");
 

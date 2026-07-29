@@ -1066,10 +1066,15 @@ function sessionScopeLabels(option: ApprovalResolution, fallback: string) {
   };
 }
 
+function isFileAccessApproval(approval: ApprovalRequest) {
+  return approval.kind?.trim().toLowerCase() === "file";
+}
+
 function approvalChoices(approval: ApprovalRequest): ApprovalChoice[] {
   const title = approvalTitle(approval);
+  const fileAccess = isFileAccessApproval(approval);
   const approveOnce: ApprovalChoice = { label: `Approve ${title}`, decision: "approve", scope: "once", reason: "approved in parent Pi" };
-  const denyOnce: ApprovalChoice = { label: `Deny ${title}`, decision: "deny", scope: "once", reason: "denied in parent Pi" };
+  const denyOnce: ApprovalChoice = { label: fileAccess ? "Deny" : `Deny ${title}`, decision: "deny", scope: "once", reason: "denied in parent Pi" };
   const sessionOptions = sessionScopeOptions(approval);
   const choices: ApprovalChoice[] = [approveOnce];
   for (const option of sessionOptions) {
@@ -1077,9 +1082,11 @@ function approvalChoices(approval: ApprovalRequest): ApprovalChoice[] {
     choices.push({ ...option, decision: "approve", scope: "session", reason: `approved for session ${labels.reasonLabel} in parent Pi`, label: labels.approveLabel });
   }
   choices.push(denyOnce);
-  for (const option of sessionOptions) {
-    const labels = sessionScopeLabels(option, title);
-    choices.push({ ...option, decision: "deny", scope: "session", reason: `denied for session ${labels.reasonLabel} in parent Pi`, label: labels.denyLabel });
+  if (!fileAccess) {
+    for (const option of sessionOptions) {
+      const labels = sessionScopeLabels(option, title);
+      choices.push({ ...option, decision: "deny", scope: "session", reason: `denied for session ${labels.reasonLabel} in parent Pi`, label: labels.denyLabel });
+    }
   }
   return choices;
 }
@@ -1090,9 +1097,14 @@ function resolveChoice(choices: ApprovalChoice[], choice: string | undefined): A
 }
 
 function showApprovalPrompt(ctx: ExtensionContext, approval: ApprovalRequest, choices: ApprovalChoice[], signal: AbortSignal): Promise<string | undefined> {
-  if (typeof ctx.ui.custom !== "function") return ctx.ui.select(formatApproval(approval), choices.map((candidate) => candidate.label), { signal });
+  if (typeof ctx.ui.custom !== "function") {
+    const denyChoice = isFileAccessApproval(approval) ? choices.find((candidate) => candidate.decision === "deny" && candidate.scope === "once") : undefined;
+    const presentedChoices = denyChoice ? [denyChoice, ...choices.filter((candidate) => candidate !== denyChoice)] : choices;
+    return ctx.ui.select(formatApproval(approval), presentedChoices.map((candidate) => candidate.label), { signal });
+  }
   return ctx.ui.custom<string | undefined>((tui, theme, _kb, done) => {
-    let selectedIndex = 0;
+    const denyIndex = choices.findIndex((candidate) => candidate.decision === "deny" && candidate.scope === "once");
+    let selectedIndex = isFileAccessApproval(approval) && denyIndex >= 0 ? denyIndex : 0;
     let scrollOffset = 0;
     let cachedLines: string[] | undefined;
     let cachedWidth = 0;

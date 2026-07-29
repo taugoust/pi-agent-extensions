@@ -725,8 +725,10 @@ and return `full_output_path` or `full_result_path`. The extension shows that
 path without reading it automatically; supervised `read` can page it on demand.
 No supervised overflow file is created in the local parent-Pi temp directory.
 Approvals are polled rather than streamed. If `fields.scope_kind`
-and `fields.scope_key` are present, Pi offers once/session approve/deny choices.
-When the supervisor reports `requested=strict`, the extension refuses all
+and `fields.scope_key` are present, Pi offers once/session approval choices.
+File-access prompts keep those scoped approval choices but collapse all denials
+into one safe-default, one-shot `Deny`; other approval kinds retain scoped deny
+choices. When the supervisor reports `requested=strict`, the extension refuses all
 AgentSH-backed tools unless the live report proves the
 `helper-ebpf-proxy-required` tier is ready and `network_policy_enforced=true`.
 Additive `helper_lifecycle` evidence is shown separately from supervisor/SSH
