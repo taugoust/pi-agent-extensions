@@ -41,10 +41,13 @@ pkgs.runCommand "subagent-finalizer-check"
     const deadlineMessage = imported.SUBAGENT_DEADLINE_FINALIZE_MESSAGE ?? imported.default?.SUBAGENT_DEADLINE_FINALIZE_MESSAGE;
     const deadlineEnv = imported.AGENTSH_SUBAGENT_DEADLINE_ENV ?? imported.default?.AGENTSH_SUBAGENT_DEADLINE_ENV;
     const deadlineLead = imported.SUBAGENT_DEADLINE_WARNING_LEAD_MS ?? imported.default?.SUBAGENT_DEADLINE_WARNING_LEAD_MS;
+    const deadlineWarningAt = imported.subagentDeadlineWarningAt ?? imported.default?.subagentDeadlineWarningAt;
     assert.equal(typeof subagentFinalizer, "function", "subagent-finalizer did not export an extension function");
     assert.match(message, /Finish now and return your answer/);
     assert.match(deadlineMessage, /execution deadline is near/);
-    assert.equal(deadlineLead, 300000, "deadline warning lead is not five minutes");
+    assert.equal(deadlineLead, 300000, "maximum deadline warning lead is not five minutes");
+    assert.equal(deadlineWarningAt(1000, 121000), 91000, "two-minute deadline did not retain three quarters of its runtime before warning");
+    assert.equal(deadlineWarningAt(1000, 7201000), 6901000, "long deadline did not retain the five-minute warning lead");
 
     function createPi() {
       const handlers = new Map();
@@ -109,24 +112,25 @@ pkgs.runCommand "subagent-finalizer-check"
       await handler(turn(), context(99));
       assert.equal(agentShPi.sent.length, 1, "finalizer sent more than one urgent message");
 
-      process.env[deadlineEnv] = String(Date.now() + deadlineLead + 20);
+      process.env[deadlineEnv] = String(Date.now() + 200);
       const deadlinePi = createPi();
       subagentFinalizer(deadlinePi);
       const deadlineStart = deadlinePi.handlers.get("session_start")?.[0];
       const deadlineTurn = deadlinePi.handlers.get("turn_end")?.[0];
       assert.equal(typeof deadlineStart, "function", "deadline finalizer did not register session_start");
       await deadlineStart({}, {});
-      await new Promise((resolve) => setTimeout(resolve, 60));
+      assert.equal(deadlinePi.sent.length, 0, "short deadline finalizer fired immediately at startup");
+      await new Promise((resolve) => setTimeout(resolve, 250));
       assert.deepEqual(deadlinePi.sent, [{ content: deadlineMessage, options: { deliverAs: "steer" } }]);
       await deadlineTurn(turn(), context(99));
       assert.equal(deadlinePi.sent.length, 1, "deadline and context pressure produced duplicate warnings");
 
-      process.env[deadlineEnv] = String(Date.now() + deadlineLead + 30);
+      process.env[deadlineEnv] = String(Date.now() + 200);
       const shutdownPi = createPi();
       subagentFinalizer(shutdownPi);
       await shutdownPi.handlers.get("session_start")?.[0]({}, {});
       await shutdownPi.handlers.get("session_shutdown")?.[0]({}, {});
-      await new Promise((resolve) => setTimeout(resolve, 60));
+      await new Promise((resolve) => setTimeout(resolve, 250));
       assert.equal(shutdownPi.sent.length, 0, "deadline warning fired after session shutdown");
 
       delete process.env[deadlineEnv];

@@ -33,6 +33,13 @@ export function subagentDeadlineEpochMS(env: NodeJS.ProcessEnv = process.env): n
   return deadline;
 }
 
+export function subagentDeadlineWarningAt(now: number, deadline: number): number {
+  const remaining = Math.max(0, deadline - now);
+  const proportionalLead = Math.max(1, Math.floor(remaining / 4));
+  const lead = Math.min(SUBAGENT_DEADLINE_WARNING_LEAD_MS, proportionalLead);
+  return Math.max(now, deadline - lead);
+}
+
 export default function (pi: ExtensionAPI) {
   if (!isSubagentProcess()) return;
 
@@ -54,7 +61,7 @@ export default function (pi: ExtensionAPI) {
     clearDeadlineTimer();
     const deadline = subagentDeadlineEpochMS();
     if (deadline === undefined || finalizeMessageSent) return;
-    const warningAt = deadline - SUBAGENT_DEADLINE_WARNING_LEAD_MS;
+    const warningAt = subagentDeadlineWarningAt(Date.now(), deadline);
     const waitUntilWarning = () => {
       const remaining = warningAt - Date.now();
       if (remaining <= 0) {

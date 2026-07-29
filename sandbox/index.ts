@@ -3827,6 +3827,11 @@ function isSubagentFailure(result: any): boolean {
   return result?.exitCode !== -1 && (result?.exitCode !== 0 || result?.stopReason === "error" || result?.stopReason === "aborted" || result?.stopReason === "timeout");
 }
 
+function subagentDetailsFailed(details: any): boolean {
+  const terminal = normalizeSubagentTerminal(details?.terminal, { exitCode: details?.exitCode, stopReason: details?.stopReason, error: details?.error });
+  return subagentTerminalFailed(terminal) || details?.results?.some((child: any) => isSubagentFailure(child)) || Boolean(details?.error);
+}
+
 function aggregateSubagentUsage(results: any[]) {
   const total = usageZero();
   for (const r of results) {
@@ -4125,6 +4130,11 @@ export default function sandbox(pi: ExtensionAPI) {
   });
 
   if (supervisorToolIntegrationRequested()) {
+    pi.on("tool_result", (event) => {
+      if (event.toolName !== "subagent" || event.isError || !subagentDetailsFailed(event.details)) return;
+      return { isError: true };
+    });
+
     pi.registerTool({
       name: "bash",
     label: "bash",
@@ -4445,12 +4455,11 @@ export default function sandbox(pi: ExtensionAPI) {
         };
         const details = subagentParentDetails(result, ctx, streamStates) as any;
         const text = boundedSubagentParentOutput(details);
-        return { content: [{ type: "text", text }], details, isError: true };
+        return { content: [{ type: "text", text }], details };
       }
       const details = subagentParentDetails(result, ctx, streamStates) as any;
       const text = boundedSubagentParentOutput(details);
-      const isError = subagentTerminalFailed(details?.terminal) || details?.results?.some((child: any) => subagentTerminalFailed(child?.terminal)) || Boolean((result as any)?.error);
-      return { content: [{ type: "text", text }], details, isError };
+      return { content: [{ type: "text", text }], details };
     },
   });
 

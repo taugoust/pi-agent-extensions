@@ -529,7 +529,10 @@ extension checks Pi's current context usage. Once usage exceeds 90%, it sends on
 urgent steering message telling the child to stop using tools and return its best
 answer to the original task immediately. Steering is delivered before the next
 model call, giving the child a final response turn before threshold compaction can
-discard detailed task context.
+discard detailed task context. AgentSH children also receive one warning before
+their authoritative execution deadline. Long runs retain the five-minute lead;
+short explicit deadlines warn after three quarters of their available runtime
+instead of steering the child immediately at startup.
 
 The Home Manager module installs this guard automatically when
 `programs.pi.extensions.subagent.enable` is enabled. It can also be enabled on
@@ -711,8 +714,12 @@ and the typed terminal result. AgentSH still applies the policy ceiling.
 `PI_AGENTSH_SUBAGENT_EXECUTION_TIMEOUT_MS` and its legacy
 `PI_AGENTSH_SUBAGENT_REQUEST_TIMEOUT_MS` alias remain optional compatibility
 client ceilings for older deployments; neither is a built-in execution default.
-Caller aborts remain distinct from execution/transport timeouts. AgentSH-owned
-child Pi processes may receive an internal `AGENTSH_CHILD_CAPABILITY`. The
+Caller aborts remain distinct from execution/transport timeouts. Completed
+subagents remain successful Pi tool results; failed, cancelled, and timed-out
+terminal states are promoted through Pi's `tool_result` event path so the parent
+records `isError=true` rather than treating failure text as a successful tool.
+AgentSH-owned child Pi processes may receive an internal
+`AGENTSH_CHILD_CAPABILITY`. The
 extension validates that credential and sends it as
 `X-AgentSH-Child-Capability` only on Unix-socket `exec_bash` requests; it is not
 included in command environment payloads or unrelated supervisor operations.
