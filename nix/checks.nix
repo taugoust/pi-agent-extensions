@@ -5,6 +5,191 @@ in
 {
   package = package;
 
+  ssh = pkgs.runCommand "ssh-extension-check" {
+    nativeBuildInputs = [
+      pkgs.nodejs
+      pkgs.typescript
+    ];
+  } ''
+    set -euo pipefail
+
+    workdir="$TMPDIR/ssh-extension-check"
+    srcdir="$workdir/src"
+    outdir="$workdir/out"
+    mkdir -p "$srcdir/ssh" "$srcdir/sandbox" "$outdir/node_modules/@mariozechner/pi-coding-agent" "$workdir/bin"
+    cp ${self}/ssh/index.ts "$srcdir/ssh/index.ts"
+    cp ${self}/sandbox/api.ts "$srcdir/sandbox/api.ts"
+
+    cat > "$outdir/node_modules/@mariozechner/pi-coding-agent/package.json" <<'EOF'
+    { "name": "@mariozechner/pi-coding-agent", "type": "module", "main": "./index.js" }
+    EOF
+    cat > "$outdir/node_modules/@mariozechner/pi-coding-agent/index.js" <<'EOF'
+    function tool(name, cwd, options = {}) {
+      return {
+        name,
+        async execute(_id, params) {
+          return { content: [{ type: "text", text: `''${name}:''${params.path || cwd}` }], details: { operations: options.operations } };
+        },
+      };
+    }
+    export const createReadTool = (cwd, options) => tool("read", cwd, options);
+    export const createWriteTool = (cwd, options) => tool("write", cwd, options);
+    export const createEditTool = (cwd, options) => tool("edit", cwd, options);
+    EOF
+
+    cat > "$workdir/bin/ssh" <<'EOF'
+    #!${pkgs.runtimeShell}
+    printf '%s\n' "$*" >>"$SSH_TEST_LOG"
+    if [ "''${2:-}" = pwd ]; then printf '/remote/home\n'; fi
+    EOF
+    chmod +x "$workdir/bin/ssh"
+
+    tsc \
+      --noCheck \
+      --skipLibCheck \
+      --module nodenext \
+      --moduleResolution nodenext \
+      --target es2022 \
+      --rootDir "$srcdir" \
+      --outDir "$outdir" \
+      "$srcdir/ssh/index.ts" "$srcdir/sandbox/api.ts"
+
+    cat > "$workdir/test.mjs" <<'EOF'
+    import fs from "node:fs";
+    import os from "node:os";
+    import path from "node:path";
+    import { pathToFileURL } from "node:url";
+
+    const assert = (condition, message) => { if (!condition) throw new Error(message); };
+
+    function createPi(flag) {
+      const handlers = new Map();
+      const commands = new Map();
+      const tools = new Map();
+      return {
+        handlers, commands, tools,
+        registerFlag() {},
+        getFlag(name) { return name === "ssh" ? flag : undefined; },
+        registerCommand(name, definition) { commands.set(name, definition); },
+        registerTool(definition) { tools.set(definition.name, definition); },
+        on(name, handler) {
+          const values = handlers.get(name) || [];
+          values.push(handler);
+          handlers.set(name, values);
+        },
+      };
+    }
+
+    function createContext(cwd, sessionFile) {
+      const notices = [];
+      const statuses = new Map();
+      let shutdown = false;
+      let waited = false;
+      return {
+        cwd,
+        mode: "tui",
+        hasUI: true,
+        notices,
+        statuses,
+        get shutdown() { return shutdown; },
+        get waited() { return waited; },
+        ui: {
+          theme: { fg: (_color, text) => text },
+          notify(message, level) { notices.push({ message, level }); },
+          setStatus(name, value) { statuses.set(name, value); },
+        },
+        sessionManager: { getSessionFile: () => sessionFile },
+        async waitForIdle() { waited = true; },
+        shutdown() { shutdown = true; },
+      };
+    }
+
+    async function first(pi, name, ...args) {
+      const handler = (pi.handlers.get(name) || [])[0];
+      assert(handler, `missing handler ''${name}`);
+      return await handler(...args);
+    }
+
+    const modulePath = path.join(process.argv[2], "ssh/index.js");
+    const imported = await import(pathToFileURL(modulePath).href);
+    const extension = imported.default?.default ?? imported.default ?? imported;
+    const root = fs.mkdtempSync(path.join(os.tmpdir(), "ssh-target-test-"));
+    const sessionFile = path.join(root, "session.jsonl");
+    fs.writeFileSync(sessionFile, "{}\n");
+
+    // Supervised mode selects the AgentSH backend and writes a wrapper request.
+    const requestDir = path.join(root, "control");
+    fs.mkdirSync(requestDir, { mode: 0o700 });
+    const requestPath = path.join(requestDir, "retarget.json");
+    process.env.PI_SUPERVISED = "1";
+    process.env.AGENTSH_SESSION_SUPERVISOR = "unix:///tmp/supervisor.sock";
+    process.env.PI_AGENTSH_TARGET_KIND = "ssh";
+    process.env.PI_AGENTSH_REMOTE_TARGET = "old-host";
+    process.env.PI_AGENTSH_REMOTE_CWD = "/old/work";
+    process.env.PI_AGENTSH_RETARGET_REQUEST = requestPath;
+    process.env.PI_AGENTSH_RETARGET_LOCAL_SUPPORTED = "1";
+    let published;
+    const execCalls = [];
+    globalThis.__AGENTSH_PI__ = {
+      setExecutionTarget(target) { published = target; },
+      getExecutionTarget() { return published; },
+      getSupervisorState() { return { configured: true, active: true, status: "connected" }; },
+      async exec(command, options) { execCalls.push({ command, options }); return { exitCode: 0 }; },
+    };
+
+    const supervisedPi = createPi(undefined);
+    extension(supervisedPi);
+    const supervisedCtx = createContext(root, sessionFile);
+    await first(supervisedPi, "session_start", {}, supervisedCtx);
+    assert(published?.kind === "ssh" && published.remote === "old-host" && published.cwd === "/old/work", "supervised target was not published");
+    assert(supervisedPi.tools.size === 0, "ssh extension must not replace sandbox tools");
+    const userBash = await first(supervisedPi, "user_bash", { command: "pwd" }, supervisedCtx);
+    await userBash.operations.exec("pwd", root, { onData() {} });
+    assert(execCalls[0]?.command?.cwd === "/old/work", "supervised ! command did not use AgentSH target cwd");
+    const prompt = await first(supervisedPi, "before_agent_start", { systemPrompt: `Current working directory: ''${process.cwd()}` }, supervisedCtx);
+    assert(prompt.systemPrompt.includes("remote AgentSH sandbox over SSH: old-host"), "supervised prompt did not describe the target");
+    await supervisedPi.commands.get("retarget").handler("new-host:/new/work", supervisedCtx);
+    assert(supervisedCtx.waited && supervisedCtx.shutdown, "supervised retarget did not wait and shut down gracefully");
+    const request = JSON.parse(fs.readFileSync(requestPath, "utf8"));
+    assert(request.schema_version === 1 && request.target === "new-host:/new/work" && request.session_file === sessionFile, "invalid wrapper retarget request");
+    assert((fs.statSync(requestPath).mode & 0o777) === 0o600, "retarget request is not private");
+
+    // Legacy mode owns raw SSH and can switch back to local in-process.
+    for (const name of [
+      "PI_SUPERVISED", "AGENTSH_SESSION_SUPERVISOR", "PI_AGENTSH_TARGET_KIND",
+      "PI_AGENTSH_REMOTE_TARGET", "PI_AGENTSH_REMOTE_CWD", "PI_AGENTSH_RETARGET_REQUEST",
+      "PI_AGENTSH_RETARGET_LOCAL_SUPPORTED",
+    ]) delete process.env[name];
+    delete globalThis.__AGENTSH_PI__;
+    const legacyPi = createPi("legacy:/repo");
+    extension(legacyPi);
+    const legacyCtx = createContext(root, sessionFile);
+    await first(legacyPi, "session_start", {}, legacyCtx);
+    assert(legacyPi.tools.size === 3, "legacy SSH tools were not registered");
+    const event = { toolName: "bash", input: { command: "echo ok" } };
+    await first(legacyPi, "tool_call", event, legacyCtx);
+    assert(event.input.command.includes("ssh 'legacy'"), "legacy bash was not routed through SSH");
+    await legacyPi.commands.get("retarget").handler("", legacyCtx);
+    const localBash = await first(legacyPi, "user_bash", { command: "pwd" }, legacyCtx);
+    assert(localBash === undefined, "legacy local retarget still intercepted user bash");
+    await legacyPi.commands.get("retarget").handler("other-host", legacyCtx);
+    const remoteBash = await first(legacyPi, "user_bash", { command: "pwd" }, legacyCtx);
+    assert(remoteBash?.operations, "legacy host retarget did not restore SSH routing");
+    assert(fs.readFileSync(process.env.SSH_TEST_LOG, "utf8").includes("other-host pwd"), "host-only retarget did not resolve remote pwd");
+
+    let invalidRejected = false;
+    try { imported.parseSshArg("\n"); } catch (error) { invalidRejected = /non-empty single-line/.test(String(error)); }
+    assert(invalidRejected, "invalid target accepted");
+    console.log("ssh extension checks passed");
+    EOF
+
+    export SSH_TEST_LOG="$workdir/ssh.log"
+    export PATH="$workdir/bin:$PATH"
+    cd "$workdir"
+    node "$workdir/test.mjs" "$outdir"
+    touch "$out"
+  '';
+
   slow-mode = pkgs.runCommand "slow-mode-check" {
     nativeBuildInputs = [
       pkgs.nodejs
@@ -2788,7 +2973,7 @@ in
         const pi = createPi(); sandbox(pi); const ctx = createContext(); await startSession(pi, ctx);
         await pi.commands.get("sandbox").handler("", ctx);
         const statusText = String(ctx.notifications.at(-1).message);
-        for (const expected of ["Supervisor: connected (wrapper-owned SSH transport)", "Helper:   expired", "lease-visible", "agentsh-nethelper-visible.service", "soft 2026", "0s remaining", "binding 2", "renewal 4", "socket unknown", "credential source not live", "soft lease expired"]) assert(statusText.includes(expected), "helper lifecycle status omitted " + expected + ": " + statusText);
+        for (const expected of ["Supervisor: connected", "Helper:   expired", "lease-visible", "agentsh-nethelper-visible.service", "soft 2026", "0s remaining", "binding 2", "renewal 4", "socket unknown", "credential source not live", "soft lease expired"]) assert(statusText.includes(expected), "helper lifecycle status omitted " + expected + ": " + statusText);
         assert(!/credential\s*[:=]|token\s*[:=]/i.test(statusText), "helper lifecycle status rendered secret-shaped data");
         network.helper_lifecycle = { schema_version: 999, status: "invented", socket_live: "yes", lease_id: "x".repeat(1000) };
         await pi.commands.get("sandbox-control").handler("reconnect", ctx);

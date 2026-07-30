@@ -70,6 +70,13 @@ export type AgentSHSupervisorMetadata = {
   [key: string]: unknown;
 };
 
+export type AgentSHExecutionTarget = {
+  kind: "local" | "ssh";
+  cwd: string;
+  remote?: string;
+  displayName?: string;
+};
+
 export type AgentSHSupervisorStatus =
   | "inactive"
   | "starting"
@@ -229,6 +236,9 @@ export type AgentSHDirenvAPI = {
 };
 
 export type AgentSHPiAPI = AgentSHDirenvAPI & {
+  /** Publish the execution target selected by the SSH/target-routing extension. */
+  setExecutionTarget(target: AgentSHExecutionTarget): void;
+  getExecutionTarget(): AgentSHExecutionTarget | undefined;
   exec(
     command:
       | string
@@ -251,6 +261,7 @@ export type AgentSHPiAPI = AgentSHDirenvAPI & {
   toSupervisorPath(path: string, cwd?: string): string;
   getSupervisorMetadata(): AgentSHSupervisorMetadata | undefined;
   getSupervisorState(): {
+    configured: boolean;
     active: boolean;
     status: AgentSHSupervisorStatus;
     source: AgentSHSupervisorSource;

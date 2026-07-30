@@ -1,15 +1,21 @@
 /**
- * SSH Remote Execution Extension
+ * SSH target-routing extension.
  *
- * Dual-mode SSH support:
- * - legacy mode (pi-unsafe --ssh ...): direct raw SSH read/write/edit/bash.
- * - supervised mode (pi/pi-auto --ssh ... wrappers): local Pi talks to a
- *   remote AgentSH supervisor through AGENTSH_SESSION_SUPERVISOR. No tool
- *   calls are sent over raw SSH in this mode.
+ * The extension owns target selection in both execution modes:
+ * - legacy mode (pi-unsafe): file and command operations use raw SSH;
+ * - supervised mode: operations use the optional AgentSH sandbox backend.
+ *
+ * The trusted pi-supervised wrapper provisions supervised local/remote AgentSH
+ * sessions. A /retarget request asks that wrapper to replace the sandbox and
+ * resume the same Pi conversation. The SSH extension never falls back to raw
+ * SSH when supervised integration was requested but failed.
  */
 
 import { spawn } from "node:child_process";
-import type { ExtensionAPI } from "@mariozechner/pi-coding-agent";
+import { randomUUID } from "node:crypto";
+import { lstatSync, renameSync, rmSync, writeFileSync } from "node:fs";
+import { dirname, isAbsolute } from "node:path";
+import type { ExtensionAPI, ExtensionCommandContext } from "@mariozechner/pi-coding-agent";
 import {
 	type BashOperations,
 	createEditTool,
@@ -19,14 +25,30 @@ import {
 	type ReadOperations,
 	type WriteOperations,
 } from "@mariozechner/pi-coding-agent";
+import type { AgentSHExecutionTarget, AgentSHPiAPI } from "../sandbox/api.js";
+
+type LocalTarget = { kind: "local"; cwd: string };
+type SshTarget = { kind: "ssh"; remote: string; remoteCwd: string };
+type ExecutionTarget = LocalTarget | SshTarget;
 
 function env(name: string) {
 	const value = process.env[name];
 	return value && value.trim() ? value.trim() : "";
 }
 
-function supervisedSshMode() {
-	return env("PI_AGENTSH_REMOTE") === "ssh";
+function sandboxAPI(): AgentSHPiAPI | undefined {
+	return globalThis.__AGENTSH_PI__;
+}
+
+function sandboxIntegrationExpected() {
+	if (env("PI_SUPERVISED") === "1") return true;
+	if (env("PI_AGENTSH_MOCK_SUPERVISOR") || env("AGENTSH_SESSION_SUPERVISOR")) return true;
+	return env("PI_AGENTSH_ENABLE") === "1";
+}
+
+function sandboxBackendSelected() {
+	const state = sandboxAPI()?.getSupervisorState();
+	return sandboxIntegrationExpected() || Boolean(state?.configured || state?.active);
 }
 
 function sshExec(remote: string, command: string): Promise<Buffer> {
@@ -38,11 +60,8 @@ function sshExec(remote: string, command: string): Promise<Buffer> {
 		child.stderr.on("data", (data) => errChunks.push(data));
 		child.on("error", reject);
 		child.on("close", (code) => {
-			if (code !== 0) {
-				reject(new Error(`SSH failed (${code}): ${Buffer.concat(errChunks).toString()}`));
-			} else {
-				resolve(Buffer.concat(chunks));
-			}
+			if (code !== 0) reject(new Error(`SSH failed (${code}): ${Buffer.concat(errChunks).toString()}`));
+			else resolve(Buffer.concat(chunks));
 		});
 	});
 }
@@ -54,9 +73,9 @@ function createRemoteReadOps(remote: string, remoteCwd: string, localCwd: string
 		access: (p) => sshExec(remote, `test -r ${JSON.stringify(toRemote(p))}`).then(() => {}),
 		detectImageMimeType: async (p) => {
 			try {
-				const r = await sshExec(remote, `file --mime-type -b ${JSON.stringify(toRemote(p))}`);
-				const m = r.toString().trim();
-				return ["image/jpeg", "image/png", "image/gif", "image/webp"].includes(m) ? m : null;
+				const result = await sshExec(remote, `file --mime-type -b ${JSON.stringify(toRemote(p))}`);
+				const mime = result.toString().trim();
+				return ["image/jpeg", "image/png", "image/gif", "image/webp"].includes(mime) ? mime : null;
 			} catch {
 				return null;
 			}
@@ -76,9 +95,9 @@ function createRemoteWriteOps(remote: string, remoteCwd: string, localCwd: strin
 }
 
 function createRemoteEditOps(remote: string, remoteCwd: string, localCwd: string): EditOperations {
-	const r = createRemoteReadOps(remote, remoteCwd, localCwd);
-	const w = createRemoteWriteOps(remote, remoteCwd, localCwd);
-	return { readFile: r.readFile, access: r.access, writeFile: w.writeFile };
+	const read = createRemoteReadOps(remote, remoteCwd, localCwd);
+	const write = createRemoteWriteOps(remote, remoteCwd, localCwd);
+	return { readFile: read.readFile, access: read.access, writeFile: write.writeFile };
 }
 
 function createRemoteBashOps(remote: string, remoteCwd: string, localCwd: string): BashOperations {
@@ -97,9 +116,9 @@ function createRemoteBashOps(remote: string, remoteCwd: string, localCwd: string
 					: undefined;
 				child.stdout.on("data", onData);
 				child.stderr.on("data", onData);
-				child.on("error", (e) => {
+				child.on("error", (error) => {
 					if (timer) clearTimeout(timer);
-					reject(e);
+					reject(error);
 				});
 				const onAbort = () => child.kill();
 				signal?.addEventListener("abort", onAbort, { once: true });
@@ -114,13 +133,13 @@ function createRemoteBashOps(remote: string, remoteCwd: string, localCwd: string
 	};
 }
 
-function createSupervisorBashOps(remoteCwd: string): BashOperations {
+function createSupervisorBashOps(targetCwd: string): BashOperations {
 	return {
 		exec: async (command, _cwd, opts) => {
-			const api = (globalThis as any).__AGENTSH_PI__;
-			if (!api) throw new Error("AgentSH supervisor API unavailable");
+			const api = sandboxAPI();
+			if (!api) throw new Error("AgentSH sandbox backend is unavailable; refusing raw execution");
 			const result = await api.exec(
-				{ command, cwd: remoteCwd, timeout_ms: opts.timeout ? opts.timeout * 1000 : undefined },
+				{ command, cwd: targetCwd, timeout_ms: opts.timeout ? opts.timeout * 1000 : undefined },
 				{
 					signal: opts.signal,
 					onOutput: (chunk: string) => opts.onData(Buffer.from(chunk)),
@@ -140,23 +159,78 @@ function wrapBashCommandForSsh(command: string, remote: string, remoteCwd: strin
 	return `ssh ${shellSingleQuote(remote)} ${shellSingleQuote(remoteCommand)}`;
 }
 
-function parseSshArg(arg: string) {
-	const colon = arg.indexOf(":");
-	if (colon >= 0) return { remote: arg.slice(0, colon), remoteCwd: arg.slice(colon + 1) };
-	return { remote: arg, remoteCwd: "" };
+export function parseSshArg(arg: string) {
+	const value = arg.trim();
+	if (!value || /[\0\r\n]/.test(value)) throw new Error("SSH target must be a non-empty single-line value");
+	const colon = value.indexOf(":");
+	const remote = colon >= 0 ? value.slice(0, colon) : value;
+	if (!remote) throw new Error("SSH target must include a host");
+	return { remote, remoteCwd: colon >= 0 ? value.slice(colon + 1) : "" };
 }
 
-export default function (pi: ExtensionAPI) {
+function targetCwd(target: ExecutionTarget) {
+	return target.kind === "ssh" ? target.remoteCwd : target.cwd;
+}
+
+function sandboxTarget(target: ExecutionTarget): AgentSHExecutionTarget {
+	return target.kind === "ssh"
+		? { kind: "ssh", cwd: target.remoteCwd, remote: target.remote, displayName: target.remote }
+		: { kind: "local", cwd: target.cwd, displayName: "local" };
+}
+
+function notify(ctx: ExtensionCommandContext, message: string, level: "info" | "error" = "info") {
+	if (ctx.hasUI) ctx.ui.notify(message, level);
+}
+
+function writeRetargetRequest(requestPath: string, target: string | null, sessionFile: string) {
+	if (!isAbsolute(requestPath)) throw new Error("The wrapper retarget request path is not absolute");
+	const parent = lstatSync(dirname(requestPath));
+	if (!parent.isDirectory() || parent.isSymbolicLink() || (parent.mode & 0o077) !== 0) {
+		throw new Error("The wrapper retarget request directory is not private");
+	}
+	if (typeof process.getuid === "function" && parent.uid !== process.getuid()) {
+		throw new Error("The wrapper retarget request directory has the wrong owner");
+	}
+	const temporary = `${requestPath}.tmp-${process.pid}-${randomUUID()}`;
+	try {
+		writeFileSync(temporary, `${JSON.stringify({ schema_version: 1, target, session_file: sessionFile })}\n`, {
+			encoding: "utf8",
+			flag: "wx",
+			mode: 0o600,
+		});
+		renameSync(temporary, requestPath);
+	} finally {
+		rmSync(temporary, { force: true });
+	}
+}
+
+export default function sshTargetExtension(pi: ExtensionAPI) {
 	pi.registerFlag("ssh", { description: "SSH remote: user@host or user@host:/path", type: "string" });
 
 	const localCwd = process.cwd();
-	let resolvedSsh: { remote: string; remoteCwd: string } | null = null;
+	let target: ExecutionTarget = { kind: "local", cwd: localCwd };
 	let legacyToolsRegistered = false;
 
-	const getSsh = () => resolvedSsh;
+	const publishTarget = () => sandboxAPI()?.setExecutionTarget(sandboxTarget(target));
+
+	function setStatus(ctx: { hasUI: boolean; ui: any }) {
+		if (!ctx.hasUI) return;
+		if (sandboxBackendSelected()) {
+			const label = target.kind === "ssh"
+				? `SSH+AgentSH: ${target.remote}:${target.remoteCwd}`
+				: `AgentSH target: local:${target.cwd}`;
+			ctx.ui.setStatus("ssh", ctx.ui.theme.fg("accent", label));
+			return;
+		}
+		if (target.kind === "ssh") {
+			ctx.ui.setStatus("ssh", ctx.ui.theme.fg("accent", `SSH: ${target.remote}:${target.remoteCwd}`));
+		} else {
+			ctx.ui.setStatus("ssh", undefined);
+		}
+	}
 
 	function registerLegacyTools() {
-		if (legacyToolsRegistered) return;
+		if (legacyToolsRegistered || sandboxBackendSelected()) return;
 		legacyToolsRegistered = true;
 		const localRead = createReadTool(localCwd);
 		const localWrite = createWriteTool(localCwd);
@@ -165,11 +239,8 @@ export default function (pi: ExtensionAPI) {
 		pi.registerTool({
 			...localRead,
 			async execute(id, params, signal, onUpdate) {
-				const ssh = getSsh();
-				if (ssh) {
-					const tool = createReadTool(localCwd, {
-						operations: createRemoteReadOps(ssh.remote, ssh.remoteCwd, localCwd),
-					});
+				if (target.kind === "ssh") {
+					const tool = createReadTool(localCwd, { operations: createRemoteReadOps(target.remote, target.remoteCwd, localCwd) });
 					return tool.execute(id, params, signal, onUpdate);
 				}
 				return localRead.execute(id, params, signal, onUpdate);
@@ -179,11 +250,8 @@ export default function (pi: ExtensionAPI) {
 		pi.registerTool({
 			...localWrite,
 			async execute(id, params, signal, onUpdate) {
-				const ssh = getSsh();
-				if (ssh) {
-					const tool = createWriteTool(localCwd, {
-						operations: createRemoteWriteOps(ssh.remote, ssh.remoteCwd, localCwd),
-					});
+				if (target.kind === "ssh") {
+					const tool = createWriteTool(localCwd, { operations: createRemoteWriteOps(target.remote, target.remoteCwd, localCwd) });
 					return tool.execute(id, params, signal, onUpdate);
 				}
 				return localWrite.execute(id, params, signal, onUpdate);
@@ -193,11 +261,8 @@ export default function (pi: ExtensionAPI) {
 		pi.registerTool({
 			...localEdit,
 			async execute(id, params, signal, onUpdate) {
-				const ssh = getSsh();
-				if (ssh) {
-					const tool = createEditTool(localCwd, {
-						operations: createRemoteEditOps(ssh.remote, ssh.remoteCwd, localCwd),
-					});
+				if (target.kind === "ssh") {
+					const tool = createEditTool(localCwd, { operations: createRemoteEditOps(target.remote, target.remoteCwd, localCwd) });
 					return tool.execute(id, params, signal, onUpdate);
 				}
 				return localEdit.execute(id, params, signal, onUpdate);
@@ -205,64 +270,113 @@ export default function (pi: ExtensionAPI) {
 		});
 	}
 
-	pi.on("tool_call", async (event) => {
-		if (supervisedSshMode()) return;
-		const ssh = getSsh();
-		if (!ssh || event.toolName !== "bash") return;
+	async function resolveRemote(value: string): Promise<SshTarget> {
+		const parsed = parseSshArg(value);
+		if (parsed.remoteCwd) return { kind: "ssh", ...parsed };
+		const pwd = (await sshExec(parsed.remote, "pwd")).toString().trim();
+		if (!pwd) throw new Error(`SSH target ${parsed.remote} returned an empty working directory`);
+		return { kind: "ssh", remote: parsed.remote, remoteCwd: pwd };
+	}
 
+	if (!env("PI_AUTO_SESSION_ID") && !env("PI_AUTO_WORK_DIR")) {
+		pi.registerCommand("retarget", {
+			description: "Switch execution to local or to host[:path] while preserving this conversation",
+			handler: async (args, ctx) => {
+				const requested = (args || "").trim();
+				try {
+					if (requested) parseSshArg(requested);
+					await ctx.waitForIdle();
+
+					if (sandboxBackendSelected()) {
+						if (!requested && target.kind === "local") {
+							notify(ctx, `Already using the sandboxed local target ${target.cwd}`);
+							return;
+						}
+						if (!requested && env("PI_AGENTSH_RETARGET_LOCAL_SUPPORTED") !== "1") {
+							throw new Error("This supervised wrapper cannot provision a sandboxed local target");
+						}
+						const requestPath = env("PI_AGENTSH_RETARGET_REQUEST");
+						if (!requestPath) throw new Error("The supervised wrapper did not expose retarget control");
+						const sessionFile = ctx.sessionManager.getSessionFile();
+						if (!sessionFile) throw new Error("Retargeting requires a saved Pi session; it is unavailable with --no-session");
+						writeRetargetRequest(requestPath, requested || null, sessionFile);
+						notify(ctx, requested ? `Retargeting to ${requested}…` : "Retargeting to the sandboxed local system…");
+						ctx.shutdown();
+						return;
+					}
+
+					if (!requested) {
+						target = { kind: "local", cwd: localCwd };
+						setStatus(ctx);
+						notify(ctx, `Execution target is now local:${localCwd}`);
+						return;
+					}
+
+					const next = await resolveRemote(requested);
+					registerLegacyTools();
+					target = next;
+					setStatus(ctx);
+					notify(ctx, `Execution target is now SSH:${next.remote}:${next.remoteCwd}`);
+				} catch (error) {
+					notify(ctx, `Retarget failed: ${error instanceof Error ? error.message : String(error)}`, "error");
+				}
+			},
+		});
+	}
+
+	pi.on("tool_call", async (event) => {
+		if (sandboxBackendSelected() || target.kind !== "ssh" || event.toolName !== "bash") return;
 		const command = event.input.command;
 		if (typeof command !== "string" || command.length === 0) return;
-
-		event.input.command = wrapBashCommandForSsh(command, ssh.remote, ssh.remoteCwd);
+		event.input.command = wrapBashCommandForSsh(command, target.remote, target.remoteCwd);
 	});
 
 	pi.on("session_start", async (_event, ctx) => {
-		if (supervisedSshMode()) {
-			const remote = env("PI_AGENTSH_REMOTE_TARGET") || "remote";
-			const remoteCwd = env("PI_AGENTSH_REMOTE_CWD") || "/workspace";
-			resolvedSsh = { remote, remoteCwd };
+		if (sandboxBackendSelected()) {
+			const kind = env("PI_AGENTSH_TARGET_KIND") || (env("PI_AGENTSH_REMOTE") === "ssh" ? "ssh" : "local");
+			if (kind === "ssh") {
+				target = {
+					kind: "ssh",
+					remote: env("PI_AGENTSH_REMOTE_TARGET") || "remote",
+					remoteCwd: env("PI_AGENTSH_REMOTE_CWD") || "/workspace",
+				};
+			} else {
+				target = { kind: "local", cwd: env("PI_AGENTSH_REMOTE_CWD") || localCwd };
+			}
+			publishTarget();
+			setStatus(ctx);
 			if (ctx.hasUI) {
-				ctx.ui.setStatus("ssh", ctx.ui.theme.fg("accent", `SSH+AgentSH: ${remote}:${remoteCwd}`));
-				ctx.ui.notify(`SSH+AgentSH mode: ${remote}:${remoteCwd}`, "info");
+				const label = target.kind === "ssh" ? `${target.remote}:${target.remoteCwd}` : `local:${target.cwd}`;
+				ctx.ui.notify(`AgentSH execution target: ${label}`, "info");
 			}
 			return;
 		}
 
 		const arg = pi.getFlag("ssh") as string | undefined;
-		if (!arg) return;
-
-		const parsed = parseSshArg(arg);
-		if (parsed.remoteCwd) {
-			resolvedSsh = parsed;
-		} else {
-			const pwd = (await sshExec(parsed.remote, "pwd")).toString().trim();
-			resolvedSsh = { remote: parsed.remote, remoteCwd: pwd };
+		if (!arg) {
+			setStatus(ctx);
+			return;
 		}
+		target = await resolveRemote(arg);
 		registerLegacyTools();
-
-		if (ctx.hasUI) {
-			ctx.ui.setStatus("ssh", ctx.ui.theme.fg("accent", `SSH: ${resolvedSsh.remote}:${resolvedSsh.remoteCwd}`));
-			ctx.ui.notify(`SSH mode: ${resolvedSsh.remote}:${resolvedSsh.remoteCwd}`, "info");
-		}
+		setStatus(ctx);
+		if (ctx.hasUI && target.kind === "ssh") ctx.ui.notify(`SSH mode: ${target.remote}:${target.remoteCwd}`, "info");
 	});
 
 	pi.on("user_bash", () => {
-		const ssh = getSsh();
-		if (!ssh) return;
-		if (supervisedSshMode()) return { operations: createSupervisorBashOps(ssh.remoteCwd) };
-		return { operations: createRemoteBashOps(ssh.remote, ssh.remoteCwd, localCwd) };
+		if (sandboxBackendSelected()) return { operations: createSupervisorBashOps(targetCwd(target)) };
+		if (target.kind === "ssh") return { operations: createRemoteBashOps(target.remote, target.remoteCwd, localCwd) };
 	});
 
 	pi.on("before_agent_start", async (event) => {
-		const ssh = getSsh();
-		if (!ssh) return;
-		const replacement = supervisedSshMode()
-			? `Current working directory: ${ssh.remoteCwd} (remote AgentSH over SSH: ${ssh.remote})`
-			: `Current working directory: ${ssh.remoteCwd} (via SSH: ${ssh.remote})`;
-		const modified = event.systemPrompt.replace(
-			`Current working directory: ${localCwd}`,
-			replacement,
-		);
-		return { systemPrompt: modified };
+		if (!sandboxBackendSelected() && target.kind === "local") return;
+		const replacement = target.kind === "ssh"
+			? sandboxBackendSelected()
+				? `Current working directory: ${target.remoteCwd} (remote AgentSH sandbox over SSH: ${target.remote})`
+				: `Current working directory: ${target.remoteCwd} (via SSH: ${target.remote})`
+			: `Current working directory: ${target.cwd} (local AgentSH sandbox)`;
+		return {
+			systemPrompt: event.systemPrompt.replace(`Current working directory: ${localCwd}`, replacement),
+		};
 	});
 }

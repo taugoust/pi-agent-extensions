@@ -22,7 +22,7 @@ import { abortSubagentProtocolStream, appendSubagentProtocolChunk, createSubagen
 import { boundSubagentProgressCapsules, createSubagentProgressCapsule, sanitizeSubagentParentText } from "./subagent-result.js";
 import { appendSubagentPrefix, appendSubagentRawText, appendSubagentStdoutChunk, createSubagentStreamState, flushSubagentStdout, parseSubagentPiJsonStdout, subagentLiveToolStatus, tailByBytes, truncateByBytes, usageNumber, usageZero, type SubagentStreamState } from "./subagent-stream.js";
 import { normalizeSubagentTerminal, subagentTerminalFailed } from "./subagent-terminal.js";
-import type { AgentSHPiAPI, DirenvRefreshOptions, DirenvRefreshResult, DirenvRefreshState } from "./api.js";
+import type { AgentSHExecutionTarget, AgentSHPiAPI, DirenvRefreshOptions, DirenvRefreshResult, DirenvRefreshState } from "./api.js";
 import {
   CommandExecutionTimeoutError,
   CommandTransportTimeoutError,
@@ -252,6 +252,7 @@ type SupervisorState = {
   recoveryAbortControllers: Set<AbortController>;
   shuttingDown: boolean;
   terminalError: boolean;
+  executionTarget?: AgentSHExecutionTarget;
 };
 
 const PROTOCOL_VERSION = 1;
@@ -575,8 +576,8 @@ function env(name: string) {
   return value && value.trim() ? value.trim() : "";
 }
 
-function effectiveSupervisorCwd(ctx?: ExtensionContext) {
-  return env("PI_AGENTSH_REMOTE_CWD") || ctx?.cwd || process.cwd();
+function effectiveSupervisorCwd(ctx?: ExtensionContext, target?: AgentSHExecutionTarget) {
+  return target?.cwd || env("PI_AGENTSH_REMOTE_CWD") || ctx?.cwd || process.cwd();
 }
 
 function normalizeSocketPath(value: string) {
@@ -3242,9 +3243,9 @@ async function attachOrStart(state: SupervisorState, ctx: ExtensionContext, opti
   });
 }
 
-function remoteStartRefusal() {
-  if (!env("AGENTSH_SESSION_SUPERVISOR") && env("PI_AGENTSH_REMOTE") !== "ssh") return "";
-  return "This AgentSH session is wrapper-owned. /sandbox-control start is refused because it would create an unrelated local session and cannot recover the remote session. Restore the wrapper tunnel with /sandbox-control reconnect, or use /sandbox-control recover when the wrapper exposes a validated recovery command.";
+function wrapperOwnedStartRefusal() {
+  if (!env("AGENTSH_SESSION_SUPERVISOR")) return "";
+  return "This AgentSH session is wrapper-owned. /sandbox-control start is refused because it would create an unrelated local session instead of replacing the wrapper target. Restore the wrapper transport with /sandbox-control reconnect, or use /sandbox-control recover when the wrapper exposes a validated recovery command.";
 }
 
 type RecoveryConfiguration = { command: string; statePath: string; expectedSession: string; cwd: string };
@@ -3560,7 +3561,7 @@ function helpText(state: SupervisorState) {
     `Mode:     ${state.activeMode || state.mode || "-"}`,
     `Socket:   ${state.socketPath}`,
     `Session:  ${state.sessionId || "-"}`,
-    `Supervisor: ${state.status}${env("PI_AGENTSH_REMOTE") === "ssh" ? " (wrapper-owned SSH transport)" : ""}`,
+    `Supervisor: ${state.status}`,
     `Pending:  ${state.pendingCount}`,
     state.metadata?.policy ? `Policy:   ${state.metadata.policy}` : "",
     state.metadata?.workspace_mode ? `Workspace: ${state.metadata.workspace_mode}` : "",
@@ -3592,12 +3593,18 @@ function grantGuidance(kind: string, target: string, reason: string, state: Supe
 
 function createGlobalAPI(state: SupervisorState): AgentSHPiAPI {
   return {
+    setExecutionTarget(target) {
+      state.executionTarget = { ...target };
+    },
+    getExecutionTarget() {
+      return state.executionTarget ? { ...state.executionTarget } : undefined;
+    },
     async exec(commandOrParams, options = {}) {
       const client = requireClient(state);
       if (typeof commandOrParams === "string") return await client.exec(commandOrParams, options);
       return await client.exec(commandOrParams.command, {
         ...options,
-        cwd: commandOrParams.cwd ?? options.cwd,
+        cwd: commandOrParams.cwd ?? options.cwd ?? effectiveSupervisorCwd(state.ctx, state.executionTarget),
         timeout_ms: commandOrParams.timeout_ms !== undefined ? commandOrParams.timeout_ms : options.timeout_ms,
         persist_output_over_bytes: commandOrParams.persist_output_over_bytes ?? options.persist_output_over_bytes,
         persist_output_over_lines: commandOrParams.persist_output_over_lines ?? options.persist_output_over_lines,
@@ -3607,7 +3614,7 @@ function createGlobalAPI(state: SupervisorState): AgentSHPiAPI {
     async refreshDirenv(options) {
       return await requireClient(state).refreshDirenv({
         ...options,
-        cwd: env("PI_AGENTSH_REMOTE_CWD") || options.cwd || effectiveSupervisorCwd(state.ctx),
+        cwd: options.cwd || effectiveSupervisorCwd(state.ctx, state.executionTarget),
       });
     },
     async readFile(path, options = {}) { return await requireClient(state).readFile(path, options); },
@@ -3615,12 +3622,12 @@ function createGlobalAPI(state: SupervisorState): AgentSHPiAPI {
     async editFile(path, edits, options = {}) { return await requireClient(state).editFile(path, edits, options); },
     async spawnSubagent(params, options = {}) { return await requireClient(state).spawnSubagent(params, options); },
     async resolveApproval(approvalId, resolution) { return await requireApprovalClient(state).resolveApproval(approvalId, resolution); },
-    toSupervisorPath(path, cwd = effectiveSupervisorCwd(state.ctx)) {
+    toSupervisorPath(path, cwd = effectiveSupervisorCwd(state.ctx, state.executionTarget)) {
       return supervisorAbsolutePath(state.metadata, path, cwd);
     },
     getSupervisorMetadata() { return state.metadata; },
     getSupervisorState() {
-      return { active: state.active, status: state.status, source: state.source, socketPath: state.socketPath, sessionId: state.sessionId, metadata: state.metadata, lastError: state.lastError || undefined };
+      return { configured: state.mode !== "", active: state.active, status: state.status, source: state.source, socketPath: state.socketPath, sessionId: state.sessionId, metadata: state.metadata, lastError: state.lastError || undefined };
     },
   };
 }
@@ -4273,7 +4280,7 @@ export default function sandbox(pi: ExtensionAPI) {
           return;
         }
         if (action === "start") {
-          const refusal = remoteStartRefusal();
+          const refusal = wrapperOwnedStartRefusal();
           if (refusal) {
             notify(ctx, refusal, "error");
             return;
@@ -4342,7 +4349,7 @@ export default function sandbox(pi: ExtensionAPI) {
       onUpdate?.({ content: [], details: undefined });
       try {
         const result = await client.exec(params.command, {
-          cwd: effectiveSupervisorCwd(ctx),
+          cwd: effectiveSupervisorCwd(ctx, state.executionTarget),
           timeout: params.timeout,
           tool_call_id: toolCallId,
           persist_output_over_bytes: DEFAULT_MAX_BYTES,
@@ -4416,7 +4423,7 @@ export default function sandbox(pi: ExtensionAPI) {
       description: "Read a file through the AgentSH session supervisor. Ordinary project reads are native unless PI_AGENTSH_READ_MODE=supervised.",
       parameters: ReadParams,
       async execute(toolCallId, params, signal, _onUpdate, ctx) {
-        const result = await requireClient(state).readFile(params.path, { cwd: effectiveSupervisorCwd(ctx), offset: params.offset, limit: params.limit, actor: parentActor(toolCallId, "Pi read tool"), signal });
+        const result = await requireClient(state).readFile(params.path, { cwd: effectiveSupervisorCwd(ctx, state.executionTarget), offset: params.offset, limit: params.limit, actor: parentActor(toolCallId, "Pi read tool"), signal });
         return { content: contentFromReadResult(result), details: (result as any)?.details };
       },
     });
@@ -4428,7 +4435,7 @@ export default function sandbox(pi: ExtensionAPI) {
     description: "Write content to a file through the AgentSH session supervisor.",
     parameters: WriteParams,
     async execute(toolCallId, params, signal, _onUpdate, ctx) {
-      const result = await requireClient(state).writeFile(params.path, params.content, { cwd: effectiveSupervisorCwd(ctx), actor: parentActor(toolCallId, "Pi write tool"), signal });
+      const result = await requireClient(state).writeFile(params.path, params.content, { cwd: effectiveSupervisorCwd(ctx, state.executionTarget), actor: parentActor(toolCallId, "Pi write tool"), signal });
       return { content: [{ type: "text", text: textFromResult(result, `Wrote ${params.path}`) }], details: undefined };
     },
   });
@@ -4446,7 +4453,7 @@ export default function sandbox(pi: ExtensionAPI) {
       return renderSandboxEditToolResult(result, options, theme, context);
     },
     async execute(toolCallId, params, signal, _onUpdate, ctx) {
-      const result = await requireClient(state).editFile(params.path, params.edits, { cwd: effectiveSupervisorCwd(ctx), actor: parentActor(toolCallId, "Pi edit tool"), signal });
+      const result = await requireClient(state).editFile(params.path, params.edits, { cwd: effectiveSupervisorCwd(ctx, state.executionTarget), actor: parentActor(toolCallId, "Pi edit tool"), signal });
       return { content: [{ type: "text", text: textFromResult(result, `Edited ${params.path}`) }], details: (result as any)?.details || { diff: (result as any)?.diff } };
     },
   });
@@ -4505,7 +4512,7 @@ export default function sandbox(pi: ExtensionAPI) {
       const resultArtifactThresholdBytes = hasSingle ? 4 * 1024 : 2 * 1024;
       let result: unknown;
       try {
-        result = await requireClient(state).spawnSubagent({ ...effectiveParams, cwd: effectiveParams.cwd || effectiveSupervisorCwd(ctx), result_artifact_threshold_bytes: resultArtifactThresholdBytes, actor: parentActor(toolCallId, "Pi subagent tool") }, {
+        result = await requireClient(state).spawnSubagent({ ...effectiveParams, cwd: effectiveParams.cwd || effectiveSupervisorCwd(ctx, state.executionTarget), result_artifact_threshold_bytes: resultArtifactThresholdBytes, actor: parentActor(toolCallId, "Pi subagent tool") }, {
           signal,
           onUpdate: (message) => {
           if (message.event === "subagent_start") {

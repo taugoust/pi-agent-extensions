@@ -540,6 +540,30 @@ its own with `programs.pi.extensions.subagent-finalizer.enable`.
 
 </details>
 <details>
+<summary><strong>ssh</strong> - Local/SSH target routing with optional AgentSH sandboxing</summary>
+<br>
+
+- **Source**: [ssh/](https://github.com/taugoust/pi-agent-extensions/tree/main/ssh)
+- **License**: MIT
+- **Flag**: `--ssh host[:path]`{.verbatim}
+- **Command**: `/retarget [host[:path]]`{.verbatim}
+
+**Description**: Owns execution-target selection for both legacy and supervised
+Pi sessions. In `pi-unsafe`, remote read/write/edit/Bash and `!` commands use
+raw SSH; `/retarget` changes targets in-process and no argument returns to the
+local launch directory. When an AgentSH sandbox is configured, the extension
+publishes the selected target to the sandbox API and never falls back to raw
+SSH. The trusted `pi-supervised` wrapper replaces the AgentSH lifecycle, then
+resumes the same saved conversation. Every supervised retarget gets a fresh
+sandbox and may therefore lose previous session-scoped grants.
+
+For `/retarget host` the destination login shell's `pwd` is used. Supply
+`host:/path` to select an explicit remote directory. `pi-auto` intentionally
+does not expose retargeting because its shadow workspace and review state are
+bound to one target.
+
+</details>
+<details>
 <summary><strong>sandbox</strong> - AgentSH supervisor client, approval UI, and AgentSH-backed tools</summary>
 <br>
 
@@ -786,6 +810,7 @@ The extension exposes `globalThis.__AGENTSH_PI__` for owned extensions:
 - `exec(...)`, `refreshDirenv(...)`, `readFile(...)`, `writeFile(...)`,
   `editFile(...)`, `spawnSubagent(...)`;
 - `resolveApproval(...)`;
+- `setExecutionTarget(...)` / `getExecutionTarget()` for the SSH target router;
 - `getSupervisorMetadata()` / `getSupervisorState()`.
 
 **Run with only this extension and the mock supervisor**:
