@@ -1220,10 +1220,11 @@ function scopeFromObject(value: unknown): ApprovalResolution | undefined {
   const kind = typeof obj.scope_kind === "string" ? obj.scope_kind.trim() : "";
   const key = typeof obj.scope_key === "string" ? obj.scope_key.trim() : "";
   if (!kind || !key) return undefined;
+  const commandLifetime = obj.scope_lifetime === "command";
   return {
     decision: "approve",
-    scope: "session",
-    reason: "approved for session in parent Pi",
+    scope: commandLifetime ? "once" : "session",
+    reason: commandLifetime ? "approved for command invocation in parent Pi" : "approved for session in parent Pi",
     scope_kind: kind,
     scope_key: key,
     scope_label: typeof obj.scope_label === "string" ? obj.scope_label : undefined,
@@ -1232,6 +1233,10 @@ function scopeFromObject(value: unknown): ApprovalResolution | undefined {
     scope_rule: typeof obj.scope_rule === "string" ? obj.scope_rule : undefined,
     scope_prefix: typeof obj.scope_prefix === "boolean" ? obj.scope_prefix : undefined,
   };
+}
+
+function commandRunScope(option: ApprovalResolution) {
+  return option.scope === "once" && option.scope_kind === "command-run" && option.scope_key === "command-run:all-approvals";
 }
 
 function commandScopeIsExact(option: ApprovalResolution) {
@@ -1295,8 +1300,19 @@ function sessionDenyOptions(approval: ApprovalRequest, options: ApprovalResoluti
 function approvalChoices(approval: ApprovalRequest): ApprovalChoice[] {
   const approveOnce: ApprovalChoice = { label: "Allow once", decision: "approve", scope: "once", reason: "approved in parent Pi" };
   const denyOnce: ApprovalChoice = { label: "Deny once", decision: "deny", scope: "once", reason: "denied in parent Pi" };
-  const sessionOptions = sessionScopeOptions(approval);
+  const options = sessionScopeOptions(approval);
+  const commandRun = options.find(commandRunScope);
+  const sessionOptions = options.filter((option) => option.scope === "session");
   const choices: ApprovalChoice[] = [denyOnce, approveOnce];
+  if (commandRun) {
+    choices.push({
+      ...commandRun,
+      decision: "approve",
+      scope: "once",
+      reason: "approved all requests for this command invocation in parent Pi",
+      label: "Allow all requests for this command invocation",
+    });
+  }
   for (const option of sessionOptions) {
     const target = option.scope_label || option.scope_key || approvalTitle(approval);
     choices.push({ ...option, decision: "approve", scope: "session", reason: `approved for session ${option.scope_kind || "scope"}: ${target} in parent Pi`, label: sessionScopeLabel(approval, option, "approve") });

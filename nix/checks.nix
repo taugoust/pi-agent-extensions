@@ -3368,6 +3368,7 @@ in
             command: executable,
             args: ["deploy-hw", bitstream],
             scope_options: [
+              { scope_kind: "command-run", scope_key: "command-run:all-approvals", scope_label: "all requests for this command invocation", scope_lifetime: "command" },
               { scope_kind: "command", scope_key: "command-executable:deploy-hw", scope_label: executable, scope_path: executable },
               { scope_kind: "command", scope_key: "command-invocation:deploy-hw-pdi", scope_label: executable + " deploy-hw " + bitstream, scope_path: executable },
             ],
@@ -3386,7 +3387,7 @@ in
         setAgentSHEnv(server.socketPath);
         const pi = createPi();
         sandbox(pi);
-        const ctx = createContext({ customActions: ["<down>", "<down>", "<enter>"] });
+        const ctx = createContext({ customActions: ["<down>", "<down>", "<down>", "<enter>"] });
         await startSession(pi, ctx);
         await waitFor(() => Boolean(resolved), "command scope approval was not resolved");
 
@@ -3396,12 +3397,13 @@ in
         assert(rendered.some((line) => line.includes("Access or modify FPGA hardware state?")), "command approval did not promote its policy reason");
         assert(rendered.some((line) => line.includes("deploy-hw /scratch/theo/")) && rendered.some((line) => line.includes("cyt_top.pdi")), "command approval omitted its readable invocation: " + JSON.stringify(rendered));
         assert(!rendered.some((line) => line.includes(executable) || line.includes("deploy-hw deploy-hw") || line.includes("The project wants to")), "command approval exposed redundant or opaque command details: " + JSON.stringify(rendered));
-        assert(renderedChoices.length === 5, "command approval should show one-shot decisions, two session grants, and one exact session denial");
+        assert(renderedChoices.length === 6, "command approval should show one-shot decisions, command-wide approval, two session grants, and one exact session denial");
         assert(renderedChoices[0].includes("Deny once"), "command approval did not make Deny once the safe default");
         assert(renderedChoices[1].includes("Allow once"), "command approval did not keep common one-shot approval adjacent to the default");
-        assert(renderedChoices[2].includes("Allow this exact invocation for session"), "missing exact-invocation/session allow choice");
-        assert(renderedChoices[3].includes("Allow any deploy-hw invocation for session"), "missing readable executable/session allow choice");
-        assert(renderedChoices[4].includes("Deny this exact invocation for session"), "missing exact-invocation/session deny choice");
+        assert(renderedChoices[2].includes("Allow all requests for this command invocation"), "missing command-wide approval choice");
+        assert(renderedChoices[3].includes("Allow this exact invocation for session"), "missing exact-invocation/session allow choice");
+        assert(renderedChoices[4].includes("Allow any deploy-hw invocation for session"), "missing readable executable/session allow choice");
+        assert(renderedChoices[5].includes("Deny this exact invocation for session"), "missing exact-invocation/session deny choice");
         assert(!renderedChoices.some((line) => /command-invocation:|command-executable:|Deny any deploy-hw/.test(line)), "command choice exposed transport metadata or a broad session denial");
         assert(resolved.id === "appr-command-scopes", "resolved wrong command approval id");
         assert(resolved.decision === "approve", "command scope approval was not approved");
@@ -3409,6 +3411,51 @@ in
         assert(resolved.scope_kind === "command", "command approval did not relay scope_kind");
         assert(resolved.scope_key === "command-invocation:deploy-hw-pdi", "command approval did not relay exact invocation scope_key");
         assert(resolved.scope_label === executable + " deploy-hw " + bitstream, "command approval did not relay scope_label");
+        await shutdownSession(pi);
+        await server.close();
+      }
+
+      // Command-wide approval is command-scoped, explicit, and has no broad denial counterpart.
+      {
+        clearAgentSHEnv();
+        let approvals = [{
+          id: "appr-command-run",
+          command_id: "command-compound",
+          kind: "command",
+          target: "command1",
+          fields: {
+            command: "command1",
+            args: ["--check"],
+            scope_options: [
+              { scope_kind: "command-run", scope_key: "command-run:all-approvals", scope_label: "all requests for this command invocation", scope_lifetime: "command" },
+            ],
+          },
+        }];
+        let resolved;
+        const server = await withApprovalServer(async (request) => {
+          if (request.op === "list") return { ok: true, approvals };
+          if (request.op === "resolve") {
+            resolved = request;
+            approvals = [];
+            return { ok: true };
+          }
+          return { ok: false, error: "unknown op" };
+        });
+        setAgentSHEnv(server.socketPath);
+        const pi = createPi();
+        sandbox(pi);
+        const ctx = createContext({ customActions: ["<down>", "<down>", "<enter>"] });
+        await startSession(pi, ctx);
+        await waitFor(() => Boolean(resolved), "command-wide approval was not resolved");
+        const rendered = ctx.customCalls[0].renders[1];
+        const renderedChoices = rendered.filter((line) => /^(?:→ |  )(?:Allow|Deny)/.test(line));
+        assert(renderedChoices.length === 3, "command-wide approval should add exactly one allow choice: " + JSON.stringify(renderedChoices));
+        assert(renderedChoices[2].includes("Allow all requests for this command invocation"), "command-wide approval label missing");
+        assert(!renderedChoices.some((line) => line.includes("Deny all requests")), "unsafe broad denial was offered");
+        assert(resolved.scope === "once", "command-wide approval must remain command-scoped");
+        assert(resolved.scope_kind === "command-run", "command-wide approval did not relay scope kind");
+        assert(resolved.scope_key === "command-run:all-approvals", "command-wide approval did not relay canonical key");
+        assert(/all requests for this command invocation/.test(resolved.reason), "command-wide approval reason was not explicit");
         await shutdownSession(pi);
         await server.close();
       }
