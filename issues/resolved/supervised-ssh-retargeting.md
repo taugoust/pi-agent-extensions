@@ -2,7 +2,7 @@
 
 ## Status
 
-In progress.
+Resolved.
 
 ## Problem
 
@@ -16,3 +16,7 @@ SSH target ownership is split between the SSH extension, the sandbox extension, 
 - `/retarget host[:path]` selects a fresh sandboxed session on that host; an omitted path uses the target login directory.
 - Legacy `pi-unsafe` retargeting remains available through raw SSH.
 - Supervised retargeting preserves the Pi conversation and never falls back to raw SSH after a sandbox failure.
+
+## Resolution
+
+Implemented by `ba93071`. The SSH extension now owns target selection and uses either legacy raw SSH or the published AgentSH backend. It writes a private wrapper handoff for supervised retargeting, while the sandbox API accepts the selected execution target and remains responsible for AgentSH operations and approvals.
