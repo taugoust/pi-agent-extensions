@@ -1089,12 +1089,28 @@ function overlayRuleSummary(value: unknown) {
   return parts.length > 0 ? `Rules: ${parts.join(", ")}` : undefined;
 }
 
+function networkApprovalTitle(a: ApprovalRequest, target: string) {
+  const hint = `${a.rule || ""} ${a.message || ""}`.toLowerCase();
+  const port = /^.*:(\d+)$/.exec(target)?.[1];
+  if (/private[-_ ]?(?:network|address)|rfc1918/.test(hint)) return "Connect to this private network address?";
+  if (/\bssh\b/.test(hint) || port === "22") return "Connect over SSH?";
+  if (/\bhttps\b/.test(hint) || port === "443") return "Connect over HTTPS?";
+  if (/\bhttp\b/.test(hint) || port === "80") return /insecure/.test(hint) ? "Connect over insecure HTTP?" : "Connect over HTTP?";
+  return "Connect to this destination?";
+}
+
 function meaningfulApprovalMessage(a: ApprovalRequest, target: string) {
   const kind = (a.kind || "").trim().toLowerCase();
   if (kind === "file" && fileApprovalSubject(a.rule || "") !== "this file") return undefined;
+  // Network policy messages normally restate the destination. Their useful
+  // context (SSH, HTTPS, private network) is already promoted into the title.
+  if (kind === "network") return undefined;
   let message = stringField(a.message)?.trim();
   if (!message) return undefined;
   message = message.replace(/\{\{\s*\.Path\s*\}\}/g, target || "the requested path");
+  // AgentSH currently may return unrendered policy templates. Never expose
+  // protocol placeholders as decision UI.
+  if (/\{\{[^}]+\}\}/.test(message)) return undefined;
   if (target) {
     for (const suffix of [`: ${target}`, ` ${target}`]) {
       if (message.endsWith(suffix)) message = message.slice(0, -suffix.length).trim();
@@ -1124,7 +1140,7 @@ function approvalPresentation(a: ApprovalRequest): ApprovalPresentation {
       details.push(target);
       break;
     case "network":
-      title = "Connect to this network destination?";
+      title = networkApprovalTitle(a, target);
       details.push(target || "unknown destination");
       break;
     case "dns":
@@ -1222,7 +1238,7 @@ function sessionScopeLabel(option: ApprovalResolution, decision: "approve" | "de
     case "command":
       if (key.startsWith("command-invocation:")) return `${verb} exact invocation for session`;
       return `${verb} executable for session${path || option.scope_label ? `: ${path || option.scope_label}` : ""}`;
-    case "network": return `${verb} this destination for session`;
+    case "network": return `${verb} for session`;
     default: return `${verb} for session${option.scope_label ? `: ${option.scope_label}` : ""}`;
   }
 }

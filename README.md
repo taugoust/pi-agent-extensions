@@ -734,7 +734,9 @@ No supervised overflow file is created in the local parent-Pi temp directory.
 Approvals are polled rather than streamed. The default prompt is compact and
 kind-aware: it shows the requested operation and target, adds only a meaningful
 reason or actor attribution, and keeps opaque IDs, timestamps, internal rule
-keys, and raw `fields` payloads out of the decision UI. If
+keys, and raw `fields` payloads out of the decision UI. Network prompts promote
+useful context such as SSH, HTTPS, or private-address access into the title,
+show the destination once, and never display unrendered policy placeholders. If
 `fields.scope_kind` and `fields.scope_key` are present, Pi offers concise
 once/session choices whose labels make broader file and command scope explicit.
 Every approval kind safe-defaults to one-shot `Deny`. File-access prompts keep

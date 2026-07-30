@@ -3120,15 +3120,16 @@ in
         await server.close();
       }
 
-      // Session-scoped approvals expose four choices and relay scope=session.
+      // Session-scoped network approvals promote protocol context without repeating raw policy templates.
       {
         clearAgentSHEnv();
         let approvals = [{
           id: "appr-session",
           kind: "network",
-          target: "example.com:443",
-          rule: "approve-unknown-https",
-          fields: { scope_kind: "network", scope_key: "network:example.com:443", scope_label: "example.com:443" },
+          target: "login.dos.cit.tum.de:22",
+          rule: "approve-unknown-ssh",
+          message: "Pi wants to connect over SSH to: {{.RemoteAddr}}:{{.RemotePort}}",
+          fields: { scope_kind: "network", scope_key: "network:login.dos.cit.tum.de:22", scope_label: "login.dos.cit.tum.de:22" },
         }];
         let resolved;
         const server = await withApprovalServer(async (request) => {
@@ -3143,14 +3144,20 @@ in
         setAgentSHEnv(server.socketPath);
         const pi = createPi();
         sandbox(pi);
-        const ctx = createContext({ choices: ["Allow this destination for session"] });
+        const ctx = createContext({ customActions: ["<down>", "<down>", "<enter>"] });
         await startSession(pi, ctx);
         await waitFor(() => Boolean(resolved), "session approval was not resolved");
 
-        assert(ctx.selectCalls[0].items.length === 4, "scoped approval should show four choices");
-        assert(ctx.selectCalls[0].items.includes("Allow this destination for session"), "missing allow-for-session choice");
-        assert(ctx.selectCalls[0].items.includes("Deny this destination for session"), "missing deny-for-session choice");
-        assert(ctx.selectCalls[0].items[0] === "Deny", "network approval did not make Deny the safe default");
+        assert(ctx.customCalls.length === 1, "network approval did not use the compact overlay prompt");
+        const rendered = ctx.customCalls[0].renders[1];
+        const renderedChoices = rendered.filter((line) => /Deny|Allow/.test(line));
+        assert(rendered.some((line) => line.includes("Connect over SSH?")), "network approval omitted SSH context");
+        assert(rendered.filter((line) => line.includes("login.dos.cit.tum.de:22")).length === 1, "network approval did not show its destination exactly once: " + JSON.stringify(rendered));
+        assert(!rendered.some((line) => /\{\{|RemoteAddr|RemotePort|Pi wants to connect|network destination/.test(line)), "network approval exposed or repeated its raw policy message: " + JSON.stringify(rendered));
+        assert(renderedChoices.length === 4, "scoped approval should show four choices");
+        assert(renderedChoices.some((line) => line.includes("Allow for session")), "missing allow-for-session choice");
+        assert(renderedChoices.some((line) => line.includes("Deny for session")), "missing deny-for-session choice");
+        assert(renderedChoices[0].includes("Deny"), "network approval did not make Deny the safe default");
         assert(resolved.id === "appr-session", "resolved wrong session approval id");
         assert(resolved.decision === "approve", "session approval was not approved");
         assert(resolved.scope === "session", "session approval did not relay scope=session");
@@ -3448,7 +3455,7 @@ in
         setAgentSHEnv(server.socketPath);
         const pi = createPi();
         sandbox(pi);
-        const ctx = createContext({ choices: ["Deny this destination for session"] });
+        const ctx = createContext({ choices: ["Deny for session"] });
         await startSession(pi, ctx);
         await waitFor(() => Boolean(resolved), "deny-for-session approval was not resolved");
 
