@@ -2,7 +2,7 @@
 
 ## Status
 
-In progress.
+Resolved.
 
 ## Problem
 
@@ -15,3 +15,7 @@ Pi currently offers one-shot target approval and several session scopes, but no 
 - Do not offer an equally broad denial unless separately designed.
 - Keep the safe default on one-shot denial.
 - Test choice rendering and the exact resolution payload.
+
+## Resolution
+
+Implemented by `336e87d`. Pi recognizes AgentSH's command-lifetime `command-run` scope, renders the explicit `Allow all requests for this command invocation` choice directly after ordinary one-shot approval, and submits it as a targeted `scope=once` resolution. The UI does not offer a command-wide denial and retains `Deny once` as the default.
