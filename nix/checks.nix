@@ -3108,11 +3108,11 @@ in
         setAgentSHEnv(server.socketPath);
         const pi = createPi();
         sandbox(pi);
-        const ctx = createContext({ choices: ["Deny"] });
+        const ctx = createContext({ choices: ["Deny once"] });
         await startSession(pi, ctx);
         await waitFor(() => Boolean(resolved), "deny approval was not resolved");
 
-        assert(JSON.stringify(ctx.selectCalls[0].items) === JSON.stringify(["Deny", "Allow once"]), "file approval fallback did not keep the prompt compact with Deny as the safe default");
+        assert(JSON.stringify(ctx.selectCalls[0].items) === JSON.stringify(["Deny once", "Allow once"]), "file approval fallback did not keep the prompt compact with Deny once as the safe default");
         assert(resolved.id === "appr-deny", "denied wrong approval id");
         assert(resolved.decision === "deny", "approval was not denied");
         assert(resolved.scope === "once", "deny approval should default to once scope");
@@ -3155,9 +3155,9 @@ in
         assert(rendered.filter((line) => line.includes("login.dos.cit.tum.de:22")).length === 1, "network approval did not show its destination exactly once: " + JSON.stringify(rendered));
         assert(!rendered.some((line) => /\{\{|RemoteAddr|RemotePort|Pi wants to connect|network destination/.test(line)), "network approval exposed or repeated its raw policy message: " + JSON.stringify(rendered));
         assert(renderedChoices.length === 4, "scoped approval should show four choices");
-        assert(renderedChoices.some((line) => line.includes("Allow for session")), "missing allow-for-session choice");
-        assert(renderedChoices.some((line) => line.includes("Deny for session")), "missing deny-for-session choice");
-        assert(renderedChoices[0].includes("Deny"), "network approval did not make Deny the safe default");
+        assert(renderedChoices.some((line) => line.includes("Allow this destination for session")), "missing allow-for-session choice");
+        assert(renderedChoices.some((line) => line.includes("Deny this destination for session")), "missing deny-for-session choice");
+        assert(renderedChoices[0].includes("Deny once"), "network approval did not make Deny once the safe default");
         assert(resolved.id === "appr-session", "resolved wrong session approval id");
         assert(resolved.decision === "approve", "session approval was not approved");
         assert(resolved.scope === "session", "session approval did not relay scope=session");
@@ -3166,17 +3166,23 @@ in
         await server.close();
       }
 
-      // Command scope_options distinguish executable/session from exact-invocation/session approvals.
+      // Command prompts promote the policy reason, hide opaque executable paths, and order exact scope before executable scope.
       {
         clearAgentSHEnv();
+        const executable = "/nix/store/05fksbfby6px2yg3ccg6ln3n7c63jps3-deploy-hw/bin/deploy-hw";
+        const bitstream = "/scratch/theo/zerog/decoder/zerog-d15-v80-rama-triangular-changed/bitstreams/cyt_top.pdi";
         let approvals = [{
           id: "appr-command-scopes",
           kind: "command",
-          target: "bash -lc 'echo hi'",
+          target: executable,
+          rule: "approve-fpga-hardware-access",
+          message: "The project wants to access or modify FPGA hardware state",
           fields: {
+            command: executable,
+            args: ["deploy-hw", bitstream],
             scope_options: [
-              { scope_kind: "command", scope_key: "command-executable:bash", scope_label: "bash" },
-              { scope_kind: "command", scope_key: "command-invocation:bash -lc 'echo hi'", scope_label: "bash -lc 'echo hi'" },
+              { scope_kind: "command", scope_key: "command-executable:deploy-hw", scope_label: executable, scope_path: executable },
+              { scope_kind: "command", scope_key: "command-invocation:deploy-hw-pdi", scope_label: executable + " deploy-hw " + bitstream, scope_path: executable },
             ],
           },
         }];
@@ -3193,23 +3199,29 @@ in
         setAgentSHEnv(server.socketPath);
         const pi = createPi();
         sandbox(pi);
-        const ctx = createContext({ choices: ["Allow exact invocation for session"] });
+        const ctx = createContext({ customActions: ["<down>", "<down>", "<enter>"] });
         await startSession(pi, ctx);
         await waitFor(() => Boolean(resolved), "command scope approval was not resolved");
 
-        assert(ctx.selectCalls[0].items.length === 6, "command scope_options should show approve/deny choices for both session scopes");
-        assert(ctx.selectCalls[0].items.includes("Allow executable for session: bash"), "missing executable/session allow choice");
-        assert(ctx.selectCalls[0].items.includes("Allow exact invocation for session"), "missing exact-invocation/session allow choice");
-        assert(ctx.selectCalls[0].items.includes("Deny executable for session: bash"), "missing executable/session deny choice");
-        assert(ctx.selectCalls[0].items.includes("Deny exact invocation for session"), "missing exact-invocation/session deny choice");
-        assert(!ctx.selectCalls[0].items.some((item) => item.includes("command:") || item.includes("command-invocation:")), "command choice exposed transport scope metadata");
-        assert(ctx.selectCalls[0].items[0] === "Deny", "command approval did not make Deny the safe default");
+        assert(ctx.customCalls.length === 1, "command approval did not use the compact overlay prompt");
+        const rendered = ctx.customCalls[0].renders[1];
+        const renderedChoices = rendered.filter((line) => /^(?:→ |  )(?:Allow|Deny)/.test(line));
+        assert(rendered.some((line) => line.includes("Access or modify FPGA hardware state?")), "command approval did not promote its policy reason");
+        assert(rendered.some((line) => line.includes("deploy-hw /scratch/theo/")) && rendered.some((line) => line.includes("cyt_top.pdi")), "command approval omitted its readable invocation: " + JSON.stringify(rendered));
+        assert(!rendered.some((line) => line.includes(executable) || line.includes("deploy-hw deploy-hw") || line.includes("The project wants to")), "command approval exposed redundant or opaque command details: " + JSON.stringify(rendered));
+        assert(renderedChoices.length === 5, "command approval should show one-shot decisions, two session grants, and one exact session denial");
+        assert(renderedChoices[0].includes("Deny once"), "command approval did not make Deny once the safe default");
+        assert(renderedChoices[1].includes("Allow once"), "command approval did not keep common one-shot approval adjacent to the default");
+        assert(renderedChoices[2].includes("Allow this exact invocation for session"), "missing exact-invocation/session allow choice");
+        assert(renderedChoices[3].includes("Allow any deploy-hw invocation for session"), "missing readable executable/session allow choice");
+        assert(renderedChoices[4].includes("Deny this exact invocation for session"), "missing exact-invocation/session deny choice");
+        assert(!renderedChoices.some((line) => /command-invocation:|command-executable:|Deny any deploy-hw/.test(line)), "command choice exposed transport metadata or a broad session denial");
         assert(resolved.id === "appr-command-scopes", "resolved wrong command approval id");
         assert(resolved.decision === "approve", "command scope approval was not approved");
         assert(resolved.scope === "session", "command scope approval did not relay scope=session");
         assert(resolved.scope_kind === "command", "command approval did not relay scope_kind");
-        assert(resolved.scope_key === "command-invocation:bash -lc 'echo hi'", "command approval did not relay exact invocation scope_key");
-        assert(resolved.scope_label === "bash -lc 'echo hi'", "command approval did not relay scope_label");
+        assert(resolved.scope_key === "command-invocation:deploy-hw-pdi", "command approval did not relay exact invocation scope_key");
+        assert(resolved.scope_label === executable + " deploy-hw " + bitstream, "command approval did not relay scope_label");
         await shutdownSession(pi);
         await server.close();
       }
@@ -3294,7 +3306,7 @@ in
         setAgentSHEnv(server.socketPath);
         const pi = createPi();
         sandbox(pi);
-        const ctx = createContext({ choices: ["Allow executable for session: /nix/store/abc-sqlite/bin/sqlite3"] });
+        const ctx = createContext({ choices: ["Allow any sqlite3 invocation for session"] });
         await startSession(pi, ctx);
         await waitFor(
           () => resolved.length >= 1 && server.requests.filter((request) => request.op === "list").length >= 2,
@@ -3366,9 +3378,9 @@ in
         assert(ctx.customCalls[0].options.overlayOptions?.anchor === "bottom-center", "approval overlay anchor regressed");
         const rendered = ctx.customCalls[0].renders[1];
         const renderedChoices = rendered.filter((line) => /^(?:→ |  )(?:Allow|Deny)/.test(line));
-        assert(renderedChoices.filter((line) => line.endsWith("Deny")).length === 1, "file approval did not collapse scoped denials into one Deny choice: " + JSON.stringify(renderedChoices));
-        assert(!renderedChoices.some((line) => line.includes("Deny for session")), "file approval still exposed a scoped denial: " + JSON.stringify(renderedChoices));
-        assert(renderedChoices.some((line) => line === "→ Deny"), "file approval did not select Deny by default: " + JSON.stringify(renderedChoices));
+        assert(renderedChoices.filter((line) => line.endsWith("Deny once")).length === 1, "file approval did not collapse scoped denials into one Deny once choice: " + JSON.stringify(renderedChoices));
+        assert(!renderedChoices.some((line) => line.includes("Deny this file for session")), "file approval still exposed a scoped denial: " + JSON.stringify(renderedChoices));
+        assert(renderedChoices.some((line) => line === "→ Deny once"), "file approval did not select Deny once by default: " + JSON.stringify(renderedChoices));
         assert(renderedChoices.some((line) => line.includes("Allow this file for session")), "file approval lost its exact-file session choice");
         assert(renderedChoices.some((line) => line.includes("Allow /workspace/src/* for session (one level)")), "file approval lost its first-level directory session choice");
         assert(renderedChoices.some((line) => line.includes("Allow /workspace/src/** for session")), "file approval lost its recursive directory session choice");
@@ -3455,7 +3467,7 @@ in
         setAgentSHEnv(server.socketPath);
         const pi = createPi();
         sandbox(pi);
-        const ctx = createContext({ choices: ["Deny for session"] });
+        const ctx = createContext({ choices: ["Deny this destination for session"] });
         await startSession(pi, ctx);
         await waitFor(() => Boolean(resolved), "deny-for-session approval was not resolved");
 

@@ -1047,7 +1047,23 @@ function fileApprovalSubject(rule: string) {
   return "this file";
 }
 
+function displayExecutable(command: string) {
+  const clean = command.trim();
+  if (/^\/nix\/store\/[^/]+\/bin\/[^/]+$/.test(clean)) return posixPath.basename(clean);
+  return clean;
+}
+
 function commandInvocation(a: ApprovalRequest) {
+  const visible = stringField(a.fields?.visible_command)?.trim();
+  if (visible) return visible;
+  const command = stringField(a.fields?.command)?.trim();
+  if (command) {
+    let args = Array.isArray(a.fields?.args) ? a.fields.args.filter((value): value is string => typeof value === "string") : [];
+    const executable = displayExecutable(command);
+    if (args[0] === posixPath.basename(command)) args = args.slice(1);
+    const quote = (value: string) => /^[A-Za-z0-9_@%+=:,./-]+$/.test(value) ? value : JSON.stringify(value);
+    return [executable, ...args].map(quote).join(" ");
+  }
   const rawOptions = Array.isArray(a.fields?.scope_options) ? a.fields.scope_options : [];
   for (const option of rawOptions) {
     if (!option || typeof option !== "object") continue;
@@ -1056,13 +1072,18 @@ function commandInvocation(a: ApprovalRequest) {
     const label = stringField(obj.scope_label)?.trim();
     if (key.startsWith("command-invocation:") && label) return label;
   }
-  const visible = stringField(a.fields?.visible_command)?.trim();
-  if (visible) return visible;
-  const command = stringField(a.fields?.command)?.trim() || a.target;
-  const args = Array.isArray(a.fields?.args) ? a.fields.args.filter((value): value is string => typeof value === "string") : [];
-  if (!command) return a.command_id || a.id;
-  const quote = (value: string) => /^[A-Za-z0-9_@%+=:,./-]+$/.test(value) ? value : JSON.stringify(value);
-  return [command, ...args].map(quote).join(" ");
+  return a.target ? displayExecutable(a.target) : a.command_id || a.id;
+}
+
+function commandApprovalQuestion(a: ApprovalRequest) {
+  let reason = stringField(a.message)?.trim();
+  if (!reason || /\{\{[^}]+\}\}|[\r\n]/.test(reason)) return undefined;
+  reason = reason
+    .replace(/^(?:Pi|Agent|The project) wants to\s+/i, "")
+    .replace(/[.?!]+$/, "")
+    .trim();
+  if (!reason || reason.length > 100) return undefined;
+  return `${reason.charAt(0).toUpperCase()}${reason.slice(1)}?`;
 }
 
 function stringList(value: unknown) {
@@ -1102,6 +1123,7 @@ function networkApprovalTitle(a: ApprovalRequest, target: string) {
 function meaningfulApprovalMessage(a: ApprovalRequest, target: string) {
   const kind = (a.kind || "").trim().toLowerCase();
   if (kind === "file" && fileApprovalSubject(a.rule || "") !== "this file") return undefined;
+  if (kind === "command" && commandApprovalQuestion(a)) return undefined;
   // Network policy messages normally restate the destination. Their useful
   // context (SSH, HTTPS, private network) is already promoted into the title.
   if (kind === "network") return undefined;
@@ -1135,7 +1157,7 @@ function approvalPresentation(a: ApprovalRequest): ApprovalPresentation {
       details.push(target);
       break;
     case "command":
-      title = "Run this command?";
+      title = commandApprovalQuestion(a) || "Run this command?";
       target = commandInvocation(a);
       details.push(target);
       break;
@@ -1211,11 +1233,19 @@ function scopeFromObject(value: unknown): ApprovalResolution | undefined {
   };
 }
 
+function commandScopeIsExact(option: ApprovalResolution) {
+  return option.scope_kind === "command" && (option.scope_key || "").startsWith("command-invocation:");
+}
+
 function sessionScopeOptions(approval: ApprovalRequest): ApprovalResolution[] {
   const fields = approval.fields || {};
   const rawOptions = Array.isArray(fields.scope_options) ? fields.scope_options : [];
   const options = rawOptions.map(scopeFromObject).filter((value): value is ApprovalResolution => Boolean(value));
-  if (options.length > 0) return options;
+  if (options.length > 0) {
+    return approval.kind?.trim().toLowerCase() === "command"
+      ? options.sort((left, right) => Number(commandScopeIsExact(right)) - Number(commandScopeIsExact(left)))
+      : options;
+  }
   const fallback = scopeFromObject(fields);
   return fallback ? [fallback] : [];
 }
@@ -1226,42 +1256,53 @@ function scopePathLabel(path: string, recursive: boolean) {
   return `${clean}/${recursive ? "**" : "*"}`;
 }
 
-function sessionScopeLabel(option: ApprovalResolution, decision: "approve" | "deny") {
+function commandScopeExecutable(approval: ApprovalRequest, option: ApprovalResolution) {
+  const command = option.scope_path?.trim()
+    || stringField(approval.fields?.command)?.trim()
+    || (!commandScopeIsExact(option) ? option.scope_label?.trim() : "")
+    || approval.target
+    || "this executable";
+  return displayExecutable(command);
+}
+
+function sessionScopeLabel(approval: ApprovalRequest, option: ApprovalResolution, decision: "approve" | "deny") {
   const verb = decision === "approve" ? "Allow" : "Deny";
   const path = option.scope_path?.trim() || "";
-  const key = option.scope_key || "";
   switch (option.scope_kind) {
     case "file": return `${verb} this file for session`;
     case "file-dir": return `${verb} ${scopePathLabel(path, false)} for session (one level)`;
     case "file-tree": return `${verb} ${scopePathLabel(path, true)} for session`;
     case "directory": return `${verb} ${scopePathLabel(path, option.scope_prefix === true)} for session${option.scope_prefix ? "" : " (one level)"}`;
     case "command":
-      if (key.startsWith("command-invocation:")) return `${verb} exact invocation for session`;
-      return `${verb} executable for session${path || option.scope_label ? `: ${path || option.scope_label}` : ""}`;
-    case "network": return `${verb} for session`;
+      if (commandScopeIsExact(option)) return `${verb} this exact invocation for session`;
+      return `${verb} any ${commandScopeExecutable(approval, option)} invocation for session`;
+    case "network": return `${verb} this destination for session`;
     default: return `${verb} for session${option.scope_label ? `: ${option.scope_label}` : ""}`;
   }
 }
 
-function isFileAccessApproval(approval: ApprovalRequest) {
-  return approval.kind?.trim().toLowerCase() === "file";
+function sessionDenyOptions(approval: ApprovalRequest, options: ApprovalResolution[]) {
+  const kind = approval.kind?.trim().toLowerCase();
+  if (kind === "file") return [];
+  if (kind === "command") {
+    const exact = options.find(commandScopeIsExact);
+    return exact ? [exact] : options.slice(0, 1);
+  }
+  return options;
 }
 
 function approvalChoices(approval: ApprovalRequest): ApprovalChoice[] {
-  const fileAccess = isFileAccessApproval(approval);
   const approveOnce: ApprovalChoice = { label: "Allow once", decision: "approve", scope: "once", reason: "approved in parent Pi" };
-  const denyOnce: ApprovalChoice = { label: "Deny", decision: "deny", scope: "once", reason: "denied in parent Pi" };
+  const denyOnce: ApprovalChoice = { label: "Deny once", decision: "deny", scope: "once", reason: "denied in parent Pi" };
   const sessionOptions = sessionScopeOptions(approval);
   const choices: ApprovalChoice[] = [denyOnce, approveOnce];
   for (const option of sessionOptions) {
     const target = option.scope_label || option.scope_key || approvalTitle(approval);
-    choices.push({ ...option, decision: "approve", scope: "session", reason: `approved for session ${option.scope_kind || "scope"}: ${target} in parent Pi`, label: sessionScopeLabel(option, "approve") });
+    choices.push({ ...option, decision: "approve", scope: "session", reason: `approved for session ${option.scope_kind || "scope"}: ${target} in parent Pi`, label: sessionScopeLabel(approval, option, "approve") });
   }
-  if (!fileAccess) {
-    for (const option of sessionOptions) {
-      const target = option.scope_label || option.scope_key || approvalTitle(approval);
-      choices.push({ ...option, decision: "deny", scope: "session", reason: `denied for session ${option.scope_kind || "scope"}: ${target} in parent Pi`, label: sessionScopeLabel(option, "deny") });
-    }
+  for (const option of sessionDenyOptions(approval, sessionOptions)) {
+    const target = option.scope_label || option.scope_key || approvalTitle(approval);
+    choices.push({ ...option, decision: "deny", scope: "session", reason: `denied for session ${option.scope_kind || "scope"}: ${target} in parent Pi`, label: sessionScopeLabel(approval, option, "deny") });
   }
   return choices;
 }

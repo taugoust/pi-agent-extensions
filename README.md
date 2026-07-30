@@ -736,12 +736,17 @@ kind-aware: it shows the requested operation and target, adds only a meaningful
 reason or actor attribution, and keeps opaque IDs, timestamps, internal rule
 keys, and raw `fields` payloads out of the decision UI. Network prompts promote
 useful context such as SSH, HTTPS, or private-address access into the title,
-show the destination once, and never display unrendered policy placeholders. If
-`fields.scope_kind` and `fields.scope_key` are present, Pi offers concise
-once/session choices whose labels make broader file and command scope explicit.
-Every approval kind safe-defaults to one-shot `Deny`. File-access prompts keep
-all scoped approval choices but collapse scoped denials into that single
-`Deny`; other approval kinds retain concise scoped-deny choices. When the
+show the destination once, and never display unrendered policy placeholders.
+Command prompts promote a concise policy reason into the question, shorten
+immutable Nix-store executables to their basename, and suppress a redundant
+leading argv entry only in the display. If `fields.scope_kind` and
+`fields.scope_key` are present, Pi offers concise once/session choices whose
+labels make broader file and command scope explicit. Every approval kind
+safe-defaults to `Deny once`, followed by the commonly used allow choices.
+Network prompts retain destination/session denial to suppress retries. Command
+prompts retain exact-invocation/session denial but omit broader executable-wide
+denial; exact grants precede executable-wide grants. File prompts retain all
+scoped allow choices without scoped denials. When the
 supervisor reports `requested=strict`, the extension refuses all
 AgentSH-backed tools unless the live report proves the
 `helper-ebpf-proxy-required` tier is ready and `network_policy_enforced=true`.
