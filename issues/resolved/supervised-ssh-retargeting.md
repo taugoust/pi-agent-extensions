@@ -19,4 +19,4 @@ SSH target ownership is split between the SSH extension, the sandbox extension, 
 
 ## Resolution
 
-Implemented by `ba93071`. The SSH extension now owns target selection and uses either legacy raw SSH or the published AgentSH backend. It writes a private wrapper handoff for supervised retargeting, while the sandbox API accepts the selected execution target and remains responsible for AgentSH operations and approvals.
+Implemented by `ba93071`, with immediate pre-conversation retargeting fixed by `c17dea2`. The SSH extension now owns target selection and uses either legacy raw SSH or the published AgentSH backend. It writes a private wrapper handoff for supervised retargeting, while the sandbox API accepts the selected execution target and remains responsible for AgentSH operations and approvals. When Pi has reserved but not yet created a session file, the handoff explicitly requests a fresh empty replacement session.
