@@ -16,7 +16,7 @@ import { homedir } from "node:os";
 import { posix as posixPath } from "node:path";
 import { Type } from "@sinclair/typebox";
 import { DEFAULT_MAX_BYTES, DEFAULT_MAX_LINES, formatSize, getMarkdownTheme, renderDiff, truncateHead, truncateTail, type ExtensionAPI, type ExtensionContext, type TruncationResult } from "@mariozechner/pi-coding-agent";
-import { Box, Container, Key, Markdown, matchesKey, Spacer, Text, truncateToWidth, type Component } from "@mariozechner/pi-tui";
+import { Box, Container, Key, Markdown, matchesKey, Spacer, Text, truncateToWidth, visibleWidth, wrapTextWithAnsi, type Component } from "@mariozechner/pi-tui";
 import { inheritSubagentModels } from "./subagent-model.js";
 import { abortSubagentProtocolStream, appendSubagentProtocolChunk, createSubagentProtocolState, finishSubagentProtocolStream } from "./subagent-protocol.js";
 import { boundSubagentProgressCapsules, createSubagentProgressCapsule, sanitizeSubagentParentText } from "./subagent-result.js";
@@ -988,31 +988,191 @@ function approvalTitle(a: ApprovalRequest) {
   return `${kind}: ${target}`;
 }
 
-function formatActor(actor: ApprovalRequest["actor"]) {
-  if (!actor || typeof actor !== "object") return "-";
-  const label = typeof actor.label === "string" ? actor.label : undefined;
-  const kind = typeof actor.kind === "string" ? actor.kind : "actor";
-  const subagent = typeof actor.subagent_id === "string" ? ` (${actor.subagent_id})` : "";
-  const tool = typeof actor.tool_call_id === "string" ? ` tool=${actor.tool_call_id}` : "";
-  return `${label || kind}${subagent}${tool}`;
+type ApprovalPresentation = {
+  title: string;
+  details: string[];
+};
+
+function approvalActor(a: ApprovalRequest): ApprovalRequest["actor"] {
+  if (a.actor && typeof a.actor === "object") return a.actor;
+  const nested = a.fields?.actor;
+  return nested && typeof nested === "object" ? nested as JsonObject : undefined;
 }
 
-function formatApproval(a: ApprovalRequest) {
-  const lines = [
-    "AgentSH approval requested",
-    "",
-    `ID:      ${a.id}`,
-    `Kind:    ${a.kind || "unknown"}`,
-    `Target:  ${a.target || "-"}`,
-    `Actor:   ${formatActor(a.actor)}`,
-    `Rule:    ${a.rule || "-"}`,
-    `Message: ${a.message || "-"}`,
-  ];
-  if (a.command_id) lines.push(`Command: ${a.command_id}`);
-  if (a.session_id) lines.push(`Session: ${a.session_id}`);
-  if (a.expires_at) lines.push(`Expires: ${a.expires_at}`);
-  if (a.fields && Object.keys(a.fields).length > 0) lines.push("", "Fields:", truncate(JSON.stringify(a.fields, null, 2), 2200));
-  return lines.join("\n");
+function formatActor(actor: ApprovalRequest["actor"]) {
+  if (!actor || typeof actor !== "object") return undefined;
+  const label = stringField(actor.label)?.trim();
+  const kind = stringField(actor.kind)?.trim();
+  const fromSubagent = Boolean(stringField(actor.subagent_id));
+  if (label) return fromSubagent && !/subagent/i.test(label) ? `${label} (subagent)` : label;
+  if (fromSubagent) return "subagent";
+  return kind && kind !== "actor" ? kind : undefined;
+}
+
+function approvalOperation(a: ApprovalRequest) {
+  return stringField(a.fields?.scope_operation)?.trim() || stringField(a.fields?.operation)?.trim() || "access";
+}
+
+function fileAction(operation: string) {
+  switch (operation.toLowerCase()) {
+    case "open":
+    case "read":
+    case "stat":
+    case "list":
+    case "readlink":
+    case "access": return "Read";
+    case "write": return "Write to";
+    case "create": return "Create";
+    case "mkdir": return "Create directory at";
+    case "delete": return "Delete";
+    case "rmdir": return "Remove directory";
+    case "rename": return "Rename";
+    case "link": return "Create link to";
+    case "symlink": return "Create symlink at";
+    case "chmod": return "Change permissions on";
+    case "chown": return "Change ownership of";
+    case "mknod": return "Create device at";
+    default: return "Access";
+  }
+}
+
+function fileApprovalSubject(rule: string) {
+  const normalized = rule.toLowerCase();
+  if (normalized.includes("outside-workspace")) return "this path outside the opened workspace";
+  if (normalized.includes("env-file")) return "this protected environment file";
+  if (normalized.includes("nix-file")) return "this protected Nix file";
+  if (normalized.includes("ssh") && (normalized.includes("key") || normalized.includes("private"))) return "this SSH private material";
+  if (normalized.includes("credential") || normalized.includes("cloud")) return "this credential material";
+  if (normalized.includes("proc-sensitive")) return "this sensitive process path";
+  return "this file";
+}
+
+function commandInvocation(a: ApprovalRequest) {
+  const rawOptions = Array.isArray(a.fields?.scope_options) ? a.fields.scope_options : [];
+  for (const option of rawOptions) {
+    if (!option || typeof option !== "object") continue;
+    const obj = option as JsonObject;
+    const key = stringField(obj.scope_key)?.trim() || "";
+    const label = stringField(obj.scope_label)?.trim();
+    if (key.startsWith("command-invocation:") && label) return label;
+  }
+  const visible = stringField(a.fields?.visible_command)?.trim();
+  if (visible) return visible;
+  const command = stringField(a.fields?.command)?.trim() || a.target;
+  const args = Array.isArray(a.fields?.args) ? a.fields.args.filter((value): value is string => typeof value === "string") : [];
+  if (!command) return a.command_id || a.id;
+  const quote = (value: string) => /^[A-Za-z0-9_@%+=:,./-]+$/.test(value) ? value : JSON.stringify(value);
+  return [command, ...args].map(quote).join(" ");
+}
+
+function stringList(value: unknown) {
+  return Array.isArray(value) ? value.filter((item): item is string => typeof item === "string" && item.trim() !== "") : [];
+}
+
+function overlayRuleSummary(value: unknown) {
+  if (!value || typeof value !== "object") return undefined;
+  const labels: Record<string, string> = {
+    file_rules: "file",
+    command_rules: "command",
+    network_rules: "network",
+    unix_socket_rules: "socket",
+    signal_rules: "signal",
+    dns_redirects: "DNS redirect",
+    connect_redirects: "connect redirect",
+    package_rules: "package",
+  };
+  const parts: string[] = [];
+  for (const [key, label] of Object.entries(labels)) {
+    const count = Number((value as JsonObject)[key]);
+    if (Number.isSafeInteger(count) && count > 0) parts.push(`${count} ${label}`);
+  }
+  return parts.length > 0 ? `Rules: ${parts.join(", ")}` : undefined;
+}
+
+function meaningfulApprovalMessage(a: ApprovalRequest, target: string) {
+  const kind = (a.kind || "").trim().toLowerCase();
+  if (kind === "file" && fileApprovalSubject(a.rule || "") !== "this file") return undefined;
+  let message = stringField(a.message)?.trim();
+  if (!message) return undefined;
+  message = message.replace(/\{\{\s*\.Path\s*\}\}/g, target || "the requested path");
+  if (target) {
+    for (const suffix of [`: ${target}`, ` ${target}`]) {
+      if (message.endsWith(suffix)) message = message.slice(0, -suffix.length).trim();
+    }
+    if (message.includes(target)) return undefined;
+  }
+  message = message.replace(/^Pi wants to\s+/i, "").trim();
+  return message || undefined;
+}
+
+function approvalPresentation(a: ApprovalRequest): ApprovalPresentation {
+  const kind = (a.kind || "approval").trim().toLowerCase();
+  const fields = a.fields || {};
+  const details: string[] = [];
+  let title: string;
+  let target = a.target || "";
+
+  switch (kind) {
+    case "file":
+      target = target || stringField(fields.path)?.trim() || "unknown path";
+      title = `${fileAction(approvalOperation(a))} ${fileApprovalSubject(a.rule || "")}?`;
+      details.push(target);
+      break;
+    case "command":
+      title = "Run this command?";
+      target = commandInvocation(a);
+      details.push(target);
+      break;
+    case "network":
+      title = "Connect to this network destination?";
+      details.push(target || "unknown destination");
+      break;
+    case "dns":
+      title = "Resolve this DNS destination?";
+      details.push(target || "unknown destination");
+      break;
+    case "http_service":
+      title = "Call this declared HTTP service?";
+      details.push(target || "unknown service request");
+      break;
+    case "policy_overlay": {
+      title = "Use project-local policy overlays?";
+      details.push(target || stringField(fields.project_root)?.trim() || "unknown project");
+      const paths = stringList(fields.overlay_paths);
+      const names = stringList(fields.overlay_names);
+      const overlays = paths.length > 0 ? paths : names;
+      if (overlays.length > 0) details.push(`Overlays: ${overlays.slice(0, 4).join(", ")}${overlays.length > 4 ? ", …" : ""}`);
+      const rules = overlayRuleSummary(fields.rule_counts);
+      if (rules) details.push(rules);
+      break;
+    }
+    case "package":
+      title = "Allow this package operation?";
+      details.push(target || "unknown package operation");
+      if (Number.isSafeInteger(Number(fields.findings)) && Number(fields.findings) > 0) details.push(`Findings: ${Number(fields.findings)}`);
+      break;
+    case "skillcheck": {
+      title = "Allow this flagged skill?";
+      details.push(target || stringField(fields.skill_name)?.trim() || "unknown skill");
+      const path = stringField(fields.skill_path)?.trim();
+      if (path && path !== target) details.push(path);
+      const summary = stringField(fields.summary)?.trim();
+      if (summary) details.push(summary);
+      const hash = stringField(fields.skill_sha256)?.trim();
+      if (hash) details.push(`SHA-256: ${hash.slice(0, 12)}${hash.length > 12 ? "…" : ""}`);
+      break;
+    }
+    default:
+      title = `${kind === "approval" ? "Allow this operation" : `Allow this ${kind.replace(/_/g, " ")}`}?`;
+      if (target) details.push(target);
+      break;
+  }
+
+  const message = meaningfulApprovalMessage(a, target);
+  if (message && !details.includes(message)) details.push(message);
+  const actor = formatActor(approvalActor(a));
+  if (actor) details.push(`Requested by ${actor}`);
+  return { title, details };
 }
 
 function scopeFromObject(value: unknown): ApprovalResolution | undefined {
@@ -1044,32 +1204,27 @@ function sessionScopeOptions(approval: ApprovalRequest): ApprovalResolution[] {
   return fallback ? [fallback] : [];
 }
 
-function commandScopeTarget(option: ApprovalResolution, fallback: string) {
-  if (option.scope_label) return option.scope_label;
-  const key = option.scope_key || "";
-  for (const prefix of ["command-executable:", "command-invocation:"]) {
-    if (key.startsWith(prefix)) return key.slice(prefix.length) || key;
-  }
-  return key || fallback;
+function scopePathLabel(path: string, recursive: boolean) {
+  const clean = path.replace(/\/+$/, "") || "/";
+  if (clean === "/") return recursive ? "/**" : "/*";
+  return `${clean}/${recursive ? "**" : "*"}`;
 }
 
-function sessionScopeLabels(option: ApprovalResolution, fallback: string) {
-  const scopeTarget = option.scope_label || option.scope_key || fallback;
-  const reasonLabel = option.scope_kind ? `${option.scope_kind}: ${scopeTarget}` : scopeTarget;
-  if (option.scope_kind === "command") {
-    const target = commandScopeTarget(option, fallback);
-    const subject = option.scope_key?.startsWith("command-invocation:") ? "this exact invocation" : "this command";
-    return {
-      reasonLabel,
-      approveLabel: `Approve ${subject} for session: ${target}`,
-      denyLabel: `Deny ${subject} for session: ${target}`,
-    };
+function sessionScopeLabel(option: ApprovalResolution, decision: "approve" | "deny") {
+  const verb = decision === "approve" ? "Allow" : "Deny";
+  const path = option.scope_path?.trim() || "";
+  const key = option.scope_key || "";
+  switch (option.scope_kind) {
+    case "file": return `${verb} this file for session`;
+    case "file-dir": return `${verb} ${scopePathLabel(path, false)} for session (one level)`;
+    case "file-tree": return `${verb} ${scopePathLabel(path, true)} for session`;
+    case "directory": return `${verb} ${scopePathLabel(path, option.scope_prefix === true)} for session${option.scope_prefix ? "" : " (one level)"}`;
+    case "command":
+      if (key.startsWith("command-invocation:")) return `${verb} exact invocation for session`;
+      return `${verb} executable for session${path || option.scope_label ? `: ${path || option.scope_label}` : ""}`;
+    case "network": return `${verb} this destination for session`;
+    default: return `${verb} for session${option.scope_label ? `: ${option.scope_label}` : ""}`;
   }
-  return {
-    reasonLabel,
-    approveLabel: `Approve for session ${reasonLabel}`,
-    denyLabel: `Deny for session ${reasonLabel}`,
-  };
 }
 
 function isFileAccessApproval(approval: ApprovalRequest) {
@@ -1077,21 +1232,19 @@ function isFileAccessApproval(approval: ApprovalRequest) {
 }
 
 function approvalChoices(approval: ApprovalRequest): ApprovalChoice[] {
-  const title = approvalTitle(approval);
   const fileAccess = isFileAccessApproval(approval);
-  const approveOnce: ApprovalChoice = { label: `Approve ${title}`, decision: "approve", scope: "once", reason: "approved in parent Pi" };
-  const denyOnce: ApprovalChoice = { label: fileAccess ? "Deny" : `Deny ${title}`, decision: "deny", scope: "once", reason: "denied in parent Pi" };
+  const approveOnce: ApprovalChoice = { label: "Allow once", decision: "approve", scope: "once", reason: "approved in parent Pi" };
+  const denyOnce: ApprovalChoice = { label: "Deny", decision: "deny", scope: "once", reason: "denied in parent Pi" };
   const sessionOptions = sessionScopeOptions(approval);
-  const choices: ApprovalChoice[] = [approveOnce];
+  const choices: ApprovalChoice[] = [denyOnce, approveOnce];
   for (const option of sessionOptions) {
-    const labels = sessionScopeLabels(option, title);
-    choices.push({ ...option, decision: "approve", scope: "session", reason: `approved for session ${labels.reasonLabel} in parent Pi`, label: labels.approveLabel });
+    const target = option.scope_label || option.scope_key || approvalTitle(approval);
+    choices.push({ ...option, decision: "approve", scope: "session", reason: `approved for session ${option.scope_kind || "scope"}: ${target} in parent Pi`, label: sessionScopeLabel(option, "approve") });
   }
-  choices.push(denyOnce);
   if (!fileAccess) {
     for (const option of sessionOptions) {
-      const labels = sessionScopeLabels(option, title);
-      choices.push({ ...option, decision: "deny", scope: "session", reason: `denied for session ${labels.reasonLabel} in parent Pi`, label: labels.denyLabel });
+      const target = option.scope_label || option.scope_key || approvalTitle(approval);
+      choices.push({ ...option, decision: "deny", scope: "session", reason: `denied for session ${option.scope_kind || "scope"}: ${target} in parent Pi`, label: sessionScopeLabel(option, "deny") });
     }
   }
   return choices;
@@ -1103,25 +1256,15 @@ function resolveChoice(choices: ApprovalChoice[], choice: string | undefined): A
 }
 
 function showApprovalPrompt(ctx: ExtensionContext, approval: ApprovalRequest, choices: ApprovalChoice[], signal: AbortSignal): Promise<string | undefined> {
+  const presentation = approvalPresentation(approval);
   if (typeof ctx.ui.custom !== "function") {
-    const denyChoice = isFileAccessApproval(approval) ? choices.find((candidate) => candidate.decision === "deny" && candidate.scope === "once") : undefined;
-    const presentedChoices = denyChoice ? [denyChoice, ...choices.filter((candidate) => candidate !== denyChoice)] : choices;
-    return ctx.ui.select(formatApproval(approval), presentedChoices.map((candidate) => candidate.label), { signal });
+    return ctx.ui.select([presentation.title, ...presentation.details].join("\n"), choices.map((candidate) => candidate.label), { signal });
   }
   return ctx.ui.custom<string | undefined>((tui, theme, _kb, done) => {
     const denyIndex = choices.findIndex((candidate) => candidate.decision === "deny" && candidate.scope === "once");
-    let selectedIndex = isFileAccessApproval(approval) && denyIndex >= 0 ? denyIndex : 0;
-    let scrollOffset = 0;
+    let selectedIndex = denyIndex >= 0 ? denyIndex : 0;
     let cachedLines: string[] | undefined;
     let cachedWidth = 0;
-    let lastGPress = 0;
-    const detailLines = formatApproval(approval).split(/\r?\n/);
-
-    const visibleDetailLines = () => Math.max(3, tui.terminal.rows - choices.length - 12);
-    const maxScroll = () => Math.max(0, detailLines.length - visibleDetailLines());
-    const clampScroll = (offset: number) => {
-      scrollOffset = Math.max(0, Math.min(maxScroll(), offset));
-    };
     const refresh = () => {
       cachedLines = undefined;
       tui.requestRender();
@@ -1153,59 +1296,39 @@ function showApprovalPrompt(ctx: ExtensionContext, approval: ApprovalRequest, ch
         if (matchesKey(data, Key.down) || data === "j") {
           selectedIndex = Math.min(choices.length - 1, selectedIndex + 1);
           refresh();
-          return;
-        }
-        if (matchesKey(data, Key.pageUp) || data === "u") {
-          clampScroll(scrollOffset - Math.max(1, Math.floor(visibleDetailLines() / 2)));
-          refresh();
-          return;
-        }
-        if (matchesKey(data, Key.pageDown) || data === "d") {
-          clampScroll(scrollOffset + Math.max(1, Math.floor(visibleDetailLines() / 2)));
-          refresh();
-          return;
-        }
-        if (data === "g") {
-          const now = Date.now();
-          if (now - lastGPress < 500) {
-            scrollOffset = 0;
-            lastGPress = 0;
-            refresh();
-          } else {
-            lastGPress = now;
-          }
-          return;
-        }
-        if (data === "G") {
-          scrollOffset = maxScroll();
-          refresh();
         }
       },
       render(width: number) {
         if (cachedLines && cachedWidth === width) return cachedLines;
-        clampScroll(scrollOffset);
+        const renderWidth = Math.max(1, width);
         const lines: string[] = [];
-        const add = (line: string) => lines.push(truncateToWidth(line, width, ""));
-        const detailVisible = visibleDetailLines();
-        const visible = detailLines.slice(scrollOffset, scrollOffset + detailVisible);
+        const addWrapped = (prefix: string, text: string) => {
+          const prefixWidth = visibleWidth(prefix);
+          if (prefixWidth >= renderWidth) {
+            lines.push(...wrapTextWithAnsi(prefix + text, renderWidth));
+            return;
+          }
+          const wrapped = wrapTextWithAnsi(text, Math.max(1, renderWidth - prefixWidth));
+          const continuation = " ".repeat(prefixWidth);
+          for (let i = 0; i < wrapped.length; i++) lines.push(`${i === 0 ? prefix : continuation}${wrapped[i]}`);
+        };
 
-        add(theme.fg("accent", "─".repeat(width)));
-        add(theme.fg("accent", theme.bold(" AgentSH approval requested")));
-        lines.push("");
-        for (const line of visible) add(line ? ` ${theme.fg("text", line)}` : "");
-        if (detailLines.length > detailVisible) {
-          const end = Math.min(scrollOffset + detailVisible, detailLines.length);
-          add(theme.fg("dim", ` lines ${scrollOffset + 1}–${end} of ${detailLines.length} • PgUp/PgDn scroll`));
+        lines.push(theme.fg("accent", "─".repeat(renderWidth)));
+        addWrapped(" ", theme.fg("accent", theme.bold(presentation.title)));
+        for (let i = 0; i < presentation.details.length; i++) {
+          const color = i === 0 ? "text" : "muted";
+          addWrapped(" ", theme.fg(color, presentation.details[i] || ""));
         }
         lines.push("");
         for (let i = 0; i < choices.length; i++) {
-          const prefix = i === selectedIndex ? theme.fg("accent", "→ ") : "  ";
+          const selected = i === selectedIndex;
+          const prefix = selected ? theme.fg("accent", "→ ") : "  ";
           const color = choices[i]?.decision === "deny" ? "warning" : "success";
-          add(`${prefix}${theme.fg(color, choices[i]?.label || "")}`);
+          addWrapped(prefix, theme.fg(color, choices[i]?.label || ""));
         }
         lines.push("");
-        add(theme.fg("dim", " ↑↓/j/k select • Enter choose • Esc deny once • u/d/PgUp/PgDn scroll"));
-        add(theme.fg("accent", "─".repeat(width)));
+        addWrapped(" ", theme.fg("dim", "↑↓/j/k select • Enter choose • Esc deny"));
+        lines.push(theme.fg("accent", "─".repeat(renderWidth)));
         cachedWidth = width;
         cachedLines = lines;
         return lines;
