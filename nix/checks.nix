@@ -115,9 +115,11 @@ in
     const extension = imported.default?.default ?? imported.default ?? imported;
     const root = fs.mkdtempSync(path.join(os.tmpdir(), "ssh-target-test-"));
     const sessionFile = path.join(root, "session.jsonl");
-    fs.writeFileSync(sessionFile, "{}\n");
 
     // Supervised mode selects the AgentSH backend and writes a wrapper request.
+    // A brand-new Pi session reserves a path but does not create the file until
+    // the first assistant response, so immediate retargeting must request a
+    // fresh empty session rather than reject the handoff.
     const requestDir = path.join(root, "control");
     fs.mkdirSync(requestDir, { mode: 0o700 });
     const requestPath = path.join(requestDir, "retarget.json");
@@ -151,7 +153,7 @@ in
     await supervisedPi.commands.get("retarget").handler("new-host:/new/work", supervisedCtx);
     assert(supervisedCtx.waited && supervisedCtx.shutdown, "supervised retarget did not wait and shut down gracefully");
     const request = JSON.parse(fs.readFileSync(requestPath, "utf8"));
-    assert(request.schema_version === 1 && request.target === "new-host:/new/work" && request.session_file === sessionFile, "invalid wrapper retarget request");
+    assert(request.schema_version === 1 && request.target === "new-host:/new/work" && request.session_file === null, "invalid wrapper retarget request for a fresh session");
     assert((fs.statSync(requestPath).mode & 0o777) === 0o600, "retarget request is not private");
 
     // Legacy mode owns raw SSH and can switch back to local in-process.

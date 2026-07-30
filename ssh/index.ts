@@ -13,7 +13,7 @@
 
 import { spawn } from "node:child_process";
 import { randomUUID } from "node:crypto";
-import { lstatSync, renameSync, rmSync, writeFileSync } from "node:fs";
+import { existsSync, lstatSync, renameSync, rmSync, writeFileSync } from "node:fs";
 import { dirname, isAbsolute } from "node:path";
 import type { ExtensionAPI, ExtensionCommandContext } from "@mariozechner/pi-coding-agent";
 import {
@@ -182,7 +182,7 @@ function notify(ctx: ExtensionCommandContext, message: string, level: "info" | "
 	if (ctx.hasUI) ctx.ui.notify(message, level);
 }
 
-function writeRetargetRequest(requestPath: string, target: string | null, sessionFile: string) {
+function writeRetargetRequest(requestPath: string, target: string | null, sessionFile: string | null) {
 	if (!isAbsolute(requestPath)) throw new Error("The wrapper retarget request path is not absolute");
 	const parent = lstatSync(dirname(requestPath));
 	if (!parent.isDirectory() || parent.isSymbolicLink() || (parent.mode & 0o077) !== 0) {
@@ -298,8 +298,11 @@ export default function sshTargetExtension(pi: ExtensionAPI) {
 						const requestPath = env("PI_AGENTSH_RETARGET_REQUEST");
 						if (!requestPath) throw new Error("The supervised wrapper did not expose retarget control");
 						const sessionFile = ctx.sessionManager.getSessionFile();
-						if (!sessionFile) throw new Error("Retargeting requires a saved Pi session; it is unavailable with --no-session");
-						writeRetargetRequest(requestPath, requested || null, sessionFile);
+						if (!sessionFile) throw new Error("Retargeting is unavailable with --no-session");
+						// Pi deliberately delays creating a new session file until the first
+						// assistant message. An immediate /retarget therefore has a reserved
+						// path but nothing to resume yet; relaunch a fresh empty session.
+						writeRetargetRequest(requestPath, requested || null, existsSync(sessionFile) ? sessionFile : null);
 						notify(ctx, requested ? `Retargeting to ${requested}…` : "Retargeting to the sandboxed local system…");
 						ctx.shutdown();
 						return;
