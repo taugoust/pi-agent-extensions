@@ -2546,6 +2546,7 @@ in
           if (request.method === "POST" && request.url.endsWith("/tools/read_file")) {
             const requested = String(request.body.path || "");
             if (requested.endsWith("missing.txt")) return { statusCode: 404, body: { ok: false, code: "file_not_found", error: "File not found", path: "/workspace/missing.txt", error_id: "error-file", internal_debug: "/private/shadow/secret-path" } };
+            if (requested.endsWith("supervisor.env")) return { statusCode: 404, body: { ok: false, code: "file_not_found", error: "File not found", path: "/workspace/sessions/session-missing/supervisor.env", error_id: "error-session-path-file" } };
             if (requested.endsWith("policy.txt")) return { statusCode: 403, body: { ok: false, code: "policy_denied", error: "operation denied by policy rule read-only", path: "/workspace/policy.txt", error_id: "error-policy" } };
             if (requested.endsWith("approval.txt")) return { statusCode: 403, body: { ok: false, code: "approval_denied", error: "operation denied by approval", path: "/workspace/approval.txt", error_id: "error-approval" } };
             if (requested.endsWith("malformed.txt")) return { statusCode: 500, body: "raw-internal-secret /private/shadow/path" };
@@ -2576,6 +2577,9 @@ in
         };
         const missing = await capture(() => readTool.execute("domain-missing", { path: "/workspace/missing.txt" }, undefined, undefined, ctx));
         assert(missing.includes("File not found: /workspace/missing.txt") && !missing.includes("HTTP 404") && !missing.includes("/api/v1/") && !missing.includes("private/shadow"), "missing file exposed REST framing: " + missing);
+        const missingSessionPath = await capture(() => readTool.execute("domain-missing-session-path", { path: "/workspace/sessions/session-missing/supervisor.env" }, undefined, undefined, ctx));
+        assert(missingSessionPath.includes("File not found: /workspace/sessions/session-missing/supervisor.env") && !missingSessionPath.includes("no longer safe to use"), "typed file_not_found containing /sessions/ was misclassified as session loss: " + missingSessionPath);
+        assert(globalThis.__AGENTSH_PI__.getSupervisorState().status === "connected", "typed file_not_found containing /sessions/ permanently disabled the AgentSH client");
         const policy = await capture(() => readTool.execute("domain-policy", { path: "/workspace/policy.txt" }, undefined, undefined, ctx));
         assert(policy.includes("AgentSH policy denied") && policy.includes("/workspace/policy.txt") && !policy.includes("HTTP 403"), "policy denial was not normalized: " + policy);
         const approval = await capture(() => readTool.execute("domain-approval", { path: "/workspace/approval.txt" }, undefined, undefined, ctx));

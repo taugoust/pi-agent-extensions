@@ -388,6 +388,12 @@ class RestHTTPError extends Error {
   }
 }
 
+function restHTTPErrorIsSessionNotFound(error: RestHTTPError) {
+  if (error.domainCode !== undefined) return error.domainCode === "session_not_found";
+  return error.statusCode === 404
+    && /session[_ -]?(?:not[_ -]?found|missing)|(?:not[_ -]?found|missing).*session/i.test(error.body);
+}
+
 class SupervisorUnavailableError extends Error {
   readonly diagnostic: string;
 
@@ -2157,7 +2163,7 @@ class RestSupervisorClient {
         options.signal,
       );
     } catch (error) {
-      if (error instanceof RestHTTPError && (error.domainCode === "session_not_found" || (error.statusCode === 404 && /session[_ -]?(?:not[_ -]?found|missing)|(?:not[_ -]?found|missing).*session/i.test(error.body)))) {
+      if (error instanceof RestHTTPError && restHTTPErrorIsSessionNotFound(error)) {
         throw this.#sessionLost(`The supervisor reported that session ${this.#expectedSessionId} no longer exists.`);
       }
       throw error;
@@ -2284,7 +2290,7 @@ class RestSupervisorClient {
         options.signal,
       );
     } catch (error) {
-      if (error instanceof RestHTTPError && (error.domainCode === "session_not_found" || (error.statusCode === 404 && /session[_ -]?(?:not[_ -]?found|missing)|(?:not[_ -]?found|missing).*session/i.test(error.body)))) {
+      if (error instanceof RestHTTPError && restHTTPErrorIsSessionNotFound(error)) {
         throw this.#sessionLost(`The supervisor reported that session ${this.#expectedSessionId} no longer exists.`);
       }
       throw error;
@@ -2395,7 +2401,7 @@ class RestSupervisorClient {
       }, options.signal);
     } catch (error) {
       if (options.signal?.aborted) throw supervisorRequestAborted();
-      if (error instanceof RestHTTPError && (error.domainCode === "session_not_found" || (error.statusCode === 404 && /session[_ -]?(?:not[_ -]?found|missing)|(?:not[_ -]?found|missing).*session/i.test(error.body)))) {
+      if (error instanceof RestHTTPError && restHTTPErrorIsSessionNotFound(error)) {
         throw this.#sessionLost(`The supervisor reported that session ${this.#expectedSessionId} no longer exists.`);
       }
       if (error instanceof RestHTTPError && budget) {
