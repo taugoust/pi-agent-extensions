@@ -1011,17 +1011,17 @@ function formatActor(actor: ApprovalRequest["actor"]) {
 }
 
 function approvalOperation(a: ApprovalRequest) {
-  return stringField(a.fields?.scope_operation)?.trim() || stringField(a.fields?.operation)?.trim() || "access";
+  return stringField(a.fields?.operation)?.trim() || stringField(a.fields?.scope_operation)?.trim() || "access";
 }
 
 function fileAction(operation: string) {
   switch (operation.toLowerCase()) {
     case "open":
-    case "read":
+    case "read": return "Read";
     case "stat":
-    case "list":
-    case "readlink":
-    case "access": return "Read";
+    case "access": return "Inspect metadata for";
+    case "list": return "List";
+    case "readlink": return "Inspect link target for";
     case "write": return "Write to";
     case "create": return "Create";
     case "mkdir": return "Create directory at";

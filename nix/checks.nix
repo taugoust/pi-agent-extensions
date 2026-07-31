@@ -3578,7 +3578,7 @@ in
           rule: "approve-outside-workspace-reads",
           message: "Pi wants to read outside the opened workspace: {{.Path}}",
           fields: {
-            operation: "open",
+            operation: "stat",
             path: "/workspace/src/secret.txt",
             scope_options: [
               { scope_kind: "file", scope_key: "file:read:/workspace/src/secret.txt", scope_label: "read /workspace/src/secret.txt", scope_operation: "read", scope_path: "/workspace/src/secret.txt", scope_rule: "approve-outside-workspace-reads", scope_prefix: false },
@@ -3619,7 +3619,7 @@ in
         assert(renderedChoices.some((line) => line.includes("Allow /workspace/src/* for session (one level)")), "file approval lost its first-level directory session choice");
         assert(renderedChoices.some((line) => line.includes("Allow /workspace/src/** for session")), "file approval lost its recursive directory session choice");
         assert(renderedChoices.some((line) => line.includes("Allow /workspace/** for session")), "file approval lost its broader parent directory session choice");
-        assert(rendered.includes(" Read this path outside the opened workspace?"), "file approval did not render a concise semantic question: " + JSON.stringify(rendered));
+        assert(rendered.includes(" Inspect metadata for this path outside the opened workspace?"), "file metadata approval did not render its actual operation: " + JSON.stringify(rendered));
         assert(rendered.includes(" /workspace/src/secret.txt"), "file approval omitted the requested path");
         assert(!rendered.some((line) => /AgentSH approval requested|Fields:|ID:|Session:|scope_key|appr-directory|sess-test|command-debug-id/.test(line)), "file approval exposed transport/debug metadata: " + JSON.stringify(rendered));
         assert(rendered.length <= 13, "file approval regressed to a tall scrolling prompt: " + JSON.stringify(rendered));
