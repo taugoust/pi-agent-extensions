@@ -9,6 +9,7 @@ import { type AutoAction, writeAutoActionRequest } from "./request.js";
 type DraftIdentity = {
   sessionId: string;
   requestPath: string;
+  authorization: string;
   status: AgentSHSupervisorStatus | "unavailable";
   metadata?: AgentSHSupervisorMetadata;
 };
@@ -26,8 +27,10 @@ function draftIdentity(): DraftIdentity {
 
   const sessionId = env("AGENTSH_SESSION_ID");
   const requestPath = env("PI_AUTO_ACTION_REQUEST");
+  const authorization = env("PI_AUTO_ACTION_TOKEN");
   if (!sessionId) throw new Error("Draft session identity is unavailable");
-  if (!requestPath) throw new Error("Draft action control is unavailable");
+  if (!requestPath || !authorization) throw new Error("Draft action control is unavailable");
+  if (!/^[0-9a-f]{64}$/.test(authorization)) throw new Error("Draft action authorization is malformed");
 
   const state = globalThis.__AGENTSH_PI__?.getSupervisorState();
   const metadata = globalThis.__AGENTSH_PI__?.getSupervisorMetadata() ?? state?.metadata;
@@ -41,7 +44,7 @@ function draftIdentity(): DraftIdentity {
   if (metadata?.workspace_mode && metadata.workspace_mode !== "shadow") {
     throw new Error("Live AgentSH workspace is not a Draft workspace");
   }
-  return { sessionId, requestPath, status: state?.status ?? "unavailable", metadata };
+  return { sessionId, requestPath, authorization, status: state?.status ?? "unavailable", metadata };
 }
 
 function displayProject(identity: DraftIdentity) {
@@ -144,7 +147,12 @@ export default function autoExtension(pi: ExtensionAPI) {
           throw new Error("Pi still has pending work; wait for it to settle before finalizing the Draft");
         }
         const finalIdentity = draftIdentity();
-        writeAutoActionRequest(finalIdentity.requestPath, finalIdentity.sessionId, action);
+        writeAutoActionRequest(
+          finalIdentity.requestPath,
+          finalIdentity.sessionId,
+          action,
+          finalIdentity.authorization,
+        );
         committed = true;
         setStatus(ctx, action);
         ctx.ui.notify(`${selection} requested; shutting down safely…`, "info");

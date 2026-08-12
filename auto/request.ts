@@ -13,12 +13,15 @@ function assertPrivateOwner(path: string, label: string) {
   return stat;
 }
 
-export function writeAutoActionRequest(path: string, sessionId: string, action: AutoAction) {
+export function writeAutoActionRequest(path: string, sessionId: string, action: AutoAction, authorization: string) {
   if (!isAbsolute(path) || /[\0\r\n]/.test(path)) {
     throw new Error("Draft action request path must be an absolute single-line path");
   }
   if (!/^session-[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/.test(sessionId)) {
     throw new Error("Draft session identity is malformed");
+  }
+  if (!/^[0-9a-f]{64}$/.test(authorization)) {
+    throw new Error("Draft action authorization is malformed");
   }
 
   const parent = assertPrivateOwner(dirname(path), "Draft action request directory");
@@ -31,7 +34,7 @@ export function writeAutoActionRequest(path: string, sessionId: string, action: 
   try {
     writeFileSync(
       temporary,
-      `${JSON.stringify({ schema_version: 1, session_id: sessionId, action })}\n`,
+      `${JSON.stringify({ schema_version: 2, session_id: sessionId, action, authorization })}\n`,
       { encoding: "utf8", flag: "wx", mode: 0o600 },
     );
     const tempStat = assertPrivateOwner(temporary, "Draft action request");

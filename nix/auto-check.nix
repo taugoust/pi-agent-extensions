@@ -32,6 +32,7 @@ pkgs.runCommand "auto-extension-check" {
   const imported = await import(pathToFileURL(path.join(process.argv[2], "auto/index.js")).href);
   const extension = imported.default?.default ?? imported.default ?? imported;
   const sessionId = "session-11111111-1111-4111-8111-111111111111";
+  const authorization = "a".repeat(64);
 
   function createPi() {
     const handlers = new Map(); const commands = new Map(); const tools = new Map();
@@ -73,6 +74,7 @@ pkgs.runCommand "auto-extension-check" {
   process.env.PI_AGENTSH_WORKSPACE_MODE = "shadow";
   process.env.AGENTSH_SESSION_ID = sessionId;
   process.env.PI_AUTO_ACTION_REQUEST = request;
+  process.env.PI_AUTO_ACTION_TOKEN = authorization;
   globalThis.__AGENTSH_PI__ = {
     getSupervisorState() { return { configured: true, active: true, status: "connected", source: "agentsh-env", socketPath: "/tmp/s", sessionId, metadata: { session_id: sessionId, workspace_mode: "shadow", real_workspace: "/project" } }; },
     getSupervisorMetadata() { return { session_id: sessionId, workspace_mode: "shadow", real_workspace: "/project" }; },
@@ -91,7 +93,7 @@ pkgs.runCommand "auto-extension-check" {
     await pi.commands.get("auto").handler("", ctx);
     assert(ctx.shutdownCalled, `''${action} did not request shutdown`);
     const body = JSON.parse(fs.readFileSync(request, "utf8"));
-    assert(body.schema_version === 1 && body.session_id === sessionId && body.action === action, `invalid ''${action} request`);
+    assert(body.schema_version === 2 && body.session_id === sessionId && body.action === action && body.authorization === authorization, `invalid ''${action} request`);
     assert((fs.statSync(request).mode & 0o777) === 0o600, "request mode is not 0600");
     assert(ctx.calls.at(-1) === "shutdown" && ctx.calls.filter((x) => x === "wait").length === 2, "request was not quiesced before shutdown");
     await event(pi, "session_shutdown", ctx);
@@ -112,6 +114,12 @@ pkgs.runCommand "auto-extension-check" {
   await unsafePi.commands.get("auto").handler("", unsafeCtx);
   assert(!unsafeCtx.shutdownCalled && unsafeCtx.notices.some((n) => n.level === "error"), "unsafe request directory was accepted");
   fs.chmodSync(root, 0o700);
+
+  process.env.PI_AUTO_ACTION_TOKEN = "invalid";
+  const malformedPi = createPi(); extension(malformedPi); const malformedCtx = context("Pause and exit");
+  await malformedPi.commands.get("auto").handler("", malformedCtx);
+  assert(!malformedCtx.shutdownCalled && malformedCtx.notices.some((n) => n.level === "error"), "malformed authorization was accepted");
+  process.env.PI_AUTO_ACTION_TOKEN = authorization;
 
   process.env.AGENTSH_SUBAGENT_ID = "subagent-test";
   const childPi = createPi(); extension(childPi); const childCtx = context("Pause and exit");
