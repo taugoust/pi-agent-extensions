@@ -513,16 +513,24 @@ const SubagentItem = Type.Object({
   cwd: Type.Optional(Type.String({ description: "Optional working directory for this subagent process" })),
 });
 
-const SubagentParams = Type.Object({
-  task: Type.Optional(Type.String({ description: "Task to delegate (single mode)" })),
-  systemPrompt: Type.Optional(Type.String({ description: "Optional additional system prompt (single mode)" })),
-  model: Type.Optional(Type.String({ description: "Optional model id (single mode)" })),
-  tools: Type.Optional(Type.Array(Type.String(), { description: "Optional tool allowlist (single mode)" })),
-  cwd: Type.Optional(Type.String({ description: "Optional working directory (single mode)" })),
-  tasks: Type.Optional(Type.Array(SubagentItem, { description: "Parallel subagent tasks. Max 8, up to 4 run concurrently." })),
-  chain: Type.Optional(Type.Array(SubagentItem, { description: "Sequential subagent steps. Each task may use {previous}." })),
-  timeout_ms: Type.Optional(Type.Number({ minimum: 1, description: "Optional shorter execution timeout in milliseconds; otherwise AgentSH uses the effective policy ceiling" })),
-});
+function modelMayOverrideSubagentTimeout(processEnv: NodeJS.ProcessEnv = process.env): boolean {
+  return processEnv.PI_AGENTSH_EXPOSE_SUBAGENT_TIMEOUT === "1";
+}
+
+function subagentParams(processEnv: NodeJS.ProcessEnv = process.env) {
+  return Type.Object({
+    task: Type.Optional(Type.String({ description: "Task to delegate (single mode)" })),
+    systemPrompt: Type.Optional(Type.String({ description: "Optional additional system prompt (single mode)" })),
+    model: Type.Optional(Type.String({ description: "Optional model id (single mode)" })),
+    tools: Type.Optional(Type.Array(Type.String(), { description: "Optional tool allowlist (single mode)" })),
+    cwd: Type.Optional(Type.String({ description: "Optional working directory (single mode)" })),
+    tasks: Type.Optional(Type.Array(SubagentItem, { description: "Parallel subagent tasks. Max 8, up to 4 run concurrently." })),
+    chain: Type.Optional(Type.Array(SubagentItem, { description: "Sequential subagent steps. Each task may use {previous}." })),
+    ...(modelMayOverrideSubagentTimeout(processEnv) ? {
+      timeout_ms: Type.Optional(Type.Number({ minimum: 1, description: "Optional shorter execution timeout in milliseconds; otherwise AgentSH uses the effective policy ceiling" })),
+    } : {}),
+  });
+}
 
 function optionalPositiveTimeoutEnv(name: string): number | undefined {
   const raw = process.env[name]?.trim();
@@ -4239,6 +4247,7 @@ function renderSubagentResult(result: any, options: any, theme: any) {
 }
 
 export default function sandbox(pi: ExtensionAPI) {
+  const exposeSubagentTimeout = modelMayOverrideSubagentTimeout();
   const state: SupervisorState = {
     active: false,
     mode: protocolModeFromEnv(),
@@ -4478,7 +4487,10 @@ export default function sandbox(pi: ExtensionAPI) {
     name: "subagent",
     label: "Subagent",
     description: "Delegate focused work to an AgentSH-supervised sandboxed subagent in the same detached supervisor session.",
-    parameters: SubagentParams,
+    // Keep speculative short deadlines out of the model-facing schema by
+    // default. Trusted programmatic callers retain the underlying API field,
+    // and operators may opt the model back in explicitly.
+    parameters: subagentParams(),
     renderCall(args, theme) {
       return renderSubagentCall(args, theme);
     },
@@ -4486,7 +4498,9 @@ export default function sandbox(pi: ExtensionAPI) {
       return renderSubagentResult(result, options, theme);
     },
     async execute(toolCallId, params: any, signal, onUpdate, ctx) {
-      const effectiveParams = inheritSubagentModels(params, ctx.model);
+      const inheritedParams = inheritSubagentModels(params, ctx.model);
+      const effectiveParams = { ...inheritedParams };
+      if (!exposeSubagentTimeout) delete effectiveParams.timeout_ms;
       const hasSingle = typeof effectiveParams.task === "string" && effectiveParams.task.trim().length > 0;
       const hasTasks = Array.isArray(effectiveParams.tasks) && effectiveParams.tasks.length > 0;
       const hasChain = Array.isArray(effectiveParams.chain) && effectiveParams.chain.length > 0;

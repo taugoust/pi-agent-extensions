@@ -628,6 +628,7 @@ PI_AGENTSH_CONNECT_TIMEOUT_MS=10000                     # connect timeout and mo
 PI_AGENTSH_COMMAND_EXECUTION_TIMEOUT_MS=14400000        # compatibility default/ceiling when metadata is absent (4h)
 PI_AGENTSH_COMMAND_TRANSPORT_SLACK_MS=310000             # command response slack baseline; modern server metadata may raise it
 
+PI_AGENTSH_EXPOSE_SUBAGENT_TIMEOUT=1                  # opt in to model-visible per-request timeout_ms; hidden by default
 PI_AGENTSH_SUBAGENT_EXECUTION_TIMEOUT_MS=7200000       # optional compatibility client ceiling; unset defers to AgentSH policy
 PI_AGENTSH_SUBAGENT_TRANSPORT_SLACK_MS=300000          # NDJSON deadline slack after an explicit child timeout (5m)
 PI_AGENTSH_SUBAGENT_TRANSPORT_TIMEOUT_MS=7500000       # optional transport floor; never shortens explicit execution + slack
@@ -728,13 +729,18 @@ actual slack, while caller abort remains `AbortError`. Exit code 124 alone is
 not interpreted as a timeout, because a normal child may return it.
 
 `spawn_subagent` separately uses an NDJSON streaming response for stdout/stderr
-and child result events. AgentSH owns the subagent execution deadline. When the
-call omits `timeout_ms`, the extension also omits it from the request so the
-effective session policy can select the deadline. The transport then remains
-open under server authority, bounded only by Node's maximum timer as a final
-client safety limit. An explicit `timeout_ms` selects a shorter requested window
-and gives the transport that duration plus five minutes for process-tree cleanup
-and the typed terminal result. AgentSH still applies the policy ceiling.
+and child result events. AgentSH owns the subagent execution deadline. The
+model-facing `subagent` tool hides `timeout_ms` by default so an agent cannot
+invent a speculative short deadline for work whose duration it cannot predict.
+Operators may set `PI_AGENTSH_EXPOSE_SUBAGENT_TIMEOUT=1` before Pi starts to
+restore that schema field. Trusted programmatic callers retain the underlying
+API option regardless of schema visibility. When the call omits `timeout_ms`,
+the extension also omits it from the request so the effective session policy can
+select the deadline. The transport then remains open under server authority,
+bounded only by Node's maximum timer as a final client safety limit. An enabled
+explicit `timeout_ms` selects a shorter requested window and gives the transport
+that duration plus five minutes for process-tree cleanup and the typed terminal
+result. AgentSH still applies the policy ceiling.
 `PI_AGENTSH_SUBAGENT_EXECUTION_TIMEOUT_MS` and its legacy
 `PI_AGENTSH_SUBAGENT_REQUEST_TIMEOUT_MS` alias remain optional compatibility
 client ceilings for older deployments; neither is a built-in execution default.

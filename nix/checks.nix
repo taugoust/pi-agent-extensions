@@ -1400,6 +1400,7 @@ in
       delete process.env.AGENTSH_SESSION_EVENT_TOKEN;
       delete process.env.PI_AGENTSH_APPROVAL_CLIENT;
       delete process.env.PI_AGENTSH_REQUIRE_NETWORK_ENFORCEMENT;
+      delete process.env.PI_AGENTSH_EXPOSE_SUBAGENT_TIMEOUT;
       delete process.env.PI_AGENTSH_REMOTE;
       delete process.env.PI_AGENTSH_REMOTE_CWD;
       delete process.env.PI_AGENTSH_RECOVERY_COMMAND;
@@ -2263,6 +2264,7 @@ in
         await startSession(pi, ctx);
         const subagentTool = pi.tools.get("subagent");
         assert(subagentTool, "REST mode did not register subagent tool");
+        assert(!("timeout_ms" in subagentTool.parameters.properties), "model-facing subagent timeout override was exposed by default");
 
         await subagentTool.execute("inherit-model", { task: "ok" }, undefined, undefined, ctx);
         await subagentTool.execute("explicit-model", { task: "ok", model: "google/gemini-pro" }, undefined, undefined, ctx);
@@ -2270,17 +2272,28 @@ in
         await subagentTool.execute("short-timeout", { task: "ok", timeout_ms: 1234 }, undefined, undefined, ctx);
         await subagentTool.execute("long-timeout", { task: "ok", timeout_ms: 10800000 }, undefined, undefined, ctx);
 
+        process.env.PI_AGENTSH_EXPOSE_SUBAGENT_TIMEOUT = "1";
+        const timeoutOptInPi = createPi();
+        sandbox(timeoutOptInPi);
+        await startSession(timeoutOptInPi, ctx);
+        const timeoutOptInTool = timeoutOptInPi.tools.get("subagent");
+        assert(timeoutOptInTool && "timeout_ms" in timeoutOptInTool.parameters.properties, "operator opt-in did not expose the model-facing subagent timeout override");
+        await timeoutOptInTool.execute("opt-in-timeout", { task: "ok", timeout_ms: 1234 }, undefined, undefined, ctx);
+        delete process.env.PI_AGENTSH_EXPOSE_SUBAGENT_TIMEOUT;
+
         const spawnRequests = supervisor.requests.filter((request) => request.method === "POST" && request.url.endsWith("/tools/spawn_subagent"));
-        assert(spawnRequests.length === 5, "unexpected subagent request count");
+        assert(spawnRequests.length === 6, "unexpected subagent request count");
         assert(spawnRequests[0].body.model === "openai-codex/gpt-5.5", "single child did not inherit parent model");
         assert(spawnRequests[1].body.model === "google/gemini-pro", "explicit child model was overwritten");
         assert(spawnRequests[2].body.tasks[0].model === "openai-codex/gpt-5.5", "parallel child did not inherit parent model");
         assert(spawnRequests[2].body.tasks[1].model === "anthropic/claude-sonnet", "parallel explicit model was overwritten");
         assert(spawnRequests[0].body.timeout_ms === undefined, "client overrode the policy-controlled subagent timeout");
-        assert(spawnRequests[3].body.timeout_ms === 1234, "explicit shorter subagent timeout was overwritten");
-        assert(spawnRequests[4].body.timeout_ms === 10800000, "client capped a timeout that AgentSH policy must control");
+        assert(spawnRequests[3].body.timeout_ms === undefined, "hidden shorter subagent timeout reached AgentSH");
+        assert(spawnRequests[4].body.timeout_ms === undefined, "hidden longer subagent timeout reached AgentSH");
+        assert(spawnRequests[5].body.timeout_ms === 1234, "operator-enabled subagent timeout was not forwarded");
         assert(spawnRequests[0].body.result_artifact_threshold_bytes === 4096, "single subagent artifact threshold did not match parent inline budget");
         assert(spawnRequests[2].body.result_artifact_threshold_bytes === 2048, "parallel subagent artifact threshold did not match per-child capsule budget");
+        await shutdownSession(timeoutOptInPi);
         await shutdownSession(pi);
         await supervisor.close();
       }
@@ -2460,8 +2473,10 @@ in
         process.env.AGENTSH_SESSION_ID = "sess-subagent-stream";
         process.env.AGENTSH_SESSION_SUPERVISOR = "unix://" + supervisor.socketPath;
         process.env.PI_AGENTSH_READ_MODE = "supervised";
+        process.env.PI_AGENTSH_EXPOSE_SUBAGENT_TIMEOUT = "1";
         const pi = createPi();
         sandbox(pi);
+        delete process.env.PI_AGENTSH_EXPOSE_SUBAGENT_TIMEOUT;
         const ctx = createContext();
         await startSession(pi, ctx);
         const bashTool = pi.tools.get("bash");
