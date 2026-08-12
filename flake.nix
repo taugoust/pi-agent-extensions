@@ -24,7 +24,12 @@
       ...
     }:
     let
-      systems = [ "aarch64-darwin" "x86_64-darwin" "aarch64-linux" "x86_64-linux" ];
+      systems = [
+        "aarch64-darwin"
+        "x86_64-darwin"
+        "aarch64-linux"
+        "x86_64-linux"
+      ];
       forAllSystems = nixpkgs.lib.genAttrs systems;
       registry = import ./nix/extension-registry.nix { inherit self pi-mcp-adapter; };
     in
@@ -38,7 +43,8 @@
         };
       };
 
-      packages = forAllSystems (system:
+      packages = forAllSystems (
+        system:
         let
           pkgs = import nixpkgs { inherit system; };
           extensionBundle = self.lib.mkExtensionBundle;
@@ -67,18 +73,21 @@
               "slow-mode"
               "ssh"
               "sandbox"
+              "auto"
               "subagent-finalizer"
             ];
           };
         }
       );
 
-      checks = forAllSystems (system:
+      checks = forAllSystems (
+        system:
         let
           pkgs = import nixpkgs { inherit system; };
         in
         (import ./nix/checks.nix { inherit self pkgs pi-mcp-adapter; })
         // {
+          auto = import ./nix/auto-check.nix { inherit self pkgs; };
           modal-editor = import ./nix/modal-editor-check.nix { inherit self pkgs; };
           subagent-finalizer = import ./nix/subagent-finalizer-check.nix { inherit self pkgs; };
         }

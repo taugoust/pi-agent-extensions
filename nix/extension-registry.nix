@@ -1,8 +1,12 @@
-{ self, pi-mcp-adapter ? null }:
+{
+  self,
+  pi-mcp-adapter ? null,
+}:
 
 let
   localExtensionNames = [
     "agent-events"
+    "auto"
     "direnv"
     "fence"
     "fetch"
@@ -19,13 +23,15 @@ let
     "subagent-finalizer"
   ];
 
-  localExtensions = builtins.listToAttrs (map (name: {
-    inherit name;
-    value = {
-      source = "${self}/${name}";
-      manifestPath = name;
-    };
-  }) localExtensionNames);
+  localExtensions = builtins.listToAttrs (
+    map (name: {
+      inherit name;
+      value = {
+        source = "${self}/${name}";
+        manifestPath = name;
+      };
+    }) localExtensionNames
+  );
 
   optionalExtensions = {
     mcp-adapter = {
@@ -42,13 +48,15 @@ let
     "tikz-figure-recreation"
   ];
 
-  skills = builtins.listToAttrs (map (name: {
-    inherit name;
-    value = {
-      source = "${self}/skills/${name}";
-      manifestPath = "skills/${name}";
-    };
-  }) localSkillNames);
+  skills = builtins.listToAttrs (
+    map (name: {
+      inherit name;
+      value = {
+        source = "${self}/skills/${name}";
+        manifestPath = "skills/${name}";
+      };
+    }) localSkillNames
+  );
 in
 {
   extensions = localExtensions // optionalExtensions;

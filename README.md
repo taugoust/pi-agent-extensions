@@ -104,6 +104,23 @@ in subdirectories.
 ## ✨ Extensions
 
 <details>
+<summary><strong>auto</strong> - Draft controls for <code>pi-auto</code></summary>
+<br>
+
+- **Source**: `auto/`
+- **Command**: `/auto`
+- **Status bar**: `auto · Draft ready` or degraded/action state
+- **Dependencies**: the trusted `pi-auto` wrapper and `sandbox` extension
+
+**Description**: Adds a user-only Draft action panel to interactive
+`pi-auto` sessions. It can request Review, Apply and exit, Discard and exit, or
+Pause and exit. The extension never exposes these actions as model-callable
+tools; it writes a private, exact-session handoff and asks Pi to shut down
+gracefully. The outer wrapper performs review/finalization only after Pi and its
+extensions have stopped.
+
+</details>
+<details>
 <summary><strong>direnv</strong> - Refresh environment from <code>.envrc</code></summary>
 <br>
 

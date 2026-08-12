@@ -27,6 +27,7 @@
   "pi": {
     "extensions": [
       "agent-events",
+      "auto",
       "direnv",
       "fence",
       "permission-gate",
