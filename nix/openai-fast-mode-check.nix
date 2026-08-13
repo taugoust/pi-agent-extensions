@@ -138,6 +138,16 @@ pkgs.runCommand "openai-fast-mode-check"
     PY
 
     python3 "$work/test.py" ${pi}/bin/pi ${bundle}/node_modules/pi-openai-fast-mode/src/index.ts "$agent"
+
+    hm_home="$work/hm-home"
+    hm_agent="$hm_home/.pi/agent"
+    mkdir -p "$hm_agent/extensions/pi-openai-fast-mode"
+    ${pkgs.lib.concatMapStringsSep "\n" (name: ''
+      mkdir -p "$hm_home/$(dirname ${pkgs.lib.escapeShellArg name})"
+      ln -s ${hmFiles.${name}.source} "$hm_home/${name}"
+    '') (builtins.attrNames hmFiles)}
+    python3 "$work/test.py" ${pi}/bin/pi "$hm_agent/extensions/pi-openai-fast-mode/index.ts" "$hm_agent"
+
     mkdir -p "$out"
     touch "$out/passed"
   ''
