@@ -1,4 +1,8 @@
-{ self, pi-mcp-adapter ? null }:
+{
+  self,
+  pi-mcp-adapter ? null,
+  pi-openai-fast-mode ? null,
+}:
 {
   config,
   lib,
@@ -30,6 +34,7 @@ in
       pdf.enable = lib.mkEnableOption "pdf extension — inspect PDFs locally or through an active AgentSH supervisor";
       permission-gate.enable = lib.mkEnableOption "permission-gate extension — legacy regex gate for dangerous bash commands";
       ssh.enable = lib.mkEnableOption "ssh extension — run read/write/edit/bash tools on a remote host via --ssh";
+      openai-fast-mode.enable = lib.mkEnableOption "pi-openai-fast-mode extension — toggle OpenAI priority inference with /fast";
 
       slow-mode = {
         enable = lib.mkEnableOption "slow-mode extension — review gate for write/edit tool calls";
@@ -59,12 +64,16 @@ in
 
     home.packages = lib.mkMerge [
       (lib.mkIf (cfg.package != null) [ cfg.package ])
-      (lib.mkIf cfg.extensions.pdf.enable [ pkgs.poppler-utils pkgs.imagemagick ])
+      (lib.mkIf cfg.extensions.pdf.enable [
+        pkgs.poppler-utils
+        pkgs.imagemagick
+      ])
     ];
 
-      home.file = lib.mkMerge [
+    home.file = lib.mkMerge [
       (lib.mkIf cfg.skills.github-repo-search.enable {
-        ".pi/agent/skills/github-repo-search/SKILL.md".source = "${self}/skills/github-repo-search/SKILL.md";
+        ".pi/agent/skills/github-repo-search/SKILL.md".source =
+          "${self}/skills/github-repo-search/SKILL.md";
       })
       (lib.mkIf cfg.skills.remindctl.enable {
         ".pi/agent/skills/remindctl/SKILL.md".source = "${self}/skills/remindctl/SKILL.md";
@@ -73,7 +82,8 @@ in
         ".pi/agent/skills/drawio".source = "${self}/skills/drawio";
       })
       (lib.mkIf cfg.skills.tikz-figure-recreation.enable {
-        ".pi/agent/skills/tikz-figure-recreation/SKILL.md".source = "${self}/skills/tikz-figure-recreation/SKILL.md";
+        ".pi/agent/skills/tikz-figure-recreation/SKILL.md".source =
+          "${self}/skills/tikz-figure-recreation/SKILL.md";
       })
       (lib.mkIf cfg.extensions.agent-events.enable {
         "${extDir}/agent-events/index.ts".source = "${self}/agent-events/index.ts";
@@ -115,6 +125,24 @@ in
         "${extDir}/ssh/index.ts".source = "${self}/ssh/index.ts";
       })
 
+      (lib.mkIf cfg.extensions.openai-fast-mode.enable (
+        builtins.listToAttrs (
+          map
+            (file: {
+              name = "${extDir}/pi-openai-fast-mode/${file}";
+              value.source = "${pi-openai-fast-mode}/src/${file}";
+            })
+            [
+              "commands.ts"
+              "config.ts"
+              "index.ts"
+              "payload.ts"
+              "status.ts"
+              "types.ts"
+            ]
+        )
+      ))
+
       (lib.mkIf cfg.extensions.slow-mode.enable {
         "${extDir}/slow-mode/index.ts".text =
           builtins.replaceStrings
@@ -136,25 +164,25 @@ in
             (builtins.readFile "${self}/slow-mode/index.ts");
       })
 
-        (lib.mkIf cfg.extensions.sandbox.enable {
-          "${extDir}/sandbox".source = "${self}/sandbox";
-        })
+      (lib.mkIf cfg.extensions.sandbox.enable {
+        "${extDir}/sandbox".source = "${self}/sandbox";
+      })
 
-        (lib.mkIf cfg.extensions.subagent.enable {
-          "${extDir}/subagent/index.ts".source = "${self}/subagent/index.ts";
-        })
+      (lib.mkIf cfg.extensions.subagent.enable {
+        "${extDir}/subagent/index.ts".source = "${self}/subagent/index.ts";
+      })
 
-        (lib.mkIf (cfg.extensions.subagent.enable || cfg.extensions.subagent-finalizer.enable) {
-          "${extDir}/subagent-finalizer/index.ts".source = "${self}/subagent-finalizer/index.ts";
-        })
+      (lib.mkIf (cfg.extensions.subagent.enable || cfg.extensions.subagent-finalizer.enable) {
+        "${extDir}/subagent-finalizer/index.ts".source = "${self}/subagent-finalizer/index.ts";
+      })
 
-        (lib.mkIf cfg.extensions.mcp-adapter.enable {
-          "${extDir}/pi-mcp-adapter".source =
-            if pi-mcp-adapter != null then
-              pi-mcp-adapter
-            else
-              throw "programs.pi.extensions.mcp-adapter.enable requires pi-mcp-adapter input";
-        })
-      ];
+      (lib.mkIf cfg.extensions.mcp-adapter.enable {
+        "${extDir}/pi-mcp-adapter".source =
+          if pi-mcp-adapter != null then
+            pi-mcp-adapter
+          else
+            throw "programs.pi.extensions.mcp-adapter.enable requires pi-mcp-adapter input";
+      })
+    ];
   };
 }

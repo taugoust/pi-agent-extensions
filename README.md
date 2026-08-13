@@ -104,6 +104,22 @@ in subdirectories.
 ## ✨ Extensions
 
 <details>
+<summary><strong>openai-fast-mode</strong> - OpenAI priority inference toggle</summary>
+<br>
+
+- **Source**: pinned unchanged from [`pi-openai-fast-mode` 0.3.0](https://github.com/johncmunson/pi-openai-fast-mode/releases/tag/v0.3.0)
+- **Command**: `/fast [on|off|toggle]`
+- **Default**: loaded but disabled
+- **Home Manager**: `programs.pi.extensions.openai-fast-mode.enable = true;`
+
+**Description**: Adds OpenAI Fast Mode priority-inference support. Loading the
+extension never enables Fast Mode automatically; use `/fast` or `/fast on` in a
+session. The Nix registry exposes it as `openai-fast-mode`, deduplicates bundle
+selection, and projects source files individually so its `config.json` remains
+writable outside the Nix store.
+
+</details>
+<details>
 <summary><strong>auto</strong> - Draft controls for <code>pi-auto</code></summary>
 <br>
 

@@ -136,11 +136,29 @@
         "type": "github"
       }
     },
+    "pi-openai-fast-mode": {
+      "flake": false,
+      "locked": {
+        "lastModified": 1783628480,
+        "narHash": "sha256-jiJ0JmgPJdxxVfUyTRF8Pf00UZsFk/+JOzbmM6VBfP4=",
+        "owner": "johncmunson",
+        "repo": "pi-openai-fast-mode",
+        "rev": "9b284561ae3e424aa5a070a6ff6da7167965a3bd",
+        "type": "github"
+      },
+      "original": {
+        "owner": "johncmunson",
+        "ref": "v0.3.0",
+        "repo": "pi-openai-fast-mode",
+        "type": "github"
+      }
+    },
     "root": {
       "inputs": {
         "llm-agents-nix": "llm-agents-nix",
         "nixpkgs": "nixpkgs",
-        "pi-mcp-adapter": "pi-mcp-adapter"
+        "pi-mcp-adapter": "pi-mcp-adapter",
+        "pi-openai-fast-mode": "pi-openai-fast-mode"
       }
     },
     "systems": {

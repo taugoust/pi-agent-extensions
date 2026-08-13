@@ -1,6 +1,7 @@
 {
   self,
   pi-mcp-adapter ? null,
+  pi-openai-fast-mode ? null,
 }:
 
 let
@@ -33,6 +34,16 @@ let
     }) localExtensionNames
   );
 
+  pinnedExtensionNames = [ "openai-fast-mode" ];
+
+  upstreamExtensions = {
+    openai-fast-mode = {
+      source = pi-openai-fast-mode;
+      manifestPath = "node_modules/pi-openai-fast-mode";
+      requiresInput = "pi-openai-fast-mode";
+    };
+  };
+
   optionalExtensions = {
     mcp-adapter = {
       source = pi-mcp-adapter;
@@ -59,6 +70,11 @@ let
   );
 in
 {
-  extensions = localExtensions // optionalExtensions;
-  inherit skills localExtensionNames localSkillNames;
+  extensions = localExtensions // upstreamExtensions // optionalExtensions;
+  inherit
+    skills
+    localExtensionNames
+    pinnedExtensionNames
+    localSkillNames
+    ;
 }

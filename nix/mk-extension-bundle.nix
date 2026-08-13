@@ -1,4 +1,9 @@
-{ self, lib, pi-mcp-adapter ? null }:
+{
+  self,
+  lib,
+  pi-mcp-adapter ? null,
+  pi-openai-fast-mode ? null,
+}:
 
 {
   pkgs,
@@ -12,15 +17,17 @@
 }:
 
 let
-  registry = import ./extension-registry.nix { inherit self pi-mcp-adapter; };
+  registry = import ./extension-registry.nix { inherit self pi-mcp-adapter pi-openai-fast-mode; };
 
   extensionRegistry = registry.extensions;
   skillRegistry = registry.skills;
 
-  unknownExtensions = lib.subtractLists (builtins.attrNames extensionRegistry) extensions;
+  selectedExtensions = lib.unique extensions;
+  unknownExtensions = lib.subtractLists (builtins.attrNames extensionRegistry) selectedExtensions;
   unknownSkills = lib.subtractLists (builtins.attrNames skillRegistry) skills;
 
-  extensionEntries = map (extName:
+  extensionEntries = map (
+    extName:
     let
       entry = extensionRegistry.${extName};
     in
@@ -28,11 +35,9 @@ let
       throw "${packageName}: extension '${extName}' requires flake input '${entry.requiresInput}'"
     else
       entry // { name = extName; }
-  ) extensions;
+  ) selectedExtensions;
 
-  skillEntries = map (skillName:
-    skillRegistry.${skillName} // { name = skillName; }
-  ) skills;
+  skillEntries = map (skillName: skillRegistry.${skillName} // { name = skillName; }) skills;
 
   copyExtensionCommands = lib.concatMapStringsSep "\n" (entry: ''
     mkdir -p "$out/$(dirname ${lib.escapeShellArg entry.manifestPath})"
