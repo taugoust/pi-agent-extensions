@@ -15,6 +15,41 @@ let
   };
   defaultBundle = self.packages.${pkgs.stdenv.hostPlatform.system}.extensions;
   pi = self.packages.${pkgs.stdenv.hostPlatform.system}.pi;
+  module = self.homeManagerModules.default;
+  modulePrelude = { lib, ... }: {
+    options.home.packages = lib.mkOption {
+      type = lib.types.listOf lib.types.package;
+      default = [ ];
+    };
+    options.home.file = lib.mkOption {
+      type = lib.types.attrsOf lib.types.anything;
+      default = { };
+    };
+  };
+  hmBase = pkgs.lib.evalModules {
+    modules = [
+      modulePrelude
+      module
+      {
+        programs.pi.enable = true;
+        programs.pi.package = null;
+      }
+    ];
+    specialArgs = { inherit pkgs; };
+  };
+  hmEnabled = pkgs.lib.evalModules {
+    modules = [
+      modulePrelude
+      module
+      {
+        programs.pi.enable = true;
+        programs.pi.package = null;
+        programs.pi.extensions.openai-fast-mode.enable = true;
+      }
+    ];
+    specialArgs = { inherit pkgs; };
+  };
+  hmFiles = hmEnabled.config.home.file;
 in
 pkgs.runCommand "openai-fast-mode-check"
   {
@@ -32,6 +67,8 @@ pkgs.runCommand "openai-fast-mode-check"
     test "$(jq -r '.pi.extensions[0]' ${pi-openai-fast-mode}/package.json)" = ./src/index.ts
     test "$(jq '[.pi.extensions[] | select(. == "node_modules/pi-openai-fast-mode")] | length' ${bundle}/package.json)" = 1
     test "$(jq '[.pi.extensions[] | select(. == "node_modules/pi-openai-fast-mode")] | length' ${defaultBundle}/package.json)" = 1
+    test ${if hmBase.config.programs.pi.extensions.openai-fast-mode.enable then "1" else "0"} = 0
+    test ${toString (builtins.length (builtins.attrNames hmFiles))} = 6
 
     work="$TMPDIR/fast-mode"
     agent="$work/agent"
