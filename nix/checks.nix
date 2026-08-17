@@ -1067,6 +1067,7 @@ in
           --outDir "$outdir" \
           "$srcdir/sandbox/index.ts" \
           "$srcdir/sandbox/command-timeout.test.ts" \
+          "$srcdir/sandbox/operator-auth.test.ts" \
           "$srcdir/sandbox/subagent-model.test.ts" \
           "$srcdir/sandbox/subagent-protocol.test.ts" \
           "$srcdir/sandbox/subagent-result.test.ts" \
@@ -1074,6 +1075,7 @@ in
           "$srcdir/sandbox/subagent-terminal.test.ts"
 
         node "$outdir/sandbox/command-timeout.test.js"
+        node "$outdir/sandbox/operator-auth.test.js"
         node "$outdir/sandbox/subagent-model.test.js"
         node "$outdir/sandbox/subagent-protocol.test.js"
         node "$outdir/sandbox/subagent-result.test.js"

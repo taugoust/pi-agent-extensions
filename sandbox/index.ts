@@ -17,6 +17,7 @@ import { posix as posixPath } from "node:path";
 import { Type } from "@sinclair/typebox";
 import { DEFAULT_MAX_BYTES, DEFAULT_MAX_LINES, formatSize, getMarkdownTheme, renderDiff, truncateHead, truncateTail, type ExtensionAPI, type ExtensionContext, type TruncationResult } from "@mariozechner/pi-coding-agent";
 import { Box, Container, Key, Markdown, matchesKey, Spacer, Text, truncateToWidth, visibleWidth, wrapTextWithAnsi, type Component } from "@mariozechner/pi-tui";
+import { detachedOperatorHeaders } from "./operator-auth.js";
 import { inheritSubagentModels } from "./subagent-model.js";
 import { abortSubagentProtocolStream, appendSubagentProtocolChunk, createSubagentProtocolState, finishSubagentProtocolStream } from "./subagent-protocol.js";
 import { boundSubagentProgressCapsules, createSubagentProgressCapsule, sanitizeSubagentParentText } from "./subagent-result.js";
@@ -609,6 +610,10 @@ function centralApprovalBridgeURL() {
 
 function centralApprovalBridgeToken() {
   return env("AGENTSH_SESSION_EVENT_TOKEN") || env("AGENTSH_DETACHED_EVENT_TOKEN");
+}
+
+function detachedControlToken() {
+  return env("AGENTSH_DETACHED_CONTROL_TOKEN");
 }
 
 function centralApprovalBridgeEnabled() {
@@ -2315,17 +2320,19 @@ class RestSupervisorClient {
         callback();
       };
       const capabilityHeaders = childExecutionCapabilityHeaders(path);
+      const operatorHeaders = detachedOperatorHeaders(path, detachedControlToken());
       const req = http.request({
         socketPath: this.socketPath,
         host: "unix",
         method,
         path,
         signal,
-        headers: payload === undefined ? { Accept: "application/json", ...capabilityHeaders } : {
+        headers: payload === undefined ? { Accept: "application/json", ...capabilityHeaders, ...operatorHeaders } : {
           Accept: "application/json",
           "Content-Type": "application/json",
           "Content-Length": Buffer.byteLength(payload),
           ...capabilityHeaders,
+          ...operatorHeaders,
         },
       }, (res) => {
         responseStarted = true;
