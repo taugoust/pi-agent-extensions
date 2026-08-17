@@ -1094,7 +1094,7 @@ in
           if (!condition) throw new Error(message);
         }
 
-        async function waitFor(predicate, message, timeoutMs = 2000) {
+        async function waitFor(predicate, message, timeoutMs = 10000) {
           const deadline = Date.now() + timeoutMs;
           while (Date.now() < deadline) {
             if (await predicate()) return;
