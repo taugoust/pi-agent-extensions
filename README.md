@@ -283,7 +283,12 @@ Allow?
 
 **Description**: Replaces the default pi input editor with a vim-style
 modal editor. Adds an `INSERT`{.verbatim} / `NORMAL`{.verbatim} mode
-indicator to the bottom border of the editor.
+indicator to the bottom border of the editor. Normal-mode yanks use Pi's
+OSC 52-capable copy path; `p`{.verbatim} / `P`{.verbatim} and insert-mode
+`Ctrl+V`{.verbatim} query the terminal clipboard with OSC 52 when no local
+desktop clipboard is available or Pi is running over SSH/mosh. This also works
+through nested tmux when every layer uses
+`set-clipboard on`{.verbatim} and the outer terminal permits clipboard reads.
 
 **Modes and key bindings**:
 

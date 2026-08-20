@@ -17,7 +17,7 @@
  *   Escape:      insert → normal, normal → abort agent
  */
 
-import { execSync } from "child_process";
+import { execFileSync } from "child_process";
 import { platform } from "os";
 import { copyToClipboard, CustomEditor, type ExtensionAPI } from "@mariozechner/pi-coding-agent";
 import { matchesKey, truncateToWidth, visibleWidth } from "@mariozechner/pi-tui";
@@ -173,27 +173,108 @@ const SHIFT_TEXT = " ".repeat(SHIFT_WIDTH);
 // System clipboard helpers
 // ---------------------------------------------------------------------------
 
-function readFromClipboard(): string {
+type TerminalInputHandler = (data: string) => { consume?: boolean; data?: string } | void;
+type OnTerminalInput = (handler: TerminalInputHandler) => () => void;
+
+const OSC52_QUERY = "\x1b]52;c;?\x07";
+const OSC52_RESPONSE = /\x1b\]52;[^;]*;([^\x07\x1b]*)(?:\x07|\x1b\\)/;
+const MAX_OSC52_RESPONSE_LENGTH = 16 * 1024 * 1024;
+
+function isRemoteSession(): boolean {
+	return Boolean(process.env.SSH_CONNECTION || process.env.SSH_CLIENT || process.env.MOSH_CONNECTION);
+}
+
+function needsTerminalClipboardFallback(): boolean {
+	return isRemoteSession() || (platform() === "linux"
+		&& !process.env.DISPLAY && !process.env.WAYLAND_DISPLAY && !process.env.TERMUX_VERSION);
+}
+
+/** Query the containing terminal (or tmux paste buffer) using OSC 52. */
+export function readClipboardViaOsc52(onTerminalInput: OnTerminalInput, timeoutMs = 1000): Promise<string | null> {
+	return new Promise((resolve) => {
+		let settled = false;
+		let unsubscribe = (): void => {};
+		let timer: ReturnType<typeof setTimeout> | undefined;
+
+		const finish = (text: string | null): void => {
+			if (settled) return;
+			settled = true;
+			if (timer) clearTimeout(timer);
+			unsubscribe();
+			resolve(text);
+		};
+
+		try {
+			unsubscribe = onTerminalInput((data) => {
+				// Pi's terminal input buffer delivers OSC strings as complete sequences.
+				// Still preserve any coalesced keyboard input around the response.
+				const match = OSC52_RESPONSE.exec(data);
+				if (!match) return;
+
+				const encoded = match[1] ?? "";
+				if (encoded === "?" || encoded.length > MAX_OSC52_RESPONSE_LENGTH
+					|| !/^(?:[A-Za-z0-9+/]{4})*(?:[A-Za-z0-9+/]{2}==|[A-Za-z0-9+/]{3}=)?$/.test(encoded)) {
+					finish(null);
+				} else {
+					try {
+						finish(Buffer.from(encoded, "base64").toString("utf8"));
+					} catch {
+						finish(null);
+					}
+				}
+
+				const remainder = data.slice(0, match.index) + data.slice(match.index + match[0].length);
+				return remainder ? { data: remainder } : { consume: true };
+			});
+			timer = setTimeout(() => finish(null), timeoutMs);
+			process.stdout.write(OSC52_QUERY);
+		} catch {
+			finish(null);
+		}
+	});
+}
+
+async function readFromClipboard(readOsc52?: () => Promise<string | null>): Promise<string> {
+	let osc52Queried = false;
+	const queryOsc52 = async (): Promise<string | null> => {
+		if (!readOsc52 || osc52Queried) return null;
+		osc52Queried = true;
+		return readOsc52();
+	};
+
+	// Over SSH/mosh the desktop clipboard belongs to the wrong machine even if
+	// DISPLAY was forwarded. Query the user's containing terminal first.
+	if (isRemoteSession()) {
+		const terminalText = await queryOsc52();
+		if (terminalText !== null) return terminalText;
+	}
+
 	try {
 		const p = platform();
 		if (p === "darwin") {
-			return execSync("pbpaste", { timeout: 5000 }).toString();
-		} else if (p === "win32") {
-			return execSync("powershell.exe -command Get-Clipboard", { timeout: 5000 }).toString();
-		} else {
+			return execFileSync("pbpaste", [], { timeout: 5000 }).toString();
+		}
+		if (p === "win32") {
+			return execFileSync("powershell.exe", ["-command", "Get-Clipboard"], { timeout: 5000 }).toString();
+		}
+		if (process.env.TERMUX_VERSION) {
+			return execFileSync("termux-clipboard-get", [], { timeout: 5000 }).toString();
+		}
+		if (process.env.WAYLAND_DISPLAY) {
+			return execFileSync("wl-paste", ["--no-newline"], { timeout: 5000 }).toString();
+		}
+		if (process.env.DISPLAY) {
 			try {
-				return execSync("wl-paste --no-newline", { timeout: 5000 }).toString();
+				return execFileSync("xclip", ["-selection", "clipboard", "-o"], { timeout: 5000 }).toString();
 			} catch {
-				try {
-					return execSync("xclip -selection clipboard -o", { timeout: 5000 }).toString();
-				} catch {
-					return execSync("xsel --clipboard --output", { timeout: 5000 }).toString();
-				}
+				return execFileSync("xsel", ["--clipboard", "--output"], { timeout: 5000 }).toString();
 			}
 		}
 	} catch {
-		return "";
+		// Fall through to OSC 52 when the local desktop integration is absent.
 	}
+
+	return (await queryOsc52()) ?? "";
 }
 
 // ---------------------------------------------------------------------------
@@ -275,6 +356,10 @@ class ModalEditor extends CustomEditor {
 
 	// Normal-mode K handler (wired to pager:open event by the extension entry point)
 	onNormalK?: () => void;
+
+	// OSC 52 clipboard reader supplied by the extension entry point.
+	onReadTerminalClipboard?: () => Promise<string | null>;
+	private pastePending = false;
 
 	// Visual-mode state
 	private visualAnchor: { line: number; col: number } | null = null;
@@ -964,6 +1049,19 @@ class ModalEditor extends CustomEditor {
 		return { text, linewise: false };
 	}
 
+	private async pasteClipboardAtCursor(): Promise<void> {
+		if (this.pastePending) return;
+		this.pastePending = true;
+		try {
+			const text = await readFromClipboard(this.onReadTerminalClipboard);
+			if (text) this.insertTextAtCursor(text);
+		} catch {
+			// Clipboard access is best-effort; keep insert-mode input responsive.
+		} finally {
+			this.pastePending = false;
+		}
+	}
+
 	/**
 	 * Paste text from the system clipboard.
 	 *
@@ -973,35 +1071,44 @@ class ModalEditor extends CustomEditor {
 	 * Cmd+V (bracketed paste) is unaffected — it is handled by the underlying
 	 * editor before this code runs.
 	 */
-	private pasteFromClipboard(after: boolean): void {
-		const text = readFromClipboard();
-		if (!text) return;
+	private async pasteFromClipboard(after: boolean): Promise<void> {
+		if (this.pastePending) return;
+		this.pastePending = true;
 
-		const isLinewise = this.lastYankLinewise && text === this.lastYankText;
+		try {
+			const text = await readFromClipboard(this.onReadTerminalClipboard);
+			if (!text) return;
 
-		if (isLinewise) {
-			const pasteText = text.endsWith("\n") ? text.slice(0, -1) : text;
-			if (after) {
-				super.handleInput("\x05"); // ctrl+e  → end of line
-				super.handleInput("\n");   // newline → open line below
-				this.insertTextAtCursor(pasteText);
-			} else {
-				super.handleInput("\x01"); // ctrl+a → start of line
-				this.insertTextAtCursor(pasteText + "\n");
-				// Move cursor back up to the first pasted line
-				const n = pasteText.split("\n").length;
-				for (let i = 0; i < n; i++) super.handleInput("\x1b[A");
-				super.handleInput("\x01"); // start of line
-			}
-		} else {
-			if (after) {
-				const cursor = this.getCursor();
-				const line = this.getLines()[cursor.line] ?? "";
-				if (line.length > 0 && cursor.col < line.length) {
-					super.handleInput("\x1b[C"); // move right one char
+			const isLinewise = this.lastYankLinewise && text === this.lastYankText;
+
+			if (isLinewise) {
+				const pasteText = text.endsWith("\n") ? text.slice(0, -1) : text;
+				if (after) {
+					super.handleInput("\x05"); // ctrl+e  → end of line
+					super.handleInput("\n");   // newline → open line below
+					this.insertTextAtCursor(pasteText);
+				} else {
+					super.handleInput("\x01"); // ctrl+a → start of line
+					this.insertTextAtCursor(pasteText + "\n");
+					// Move cursor back up to the first pasted line
+					const n = pasteText.split("\n").length;
+					for (let i = 0; i < n; i++) super.handleInput("\x1b[A");
+					super.handleInput("\x01"); // start of line
 				}
+			} else {
+				if (after) {
+					const cursor = this.getCursor();
+					const line = this.getLines()[cursor.line] ?? "";
+					if (line.length > 0 && cursor.col < line.length) {
+						super.handleInput("\x1b[C"); // move right one char
+					}
+				}
+				this.insertTextAtCursor(text);
 			}
-			this.insertTextAtCursor(text);
+		} catch {
+			// Clipboard access is best-effort; keep normal-mode input responsive.
+		} finally {
+			this.pastePending = false;
 		}
 	}
 
@@ -1169,6 +1276,12 @@ class ModalEditor extends CustomEditor {
 
 		// ── Insert mode: pass everything through ─────────────────────────────
 		if (this.mode === "insert") {
+			// Pi's built-in Ctrl+V reads only a machine-local desktop clipboard.
+			// Use OSC 52 for text when running remotely or without a display.
+			if (matchesKey(data, "ctrl+v") && needsTerminalClipboardFallback()) {
+				void this.pasteClipboardAtCursor();
+				return;
+			}
 			super.handleInput(data);
 			this.autoWrap();
 			return;
@@ -1619,8 +1732,8 @@ class ModalEditor extends CustomEditor {
 		}
 
 		// Paste from system clipboard
-		if (data === "p") { this.pasteFromClipboard(true);  return; }
-		if (data === "P") { this.pasteFromClipboard(false); return; }
+		if (data === "p") { void this.pasteFromClipboard(true);  return; }
+		if (data === "P") { void this.pasteFromClipboard(false); return; }
 
 		// Simple motion / edit mappings
 		const seq: Record<string, string> = {
@@ -1794,6 +1907,7 @@ export default function (pi: ExtensionAPI) {
 		ctx.ui.setEditorComponent((tui, theme, kb) => {
 			const editor = new ModalEditor(tui, theme, kb);
 			editor.onNormalK = () => pi.events.emit("pager:open");
+			editor.onReadTerminalClipboard = () => readClipboardViaOsc52((handler) => ctx.ui.onTerminalInput(handler));
 			return editor;
 		});
 

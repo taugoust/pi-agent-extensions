@@ -67,7 +67,61 @@ pkgs.runCommand "modal-editor-check"
     const moduleUrl = pathToFileURL(path.join(compiledRoot, "modal-editor/index.js")).href;
     const imported = await import(moduleUrl);
     const modalEditor = imported.default?.default ?? imported.default ?? imported;
+    const readClipboardViaOsc52 = imported.readClipboardViaOsc52 ?? imported.default?.readClipboardViaOsc52;
     assert.equal(typeof modalEditor, "function", "modal-editor did not export an extension function");
+    assert.equal(typeof readClipboardViaOsc52, "function", "OSC 52 clipboard reader was not exported");
+
+    let osc52Handler;
+    let osc52Unsubscribed = false;
+    const osc52Writes = [];
+    const originalOsc52Write = process.stdout.write;
+    process.stdout.write = function (chunk) {
+      osc52Writes.push(Buffer.isBuffer(chunk) ? chunk.toString("utf8") : String(chunk));
+      return true;
+    };
+    try {
+      const clipboardPromise = readClipboardViaOsc52((handler) => {
+        osc52Handler = handler;
+        return () => { osc52Unsubscribed = true; };
+      }, 100);
+      assert.deepEqual(osc52Writes, ["\x1b]52;c;?\x07"], "did not emit the OSC 52 clipboard query");
+      assert.equal(typeof osc52Handler, "function", "did not install a terminal input listener");
+      assert.deepEqual(
+        osc52Handler("\x1b]52;c;aGVhZGxlc3MgcGFzdGU=\x07"),
+        { consume: true },
+        "did not consume the OSC 52 response",
+      );
+      assert.equal(await clipboardPromise, "headless paste");
+      assert.equal(osc52Unsubscribed, true, "did not remove the OSC 52 listener");
+
+      let coalescedHandler;
+      const coalescedPromise = readClipboardViaOsc52((handler) => {
+        coalescedHandler = handler;
+        return () => {};
+      }, 100);
+      assert.deepEqual(
+        coalescedHandler("x\x1b]52;c;bmVzdGVkIHRtdXg=\x1b\\y"),
+        { data: "xy" },
+        "did not preserve input coalesced around an ST-terminated response",
+      );
+      assert.equal(await coalescedPromise, "nested tmux");
+
+      let timedOutUnsubscribed = false;
+      assert.equal(
+        await readClipboardViaOsc52(() => () => { timedOutUnsubscribed = true; }, 5),
+        null,
+        "OSC 52 timeout did not return null",
+      );
+      assert.equal(timedOutUnsubscribed, true, "OSC 52 timeout did not remove its listener");
+
+      assert.equal(
+        await readClipboardViaOsc52(() => { throw new Error("no terminal listener"); }, 5),
+        null,
+        "OSC 52 listener setup failure did not return null",
+      );
+    } finally {
+      process.stdout.write = originalOsc52Write;
+    }
 
     const handlers = new Map();
     const pi = {
