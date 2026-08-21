@@ -511,7 +511,7 @@ const SubagentItem = Type.Object({
   systemPrompt: Type.Optional(Type.String({ description: "Optional additional system prompt for this subagent" })),
   model: Type.Optional(Type.String({ description: "Optional model id for this subagent" })),
   tools: Type.Optional(Type.Array(Type.String(), { description: "Optional tool allowlist, e.g. ['read','grep','find','ls']" })),
-  cwd: Type.Optional(Type.String({ description: "Optional working directory for this subagent process" })),
+  cwd: Type.Optional(Type.String({ description: "Optional directory inside the AgentSH session workspace; relative paths are resolved from the parent Pi working directory" })),
 });
 
 function modelMayOverrideSubagentTimeout(processEnv: NodeJS.ProcessEnv = process.env): boolean {
@@ -524,7 +524,7 @@ function subagentParams(processEnv: NodeJS.ProcessEnv = process.env) {
     systemPrompt: Type.Optional(Type.String({ description: "Optional additional system prompt (single mode)" })),
     model: Type.Optional(Type.String({ description: "Optional model id (single mode)" })),
     tools: Type.Optional(Type.Array(Type.String(), { description: "Optional tool allowlist (single mode)" })),
-    cwd: Type.Optional(Type.String({ description: "Optional working directory (single mode)" })),
+    cwd: Type.Optional(Type.String({ description: "Optional directory inside the AgentSH session workspace; relative paths are resolved from the parent Pi working directory (single mode)" })),
     tasks: Type.Optional(Type.Array(SubagentItem, { description: "Parallel subagent tasks. Max 8, up to 4 run concurrently." })),
     chain: Type.Optional(Type.Array(SubagentItem, { description: "Sequential subagent steps. Each task may use {previous}." })),
     ...(modelMayOverrideSubagentTimeout(processEnv) ? {
@@ -587,6 +587,30 @@ function env(name: string) {
 
 function effectiveSupervisorCwd(ctx?: ExtensionContext, target?: AgentSHExecutionTarget) {
   return target?.cwd || env("PI_AGENTSH_REMOTE_CWD") || ctx?.cwd || process.cwd();
+}
+
+function resolveSubagentRequestedCwd(cwd: unknown, parentCwd: string): string | undefined {
+  if (typeof cwd !== "string" || !cwd.trim()) return undefined;
+  const requested = toSlashPath(cwd.trim());
+  if (requested.startsWith("/") || /^[A-Za-z]:\//.test(requested)) return cleanPosix(requested);
+  return cleanPosix(`${cleanPosix(toSlashPath(parentCwd))}/${requested}`);
+}
+
+function normalizeSubagentRequestedCwds(params: any, parentCwd: string) {
+  const normalized = { ...params };
+  const requestCwd = resolveSubagentRequestedCwd(normalized.cwd, parentCwd) || parentCwd;
+  if (typeof normalized.cwd === "string") normalized.cwd = requestCwd;
+  for (const key of ["tasks", "chain"]) {
+    if (!Array.isArray(normalized[key])) continue;
+    normalized[key] = normalized[key].map((candidate: unknown) => {
+      if (!candidate || typeof candidate !== "object") return candidate;
+      const item = { ...(candidate as JsonObject) };
+      const cwd = resolveSubagentRequestedCwd(item.cwd, requestCwd);
+      if (cwd) item.cwd = cwd;
+      return item;
+    });
+  }
+  return normalized;
 }
 
 function normalizeSocketPath(value: string) {
@@ -4506,7 +4530,8 @@ export default function sandbox(pi: ExtensionAPI) {
     },
     async execute(toolCallId, params: any, signal, onUpdate, ctx) {
       const inheritedParams = inheritSubagentModels(params, ctx.model);
-      const effectiveParams = { ...inheritedParams };
+      const parentCwd = effectiveSupervisorCwd(ctx, state.executionTarget);
+      const effectiveParams = normalizeSubagentRequestedCwds(inheritedParams, parentCwd);
       if (!exposeSubagentTimeout) delete effectiveParams.timeout_ms;
       const hasSingle = typeof effectiveParams.task === "string" && effectiveParams.task.trim().length > 0;
       const hasTasks = Array.isArray(effectiveParams.tasks) && effectiveParams.tasks.length > 0;
@@ -4549,7 +4574,7 @@ export default function sandbox(pi: ExtensionAPI) {
       const resultArtifactThresholdBytes = hasSingle ? 4 * 1024 : 2 * 1024;
       let result: unknown;
       try {
-        result = await requireClient(state).spawnSubagent({ ...effectiveParams, cwd: effectiveParams.cwd || effectiveSupervisorCwd(ctx, state.executionTarget), result_artifact_threshold_bytes: resultArtifactThresholdBytes, actor: parentActor(toolCallId, "Pi subagent tool") }, {
+        result = await requireClient(state).spawnSubagent({ ...effectiveParams, cwd: effectiveParams.cwd || parentCwd, result_artifact_threshold_bytes: resultArtifactThresholdBytes, actor: parentActor(toolCallId, "Pi subagent tool") }, {
           signal,
           onUpdate: (message) => {
           if (message.event === "subagent_start") {

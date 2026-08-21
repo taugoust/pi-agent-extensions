@@ -1135,7 +1135,7 @@ in
           };
         }
 
-        function createContext({ choices = [], hasUI = true, customActions, model } = {}) {
+        function createContext({ choices = [], hasUI = true, customActions, model, cwd = process.cwd() } = {}) {
           const statuses = [];
           const notifications = [];
           const selectCalls = [];
@@ -1184,7 +1184,7 @@ in
             };
           }
           return {
-            cwd: process.cwd(),
+            cwd,
             hasUI,
             model,
             statuses,
@@ -2289,7 +2289,7 @@ in
             process.env.AGENTSH_SESSION_SUPERVISOR = "unix://" + supervisor.socketPath;
             const pi = createPi();
             sandbox(pi);
-            const ctx = createContext({ model: { provider: "openai-codex", id: "gpt-5.5", contextWindow: 200000 } });
+            const ctx = createContext({ model: { provider: "openai-codex", id: "gpt-5.5", contextWindow: 200000 }, cwd: "/workspace/project" });
             await startSession(pi, ctx);
             const subagentTool = pi.tools.get("subagent");
             assert(subagentTool, "REST mode did not register subagent tool");
@@ -2298,6 +2298,8 @@ in
             await subagentTool.execute("inherit-model", { task: "ok" }, undefined, undefined, ctx);
             await subagentTool.execute("explicit-model", { task: "ok", model: "google/gemini-pro" }, undefined, undefined, ctx);
             await subagentTool.execute("parallel-model", { tasks: [{ task: "one" }, { task: "two", model: "anthropic/claude-sonnet" }] }, undefined, undefined, ctx);
+            await subagentTool.execute("relative-single-cwd", { task: "ok", cwd: "rtl/package" }, undefined, undefined, ctx);
+            await subagentTool.execute("relative-parallel-cwd", { tasks: [{ task: "one" }, { task: "two", cwd: "../shared" }] }, undefined, undefined, ctx);
             await subagentTool.execute("short-timeout", { task: "ok", timeout_ms: 1234 }, undefined, undefined, ctx);
             await subagentTool.execute("long-timeout", { task: "ok", timeout_ms: 10800000 }, undefined, undefined, ctx);
 
@@ -2311,15 +2313,19 @@ in
             delete process.env.PI_AGENTSH_EXPOSE_SUBAGENT_TIMEOUT;
 
             const spawnRequests = supervisor.requests.filter((request) => request.method === "POST" && request.url.endsWith("/tools/spawn_subagent"));
-            assert(spawnRequests.length === 6, "unexpected subagent request count");
+            assert(spawnRequests.length === 8, "unexpected subagent request count");
             assert(spawnRequests[0].body.model === "openai-codex/gpt-5.5", "single child did not inherit parent model");
             assert(spawnRequests[1].body.model === "google/gemini-pro", "explicit child model was overwritten");
             assert(spawnRequests[2].body.tasks[0].model === "openai-codex/gpt-5.5", "parallel child did not inherit parent model");
             assert(spawnRequests[2].body.tasks[1].model === "anthropic/claude-sonnet", "parallel explicit model was overwritten");
+            assert(spawnRequests[3].body.cwd === "/workspace/project/rtl/package", "single relative cwd was not resolved from the parent Pi cwd");
+            assert(spawnRequests[4].body.cwd === "/workspace/project", "parallel request omitted the parent Pi cwd");
+            assert(spawnRequests[4].body.tasks[0].cwd === undefined, "parallel child without cwd was rewritten unnecessarily");
+            assert(spawnRequests[4].body.tasks[1].cwd === "/workspace/shared", "parallel relative cwd was not resolved from the parent Pi cwd");
             assert(spawnRequests[0].body.timeout_ms === undefined, "client overrode the policy-controlled subagent timeout");
-            assert(spawnRequests[3].body.timeout_ms === undefined, "hidden shorter subagent timeout reached AgentSH");
-            assert(spawnRequests[4].body.timeout_ms === undefined, "hidden longer subagent timeout reached AgentSH");
-            assert(spawnRequests[5].body.timeout_ms === 1234, "operator-enabled subagent timeout was not forwarded");
+            assert(spawnRequests[5].body.timeout_ms === undefined, "hidden shorter subagent timeout reached AgentSH");
+            assert(spawnRequests[6].body.timeout_ms === undefined, "hidden longer subagent timeout reached AgentSH");
+            assert(spawnRequests[7].body.timeout_ms === 1234, "operator-enabled subagent timeout was not forwarded");
             assert(spawnRequests[0].body.result_artifact_threshold_bytes === 4096, "single subagent artifact threshold did not match parent inline budget");
             assert(spawnRequests[2].body.result_artifact_threshold_bytes === 2048, "parallel subagent artifact threshold did not match per-child capsule budget");
             await shutdownSession(timeoutOptInPi);
