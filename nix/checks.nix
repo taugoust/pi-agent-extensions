@@ -1653,11 +1653,16 @@ in
             process.env.AGENTSH_CHILD_CAPABILITY = fixtureCapability;
             const sessionId = "sess-command-timeouts";
             const commandTimeout = { default_ms: 200, maximum_ms: 240, source: "policy" };
+            const cancelledRequestIds = [];
             const supervisor = await withRestSupervisor(async (request) => {
               if (request.method === "GET" && request.url === "/api/v1/sessions/" + sessionId) {
                 return { id: sessionId, session_id: sessionId, workspace: "/workspace", worktree: "/workspace", workspace_mode: "shadow", command_timeout: commandTimeout };
               }
               if (request.method === "GET" && request.url === "/api/v1/approvals") return [];
+              if (request.method === "POST" && request.url.startsWith("/api/v1/sessions/" + sessionId + "/tools/exec_bash/") && request.url.endsWith("/cancel")) {
+                cancelledRequestIds.push(request.url.split("/").at(-2));
+                return { cancelled: true };
+              }
               if (request.method === "POST" && request.url === "/api/v1/sessions/" + sessionId + "/tools/exec_bash") {
                 const command = request.body.command;
                 if (command === "omitted-outlives-generic") {
@@ -1816,6 +1821,9 @@ in
             }
             clearTimeout(abortTimer);
             assert(abortError?.name === "AbortError", "caller cancellation was confused with command transport timeout: " + abortError);
+            const abortedRequest = supervisor.requests.find((request) => request.body?.command === "caller-abort");
+            assert(typeof abortedRequest?.body?.request_id === "string", "exec_bash omitted its stable cancellation request ID");
+            assert(cancelledRequestIds.includes(abortedRequest.body.request_id), "caller abort did not send an explicit exact-command cancellation request");
 
             const child124Result = await bashTool.execute("child-exit-124", { command: "child-exit-124" }, undefined, undefined, ctx);
             assert(child124Result?.isError === true && child124Result?.details?.exitCode === 124, "ordinary child exit 124 was inferred to be command timeout: " + JSON.stringify(child124Result));

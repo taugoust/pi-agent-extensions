@@ -2586,6 +2586,23 @@ class RestSupervisorClient {
   }
 
   async exec(command: string, options: ExecOptions = {}) {
+    const requestId = randomUUID();
+    let explicitCancellation: Promise<void> | undefined;
+    const cancelExplicitly = () => {
+      if (!explicitCancellation) {
+        explicitCancellation = this.#requestOnce(
+          "POST",
+          `${this.toolPath("exec_bash")}/${encodeURIComponent(requestId)}/cancel`,
+          { cause: "client_cancelled" },
+          { timeoutMs: 2_000 },
+        ).then(() => undefined, () => undefined);
+      }
+      return explicitCancellation;
+    };
+    const onAbort = () => { void cancelExplicitly(); };
+    const removeAbortListener = () => options.signal?.removeEventListener("abort", onAbort);
+    if (options.signal?.aborted) onAbort();
+    else options.signal?.addEventListener("abort", onAbort, { once: true });
 
     let budget: CommandTimeoutBudget | undefined;
     let raw: unknown;
@@ -2605,6 +2622,7 @@ class RestSupervisorClient {
         });
         budget = attemptBudget;
         const body: JsonObject = {
+          request_id: requestId,
           command,
           cwd: options.cwd || effectiveSupervisorCwd(),
           persist_output_over_bytes: options.persist_output_over_bytes,
@@ -2622,10 +2640,14 @@ class RestSupervisorClient {
             timeoutMs: attemptBudget.transportTimeoutMs,
           });
         } catch (error) {
-          if (options.signal?.aborted) throw supervisorRequestAborted();
+          if (options.signal?.aborted) {
+            await cancelExplicitly();
+            throw supervisorRequestAborted();
+          }
           // Classify only this dispatched/socket-response lifetime. Errors from
           // the separate safe reconnect poll retain reconnect diagnostics.
           if (error instanceof SupervisorRequestTimeoutError) {
+            await cancelExplicitly();
             throw new CommandTransportTimeoutError(
               attemptBudget.executionTimeoutMs,
               attemptBudget.transportTimeoutMs,
@@ -2636,8 +2658,13 @@ class RestSupervisorClient {
         }
       }, options.signal);
     } catch (error) {
-      if (options.signal?.aborted) throw supervisorRequestAborted();
+      if (options.signal?.aborted) {
+        await cancelExplicitly();
+        removeAbortListener();
+        throw supervisorRequestAborted();
+      }
       if (error instanceof RestHTTPError && restHTTPErrorIsSessionNotFound(error)) {
+        removeAbortListener();
         throw this.#sessionLost(`The supervisor reported that session ${this.#expectedSessionId} no longer exists.`);
       }
       if (error instanceof RestHTTPError && budget) {
@@ -2645,6 +2672,7 @@ class RestSupervisorClient {
         const executionTimeout = commandExecutionTimeoutError(parsed, budget);
         if (executionTimeout) {
           emitBufferedExecOutput(bufferedExecResult(parsed), options);
+          removeAbortListener();
           throw executionTimeout;
         }
         const envelope = objectField(parsed);
@@ -2652,12 +2680,15 @@ class RestSupervisorClient {
         if (semanticResult && recognizedSemanticExecFailure(semanticResult)) {
           raw = parsed;
         } else {
+          removeAbortListener();
           throw error;
         }
       } else {
+        removeAbortListener();
         throw error;
       }
     }
+    removeAbortListener();
 
     if (!budget) throw new Error("AgentSH exec_bash completed without a command timeout budget");
     const executionTimeout = commandExecutionTimeoutError(raw, budget);
