@@ -3374,7 +3374,12 @@ in
               target: "login.dos.cit.tum.de:22",
               rule: "approve-unknown-ssh",
               message: "Pi wants to connect over SSH to: {{.RemoteAddr}}:{{.RemotePort}}",
-              fields: { scope_kind: "network", scope_key: "network:login.dos.cit.tum.de:22", scope_label: "login.dos.cit.tum.de:22" },
+              fields: {
+                scope_kind: "network",
+                scope_key: "network:login.dos.cit.tum.de:22",
+                scope_label: "login.dos.cit.tum.de:22",
+                scope_options: [{ scope_kind: "command-run", scope_key: "command-run:all-approvals", scope_label: "all requests for this command invocation", scope_lifetime: "command" }],
+              },
             }];
             let resolved;
             const server = await withApprovalServer(async (request) => {
@@ -3399,10 +3404,11 @@ in
             assert(rendered.some((line) => line.includes("Connect over SSH?")), "network approval omitted SSH context");
             assert(rendered.filter((line) => line.includes("login.dos.cit.tum.de:22")).length === 1, "network approval did not show its destination exactly once: " + JSON.stringify(rendered));
             assert(!rendered.some((line) => /\{\{|RemoteAddr|RemotePort|Pi wants to connect|network destination/.test(line)), "network approval exposed or repeated its raw policy message: " + JSON.stringify(rendered));
-            assert(renderedChoices.length === 4, "scoped approval should show four choices");
-            assert(renderedChoices.some((line) => line.includes("Allow this destination for session")), "missing allow-for-session choice");
-            assert(renderedChoices.some((line) => line.includes("Deny this destination for session")), "missing deny-for-session choice");
-            assert(renderedChoices[0].includes("Deny once"), "network approval did not make Deny once the safe default");
+            assert(renderedChoices.length === 4, "network approval should show exactly four choices");
+            assert(renderedChoices[0].endsWith("Deny"), "network approval did not make Deny the safe default");
+            assert(renderedChoices[1].endsWith("Allow once"), "network approval omitted Allow once");
+            assert(renderedChoices[2].endsWith("Allow for session"), "network approval omitted Allow for session");
+            assert(renderedChoices[3].endsWith("Allow all accesses for command"), "network approval omitted command-wide network access");
             assert(resolved.id === "appr-session", "resolved wrong session approval id");
             assert(resolved.decision === "approve", "session approval was not approved");
             assert(resolved.scope === "session", "session approval did not relay scope=session");
@@ -3737,7 +3743,7 @@ in
             await server.close();
           }
 
-          // Deny-for-session relays decision=deny with scope=session.
+          // Network denial is deliberately one-shot; the compact network prompt does not persist denials.
           {
             clearAgentSHEnv();
             let approvals = [{
@@ -3759,14 +3765,14 @@ in
             setAgentSHEnv(server.socketPath);
             const pi = createPi();
             sandbox(pi);
-            const ctx = createContext({ choices: ["Deny this destination for session"] });
+            const ctx = createContext({ choices: ["Deny"] });
             await startSession(pi, ctx);
             await waitFor(() => Boolean(resolved), "deny-for-session approval was not resolved");
 
             assert(resolved.id === "appr-deny-session", "resolved wrong deny-session approval id");
             assert(resolved.decision === "deny", "deny-for-session approval was not denied");
-            assert(resolved.scope === "session", "deny-for-session did not relay scope=session");
-            assert(/denied for session/i.test(resolved.reason), "deny-for-session reason did not mention session");
+            assert(resolved.scope === "once", "network Deny did not remain one-shot");
+            assert(/denied in parent Pi/i.test(resolved.reason), "network Deny reason was not preserved");
             await shutdownSession(pi);
             await server.close();
           }

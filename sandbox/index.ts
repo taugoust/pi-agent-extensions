@@ -1284,13 +1284,11 @@ function sessionScopeOptions(approval: ApprovalRequest): ApprovalResolution[] {
   const fields = approval.fields || {};
   const rawOptions = Array.isArray(fields.scope_options) ? fields.scope_options : [];
   const options = rawOptions.map(scopeFromObject).filter((value): value is ApprovalResolution => Boolean(value));
-  if (options.length > 0) {
-    return approval.kind?.trim().toLowerCase() === "command"
-      ? options.sort((left, right) => Number(commandScopeIsExact(right)) - Number(commandScopeIsExact(left)))
-      : options;
-  }
   const fallback = scopeFromObject(fields);
-  return fallback ? [fallback] : [];
+  if (fallback && !options.some((option) => option.scope_key === fallback.scope_key)) options.unshift(fallback);
+  return approval.kind?.trim().toLowerCase() === "command"
+    ? options.sort((left, right) => Number(commandScopeIsExact(right)) - Number(commandScopeIsExact(left)))
+    : options;
 }
 
 function scopePathLabel(path: string, recursive: boolean) {
@@ -1340,6 +1338,37 @@ function approvalChoices(approval: ApprovalRequest): ApprovalChoice[] {
   const options = sessionScopeOptions(approval);
   const commandRun = options.find(commandRunScope);
   const sessionOptions = options.filter((option) => option.scope === "session");
+  const networkDestination = sessionOptions.find((option) => option.scope_kind === "network");
+  if (approval.kind?.trim().toLowerCase() === "network" && networkDestination) {
+    const destination = networkDestination;
+    const allForCommand = commandRun || {
+      scope: "once" as const,
+      scope_kind: "command-run",
+      scope_key: "command-run:all-approvals",
+      scope_label: "all accesses for this command",
+    };
+    const choices: ApprovalChoice[] = [
+      { ...denyOnce, label: "Deny" },
+      approveOnce,
+    ];
+    if (destination) {
+      choices.push({
+        ...destination,
+        decision: "approve",
+        scope: "session",
+        reason: `approved for session network destination: ${destination.scope_label || destination.scope_key || approvalTitle(approval)} in parent Pi`,
+        label: "Allow for session",
+      });
+    }
+    choices.push({
+      ...allForCommand,
+      decision: "approve",
+      scope: "once",
+      reason: "approved all network accesses for this command in parent Pi",
+      label: "Allow all accesses for command",
+    });
+    return choices;
+  }
   const choices: ApprovalChoice[] = [denyOnce, approveOnce];
   if (commandRun) {
     choices.push({
