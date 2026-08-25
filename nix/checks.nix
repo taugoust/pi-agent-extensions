@@ -825,10 +825,18 @@ in
 
             nextState = "not_allowed";
             await emit(pi, "tool_result", { toolName: "bash" }, ctx);
-            assert(ctx.notifications.some((entry) => entry.level === "warning" && entry.message.includes("direnv allow")), "not_allowed was not actionable");
-
-            nextState = "policy_denied";
             await emit(pi, "tool_result", { toolName: "bash" }, ctx);
+            const allowWarnings = ctx.notifications.filter((entry) => entry.level === "warning" && entry.message.includes("direnv allow"));
+            assert(allowWarnings.length === 1, "repeated not_allowed refreshes emitted duplicate warnings");
+          }
+
+          // A separate supervised session still reports an initial policy denial.
+          nextState = "policy_denied";
+          {
+            const pi = createPi();
+            direnv(pi);
+            const ctx = createContext("/execution/workspace");
+            await emit(pi, "session_start", {}, ctx);
             assert(ctx.notifications.some((entry) => entry.level === "error" && entry.message.includes("policy denied")), "policy_denied was not clear and non-fatal");
           }
 

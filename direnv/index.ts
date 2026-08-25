@@ -19,6 +19,7 @@ const DIAGNOSTIC_LIMIT = 500;
 
 export default function (pi: ExtensionAPI) {
   let pending: Promise<void> | null = null;
+  let failureReported = false;
   const supervised = process.env.PI_SUPERVISED === "1"
     || Boolean(process.env.AGENTSH_SESSION_SUPERVISOR)
     || process.env.PI_AGENTSH_ENABLE === "1"
@@ -68,6 +69,7 @@ export default function (pi: ExtensionAPI) {
         return;
       case "loaded":
       case "unchanged":
+        failureReported = false;
         if (ctx.hasUI) ctx.ui.setStatus("direnv", ctx.ui.theme.fg("success", "direnv ✓"));
         return;
       case "not_allowed":
@@ -91,6 +93,8 @@ export default function (pi: ExtensionAPI) {
   }
 
   function reportFailure(ctx: ExtensionContext, message: string, level: "warning" | "error" = "error") {
+    if (failureReported) return;
+    failureReported = true;
     const bounded = message.replace(/[\r\n]+/g, " ").slice(0, DIAGNOSTIC_LIMIT);
     if (ctx.hasUI) {
       ctx.ui.setStatus("direnv", ctx.ui.theme.fg(level === "warning" ? "warning" : "error", "direnv ✗"));
