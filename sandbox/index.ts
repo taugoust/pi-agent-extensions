@@ -2366,20 +2366,26 @@ class RestSupervisorClient {
       const payload = body === undefined ? undefined : JSON.stringify(body);
       let responseStarted = false;
       let settled = false;
+      let req: http.ClientRequest | undefined;
       const finish = (callback: () => void) => {
         if (settled) return;
         settled = true;
+        signal.removeEventListener("abort", onAbort);
         cleanup();
         callback();
       };
+      const onAbort = () => {
+        const error = normalizeRequestError(new Error(`${method} ${path}: supervisor request was aborted`));
+        finish(() => reject(error));
+        req?.destroy(error);
+      };
       const capabilityHeaders = childExecutionCapabilityHeaders(path);
       const operatorHeaders = detachedOperatorHeaders(path, detachedControlToken());
-      const req = http.request({
+      req = http.request({
         socketPath: this.socketPath,
         host: "unix",
         method,
         path,
-        signal,
         headers: payload === undefined ? { Accept: "application/json", ...capabilityHeaders, ...operatorHeaders } : {
           Accept: "application/json",
           "Content-Type": "application/json",
@@ -2414,10 +2420,14 @@ class RestSupervisorClient {
       }));
       req.setTimeout(timeoutMs, () => {
         socketTimedOut = true;
-        req.destroy(timeoutError());
+        req?.destroy(timeoutError());
       });
-      if (payload !== undefined) req.write(payload);
-      req.end();
+      signal.addEventListener("abort", onAbort, { once: true });
+      if (signal.aborted) onAbort();
+      if (!settled) {
+        if (payload !== undefined) req.write(payload);
+        req.end();
+      }
     });
   }
 
@@ -2454,8 +2464,15 @@ class RestSupervisorClient {
       const settle = (fn: () => void) => {
         if (settled) return;
         settled = true;
+        signal.removeEventListener("abort", onAbort);
         cleanup();
         fn();
+      };
+      const onAbort = () => {
+        const error = normalizeRequestError(new Error(`${method} ${path}: supervisor stream was aborted`));
+        abortSubagentProtocolStream(protocol, error.message);
+        settle(() => reject(error));
+        req?.destroy(error);
       };
       const emitEvent = (message: SupervisorMessage) => {
         if (!options.onEvent) return true;
@@ -2474,7 +2491,6 @@ class RestSupervisorClient {
         host: "unix",
         method,
         path,
-        signal,
         headers: {
           Accept: "application/x-ndjson",
           "Content-Type": "application/json",
@@ -2543,8 +2559,12 @@ class RestSupervisorClient {
         });
       });
       req.setTimeout(timeoutMs, () => req?.destroy(timeoutError()));
-      req.write(payload);
-      req.end();
+      signal.addEventListener("abort", onAbort, { once: true });
+      if (signal.aborted) onAbort();
+      if (!settled) {
+        req.write(payload);
+        req.end();
+      }
     });
   }
 

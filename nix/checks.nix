@@ -867,6 +867,7 @@ in
     pkgs.runCommand "sandbox-check"
       {
         nativeBuildInputs = [
+          pkgs.bun
           pkgs.nodejs
           pkgs.typescript
         ];
@@ -1493,6 +1494,70 @@ in
           let malformedCapabilityError;
           try { childCapabilityHeaders("/api/v1/sessions/s/tools/exec_bash", { AGENTSH_CHILD_CAPABILITY: "malformed" }); } catch (error) { malformedCapabilityError = error; }
           assert(String(malformedCapabilityError).includes("AGENTSH_CHILD_CAPABILITY is malformed"), "malformed child capability was accepted");
+
+          // Pi is compiled with Bun. Its node:http compatibility layer can close
+          // an aborted Unix-socket request without emitting a terminal event.
+          // Exercise the production runtime separately so one orphaned request
+          // Promise cannot leave Pi's parallel Promise.all busy forever.
+          if (process.env.PI_AGENTSH_BUN_ABORT_REGRESSION === "1") {
+            clearAgentSHEnv();
+            const sessionId = "sess-bun-parallel-abort";
+            const cancelledRequestIds = [];
+            const supervisor = await withRestSupervisor(async (request) => {
+              if (request.method === "GET" && request.url === "/api/v1/sessions/" + sessionId) {
+                return { id: sessionId, session_id: sessionId, workspace: "/workspace", worktree: "/workspace", command_timeout: { default_ms: 200, maximum_ms: 200, source: "policy" } };
+              }
+              if (request.method === "GET" && request.url === "/api/v1/approvals") return [];
+              if (request.method === "POST" && request.url.startsWith("/api/v1/sessions/" + sessionId + "/tools/exec_bash/") && request.url.endsWith("/cancel")) {
+                cancelledRequestIds.push(request.url.split("/").at(-2));
+                return { cancelled: true };
+              }
+              if (request.method === "POST" && (request.url.endsWith("/tools/read_file") || request.url.endsWith("/tools/exec_bash") || request.url.endsWith("/tools/spawn_subagent"))) {
+                await new Promise((resolve) => setTimeout(resolve, 200));
+                if (request.url.endsWith("/tools/read_file")) return { ok: true, result: { path: request.body.path, content: "too late" } };
+                if (request.url.endsWith("/tools/exec_bash")) return { ok: true, result: { exit_code: 0, stdout: "too late", stderr: "" } };
+                return { ndjsonChunks: [Buffer.from(JSON.stringify({ event: "done", ok: true, result: { mode: "single", final: "too late", results: [] } }) + "\n")] };
+              }
+              return { statusCode: 404, body: { error: "unexpected supervisor request", request } };
+            });
+            process.env.AGENTSH_SESSION_ID = sessionId;
+            process.env.AGENTSH_SESSION_SUPERVISOR = "unix://" + supervisor.socketPath;
+            process.env.PI_AGENTSH_READ_MODE = "supervised";
+            const pi = createPi();
+            sandbox(pi);
+            const ctx = createContext();
+            await startSession(pi, ctx);
+            const controller = new AbortController();
+            const calls = [
+              pi.tools.get("read").execute("bun-read-1", { path: "/workspace/one" }, controller.signal, undefined, ctx),
+              pi.tools.get("read").execute("bun-read-2", { path: "/workspace/two" }, controller.signal, undefined, ctx),
+              pi.tools.get("read").execute("bun-read-3", { path: "/workspace/three" }, controller.signal, undefined, ctx),
+              pi.tools.get("bash").execute("bun-bash", { command: "sleep forever" }, controller.signal, undefined, ctx),
+            ];
+            setTimeout(() => controller.abort(), 20);
+            const results = await Promise.race([
+              Promise.allSettled(calls),
+              new Promise((_, reject) => setTimeout(() => reject(new Error("Bun left an aborted supervised request Promise unresolved")), 1000)),
+            ]);
+            assert(results.length === 4 && results.every((result) => result.status === "rejected" && result.reason?.name === "AbortError"), "parallel Bun abort did not settle every supervised request: " + JSON.stringify(results));
+            assert(cancelledRequestIds.length === 1, "parallel Bun abort did not issue the Bash exact-command cancellation");
+
+            const subagentStartedAt = Date.now();
+            let subagentError;
+            try {
+              await Promise.race([
+                globalThis.__AGENTSH_PI__.spawnSubagent({ task: "wait forever", timeout_ms: 20 }),
+                new Promise((_, reject) => setTimeout(() => reject(new Error("Bun left an internally timed-out supervised NDJSON Promise unresolved")), 1000)),
+              ]);
+            } catch (error) {
+              subagentError = error;
+            }
+            assert(subagentError?.name === "SubagentTransportTimeoutError", "Bun NDJSON deadline did not settle as a typed transport timeout: " + subagentError);
+            assert(Date.now() - subagentStartedAt < 180, "Bun NDJSON deadline waited for the late supervisor response");
+            await shutdownSession(pi);
+            await supervisor.close();
+            return;
+          }
 
           // Missing AgentSH env leaves the relay inactive and does not need credentials.
           {
@@ -3875,6 +3940,7 @@ in
         EOF
 
         node "$workdir/test.mjs" "$outdir"
+        PI_AGENTSH_BUN_ABORT_REGRESSION=1 bun "$workdir/test.mjs" "$outdir"
 
         mkdir -p "$out"
         touch "$out/passed"
