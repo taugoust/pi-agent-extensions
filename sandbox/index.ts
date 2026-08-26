@@ -18,6 +18,7 @@ import { Type } from "@sinclair/typebox";
 import { DEFAULT_MAX_BYTES, DEFAULT_MAX_LINES, formatSize, getMarkdownTheme, renderDiff, truncateHead, truncateTail, type ExtensionAPI, type ExtensionContext, type TruncationResult } from "@mariozechner/pi-coding-agent";
 import { Box, Container, Key, Markdown, matchesKey, Spacer, Text, truncateToWidth, visibleWidth, wrapTextWithAnsi, type Component } from "@mariozechner/pi-tui";
 import { detachedOperatorHeaders } from "./operator-auth.js";
+import { normalizeSupervisorSubagentCwds } from "./subagent-cwd.js";
 import { inheritSubagentModels } from "./subagent-model.js";
 import { abortSubagentProtocolStream, appendSubagentProtocolChunk, createSubagentProtocolState, finishSubagentProtocolStream } from "./subagent-protocol.js";
 import { boundSubagentProgressCapsules, createSubagentProgressCapsule, sanitizeSubagentParentText } from "./subagent-result.js";
@@ -587,30 +588,6 @@ function env(name: string) {
 
 function effectiveSupervisorCwd(ctx?: ExtensionContext, target?: AgentSHExecutionTarget) {
   return target?.cwd || env("PI_AGENTSH_REMOTE_CWD") || ctx?.cwd || process.cwd();
-}
-
-function resolveSubagentRequestedCwd(cwd: unknown, parentCwd: string): string | undefined {
-  if (typeof cwd !== "string" || !cwd.trim()) return undefined;
-  const requested = toSlashPath(cwd.trim());
-  if (requested.startsWith("/") || /^[A-Za-z]:\//.test(requested)) return cleanPosix(requested);
-  return cleanPosix(`${cleanPosix(toSlashPath(parentCwd))}/${requested}`);
-}
-
-function normalizeSubagentRequestedCwds(params: any, parentCwd: string) {
-  const normalized = { ...params };
-  const requestCwd = resolveSubagentRequestedCwd(normalized.cwd, parentCwd) || parentCwd;
-  if (typeof normalized.cwd === "string") normalized.cwd = requestCwd;
-  for (const key of ["tasks", "chain"]) {
-    if (!Array.isArray(normalized[key])) continue;
-    normalized[key] = normalized[key].map((candidate: unknown) => {
-      if (!candidate || typeof candidate !== "object") return candidate;
-      const item = { ...(candidate as JsonObject) };
-      const cwd = resolveSubagentRequestedCwd(item.cwd, requestCwd);
-      if (cwd) item.cwd = cwd;
-      return item;
-    });
-  }
-  return normalized;
 }
 
 function normalizeSocketPath(value: string) {
@@ -4620,8 +4597,13 @@ export default function sandbox(pi: ExtensionAPI) {
     },
     async execute(toolCallId, params: any, signal, onUpdate, ctx) {
       const inheritedParams = inheritSubagentModels(params, ctx.model);
-      const parentCwd = effectiveSupervisorCwd(ctx, state.executionTarget);
-      const effectiveParams = normalizeSubagentRequestedCwds(inheritedParams, parentCwd);
+      const normalizedCwds = normalizeSupervisorSubagentCwds(
+        inheritedParams,
+        effectiveSupervisorCwd(ctx, state.executionTarget),
+        (absolute) => absoluteToVirtual(state.metadata, toSlashPath(absolute)),
+      );
+      const parentCwd = normalizedCwds.parentCwd;
+      const effectiveParams = normalizedCwds.params;
       if (!exposeSubagentTimeout) delete effectiveParams.timeout_ms;
       const hasSingle = typeof effectiveParams.task === "string" && effectiveParams.task.trim().length > 0;
       const hasTasks = Array.isArray(effectiveParams.tasks) && effectiveParams.tasks.length > 0;
