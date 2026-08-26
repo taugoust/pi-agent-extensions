@@ -1437,6 +1437,7 @@ in
           delete process.env.AGENTSH_SESSION_EVENT_URL;
           delete process.env.AGENTSH_SESSION_EVENT_TOKEN;
           delete process.env.PI_AGENTSH_APPROVAL_CLIENT;
+          delete process.env.PI_AGENTSH_APPROVAL_BELL;
           delete process.env.PI_AGENTSH_REQUIRE_NETWORK_ENFORCEMENT;
           delete process.env.PI_AGENTSH_EXPOSE_SUBAGENT_TIMEOUT;
           delete process.env.PI_AGENTSH_REMOTE;
@@ -1594,9 +1595,22 @@ in
             const pi = createPi();
             sandbox(pi);
             const ctx = createContext({ choices: ["Allow once"] });
-            await startSession(pi, ctx);
-            await waitFor(() => Boolean(resolved), "approval was not resolved");
+            process.env.PI_AGENTSH_APPROVAL_BELL = "1";
+            const originalStdoutWrite = process.stdout.write;
+            let approvalBellOutput = "";
+            process.stdout.write = function (chunk) {
+              approvalBellOutput += Buffer.isBuffer(chunk) ? chunk.toString("utf8") : String(chunk);
+              return true;
+            };
+            try {
+              await startSession(pi, ctx);
+              await waitFor(() => Boolean(resolved), "approval was not resolved");
+            } finally {
+              process.stdout.write = originalStdoutWrite;
+              delete process.env.PI_AGENTSH_APPROVAL_BELL;
+            }
 
+            assert(approvalBellOutput === "\x07", "approval prompt did not emit exactly one terminal bell: " + JSON.stringify(approvalBellOutput));
             assert(server.requests.some((request) => request.op === "list"), "approval list was not polled");
             assert(resolved.op === "resolve", "approval resolve op was not sent");
             assert(resolved.id === "appr-1", "resolved wrong approval id");

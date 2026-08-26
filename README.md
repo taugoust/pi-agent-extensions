@@ -656,6 +656,7 @@ PI_AGENTSH_WORKSPACE_MODE=shadow|direct                # Stage 1 only; default: 
 PI_AGENTSH_BIN=agentsh                                 # default: agentsh
 PI_AGENTSH_READ_MODE=supervised                        # optional read override (mock and real REST)
 PI_AGENTSH_APPROVAL_CLIENT=central                     # opt into central detached approval bridge
+PI_AGENTSH_APPROVAL_BELL=1                             # ring once when an AgentSH decision prompt opens
 PI_AGENTSH_REQUIRE_NETWORK_ENFORCEMENT=strict           # refuse tools without live strict runtime evidence
 PI_AGENTSH_RECOVERY_COMMAND=/nix/store/.../bin/recover  # optional immutable wrapper-owned recovery executable
 PI_AGENTSH_LIFECYCLE_STATE=/private/.../state.json      # optional private canonical wrapper-owned state

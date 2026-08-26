@@ -1395,6 +1395,15 @@ function resolveChoice(choices: ApprovalChoice[], choice: string | undefined): A
   return selected || { decision: "deny", scope: "once", reason: "denied in parent Pi" };
 }
 
+function ringApprovalBell() {
+  if (!/^(1|true|yes|on)$/i.test(env("PI_AGENTSH_APPROVAL_BELL"))) return;
+  try {
+    process.stdout.write("\x07");
+  } catch {
+    // A notification must never prevent the approval prompt from opening.
+  }
+}
+
 function showApprovalPrompt(ctx: ExtensionContext, approval: ApprovalRequest, choices: ApprovalChoice[], signal: AbortSignal): Promise<string | undefined> {
   const presentation = approvalPresentation(approval);
   if (typeof ctx.ui.custom !== "function") {
@@ -3137,6 +3146,7 @@ async function promptApproval(state: SupervisorState, approval: ApprovalRequest)
   state.promptAbortControllers.set(approval.id, controller);
   try {
     const choices = approvalChoices(approval);
+    ringApprovalBell();
     const choice = await showApprovalPrompt(ctx, approval, choices, controller.signal);
     if (controller.signal.aborted) return;
     const resolution = resolveChoice(choices, choice);
