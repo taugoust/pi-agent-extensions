@@ -819,8 +819,15 @@ operations carrying the same top-level command ID, but is neither a session
 grant nor an override for hard policy denials. Command prompts retain
 exact-invocation/session denial but omit broader executable-wide or
 command-wide denial; exact grants precede executable-wide grants. File prompts retain all
-scoped allow choices without scoped denials. When the
-supervisor reports `requested=strict`, the extension refuses all
+scoped allow choices without scoped denials. When a terminal Pi session is attached through
+a compatible Paseo bridge, both the legacy `permission-gate` selection and AgentSH approval
+selection are rendered as Paseo permission cards. Paseo transports only the selected label;
+`sandbox` maps it back to the original AgentSH approval ID and exact scope metadata before
+asking AgentSH to resolve it. A bridge disconnect or response failure denies the request, while
+sessions without an attached bridge retain their normal terminal UI. In native Pi RPC mode,
+the extension uses Pi's standard selectable UI rather than the TUI-only custom overlay.
+When the supervisor reports `requested=strict`, the extension refuses all
+AgentSH-backed tools unless the live report proves the the extension refuses all
 AgentSH-backed tools unless the live report proves the
 `helper-ebpf-proxy-required` tier is ready and `network_policy_enforced=true`.
 Additive `helper_lifecycle` evidence is shown separately from supervisor/SSH

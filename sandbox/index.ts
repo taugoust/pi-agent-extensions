@@ -170,6 +170,10 @@ type ApprovalResolution = {
 };
 
 type ApprovalChoice = { label: string } & ApprovalResolution;
+type PaseoRemoteUi = {
+  isConnected(): boolean;
+  select(title: string, options: string[], settings?: { signal?: AbortSignal }): Promise<string | undefined>;
+};
 
 type ExecOptions = {
   cwd?: string;
@@ -288,6 +292,7 @@ const MAX_RECOVERY_STATE_BYTES = 16 * 1024;
 const MAX_RECOVERY_OUTPUT_BYTES = 64 * 1024;
 const AGENTSH_CHILD_CAPABILITY_ENV = "AGENTSH_CHILD_CAPABILITY";
 const AGENTSH_CHILD_CAPABILITY_HEADER = "X-AgentSH-Child-Capability";
+const PASEO_REMOTE_UI_KEY = "__piPaseoRemoteUiV1";
 const LEGACY_PRE_EXEC_CODES = new Set(["E_COMMAND_NOT_STARTED", "E_COMMAND_START_FAILED", "E_PRE_EXEC_FAILED"]);
 const SEMANTIC_EXEC_CODES = /^(?:E_(?:COMMAND|EXEC|QUEUE|POLICY|APPROVAL|NETHELPER|PRE_EXEC|REQUEST|CANCEL|TIMEOUT)_[A-Z0-9_]+)$/;
 
@@ -1381,10 +1386,25 @@ function ringApprovalBell() {
   }
 }
 
+function paseoRemoteSelect(title: string, options: string[], signal: AbortSignal): Promise<string | undefined> | null {
+  const bridge = (globalThis as Record<string, unknown>)[PASEO_REMOTE_UI_KEY] as PaseoRemoteUi | undefined;
+  if (!bridge || typeof bridge.isConnected !== "function" || typeof bridge.select !== "function") return null;
+  try {
+    if (!bridge.isConnected()) return null;
+    return Promise.resolve(bridge.select(title, options, { signal })).catch(() => undefined);
+  } catch {
+    return Promise.resolve(undefined);
+  }
+}
+
 function showApprovalPrompt(ctx: ExtensionContext, approval: ApprovalRequest, choices: ApprovalChoice[], signal: AbortSignal): Promise<string | undefined> {
   const presentation = approvalPresentation(approval);
-  if (typeof ctx.ui.custom !== "function") {
-    return ctx.ui.select([presentation.title, ...presentation.details].join("\n"), choices.map((candidate) => candidate.label), { signal });
+  const title = [presentation.title, ...presentation.details].join("\n");
+  const options = choices.map((candidate) => candidate.label);
+  const remoteChoice = paseoRemoteSelect(title, options, signal);
+  if (remoteChoice) return remoteChoice;
+  if (ctx.mode !== "tui" || typeof ctx.ui.custom !== "function") {
+    return ctx.ui.select(title, options, { signal });
   }
   return ctx.ui.custom<string | undefined>((tui, theme, _kb, done) => {
     const denyIndex = choices.findIndex((candidate) => candidate.decision === "deny" && candidate.scope === "once");

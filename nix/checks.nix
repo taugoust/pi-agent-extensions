@@ -861,6 +861,82 @@ in
         touch "$out/passed"
       '';
 
+  permission-gate =
+    pkgs.runCommand "permission-gate-check"
+      {
+        nativeBuildInputs = [
+          pkgs.nodejs
+          pkgs.typescript
+        ];
+      }
+      ''
+        set -euo pipefail
+
+        workdir="$TMPDIR/permission-gate-check"
+        mkdir -p "$workdir/out"
+        tsc \
+          --noCheck \
+          --skipLibCheck \
+          --module nodenext \
+          --moduleResolution nodenext \
+          --target es2022 \
+          --outDir "$workdir/out" \
+          ${self}/permission-gate/index.ts
+
+        cat > "$workdir/test.mjs" <<'EOF'
+        import gate from "./out/index.js";
+
+        const assert = (condition, message) => { if (!condition) throw new Error(message); };
+        const handlers = new Map();
+        const pi = {
+          events: { emit() {} },
+          registerCommand() {},
+          on(name, handler) { handlers.set(name, handler); },
+        };
+        gate(pi);
+
+        let localCalls = 0;
+        const ctx = {
+          hasUI: true,
+          ui: {
+            async select() { localCalls += 1; return "Yes"; },
+            setStatus() {},
+          },
+        };
+        const dangerous = { toolName: "bash", input: { command: "sudo true" } };
+        const remoteCalls = [];
+        globalThis.__piPaseoRemoteUiV1 = {
+          isConnected: () => true,
+          async select(title, options) {
+            remoteCalls.push({ title, options });
+            return "Yes";
+          },
+        };
+        let result = await handlers.get("tool_call")(dangerous, ctx);
+        assert(result === undefined, "remote approval did not allow the command");
+        assert(remoteCalls.length === 1 && localCalls === 0, "remote approval did not bypass terminal selection");
+        assert(remoteCalls[0].options.join(",") === "Yes,No", "remote approval options changed");
+
+        globalThis.__piPaseoRemoteUiV1.select = async () => "No";
+        result = await handlers.get("tool_call")(dangerous, ctx);
+        assert(result?.block === true, "remote denial did not block the command");
+
+        globalThis.__piPaseoRemoteUiV1.select = async () => { throw new Error("disconnected"); };
+        result = await handlers.get("tool_call")(dangerous, ctx);
+        assert(result?.block === true, "remote UI failure did not fail closed");
+
+        globalThis.__piPaseoRemoteUiV1.isConnected = () => false;
+        result = await handlers.get("tool_call")(dangerous, ctx);
+        assert(result === undefined && localCalls === 1, "detached Paseo did not fall back to terminal selection");
+        delete globalThis.__piPaseoRemoteUiV1;
+        console.log("permission-gate checks passed");
+        EOF
+
+        cd "$workdir"
+        node test.mjs
+        touch "$out"
+      '';
+
   pdf = import ./pdf-check.nix { inherit self pkgs; };
 
   sandbox =
@@ -1196,6 +1272,7 @@ in
           }
           return {
             cwd,
+            mode: "tui",
             hasUI,
             model,
             statuses,
@@ -1596,7 +1673,8 @@ in
             setAgentSHEnv(server.socketPath);
             const pi = createPi();
             sandbox(pi);
-            const ctx = createContext({ choices: ["Allow once"] });
+            const ctx = createContext({ choices: ["Allow once"], customActions: ["<enter>"] });
+            ctx.mode = "rpc";
             process.env.PI_AGENTSH_APPROVAL_BELL = "1";
             const originalStdoutWrite = process.stdout.write;
             let approvalBellOutput = "";
@@ -1619,8 +1697,68 @@ in
             assert(resolved.decision === "approve", "approval was not approved");
             assert(resolved.scope === "once", "approval should default to once scope");
             assert(ctx.selectCalls[0].items.length === 2, "unscoped approval should only show once approve/deny choices");
+            assert(ctx.customCalls.length === 0, "RPC mode used the TUI-only custom approval overlay");
             assert(!ctx.selectCalls[0].items.some((item) => item.includes("for session")), "unscoped approval unexpectedly showed session choices");
             assertNoBearerCredentialFields(server.requests);
+            await shutdownSession(pi);
+            await server.close();
+          }
+
+          // Paseo transports the choice only; the sandbox maps the selected
+          // label back to the AgentSH-owned approval ID and exact scope.
+          {
+            clearAgentSHEnv();
+            let approvals = [{
+              id: "paseo-appr",
+              kind: "command",
+              target: "sudo true",
+              fields: {
+                command: "sudo true",
+                scope_options: [{
+                  scope: "session",
+                  scope_kind: "command",
+                  scope_key: "command-invocation:sha256:test",
+                  scope_label: "sudo true",
+                  scope_path: "sudo",
+                  scope_rule: "unknown-command",
+                }],
+              },
+            }];
+            let resolved;
+            const server = await withApprovalServer(async (request) => {
+              if (request.op === "list") return { ok: true, approvals };
+              if (request.op === "resolve") {
+                resolved = request;
+                approvals = [];
+                return { ok: true };
+              }
+              return { ok: false, error: "unknown op" };
+            });
+            setAgentSHEnv(server.socketPath);
+            const remoteCalls = [];
+            globalThis.__piPaseoRemoteUiV1 = {
+              isConnected: () => true,
+              async select(title, options, settings) {
+                remoteCalls.push({ title, options, settings });
+                return "Allow this exact invocation for session";
+              },
+            };
+            const pi = createPi();
+            sandbox(pi);
+            const ctx = createContext({ choices: ["Deny once"], customActions: ["<enter>"] });
+            try {
+              await startSession(pi, ctx);
+              await waitFor(() => Boolean(resolved), "Paseo approval was not resolved");
+            } finally {
+              delete globalThis.__piPaseoRemoteUiV1;
+            }
+            assert(remoteCalls.length === 1, "AgentSH approval was not sent through Paseo");
+            assert(ctx.selectCalls.length === 0 && ctx.customCalls.length === 0, "Paseo approval also opened a terminal dialog");
+            assert(resolved.id === "paseo-appr", "Paseo changed the AgentSH approval ID");
+            assert(resolved.decision === "approve" && resolved.scope === "session", "Paseo changed the approval decision or lifetime");
+            assert(resolved.scope_kind === "command", "Paseo changed the AgentSH scope kind");
+            assert(resolved.scope_key === "command-invocation:sha256:test", "Paseo changed the exact command scope key");
+            assert(resolved.scope_path === "sudo" && resolved.scope_rule === "unknown-command", "Paseo dropped exact scope metadata");
             await shutdownSession(pi);
             await server.close();
           }

@@ -13,6 +13,23 @@
 import type { ExtensionAPI } from "@mariozechner/pi-coding-agent";
 
 const CAPABILITY_GATE_MARKER = "__paeSandboxCapabilityGateActive";
+const PASEO_REMOTE_UI_KEY = "__piPaseoRemoteUiV1";
+
+type PaseoRemoteUi = {
+  isConnected(): boolean;
+  select(title: string, options: string[], settings?: { signal?: AbortSignal }): Promise<string | undefined>;
+};
+
+function paseoRemoteSelect(title: string, options: string[]): Promise<string | undefined> | null {
+  const bridge = (globalThis as Record<string, unknown>)[PASEO_REMOTE_UI_KEY] as PaseoRemoteUi | undefined;
+  if (!bridge || typeof bridge.isConnected !== "function" || typeof bridge.select !== "function") return null;
+  try {
+    if (!bridge.isConnected()) return null;
+    return Promise.resolve(bridge.select(title, options)).catch(() => undefined);
+  } catch {
+    return Promise.resolve(undefined);
+  }
+}
 
 function isSuppressedBySandbox(): boolean {
   return (globalThis as Record<string, unknown>)[CAPABILITY_GATE_MARKER] === true;
@@ -138,10 +155,11 @@ export default function (pi: ExtensionAPI) {
 
       pi.events.emit("permission-gate:waiting");
 
-      const choice = await ctx.ui.select(
-        `⚠️  Dangerous command detected (${labels}):\n\n  ${command}\n\nAllow?`,
-        ["Yes", "No"],
-      );
+      const title = `⚠️  Dangerous command detected (${labels}):\n\n  ${command}\n\nAllow?`;
+      const remoteChoice = paseoRemoteSelect(title, ["Yes", "No"]);
+      const choice = remoteChoice === null
+        ? await ctx.ui.select(title, ["Yes", "No"])
+        : await remoteChoice;
 
       pi.events.emit("permission-gate:resolved");
 
