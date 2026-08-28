@@ -208,6 +208,31 @@ in
       '';
 
   questionnaire =
+    let
+      moduleResult = pkgs.lib.evalModules {
+        modules = [
+          {
+            options.home.packages = pkgs.lib.mkOption {
+              type = pkgs.lib.types.listOf pkgs.lib.types.package;
+              default = [ ];
+            };
+            options.home.file = pkgs.lib.mkOption {
+              type = pkgs.lib.types.attrsOf pkgs.lib.types.anything;
+              default = { };
+            };
+          }
+          self.homeManagerModules.default
+          {
+            programs.pi.enable = true;
+            programs.pi.package = null;
+            programs.pi.extensions.questionnaire.enable = true;
+          }
+        ];
+        specialArgs = { inherit pkgs; };
+      };
+      moduleFiles = moduleResult.config.home.file;
+      questionnaireBundle = self.packages.${pkgs.stdenv.hostPlatform.system}.example-auto-extensions;
+    in
     pkgs.runCommand "questionnaire-check"
       {
         nativeBuildInputs = [
@@ -223,6 +248,12 @@ in
         outdir="$workdir/out"
         mkdir -p "$srcdir/questionnaire" "$outdir"
         cp ${self}/questionnaire/paseo.ts "$srcdir/questionnaire/paseo.ts"
+
+        test ${toString (builtins.length (builtins.attrNames moduleFiles))} = 2
+        test -f ${moduleFiles.".pi/agent/extensions/questionnaire/index.ts".source}
+        test -f ${moduleFiles.".pi/agent/extensions/questionnaire/paseo.ts".source}
+        test -f ${questionnaireBundle}/questionnaire/index.ts
+        test -f ${questionnaireBundle}/questionnaire/paseo.ts
 
         tsc \
           --strict \

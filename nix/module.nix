@@ -98,6 +98,7 @@ in
 
       (lib.mkIf cfg.extensions.questionnaire.enable {
         "${extDir}/questionnaire/index.ts".source = "${self}/questionnaire/index.ts";
+        "${extDir}/questionnaire/paseo.ts".source = "${self}/questionnaire/paseo.ts";
       })
 
       (lib.mkIf cfg.extensions.modal-editor.enable {
