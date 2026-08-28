@@ -470,6 +470,113 @@ in
             assert(loggedPaths[0].includes(`''${path.sep}pi-slow-mode-`), "edit review did not edit a staged temp file");
             assert(loggedPaths[0] !== targetPath, "edit review opened the real file instead of the staged new file");
           }
+
+          // Test: attached Paseo receives write reviews and can approve without opening TUI UI.
+          {
+            const pi = createPi();
+            slowMode(pi);
+            const cwd = path.join(tempRoot, "paseo-write");
+            fs.mkdirSync(cwd, { recursive: true });
+            const customUI = createCustomUI([]);
+            const ctx = createContext(cwd, customUI);
+            ctx.signal = new AbortController().signal;
+            await enableSlowMode(pi, ctx);
+
+            const remoteCalls = [];
+            globalThis.__piPaseoRemoteUiV1 = {
+              isConnected: () => true,
+              async select(title, options, settings) {
+                remoteCalls.push({ title, options, settings });
+                return "Approve";
+              },
+            };
+            const event = {
+              toolName: "write",
+              toolCallId: "paseo-write-1",
+              input: { path: "remote.txt", content: "remote content\n" },
+            };
+            const result = await getToolCallHandler(pi)(event, ctx);
+            assert(result === undefined, "Paseo write approval did not allow the write");
+            assert(customUI.calls === 0, "Paseo write approval also opened terminal UI");
+            assert(remoteCalls.length === 1, "Paseo write review was not requested exactly once");
+            assert(remoteCalls[0].title.includes("Slow mode WRITE review"), "Paseo write title omitted operation");
+            assert(remoteCalls[0].title.includes("remote.txt") && remoteCalls[0].title.includes("remote content"), "Paseo write review omitted path or content");
+            assert(remoteCalls[0].options.join(",") === "Approve,Reject,Review in terminal", "Paseo write options changed");
+            assert(remoteCalls[0].settings.signal === ctx.signal, "Paseo write review dropped cancellation signal");
+
+            const oversized = await getToolCallHandler(pi)({
+              toolName: "write",
+              toolCallId: "paseo-write-oversized",
+              input: { path: "oversized.txt", content: "x".repeat(50_001) },
+            }, ctx);
+            assert(oversized?.block === true, "Paseo accepted an approval label omitted from an oversized review");
+            assert(remoteCalls[1].options.join(",") === "Review in terminal,Reject", "oversized Paseo review offered remote approval");
+            assert(remoteCalls[1].title.includes("additional characters omitted"), "oversized Paseo review omitted truncation warning");
+            delete globalThis.__piPaseoRemoteUiV1;
+          }
+
+          // Test: attached Paseo receives edit diffs and denial fails closed.
+          {
+            const pi = createPi();
+            slowMode(pi);
+            const cwd = path.join(tempRoot, "paseo-edit");
+            fs.mkdirSync(cwd, { recursive: true });
+            fs.writeFileSync(path.join(cwd, "demo.txt"), "alpha\nbeta\n");
+            const customUI = createCustomUI([]);
+            const ctx = createContext(cwd, customUI);
+            await enableSlowMode(pi, ctx);
+
+            const remoteCalls = [];
+            globalThis.__piPaseoRemoteUiV1 = {
+              isConnected: () => true,
+              async select(title, options) {
+                remoteCalls.push({ title, options });
+                return "Reject";
+              },
+            };
+            const event = {
+              toolName: "edit",
+              toolCallId: "paseo-edit-1",
+              input: { path: "demo.txt", edits: [{ oldText: "beta", newText: "gamma" }] },
+            };
+            const result = await getToolCallHandler(pi)(event, ctx);
+            assert(result?.block === true, "Paseo edit denial did not block the edit");
+            assert(customUI.calls === 0, "Paseo edit denial also opened terminal UI");
+            assert(remoteCalls.length === 1, "Paseo edit review was not requested exactly once");
+            assert(remoteCalls[0].title.includes("Slow mode EDIT review"), "Paseo edit title omitted operation");
+            assert(remoteCalls[0].title.includes("-beta") && remoteCalls[0].title.includes("+gamma"), "Paseo edit review omitted diff");
+
+            globalThis.__piPaseoRemoteUiV1.select = async () => { throw new Error("disconnected"); };
+            const failed = await getToolCallHandler(pi)({
+              toolName: "write",
+              toolCallId: "paseo-write-failed",
+              input: { path: "failed.txt", content: "must not pass\n" },
+            }, ctx);
+            assert(failed?.block === true, "Paseo review failure did not fail closed");
+            delete globalThis.__piPaseoRemoteUiV1;
+          }
+
+          // Test: Paseo can hand a review back to the terminal's full custom UI.
+          {
+            const pi = createPi();
+            slowMode(pi);
+            const cwd = path.join(tempRoot, "paseo-terminal-fallback");
+            fs.mkdirSync(cwd, { recursive: true });
+            const customUI = createCustomUI([["<enter>"]]);
+            const ctx = createContext(cwd, customUI);
+            await enableSlowMode(pi, ctx);
+            globalThis.__piPaseoRemoteUiV1 = {
+              isConnected: () => true,
+              select: async () => "Review in terminal",
+            };
+            const result = await getToolCallHandler(pi)({
+              toolName: "write",
+              toolCallId: "paseo-terminal-1",
+              input: { path: "terminal.txt", content: "review locally\n" },
+            }, ctx);
+            assert(result === undefined && customUI.calls === 1, "Paseo terminal handoff did not use custom UI");
+            delete globalThis.__piPaseoRemoteUiV1;
+          }
         }
 
         await main();

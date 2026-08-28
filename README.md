@@ -183,6 +183,7 @@ hit disk.
 - Vim-style navigation in inline TUI (`j/k`{.verbatim},
   `u/d`{.verbatim}, `gg/G`{.verbatim})
 - `Ctrl+O`{.verbatim} from inline view opens external diff viewer
+- Attached Paseo sessions show approval cards containing the proposed write or unified diff. Remote users can approve, reject, or hand the full review back to the terminal; oversized previews cannot be approved remotely.
 
 **Key bindings**:
 

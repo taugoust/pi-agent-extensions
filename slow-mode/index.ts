@@ -9,6 +9,7 @@
  * - Ctrl+E opens the new file in $VISUAL/$EDITOR for editing (edit operations).
  * - Ctrl+O opens the diff in an external viewer (nvim/vim/diff).
  * - After editing, the diff is regenerated and shown again for approval.
+ * - Attached Paseo sessions receive approve/reject cards with the proposed content or diff.
  * - Esc opens a rejection-reason prompt; type a message to send back to the model, or just press Enter to reject silently.
  * - Toggle with /slow-mode command.
  * - Status bar shows "slow ■" when active.
@@ -31,6 +32,60 @@ import type {
   ExtensionContext,
 } from "@mariozechner/pi-coding-agent";
 import { truncateToWidth } from "@mariozechner/pi-tui";
+
+const PASEO_REMOTE_UI_KEY = "__piPaseoRemoteUiV1";
+const MAX_REMOTE_REVIEW_CHARS = 50_000;
+
+type PaseoRemoteUi = {
+  isConnected(): boolean;
+  select(
+    title: string,
+    options: string[],
+    settings?: { signal?: AbortSignal },
+  ): Promise<string | undefined>;
+};
+
+function paseoRemoteSelect(
+  title: string,
+  options: string[],
+  signal?: AbortSignal,
+): Promise<string | undefined> | null {
+  const bridge = (globalThis as Record<string, unknown>)[PASEO_REMOTE_UI_KEY] as
+    | PaseoRemoteUi
+    | undefined;
+  if (!bridge || typeof bridge.isConnected !== "function" || typeof bridge.select !== "function") {
+    return null;
+  }
+  try {
+    if (!bridge.isConnected()) return null;
+    return Promise.resolve(bridge.select(title, options, { signal })).catch(() => undefined);
+  } catch {
+    return Promise.resolve(undefined);
+  }
+}
+
+function buildRemoteReview(
+  operation: "WRITE" | "EDIT",
+  filePath: string,
+  body: string,
+): { title: string; options: string[] } {
+  const heading = `Slow mode ${operation} review\n\n${filePath}\n\n`;
+  if (body.length <= MAX_REMOTE_REVIEW_CHARS) {
+    return {
+      title: heading + body,
+      options: ["Approve", "Reject", "Review in terminal"],
+    };
+  }
+
+  const omitted = body.length - MAX_REMOTE_REVIEW_CHARS;
+  return {
+    title:
+      heading +
+      body.slice(0, MAX_REMOTE_REVIEW_CHARS) +
+      `\n\n[${omitted} additional characters omitted; use the terminal for full review]`,
+    options: ["Review in terminal", "Reject"],
+  };
+}
 
 export default function slowMode(pi: ExtensionAPI) {
   // State: whether slow mode is currently enabled
@@ -581,6 +636,14 @@ export default function slowMode(pi: ExtensionAPI) {
     ctx: ExtensionContext,
     opts: ReviewOptions,
   ): Promise<string | null> {
+    const remoteReview = buildRemoteReview(opts.operation, opts.filePath, opts.body);
+    const remoteChoice = paseoRemoteSelect(remoteReview.title, remoteReview.options, ctx.signal);
+    if (remoteChoice !== null) {
+      const choice = await remoteChoice;
+      if (choice === "Approve" && remoteReview.options.includes("Approve")) return null;
+      if (choice !== "Review in terminal") return "";
+    }
+
     const { matchesKey, Key } = await import("@mariozechner/pi-tui");
 
     return ctx.ui.custom<string | null>((tui, theme, _kb, done) => {
@@ -900,6 +963,14 @@ export default function slowMode(pi: ExtensionAPI) {
     ctx: ExtensionContext,
     opts: EditReviewOptions,
   ): Promise<"approve" | "edit" | { type: "reject"; reason: string }> {
+    const remoteReview = buildRemoteReview("EDIT", opts.filePath, opts.body);
+    const remoteChoice = paseoRemoteSelect(remoteReview.title, remoteReview.options, ctx.signal);
+    if (remoteChoice !== null) {
+      const choice = await remoteChoice;
+      if (choice === "Approve" && remoteReview.options.includes("Approve")) return "approve";
+      if (choice !== "Review in terminal") return { type: "reject", reason: "" };
+    }
+
     const { matchesKey, Key } = await import("@mariozechner/pi-tui");
 
     return ctx.ui.custom<"approve" | "edit" | { type: "reject"; reason: string }>((tui, theme, _kb, done) => {
