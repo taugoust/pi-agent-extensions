@@ -15,6 +15,7 @@ import {
   truncateToWidth,
 } from "@mariozechner/pi-tui";
 import { Type } from "@sinclair/typebox";
+import { answerQuestionnaireInPaseo } from "./paseo.js";
 
 // Types
 interface QuestionOption {
@@ -186,7 +187,7 @@ export default function questionnaire(pi: ExtensionAPI) {
     ],
     parameters: QuestionnaireParams,
 
-    async execute(_toolCallId, params, _signal, _onUpdate, ctx) {
+    async execute(_toolCallId, params, signal, _onUpdate, ctx) {
       if (!ctx.hasUI) {
         return errorResult(
           "Error: UI not available (running in non-interactive mode)",
@@ -231,8 +232,19 @@ export default function questionnaire(pi: ExtensionAPI) {
 
       let completed = false;
       let completeFromExternal: ((answer: QuestionnaireResult) => void) | undefined;
+      const paseoOutcome = await answerQuestionnaireInPaseo(questions, signal);
+      const remoteResult: QuestionnaireResult | undefined = paseoOutcome && paseoOutcome.kind !== "terminal"
+        ? {
+            questions,
+            answers: paseoOutcome.kind === "answered" ? paseoOutcome.answers : [],
+            cancelled: paseoOutcome.kind === "cancelled",
+          }
+        : undefined;
+      if (remoteResult?.cancelled) ctx.abort();
 
-      const uiResult = ctx.ui.custom<QuestionnaireResult>(
+      const uiResult = remoteResult
+        ? Promise.resolve(remoteResult)
+        : ctx.ui.custom<QuestionnaireResult>(
         (tui, theme, _kb, done) => {
           // State
           let currentTab = 0;
@@ -549,13 +561,15 @@ export default function questionnaire(pi: ExtensionAPI) {
         },
       );
 
-      void pollExternalAnswer(questionnaireId, questions, () => completed).then(
-        (answer) => {
-          if (answer && completeFromExternal) {
-            completeFromExternal(answer);
-          }
-        },
-      );
+      if (!remoteResult) {
+        void pollExternalAnswer(questionnaireId, questions, () => completed).then(
+          (answer) => {
+            if (answer && completeFromExternal) {
+              completeFromExternal(answer);
+            }
+          },
+        );
+      }
 
       const result = await uiResult;
       completed = true;

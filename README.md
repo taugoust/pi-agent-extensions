@@ -328,6 +328,8 @@ through nested tmux when every layer uses
 - **Type**: Tool (LLM-callable)
 - **Use cases**: Configuration wizards, disambiguation, confirmations,
   multi-step workflows
+- **Paseo**: Attached sessions present each question as a sequential choice
+  card. Free-text answers can be handed back to the full terminal UI.
 
 **Description**: A tool the LLM can call to ask single or
 multiple-choice questions with tab-based navigation.
