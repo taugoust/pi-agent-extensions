@@ -183,7 +183,7 @@ hit disk.
 - Vim-style navigation in inline TUI (`j/k`{.verbatim},
   `u/d`{.verbatim}, `gg/G`{.verbatim})
 - `Ctrl+O`{.verbatim} from inline view opens external diff viewer
-- Attached Paseo sessions show approval cards containing the proposed write or unified diff. Remote users can approve, reject, or hand the full review back to the terminal; oversized previews cannot be approved remotely.
+- Attached Paseo sessions show the review concurrently in Paseo and the terminal. The first decision wins and dismisses the other prompt; oversized previews still cannot be approved from Paseo.
 
 **Key bindings**:
 
@@ -328,8 +328,9 @@ through nested tmux when every layer uses
 - **Type**: Tool (LLM-callable)
 - **Use cases**: Configuration wizards, disambiguation, confirmations,
   multi-step workflows
-- **Paseo**: Attached sessions present each question as a sequential choice
-  card. Free-text answers can be handed back to the full terminal UI.
+- **Paseo**: Attached sessions present sequential choice cards while the full
+  terminal questionnaire remains open. The first completed UI wins and dismisses
+  the other; free-text answers remain terminal-owned.
 
 **Description**: A tool the LLM can call to ask single or
 multiple-choice questions with tab-based navigation.
@@ -643,7 +644,9 @@ been retired. `sandbox` now has two explicit protocol modes:
 
 With no supervisor/enable env var, the extension stays inactive and does not
 register `bash`/`write`/`edit`/`subagent` overrides, so normal Pi tools are not
-broken. On `session_start`, it attaches to the mock socket first if present;
+broken. For terminal-attached Paseo sessions, exact-scope approvals appear
+concurrently in both UIs; the first response wins and dismisses the other prompt.
+On `session_start`, it attaches to the mock socket first if present;
 otherwise it attaches to the real REST socket, or starts one with
 `agentsh session start --detach --policy <policy> --workspace <cwd> --workspace-mode <mode> --json`.
 

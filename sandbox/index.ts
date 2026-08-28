@@ -173,6 +173,12 @@ type ApprovalChoice = { label: string } & ApprovalResolution;
 type PaseoRemoteUi = {
   isConnected(): boolean;
   select(title: string, options: string[], settings?: { signal?: AbortSignal }): Promise<string | undefined>;
+  selectMirrored?(
+    title: string,
+    options: string[],
+    localSelect: (signal: AbortSignal) => Promise<string | undefined>,
+    settings?: { signal?: AbortSignal },
+  ): Promise<string | undefined>;
 };
 
 type ExecOptions = {
@@ -1386,11 +1392,19 @@ function ringApprovalBell() {
   }
 }
 
-function paseoRemoteSelect(title: string, options: string[], signal: AbortSignal): Promise<string | undefined> | null {
+function paseoRemoteSelect(
+  title: string,
+  options: string[],
+  localSelect: (signal: AbortSignal) => Promise<string | undefined>,
+  signal: AbortSignal,
+): Promise<string | undefined> | null {
   const bridge = (globalThis as Record<string, unknown>)[PASEO_REMOTE_UI_KEY] as PaseoRemoteUi | undefined;
   if (!bridge || typeof bridge.isConnected !== "function" || typeof bridge.select !== "function") return null;
   try {
     if (!bridge.isConnected()) return null;
+    if (typeof bridge.selectMirrored === "function") {
+      return Promise.resolve(bridge.selectMirrored(title, options, localSelect, { signal })).catch(() => undefined);
+    }
     return Promise.resolve(bridge.select(title, options, { signal })).catch(() => undefined);
   } catch {
     return Promise.resolve(undefined);
@@ -1401,8 +1415,19 @@ function showApprovalPrompt(ctx: ExtensionContext, approval: ApprovalRequest, ch
   const presentation = approvalPresentation(approval);
   const title = [presentation.title, ...presentation.details].join("\n");
   const options = choices.map((candidate) => candidate.label);
-  const remoteChoice = paseoRemoteSelect(title, options, signal);
-  if (remoteChoice) return remoteChoice;
+  const localSelect = (localSignal: AbortSignal) => showTerminalApprovalPrompt(ctx, presentation, choices, localSignal);
+  const remoteChoice = paseoRemoteSelect(title, options, localSelect, signal);
+  return remoteChoice ?? localSelect(signal);
+}
+
+function showTerminalApprovalPrompt(
+  ctx: ExtensionContext,
+  presentation: ApprovalPresentation,
+  choices: ApprovalChoice[],
+  signal: AbortSignal,
+): Promise<string | undefined> {
+  const title = [presentation.title, ...presentation.details].join("\n");
+  const options = choices.map((candidate) => candidate.label);
   if (ctx.mode !== "tui" || typeof ctx.ui.custom !== "function") {
     return ctx.ui.select(title, options, { signal });
   }

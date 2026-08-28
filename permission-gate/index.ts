@@ -18,14 +18,28 @@ const PASEO_REMOTE_UI_KEY = "__piPaseoRemoteUiV1";
 type PaseoRemoteUi = {
   isConnected(): boolean;
   select(title: string, options: string[], settings?: { signal?: AbortSignal }): Promise<string | undefined>;
+  selectMirrored?(
+    title: string,
+    options: string[],
+    localSelect: (signal: AbortSignal) => Promise<string | undefined>,
+    settings?: { signal?: AbortSignal },
+  ): Promise<string | undefined>;
 };
 
-function paseoRemoteSelect(title: string, options: string[]): Promise<string | undefined> | null {
+function paseoRemoteSelect(
+  title: string,
+  options: string[],
+  localSelect: (signal: AbortSignal) => Promise<string | undefined>,
+  signal?: AbortSignal,
+): Promise<string | undefined> | null {
   const bridge = (globalThis as Record<string, unknown>)[PASEO_REMOTE_UI_KEY] as PaseoRemoteUi | undefined;
   if (!bridge || typeof bridge.isConnected !== "function" || typeof bridge.select !== "function") return null;
   try {
     if (!bridge.isConnected()) return null;
-    return Promise.resolve(bridge.select(title, options)).catch(() => undefined);
+    if (typeof bridge.selectMirrored === "function") {
+      return Promise.resolve(bridge.selectMirrored(title, options, localSelect, { signal })).catch(() => undefined);
+    }
+    return Promise.resolve(bridge.select(title, options, { signal })).catch(() => undefined);
   } catch {
     return Promise.resolve(undefined);
   }
@@ -156,9 +170,11 @@ export default function (pi: ExtensionAPI) {
       pi.events.emit("permission-gate:waiting");
 
       const title = `⚠️  Dangerous command detected (${labels}):\n\n  ${command}\n\nAllow?`;
-      const remoteChoice = paseoRemoteSelect(title, ["Yes", "No"]);
+      const options = ["Yes", "No"];
+      const localSelect = (signal: AbortSignal) => ctx.ui.select(title, options, { signal });
+      const remoteChoice = paseoRemoteSelect(title, options, localSelect, ctx.signal);
       const choice = remoteChoice === null
-        ? await ctx.ui.select(title, ["Yes", "No"])
+        ? await localSelect(ctx.signal ?? new AbortController().signal)
         : await remoteChoice;
 
       pi.events.emit("permission-gate:resolved");

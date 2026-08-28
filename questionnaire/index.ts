@@ -232,19 +232,15 @@ export default function questionnaire(pi: ExtensionAPI) {
 
       let completed = false;
       let completeFromExternal: ((answer: QuestionnaireResult) => void) | undefined;
-      const paseoOutcome = await answerQuestionnaireInPaseo(questions, signal);
-      const remoteResult: QuestionnaireResult | undefined = paseoOutcome && paseoOutcome.kind !== "terminal"
-        ? {
-            questions,
-            answers: paseoOutcome.kind === "answered" ? paseoOutcome.answers : [],
-            cancelled: paseoOutcome.kind === "cancelled",
-          }
-        : undefined;
-      if (remoteResult?.cancelled) ctx.abort();
+      const remoteController = new AbortController();
+      const abortRemote = () => remoteController.abort();
+      if (signal) {
+        if (signal.aborted) remoteController.abort();
+        else signal.addEventListener("abort", abortRemote, { once: true });
+      }
+      const paseoResult = answerQuestionnaireInPaseo(questions, remoteController.signal);
 
-      const uiResult = remoteResult
-        ? Promise.resolve(remoteResult)
-        : ctx.ui.custom<QuestionnaireResult>(
+      const uiResult = ctx.ui.custom<QuestionnaireResult>(
         (tui, theme, _kb, done) => {
           // State
           let currentTab = 0;
@@ -561,17 +557,38 @@ export default function questionnaire(pi: ExtensionAPI) {
         },
       );
 
-      if (!remoteResult) {
-        void pollExternalAnswer(questionnaireId, questions, () => completed).then(
-          (answer) => {
-            if (answer && completeFromExternal) {
-              completeFromExternal(answer);
-            }
-          },
-        );
-      }
+      void pollExternalAnswer(questionnaireId, questions, () => completed).then(
+        (answer) => {
+          if (answer && completeFromExternal) {
+            completeFromExternal(answer);
+          }
+        },
+      );
 
-      const result = await uiResult;
+      const winner = await Promise.race([
+        uiResult.then((result) => ({ source: "terminal" as const, result })),
+        paseoResult.then((outcome) =>
+          outcome === null
+            ? new Promise<never>(() => {})
+            : { source: "paseo" as const, outcome }
+        ),
+      ]);
+      let result: QuestionnaireResult;
+      if (winner.source === "terminal") {
+        remoteController.abort();
+        result = winner.result;
+      } else if (winner.outcome.kind === "terminal") {
+        result = await uiResult;
+      } else {
+        result = {
+          questions,
+          answers: winner.outcome.kind === "answered" ? winner.outcome.answers : [],
+          cancelled: winner.outcome.kind === "cancelled",
+        };
+        if (result.cancelled) ctx.abort();
+        completeFromExternal?.(result);
+      }
+      signal?.removeEventListener("abort", abortRemote);
       completed = true;
 
       await publishQuestionnaireEvent(

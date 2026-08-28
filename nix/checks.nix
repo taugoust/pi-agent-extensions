@@ -606,13 +606,13 @@ in
             assert(loggedPaths[0] !== targetPath, "edit review opened the real file instead of the staged new file");
           }
 
-          // Test: attached Paseo receives write reviews and can approve without opening TUI UI.
+          // Test: attached Paseo and the terminal receive mirrored write reviews.
           {
             const pi = createPi();
             slowMode(pi);
             const cwd = path.join(tempRoot, "paseo-write");
             fs.mkdirSync(cwd, { recursive: true });
-            const customUI = createCustomUI([]);
+            const customUI = createCustomUI([[], []]);
             const ctx = createContext(cwd, customUI);
             ctx.signal = new AbortController().signal;
             await enableSlowMode(pi, ctx);
@@ -624,6 +624,15 @@ in
                 remoteCalls.push({ title, options, settings });
                 return "Approve";
               },
+              async selectMirrored(title, options, localSelect, settings) {
+                remoteCalls.push({ title, options, settings });
+                const controller = new AbortController();
+                const local = localSelect(controller.signal);
+                await new Promise((resolve) => setTimeout(resolve, 0));
+                controller.abort();
+                await local;
+                return options.includes("Approve") ? "Approve" : "Reject";
+              },
             };
             const event = {
               toolName: "write",
@@ -632,11 +641,11 @@ in
             };
             const result = await getToolCallHandler(pi)(event, ctx);
             assert(result === undefined, "Paseo write approval did not allow the write");
-            assert(customUI.calls === 0, "Paseo write approval also opened terminal UI");
+            assert(customUI.calls === 1, "Paseo write approval was not mirrored to terminal UI");
             assert(remoteCalls.length === 1, "Paseo write review was not requested exactly once");
             assert(remoteCalls[0].title.includes("Slow mode WRITE review"), "Paseo write title omitted operation");
             assert(remoteCalls[0].title.includes("remote.txt") && remoteCalls[0].title.includes("remote content"), "Paseo write review omitted path or content");
-            assert(remoteCalls[0].options.join(",") === "Approve,Reject,Review in terminal", "Paseo write options changed");
+            assert(remoteCalls[0].options.join(",") === "Approve,Reject", "mirrored Paseo write options changed");
             assert(remoteCalls[0].settings.signal === ctx.signal, "Paseo write review dropped cancellation signal");
 
             const oversized = await getToolCallHandler(pi)({
@@ -645,7 +654,8 @@ in
               input: { path: "oversized.txt", content: "x".repeat(50_001) },
             }, ctx);
             assert(oversized?.block === true, "Paseo accepted an approval label omitted from an oversized review");
-            assert(remoteCalls[1].options.join(",") === "Review in terminal,Reject", "oversized Paseo review offered remote approval");
+            assert(customUI.calls === 2, "oversized Paseo review was not mirrored to terminal UI");
+            assert(remoteCalls[1].options.join(",") === "Reject", "oversized mirrored Paseo review offered remote approval");
             assert(remoteCalls[1].title.includes("additional characters omitted"), "oversized Paseo review omitted truncation warning");
             delete globalThis.__piPaseoRemoteUiV1;
           }
@@ -1153,23 +1163,35 @@ in
             remoteCalls.push({ title, options });
             return "Yes";
           },
+          async selectMirrored(title, options, localSelect) {
+            remoteCalls.push({ title, options });
+            const controller = new AbortController();
+            void localSelect(controller.signal);
+            controller.abort();
+            return "Yes";
+          },
         };
         let result = await handlers.get("tool_call")(dangerous, ctx);
         assert(result === undefined, "remote approval did not allow the command");
-        assert(remoteCalls.length === 1 && localCalls === 0, "remote approval did not bypass terminal selection");
+        assert(remoteCalls.length === 1 && localCalls === 1, "mirrored approval was not shown in both Paseo and the terminal");
         assert(remoteCalls[0].options.join(",") === "Yes,No", "remote approval options changed");
 
-        globalThis.__piPaseoRemoteUiV1.select = async () => "No";
+        globalThis.__piPaseoRemoteUiV1.selectMirrored = async (_title, _options, localSelect) => {
+          const controller = new AbortController();
+          void localSelect(controller.signal);
+          controller.abort();
+          return "No";
+        };
         result = await handlers.get("tool_call")(dangerous, ctx);
         assert(result?.block === true, "remote denial did not block the command");
 
-        globalThis.__piPaseoRemoteUiV1.select = async () => { throw new Error("disconnected"); };
+        globalThis.__piPaseoRemoteUiV1.selectMirrored = async () => { throw new Error("disconnected"); };
         result = await handlers.get("tool_call")(dangerous, ctx);
         assert(result?.block === true, "remote UI failure did not fail closed");
 
         globalThis.__piPaseoRemoteUiV1.isConnected = () => false;
         result = await handlers.get("tool_call")(dangerous, ctx);
-        assert(result === undefined && localCalls === 1, "detached Paseo did not fall back to terminal selection");
+        assert(result === undefined && localCalls === 3, "detached Paseo did not fall back to terminal selection");
         delete globalThis.__piPaseoRemoteUiV1;
         console.log("permission-gate checks passed");
         EOF
@@ -1984,6 +2006,13 @@ in
                 remoteCalls.push({ title, options, settings });
                 return "Allow this exact invocation for session";
               },
+              async selectMirrored(title, options, localSelect, settings) {
+                remoteCalls.push({ title, options, settings });
+                const controller = new AbortController();
+                void localSelect(controller.signal);
+                controller.abort();
+                return "Allow this exact invocation for session";
+              },
             };
             const pi = createPi();
             sandbox(pi);
@@ -1995,7 +2024,7 @@ in
               delete globalThis.__piPaseoRemoteUiV1;
             }
             assert(remoteCalls.length === 1, "AgentSH approval was not sent through Paseo");
-            assert(ctx.selectCalls.length === 0 && ctx.customCalls.length === 0, "Paseo approval also opened a terminal dialog");
+            assert(ctx.selectCalls.length === 0 && ctx.customCalls.length === 1, "AgentSH approval was not mirrored to the terminal");
             assert(resolved.id === "paseo-appr", "Paseo changed the AgentSH approval ID");
             assert(resolved.decision === "approve" && resolved.scope === "session", "Paseo changed the approval decision or lifetime");
             assert(resolved.scope_kind === "command", "Paseo changed the AgentSH scope kind");
