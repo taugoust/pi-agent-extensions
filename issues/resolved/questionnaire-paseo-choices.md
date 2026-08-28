@@ -17,4 +17,4 @@ For terminal-started Pi sessions attached through the Paseo bridge, the question
 
 ## Resolution
 
-Commit `639ad66` presents questionnaire options as sequential Paseo selection cards, preserves numbered option identity and descriptions, supports terminal handoff for free-text answers, and fails closed on invalid or interrupted remote responses.
+Commit `639ad66` presents questionnaire options as sequential Paseo selection cards, preserves numbered option identity and descriptions, supports terminal handoff for free-text answers, and fails closed on invalid or interrupted remote responses. Commit `520173a` installs the companion helper through the Home Manager module and adds packaging regression coverage.
