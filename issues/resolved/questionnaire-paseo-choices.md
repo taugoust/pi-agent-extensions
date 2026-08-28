@@ -2,7 +2,7 @@
 
 ## Status
 
-In progress.
+Resolved.
 
 ## Problem
 
@@ -14,3 +14,7 @@ For terminal-started Pi sessions attached through the Paseo bridge, the question
 - Preserve option values, labels, descriptions, ordering, and multi-question results.
 - Offer a handoff to the terminal UI for custom free-text answers.
 - Fail closed on cancellation, bridge errors, or unknown response labels.
+
+## Resolution
+
+Commit `639ad66` presents questionnaire options as sequential Paseo selection cards, preserves numbered option identity and descriptions, supports terminal handoff for free-text answers, and fails closed on invalid or interrupted remote responses.
