@@ -2,7 +2,7 @@ import { randomUUID } from "node:crypto";
 import { existsSync, lstatSync, renameSync, rmSync, writeFileSync } from "node:fs";
 import { dirname, isAbsolute } from "node:path";
 
-export type AutoAction = "review" | "apply" | "discard" | "pause";
+export type AutoAction = "review" | "apply" | "publish" | "discard" | "pause";
 
 function assertPrivateOwner(path: string, label: string) {
   const stat = lstatSync(path);

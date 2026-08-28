@@ -42,7 +42,12 @@ function draftIdentity(): DraftIdentity {
     throw new Error("Live AgentSH metadata does not match this Draft");
   }
   if (metadata?.workspace_mode && metadata.workspace_mode !== "shadow") {
-    throw new Error("Live AgentSH workspace is not a Draft workspace");
+    // A Git-backed MicroVM Draft is shadowed by the outer trusted wrapper, but
+    // its authenticated guest supervisor intentionally operates directly on
+    // the private volume mounted at /workspace.
+    if (!(env("PI_AUTO_RUNTIME_PROFILE") === "pi-linux-qemu-v2" && metadata.workspace_mode === "direct")) {
+      throw new Error("Live AgentSH workspace is not a Draft workspace");
+    }
   }
   return { sessionId, requestPath, authorization, status: state?.status ?? "unavailable", metadata };
 }
@@ -116,7 +121,7 @@ export default function autoExtension(pi: ExtensionAPI) {
             `Connection: ${identity.status}`,
             "Your project is unchanged until you Apply.",
           ].join("\n"),
-          ["Review", "Apply and exit", "Discard and exit", "Pause and exit"],
+          ["Review", "Apply and exit", "Apply, push, and exit", "Discard and exit", "Pause and exit"],
         );
         if (!selection) return;
 
@@ -124,14 +129,18 @@ export default function autoExtension(pi: ExtensionAPI) {
           ? "review"
           : selection === "Apply and exit"
             ? "apply"
-            : selection === "Discard and exit"
-              ? "discard"
-              : "pause";
+            : selection === "Apply, push, and exit"
+              ? "publish"
+              : selection === "Discard and exit"
+                ? "discard"
+                : "pause";
 
-        if (action === "apply") {
+        if (action === "apply" || action === "publish") {
           const confirmed = await ctx.ui.confirm(
-            "Apply Draft changes?",
-            `A fresh change summary will be shown before file content is applied to ${project}. Git history, index, and branches are not applied.`,
+            action === "publish" ? "Apply and publish Draft commits?" : "Apply Draft changes?",
+            action === "publish"
+              ? `The unchanged source branch will be fast-forwarded to the verified Draft result and pushed using its configured upstream from ${project}.`
+              : `A fresh change summary will be shown before the verified Draft is applied to ${project}.`,
           );
           if (!confirmed) return;
         } else if (action === "discard") {
