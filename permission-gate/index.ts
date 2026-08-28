@@ -100,6 +100,12 @@ type PaseoRemoteUi = {
     options: string[],
     settings?: { signal?: AbortSignal },
   ): Promise<string | undefined>;
+  selectMirrored?(
+    title: string,
+    options: string[],
+    localSelect: (signal: AbortSignal) => Promise<string | undefined>,
+    settings?: { signal?: AbortSignal },
+  ): Promise<string | undefined>;
 };
 
 type JsonObject = Record<string, unknown>;
@@ -207,6 +213,7 @@ function gateClient(claim: GateClaim): AgentSHPermissionGateClient {
 function paseoRemoteSelect(
   title: string,
   options: string[],
+  localSelect: (signal: AbortSignal) => Promise<string | undefined>,
   signal?: AbortSignal,
 ): Promise<string | undefined> | null {
   const bridge = (globalThis as Record<string, unknown>)[PASEO_REMOTE_UI_KEY] as
@@ -217,6 +224,9 @@ function paseoRemoteSelect(
   }
   try {
     if (!bridge.isConnected()) return null;
+    if (typeof bridge.selectMirrored === "function") {
+      return Promise.resolve(bridge.selectMirrored(title, options, localSelect, { signal })).catch(() => undefined);
+    }
     return Promise.resolve(bridge.select(title, options, { signal })).catch(() => undefined);
   } catch {
     return Promise.resolve(undefined);
@@ -848,12 +858,11 @@ async function resolveAgentSHPrompt(
   try {
     const title = promptTitle(metadata);
     const options = [DENY_CHOICE, ALLOW_CHOICE];
-    const remote = paseoRemoteSelect(title, options, deadline.signal);
+    const localSelect = (signal: AbortSignal) => ctx.ui.select(title, options, { signal });
+    const remote = paseoRemoteSelect(title, options, localSelect, deadline.signal);
     let choice: string | undefined;
     try {
-      const selection = remote === null
-        ? ctx.ui.select(title, options, { signal: deadline.signal })
-        : remote;
+      const selection = remote ?? localSelect(deadline.signal);
       choice = await abortableSelection(selection, deadline.signal);
     } catch {
       choice = undefined;
@@ -1085,10 +1094,10 @@ export default function permissionGate(pi: ExtensionAPI) {
     let choice: string | undefined;
     try {
       const title = `⚠️  Dangerous command detected (${labels}):\n\n  ${command}\n\nAllow?`;
-      const remote = paseoRemoteSelect(title, ["Yes", "No"], ctx.signal);
-      choice = remote === null
-        ? await ctx.ui.select(title, ["Yes", "No"], { signal: ctx.signal })
-        : await remote;
+      const options = ["Yes", "No"];
+      const localSelect = (signal: AbortSignal) => ctx.ui.select(title, options, { signal });
+      const remote = paseoRemoteSelect(title, options, localSelect, ctx.signal);
+      choice = await (remote ?? localSelect(ctx.signal ?? new AbortController().signal));
     } catch {
       choice = undefined;
     } finally {

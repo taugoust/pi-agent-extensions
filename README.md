@@ -905,7 +905,8 @@ command-wide denial; exact grants precede executable-wide grants. File prompts r
 scoped allow choices without scoped denials. When a terminal Pi session is attached through
 a compatible Paseo bridge, the legacy and AgentSH-owned `permission-gate`
 selections and full AgentSH approval selections are rendered as Paseo permission
-cards. Paseo transports only the selected label;
+cards while remaining actionable in the terminal. The first terminal or Paseo
+response wins and dismisses the other presentation. Paseo transports only the selected label;
 `sandbox` maps it back to the original AgentSH approval ID and exact scope metadata before
 asking AgentSH to resolve it. A bridge disconnect or response failure denies the request, while
 sessions without an attached bridge retain their normal terminal UI. In native Pi RPC mode,

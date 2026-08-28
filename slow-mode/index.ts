@@ -43,11 +43,18 @@ type PaseoRemoteUi = {
     options: string[],
     settings?: { signal?: AbortSignal },
   ): Promise<string | undefined>;
+  selectMirrored?(
+    title: string,
+    options: string[],
+    localSelect: (signal: AbortSignal) => Promise<string | undefined>,
+    settings?: { signal?: AbortSignal },
+  ): Promise<string | undefined>;
 };
 
 function paseoRemoteSelect(
   title: string,
   options: string[],
+  localSelect: (signal: AbortSignal) => Promise<string | undefined>,
   signal?: AbortSignal,
 ): Promise<string | undefined> | null {
   const bridge = (globalThis as Record<string, unknown>)[PASEO_REMOTE_UI_KEY] as
@@ -58,6 +65,10 @@ function paseoRemoteSelect(
   }
   try {
     if (!bridge.isConnected()) return null;
+    if (typeof bridge.selectMirrored === "function") {
+      const mirroredOptions = options.filter((option) => option !== "Review in terminal");
+      return Promise.resolve(bridge.selectMirrored(title, mirroredOptions, localSelect, { signal })).catch(() => undefined);
+    }
     return Promise.resolve(bridge.select(title, options, { signal })).catch(() => undefined);
   } catch {
     return Promise.resolve(undefined);
@@ -635,18 +646,32 @@ export default function slowMode(pi: ExtensionAPI) {
   async function showReview(
     ctx: ExtensionContext,
     opts: ReviewOptions,
+    terminalOnly = false,
+    dialogSignal: AbortSignal = ctx.signal ?? new AbortController().signal,
   ): Promise<string | null> {
     const remoteReview = buildRemoteReview(opts.operation, opts.filePath, opts.body);
-    const remoteChoice = paseoRemoteSelect(remoteReview.title, remoteReview.options, ctx.signal);
-    if (remoteChoice !== null) {
-      const choice = await remoteChoice;
-      if (choice === "Approve" && remoteReview.options.includes("Approve")) return null;
-      if (choice !== "Review in terminal") return "";
+    if (!terminalOnly) {
+      let localCompleted = false;
+      let localOutcome: string | null = "";
+      const localSelect = async (signal: AbortSignal) => {
+        localOutcome = await showReview(ctx, opts, true, signal);
+        localCompleted = !signal.aborted;
+        return localOutcome === null ? "Approve" : "Reject";
+      };
+      const remoteChoice = paseoRemoteSelect(remoteReview.title, remoteReview.options, localSelect, ctx.signal);
+      if (remoteChoice !== null) {
+        const choice = await remoteChoice;
+        if (localCompleted) return localOutcome;
+        if (choice === "Approve" && remoteReview.options.includes("Approve")) return null;
+        if (choice !== "Review in terminal") return "";
+      }
     }
 
     const { matchesKey, Key } = await import("@mariozechner/pi-tui");
 
     return ctx.ui.custom<string | null>((tui, theme, _kb, done) => {
+      const abort = () => done("");
+      dialogSignal.addEventListener("abort", abort, { once: true });
       // Scroll state
       let scrollOffset = 0;
       let cachedLines: string[] | undefined;
@@ -930,6 +955,7 @@ export default function slowMode(pi: ExtensionAPI) {
           cachedLines = undefined;
         },
         handleInput,
+        dispose: () => dialogSignal.removeEventListener("abort", abort),
       };
     });
   }
@@ -962,18 +988,32 @@ export default function slowMode(pi: ExtensionAPI) {
   async function showEditReview(
     ctx: ExtensionContext,
     opts: EditReviewOptions,
+    terminalOnly = false,
+    dialogSignal: AbortSignal = ctx.signal ?? new AbortController().signal,
   ): Promise<"approve" | "edit" | { type: "reject"; reason: string }> {
     const remoteReview = buildRemoteReview("EDIT", opts.filePath, opts.body);
-    const remoteChoice = paseoRemoteSelect(remoteReview.title, remoteReview.options, ctx.signal);
-    if (remoteChoice !== null) {
-      const choice = await remoteChoice;
-      if (choice === "Approve" && remoteReview.options.includes("Approve")) return "approve";
-      if (choice !== "Review in terminal") return { type: "reject", reason: "" };
+    if (!terminalOnly) {
+      let localCompleted = false;
+      let localOutcome: "approve" | "edit" | { type: "reject"; reason: string } = { type: "reject", reason: "" };
+      const localSelect = async (signal: AbortSignal) => {
+        localOutcome = await showEditReview(ctx, opts, true, signal);
+        localCompleted = !signal.aborted;
+        return localOutcome === "approve" ? "Approve" : localOutcome === "edit" ? "Review in terminal" : "Reject";
+      };
+      const remoteChoice = paseoRemoteSelect(remoteReview.title, remoteReview.options, localSelect, ctx.signal);
+      if (remoteChoice !== null) {
+        const choice = await remoteChoice;
+        if (localCompleted) return localOutcome;
+        if (choice === "Approve" && remoteReview.options.includes("Approve")) return "approve";
+        if (choice !== "Review in terminal") return { type: "reject", reason: "" };
+      }
     }
 
     const { matchesKey, Key } = await import("@mariozechner/pi-tui");
 
     return ctx.ui.custom<"approve" | "edit" | { type: "reject"; reason: string }>((tui, theme, _kb, done) => {
+      const abort = () => done({ type: "reject", reason: "" });
+      dialogSignal.addEventListener("abort", abort, { once: true });
       // Scroll state
       let scrollOffset = 0;
       let cachedLines: string[] | undefined;
@@ -1153,6 +1193,7 @@ export default function slowMode(pi: ExtensionAPI) {
         render,
         invalidate: () => { cachedLines = undefined; },
         handleInput,
+        dispose: () => dialogSignal.removeEventListener("abort", abort),
       };
     });
   }

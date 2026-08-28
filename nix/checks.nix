@@ -618,13 +618,13 @@ in
             assert(loggedPaths[0] !== targetPath, "edit review opened the real file instead of the staged new file");
           }
 
-          // Test: attached Paseo receives write reviews and can approve without opening TUI UI.
+          // Test: attached Paseo and the terminal receive mirrored write reviews.
           {
             const pi = createPi();
             slowMode(pi);
             const cwd = path.join(tempRoot, "paseo-write");
             fs.mkdirSync(cwd, { recursive: true });
-            const customUI = createCustomUI([]);
+            const customUI = createCustomUI([[], []]);
             const ctx = createContext(cwd, customUI);
             ctx.signal = new AbortController().signal;
             await enableSlowMode(pi, ctx);
@@ -636,6 +636,15 @@ in
                 remoteCalls.push({ title, options, settings });
                 return "Approve";
               },
+              async selectMirrored(title, options, localSelect, settings) {
+                remoteCalls.push({ title, options, settings });
+                const controller = new AbortController();
+                const local = localSelect(controller.signal);
+                await new Promise((resolve) => setTimeout(resolve, 0));
+                controller.abort();
+                await local;
+                return options.includes("Approve") ? "Approve" : "Reject";
+              },
             };
             const event = {
               toolName: "write",
@@ -644,11 +653,11 @@ in
             };
             const result = await getToolCallHandler(pi)(event, ctx);
             assert(result === undefined, "Paseo write approval did not allow the write");
-            assert(customUI.calls === 0, "Paseo write approval also opened terminal UI");
+            assert(customUI.calls === 1, "Paseo write approval was not mirrored to terminal UI");
             assert(remoteCalls.length === 1, "Paseo write review was not requested exactly once");
             assert(remoteCalls[0].title.includes("Slow mode WRITE review"), "Paseo write title omitted operation");
             assert(remoteCalls[0].title.includes("remote.txt") && remoteCalls[0].title.includes("remote content"), "Paseo write review omitted path or content");
-            assert(remoteCalls[0].options.join(",") === "Approve,Reject,Review in terminal", "Paseo write options changed");
+            assert(remoteCalls[0].options.join(",") === "Approve,Reject", "mirrored Paseo write options changed");
             assert(remoteCalls[0].settings.signal === ctx.signal, "Paseo write review dropped cancellation signal");
 
             const oversized = await getToolCallHandler(pi)({
@@ -657,7 +666,8 @@ in
               input: { path: "oversized.txt", content: "x".repeat(50_001) },
             }, ctx);
             assert(oversized?.block === true, "Paseo accepted an approval label omitted from an oversized review");
-            assert(remoteCalls[1].options.join(",") === "Review in terminal,Reject", "oversized Paseo review offered remote approval");
+            assert(customUI.calls === 2, "oversized Paseo review was not mirrored to terminal UI");
+            assert(remoteCalls[1].options.join(",") === "Reject", "oversized mirrored Paseo review offered remote approval");
             assert(remoteCalls[1].title.includes("additional characters omitted"), "oversized Paseo review omitted truncation warning");
             delete globalThis.__piPaseoRemoteUiV1;
           }
@@ -1232,8 +1242,20 @@ in
                 remoteSelections.push({ title, choices, signal: Boolean(settings?.signal) });
                 return "Allow";
               },
+              async selectMirrored(title, choices, localSelect, settings) {
+                remoteSelections.push({ title, choices, signal: Boolean(settings?.signal) });
+                const controller = new AbortController();
+                const local = localSelect(controller.signal);
+                await new Promise((resolve) => setTimeout(resolve, 0));
+                controller.abort();
+                await local;
+                return "Allow";
+              },
             };
-            contextOptions.onSelect = () => { throw new Error("terminal selection must not open while Paseo is attached"); };
+            contextOptions.onSelect = async (_title, _choices, settings) => {
+              await new Promise((resolve) => settings.signal.addEventListener("abort", resolve, { once: true }));
+              return undefined;
+            };
           }
 
           const ctx = createContext(contextOptions);
@@ -1418,7 +1440,7 @@ in
           assert(denied.blocked[0], "AgentSH explicit denial did not block");
 
           const remote = await spawnInheritedChild("remote-allow", (socket) => promptedBroker(socket, { type: "resolve", decision: "allow" }));
-          assert(remote.allowed[0] && remote.selections.length === 0 && remote.remoteSelections.length === 1, "Paseo did not exclusively render the AgentSH prompt");
+          assert(remote.allowed[0] && remote.selections.length === 1 && remote.remoteSelections.length === 1, "AgentSH prompt was not mirrored to Paseo and the terminal");
           assert(remote.remoteSelections[0].choices.join(",") === "Deny,Allow" && remote.remoteSelections[0].signal, "Paseo AgentSH prompt was not deny-first or omitted signal");
 
           const cancelled = await spawnInheritedChild("cancel", (socket) => promptedBroker(socket, { type: "cancel", reason: "authorization prompt cancelled" }));
@@ -1482,13 +1504,15 @@ in
           const pi = createPi();
           gate(pi);
           let localCalls = 0;
+          const localSignals = [];
           const controller = new AbortController();
           const ctx = createContext({
             controller,
             choice: "Yes",
             onSelect: async (_title, _choices, settings) => {
               localCalls += 1;
-              assert(settings?.signal === controller.signal, "legacy terminal prompt dropped ctx.signal");
+              localSignals.push(settings?.signal);
+              assert(settings?.signal instanceof AbortSignal, "legacy terminal prompt dropped its cancellation signal");
               return "Yes";
             },
           });
@@ -1500,24 +1524,37 @@ in
               remoteCalls.push({ title, options, settings });
               return "Yes";
             },
+            async selectMirrored(title, options, localSelect, settings) {
+              remoteCalls.push({ title, options, settings });
+              const localController = new AbortController();
+              void localSelect(localController.signal);
+              localController.abort();
+              return "Yes";
+            },
           };
           let result = await pi.handlers.get("tool_call")(dangerous, ctx);
           assert(result === undefined, "legacy remote approval did not allow the command");
-          assert(remoteCalls.length === 1 && localCalls === 0, "legacy remote approval did not bypass terminal selection");
+          assert(remoteCalls.length === 1 && localCalls === 1, "legacy approval was not mirrored to Paseo and the terminal");
           assert(remoteCalls[0].options.join(",") === "Yes,No", "legacy remote approval options changed");
           assert(remoteCalls[0].settings.signal === controller.signal, "legacy Paseo prompt dropped ctx.signal");
 
-          globalThis.__piPaseoRemoteUiV1.select = async () => "No";
+          globalThis.__piPaseoRemoteUiV1.selectMirrored = async (_title, _options, localSelect) => {
+            const localController = new AbortController();
+            void localSelect(localController.signal);
+            localController.abort();
+            return "No";
+          };
           result = await pi.handlers.get("tool_call")(dangerous, ctx);
           assert(result?.block === true, "legacy remote denial did not block the command");
 
-          globalThis.__piPaseoRemoteUiV1.select = async () => { throw new Error("disconnected"); };
+          globalThis.__piPaseoRemoteUiV1.selectMirrored = async () => { throw new Error("disconnected"); };
           result = await pi.handlers.get("tool_call")(dangerous, ctx);
           assert(result?.block === true, "legacy remote UI failure did not fail closed");
 
           globalThis.__piPaseoRemoteUiV1.isConnected = () => false;
           result = await pi.handlers.get("tool_call")(dangerous, ctx);
-          assert(result === undefined && localCalls === 1, "detached Paseo did not fall back to terminal selection");
+          assert(result === undefined && localCalls === 3, "detached Paseo did not fall back to terminal selection");
+          assert(localSignals.at(-1) === controller.signal, "detached Paseo fallback dropped ctx.signal");
           delete globalThis.__piPaseoRemoteUiV1;
 
           for (const [name, value] of [
@@ -2437,6 +2474,13 @@ in
                 remoteCalls.push({ title, options, settings });
                 return "Allow this exact invocation for session";
               },
+              async selectMirrored(title, options, localSelect, settings) {
+                remoteCalls.push({ title, options, settings });
+                const controller = new AbortController();
+                void localSelect(controller.signal);
+                controller.abort();
+                return "Allow this exact invocation for session";
+              },
             };
             const pi = createPi();
             sandbox(pi);
@@ -2448,7 +2492,7 @@ in
               delete globalThis.__piPaseoRemoteUiV1;
             }
             assert(remoteCalls.length === 1, "AgentSH approval was not sent through Paseo");
-            assert(ctx.selectCalls.length === 0 && ctx.customCalls.length === 0, "Paseo approval also opened a terminal dialog");
+            assert(ctx.selectCalls.length === 0 && ctx.customCalls.length === 1, "AgentSH approval was not mirrored to the terminal");
             assert(resolved.id === "paseo-appr", "Paseo changed the AgentSH approval ID");
             assert(resolved.decision === "approve" && resolved.scope === "session", "Paseo changed the approval decision or lifetime");
             assert(resolved.scope_kind === "command", "Paseo changed the AgentSH scope kind");
