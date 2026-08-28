@@ -2,7 +2,7 @@
 
 ## Status
 
-In progress.
+Resolved.
 
 ## Problem
 
@@ -14,3 +14,7 @@ Terminal-attached Pi sessions can be controlled through Paseo, but slow-mode use
 - Preserve the full terminal review UI when Paseo is detached or the user requests terminal review.
 - Fail closed if an attached Paseo request fails or is cancelled.
 - Do not allow remote approval when the preview was truncated.
+
+## Resolution
+
+Commit `b175955` routes slow-mode write content and edit diffs through the attached Paseo selection bridge. Remote failures and unknown choices fail closed, oversized previews require terminal review, and detached sessions retain the full TUI workflow.
