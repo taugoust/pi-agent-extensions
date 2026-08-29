@@ -527,6 +527,9 @@ function modelMayOverrideSubagentTimeout(processEnv: NodeJS.ProcessEnv = process
 
 function subagentParams(processEnv: NodeJS.ProcessEnv = process.env) {
   return Type.Object({
+    mode: Type.Optional(Type.String({ pattern: "^(shared|draft)$", description: "Execution isolation: shared uses the current session; draft uses independent Git-backed MicroVM Drafts. Draft disposition requires mode=draft." })),
+    action: Type.Optional(Type.String({ pattern: "^(review|apply|discard)$", description: "Parent-side action for an existing Draft; use with mode=draft and draft_id instead of task/tasks/chain." })),
+    draft_id: Type.Optional(Type.String({ pattern: "^session-[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$", description: "Exact retained Draft identity for review/apply/discard." })),
     task: Type.Optional(Type.String({ description: "Task to delegate (single mode)" })),
     systemPrompt: Type.Optional(Type.String({ description: "Optional additional system prompt (single mode)" })),
     model: Type.Optional(Type.String({ description: "Optional model id (single mode)" })),
@@ -4608,7 +4611,7 @@ export default function sandbox(pi: ExtensionAPI) {
   pi.registerTool({
     name: "subagent",
     label: "Subagent",
-    description: "Delegate focused work to an AgentSH-supervised sandboxed subagent in the same detached supervisor session.",
+    description: "Delegate focused work with mode=shared or isolated mode=draft. For a returned Draft, use mode=draft with action=review|apply|discard and its exact draft_id; restricted Apply requests explicit approval.",
     // Keep speculative short deadlines out of the model-facing schema by
     // default. Trusted programmatic callers retain the underlying API field,
     // and operators may opt the model back in explicitly.
@@ -4632,8 +4635,12 @@ export default function sandbox(pi: ExtensionAPI) {
       const hasSingle = typeof effectiveParams.task === "string" && effectiveParams.task.trim().length > 0;
       const hasTasks = Array.isArray(effectiveParams.tasks) && effectiveParams.tasks.length > 0;
       const hasChain = Array.isArray(effectiveParams.chain) && effectiveParams.chain.length > 0;
-      if (Number(hasSingle) + Number(hasTasks) + Number(hasChain) !== 1) {
-        throw new Error("Invalid parameters. Provide exactly one mode: task, non-empty tasks, or non-empty chain.");
+      const hasDisposition = typeof effectiveParams.action === "string" || typeof effectiveParams.draft_id === "string";
+      if (Number(hasSingle) + Number(hasTasks) + Number(hasChain) + Number(hasDisposition) !== 1) {
+        throw new Error("Invalid parameters. Provide exactly one mode: task, non-empty tasks, non-empty chain, or Draft disposition.");
+      }
+      if (hasDisposition && effectiveParams.mode !== "draft") {
+        throw new Error("Draft disposition requires mode=draft.");
       }
       const streamStates = new Map<string, SubagentStreamState>();
       const streamOrder: string[] = [];
