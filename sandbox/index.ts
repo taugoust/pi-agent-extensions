@@ -18,6 +18,7 @@ import { Type } from "@sinclair/typebox";
 import { DEFAULT_MAX_BYTES, DEFAULT_MAX_LINES, formatSize, getMarkdownTheme, renderDiff, truncateHead, truncateTail, type ExtensionAPI, type ExtensionContext, type TruncationResult } from "@mariozechner/pi-coding-agent";
 import { Box, Container, Key, Markdown, matchesKey, Spacer, Text, truncateToWidth, visibleWidth, wrapTextWithAnsi, type Component } from "@mariozechner/pi-tui";
 import { detachedOperatorHeaders } from "./operator-auth.js";
+import { selectSupervisorCwd } from "./execution-cwd.js";
 import { normalizeSupervisorSubagentCwds } from "./subagent-cwd.js";
 import { inheritSubagentModels } from "./subagent-model.js";
 import { abortSubagentProtocolStream, appendSubagentProtocolChunk, createSubagentProtocolState, finishSubagentProtocolStream } from "./subagent-protocol.js";
@@ -592,7 +593,10 @@ function env(name: string) {
 }
 
 function effectiveSupervisorCwd(ctx?: ExtensionContext, target?: AgentSHExecutionTarget) {
-  return target?.cwd || env("PI_AGENTSH_REMOTE_CWD") || ctx?.cwd || process.cwd();
+  // A fixed remote cwd is operator-owned routing configuration. Pi's context
+  // and a retained execution target may still name the host checkout when a
+  // MicroVM Draft is resumed; never forward that host path into the guest.
+  return selectSupervisorCwd(env("PI_AGENTSH_REMOTE_CWD"), target?.cwd, ctx?.cwd, process.cwd());
 }
 
 function normalizeSocketPath(value: string) {
