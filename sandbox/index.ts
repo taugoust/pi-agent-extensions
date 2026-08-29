@@ -4233,6 +4233,9 @@ function compactSubagentResultSummary(result: any): string {
 }
 
 function renderSubagentCall(args: any, theme: any) {
+  if (args.action && args.draft_id) {
+    return new Text(`${theme.fg("toolTitle", theme.bold("subagent draft "))}${theme.fg("accent", String(args.action))}\n  ${theme.fg("dim", String(args.draft_id))}`, 0, 0);
+  }
   if (args.chain?.length) return new Text(`${theme.fg("toolTitle", theme.bold("subagent "))}${theme.fg("accent", `chain (${args.chain.length} steps)`)}`, 0, 0);
   if (args.tasks?.length) return new Text(`${theme.fg("toolTitle", theme.bold("subagent "))}${theme.fg("accent", `parallel (${args.tasks.length} tasks)`)}`, 0, 0);
   const task = String(args.task ?? "...");
