@@ -4476,11 +4476,6 @@ export default function sandbox(pi: ExtensionAPI) {
   });
 
   if (supervisorToolIntegrationRequested()) {
-    pi.on("tool_result", (event) => {
-      if (event.toolName !== "subagent" || event.isError || !subagentDetailsFailed(event.details)) return;
-      return { isError: true };
-    });
-
     pi.registerTool({
       name: "bash",
     label: "bash",
@@ -4611,8 +4606,9 @@ export default function sandbox(pi: ExtensionAPI) {
     },
   });
 
-  pi.registerTool({
-    name: "subagent",
+  }
+
+  const agentSHSubagentAdapter = {
     label: "Subagent",
     description: "Delegate focused work with mode=shared or isolated mode=draft. For a returned Draft, use mode=draft with action=review|apply|discard and its exact draft_id; restricted Apply requests explicit approval.",
     // Keep speculative short deadlines out of the model-facing schema by
@@ -4822,9 +4818,12 @@ export default function sandbox(pi: ExtensionAPI) {
       const text = boundedSubagentParentOutput(details);
       return { content: [{ type: "text", text }], details };
     },
+  };
+  if (globalThis.__AGENTSH_PI__) globalThis.__AGENTSH_PI__.subagentAdapter = agentSHSubagentAdapter;
+  pi.on("tool_result", (event) => {
+    if (event.toolName !== "subagent" || event.isError || !subagentDetailsFailed(event.details)) return;
+    return { isError: true };
   });
-
-  }
 
   pi.registerTool({
     name: "sandbox_allow_path",

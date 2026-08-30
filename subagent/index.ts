@@ -15,6 +15,7 @@ import type { AgentToolResult, ExtensionAPI } from "@mariozechner/pi-coding-agen
 import { getAgentDir, getMarkdownTheme } from "@mariozechner/pi-coding-agent";
 import { Container, Markdown, Spacer, Text } from "@mariozechner/pi-tui";
 import { Type } from "@sinclair/typebox";
+import { adaptiveDispositionError, agentSHExpected, nativeSubagentRequestSupported, selectSubagentBackend, type AdaptiveSubagentBridge } from "./backend.js";
 import { formatParallelResultContent } from "./parallel-result.js";
 
 const MAX_PARALLEL_TASKS = 8;
@@ -72,9 +73,27 @@ type SingleResult = {
 };
 
 type SubagentDetails = {
+  backend?: "native";
   mode: Mode;
   results: SingleResult[];
 };
+
+type AgentSHBridge = AdaptiveSubagentBridge & {
+  subagentAdapter?: {
+    execute(toolCallId: string, params: Record<string, unknown>, signal: AbortSignal | undefined, onUpdate: ((partial: any) => void) | undefined, ctx: any): Promise<any>;
+    renderCall(args: any, theme: any): any;
+    renderResult(result: any, options: any, theme: any): any;
+  };
+};
+
+function agentSHBridge(): AgentSHBridge | undefined {
+  return (globalThis as any).__AGENTSH_PI__ as AgentSHBridge | undefined;
+}
+
+function withBackend(details: unknown, backend: "native" | "agentsh") {
+  const source = details && typeof details === "object" && !Array.isArray(details) ? details as Record<string, unknown> : {};
+  return { ...source, backend };
+}
 
 type DisplayItem = { type: "text"; text: string } | { type: "toolCall"; name: string; args: Record<string, any> };
 type OnUpdateCallback = (partial: AgentToolResult<SubagentDetails>) => void;
@@ -206,7 +225,7 @@ function getToolResultText(value: any): string {
     .join("\n");
 }
 
-function stderrTail(stderr: string, maxLines = 8): string {
+function stderrTail(stderr = "", maxLines = 8): string {
   return stderr.trim().split("\n").filter(Boolean).slice(-maxLines).join("\n");
 }
 
@@ -417,6 +436,13 @@ async function runSingleSubagent(
     });
   };
 
+  if (signal?.aborted) {
+    currentResult.exitCode = 130;
+    currentResult.stopReason = "aborted";
+    currentResult.errorMessage = "Subagent aborted by user before launch.";
+    return currentResult;
+  }
+
   try {
     childAgentDir = await prepareChildAgentDir(subagentId);
     childSessionDir = path.join(childAgentDir, "sessions");
@@ -430,6 +456,13 @@ async function runSingleSubagent(
     }
 
     args.push(`Task: ${spec.task}`);
+    if (signal?.aborted) {
+      currentResult.exitCode = 130;
+      currentResult.stopReason = "aborted";
+      currentResult.errorMessage = "Subagent aborted by user before launch.";
+      return currentResult;
+    }
+
     const invocation = resolvePiInvocation(args);
     currentResult.command = invocation.command;
     currentResult.args = invocation.args;
@@ -438,6 +471,11 @@ async function runSingleSubagent(
 
     let wasAborted = false;
     const exitCode = await new Promise<number>((resolve) => {
+      if (signal?.aborted) {
+        wasAborted = true;
+        resolve(130);
+        return;
+      }
       const env = {
         ...process.env,
         PI_CODING_AGENT_DIR: childAgentDir,
@@ -581,6 +619,7 @@ async function runSingleSubagent(
         if (code !== null && code !== undefined) finish(code);
         else if (closeSignal === "SIGTERM") finish(143);
         else if (closeSignal === "SIGKILL") finish(137);
+        else if (closeSignal) finish(1);
         else finish(0);
       });
 
@@ -660,7 +699,11 @@ const SubagentItem = Type.Object({
   cwd: Type.Optional(Type.String({ description: "Optional working directory for this subagent process" })),
 });
 
-const SubagentParams = Type.Object({
+function subagentParams() {
+  return Type.Object({
+  mode: Type.Optional(Type.String({ pattern: "^(shared|draft)$", description: "Execution isolation. Omitted/shared uses AgentSH when configured, otherwise a native child; draft requires AgentSH." })),
+  action: Type.Optional(Type.String({ pattern: "^(review|apply|discard)$", description: "AgentSH Draft disposition; use with mode=draft and draft_id instead of task/tasks/chain." })),
+  draft_id: Type.Optional(Type.String({ pattern: "^session-[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$", description: "Exact retained AgentSH Draft identity." })),
   task: Type.Optional(Type.String({ description: "Task to delegate (single mode)" })),
   systemPrompt: Type.Optional(Type.String({ description: "Optional additional system prompt (single mode)" })),
   model: Type.Optional(Type.String({ description: "Optional model id (single mode)" })),
@@ -668,33 +711,60 @@ const SubagentParams = Type.Object({
   cwd: Type.Optional(Type.String({ description: "Optional working directory (single mode)" })),
   tasks: Type.Optional(Type.Array(SubagentItem, { description: "Parallel subagent tasks. Max 8, up to 4 run concurrently." })),
   chain: Type.Optional(Type.Array(SubagentItem, { description: "Sequential subagent steps. Each task may use {previous}." })),
-});
+    ...(process.env.PI_AGENTSH_EXPOSE_SUBAGENT_TIMEOUT === "1" ? {
+      timeout_ms: Type.Optional(Type.Number({ minimum: 1, description: "Optional shorter AgentSH execution timeout in milliseconds." })),
+    } : {}),
+  });
+}
 
 export default function (pi: ExtensionAPI) {
+  pi.on("tool_result", (event) => {
+    if (event.toolName !== "subagent" || event.isError) return;
+    const details = event.details as SubagentDetails | undefined;
+    if (details?.backend === "native" && details.results.some(isFailure)) return { isError: true };
+  });
+
   pi.registerTool({
     name: "subagent",
     label: "Subagent",
     description: [
-      "Delegate focused work to same-session dynamic child Pi processes.",
-      "Exactly one mode: single task, parallel tasks, or chain steps.",
-      "Each child inherits the parent AgentSH sandbox/session as a descendant process; do not use this to spawn pi-auto or AgentSH wrappers.",
+      "Delegate focused work through AgentSH when configured, otherwise through native child Pi processes.",
+      "Exactly one request form: single task, parallel tasks, chain steps, or an AgentSH Draft disposition.",
+      "mode defaults to shared; mode=draft requires an active AgentSH supervisor.",
     ].join(" "),
-    parameters: SubagentParams,
+    parameters: subagentParams(),
 
-    async execute(_toolCallId, params: any, signal, onUpdate, ctx) {
+    async execute(toolCallId, params: any, signal, onUpdate, ctx) {
+      const dispositionError = adaptiveDispositionError(params);
+      if (dispositionError) throw new Error(dispositionError);
+
+      const bridge = agentSHBridge();
+      const backend = selectSubagentBackend(bridge, agentSHExpected(process.env));
+      if (backend.kind === "unavailable") throw new Error(backend.message);
+      if (backend.kind === "agentsh") {
+        const adaptedUpdate = onUpdate
+          ? (partial: any) => onUpdate({ ...partial, details: withBackend(partial?.details, "agentsh") })
+          : undefined;
+        const result = await bridge!.subagentAdapter!.execute(toolCallId, params, signal, adaptedUpdate, ctx);
+        return { ...result, details: withBackend(result?.details, "agentsh") };
+      }
+      if (!nativeSubagentRequestSupported(params)) {
+        throw new Error("mode=draft and Draft dispositions require an active AgentSH supervisor");
+      }
+      const nativeParams = { ...params };
+      delete nativeParams.mode;
+      delete nativeParams.action;
+      delete nativeParams.draft_id;
+      params = nativeParams;
       const hasSingle = typeof params.task === "string" && params.task.trim().length > 0;
       const hasTasks = Array.isArray(params.tasks) && params.tasks.length > 0;
       const hasChain = Array.isArray(params.chain) && params.chain.length > 0;
       const modeCount = Number(hasSingle) + Number(hasTasks) + Number(hasChain);
       const mode: Mode = hasChain ? "chain" : hasTasks ? "parallel" : "single";
-      const makeDetails = (detailsMode: Mode) => (results: SingleResult[]): SubagentDetails => ({ mode: detailsMode, results });
+      const makeDetails = (detailsMode: Mode) => (results: SingleResult[]): SubagentDetails => ({ backend: "native", mode: detailsMode, results });
 
       if (modeCount !== 1) {
-        return {
-          content: [{ type: "text", text: "Invalid parameters. Provide exactly one mode: task, non-empty tasks, or non-empty chain." }],
-          details: makeDetails(mode)([]),
-          isError: true,
-        };
+        throw new Error("Invalid parameters. Provide exactly one mode: task, non-empty tasks, or non-empty chain.");
       }
 
       if (hasChain) {
@@ -735,11 +805,7 @@ export default function (pi: ExtensionAPI) {
 
       if (hasTasks) {
         if (params.tasks.length > MAX_PARALLEL_TASKS) {
-          return {
-            content: [{ type: "text", text: `Too many parallel tasks (${params.tasks.length}). Max is ${MAX_PARALLEL_TASKS}.` }],
-            details: makeDetails("parallel")([]),
-            isError: true,
-          };
+          throw new Error(`Too many parallel tasks (${params.tasks.length}). Max is ${MAX_PARALLEL_TASKS}.`);
         }
 
         const specs = params.tasks.map((taskParams: any) => specFromParams(taskParams));
@@ -813,6 +879,9 @@ export default function (pi: ExtensionAPI) {
     },
 
     renderCall(args: any, theme) {
+      const bridge = agentSHBridge();
+      const supervisor = bridge?.getSupervisorState?.();
+      if ((supervisor?.configured || supervisor?.active) && bridge?.subagentAdapter) return bridge.subagentAdapter.renderCall(args, theme);
       if (args.chain && args.chain.length > 0) {
         let text = theme.fg("toolTitle", theme.bold("subagent ")) + theme.fg("accent", `chain (${args.chain.length} steps)`);
         for (let i = 0; i < Math.min(args.chain.length, 3); i++) {
@@ -839,7 +908,14 @@ export default function (pi: ExtensionAPI) {
       return new Text(`${theme.fg("toolTitle", theme.bold("subagent single"))}\n  ${theme.fg("dim", preview)}`, 0, 0);
     },
 
-    renderResult(result, { expanded }, theme) {
+    renderResult(result, options, theme) {
+      const bridge = agentSHBridge();
+      const adapter = bridge?.subagentAdapter;
+      const backend = (result.details as any)?.backend;
+      if (adapter && backend !== "native" && (backend === "agentsh" || bridge?.getSupervisorState?.().configured)) {
+        return adapter.renderResult(result, options, theme);
+      }
+      const { expanded } = options;
       const details = result.details as SubagentDetails | undefined;
       if (!details || details.results.length === 0) {
         const text = result.content[0];

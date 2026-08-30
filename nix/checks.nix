@@ -1235,6 +1235,7 @@ in
         mkdir -p "$srcdir" "$outdir"
 
         cp -r ${self}/sandbox "$srcdir/"
+        cp -r ${self}/subagent "$srcdir/"
 
         mkdir -p "$outdir/node_modules/@sinclair/typebox"
         cat > "$outdir/node_modules/@sinclair/typebox/package.json" <<'EOF'
@@ -1278,6 +1279,7 @@ in
         export const DEFAULT_MAX_LINES = 2000;
         export function formatSize(bytes) { return String(bytes) + "B"; }
         export function getMarkdownTheme() { return {}; }
+        export function getAgentDir() { return process.env.PI_TEST_AGENT_DIR || "/tmp/pi-test-agent"; }
         export function truncateHead(value, options = {}) {
           const text = String(value);
           const maxLines = options.maxLines ?? DEFAULT_MAX_LINES;
@@ -1393,6 +1395,9 @@ in
           --rootDir "$srcdir" \
           --outDir "$outdir" \
           "$srcdir/sandbox/index.ts" \
+          "$srcdir/subagent/index.ts" \
+          "$srcdir/subagent/backend.ts" \
+          "$srcdir/subagent/parallel-result.ts" \
           "$srcdir/sandbox/command-timeout.test.ts" \
           "$srcdir/sandbox/operator-auth.test.ts" \
           "$srcdir/sandbox/subagent-cwd.test.ts" \
@@ -1806,7 +1811,10 @@ in
           const compiledRoot = process.argv[2];
           const moduleUrl = pathToFileURL(path.join(compiledRoot, "sandbox/index.js")).href;
           const importedModule = await import(moduleUrl);
-          const sandbox = importedModule.default?.default ?? importedModule.default ?? importedModule;
+          const sandboxExtension = importedModule.default?.default ?? importedModule.default ?? importedModule;
+          const subagentModule = await import(pathToFileURL(path.join(compiledRoot, "subagent/index.js")).href);
+          const subagent = subagentModule.default?.default ?? subagentModule.default ?? subagentModule;
+          const sandbox = (pi) => { sandboxExtension(pi); subagent(pi); };
           const childCapabilityHeaders = importedModule.childExecutionCapabilityHeaders ?? importedModule.default?.childExecutionCapabilityHeaders;
           assert(typeof sandbox === "function", "sandbox module did not export a function");
           assert(typeof childCapabilityHeaders === "function", "sandbox module did not export child capability header derivation");

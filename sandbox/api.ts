@@ -235,6 +235,12 @@ export type AgentSHDirenvAPI = {
   refreshDirenv(options: DirenvRefreshOptions): Promise<DirenvRefreshResult>;
 };
 
+export type AgentSHSubagentAdapter = {
+  execute(toolCallId: string, params: JsonObject, signal: AbortSignal | undefined, onUpdate: ((partial: any) => void) | undefined, ctx: any): Promise<any>;
+  renderCall(args: any, theme: any): any;
+  renderResult(result: any, options: any, theme: any): any;
+};
+
 export type AgentSHPiAPI = AgentSHDirenvAPI & {
   /** Publish the execution target selected by the SSH/target-routing extension. */
   setExecutionTarget(target: AgentSHExecutionTarget): void;
@@ -256,6 +262,7 @@ export type AgentSHPiAPI = AgentSHDirenvAPI & {
   writeFile(path: string, content: string, options?: AgentSHWriteFileOptions): Promise<unknown>;
   editFile(path: string, edits: AgentSHEdit[], options?: AgentSHEditFileOptions): Promise<unknown>;
   spawnSubagent(params: JsonObject, options?: AgentSHSpawnSubagentOptions): Promise<unknown>;
+  subagentAdapter?: AgentSHSubagentAdapter;
   resolveApproval(approvalId: string, resolution: AgentSHApprovalResolution): Promise<unknown>;
   /** Resolve a control-plane, real-workspace, shadow-worktree, or relative path to the supervisor-visible path. */
   toSupervisorPath(path: string, cwd?: string): string;

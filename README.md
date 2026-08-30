@@ -521,24 +521,24 @@ trusted Pi control plane is insufficient.
 
 </details>
 <details>
-<summary><strong>subagent</strong> - Same-session dynamic child Pi processes</summary>
+<summary><strong>subagent</strong> - Adaptive native and AgentSH-backed delegation</summary>
 <br>
 
 - **Source**:
   [subagent/](https://github.com/rytswd/pi-agent-extensions/tree/main/subagent)
 - **License**: MIT
 - **Type**: Tool (LLM-callable)
-- **Security model**: Child Pi processes are ordinary descendants of the
-  parent Pi process. Under AgentSH they inherit the same session, sandbox,
-  approvals, network/file policy, and shadow workspace. The extension does
-  **not** spawn `pi-auto`, `pi-supervised`, `agentsh wrap`, or nested AgentSH
-  sessions.
+- **Security model**: This is the sole model-facing `subagent` registration.
+  With an active AgentSH supervisor it delegates through AgentSH, including
+  isolated Git-backed Draft VMs. Without AgentSH configuration it starts raw
+  child Pi processes. If AgentSH is expected but unavailable, it fails closed
+  and never falls back to native execution.
 
-**Description**: Registers a `subagent` tool for delegating focused work to
-raw child Pi processes in JSON print mode. Subagents are dynamic per call: the
-parent supplies the task plus optional `systemPrompt`, `model`, `tools`, and
-`cwd`. Child Pi state is isolated under `$PI_CODING_AGENT_DIR/subagents/...` and
-only minimal config/auth files are copied.
+**Description**: Registers one adaptive `subagent` tool. The parent supplies a
+single task, parallel tasks, a chain, or an AgentSH Draft disposition. Native
+child Pi state is isolated under `$PI_CODING_AGENT_DIR/subagents/...`; AgentSH
+owns policy, streaming, approvals, artifacts, and Draft lifecycle whenever its
+backend is active.
 
 **Modes**:
 
@@ -546,6 +546,8 @@ only minimal config/auth files are copied.
 { "task": "Review README.md", "tools": ["read"] }
 { "tasks": [{ "task": "Find model code", "tools": ["read", "grep", "find"] }] }
 { "chain": [{ "task": "Find files" }, { "task": "Plan from: {previous}" }] }
+{ "mode": "draft", "task": "Implement and commit the change in an isolated VM" }
+{ "mode": "draft", "action": "review", "draft_id": "session-..." }
 ```
 
 Set `PI_SUBAGENT_BIN` to the raw Pi executable selected by your wrapper, e.g.
@@ -617,11 +619,10 @@ bound to one target.
   `/sandbox-allow <target>`{.verbatim} for retry guidance
 - **Tool overrides**: only registered when an AgentSH integration env var is set.
   Mock NDJSON can handle `bash`{.verbatim}, `write`{.verbatim},
-  `edit`{.verbatim}, `subagent`{.verbatim}, and optional `read`{.verbatim};
-  real AgentSH REST handles `bash`{.verbatim}, `write`{.verbatim},
-  `edit`{.verbatim}, optional supervised `read`{.verbatim}, and
-  `subagent`{.verbatim} through `/api/v1/sessions/{id}/tools/*` endpoints when
-  the AgentSH supervisor has a generic subagent runtime configured.
+  `edit`{.verbatim}, and optional `read`{.verbatim}; real AgentSH REST handles
+  those tools through `/api/v1/sessions/{id}/tools/*`. The separate adaptive
+  `subagent` extension is the sole registration and consumes the sandbox's
+  AgentSH backend when active.
 - **Status bar**: `agentsh inactive`{.verbatim}, `agentsh start…`{.verbatim},
   `agentsh …`{.verbatim}, `agentsh ✓`{.verbatim}, `agentsh net ✓`{.verbatim},
   `agentsh net ?`{.verbatim}, `agentsh ? N`{.verbatim}, or `agentsh ✗`{.verbatim}
@@ -642,8 +643,8 @@ been retired. `sandbox` now has two explicit protocol modes:
    `PI_AGENTSH_ENABLE=1`. This uses HTTP JSON over the AgentSH Unix socket.
 
 With no supervisor/enable env var, the extension stays inactive and does not
-register `bash`/`write`/`edit`/`subagent` overrides, so normal Pi tools are not
-broken. On `session_start`, it attaches to the mock socket first if present;
+register `bash`/`write`/`edit` overrides. The adaptive `subagent` extension uses
+its native backend in that case. On `session_start`, it attaches to the mock socket first if present;
 otherwise it attaches to the real REST socket, or starts one with
 `agentsh session start --detach --policy <policy> --workspace <cwd> --workspace-mode <mode> --json`.
 
@@ -872,17 +873,18 @@ The extension exposes `globalThis.__AGENTSH_PI__` for owned extensions:
 - `setExecutionTarget(...)` / `getExecutionTarget()` for the SSH target router;
 - `getSupervisorMetadata()` / `getSupervisorState()`.
 
-**Run with only this extension and the mock supervisor**:
+**Run with only the sandbox backend, adaptive subagent, and mock supervisor**:
 
 ``` sh
 SOCK=${TMPDIR:-/tmp}/pi-agentsh-mock.sock
 nix shell nixpkgs#nodejs --command node sandbox/mock-supervisor.mjs --socket "$SOCK" --fake-approval &
 PI_AGENTSH_MOCK_SUPERVISOR="$SOCK" PI_AGENTSH_READ_MODE=supervised \
-  pi --no-extensions -e ./sandbox/index.ts
+  pi --no-extensions -e ./sandbox/index.ts -e ./subagent/index.ts
 ```
 
-(`-e` is short for `--extension`; `--no-extensions` disables normal discovery
-so only this extension is loaded.)
+(`-e` is short for `--extension`; `--no-extensions` disables normal discovery.
+The sandbox publishes the backend and the adaptive extension registers the sole
+`subagent` tool.)
 
 **Manual real-AgentSH Stage 1 run**:
 
@@ -890,7 +892,7 @@ so only this extension is loaded.)
 PI_AGENTSH_ENABLE=1 \
 PI_AGENTSH_POLICY=pi-autonomous \
 PI_AGENTSH_WORKSPACE_MODE=shadow \
-  pi --no-extensions -e ./sandbox/index.ts
+  pi --no-extensions -e ./sandbox/index.ts -e ./subagent/index.ts
 ```
 
 This starts/attaches a detached REST supervisor and enables AgentSH-backed
@@ -902,7 +904,7 @@ Or attach to a supervisor started externally:
 ``` sh
 AGENTSH_SESSION_ID=session-... \
 AGENTSH_SESSION_SUPERVISOR=unix:///path/to/sessions/<id>/supervisor.sock \
-  pi --no-extensions -e ./sandbox/index.ts
+  pi --no-extensions -e ./sandbox/index.ts -e ./subagent/index.ts
 ```
 
 **Mock-driven protocol check**:

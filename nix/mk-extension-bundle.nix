@@ -22,7 +22,11 @@ let
   extensionRegistry = registry.extensions;
   skillRegistry = registry.skills;
 
-  selectedExtensions = lib.unique extensions;
+  # sandbox publishes the AgentSH backend; subagent is the sole adaptive
+  # model-facing registration and must be loaded after it.
+  selectedExtensions = lib.unique (
+    extensions ++ lib.optional (builtins.elem "sandbox" extensions) "subagent"
+  );
   unknownExtensions = lib.subtractLists (builtins.attrNames extensionRegistry) selectedExtensions;
   unknownSkills = lib.subtractLists (builtins.attrNames skillRegistry) skills;
 
