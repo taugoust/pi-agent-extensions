@@ -58,7 +58,7 @@ pkgs.runCommand "subagent-check"
 
     node "$workdir/test.mjs" "$workdir/out/parallel-result.js"
     grep -F 'formatParallelResultContent(sections, successCount, MAX_TEXT_PREVIEW_BYTES)' ${self}/subagent/index.ts >/dev/null
-    grep -F '"''${extDir}/subagent".source = "''${self}/subagent";' ${self}/nix/module.nix >/dev/null
+    grep -F '"''${extDir}/subagent/parallel-result.ts".source = "''${self}/subagent/parallel-result.ts";' ${self}/nix/module.nix >/dev/null
     if grep -F 'output.slice(0, 100)' ${self}/subagent/index.ts >/dev/null; then
       echo 'parallel results still use the lossy 100-character preview' >&2
       exit 1
