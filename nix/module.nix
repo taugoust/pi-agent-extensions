@@ -170,7 +170,7 @@ in
       })
 
       (lib.mkIf cfg.extensions.subagent.enable {
-        "${extDir}/subagent/index.ts".source = "${self}/subagent/index.ts";
+        "${extDir}/subagent".source = "${self}/subagent";
       })
 
       (lib.mkIf (cfg.extensions.subagent.enable || cfg.extensions.subagent-finalizer.enable) {
