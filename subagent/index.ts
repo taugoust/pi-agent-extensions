@@ -15,6 +15,7 @@ import type { AgentToolResult, ExtensionAPI } from "@mariozechner/pi-coding-agen
 import { getAgentDir, getMarkdownTheme } from "@mariozechner/pi-coding-agent";
 import { Container, Markdown, Spacer, Text } from "@mariozechner/pi-tui";
 import { Type } from "@sinclair/typebox";
+import { formatParallelResultContent } from "./parallel-result.js";
 
 const MAX_PARALLEL_TASKS = 8;
 const MAX_CONCURRENCY = 4;
@@ -785,14 +786,13 @@ export default function (pi: ExtensionAPI) {
         });
 
         const successCount = results.filter((r) => !isFailure(r)).length;
-        const summaries = results.map((r) => {
-          if (isFailure(r)) return `[${r.label}] ${compactResultSummary(r)}`;
-          const output = getFinalOutput(r.messages);
-          const preview = output.slice(0, 100) + (output.length > 100 ? "..." : "");
-          return `[${r.label}] completed: ${preview || "(no output)"}`;
-        });
+        const sections = results.map((r) => ({
+          label: r.label,
+          status: isFailure(r) ? "failed" as const : "completed" as const,
+          output: isFailure(r) ? compactResultSummary(r) : getFinalOutput(r.messages) || "(no output)",
+        }));
         return {
-          content: [{ type: "text", text: truncateByBytes(`Parallel: ${successCount}/${results.length} succeeded\n\n${summaries.join("\n\n")}`) }],
+          content: [{ type: "text", text: formatParallelResultContent(sections, successCount, MAX_TEXT_PREVIEW_BYTES) }],
           details: makeDetails("parallel")(results),
           isError: successCount !== results.length,
         };

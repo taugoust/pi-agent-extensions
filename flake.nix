@@ -112,6 +112,7 @@
           };
           auto = import ./nix/auto-check.nix { inherit self pkgs; };
           modal-editor = import ./nix/modal-editor-check.nix { inherit self pkgs; };
+          subagent = import ./nix/subagent-check.nix { inherit self pkgs; };
           subagent-finalizer = import ./nix/subagent-finalizer-check.nix { inherit self pkgs; };
         }
       );
