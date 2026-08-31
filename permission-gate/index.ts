@@ -893,6 +893,10 @@ function gateStatus(ctx: ExtensionContext, state: "ready" | "waiting" | "error" 
 }
 
 export default function permissionGate(pi: ExtensionAPI) {
+  // AgentSH bounds the initial handshake independently of model latency. Start
+  // it when Pi registers the extension, not on the first Bash tool call.
+  if (inheritedGateClaim) void gateClient(inheritedGateClaim).initialize().catch(() => undefined);
+
   let enabled = true;
   let failureReported = false;
   const suppressLegacySynchronously = !inheritedGateClaim && fullAgentSHMode();
