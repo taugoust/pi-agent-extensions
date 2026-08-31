@@ -23,9 +23,12 @@ let
   skillRegistry = registry.skills;
 
   # sandbox publishes the AgentSH backend; subagent is the sole adaptive
-  # model-facing registration and must be loaded after it.
+  # model-facing registration. Native children explicitly load the finalizer.
+  wantsSubagent = builtins.elem "sandbox" extensions || builtins.elem "subagent" extensions;
   selectedExtensions = lib.unique (
-    extensions ++ lib.optional (builtins.elem "sandbox" extensions) "subagent"
+    extensions
+    ++ lib.optional (builtins.elem "sandbox" extensions) "subagent"
+    ++ lib.optional wantsSubagent "subagent-finalizer"
   );
   unknownExtensions = lib.subtractLists (builtins.attrNames extensionRegistry) selectedExtensions;
   unknownSkills = lib.subtractLists (builtins.attrNames skillRegistry) skills;

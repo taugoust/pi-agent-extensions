@@ -10,6 +10,7 @@ import { spawn, type ChildProcessWithoutNullStreams } from "node:child_process";
 import * as fs from "node:fs";
 import * as os from "node:os";
 import * as path from "node:path";
+import { fileURLToPath } from "node:url";
 import type { Message } from "@mariozechner/pi-ai";
 import type { AgentToolResult, ExtensionAPI } from "@mariozechner/pi-coding-agent";
 import { getAgentDir, getMarkdownTheme } from "@mariozechner/pi-coding-agent";
@@ -73,7 +74,8 @@ type SingleResult = {
 };
 
 type SubagentDetails = {
-  backend?: "native";
+  backend?: "native" | "agentsh";
+  failed?: boolean;
   mode: Mode;
   results: SingleResult[];
 };
@@ -81,6 +83,7 @@ type SubagentDetails = {
 type AgentSHBridge = AdaptiveSubagentBridge & {
   subagentAdapter?: {
     execute(toolCallId: string, params: Record<string, unknown>, signal: AbortSignal | undefined, onUpdate: ((partial: any) => void) | undefined, ctx: any): Promise<any>;
+    detailsFailed(details: unknown): boolean;
     renderCall(args: any, theme: any): any;
     renderResult(result: any, options: any, theme: any): any;
   };
@@ -90,9 +93,9 @@ function agentSHBridge(): AgentSHBridge | undefined {
   return (globalThis as any).__AGENTSH_PI__ as AgentSHBridge | undefined;
 }
 
-function withBackend(details: unknown, backend: "native" | "agentsh") {
+function withBackend(details: unknown, backend: "native" | "agentsh", failed?: boolean) {
   const source = details && typeof details === "object" && !Array.isArray(details) ? details as Record<string, unknown> : {};
-  return { ...source, backend };
+  return { ...source, backend, ...(failed === undefined ? {} : { failed }) };
 }
 
 type DisplayItem = { type: "text"; text: string } | { type: "toolCall"; name: string; args: Record<string, any> };
@@ -319,6 +322,17 @@ function pathOnPath(command: string): string | undefined {
   return undefined;
 }
 
+function installedFinalizerEntrypoint(): string | undefined {
+  const directory = path.dirname(fileURLToPath(import.meta.url));
+  for (const candidate of [
+    path.resolve(directory, "../subagent-finalizer/index.ts"),
+    path.resolve(directory, "../subagent-finalizer/index.js"),
+  ]) {
+    if (fs.existsSync(candidate)) return candidate;
+  }
+  return undefined;
+}
+
 function resolvePiInvocation(args: string[]): { command: string; args: string[]; warning?: string } {
   const configured = process.env.PI_SUBAGENT_BIN;
   if (configured) return { command: configured, args };
@@ -406,6 +420,8 @@ async function runSingleSubagent(
   makeDetails: (results: SingleResult[]) => SubagentDetails,
 ): Promise<SingleResult> {
   const args: string[] = ["--mode", "json", "-p", "--no-session"];
+  const finalizerEntrypoint = installedFinalizerEntrypoint();
+  if (finalizerEntrypoint) args.push("--extension", finalizerEntrypoint);
   if (spec.model) args.push("--model", spec.model);
   if (spec.tools?.length) args.push("--tools", spec.tools.join(","));
 
@@ -721,7 +737,7 @@ export default function (pi: ExtensionAPI) {
   pi.on("tool_result", (event) => {
     if (event.toolName !== "subagent" || event.isError) return;
     const details = event.details as SubagentDetails | undefined;
-    if (details?.backend === "native" && details.results.some(isFailure)) return { isError: true };
+    if (details?.failed || (details?.backend === "native" && details.results.some(isFailure))) return { isError: true };
   });
 
   pi.registerTool({
@@ -746,7 +762,8 @@ export default function (pi: ExtensionAPI) {
           ? (partial: any) => onUpdate({ ...partial, details: withBackend(partial?.details, "agentsh") })
           : undefined;
         const result = await bridge!.subagentAdapter!.execute(toolCallId, params, signal, adaptedUpdate, ctx);
-        return { ...result, details: withBackend(result?.details, "agentsh") };
+        const failed = bridge!.subagentAdapter!.detailsFailed(result?.details);
+        return { ...result, details: withBackend(result?.details, "agentsh", failed) };
       }
       if (!nativeSubagentRequestSupported(params)) {
         throw new Error("mode=draft and Draft dispositions require an active AgentSH supervisor");

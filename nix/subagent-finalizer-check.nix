@@ -17,6 +17,7 @@ pkgs.runCommand "subagent-finalizer-check"
     mkdir -p "$srcdir" "$outdir"
 
     cp -r ${self}/subagent-finalizer "$srcdir/"
+    printf '%s\n' '{"type":"module"}' > "$srcdir/package.json"
 
     tsc \
       --noCheck \
@@ -154,5 +155,6 @@ pkgs.runCommand "subagent-finalizer-check"
 
     node "$workdir/test.mjs" "$outdir"
     grep -F 'PI_SUBAGENT_ID: subagentId' ${self}/subagent/index.ts >/dev/null
+    grep -F 'args.push("--extension", finalizerEntrypoint)' ${self}/subagent/index.ts >/dev/null
     touch "$out"
   ''

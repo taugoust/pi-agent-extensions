@@ -577,9 +577,10 @@ their authoritative execution deadline. Long runs retain the five-minute lead;
 short explicit deadlines warn after three quarters of their available runtime
 instead of steering the child immediately at startup.
 
-The Home Manager module installs this guard automatically when
-`programs.pi.extensions.subagent.enable` is enabled. It can also be enabled on
-its own with `programs.pi.extensions.subagent-finalizer.enable`.
+The Home Manager module and extension bundles install this guard automatically
+with `sandbox` or `subagent`; it can also be enabled on its own. Native
+subagents explicitly load the packaged finalizer entrypoint because their
+isolated `PI_CODING_AGENT_DIR` does not inherit parent extension discovery.
 
 </details>
 <details>
@@ -615,7 +616,6 @@ bound to one target.
 - **License**: MIT
 - **Type**: AgentSH supervisor client (mock NDJSON test protocol and real Stage 1 REST)
 - **Commands**: `/sandbox`{.verbatim} for status/debug;
-  `/sandbox-control reconnect|recover|start|stop|status`{.verbatim};
   `/sandbox-allow <target>`{.verbatim} for retry guidance
 - **Tool overrides**: only registered when an AgentSH integration env var is set.
   Mock NDJSON can handle `bash`{.verbatim}, `write`{.verbatim},
@@ -702,8 +702,7 @@ Streaming ops may emit `stdout`, `stderr`, `tool_update`, `subagent_update`, or
   `read`{.verbatim};
 - `POST /api/v1/sessions/{id}/tools/write_file` for `write`{.verbatim};
 - `POST /api/v1/sessions/{id}/tools/edit_file` for `edit`{.verbatim};
-- `POST /api/v1/sessions/{id}/tools/spawn_subagent` for `subagent`{.verbatim};
-- `DELETE /api/v1/sessions/{id}` best-effort for `/sandbox-control stop`.
+- `POST /api/v1/sessions/{id}/tools/spawn_subagent` for `subagent`{.verbatim}.
 
 The REST `exec_bash` response is buffered; it does not stream command output
 while the command runs. Ordinary Bash execution and HTTP transport use separate
@@ -831,7 +830,6 @@ asking AgentSH to resolve it. A bridge disconnect or response failure denies the
 sessions without an attached bridge retain their normal terminal UI. In native Pi RPC mode,
 the extension uses Pi's standard selectable UI rather than the TUI-only custom overlay.
 When the supervisor reports `requested=strict`, the extension refuses all
-AgentSH-backed tools unless the live report proves the the extension refuses all
 AgentSH-backed tools unless the live report proves the
 `helper-ebpf-proxy-required` tier is ready and `network_policy_enforced=true`.
 Additive `helper_lifecycle` evidence is shown separately from supervisor/SSH
@@ -846,24 +844,13 @@ queue timeout, cancellation, command timeout, denial, transport ambiguity, and a
 genuine child exit 127 remain distinct. Diagnostic messages are bounded and
 redacted, and ambiguous mutations are never replayed.
 
-`/sandbox-control start` remains available for local extension-owned sessions,
-but is refused when `AGENTSH_SESSION_SUPERVISOR` is provided or
-`PI_AGENTSH_REMOTE=ssh`; starting there would leak an unrelated local session.
-`/sandbox-control recover` appears only when the wrapper supplies a protected,
-versioned lifecycle state file containing the exact expected session ID and an
-executable at an immutable `/nix/store` path. The wrapper contract must re-open
-and revalidate that stable state path immediately before mutation; the
-extension's no-follow/owner/mode/schema checks are defense in depth, not a claim
-that pathname TOCTOU is eliminated. Pi invokes the executable directly with no
-shell or arguments, a minimal allowlisted environment, an explicit local cwd,
-and captured bounded/redacted output. On POSIX it uses a separate process group
-and performs bounded TERM/KILL cleanup; group escalation survives direct-child
-close and is completed before cancellation, stop, timeout, or shutdown settles.
-Recovery and all start/reconnect/stop operations are serialized, shutdown awaits
-cleanup, and reattachment publishes no client/watcher state until the exact
-captured session ID and fresh proven
-strict evidence validate. SSH, sudo, helper credentials, and rebind remain
-wrapper-owned, and the failed command is never replayed.
+Supervisor lifecycle is launcher-owned. The extension attaches or performs its
+configured initial local startup on `session_start`; it does not expose runtime
+start, stop, reconnect, or recovery commands. When a trusted launcher supplies
+a protected lifecycle state and immutable recovery executable, transport
+recovery remains automatic, exact-session-bound, bounded, and fail-closed. SSH,
+sudo, helper credentials, replacement, and rebind remain wrapper-owned, and an
+ambiguous failed command is never replayed.
 
 The extension exposes `globalThis.__AGENTSH_PI__` for owned extensions:
 

@@ -251,12 +251,12 @@ type SupervisorState = {
   promptAbortControllers: Map<string, AbortController>;
   promptChain: Promise<void>;
   client?: SupervisorClient;
+  connectingClient?: SupervisorClient;
   approvalClient?: ApprovalClient;
   watcher?: ApprovalWatcher;
   ctx?: ExtensionContext;
   lifecycleTail: Promise<void>;
   lifecycleBusy: boolean;
-  recoveryAbortControllers: Set<AbortController>;
   shuttingDown: boolean;
   terminalError: boolean;
   executionTarget?: AgentSHExecutionTarget;
@@ -513,34 +513,8 @@ const EditParams = Type.Object({
   }), { description: "Exact, non-overlapping replacements" }),
 });
 
-const SubagentItem = Type.Object({
-  task: Type.String({ description: "Task to delegate to this dynamic subagent" }),
-  systemPrompt: Type.Optional(Type.String({ description: "Optional additional system prompt for this subagent" })),
-  model: Type.Optional(Type.String({ description: "Optional model id for this subagent" })),
-  tools: Type.Optional(Type.Array(Type.String(), { description: "Optional tool allowlist, e.g. ['read','grep','find','ls']" })),
-  cwd: Type.Optional(Type.String({ description: "Optional directory inside the AgentSH session workspace; relative paths are resolved from the parent Pi working directory" })),
-});
-
 function modelMayOverrideSubagentTimeout(processEnv: NodeJS.ProcessEnv = process.env): boolean {
   return processEnv.PI_AGENTSH_EXPOSE_SUBAGENT_TIMEOUT === "1";
-}
-
-function subagentParams(processEnv: NodeJS.ProcessEnv = process.env) {
-  return Type.Object({
-    mode: Type.Optional(Type.String({ pattern: "^(shared|draft)$", description: "Execution isolation: shared uses the current session; draft uses independent Git-backed MicroVM Drafts. Draft disposition requires mode=draft." })),
-    action: Type.Optional(Type.String({ pattern: "^(review|apply|discard)$", description: "Parent-side action for an existing Draft; use with mode=draft and draft_id instead of task/tasks/chain." })),
-    draft_id: Type.Optional(Type.String({ pattern: "^session-[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$", description: "Exact retained Draft identity for review/apply/discard." })),
-    task: Type.Optional(Type.String({ description: "Task to delegate (single mode)" })),
-    systemPrompt: Type.Optional(Type.String({ description: "Optional additional system prompt (single mode)" })),
-    model: Type.Optional(Type.String({ description: "Optional model id (single mode)" })),
-    tools: Type.Optional(Type.Array(Type.String(), { description: "Optional tool allowlist (single mode)" })),
-    cwd: Type.Optional(Type.String({ description: "Optional directory inside the AgentSH session workspace; relative paths are resolved from the parent Pi working directory (single mode)" })),
-    tasks: Type.Optional(Type.Array(SubagentItem, { description: "Parallel subagent tasks. Max 8, up to 4 run concurrently." })),
-    chain: Type.Optional(Type.Array(SubagentItem, { description: "Sequential subagent steps. Each task may use {previous}." })),
-    ...(modelMayOverrideSubagentTimeout(processEnv) ? {
-      timeout_ms: Type.Optional(Type.Number({ minimum: 1, description: "Optional shorter execution timeout in milliseconds; otherwise AgentSH uses the effective policy ceiling" })),
-    } : {}),
-  });
 }
 
 function optionalPositiveTimeoutEnv(name: string): number | undefined {
@@ -2102,6 +2076,7 @@ class RestSupervisorClient {
   #metadata?: SupervisorMetadata;
   #detachedRuntime?: DetachedRuntimeStatus;
   #reconnectInFlight?: Promise<SupervisorMetadata>;
+  #lifecycleController = new AbortController();
 
   constructor(readonly socketPath: string, seedMetadata?: SupervisorMetadata, private readonly connectionEvents: RestConnectionEvents = {}) {
     this.#metadata = seedMetadata;
@@ -2111,14 +2086,19 @@ class RestSupervisorClient {
 
   get sessionId() { return this.#sessionId; }
 
+  async dispose() {
+    this.#lifecycleController.abort();
+    try { await this.#reconnectInFlight; } catch { /* shutdown owns the terminal state */ }
+  }
+
   #sessionPath(sessionId = this.#expectedSessionId) {
     return `/api/v1/sessions/${encodeURIComponent(sessionId)}`;
   }
 
-  async #observeDetachedRuntime(timeoutMs: number) {
+  async #observeDetachedRuntime(timeoutMs: number, signal?: AbortSignal) {
     let raw: unknown;
     try {
-      raw = await this.#requestOnce("GET", "/api/v1/detached/status", undefined, { timeoutMs });
+      raw = await this.#requestOnce("GET", "/api/v1/detached/status", undefined, { signal, timeoutMs });
     } catch (error) {
       if (error instanceof RestHTTPError && error.statusCode === 404) return undefined;
       throw error;
@@ -2206,7 +2186,7 @@ class RestSupervisorClient {
       }
     }
     if (names.length === 0 && !status.direnv_refresh_required) return status;
-    const refreshed = await this.#observeDetachedRuntime(timeoutMs);
+    const refreshed = await this.#observeDetachedRuntime(timeoutMs, signal);
     if (!refreshed) throw this.#sessionLost("The protocol-v2 detached status disappeared during environment recovery.");
     return refreshed;
   }
@@ -2222,16 +2202,18 @@ class RestSupervisorClient {
     if (!config) return current;
     const controller = new AbortController();
     const onAbort = () => controller.abort();
-    if (signal) {
-      if (signal.aborted) controller.abort();
-      else signal.addEventListener("abort", onAbort, { once: true });
+    const lifecycleSignal = this.#lifecycleController.signal;
+    for (const source of [signal, lifecycleSignal]) {
+      if (source?.aborted) controller.abort();
+      else source?.addEventListener("abort", onAbort, { once: true });
     }
     try {
       await spawnRecovery(config, controller, timeoutMs);
     } finally {
       signal?.removeEventListener("abort", onAbort);
+      lifecycleSignal.removeEventListener("abort", onAbort);
     }
-    const recovered = await this.#observeDetachedRuntime(timeoutMs);
+    const recovered = await this.#observeDetachedRuntime(timeoutMs, signal);
     if (!recovered) throw this.#sessionLost("The recovery command returned without a protocol-v2 detached status.");
     return await this.#reprovisionDetachedRuntime(recovered, timeoutMs, signal);
   }
@@ -2274,14 +2256,15 @@ class RestSupervisorClient {
     const reconnectStartedAt = Date.now();
     try {
       for (;;) {
+        if (this.#lifecycleController.signal.aborted) throw supervisorRequestAborted();
         const remaining = deadline - Date.now();
         if (remaining <= 0) {
           throw new SupervisorUnavailableError(`Timed out waiting ${SUPERVISOR_RECONNECT_TIMEOUT_MS}ms for AgentSH session ${this.#expectedSessionId} at ${this.socketPath}: ${lastError instanceof SafeSupervisorConnectError ? lastError.diagnostic : lastError.message}`);
         }
         try {
           const probeTimeout = Math.max(1, Math.min(CONNECT_TIMEOUT_MS, remaining));
-          let runtime = await this.#observeDetachedRuntime(probeTimeout);
-          if (runtime) runtime = await this.#reprovisionDetachedRuntime(runtime, probeTimeout);
+          let runtime = await this.#observeDetachedRuntime(probeTimeout, this.#lifecycleController.signal);
+          if (runtime) runtime = await this.#reprovisionDetachedRuntime(runtime, probeTimeout, this.#lifecycleController.signal);
           if (runtime && this.#runtimeNeedsSupervisorRecovery(runtime)) {
             throw new SafeSupervisorConnectError(new Error(`exact detached supervisor is ${runtime.lifecycle_state}: ${runtime.last_error || "recovery required"}`));
           }
@@ -2289,9 +2272,23 @@ class RestSupervisorClient {
             "GET",
             this.#sessionPath(),
             undefined,
-            { timeoutMs: probeTimeout },
+            { signal: this.#lifecycleController.signal, timeoutMs: probeTimeout },
           );
           const metadata = this.#validateExpectedSession(raw);
+          try {
+            metadata.network_enforcement = await this.#requestOnce(
+              "GET",
+              `${this.#sessionPath(this.#sessionId)}/network-enforcement`,
+              undefined,
+              { signal: this.#lifecycleController.signal, timeoutMs: probeTimeout },
+            ) as NetworkEnforcement;
+            metadata.network_enforcement_live = true;
+            metadata.network_enforcement_error = undefined;
+          } catch (networkError) {
+            metadata.network_enforcement_live = false;
+            metadata.network_enforcement_error = asError(networkError).message;
+          }
+          assertNetworkEnforcementReady(metadata);
           this.connectionEvents.onReconnected?.(metadata);
           return metadata;
         } catch (error) {
@@ -2305,12 +2302,19 @@ class RestSupervisorClient {
             if (config) {
               recoveryAttempted = true;
               const controller = new AbortController();
+              const onLifecycleAbort = () => controller.abort();
+              const lifecycleSignal = this.#lifecycleController.signal;
+              if (lifecycleSignal.aborted) controller.abort();
+              else lifecycleSignal.addEventListener("abort", onLifecycleAbort, { once: true });
               try {
                 await spawnRecovery(config, controller, Math.max(1, Math.min(recoveryTimeoutMs(), deadline - Date.now())));
                 lastError = new Error("wrapper recovery completed; waiting for the exact supervisor incarnation");
                 continue;
               } catch (recoveryError) {
+                if (lifecycleSignal.aborted) throw supervisorRequestAborted();
                 lastError = asError(recoveryError);
+              } finally {
+                lifecycleSignal.removeEventListener("abort", onLifecycleAbort);
               }
             }
           }
@@ -2341,7 +2345,10 @@ class RestSupervisorClient {
   async #withReconnect<T>(operation: () => Promise<T>, signal?: AbortSignal): Promise<T> {
     const deadline = Date.now() + Math.max(0, SUPERVISOR_RECONNECT_TIMEOUT_MS);
     for (;;) {
-      if (signal?.aborted) throw supervisorRequestAborted();
+      if (signal?.aborted || this.#lifecycleController.signal.aborted) throw supervisorRequestAborted();
+      if (this.#reconnectInFlight) {
+        await awaitReconnectForCaller(this.#reconnectInFlight, signal, deadline);
+      }
       try {
         return await operation();
       } catch (error) {
@@ -2596,8 +2603,9 @@ class RestSupervisorClient {
   }
 
   async hello() {
-    let runtime = await this.#observeDetachedRuntime(CONNECT_TIMEOUT_MS);
-    if (runtime) runtime = await this.#recoverLiveDetachedRuntime(runtime, recoveryTimeoutMs());
+    const lifecycleSignal = this.#lifecycleController.signal;
+    let runtime = await this.#observeDetachedRuntime(CONNECT_TIMEOUT_MS, lifecycleSignal);
+    if (runtime) runtime = await this.#recoverLiveDetachedRuntime(runtime, recoveryTimeoutMs(), lifecycleSignal);
     if (runtime && runtime.lifecycle_state !== "ready") {
       throw new Error(`Exact detached supervisor recovery is incomplete (${runtime.lifecycle_state}): ${runtime.last_error || "runtime prerequisites are not ready"}`);
     }
@@ -2605,7 +2613,7 @@ class RestSupervisorClient {
     if (this.#expectedSessionId) {
       let raw: unknown;
       try {
-        raw = await this.request("GET", this.#sessionPath());
+        raw = await this.request("GET", this.#sessionPath(), undefined, { signal: lifecycleSignal });
       } catch (error) {
         if (error instanceof RestHTTPError && error.statusCode === 404) {
           throw this.#sessionLost(`The supervisor returned HTTP 404 for ${this.#sessionPath()}.`);
@@ -2614,7 +2622,7 @@ class RestSupervisorClient {
       }
       metadata = this.#validateExpectedSession(raw);
     } else {
-      const sessions = await this.request<unknown[]>("GET", "/api/v1/sessions");
+      const sessions = await this.request<unknown[]>("GET", "/api/v1/sessions", undefined, { signal: lifecycleSignal });
       const first = sessions[0];
       if (!first) throw this.#sessionLost("The supervisor listed no sessions to attach to.");
       metadata = this.#validateExpectedSession(first);
@@ -2624,6 +2632,8 @@ class RestSupervisorClient {
         metadata.network_enforcement = await this.request<NetworkEnforcement>(
           "GET",
           `${this.#sessionPath(this.#sessionId)}/network-enforcement`,
+          undefined,
+          { signal: lifecycleSignal },
         );
         metadata.network_enforcement_live = true;
         metadata.network_enforcement_error = undefined;
@@ -3261,12 +3271,19 @@ async function attachToSocket(state: SupervisorState, mode: ProtocolMode, source
       setStatus(state);
     },
   };
+  if (state.shuttingDown) throw supervisorRequestAborted();
   client = mode === "mock-ndjson"
     ? new MockSupervisorClient(socketPath)
     : mode === "legacy-approval-ui"
       ? new LegacyApprovalUIClient(socketPath)
       : new RestSupervisorClient(socketPath, expectedSessionId ? { ...seedMetadata, session_id: expectedSessionId } : seedMetadata, connectionEvents);
-  const metadata = await client.hello();
+  state.connectingClient = client;
+  let metadata: SupervisorMetadata;
+  try {
+    metadata = await client.hello();
+  } finally {
+    if (state.connectingClient === client) state.connectingClient = undefined;
+  }
   const validatedMetadata = mergeLiveSupervisorMetadata(seedMetadata, metadata, socketPath);
   assertNetworkEnforcementReady(validatedMetadata);
   const actualSessionId = metadataSessionId(validatedMetadata);
@@ -3315,7 +3332,8 @@ function detachedIdentitySeed(expectedSessionId: string): SupervisorMetadata | u
   return seed;
 }
 
-async function attachOrStartUnserialized(state: SupervisorState, ctx: ExtensionContext, options: { forceStart?: boolean; notifyOnSuccess?: boolean; expectedSessionId?: string } = {}) {
+async function attachOrStartUnserialized(state: SupervisorState, ctx: ExtensionContext, options: { notifyOnSuccess?: boolean; expectedSessionId?: string } = {}) {
+    if (state.shuttingDown) throw supervisorRequestAborted();
     state.ctx = ctx;
     state.mode = protocolModeFromEnv();
     resetConnection(state);
@@ -3325,27 +3343,27 @@ async function attachOrStartUnserialized(state: SupervisorState, ctx: ExtensionC
     const expectedSessionId = options.expectedSessionId ?? env("AGENTSH_SESSION_ID");
 
     const mockSock = normalizeSocketPath(env("PI_AGENTSH_MOCK_SUPERVISOR"));
-    if (mockSock && !options.forceStart) {
+    if (mockSock) {
       await attachToSocket(state, "mock-ndjson", "mock", mockSock, ctx, undefined, expectedSessionId);
       if (options.notifyOnSuccess) notify(ctx, `AgentSH mock supervisor attached: ${state.sessionId || mockSock}`, "info");
       return;
     }
 
     const envSock = normalizeSocketPath(env("AGENTSH_SESSION_SUPERVISOR"));
-    if (envSock && !options.forceStart) {
+    if (envSock) {
       await attachToSocket(state, "rest", "agentsh-env", envSock, ctx, detachedIdentitySeed(expectedSessionId), expectedSessionId);
       if (options.notifyOnSuccess) notify(ctx, `AgentSH REST supervisor attached: ${state.sessionId || envSock}`, "info");
       return;
     }
 
     const approvalUISock = normalizeSocketPath(env("AGENTSH_APPROVAL_UI_SOCKET"));
-    if (approvalUISock && !options.forceStart) {
+    if (approvalUISock) {
       await attachToSocket(state, "legacy-approval-ui", "agentsh-approval-ui", approvalUISock, ctx, undefined, expectedSessionId);
       if (options.notifyOnSuccess) notify(ctx, `AgentSH approval UI socket attached: ${state.sessionId || approvalUISock}`, "info");
       return;
     }
 
-    if (shouldStartSupervisor() || options.forceStart) {
+    if (shouldStartSupervisor()) {
       state.active = true;
       state.source = "agentsh-started";
       state.status = "starting";
@@ -3381,7 +3399,7 @@ function attachFailure(state: SupervisorState, ctx: ExtensionContext, error: unk
   setStatus(state, ctx);
 }
 
-async function attachOrStart(state: SupervisorState, ctx: ExtensionContext, options: { forceStart?: boolean; notifyOnSuccess?: boolean; expectedSessionId?: string } = {}) {
+async function attachOrStart(state: SupervisorState, ctx: ExtensionContext, options: { notifyOnSuccess?: boolean; expectedSessionId?: string } = {}) {
   return await queueLifecycle(state, async () => {
     try {
       await attachOrStartUnserialized(state, ctx, options);
@@ -3390,11 +3408,6 @@ async function attachOrStart(state: SupervisorState, ctx: ExtensionContext, opti
       throw error;
     }
   });
-}
-
-function wrapperOwnedStartRefusal() {
-  if (!env("AGENTSH_SESSION_SUPERVISOR")) return "";
-  return "This AgentSH session is wrapper-owned. /sandbox-control start is refused because it would create an unrelated local session instead of replacing the wrapper target. Restore the wrapper transport with /sandbox-control reconnect, or use /sandbox-control recover when the wrapper exposes a validated recovery command.";
 }
 
 type RecoveryConfiguration = { command: string; statePath: string; expectedSession: string; cwd: string };
@@ -3605,43 +3618,6 @@ async function spawnRecovery(config: RecoveryConfiguration, controller: AbortCon
   });
 }
 
-async function runWrapperRecoveryUnserialized(state: SupervisorState, ctx: ExtensionContext, controller: AbortController) {
-  if (state.shuttingDown || controller.signal.aborted) throw supervisorRequestAborted();
-  const expectedSession = state.sessionId || env("AGENTSH_SESSION_ID");
-  if (!expectedSession) throw new Error("Wrapper recovery is unsafe because no captured exact session identity is available.");
-  if (env("AGENTSH_SESSION_ID") && env("AGENTSH_SESSION_ID") !== expectedSession) throw new Error("Wrapper recovery refused because the environment session ID differs from the captured session.");
-  const config = recoveryConfiguration(expectedSession);
-  if (!config) throw new Error("Wrapper recovery is unavailable because its immutable executable, protected versioned lifecycle state, exact session identity, or safe local cwd did not validate.");
-  try {
-    await spawnRecovery(config, controller, recoveryTimeoutMs());
-    // The wrapper owns pathname revalidation immediately before mutation. We
-    // re-read here as defense in depth and never infer that this closes its
-    // pathname race.
-    readLifecycleState(config.statePath, expectedSession);
-    await attachOrStartUnserialized(state, ctx, { notifyOnSuccess: false, expectedSessionId: expectedSession });
-    const report = metadataNetworkEnforcement(state.metadata);
-    if (state.sessionId !== expectedSession || state.metadata?.network_enforcement_live !== true || report?.requested !== "strict" || !networkEnforcementProven(report)) {
-      throw new Error("Wrapper recovery returned without fresh, live, proven strict evidence for the exact captured session.");
-    }
-    notify(ctx, `AgentSH wrapper recovery restored exact session ${expectedSession}; the failed command was not replayed.`, "info");
-  } catch (error) {
-    attachFailure(state, ctx, error);
-    throw error;
-  } finally {
-    // The caller removes the controller after the queued operation settles.
-  }
-}
-
-async function runWrapperRecovery(state: SupervisorState, ctx: ExtensionContext) {
-  const controller = new AbortController();
-  state.recoveryAbortControllers.add(controller);
-  try {
-    return await queueLifecycle(state, () => runWrapperRecoveryUnserialized(state, ctx, controller));
-  } finally {
-    state.recoveryAbortControllers.delete(controller);
-  }
-}
-
 function lifecycleIdentity(value: unknown) {
   return safeExecText(value, 180) || "-";
 }
@@ -3700,7 +3676,7 @@ function helpText(state: SupervisorState) {
       "test with PI_AGENTSH_MOCK_SUPERVISOR=<mock.sock>, or start a detached supervisor with PI_AGENTSH_ENABLE=1.",
       "",
       "Optional env: PI_AGENTSH_POLICY=pi-autonomous|pi-supervised, PI_AGENTSH_WORKSPACE_MODE=shadow|direct, PI_AGENTSH_BIN=agentsh.",
-      recoveryConfiguration() ? "Wrapper recovery: available with /sandbox-control recover." : "",
+      recoveryConfiguration() ? "Wrapper recovery is managed automatically by the trusted launcher." : "",
     ].join("\n");
   }
   return [
@@ -3723,7 +3699,7 @@ function helpText(state: SupervisorState) {
     ...helperLifecycleLines(metadataNetworkEnforcement(state.metadata)),
     state.metadata?.network_enforcement_error ? `Net error: ${state.metadata.network_enforcement_error}` : "",
     Array.isArray(state.metadata?.supported_ops) ? `Ops:      ${state.metadata.supported_ops.join(", ")}` : "",
-    recoveryConfiguration() ? "Recovery: available (/sandbox-control recover)" : "Recovery: unavailable (wrapper did not provide validated recovery state)",
+    recoveryConfiguration() ? "Recovery: automatic through the trusted launcher" : "Recovery: unavailable (wrapper did not provide validated recovery state)",
     state.lastError ? `Error:    ${state.lastError}` : "",
   ].filter(Boolean).join("\n");
 }
@@ -4393,7 +4369,6 @@ export default function sandbox(pi: ExtensionAPI) {
     promptChain: Promise.resolve(),
     lifecycleTail: Promise.resolve(),
     lifecycleBusy: false,
-    recoveryAbortControllers: new Set(),
     shuttingDown: false,
     terminalError: false,
   };
@@ -4410,7 +4385,10 @@ export default function sandbox(pi: ExtensionAPI) {
 
   pi.on("session_shutdown", async () => {
     state.shuttingDown = true;
-    for (const controller of state.recoveryAbortControllers) controller.abort();
+    const clients = new Set([state.client, state.connectingClient]);
+    await Promise.all(Array.from(clients, async (client) => {
+      if (client instanceof RestSupervisorClient) await client.dispose();
+    }));
     await queueLifecycle(state, async () => {
       resetConnection(state);
       if (state.ctx?.hasUI) state.ctx.ui.setStatus("sandbox", undefined);
@@ -4421,53 +4399,6 @@ export default function sandbox(pi: ExtensionAPI) {
   pi.registerCommand("sandbox", {
     description: "Show AgentSH supervisor-client status",
     handler: async (_args, ctx) => notify(ctx, helpText(state), state.status === "error" ? "error" : "info"),
-  });
-
-  pi.registerCommand("sandbox-control", {
-    description: "Control AgentSH supervisor client: status, reconnect, recover, start, stop",
-    handler: async (args, ctx) => {
-      const action = (args || "status").trim() || "status";
-      try {
-        if (action === "reconnect") {
-          await attachOrStart(state, ctx, { notifyOnSuccess: true });
-          return;
-        }
-        if (action === "start") {
-          const refusal = wrapperOwnedStartRefusal();
-          if (refusal) {
-            notify(ctx, refusal, "error");
-            return;
-          }
-          await attachOrStart(state, ctx, { forceStart: true, notifyOnSuccess: true });
-          return;
-        }
-        if (action === "recover") {
-          await runWrapperRecovery(state, ctx);
-          return;
-        }
-        if (action === "stop") {
-          // Cancellation is immediate; cleanup/reset itself is ordered after the
-          // recovery child (including its POSIX process group) has been reaped.
-          for (const controller of state.recoveryAbortControllers) controller.abort();
-          await queueLifecycle(state, async () => {
-            if (state.client) {
-              try { await state.client.stop(); } catch { /* older/mock supervisors may not support stop */ }
-            }
-            resetConnection(state);
-            setStatus(state, ctx);
-          });
-          notify(ctx, "AgentSH supervisor client stopped/detached", "info");
-          return;
-        }
-        notify(ctx, helpText(state), state.status === "error" ? "error" : "info");
-      } catch (error) {
-        if (state.shuttingDown) return;
-        state.status = "error";
-        state.lastError = safeExecText(asError(error).message) || "lifecycle operation failed";
-        setStatus(state, ctx);
-        notify(ctx, `sandbox-control ${action} failed: ${state.lastError}`, "error");
-      }
-    },
   });
 
   pi.registerCommand("sandbox-allow", {
@@ -4515,6 +4446,8 @@ export default function sandbox(pi: ExtensionAPI) {
         const artifact = remoteOutputArtifact(result);
         const failure = result.normalizedFailure;
         const details = {
+          backend: "agentsh" as const,
+          failed: Boolean(failure || exitCode !== 0),
           exitCode,
           commandStarted: failure?.commandStarted,
           dispatchState: failure?.dispatchState,
@@ -4555,7 +4488,7 @@ export default function sandbox(pi: ExtensionAPI) {
         const text = safeBeforeDispatch
           ? `Command was not executed because the AgentSH supervisor transport was unavailable. ${message}`
           : `Command outcome is ambiguous because the AgentSH supervisor transport failed after dispatch could not be excluded. The command was not replayed. ${message}`;
-        return { content: [{ type: "text", text: `${formatAccumulatedOutput(snapshot, output)}\n\n${text}` }], details: { commandStarted: undefined, failureKind: "transport_ambiguity", retryable: false, message, normalizationSource: "transport" }, isError: true };
+        return { content: [{ type: "text", text: `${formatAccumulatedOutput(snapshot, output)}\n\n${text}` }], details: { backend: "agentsh", failed: true, commandStarted: undefined, failureKind: "transport_ambiguity", retryable: false, message, normalizationSource: "transport" }, isError: true };
 
       } finally {
         output.finish();
@@ -4609,12 +4542,9 @@ export default function sandbox(pi: ExtensionAPI) {
   }
 
   const agentSHSubagentAdapter = {
-    label: "Subagent",
-    description: "Delegate focused work with mode=shared or isolated mode=draft. For a returned Draft, use mode=draft with action=review|apply|discard and its exact draft_id; restricted Apply requests explicit approval.",
-    // Keep speculative short deadlines out of the model-facing schema by
-    // default. Trusted programmatic callers retain the underlying API field,
-    // and operators may opt the model back in explicitly.
-    parameters: subagentParams(),
+    detailsFailed(details: unknown) {
+      return subagentDetailsFailed(details);
+    },
     renderCall(args, theme) {
       return renderSubagentCall(args, theme);
     },
@@ -4820,9 +4750,13 @@ export default function sandbox(pi: ExtensionAPI) {
     },
   };
   if (globalThis.__AGENTSH_PI__) globalThis.__AGENTSH_PI__.subagentAdapter = agentSHSubagentAdapter;
+
   pi.on("tool_result", (event) => {
-    if (event.toolName !== "subagent" || event.isError || !subagentDetailsFailed(event.details)) return;
-    return { isError: true };
+    if (event.toolName !== "bash" || event.isError) return;
+    const details = event.details as { backend?: string; failed?: boolean } | undefined;
+    if (details?.backend === "agentsh" && details.failed === true) {
+      return { isError: true };
+    }
   });
 
   pi.registerTool({

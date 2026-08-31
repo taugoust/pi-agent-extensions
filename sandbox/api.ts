@@ -237,6 +237,7 @@ export type AgentSHDirenvAPI = {
 
 export type AgentSHSubagentAdapter = {
   execute(toolCallId: string, params: JsonObject, signal: AbortSignal | undefined, onUpdate: ((partial: any) => void) | undefined, ctx: any): Promise<any>;
+  detailsFailed(details: unknown): boolean;
   renderCall(args: any, theme: any): any;
   renderResult(result: any, options: any, theme: any): any;
 };

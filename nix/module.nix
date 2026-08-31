@@ -45,9 +45,9 @@ in
         };
       };
 
-      sandbox.enable = lib.mkEnableOption "sandbox extension — AgentSH approval relay UI";
-      subagent.enable = lib.mkEnableOption "subagent extension — same-session dynamic child Pi processes under AgentSH inheritance";
-      subagent-finalizer.enable = lib.mkEnableOption "subagent-finalizer extension — steer subagents to finish before context compaction";
+      sandbox.enable = lib.mkEnableOption "sandbox extension — AgentSH supervisor backend; also installs the adaptive subagent and its child finalizer";
+      subagent.enable = lib.mkEnableOption "adaptive subagent extension — native child Pi or AgentSH backend; also installs its child finalizer";
+      subagent-finalizer.enable = lib.mkEnableOption "standalone subagent-finalizer extension — automatically included with sandbox or subagent";
       mcp-adapter.enable = lib.mkEnableOption "pi-mcp-adapter extension — MCP proxy/direct-tools integration";
     };
 
@@ -175,9 +175,16 @@ in
         "${extDir}/subagent/parallel-result.ts".source = "${self}/subagent/parallel-result.ts";
       })
 
-      (lib.mkIf (cfg.extensions.subagent.enable || cfg.extensions.subagent-finalizer.enable) {
-        "${extDir}/subagent-finalizer/index.ts".source = "${self}/subagent-finalizer/index.ts";
-      })
+      (lib.mkIf
+        (
+          cfg.extensions.sandbox.enable
+          || cfg.extensions.subagent.enable
+          || cfg.extensions.subagent-finalizer.enable
+        )
+        {
+          "${extDir}/subagent-finalizer/index.ts".source = "${self}/subagent-finalizer/index.ts";
+        }
+      )
 
       (lib.mkIf cfg.extensions.mcp-adapter.enable {
         "${extDir}/pi-mcp-adapter".source =

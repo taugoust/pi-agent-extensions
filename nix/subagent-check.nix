@@ -1,9 +1,26 @@
 { self, pkgs }:
 
+let
+  mkExtensionBundle = import ./mk-extension-bundle.nix {
+    inherit self;
+    lib = pkgs.lib;
+  };
+  sandboxOnlyBundle = mkExtensionBundle {
+    inherit pkgs;
+    name = "sandbox-only-subagent-check-bundle";
+    extensions = [ "sandbox" ];
+  };
+  subagentOnlyBundle = mkExtensionBundle {
+    inherit pkgs;
+    name = "subagent-only-finalizer-check-bundle";
+    extensions = [ "subagent" ];
+  };
+in
 pkgs.runCommand "subagent-check"
   {
     nativeBuildInputs = [
       pkgs.gnugrep
+      pkgs.jq
       pkgs.nodejs
       pkgs.typescript
     ];
@@ -42,7 +59,7 @@ pkgs.runCommand "subagent-check"
     assert.equal(backend.agentSHExpected({ AGENTSH_SESSION_SUPERVISOR: "unix:///run/test.sock" }), true);
     assert.deepEqual(backend.selectSubagentBackend(undefined), { kind: "native" });
     assert.deepEqual(backend.selectSubagentBackend({ getSupervisorState: () => ({ configured: false, active: false }) }), { kind: "native" });
-    const adapter = { execute() {}, renderCall() {}, renderResult() {} };
+    const adapter = { execute() {}, detailsFailed() { return false; }, renderCall() {}, renderResult() {} };
     assert.equal(backend.selectSubagentBackend({ getSupervisorState: () => ({ configured: true, active: true }), subagentAdapter: adapter }).kind, "agentsh");
     assert.equal(backend.selectSubagentBackend({ getSupervisorState: () => ({ configured: false, active: true }), subagentAdapter: adapter }).kind, "agentsh");
     assert.equal(backend.selectSubagentBackend(undefined, true).kind, "unavailable");
@@ -90,6 +107,18 @@ pkgs.runCommand "subagent-check"
       echo 'sandbox still registers a duplicate subagent tool' >&2
       exit 1
     fi
+    if grep -F 'function subagentParams' ${self}/sandbox/index.ts >/dev/null; then
+      echo 'sandbox still owns a dead model-facing subagent schema' >&2
+      exit 1
+    fi
+    for bundle in ${sandboxOnlyBundle} ${subagentOnlyBundle}; do
+      test "$(jq '[.pi.extensions[] | select(. == "subagent")] | length' "$bundle/package.json")" -eq 1
+      test "$(jq '[.pi.extensions[] | select(. == "subagent-finalizer")] | length' "$bundle/package.json")" -eq 1
+      test -f "$bundle/subagent/index.ts"
+      test -f "$bundle/subagent-finalizer/index.ts"
+    done
+    test "$(jq '[.pi.extensions[] | select(. == "sandbox")] | length' ${sandboxOnlyBundle}/package.json)" -eq 1
+    test "$(jq '[.pi.extensions[] | select(. == "sandbox")] | length' ${subagentOnlyBundle}/package.json)" -eq 0
     if grep -F 'output.slice(0, 100)' ${self}/subagent/index.ts >/dev/null; then
       echo 'parallel results still use the lossy 100-character preview' >&2
       exit 1
