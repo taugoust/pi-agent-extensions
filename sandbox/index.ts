@@ -26,6 +26,7 @@ import { boundSubagentProgressCapsules, createSubagentProgressCapsule, sanitizeS
 import { appendSubagentPrefix, appendSubagentRawText, appendSubagentStdoutChunk, createSubagentStreamState, flushSubagentStdout, parseSubagentPiJsonStdout, subagentLiveToolStatus, tailByBytes, truncateByBytes, usageNumber, usageZero, type SubagentStreamState } from "./subagent-stream.js";
 import { normalizeSubagentTerminal, subagentTerminalFailed } from "./subagent-terminal.js";
 import type { AgentSHExecutionTarget, AgentSHPiAPI, DirenvRefreshOptions, DirenvRefreshResult, DirenvRefreshState } from "./api.js";
+import { bufferedHttpRequest, HttpTransportError } from "../shared/http-transport.js";
 import {
   CommandExecutionTimeoutError,
   CommandTransportTimeoutError,
@@ -2374,81 +2375,42 @@ class RestSupervisorClient {
   async #requestOnce<T = unknown>(method: string, path: string, body?: unknown, options: { signal?: AbortSignal; timeoutMs?: number } = {}): Promise<T> {
     const timeoutMs = options.timeoutMs || CONNECT_TIMEOUT_MS;
     const { signal, cleanup, didTimeout } = abortSignalFrom(options.signal, timeoutMs);
-    let socketTimedOut = false;
-    const timeoutError = () => new SupervisorRequestTimeoutError(timeoutMs, `${method} ${path}`);
-    const requestTimedOut = () => didTimeout() || socketTimedOut;
-    const normalizeRequestError = (error: unknown) => {
-      // The caller's signal always wins a race with either internal deadline.
-      if (options.signal?.aborted) return supervisorRequestAborted();
-      return requestTimedOut() ? timeoutError() : asError(error);
-    };
-    return await new Promise<T>((resolve, reject) => {
-      const payload = body === undefined ? undefined : JSON.stringify(body);
-      let responseStarted = false;
-      let settled = false;
-      let req: http.ClientRequest | undefined;
-      const finish = (callback: () => void) => {
-        if (settled) return;
-        settled = true;
-        signal.removeEventListener("abort", onAbort);
-        cleanup();
-        callback();
-      };
-      const onAbort = () => {
-        const error = normalizeRequestError(new Error(`${method} ${path}: supervisor request was aborted`));
-        finish(() => reject(error));
-        req?.destroy(error);
-      };
-      const capabilityHeaders = childExecutionCapabilityHeaders(path);
-      const operatorHeaders = detachedOperatorHeaders(path, detachedControlToken());
-      req = http.request({
-        socketPath: this.socketPath,
-        host: "unix",
+    const payload = body === undefined ? undefined : JSON.stringify(body);
+    const capabilityHeaders = childExecutionCapabilityHeaders(path);
+    const operatorHeaders = detachedOperatorHeaders(path, detachedControlToken());
+    try {
+      const response = await bufferedHttpRequest({
+        request: { socketPath: this.socketPath, host: "unix", path },
         method,
-        path,
         headers: payload === undefined ? { Accept: "application/json", ...capabilityHeaders, ...operatorHeaders } : {
           Accept: "application/json",
           "Content-Type": "application/json",
-          "Content-Length": Buffer.byteLength(payload),
+          "Content-Length": String(Buffer.byteLength(payload)),
           ...capabilityHeaders,
           ...operatorHeaders,
         },
-      }, (res) => {
-        responseStarted = true;
-        const chunks: Buffer[] = [];
-        res.on("data", (chunk) => chunks.push(Buffer.isBuffer(chunk) ? chunk : Buffer.from(chunk)));
-        res.on("aborted", () => finish(() => reject(normalizeRequestError(new Error(`${method} ${path}: supervisor response was aborted after dispatch`)))));
-        res.on("error", (error) => finish(() => reject(normalizeRequestError(error))));
-        res.on("end", () => finish(() => {
-          const text = Buffer.concat(chunks).toString("utf8");
-          const statusCode = res.statusCode || 0;
-          if (statusCode < 200 || statusCode >= 300) {
-            reject(new RestHTTPError(method, path, statusCode, text));
-            return;
-          }
-          if (!text.trim()) { resolve(undefined as T); return; }
-          try { resolve(JSON.parse(text) as T); } catch (error) { reject(asError(error)); }
-        }));
-        res.on("close", () => {
-          if (!settled && !res.complete) finish(() => reject(normalizeRequestError(new Error(`${method} ${path}: supervisor response closed before completion after dispatch`))));
-        });
+        body: payload,
+        signal,
+        timeoutMs,
       });
-      req.on("error", (error) => finish(() => {
-        const normalized = normalizeRequestError(error);
-        if (!responseStarted && !requestTimedOut() && !options.signal?.aborted && supervisorSocketUnavailable(error)) reject(new SafeSupervisorConnectError(error));
-        else reject(normalized);
-      }));
-      req.setTimeout(timeoutMs, () => {
-        socketTimedOut = true;
-        req?.destroy(timeoutError());
-      });
-      signal.addEventListener("abort", onAbort, { once: true });
-      if (signal.aborted) onAbort();
-      if (!settled) {
-        if (payload !== undefined) req.write(payload);
-        req.end();
+      const text = response.body.toString("utf8");
+      if (response.statusCode < 200 || response.statusCode >= 300) throw new RestHTTPError(method, path, response.statusCode, text);
+      if (!text.trim()) return undefined as T;
+      try { return JSON.parse(text) as T; } catch (error) { throw asError(error); }
+    } catch (error) {
+      if (error instanceof RestHTTPError) throw error;
+      if (options.signal?.aborted) throw supervisorRequestAborted();
+      if (didTimeout() || (error instanceof HttpTransportError && error.kind === "timeout")) {
+        throw new SupervisorRequestTimeoutError(timeoutMs, `${method} ${path}`);
       }
-    });
+      const cause = error instanceof HttpTransportError ? error.cause : error;
+      if (error instanceof HttpTransportError && !error.responseStarted && supervisorSocketUnavailable(cause)) {
+        throw new SafeSupervisorConnectError(cause);
+      }
+      throw asError(error);
+    } finally {
+      cleanup();
+    }
   }
 
   async request<T = unknown>(method: string, path: string, body?: unknown, options: { signal?: AbortSignal; timeoutMs?: number } = {}): Promise<T> {
@@ -2947,41 +2909,29 @@ class CentralApprovalClient implements ApprovalClient {
   constructor(readonly baseURL: string, readonly sessionId: string, readonly token: string) {}
 
   async request<T = unknown>(method: string, path: string, body?: unknown): Promise<T> {
-    const { signal, cleanup } = abortSignalFrom(undefined, CONNECT_TIMEOUT_MS);
-    return await new Promise<T>((resolve, reject) => {
-      const payload = body === undefined ? undefined : JSON.stringify(body);
-      const url = new URL(path, `${this.baseURL}/`);
-      const req = http.request(url, {
-        method,
-        signal,
-        headers: payload === undefined ? {
-          Accept: "application/json",
-          "X-AgentSH-Session-Event-Token": this.token,
-        } : {
-          Accept: "application/json",
-          "Content-Type": "application/json",
-          "Content-Length": Buffer.byteLength(payload),
-          "X-AgentSH-Session-Event-Token": this.token,
-        },
-      }, (res) => {
-        const chunks: Buffer[] = [];
-        res.on("data", (chunk) => chunks.push(Buffer.isBuffer(chunk) ? chunk : Buffer.from(chunk)));
-        res.on("end", () => {
-          cleanup();
-          const text = Buffer.concat(chunks).toString("utf8");
-          if ((res.statusCode || 0) < 200 || (res.statusCode || 0) >= 300) {
-            reject(new Error(`${method} ${url.pathname}: HTTP ${res.statusCode}${text.trim() ? `: ${truncate(text.trim(), 1000)}` : ""}`));
-            return;
-          }
-          if (!text.trim()) { resolve(undefined as T); return; }
-          try { resolve(JSON.parse(text) as T); } catch (error) { reject(asError(error)); }
-        });
-      });
-      req.on("error", (error) => { cleanup(); reject(error); });
-      req.setTimeout(CONNECT_TIMEOUT_MS, () => req.destroy(new Error(`Timed out connecting to AgentSH central approvals at ${this.baseURL}`)));
-      if (payload !== undefined) req.write(payload);
-      req.end();
+    const payload = body === undefined ? undefined : JSON.stringify(body);
+    const url = new URL(path, `${this.baseURL}/`);
+    const response = await bufferedHttpRequest({
+      request: url,
+      method,
+      headers: payload === undefined ? {
+        Accept: "application/json",
+        "X-AgentSH-Session-Event-Token": this.token,
+      } : {
+        Accept: "application/json",
+        "Content-Type": "application/json",
+        "Content-Length": String(Buffer.byteLength(payload)),
+        "X-AgentSH-Session-Event-Token": this.token,
+      },
+      body: payload,
+      timeoutMs: CONNECT_TIMEOUT_MS,
     });
+    const text = response.body.toString("utf8");
+    if (response.statusCode < 200 || response.statusCode >= 300) {
+      throw new Error(`${method} ${url.pathname}: HTTP ${response.statusCode}${text.trim() ? `: ${truncate(text.trim(), 1000)}` : ""}`);
+    }
+    if (!text.trim()) return undefined as T;
+    try { return JSON.parse(text) as T; } catch (error) { throw asError(error); }
   }
 
   async listApprovals() {

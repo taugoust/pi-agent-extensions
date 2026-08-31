@@ -89,6 +89,9 @@ in
       (lib.mkIf cfg.extensions.agent-events.enable {
         "${extDir}/agent-events/index.ts".source = "${self}/agent-events/index.ts";
       })
+      (lib.mkIf (cfg.extensions.agent-events.enable || cfg.extensions.sandbox.enable) {
+        "${extDir}/shared".source = "${self}/shared";
+      })
       (lib.mkIf cfg.extensions.direnv.enable {
         "${extDir}/direnv/index.ts".source = "${self}/direnv/index.ts";
       })

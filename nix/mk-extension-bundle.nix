@@ -30,6 +30,8 @@ let
     ++ lib.optional (builtins.elem "sandbox" extensions) "subagent"
     ++ lib.optional wantsSubagent "subagent-finalizer"
   );
+  needsSharedRuntime =
+    builtins.elem "sandbox" selectedExtensions || builtins.elem "agent-events" selectedExtensions;
   unknownExtensions = lib.subtractLists (builtins.attrNames extensionRegistry) selectedExtensions;
   unknownSkills = lib.subtractLists (builtins.attrNames skillRegistry) skills;
 
@@ -80,6 +82,10 @@ else
     mkdir -p "$out"
 
     ${copyExtensionCommands}
+    ${lib.optionalString needsSharedRuntime ''
+      cp -R ${self}/shared "$out/shared"
+      chmod -R u+rwX "$out/shared"
+    ''}
     ${copySkillCommands}
 
     cat > "$out/package.json" <<'EOF'

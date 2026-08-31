@@ -18,6 +18,7 @@ in
   package = package;
 
   fetch = import ./fetch-check.nix { inherit self pkgs; };
+  http-transport = import ./http-transport-check.nix { inherit self pkgs; };
 
   ssh =
     pkgs.runCommand "ssh-extension-check"
@@ -1238,6 +1239,7 @@ in
 
         cp -r ${self}/sandbox "$srcdir/"
         cp -r ${self}/subagent "$srcdir/"
+        cp -r ${self}/shared "$srcdir/"
         printf '%s\n' '{"type":"module"}' > "$srcdir/package.json"
 
         mkdir -p "$outdir/node_modules/@sinclair/typebox"

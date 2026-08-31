@@ -7,9 +7,9 @@
  * use AgentSH approver/admin API keys.
  */
 
-import * as http from "node:http";
 import { createConnection } from "node:net";
 import type { ExtensionAPI, ExtensionContext } from "@mariozechner/pi-coding-agent";
+import { bufferedHttpRequest, type BufferedHttpResponse } from "../shared/http-transport.js";
 
 type AgentEvent = {
   id: string;
@@ -137,92 +137,54 @@ async function uiRequest<T>(state: EventState, request: Record<string, unknown>)
   });
 }
 
+function parseRestResponse<T>(response: BufferedHttpResponse, method: string, path: string, fallback: string): T {
+  const text = response.body.toString("utf8");
+  if (response.statusCode < 200 || response.statusCode >= 300) {
+    throw new Error(`${method} ${path}: HTTP ${response.statusCode}${text.trim() ? `: ${truncate(text.trim(), 1000)}` : ""}`);
+  }
+  if (!text.trim()) return undefined as T;
+  const parsed = JSON.parse(text) as { ok?: boolean; error?: string } & T;
+  if (parsed.ok === false) throw new Error(parsed.error || fallback);
+  return parsed as T;
+}
+
 async function restRequest<T>(state: EventState, method: string, path: string, body?: unknown): Promise<T> {
   if (!state.socketPath) throw new Error("AgentSH supervisor socket not configured");
-  return await new Promise<T>((resolve, reject) => {
-    const payload = body === undefined ? undefined : JSON.stringify(body);
-    const req = http.request({
-      socketPath: state.socketPath,
-      host: "unix",
-      method,
-      path,
-      headers: payload === undefined ? { Accept: "application/json" } : {
-        Accept: "application/json",
-        "Content-Type": "application/json",
-        "Content-Length": Buffer.byteLength(payload),
-      },
-    }, (res) => {
-      const chunks: Buffer[] = [];
-      res.on("data", (chunk) => chunks.push(Buffer.isBuffer(chunk) ? chunk : Buffer.from(chunk)));
-      res.on("end", () => {
-        const text = Buffer.concat(chunks).toString("utf8");
-        if ((res.statusCode || 0) < 200 || (res.statusCode || 0) >= 300) {
-          reject(new Error(`${method} ${path}: HTTP ${res.statusCode}${text.trim() ? `: ${truncate(text.trim(), 1000)}` : ""}`));
-          return;
-        }
-        if (!text.trim()) {
-          resolve(undefined as T);
-          return;
-        }
-        try {
-          const parsed = JSON.parse(text) as { ok?: boolean; error?: string } & T;
-          if (parsed.ok === false) reject(new Error(parsed.error || "AgentSH REST request failed"));
-          else resolve(parsed as T);
-        } catch (error) {
-          reject(error instanceof Error ? error : new Error(String(error)));
-        }
-      });
-    });
-    req.on("error", (error) => reject(error));
-    req.setTimeout(10_000, () => req.destroy(new Error("AgentSH supervisor socket timeout")));
-    if (payload !== undefined) req.write(payload);
-    req.end();
+  const payload = body === undefined ? undefined : JSON.stringify(body);
+  const response = await bufferedHttpRequest({
+    request: { socketPath: state.socketPath, host: "unix", path },
+    method,
+    headers: payload === undefined ? { Accept: "application/json" } : {
+      Accept: "application/json",
+      "Content-Type": "application/json",
+      "Content-Length": String(Buffer.byteLength(payload)),
+    },
+    body: payload,
+    timeoutMs: 10_000,
   });
+  return parseRestResponse<T>(response, method, path, "AgentSH REST request failed");
 }
 
 async function centralRequest<T>(state: EventState, method: string, path: string, body?: unknown): Promise<T> {
   if (!state.centralURL || !state.eventToken) throw new Error("AgentSH central event endpoint not configured");
-  return await new Promise<T>((resolve, reject) => {
-    const payload = body === undefined ? undefined : JSON.stringify(body);
-    const url = new URL(path, `${state.centralURL}/`);
-    const req = http.request(url, {
-      method,
-      headers: payload === undefined ? {
-        Accept: "application/json",
-        "X-AgentSH-Session-Event-Token": state.eventToken,
-      } : {
-        Accept: "application/json",
-        "Content-Type": "application/json",
-        "Content-Length": Buffer.byteLength(payload),
-        "X-AgentSH-Session-Event-Token": state.eventToken,
-      },
-    }, (res) => {
-      const chunks: Buffer[] = [];
-      res.on("data", (chunk) => chunks.push(Buffer.isBuffer(chunk) ? chunk : Buffer.from(chunk)));
-      res.on("end", () => {
-        const text = Buffer.concat(chunks).toString("utf8");
-        if ((res.statusCode || 0) < 200 || (res.statusCode || 0) >= 300) {
-          reject(new Error(`${method} ${url.pathname}: HTTP ${res.statusCode}${text.trim() ? `: ${truncate(text.trim(), 1000)}` : ""}`));
-          return;
-        }
-        if (!text.trim()) {
-          resolve(undefined as T);
-          return;
-        }
-        try {
-          const parsed = JSON.parse(text) as { ok?: boolean; error?: string } & T;
-          if (parsed.ok === false) reject(new Error(parsed.error || "AgentSH central event request failed"));
-          else resolve(parsed as T);
-        } catch (error) {
-          reject(error instanceof Error ? error : new Error(String(error)));
-        }
-      });
-    });
-    req.on("error", (error) => reject(error));
-    req.setTimeout(10_000, () => req.destroy(new Error("AgentSH central event request timeout")));
-    if (payload !== undefined) req.write(payload);
-    req.end();
+  const payload = body === undefined ? undefined : JSON.stringify(body);
+  const url = new URL(path, `${state.centralURL}/`);
+  const response = await bufferedHttpRequest({
+    request: url,
+    method,
+    headers: payload === undefined ? {
+      Accept: "application/json",
+      "X-AgentSH-Session-Event-Token": state.eventToken,
+    } : {
+      Accept: "application/json",
+      "Content-Type": "application/json",
+      "Content-Length": String(Buffer.byteLength(payload)),
+      "X-AgentSH-Session-Event-Token": state.eventToken,
+    },
+    body: payload,
+    timeoutMs: 10_000,
   });
+  return parseRestResponse<T>(response, method, url.pathname, "AgentSH central event request failed");
 }
 
 function isUnsupported(error: unknown) {
