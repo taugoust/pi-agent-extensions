@@ -14,12 +14,12 @@
  *   - Readability mode for extracting main content from web pages
  */
 
-import { writeFile, mkdir } from "node:fs/promises";
-import { tmpdir } from "node:os";
-import { dirname, resolve } from "node:path";
 import type { ExtensionAPI } from "@mariozechner/pi-coding-agent";
 import { Text } from "@mariozechner/pi-tui";
 import { Type } from "@sinclair/typebox";
+import type { AgentSHPiAPI } from "../sandbox/api.js";
+import { agentSHFetchExpected, executeAgentSHFetch, selectFetchBackend } from "./backend.js";
+import { executeNativeFetch } from "./native.js";
 // Lazy-loaded: gracefully degrades if not installed (bun install)
 let Readability: typeof import("@mozilla/readability").Readability | null = null;
 let JSDOM: typeof import("jsdom").JSDOM | null = null;
@@ -36,24 +36,8 @@ const DEFAULT_MAX_BODY_BYTES = 5 * 1024 * 1024; // 5MB (download / outputPath)
 const DEFAULT_MAX_RESPONSE_TEXT = 100 * 1024; // 100KB text returned to LLM
 const MIN_READABILITY_CONTENT_LENGTH = 200; // Minimum chars for readability to be considered successful
 
-function isAgentSHSupervisedMode(): boolean {
-  return (
-    process.env.PI_SUPERVISED === "1" ||
-    process.env.PI_AUTO === "1" ||
-    process.env.PI_AGENTSH_REMOTE === "ssh" ||
-    Boolean(process.env.AGENTSH_SESSION_SUPERVISOR)
-  );
-}
-
-function assertNativeFetchAllowed() {
-  if (isAgentSHSupervisedMode()) {
-    throw new Error(
-      "native fetch is disabled in AgentSH-supervised mode; use supervised bash/curl",
-    );
-  }
-}
-
 interface FetchDetails {
+  backend: "native" | "agentsh";
   url: string;
   method: string;
   status: number;
@@ -67,6 +51,7 @@ interface FetchDetails {
   readability?: boolean;
   readabilityMethod?: "mozilla" | "simple" | "failed";
   readabilityWarning?: string;
+  effectiveUrl?: string;
 }
 
 /** Escape a string for safe use inside single quotes in shell. */
@@ -228,13 +213,44 @@ function stripHtml(html: string): string {
   );
 }
 
-export default function fetchExtension(pi: ExtensionAPI) {
-  // Native Node fetch executes in the trusted parent Pi and cannot be observed
-  // by the remote/local AgentSH command cgroup or proxy. Do not advertise the
-  // tool at all in supervised sessions, even if a package accidentally includes
-  // this extension.
-  if (isAgentSHSupervisedMode()) return;
+function validatedPositiveInteger(value: unknown, fallback: number, name: string): number {
+  const selected = value ?? fallback;
+  if (typeof selected !== "number" || !Number.isSafeInteger(selected) || selected <= 0) {
+    throw new Error(`${name} must be a positive integer`);
+  }
+  return selected;
+}
 
+function validatedHttpUrl(value: string): URL {
+  if (Buffer.byteLength(value, "utf8") > 16 * 1024 || /[\0\r\n]/.test(value)) throw new Error("fetch URL exceeds 16 KiB or contains control bytes");
+  const url = new URL(value);
+  if (url.protocol !== "http:" && url.protocol !== "https:") throw new Error("fetch supports only HTTP and HTTPS URLs");
+  return url;
+}
+
+function validateRequestData(headers: Record<string, string> | undefined, body: string | undefined) {
+  if (body !== undefined && Buffer.byteLength(body, "utf8") > 1024 * 1024) throw new Error("fetch request body must not exceed 1 MiB");
+  const entries = Object.entries(headers || {});
+  if (entries.length > 100) throw new Error("fetch accepts at most 100 request headers");
+  const bytes = entries.reduce((total, [name, value]) => total + Buffer.byteLength(name, "utf8") + Buffer.byteLength(value, "utf8"), 0);
+  if (bytes > 64 * 1024) throw new Error("fetch request headers must not exceed 64 KiB");
+}
+
+function truncateResultText(text: string): { text: string; truncated: boolean } {
+  const lines = text.split("\n");
+  const lineTruncated = lines.length > 2000;
+  let bounded = lines.slice(0, 2000).join("\n");
+  const byteTruncated = Buffer.byteLength(bounded, "utf8") > 50 * 1024;
+  if (byteTruncated) bounded = Buffer.from(bounded, "utf8").subarray(0, 50 * 1024 - 64).toString("utf8").replace(/\uFFFD+$/g, "");
+  const truncated = lineTruncated || byteTruncated;
+  return { text: truncated ? `${bounded}\n[Result truncated to Pi's 50 KiB/2000-line limit]` : bounded, truncated };
+}
+
+function agentSHAPI(): AgentSHPiAPI | undefined {
+  return (globalThis as { __AGENTSH_PI__?: AgentSHPiAPI }).__AGENTSH_PI__;
+}
+
+export default function fetchExtension(pi: ExtensionAPI) {
   pi.registerTool({
     name: "fetch",
     label: "Fetch",
@@ -305,218 +321,129 @@ export default function fetchExtension(pi: ExtensionAPI) {
       ),
     }),
 
-    async execute(_toolCallId, params, signal, _onUpdate, ctx) {
-      assertNativeFetchAllowed();
+    async execute(toolCallId, params, signal, _onUpdate, ctx) {
       const method = params.method ?? "GET";
-      const timeout = params.timeoutMs ?? DEFAULT_TIMEOUT_MS;
-      const maxBody = params.maxBodyBytes ?? DEFAULT_MAX_BODY_BYTES;
-      const outputPath = params.outputPath
-        ? resolve(ctx.cwd, params.outputPath)
-        : undefined;
+      const timeout = validatedPositiveInteger(params.timeoutMs, DEFAULT_TIMEOUT_MS, "timeoutMs");
+      if (timeout > 2_147_483_647) throw new Error("timeoutMs exceeds the supported timer range");
+      validateRequestData(params.headers, params.body);
+      const maxBody = validatedPositiveInteger(params.maxBodyBytes, DEFAULT_MAX_BODY_BYTES, "maxBodyBytes");
+      if (maxBody > 64 * 1024 * 1024) throw new Error("maxBodyBytes must not exceed 64 MiB");
+      const url = validatedHttpUrl(params.url).toString();
+      const selection = selectFetchBackend(agentSHAPI(), agentSHFetchExpected(process.env));
+      if (selection.kind === "unavailable") throw new Error(selection.message);
+
+      const transport = selection.kind === "agentsh"
+        ? await executeAgentSHFetch(selection.api, {
+            url,
+            method,
+            headers: params.headers,
+            body: params.body,
+            timeoutMs: timeout,
+            maxBodyBytes: maxBody,
+            outputPath: params.outputPath,
+            toolCallId,
+            signal,
+          })
+        : await executeNativeFetch({
+            url,
+            method,
+            headers: params.headers,
+            body: params.body,
+            timeoutMs: timeout,
+            maxBodyBytes: maxBody,
+            outputPath: params.outputPath,
+            cwd: ctx.cwd,
+            signal,
+          });
+
+      if (transport.status < 200 || transport.status >= 300) {
+        throw new Error(`✗ ${transport.status} ${transport.statusText}: ${url}`);
+      }
 
       const curlCommand = toCurl({
-        url: params.url,
+        url,
         method,
         headers: params.headers,
         body: params.body,
-        outputPath,
+        outputPath: transport.outputPath,
       });
 
-      // Guard: without write tool, outputPath is restricted to tmpdir
-      if (outputPath && !pi.getActiveTools().includes("write")) {
-        const tmp = tmpdir();
-        if (!outputPath.startsWith(tmp + "/")) {
-          throw new Error(
-            `✗ outputPath restricted to ${tmp}/ when write tool is not enabled. ` +
-            `Use a path under ${tmp}/ or enable the write tool.`,
-          );
-        }
-      }
-
-      // Build abort controller that respects both our timeout and the caller's signal
-      const controller = new AbortController();
-      const timer = setTimeout(() => controller.abort(), timeout);
-      if (signal) {
-        signal.addEventListener("abort", () => controller.abort(), {
-          once: true,
-        });
-      }
-
-      try {
-        const response = await fetch(params.url, {
-          method,
-          headers: params.headers,
-          body: params.body,
-          signal: controller.signal,
-          redirect: "follow",
-        });
-
-        clearTimeout(timer);
-
-        const buffer = await response.arrayBuffer();
-        const totalBytes = buffer.byteLength;
-
-        // Collect response headers
-        const responseHeaders: Record<string, string> = {};
-        response.headers.forEach((value, key) => {
-          responseHeaders[key] = value;
-        });
-
-        // HTTP errors: throw so pi renders with red toolErrorBg
-        if (!response.ok) {
-          throw new Error(
-            `✗ ${response.status} ${response.statusText}: ${params.url}`,
-          );
-        }
-
-        // Save to file: write bytes to disk, return metadata only
-        if (outputPath) {
-          await mkdir(dirname(outputPath), { recursive: true });
-          await writeFile(outputPath, Buffer.from(buffer));
-
-          const details: FetchDetails = {
-            url: params.url,
-            method,
-            status: response.status,
-            statusText: response.statusText,
-            headers: responseHeaders,
-            bodyLength: totalBytes,
-            truncated: false,
-            curlCommand,
-            outputPath,
-          };
-
-          const lines: string[] = [
-            `HTTP ${response.status} ${response.statusText}`,
-            `Saved ${totalBytes} bytes to ${outputPath}`,
-          ];
-
-          return {
-            content: [{ type: "text", text: lines.join("\n") }],
-            details,
-          };
-        }
-
-        // Return as text: decode full download, strip if needed, then truncate for LLM
-        let bodyText = new TextDecoder("utf-8", { fatal: false }).decode(
-          buffer,
-        );
-
-        // Auto-detect: strip HTML unless explicitly told not to
-        const contentType = responseHeaders["content-type"] || "";
-        const isHtml = contentType.includes("text/html");
-        
-        // Track readability processing
-        let readabilityUsed = false;
-        let readabilityMethod: "mozilla" | "simple" | "failed" | undefined;
-        let readabilityWarning: string | undefined;
-        let articleTitle: string | undefined;
-
-        // Apply readability extraction if requested and content is HTML
-        if (params.readability && isHtml) {
-          readabilityUsed = true;
-          
-          // Try Mozilla Readability first
-          const mozillaResult = extractWithMozillaReadability(bodyText, params.url);
-          if (mozillaResult) {
-            bodyText = mozillaResult.content;
-            readabilityMethod = "mozilla";
-            articleTitle = mozillaResult.title;
-          } else {
-            // Fallback to simple extraction
-            const extractedHtml = extractMainContentSimple(bodyText);
-            bodyText = stripHtml(extractedHtml);
-            readabilityMethod = "simple";
-          }
-          
-          // Check if readability extraction yielded enough content
-          if (bodyText.length < MIN_READABILITY_CONTENT_LENGTH) {
-            readabilityMethod = "failed";
-            readabilityWarning = 
-              `Readability extraction yielded only ${bodyText.length} chars (minimum: ${MIN_READABILITY_CONTENT_LENGTH}). ` +
-              `Re-fetch with readability=false to get full page content.`;
-          }
-        } else {
-          // Normal text-only stripping
-          const stripped =
-            params.textOnly === true || (params.textOnly !== false && isHtml);
-
-          if (stripped) {
-            bodyText = stripHtml(bodyText);
-          }
-        }
-
-        const textLimit = DEFAULT_MAX_RESPONSE_TEXT;
-        const truncated = bodyText.length > textLimit;
-        if (truncated) {
-          bodyText = bodyText.slice(0, textLimit);
-        }
-
+      if (transport.outputPath) {
         const details: FetchDetails = {
-          url: params.url,
+          backend: transport.backend,
+          url,
+          effectiveUrl: transport.effectiveUrl,
           method,
-          status: response.status,
-          statusText: response.statusText,
-          headers: responseHeaders,
-          bodyLength: totalBytes,
-          truncated,
+          status: transport.status,
+          statusText: transport.statusText,
+          headers: transport.headers,
+          bodyLength: transport.bodyLength,
+          truncated: false,
           curlCommand,
-          textOnly: !readabilityUsed && (params.textOnly === true || (params.textOnly !== false && isHtml)),
-          readability: readabilityUsed,
-          readabilityMethod,
-          readabilityWarning,
+          outputPath: transport.outputPath,
         };
-
-        // Format output
-        const lines: string[] = [
-          `HTTP ${response.status} ${response.statusText}`,
-          "",
-        ];
-
-        for (const [key, value] of Object.entries(responseHeaders)) {
-          lines.push(`${key}: ${value}`);
-        }
-        lines.push("");
-
-        // Add readability info if used
-        if (readabilityUsed && articleTitle) {
-          lines.push(`Article: ${articleTitle}`);
-          lines.push("");
-        }
-
-        if (readabilityWarning) {
-          lines.push(`⚠️  ${readabilityWarning}`);
-          lines.push("");
-        }
-
-        if (truncated) {
-          lines.push(
-            `[Truncated to ${textLimit} chars for context. Use outputPath to save full response.]`,
-          );
-        }
-        lines.push(bodyText);
-
         return {
-          content: [{ type: "text", text: lines.join("\n") }],
+          content: [{ type: "text", text: `HTTP ${transport.status} ${transport.statusText}\nSaved ${transport.bodyLength} bytes to ${transport.outputPath}` }],
           details,
         };
-      } catch (err: unknown) {
-        clearTimeout(timer);
-
-        // Re-throw our own errors (HTTP 4xx/5xx) as-is
-        if (err instanceof Error && err.message.startsWith("✗")) {
-          throw err;
-        }
-
-        const isTimeout =
-          err instanceof DOMException && err.name === "AbortError";
-
-        throw new Error(
-          isTimeout
-            ? `✗ Timed out after ${timeout}ms: ${params.url}`
-            : `✗ ${err instanceof Error ? err.message : "Unknown fetch error"}`,
-        );
       }
+
+      let bodyText = new TextDecoder("utf-8", { fatal: false }).decode(transport.body);
+      const contentType = transport.headers["content-type"] || "";
+      const isHtml = contentType.includes("text/html");
+      let readabilityUsed = false;
+      let readabilityMethod: "mozilla" | "simple" | "failed" | undefined;
+      let readabilityWarning: string | undefined;
+      let articleTitle: string | undefined;
+
+      if (params.readability && isHtml) {
+        readabilityUsed = true;
+        const mozillaResult = extractWithMozillaReadability(bodyText, transport.effectiveUrl || url);
+        if (mozillaResult) {
+          bodyText = mozillaResult.content;
+          readabilityMethod = "mozilla";
+          articleTitle = mozillaResult.title;
+        } else {
+          bodyText = stripHtml(extractMainContentSimple(bodyText));
+          readabilityMethod = "simple";
+        }
+        if (bodyText.length < MIN_READABILITY_CONTENT_LENGTH) {
+          readabilityMethod = "failed";
+          readabilityWarning = `Readability extraction yielded only ${bodyText.length} chars (minimum: ${MIN_READABILITY_CONTENT_LENGTH}). Re-fetch with readability=false to get full page content.`;
+        }
+      } else if (params.textOnly === true || (params.textOnly !== false && isHtml)) {
+        bodyText = stripHtml(bodyText);
+      }
+
+      const textTruncated = bodyText.length > DEFAULT_MAX_RESPONSE_TEXT;
+      if (textTruncated) bodyText = bodyText.slice(0, DEFAULT_MAX_RESPONSE_TEXT);
+      const truncated = transport.truncated || textTruncated;
+      const details: FetchDetails = {
+        backend: transport.backend,
+        url,
+        effectiveUrl: transport.effectiveUrl,
+        method,
+        status: transport.status,
+        statusText: transport.statusText,
+        headers: transport.headers,
+        bodyLength: transport.bodyLength,
+        truncated,
+        curlCommand,
+        textOnly: !readabilityUsed && (params.textOnly === true || (params.textOnly !== false && isHtml)),
+        readability: readabilityUsed,
+        readabilityMethod,
+        readabilityWarning,
+      };
+      const lines = [`HTTP ${transport.status} ${transport.statusText}`, ""];
+      for (const [key, value] of Object.entries(transport.headers)) lines.push(`${key}: ${value}`);
+      lines.push("");
+      if (readabilityUsed && articleTitle) lines.push(`Article: ${articleTitle}`, "");
+      if (readabilityWarning) lines.push(`⚠️  ${readabilityWarning}`, "");
+      if (truncated) lines.push(`[Response truncated. Use outputPath with an appropriate maxBodyBytes value to save a bounded complete response.]`);
+      lines.push(bodyText);
+      const rendered = truncateResultText(lines.join("\n"));
+      if (rendered.truncated) details.truncated = true;
+      return { content: [{ type: "text", text: rendered.text }], details };
     },
 
     renderCall(args, theme) {

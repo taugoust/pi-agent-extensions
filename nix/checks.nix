@@ -17,6 +17,8 @@ in
 {
   package = package;
 
+  fetch = import ./fetch-check.nix { inherit self pkgs; };
+
   ssh =
     pkgs.runCommand "ssh-extension-check"
       {

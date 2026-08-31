@@ -408,7 +408,7 @@ Tab/←→ navigate • ↑↓ select • Enter confirm • Esc cancel
 
 </details>
 <details>
-<summary><strong>fetch</strong> - HTTP request tool without bash/curl</summary>
+<summary><strong>fetch</strong> - Adaptive native and AgentSH-supervised HTTP</summary>
 <br>
 
 - **Source**:
@@ -424,11 +424,13 @@ Tab/←→ navigate • ↑↓ select • Enter confirm • Esc cancel
   `jsdom`{.verbatim} (for Readability mode --- installed via
   `bun install`{.verbatim} at root)
 
-**Description**: Registers a native `fetch`{.verbatim} tool that the LLM
-can use for HTTP requests without relying on `bash`{.verbatim} or
-`curl`{.verbatim}. Uses Node.js built-in `fetch`{.verbatim}. Optionally
-uses Mozilla Readability for intelligent content extraction from HTML
-pages. Without dependencies, falls back to regex-based HTML stripping.
+**Description**: Registers one adaptive `fetch`{.verbatim} tool. Outside
+AgentSH it uses bounded Node.js `fetch`{.verbatim}; with an active AgentSH
+supervisor it executes bounded `curl` through AgentSH so DNS, destination
+policy, approvals, cancellation, and audit remain authoritative. If AgentSH is
+expected but unavailable, native fallback is disabled. Supervised runtimes must
+provide `curl`. Optional Mozilla Readability support falls back to regex-based
+HTML stripping when its dependencies are absent.
 
 **Features**:
 
@@ -437,9 +439,10 @@ pages. Without dependencies, falls back to regex-based HTML stripping.
 - Custom request headers and body
 - Configurable timeout (default 30s) and response truncation (default
   100KB)
-- Binary download to file via `outputPath`{.verbatim} parameter
-- `outputPath`{.verbatim} restricted to `/tmp/`{.verbatim} when
-  `write`{.verbatim} tool is not enabled
+- Bounded, atomically published downloads via `outputPath`{.verbatim}
+- Native `outputPath`{.verbatim} is always restricted to the canonical system
+  temporary directory; supervised paths are translated and enforced by AgentSH
+- HTTP(S)-only initial and redirect protocols
 - Curl equivalent shown on expand (`Ctrl+O`{.verbatim})
 - Red error strip for HTTP 4xx/5xx, timeouts, and blocked writes
 
@@ -474,7 +477,7 @@ Errors show with red background:
 ``` example
 ✗ 404 Not Found: https://example.com/missing
 ✗ Timed out after 30000ms: https://slow.example.com
-✗ outputPath restricted to /tmp/ when write tool is not enabled.
+Native fetch outputPath is restricted to /tmp/
 ```
 
 </details>
