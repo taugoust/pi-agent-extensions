@@ -500,7 +500,6 @@ class AgentSHPermissionGateClient {
   constructor(fd: number, timeoutMs: number) {
     this.timeoutMs = timeoutMs;
     this.#socket = new Socket({ fd, readable: true, writable: true });
-    this.#socket.unref();
     this.#socket.on("data", (chunk: Buffer) => this.#receive(Buffer.from(chunk)));
     this.#socket.on("end", () => this.#end());
     this.#socket.on("error", (error) => this.#fail(new Error(`AgentSH Permission Gate transport error: ${error.message}`)));
@@ -511,6 +510,10 @@ class AgentSHPermissionGateClient {
 
   get failure(): Error | undefined {
     return this.#fatal;
+  }
+
+  releaseForProcessExit(): void {
+    this.#socket.unref();
   }
 
   initialize(): Promise<void> {
@@ -956,6 +959,10 @@ export default function permissionGate(pi: ExtensionAPI) {
         ctx.ui.notify("Permission gate disabled", "info");
       }
     },
+  });
+
+  pi.on("session_shutdown", () => {
+    inheritedGateClaim?.client?.releaseForProcessExit();
   });
 
   pi.on("session_start", async (_event, ctx) => {

@@ -1222,6 +1222,7 @@ in
             results.push(await tool({ toolName: "bash", toolCallId: "tool-safe", input: { command: "printf safe" } }, ctx));
           }
           results.push(await tool({ toolName: "bash", toolCallId: "tool-dangerous", input: { command: "sudo true" } }, ctx));
+          await pi.handlers.get("session_shutdown")?.({}, ctx);
           delete globalThis.__piPaseoRemoteUiV1;
           process.stdout.write(JSON.stringify({
             allowed: results.map((result) => result === undefined),
