@@ -1129,52 +1129,397 @@ in
           ${self}/permission-gate/index.ts
 
         cat > "$workdir/test.mjs" <<'EOF'
+        import { spawn } from "node:child_process";
+        import fs from "node:fs";
+        import net from "node:net";
+        import os from "node:os";
+        import path from "node:path";
+        import readline from "node:readline";
+        import { once } from "node:events";
+        import { fileURLToPath } from "node:url";
         import gate from "./out/index.js";
 
         const assert = (condition, message) => { if (!condition) throw new Error(message); };
-        const handlers = new Map();
-        const pi = {
-          events: { emit() {} },
-          registerCommand() {},
-          on(name, handler) { handlers.set(name, handler); },
+        const delay = (milliseconds) => new Promise((resolve) => setTimeout(resolve, milliseconds));
+
+        function createPi() {
+          const handlers = new Map();
+          const commands = new Map();
+          const emitted = [];
+          return {
+            handlers,
+            commands,
+            emitted,
+            events: { emit(name) { emitted.push(name); } },
+            registerCommand(name, definition) { commands.set(name, definition); },
+            on(name, handler) { handlers.set(name, handler); },
+          };
+        }
+
+        function createContext(options = {}) {
+          const statuses = [];
+          const notifications = [];
+          const selections = [];
+          const controller = options.controller || new AbortController();
+          return {
+            cwd: "/exact/workspace",
+            mode: "tui",
+            hasUI: options.hasUI !== false,
+            signal: controller.signal,
+            controller,
+            statuses,
+            notifications,
+            selections,
+            ui: {
+              theme: { fg: (_color, text) => text },
+              setStatus(name, value) { statuses.push({ name, value }); },
+              notify(message, level) { notifications.push({ message, level }); },
+              async select(title, choices, settings) {
+                selections.push({ title, choices, signal: settings?.signal });
+                if (options.onSelect) return await options.onSelect(title, choices, settings, controller);
+                return options.choice;
+              },
+            },
+          };
+        }
+
+        async function runInheritedChild(name) {
+          assert(process.env.AGENTSH_PERMISSION_GATE_FD === undefined, "gate FD marker was not claimed and deleted during import");
+          const pi = createPi();
+          let remoteSelections = [];
+          let contextOptions = { choice: "Allow" };
+          if (name === "local-deny") contextOptions.choice = "Deny";
+          if (name === "cancel") contextOptions.choice = undefined;
+          if (name === "headless") contextOptions.hasUI = false;
+          if (name === "prompt-timeout") {
+            contextOptions.onSelect = async () => await new Promise(() => {});
+          }
+          if (name === "abort" || name === "transport-eof") {
+            contextOptions.onSelect = async (_title, _choices, settings, controller) => {
+              assert(settings?.signal, "AgentSH terminal prompt omitted its signal");
+              if (name === "abort") setTimeout(() => controller.abort(), 5);
+              await new Promise((resolve) => settings.signal.addEventListener("abort", resolve, { once: true }));
+              return undefined;
+            };
+          }
+          if (name === "remote-allow") {
+            globalThis.__piPaseoRemoteUiV1 = {
+              isConnected: () => true,
+              async select(title, choices, settings) {
+                remoteSelections.push({ title, choices, signal: Boolean(settings?.signal) });
+                return "Allow";
+              },
+            };
+            contextOptions.onSelect = () => { throw new Error("terminal selection must not open while Paseo is attached"); };
+          }
+
+          const ctx = createContext(contextOptions);
+          gate(pi);
+          await pi.handlers.get("session_start")({}, ctx);
+          const tool = pi.handlers.get("tool_call");
+          const results = [];
+          if (name === "local-allow") {
+            results.push(await tool({ toolName: "bash", toolCallId: "tool-safe", input: { command: "printf safe" } }, ctx));
+          }
+          results.push(await tool({ toolName: "bash", toolCallId: "tool-dangerous", input: { command: "sudo true" } }, ctx));
+          delete globalThis.__piPaseoRemoteUiV1;
+          process.stdout.write(JSON.stringify({
+            allowed: results.map((result) => result === undefined),
+            blocked: results.map((result) => result?.block === true),
+            reasons: results.map((result) => result?.reason || ""),
+            selections: ctx.selections.map((selection) => ({
+              title: selection.title,
+              choices: selection.choices,
+              signal: Boolean(selection.signal),
+            })),
+            remoteSelections: remoteSelections.map((selection) => ({
+              title: selection.title,
+              choices: selection.choices,
+              signal: selection.signal,
+            })),
+            emitted: pi.emitted,
+            notifications: ctx.notifications,
+          }));
+        }
+
+        function lineReader(socket) {
+          const lines = readline.createInterface({ input: socket, crlfDelay: Infinity });
+          const iterator = lines[Symbol.asyncIterator]();
+          return async () => {
+            let timer;
+            try {
+              const result = await Promise.race([
+                iterator.next(),
+                new Promise((_, reject) => {
+                  timer = setTimeout(() => reject(new Error("timed out waiting for client frame")), 2000);
+                }),
+              ]);
+              if (result.done) throw new Error("permission gate client closed before its next frame");
+              return JSON.parse(result.value);
+            } finally {
+              clearTimeout(timer);
+            }
+          };
+        }
+
+        function send(socket, message) {
+          socket.write(JSON.stringify(message) + "\n");
+        }
+
+        async function expectHello(read, socket, fragmented = false) {
+          const hello = await read();
+          assert(JSON.stringify(hello) === JSON.stringify({ v: 1, type: "hello", client: "pi-permission-gate" }), "invalid client hello: " + JSON.stringify(hello));
+          const response = JSON.stringify({ v: 1, type: "hello", service: "agentsh-permission-gate", capabilities: ["bash", "resolve", "cancel"] }) + "\n";
+          if (fragmented) {
+            socket.write(response.slice(0, 9));
+            await delay(2);
+            socket.write(response.slice(9));
+          } else {
+            socket.write(response);
+          }
+        }
+
+        function assertAuthorize(request, command, toolCallId) {
+          assert(request.v === 1 && request.type === "authorize" && request.kind === "bash", "invalid authorize envelope");
+          assert(request.command === command, "authorize changed the exact Bash command");
+          assert(request.cwd === "/exact/workspace", "authorize changed the exact cwd");
+          assert(request.tool_call_id === toolCallId, "authorize changed the exact toolCallId");
+          assert(typeof request.id === "string" && request.id.length > 0, "authorize omitted its correlation ID");
+        }
+
+        const prompt = {
+          title: "Dangerous command requires approval",
+          message: "Detected: sudo",
+          labels: ["sudo"],
+          command_preview: "sudo true",
         };
-        gate(pi);
 
-        let localCalls = 0;
-        const ctx = {
-          hasUI: true,
-          ui: {
-            async select() { localCalls += 1; return "Yes"; },
-            setStatus() {},
-          },
-        };
-        const dangerous = { toolName: "bash", input: { command: "sudo true" } };
-        const remoteCalls = [];
-        globalThis.__piPaseoRemoteUiV1 = {
-          isConnected: () => true,
-          async select(title, options) {
-            remoteCalls.push({ title, options });
-            return "Yes";
-          },
-        };
-        let result = await handlers.get("tool_call")(dangerous, ctx);
-        assert(result === undefined, "remote approval did not allow the command");
-        assert(remoteCalls.length === 1 && localCalls === 0, "remote approval did not bypass terminal selection");
-        assert(remoteCalls[0].options.join(",") === "Yes,No", "remote approval options changed");
+        async function promptedBroker(socket, expectedFinish, fragmentedHello = false) {
+          const read = lineReader(socket);
+          await expectHello(read, socket, fragmentedHello);
+          const request = await read();
+          assertAuthorize(request, "sudo true", "tool-dangerous");
+          send(socket, { v: 1, type: "decision", id: request.id, decision: "prompt", prompt });
+          const finish = await read();
+          assert(finish.v === 1 && finish.id === request.id && finish.type === expectedFinish.type, "client sent the wrong terminal prompt frame");
+          if (expectedFinish.type === "resolve") {
+            assert(finish.decision === expectedFinish.decision, "client sent the wrong resolution");
+          } else {
+            assert(finish.reason === expectedFinish.reason, "client sent the wrong cancellation reason: " + finish.reason);
+          }
+          send(socket, {
+            v: 1,
+            type: "complete",
+            id: request.id,
+            decision: expectedFinish.decision || "deny",
+            reason: expectedFinish.decision === "allow" ? "approved by Pi user interface" : (finish.reason || "denied by Pi user interface"),
+          });
+        }
 
-        globalThis.__piPaseoRemoteUiV1.select = async () => "No";
-        result = await handlers.get("tool_call")(dangerous, ctx);
-        assert(result?.block === true, "remote denial did not block the command");
+        async function spawnInheritedChild(name, broker, timeout) {
+          const root = fs.mkdtempSync(path.join(os.tmpdir(), "permission-gate-check-"));
+          const socketPath = path.join(root, "gate.sock");
+          const server = net.createServer();
+          await new Promise((resolve, reject) => {
+            server.once("error", reject);
+            server.listen(socketPath, resolve);
+          });
+          const accepted = new Promise((resolve) => server.once("connection", resolve));
+          const carrier = net.createConnection(socketPath);
+          await once(carrier, "connect");
+          const peer = await accepted;
 
-        globalThis.__piPaseoRemoteUiV1.select = async () => { throw new Error("disconnected"); };
-        result = await handlers.get("tool_call")(dangerous, ctx);
-        assert(result?.block === true, "remote UI failure did not fail closed");
+          const environment = { ...process.env, AGENTSH_PERMISSION_GATE_FD: "3", PERMISSION_GATE_CHILD_CASE: name };
+          if (timeout !== undefined) environment.PI_AGENTSH_PERMISSION_GATE_TIMEOUT_MS = String(timeout);
+          for (const variable of [
+            "PI_SUPERVISED", "PI_AUTO", "PI_AGENTSH_REMOTE", "PI_AGENTSH_READ_MODE",
+            "AGENTSH_SESSION_SUPERVISOR", "AGENTSH_APPROVAL_UI_SOCKET",
+            "PI_AGENTSH_MOCK_SUPERVISOR", "PI_AGENTSH_ENABLE", "AGENTSH_CHILD_CAPABILITY",
+          ]) delete environment[variable];
 
-        globalThis.__piPaseoRemoteUiV1.isConnected = () => false;
-        result = await handlers.get("tool_call")(dangerous, ctx);
-        assert(result === undefined && localCalls === 1, "detached Paseo did not fall back to terminal selection");
-        delete globalThis.__piPaseoRemoteUiV1;
-        console.log("permission-gate checks passed");
+          const child = spawn(process.execPath, [fileURLToPath(import.meta.url)], {
+            env: environment,
+            stdio: ["ignore", "pipe", "pipe", carrier],
+          });
+          carrier.destroy();
+          let stdout = "";
+          let stderr = "";
+          child.stdout.on("data", (chunk) => { stdout += chunk; });
+          child.stderr.on("data", (chunk) => { stderr += chunk; });
+
+          try {
+            await broker(peer, () => stdout);
+            let timer;
+            const [code, childSignal] = await Promise.race([
+              once(child, "close"),
+              new Promise((_, reject) => {
+                timer = setTimeout(() => reject(new Error("permission gate child hung")), 3000);
+              }),
+            ]).finally(() => clearTimeout(timer));
+            assert(code === 0, "permission gate child failed (signal " + childSignal + "): " + stderr);
+            return JSON.parse(stdout);
+          } catch (error) {
+            child.kill("SIGKILL");
+            throw error;
+          } finally {
+            peer.destroy();
+            server.close();
+            fs.rmSync(root, { recursive: true, force: true });
+          }
+        }
+
+        async function runInheritedChecks() {
+          const allowed = await spawnInheritedChild("local-allow", async (socket, stdout) => {
+            const read = lineReader(socket);
+            await expectHello(read, socket, true);
+            const harmless = await read();
+            assertAuthorize(harmless, "printf safe", "tool-safe");
+            send(socket, { v: 1, type: "decision", id: harmless.id, decision: "allow" });
+            const dangerous = await read();
+            assertAuthorize(dangerous, "sudo true", "tool-dangerous");
+            send(socket, { v: 1, type: "decision", id: dangerous.id, decision: "prompt", prompt });
+            const resolution = await read();
+            assert(resolution.type === "resolve" && resolution.decision === "allow", "allow prompt was not resolved");
+            await delay(25);
+            assert(stdout() === "", "client allowed before AgentSH sent complete");
+            send(socket, { v: 1, type: "complete", id: dangerous.id, decision: "allow", reason: "approved by Pi user interface" });
+          });
+          assert(allowed.allowed.join(",") === "true,true", "AgentSH allow decisions did not allow both exact commands");
+          assert(allowed.selections.length === 1, "AgentSH prompt did not use terminal UI exactly once");
+          assert(allowed.selections[0].choices.join(",") === "Deny,Allow", "AgentSH prompt was not deny-first");
+          assert(allowed.selections[0].signal, "AgentSH terminal prompt omitted cancellation signal");
+          assert(allowed.selections[0].title.includes("Dangerous command requires approval") && allowed.selections[0].title.includes("sudo true"), "AgentSH prompt metadata was not rendered");
+
+          const denied = await spawnInheritedChild("local-deny", (socket) => promptedBroker(socket, { type: "resolve", decision: "deny" }));
+          assert(denied.blocked[0], "AgentSH explicit denial did not block");
+
+          const remote = await spawnInheritedChild("remote-allow", (socket) => promptedBroker(socket, { type: "resolve", decision: "allow" }));
+          assert(remote.allowed[0] && remote.selections.length === 0 && remote.remoteSelections.length === 1, "Paseo did not exclusively render the AgentSH prompt");
+          assert(remote.remoteSelections[0].choices.join(",") === "Deny,Allow" && remote.remoteSelections[0].signal, "Paseo AgentSH prompt was not deny-first or omitted signal");
+
+          const cancelled = await spawnInheritedChild("cancel", (socket) => promptedBroker(socket, { type: "cancel", reason: "authorization prompt cancelled" }));
+          assert(cancelled.blocked[0], "dismissed AgentSH prompt did not fail closed");
+
+          const headless = await spawnInheritedChild("headless", (socket) => promptedBroker(socket, { type: "cancel", reason: "no UI available" }));
+          assert(headless.blocked[0], "headless AgentSH prompt did not fail closed");
+
+          const aborted = await spawnInheritedChild("abort", (socket) => promptedBroker(socket, { type: "cancel", reason: "caller aborted" }));
+          assert(aborted.blocked[0], "aborted AgentSH prompt did not fail closed");
+
+          const promptTimeout = await spawnInheritedChild("prompt-timeout", (socket) => promptedBroker(socket, { type: "cancel", reason: "authorization prompt timed out" }), 40);
+          assert(promptTimeout.blocked[0], "AgentSH prompt timeout did not fail closed");
+
+          const malformed = await spawnInheritedChild("malformed", async (socket) => {
+            const read = lineReader(socket);
+            const hello = await read();
+            assert(hello.type === "hello", "malformed test did not receive hello");
+            socket.write('{"v":1,"v":1,"type":"hello","service":"agentsh-permission-gate","capabilities":["bash","resolve","cancel"]}\n');
+          });
+          assert(malformed.blocked[0] && malformed.reasons[0].includes("failed closed"), "duplicate JSON field did not fail closed");
+
+          const eof = await spawnInheritedChild("eof", async (socket) => {
+            const read = lineReader(socket);
+            await read();
+            socket.end();
+          });
+          assert(eof.blocked[0], "unexpected gate EOF did not fail closed");
+
+          const eofDuringPrompt = await spawnInheritedChild("transport-eof", async (socket) => {
+            const read = lineReader(socket);
+            await expectHello(read, socket);
+            const request = await read();
+            assertAuthorize(request, "sudo true", "tool-dangerous");
+            send(socket, { v: 1, type: "decision", id: request.id, decision: "prompt", prompt });
+            await delay(10);
+            socket.end();
+          });
+          assert(eofDuringPrompt.blocked[0], "gate EOF did not abort and fail closed an open prompt");
+
+          const eofBeforeComplete = await spawnInheritedChild("eof-complete", async (socket) => {
+            const read = lineReader(socket);
+            await expectHello(read, socket);
+            const request = await read();
+            assertAuthorize(request, "sudo true", "tool-dangerous");
+            send(socket, { v: 1, type: "decision", id: request.id, decision: "prompt", prompt });
+            const resolution = await read();
+            assert(resolution.type === "resolve", "EOF completion test did not receive a resolution");
+            socket.end();
+          });
+          assert(eofBeforeComplete.blocked[0], "gate EOF before complete did not fail closed");
+
+          const timedOut = await spawnInheritedChild("timeout", async (socket) => {
+            const read = lineReader(socket);
+            await read();
+          }, 40);
+          assert(timedOut.blocked[0] && timedOut.reasons[0].includes("timed out"), "gate timeout did not fail closed");
+        }
+
+        async function runLegacyChecks() {
+          const pi = createPi();
+          gate(pi);
+          let localCalls = 0;
+          const controller = new AbortController();
+          const ctx = createContext({
+            controller,
+            choice: "Yes",
+            onSelect: async (_title, _choices, settings) => {
+              localCalls += 1;
+              assert(settings?.signal === controller.signal, "legacy terminal prompt dropped ctx.signal");
+              return "Yes";
+            },
+          });
+          const dangerous = { toolName: "bash", toolCallId: "legacy-tool", input: { command: "sudo true" } };
+          const remoteCalls = [];
+          globalThis.__piPaseoRemoteUiV1 = {
+            isConnected: () => true,
+            async select(title, options, settings) {
+              remoteCalls.push({ title, options, settings });
+              return "Yes";
+            },
+          };
+          let result = await pi.handlers.get("tool_call")(dangerous, ctx);
+          assert(result === undefined, "legacy remote approval did not allow the command");
+          assert(remoteCalls.length === 1 && localCalls === 0, "legacy remote approval did not bypass terminal selection");
+          assert(remoteCalls[0].options.join(",") === "Yes,No", "legacy remote approval options changed");
+          assert(remoteCalls[0].settings.signal === controller.signal, "legacy Paseo prompt dropped ctx.signal");
+
+          globalThis.__piPaseoRemoteUiV1.select = async () => "No";
+          result = await pi.handlers.get("tool_call")(dangerous, ctx);
+          assert(result?.block === true, "legacy remote denial did not block the command");
+
+          globalThis.__piPaseoRemoteUiV1.select = async () => { throw new Error("disconnected"); };
+          result = await pi.handlers.get("tool_call")(dangerous, ctx);
+          assert(result?.block === true, "legacy remote UI failure did not fail closed");
+
+          globalThis.__piPaseoRemoteUiV1.isConnected = () => false;
+          result = await pi.handlers.get("tool_call")(dangerous, ctx);
+          assert(result === undefined && localCalls === 1, "detached Paseo did not fall back to terminal selection");
+          delete globalThis.__piPaseoRemoteUiV1;
+
+          for (const [name, value] of [
+            ["PI_SUPERVISED", "1"],
+            ["PI_AUTO", "1"],
+            ["AGENTSH_SESSION_SUPERVISOR", "unix:///tmp/supervisor.sock"],
+            ["PI_AGENTSH_MOCK_SUPERVISOR", "/tmp/mock-supervisor.sock"],
+            ["PI_AGENTSH_ENABLE", "1"],
+          ]) {
+            process.env[name] = value;
+            const supervisedPi = createPi();
+            gate(supervisedPi);
+            const supervisedCtx = createContext({ onSelect: () => { throw new Error("legacy prompt opened in " + name + " mode"); } });
+            const supervisedResult = await supervisedPi.handlers.get("tool_call")(dangerous, supervisedCtx);
+            assert(supervisedResult === undefined && supervisedCtx.selections.length === 0, "legacy gate was not synchronously suppressed in " + name + " mode");
+            delete process.env[name];
+          }
+        }
+
+        if (process.env.PERMISSION_GATE_CHILD_CASE) {
+          await runInheritedChild(process.env.PERMISSION_GATE_CHILD_CASE);
+        } else {
+          await runLegacyChecks();
+          await runInheritedChecks();
+          console.log("permission-gate checks passed");
+        }
         EOF
 
         cd "$workdir"

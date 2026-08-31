@@ -159,6 +159,52 @@ closed with an actionable diagnostic.
 
 </details>
 <details>
+<summary><strong>permission-gate</strong> - AgentSH or legacy dangerous-command authorization</summary>
+<br>
+
+- **Source**:
+  [permission-gate/](https://github.com/rytswd/pi-agent-extensions/tree/main/permission-gate)
+- **License**: MIT
+- **Command**: `/permission-gate` toggles only the unsupervised legacy gate;
+  AgentSH-owned gates cannot be disabled from Pi
+- **Status bar**: `gate ■` in legacy mode, or `AgentSH gate ■` / `?` / `✗`
+  with an inherited AgentSH gate
+
+**Description**: Selects exactly one authority for Bash tool calls:
+
+1. When the trusted AgentSH launcher passes `AGENTSH_PERMISSION_GATE_FD`, the
+   extension claims and deletes that environment marker, performs the version 1
+   hello over the inherited Unix socket, and sends every exact Bash command,
+   working directory, and Pi tool-call ID to AgentSH. AgentSH—not Pi's local
+   regex list—classifies the command and durably audits the terminal decision.
+2. Full AgentSH supervised, Auto, and sandbox modes synchronously suppress this
+   legacy gate so they do not produce a second prompt before the sandbox
+   extension has attached.
+3. Only an ordinary session with neither integration uses the original local
+   dangerous-command regex prompts and `/permission-gate` toggle.
+
+The inherited protocol is bounded JSONL (64 KiB frames, with smaller command,
+cwd, ID, and prompt-preview limits). AgentSH prompt metadata is rendered through
+an attached Paseo permission card or Pi's selectable UI, with **Deny first** and
+the active cancellation signal. Pi sends `resolve` for explicit allow/deny or
+`cancel` for dismissal, timeout, headless use, or abort, then waits for
+AgentSH's audited `complete` acknowledgement before allowing anything. Invalid
+FDs, handshake/version errors, malformed or oversized frames, mismatched IDs,
+unexpected EOF, timeout, and abort all fail closed. The default per-step and
+prompt bound is five minutes; a trusted launcher may set
+`PI_AGENTSH_PERMISSION_GATE_TIMEOUT_MS` to another positive millisecond value.
+
+This AgentSH mode is a lightweight **guard only**. It authorizes command intent
+but does not create a sandbox or observe native Bash execution. Launch it via
+AgentSH rather than setting `AGENTSH_PERMISSION_GATE_FD` manually; the value is
+an inherited file descriptor, not a socket path or user configuration knob.
+
+``` sh
+agentsh permission-gate run -- pi
+```
+
+</details>
+<details>
 <summary><strong>slow-mode</strong> - Review gate for <code>write</code> and <code>edit</code> tool calls</summary>
 <br>
 
@@ -826,8 +872,9 @@ grant nor an override for hard policy denials. Command prompts retain
 exact-invocation/session denial but omit broader executable-wide or
 command-wide denial; exact grants precede executable-wide grants. File prompts retain all
 scoped allow choices without scoped denials. When a terminal Pi session is attached through
-a compatible Paseo bridge, both the legacy `permission-gate` selection and AgentSH approval
-selection are rendered as Paseo permission cards. Paseo transports only the selected label;
+a compatible Paseo bridge, the legacy and inherited-FD `permission-gate`
+selections and full AgentSH approval selections are rendered as Paseo permission
+cards. Paseo transports only the selected label;
 `sandbox` maps it back to the original AgentSH approval ID and exact scope metadata before
 asking AgentSH to resolve it. A bridge disconnect or response failure denies the request, while
 sessions without an attached bridge retain their normal terminal UI. In native Pi RPC mode,
@@ -1056,6 +1103,8 @@ pi
 ├── fetch/              # HTTP request tool
 │   └── index.ts
 ├── modal-editor/       # Vim-style modal input editor
+│   └── index.ts
+├── permission-gate/    # AgentSH/legacy Bash authorization gate
 │   └── index.ts
 ├── pdf/                # Local or AgentSH-supervised PDF inspection tools
 │   ├── backend.ts
