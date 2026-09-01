@@ -30,8 +30,7 @@ let
     ++ lib.optional (builtins.elem "sandbox" extensions) "subagent"
     ++ lib.optional wantsSubagent "subagent-finalizer"
   );
-  needsSharedRuntime =
-    builtins.elem "sandbox" selectedExtensions || builtins.elem "agent-events" selectedExtensions;
+  needsSharedRuntime = builtins.elem "sandbox" selectedExtensions;
   unknownExtensions = lib.subtractLists (builtins.attrNames extensionRegistry) selectedExtensions;
   unknownSkills = lib.subtractLists (builtins.attrNames skillRegistry) skills;
 

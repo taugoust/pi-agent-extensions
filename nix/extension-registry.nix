@@ -6,7 +6,6 @@
 
 let
   localExtensionNames = [
-    "agent-events"
     "auto"
     "direnv"
     "fence"

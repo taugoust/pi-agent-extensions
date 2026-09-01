@@ -77,7 +77,6 @@
             name = "pi-auto-extensions";
             packageName = "pi-auto-extensions";
             extensions = [
-              "agent-events"
               "questionnaire"
               "pager"
               "fetch"

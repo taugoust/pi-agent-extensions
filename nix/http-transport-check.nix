@@ -10,12 +10,11 @@ pkgs.runCommand "http-transport-check"
   ''
     set -euo pipefail
     workdir="$TMPDIR/http-transport-check"
-    mkdir -p "$workdir/src/shared" "$workdir/src/agent-events" "$workdir/out"
+    mkdir -p "$workdir/src/shared" "$workdir/out"
     cp ${self}/shared/http-transport.ts "$workdir/src/shared/http-transport.ts"
-    cp ${self}/agent-events/index.ts "$workdir/src/agent-events/index.ts"
     printf '%s\n' '{"type":"module"}' > "$workdir/src/package.json"
     tsc --noCheck --skipLibCheck --module nodenext --moduleResolution nodenext --target es2022 \
-      --rootDir "$workdir/src" --outDir "$workdir/out" "$workdir/src/shared/http-transport.ts" "$workdir/src/agent-events/index.ts"
+      --rootDir "$workdir/src" --outDir "$workdir/out" "$workdir/src/shared/http-transport.ts"
     cat > "$workdir/test.mjs" <<'EOF'
     import assert from "node:assert/strict";
     import fs from "node:fs";
@@ -24,11 +23,6 @@ pkgs.runCommand "http-transport-check"
     import path from "node:path";
     import { pathToFileURL } from "node:url";
     const transport = await import(pathToFileURL(path.join(process.argv[2], "shared/http-transport.js")).href);
-    const eventsModule = await import(pathToFileURL(path.join(process.argv[2], "agent-events/index.js")).href);
-    const eventsExtension = eventsModule.default?.default ?? eventsModule.default ?? eventsModule;
-    const eventHandlers = new Map();
-    eventsExtension({ registerCommand() {}, on(name, handler) { eventHandlers.set(name, handler); } });
-    assert.equal(typeof eventHandlers.get("session_start"), "function", "agent-events did not load with the shared transport");
     const socket = path.join(fs.mkdtempSync(path.join(os.tmpdir(), "http-transport-")), "server.sock");
     const server = http.createServer((request, response) => {
       if (request.url === "/closed") { response.writeHead(200); response.flushHeaders(); response.write("partial"); setTimeout(() => response.socket.destroy(), 10); return; }

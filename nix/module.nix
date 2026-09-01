@@ -24,7 +24,6 @@ in
     };
 
     extensions = {
-      agent-events.enable = lib.mkEnableOption "agent-events extension — publish AgentSH session events for external notifications";
       direnv.enable = lib.mkEnableOption "direnv extension — refreshes environment via direnv export";
       fence.enable = lib.mkEnableOption "fence extension — blocks write/edit outside cwd";
       fetch.enable = lib.mkEnableOption "adaptive fetch extension — native HTTP outside AgentSH and supervised curl when AgentSH is active";
@@ -86,10 +85,7 @@ in
         ".pi/agent/skills/tikz-figure-recreation/SKILL.md".source =
           "${self}/skills/tikz-figure-recreation/SKILL.md";
       })
-      (lib.mkIf cfg.extensions.agent-events.enable {
-        "${extDir}/agent-events/index.ts".source = "${self}/agent-events/index.ts";
-      })
-      (lib.mkIf (cfg.extensions.agent-events.enable || cfg.extensions.sandbox.enable) {
+      (lib.mkIf cfg.extensions.sandbox.enable {
         "${extDir}/shared".source = "${self}/shared";
       })
       (lib.mkIf cfg.extensions.direnv.enable {
