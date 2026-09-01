@@ -2,15 +2,16 @@
  * Permission Gate Extension
  *
  * In ordinary Pi sessions this retains the legacy, toggleable regex prompt.
- * When AgentSH passes AGENTSH_PERMISSION_GATE_FD, AgentSH owns classification
- * and this extension becomes a bounded client for that inherited authority
- * channel. Full AgentSH sandbox/supervised modes suppress the legacy gate.
+ * When AgentSH passes its private Permission Gate rendezvous, AgentSH owns
+ * classification and this extension becomes a bounded client for that
+ * authority channel. Full AgentSH sandbox/supervised modes suppress the legacy gate.
  *
  * Credit for the original legacy gate: Mic92
  * (https://github.com/Mic92/dotfiles)
  */
 
-import { Socket } from "node:net";
+import { createConnection, Socket } from "node:net";
+import { isAbsolute } from "node:path";
 import type {
   ExtensionAPI,
   ExtensionContext,
@@ -19,6 +20,9 @@ import type {
 const CAPABILITY_GATE_MARKER = "__paeSandboxCapabilityGateActive";
 const GATE_CLAIM_KEY = "__paeAgentSHPermissionGateClaimV1";
 const PASEO_REMOTE_UI_KEY = "__piPaseoRemoteUiV1";
+const GATE_SOCKET_ENV = "AGENTSH_PERMISSION_GATE_SOCKET";
+// Retain the inherited-FD client only for compatibility with an already-running
+// launcher during an in-process extension reload.
 const GATE_FD_ENV = "AGENTSH_PERMISSION_GATE_FD";
 const GATE_TIMEOUT_ENV = "PI_AGENTSH_PERMISSION_GATE_TIMEOUT_MS";
 
@@ -124,7 +128,8 @@ type FrameWaiter = {
 
 type GateClaim = {
   protocol: 1;
-  rawFD: string;
+  rawSocket?: string;
+  rawFD?: string;
   timeoutRaw?: string;
   client?: AgentSHPermissionGateClient;
   error?: Error;
@@ -142,18 +147,23 @@ function ownEnvironment(name: string): boolean {
 function claimInheritedGate(): GateClaim | undefined {
   const root = globalThis as Record<string, unknown>;
   const existing = root[GATE_CLAIM_KEY] as GateClaim | undefined;
-  const markerPresent = ownEnvironment(GATE_FD_ENV);
-  const rawFD = markerPresent ? process.env[GATE_FD_ENV] ?? "" : undefined;
-  if (markerPresent) delete process.env[GATE_FD_ENV];
+  const socketPresent = ownEnvironment(GATE_SOCKET_ENV);
+  const fdPresent = ownEnvironment(GATE_FD_ENV);
+  const rawSocket = socketPresent ? process.env[GATE_SOCKET_ENV] ?? "" : undefined;
+  const rawFD = fdPresent ? process.env[GATE_FD_ENV] ?? "" : undefined;
+  if (socketPresent) delete process.env[GATE_SOCKET_ENV];
+  if (fdPresent) delete process.env[GATE_FD_ENV];
 
-  if (existing?.protocol === PROTOCOL_VERSION && typeof existing.rawFD === "string") {
+  if (existing?.protocol === PROTOCOL_VERSION
+    && (typeof existing.rawSocket === "string" || typeof existing.rawFD === "string")) {
     return existing;
   }
-  if (!markerPresent) return undefined;
+  if (!socketPresent && !fdPresent) return undefined;
 
   const claim: GateClaim = {
     protocol: PROTOCOL_VERSION,
-    rawFD: rawFD!,
+    rawSocket,
+    rawFD,
     timeoutRaw: process.env[GATE_TIMEOUT_ENV],
   };
   root[GATE_CLAIM_KEY] = claim;
@@ -185,12 +195,25 @@ function parseGateFD(raw: string): number {
   return fd;
 }
 
+function parseGateSocket(raw: string): string {
+  if (!isAbsolute(raw) || raw.includes("\0") || Buffer.byteLength(raw, "utf8") > MAX_CWD_BYTES) {
+    throw new Error(`${GATE_SOCKET_ENV} is not a valid absolute Unix socket path`);
+  }
+  return raw;
+}
+
 function gateClient(claim: GateClaim): AgentSHPermissionGateClient {
   if (claim.error) throw claim.error;
   if (claim.client) return claim.client;
   try {
+    if (claim.rawSocket !== undefined && claim.rawFD !== undefined) {
+      throw new Error("AgentSH Permission Gate supplied conflicting transports");
+    }
+    const endpoint = claim.rawSocket !== undefined
+      ? parseGateSocket(claim.rawSocket)
+      : parseGateFD(claim.rawFD ?? "");
     claim.client = new AgentSHPermissionGateClient(
-      parseGateFD(claim.rawFD),
+      endpoint,
       configuredTimeout(claim.timeoutRaw),
     );
     return claim.client;
@@ -497,9 +520,12 @@ class AgentSHPermissionGateClient {
   #tail: Promise<void> = Promise.resolve();
   #requestNumber = 0;
 
-  constructor(fd: number, timeoutMs: number) {
+  constructor(endpoint: number | string, timeoutMs: number) {
     this.timeoutMs = timeoutMs;
-    this.#socket = new Socket({ fd, readable: true, writable: true });
+    this.#socket = typeof endpoint === "number"
+      ? new Socket({ fd: endpoint, readable: true, writable: true })
+      : createConnection({ path: endpoint });
+    this.#socket.unref();
     this.#socket.on("data", (chunk: Buffer) => this.#receive(Buffer.from(chunk)));
     this.#socket.on("end", () => this.#end());
     this.#socket.on("error", (error) => this.#fail(new Error(`AgentSH Permission Gate transport error: ${error.message}`)));
@@ -510,10 +536,6 @@ class AgentSHPermissionGateClient {
 
   get failure(): Error | undefined {
     return this.#fatal;
-  }
-
-  releaseForProcessExit(): void {
-    this.#socket.unref();
   }
 
   initialize(): Promise<void> {
@@ -959,10 +981,6 @@ export default function permissionGate(pi: ExtensionAPI) {
         ctx.ui.notify("Permission gate disabled", "info");
       }
     },
-  });
-
-  pi.on("session_shutdown", () => {
-    inheritedGateClaim?.client?.releaseForProcessExit();
   });
 
   pi.on("session_start", async (_event, ctx) => {

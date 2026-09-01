@@ -1185,6 +1185,7 @@ in
 
         async function runInheritedChild(name) {
           assert(process.env.AGENTSH_PERMISSION_GATE_FD === undefined, "gate FD marker was not claimed and deleted during import");
+          assert(process.env.AGENTSH_PERMISSION_GATE_SOCKET === undefined, "gate socket marker was not claimed and deleted during import");
           const pi = createPi();
           let remoteSelections = [];
           let contextOptions = { choice: "Allow" };
@@ -1222,7 +1223,6 @@ in
             results.push(await tool({ toolName: "bash", toolCallId: "tool-safe", input: { command: "printf safe" } }, ctx));
           }
           results.push(await tool({ toolName: "bash", toolCallId: "tool-dangerous", input: { command: "sudo true" } }, ctx));
-          await pi.handlers.get("session_shutdown")?.({}, ctx);
           delete globalThis.__piPaseoRemoteUiV1;
           process.stdout.write(JSON.stringify({
             allowed: results.map((result) => result === undefined),
@@ -1317,7 +1317,7 @@ in
           });
         }
 
-        async function spawnInheritedChild(name, broker, timeout) {
+        async function spawnInheritedChild(name, broker, timeout, transport = "fd") {
           const root = fs.mkdtempSync(path.join(os.tmpdir(), "permission-gate-check-"));
           const socketPath = path.join(root, "gate.sock");
           const server = net.createServer();
@@ -1326,11 +1326,17 @@ in
             server.listen(socketPath, resolve);
           });
           const accepted = new Promise((resolve) => server.once("connection", resolve));
-          const carrier = net.createConnection(socketPath);
-          await once(carrier, "connect");
-          const peer = await accepted;
+          let carrier;
+          let peer;
+          if (transport === "fd") {
+            carrier = net.createConnection(socketPath);
+            await once(carrier, "connect");
+            peer = await accepted;
+          }
 
-          const environment = { ...process.env, AGENTSH_PERMISSION_GATE_FD: "3", PERMISSION_GATE_CHILD_CASE: name };
+          const environment = { ...process.env, PERMISSION_GATE_CHILD_CASE: name };
+          if (transport === "fd") environment.AGENTSH_PERMISSION_GATE_FD = "3";
+          else environment.AGENTSH_PERMISSION_GATE_SOCKET = socketPath;
           if (timeout !== undefined) environment.PI_AGENTSH_PERMISSION_GATE_TIMEOUT_MS = String(timeout);
           for (const variable of [
             "PI_SUPERVISED", "PI_AUTO", "PI_AGENTSH_REMOTE", "PI_AGENTSH_READ_MODE",
@@ -1340,9 +1346,10 @@ in
 
           const child = spawn(process.execPath, [fileURLToPath(import.meta.url)], {
             env: environment,
-            stdio: ["ignore", "pipe", "pipe", carrier],
+            stdio: transport === "fd" ? ["ignore", "pipe", "pipe", carrier] : ["ignore", "pipe", "pipe"],
           });
-          carrier.destroy();
+          if (carrier) carrier.destroy();
+          if (transport === "socket") peer = await accepted;
           let stdout = "";
           let stderr = "";
           child.stdout.on("data", (chunk) => { stdout += chunk; });
@@ -1370,6 +1377,21 @@ in
         }
 
         async function runInheritedChecks() {
+          const socketAllowed = await spawnInheritedChild("local-allow", async (socket) => {
+            const read = lineReader(socket);
+            await expectHello(read, socket, true);
+            const harmless = await read();
+            assertAuthorize(harmless, "printf safe", "tool-safe");
+            send(socket, { v: 1, type: "decision", id: harmless.id, decision: "allow" });
+            const dangerous = await read();
+            assertAuthorize(dangerous, "sudo true", "tool-dangerous");
+            send(socket, { v: 1, type: "decision", id: dangerous.id, decision: "prompt", prompt });
+            const resolution = await read();
+            assert(resolution.type === "resolve" && resolution.decision === "allow", "Unix rendezvous prompt was not allowed");
+            send(socket, { v: 1, type: "complete", id: dangerous.id, decision: "allow", reason: "approved by Pi user interface" });
+          }, undefined, "socket");
+          assert(socketAllowed.allowed.join(",") === "true,true", "Unix rendezvous did not authorize both commands");
+
           const allowed = await spawnInheritedChild("local-allow", async (socket, stdout) => {
             const read = lineReader(socket);
             await expectHello(read, socket, true);

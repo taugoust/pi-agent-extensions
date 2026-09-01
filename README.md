@@ -172,18 +172,19 @@ closed with an actionable diagnostic.
 
 **Description**: Selects exactly one authority for Bash tool calls:
 
-1. When the trusted AgentSH launcher passes `AGENTSH_PERMISSION_GATE_FD`, the
-   extension claims and deletes that environment marker, performs the version 1
-   hello over the inherited Unix socket, and sends every exact Bash command,
-   working directory, and Pi tool-call ID to AgentSH. AgentSH—not Pi's local
-   regex list—classifies the command and durably audits the terminal decision.
+1. When the trusted AgentSH launcher passes `AGENTSH_PERMISSION_GATE_SOCKET`,
+   the extension claims and deletes that environment marker, connects to the
+   private one-shot Unix rendezvous, performs the version 1 hello, and sends
+   every exact Bash command, working directory, and Pi tool-call ID to AgentSH.
+   AgentSH—not Pi's local regex list—classifies the command and durably audits
+   the terminal decision.
 2. Full AgentSH supervised, Auto, and sandbox modes synchronously suppress this
    legacy gate so they do not produce a second prompt before the sandbox
    extension has attached.
 3. Only an ordinary session with neither integration uses the original local
    dangerous-command regex prompts and `/permission-gate` toggle.
 
-The inherited protocol is bounded JSONL (64 KiB frames, with smaller command,
+The rendezvous protocol is bounded JSONL (64 KiB frames, with smaller command,
 cwd, ID, and prompt-preview limits). AgentSH prompt metadata is rendered through
 an attached Paseo permission card or Pi's selectable UI, with **Deny first** and
 the active cancellation signal. Pi sends `resolve` for explicit allow/deny or
@@ -196,8 +197,9 @@ prompt bound is five minutes; a trusted launcher may set
 
 This AgentSH mode is a lightweight **guard only**. It authorizes command intent
 but does not create a sandbox or observe native Bash execution. Launch it via
-AgentSH rather than setting `AGENTSH_PERMISSION_GATE_FD` manually; the value is
-an inherited file descriptor, not a socket path or user configuration knob.
+AgentSH rather than setting `AGENTSH_PERMISSION_GATE_SOCKET` manually. AgentSH
+creates the private mode-0700 rendezvous, binds its peer to the launched Pi PID
+on Linux, and removes its path immediately after the one allowed connection.
 
 ``` sh
 agentsh permission-gate run -- pi
@@ -872,7 +874,7 @@ grant nor an override for hard policy denials. Command prompts retain
 exact-invocation/session denial but omit broader executable-wide or
 command-wide denial; exact grants precede executable-wide grants. File prompts retain all
 scoped allow choices without scoped denials. When a terminal Pi session is attached through
-a compatible Paseo bridge, the legacy and inherited-FD `permission-gate`
+a compatible Paseo bridge, the legacy and AgentSH-owned `permission-gate`
 selections and full AgentSH approval selections are rendered as Paseo permission
 cards. Paseo transports only the selected label;
 `sandbox` maps it back to the original AgentSH approval ID and exact scope metadata before

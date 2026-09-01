@@ -33,7 +33,7 @@ in
       mac-system-theme.enable = lib.mkEnableOption "mac-system-theme extension — syncs pi theme to macOS system appearance";
       pager.enable = lib.mkEnableOption "pager extension — open conversation in an external pager (bat/less)";
       pdf.enable = lib.mkEnableOption "pdf extension — inspect PDFs locally or through an active AgentSH supervisor";
-      permission-gate.enable = lib.mkEnableOption "permission-gate extension — AgentSH inherited-FD or legacy dangerous Bash authorization";
+      permission-gate.enable = lib.mkEnableOption "permission-gate extension — AgentSH rendezvous or legacy dangerous Bash authorization";
       ssh.enable = lib.mkEnableOption "ssh extension — run read/write/edit/bash tools on a remote host via --ssh";
       openai-fast-mode.enable = lib.mkEnableOption "pi-openai-fast-mode extension — toggle OpenAI priority inference with /fast";
 
