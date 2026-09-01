@@ -249,7 +249,9 @@ class FakeAgentSHAPI implements AgentSHPiAPI {
   }
   getSupervisorState() {
     return {
+      configured: true,
       active: this.active,
+      protocol: "rest" as const,
       status: this.active ? "connected" as const : "error" as const,
       source: "agentsh-env" as const,
       socketPath: "/tmp/fake-supervisor.sock",
@@ -268,6 +270,11 @@ function clearSupervisionEnv() {
     "PI_AGENTSH_REMOTE_CWD",
     "PI_AGENTSH_READ_MODE",
     "AGENTSH_SESSION_SUPERVISOR",
+    "PI_AGENTSH_MOCK_SUPERVISOR",
+    "PI_AGENTSH_ENABLE",
+    "AGENTSH_CHILD_CAPABILITY",
+    "AGENTSH_APPROVAL_UI_SOCKET",
+    "AGENTSH_PERMISSION_GATE_SOCKET",
   ]) delete process.env[name];
   delete globalThis.__AGENTSH_PI__;
 }

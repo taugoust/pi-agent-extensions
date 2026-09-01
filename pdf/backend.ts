@@ -9,6 +9,12 @@ import {
   writeFile,
 } from "node:fs/promises";
 import { resolve } from "node:path";
+import {
+  agentSHRuntimeDisposition,
+  classifyAgentSHStartup,
+  type AgentSHRuntimeState,
+  type AgentSHStartupClassification,
+} from "../shared/agentsh-mode.js";
 import type {
   AgentSHActor,
   AgentSHExecResult,
@@ -453,16 +459,6 @@ function decodeAgentSHAttachment(
   return { size, data };
 }
 
-function supervisionRequired(): boolean {
-  return [
-    "PI_AUTO",
-    "PI_SUPERVISED",
-    "PI_AGENTSH_REMOTE",
-    "PI_AGENTSH_READ_MODE",
-    "AGENTSH_SESSION_SUPERVISOR",
-  ].some((name) => Boolean(process.env[name]?.trim()));
-}
-
 function sharedAgentSHAPI(): AgentSHPiAPI | undefined {
   const api = globalThis.__AGENTSH_PI__;
   if (!api || typeof api.getSupervisorState !== "function") return undefined;
@@ -473,28 +469,38 @@ export function createPdfBackend(
   controlPlaneCwd: string,
   toolCallId: string,
   toolName: string,
+  startup: AgentSHStartupClassification = classifyAgentSHStartup(process.env),
 ): PdfBackend {
+  const publishedAPI = globalThis.__AGENTSH_PI__;
   const api = sharedAgentSHAPI();
-  if (api) {
-    const state = api.getSupervisorState();
-    if (state.active) {
-      if (typeof api.toSupervisorPath !== "function") {
-        throw new Error(
-          "The active AgentSH sandbox extension is too old for supervised PDF tools: toSupervisorPath is unavailable.",
-        );
-      }
-      const cwd = process.env.PI_AGENTSH_REMOTE_CWD?.trim() || controlPlaneCwd;
-      return new AgentSHPdfBackend(api, cwd, toolCallId, toolName);
-    }
-    if (supervisionRequired()) {
+  let state: AgentSHRuntimeState | undefined;
+  try {
+    state = publishedAPI && !api
+      ? { configured: true, active: false }
+      : api?.getSupervisorState();
+  } catch {
+    state = { configured: true, active: false };
+  }
+  const disposition = agentSHRuntimeDisposition(startup, state);
+
+  if (disposition.kind === "full") {
+    if (!api || typeof api.toSupervisorPath !== "function") {
       throw new Error(
-        `PDF tools require the active AgentSH supervisor, but it is ${state.status}` +
-          (state.lastError ? `: ${state.lastError}` : "."),
+        "The active AgentSH sandbox extension is too old for supervised PDF tools: toSupervisorPath is unavailable.",
       );
     }
-  } else if (supervisionRequired()) {
+    const cwd = process.env.PI_AGENTSH_REMOTE_CWD?.trim() || controlPlaneCwd;
+    return new AgentSHPdfBackend(api, cwd, toolCallId, toolName);
+  }
+  if (disposition.kind === "unavailable") {
+    if (!api) {
+      throw new Error(
+        "PDF tools require the AgentSH sandbox extension in this supervised session; refusing to access the trusted parent filesystem.",
+      );
+    }
     throw new Error(
-      "PDF tools require the AgentSH sandbox extension in this supervised session; refusing to access the trusted parent filesystem.",
+      `PDF tools require the active AgentSH supervisor, but it is ${String(state?.status || "unavailable")}` +
+        (state?.lastError ? `: ${String(state.lastError)}` : "."),
     );
   }
   return new NativePdfBackend(controlPlaneCwd);

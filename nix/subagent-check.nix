@@ -29,9 +29,10 @@ pkgs.runCommand "subagent-check"
     set -euo pipefail
 
     workdir="$TMPDIR/subagent-check"
-    mkdir -p "$workdir/src" "$workdir/out"
-    cp ${self}/subagent/backend.ts "$workdir/src/backend.ts"
-    cp ${self}/subagent/parallel-result.ts "$workdir/src/parallel-result.ts"
+    mkdir -p "$workdir/src/subagent" "$workdir/src/shared" "$workdir/out"
+    cp ${self}/subagent/backend.ts "$workdir/src/subagent/backend.ts"
+    cp ${self}/subagent/parallel-result.ts "$workdir/src/subagent/parallel-result.ts"
+    cp ${self}/shared/agentsh-mode.ts "$workdir/src/shared/agentsh-mode.ts"
 
     tsc \
       --noCheck \
@@ -41,8 +42,9 @@ pkgs.runCommand "subagent-check"
       --target es2022 \
       --rootDir "$workdir/src" \
       --outDir "$workdir/out" \
-      "$workdir/src/backend.ts" \
-      "$workdir/src/parallel-result.ts"
+      "$workdir/src/subagent/backend.ts" \
+      "$workdir/src/subagent/parallel-result.ts" \
+      "$workdir/src/shared/agentsh-mode.ts"
 
     cat > "$workdir/test.mjs" <<'EOF'
     import assert from "node:assert/strict";
@@ -50,21 +52,21 @@ pkgs.runCommand "subagent-check"
 
     const imported = await import(pathToFileURL(process.argv[2]).href);
     const backend = await import(pathToFileURL(process.argv[3]).href);
+    const mode = await import(pathToFileURL(process.argv[4]).href);
     const format = imported.formatParallelResultContent ?? imported.default?.formatParallelResultContent;
+    const nativeStartup = mode.classifyAgentSHStartup({});
+    const fullStartup = mode.classifyAgentSHStartup({ PI_SUPERVISED: "1" });
     assert.equal(typeof format, "function");
-    assert.equal(backend.agentSHExpected({}), false);
-    assert.equal(backend.agentSHExpected({ PI_SUPERVISED: "1" }), true);
-    assert.equal(backend.agentSHExpected({ PI_AUTO: "1" }), true);
-    assert.equal(backend.agentSHExpected({ PI_AGENTSH_REMOTE: "ssh" }), true);
-    assert.equal(backend.agentSHExpected({ AGENTSH_SESSION_SUPERVISOR: "unix:///run/test.sock" }), true);
-    assert.deepEqual(backend.selectSubagentBackend(undefined), { kind: "native" });
-    assert.deepEqual(backend.selectSubagentBackend({ getSupervisorState: () => ({ configured: false, active: false }) }), { kind: "native" });
+    assert.deepEqual(backend.selectSubagentBackend(undefined, nativeStartup), { kind: "native" });
+    assert.deepEqual(backend.selectSubagentBackend({ getSupervisorState: () => ({ configured: false, active: false, protocol: "" }) }, nativeStartup), { kind: "native" });
+    assert.deepEqual(backend.selectSubagentBackend(undefined, mode.classifyAgentSHStartup({ AGENTSH_PERMISSION_GATE_SOCKET: "/guard" })), { kind: "native" });
+    assert.equal(backend.selectSubagentBackend({ subagentAdapter: {} }, nativeStartup).kind, "unavailable");
     const adapter = { execute() {}, detailsFailed() { return false; }, renderCall() {}, renderResult() {} };
-    assert.equal(backend.selectSubagentBackend({ getSupervisorState: () => ({ configured: true, active: true }), subagentAdapter: adapter }).kind, "agentsh");
-    assert.equal(backend.selectSubagentBackend({ getSupervisorState: () => ({ configured: false, active: true }), subagentAdapter: adapter }).kind, "agentsh");
-    assert.equal(backend.selectSubagentBackend(undefined, true).kind, "unavailable");
-    assert.equal(backend.selectSubagentBackend({ getSupervisorState: () => ({ configured: true, active: true }), subagentAdapter: {} }).kind, "unavailable");
-    const unavailable = backend.selectSubagentBackend({ getSupervisorState: () => ({ configured: true, active: false, status: "connecting" }) });
+    assert.equal(backend.selectSubagentBackend({ getSupervisorState: () => ({ configured: true, active: true, protocol: "rest", status: "connected" }), subagentAdapter: adapter }, nativeStartup).kind, "agentsh");
+    assert.equal(backend.selectSubagentBackend({ getSupervisorState: () => ({ configured: false, active: true }), subagentAdapter: adapter }, nativeStartup).kind, "agentsh");
+    assert.equal(backend.selectSubagentBackend(undefined, fullStartup).kind, "unavailable");
+    assert.equal(backend.selectSubagentBackend({ getSupervisorState: () => ({ configured: true, active: true, protocol: "rest", status: "connected" }), subagentAdapter: {} }, fullStartup).kind, "unavailable");
+    const unavailable = backend.selectSubagentBackend({ getSupervisorState: () => ({ configured: true, active: false, protocol: "rest", status: "connecting" }) }, nativeStartup);
     assert.equal(unavailable.kind, "unavailable");
     assert.match(unavailable.message, /native fallback is disabled/);
     assert.equal(backend.adaptiveDispositionError({ action: "review" }), "Draft disposition requires both action and draft_id");
@@ -97,7 +99,7 @@ pkgs.runCommand "subagent-check"
     assert.ok(!crowded.includes("�"), "UTF-8 truncation introduced a replacement character");
     EOF
 
-    node "$workdir/test.mjs" "$workdir/out/parallel-result.js" "$workdir/out/backend.js"
+    node "$workdir/test.mjs" "$workdir/out/subagent/parallel-result.js" "$workdir/out/subagent/backend.js" "$workdir/out/shared/agentsh-mode.js"
     grep -F 'formatParallelResultContent(sections, successCount, MAX_TEXT_PREVIEW_BYTES)' ${self}/subagent/index.ts >/dev/null
     grep -F '(cfg.extensions.sandbox.enable || cfg.extensions.subagent.enable)' ${self}/nix/module.nix >/dev/null
     grep -F 'builtins.elem "sandbox" extensions' ${self}/nix/mk-extension-bundle.nix >/dev/null
@@ -116,6 +118,7 @@ pkgs.runCommand "subagent-check"
       test "$(jq '[.pi.extensions[] | select(. == "subagent-finalizer")] | length' "$bundle/package.json")" -eq 1
       test -f "$bundle/subagent/index.ts"
       test -f "$bundle/subagent-finalizer/index.ts"
+      test -f "$bundle/shared/agentsh-mode.ts"
     done
     test "$(jq '[.pi.extensions[] | select(. == "sandbox")] | length' ${sandboxOnlyBundle}/package.json)" -eq 1
     test "$(jq '[.pi.extensions[] | select(. == "sandbox")] | length' ${subagentOnlyBundle}/package.json)" -eq 0

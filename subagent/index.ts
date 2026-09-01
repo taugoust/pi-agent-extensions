@@ -16,7 +16,12 @@ import type { AgentToolResult, ExtensionAPI } from "@mariozechner/pi-coding-agen
 import { getAgentDir, getMarkdownTheme } from "@mariozechner/pi-coding-agent";
 import { Container, Markdown, Spacer, Text } from "@mariozechner/pi-tui";
 import { Type } from "@sinclair/typebox";
-import { adaptiveDispositionError, agentSHExpected, nativeSubagentRequestSupported, selectSubagentBackend, type AdaptiveSubagentBridge } from "./backend.js";
+import {
+  agentSHRuntimeDisposition,
+  classifyAgentSHStartup,
+  type AgentSHRuntimeState,
+} from "../shared/agentsh-mode.js";
+import { adaptiveDispositionError, nativeSubagentRequestSupported, selectSubagentBackend, type AdaptiveSubagentBridge } from "./backend.js";
 import { formatParallelResultContent } from "./parallel-result.js";
 
 const MAX_PARALLEL_TASKS = 8;
@@ -91,6 +96,16 @@ type AgentSHBridge = AdaptiveSubagentBridge & {
 
 function agentSHBridge(): AgentSHBridge | undefined {
   return (globalThis as any).__AGENTSH_PI__ as AgentSHBridge | undefined;
+}
+
+function bridgeSupervisorState(bridge: AgentSHBridge | undefined): AgentSHRuntimeState | undefined {
+  try {
+    return bridge && typeof bridge.getSupervisorState !== "function"
+      ? { configured: true, active: false }
+      : bridge?.getSupervisorState?.();
+  } catch {
+    return { configured: true, active: false };
+  }
 }
 
 function withBackend(details: unknown, backend: "native" | "agentsh", failed?: boolean) {
@@ -734,6 +749,10 @@ function subagentParams() {
 }
 
 export default function (pi: ExtensionAPI) {
+  const agentSHStartup = classifyAgentSHStartup(process.env);
+  const bridgeDisposition = (bridge: AgentSHBridge | undefined) =>
+    agentSHRuntimeDisposition(agentSHStartup, bridgeSupervisorState(bridge));
+
   pi.on("tool_result", (event) => {
     if (event.toolName !== "subagent" || event.isError) return;
     const details = event.details as SubagentDetails | undefined;
@@ -755,7 +774,7 @@ export default function (pi: ExtensionAPI) {
       if (dispositionError) throw new Error(dispositionError);
 
       const bridge = agentSHBridge();
-      const backend = selectSubagentBackend(bridge, agentSHExpected(process.env));
+      const backend = selectSubagentBackend(bridge, agentSHStartup);
       if (backend.kind === "unavailable") throw new Error(backend.message);
       if (backend.kind === "agentsh") {
         const adaptedUpdate = onUpdate
@@ -897,8 +916,10 @@ export default function (pi: ExtensionAPI) {
 
     renderCall(args: any, theme) {
       const bridge = agentSHBridge();
-      const supervisor = bridge?.getSupervisorState?.();
-      if ((supervisor?.configured || supervisor?.active) && bridge?.subagentAdapter) return bridge.subagentAdapter.renderCall(args, theme);
+      const disposition = bridgeDisposition(bridge);
+      if ((disposition.kind === "full" || disposition.kind === "unavailable") && bridge?.subagentAdapter) {
+        return bridge.subagentAdapter.renderCall(args, theme);
+      }
       if (args.chain && args.chain.length > 0) {
         let text = theme.fg("toolTitle", theme.bold("subagent ")) + theme.fg("accent", `chain (${args.chain.length} steps)`);
         for (let i = 0; i < Math.min(args.chain.length, 3); i++) {
@@ -929,7 +950,8 @@ export default function (pi: ExtensionAPI) {
       const bridge = agentSHBridge();
       const adapter = bridge?.subagentAdapter;
       const backend = (result.details as any)?.backend;
-      if (adapter && backend !== "native" && (backend === "agentsh" || bridge?.getSupervisorState?.().configured)) {
+      const disposition = bridgeDisposition(bridge);
+      if (adapter && backend !== "native" && (backend === "agentsh" || disposition.kind === "full" || disposition.kind === "unavailable")) {
         return adapter.renderResult(result, options, theme);
       }
       const { expanded } = options;

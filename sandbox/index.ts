@@ -15,17 +15,46 @@ import { createConnection, type Socket } from "node:net";
 import { homedir } from "node:os";
 import { posix as posixPath } from "node:path";
 import { Type } from "@sinclair/typebox";
-import { DEFAULT_MAX_BYTES, DEFAULT_MAX_LINES, formatSize, getMarkdownTheme, renderDiff, truncateHead, truncateTail, type ExtensionAPI, type ExtensionContext, type TruncationResult } from "@mariozechner/pi-coding-agent";
-import { Box, Container, Key, Markdown, matchesKey, Spacer, Text, truncateToWidth, visibleWidth, wrapTextWithAnsi, type Component } from "@mariozechner/pi-tui";
+import { DEFAULT_MAX_BYTES, DEFAULT_MAX_LINES, type ExtensionAPI, type ExtensionContext } from "@mariozechner/pi-coding-agent";
+import { Key, matchesKey, truncateToWidth, visibleWidth, wrapTextWithAnsi, type Component } from "@mariozechner/pi-tui";
+import {
+  approvalChoices,
+  approvalPresentation,
+  approvalResolutionBody,
+  approvalTitle,
+  resolveChoice,
+  type ApprovalChoice,
+  type ApprovalRequest,
+  type ApprovalResolution,
+} from "./approval-model.js";
+import { formatAccumulatedOutput, remoteOutputArtifact, StringOutputAccumulator } from "./command-output.js";
+import { execFailureText, normalizeExecResult, recognizedSemanticExecFailure, type ExecResult } from "./exec-result.js";
+import { contentFromReadResult, renderSandboxEditToolCall, renderSandboxEditToolResult, textFromResult } from "./tool-result-presentation.js";
 import { detachedOperatorHeaders } from "./operator-auth.js";
 import { selectSupervisorCwd } from "./execution-cwd.js";
+import {
+  absoluteToVirtual,
+  normalizeWorkspaceRoots,
+  restFileRequest as buildRestFileRequest,
+  supervisorAbsolutePath as resolveSupervisorAbsolutePath,
+  toSlashPath,
+  type WorkspaceRoot,
+} from "./workspace-paths.js";
 import { normalizeSupervisorSubagentCwds } from "./subagent-cwd.js";
 import { inheritSubagentModels } from "./subagent-model.js";
 import { abortSubagentProtocolStream, appendSubagentProtocolChunk, createSubagentProtocolState, finishSubagentProtocolStream } from "./subagent-protocol.js";
-import { boundSubagentProgressCapsules, createSubagentProgressCapsule, sanitizeSubagentParentText } from "./subagent-result.js";
-import { appendSubagentPrefix, appendSubagentRawText, appendSubagentStdoutChunk, createSubagentStreamState, flushSubagentStdout, parseSubagentPiJsonStdout, subagentLiveToolStatus, tailByBytes, truncateByBytes, usageNumber, usageZero, type SubagentStreamState } from "./subagent-stream.js";
-import { normalizeSubagentTerminal, subagentTerminalFailed } from "./subagent-terminal.js";
+import { boundedSubagentParentOutput, contextWindowForModel, latestSubagentAssistantText, piProtocolFailure, subagentParentDetails } from "./subagent-parent-result.js";
+import { renderSubagentCall, renderSubagentResult, renderSubagentStream, subagentDetailsFailed } from "./subagent-render.js";
+import { boundSubagentProgressCapsules, createSubagentProgressCapsule } from "./subagent-result.js";
+import { appendSubagentPrefix, appendSubagentRawText, appendSubagentStdoutChunk, createSubagentStreamState, flushSubagentStdout, tailByBytes, truncateByBytes, usageNumber, usageZero, type SubagentStreamState } from "./subagent-stream.js";
+import { normalizeSubagentTerminal } from "./subagent-terminal.js";
 import type { AgentSHExecutionTarget, AgentSHPiAPI, DirenvRefreshOptions, DirenvRefreshResult, DirenvRefreshState } from "./api.js";
+import {
+  agentSHSupervisorProtocol,
+  classifyAgentSHStartup,
+  type AgentSHStartupClassification,
+  type AgentSHSupervisorProtocol,
+} from "../shared/agentsh-mode.js";
 import { bufferedHttpRequest, HttpTransportError } from "../shared/http-transport.js";
 import {
   CommandExecutionTimeoutError,
@@ -39,7 +68,7 @@ import {
 } from "./command-timeout.js";
 
 type JsonObject = Record<string, unknown>;
-type ProtocolMode = "mock-ndjson" | "rest" | "legacy-approval-ui" | "";
+type ProtocolMode = AgentSHSupervisorProtocol;
 type SupervisorSource = "agentsh-env" | "agentsh-started" | "agentsh-approval-ui" | "mock" | "";
 type SupervisorStatus = "inactive" | "starting" | "connecting" | "connected" | "pending" | "error";
 
@@ -50,12 +79,6 @@ type Actor = {
   subagent_depth?: number;
   tool_call_id?: string;
   task?: string;
-};
-
-type WorkspaceRoot = {
-  name?: string;
-  real?: string;
-  work?: string;
 };
 
 type NethelperLifecycle = {
@@ -144,34 +167,6 @@ type SupervisorMessage = {
   [key: string]: unknown;
 };
 
-type ApprovalRequest = {
-  id: string;
-  created_at?: string;
-  expires_at?: string;
-  session_id?: string;
-  command_id?: string;
-  kind?: string;
-  target?: string;
-  rule?: string;
-  message?: string;
-  actor?: Actor | JsonObject;
-  fields?: Record<string, unknown>;
-};
-
-type ApprovalResolution = {
-  decision: "approve" | "deny";
-  scope?: "once" | "session";
-  reason?: string;
-  scope_kind?: string;
-  scope_key?: string;
-  scope_label?: string;
-  scope_operation?: string;
-  scope_path?: string;
-  scope_rule?: string;
-  scope_prefix?: boolean;
-};
-
-type ApprovalChoice = { label: string } & ApprovalResolution;
 type PaseoRemoteUi = {
   isConnected(): boolean;
   select(title: string, options: string[], settings?: { signal?: AbortSignal }): Promise<string | undefined>;
@@ -191,31 +186,6 @@ type ExecOptions = {
   signal?: AbortSignal;
 };
 
-type ExecError = { code?: string; message?: string; policy_rule?: string; [key: string]: unknown };
-type ExecOutcome = {
-  command_started?: boolean;
-  dispatch_state?: string;
-  failure_kind?: string;
-  retryable?: boolean;
-  code?: string;
-  message?: string;
-  queue_duration_ms?: number;
-  execution_duration_ms?: number;
-  [key: string]: unknown;
-};
-type NormalizedExecFailure = {
-  commandStarted?: boolean;
-  dispatchState?: string;
-  failureKind?: string;
-  retryable?: boolean;
-  code?: string;
-  message?: string;
-  policyRule?: string;
-  queueDurationMs?: number;
-  executionDurationMs?: number;
-  source: "top-level" | "nested" | "legacy" | "transport";
-};
-type ExecResult = { exitCode?: number | null; signal?: string | null; stdout?: string; stderr?: string; normalizedFailure?: NormalizedExecFailure; [key: string]: unknown };
 type ReadFileOptions = { offset?: number; limit?: number; maxBytes?: number; cwd?: string; actor?: Actor; signal?: AbortSignal };
 type WriteFileOptions = { cwd?: string; actor?: Actor; signal?: AbortSignal };
 type Edit = { oldText: string; newText: string };
@@ -237,6 +207,7 @@ type RestConnectionEvents = {
 
 type SupervisorState = {
   active: boolean;
+  startup: AgentSHStartupClassification;
   mode: ProtocolMode;
   activeMode: ProtocolMode;
   source: SupervisorSource;
@@ -295,8 +266,6 @@ const MAX_RECOVERY_OUTPUT_BYTES = 64 * 1024;
 const AGENTSH_CHILD_CAPABILITY_ENV = "AGENTSH_CHILD_CAPABILITY";
 const AGENTSH_CHILD_CAPABILITY_HEADER = "X-AgentSH-Child-Capability";
 const PASEO_REMOTE_UI_KEY = "__piPaseoRemoteUiV1";
-const LEGACY_PRE_EXEC_CODES = new Set(["E_COMMAND_NOT_STARTED", "E_COMMAND_START_FAILED", "E_PRE_EXEC_FAILED"]);
-const SEMANTIC_EXEC_CODES = /^(?:E_(?:COMMAND|EXEC|QUEUE|POLICY|APPROVAL|NETHELPER|PRE_EXEC|REQUEST|CANCEL|TIMEOUT)_[A-Z0-9_]+)$/;
 
 function supervisorErrorCode(error: unknown) {
   const candidate = error && typeof error === "object" ? error as { code?: unknown } : undefined;
@@ -612,28 +581,8 @@ function centralApprovalBridgeRequested() {
   return env("PI_AGENTSH_APPROVAL_CLIENT").toLowerCase() === "central";
 }
 
-function protocolModeFromEnv(): ProtocolMode {
-  if (env("PI_AGENTSH_MOCK_SUPERVISOR")) return "mock-ndjson";
-  if (env("AGENTSH_SESSION_SUPERVISOR") || shouldStartSupervisor()) return "rest";
-  if (env("AGENTSH_APPROVAL_UI_SOCKET")) return "legacy-approval-ui";
-  return "";
-}
-
-function integrationRequested() {
-  return protocolModeFromEnv() !== "";
-}
-
-function supervisorToolIntegrationRequested() {
-  const mode = protocolModeFromEnv();
-  return mode === "mock-ndjson" || mode === "rest";
-}
-
 function agentshBinEnv() {
   return env("PI_AGENTSH_BIN") || "agentsh";
-}
-
-function shouldStartSupervisor() {
-  return env("PI_AGENTSH_ENABLE") === "1";
 }
 
 function strictNetworkEvidenceRequired() {
@@ -685,206 +634,6 @@ function stringifyData(data: unknown) {
   if (data instanceof Uint8Array) return Buffer.from(data).toString("utf8");
   if (data === undefined || data === null) return "";
   return String(data);
-}
-
-type OutputSnapshot = {
-  content: string;
-  truncation: TruncationResult;
-  fullOutputPath?: string;
-};
-
-function byteLength(text: string) {
-  return Buffer.byteLength(text, "utf-8");
-}
-
-class StringOutputAccumulator {
-  private readonly decoder = new TextDecoder();
-  private tailText = "";
-  private tailBytes = 0;
-  private tailStartsAtLineBoundary = true;
-  private totalDecodedBytes = 0;
-  private completedLines = 0;
-  private totalLines = 0;
-  private currentLineBytes = 0;
-  private hasOpenLine = false;
-  private finished = false;
-
-  append(text: string): void {
-    if (this.finished) throw new Error("Cannot append to a finished output accumulator");
-    if (!text) return;
-
-    const data = Buffer.from(text, "utf-8");
-    this.appendDecodedText(this.decoder.decode(data, { stream: true }));
-  }
-
-  finish(): void {
-    if (this.finished) return;
-    this.finished = true;
-    this.appendDecodedText(this.decoder.decode());
-  }
-
-  snapshot(_options: { persistIfTruncated?: boolean } = {}): OutputSnapshot {
-    const tailTruncation = truncateTail(this.getSnapshotText(), {
-      maxLines: DEFAULT_MAX_LINES,
-      maxBytes: DEFAULT_MAX_BYTES,
-    });
-    const truncated = this.totalLines > DEFAULT_MAX_LINES || this.totalDecodedBytes > DEFAULT_MAX_BYTES;
-    const truncation: TruncationResult = {
-      ...tailTruncation,
-      truncated,
-      truncatedBy: truncated ? (tailTruncation.truncatedBy ?? (this.totalDecodedBytes > DEFAULT_MAX_BYTES ? "bytes" : "lines")) : null,
-      totalLines: this.totalLines,
-      totalBytes: this.totalDecodedBytes,
-      maxLines: DEFAULT_MAX_LINES,
-      maxBytes: DEFAULT_MAX_BYTES,
-    };
-
-    return {
-      content: truncation.content,
-      truncation,
-    };
-  }
-
-  async closeTempFile(): Promise<void> {
-    // Supervised overflow artifacts are owned by remote AgentSH. Retain this
-    // no-op during the compatibility transition so existing finally blocks do
-    // not create local-Pi filesystem capabilities.
-  }
-
-  getLastLineBytes(): number {
-    return this.currentLineBytes;
-  }
-
-  private appendDecodedText(text: string): void {
-    if (!text) return;
-
-    const bytes = byteLength(text);
-    this.totalDecodedBytes += bytes;
-    this.tailText += text;
-    this.tailBytes += bytes;
-    if (this.tailBytes > DEFAULT_MAX_BYTES * 4) this.trimTail();
-
-    let newlines = 0;
-    let lastNewline = -1;
-    for (let i = text.indexOf("\n"); i !== -1; i = text.indexOf("\n", i + 1)) {
-      newlines++;
-      lastNewline = i;
-    }
-    if (newlines === 0) {
-      this.currentLineBytes += bytes;
-      this.hasOpenLine = true;
-    } else {
-      this.completedLines += newlines;
-      const tail = text.slice(lastNewline + 1);
-      this.currentLineBytes = byteLength(tail);
-      this.hasOpenLine = tail.length > 0;
-    }
-    this.totalLines = this.completedLines + (this.hasOpenLine ? 1 : 0);
-  }
-
-  private trimTail(): void {
-    const buffer = Buffer.from(this.tailText, "utf-8");
-    const maxRollingBytes = DEFAULT_MAX_BYTES * 2;
-    if (buffer.length <= maxRollingBytes) {
-      this.tailBytes = buffer.length;
-      return;
-    }
-
-    let start = buffer.length - maxRollingBytes;
-    while (start < buffer.length && (buffer[start] & 0xc0) === 0x80) start++;
-
-    this.tailStartsAtLineBoundary = start === 0 ? this.tailStartsAtLineBoundary : buffer[start - 1] === 0x0a;
-    this.tailText = buffer.subarray(start).toString("utf-8");
-    this.tailBytes = byteLength(this.tailText);
-  }
-
-  private getSnapshotText(): string {
-    if (this.tailStartsAtLineBoundary) return this.tailText;
-    const firstNewline = this.tailText.indexOf("\n");
-    return firstNewline === -1 ? this.tailText : this.tailText.slice(firstNewline + 1);
-  }
-
-}
-
-function execResultBoolean(result: ExecResult | undefined, key: string) {
-  return result?.[key] === true;
-}
-
-function execResultNumber(result: ExecResult | undefined, key: string) {
-  const value = result?.[key];
-  return typeof value === "number" && Number.isFinite(value) ? value : undefined;
-}
-
-type RemoteOutputArtifact = {
-  path?: string;
-  bytes?: number;
-  totalBytes?: number;
-  complete?: boolean;
-  error?: string;
-};
-
-function remoteOutputArtifact(result: ExecResult | undefined): RemoteOutputArtifact | undefined {
-  if (!result) return undefined;
-  const nested = result.output_artifact && typeof result.output_artifact === "object" ? result.output_artifact as JsonObject : undefined;
-  const path = typeof result.full_output_path === "string" ? result.full_output_path : typeof nested?.path === "string" ? nested.path : undefined;
-  const bytes = execResultNumber(result, "artifact_bytes") ?? numericField(nested?.bytes);
-  const totalBytes = execResultNumber(result, "artifact_total_bytes") ?? numericField(nested?.total_bytes);
-  const completeValue = typeof result.artifact_complete === "boolean" ? result.artifact_complete : nested?.complete;
-  const error = typeof result.artifact_error === "string" ? result.artifact_error : typeof nested?.error === "string" ? nested.error : undefined;
-  if (!path && !error && bytes === undefined && totalBytes === undefined) return undefined;
-  return { path, bytes, totalBytes, complete: typeof completeValue === "boolean" ? completeValue : undefined, error };
-}
-
-function agentSHOutputWarnings(result: ExecResult | undefined, artifact?: RemoteOutputArtifact) {
-  const warnings: string[] = [];
-  const sessionID = typeof result?.session_id === "string" ? result.session_id : "";
-  const commandID = typeof result?.command_id === "string" ? result.command_id : "";
-  for (const stream of ["stdout", "stderr"] as const) {
-    if (!execResultBoolean(result, `${stream}_truncated`)) continue;
-    const total = execResultNumber(result, `${stream}_total_bytes`);
-    const totalText = total === undefined ? "" : ` at ${formatSize(total)}`;
-    let hint = "";
-    if (artifact?.path && artifact.complete) hint = " Complete output is available in the remote artifact.";
-    else if (artifact?.path) hint = " The remote artifact is also bounded; its byte counts are shown above.";
-    else if (sessionID && commandID) hint = ` The retained AgentSH prefix can be paged with: agentsh output ${sessionID} ${commandID} --stream ${stream}`;
-    warnings.push(`AgentSH response truncated ${stream}${totalText}.${hint}`);
-  }
-  return warnings;
-}
-
-function formatAccumulatedOutput(snapshot: OutputSnapshot, output: StringOutputAccumulator, result?: ExecResult, emptyText = "(no output)") {
-  const truncation = snapshot.truncation;
-  let text = snapshot.content || emptyText;
-  const artifact = remoteOutputArtifact(result);
-  const warnings = agentSHOutputWarnings(result, artifact);
-  if (truncation.truncated) {
-    const startLine = truncation.totalLines - truncation.outputLines + 1;
-    const endLine = truncation.totalLines;
-    let shown: string;
-    if (truncation.lastLinePartial) {
-      const lastLineSize = formatSize(output.getLastLineBytes());
-      shown = `Showing last ${formatSize(truncation.outputBytes)} of line ${endLine} (line is ${lastLineSize}).`;
-    } else if (truncation.truncatedBy === "lines") {
-      shown = `Showing lines ${startLine}-${endLine} of ${truncation.totalLines}.`;
-    } else {
-      shown = `Showing lines ${startLine}-${endLine} of ${truncation.totalLines} (${formatSize(DEFAULT_MAX_BYTES)} limit).`;
-    }
-    if (artifact?.path) {
-      const retained = artifact.complete === false
-        ? ` Retained remote output: ${artifact.path} (${formatSize(artifact.bytes ?? 0)} of ${formatSize(artifact.totalBytes ?? 0)}).`
-        : ` Full output: ${artifact.path}`;
-      shown += retained;
-    } else if (artifact?.error) {
-      shown += ` Remote output artifact unavailable: ${artifact.error}`;
-    } else if (result) {
-      shown += " Remote output artifact unavailable from this supervisor.";
-    } else {
-      shown += " Remote output artifact pending command completion.";
-    }
-    warnings.unshift(shown);
-  }
-  if (warnings.length > 0) text += `\n\n[${warnings.join(" ")}]`;
-  return text;
 }
 
 function parentActor(toolCallId?: string, label?: string): Actor {
@@ -982,381 +731,6 @@ async function runAgentSHSessionStart(ctx: ExtensionContext) {
       }
     });
   });
-}
-
-function approvalTitle(a: ApprovalRequest) {
-  const kind = a.kind || "approval";
-  const target = a.target || a.command_id || a.id;
-  return `${kind}: ${target}`;
-}
-
-type ApprovalPresentation = {
-  title: string;
-  details: string[];
-};
-
-function approvalActor(a: ApprovalRequest): ApprovalRequest["actor"] {
-  if (a.actor && typeof a.actor === "object") return a.actor;
-  const nested = a.fields?.actor;
-  return nested && typeof nested === "object" ? nested as JsonObject : undefined;
-}
-
-function formatActor(actor: ApprovalRequest["actor"]) {
-  if (!actor || typeof actor !== "object") return undefined;
-  const label = stringField(actor.label)?.trim();
-  const kind = stringField(actor.kind)?.trim();
-  const fromSubagent = Boolean(stringField(actor.subagent_id));
-  if (label) return fromSubagent && !/subagent/i.test(label) ? `${label} (subagent)` : label;
-  if (fromSubagent) return "subagent";
-  return kind && kind !== "actor" ? kind : undefined;
-}
-
-function approvalOperation(a: ApprovalRequest) {
-  return stringField(a.fields?.operation)?.trim() || stringField(a.fields?.scope_operation)?.trim() || "access";
-}
-
-function fileAction(operation: string) {
-  switch (operation.toLowerCase()) {
-    case "open":
-    case "read": return "Read";
-    case "stat":
-    case "access": return "Inspect metadata for";
-    case "list": return "List";
-    case "readlink": return "Inspect link target for";
-    case "write": return "Write to";
-    case "create": return "Create";
-    case "mkdir": return "Create directory at";
-    case "delete": return "Delete";
-    case "rmdir": return "Remove directory";
-    case "rename": return "Rename";
-    case "link": return "Create link to";
-    case "symlink": return "Create symlink at";
-    case "chmod": return "Change permissions on";
-    case "chown": return "Change ownership of";
-    case "mknod": return "Create device at";
-    default: return "Access";
-  }
-}
-
-function fileApprovalSubject(rule: string) {
-  const normalized = rule.toLowerCase();
-  if (normalized.includes("outside-workspace")) return "this path outside the opened workspace";
-  if (normalized.includes("env-file")) return "this protected environment file";
-  if (normalized.includes("nix-file")) return "this protected Nix file";
-  if (normalized.includes("ssh") && (normalized.includes("key") || normalized.includes("private"))) return "this SSH private material";
-  if (normalized.includes("credential") || normalized.includes("cloud")) return "this credential material";
-  if (normalized.includes("proc-sensitive")) return "this sensitive process path";
-  return "this file";
-}
-
-function displayExecutable(command: string) {
-  const clean = command.trim();
-  if (/^\/nix\/store\/[^/]+\/bin\/[^/]+$/.test(clean)) return posixPath.basename(clean);
-  return clean;
-}
-
-function commandInvocation(a: ApprovalRequest) {
-  const visible = stringField(a.fields?.visible_command)?.trim();
-  if (visible) return visible;
-  const command = stringField(a.fields?.command)?.trim();
-  if (command) {
-    let args = Array.isArray(a.fields?.args) ? a.fields.args.filter((value): value is string => typeof value === "string") : [];
-    const executable = displayExecutable(command);
-    if (args[0] === posixPath.basename(command)) args = args.slice(1);
-    const quote = (value: string) => /^[A-Za-z0-9_@%+=:,./-]+$/.test(value) ? value : JSON.stringify(value);
-    return [executable, ...args].map(quote).join(" ");
-  }
-  const rawOptions = Array.isArray(a.fields?.scope_options) ? a.fields.scope_options : [];
-  for (const option of rawOptions) {
-    if (!option || typeof option !== "object") continue;
-    const obj = option as JsonObject;
-    const key = stringField(obj.scope_key)?.trim() || "";
-    const label = stringField(obj.scope_label)?.trim();
-    if (key.startsWith("command-invocation:") && label) return label;
-  }
-  return a.target ? displayExecutable(a.target) : a.command_id || a.id;
-}
-
-function commandApprovalQuestion(a: ApprovalRequest) {
-  let reason = stringField(a.message)?.trim();
-  if (!reason || /\{\{[^}]+\}\}|[\r\n]/.test(reason)) return undefined;
-  reason = reason
-    .replace(/^(?:Pi|Agent|The project) wants to\s+/i, "")
-    .replace(/[.?!]+$/, "")
-    .trim();
-  if (!reason || reason.length > 100) return undefined;
-  return `${reason.charAt(0).toUpperCase()}${reason.slice(1)}?`;
-}
-
-function stringList(value: unknown) {
-  return Array.isArray(value) ? value.filter((item): item is string => typeof item === "string" && item.trim() !== "") : [];
-}
-
-function overlayRuleSummary(value: unknown) {
-  if (!value || typeof value !== "object") return undefined;
-  const labels: Record<string, string> = {
-    file_rules: "file",
-    command_rules: "command",
-    network_rules: "network",
-    unix_socket_rules: "socket",
-    signal_rules: "signal",
-    dns_redirects: "DNS redirect",
-    connect_redirects: "connect redirect",
-    package_rules: "package",
-  };
-  const parts: string[] = [];
-  for (const [key, label] of Object.entries(labels)) {
-    const count = Number((value as JsonObject)[key]);
-    if (Number.isSafeInteger(count) && count > 0) parts.push(`${count} ${label}`);
-  }
-  return parts.length > 0 ? `Rules: ${parts.join(", ")}` : undefined;
-}
-
-function networkApprovalTitle(a: ApprovalRequest, target: string) {
-  const hint = `${a.rule || ""} ${a.message || ""}`.toLowerCase();
-  const port = /^.*:(\d+)$/.exec(target)?.[1];
-  if (/private[-_ ]?(?:network|address)|rfc1918/.test(hint)) return "Connect to this private network address?";
-  if (/\bssh\b/.test(hint) || port === "22") return "Connect over SSH?";
-  if (/\bhttps\b/.test(hint) || port === "443") return "Connect over HTTPS?";
-  if (/\bhttp\b/.test(hint) || port === "80") return /insecure/.test(hint) ? "Connect over insecure HTTP?" : "Connect over HTTP?";
-  return "Connect to this destination?";
-}
-
-function meaningfulApprovalMessage(a: ApprovalRequest, target: string) {
-  const kind = (a.kind || "").trim().toLowerCase();
-  if (kind === "file" && fileApprovalSubject(a.rule || "") !== "this file") return undefined;
-  if (kind === "command" && commandApprovalQuestion(a)) return undefined;
-  // Network policy messages normally restate the destination. Their useful
-  // context (SSH, HTTPS, private network) is already promoted into the title.
-  if (kind === "network") return undefined;
-  let message = stringField(a.message)?.trim();
-  if (!message) return undefined;
-  message = message.replace(/\{\{\s*\.Path\s*\}\}/g, target || "the requested path");
-  // AgentSH currently may return unrendered policy templates. Never expose
-  // protocol placeholders as decision UI.
-  if (/\{\{[^}]+\}\}/.test(message)) return undefined;
-  if (target) {
-    for (const suffix of [`: ${target}`, ` ${target}`]) {
-      if (message.endsWith(suffix)) message = message.slice(0, -suffix.length).trim();
-    }
-    if (message.includes(target)) return undefined;
-  }
-  message = message.replace(/^Pi wants to\s+/i, "").trim();
-  return message || undefined;
-}
-
-function approvalPresentation(a: ApprovalRequest): ApprovalPresentation {
-  const kind = (a.kind || "approval").trim().toLowerCase();
-  const fields = a.fields || {};
-  const details: string[] = [];
-  let title: string;
-  let target = a.target || "";
-
-  switch (kind) {
-    case "file":
-      target = target || stringField(fields.path)?.trim() || "unknown path";
-      title = `${fileAction(approvalOperation(a))} ${fileApprovalSubject(a.rule || "")}?`;
-      details.push(target);
-      break;
-    case "command":
-      title = commandApprovalQuestion(a) || "Run this command?";
-      target = commandInvocation(a);
-      details.push(target);
-      break;
-    case "network":
-      title = networkApprovalTitle(a, target);
-      details.push(target || "unknown destination");
-      break;
-    case "dns":
-      title = "Resolve this DNS destination?";
-      details.push(target || "unknown destination");
-      break;
-    case "http_service":
-      title = "Call this declared HTTP service?";
-      details.push(target || "unknown service request");
-      break;
-    case "policy_overlay": {
-      title = "Use project-local policy overlays?";
-      details.push(target || stringField(fields.project_root)?.trim() || "unknown project");
-      const paths = stringList(fields.overlay_paths);
-      const names = stringList(fields.overlay_names);
-      const overlays = paths.length > 0 ? paths : names;
-      if (overlays.length > 0) details.push(`Overlays: ${overlays.slice(0, 4).join(", ")}${overlays.length > 4 ? ", …" : ""}`);
-      const rules = overlayRuleSummary(fields.rule_counts);
-      if (rules) details.push(rules);
-      break;
-    }
-    case "package":
-      title = "Allow this package operation?";
-      details.push(target || "unknown package operation");
-      if (Number.isSafeInteger(Number(fields.findings)) && Number(fields.findings) > 0) details.push(`Findings: ${Number(fields.findings)}`);
-      break;
-    case "skillcheck": {
-      title = "Allow this flagged skill?";
-      details.push(target || stringField(fields.skill_name)?.trim() || "unknown skill");
-      const path = stringField(fields.skill_path)?.trim();
-      if (path && path !== target) details.push(path);
-      const summary = stringField(fields.summary)?.trim();
-      if (summary) details.push(summary);
-      const hash = stringField(fields.skill_sha256)?.trim();
-      if (hash) details.push(`SHA-256: ${hash.slice(0, 12)}${hash.length > 12 ? "…" : ""}`);
-      break;
-    }
-    default:
-      title = `${kind === "approval" ? "Allow this operation" : `Allow this ${kind.replace(/_/g, " ")}`}?`;
-      if (target) details.push(target);
-      break;
-  }
-
-  const message = meaningfulApprovalMessage(a, target);
-  if (message && !details.includes(message)) details.push(message);
-  const actor = formatActor(approvalActor(a));
-  if (actor) details.push(`Requested by ${actor}`);
-  return { title, details };
-}
-
-function scopeFromObject(value: unknown): ApprovalResolution | undefined {
-  if (!value || typeof value !== "object") return undefined;
-  const obj = value as Record<string, unknown>;
-  const kind = typeof obj.scope_kind === "string" ? obj.scope_kind.trim() : "";
-  const key = typeof obj.scope_key === "string" ? obj.scope_key.trim() : "";
-  if (!kind || !key) return undefined;
-  const commandLifetime = obj.scope_lifetime === "command";
-  return {
-    decision: "approve",
-    scope: commandLifetime ? "once" : "session",
-    reason: commandLifetime ? "approved for command invocation in parent Pi" : "approved for session in parent Pi",
-    scope_kind: kind,
-    scope_key: key,
-    scope_label: typeof obj.scope_label === "string" ? obj.scope_label : undefined,
-    scope_operation: typeof obj.scope_operation === "string" ? obj.scope_operation : undefined,
-    scope_path: typeof obj.scope_path === "string" ? obj.scope_path : undefined,
-    scope_rule: typeof obj.scope_rule === "string" ? obj.scope_rule : undefined,
-    scope_prefix: typeof obj.scope_prefix === "boolean" ? obj.scope_prefix : undefined,
-  };
-}
-
-function commandRunScope(option: ApprovalResolution) {
-  return option.scope === "once" && option.scope_kind === "command-run" && option.scope_key === "command-run:all-approvals";
-}
-
-function commandScopeIsExact(option: ApprovalResolution) {
-  return option.scope_kind === "command" && (option.scope_key || "").startsWith("command-invocation:");
-}
-
-function sessionScopeOptions(approval: ApprovalRequest): ApprovalResolution[] {
-  const fields = approval.fields || {};
-  const rawOptions = Array.isArray(fields.scope_options) ? fields.scope_options : [];
-  const options = rawOptions.map(scopeFromObject).filter((value): value is ApprovalResolution => Boolean(value));
-  const fallback = scopeFromObject(fields);
-  if (fallback && !options.some((option) => option.scope_key === fallback.scope_key)) options.unshift(fallback);
-  return approval.kind?.trim().toLowerCase() === "command"
-    ? options.sort((left, right) => Number(commandScopeIsExact(right)) - Number(commandScopeIsExact(left)))
-    : options;
-}
-
-function scopePathLabel(path: string, recursive: boolean) {
-  const clean = path.replace(/\/+$/, "") || "/";
-  if (clean === "/") return recursive ? "/**" : "/*";
-  return `${clean}/${recursive ? "**" : "*"}`;
-}
-
-function commandScopeExecutable(approval: ApprovalRequest, option: ApprovalResolution) {
-  const command = option.scope_path?.trim()
-    || stringField(approval.fields?.command)?.trim()
-    || (!commandScopeIsExact(option) ? option.scope_label?.trim() : "")
-    || approval.target
-    || "this executable";
-  return displayExecutable(command);
-}
-
-function sessionScopeLabel(approval: ApprovalRequest, option: ApprovalResolution, decision: "approve" | "deny") {
-  const verb = decision === "approve" ? "Allow" : "Deny";
-  const path = option.scope_path?.trim() || "";
-  switch (option.scope_kind) {
-    case "file": return `${verb} this file for session`;
-    case "file-dir": return `${verb} ${scopePathLabel(path, false)} for session (one level)`;
-    case "file-tree": return `${verb} ${scopePathLabel(path, true)} for session`;
-    case "directory": return `${verb} ${scopePathLabel(path, option.scope_prefix === true)} for session${option.scope_prefix ? "" : " (one level)"}`;
-    case "command":
-      if (commandScopeIsExact(option)) return `${verb} this exact invocation for session`;
-      return `${verb} any ${commandScopeExecutable(approval, option)} invocation for session`;
-    case "network": return `${verb} this destination for session`;
-    default: return `${verb} for session${option.scope_label ? `: ${option.scope_label}` : ""}`;
-  }
-}
-
-function sessionDenyOptions(approval: ApprovalRequest, options: ApprovalResolution[]) {
-  const kind = approval.kind?.trim().toLowerCase();
-  if (kind === "file") return [];
-  if (kind === "command") {
-    const exact = options.find(commandScopeIsExact);
-    return exact ? [exact] : options.slice(0, 1);
-  }
-  return options;
-}
-
-function approvalChoices(approval: ApprovalRequest): ApprovalChoice[] {
-  const approveOnce: ApprovalChoice = { label: "Allow once", decision: "approve", scope: "once", reason: "approved in parent Pi" };
-  const denyOnce: ApprovalChoice = { label: "Deny once", decision: "deny", scope: "once", reason: "denied in parent Pi" };
-  const options = sessionScopeOptions(approval);
-  const commandRun = options.find(commandRunScope);
-  const sessionOptions = options.filter((option) => option.scope === "session");
-  const networkDestination = sessionOptions.find((option) => option.scope_kind === "network");
-  if (approval.kind?.trim().toLowerCase() === "network" && networkDestination) {
-    const destination = networkDestination;
-    const allForCommand = commandRun || {
-      scope: "once" as const,
-      scope_kind: "command-run",
-      scope_key: "command-run:all-approvals",
-      scope_label: "all accesses for this command",
-    };
-    const choices: ApprovalChoice[] = [
-      { ...denyOnce, label: "Deny" },
-      approveOnce,
-    ];
-    if (destination) {
-      choices.push({
-        ...destination,
-        decision: "approve",
-        scope: "session",
-        reason: `approved for session network destination: ${destination.scope_label || destination.scope_key || approvalTitle(approval)} in parent Pi`,
-        label: "Allow for session",
-      });
-    }
-    choices.push({
-      ...allForCommand,
-      decision: "approve",
-      scope: "once",
-      reason: "approved all network accesses for this command in parent Pi",
-      label: "Allow all accesses for command",
-    });
-    return choices;
-  }
-  const choices: ApprovalChoice[] = [denyOnce, approveOnce];
-  if (commandRun) {
-    choices.push({
-      ...commandRun,
-      decision: "approve",
-      scope: "once",
-      reason: "approved all requests for this command invocation in parent Pi",
-      label: "Allow all requests for this command invocation",
-    });
-  }
-  for (const option of sessionOptions) {
-    const target = option.scope_label || option.scope_key || approvalTitle(approval);
-    choices.push({ ...option, decision: "approve", scope: "session", reason: `approved for session ${option.scope_kind || "scope"}: ${target} in parent Pi`, label: sessionScopeLabel(approval, option, "approve") });
-  }
-  for (const option of sessionDenyOptions(approval, sessionOptions)) {
-    const target = option.scope_label || option.scope_key || approvalTitle(approval);
-    choices.push({ ...option, decision: "deny", scope: "session", reason: `denied for session ${option.scope_kind || "scope"}: ${target} in parent Pi`, label: sessionScopeLabel(approval, option, "deny") });
-  }
-  return choices;
-}
-
-function resolveChoice(choices: ApprovalChoice[], choice: string | undefined): ApprovalResolution {
-  const selected = choices.find((candidate) => candidate.label === choice);
-  return selected || { decision: "deny", scope: "once", reason: "denied in parent Pi" };
 }
 
 function ringApprovalBell() {
@@ -1832,189 +1206,14 @@ function safeExecText(value: unknown, max = 1000) {
   return text ? truncate(text, max) : undefined;
 }
 
-function firstDefined(...values: unknown[]) {
-  return values.find((value) => value !== undefined);
-}
-
-function normalizeExecResult(result: JsonObject): ExecResult {
-  const nestedResult = objectField(objectField(result.exec_response)?.result);
-  const topOutcome = objectField(result.outcome);
-  const nestedOutcome = objectField(nestedResult?.outcome);
-  const topError = objectField(result.error);
-  const nestedError = objectField(nestedResult?.error);
-  const promoted = Boolean(topOutcome || topError || result.command_started !== undefined || result.error_code !== undefined || result.error_message !== undefined);
-  const typedNested = Boolean(nestedOutcome);
-
-  const code = safeExecText(firstDefined(topOutcome?.code, topError?.code, result.error_code, nestedOutcome?.code, nestedError?.code), 160);
-  const explicitCommandStarted = firstDefined(topOutcome?.command_started, result.command_started, nestedOutcome?.command_started);
-  const commandStartedValue = typeof explicitCommandStarted === "boolean"
-    ? explicitCommandStarted
-    : code && LEGACY_PRE_EXEC_CODES.has(code) ? false : undefined;
-  const failureKind = safeExecText(firstDefined(topOutcome?.failure_kind, result.failure_kind, nestedOutcome?.failure_kind), 80);
-  const message = safeExecText(firstDefined(topOutcome?.message, topError?.message, result.error_message, nestedOutcome?.message, nestedError?.message));
-  const dispatchState = safeExecText(firstDefined(topOutcome?.dispatch_state, result.dispatch_state, nestedOutcome?.dispatch_state), 80);
-  const retryableValue = firstDefined(topOutcome?.retryable, result.retryable, nestedOutcome?.retryable);
-  const policyRule = safeExecText(firstDefined(topError?.policy_rule, nestedError?.policy_rule), 240);
-  const hasFailure = Boolean(message || code || (failureKind && failureKind !== "none") || commandStartedValue === false);
-  const normalizedFailure: NormalizedExecFailure | undefined = hasFailure ? {
-    commandStarted: commandStartedValue,
-    dispatchState,
-    failureKind,
-    retryable: typeof retryableValue === "boolean" ? retryableValue : undefined,
-    code,
-    message,
-    policyRule,
-    queueDurationMs: numericField(firstDefined(topOutcome?.queue_duration_ms, result.queue_duration_ms, nestedOutcome?.queue_duration_ms)),
-    executionDurationMs: numericField(firstDefined(topOutcome?.execution_duration_ms, result.execution_duration_ms, nestedOutcome?.execution_duration_ms)),
-    source: promoted ? "top-level" : typedNested ? "nested" : "legacy",
-  } : undefined;
-
-  const stdout = String(result.stdout ?? nestedResult?.stdout ?? "");
-  const stderr = String(result.stderr ?? nestedResult?.stderr ?? "");
-  const explicitExit = numericField(result.exitCode) ?? numericField(result.exit_code) ?? numericField(nestedResult?.exit_code);
-  const exitCode = explicitExit ?? (normalizedFailure ? 1 : 0);
-  return { ...result, exitCode, stdout, stderr, normalizedFailure } as ExecResult;
-}
-
-function recognizedSemanticExecFailure(result: JsonObject) {
-  const nestedResult = objectField(objectField(result.exec_response)?.result);
-  const outcomes = [objectField(result.outcome), objectField(nestedResult?.outcome)].filter(Boolean) as JsonObject[];
-  if (outcomes.some((outcome) => typeof outcome.command_started === "boolean"
-    && typeof outcome.failure_kind === "string" && outcome.failure_kind.length > 0 && outcome.failure_kind.length <= 80)) return true;
-  const errors = [objectField(result.error), objectField(nestedResult?.error)].filter(Boolean) as JsonObject[];
-  return errors.some((error) => typeof error.code === "string" && SEMANTIC_EXEC_CODES.test(error.code));
-}
-
-function execFailureText(failure: NormalizedExecFailure, exitCode: number) {
-  const message = failure.message || failure.code || "AgentSH refused the command";
-  switch (failure.failureKind) {
-    case "queue_timeout": return `Command was not executed: it timed out waiting in the AgentSH execution queue. ${message}`;
-    case "caller_cancellation": return failure.commandStarted === false
-      ? `Command was not executed: the queued request was cancelled. ${message}`
-      : `Command was cancelled after it started. ${message}`;
-    case "command_timeout": return failure.commandStarted === false
-      ? `Command was not executed: its deadline expired before start. ${message}`
-      : `Command timed out after it started. ${message}`;
-    case "policy_or_approval_denial": return `Command was not executed: AgentSH policy or approval denied it. ${message}`;
-    case "pre_exec_enforcement": return failure.commandStarted === true
-      ? `Command started, but AgentSH enforcement cleanup failed; side effects may have occurred and the command must not be replayed automatically. ${message}`
-      : `Command was not executed: AgentSH pre-execution/helper enforcement failed. ${message}`;
-    case "post_start_cleanup": return `Command started, but AgentSH cleanup failed; side effects may have occurred and the command must not be replayed automatically. ${message}`;
-    case "request_validation":
-    case "command_start": return `Command was not executed: ${message}`;
-    case "child_exit": return `Command exited with code ${exitCode}${failure.message ? `: ${failure.message}` : ""}`;
-    default: return failure.commandStarted === false ? `Command was not executed: ${message}` : message;
-  }
-}
-
-function toSlashPath(path: string) {
-  return path.replace(/\\/g, "/");
-}
-
-function cleanPosix(path: string) {
-  const cleaned = posixPath.normalize(toSlashPath(path));
-  return cleaned === "." ? "" : cleaned;
-}
-
-function isUnderPath(path: string, root: string) {
-  const cleanPath = cleanPosix(path);
-  const cleanRoot = cleanPosix(root);
-  return cleanPath === cleanRoot || cleanPath.startsWith(`${cleanRoot}/`);
-}
-
-function relativeToRoot(path: string, root: string) {
-  const cleanPath = cleanPosix(path);
-  const cleanRoot = cleanPosix(root);
-  if (cleanPath === cleanRoot) return "";
-  return cleanPath.slice(cleanRoot.length + 1);
-}
-
-function stringField(value: unknown) {
-  return typeof value === "string" && value.trim() ? value : undefined;
-}
-
-function normalizeWorkspaceRoots(value: unknown): WorkspaceRoot[] {
-  if (!Array.isArray(value)) return [];
-  return value.flatMap((candidate) => {
-    if (!candidate || typeof candidate !== "object") return [];
-    const obj = candidate as JsonObject;
-    const root: WorkspaceRoot = {
-      name: stringField(obj.name),
-      real: stringField(obj.real),
-      work: stringField(obj.work),
-    };
-    return root.name || root.real || root.work ? [root] : [];
-  });
-}
-
-function metadataVirtualRoot(metadata?: SupervisorMetadata) {
-  return stringField(metadata?.virtual_root) || "/workspace";
-}
-
-function virtualForRoot(vroot: string, root: WorkspaceRoot, rel: string) {
-  const parts = [vroot, root.name || "", rel].filter(Boolean);
-  return cleanPosix(parts.join("/"));
-}
-
-function absoluteToVirtual(metadata: SupervisorMetadata | undefined, path: string) {
-  if (!path.startsWith("/")) return undefined;
-  const abs = cleanPosix(path);
-  const vroot = metadataVirtualRoot(metadata);
-  if (isUnderPath(abs, vroot)) return abs;
-
-  const roots = metadata?.workspace_roots || [];
-  const singleFlatRoot = roots.length === 1 && roots[0].work && metadata?.worktree && cleanPosix(roots[0].work) === cleanPosix(metadata.worktree);
-  if (singleFlatRoot) {
-    const root = roots[0];
-    for (const candidate of [root.work, root.real]) {
-      if (candidate && isUnderPath(abs, candidate)) {
-        return cleanPosix(`${vroot}/${relativeToRoot(abs, candidate)}`);
-      }
-    }
-  }
-
-  for (const root of roots) {
-    for (const candidate of [root.work, root.real]) {
-      if (candidate && isUnderPath(abs, candidate)) {
-        return virtualForRoot(vroot, root, relativeToRoot(abs, candidate));
-      }
-    }
-  }
-
-  if (metadata?.worktree && isUnderPath(abs, metadata.worktree)) {
-    return cleanPosix(`${vroot}/${relativeToRoot(abs, metadata.worktree)}`);
-  }
-  if (metadata?.real_workspace && isUnderPath(abs, metadata.real_workspace)) {
-    return cleanPosix(`${vroot}/${relativeToRoot(abs, metadata.real_workspace)}`);
-  }
-  return undefined;
-}
-
-function firstPathComponent(path: string) {
-  return cleanPosix(path).split("/").find(Boolean) || "";
-}
-
+// Bind the pure path helpers to Pi's dynamic execution default here so a fixed
+// remote cwd keeps precedence when callers omit cwd.
 function restFileRequest(metadata: SupervisorMetadata | undefined, path: string, cwd = effectiveSupervisorCwd()) {
-  const directVirtual = absoluteToVirtual(metadata, toSlashPath(path));
-  if (directVirtual) return { path: directVirtual };
-
-  cwd = toSlashPath(cwd);
-  const virtualCwd = absoluteToVirtual(metadata, cwd);
-  if (virtualCwd) return { path, cwd: virtualCwd };
-
-  const first = firstPathComponent(path);
-  if (first && (metadata?.workspace_roots || []).some((root) => root.name === first)) {
-    return { path, cwd: metadataVirtualRoot(metadata) };
-  }
-
-  return { path };
+  return buildRestFileRequest(metadata, path, cwd);
 }
 
 function supervisorAbsolutePath(metadata: SupervisorMetadata | undefined, path: string, cwd = effectiveSupervisorCwd()) {
-  const file = restFileRequest(metadata, path, cwd);
-  if (posixPath.isAbsolute(file.path)) return cleanPosix(file.path);
-  const virtualCwd = file.cwd || absoluteToVirtual(metadata, toSlashPath(cwd)) || metadataVirtualRoot(metadata);
-  return cleanPosix(posixPath.resolve(virtualCwd, file.path));
+  return resolveSupervisorAbsolutePath(metadata, path, cwd);
 }
 
 function commandTimeoutFieldFromRest(...objects: JsonObject[]) {
@@ -2890,21 +2089,6 @@ class RestSupervisorClient {
   }
 }
 
-function approvalResolutionBody(resolution: ApprovalResolution) {
-  return {
-    decision: resolution.decision,
-    scope: resolution.scope || "once",
-    reason: resolution.reason || `${resolution.decision}d in parent Pi`,
-    scope_kind: resolution.scope_kind,
-    scope_key: resolution.scope_key,
-    scope_label: resolution.scope_label,
-    scope_operation: resolution.scope_operation,
-    scope_path: resolution.scope_path,
-    scope_rule: resolution.scope_rule,
-    scope_prefix: resolution.scope_prefix,
-  };
-}
-
 class CentralApprovalClient implements ApprovalClient {
   constructor(readonly baseURL: string, readonly sessionId: string, readonly token: string) {}
 
@@ -3285,44 +2469,51 @@ function detachedIdentitySeed(expectedSessionId: string): SupervisorMetadata | u
 async function attachOrStartUnserialized(state: SupervisorState, ctx: ExtensionContext, options: { notifyOnSuccess?: boolean; expectedSessionId?: string } = {}) {
     if (state.shuttingDown) throw supervisorRequestAborted();
     state.ctx = ctx;
-    state.mode = protocolModeFromEnv();
+    state.mode = agentSHSupervisorProtocol(state.startup);
     resetConnection(state);
     state.ctx = ctx;
-    state.mode = protocolModeFromEnv();
     state.lastError = "";
     const expectedSessionId = options.expectedSessionId ?? env("AGENTSH_SESSION_ID");
 
-    const mockSock = normalizeSocketPath(env("PI_AGENTSH_MOCK_SUPERVISOR"));
-    if (mockSock) {
+    if (state.mode === "mock-ndjson") {
+      const mockSock = normalizeSocketPath(env("PI_AGENTSH_MOCK_SUPERVISOR"));
+      if (!mockSock) throw new Error("Full AgentSH mock mode was selected without a supervisor socket");
       await attachToSocket(state, "mock-ndjson", "mock", mockSock, ctx, undefined, expectedSessionId);
       if (options.notifyOnSuccess) notify(ctx, `AgentSH mock supervisor attached: ${state.sessionId || mockSock}`, "info");
       return;
     }
 
-    const envSock = normalizeSocketPath(env("AGENTSH_SESSION_SUPERVISOR"));
-    if (envSock) {
-      await attachToSocket(state, "rest", "agentsh-env", envSock, ctx, detachedIdentitySeed(expectedSessionId), expectedSessionId);
-      if (options.notifyOnSuccess) notify(ctx, `AgentSH REST supervisor attached: ${state.sessionId || envSock}`, "info");
-      return;
+    if (state.mode === "rest") {
+      const envSock = normalizeSocketPath(env("AGENTSH_SESSION_SUPERVISOR"));
+      if (envSock) {
+        await attachToSocket(state, "rest", "agentsh-env", envSock, ctx, detachedIdentitySeed(expectedSessionId), expectedSessionId);
+        if (options.notifyOnSuccess) notify(ctx, `AgentSH REST supervisor attached: ${state.sessionId || envSock}`, "info");
+        return;
+      }
+      if (state.startup.startSupervisor) {
+        state.active = true;
+        state.source = "agentsh-started";
+        state.status = "starting";
+        setStatus(state, ctx);
+        const started = await runAgentSHSessionStart(ctx);
+        const sock = metadataSocket(started);
+        if (!sock) throw new Error("Started AgentSH session did not report supervisor_sock");
+        await attachToSocket(state, "rest", "agentsh-started", sock, ctx, started, expectedSessionId || metadataSessionId(started));
+        if (options.notifyOnSuccess) notify(ctx, `AgentSH REST supervisor started: ${state.sessionId || sock}`, "info");
+        return;
+      }
+      throw new Error("Full AgentSH REST mode was selected without a supervisor socket or local-start request");
     }
 
-    const approvalUISock = normalizeSocketPath(env("AGENTSH_APPROVAL_UI_SOCKET"));
-    if (approvalUISock) {
+    if (state.startup.kind === "full" || state.startup.kind === "conflict") {
+      throw new Error("Full AgentSH mode was selected, but no full supervisor transport is configured");
+    }
+
+    if (state.mode === "legacy-approval-ui") {
+      const approvalUISock = normalizeSocketPath(env("AGENTSH_APPROVAL_UI_SOCKET"));
+      if (!approvalUISock) throw new Error("AgentSH approval-only mode was selected without its socket");
       await attachToSocket(state, "legacy-approval-ui", "agentsh-approval-ui", approvalUISock, ctx, undefined, expectedSessionId);
       if (options.notifyOnSuccess) notify(ctx, `AgentSH approval UI socket attached: ${state.sessionId || approvalUISock}`, "info");
-      return;
-    }
-
-    if (shouldStartSupervisor()) {
-      state.active = true;
-      state.source = "agentsh-started";
-      state.status = "starting";
-      setStatus(state, ctx);
-      const started = await runAgentSHSessionStart(ctx);
-      const sock = metadataSocket(started);
-      if (!sock) throw new Error("Started AgentSH session did not report supervisor_sock");
-      await attachToSocket(state, "rest", "agentsh-started", sock, ctx, started, expectedSessionId || metadataSessionId(started));
-      if (options.notifyOnSuccess) notify(ctx, `AgentSH REST supervisor started: ${state.sessionId || sock}`, "info");
       return;
     }
 
@@ -3702,609 +2893,32 @@ function createGlobalAPI(state: SupervisorState): AgentSHPiAPI {
     },
     getSupervisorMetadata() { return state.metadata; },
     getSupervisorState() {
-      return { configured: state.mode !== "", active: state.active, status: state.status, source: state.source, socketPath: state.socketPath, sessionId: state.sessionId, metadata: state.metadata, lastError: state.lastError || undefined };
+      const protocol = state.activeMode || state.mode;
+      const active = state.active
+        && Boolean(state.client)
+        && (state.status === "connecting" || state.status === "connected" || state.status === "pending");
+      return {
+        configured: state.startup.kind === "full" || state.startup.kind === "conflict" || state.mode !== "",
+        active,
+        protocol,
+        status: state.status,
+        source: state.source,
+        socketPath: state.socketPath,
+        sessionId: state.sessionId,
+        metadata: state.metadata,
+        lastError: state.lastError || undefined,
+      };
     },
   };
 }
 
-function textFromResult(result: any, fallback = "") {
-  if (typeof result === "string") return result;
-  if (typeof result?.text === "string") return result.text;
-  if (typeof result?.content === "string") return result.content;
-  if (Array.isArray(result?.content)) return result.content.map((item: any) => typeof item?.text === "string" ? item.text : "").filter(Boolean).join("\n");
-  return fallback;
-}
-
-function contentFromReadResult(result: any) {
-  if (Array.isArray(result?.content)) return result.content;
-  if (typeof result?.base64 === "string" && typeof result?.mimeType === "string" && result.mimeType.startsWith("image/")) {
-    return [{ type: "image", source: { type: "base64", media_type: result.mimeType, data: result.base64 } }];
-  }
-  const rawText = textFromResult(result, "");
-  const localWindow = truncateHead(rawText, { maxLines: DEFAULT_MAX_LINES, maxBytes: DEFAULT_MAX_BYTES });
-  let text = localWindow.content;
-  const remotelyTruncated = result?.truncated === true;
-  if (remotelyTruncated || localWindow.truncated) {
-    const startLine = numericField(result?.start_line) ?? 1;
-    const endLine = numericField(result?.end_line) ?? (startLine + localWindow.outputLines - 1);
-    const nextOffset = numericField(result?.next_offset) ?? (!localWindow.firstLineExceedsLimit && localWindow.outputLines > 0 ? endLine + 1 : undefined);
-    if (nextOffset) {
-      const range = endLine >= startLine ? `Showing lines ${startLine}-${endLine}. ` : "";
-      text += `\n\n[${range}Use offset=${nextOffset} to continue.]`;
-    } else if (result?.byte_truncated === true || localWindow.firstLineExceedsLimit) {
-      text += `\n\n[Current line exceeds the ${formatSize(numericField(result?.max_bytes) ?? DEFAULT_MAX_BYTES)} read limit. Use supervised bash with a byte-range command to inspect the remainder.]`;
-    }
-  }
-  return [{ type: "text", text }];
-}
-
-type SandboxEditRenderState = {
-  callComponent?: Box;
-  output?: string;
-  isError?: boolean;
-};
-
-type SandboxEditRenderContext = {
-  args?: any;
-  state?: SandboxEditRenderState;
-  lastComponent?: Component;
-  isError?: boolean;
-};
-
-function sandboxEditPath(args: any) {
-  return typeof args?.path === "string" && args.path ? args.path : "(unknown path)";
-}
-
-function getSandboxEditCallComponent(context: SandboxEditRenderContext | undefined) {
-  const state = context?.state;
-  if (context?.lastComponent instanceof Box) {
-    if (state) state.callComponent = context.lastComponent;
-    return context.lastComponent;
-  }
-  if (state?.callComponent) return state.callComponent;
-  const component = new Box(1, 1, (text: string) => text);
-  if (state) state.callComponent = component;
-  return component;
-}
-
-function themeBg(theme: any, color: string, text: string) {
-  return typeof theme?.bg === "function" ? theme.bg(color, text) : text;
-}
-
-function themeBold(theme: any, text: string) {
-  return typeof theme?.bold === "function" ? theme.bold(text) : text;
-}
-
-function renderSandboxEditCallInto(component: Box, args: any, theme: any, state?: SandboxEditRenderState) {
-  component.setBgFn(
-    state?.isError
-      ? (text: string) => themeBg(theme, "toolErrorBg", text)
-      : state?.output
-        ? (text: string) => themeBg(theme, "toolSuccessBg", text)
-        : (text: string) => themeBg(theme, "toolPendingBg", text),
-  );
-  component.clear();
-  component.addChild(new Text(`${theme.fg("toolTitle", themeBold(theme, "edit"))} ${theme.fg("accent", sandboxEditPath(args))}`, 0, 0));
-  if (state?.output) {
-    component.addChild(new Spacer(1));
-    component.addChild(new Text(state.output, 0, 0));
-  }
-  return component;
-}
-
-function renderSandboxEditToolCall(args: any, theme: any, context?: SandboxEditRenderContext) {
-  const component = getSandboxEditCallComponent(context);
-  return renderSandboxEditCallInto(component, args, theme, context?.state);
-}
-
-function formatSandboxEditResult(result: any, args: any, theme: any, isError: boolean | undefined) {
-  const details = result?.details && typeof result.details === "object" ? result.details : {};
-  const diff = typeof details.diff === "string" && details.diff ? details.diff : typeof result?.details?.patch === "string" ? result.details.patch : typeof result?.diff === "string" ? result.diff : undefined;
-  const text = textFromResult(result, "").trim();
-  if (isError) return text ? theme.fg("error", text) : undefined;
-  if (diff) return renderDiff(diff, { filePath: sandboxEditPath(args) });
-  return text ? theme.fg("toolOutput", text) : undefined;
-}
-
-function renderSandboxEditToolResult(result: any, _options: any, theme: any, context?: SandboxEditRenderContext) {
-  const state = context?.state;
-  const output = formatSandboxEditResult(result, context?.args, theme, context?.isError);
-  if (state) {
-    state.output = output;
-    state.isError = context?.isError;
-    if (state.callComponent) renderSandboxEditCallInto(state.callComponent, context?.args, theme, state);
-  }
-  const component = new Container();
-  if (!state && output) {
-    const text = textFromResult(result, "").trim();
-    component.addChild(new Text(text && !output.includes(text) ? `${theme.fg("toolOutput", text)}\n\n${output}` : output, 0, 0));
-  }
-  return component;
-}
-
-function modelMatches(candidate: any, requested: string) {
-  const value = requested.trim();
-  if (!value) return false;
-  return candidate?.id === value || candidate?.name === value || `${candidate?.provider}/${candidate?.id}` === value || `${candidate?.provider}:${candidate?.id}` === value;
-}
-
-function contextWindowForModel(ctx: ExtensionContext | undefined, model?: string): number {
-  const requested = typeof model === "string" ? model.trim() : "";
-  if (requested) {
-    const allModels = ctx?.modelRegistry?.getAll?.() ?? [];
-    const match = allModels.find((candidate: any) => modelMatches(candidate, requested));
-    if (typeof match?.contextWindow === "number" && Number.isFinite(match.contextWindow) && match.contextWindow > 0) return match.contextWindow;
-  }
-  const current = ctx?.model;
-  if (!requested || modelMatches(current, requested)) {
-    const contextWindow = current?.contextWindow;
-    if (typeof contextWindow === "number" && Number.isFinite(contextWindow) && contextWindow > 0) return contextWindow;
-  }
-  return 0;
-}
-
-function latestSubagentAssistantMessage(state: SubagentStreamState) {
-  return [...state.messages].reverse().find((message) => message.role === "assistant");
-}
-
-function latestSubagentAssistantText(state: SubagentStreamState): string {
-  const latestAssistant = latestSubagentAssistantMessage(state);
-  return latestAssistant?.content.filter((part) => part.type === "text").map((part) => String(part.text || "")).join("").trim() || "";
-}
-
-function piProtocolFailure(state: SubagentStreamState): { failureKind: "model" | "protocol"; message: string; retryable: boolean } | undefined {
-  const hasProtocolEvidence = state.sawPiJsonStdout || state.protocolSettled || Boolean(state.modelStopReason);
-  if (!hasProtocolEvidence) return undefined;
-  const latestAssistant = latestSubagentAssistantMessage(state);
-  const modelStopReason = String(state.modelStopReason || latestAssistant?.stopReason || "").trim();
-  const normalizedStopReason = modelStopReason.toLowerCase().replace(/[_-]/g, "");
-  if (["error", "aborted", "cancelled", "canceled"].includes(normalizedStopReason)) {
-    return { failureKind: "model", message: latestAssistant?.errorMessage || `child model stopped: ${modelStopReason || "error"}`, retryable: false };
-  }
-  if (!state.protocolSettled) return { failureKind: "protocol", message: "child Pi stream ended before agent_settled", retryable: true };
-  if (normalizedStopReason === "tooluse") {
-    return { failureKind: "protocol", message: "child Pi settled after a tool-use turn without a final assistant response", retryable: true };
-  }
-  if (!state.final?.trim() && !latestSubagentAssistantText(state)) {
-    return { failureKind: "protocol", message: "child Pi settled without visible final assistant text", retryable: true };
-  }
-  return undefined;
-}
-
-function subagentParentDetails(result: any, ctx?: ExtensionContext, streamedStates?: Map<string, SubagentStreamState>) {
-  const detailResult = (item: any) => {
-    const label = stringifyData(item?.label || "subagent") || "subagent";
-    const streamed = streamedStates?.get(label);
-    const parsed = typeof item?.stdout === "string" ? parseSubagentPiJsonStdout(item.stdout) : undefined;
-    const model = item?.model || streamed?.model || parsed?.model;
-    const usageCandidates = [streamed?.usage, parsed?.usage, item?.usage].filter((candidate): candidate is any => Boolean(candidate));
-    const mostCompleteUsage = usageCandidates.sort((a, b) => usageNumber(b?.turns) - usageNumber(a?.turns))[0] ?? usageZero();
-    const usage = { ...mostCompleteUsage };
-    usage.contextWindow = usageNumber(item?.context_window ?? item?.contextWindow) || usageNumber(streamed?.usage.contextWindow) || contextWindowForModel(ctx, model);
-    const serverDiagnostics = !streamed && Array.isArray(item?.protocol_diagnostics ?? item?.protocolDiagnostics)
-      ? (item.protocol_diagnostics ?? item.protocolDiagnostics).map((diagnostic: any) => ({
-          kind: stringifyData(diagnostic?.kind || "unknown_event") as any,
-          detail: [diagnostic?.event, diagnostic?.bytes ? `${diagnostic.bytes} B` : ""].filter(Boolean).join(": ") || undefined,
-        }))
-      : [];
-    const protocolDiagnostics = [
-      ...(streamed?.protocolDiagnostics ?? parsed?.protocolDiagnostics ?? item?.protocolDiagnostics ?? []),
-      ...serverDiagnostics,
-    ];
-    const itemTerminal = normalizeSubagentTerminal(item?.terminal, { exitCode: item?.exit_code ?? item?.exitCode, stopReason: item?.stop_reason ?? item?.stopReason, error: item?.error ?? item?.errorMessage });
-    const terminalWasDowngraded = itemTerminal?.state === "completed" && streamed?.terminal?.state === "failed";
-    const serverFinal = !terminalWasDowngraded && typeof item?.final === "string" && item.final.trim() ? item.final : undefined;
-    return createSubagentProgressCapsule({
-      label,
-      task: item?.task ?? streamed?.task,
-      exitCode: item?.exit_code ?? item?.exitCode ?? streamed?.exitCode,
-      stopReason: item?.stop_reason ?? item?.stopReason ?? streamed?.stopReason,
-      terminal: streamed?.terminal ?? itemTerminal,
-      final: serverFinal ?? (terminalWasDowngraded ? undefined : streamed?.final),
-      errorMessage: item?.error ?? item?.errorMessage ?? streamed?.errorMessage,
-      stderr: item?.stderr ?? item?.stderrTail ?? streamed?.stderr,
-      usage,
-      messages: streamed?.messages?.length ? streamed.messages : parsed?.messages ?? item?.messages ?? [],
-      model,
-      modelStopReason: item?.model_stop_reason ?? item?.modelStopReason ?? streamed?.modelStopReason ?? parsed?.modelStopReason,
-      tools: item?.tools ?? streamed?.tools,
-      cwd: item?.cwd ?? streamed?.cwd,
-      lastToolCall: streamed?.lastToolCall ?? parsed?.lastToolCall ?? item?.activeTool,
-      completedTools: streamed?.completedTools?.length ? streamed.completedTools : parsed?.completedTools ?? item?.completedTools ?? [],
-      readFiles: streamed?.readFiles?.length ? streamed.readFiles : parsed?.readFiles ?? item?.readFiles ?? [],
-      modifiedFiles: streamed?.modifiedFiles?.length ? streamed.modifiedFiles : parsed?.modifiedFiles ?? item?.modifiedFiles ?? [],
-      protocolDiagnostics,
-      protocolSettled: item?.protocol_settled === true || item?.protocolSettled === true || streamed?.protocolSettled === true || parsed?.protocolSettled === true,
-      stdoutTruncated: item?.stdout_truncated === true || item?.stdoutTruncated === true || streamed?.stdoutTruncated === true,
-      stdoutTotalBytes: Math.max(usageNumber(item?.stdout_total_bytes ?? item?.stdoutTotalBytes), usageNumber(streamed?.stdoutTotalBytes)),
-      compaction: streamed?.compaction ?? parsed?.compaction ?? item?.compaction,
-      fullResultPath: item?.full_result_path ?? item?.fullResultPath,
-      finalTruncated: item?.final_truncated === true || item?.finalTruncated === true,
-      finalTotalBytes: item?.final_total_bytes ?? item?.finalTotalBytes,
-      finalInlineBytes: item?.final_inline_bytes ?? item?.finalInlineBytes,
-      artifactBytes: item?.artifact_bytes ?? item?.artifactBytes,
-      artifactComplete: typeof item?.artifact_complete === "boolean" ? item.artifact_complete : item?.artifactComplete,
-      artifactError: item?.artifact_error ?? item?.artifactError,
-    });
-  };
-  const results = boundSubagentProgressCapsules(Array.isArray(result?.results) ? result.results.map(detailResult) : []);
-  let terminal = normalizeSubagentTerminal(result?.terminal);
-  if (terminal?.state === "completed") {
-    const failedChild = results.find((child) => subagentTerminalFailed(child.terminal));
-    if (failedChild?.terminal) terminal = { ...failedChild.terminal, message: failedChild.terminal.message || failedChild.errorMessage };
-  }
-  const serverParentFinal = terminal?.state === "completed" && typeof result?.final === "string" && result.final.trim() ? sanitizeSubagentParentText(result.final, 4 * 1024) : undefined;
-  const singleArtifact = results.length === 1 ? results[0] : undefined;
-  return {
-    mode: result?.mode || (results.length > 1 ? "parallel" : "single"),
-    results,
-    terminal,
-    final: serverParentFinal ?? (results.length === 1 && results[0].terminal?.state === "completed" ? results[0].final ?? results[0].lastAssistantText : undefined),
-    summary: typeof result?.summary === "string" ? sanitizeSubagentParentText(result.summary, 4 * 1024) : undefined,
-    error: terminal?.message || (typeof result?.error === "string" ? sanitizeSubagentParentText(result.error, 1024) : undefined),
-    fullResultPath: singleArtifact?.fullResultPath,
-    finalTruncated: singleArtifact?.finalTruncated,
-    finalTotalBytes: singleArtifact?.finalTotalBytes,
-    artifactBytes: singleArtifact?.artifactBytes,
-    artifactComplete: singleArtifact?.artifactComplete,
-    artifactError: singleArtifact?.artifactError,
-  };
-}
-
-function resultLine(result: any) {
-  const label = stringifyData(result?.label || "subagent");
-  const failed = subagentTerminalFailed(result?.terminal);
-  const text = stringifyData(failed
-    ? result?.error || result?.errorMessage || result?.terminal?.message || result?.stop_reason || result?.stopReason || result?.final || result?.lastAssistantText || ""
-    : result?.final || result?.lastAssistantText || result?.summary || result?.error || result?.errorMessage || result?.terminal?.message || result?.stop_reason || result?.stopReason || "").trim();
-  return text ? `[${label}] ${truncateByBytes(text)}` : `[${label}] ${result?.exit_code ?? result?.exitCode ?? "completed"}`;
-}
-
-function subagentText(result: any) {
-  const direct = textFromResult(result, "").trim();
-  if (direct) return direct;
-  if (typeof result?.final === "string" && result.final.trim()) return result.final;
-  if (typeof result?.summary === "string" && result.summary.trim()) return result.summary;
-  if (Array.isArray(result?.results) && result.results.length > 0) return result.results.map(resultLine).join("\n\n");
-  return JSON.stringify(subagentParentDetails(result) ?? {}, null, 2);
-}
-
-function subagentArtifactHints(result: any): string {
-  if (!Array.isArray(result?.results)) return "";
-  const hints = result.results.flatMap((child: any) => {
-    const label = stringifyData(child?.label || "subagent");
-    const path = typeof child?.fullResultPath === "string" ? child.fullResultPath : "";
-    if (path) {
-      const bytes = usageNumber(child?.artifactBytes);
-      const total = usageNumber(child?.finalTotalBytes);
-      const completeness = child?.artifactComplete === false && total
-        ? ` (${formatSize(bytes)} of ${formatSize(total)} retained)`
-        : "";
-      return [`Full subagent result [${label}]: ${path}${completeness}`];
-    }
-    if (typeof child?.artifactError === "string" && child.artifactError) {
-      return [`Subagent result artifact unavailable [${label}]: ${child.artifactError}`];
-    }
-    return [];
-  });
-  return truncateByBytes(hints.join("\n"), 4 * 1024);
-}
-
-function boundedSubagentParentOutput(result: any): string {
-  const inline = truncateByBytes(subagentText(result));
-  const artifactHints = subagentArtifactHints(result);
-  const terminals = [result?.terminal, ...(Array.isArray(result?.results) ? result.results.map((child: any) => child?.terminal) : [])];
-  const sideEffectsUnknown = terminals.some((terminal) => terminal?.sideEffectsMayHaveOccurred === true && terminal?.retryable !== true);
-  const safetyHint = sideEffectsUnknown ? "The subagent may have produced side effects and must not be replayed automatically." : "";
-  const hints = [artifactHints, safetyHint].filter(Boolean).join("\n");
-  return hints ? `${inline}\n\n${hints}` : inline;
-}
-
-function renderSubagentStream(state: SubagentStreamState) {
-  let text = state.prefix;
-  const appendBlock = (block: string) => {
-    if (!block) return;
-    if (text && !text.endsWith("\n")) text += "\n";
-    text += block;
-    if (!text.endsWith("\n")) text += "\n";
-  };
-  appendBlock(state.liveText);
-  appendBlock(subagentLiveToolStatus(state) || "");
-  appendBlock(state.rawText);
-  const usage = formatSubagentUsage(state.usage, state.model);
-  if (usage) appendBlock(`[${usage}]`);
-  return text.trimEnd();
-}
-
-function formatTokenCount(count: number): string {
-  if (count < 1000) return count.toString();
-  if (count < 10000) return `${(count / 1000).toFixed(1)}k`;
-  if (count < 1000000) return `${Math.round(count / 1000)}k`;
-  return `${(count / 1000000).toFixed(1)}M`;
-}
-
-function formatSubagentUsage(usage: any, model?: string): string {
-  const parts: string[] = [];
-  const contextTokens = usageNumber(usage?.contextTokens);
-  const contextWindow = usageNumber(usage?.contextWindow);
-  if (usage?.turns) parts.push(`${usage.turns} turn${usage.turns > 1 ? "s" : ""}`);
-  if (usage?.input) parts.push(`↑${formatTokenCount(usage.input)}`);
-  if (usage?.output) parts.push(`↓${formatTokenCount(usage.output)}`);
-  if (usage?.cacheRead) parts.push(`R${formatTokenCount(usage.cacheRead)}`);
-  if (usage?.cacheWrite) parts.push(`W${formatTokenCount(usage.cacheWrite)}`);
-  if (usage?.cost) parts.push(`$${usage.cost.toFixed(4)}`);
-  if (contextTokens && contextWindow) {
-    const pct = Math.min(999, Math.round((contextTokens / contextWindow) * 100));
-    parts.push(`ctx:${formatTokenCount(contextTokens)}/${formatTokenCount(contextWindow)} (${pct}%)`);
-  } else if (contextTokens) {
-    parts.push(`ctx:${formatTokenCount(contextTokens)}`);
-  }
-  if (model) parts.push(model);
-  return parts.join(" ");
-}
-
-function subagentFinalOutput(messages: any[]): string {
-  for (let i = messages.length - 1; i >= 0; i--) {
-    const msg = messages[i];
-    if (msg?.role !== "assistant" || !Array.isArray(msg.content)) continue;
-    for (const part of msg.content) if (part?.type === "text") return String(part.text || "");
-  }
-  return "";
-}
-
-function subagentDisplayItems(messages: any[]): Array<{ type: "text"; text: string } | { type: "toolCall"; name: string; args: Record<string, any> }> {
-  const items: Array<{ type: "text"; text: string } | { type: "toolCall"; name: string; args: Record<string, any> }> = [];
-  for (const msg of messages) {
-    if (msg?.role !== "assistant" || !Array.isArray(msg.content)) continue;
-    for (const part of msg.content) {
-      if (part?.type === "text") items.push({ type: "text", text: String(part.text || "") });
-      else if (part?.type === "toolCall") items.push({ type: "toolCall", name: String(part.name || "unknown"), args: part.arguments || {} });
-    }
-  }
-  return items;
-}
-
-function formatSubagentToolCall(toolName: string, args: Record<string, unknown>, themeFg: (color: any, text: string) => string): string {
-  const shortenPath = (p: string) => {
-    const home = homedir();
-    return p.startsWith(home) ? `~${p.slice(home.length)}` : p;
-  };
-  if (toolName === "bash") return themeFg("muted", "$ ") + themeFg("toolOutput", String(args.command || "...").slice(0, 80));
-  if (toolName === "read") {
-    const path = shortenPath(String(args.path || args.file_path || "..."));
-    const lineInfo = args.offset ? `:${args.offset}${args.limit ? `-${Number(args.offset) + Number(args.limit) - 1}` : ""}` : "";
-    return themeFg("muted", "read ") + themeFg("accent", path + lineInfo);
-  }
-  if (toolName === "write") return themeFg("muted", "write ") + themeFg("accent", shortenPath(String(args.path || args.file_path || "...")));
-  if (toolName === "edit") return themeFg("muted", "edit ") + themeFg("accent", shortenPath(String(args.path || args.file_path || "...")));
-  if (toolName === "ls") return themeFg("muted", "ls ") + themeFg("accent", shortenPath(String(args.path || ".")));
-  if (toolName === "find") return themeFg("muted", "find ") + themeFg("accent", String(args.pattern || "*")) + themeFg("dim", ` in ${shortenPath(String(args.path || "."))}`);
-  if (toolName === "grep") return themeFg("muted", "grep ") + themeFg("accent", `/${String(args.pattern || "")}/`) + themeFg("dim", ` in ${shortenPath(String(args.path || "."))}`);
-  const argsStr = JSON.stringify(args || {});
-  return themeFg("accent", toolName) + themeFg("dim", ` ${argsStr.length > 50 ? `${argsStr.slice(0, 50)}...` : argsStr}`);
-}
-
-function completedSubagentToolArgs(tool: any): Record<string, unknown> {
-  if (tool?.args && typeof tool.args === "object" && !Array.isArray(tool.args)) return tool.args;
-  return tool?.path ? { path: tool.path } : {};
-}
-
-function isSubagentFailure(result: any): boolean {
-  const terminal = normalizeSubagentTerminal(result?.terminal, { exitCode: result?.exitCode, stopReason: result?.stopReason, error: result?.errorMessage });
-  if (terminal) return subagentTerminalFailed(terminal);
-  return result?.exitCode !== -1 && (result?.exitCode !== 0 || result?.stopReason === "error" || result?.stopReason === "aborted" || result?.stopReason === "timeout");
-}
-
-function subagentDetailsFailed(details: any): boolean {
-  const terminal = normalizeSubagentTerminal(details?.terminal, { exitCode: details?.exitCode, stopReason: details?.stopReason, error: details?.error });
-  return subagentTerminalFailed(terminal) || details?.results?.some((child: any) => isSubagentFailure(child)) || Boolean(details?.error);
-}
-
-function aggregateSubagentUsage(results: any[]) {
-  const total = usageZero();
-  for (const r of results) {
-    total.input += usageNumber(r?.usage?.input);
-    total.output += usageNumber(r?.usage?.output);
-    total.cacheRead += usageNumber(r?.usage?.cacheRead);
-    total.cacheWrite += usageNumber(r?.usage?.cacheWrite);
-    total.cost += usageNumber(r?.usage?.cost);
-    total.turns += usageNumber(r?.usage?.turns);
-  }
-  return total;
-}
-
-function subagentResultStatus(result: any): string {
-  if (result?.exitCode === -1) return "running";
-  const terminal = normalizeSubagentTerminal(result?.terminal, { exitCode: result?.exitCode, stopReason: result?.stopReason, error: result?.errorMessage });
-  if (terminal?.state === "timed_out") return "timed out";
-  if (terminal?.state === "cancelled") return "cancelled";
-  if (terminal?.state === "failed") return "failed";
-  if (terminal?.state === "completed") return "completed";
-  if (result?.stopReason === "aborted") return "aborted";
-  if (result?.stopReason === "timeout") return "timed out";
-  if (isSubagentFailure(result)) return "failed";
-  return "completed";
-}
-
-function subagentLastAssistantText(messages: any[]): string {
-  for (let i = messages.length - 1; i >= 0; i--) {
-    const msg = messages[i];
-    if (msg?.role !== "assistant" || !Array.isArray(msg.content)) continue;
-    return msg.content.filter((part: any) => part?.type === "text").map((part: any) => String(part.text || "")).join("").trim();
-  }
-  return "";
-}
-
-function compactSubagentResultSummary(result: any): string {
-  const lines: string[] = [];
-  lines.push(`Subagent ${subagentResultStatus(result)}.`);
-  if (result?.task) lines.push(`Task: ${result.task}`);
-  if (result?.model) lines.push(`Model: ${result.model}`);
-  if (result?.tools?.length) lines.push(`Tools: ${result.tools.join(", ")}`);
-  const lastAssistant = String(result?.lastAssistantText || subagentLastAssistantText(result?.messages || [])).trim();
-  if (lastAssistant) lines.push(`Last assistant text:\n${truncateByBytes(lastAssistant).split("\n").slice(-8).join("\n")}`);
-  if (result?.activeTool) lines.push(`Active tool: ${result.activeTool.name} ${JSON.stringify(result.activeTool.args)}`);
-  const lastTool = Array.isArray(result?.completedTools) ? result.completedTools.at(-1) : undefined;
-  if (lastTool) {
-    const summary = formatSubagentToolCall(lastTool.name, completedSubagentToolArgs(lastTool), (_color, text) => text);
-    lines.push(`Last completed tool: ${summary}${lastTool.isError ? " (failed)" : ""}${lastTool.resultPreview ? `\n${lastTool.resultPreview}` : ""}`);
-  }
-  const stderr = String(result?.stderrTail || result?.stderr || "").trim().split("\n").filter(Boolean).slice(-8).join("\n");
-  if (stderr) lines.push(`stderr:\n${stderr}`);
-  if (result?.errorMessage) lines.push(`Error: ${result.errorMessage}`);
-  if (result?.fullResultPath) lines.push(`Full result: ${result.fullResultPath}`);
-  if (result?.artifactError) lines.push(`Result artifact unavailable: ${result.artifactError}`);
-  lines.push(`Exit: ${result?.exitCode ?? 0}${result?.stopReason ? ` (${result.stopReason})` : ""}`);
-  return truncateByBytes(lines.join("\n"));
-}
-
-function renderSubagentCall(args: any, theme: any) {
-  if (args.action && args.draft_id) {
-    return new Text(`${theme.fg("toolTitle", theme.bold("subagent draft "))}${theme.fg("accent", String(args.action))}\n  ${theme.fg("dim", String(args.draft_id))}`, 0, 0);
-  }
-  if (args.chain?.length) return new Text(`${theme.fg("toolTitle", theme.bold("subagent "))}${theme.fg("accent", `chain (${args.chain.length} steps)`)}`, 0, 0);
-  if (args.tasks?.length) return new Text(`${theme.fg("toolTitle", theme.bold("subagent "))}${theme.fg("accent", `parallel (${args.tasks.length} tasks)`)}`, 0, 0);
-  const task = String(args.task ?? "...");
-  return new Text(`${theme.fg("toolTitle", theme.bold("subagent single"))}\n  ${theme.fg("dim", task.length > 70 ? `${task.slice(0, 70)}...` : task)}`, 0, 0);
-}
-
-function renderSubagentResult(result: any, options: any, theme: any) {
-  const details = result.details as any | undefined;
-  if (!details?.results?.length) return new Text(result.content?.[0]?.type === "text" ? result.content[0].text : "(no output)", 0, 0);
-  const expanded = Boolean(options?.expanded);
-  const mdTheme = getMarkdownTheme();
-
-  const renderDisplayItems = (items: ReturnType<typeof subagentDisplayItems>, limit?: number) => {
-    const toShow = limit ? items.slice(-limit) : items;
-    const skipped = limit && items.length > limit ? items.length - limit : 0;
-    let text = "";
-    if (skipped > 0) text += theme.fg("muted", `... ${skipped} earlier items\n`);
-    for (const item of toShow) {
-      if (item.type === "text") {
-        const preview = expanded ? truncateByBytes(item.text) : truncateByBytes(item.text).split("\n").slice(0, 3).join("\n");
-        text += `${theme.fg("toolOutput", preview)}\n`;
-      } else {
-        text += `${theme.fg("muted", "→ ") + formatSubagentToolCall(item.name, item.args, theme.fg.bind(theme))}\n`;
-      }
-    }
-    return text.trimEnd();
-  };
-
-  const renderOneExpanded = (container: Container, r: any, title: string) => {
-    const failed = isSubagentFailure(r);
-    const icon = failed ? theme.fg("error", "✗") : r.exitCode === -1 ? theme.fg("warning", "⏳") : theme.fg("success", "✓");
-    container.addChild(new Text(`${icon} ${theme.fg("toolTitle", theme.bold(title))}`, 0, 0));
-    container.addChild(new Text(theme.fg("muted", "Status: ") + theme.fg(failed ? "error" : "dim", `${subagentResultStatus(r)} (exit ${r.exitCode ?? 0})`), 0, 0));
-    if (r.task) container.addChild(new Text(theme.fg("muted", "Task: ") + theme.fg("dim", r.task), 0, 0));
-    if (r.model) container.addChild(new Text(theme.fg("muted", "Model: ") + theme.fg("dim", r.model), 0, 0));
-    if (r.tools?.length) container.addChild(new Text(theme.fg("muted", "Tools: ") + theme.fg("dim", r.tools.join(", ")), 0, 0));
-    if (r.cwd) container.addChild(new Text(theme.fg("muted", "Cwd: ") + theme.fg("dim", r.cwd), 0, 0));
-    if (failed && r.errorMessage) container.addChild(new Text(theme.fg("error", `Error: ${r.errorMessage}`), 0, 0));
-    if (r.activeTool) container.addChild(new Text(theme.fg("muted", "Active tool: ") + formatSubagentToolCall(r.activeTool.name, r.activeTool.args, theme.fg.bind(theme)), 0, 0));
-    const lastTool = Array.isArray(r.completedTools) ? r.completedTools.at(-1) : undefined;
-    if (lastTool) {
-      const summary = formatSubagentToolCall(lastTool.name, completedSubagentToolArgs(lastTool), theme.fg.bind(theme));
-      container.addChild(new Text(theme.fg("muted", "Last completed tool: ") + summary + theme.fg("muted", `${lastTool.isError ? " (failed)" : ""}${lastTool.resultPreview ? `\n${lastTool.resultPreview}` : ""}`), 0, 0));
-    }
-
-    for (const item of subagentDisplayItems(r.messages || [])) {
-      if (item.type === "toolCall") container.addChild(new Text(theme.fg("muted", "→ ") + formatSubagentToolCall(item.name, item.args, theme.fg.bind(theme)), 0, 0));
-    }
-
-    const finalOutput = r.final || subagentFinalOutput(r.messages || []);
-    container.addChild(new Spacer(1));
-    container.addChild(new Text(theme.fg("muted", "─── Output ───"), 0, 0));
-    if (finalOutput) container.addChild(new Markdown(truncateByBytes(finalOutput.trim()), 0, 0, mdTheme));
-    else container.addChild(new Text(theme.fg("muted", r.exitCode === -1 ? "(running...)" : "(no output)"), 0, 0));
-    if (r.fullResultPath) container.addChild(new Text(theme.fg("dim", `Full result: ${r.fullResultPath}`), 0, 0));
-    else if (r.artifactError) container.addChild(new Text(theme.fg("warning", `Result artifact unavailable: ${r.artifactError}`), 0, 0));
-
-    const usage = formatSubagentUsage(r.usage, r.model);
-    if (usage) container.addChild(new Text(theme.fg("dim", usage), 0, 0));
-    if ((r.stderrTail || r.stderr)?.trim()) {
-      container.addChild(new Spacer(1));
-      container.addChild(new Text(theme.fg(failed ? "error" : "dim", `stderr:\n${truncateByBytes((r.stderrTail || r.stderr).trim())}`), 0, 0));
-    }
-  };
-
-  const mode = details.mode || (details.results.length > 1 ? "parallel" : "single");
-  if (mode === "single" && details.results.length === 1) {
-    const r = details.results[0];
-    if (expanded) {
-      const container = new Container();
-      renderOneExpanded(container, r, r.label || "subagent");
-      return container;
-    }
-    const failed = isSubagentFailure(r);
-    const icon = r.exitCode === -1 ? theme.fg("warning", "⏳") : failed ? theme.fg("error", "✗") : theme.fg("success", "✓");
-    const displayItems = subagentDisplayItems(r.messages || []);
-    let text = `${icon} ${theme.fg("toolTitle", theme.bold("subagent"))}`;
-    if (failed) text += `\n${theme.fg("error", compactSubagentResultSummary(r).split("\n").slice(0, 14).join("\n"))}`;
-    else if (displayItems.length === 0) {
-      const lastTool = Array.isArray(r.completedTools) ? r.completedTools.at(-1) : undefined;
-      const fallback = String(r.final || r.errorMessage || "").trim();
-      if (lastTool) text += `\n${theme.fg("muted", "→ ")}${formatSubagentToolCall(lastTool.name, completedSubagentToolArgs(lastTool), theme.fg.bind(theme))}`;
-      else text += fallback ? `\n${theme.fg("toolOutput", truncateByBytes(fallback).split("\n").slice(0, 8).join("\n"))}` : `\n${theme.fg("muted", r.exitCode === -1 ? "(running...)" : "(no output)")}`;
-    } else text += `\n${renderDisplayItems(displayItems, 10)}`;
-    if (r.fullResultPath) text += `\n${theme.fg("dim", `Full result: ${r.fullResultPath}`)}`;
-    else if (r.artifactError) text += `\n${theme.fg("warning", `Result artifact unavailable: ${r.artifactError}`)}`;
-    const usage = formatSubagentUsage(r.usage, r.model);
-    if (usage) text += `\n${theme.fg("dim", usage)}`;
-    return new Text(text, 0, 0);
-  }
-
-  const running = details.results.filter((r: any) => r.exitCode === -1).length;
-  const successCount = details.results.filter((r: any) => r.exitCode !== -1 && !isSubagentFailure(r)).length;
-  const failCount = details.results.filter((r: any) => r.exitCode !== -1 && isSubagentFailure(r)).length;
-  const icon = running > 0 ? theme.fg("warning", "⏳") : failCount > 0 ? theme.fg("warning", "◐") : theme.fg("success", "✓");
-  const noun = mode === "chain" ? "steps" : "tasks";
-  const status = running > 0 ? `${successCount + failCount}/${details.results.length} done, ${running} running` : `${successCount}/${details.results.length} ${noun}`;
-
-  if (expanded) {
-    const container = new Container();
-    container.addChild(new Text(`${icon} ${theme.fg("toolTitle", theme.bold(`${mode} `))}${theme.fg("accent", status)}`, 0, 0));
-    for (const r of details.results) {
-      container.addChild(new Spacer(1));
-      renderOneExpanded(container, r, mode === "chain" ? `step ${r.step ?? "?"}` : r.label || "subagent");
-    }
-    const totalUsage = formatSubagentUsage(aggregateSubagentUsage(details.results));
-    if (totalUsage) {
-      container.addChild(new Spacer(1));
-      container.addChild(new Text(theme.fg("dim", `Total: ${totalUsage}`), 0, 0));
-    }
-    return container;
-  }
-
-  let text = `${icon} ${theme.fg("toolTitle", theme.bold(`${mode} `))}${theme.fg("accent", status)}`;
-  for (const r of details.results) {
-    const rIcon = r.exitCode === -1 ? theme.fg("warning", "⏳") : isSubagentFailure(r) ? theme.fg("error", "✗") : theme.fg("success", "✓");
-    const displayItems = subagentDisplayItems(r.messages || []);
-    text += `\n\n${theme.fg("muted", "─── ")}${theme.fg("accent", mode === "chain" ? `step ${r.step ?? "?"}` : r.label || "subagent")} ${rIcon}`;
-    if (isSubagentFailure(r)) text += `\n${theme.fg("error", compactSubagentResultSummary(r).split("\n").slice(0, 10).join("\n"))}`;
-    else if (displayItems.length === 0) {
-      const lastTool = Array.isArray(r.completedTools) ? r.completedTools.at(-1) : undefined;
-      const fallback = String(r.final || r.errorMessage || "").trim();
-      if (lastTool) text += `\n${theme.fg("muted", "→ ")}${formatSubagentToolCall(lastTool.name, completedSubagentToolArgs(lastTool), theme.fg.bind(theme))}`;
-      else text += fallback ? `\n${theme.fg("toolOutput", truncateByBytes(fallback).split("\n").slice(0, 5).join("\n"))}` : `\n${theme.fg("muted", r.exitCode === -1 ? "(running...)" : "(no output)")}`;
-    } else text += `\n${renderDisplayItems(displayItems, 5)}`;
-    if (r.fullResultPath) text += `\n${theme.fg("dim", `Full result: ${r.fullResultPath}`)}`;
-    else if (r.artifactError) text += `\n${theme.fg("warning", `Result artifact unavailable: ${r.artifactError}`)}`;
-    const usage = formatSubagentUsage(r.usage, r.model);
-    if (usage) text += `\n${theme.fg("dim", usage)}`;
-  }
-  if (running === 0) {
-    const totalUsage = formatSubagentUsage(aggregateSubagentUsage(details.results));
-    if (totalUsage) text += `\n\n${theme.fg("dim", `Total: ${totalUsage}`)}`;
-  }
-  if (!expanded) text += `\n${theme.fg("muted", "(Ctrl+O to expand)")}`;
-  return new Text(text, 0, 0);
-}
-
 export default function sandbox(pi: ExtensionAPI) {
   const exposeSubagentTimeout = modelMayOverrideSubagentTimeout();
+  const startup = classifyAgentSHStartup(process.env);
   const state: SupervisorState = {
     active: false,
-    mode: protocolModeFromEnv(),
+    startup,
+    mode: agentSHSupervisorProtocol(startup),
     activeMode: "",
     source: "",
     socketPath: "",
@@ -4356,7 +2970,7 @@ export default function sandbox(pi: ExtensionAPI) {
     handler: async (args, ctx) => notify(ctx, grantGuidance("access", args?.trim?.() || "", "manual request", state), "info"),
   });
 
-  if (supervisorToolIntegrationRequested()) {
+  if (startup.kind === "full" || startup.kind === "conflict") {
     pi.registerTool({
       name: "bash",
     label: "bash",

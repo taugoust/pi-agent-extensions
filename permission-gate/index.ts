@@ -12,18 +12,19 @@
 
 import { createConnection, Socket } from "node:net";
 import { isAbsolute } from "node:path";
+import {
+  agentSHRuntimeDisposition,
+  classifyAgentSHStartup,
+  type AgentSHRuntimeState,
+} from "../shared/agentsh-mode.js";
 import type {
   ExtensionAPI,
   ExtensionContext,
 } from "@mariozechner/pi-coding-agent";
 
-const CAPABILITY_GATE_MARKER = "__paeSandboxCapabilityGateActive";
 const GATE_CLAIM_KEY = "__paeAgentSHPermissionGateClaimV1";
 const PASEO_REMOTE_UI_KEY = "__piPaseoRemoteUiV1";
 const GATE_SOCKET_ENV = "AGENTSH_PERMISSION_GATE_SOCKET";
-// Retain the inherited-FD client only for compatibility with an already-running
-// launcher during an in-process extension reload.
-const GATE_FD_ENV = "AGENTSH_PERMISSION_GATE_FD";
 const GATE_TIMEOUT_ENV = "PI_AGENTSH_PERMISSION_GATE_TIMEOUT_MS";
 
 const PROTOCOL_VERSION = 1;
@@ -128,8 +129,7 @@ type FrameWaiter = {
 
 type GateClaim = {
   protocol: 1;
-  rawSocket?: string;
-  rawFD?: string;
+  rawSocket: string;
   timeoutRaw?: string;
   client?: AgentSHPermissionGateClient;
   error?: Error;
@@ -148,28 +148,26 @@ function claimInheritedGate(): GateClaim | undefined {
   const root = globalThis as Record<string, unknown>;
   const existing = root[GATE_CLAIM_KEY] as GateClaim | undefined;
   const socketPresent = ownEnvironment(GATE_SOCKET_ENV);
-  const fdPresent = ownEnvironment(GATE_FD_ENV);
   const rawSocket = socketPresent ? process.env[GATE_SOCKET_ENV] ?? "" : undefined;
-  const rawFD = fdPresent ? process.env[GATE_FD_ENV] ?? "" : undefined;
   if (socketPresent) delete process.env[GATE_SOCKET_ENV];
-  if (fdPresent) delete process.env[GATE_FD_ENV];
 
-  if (existing?.protocol === PROTOCOL_VERSION
-    && (typeof existing.rawSocket === "string" || typeof existing.rawFD === "string")) {
+  if (existing?.protocol === PROTOCOL_VERSION && typeof existing.rawSocket === "string") {
     return existing;
   }
-  if (!socketPresent && !fdPresent) return undefined;
+  if (!socketPresent) return undefined;
 
   const claim: GateClaim = {
     protocol: PROTOCOL_VERSION,
-    rawSocket,
-    rawFD,
+    rawSocket: rawSocket!,
     timeoutRaw: process.env[GATE_TIMEOUT_ENV],
   };
   root[GATE_CLAIM_KEY] = claim;
   return claim;
 }
 
+// Capture the guard/full distinction before claiming and deleting the private
+// Permission Gate marker from the process environment.
+const importedAgentSHStartup = classifyAgentSHStartup(process.env);
 const inheritedGateClaim = claimInheritedGate();
 
 function configuredTimeout(raw: string | undefined): number {
@@ -184,17 +182,6 @@ function configuredTimeout(raw: string | undefined): number {
   return value;
 }
 
-function parseGateFD(raw: string): number {
-  if (!/^[1-9][0-9]*$/.test(raw)) {
-    throw new Error(`${GATE_FD_ENV} is malformed`);
-  }
-  const fd = Number(raw);
-  if (!Number.isSafeInteger(fd) || fd < 3 || fd > 1_048_575) {
-    throw new Error(`${GATE_FD_ENV} is not a valid inherited descriptor`);
-  }
-  return fd;
-}
-
 function parseGateSocket(raw: string): string {
   if (!isAbsolute(raw) || raw.includes("\0") || Buffer.byteLength(raw, "utf8") > MAX_CWD_BYTES) {
     throw new Error(`${GATE_SOCKET_ENV} is not a valid absolute Unix socket path`);
@@ -206,14 +193,8 @@ function gateClient(claim: GateClaim): AgentSHPermissionGateClient {
   if (claim.error) throw claim.error;
   if (claim.client) return claim.client;
   try {
-    if (claim.rawSocket !== undefined && claim.rawFD !== undefined) {
-      throw new Error("AgentSH Permission Gate supplied conflicting transports");
-    }
-    const endpoint = claim.rawSocket !== undefined
-      ? parseGateSocket(claim.rawSocket)
-      : parseGateFD(claim.rawFD ?? "");
     claim.client = new AgentSHPermissionGateClient(
-      endpoint,
+      parseGateSocket(claim.rawSocket),
       configuredTimeout(claim.timeoutRaw),
     );
     return claim.client;
@@ -221,23 +202,6 @@ function gateClient(claim: GateClaim): AgentSHPermissionGateClient {
     claim.error = asError(error);
     throw claim.error;
   }
-}
-
-/** Capture full AgentSH modes before asynchronous extension startup/order. */
-function fullAgentSHMode(): boolean {
-  const env = process.env;
-  return env.PI_SUPERVISED === "1"
-    || env.PI_AUTO === "1"
-    || env.PI_AGENTSH_REMOTE === "ssh"
-    || env.PI_AGENTSH_READ_MODE === "supervised"
-    || Boolean(env.AGENTSH_SESSION_SUPERVISOR)
-    || Boolean(env.PI_AGENTSH_MOCK_SUPERVISOR)
-    || env.PI_AGENTSH_ENABLE === "1"
-    || Boolean(env.AGENTSH_CHILD_CAPABILITY);
-}
-
-function isSuppressedBySandboxMarker(): boolean {
-  return (globalThis as Record<string, unknown>)[CAPABILITY_GATE_MARKER] === true;
 }
 
 function paseoRemoteSelect(
@@ -520,11 +484,9 @@ class AgentSHPermissionGateClient {
   #tail: Promise<void> = Promise.resolve();
   #requestNumber = 0;
 
-  constructor(endpoint: number | string, timeoutMs: number) {
+  constructor(socketPath: string, timeoutMs: number) {
     this.timeoutMs = timeoutMs;
-    this.#socket = typeof endpoint === "number"
-      ? new Socket({ fd: endpoint, readable: true, writable: true })
-      : createConnection({ path: endpoint });
+    this.#socket = createConnection({ path: socketPath });
     this.#socket.unref();
     this.#socket.on("data", (chunk: Buffer) => this.#receive(Buffer.from(chunk)));
     this.#socket.on("end", () => this.#end());
@@ -924,7 +886,10 @@ export default function permissionGate(pi: ExtensionAPI) {
 
   let enabled = true;
   let failureReported = false;
-  const suppressLegacySynchronously = !inheritedGateClaim && fullAgentSHMode();
+  const agentSHStartup = inheritedGateClaim
+    ? importedAgentSHStartup
+    : classifyAgentSHStartup(process.env);
+  const suppressLegacySynchronously = !inheritedGateClaim && agentSHStartup.kind === "full";
   // This inherited channel is process-scoped rather than a normal session
   // resource. Start hello at factory time so AgentSH's launch handshake is not
   // delayed behind unrelated session_start handlers; retain the promise for
@@ -940,7 +905,28 @@ export default function permissionGate(pi: ExtensionAPI) {
     : undefined;
   void eagerInitialization?.catch(() => undefined);
 
-  const legacySuppressed = () => suppressLegacySynchronously || isSuppressedBySandboxMarker();
+  const runtimeDisposition = () => {
+    const api = (globalThis as Record<string, any>).__AGENTSH_PI__;
+    let state: AgentSHRuntimeState | undefined;
+    try {
+      state = api && typeof api.getSupervisorState !== "function"
+        ? { configured: true, active: false }
+        : api?.getSupervisorState?.();
+    } catch {
+      state = { configured: true, active: false };
+    }
+    const disposition = agentSHRuntimeDisposition(agentSHStartup, state);
+    if (disposition.kind === "full" && typeof api?.exec !== "function") {
+      return { kind: "unavailable" as const, protocol: disposition.protocol };
+    }
+    return disposition;
+  };
+  const legacySuppressed = () => {
+    const disposition = runtimeDisposition();
+    return suppressLegacySynchronously
+      || disposition.kind === "full"
+      || disposition.kind === "unavailable";
+  };
 
   const reportGateFailure = (ctx: ExtensionContext, error: unknown) => {
     gateStatus(ctx, "error");
@@ -967,8 +953,14 @@ export default function permissionGate(pi: ExtensionAPI) {
         return;
       }
       if (legacySuppressed()) {
+        const unavailable = runtimeDisposition().kind === "unavailable";
         ctx.ui.setStatus("permission-gate", undefined);
-        ctx.ui.notify("Legacy permission prompts are suppressed because AgentSH owns this session", "info");
+        ctx.ui.notify(
+          unavailable
+            ? "Full AgentSH mode is selected but its supervisor is unavailable; native Bash is blocked"
+            : "Legacy permission prompts are suppressed because AgentSH owns this session",
+          unavailable ? "error" : "info",
+        );
         return;
       }
 
@@ -1007,6 +999,13 @@ export default function permissionGate(pi: ExtensionAPI) {
     if (event.toolName !== "bash") return undefined;
 
     if (inheritedGateClaim) {
+      if (agentSHStartup.kind === "conflict") {
+        gateStatus(ctx, "error");
+        return {
+          block: true,
+          reason: "Conflicting AgentSH guard-only and full-supervisor authorities were selected; refusing Bash execution",
+        };
+      }
       gateStatus(ctx, "waiting");
       try {
         const command = (event.input as { command?: unknown }).command;
@@ -1036,6 +1035,12 @@ export default function permissionGate(pi: ExtensionAPI) {
         if (!result.allowed) {
           return { block: true, reason: `Blocked by AgentSH Permission Gate (${result.reason})` };
         }
+        if (runtimeDisposition().kind === "unavailable") {
+          return {
+            block: true,
+            reason: "AgentSH Permission Gate allowed the command intent, but full AgentSH mode is unavailable; refusing native Bash execution",
+          };
+        }
         return undefined;
       } catch (error) {
         reportGateFailure(ctx, error);
@@ -1046,9 +1051,18 @@ export default function permissionGate(pi: ExtensionAPI) {
       }
     }
 
-    // A configured full supervisor is authoritative. Suppress this local gate
-    // even before sandbox's asynchronous session_start has attached.
-    if (legacySuppressed()) {
+    // A selected full supervisor is authoritative. Never let its unavailable
+    // state turn into native Bash fallback; once active, suppress only this
+    // duplicate local gate and let the sandbox frontend dispatch.
+    const disposition = runtimeDisposition();
+    if (disposition.kind === "unavailable") {
+      if (ctx.hasUI) ctx.ui.setStatus("permission-gate", undefined);
+      return {
+        block: true,
+        reason: "Full AgentSH mode is selected but its supervisor is unavailable; refusing native Bash execution",
+      };
+    }
+    if (disposition.kind === "full" || legacySuppressed()) {
       if (ctx.hasUI) ctx.ui.setStatus("permission-gate", undefined);
       return undefined;
     }

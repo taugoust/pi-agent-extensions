@@ -17,8 +17,9 @@
 import type { ExtensionAPI } from "@mariozechner/pi-coding-agent";
 import { Text } from "@mariozechner/pi-tui";
 import { Type } from "@sinclair/typebox";
+import { classifyAgentSHStartup } from "../shared/agentsh-mode.js";
 import type { AgentSHPiAPI } from "../sandbox/api.js";
-import { agentSHFetchExpected, executeAgentSHFetch, selectFetchBackend } from "./backend.js";
+import { executeAgentSHFetch, selectFetchBackend } from "./backend.js";
 import { executeNativeFetch } from "./native.js";
 // Lazy-loaded: gracefully degrades if not installed (bun install)
 let Readability: typeof import("@mozilla/readability").Readability | null = null;
@@ -251,6 +252,8 @@ function agentSHAPI(): AgentSHPiAPI | undefined {
 }
 
 export default function fetchExtension(pi: ExtensionAPI) {
+  const agentSHStartup = classifyAgentSHStartup(process.env);
+
   pi.registerTool({
     name: "fetch",
     label: "Fetch",
@@ -329,7 +332,7 @@ export default function fetchExtension(pi: ExtensionAPI) {
       const maxBody = validatedPositiveInteger(params.maxBodyBytes, DEFAULT_MAX_BODY_BYTES, "maxBodyBytes");
       if (maxBody > 64 * 1024 * 1024) throw new Error("maxBodyBytes must not exceed 64 MiB");
       const url = validatedHttpUrl(params.url).toString();
-      const selection = selectFetchBackend(agentSHAPI(), agentSHFetchExpected(process.env));
+      const selection = selectFetchBackend(agentSHAPI(), agentSHStartup);
       if (selection.kind === "unavailable") throw new Error(selection.message);
 
       const transport = selection.kind === "agentsh"

@@ -12,6 +12,8 @@
 let
   cfg = config.programs.pi;
   extDir = ".pi/agent/extensions";
+  registry = import ./extension-registry.nix { inherit self pi-mcp-adapter pi-openai-fast-mode; };
+  needsSharedRuntime = lib.any (name: cfg.extensions.${name}.enable) registry.sharedRuntimeExtensionNames;
 in
 {
   options.programs.pi = {
@@ -85,7 +87,7 @@ in
         ".pi/agent/skills/tikz-figure-recreation/SKILL.md".source =
           "${self}/skills/tikz-figure-recreation/SKILL.md";
       })
-      (lib.mkIf cfg.extensions.sandbox.enable {
+      (lib.mkIf needsSharedRuntime {
         "${extDir}/shared".source = "${self}/shared";
       })
       (lib.mkIf cfg.extensions.direnv.enable {

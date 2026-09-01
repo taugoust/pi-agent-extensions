@@ -14,13 +14,14 @@ pkgs.runCommand "fetch-extension-check"
   ''
     set -euo pipefail
     workdir="$TMPDIR/fetch-check"
-    mkdir -p "$workdir/src/fetch" "$workdir/src/sandbox" "$workdir/out"
+    mkdir -p "$workdir/src/fetch" "$workdir/src/sandbox" "$workdir/src/shared" "$workdir/out"
     cp ${self}/fetch/backend.ts "$workdir/src/fetch/backend.ts"
     cp ${self}/fetch/native.ts "$workdir/src/fetch/native.ts"
     cp ${self}/sandbox/api.ts "$workdir/src/sandbox/api.ts"
+    cp ${self}/shared/agentsh-mode.ts "$workdir/src/shared/agentsh-mode.ts"
     printf '%s\n' '{"type":"module"}' > "$workdir/src/package.json"
     tsc --noCheck --skipLibCheck --module nodenext --moduleResolution nodenext --target es2022 \
-      --rootDir "$workdir/src" --outDir "$workdir/out" "$workdir/src/fetch/backend.ts" "$workdir/src/fetch/native.ts" "$workdir/src/sandbox/api.ts"
+      --rootDir "$workdir/src" --outDir "$workdir/out" "$workdir/src/fetch/backend.ts" "$workdir/src/fetch/native.ts" "$workdir/src/sandbox/api.ts" "$workdir/src/shared/agentsh-mode.ts"
 
     cat > "$workdir/test.mjs" <<'EOF'
     import assert from "node:assert/strict";
@@ -33,15 +34,14 @@ pkgs.runCommand "fetch-extension-check"
 
     const backend = await import(pathToFileURL(path.join(process.argv[2], "fetch/backend.js")).href);
     const native = await import(pathToFileURL(path.join(process.argv[2], "fetch/native.js")).href);
-    for (const env of [
-      { PI_SUPERVISED: "1" }, { PI_AUTO: "1" }, { PI_AGENTSH_REMOTE: "ssh" },
-      { PI_AGENTSH_READ_MODE: "supervised" }, { AGENTSH_SESSION_SUPERVISOR: "unix:///x" },
-      { PI_AGENTSH_MOCK_SUPERVISOR: "/x" }, { PI_AGENTSH_ENABLE: "1" },
-    ]) assert.equal(backend.agentSHFetchExpected(env), true);
-    assert.equal(backend.agentSHFetchExpected({}), false);
-    assert.equal(backend.selectFetchBackend(undefined, false).kind, "native");
-    assert.equal(backend.selectFetchBackend(undefined, true).kind, "unavailable");
-    assert.equal(backend.selectFetchBackend({ getSupervisorState: () => ({ configured: true, active: false, status: "error" }) }, false).kind, "unavailable");
+    const mode = await import(pathToFileURL(path.join(process.argv[2], "shared/agentsh-mode.js")).href);
+    const nativeStartup = mode.classifyAgentSHStartup({});
+    const fullStartup = mode.classifyAgentSHStartup({ PI_SUPERVISED: "1" });
+    assert.equal(backend.selectFetchBackend(undefined, nativeStartup).kind, "native");
+    assert.equal(backend.selectFetchBackend(undefined, fullStartup).kind, "unavailable");
+    assert.equal(backend.selectFetchBackend({ getSupervisorState: () => ({ configured: true, active: false, protocol: "rest", status: "error" }) }, nativeStartup).kind, "unavailable");
+    assert.equal(backend.selectFetchBackend(undefined, mode.classifyAgentSHStartup({ AGENTSH_PERMISSION_GATE_SOCKET: "/guard" })).kind, "native");
+    assert.equal(backend.selectFetchBackend({ exec() {}, toSupervisorPath(value) { return value; } }, nativeStartup).kind, "unavailable");
 
     const server = http.createServer((request, response) => {
       if (request.url === "/large") {
@@ -81,8 +81,8 @@ pkgs.runCommand "fetch-extension-check"
         });
       },
     };
-    assert.equal(backend.selectFetchBackend(api, true).kind, "agentsh");
-    assert.equal(backend.selectFetchBackend({ ...api, getSupervisorState: () => ({ configured: true, active: true, source: "mock" }) }, true).kind, "unavailable");
+    assert.equal(backend.selectFetchBackend(api, fullStartup).kind, "agentsh");
+    assert.equal(backend.selectFetchBackend({ ...api, getSupervisorState: () => ({ configured: true, active: true, protocol: "mock-ndjson", status: "connected", source: "mock" }) }, fullStartup).kind, "unavailable");
     const common = { method: "GET", timeoutMs: 5000, cwd: os.tmpdir(), toolCallId: "fetch-check" };
     const small = await backend.executeAgentSHFetch(api, { ...common, url: base + "/small", maxBodyBytes: 1024 });
     assert.equal(small.status, 200);
@@ -145,7 +145,7 @@ pkgs.runCommand "fetch-extension-check"
     EOF
     node "$workdir/test.mjs" "$workdir/out"
 
-    grep -F 'selectFetchBackend(agentSHAPI(), agentSHFetchExpected(process.env))' ${self}/fetch/index.ts >/dev/null
+    grep -F 'selectFetchBackend(agentSHAPI(), agentSHStartup)' ${self}/fetch/index.ts >/dev/null
     grep -F '"''${extDir}/fetch".source = "''${self}/fetch";' ${self}/nix/module.nix >/dev/null
     touch "$out"
   ''

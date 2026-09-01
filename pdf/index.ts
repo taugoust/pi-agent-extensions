@@ -9,6 +9,7 @@
 import { basename, dirname, extname, join } from "node:path";
 import type { ExtensionAPI } from "@mariozechner/pi-coding-agent";
 import { Type } from "@sinclair/typebox";
+import { classifyAgentSHStartup } from "../shared/agentsh-mode.js";
 import {
   commandString,
   createPdfBackend,
@@ -229,6 +230,10 @@ async function getImageMagickVersion(
 }
 
 export default function pdfExtension(pi: ExtensionAPI) {
+  const agentSHStartup = classifyAgentSHStartup(process.env);
+  const backendFor = (cwd: string, toolCallId: string, toolName: string) =>
+    createPdfBackend(cwd, toolCallId, toolName, agentSHStartup);
+
   pi.registerTool({
     name: "pdf_info",
     label: "PDF Info",
@@ -241,7 +246,7 @@ export default function pdfExtension(pi: ExtensionAPI) {
       ),
     }),
     async execute(toolCallId, params, signal, _onUpdate, ctx) {
-      const backend = createPdfBackend(ctx.cwd, toolCallId, "pdf_info");
+      const backend = backendFor(ctx.cwd, toolCallId, "pdf_info");
       const pdfPath = backend.resolvePath(params.pdfPath, "pdfPath");
       await backend.requireReadableFile(pdfPath, "pdfPath", signal);
 
@@ -291,7 +296,7 @@ export default function pdfExtension(pi: ExtensionAPI) {
       timeoutMs: Type.Optional(Type.Number({ description: `Timeout per page in milliseconds (default: ${DEFAULT_TIMEOUT_MS})` })),
     }),
     async execute(toolCallId, params, signal, onUpdate, ctx) {
-      const backend = createPdfBackend(ctx.cwd, toolCallId, "pdf_render_pages");
+      const backend = backendFor(ctx.cwd, toolCallId, "pdf_render_pages");
       const pdfPath = backend.resolvePath(params.pdfPath, "pdfPath");
       const outputDir = backend.resolvePath(params.outputDir, "outputDir");
       await backend.requireReadableFile(pdfPath, "pdfPath", signal);
@@ -409,7 +414,7 @@ export default function pdfExtension(pi: ExtensionAPI) {
       timeoutMs: Type.Optional(Type.Number({ description: `Timeout in milliseconds (default: ${DEFAULT_TIMEOUT_MS})` })),
     }),
     async execute(toolCallId, params, signal, _onUpdate, ctx) {
-      const backend = createPdfBackend(ctx.cwd, toolCallId, "pdf_crop_image");
+      const backend = backendFor(ctx.cwd, toolCallId, "pdf_crop_image");
       const sourceImagePath = backend.resolvePath(params.sourceImagePath, "sourceImagePath");
       await backend.requireReadableFile(sourceImagePath, "sourceImagePath", signal);
       const crop = params.crop as CropRect;
@@ -510,7 +515,7 @@ export default function pdfExtension(pi: ExtensionAPI) {
       timeoutMs: Type.Optional(Type.Number({ description: `Timeout in milliseconds (default: ${DEFAULT_TIMEOUT_MS})` })),
     }),
     async execute(toolCallId, params, signal, _onUpdate, ctx) {
-      const backend = createPdfBackend(ctx.cwd, toolCallId, "pdf_extract_text");
+      const backend = backendFor(ctx.cwd, toolCallId, "pdf_extract_text");
       const pdfPath = backend.resolvePath(params.pdfPath, "pdfPath");
       await backend.requireReadableFile(pdfPath, "pdfPath", signal);
       const outputPath = params.outputPath ? backend.resolvePath(params.outputPath, "outputPath") : undefined;
@@ -609,7 +614,7 @@ export default function pdfExtension(pi: ExtensionAPI) {
       timeoutMs: Type.Optional(Type.Number({ description: `Timeout in milliseconds (default: ${DEFAULT_TIMEOUT_MS})` })),
     }),
     async execute(toolCallId, params, signal, _onUpdate, ctx) {
-      const backend = createPdfBackend(ctx.cwd, toolCallId, "pdf_extract_images");
+      const backend = backendFor(ctx.cwd, toolCallId, "pdf_extract_images");
       const pdfPath = backend.resolvePath(params.pdfPath, "pdfPath");
       const outputDir = backend.resolvePath(params.outputDir, "outputDir");
       await backend.requireReadableFile(pdfPath, "pdfPath", signal);

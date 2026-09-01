@@ -1,5 +1,11 @@
 import { randomBytes } from "node:crypto";
 import { STATUS_CODES } from "node:http";
+import {
+  agentSHRuntimeDisposition,
+  classifyAgentSHStartup,
+  type AgentSHRuntimeState,
+  type AgentSHStartupClassification,
+} from "../shared/agentsh-mode.js";
 import type { AgentSHPiAPI } from "../sandbox/api.js";
 
 export type FetchBackendSelection =
@@ -19,29 +25,33 @@ export type FetchTransportResult = {
   outputPath?: string;
 };
 
-export function agentSHFetchExpected(env: Record<string, string | undefined>): boolean {
-  return Boolean(
-    env.PI_SUPERVISED === "1" ||
-    env.PI_AUTO === "1" ||
-    env.PI_AGENTSH_REMOTE === "ssh" ||
-    env.PI_AGENTSH_READ_MODE === "supervised" ||
-    env.AGENTSH_SESSION_SUPERVISOR ||
-    env.AGENTSH_APPROVAL_UI_SOCKET ||
-    env.PI_AGENTSH_MOCK_SUPERVISOR ||
-    env.PI_AGENTSH_ENABLE === "1"
-  );
-}
-
-export function selectFetchBackend(api: AgentSHPiAPI | undefined, expected = false): FetchBackendSelection {
-  const state = api?.getSupervisorState?.();
-  const valid = typeof api?.exec === "function" && typeof api?.toSupervisorPath === "function";
-  if (state?.active && valid && state.source !== "mock") return { kind: "agentsh", api: api! };
-  if (api && !state) return { kind: "unavailable", message: "AgentSH fetch bridge is malformed; native fallback is disabled" };
-  if (expected || state?.configured || state?.active) {
-    const detail = state?.lastError ? `: ${state.lastError}` : state?.status ? ` (${state.status})` : "";
-    return { kind: "unavailable", message: `AgentSH is configured but supervised fetch is unavailable${detail}; native fallback is disabled` };
+export function selectFetchBackend(
+  api: AgentSHPiAPI | undefined,
+  startup: AgentSHStartupClassification = classifyAgentSHStartup(process.env),
+): FetchBackendSelection {
+  let state: AgentSHRuntimeState | undefined;
+  try {
+    state = api && typeof api.getSupervisorState !== "function"
+      ? { configured: true, active: false }
+      : api?.getSupervisorState?.();
+  } catch {
+    state = { configured: true, active: false };
   }
-  return { kind: "native" };
+  const disposition = agentSHRuntimeDisposition(startup, state);
+  const valid = typeof api?.exec === "function" && typeof api?.toSupervisorPath === "function";
+  if (disposition.kind === "full" && valid && disposition.protocol !== "mock-ndjson") {
+    return { kind: "agentsh", api: api! };
+  }
+  if (disposition.kind === "native" || disposition.kind === "guard-only") return { kind: "native" };
+
+  const detail = state?.lastError ? `: ${String(state.lastError)}` : state?.status ? ` (${String(state.status)})` : "";
+  const protocolDetail = disposition.kind === "full" && disposition.protocol === "mock-ndjson"
+    ? " (mock protocol does not provide supervised curl)"
+    : "";
+  return {
+    kind: "unavailable",
+    message: `AgentSH is configured but supervised fetch is unavailable${protocolDetail}${detail}; native fallback is disabled`,
+  };
 }
 
 function shellQuote(value: string): string {

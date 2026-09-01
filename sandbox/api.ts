@@ -1,3 +1,5 @@
+import type { AgentSHSupervisorProtocol } from "../shared/agentsh-mode.js";
+
 export type JsonObject = Record<string, unknown>;
 
 export type AgentSHActor = {
@@ -271,6 +273,7 @@ export type AgentSHPiAPI = AgentSHDirenvAPI & {
   getSupervisorState(): {
     configured: boolean;
     active: boolean;
+    protocol: AgentSHSupervisorProtocol;
     status: AgentSHSupervisorStatus;
     source: AgentSHSupervisorSource;
     socketPath: string;

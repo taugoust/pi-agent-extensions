@@ -1,4 +1,11 @@
-export type AdaptiveSupervisorState = {
+import {
+  agentSHRuntimeDisposition,
+  classifyAgentSHStartup,
+  type AgentSHRuntimeState,
+  type AgentSHStartupClassification,
+} from "../shared/agentsh-mode.js";
+
+export type AdaptiveSupervisorState = AgentSHRuntimeState & {
   configured: boolean;
   active: boolean;
   status?: string;
@@ -10,33 +17,32 @@ export type AdaptiveSubagentBridge = {
   subagentAdapter?: unknown;
 };
 
-export function agentSHExpected(processEnv: Record<string, string | undefined>): boolean {
-  return Boolean(
-    processEnv.PI_SUPERVISED === "1" ||
-    processEnv.PI_AUTO === "1" ||
-    processEnv.PI_AGENTSH_REMOTE === "ssh" ||
-    processEnv.AGENTSH_SESSION_SUPERVISOR ||
-    processEnv.PI_AGENTSH_MOCK_SUPERVISOR ||
-    processEnv.PI_AGENTSH_ENABLE === "1"
-  );
-}
-
 export type AdaptiveSubagentBackend =
   | { kind: "native" }
   | { kind: "agentsh" }
   | { kind: "unavailable"; message: string };
 
-/** Select once at tool execution time. Never bypass an expected AgentSH boundary. */
-export function selectSubagentBackend(bridge: AdaptiveSubagentBridge | undefined, agentSHExpected = false): AdaptiveSubagentBackend {
-  const state = bridge?.getSupervisorState?.();
+/** Select once at tool execution time. Never bypass a selected full AgentSH boundary. */
+export function selectSubagentBackend(
+  bridge: AdaptiveSubagentBridge | undefined,
+  startup: AgentSHStartupClassification = classifyAgentSHStartup(process.env),
+): AdaptiveSubagentBackend {
+  let state: AdaptiveSupervisorState | undefined;
+  try {
+    state = bridge && typeof bridge.getSupervisorState !== "function"
+      ? { configured: true, active: false }
+      : bridge?.getSupervisorState?.();
+  } catch {
+    state = { configured: true, active: false };
+  }
+  const disposition = agentSHRuntimeDisposition(startup, state);
   const adapter = bridge?.subagentAdapter as { execute?: unknown; detailsFailed?: unknown; renderCall?: unknown; renderResult?: unknown } | undefined;
   const adapterValid = typeof adapter?.execute === "function" && typeof adapter.detailsFailed === "function" && typeof adapter.renderCall === "function" && typeof adapter.renderResult === "function";
-  if (state?.active && adapterValid) return { kind: "agentsh" };
-  if (agentSHExpected || state?.configured || state?.active) {
-    const detail = state?.lastError ? `: ${state.lastError}` : state?.status ? ` (${state.status})` : "";
-    return { kind: "unavailable", message: `AgentSH is configured but its subagent supervisor is unavailable${detail}; native fallback is disabled` };
-  }
-  return { kind: "native" };
+  if (disposition.kind === "full" && adapterValid) return { kind: "agentsh" };
+  if (disposition.kind === "native" || disposition.kind === "guard-only") return { kind: "native" };
+
+  const detail = state?.lastError ? `: ${state.lastError}` : state?.status ? ` (${state.status})` : "";
+  return { kind: "unavailable", message: `AgentSH is configured but its subagent supervisor is unavailable${detail}; native fallback is disabled` };
 }
 
 export function adaptiveDispositionError(params: Record<string, unknown>): string | undefined {

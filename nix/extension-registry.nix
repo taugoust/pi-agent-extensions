@@ -35,6 +35,18 @@ let
 
   pinnedExtensionNames = [ "openai-fast-mode" ];
 
+  # These extensions import the canonical AgentSH startup/runtime classifier
+  # from the package-level shared directory.
+  sharedRuntimeExtensionNames = [
+    "direnv"
+    "fetch"
+    "pdf"
+    "permission-gate"
+    "sandbox"
+    "ssh"
+    "subagent"
+  ];
+
   upstreamExtensions = {
     openai-fast-mode = {
       source = pi-openai-fast-mode;
@@ -74,6 +86,7 @@ in
     skills
     localExtensionNames
     pinnedExtensionNames
+    sharedRuntimeExtensionNames
     localSkillNames
     ;
 }

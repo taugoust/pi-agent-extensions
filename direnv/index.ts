@@ -13,6 +13,10 @@ import type {
   ExtensionAPI,
   ExtensionContext,
 } from "@mariozechner/pi-coding-agent";
+import {
+  agentSHRuntimeDisposition,
+  classifyAgentSHStartup,
+} from "../shared/agentsh-mode.js";
 import type { DirenvRefreshResult } from "../sandbox/api.js";
 
 const DIAGNOSTIC_LIMIT = 500;
@@ -20,10 +24,19 @@ const DIAGNOSTIC_LIMIT = 500;
 export default function (pi: ExtensionAPI) {
   let pending: Promise<void> | null = null;
   let failureReported = false;
-  const supervised = process.env.PI_SUPERVISED === "1"
-    || Boolean(process.env.AGENTSH_SESSION_SUPERVISOR)
-    || process.env.PI_AGENTSH_ENABLE === "1"
-    || Boolean(process.env.PI_AGENTSH_MOCK_SUPERVISOR);
+  const agentSHStartup = classifyAgentSHStartup(process.env);
+
+  function runtimeDisposition() {
+    const api = globalThis.__AGENTSH_PI__;
+    try {
+      const state = api && typeof api.getSupervisorState !== "function"
+        ? { configured: true, active: false }
+        : api?.getSupervisorState?.();
+      return agentSHRuntimeDisposition(agentSHStartup, state);
+    } catch {
+      return agentSHRuntimeDisposition(agentSHStartup, { configured: true, active: false });
+    }
+  }
 
   async function loadDirenv(cwd: string, ctx: ExtensionContext) {
     // Chain before awaiting so any number of simultaneous tool_result handlers
@@ -34,7 +47,14 @@ export default function (pi: ExtensionAPI) {
       if (ctx.hasUI) {
         ctx.ui.setStatus("direnv", ctx.ui.theme.fg("warning", "direnv …"));
       }
-      await (supervised ? runSupervisedDirenv(cwd, ctx) : runDirenv(cwd, ctx));
+      const disposition = runtimeDisposition();
+      if (disposition.kind === "full") {
+        await runSupervisedDirenv(cwd, ctx);
+      } else if (disposition.kind === "unavailable") {
+        reportFailure(ctx, "AgentSH direnv refresh is unavailable; full AgentSH mode will not run direnv in the parent");
+      } else {
+        await runDirenv(cwd, ctx);
+      }
     })();
     pending = current;
     try {

@@ -14,10 +14,11 @@ pkgs.runCommand "pdf-check"
     workdir="$TMPDIR/pdf-check"
     srcdir="$workdir/src"
     outdir="$workdir/out"
-    mkdir -p "$srcdir/pdf" "$srcdir/sandbox" "$outdir/node_modules/@sinclair/typebox"
+    mkdir -p "$srcdir/pdf" "$srcdir/sandbox" "$srcdir/shared" "$outdir/node_modules/@sinclair/typebox"
 
     cp ${self}/pdf/index.ts ${self}/pdf/backend.ts ${self}/pdf/index.test.ts "$srcdir/pdf/"
     cp ${self}/sandbox/api.ts "$srcdir/sandbox/api.ts"
+    cp ${self}/shared/agentsh-mode.ts "$srcdir/shared/agentsh-mode.ts"
     printf '{"type":"module"}\n' > "$srcdir/package.json"
     printf '{"type":"module"}\n' > "$outdir/package.json"
 
@@ -51,7 +52,8 @@ pkgs.runCommand "pdf-check"
       "$srcdir/pdf/index.ts" \
       "$srcdir/pdf/backend.ts" \
       "$srcdir/pdf/index.test.ts" \
-      "$srcdir/sandbox/api.ts"
+      "$srcdir/sandbox/api.ts" \
+      "$srcdir/shared/agentsh-mode.ts"
 
     node "$outdir/pdf/index.test.js"
     mkdir -p "$out"

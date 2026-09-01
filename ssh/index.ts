@@ -25,6 +25,11 @@ import {
 	type ReadOperations,
 	type WriteOperations,
 } from "@mariozechner/pi-coding-agent";
+import {
+	agentSHRuntimeDisposition,
+	classifyAgentSHStartup,
+	type AgentSHRuntimeState,
+} from "../shared/agentsh-mode.js";
 import type { AgentSHExecutionTarget, AgentSHPiAPI } from "../sandbox/api.js";
 
 type LocalTarget = { kind: "local"; cwd: string };
@@ -38,17 +43,6 @@ function env(name: string) {
 
 function sandboxAPI(): AgentSHPiAPI | undefined {
 	return globalThis.__AGENTSH_PI__;
-}
-
-function sandboxIntegrationExpected() {
-	if (env("PI_SUPERVISED") === "1") return true;
-	if (env("PI_AGENTSH_MOCK_SUPERVISOR") || env("AGENTSH_SESSION_SUPERVISOR")) return true;
-	return env("PI_AGENTSH_ENABLE") === "1";
-}
-
-function sandboxBackendSelected() {
-	const state = sandboxAPI()?.getSupervisorState();
-	return sandboxIntegrationExpected() || Boolean(state?.configured || state?.active);
 }
 
 function sshExec(remote: string, command: string): Promise<Buffer> {
@@ -207,6 +201,28 @@ function writeRetargetRequest(requestPath: string, target: string | null, sessio
 export default function sshTargetExtension(pi: ExtensionAPI) {
 	pi.registerFlag("ssh", { description: "SSH remote: user@host or user@host:/path", type: "string" });
 
+	const agentSHStartup = classifyAgentSHStartup(process.env);
+	const sandboxDisposition = () => {
+		const api = sandboxAPI();
+		let state: AgentSHRuntimeState | undefined;
+		try {
+			state = api && typeof api.getSupervisorState !== "function"
+				? { configured: true, active: false }
+				: api?.getSupervisorState?.();
+		} catch {
+			state = { configured: true, active: false };
+		}
+		const disposition = agentSHRuntimeDisposition(agentSHStartup, state);
+		if (disposition.kind === "full" && typeof api?.exec !== "function") {
+			return { kind: "unavailable" as const, protocol: disposition.protocol };
+		}
+		return disposition;
+	};
+	const sandboxBackendSelected = () => {
+		const disposition = sandboxDisposition();
+		return disposition.kind === "full" || disposition.kind === "unavailable";
+	};
+
 	const localCwd = process.cwd();
 	let target: ExecutionTarget = { kind: "local", cwd: localCwd };
 	let legacyToolsRegistered = false;
@@ -328,7 +344,14 @@ export default function sshTargetExtension(pi: ExtensionAPI) {
 	}
 
 	pi.on("tool_call", async (event) => {
-		if (sandboxBackendSelected() || target.kind !== "ssh" || event.toolName !== "bash") return;
+		const disposition = sandboxDisposition();
+		if (disposition.kind === "unavailable" && ["bash", "write", "edit", "read"].includes(event.toolName)) {
+			return {
+				block: true,
+				reason: `Full AgentSH mode is selected but its supervisor is unavailable; refusing native ${event.toolName} execution`,
+			};
+		}
+		if (disposition.kind === "full" || target.kind !== "ssh" || event.toolName !== "bash") return;
 		const command = event.input.command;
 		if (typeof command !== "string" || command.length === 0) return;
 		event.input.command = wrapBashCommandForSsh(command, target.remote, target.remoteCwd);

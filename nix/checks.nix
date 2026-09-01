@@ -34,9 +34,10 @@ in
         workdir="$TMPDIR/ssh-extension-check"
         srcdir="$workdir/src"
         outdir="$workdir/out"
-        mkdir -p "$srcdir/ssh" "$srcdir/sandbox" "$outdir/node_modules/@mariozechner/pi-coding-agent" "$workdir/bin"
+        mkdir -p "$srcdir/ssh" "$srcdir/sandbox" "$srcdir/shared" "$outdir/node_modules/@mariozechner/pi-coding-agent" "$workdir/bin"
         cp ${self}/ssh/index.ts "$srcdir/ssh/index.ts"
         cp ${self}/sandbox/api.ts "$srcdir/sandbox/api.ts"
+        cp ${self}/shared/agentsh-mode.ts "$srcdir/shared/agentsh-mode.ts"
 
         cat > "$outdir/node_modules/@mariozechner/pi-coding-agent/package.json" <<'EOF'
         { "name": "@mariozechner/pi-coding-agent", "type": "module", "main": "./index.js" }
@@ -70,7 +71,7 @@ in
           --target es2022 \
           --rootDir "$srcdir" \
           --outDir "$outdir" \
-          "$srcdir/ssh/index.ts" "$srcdir/sandbox/api.ts"
+          "$srcdir/ssh/index.ts" "$srcdir/sandbox/api.ts" "$srcdir/shared/agentsh-mode.ts"
 
         cat > "$workdir/test.mjs" <<'EOF'
         import fs from "node:fs";
@@ -153,7 +154,7 @@ in
         globalThis.__AGENTSH_PI__ = {
           setExecutionTarget(target) { published = target; },
           getExecutionTarget() { return published; },
-          getSupervisorState() { return { configured: true, active: true, status: "connected" }; },
+          getSupervisorState() { return { configured: true, active: true, protocol: "rest", status: "connected" }; },
           async exec(command, options) { execCalls.push({ command, options }); return { exitCode: 0 }; },
         };
 
@@ -173,6 +174,14 @@ in
         const request = JSON.parse(fs.readFileSync(requestPath, "utf8"));
         assert(request.schema_version === 1 && request.target === "new-host:/new/work" && request.session_file === null, "invalid wrapper retarget request for a fresh session");
         assert((fs.statSync(requestPath).mode & 0o777) === 0o600, "retarget request is not private");
+
+        delete globalThis.__AGENTSH_PI__;
+        const unavailablePi = createPi(undefined);
+        extension(unavailablePi);
+        for (const toolName of ["bash", "write", "edit", "read"]) {
+          const blocked = await first(unavailablePi, "tool_call", { toolName, input: { command: "printf no-fallback" } }, supervisedCtx);
+          assert(blocked?.block === true, "unavailable full mode did not block native " + toolName);
+        }
 
         // Legacy mode owns raw SSH and can switch back to local in-process.
         for (const name of [
@@ -939,9 +948,10 @@ in
         workdir="$TMPDIR/direnv-check"
         srcdir="$workdir/src"
         outdir="$workdir/out"
-        mkdir -p "$srcdir/direnv" "$srcdir/sandbox" "$outdir"
+        mkdir -p "$srcdir/direnv" "$srcdir/sandbox" "$srcdir/shared" "$outdir"
         cp ${self}/direnv/index.ts "$srcdir/direnv/index.ts"
         cp ${self}/sandbox/api.ts "$srcdir/sandbox/api.ts"
+        cp ${self}/shared/agentsh-mode.ts "$srcdir/shared/agentsh-mode.ts"
 
         tsc \
           --noCheck \
@@ -952,7 +962,8 @@ in
           --rootDir "$srcdir" \
           --outDir "$outdir" \
           "$srcdir/direnv/index.ts" \
-          "$srcdir/sandbox/api.ts"
+          "$srcdir/sandbox/api.ts" \
+          "$srcdir/shared/agentsh-mode.ts"
 
         cat > "$workdir/test.mjs" <<'EOF'
         import fs from "node:fs";
@@ -1015,7 +1026,11 @@ in
           process.env.DIRENV_SPAWN_MARKER = spawnMarker;
 
           // pi-unsafe/non-AgentSH behaviour remains the local process.env hook.
-          delete process.env.PI_SUPERVISED;
+          for (const name of [
+            "PI_SUPERVISED", "PI_AUTO", "PI_AGENTSH_REMOTE", "PI_AGENTSH_READ_MODE",
+            "AGENTSH_SESSION_SUPERVISOR", "PI_AGENTSH_MOCK_SUPERVISOR", "PI_AGENTSH_ENABLE",
+            "AGENTSH_CHILD_CAPABILITY", "AGENTSH_APPROVAL_UI_SOCKET", "AGENTSH_PERMISSION_GATE_SOCKET",
+          ]) delete process.env[name];
           delete globalThis.__AGENTSH_PI__;
           process.env.DIRENV_CHECK_UNSET = "remove-me";
           {
@@ -1039,6 +1054,9 @@ in
           let maxActive = 0;
           let nextState = "loaded";
           globalThis.__AGENTSH_PI__ = {
+            getSupervisorState() {
+              return { configured: true, active: true, protocol: "rest", status: "connected" };
+            },
             async refreshDirenv(options) {
               calls.push(options);
               active += 1;
@@ -1118,15 +1136,20 @@ in
         set -euo pipefail
 
         workdir="$TMPDIR/permission-gate-check"
-        mkdir -p "$workdir/out"
+        mkdir -p "$workdir/src/permission-gate" "$workdir/src/shared" "$workdir/out"
+        cp ${self}/permission-gate/index.ts "$workdir/src/permission-gate/index.ts"
+        cp ${self}/shared/agentsh-mode.ts "$workdir/src/shared/agentsh-mode.ts"
+        printf '%s\n' '{"type":"module"}' > "$workdir/src/package.json"
         tsc \
           --noCheck \
           --skipLibCheck \
           --module nodenext \
           --moduleResolution nodenext \
           --target es2022 \
+          --rootDir "$workdir/src" \
           --outDir "$workdir/out" \
-          ${self}/permission-gate/index.ts
+          "$workdir/src/permission-gate/index.ts" \
+          "$workdir/src/shared/agentsh-mode.ts"
 
         cat > "$workdir/test.mjs" <<'EOF'
         import { spawn } from "node:child_process";
@@ -1137,7 +1160,7 @@ in
         import readline from "node:readline";
         import { once } from "node:events";
         import { fileURLToPath } from "node:url";
-        import gate from "./out/index.js";
+        import gate from "./out/permission-gate/index.js";
 
         const assert = (condition, message) => { if (!condition) throw new Error(message); };
         const delay = (milliseconds) => new Promise((resolve) => setTimeout(resolve, milliseconds));
@@ -1184,7 +1207,6 @@ in
         }
 
         async function runInheritedChild(name) {
-          assert(process.env.AGENTSH_PERMISSION_GATE_FD === undefined, "gate FD marker was not claimed and deleted during import");
           assert(process.env.AGENTSH_PERMISSION_GATE_SOCKET === undefined, "gate socket marker was not claimed and deleted during import");
           const pi = createPi();
           let remoteSelections = [];
@@ -1317,7 +1339,7 @@ in
           });
         }
 
-        async function spawnInheritedChild(name, broker, timeout, transport = "fd") {
+        async function spawnInheritedChild(name, broker, timeout) {
           const root = fs.mkdtempSync(path.join(os.tmpdir(), "permission-gate-check-"));
           const socketPath = path.join(root, "gate.sock");
           const server = net.createServer();
@@ -1326,17 +1348,12 @@ in
             server.listen(socketPath, resolve);
           });
           const accepted = new Promise((resolve) => server.once("connection", resolve));
-          let carrier;
-          let peer;
-          if (transport === "fd") {
-            carrier = net.createConnection(socketPath);
-            await once(carrier, "connect");
-            peer = await accepted;
-          }
 
-          const environment = { ...process.env, PERMISSION_GATE_CHILD_CASE: name };
-          if (transport === "fd") environment.AGENTSH_PERMISSION_GATE_FD = "3";
-          else environment.AGENTSH_PERMISSION_GATE_SOCKET = socketPath;
+          const environment = {
+            ...process.env,
+            AGENTSH_PERMISSION_GATE_SOCKET: socketPath,
+            PERMISSION_GATE_CHILD_CASE: name,
+          };
           if (timeout !== undefined) environment.PI_AGENTSH_PERMISSION_GATE_TIMEOUT_MS = String(timeout);
           for (const variable of [
             "PI_SUPERVISED", "PI_AUTO", "PI_AGENTSH_REMOTE", "PI_AGENTSH_READ_MODE",
@@ -1346,10 +1363,9 @@ in
 
           const child = spawn(process.execPath, [fileURLToPath(import.meta.url)], {
             env: environment,
-            stdio: transport === "fd" ? ["ignore", "pipe", "pipe", carrier] : ["ignore", "pipe", "pipe"],
+            stdio: ["ignore", "pipe", "pipe"],
           });
-          if (carrier) carrier.destroy();
-          if (transport === "socket") peer = await accepted;
+          const peer = await accepted;
           let stdout = "";
           let stderr = "";
           child.stdout.on("data", (chunk) => { stdout += chunk; });
@@ -1377,21 +1393,6 @@ in
         }
 
         async function runInheritedChecks() {
-          const socketAllowed = await spawnInheritedChild("local-allow", async (socket) => {
-            const read = lineReader(socket);
-            await expectHello(read, socket, true);
-            const harmless = await read();
-            assertAuthorize(harmless, "printf safe", "tool-safe");
-            send(socket, { v: 1, type: "decision", id: harmless.id, decision: "allow" });
-            const dangerous = await read();
-            assertAuthorize(dangerous, "sudo true", "tool-dangerous");
-            send(socket, { v: 1, type: "decision", id: dangerous.id, decision: "prompt", prompt });
-            const resolution = await read();
-            assert(resolution.type === "resolve" && resolution.decision === "allow", "Unix rendezvous prompt was not allowed");
-            send(socket, { v: 1, type: "complete", id: dangerous.id, decision: "allow", reason: "approved by Pi user interface" });
-          }, undefined, "socket");
-          assert(socketAllowed.allowed.join(",") === "true,true", "Unix rendezvous did not authorize both commands");
-
           const allowed = await spawnInheritedChild("local-allow", async (socket, stdout) => {
             const read = lineReader(socket);
             await expectHello(read, socket, true);
@@ -1531,9 +1532,21 @@ in
             gate(supervisedPi);
             const supervisedCtx = createContext({ onSelect: () => { throw new Error("legacy prompt opened in " + name + " mode"); } });
             const supervisedResult = await supervisedPi.handlers.get("tool_call")(dangerous, supervisedCtx);
-            assert(supervisedResult === undefined && supervisedCtx.selections.length === 0, "legacy gate was not synchronously suppressed in " + name + " mode");
+            assert(supervisedResult?.block === true && supervisedCtx.selections.length === 0, "unavailable full mode did not synchronously block native Bash for " + name);
             delete process.env[name];
           }
+
+          process.env.PI_SUPERVISED = "1";
+          globalThis.__AGENTSH_PI__ = {
+            getSupervisorState() { return { configured: true, active: true, protocol: "rest", status: "connected" }; },
+            async exec() { return { exitCode: 0 }; },
+          };
+          const activePi = createPi();
+          gate(activePi);
+          const activeResult = await activePi.handlers.get("tool_call")(dangerous, createContext());
+          assert(activeResult === undefined, "active full AgentSH mode was blocked by the duplicate permission gate");
+          delete globalThis.__AGENTSH_PI__;
+          delete process.env.PI_SUPERVISED;
         }
 
         if (process.env.PERMISSION_GATE_CHILD_CASE) {
@@ -1650,7 +1663,11 @@ in
         cat > "$outdir/node_modules/@mariozechner/pi-coding-agent/index.js" <<'EOF'
         export const DEFAULT_MAX_BYTES = 50 * 1024;
         export const DEFAULT_MAX_LINES = 2000;
-        export function formatSize(bytes) { return String(bytes) + "B"; }
+        export function formatSize(bytes) {
+          if (bytes < 1024) return String(bytes) + "B";
+          if (bytes < 1024 * 1024) return (bytes / 1024).toFixed(1) + "KB";
+          return (bytes / (1024 * 1024)).toFixed(1) + "MB";
+        }
         export function getMarkdownTheme() { return {}; }
         export function getAgentDir() { return process.env.PI_TEST_AGENT_DIR || "/tmp/pi-test-agent"; }
         export function truncateHead(value, options = {}) {
@@ -1696,7 +1713,9 @@ in
               truncatedBy = "bytes";
               if (selected.length === 0) {
                 const bytes = Buffer.from(line);
-                selected.unshift(bytes.subarray(Math.max(0, bytes.length - maxBytes)).toString("utf8"));
+                let start = Math.max(0, bytes.length - maxBytes);
+                while (start < bytes.length && (bytes[start] & 0xc0) === 0x80) start += 1;
+                selected.unshift(bytes.subarray(start).toString("utf8"));
                 selectedBytes = Buffer.byteLength(selected[0]);
                 lastLinePartial = true;
               }
@@ -1771,23 +1790,37 @@ in
           "$srcdir/subagent/index.ts" \
           "$srcdir/subagent/backend.ts" \
           "$srcdir/subagent/parallel-result.ts" \
+          "$srcdir/sandbox/approval-model.test.ts" \
+          "$srcdir/sandbox/command-output.test.ts" \
+          "$srcdir/sandbox/exec-result.test.ts" \
+          "$srcdir/sandbox/tool-result-presentation.test.ts" \
           "$srcdir/sandbox/command-timeout.test.ts" \
           "$srcdir/sandbox/operator-auth.test.ts" \
           "$srcdir/sandbox/subagent-cwd.test.ts" \
           "$srcdir/sandbox/subagent-model.test.ts" \
+          "$srcdir/sandbox/subagent-parent-result.test.ts" \
           "$srcdir/sandbox/subagent-protocol.test.ts" \
+          "$srcdir/sandbox/subagent-render.test.ts" \
           "$srcdir/sandbox/subagent-result.test.ts" \
           "$srcdir/sandbox/subagent-stream.test.ts" \
-          "$srcdir/sandbox/subagent-terminal.test.ts"
+          "$srcdir/sandbox/subagent-terminal.test.ts" \
+          "$srcdir/sandbox/workspace-paths.test.ts"
 
+        node "$outdir/sandbox/approval-model.test.js"
+        node "$outdir/sandbox/command-output.test.js"
+        node "$outdir/sandbox/exec-result.test.js"
+        node "$outdir/sandbox/tool-result-presentation.test.js"
         node "$outdir/sandbox/command-timeout.test.js"
         node "$outdir/sandbox/operator-auth.test.js"
         node "$outdir/sandbox/subagent-cwd.test.js"
         node "$outdir/sandbox/subagent-model.test.js"
+        node "$outdir/sandbox/subagent-parent-result.test.js"
         node "$outdir/sandbox/subagent-protocol.test.js"
+        node "$outdir/sandbox/subagent-render.test.js"
         node "$outdir/sandbox/subagent-result.test.js"
         node "$outdir/sandbox/subagent-stream.test.js"
         node "$outdir/sandbox/subagent-terminal.test.js"
+        node "$outdir/sandbox/workspace-paths.test.js"
 
         cat > "$workdir/test.mjs" <<'EOF'
         import fs from "node:fs";
@@ -2145,6 +2178,11 @@ in
           delete process.env.PI_AGENTSH_APPROVAL_BELL;
           delete process.env.PI_AGENTSH_REQUIRE_NETWORK_ENFORCEMENT;
           delete process.env.PI_AGENTSH_EXPOSE_SUBAGENT_TIMEOUT;
+          delete process.env.PI_SUPERVISED;
+          delete process.env.PI_AUTO;
+          delete process.env.PI_AGENTSH_MOCK_SUPERVISOR;
+          delete process.env.PI_AGENTSH_READ_MODE;
+          delete process.env.AGENTSH_PERMISSION_GATE_SOCKET;
           delete process.env.PI_AGENTSH_REMOTE;
           delete process.env.PI_AGENTSH_REMOTE_CWD;
           delete process.env.PI_AGENTSH_RECOVERY_COMMAND;
@@ -2280,6 +2318,31 @@ in
 
             assert(ctx.statuses.some((entry) => entry.name === "sandbox" && entry.value === "agentsh inactive"), "missing env did not mark relay inactive");
             assert(ctx.selectCalls.length === 0, "inactive relay should not prompt");
+            const inactiveState = globalThis.__AGENTSH_PI__.getSupervisorState();
+            assert(!inactiveState.configured && !inactiveState.active && inactiveState.protocol === "", "inactive supervisor state semantics are incorrect");
+            await shutdownSession(pi);
+          }
+
+          // A trusted full-mode signal without a usable transport must still
+          // install the supervised frontends and publish unavailable state.
+          {
+            clearAgentSHEnv();
+            process.env.PI_SUPERVISED = "1";
+            const pi = createPi();
+            sandbox(pi);
+            const ctx = createContext();
+            assert(pi.tools.has("bash") && pi.tools.has("write") && pi.tools.has("edit"), "selected full mode omitted fail-closed tool frontends");
+            await startSession(pi, ctx);
+            const unavailableState = globalThis.__AGENTSH_PI__.getSupervisorState();
+            assert(unavailableState.configured && !unavailableState.active, "unavailable full mode was published as inactive configuration or active runtime");
+            assert(unavailableState.protocol === "" && unavailableState.status === "error", "missing full transport did not publish a terminal unavailable disposition");
+            let unavailableError;
+            try {
+              await pi.tools.get("bash").execute("missing-supervisor", { command: "printf unsafe-fallback" }, undefined, undefined, ctx);
+            } catch (error) {
+              unavailableError = error;
+            }
+            assert(String(unavailableError).includes("not ready"), "selected full mode did not fail closed without a supervisor");
             await shutdownSession(pi);
           }
 
@@ -2313,6 +2376,9 @@ in
             };
             try {
               await startSession(pi, ctx);
+              const approvalOnlyState = globalThis.__AGENTSH_PI__.getSupervisorState();
+              assert(approvalOnlyState.configured && approvalOnlyState.active && approvalOnlyState.protocol === "legacy-approval-ui", "approval-only protocol was mispublished as a full or inactive supervisor");
+              assert(!pi.tools.has("bash") && !pi.tools.has("write") && !pi.tools.has("edit"), "approval-only mode registered full supervised tools");
               await waitFor(() => Boolean(resolved), "approval was not resolved");
             } finally {
               process.stdout.write = originalStdoutWrite;
@@ -2416,10 +2482,13 @@ in
             sandbox(pi);
             const ctx = createContext({ choices: ["Allow once"] });
             await startSession(pi, ctx);
+            const restState = globalThis.__AGENTSH_PI__.getSupervisorState();
+            assert(restState.configured && restState.active && restState.protocol === "rest", "attached REST supervisor protocol/readiness state is incorrect");
             await waitFor(() => Boolean(resolved), "REST supervisor approval was not resolved through supervisor socket");
 
             const editTool = pi.tools.get("edit");
             assert(editTool, "REST mode did not register AgentSH-backed edit tool");
+            assert(editTool.renderShell === "self", "AgentSH-backed edit tool must preserve its self-rendered shell");
             assert(typeof editTool.renderCall === "function", "AgentSH-backed edit tool must provide its own renderCall to avoid local preview reads");
             assert(typeof editTool.renderResult === "function", "AgentSH-backed edit tool must provide its own renderResult");
             const renderedCall = editTool.renderCall({ path: "hw/src/file.cpp", edits: [{ oldText: "a", newText: "b" }] }, ctx.ui.theme).render().join("\n");

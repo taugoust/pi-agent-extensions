@@ -97,9 +97,32 @@ bun install
 
 Extensions are auto-discovered from `~/.pi/agent/extensions/`{.verbatim}
 --- pi loads all `*.ts`{.verbatim} files and `index.ts`{.verbatim} files
-in subdirectories.
+in subdirectories. When manually copying `direnv`, `fetch`, `pdf`,
+`permission-gate`, `sandbox`, `ssh`, or `subagent`, also copy this repository's
+`shared/` directory beside the extension directories. Nix bundles and the Home
+Manager module add that shared runtime automatically.
 
 </details>
+
+## AgentSH mode selection
+
+AgentSH-aware extensions share one startup classification. Full AgentSH is
+selected by a REST/mock supervisor, `PI_AGENTSH_ENABLE=1`, or trusted wrapper
+signals such as `PI_SUPERVISED=1`, `PI_AUTO=1`,
+`PI_AGENTSH_REMOTE=ssh`, `PI_AGENTSH_READ_MODE=supervised`, and an AgentSH child
+capability. Once full mode is selected, adaptive tools fail closed until a full
+supervisor is active; they never fall back to native commands, files, network,
+direnv, SSH, PDF processing, or subagents.
+
+`AGENTSH_PERMISSION_GATE_SOCKET` remains a distinct **guard-only** startup mode:
+it authorizes Bash intent but does not claim that execution is supervised.
+The compatibility `AGENTSH_APPROVAL_UI_SOCKET` protocol is likewise
+approval-only. Neither limited protocol selects the full backend by itself.
+Selecting guard-only and full authority together is a configuration conflict
+and Bash fails closed without opening duplicate authorization prompts.
+Published supervisor state includes its concrete `protocol`; `active=true`
+means a usable client has completed its initial attachment (or is reconnecting
+an already attached client), not merely that AgentSH was configured or attempted.
 
 ## ✨ Extensions
 
@@ -149,8 +172,9 @@ extensions have stopped.
 **Description**: Refreshes direnv on session start and after each `bash` tool
 call. In ordinary/`pi-unsafe` sessions it preserves the shell-hook behaviour of
 running `direnv export json` locally and updating the Pi process environment. In
-supervised sessions (`PI_SUPERVISED=1`) it requires the sandbox extension and
-uses AgentSH's exact-session `refresh_direnv` endpoint instead: `.envrc` code
+sessions classified as full AgentSH (including `PI_SUPERVISED=1`) it requires
+the sandbox extension and uses AgentSH's exact-session `refresh_direnv` endpoint
+instead: `.envrc` code
 runs in the supervised execution workspace, values remain server-side for later
 commands, and the trusted parent Pi environment is never mutated. There is no
 local fallback when AgentSH is unavailable. Supervised use therefore requires
@@ -178,9 +202,10 @@ closed with an actionable diagnostic.
    every exact Bash command, working directory, and Pi tool-call ID to AgentSH.
    AgentSH—not Pi's local regex list—classifies the command and durably audits
    the terminal decision.
-2. Full AgentSH supervised, Auto, and sandbox modes synchronously suppress this
-   legacy gate so they do not produce a second prompt before the sandbox
-   extension has attached.
+2. Full AgentSH supervised, Auto, and sandbox modes suppress this legacy gate
+   once the supervisor is active, so they do not produce a duplicate prompt.
+   If full mode was selected but its supervisor is unavailable, the extension
+   blocks Bash rather than permitting native fallback.
 3. Only an ordinary session with neither integration uses the original local
    dangerous-command regex prompts and `/permission-gate` toggle.
 
@@ -668,8 +693,10 @@ bound to one target.
 - **Type**: AgentSH supervisor client (mock NDJSON test protocol and real Stage 1 REST)
 - **Commands**: `/sandbox`{.verbatim} for status/debug;
   `/sandbox-allow <target>`{.verbatim} for retry guidance
-- **Tool overrides**: only registered when an AgentSH integration env var is set.
-  Mock NDJSON can handle `bash`{.verbatim}, `write`{.verbatim},
+- **Tool overrides**: registered whenever the canonical startup classification
+  selects full AgentSH, including trusted wrapper signals without a usable
+  transport; the latter remain unavailable and fail closed. Mock NDJSON can
+  handle `bash`{.verbatim}, `write`{.verbatim},
   `edit`{.verbatim}, and optional `read`{.verbatim}; real AgentSH REST handles
   those tools through `/api/v1/sessions/{id}/tools/*`. The separate adaptive
   `subagent` extension is the sole registration and consumes the sandbox's
@@ -693,10 +720,12 @@ been retired. `sandbox` now has two explicit protocol modes:
 2. **Real Stage 1 REST** when `AGENTSH_SESSION_SUPERVISOR` is set or
    `PI_AGENTSH_ENABLE=1`. This uses HTTP JSON over the AgentSH Unix socket.
 
-With no supervisor/enable env var, the extension stays inactive and does not
-register `bash`/`write`/`edit` overrides. The adaptive `subagent` extension uses
-its native backend in that case. On `session_start`, it attaches to the mock socket first if present;
-otherwise it attaches to the real REST socket, or starts one with
+With no full-mode signal, the extension stays inactive and does not register
+`bash`/`write`/`edit` overrides. The adaptive `subagent` extension uses its
+native backend in that case. A full-mode wrapper signal without a full
+supervisor transport still registers the overrides, publishes an unavailable
+state, and refuses native fallback. On `session_start`, the extension attaches
+to the canonically selected mock or real REST socket, or starts one with
 `agentsh session start --detach --policy <policy> --workspace <cwd> --workspace-mode <mode> --json`.
 
 **Environment**:
@@ -910,7 +939,9 @@ The extension exposes `globalThis.__AGENTSH_PI__` for owned extensions:
   `editFile(...)`, `spawnSubagent(...)`;
 - `resolveApproval(...)`;
 - `setExecutionTarget(...)` / `getExecutionTarget()` for the SSH target router;
-- `getSupervisorMetadata()` / `getSupervisorState()`.
+- `getSupervisorMetadata()` / `getSupervisorState()`; state reports
+  `configured`, readiness-correct `active`, and supervisor `protocol` (`rest`,
+  `mock-ndjson`, `legacy-approval-ui`, or empty).
 
 **Run with only the sandbox backend, adaptive subagent, and mock supervisor**:
 
