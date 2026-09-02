@@ -479,7 +479,7 @@ async function runSingleSubagent(
   const currentResult: SingleResult = {
     label,
     task: spec.task,
-    exitCode: 0,
+    exitCode: -1,
     messages: [],
     stderr: "",
     usage: usageZero(),
@@ -717,7 +717,7 @@ async function runSingleSubagent(
     return currentResult;
   } catch (error) {
     const message = error instanceof Error ? error.message : String(error);
-    currentResult.exitCode = signal?.aborted ? 130 : currentResult.exitCode || 1;
+    currentResult.exitCode = signal?.aborted ? 130 : 1;
     currentResult.stopReason = signal?.aborted ? "aborted" : "error";
     currentResult.errorMessage = signal?.aborted ? "Subagent aborted by user." : message;
     currentResult.stderr += `${message}\n`;
@@ -744,7 +744,10 @@ function specFromParams(params: any): SubagentSpec {
 }
 
 function isFailure(result: SingleResult): boolean {
-  return result.exitCode !== 0 || result.stopReason === "error" || result.stopReason === "aborted" || result.stopReason === "timeout";
+  return (result.exitCode !== -1 && result.exitCode !== 0)
+    || result.stopReason === "error"
+    || result.stopReason === "aborted"
+    || result.stopReason === "timeout";
 }
 
 function resultErrorText(result: SingleResult): string {

@@ -36,6 +36,9 @@ pkgs.runCommand "subagent-check"
     cp ${self}/subagent/parallel-result.ts "$workdir/src/subagent/parallel-result.ts"
     cp ${self}/shared/agentsh-mode.ts "$workdir/src/shared/agentsh-mode.ts"
 
+    grep -A12 'const currentResult: SingleResult' ${self}/subagent/index.ts | grep -Fq 'exitCode: -1,'
+    grep -A4 'function isFailure' ${self}/subagent/index.ts | grep -Fq 'result.exitCode !== -1'
+
     tsc \
       --noCheck \
       --skipLibCheck \
