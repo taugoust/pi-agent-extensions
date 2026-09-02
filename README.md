@@ -689,7 +689,7 @@ Foreground rendering stops, the original execution continues under the existing
 background manager, and each detached tool result explicitly tells the parent
 agent to continue useful work and consume the result before completing dependent
 work. The command does nothing to existing background jobs or unrelated tools.
-It refuses an all-at-once handoff when the two-job aggregate background limit
+It refuses an all-at-once handoff when the eight-job aggregate background limit
 would be exceeded. Escape retains its normal cancellation behavior before a
 successful handoff; afterward, only `operation=cancel` cancels the detached work.
 

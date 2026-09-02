@@ -4,7 +4,7 @@ import { access, lstat, mkdir, open, readFile, readdir, rename, rm, writeFile } 
 import { dirname, join } from "node:path";
 
 export const BACKGROUND_SUBAGENT_ID_PATTERN = /^subagent-job-[0-9a-f]{24}$/;
-export const MAX_BACKGROUND_SUBAGENTS = 2;
+export const MAX_BACKGROUND_SUBAGENTS = 8;
 export const MAX_BACKGROUND_SUBAGENT_TEXT_BYTES = 50 * 1024;
 const MAX_STATE_BYTES = 128 * 1024;
 const TERMINAL_RETENTION_MS = 7 * 24 * 60 * 60 * 1000;

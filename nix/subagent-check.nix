@@ -63,6 +63,7 @@ pkgs.runCommand "subagent-check"
     const mode = await import(pathToFileURL(process.argv[4]).href);
     const background = await import(pathToFileURL(process.argv[5]).href);
     const handoff = await import(pathToFileURL(process.argv[6]).href);
+    assert.equal(background.MAX_BACKGROUND_SUBAGENTS, 8);
     const format = imported.formatParallelResultContent ?? imported.default?.formatParallelResultContent;
     const nativeStartup = mode.classifyAgentSHStartup({});
     const fullStartup = mode.classifyAgentSHStartup({ PI_SUPERVISED: "1" });
