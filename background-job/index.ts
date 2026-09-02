@@ -255,9 +255,10 @@ export default function backgroundJob(pi: ExtensionAPI) {
     if (!record.result || idlePending.has(id) || idleInFlight.has(id) || deliveryClaims.has(id)) return;
     deliveryClaims.add(id);
     try {
-      if (await service.store.isNotified(id) || sessionContext !== ctx) return;
+      if (sessionContext !== ctx) return;
       const message = completionMessage(record);
       if (ctx.isIdle()) {
+        if (await service.store.isNotified(id)) return;
         idlePending.add(id);
         try {
           deliverLifecycleMessage(ctx, message, { kind: "completion", job_id: id, status: record.status });
@@ -266,8 +267,8 @@ export default function backgroundJob(pi: ExtensionAPI) {
           throw error;
         }
       } else {
+        if (!(await service.store.markNotified(id))) return;
         deliverLifecycleMessage(ctx, message, { kind: "completion", job_id: id, status: record.status });
-        await service.store.markNotified(id);
       }
       if (ctx.hasUI) ctx.ui.notify(message, record.status === "completed" ? "info" : "warning");
     } finally {

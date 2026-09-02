@@ -22,6 +22,13 @@ import {
   type AgentSHRuntimeState,
 } from "../shared/agentsh-mode.js";
 import { adaptiveDispositionError, nativeSubagentRequestSupported, selectSubagentBackend, type AdaptiveSubagentBridge } from "./backend.js";
+import {
+  BACKGROUND_SUBAGENT_ID_PATTERN,
+  backgroundSubagentLine,
+  isBackgroundSubagentActive,
+  sharedBackgroundSubagentManager,
+  type BackgroundSubagentRecord,
+} from "./background.js";
 import { formatParallelResultContent } from "./parallel-result.js";
 
 const MAX_PARALLEL_TASKS = 8;
@@ -83,6 +90,16 @@ type SubagentDetails = {
   failed?: boolean;
   mode: Mode;
   results: SingleResult[];
+};
+
+type BackgroundSubagentDetails = {
+  background_subagent: true;
+  operation: "start" | "list" | "status" | "output" | "wait" | "result" | "cancel";
+  job_id?: string;
+  status?: BackgroundSubagentRecord["status"];
+  backend?: "native" | "agentsh";
+  failed?: boolean;
+  timed_out?: boolean;
 };
 
 type AgentSHBridge = AdaptiveSubagentBridge & {
@@ -722,6 +739,75 @@ function resultErrorText(result: SingleResult): string {
   return result.errorMessage || result.stderr || getFinalOutput(result.messages) || "(no output)";
 }
 
+function agentResultText(result: any): string {
+  const content = Array.isArray(result?.content) ? result.content : [];
+  const text = content.filter((part: any) => part?.type === "text").map((part: any) => String(part.text ?? "")).join("\n");
+  return truncateByBytes(text || "(no output)");
+}
+
+function requestMode(params: any): Mode {
+  return Array.isArray(params.chain) && params.chain.length > 0 ? "chain"
+    : Array.isArray(params.tasks) && params.tasks.length > 0 ? "parallel"
+      : "single";
+}
+
+function requestSummary(params: any): string {
+  if (typeof params.task === "string") return truncateByBytes(params.task, 500).replace(/\s+/g, " ");
+  const items = Array.isArray(params.tasks) ? params.tasks : Array.isArray(params.chain) ? params.chain : [];
+  const first = typeof items[0]?.task === "string" ? items[0].task.replace(/\s+/g, " ") : "subagent work";
+  return `${requestMode(params)} ${items.length}: ${truncateByBytes(first, 400)}`;
+}
+
+function backgroundRecordText(record: BackgroundSubagentRecord, includeOutput = false): string {
+  return [
+    backgroundSubagentLine(record),
+    ...(includeOutput ? [record.result ?? record.latest ?? "(no output)"] : []),
+    ...(record.error ? [`error: ${record.error}`] : []),
+  ].join("\n");
+}
+
+function terminalBackgroundStatus(status: BackgroundSubagentRecord["status"]): boolean {
+  return !["running", "cancelling"].includes(status);
+}
+
+function stableSessionId(ctx: any): string {
+  const value = ctx?.sessionManager?.getSessionId?.();
+  if (typeof value !== "string" || value.length === 0 || Buffer.byteLength(value, "utf8") > 512) {
+    throw new Error("background subagents require a stable Pi session ID");
+  }
+  return value;
+}
+
+function validateBackgroundOperation(params: any): void {
+  const operation = typeof params.operation === "string" ? params.operation : undefined;
+  if (!operation) return;
+  const launchFields = ["task", "tasks", "chain", "systemPrompt", "model", "tools", "cwd", "action", "draft_id", "background", "mode", "timeout_ms"];
+  if (launchFields.some((field) => params[field] !== undefined)) throw new Error("A background subagent operation cannot include launch or Draft disposition fields");
+  if (operation === "list") {
+    if (params.job_id !== undefined || params.wait_ms !== undefined) throw new Error("Background subagent list accepts only optional limit");
+    return;
+  }
+  if (typeof params.job_id !== "string" || !BACKGROUND_SUBAGENT_ID_PATTERN.test(params.job_id)) throw new Error(`${operation} requires a valid job_id`);
+  if (operation === "wait") {
+    if (params.limit !== undefined) throw new Error("Background subagent wait accepts only job_id and wait_ms");
+  } else if (params.wait_ms !== undefined || params.limit !== undefined) {
+    throw new Error(`${operation} accepts only job_id`);
+  }
+}
+
+function validateBackgroundLaunch(params: any): void {
+  if (params.background !== true) return;
+  if (params.operation !== undefined || params.job_id !== undefined || params.wait_ms !== undefined || params.limit !== undefined) throw new Error("Background launch cannot include lifecycle operation fields");
+  if (params.action !== undefined || params.draft_id !== undefined) throw new Error("Draft review/apply/discard cannot run in the background");
+  const forms = Number(typeof params.task === "string" && params.task.trim().length > 0)
+    + Number(Array.isArray(params.tasks) && params.tasks.length > 0)
+    + Number(Array.isArray(params.chain) && params.chain.length > 0);
+  if (forms !== 1) throw new Error("Background launch requires exactly one task, non-empty tasks, or non-empty chain form");
+  if (Array.isArray(params.tasks) && params.tasks.length > MAX_PARALLEL_TASKS) throw new Error(`Too many parallel tasks (${params.tasks.length}). Max is ${MAX_PARALLEL_TASKS}.`);
+  const items = Array.isArray(params.tasks) ? params.tasks : Array.isArray(params.chain) ? params.chain : [];
+  if (items.some((item: any) => typeof item?.task !== "string" || item.task.trim().length === 0)) throw new Error("Every background subagent task must be a non-empty string");
+}
+
 const SubagentItem = Type.Object({
   task: Type.String({ description: "Task to delegate to this dynamic subagent" }),
   systemPrompt: Type.Optional(Type.String({ description: "Optional additional system prompt for this subagent" })),
@@ -735,6 +821,11 @@ function subagentParams() {
   mode: Type.Optional(Type.String({ pattern: "^(shared|draft)$", description: "Execution isolation. Omitted/shared uses AgentSH when configured, otherwise a native child; draft requires AgentSH." })),
   action: Type.Optional(Type.String({ pattern: "^(review|apply|discard)$", description: "AgentSH Draft disposition; use with mode=draft and draft_id instead of task/tasks/chain." })),
   draft_id: Type.Optional(Type.String({ pattern: "^session-[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$", description: "Exact retained AgentSH Draft identity." })),
+  background: Type.Optional(Type.Boolean({ description: "Return immediately and continue a task/tasks/chain request in the background." })),
+  operation: Type.Optional(Type.String({ pattern: "^(list|status|output|wait|result|cancel)$", description: "Background subagent lifecycle operation; use instead of task/tasks/chain." })),
+  job_id: Type.Optional(Type.String({ pattern: "^subagent-job-[0-9a-f]{24}$", description: "Opaque background subagent execution ID." })),
+  wait_ms: Type.Optional(Type.Integer({ minimum: 0, maximum: 30000, description: "Bounded background wait duration; default 1000ms." })),
+  limit: Type.Optional(Type.Integer({ minimum: 1, maximum: 50, description: "Maximum background jobs returned by list." })),
   task: Type.Optional(Type.String({ description: "Task to delegate (single mode)" })),
   systemPrompt: Type.Optional(Type.String({ description: "Optional additional system prompt (single mode)" })),
   model: Type.Optional(Type.String({ description: "Optional model id (single mode)" })),
@@ -752,24 +843,241 @@ export default function (pi: ExtensionAPI) {
   const agentSHStartup = classifyAgentSHStartup(process.env);
   const bridgeDisposition = (bridge: AgentSHBridge | undefined) =>
     agentSHRuntimeDisposition(agentSHStartup, bridgeSupervisorState(bridge));
+  const backgroundManager = sharedBackgroundSubagentManager(path.join(getAgentDir(), "state", "background-subagents-v1"));
+  let sessionContext: any;
+  let sessionGeneration = 0;
+  let pollTimer: NodeJS.Timeout | undefined;
+  let pollRunning = false;
+  let settleReminderArmed = false;
+  const idlePending = new Set<string>();
+  const idleInFlight = new Set<string>();
+  const deliveryClaims = new Set<string>();
+
+  const updateBackgroundStatus = async (ctx: any) => {
+    if (!ctx?.hasUI) return;
+    try {
+      const running = (await backgroundManager.list(stableSessionId(ctx), 1000)).filter(isBackgroundSubagentActive).length;
+      ctx.ui.setStatus("background-subagents", running ? ctx.ui.theme.fg("accent", `subagents ${running}`) : undefined);
+    } catch {
+      ctx.ui.setStatus("background-subagents", ctx.ui.theme.fg("error", "subagents ✗"));
+    }
+  };
+
+  const sendLifecycle = (ctx: any, content: string, details: Record<string, unknown>) => {
+    pi.sendMessage(
+      { customType: "background-subagent-lifecycle", content, display: false, details },
+      { deliverAs: ctx.isIdle() ? "nextTurn" : "steer" },
+    );
+  };
+
+  const deliverTerminal = async (ctx: any, record: BackgroundSubagentRecord) => {
+    if (!terminalBackgroundStatus(record.status) || idlePending.has(record.id) || idleInFlight.has(record.id) || deliveryClaims.has(record.id)) return;
+    deliveryClaims.add(record.id);
+    try {
+      if (sessionContext !== ctx) return;
+      const message = `Background subagent ${record.id}: ${record.status}. Inspect its result before declaring dependent work complete.`;
+      if (ctx.isIdle()) {
+        if (await backgroundManager.isNotified(record.id)) return;
+        idlePending.add(record.id);
+        try { sendLifecycle(ctx, message, { kind: "completion", job_id: record.id, status: record.status }); }
+        catch (error) { idlePending.delete(record.id); throw error; }
+      } else {
+        if (!(await backgroundManager.markNotified(record.id))) return;
+        sendLifecycle(ctx, message, { kind: "completion", job_id: record.id, status: record.status });
+      }
+      if (ctx.hasUI) ctx.ui.notify(message, record.status === "completed" ? "info" : "warning");
+    } finally {
+      deliveryClaims.delete(record.id);
+    }
+  };
+
+  const pollBackground = async () => {
+    if (pollRunning || !sessionContext) return;
+    const ctx = sessionContext;
+    const generation = sessionGeneration;
+    pollRunning = true;
+    try {
+      const records = await backgroundManager.list(stableSessionId(ctx), 1000);
+      for (const record of records) {
+        if (generation !== sessionGeneration || sessionContext !== ctx) return;
+        if (terminalBackgroundStatus(record.status)) await deliverTerminal(ctx, record);
+      }
+      if (generation === sessionGeneration && sessionContext === ctx) await updateBackgroundStatus(ctx);
+    } catch {
+      if (generation === sessionGeneration && sessionContext === ctx && ctx.hasUI) ctx.ui.setStatus("background-subagents", ctx.ui.theme.fg("error", "subagents ✗"));
+    } finally {
+      pollRunning = false;
+    }
+  };
+
+  pi.on("session_start", async (_event, ctx) => {
+    sessionGeneration += 1;
+    sessionContext = ctx;
+    try {
+      await backgroundManager.initialize();
+      await updateBackgroundStatus(ctx);
+      if (pollTimer) clearInterval(pollTimer);
+      pollTimer = setInterval(() => void pollBackground(), 2000);
+      pollTimer.unref();
+      void pollBackground();
+    } catch (error) {
+      if (ctx.hasUI) ctx.ui.notify(`Background subagents unavailable: ${error instanceof Error ? error.message : String(error)}`, "warning");
+    }
+  });
+
+  pi.on("before_agent_start", () => {
+    for (const id of idlePending) idleInFlight.add(id);
+    idlePending.clear();
+  });
+
+  pi.on("agent_end", async (_event, ctx) => {
+    const remind = settleReminderArmed;
+    settleReminderArmed = false;
+    if (!remind && idleInFlight.size === 0) return;
+    try {
+      if (remind) {
+        const records = await backgroundManager.list(stableSessionId(ctx), 1000);
+        for (const record of records) if (terminalBackgroundStatus(record.status)) await deliverTerminal(ctx, record);
+        const running = records.filter(isBackgroundSubagentActive);
+        if (running.length > 0) {
+          const ids = running.slice(0, 8).map((record) => record.id).join(", ");
+          sendLifecycle(ctx, `${running.length} background subagent${running.length === 1 ? " is" : "s are"} still running (${ids}). Do not claim dependent work complete; use a bounded subagent wait/status/result operation.`, { kind: "running-reminder", job_ids: running.slice(0, 8).map((record) => record.id) });
+        }
+      }
+      for (const id of [...idleInFlight]) {
+        await backgroundManager.markNotified(id);
+        idleInFlight.delete(id);
+      }
+    } catch (error) {
+      if (ctx.hasUI) ctx.ui.notify(`Could not check background subagents before settling: ${error instanceof Error ? error.message : String(error)}`, "warning");
+    }
+  });
+
+  pi.on("session_shutdown", (_event, ctx) => {
+    sessionGeneration += 1;
+    sessionContext = undefined;
+    settleReminderArmed = false;
+    idlePending.clear();
+    idleInFlight.clear();
+    deliveryClaims.clear();
+    if (pollTimer) clearInterval(pollTimer);
+    pollTimer = undefined;
+    try { backgroundManager.requestCancelSession(stableSessionId(ctx)); } catch {}
+  });
 
   pi.on("tool_result", (event) => {
     if (event.toolName !== "subagent" || event.isError) return;
-    const details = event.details as SubagentDetails | undefined;
-    if (details?.failed || (details?.backend === "native" && details.results.some(isFailure))) return { isError: true };
+    const details = event.details as SubagentDetails | BackgroundSubagentDetails | undefined;
+    if ((details as BackgroundSubagentDetails | undefined)?.background_subagent) return;
+    const foreground = details as SubagentDetails | undefined;
+    if (foreground?.failed || (foreground?.backend === "native" && foreground.results.some(isFailure))) return { isError: true };
   });
 
-  pi.registerTool({
+  let subagentTool: any;
+  subagentTool = {
     name: "subagent",
     label: "Subagent",
     description: [
       "Delegate focused work through AgentSH when configured, otherwise through native child Pi processes.",
-      "Exactly one request form: single task, parallel tasks, chain steps, or an AgentSH Draft disposition.",
+      "Exactly one request form: single task, parallel tasks, chain steps, a background lifecycle operation, or an AgentSH Draft disposition.",
+      "Set background=true on task/tasks/chain to continue without blocking; inspect it later with operation and job_id.",
       "mode defaults to shared; mode=draft requires an active AgentSH supervisor.",
     ].join(" "),
+    promptSnippet: "Delegate focused work synchronously or as a durable-in-session background subagent",
+    promptGuidelines: [
+      "Use background=true when delegated work may take long enough that useful parent work can continue concurrently.",
+      "Before claiming dependent work complete, consume a terminal background subagent result; cancelling a bounded wait does not cancel the subagent.",
+      "Use operation=cancel explicitly to stop a background subagent. Running subagents are cancelled when their owning Pi session shuts down.",
+    ],
     parameters: subagentParams(),
 
     async execute(toolCallId, params: any, signal, onUpdate, ctx) {
+      validateBackgroundOperation(params);
+      if (params.operation) {
+        const ownerSessionId = stableSessionId(ctx);
+        const operation = params.operation as BackgroundSubagentDetails["operation"];
+        if (operation === "list") {
+          const records = await backgroundManager.list(ownerSessionId, params.limit ?? 20);
+          return {
+            content: [{ type: "text", text: records.length ? records.map(backgroundSubagentLine).join("\n") : "No background subagents for this Pi session." }],
+            details: { background_subagent: true, operation, failed: false, jobs: records.map((record) => ({ job_id: record.id, status: record.status, backend: record.backend, mode: record.mode })) },
+          };
+        }
+        const id = params.job_id as string;
+        const owned = async () => {
+          const record = await backgroundManager.get(id);
+          if (record.sessionId !== ownerSessionId) throw new Error(`Background subagent ${id} belongs to a different Pi session`);
+          return record;
+        };
+        let record = await owned();
+        let timedOut = false;
+        if (operation === "wait") {
+          const waited = await backgroundManager.wait(id, params.wait_ms ?? 1000, signal);
+          record = waited.record;
+          timedOut = waited.timedOut;
+        } else if (operation === "cancel") {
+          record = await backgroundManager.cancel(id);
+        }
+        const discloseOutput = operation === "output" || operation === "result" || operation === "wait" || operation === "cancel" || (operation === "status" && terminalBackgroundStatus(record.status));
+        if (discloseOutput && terminalBackgroundStatus(record.status)) await backgroundManager.markNotified(id);
+        const waiting = timedOut ? "\nWait timed out; the subagent is still running." : "";
+        const notReady = operation === "result" && isBackgroundSubagentActive(record) ? "\nResult is not ready; use a bounded wait or continue other work." : "";
+        await updateBackgroundStatus(ctx);
+        return {
+          content: [{ type: "text", text: `${backgroundRecordText(record, discloseOutput)}${waiting}${notReady}` }],
+          details: {
+            background_subagent: true,
+            operation,
+            job_id: id,
+            status: record.status,
+            backend: record.backend,
+            failed: terminalBackgroundStatus(record.status) && record.status !== "completed",
+            timed_out: timedOut,
+          } satisfies BackgroundSubagentDetails,
+        };
+      }
+
+      validateBackgroundLaunch(params);
+      if (params.background === true) {
+        if (signal?.aborted) throw signal.reason instanceof Error ? signal.reason : new Error("Background subagent launch cancelled");
+        const dispositionError = adaptiveDispositionError(params);
+        if (dispositionError) throw new Error(dispositionError);
+        const bridge = agentSHBridge();
+        const backend = selectSubagentBackend(bridge, agentSHStartup);
+        if (backend.kind === "unavailable") throw new Error(backend.message);
+        if (backend.kind === "native" && !nativeSubagentRequestSupported(params)) {
+          throw new Error("mode=draft requires an active AgentSH supervisor");
+        }
+        const launchedParams = { ...params };
+        delete launchedParams.background;
+        delete launchedParams.operation;
+        delete launchedParams.job_id;
+        delete launchedParams.wait_ms;
+        delete launchedParams.limit;
+        const record = await backgroundManager.start({
+          sessionId: stableSessionId(ctx),
+          backend: backend.kind,
+          mode: requestMode(params),
+          summary: requestSummary(params),
+        }, async (backgroundSignal, update) => {
+          const result = await subagentTool.execute(toolCallId, launchedParams, backgroundSignal, (partial: any) => update(agentResultText(partial)), ctx);
+          const failed = result?.isError === true || result?.details?.failed === true;
+          return { text: agentResultText(result), failed };
+        });
+        settleReminderArmed = true;
+        await updateBackgroundStatus(ctx);
+        return {
+          content: [{ type: "text", text: `${backgroundSubagentLine(record)}\nStarted without blocking. Continue other work; use subagent operation=wait|status|output|result|cancel with this job_id when needed.` }],
+          details: { background_subagent: true, operation: "start", job_id: record.id, status: record.status, backend: record.backend, failed: false } satisfies BackgroundSubagentDetails,
+        };
+      }
+
+      params = { ...params };
+      delete params.background;
+      delete params.operation;
+      delete params.job_id;
+      delete params.wait_ms;
+      delete params.limit;
       const dispositionError = adaptiveDispositionError(params);
       if (dispositionError) throw new Error(dispositionError);
 
@@ -915,6 +1223,13 @@ export default function (pi: ExtensionAPI) {
     },
 
     renderCall(args: any, theme) {
+      if (args.operation) {
+        return new Text(`${theme.fg("toolTitle", theme.bold("subagent"))} ${theme.fg("muted", args.operation)}${args.job_id ? ` ${theme.fg("dim", args.job_id)}` : ""}`, 0, 0);
+      }
+      if (args.background) {
+        const mode = requestMode(args);
+        return new Text(`${theme.fg("toolTitle", theme.bold("subagent"))} ${theme.fg("accent", `background ${mode}`)}\n  ${theme.fg("dim", requestSummary(args))}`, 0, 0);
+      }
       const bridge = agentSHBridge();
       const disposition = bridgeDisposition(bridge);
       if ((disposition.kind === "full" || disposition.kind === "unavailable") && bridge?.subagentAdapter) {
@@ -947,6 +1262,10 @@ export default function (pi: ExtensionAPI) {
     },
 
     renderResult(result, options, theme) {
+      if ((result.details as BackgroundSubagentDetails | undefined)?.background_subagent) {
+        const text = result.content.find((part: any) => part?.type === "text")?.text ?? "(no output)";
+        return new Text(text, 0, 0);
+      }
       const bridge = agentSHBridge();
       const adapter = bridge?.subagentAdapter;
       const backend = (result.details as any)?.backend;
@@ -1087,5 +1406,6 @@ export default function (pi: ExtensionAPI) {
       if (!expanded) text += `\n${theme.fg("muted", "(Ctrl+O to expand)")}`;
       return new Text(text, 0, 0);
     },
-  });
+  };
+  pi.registerTool(subagentTool);
 }

@@ -31,6 +31,7 @@ pkgs.runCommand "subagent-check"
     workdir="$TMPDIR/subagent-check"
     mkdir -p "$workdir/src/subagent" "$workdir/src/shared" "$workdir/out"
     cp ${self}/subagent/backend.ts "$workdir/src/subagent/backend.ts"
+    cp ${self}/subagent/background.ts "$workdir/src/subagent/background.ts"
     cp ${self}/subagent/parallel-result.ts "$workdir/src/subagent/parallel-result.ts"
     cp ${self}/shared/agentsh-mode.ts "$workdir/src/shared/agentsh-mode.ts"
 
@@ -43,6 +44,7 @@ pkgs.runCommand "subagent-check"
       --rootDir "$workdir/src" \
       --outDir "$workdir/out" \
       "$workdir/src/subagent/backend.ts" \
+      "$workdir/src/subagent/background.ts" \
       "$workdir/src/subagent/parallel-result.ts" \
       "$workdir/src/shared/agentsh-mode.ts"
 
@@ -53,6 +55,7 @@ pkgs.runCommand "subagent-check"
     const imported = await import(pathToFileURL(process.argv[2]).href);
     const backend = await import(pathToFileURL(process.argv[3]).href);
     const mode = await import(pathToFileURL(process.argv[4]).href);
+    const background = await import(pathToFileURL(process.argv[5]).href);
     const format = imported.formatParallelResultContent ?? imported.default?.formatParallelResultContent;
     const nativeStartup = mode.classifyAgentSHStartup({});
     const fullStartup = mode.classifyAgentSHStartup({ PI_SUPERVISED: "1" });
@@ -97,13 +100,51 @@ pkgs.runCommand "subagent-check"
       assert.match(crowded, new RegExp(`child-''${index}-sentinel`));
     }
     assert.ok(!crowded.includes("�"), "UTF-8 truncation introduced a replacement character");
+
+    const stateRoot = `''${process.env.TMPDIR}/background-subagents`;
+    const manager = new background.BackgroundSubagentManager(stateRoot);
+    await manager.initialize();
+    const success = await manager.start({ sessionId: "session-a", backend: "native", mode: "single", summary: "slow review" }, async (_signal, update) => {
+      update("working");
+      await new Promise((resolve) => setTimeout(resolve, 80));
+      return { text: "review complete", failed: false };
+    });
+    assert.match(success.id, background.BACKGROUND_SUBAGENT_ID_PATTERN);
+    assert.equal(success.status, "running");
+    assert.equal((await manager.wait(success.id, 0)).timedOut, true);
+    const completed = await manager.wait(success.id, 2000);
+    assert.equal(completed.record.status, "completed");
+    assert.equal(completed.record.result, "review complete");
+    assert.equal(await manager.markNotified(success.id), true);
+    assert.equal(await manager.markNotified(success.id), false);
+
+    const waitOnly = await manager.start({ sessionId: "session-a", backend: "agentsh", mode: "single", summary: "wait cancellation" }, async (signal) => {
+      await new Promise((resolve, reject) => {
+        const timer = setTimeout(resolve, 500);
+        signal.addEventListener("abort", () => { clearTimeout(timer); reject(signal.reason); }, { once: true });
+      });
+      return { text: "unexpected", failed: false };
+    });
+    const waitAbort = new AbortController();
+    const cancelledWait = manager.wait(waitOnly.id, 2000, waitAbort.signal);
+    waitAbort.abort(new Error("stop waiting"));
+    await assert.rejects(cancelledWait, /stop waiting/);
+    assert.equal((await manager.get(waitOnly.id)).status, "running", "cancelled wait stopped the subagent");
+    assert.equal((await manager.cancel(waitOnly.id)).status, "cancelled");
+
+    const failing = await manager.start({ sessionId: "session-a", backend: "native", mode: "chain", summary: "failure" }, async () => {
+      throw new Error("expected failure");
+    });
+    assert.equal((await manager.wait(failing.id, 2000)).record.status, "failed");
+    assert.equal((await manager.list("session-a", 10)).length, 3);
     EOF
 
-    node "$workdir/test.mjs" "$workdir/out/subagent/parallel-result.js" "$workdir/out/subagent/backend.js" "$workdir/out/shared/agentsh-mode.js"
+    node "$workdir/test.mjs" "$workdir/out/subagent/parallel-result.js" "$workdir/out/subagent/backend.js" "$workdir/out/shared/agentsh-mode.js" "$workdir/out/subagent/background.js"
     grep -F 'formatParallelResultContent(sections, successCount, MAX_TEXT_PREVIEW_BYTES)' ${self}/subagent/index.ts >/dev/null
     grep -F '(cfg.extensions.sandbox.enable || cfg.extensions.subagent.enable)' ${self}/nix/module.nix >/dev/null
     grep -F 'builtins.elem "sandbox" extensions' ${self}/nix/mk-extension-bundle.nix >/dev/null
     grep -F '"''${extDir}/subagent/backend.ts".source = "''${self}/subagent/backend.ts";' ${self}/nix/module.nix >/dev/null
+    grep -F '"''${extDir}/subagent/background.ts".source = "''${self}/subagent/background.ts";' ${self}/nix/module.nix >/dev/null
     grep -F '"''${extDir}/subagent/parallel-result.ts".source = "''${self}/subagent/parallel-result.ts";' ${self}/nix/module.nix >/dev/null
     if grep -F 'name: "subagent"' ${self}/sandbox/index.ts >/dev/null; then
       echo 'sandbox still registers a duplicate subagent tool' >&2
@@ -117,6 +158,7 @@ pkgs.runCommand "subagent-check"
       test "$(jq '[.pi.extensions[] | select(. == "subagent")] | length' "$bundle/package.json")" -eq 1
       test "$(jq '[.pi.extensions[] | select(. == "subagent-finalizer")] | length' "$bundle/package.json")" -eq 1
       test -f "$bundle/subagent/index.ts"
+      test -f "$bundle/subagent/background.ts"
       test -f "$bundle/subagent-finalizer/index.ts"
       test -f "$bundle/shared/agentsh-mode.ts"
     done

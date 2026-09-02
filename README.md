@@ -651,10 +651,10 @@ trusted Pi control plane is insufficient.
   and never falls back to native execution.
 
 **Description**: Registers one adaptive `subagent` tool. The parent supplies a
-single task, parallel tasks, a chain, or an AgentSH Draft disposition. Native
-child Pi state is isolated under `$PI_CODING_AGENT_DIR/subagents/...`; AgentSH
-owns policy, streaming, approvals, artifacts, and Draft lifecycle whenever its
-backend is active.
+single task, parallel tasks, a chain, a background lifecycle operation, or an
+AgentSH Draft disposition. Native child Pi state is isolated under
+`$PI_CODING_AGENT_DIR/subagents/...`; AgentSH owns policy, streaming, approvals,
+artifacts, and Draft lifecycle whenever its backend is active.
 
 **Modes**:
 
@@ -662,9 +662,23 @@ backend is active.
 { "task": "Review README.md", "tools": ["read"] }
 { "tasks": [{ "task": "Find model code", "tools": ["read", "grep", "find"] }] }
 { "chain": [{ "task": "Find files" }, { "task": "Plan from: {previous}" }] }
+{ "task": "Run the slower investigation", "background": true }
+{ "operation": "wait", "job_id": "subagent-job-...", "wait_ms": 30000 }
+{ "operation": "result", "job_id": "subagent-job-..." }
 { "mode": "draft", "task": "Implement and commit the change in an isolated VM" }
 { "mode": "draft", "action": "review", "draft_id": "session-..." }
 ```
+
+Background launches support single, parallel, and chain requests through both
+adaptive backends. They return immediately, retain bounded progress/results in
+a private per-user store, and emit deduplicated active/passive completion
+events. `list`, `status`, `output`, bounded `wait`, `result`, and `cancel` remain
+part of the same tool. Cancelling `wait` does not cancel execution. Because
+AgentSH authority and native child pipes are bound to the owning Pi process,
+running background subagents are cancelled on orderly session shutdown and are
+reported as `lost` after an unclean Pi restart; terminal records remain
+available for seven days. Draft cancellation never applies or discards a
+retained Draft result.
 
 Set `PI_SUBAGENT_BIN` to the raw Pi executable selected by your wrapper, e.g.
 `/nix/store/.../bin/pi` or `pi-unsafe`. If unset, the extension tries source/dev
