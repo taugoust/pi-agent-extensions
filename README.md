@@ -181,8 +181,14 @@ and per-working-directory concurrency is four. Terminal records older than
 seven days, or beyond the newest 100, are pruned when another job starts.
 
 A cancelled `wait` leaves the underlying job running. `cancel` is the only
-lifecycle action that stops a job. Starts pass through the same Permission Gate
-classification as ordinary Bash. Guard-only AgentSH can authorize native
+lifecycle action that stops a job. Deduplicated terminal notifications steer an
+active agent to inspect completed or failed work; idle agents receive a durable,
+passive event on their next turn. Reading terminal status/output suppresses a
+stale notification. After starting work, one bounded settle-time reminder
+prevents the agent from silently forgetting jobs that are still running without
+creating a reminder loop or waking an otherwise idle session. Starts pass
+through the same Permission Gate classification as ordinary Bash. Guard-only
+AgentSH can authorize native
 starts, while full AgentSH mode fails closed until it has a dedicated
 background-job backend. Interactive pane input and tmux coordinates are
 intentionally not exposed to the model; users can obtain the fixed private-server

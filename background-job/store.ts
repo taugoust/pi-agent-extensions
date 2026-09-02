@@ -234,6 +234,10 @@ export class JobStore {
     }
   }
 
+  async isNotified(id: string): Promise<boolean> {
+    return await this.exists(this.path(id, "notified"));
+  }
+
   async markNotified(id: string): Promise<boolean> {
     try {
       const handle = await open(this.path(id, "notified"), "wx", 0o600);

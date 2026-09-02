@@ -90,7 +90,18 @@ pkgs.runCommand "background-job-extension-check"
     EOF
     cat > "$workdir/contract.mjs" <<'EOF'
     process.env.PI_SUPERVISED = "1";
-    const extension = (await import("./out/background-job/index.js")).default;
+    const module = await import("./out/background-job/index.js");
+    const extension = module.default;
+    const fixture = (status, exitCode = null) => ({
+      status,
+      metadata: { id: "job-0123456789abcdef01234567", createdAt: new Date().toISOString(), command: "test", cwd: "/tmp" },
+      result: ["completed", "failed", "cancelled", "lost"].includes(status) ? { status, exitCode } : undefined,
+    });
+    if (module.lifecycleDelivery(false) !== "steer" || module.lifecycleDelivery(true) !== "nextTurn") throw new Error("completion delivery is not active-steer/idle-passive");
+    if (!module.completionMessage(fixture("failed", 7)).includes("handle this outcome")) throw new Error("failed completion is not actionable");
+    if (!module.completionMessage(fixture("completed", 0)).includes("Inspect output")) throw new Error("successful completion omitted output verification guidance");
+    if (module.runningReminder([fixture("completed", 0)]) !== undefined) throw new Error("terminal jobs produced a running reminder");
+    if (!module.runningReminder([fixture("running")])?.includes("still running")) throw new Error("running jobs did not produce a bounded reminder");
     const tools = new Map();
     const commands = new Map();
     const handlers = new Map();

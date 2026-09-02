@@ -58,6 +58,7 @@ try {
   assert(!finished.timedOut && finished.record.status === "completed" && finished.record.result?.exitCode === 0, "reloaded manager did not recover completed job");
   const output = await reloaded.output(first.metadata.id);
   assert(output.text.includes(`cwd=${root}`) && output.text.includes("env=exact value with spaces") && output.text.includes("done"), "job output/cwd/environment was not preserved");
+  assert(!(await store.markNotified(first.metadata.id)), "reading completed output did not suppress the pending completion notification");
 
   const failing = await manager.start({ command: "printf 'failure output\\n'; exit 7", cwd: root });
   const failed = await manager.wait(failing.metadata.id, 5000);

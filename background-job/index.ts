@@ -181,6 +181,25 @@ function toolResult(text: string, details: Record<string, unknown>) {
   return { content: [{ type: "text" as const, text }], details };
 }
 
+export function completionMessage(record: JobRecord): string {
+  const outcome = `${record.status}${record.result?.exitCode === null || record.result?.exitCode === undefined ? "" : ` (exit ${record.result.exitCode})`}`;
+  const action = record.status === "completed"
+    ? "Inspect output before declaring dependent work complete."
+    : "Inspect output and handle this outcome before declaring the task complete.";
+  return `Background job ${record.metadata.id}: ${outcome}. ${action}`;
+}
+
+export function lifecycleDelivery(isIdle: boolean): "steer" | "nextTurn" {
+  return isIdle ? "nextTurn" : "steer";
+}
+
+export function runningReminder(records: readonly JobRecord[]): string | undefined {
+  const running = records.filter((record) => record.status === "running" || record.status === "starting");
+  if (running.length === 0) return undefined;
+  const ids = running.slice(0, 8).map((record) => record.metadata.id).join(", ");
+  return `${running.length} background job${running.length === 1 ? " is" : "s are"} still running (${ids}). Do not claim dependent work is complete; use a bounded background_job wait/status/output check. Intentionally long-lived services may remain running.`;
+}
+
 export default function backgroundJob(pi: ExtensionAPI) {
   const startup = classifyAgentSHStartup(process.env);
   let managerPromise: Promise<BackgroundJobManager> | undefined;
@@ -188,6 +207,10 @@ export default function backgroundJob(pi: ExtensionAPI) {
   let sessionContext: ExtensionContext | undefined;
   let pollRunning = false;
   let sessionGeneration = 0;
+  let runningReminderArmed = false;
+  const idlePending = new Set<string>();
+  const idleInFlight = new Set<string>();
+  const deliveryClaims = new Set<string>();
 
   const manager = () => {
     if (!managerPromise) managerPromise = (async () => {
@@ -212,6 +235,46 @@ export default function backgroundJob(pi: ExtensionAPI) {
     }
   };
 
+  const deliverLifecycleMessage = (
+    ctx: ExtensionContext,
+    content: string,
+    details: Record<string, unknown>,
+  ) => {
+    pi.sendMessage(
+      { customType: "background-job-lifecycle", content, display: false, details },
+      { deliverAs: lifecycleDelivery(ctx.isIdle()) },
+    );
+  };
+
+  const deliverTerminal = async (
+    ctx: ExtensionContext,
+    service: BackgroundJobManager,
+    record: JobRecord,
+  ): Promise<void> => {
+    const id = record.metadata.id;
+    if (!record.result || idlePending.has(id) || idleInFlight.has(id) || deliveryClaims.has(id)) return;
+    deliveryClaims.add(id);
+    try {
+      if (await service.store.isNotified(id) || sessionContext !== ctx) return;
+      const message = completionMessage(record);
+      if (ctx.isIdle()) {
+        idlePending.add(id);
+        try {
+          deliverLifecycleMessage(ctx, message, { kind: "completion", job_id: id, status: record.status });
+        } catch (error) {
+          idlePending.delete(id);
+          throw error;
+        }
+      } else {
+        deliverLifecycleMessage(ctx, message, { kind: "completion", job_id: id, status: record.status });
+        await service.store.markNotified(id);
+      }
+      if (ctx.hasUI) ctx.ui.notify(message, record.status === "completed" ? "info" : "warning");
+    } finally {
+      deliveryClaims.delete(id);
+    }
+  };
+
   const poll = async () => {
     if (pollRunning) return;
     const ctx = sessionContext;
@@ -221,14 +284,11 @@ export default function backgroundJob(pi: ExtensionAPI) {
     try {
       const ownerSessionId = sessionId(ctx);
       const service = await manager();
-      const records = (await service.list()).filter((record) => record.metadata.sessionId === ownerSessionId);
+      const records = (await service.list(1000)).filter((record) => record.metadata.sessionId === ownerSessionId);
       for (const record of records) {
-        if (!record.result || generation !== sessionGeneration || sessionContext !== ctx) return;
-        if (!(await service.store.markNotified(record.metadata.id))) continue;
-        const message = `Background job ${record.metadata.id}: ${record.status}${record.result.exitCode === null ? "" : ` (exit ${record.result.exitCode})`}`;
-        if (ctx.hasUI) ctx.ui.notify(message, record.status === "completed" ? "info" : "warning");
         if (generation !== sessionGeneration || sessionContext !== ctx) return;
-        pi.sendMessage({ customType: "background-job-complete", content: message, display: false, details: { job_id: record.metadata.id, status: record.status } }, { deliverAs: "nextTurn" });
+        if (!record.result) continue;
+        await deliverTerminal(ctx, service, record);
       }
       if (generation === sessionGeneration && sessionContext === ctx) await updateStatus(ctx);
     } catch {
@@ -248,11 +308,42 @@ export default function backgroundJob(pi: ExtensionAPI) {
     void poll();
   });
 
+  pi.on("before_agent_start", () => {
+    for (const id of idlePending) idleInFlight.add(id);
+    idlePending.clear();
+  });
+
   pi.on("session_shutdown", () => {
     sessionGeneration += 1;
     sessionContext = undefined;
+    runningReminderArmed = false;
+    idlePending.clear();
+    idleInFlight.clear();
+    deliveryClaims.clear();
     if (pollTimer) clearInterval(pollTimer);
     pollTimer = undefined;
+  });
+
+  pi.on("agent_end", async (_event, ctx) => {
+    const remind = runningReminderArmed;
+    runningReminderArmed = false;
+    if (!remind && idleInFlight.size === 0) return;
+    try {
+      const service = await manager();
+      if (remind) {
+        const ownerSessionId = sessionId(ctx);
+        const records = (await service.list(1000)).filter((record) => record.metadata.sessionId === ownerSessionId);
+        for (const record of records) if (record.result) await deliverTerminal(ctx, service, record);
+        const message = runningReminder(records);
+        if (message) deliverLifecycleMessage(ctx, message, { kind: "running-reminder", job_ids: records.filter((record) => record.status === "running" || record.status === "starting").map((record) => record.metadata.id).slice(0, 8) });
+      }
+      for (const id of [...idleInFlight]) {
+        await service.store.markNotified(id);
+        idleInFlight.delete(id);
+      }
+    } catch (error) {
+      if (ctx.hasUI) ctx.ui.notify(`Could not check background jobs before settling: ${error instanceof Error ? error.message : String(error)}`, "warning");
+    }
   });
 
   pi.registerTool({
@@ -285,11 +376,12 @@ export default function backgroundJob(pi: ExtensionAPI) {
       switch (params.action) {
         case "start": {
           const record = await service.start({ command: params.command!, cwd: ctx.cwd, name: params.name, sessionId: ownerSessionId }, signal);
-          response = toolResult(`${recordText(record)}\nStarted in an extension-owned tmux server.`, { action: params.action, ...publicDetails(record) });
+          runningReminderArmed = record.status === "running" || record.status === "starting";
+          response = toolResult(`${recordText(record)}\nStarted in an extension-owned tmux server. Before declaring dependent work complete, use bounded wait/status/output checks.`, { action: params.action, ...publicDetails(record) });
           break;
         }
         case "list": {
-          const records = (await service.list(50)).filter((record) => record.metadata.sessionId === ownerSessionId).slice(0, params.limit ?? 20);
+          const records = (await service.list(1000)).filter((record) => record.metadata.sessionId === ownerSessionId).slice(0, params.limit ?? 20);
           for (const record of records) if (record.result) await service.store.markNotified(record.metadata.id);
           response = toolResult(records.length ? records.map(recordLine).join("\n") : "No background jobs for this Pi session.", { action: params.action, jobs: records.map(publicDetails) });
           break;
@@ -305,7 +397,9 @@ export default function backgroundJob(pi: ExtensionAPI) {
           const id = requireJobId(params);
           assertOwned(await service.get(id), ownerSessionId);
           const snapshot = await service.output(id);
-          response = toolResult(outputText(snapshot, params.lines), { action: params.action, job_id: id, source: snapshot.source, truncated: snapshot.truncated });
+          const record = await service.get(id);
+          if (record.result) await service.store.markNotified(id);
+          response = toolResult(`${recordLine(record)}\n${outputText(snapshot, params.lines)}`, { action: params.action, ...publicDetails(record), source: snapshot.source, truncated: snapshot.truncated });
           break;
         }
         case "wait": {
@@ -313,7 +407,12 @@ export default function backgroundJob(pi: ExtensionAPI) {
           assertOwned(await service.get(id), ownerSessionId);
           const waited = await service.wait(id, params.timeout_ms ?? 1000, signal);
           const snapshot = await service.output(id);
-          response = toolResult(`${recordText(waited.record)}\n${waited.timedOut ? "Wait timed out; job is still running.\n" : ""}${outputText(snapshot, params.lines)}`, { action: params.action, ...publicDetails(waited.record), timed_out: waited.timedOut, output_source: snapshot.source });
+          const current = await service.get(id);
+          if (current.result) await service.store.markNotified(id);
+          const deadlineText = waited.timedOut
+            ? current.result ? "Wait deadline elapsed; the job completed immediately afterward.\n" : "Wait timed out; job is still running.\n"
+            : "";
+          response = toolResult(`${recordText(current)}\n${deadlineText}${outputText(snapshot, params.lines)}`, { action: params.action, ...publicDetails(current), timed_out: waited.timedOut, output_source: snapshot.source });
           break;
         }
         case "signal": {
@@ -327,6 +426,7 @@ export default function backgroundJob(pi: ExtensionAPI) {
           const id = requireJobId(params);
           assertOwned(await service.get(id), ownerSessionId);
           const record = await service.cancel(id);
+          if (record.result) await service.store.markNotified(id);
           response = toolResult(recordText(record), { action: params.action, ...publicDetails(record) });
           break;
         }
