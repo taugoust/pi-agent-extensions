@@ -7,6 +7,7 @@
 let
   localExtensionNames = [
     "auto"
+    "background-job"
     "direnv"
     "fence"
     "fetch"
@@ -38,6 +39,7 @@ let
   # These extensions import the canonical AgentSH startup/runtime classifier
   # from the package-level shared directory.
   sharedRuntimeExtensionNames = [
+    "background-job"
     "direnv"
     "fetch"
     "pdf"

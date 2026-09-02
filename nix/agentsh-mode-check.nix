@@ -2,6 +2,7 @@
 
 let
   consumerNames = [
+    "background-job"
     "direnv"
     "fetch"
     "pdf"

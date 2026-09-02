@@ -26,6 +26,7 @@ in
     };
 
     extensions = {
+      background-job.enable = lib.mkEnableOption "background-job extension — durable native shell jobs in an isolated tmux server";
       direnv.enable = lib.mkEnableOption "direnv extension — refreshes environment via direnv export";
       fence.enable = lib.mkEnableOption "fence extension — blocks write/edit outside cwd";
       fetch.enable = lib.mkEnableOption "adaptive fetch extension — native HTTP outside AgentSH and supervised curl when AgentSH is active";
@@ -66,6 +67,7 @@ in
 
     home.packages = lib.mkMerge [
       (lib.mkIf (cfg.package != null) [ cfg.package ])
+      (lib.mkIf cfg.extensions.background-job.enable [ pkgs.tmux ])
       (lib.mkIf cfg.extensions.pdf.enable [
         pkgs.poppler-utils
         pkgs.imagemagick
@@ -90,6 +92,10 @@ in
       (lib.mkIf needsSharedRuntime {
         "${extDir}/shared".source = "${self}/shared";
       })
+      (lib.mkIf cfg.extensions.background-job.enable {
+        "${extDir}/background-job".source = "${self}/background-job";
+      })
+
       (lib.mkIf cfg.extensions.direnv.enable {
         "${extDir}/direnv/index.ts".source = "${self}/direnv/index.ts";
       })

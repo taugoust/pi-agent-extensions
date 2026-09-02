@@ -106,6 +106,7 @@
             ;
         })
         // {
+          background-job = import ./nix/background-job-check.nix { inherit self pkgs; };
           openai-fast-mode = import ./nix/openai-fast-mode-check.nix {
             inherit self pkgs pi-openai-fast-mode;
           };

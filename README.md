@@ -97,8 +97,8 @@ bun install
 
 Extensions are auto-discovered from `~/.pi/agent/extensions/`{.verbatim}
 --- pi loads all `*.ts`{.verbatim} files and `index.ts`{.verbatim} files
-in subdirectories. When manually copying `direnv`, `fetch`, `pdf`,
-`permission-gate`, `sandbox`, `ssh`, or `subagent`, also copy this repository's
+in subdirectories. When manually copying `background-job`, `direnv`, `fetch`,
+`pdf`, `permission-gate`, `sandbox`, `ssh`, or `subagent`, also copy this repository's
 `shared/` directory beside the extension directories. Nix bundles and the Home
 Manager module add that shared runtime automatically.
 
@@ -115,7 +115,8 @@ supervisor is active; they never fall back to native commands, files, network,
 direnv, SSH, PDF processing, or subagents.
 
 `AGENTSH_PERMISSION_GATE_SOCKET` remains a distinct **guard-only** startup mode:
-it authorizes Bash intent but does not claim that execution is supervised.
+it authorizes Bash and native background-start intent but does not claim that
+execution is supervised.
 The compatibility `AGENTSH_APPROVAL_UI_SOCKET` protocol is likewise
 approval-only. Neither limited protocol selects the full backend by itself.
 Selecting guard-only and full authority together is a configuration conflict
@@ -160,6 +161,35 @@ extensions have stopped.
 
 </details>
 <details>
+<summary><strong>background-job</strong> - Durable native shell jobs in controlled tmux windows</summary>
+<br>
+
+- **Source**: `background-job/`
+- **Tool**: `background_job` with `start`, `list`, `status`, `output`, bounded
+  `wait`, `signal`, and `cancel`
+- **Command**: `/background-jobs`
+- **Dependency**: tmux
+
+**Description**: Runs long native commands in an extension-owned tmux server
+without overriding Pi's Bash tool. Jobs, private metadata, and a bounded 1 MiB
+output tail live under Pi's private agent state directory and survive turns,
+compaction, extension reload, session replacement, and Pi exit. Model-facing
+operations are bound to the creating Pi session and expose only opaque job IDs;
+they cannot provide tmux targets or tmux commands. Output returned to the model
+is further limited to 50 KiB/2000 lines. Aggregate concurrency is eight jobs
+and per-working-directory concurrency is four. Terminal records older than
+seven days, or beyond the newest 100, are pruned when another job starts.
+
+A cancelled `wait` leaves the underlying job running. `cancel` is the only
+lifecycle action that stops a job. Starts pass through the same Permission Gate
+classification as ordinary Bash. Guard-only AgentSH can authorize native
+starts, while full AgentSH mode fails closed until it has a dedicated
+background-job backend. Interactive pane input and tmux coordinates are
+intentionally not exposed to the model; users can obtain the fixed private-server
+attach command through `/background-jobs`.
+
+</details>
+<details>
 <summary><strong>direnv</strong> - Refresh environment from <code>.envrc</code></summary>
 <br>
 
@@ -194,14 +224,18 @@ closed with an actionable diagnostic.
 - **Status bar**: `gate ■` in legacy mode, or `AgentSH gate ■` / `?` / `✗`
   with an inherited AgentSH gate
 
-**Description**: Selects exactly one authority for Bash tool calls:
+**Description**: Selects exactly one authority for Bash tool calls and
+`background_job` starts:
 
 1. When the trusted AgentSH launcher passes `AGENTSH_PERMISSION_GATE_SOCKET`,
    the extension claims and deletes that environment marker, connects to the
    private one-shot Unix rendezvous, performs the version 1 hello, and sends
-   every exact Bash command, working directory, and Pi tool-call ID to AgentSH.
+   every exact Bash command or background start, working directory, and Pi
+   tool-call ID to AgentSH.
    AgentSH—not Pi's local regex list—classifies the command and durably audits
-   the terminal decision.
+   the terminal decision. Allowed background starts receive a one-use receipt
+   bound to the exact tool-call ID, command, and working directory, preventing
+   post-authorization argument mutation before launch.
 2. Full AgentSH supervised, Auto, and sandbox modes suppress this legacy gate
    once the supervisor is active, so they do not produce a duplicate prompt.
    If full mode was selected but its supervisor is unavailable, the extension

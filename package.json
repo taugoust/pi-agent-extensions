@@ -27,6 +27,7 @@
   "pi": {
     "extensions": [
       "auto",
+      "background-job",
       "direnv",
       "fence",
       "permission-gate",

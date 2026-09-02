@@ -1266,7 +1266,12 @@ in
           if (name === "local-allow") {
             results.push(await tool({ toolName: "bash", toolCallId: "tool-safe", input: { command: "printf safe" } }, ctx));
           }
-          results.push(await tool({ toolName: "bash", toolCallId: "tool-dangerous", input: { command: "sudo true" } }, ctx));
+          if (name === "background-allow") {
+            results.push(await tool({ toolName: "background_job", toolCallId: "tool-background-list", input: { action: "list" } }, ctx));
+            results.push(await tool({ toolName: "background_job", toolCallId: "tool-background-start", input: { action: "start", command: "printf background" } }, ctx));
+          } else {
+            results.push(await tool({ toolName: "bash", toolCallId: "tool-dangerous", input: { command: "sudo true" } }, ctx));
+          }
           delete globalThis.__piPaseoRemoteUiV1;
           process.stdout.write(JSON.stringify({
             allowed: results.map((result) => result === undefined),
@@ -1436,6 +1441,15 @@ in
           assert(allowed.selections[0].signal, "AgentSH terminal prompt omitted cancellation signal");
           assert(allowed.selections[0].title.includes("Dangerous command requires approval") && allowed.selections[0].title.includes("sudo true"), "AgentSH prompt metadata was not rendered");
 
+          const backgroundAllowed = await spawnInheritedChild("background-allow", async (socket) => {
+            const read = lineReader(socket);
+            await expectHello(read, socket);
+            const request = await read();
+            assertAuthorize(request, "printf background", "tool-background-start");
+            send(socket, { v: 1, type: "decision", id: request.id, decision: "allow" });
+          });
+          assert(backgroundAllowed.allowed.join(",") === "true,true", "AgentSH did not ignore background list and allow the exact background start");
+
           const denied = await spawnInheritedChild("local-deny", (socket) => promptedBroker(socket, { type: "resolve", decision: "deny" }));
           assert(denied.blocked[0], "AgentSH explicit denial did not block");
 
@@ -1557,6 +1571,11 @@ in
           assert(localSignals.at(-1) === controller.signal, "detached Paseo fallback dropped ctx.signal");
           delete globalThis.__piPaseoRemoteUiV1;
 
+          result = await pi.handlers.get("tool_call")({ toolName: "background_job", toolCallId: "legacy-background", input: { action: "start", command: "sudo true" } }, ctx);
+          assert(result === undefined && localCalls === 4, "legacy gate did not authorize a dangerous background start like Bash");
+          const headlessBackground = await pi.handlers.get("tool_call")({ toolName: "background_job", toolCallId: "legacy-background-headless", input: { action: "start", command: "sudo true" } }, createContext({ hasUI: false }));
+          assert(headlessBackground?.block === true, "legacy gate did not fail closed for a headless dangerous background start");
+
           for (const [name, value] of [
             ["PI_SUPERVISED", "1"],
             ["PI_AUTO", "1"],
@@ -1570,6 +1589,8 @@ in
             const supervisedCtx = createContext({ onSelect: () => { throw new Error("legacy prompt opened in " + name + " mode"); } });
             const supervisedResult = await supervisedPi.handlers.get("tool_call")(dangerous, supervisedCtx);
             assert(supervisedResult?.block === true && supervisedCtx.selections.length === 0, "unavailable full mode did not synchronously block native Bash for " + name);
+            const backgroundResult = await supervisedPi.handlers.get("tool_call")({ toolName: "background_job", toolCallId: "bg-unavailable", input: { action: "start", command: "printf no" } }, supervisedCtx);
+            assert(backgroundResult?.block === true && supervisedCtx.selections.length === 0, "unavailable full mode did not synchronously block native background start for " + name);
             delete process.env[name];
           }
 
@@ -1582,6 +1603,8 @@ in
           gate(activePi);
           const activeResult = await activePi.handlers.get("tool_call")(dangerous, createContext());
           assert(activeResult === undefined, "active full AgentSH mode was blocked by the duplicate permission gate");
+          const activeBackgroundResult = await activePi.handlers.get("tool_call")({ toolName: "background_job", toolCallId: "bg-active", input: { action: "start", command: "printf no-native" } }, createContext());
+          assert(activeBackgroundResult === undefined, "active full AgentSH background start was blocked by the duplicate permission gate rather than its own backend guard");
           delete globalThis.__AGENTSH_PI__;
           delete process.env.PI_SUPERVISED;
         }

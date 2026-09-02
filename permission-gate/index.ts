@@ -23,6 +23,7 @@ import type {
 } from "@mariozechner/pi-coding-agent";
 
 const GATE_CLAIM_KEY = "__paeAgentSHPermissionGateClaimV1";
+const COMMAND_AUTHORITY_KEY = "__paeCommandAuthorityV1";
 const PASEO_REMOTE_UI_KEY = "__piPaseoRemoteUiV1";
 const GATE_SOCKET_ENV = "AGENTSH_PERMISSION_GATE_SOCKET";
 const GATE_TIMEOUT_ENV = "PI_AGENTSH_PERMISSION_GATE_TIMEOUT_MS";
@@ -125,6 +126,13 @@ type PromptResolution =
 type AuthorizationResult = {
   allowed: boolean;
   reason: string;
+};
+
+type CommandReceipt = { command: string; cwd: string };
+type CommandAuthority = {
+  protocol: 1;
+  active: boolean;
+  consume(toolCallId: string, command: string, cwd: string): boolean;
 };
 
 type FrameWaiter = {
@@ -779,13 +787,22 @@ function boundedError(error: unknown): string {
   return asError(error).message.replace(/[\r\n\x00-\x08\x0b\x0c\x0e-\x1f\x7f]+/g, " ").slice(0, 500);
 }
 
+function safePromptText(value: string): string {
+  return value
+    .replace(/\x1b\][\s\S]*?(?:\x07|\x1b\\)/g, "")
+    .replace(/\x1b[P_^][\s\S]*?\x1b\\/g, "")
+    .replace(/(?:\x1b\[|\x9b)[0-?]*[ -/]*[@-~]/g, "")
+    .replace(/\x1b[@-_]/g, "")
+    .replace(/[\x00-\x08\x0b-\x1f\x7f-\x9f]/g, "");
+}
+
 function promptTitle(metadata: PromptMetadata): string {
-  const lines = [metadata.title];
-  if (metadata.message) lines.push("", metadata.message);
+  const lines = [safePromptText(metadata.title)];
+  if (metadata.message) lines.push("", safePromptText(metadata.message));
   if (metadata.labels.length > 0 && !metadata.message) {
-    lines.push("", `Detected: ${metadata.labels.join(", ")}`);
+    lines.push("", `Detected: ${metadata.labels.map(safePromptText).join(", ")}`);
   }
-  lines.push("", "Command:", metadata.commandPreview);
+  lines.push("", "Command:", safePromptText(metadata.commandPreview));
   if (metadata.commandTruncated) lines.push("[command preview truncated by AgentSH]");
   return lines.join("\n");
 }
@@ -889,6 +906,28 @@ function gateStatus(ctx: ExtensionContext, state: "ready" | "waiting" | "error" 
 }
 
 export default function permissionGate(pi: ExtensionAPI) {
+  const commandReceipts = new Map<string, CommandReceipt>();
+  const commandAuthority: CommandAuthority = {
+    protocol: 1,
+    active: true,
+    consume(toolCallId, command, cwd) {
+      const receipt = commandReceipts.get(toolCallId);
+      commandReceipts.delete(toolCallId);
+      return receipt?.command === command && receipt.cwd === cwd;
+    },
+  };
+  (globalThis as Record<string, unknown>)[COMMAND_AUTHORITY_KEY] = commandAuthority;
+  const authorizeBackgroundStart = (event: { toolName: string; toolCallId?: unknown }, command: string, cwd: string) => {
+    if (event.toolName !== "background_job" || typeof event.toolCallId !== "string") return;
+    if (commandReceipts.size >= MAX_REQUESTS) commandReceipts.clear();
+    commandReceipts.set(event.toolCallId, { command, cwd });
+  };
+
+  pi.on("session_shutdown", () => {
+    commandAuthority.active = false;
+    commandReceipts.clear();
+  });
+
   // AgentSH bounds the initial handshake independently of model latency. Start
   // it when Pi registers the extension, not on the first Bash tool call.
   if (inheritedGateClaim) void gateClient(inheritedGateClaim).initialize().catch(() => undefined);
@@ -1005,24 +1044,27 @@ export default function permissionGate(pi: ExtensionAPI) {
   });
 
   pi.on("tool_call", async (event, ctx) => {
-    if (event.toolName !== "bash") return undefined;
+    const input = event.input as { action?: unknown; command?: unknown };
+    const isBash = event.toolName === "bash";
+    const isBackgroundStart = event.toolName === "background_job" && input.action === "start";
+    if (!isBash && !isBackgroundStart) return undefined;
 
     if (inheritedGateClaim) {
       if (agentSHStartup.kind === "conflict") {
         gateStatus(ctx, "error");
         return {
           block: true,
-          reason: "Conflicting AgentSH guard-only and full-supervisor authorities were selected; refusing Bash execution",
+          reason: "Conflicting AgentSH guard-only and full-supervisor authorities were selected; refusing command execution",
         };
       }
       gateStatus(ctx, "waiting");
       try {
-        const command = (event.input as { command?: unknown }).command;
+        const command = input.command;
         if (typeof command !== "string") {
-          throw new Error("Bash command is missing or malformed");
+          throw new Error("Command is missing or malformed");
         }
         if (typeof event.toolCallId !== "string" || event.toolCallId.length === 0) {
-          throw new Error("Bash tool call ID is missing or malformed");
+          throw new Error("Command tool call ID is missing or malformed");
         }
         if (typeof ctx.cwd !== "string") throw new Error("Bash working directory is missing");
 
@@ -1047,9 +1089,10 @@ export default function permissionGate(pi: ExtensionAPI) {
         if (runtimeDisposition().kind === "unavailable") {
           return {
             block: true,
-            reason: "AgentSH Permission Gate allowed the command intent, but full AgentSH mode is unavailable; refusing native Bash execution",
+            reason: "AgentSH Permission Gate allowed the command intent, but full AgentSH mode is unavailable; refusing native command execution",
           };
         }
+        authorizeBackgroundStart(event, command, ctx.cwd);
         return undefined;
       } catch (error) {
         reportGateFailure(ctx, error);
@@ -1068,19 +1111,26 @@ export default function permissionGate(pi: ExtensionAPI) {
       if (ctx.hasUI) ctx.ui.setStatus("permission-gate", undefined);
       return {
         block: true,
-        reason: "Full AgentSH mode is selected but its supervisor is unavailable; refusing native Bash execution",
+        reason: "Full AgentSH mode is selected but its supervisor is unavailable; refusing native command execution",
       };
     }
     if (disposition.kind === "full" || legacySuppressed()) {
       if (ctx.hasUI) ctx.ui.setStatus("permission-gate", undefined);
+      if (typeof input.command === "string") authorizeBackgroundStart(event, input.command, ctx.cwd);
       return undefined;
     }
-    if (!enabled) return undefined;
 
-    const command = (event.input as { command?: unknown }).command;
+    const command = input.command;
     if (typeof command !== "string") return undefined;
+    if (!enabled) {
+      authorizeBackgroundStart(event, command, ctx.cwd);
+      return undefined;
+    }
     const matched = dangerousPatterns.filter((candidate) => candidate.pattern.test(command));
-    if (matched.length === 0) return undefined;
+    if (matched.length === 0) {
+      authorizeBackgroundStart(event, command, ctx.cwd);
+      return undefined;
+    }
 
     const labels = matched.map((match) => match.label).join(", ");
     if (!ctx.hasUI) {
@@ -1093,7 +1143,7 @@ export default function permissionGate(pi: ExtensionAPI) {
     pi.events.emit("permission-gate:waiting");
     let choice: string | undefined;
     try {
-      const title = `⚠️  Dangerous command detected (${labels}):\n\n  ${command}\n\nAllow?`;
+      const title = `⚠️  Dangerous command detected (${safePromptText(labels)}):\n\n  ${safePromptText(command)}\n\nAllow?`;
       const options = ["Yes", "No"];
       const localSelect = (signal: AbortSignal) => ctx.ui.select(title, options, { signal });
       const remote = paseoRemoteSelect(title, options, localSelect, ctx.signal);
@@ -1107,6 +1157,7 @@ export default function permissionGate(pi: ExtensionAPI) {
     if (choice !== "Yes") {
       return { block: true, reason: `Blocked by user (${labels})` };
     }
+    authorizeBackgroundStart(event, command, ctx.cwd);
     return undefined;
   });
 }
