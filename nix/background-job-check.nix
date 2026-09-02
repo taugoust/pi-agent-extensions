@@ -139,6 +139,7 @@ pkgs.runCommand "background-job-extension-check"
     test -f ${moduleFiles.".pi/agent/extensions/background-job".source}/index.ts
     test -f ${moduleFiles.".pi/agent/extensions/shared".source}/agentsh-mode.ts
     test ${toString (builtins.elem pkgs.tmux modulePackages)} = 1
+    test ${toString (builtins.elem pkgs.nodejs modulePackages)} = 1
 
     test -f ${package}/background-job/index.ts
     test -f ${package}/background-job/runner.mjs

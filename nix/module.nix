@@ -67,7 +67,10 @@ in
 
     home.packages = lib.mkMerge [
       (lib.mkIf (cfg.package != null) [ cfg.package ])
-      (lib.mkIf cfg.extensions.background-job.enable [ pkgs.tmux ])
+      (lib.mkIf cfg.extensions.background-job.enable [
+        pkgs.nodejs
+        pkgs.tmux
+      ])
       (lib.mkIf cfg.extensions.pdf.enable [
         pkgs.poppler-utils
         pkgs.imagemagick

@@ -194,7 +194,7 @@ export default function backgroundJob(pi: ExtensionAPI) {
       const stateRoot = join(getAgentDir(), "state", "background-jobs-v1");
       const store = new JobStore(stateRoot, runtimeRoot(stateRoot));
       await store.initialize();
-      const [tmux, node] = await Promise.all([resolveExecutable("tmux"), resolveExecutable(process.execPath)]);
+      const [tmux, node] = await Promise.all([resolveExecutable("tmux"), resolveExecutable("node")]);
       const runner = fileURLToPath(new URL("./runner.mjs", import.meta.url));
       return new BackgroundJobManager(store, new TmuxBackend(store, tmux, node, runner));
     })();

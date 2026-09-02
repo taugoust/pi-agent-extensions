@@ -168,7 +168,7 @@ extensions have stopped.
 - **Tool**: `background_job` with `start`, `list`, `status`, `output`, bounded
   `wait`, `signal`, and `cancel`
 - **Command**: `/background-jobs`
-- **Dependency**: tmux
+- **Dependencies**: tmux and Node.js (installed by the Home Manager module)
 
 **Description**: Runs long native commands in an extension-owned tmux server
 without overriding Pi's Bash tool. Jobs, private metadata, and a bounded 1 MiB
