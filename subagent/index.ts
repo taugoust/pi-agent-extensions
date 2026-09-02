@@ -764,6 +764,13 @@ function delegationFormCount(params: any): number {
     + Number(Array.isArray(params.chain) && params.chain.length > 0);
 }
 
+function isDetachableForegroundRequest(params: any): boolean {
+  return params?.background !== true
+    && params?.operation === undefined
+    && params?.action === undefined
+    && delegationFormCount(params) === 1;
+}
+
 function requestMode(params: any): Mode {
   return Array.isArray(params.chain) && params.chain.length > 0 ? "chain"
     : Array.isArray(params.tasks) && params.tasks.length > 0 ? "parallel"
@@ -899,6 +906,8 @@ export default function (pi: ExtensionAPI) {
   const idleInFlight = new Set<string>();
   const deliveryClaims = new Set<string>();
   const activeForegroundSubagents = new Map<string, ActiveForegroundSubagent>();
+  const pendingForegroundSubagents = new Map<string, string>();
+  const requestedForegroundHandoffs = new Set<string>();
 
   const updateBackgroundStatus = async (ctx: any) => {
     if (!ctx?.hasUI) return;
@@ -1018,6 +1027,13 @@ export default function (pi: ExtensionAPI) {
       backgroundManager.requestCancelSession(sessionId);
     } catch {}
     activeForegroundSubagents.clear();
+    pendingForegroundSubagents.clear();
+    requestedForegroundHandoffs.clear();
+  });
+
+  pi.on("tool_call", (event, ctx) => {
+    if (event.toolName !== "subagent" || !isDetachableForegroundRequest(event.input)) return;
+    try { pendingForegroundSubagents.set(event.toolCallId, stableSessionId(ctx)); } catch { /* Tool execution reports the missing session identity. */ }
   });
 
   pi.registerCommand("background", {
@@ -1029,30 +1045,39 @@ export default function (pi: ExtensionAPI) {
       }
       try {
         const sessionId = stableSessionId(ctx);
-        const candidates = [...activeForegroundSubagents.values()]
-          .filter((entry) => entry.sessionId === sessionId && entry.execution.detachable);
-        if (candidates.length === 0) {
+        const targetIds = new Set<string>();
+        for (const [toolCallId, pendingSessionId] of pendingForegroundSubagents) {
+          if (pendingSessionId === sessionId) targetIds.add(toolCallId);
+        }
+        for (const entry of activeForegroundSubagents.values()) {
+          if (entry.sessionId === sessionId && entry.execution.detachable) targetIds.add(entry.toolCallId);
+        }
+        if (targetIds.size === 0) {
           if (ctx.hasUI) ctx.ui.notify("No foreground subagents are currently running.", "info");
           return;
         }
         const existing = (await backgroundManager.list(sessionId, 1000)).filter(isBackgroundSubagentActive).length;
-        if (existing + candidates.length > MAX_BACKGROUND_SUBAGENTS) {
+        if (existing + targetIds.size > MAX_BACKGROUND_SUBAGENTS) {
           if (ctx.hasUI) {
             ctx.ui.notify(
-              `Cannot move ${candidates.length} foreground subagent execution${candidates.length === 1 ? "" : "s"}: ${existing} background job${existing === 1 ? " is" : "s are"} already active and the limit is ${MAX_BACKGROUND_SUBAGENTS}.`,
+              `Cannot move ${targetIds.size} foreground subagent execution${targetIds.size === 1 ? "" : "s"}: ${existing} background job${existing === 1 ? " is" : "s are"} already active and the limit is ${MAX_BACKGROUND_SUBAGENTS}.`,
               "warning",
             );
           }
           return;
         }
 
+        for (const toolCallId of targetIds) requestedForegroundHandoffs.add(toolCallId);
         const moved: BackgroundSubagentRecord[] = [];
         const errors: string[] = [];
-        for (const entry of candidates) {
+        for (const toolCallId of targetIds) {
+          const entry = activeForegroundSubagents.get(toolCallId);
+          if (!entry?.execution.detachable) continue;
           try {
             const record = await entry.detach();
             if (record) moved.push(record);
           } catch (error) {
+            requestedForegroundHandoffs.delete(toolCallId);
             errors.push(`${entry.summary}: ${error instanceof Error ? error.message : String(error)}`);
           }
         }
@@ -1061,12 +1086,11 @@ export default function (pi: ExtensionAPI) {
           await updateBackgroundStatus(ctx);
         }
         if (ctx.hasUI) {
-          if (moved.length > 0) {
-            const ids = moved.map((record) => record.id).join(", ");
-            ctx.ui.notify(`Moved ${moved.length} foreground subagent execution${moved.length === 1 ? "" : "s"} to the background: ${ids}`, errors.length ? "warning" : "info");
-          } else {
-            ctx.ui.notify("The foreground subagent work completed before it could be moved.", errors.length ? "warning" : "info");
-          }
+          const queued = targetIds.size - moved.length - errors.length;
+          const ids = moved.map((record) => record.id).join(", ");
+          const movedText = moved.length > 0 ? ` Moved now: ${ids}.` : "";
+          const queuedText = queued > 0 ? ` ${queued} queued tool invocation${queued === 1 ? " will" : "s will"} move as execution starts.` : "";
+          ctx.ui.notify(`Background handoff requested for ${targetIds.size} foreground subagent execution${targetIds.size === 1 ? "" : "s"}.${movedText}${queuedText}`, errors.length ? "warning" : "info");
           if (errors.length > 0) ctx.ui.notify(`Could not move: ${errors.join("; ")}`, "warning");
         }
       } catch (error) {
@@ -1076,7 +1100,10 @@ export default function (pi: ExtensionAPI) {
   });
 
   pi.on("tool_result", (event) => {
-    if (event.toolName !== "subagent" || event.isError) return;
+    if (event.toolName !== "subagent") return;
+    pendingForegroundSubagents.delete(event.toolCallId);
+    requestedForegroundHandoffs.delete(event.toolCallId);
+    if (event.isError) return;
     const details = event.details as SubagentDetails | BackgroundSubagentDetails | undefined;
     if ((details as BackgroundSubagentDetails | undefined)?.background_subagent) return;
     const foreground = details as SubagentDetails | undefined;
@@ -1244,6 +1271,17 @@ export default function (pi: ExtensionAPI) {
         };
         activeForegroundSubagents.set(toolCallId, entry);
         try {
+          if (requestedForegroundHandoffs.delete(toolCallId)) {
+            try {
+              const record = await entry.detach();
+              if (record) {
+                settleReminderArmed = true;
+                await updateBackgroundStatus(ctx);
+              }
+            } catch (error) {
+              if (ctx.hasUI) ctx.ui.notify(`Could not move foreground subagent to the background: ${error instanceof Error ? error.message : String(error)}`, "warning");
+            }
+          }
           const decision = await execution.waitForDecision();
           if (decision.kind === "completed") return decision.result;
           settleReminderArmed = true;
