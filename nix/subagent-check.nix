@@ -50,6 +50,7 @@ pkgs.runCommand "subagent-check"
 
     cat > "$workdir/test.mjs" <<'EOF'
     import assert from "node:assert/strict";
+    import { mkdir, writeFile } from "node:fs/promises";
     import { pathToFileURL } from "node:url";
 
     const imported = await import(pathToFileURL(process.argv[2]).href);
@@ -104,6 +105,7 @@ pkgs.runCommand "subagent-check"
     const stateRoot = `''${process.env.TMPDIR}/background-subagents`;
     const manager = new background.BackgroundSubagentManager(stateRoot);
     await manager.initialize();
+    assert.equal(background.sharedBackgroundSubagentManager(stateRoot + "-shared"), background.sharedBackgroundSubagentManager(stateRoot + "-shared"));
     const success = await manager.start({ sessionId: "session-a", backend: "native", mode: "single", summary: "slow review" }, async (_signal, update) => {
       update("working");
       await new Promise((resolve) => setTimeout(resolve, 80));
@@ -137,6 +139,19 @@ pkgs.runCommand "subagent-check"
     });
     assert.equal((await manager.wait(failing.id, 2000)).record.status, "failed");
     assert.equal((await manager.list("session-a", 10)).length, 3);
+
+    const staleRoot = stateRoot + "-stale";
+    const staleID = "subagent-job-0123456789abcdef01234567";
+    await mkdir(staleRoot + "/jobs/" + staleID, { recursive: true, mode: 0o700 });
+    const staleTime = new Date().toISOString();
+    await writeFile(staleRoot + "/jobs/" + staleID + "/state.json", JSON.stringify({
+      schemaVersion: 1, id: staleID, sessionId: "session-stale", backend: "agentsh", mode: "single",
+      summary: "interrupted", createdAt: staleTime, updatedAt: staleTime, ownerPid: 999999,
+      ownerStartToken: "reused-pid-defense", status: "running", latest: "partial",
+    }), { mode: 0o600 });
+    const recovered = new background.BackgroundSubagentManager(staleRoot);
+    await recovered.initialize();
+    assert.equal((await recovered.get(staleID)).status, "lost");
     EOF
 
     node "$workdir/test.mjs" "$workdir/out/subagent/parallel-result.js" "$workdir/out/subagent/backend.js" "$workdir/out/shared/agentsh-mode.js" "$workdir/out/subagent/background.js"

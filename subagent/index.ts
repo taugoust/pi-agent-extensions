@@ -778,6 +778,19 @@ function stableSessionId(ctx: any): string {
   return value;
 }
 
+function persistentAgentDir(ctx: any): string {
+  const sessionFile = ctx?.sessionManager?.getSessionFile?.();
+  if (typeof sessionFile !== "string" || !path.isAbsolute(sessionFile)) return getAgentDir();
+  let directory = path.dirname(sessionFile);
+  for (let depth = 0; depth < 8; depth++) {
+    if (path.basename(directory) === "sessions") return path.dirname(directory);
+    const parent = path.dirname(directory);
+    if (parent === directory) break;
+    directory = parent;
+  }
+  return getAgentDir();
+}
+
 function validateBackgroundOperation(params: any): void {
   const operation = typeof params.operation === "string" ? params.operation : undefined;
   if (!operation) return;
@@ -843,7 +856,7 @@ export default function (pi: ExtensionAPI) {
   const agentSHStartup = classifyAgentSHStartup(process.env);
   const bridgeDisposition = (bridge: AgentSHBridge | undefined) =>
     agentSHRuntimeDisposition(agentSHStartup, bridgeSupervisorState(bridge));
-  const backgroundManager = sharedBackgroundSubagentManager(path.join(getAgentDir(), "state", "background-subagents-v1"));
+  let backgroundManager = sharedBackgroundSubagentManager(path.join(getAgentDir(), "state", "background-subagents-v1"));
   let sessionContext: any;
   let sessionGeneration = 0;
   let pollTimer: NodeJS.Timeout | undefined;
@@ -913,6 +926,7 @@ export default function (pi: ExtensionAPI) {
   pi.on("session_start", async (_event, ctx) => {
     sessionGeneration += 1;
     sessionContext = ctx;
+    backgroundManager = sharedBackgroundSubagentManager(path.join(persistentAgentDir(ctx), "state", "background-subagents-v1"));
     try {
       await backgroundManager.initialize();
       await updateBackgroundStatus(ctx);
