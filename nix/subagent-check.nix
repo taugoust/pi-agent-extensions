@@ -32,6 +32,7 @@ pkgs.runCommand "subagent-check"
     mkdir -p "$workdir/src/subagent" "$workdir/src/shared" "$workdir/out"
     cp ${self}/subagent/backend.ts "$workdir/src/subagent/backend.ts"
     cp ${self}/subagent/background.ts "$workdir/src/subagent/background.ts"
+    cp ${self}/subagent/foreground-handoff.ts "$workdir/src/subagent/foreground-handoff.ts"
     cp ${self}/subagent/parallel-result.ts "$workdir/src/subagent/parallel-result.ts"
     cp ${self}/shared/agentsh-mode.ts "$workdir/src/shared/agentsh-mode.ts"
 
@@ -45,6 +46,7 @@ pkgs.runCommand "subagent-check"
       --outDir "$workdir/out" \
       "$workdir/src/subagent/backend.ts" \
       "$workdir/src/subagent/background.ts" \
+      "$workdir/src/subagent/foreground-handoff.ts" \
       "$workdir/src/subagent/parallel-result.ts" \
       "$workdir/src/shared/agentsh-mode.ts"
 
@@ -57,6 +59,7 @@ pkgs.runCommand "subagent-check"
     const backend = await import(pathToFileURL(process.argv[3]).href);
     const mode = await import(pathToFileURL(process.argv[4]).href);
     const background = await import(pathToFileURL(process.argv[5]).href);
+    const handoff = await import(pathToFileURL(process.argv[6]).href);
     const format = imported.formatParallelResultContent ?? imported.default?.formatParallelResultContent;
     const nativeStartup = mode.classifyAgentSHStartup({});
     const fullStartup = mode.classifyAgentSHStartup({ PI_SUPERVISED: "1" });
@@ -101,6 +104,66 @@ pkgs.runCommand "subagent-check"
       assert.match(crowded, new RegExp(`child-''${index}-sentinel`));
     }
     assert.ok(!crowded.includes("�"), "UTF-8 truncation introduced a replacement character");
+
+    const tick = () => new Promise((resolve) => setImmediate(resolve));
+    let finishForeground;
+    let updateForeground;
+    const foregroundUpdates = [];
+    const foreground = new handoff.DetachableForegroundExecution(async (_signal, update) => {
+      updateForeground = update;
+      return await new Promise((resolve) => { finishForeground = resolve; });
+    }, (update) => foregroundUpdates.push(update));
+    await tick();
+    updateForeground("working");
+    finishForeground("foreground-result");
+    assert.deepEqual(await foreground.waitForDecision(), { kind: "completed", result: "foreground-result" });
+    assert.deepEqual(foregroundUpdates, ["working"]);
+    assert.equal(await foreground.detach(async () => "too-late"), undefined);
+
+    let finishDetached;
+    let updateDetached;
+    let unsubscribeDetached = () => {};
+    const detachedForegroundUpdates = [];
+    const detachedBackgroundUpdates = [];
+    const detached = new handoff.DetachableForegroundExecution(async (_signal, update) => {
+      updateDetached = update;
+      return await new Promise((resolve) => { finishDetached = resolve; });
+    }, (update) => detachedForegroundUpdates.push(update));
+    await tick();
+    updateDetached("before handoff");
+    const detachedValue = await detached.detach(async (execution) => {
+      unsubscribeDetached = execution.subscribe((update) => detachedBackgroundUpdates.push(update));
+      return "subagent-job-detached";
+    });
+    assert.equal(detachedValue, "subagent-job-detached");
+    assert.deepEqual(await detached.waitForDecision(), { kind: "detached", value: "subagent-job-detached" });
+    updateDetached("after handoff");
+    assert.deepEqual(detachedForegroundUpdates, ["before handoff"]);
+    assert.deepEqual(detachedBackgroundUpdates, ["before handoff", "after handoff"]);
+    finishDetached("detached-result");
+    assert.equal(await detached.completion, "detached-result");
+    unsubscribeDetached();
+
+    let finishDuringFailedAdoption;
+    const failedAdoption = new handoff.DetachableForegroundExecution(async () => await new Promise((resolve) => {
+      finishDuringFailedAdoption = resolve;
+    }));
+    await tick();
+    await assert.rejects(failedAdoption.detach(async () => {
+      finishDuringFailedAdoption("completed-during-adoption");
+      await tick();
+      throw new Error("adoption unavailable");
+    }), /adoption unavailable/);
+    assert.deepEqual(await failedAdoption.waitForDecision(), { kind: "completed", result: "completed-during-adoption" });
+
+    const abortedForeground = new handoff.DetachableForegroundExecution(async (signal) => {
+      if (signal.aborted) throw signal.reason;
+      return await new Promise((_resolve, reject) => {
+        signal.addEventListener("abort", () => reject(signal.reason), { once: true });
+      });
+    });
+    abortedForeground.abort(new Error("foreground stopped"));
+    await assert.rejects(abortedForeground.waitForDecision(), /foreground stopped/);
 
     const stateRoot = `''${process.env.TMPDIR}/background-subagents`;
     const manager = new background.BackgroundSubagentManager(stateRoot);
@@ -154,12 +217,13 @@ pkgs.runCommand "subagent-check"
     assert.equal((await recovered.get(staleID)).status, "lost");
     EOF
 
-    node "$workdir/test.mjs" "$workdir/out/subagent/parallel-result.js" "$workdir/out/subagent/backend.js" "$workdir/out/shared/agentsh-mode.js" "$workdir/out/subagent/background.js"
+    node "$workdir/test.mjs" "$workdir/out/subagent/parallel-result.js" "$workdir/out/subagent/backend.js" "$workdir/out/shared/agentsh-mode.js" "$workdir/out/subagent/background.js" "$workdir/out/subagent/foreground-handoff.js"
     grep -F 'formatParallelResultContent(sections, successCount, MAX_TEXT_PREVIEW_BYTES)' ${self}/subagent/index.ts >/dev/null
     grep -F '(cfg.extensions.sandbox.enable || cfg.extensions.subagent.enable)' ${self}/nix/module.nix >/dev/null
     grep -F 'builtins.elem "sandbox" extensions' ${self}/nix/mk-extension-bundle.nix >/dev/null
     grep -F '"''${extDir}/subagent/backend.ts".source = "''${self}/subagent/backend.ts";' ${self}/nix/module.nix >/dev/null
     grep -F '"''${extDir}/subagent/background.ts".source = "''${self}/subagent/background.ts";' ${self}/nix/module.nix >/dev/null
+    grep -F '"''${extDir}/subagent/foreground-handoff.ts".source = "''${self}/subagent/foreground-handoff.ts";' ${self}/nix/module.nix >/dev/null
     grep -F '"''${extDir}/subagent/parallel-result.ts".source = "''${self}/subagent/parallel-result.ts";' ${self}/nix/module.nix >/dev/null
     if grep -F 'name: "subagent"' ${self}/sandbox/index.ts >/dev/null; then
       echo 'sandbox still registers a duplicate subagent tool' >&2
@@ -174,6 +238,7 @@ pkgs.runCommand "subagent-check"
       test "$(jq '[.pi.extensions[] | select(. == "subagent-finalizer")] | length' "$bundle/package.json")" -eq 1
       test -f "$bundle/subagent/index.ts"
       test -f "$bundle/subagent/background.ts"
+      test -f "$bundle/subagent/foreground-handoff.ts"
       test -f "$bundle/subagent-finalizer/index.ts"
       test -f "$bundle/shared/agentsh-mode.ts"
     done

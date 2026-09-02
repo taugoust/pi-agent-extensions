@@ -644,6 +644,8 @@ trusted Pi control plane is insufficient.
   [subagent/](https://github.com/rytswd/pi-agent-extensions/tree/main/subagent)
 - **License**: MIT
 - **Type**: Tool (LLM-callable)
+- **Command**: `/background` moves every currently running foreground
+  `subagent` invocation to the background without restarting it
 - **Security model**: This is the sole model-facing `subagent` registration.
   With an active AgentSH supervisor it delegates through AgentSH, including
   isolated Git-backed Draft VMs. Without AgentSH configuration it starts raw
@@ -679,6 +681,17 @@ running background subagents are cancelled on orderly session shutdown and are
 reported as `lost` after an unclean Pi restart; terminal records remain
 available for seven days. Draft cancellation never applies or discards a
 retained Draft result.
+
+While foreground subagent calls are blocking the parent, `/background` promotes
+all currently running calls in place. A single, parallel, or chain call remains
+one aggregate job; multiple sibling `subagent` calls receive separate job IDs.
+Foreground rendering stops, the original execution continues under the existing
+background manager, and each detached tool result explicitly tells the parent
+agent to continue useful work and consume the result before completing dependent
+work. The command does nothing to existing background jobs or unrelated tools.
+It refuses an all-at-once handoff when the two-job aggregate background limit
+would be exceeded. Escape retains its normal cancellation behavior before a
+successful handoff; afterward, only `operation=cancel` cancels the detached work.
 
 Set `PI_SUBAGENT_BIN` to the raw Pi executable selected by your wrapper, e.g.
 `/nix/store/.../bin/pi` or `pi-unsafe`. If unset, the extension tries source/dev
