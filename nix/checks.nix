@@ -38,6 +38,7 @@ in
         cp ${self}/ssh/index.ts "$srcdir/ssh/index.ts"
         cp ${self}/sandbox/api.ts "$srcdir/sandbox/api.ts"
         cp ${self}/shared/agentsh-mode.ts "$srcdir/shared/agentsh-mode.ts"
+        cp ${self}/shared/bash-command-transform.ts "$srcdir/shared/bash-command-transform.ts"
 
         cat > "$outdir/node_modules/@mariozechner/pi-coding-agent/package.json" <<'EOF'
         { "name": "@mariozechner/pi-coding-agent", "type": "module", "main": "./index.js" }
@@ -71,7 +72,8 @@ in
           --target es2022 \
           --rootDir "$srcdir" \
           --outDir "$outdir" \
-          "$srcdir/ssh/index.ts" "$srcdir/sandbox/api.ts" "$srcdir/shared/agentsh-mode.ts"
+          "$srcdir/ssh/index.ts" "$srcdir/sandbox/api.ts" \
+          "$srcdir/shared/agentsh-mode.ts" "$srcdir/shared/bash-command-transform.ts"
 
         cat > "$workdir/test.mjs" <<'EOF'
         import fs from "node:fs";
@@ -131,6 +133,7 @@ in
 
         const modulePath = path.join(process.argv[2], "ssh/index.js");
         const imported = await import(pathToFileURL(modulePath).href);
+        const transforms = await import(pathToFileURL(path.join(process.argv[2], "shared/bash-command-transform.js")).href);
         const extension = imported.default?.default ?? imported.default ?? imported;
         const root = fs.mkdtempSync(path.join(os.tmpdir(), "ssh-target-test-"));
         const sessionFile = path.join(root, "session.jsonl");
@@ -196,8 +199,14 @@ in
         await first(legacyPi, "session_start", {}, legacyCtx);
         assert(legacyPi.tools.size === 3, "legacy SSH tools were not registered");
         const event = { toolName: "bash", input: { command: "echo ok" } };
+        // Simulate Permission Gate running before SSH. Both handlers share the
+        // same idempotent transform, so the gate sees the final command and SSH
+        // cannot wrap it again later.
+        transforms.applyBashCommandTransforms(event.input);
+        Object.freeze(event.input);
         await first(legacyPi, "tool_call", event, legacyCtx);
         assert(event.input.command.includes("ssh 'legacy'"), "legacy bash was not routed through SSH");
+        assert((event.input.command.match(/ssh 'legacy'/g) || []).length === 1, "legacy Bash was transformed more than once");
         await legacyPi.commands.get("retarget").handler("", legacyCtx);
         const localBash = await first(legacyPi, "user_bash", { command: "pwd" }, legacyCtx);
         assert(localBash === undefined, "legacy local retarget still intercepted user bash");
@@ -1149,6 +1158,8 @@ in
         mkdir -p "$workdir/src/permission-gate" "$workdir/src/shared" "$workdir/out"
         cp ${self}/permission-gate/index.ts "$workdir/src/permission-gate/index.ts"
         cp ${self}/shared/agentsh-mode.ts "$workdir/src/shared/agentsh-mode.ts"
+        cp ${self}/shared/bash-command-transform.ts "$workdir/src/shared/bash-command-transform.ts"
+        cp ${self}/shared/subagent-permission.ts "$workdir/src/shared/subagent-permission.ts"
         printf '%s\n' '{"type":"module"}' > "$workdir/src/package.json"
         tsc \
           --noCheck \
@@ -1159,7 +1170,9 @@ in
           --rootDir "$workdir/src" \
           --outDir "$workdir/out" \
           "$workdir/src/permission-gate/index.ts" \
-          "$workdir/src/shared/agentsh-mode.ts"
+          "$workdir/src/shared/agentsh-mode.ts" \
+          "$workdir/src/shared/bash-command-transform.ts" \
+          "$workdir/src/shared/subagent-permission.ts"
 
         cat > "$workdir/test.mjs" <<'EOF'
         import { spawn } from "node:child_process";
@@ -1171,6 +1184,7 @@ in
         import { once } from "node:events";
         import { fileURLToPath } from "node:url";
         import gate from "./out/permission-gate/index.js";
+        import { registerBashCommandTransform } from "./out/shared/bash-command-transform.js";
 
         const assert = (condition, message) => { if (!condition) throw new Error(message); };
         const delay = (milliseconds) => new Promise((resolve) => setTimeout(resolve, milliseconds));
@@ -1259,16 +1273,32 @@ in
           }
 
           const ctx = createContext(contextOptions);
+          if (name === "transform-order") {
+            registerBashCommandTransform("test-wrapper", (command) => `ssh 'test-host' ''${JSON.stringify(command)}`);
+          }
           gate(pi);
+          assert(JSON.stringify(globalThis.__paeSubagentPermissionSelectionV1) === JSON.stringify({ protocol: 1, selected: true, conflict: false }), "guard selection was not published before session start");
           await pi.handlers.get("session_start")({}, ctx);
           const tool = pi.handlers.get("tool_call");
           const results = [];
+          let childAuthorization;
           if (name === "local-allow") {
             results.push(await tool({ toolName: "bash", toolCallId: "tool-safe", input: { command: "printf safe" } }, ctx));
           }
           if (name === "background-allow") {
             results.push(await tool({ toolName: "background_job", toolCallId: "tool-background-list", input: { action: "list" } }, ctx));
             results.push(await tool({ toolName: "background_job", toolCallId: "tool-background-start", input: { action: "start", command: "printf background" } }, ctx));
+          } else if (name === "child-allow") {
+            const authority = globalThis.__paeSubagentPermissionAuthorityV1;
+            assert(authority?.active === true, "child authority was not published after session start");
+            childAuthorization = await authority.authorize({
+              subagentId: "native-child-1",
+              label: "task 1",
+              task: "inspect the remote safely",
+              command: "ssh example.test",
+              cwd: "/child/workspace",
+              toolCallId: "child-tool-dangerous",
+            }, ctx.signal);
           } else {
             results.push(await tool({ toolName: "bash", toolCallId: "tool-dangerous", input: { command: "sudo true" } }, ctx));
           }
@@ -1277,6 +1307,8 @@ in
             allowed: results.map((result) => result === undefined),
             blocked: results.map((result) => result?.block === true),
             reasons: results.map((result) => result?.reason || ""),
+            childAuthorization,
+            childAuthorityActive: globalThis.__paeSubagentPermissionAuthorityV1?.active,
             selections: ctx.selections.map((selection) => ({
               title: selection.title,
               choices: selection.choices,
@@ -1419,6 +1451,37 @@ in
           }
         }
 
+        async function spawnMalformedStartup(name, socketValue, timeoutValue) {
+          const environment = {
+            ...process.env,
+            AGENTSH_PERMISSION_GATE_SOCKET: socketValue,
+            PI_AGENTSH_PERMISSION_GATE_TIMEOUT_MS: timeoutValue,
+            PERMISSION_GATE_CHILD_CASE: name,
+          };
+          for (const variable of [
+            "PI_SUPERVISED", "PI_AUTO", "PI_AGENTSH_REMOTE", "PI_AGENTSH_READ_MODE",
+            "AGENTSH_SESSION_SUPERVISOR", "AGENTSH_APPROVAL_UI_SOCKET",
+            "PI_AGENTSH_MOCK_SUPERVISOR", "PI_AGENTSH_ENABLE", "AGENTSH_CHILD_CAPABILITY",
+          ]) delete environment[variable];
+          const child = spawn(process.execPath, [fileURLToPath(import.meta.url)], {
+            env: environment,
+            stdio: ["ignore", "pipe", "pipe"],
+          });
+          let stdout = "";
+          let stderr = "";
+          child.stdout.on("data", (chunk) => { stdout += chunk; });
+          child.stderr.on("data", (chunk) => { stderr += chunk; });
+          let timer;
+          const [code, childSignal] = await Promise.race([
+            once(child, "close"),
+            new Promise((_, reject) => {
+              timer = setTimeout(() => reject(new Error("malformed startup child hung")), 3000);
+            }),
+          ]).finally(() => clearTimeout(timer));
+          assert(code === 0, "malformed startup child failed (signal " + childSignal + "): " + stderr);
+          return JSON.parse(stdout);
+        }
+
         async function runInheritedChecks() {
           const allowed = await spawnInheritedChild("local-allow", async (socket, stdout) => {
             const read = lineReader(socket);
@@ -1440,6 +1503,38 @@ in
           assert(allowed.selections[0].choices.join(",") === "Deny,Allow", "AgentSH prompt was not deny-first");
           assert(allowed.selections[0].signal, "AgentSH terminal prompt omitted cancellation signal");
           assert(allowed.selections[0].title.includes("Dangerous command requires approval") && allowed.selections[0].title.includes("sudo true"), "AgentSH prompt metadata was not rendered");
+
+          const transformed = await spawnInheritedChild("transform-order", async (socket) => {
+            const read = lineReader(socket);
+            await expectHello(read, socket);
+            const request = await read();
+            assertAuthorize(request, `ssh 'test-host' ''${JSON.stringify("sudo true")}`, "tool-dangerous");
+            send(socket, { v: 1, type: "decision", id: request.id, decision: "allow" });
+          });
+          assert(transformed.allowed[0], "Permission Gate did not authorize the final transformed Bash command");
+
+          const childAllowed = await spawnInheritedChild("child-allow", async (socket) => {
+            const read = lineReader(socket);
+            await expectHello(read, socket);
+            const request = await read();
+            assert(request.v === 1 && request.type === "authorize" && request.kind === "bash", "child authority sent an invalid authorize envelope");
+            assert(request.command === "ssh example.test" && request.cwd === "/child/workspace", "child authority changed the exact command or cwd");
+            assert(request.tool_call_id === "child-tool-dangerous", "child authority changed the child tool call ID");
+            assert(request.session_id === "subagent:native-child-1", "child authority omitted its subagent audit identity");
+            send(socket, { v: 1, type: "decision", id: request.id, decision: "prompt", prompt: {
+              title: "Dangerous command requires approval",
+              message: "Detected: ssh",
+              labels: ["ssh"],
+              command_preview: "ssh example.test",
+            } });
+            const resolution = await read();
+            assert(resolution.type === "resolve" && resolution.decision === "allow", "parent did not approve the child command");
+            send(socket, { v: 1, type: "complete", id: request.id, decision: "allow", reason: "approved by Pi user interface" });
+          });
+          assert(childAllowed.childAuthorization?.allowed === true, "parent child authority did not return AgentSH allow");
+          assert(childAllowed.selections.length === 1, "child authorization did not surface in the parent UI");
+          assert(childAllowed.selections[0].title.includes("Requested by native subagent task 1"), "child authorization prompt omitted its parent-owned origin");
+          assert(childAllowed.selections[0].title.includes("inspect the remote safely"), "child authorization prompt omitted its task summary");
 
           const backgroundAllowed = await spawnInheritedChild("background-allow", async (socket) => {
             const read = lineReader(socket);
@@ -1494,6 +1589,7 @@ in
             socket.end();
           });
           assert(eofDuringPrompt.blocked[0], "gate EOF did not abort and fail closed an open prompt");
+          assert(eofDuringPrompt.childAuthorityActive === false, "dead Permission Gate transport remained advertised to native subagents");
 
           const eofBeforeComplete = await spawnInheritedChild("eof-complete", async (socket) => {
             const read = lineReader(socket);
@@ -1512,6 +1608,11 @@ in
             await read();
           }, 40);
           assert(timedOut.blocked[0] && timedOut.reasons[0].includes("timed out"), "gate timeout did not fail closed");
+
+          const malformedSocket = await spawnMalformedStartup("malformed-startup-socket", "relative.sock", "100");
+          assert(malformedSocket.blocked[0] && malformedSocket.reasons[0].includes("failed closed"), "malformed gate socket removed parent Bash protection");
+          const malformedTimeout = await spawnMalformedStartup("malformed-startup-timeout", "/tmp/unused-gate.sock", "not-a-number");
+          assert(malformedTimeout.blocked[0] && malformedTimeout.reasons[0].includes("failed closed"), "malformed gate timeout removed parent Bash protection");
         }
 
         async function runLegacyChecks() {

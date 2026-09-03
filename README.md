@@ -241,7 +241,9 @@ closed with an actionable diagnostic.
    AgentSH—not Pi's local regex list—classifies the command and durably audits
    the terminal decision. Allowed background starts receive a one-use receipt
    bound to the exact tool-call ID, command, and working directory, preventing
-   post-authorization argument mutation before launch.
+   post-authorization argument mutation before launch. Trusted Bash routers
+   (currently SSH targeting) apply their idempotent rewrite before this exact
+   authorization regardless of extension handler order.
 2. Full AgentSH supervised, Auto, and sandbox modes suppress this legacy gate
    once the supervisor is active, so they do not produce a duplicate prompt.
    If full mode was selected but its supervisor is unavailable, the extension
@@ -656,7 +658,21 @@ trusted Pi control plane is insufficient.
 single task, parallel tasks, a chain, a background lifecycle operation, or an
 AgentSH Draft disposition. Native child Pi state is isolated under
 `$PI_CODING_AGENT_DIR/subagents/...`; AgentSH owns policy, streaming, approvals,
-artifacts, and Draft lifecycle whenever its backend is active.
+artifacts, and Draft lifecycle whenever its backend is active. In guard-only
+`pi-unsafe` sessions, each native child loads only immutable Nix-store finalizer
+and permission-proxy extensions. The proxy exposes shell execution under the
+distinct `parent_bash` child-tool name, so a missing proxy cannot fall back to
+Pi's built-in Bash. Every command is relayed from that wrapper through a private
+one-connection Unix rendezvous to the launcher's parent-bound AgentSH Permission
+Gate, so dangerous commands appear in the parent terminal and Paseo for approval.
+Missing, disconnected, cancelled, stale, or conflicting authority blocks the
+child command; infrastructure loss terminates the child rather than becoming a
+model-visible ordinary denial. A successful child must close its authenticated
+relay with `goodbye`. This guarded-native relay currently requires Linux process
+identity support. Guarded native children accept only Pi's built-in `read`, `bash`,
+`edit`, and `write` tool names; project/package extensions are deliberately not
+loaded. This is still intent authorization, not containment: full AgentSH is
+required for filesystem, process, network, and descendant enforcement.
 
 **Modes**:
 
@@ -699,10 +715,14 @@ would be exceeded. Escape retains its normal cancellation behavior before a
 successful handoff; afterward, only `operation=cancel` cancels the detached work.
 
 Set `PI_SUBAGENT_BIN` to the raw Pi executable selected by your wrapper, e.g.
-`/nix/store/.../bin/pi` or `pi-unsafe`. If unset, the extension tries source/dev
-execution, then `pi-unsafe`, and only falls back to `pi` with a warning. Native
-children are marked with `PI_SUBAGENT_ID` so child-only extensions can identify
-them reliably.
+`/nix/store/.../bin/pi`. If unset, the extension tries source/dev execution,
+then `pi-unsafe`, and only falls back to `pi` with a warning. Native children are
+marked with `PI_SUBAGENT_ID` so child-only extensions can identify them
+reliably. A guard-only parent directly re-executes its current raw Pi binary and
+requires both that executable and the child proxy to be immutable Nix-store
+files; it ignores wrapper/PATH fallbacks. The explicitly loaded child proxy returns each shell authorization to the
+already-bound parent Permission Gate instead of creating an unapprovable nested
+guard process.
 
 </details>
 <details>

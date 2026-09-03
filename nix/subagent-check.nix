@@ -34,8 +34,11 @@ pkgs.runCommand "subagent-check"
     cp ${self}/subagent/background.ts "$workdir/src/subagent/background.ts"
     cp ${self}/subagent/foreground-handoff.ts "$workdir/src/subagent/foreground-handoff.ts"
     cp ${self}/subagent/parallel-result.ts "$workdir/src/subagent/parallel-result.ts"
+    cp ${self}/subagent/permission-proxy.ts "$workdir/src/subagent/permission-proxy.ts"
+    cp ${self}/subagent/permission-relay.ts "$workdir/src/subagent/permission-relay.ts"
     cp ${self}/subagent/result-artifact.ts "$workdir/src/subagent/result-artifact.ts"
     cp ${self}/shared/agentsh-mode.ts "$workdir/src/shared/agentsh-mode.ts"
+    cp ${self}/shared/subagent-permission.ts "$workdir/src/shared/subagent-permission.ts"
 
     grep -A12 'const currentResult: SingleResult' ${self}/subagent/index.ts | grep -Fq 'exitCode: -1,'
     grep -A4 'function isFailure' ${self}/subagent/index.ts | grep -Fq 'result.exitCode !== -1'
@@ -52,11 +55,34 @@ pkgs.runCommand "subagent-check"
       "$workdir/src/subagent/background.ts" \
       "$workdir/src/subagent/foreground-handoff.ts" \
       "$workdir/src/subagent/parallel-result.ts" \
+      "$workdir/src/subagent/permission-proxy.ts" \
+      "$workdir/src/subagent/permission-relay.ts" \
       "$workdir/src/subagent/result-artifact.ts" \
-      "$workdir/src/shared/agentsh-mode.ts"
+      "$workdir/src/shared/agentsh-mode.ts" \
+      "$workdir/src/shared/subagent-permission.ts"
+
+    mkdir -p "$workdir/out/node_modules/@mariozechner/pi-coding-agent"
+    cat > "$workdir/out/node_modules/@mariozechner/pi-coding-agent/package.json" <<'EOF'
+    { "name": "@mariozechner/pi-coding-agent", "type": "module", "main": "./index.js" }
+    EOF
+    cat > "$workdir/out/node_modules/@mariozechner/pi-coding-agent/index.js" <<'EOF'
+    export function createBashTool() {
+      return {
+        name: "bash",
+        label: "bash",
+        description: "test bash",
+        parameters: {},
+        async execute(_id, params) {
+          return { content: [{ type: "text", text: "built-in:" + params.command }], details: {}, isError: false };
+        },
+      };
+    }
+    EOF
 
     cat > "$workdir/test.mjs" <<'EOF'
     import assert from "node:assert/strict";
+    import { createHash } from "node:crypto";
+    import net from "node:net";
     import { mkdir, writeFile } from "node:fs/promises";
     import { pathToFileURL } from "node:url";
 
@@ -66,9 +92,14 @@ pkgs.runCommand "subagent-check"
     const background = await import(pathToFileURL(process.argv[5]).href);
     const handoff = await import(pathToFileURL(process.argv[6]).href);
     const artifacts = await import(pathToFileURL(process.argv[7]).href);
+    const permissions = await import(pathToFileURL(process.argv[8]).href);
+    const permissionProtocol = await import(pathToFileURL(process.argv[9]).href);
     assert.equal(background.MAX_BACKGROUND_SUBAGENTS, 8);
     assert.equal(artifacts.MAX_RETAINED_SUBAGENT_REPORT_BYTES, 16 * 1024 * 1024);
     assert.equal(artifacts.MAX_RETAINED_SUBAGENT_JOB_BYTES, 32 * 1024 * 1024);
+    globalThis[permissionProtocol.SUBAGENT_PERMISSION_SELECTION_KEY] = { protocol: 1, selected: true, conflict: false };
+    assert.throws(() => permissionProtocol.currentSubagentPermissionAuthority(), /selected but its authority is unavailable/);
+    delete globalThis[permissionProtocol.SUBAGENT_PERMISSION_SELECTION_KEY];
     const format = imported.formatParallelResultContent ?? imported.default?.formatParallelResultContent;
     const nativeStartup = mode.classifyAgentSHStartup({});
     const fullStartup = mode.classifyAgentSHStartup({ PI_SUPERVISED: "1" });
@@ -113,6 +144,139 @@ pkgs.runCommand "subagent-check"
       assert.match(crowded, new RegExp(`child-''${index}-sentinel`));
     }
     assert.ok(!crowded.includes("�"), "UTF-8 truncation introduced a replacement character");
+
+    if (process.platform === "linux") {
+    const readFrame = (socket) => new Promise((resolve, reject) => {
+      let buffer = "";
+      const onData = (chunk) => {
+        buffer += chunk.toString("utf8");
+        const newline = buffer.indexOf("\n");
+        if (newline < 0) return;
+        socket.off("data", onData);
+        try { resolve(JSON.parse(buffer.slice(0, newline))); } catch (error) { reject(error); }
+      };
+      socket.on("data", onData);
+      socket.once("error", reject);
+    });
+    const authorityCalls = [];
+    const authority = {
+      protocol: 1, selected: true, active: true,
+      async authorize(request, signal) {
+        authorityCalls.push(request);
+        if (request.command === "wait-for-cancel") {
+          await new Promise((resolve) => signal.addEventListener("abort", resolve, { once: true }));
+          return { allowed: false, reason: "cancelled" };
+        }
+        return { allowed: request.command === "printf safe", reason: request.command === "printf safe" ? "allowed" : "denied" };
+      },
+    };
+    const relay = await permissions.NativeSubagentPermissionRelay.create({
+      authority, subagentId: "native-child-1", label: "task 1", task: "review safely", cwd: "/workspace", tools: ["bash"],
+    });
+    relay.bindChild(process.pid);
+    const relaySocket = net.createConnection({ path: relay.environment[permissionProtocol.SUBAGENT_PERMISSION_SOCKET_ENV] });
+    relaySocket.write(JSON.stringify({
+      v: 1, type: "hello", token: relay.environment[permissionProtocol.SUBAGENT_PERMISSION_TOKEN_ENV],
+      subagent_id: "native-child-1", pid: process.pid,
+    }) + "\n");
+    assert.deepEqual(await readFrame(relaySocket), { v: 1, type: "hello", service: "pi-subagent-permission-relay", tools: ["bash"] });
+    await relay.ready;
+    relaySocket.write(JSON.stringify({ v: 1, type: "authorize", id: "request-1", kind: "bash", command: "printf safe", cwd: "/workspace", tool_call_id: "tool-1" }) + "\n");
+    assert.deepEqual(await readFrame(relaySocket), { v: 1, type: "decision", id: "request-1", allowed: true, reason: "allowed", fatal: false });
+    assert.deepEqual(authorityCalls[0], {
+      subagentId: "native-child-1", label: "task 1", task: "review safely", command: "printf safe", cwd: "/workspace",
+      toolCallId: "subagent-" + createHash("sha256").update("native-child-1\0tool-1").digest("hex"),
+    });
+    relaySocket.write(JSON.stringify({ v: 1, type: "cancel", id: "request-1" }) + "\n");
+    relaySocket.write(JSON.stringify({ v: 1, type: "authorize", id: "request-late", kind: "bash", command: "printf safe", cwd: "/workspace", tool_call_id: "tool-late" }) + "\n");
+    assert.deepEqual(await readFrame(relaySocket), { v: 1, type: "decision", id: "request-late", allowed: true, reason: "allowed", fatal: false });
+    relaySocket.write(JSON.stringify({ v: 1, type: "authorize", id: "request-2", kind: "bash", command: "wait-for-cancel", cwd: "/workspace", tool_call_id: "tool-2" }) + "\n");
+    relaySocket.write(JSON.stringify({ v: 1, type: "cancel", id: "request-2" }) + "\n");
+    assert.deepEqual(await readFrame(relaySocket), { v: 1, type: "decision", id: "request-2", allowed: false, reason: "native subagent tool call was aborted", fatal: false });
+    const relayDisconnected = relay.failure;
+    relaySocket.destroy();
+    await assert.rejects(relayDisconnected, /permission proxy disconnected/);
+    await assert.rejects(relay.waitForGracefulShutdown(), /permission proxy disconnected/);
+    relay.dispose();
+
+    const proxyCalls = [];
+    const proxyAuthority = {
+      protocol: 1, selected: true, active: true,
+      async authorize(request) {
+        proxyCalls.push(request);
+        return { allowed: request.command === "printf proxied", reason: request.command === "printf proxied" ? "parent allowed" : "parent denied" };
+      },
+    };
+    const proxyRelay = await permissions.NativeSubagentPermissionRelay.create({
+      authority: proxyAuthority, subagentId: "native-child-proxy", label: "subagent", task: "exercise proxy",
+      cwd: process.cwd(), tools: ["bash"],
+    });
+    proxyRelay.bindChild(process.pid);
+    process.env.PI_SUBAGENT_ID = "native-child-proxy";
+    process.env[permissionProtocol.SUBAGENT_PERMISSION_SOCKET_ENV] = proxyRelay.environment[permissionProtocol.SUBAGENT_PERMISSION_SOCKET_ENV];
+    process.env[permissionProtocol.SUBAGENT_PERMISSION_TOKEN_ENV] = proxyRelay.environment[permissionProtocol.SUBAGENT_PERMISSION_TOKEN_ENV];
+    const proxyModule = await import(pathToFileURL(process.argv[10]).href + "?proxy-check");
+    const proxy = proxyModule.default?.default ?? proxyModule.default ?? proxyModule;
+    const proxyHandlers = new Map();
+    let proxyBash;
+    proxy({
+      on(name, handler) { proxyHandlers.set(name, handler); },
+      registerTool(tool) { if (tool.name === permissionProtocol.SUBAGENT_PERMISSION_BASH_TOOL) proxyBash = tool; },
+    });
+    assert.equal(process.env[permissionProtocol.SUBAGENT_PERMISSION_SOCKET_ENV], undefined, "child proxy did not delete its socket marker");
+    assert.equal(process.env[permissionProtocol.SUBAGENT_PERMISSION_TOKEN_ENV], undefined, "child proxy did not delete its token marker");
+    assert(proxyBash, "child proxy did not register the distinct parent-authorized Bash wrapper");
+    assert.equal(proxyBash.name, "parent_bash");
+    await proxyHandlers.get("session_start")();
+    await proxyRelay.ready;
+    await proxyHandlers.get("before_agent_start")();
+    const proxyController = new AbortController();
+    const proxyAllowed = await proxyBash.execute("proxy-tool-1", { command: "printf proxied" }, proxyController.signal);
+    assert.equal(proxyAllowed.content[0].text, "built-in:printf proxied");
+    const proxyDenied = await proxyBash.execute("proxy-tool-2", { command: "sudo denied" }, proxyController.signal);
+    assert.equal(proxyDenied.details.permissionGate, "denied");
+    assert.match(proxyDenied.content[0].text, /parent denied/);
+    assert.deepEqual(proxyCalls.map((call) => [call.command, call.cwd, call.toolCallId]), [
+      ["printf proxied", process.cwd(), "subagent-" + createHash("sha256").update("native-child-proxy\0proxy-tool-1").digest("hex")],
+      ["sudo denied", process.cwd(), "subagent-" + createHash("sha256").update("native-child-proxy\0proxy-tool-2").digest("hex")],
+    ]);
+    let gracefulRelayFailed = false;
+    void proxyRelay.failure.catch(() => { gracefulRelayFailed = true; });
+    await proxyHandlers.get("session_shutdown")();
+    await proxyRelay.waitForGracefulShutdown();
+    await new Promise((resolve) => setImmediate(resolve));
+    assert.equal(gracefulRelayFailed, false, "normal child shutdown was reported as a mandatory relay failure");
+    proxyRelay.dispose();
+
+    const fatalRelay = await permissions.NativeSubagentPermissionRelay.create({
+      authority: {
+        protocol: 1, selected: true, active: true,
+        async authorize() { throw new Error("authority transport died"); },
+      },
+      subagentId: "native-child-fatal", label: "fatal child", task: "exercise fatal authority loss",
+      cwd: process.cwd(), tools: ["bash"],
+    });
+    fatalRelay.bindChild(process.pid);
+    const fatalSocket = net.createConnection({ path: fatalRelay.environment[permissionProtocol.SUBAGENT_PERMISSION_SOCKET_ENV] });
+    fatalSocket.write(JSON.stringify({
+      v: 1, type: "hello", token: fatalRelay.environment[permissionProtocol.SUBAGENT_PERMISSION_TOKEN_ENV],
+      subagent_id: "native-child-fatal", pid: process.pid,
+    }) + "\n");
+    assert.equal((await readFrame(fatalSocket)).type, "hello");
+    await fatalRelay.ready;
+    fatalSocket.write(JSON.stringify({
+      v: 1, type: "authorize", id: "fatal-request", kind: "bash", command: "sudo true",
+      cwd: process.cwd(), tool_call_id: "fatal-tool",
+    }) + "\n");
+    const fatalDecision = await readFrame(fatalSocket);
+    assert.equal(fatalDecision.allowed, false);
+    assert.equal(fatalDecision.fatal, true);
+    assert.match(fatalDecision.reason, /authority transport died/);
+    await assert.rejects(fatalRelay.failure, /authority transport died/);
+    await assert.rejects(fatalRelay.waitForGracefulShutdown(), /authority transport died/);
+    fatalSocket.destroy();
+    fatalRelay.dispose();
+    }
 
     const tick = () => new Promise((resolve) => setImmediate(resolve));
     let finishForeground;
@@ -270,14 +434,29 @@ pkgs.runCommand "subagent-check"
     assert.equal((await recovered.get(staleID)).status, "lost");
     EOF
 
-    node "$workdir/test.mjs" "$workdir/out/subagent/parallel-result.js" "$workdir/out/subagent/backend.js" "$workdir/out/shared/agentsh-mode.js" "$workdir/out/subagent/background.js" "$workdir/out/subagent/foreground-handoff.js" "$workdir/out/subagent/result-artifact.js"
+    node "$workdir/test.mjs" "$workdir/out/subagent/parallel-result.js" "$workdir/out/subagent/backend.js" "$workdir/out/shared/agentsh-mode.js" "$workdir/out/subagent/background.js" "$workdir/out/subagent/foreground-handoff.js" "$workdir/out/subagent/result-artifact.js" "$workdir/out/subagent/permission-relay.js" "$workdir/out/shared/subagent-permission.js" "$workdir/out/subagent/permission-proxy.js"
     grep -F 'formatParallelResultContent(sections, successCount, MAX_TEXT_PREVIEW_BYTES)' ${self}/subagent/index.ts >/dev/null
+    grep -F 'args.push("--no-extensions", "--extension", permissionProxyEntrypoint);' ${self}/subagent/index.ts >/dev/null
+    grep -F 'const permissionAuthority = currentSubagentPermissionAuthority();' ${self}/subagent/index.ts >/dev/null
+    grep -F 'SUBAGENT_PERMISSION_BASH_TOOL' ${self}/subagent/index.ts >/dev/null
+    grep -F 'trustedNixStoreFile' ${self}/subagent/index.ts >/dev/null
+    if grep -F 'this.socket.unref()' ${self}/subagent/permission-proxy.ts >/dev/null; then
+      echo 'child permission relay socket must keep Pi print mode alive' >&2
+      exit 1
+    fi
+    if grep -F 'isError:' ${self}/subagent/permission-proxy.ts >/dev/null; then
+      echo 'child permission proxy must throw fatal tool failures rather than return ignored isError metadata' >&2
+      exit 1
+    fi
+    grep -F 'waitForGracefulShutdown' ${self}/subagent/index.ts >/dev/null
     grep -F '(cfg.extensions.sandbox.enable || cfg.extensions.subagent.enable)' ${self}/nix/module.nix >/dev/null
     grep -F 'builtins.elem "sandbox" extensions' ${self}/nix/mk-extension-bundle.nix >/dev/null
     grep -F '"''${extDir}/subagent/backend.ts".source = "''${self}/subagent/backend.ts";' ${self}/nix/module.nix >/dev/null
     grep -F '"''${extDir}/subagent/background.ts".source = "''${self}/subagent/background.ts";' ${self}/nix/module.nix >/dev/null
     grep -F '"''${extDir}/subagent/foreground-handoff.ts".source = "''${self}/subagent/foreground-handoff.ts";' ${self}/nix/module.nix >/dev/null
     grep -F '"''${extDir}/subagent/parallel-result.ts".source = "''${self}/subagent/parallel-result.ts";' ${self}/nix/module.nix >/dev/null
+    grep -F '"''${extDir}/subagent/permission-proxy.ts".source = "''${self}/subagent/permission-proxy.ts";' ${self}/nix/module.nix >/dev/null
+    grep -F '"''${extDir}/subagent/permission-relay.ts".source = "''${self}/subagent/permission-relay.ts";' ${self}/nix/module.nix >/dev/null
     grep -F '"''${extDir}/subagent/result-artifact.ts".source = "''${self}/subagent/result-artifact.ts";' ${self}/nix/module.nix >/dev/null
     if grep -F 'name: "subagent"' ${self}/sandbox/index.ts >/dev/null; then
       echo 'sandbox still registers a duplicate subagent tool' >&2
@@ -293,6 +472,8 @@ pkgs.runCommand "subagent-check"
       test -f "$bundle/subagent/index.ts"
       test -f "$bundle/subagent/background.ts"
       test -f "$bundle/subagent/foreground-handoff.ts"
+      test -f "$bundle/subagent/permission-proxy.ts"
+      test -f "$bundle/subagent/permission-relay.ts"
       test -f "$bundle/subagent/result-artifact.ts"
       test -f "$bundle/subagent-finalizer/index.ts"
       test -f "$bundle/shared/agentsh-mode.ts"

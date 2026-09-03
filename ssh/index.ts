@@ -26,6 +26,10 @@ import {
 	type WriteOperations,
 } from "@mariozechner/pi-coding-agent";
 import {
+	applyBashCommandTransforms,
+	registerBashCommandTransform,
+} from "../shared/bash-command-transform.js";
+import {
 	agentSHRuntimeDisposition,
 	classifyAgentSHStartup,
 	type AgentSHRuntimeState,
@@ -226,6 +230,15 @@ export default function sshTargetExtension(pi: ExtensionAPI) {
 	const localCwd = process.cwd();
 	let target: ExecutionTarget = { kind: "local", cwd: localCwd };
 	let legacyToolsRegistered = false;
+	const transformBashForTarget = (command: string) => {
+		if (sandboxBackendSelected() || target.kind !== "ssh") return command;
+		return wrapBashCommandForSsh(command, target.remote, target.remoteCwd);
+	};
+	let unregisterBashTransform = registerBashCommandTransform("ssh-target", transformBashForTarget);
+	const ensureBashTransform = () => {
+		unregisterBashTransform();
+		unregisterBashTransform = registerBashCommandTransform("ssh-target", transformBashForTarget);
+	};
 
 	const publishTarget = () => sandboxAPI()?.setExecutionTarget(sandboxTarget(target));
 
@@ -354,10 +367,18 @@ export default function sshTargetExtension(pi: ExtensionAPI) {
 		if (disposition.kind === "full" || target.kind !== "ssh" || event.toolName !== "bash") return;
 		const command = event.input.command;
 		if (typeof command !== "string" || command.length === 0) return;
-		event.input.command = wrapBashCommandForSsh(command, target.remote, target.remoteCwd);
+		try {
+			applyBashCommandTransforms(event.input);
+		} catch (error) {
+			return {
+				block: true,
+				reason: `SSH Bash routing failed closed: ${error instanceof Error ? error.message : String(error)}`,
+			};
+		}
 	});
 
 	pi.on("session_start", async (_event, ctx) => {
+		ensureBashTransform();
 		if (sandboxBackendSelected()) {
 			const kind = env("PI_AGENTSH_TARGET_KIND") || (env("PI_AGENTSH_REMOTE") === "ssh" ? "ssh" : "local");
 			if (kind === "ssh") {
@@ -387,6 +408,10 @@ export default function sshTargetExtension(pi: ExtensionAPI) {
 		registerLegacyTools();
 		setStatus(ctx);
 		if (ctx.hasUI && target.kind === "ssh") ctx.ui.notify(`SSH mode: ${target.remote}:${target.remoteCwd}`, "info");
+	});
+
+	pi.on("session_shutdown", () => {
+		unregisterBashTransform();
 	});
 
 	pi.on("user_bash", () => {

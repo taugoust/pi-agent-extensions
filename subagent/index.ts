@@ -21,6 +21,15 @@ import {
   classifyAgentSHStartup,
   type AgentSHRuntimeState,
 } from "../shared/agentsh-mode.js";
+import {
+  currentSubagentPermissionAuthority,
+  currentSubagentPermissionSelection,
+  SUBAGENT_PERMISSION_BASH_TOOL,
+  SUBAGENT_PERMISSION_NATIVE_TOOLS,
+  SUBAGENT_PERMISSION_SOCKET_ENV,
+  SUBAGENT_PERMISSION_TOKEN_ENV,
+  type SubagentPermissionAuthority,
+} from "../shared/subagent-permission.js";
 import { adaptiveDispositionError, nativeSubagentRequestSupported, selectSubagentBackend, type AdaptiveSubagentBridge } from "./backend.js";
 import {
   BACKGROUND_SUBAGENT_ID_PATTERN,
@@ -32,6 +41,7 @@ import {
 } from "./background.js";
 import { DetachableForegroundExecution } from "./foreground-handoff.js";
 import { formatParallelResultContent } from "./parallel-result.js";
+import { NativeSubagentPermissionRelay } from "./permission-relay.js";
 import { MAX_SUBAGENT_RESULT_PAGE_BYTES, attachRetainedSubagentReports, extractRetainedSubagentReports } from "./result-artifact.js";
 
 const MAX_PARALLEL_TASKS = 8;
@@ -39,6 +49,8 @@ const MAX_CONCURRENCY = 4;
 const COLLAPSED_ITEM_COUNT = 10;
 const MAX_TEXT_PREVIEW_BYTES = 50 * 1024;
 const CONFIG_FILES = ["settings.json", "models.json", "auth.json", "oauth.json", "AGENTS.md"];
+// Resolve once before the model can mutate replaceable Home Manager symlinks.
+const LOADED_SUBAGENT_MODULE_PATH = fs.realpathSync(fileURLToPath(import.meta.url));
 const INTERNAL_MANAGED_EXECUTION = Symbol("subagent-internal-managed-execution");
 
 type Mode = "single" | "parallel" | "chain";
@@ -386,18 +398,59 @@ function pathOnPath(command: string): string | undefined {
   return undefined;
 }
 
-function installedFinalizerEntrypoint(): string | undefined {
-  const directory = path.dirname(fileURLToPath(import.meta.url));
+function installedFinalizerEntrypoint(requireTrusted = false): string | undefined {
+  const modulePath = fileURLToPath(import.meta.url);
+  const directory = path.dirname(requireTrusted ? LOADED_SUBAGENT_MODULE_PATH : modulePath);
   for (const candidate of [
     path.resolve(directory, "../subagent-finalizer/index.ts"),
     path.resolve(directory, "../subagent-finalizer/index.js"),
   ]) {
-    if (fs.existsSync(candidate)) return candidate;
+    if (requireTrusted) {
+      const trusted = trustedNixStoreFile(candidate);
+      if (trusted) return trusted;
+    } else if (fs.existsSync(candidate)) {
+      return candidate;
+    }
   }
   return undefined;
 }
 
-function resolvePiInvocation(args: string[]): { command: string; args: string[]; warning?: string } {
+function trustedNixStoreFile(candidate: string, executable = false): string | undefined {
+  try {
+    const resolved = fs.realpathSync(candidate);
+    const info = fs.statSync(resolved);
+    if (!resolved.startsWith("/nix/store/") || !info.isFile() || info.uid !== 0 || (info.mode & 0o022) !== 0) return undefined;
+    if (executable) fs.accessSync(resolved, fs.constants.X_OK);
+    return resolved;
+  } catch {
+    return undefined;
+  }
+}
+
+function installedPermissionProxyEntrypoint(): string | undefined {
+  // Anchor the proxy to the already-loaded immutable source tree. Do not
+  // follow a separately replaceable Home Manager sibling symlink.
+  const directory = path.dirname(LOADED_SUBAGENT_MODULE_PATH);
+  for (const candidate of [
+    path.resolve(directory, "permission-proxy.ts"),
+    path.resolve(directory, "permission-proxy.js"),
+  ]) {
+    const trusted = trustedNixStoreFile(candidate);
+    if (trusted) return trusted;
+  }
+  return undefined;
+}
+
+function resolvePiInvocation(args: string[], requireRaw = false): { command: string; args: string[]; warning?: string } {
+  if (requireRaw) {
+    const trustedExecutable = trustedNixStoreFile("/proc/self/exe", true);
+    const execName = trustedExecutable ? path.basename(trustedExecutable).toLowerCase() : "";
+    if (!trustedExecutable || /^(node|bun)(\.exe)?$/.test(execName)) {
+      throw new Error("Guarded native subagents require the current Pi process to be an immutable Nix-store executable");
+    }
+    return { command: trustedExecutable, args };
+  }
+
   const configured = process.env.PI_SUBAGENT_BIN;
   if (configured) return { command: configured, args };
 
@@ -466,12 +519,24 @@ function killProcessTree(proc: ChildProcessWithoutNullStreams): void {
   }
   setTimeout(() => {
     try {
+      // Do not signal a process-group ID after Node has reaped the original
+      // leader; that numeric ID may already belong to an unrelated process.
+      if (proc.exitCode !== null || proc.signalCode !== null) return;
       if (process.platform !== "win32") process.kill(-proc.pid!, "SIGKILL");
       else proc.kill("SIGKILL");
     } catch {
       // already exited
     }
   }, 5000).unref?.();
+}
+
+function guardedNativeTools(requested: string[] | undefined): string[] {
+  const tools = requested?.length ? requested : [...SUBAGENT_PERMISSION_NATIVE_TOOLS];
+  if (new Set(tools).size !== tools.length
+    || tools.some((tool) => !SUBAGENT_PERMISSION_NATIVE_TOOLS.includes(tool as typeof SUBAGENT_PERMISSION_NATIVE_TOOLS[number]))) {
+    throw new Error(`Guarded native subagents support only these explicitly loaded tools: ${SUBAGENT_PERMISSION_NATIVE_TOOLS.join(", ")}`);
+  }
+  return [...tools];
 }
 
 async function runSingleSubagent(
@@ -482,15 +547,32 @@ async function runSingleSubagent(
   signal: AbortSignal | undefined,
   onUpdate: OnUpdateCallback | undefined,
   makeDetails: (results: SingleResult[]) => SubagentDetails,
+  permissionAuthority: SubagentPermissionAuthority | undefined,
 ): Promise<SingleResult> {
   const args: string[] = ["--mode", "json", "-p", "--no-session"];
-  const finalizerEntrypoint = installedFinalizerEntrypoint();
+  const permissionTools = permissionAuthority ? guardedNativeTools(spec.tools) : undefined;
+  if (permissionAuthority) {
+    const permissionProxyEntrypoint = installedPermissionProxyEntrypoint();
+    if (!permissionAuthority.active) throw new Error("Parent AgentSH Permission Gate is unavailable; refusing native subagent launch");
+    if (!permissionProxyEntrypoint) throw new Error("Native subagent Permission Gate proxy is not installed; refusing native subagent launch");
+    args.push("--no-extensions", "--extension", permissionProxyEntrypoint);
+  }
+  const finalizerEntrypoint = installedFinalizerEntrypoint(Boolean(permissionAuthority));
   if (finalizerEntrypoint) args.push("--extension", finalizerEntrypoint);
   if (spec.model) args.push("--model", spec.model);
-  if (spec.tools?.length) args.push("--tools", spec.tools.join(","));
+  if (permissionTools) {
+    // A distinct name prevents a missing/broken proxy from falling back to the
+    // built-in Bash implementation under Pi's hard CLI tool allowlist.
+    args.push("--tools", permissionTools.map((tool) => tool === "bash" ? SUBAGENT_PERMISSION_BASH_TOOL : tool).join(","));
+  } else if (spec.tools?.length) {
+    args.push("--tools", spec.tools.join(","));
+  }
 
   let tmpPromptDir: string | null = null;
   let tmpPromptPath: string | null = null;
+  let permissionRelay: NativeSubagentPermissionRelay | undefined;
+  let permissionRelayFailure: Error | undefined;
+  let launchCwd: string | undefined;
   const subagentId = makeSubagentId(label);
   let childAgentDir: string | undefined;
   let childSessionDir: string | undefined;
@@ -524,9 +606,25 @@ async function runSingleSubagent(
   }
 
   try {
+    const requestedCwd = path.resolve(spec.cwd ?? defaultCwd);
+    launchCwd = await fs.promises.realpath(requestedCwd);
+    const cwdInfo = await fs.promises.stat(launchCwd);
+    if (!cwdInfo.isDirectory()) throw new Error(`Native subagent cwd is not a directory: ${requestedCwd}`);
     childAgentDir = await prepareChildAgentDir(subagentId);
     childSessionDir = path.join(childAgentDir, "sessions");
     currentResult.childAgentDir = childAgentDir;
+
+    if (permissionAuthority) {
+      permissionRelay = await NativeSubagentPermissionRelay.create({
+        authority: permissionAuthority,
+        subagentId,
+        label,
+        task: spec.task,
+        cwd: launchCwd,
+        tools: permissionTools!,
+        signal,
+      });
+    }
 
     if (spec.systemPrompt?.trim()) {
       const tmp = await writePromptToTempFile(label, spec.systemPrompt);
@@ -535,7 +633,9 @@ async function runSingleSubagent(
       args.push("--append-system-prompt", tmpPromptPath);
     }
 
-    args.push(`Task: ${spec.task}`);
+    args.push(permissionTools?.includes("bash")
+      ? `Task: ${spec.task}\n\nUse the ${SUBAGENT_PERMISSION_BASH_TOOL} tool for every Bash or shell command.`
+      : `Task: ${spec.task}`);
     if (signal?.aborted) {
       currentResult.exitCode = 130;
       currentResult.stopReason = "aborted";
@@ -543,7 +643,7 @@ async function runSingleSubagent(
       return currentResult;
     }
 
-    const invocation = resolvePiInvocation(args);
+    const invocation = resolvePiInvocation(args, Boolean(permissionAuthority));
     currentResult.command = invocation.command;
     currentResult.args = invocation.args;
     currentResult.warning = invocation.warning;
@@ -556,14 +656,17 @@ async function runSingleSubagent(
         resolve(130);
         return;
       }
-      const env = {
+      const env: NodeJS.ProcessEnv = {
         ...process.env,
         PI_CODING_AGENT_DIR: childAgentDir,
         PI_CODING_AGENT_SESSION_DIR: childSessionDir,
         PI_SUBAGENT_ID: subagentId,
       };
+      delete env[SUBAGENT_PERMISSION_SOCKET_ENV];
+      delete env[SUBAGENT_PERMISSION_TOKEN_ENV];
+      if (permissionRelay) Object.assign(env, permissionRelay.environment);
       const proc = spawn(invocation.command, invocation.args, {
-        cwd: spec.cwd ?? defaultCwd,
+        cwd: launchCwd,
         env,
         shell: false,
         detached: process.platform !== "win32",
@@ -571,6 +674,16 @@ async function runSingleSubagent(
       });
       let buffer = "";
       let settled = false;
+      permissionRelay?.bindChild(proc.pid);
+      if (permissionRelay) {
+        void permissionRelay.failure.catch((error) => {
+          if (settled) return;
+          permissionRelayFailure = error instanceof Error ? error : new Error(String(error));
+          currentResult.errorMessage = `Native subagent Permission Gate failed closed: ${permissionRelayFailure.message}`;
+          currentResult.stderr += `${currentResult.errorMessage}\n`;
+          killProcessTree(proc);
+        });
+      }
       let activeMessageIndex: number | undefined;
 
       const finish = (code: number) => {
@@ -694,16 +807,36 @@ async function runSingleSubagent(
       });
 
       proc.on("close", (code, closeSignal) => {
-        if (buffer.trim()) processLine(buffer);
-        if (abortHandler && signal) signal.removeEventListener("abort", abortHandler);
-        if (code !== null && code !== undefined) finish(code);
-        else if (closeSignal === "SIGTERM") finish(143);
-        else if (closeSignal === "SIGKILL") finish(137);
-        else if (closeSignal) finish(1);
-        else finish(0);
+        void (async () => {
+          if (buffer.trim()) processLine(buffer);
+          if (abortHandler && signal) signal.removeEventListener("abort", abortHandler);
+          let exitCode = code !== null && code !== undefined
+            ? code
+            : closeSignal === "SIGTERM"
+              ? 143
+              : closeSignal === "SIGKILL"
+                ? 137
+                : closeSignal
+                  ? 1
+                  : 0;
+          if (permissionRelay && exitCode === 0 && !wasAborted) {
+            try {
+              await permissionRelay.waitForGracefulShutdown();
+            } catch (error) {
+              const message = error instanceof Error ? error.message : String(error);
+              currentResult.stderr += `${message}\n`;
+              currentResult.stopReason = "error";
+              currentResult.errorMessage = message;
+              exitCode = 1;
+            }
+          }
+          finish(exitCode);
+          permissionRelay?.dispose();
+        })();
       });
 
       proc.on("error", (error) => {
+        permissionRelay?.close(error instanceof Error ? error : new Error(String(error)));
         const message = error instanceof Error ? error.message : String(error);
         currentResult.stderr += `${message}\n`;
         currentResult.stopReason = wasAborted ? "aborted" : "error";
@@ -723,7 +856,19 @@ async function runSingleSubagent(
       else signal?.addEventListener("abort", abortHandler, { once: true });
     });
 
+    if (permissionRelay) {
+      try {
+        await permissionRelay.ready;
+      } catch (error) {
+        permissionRelayFailure ??= error instanceof Error ? error : new Error(String(error));
+      }
+    }
     currentResult.exitCode = wasAborted ? exitCode || 130 : exitCode;
+    if (permissionRelayFailure) {
+      currentResult.exitCode = currentResult.exitCode || 1;
+      currentResult.stopReason = "error";
+      currentResult.errorMessage = currentResult.errorMessage || `Native subagent Permission Gate failed closed: ${permissionRelayFailure.message}`;
+    }
     if (wasAborted) {
       currentResult.stopReason = "aborted";
       currentResult.errorMessage = currentResult.errorMessage || "Subagent aborted by user.";
@@ -742,6 +887,7 @@ async function runSingleSubagent(
     currentResult.stderr += `${message}\n`;
     return currentResult;
   } finally {
+    permissionRelay?.dispose();
     if (tmpPromptPath) await fs.promises.unlink(tmpPromptPath).catch(() => undefined);
     if (tmpPromptDir) await fs.promises.rm(tmpPromptDir, { recursive: true, force: true }).catch(() => undefined);
   }
@@ -1167,6 +1313,7 @@ export default function (pi: ExtensionAPI) {
       "Delegate focused work through AgentSH when configured, otherwise through native child Pi processes.",
       "Exactly one request form: single task, parallel tasks, chain steps, a background lifecycle operation, or an AgentSH Draft disposition.",
       "Set background=true on task/tasks/chain to continue without blocking; inspect it later with operation and job_id.",
+      "In guard-only sessions, native child shell commands use the parent AgentSH Permission Gate and may request approval in the parent UI.",
       "mode defaults to shared; mode=draft requires an active AgentSH supervisor.",
     ].join(" "),
     promptSnippet: "Delegate focused work synchronously or as a durable-in-session background subagent",
@@ -1255,11 +1402,25 @@ export default function (pi: ExtensionAPI) {
         if (signal?.aborted) throw signal.reason instanceof Error ? signal.reason : new Error("Background subagent launch cancelled");
         const dispositionError = adaptiveDispositionError(params);
         if (dispositionError) throw new Error(dispositionError);
+        const permissionSelection = currentSubagentPermissionSelection();
+        if (agentSHStartup.kind === "conflict" || permissionSelection?.conflict) {
+          throw new Error("Conflicting AgentSH guard-only and full-supervisor authorities were selected; refusing subagent execution");
+        }
         const bridge = agentSHBridge();
         const backend = selectSubagentBackend(bridge, agentSHStartup);
         if (backend.kind === "unavailable") throw new Error(backend.message);
-        if (backend.kind === "native" && !nativeSubagentRequestSupported(params)) {
-          throw new Error("mode=draft requires an active AgentSH supervisor");
+        if (backend.kind === "agentsh" && permissionSelection?.selected) {
+          throw new Error("Conflicting AgentSH guard-only and full-supervisor authorities were selected; refusing subagent execution");
+        }
+        if (backend.kind === "native") {
+          if (!nativeSubagentRequestSupported(params)) throw new Error("mode=draft requires an active AgentSH supervisor");
+          const permissionAuthority = currentSubagentPermissionAuthority();
+          if (!permissionAuthority && (agentSHStartup.kind === "guard-only" || permissionSelection?.selected)) {
+            throw new Error("Parent AgentSH Permission Gate was selected but its authority is unavailable; refusing native subagent launch");
+          }
+          if (permissionAuthority && (!permissionAuthority.active || !installedPermissionProxyEntrypoint())) {
+            throw new Error("Parent AgentSH Permission Gate or its immutable child proxy is unavailable; refusing native subagent launch");
+          }
         }
         const launchedParams = { ...params };
         delete launchedParams.background;
@@ -1295,9 +1456,16 @@ export default function (pi: ExtensionAPI) {
       const dispositionError = adaptiveDispositionError(params);
       if (dispositionError) throw new Error(dispositionError);
 
+      const permissionSelection = currentSubagentPermissionSelection();
+      if (agentSHStartup.kind === "conflict" || permissionSelection?.conflict) {
+        throw new Error("Conflicting AgentSH guard-only and full-supervisor authorities were selected; refusing subagent execution");
+      }
       const bridge = agentSHBridge();
       const backend = selectSubagentBackend(bridge, agentSHStartup);
       if (backend.kind === "unavailable") throw new Error(backend.message);
+      if (backend.kind === "agentsh" && permissionSelection?.selected) {
+        throw new Error("Conflicting AgentSH guard-only and full-supervisor authorities were selected; refusing subagent execution");
+      }
       if (backend.kind === "native" && !nativeSubagentRequestSupported(params)) {
         throw new Error("mode=draft and Draft dispositions require an active AgentSH supervisor");
       }
@@ -1378,6 +1546,16 @@ export default function (pi: ExtensionAPI) {
         const failed = bridge!.subagentAdapter!.detailsFailed(result?.details);
         return attachRetainedSubagentReports({ ...result, details: withBackend(result?.details, "agentsh", failed) }, result);
       }
+      const permissionAuthority = currentSubagentPermissionAuthority();
+      if (!permissionAuthority && (agentSHStartup.kind === "guard-only" || permissionSelection?.selected)) {
+        throw new Error("Parent AgentSH Permission Gate was selected but its authority is unavailable; refusing native subagent launch");
+      }
+      if (permissionAuthority && !permissionAuthority.active) {
+        throw new Error("Parent AgentSH Permission Gate is unavailable; refusing native subagent launch");
+      }
+      if (permissionAuthority && !installedPermissionProxyEntrypoint()) {
+        throw new Error("Native subagent Permission Gate proxy is not installed; refusing native subagent launch");
+      }
       const nativeParams = { ...params };
       delete nativeParams.mode;
       delete nativeParams.action;
@@ -1411,7 +1589,7 @@ export default function (pi: ExtensionAPI) {
               }
             : undefined;
 
-          const result = await runSingleSubagent(ctx.cwd, stepSpec, label, i + 1, signal, chainUpdate, makeDetails("chain"));
+          const result = await runSingleSubagent(ctx.cwd, stepSpec, label, i + 1, signal, chainUpdate, makeDetails("chain"), permissionAuthority);
           results.push(result);
 
           if (isFailure(result)) {
@@ -1472,6 +1650,7 @@ export default function (pi: ExtensionAPI) {
               }
             },
             makeDetails("parallel"),
+            permissionAuthority,
           );
           allResults[index] = result;
           emitParallelUpdate();
@@ -1491,7 +1670,7 @@ export default function (pi: ExtensionAPI) {
         };
       }
 
-      const result = await runSingleSubagent(ctx.cwd, specFromParams(params), "subagent", undefined, signal, onUpdate, makeDetails("single"));
+      const result = await runSingleSubagent(ctx.cwd, specFromParams(params), "subagent", undefined, signal, onUpdate, makeDetails("single"), permissionAuthority);
       if (isFailure(result)) {
         return {
           content: [{ type: "text", text: `Subagent ${result.stopReason || "failed"}: ${truncateByBytes(resultErrorText(result))}` }],
