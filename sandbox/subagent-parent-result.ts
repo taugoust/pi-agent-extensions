@@ -1,4 +1,5 @@
-import { formatSize, type ExtensionContext } from "@mariozechner/pi-coding-agent";
+import type { ExtensionContext } from "@mariozechner/pi-coding-agent";
+import { extractRetainedSubagentReports, formatRemoteSubagentArtifactHints, type RetainedSubagentReport } from "../subagent/result-artifact.js";
 import { boundSubagentProgressCapsules, createSubagentProgressCapsule, sanitizeSubagentParentText } from "./subagent-result.js";
 import { parseSubagentPiJsonStdout, truncateByBytes, usageNumber, usageZero, type SubagentStreamState } from "./subagent-stream.js";
 import { normalizeSubagentTerminal, subagentTerminalFailed } from "./subagent-terminal.js";
@@ -158,30 +159,33 @@ function subagentText(result: any) {
   return JSON.stringify(subagentParentDetails(result) ?? {}, null, 2);
 }
 
-function subagentArtifactHints(result: any): string {
-  if (!Array.isArray(result?.results)) return "";
-  const hints = result.results.flatMap((child: any) => {
-    const label = stringifyData(child?.label || "subagent");
-    const path = typeof child?.fullResultPath === "string" ? child.fullResultPath : "";
-    if (path) {
-      const bytes = usageNumber(child?.artifactBytes);
-      const total = usageNumber(child?.finalTotalBytes);
-      const completeness = child?.artifactComplete === false && total
-        ? ` (${formatSize(bytes)} of ${formatSize(total)} retained)`
-        : "";
-      return [`Full subagent result [${label}]: ${path}${completeness}`];
-    }
-    if (typeof child?.artifactError === "string" && child.artifactError) {
-      return [`Subagent result artifact unavailable [${label}]: ${child.artifactError}`];
-    }
-    return [];
+export function trustedRetainedSubagentReports(rawResult: any, details: any, streamedStates?: Map<string, SubagentStreamState>): RetainedSubagentReport[] {
+  const rawResults = Array.isArray(rawResult?.results) ? rawResult.results : [];
+  const normalized = Array.isArray(details?.results) ? details.results : [];
+  const source = normalized.map((child: any, index: number) => {
+    const label = stringifyData(child?.label || `result ${index + 1}`);
+    const raw = rawResults[index] ?? {};
+    const streamed = streamedStates?.get(label);
+    const completed = !subagentTerminalFailed(child?.terminal);
+    const candidates = completed
+      ? [raw?.final, streamed ? latestSubagentAssistantText(streamed) : "", child?.final, child?.lastAssistantText]
+      : [child?.errorMessage, child?.terminal?.message, raw?.error, raw?.errorMessage];
+    const final = candidates
+      .filter((candidate): candidate is string => typeof candidate === "string" && candidate.trim().length > 0)
+      .sort((left, right) => Buffer.byteLength(right, "utf8") - Buffer.byteLength(left, "utf8"))[0];
+    return {
+      label,
+      final: final || "(no visible terminal report)",
+      final_truncated: raw?.final_truncated ?? raw?.finalTruncated,
+      final_total_bytes: raw?.final_total_bytes ?? raw?.finalTotalBytes,
+    };
   });
-  return truncateByBytes(hints.join("\n"), 4 * 1024);
+  return extractRetainedSubagentReports({ results: source });
 }
 
 export function boundedSubagentParentOutput(result: any): string {
   const inline = truncateByBytes(subagentText(result));
-  const artifactHints = subagentArtifactHints(result);
+  const artifactHints = formatRemoteSubagentArtifactHints(result?.results, truncateByBytes);
   const terminals = [result?.terminal, ...(Array.isArray(result?.results) ? result.results.map((child: any) => child?.terminal) : [])];
   const sideEffectsUnknown = terminals.some((terminal) => terminal?.sideEffectsMayHaveOccurred === true && terminal?.retryable !== true);
   const safetyHint = sideEffectsUnknown ? "The subagent may have produced side effects and must not be replayed automatically." : "";

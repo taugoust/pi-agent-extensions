@@ -1700,6 +1700,12 @@ in
           Number(options = {}) {
             return { type: "number", ...options };
           },
+          Integer(options = {}) {
+            return { type: "integer", ...options };
+          },
+          Boolean(options = {}) {
+            return { type: "boolean", ...options };
+          },
           Array(items, options = {}) {
             return { type: "array", items, ...options };
           },
@@ -1999,6 +2005,11 @@ in
             selectCalls,
             customCalls,
             ui,
+            sessionManager: {
+              getSessionId: () => "sandbox-check-session",
+              getSessionFile: () => process.env.TMPDIR + "/agent/sessions/sandbox-check.jsonl",
+            },
+            isIdle: () => false,
           };
         }
 
@@ -3548,6 +3559,26 @@ in
             assert(!artifactToolResult.content[0].text.includes(artifactTail), "long artifact tail was injected into bounded parent context");
             const artifactSpawnRequest = supervisor.requests.find((request) => request.method === "POST" && request.url.endsWith("/tools/spawn_subagent") && request.body.task === "artifact-overflow");
             assert(artifactSpawnRequest?.body.result_artifact_threshold_bytes === 4096, "extension did not request the 4 KiB remote artifact threshold");
+
+            const backgroundStart = await subagentTool.execute("background-artifact", { task: "artifact-overflow", background: true }, undefined, undefined, ctx);
+            const backgroundID = backgroundStart.details.job_id;
+            assert(/^subagent-job-[0-9a-f]{24}$/.test(backgroundID), "background AgentSH launch omitted its opaque job ID");
+            let backgroundWait;
+            for (let attempt = 0; attempt < 20; attempt++) {
+              backgroundWait = await subagentTool.execute("background-wait", { operation: "wait", job_id: backgroundID, wait_ms: 100 }, undefined, undefined, ctx);
+              if (backgroundWait.details.status !== "running" && backgroundWait.details.status !== "cancelling") break;
+            }
+            assert(backgroundWait.details.status === "completed", "background AgentSH result did not complete: " + JSON.stringify(backgroundWait.details));
+            assert(backgroundWait.details.result_children?.[0]?.sha256?.length === 64, "background result metadata omitted its checksum");
+            let reconstructed = "";
+            let nextOffset = 0;
+            do {
+              const page = await subagentTool.execute("background-result", { operation: "result", job_id: backgroundID, offset: nextOffset, limit: 1024 }, undefined, undefined, ctx);
+              reconstructed += page.content[0].text.split("\n\n")[1].split("\n\n[Use operation=result")[0];
+              nextOffset = page.details.next_offset;
+            } while (nextOffset !== undefined);
+            assert(reconstructed === artifactFinal, "paginated background AgentSH report was not reconstructed exactly");
+
             const readTool = pi.tools.get("read");
             assert(readTool, "supervised read tool was not registered");
             const readBashArtifactResult = await readTool.execute("read-bash-artifact", { path: bashArtifactPath }, undefined, undefined, ctx);

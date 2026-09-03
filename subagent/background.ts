@@ -1,7 +1,12 @@
-import { randomBytes } from "node:crypto";
+import { createHash, randomBytes } from "node:crypto";
 import { constants } from "node:fs";
 import { access, lstat, mkdir, open, readFile, readdir, rename, rm, writeFile } from "node:fs/promises";
 import { dirname, join } from "node:path";
+import {
+  MAX_RETAINED_SUBAGENT_REPORT_BYTES,
+  MAX_SUBAGENT_RESULT_PAGE_BYTES,
+  type RetainedSubagentReport,
+} from "./result-artifact.js";
 
 export const BACKGROUND_SUBAGENT_ID_PATTERN = /^subagent-job-[0-9a-f]{24}$/;
 export const MAX_BACKGROUND_SUBAGENTS = 8;
@@ -9,13 +14,22 @@ export const MAX_BACKGROUND_SUBAGENT_TEXT_BYTES = 50 * 1024;
 const MAX_STATE_BYTES = 128 * 1024;
 const TERMINAL_RETENTION_MS = 7 * 24 * 60 * 60 * 1000;
 const MAX_TERMINAL_RECORDS = 100;
-const SCHEMA_VERSION = 1;
+const SCHEMA_VERSION = 2;
 
 export type BackgroundSubagentStatus = "running" | "cancelling" | "completed" | "failed" | "cancelled" | "lost";
 export type BackgroundSubagentBackend = "native" | "agentsh";
 
+export type BackgroundSubagentArtifact = {
+  child: number;
+  label: string;
+  bytes: number;
+  totalBytes: number;
+  complete: boolean;
+  sha256: string;
+};
+
 export type BackgroundSubagentRecord = {
-  schemaVersion: 1;
+  schemaVersion: 2;
   id: string;
   sessionId: string;
   backend: BackgroundSubagentBackend;
@@ -28,12 +42,27 @@ export type BackgroundSubagentRecord = {
   status: BackgroundSubagentStatus;
   latest: string;
   result?: string;
+  artifacts?: BackgroundSubagentArtifact[];
   error?: string;
 };
 
 export type BackgroundSubagentOutcome = {
   text: string;
   failed: boolean;
+  reports?: RetainedSubagentReport[];
+};
+
+export type BackgroundSubagentResultPage = {
+  child: number;
+  label: string;
+  offset: number;
+  nextOffset?: number;
+  bytes: number;
+  totalBytes: number;
+  sourceTotalBytes: number;
+  complete: boolean;
+  sha256: string;
+  text: string;
 };
 
 export type BackgroundSubagentRunner = (
@@ -46,8 +75,8 @@ type RuntimeRegistry = {
   flushTimers: Map<string, NodeJS.Timeout>;
 };
 
-const RUNTIME_KEY = "__paeBackgroundSubagentRuntimeV1";
-const MANAGERS_KEY = "__paeBackgroundSubagentManagersV1";
+const RUNTIME_KEY = "__paeBackgroundSubagentRuntimeV2";
+const MANAGERS_KEY = "__paeBackgroundSubagentManagersV2";
 
 function runtimeRegistry(): RuntimeRegistry {
   const root = globalThis as Record<string, unknown>;
@@ -62,7 +91,17 @@ function boundedText(value: unknown, maximum = MAX_BACKGROUND_SUBAGENT_TEXT_BYTE
   const text = typeof value === "string" ? value : value === undefined ? "" : String(value);
   const bytes = Buffer.from(text, "utf8");
   if (bytes.length <= maximum) return text;
-  return `${bytes.subarray(0, maximum).toString("utf8").replace(/\uFFFD$/u, "")}\n\n… truncated at ${maximum} bytes`;
+  const suffix = Buffer.from(`\n\n… truncated at ${maximum} bytes`, "utf8");
+  let prefix = bytes.subarray(0, Math.max(0, maximum - suffix.length));
+  while (prefix.length > 0) {
+    try {
+      new TextDecoder("utf-8", { fatal: true }).decode(prefix);
+      break;
+    } catch {
+      prefix = prefix.subarray(0, -1);
+    }
+  }
+  return Buffer.concat([prefix, suffix]).subarray(0, maximum).toString("utf8");
 }
 
 function requiredString(value: unknown, label: string, maximum: number): string {
@@ -72,12 +111,33 @@ function requiredString(value: unknown, label: string, maximum: number): string 
   return value;
 }
 
+function parseArtifacts(value: unknown): BackgroundSubagentArtifact[] {
+  if (!Array.isArray(value) || value.length > 8) throw new Error("invalid background subagent artifacts");
+  return value.map((entry, index) => {
+    if (!entry || typeof entry !== "object" || Array.isArray(entry)) throw new Error("invalid background subagent artifact");
+    const artifact = entry as Record<string, unknown>;
+    if (!Number.isSafeInteger(artifact.child) || artifact.child !== index + 1) throw new Error("invalid background subagent artifact child");
+    if (!Number.isSafeInteger(artifact.bytes) || (artifact.bytes as number) < 0 || (artifact.bytes as number) > MAX_RETAINED_SUBAGENT_REPORT_BYTES) throw new Error("invalid background subagent artifact bytes");
+    if (!Number.isSafeInteger(artifact.totalBytes) || (artifact.totalBytes as number) < (artifact.bytes as number)) throw new Error("invalid background subagent artifact total bytes");
+    if (typeof artifact.complete !== "boolean") throw new Error("invalid background subagent artifact completeness");
+    if (typeof artifact.sha256 !== "string" || !/^[0-9a-f]{64}$/.test(artifact.sha256)) throw new Error("invalid background subagent artifact checksum");
+    return {
+      child: artifact.child as number,
+      label: requiredString(artifact.label, "background subagent artifact label", 256),
+      bytes: artifact.bytes as number,
+      totalBytes: artifact.totalBytes as number,
+      complete: artifact.complete,
+      sha256: artifact.sha256,
+    };
+  });
+}
+
 function parseRecord(value: unknown): BackgroundSubagentRecord {
   if (!value || typeof value !== "object" || Array.isArray(value)) throw new Error("background subagent state must be an object");
   const data = value as Record<string, unknown>;
-  const allowed = new Set(["schemaVersion", "id", "sessionId", "backend", "mode", "summary", "createdAt", "updatedAt", "ownerPid", "ownerStartToken", "status", "latest", "result", "error"]);
+  const allowed = new Set(["schemaVersion", "id", "sessionId", "backend", "mode", "summary", "createdAt", "updatedAt", "ownerPid", "ownerStartToken", "status", "latest", "result", "artifacts", "error"]);
   for (const key of Object.keys(data)) if (!allowed.has(key)) throw new Error(`unknown background subagent field ${key}`);
-  if (data.schemaVersion !== SCHEMA_VERSION) throw new Error("unsupported background subagent state schema");
+  if (data.schemaVersion !== 1 && data.schemaVersion !== SCHEMA_VERSION) throw new Error("unsupported background subagent state schema");
   const id = requiredString(data.id, "background subagent id", 64);
   if (!BACKGROUND_SUBAGENT_ID_PATTERN.test(id)) throw new Error("invalid background subagent id");
   if (data.backend !== "native" && data.backend !== "agentsh") throw new Error("invalid background subagent backend");
@@ -87,6 +147,7 @@ function parseRecord(value: unknown): BackgroundSubagentRecord {
   for (const field of ["createdAt", "updatedAt"] as const) {
     if (!Number.isFinite(Date.parse(requiredString(data[field], field, 64)))) throw new Error(`invalid ${field}`);
   }
+  const artifacts = data.artifacts === undefined ? undefined : parseArtifacts(data.artifacts);
   return {
     schemaVersion: SCHEMA_VERSION,
     id,
@@ -101,6 +162,7 @@ function parseRecord(value: unknown): BackgroundSubagentRecord {
     status: data.status as BackgroundSubagentStatus,
     latest: boundedText(data.latest),
     ...(data.result === undefined ? {} : { result: boundedText(data.result) }),
+    ...(artifacts?.length ? { artifacts } : {}),
     ...(data.error === undefined ? {} : { error: boundedText(data.error, 4096) }),
   };
 }
@@ -118,11 +180,15 @@ async function processStartToken(pid: number): Promise<string | undefined> {
   return `${pid}:${Math.floor(Date.now() - process.uptime() * 1000)}`;
 }
 
-async function writeAtomic(path: string, value: unknown): Promise<void> {
+async function writeAtomicBytes(path: string, value: string | Buffer): Promise<void> {
   await mkdir(dirname(path), { recursive: true, mode: 0o700 });
   const temporary = `${path}.tmp-${process.pid}-${randomBytes(6).toString("hex")}`;
-  await writeFile(temporary, `${JSON.stringify(value)}\n`, { mode: 0o600, flag: "wx" });
+  await writeFile(temporary, value, { mode: 0o600, flag: "wx" });
   await rename(temporary, path);
+}
+
+async function writeAtomic(path: string, value: unknown): Promise<void> {
+  await writeAtomicBytes(path, `${JSON.stringify(value)}\n`);
 }
 
 async function exists(path: string): Promise<boolean> {
@@ -145,6 +211,10 @@ export class BackgroundSubagentManager {
   }
   private statePath(id: string): string { return join(this.jobDir(id), "state.json"); }
   private notifiedPath(id: string): string { return join(this.jobDir(id), "notified"); }
+  private artifactPath(id: string, child: number): string {
+    if (!Number.isSafeInteger(child) || child < 1 || child > 8) throw new Error("Invalid background subagent result child");
+    return join(this.jobDir(id), `result-${child}.md`);
+  }
 
   async initialize(): Promise<void> {
     if (!this.initialized) this.initialized = this.initializeOnce();
@@ -168,7 +238,7 @@ export class BackgroundSubagentManager {
         if (!info.isFile() || info.isSymbolicLink() || info.size > MAX_STATE_BYTES) continue;
         const record = parseRecord(JSON.parse(await readFile(this.statePath(entry.name), "utf8")));
         if ((record.status === "running" || record.status === "cancelling") &&
-            (record.ownerPid !== process.pid || record.ownerStartToken !== this.ownerStartToken)) {
+            (!this.runtime.controllers.has(record.id) || record.ownerPid !== process.pid || record.ownerStartToken !== this.ownerStartToken)) {
           record.status = "lost";
           record.updatedAt = new Date().toISOString();
           record.error = "The owning Pi process exited before this subagent reported a terminal result.";
@@ -228,7 +298,7 @@ export class BackgroundSubagentManager {
     const controller = new AbortController();
     this.runtime.controllers.set(id, controller);
     void Promise.resolve().then(() => runner(controller.signal, (text) => this.updateProgress(id, text))).then(
-      (outcome) => this.finish(id, controller.signal.aborted ? "cancelled" : outcome.failed ? "failed" : "completed", outcome.text),
+      (outcome) => this.finish(id, controller.signal.aborted ? "cancelled" : outcome.failed ? "failed" : "completed", outcome.text, undefined, outcome.reports),
       (error) => {
         const message = error instanceof Error ? error.message : String(error);
         return this.finish(id, controller.signal.aborted ? "cancelled" : "failed", message, message);
@@ -252,19 +322,52 @@ export class BackgroundSubagentManager {
     this.runtime.flushTimers.set(id, timer);
   }
 
-  private async finish(id: string, status: "completed" | "failed" | "cancelled", text: string, error?: string): Promise<void> {
+  private async persistReports(id: string, reports: RetainedSubagentReport[]): Promise<BackgroundSubagentArtifact[]> {
+    const artifacts: BackgroundSubagentArtifact[] = [];
+    for (let index = 0; index < reports.slice(0, 8).length; index++) {
+      const report = reports[index];
+      const source = Buffer.from(report.text, "utf8");
+      let retained = source.subarray(0, MAX_RETAINED_SUBAGENT_REPORT_BYTES);
+      while (retained.length > 0) {
+        try {
+          new TextDecoder("utf-8", { fatal: true }).decode(retained);
+          break;
+        } catch {
+          retained = retained.subarray(0, -1);
+        }
+      }
+      await writeAtomicBytes(this.artifactPath(id, index + 1), retained);
+      artifacts.push({
+        child: index + 1,
+        label: boundedText(report.label, 256) || `result ${index + 1}`,
+        bytes: retained.byteLength,
+        totalBytes: Math.max(source.byteLength, report.totalBytes ?? 0),
+        complete: report.complete !== false && retained.byteLength === source.byteLength,
+        sha256: createHash("sha256").update(retained).digest("hex"),
+      });
+    }
+    return artifacts;
+  }
+
+  private async finish(id: string, status: "completed" | "failed" | "cancelled", text: string, error?: string, reports?: RetainedSubagentReport[]): Promise<void> {
     const record = this.records.get(id);
     if (!record || !["running", "cancelling"].includes(record.status)) return;
     const timer = this.runtime.flushTimers.get(id);
     if (timer) clearTimeout(timer);
     this.runtime.flushTimers.delete(id);
-    this.runtime.controllers.delete(id);
-    record.status = status;
-    record.updatedAt = new Date().toISOString();
     record.result = boundedText(text || record.latest || "(no output)");
     record.latest = record.result;
     if (error) record.error = boundedText(error, 4096);
+    try {
+      const retainedReports = reports?.filter((report) => report.text.trim()) ?? [];
+      record.artifacts = await this.persistReports(id, retainedReports.length ? retainedReports : [{ label: "result", text: text || record.latest || "(no output)" }]);
+    } catch (artifactError) {
+      record.error = boundedText([record.error, `Result artifact unavailable: ${artifactError instanceof Error ? artifactError.message : String(artifactError)}`].filter(Boolean).join("\n"), 4096);
+    }
+    record.status = status;
+    record.updatedAt = new Date().toISOString();
     await this.persist(record);
+    this.runtime.controllers.delete(id);
     await this.prune();
   }
 
@@ -273,6 +376,69 @@ export class BackgroundSubagentManager {
     const record = this.records.get(id);
     if (!record) throw new Error(`Unknown background subagent: ${id}`);
     return structuredClone(record);
+  }
+
+  async readResult(id: string, child: number | undefined = undefined, offset = 0, limit = MAX_SUBAGENT_RESULT_PAGE_BYTES): Promise<BackgroundSubagentResultPage> {
+    const record = await this.get(id);
+    if (isBackgroundSubagentActive(record)) throw new Error("Background subagent result is not ready");
+    if (!Number.isSafeInteger(offset) || offset < 0) throw new Error("Result offset must be a non-negative integer");
+    if (!Number.isSafeInteger(limit) || limit < 4 || limit > MAX_SUBAGENT_RESULT_PAGE_BYTES) throw new Error(`Result limit must be between 4 and ${MAX_SUBAGENT_RESULT_PAGE_BYTES} bytes`);
+    let artifacts = record.artifacts ?? [];
+    const legacyResult = record.result || record.latest;
+    if (artifacts.length === 0 && legacyResult) {
+      const current = this.records.get(id);
+      if (!current) throw new Error(`Unknown background subagent: ${id}`);
+      current.artifacts = await this.persistReports(id, [{ label: "result", text: legacyResult, totalBytes: Buffer.byteLength(legacyResult, "utf8") + 1, complete: false }]);
+      await this.persist(current);
+      artifacts = current.artifacts;
+    }
+    if (artifacts.length === 0) throw new Error("No retained result artifact is available for this background subagent");
+    if (artifacts.length > 1 && child === undefined) throw new Error("Parallel and chain results require a child number");
+    child ??= 1;
+    const artifact = artifacts.find((candidate) => candidate.child === child);
+    if (!artifact) throw new Error(`Background subagent result child ${child} is unavailable`);
+    if (offset > artifact.bytes) throw new Error(`Result offset ${offset} exceeds retained size ${artifact.bytes}`);
+    const path = this.artifactPath(id, child);
+    const info = await lstat(path);
+    if (!info.isFile() || info.isSymbolicLink() || info.size !== artifact.bytes) throw new Error("Retained background subagent result identity is invalid");
+    if (process.getuid && info.uid !== process.getuid()) throw new Error("Retained background subagent result is owned by another user");
+    if ((info.mode & 0o077) !== 0) throw new Error("Retained background subagent result is not private");
+    const noFollow = typeof constants.O_NOFOLLOW === "number" ? constants.O_NOFOLLOW : 0;
+    const handle = await open(path, constants.O_RDONLY | noFollow);
+    try {
+      const opened = await handle.stat();
+      if (!opened.isFile() || opened.size !== artifact.bytes || opened.dev !== info.dev || opened.ino !== info.ino) throw new Error("Retained background subagent result identity changed");
+      const completeArtifact = await handle.readFile();
+      if (createHash("sha256").update(completeArtifact).digest("hex") !== artifact.sha256) throw new Error("Retained background subagent result checksum mismatch");
+      if (offset < artifact.bytes && (completeArtifact[offset] & 0xc0) === 0x80) throw new Error(`Result offset ${offset} is not a UTF-8 character boundary`);
+      const bytesRead = Math.min(limit, artifact.bytes - offset);
+      let retained = completeArtifact.subarray(offset, offset + bytesRead);
+      let text = "";
+      while (retained.length > 0) {
+        try {
+          text = new TextDecoder("utf-8", { fatal: true }).decode(retained);
+          break;
+        } catch {
+          retained = retained.subarray(0, -1);
+        }
+      }
+      const nextOffset = offset + retained.byteLength < artifact.bytes ? offset + retained.byteLength : undefined;
+      if (bytesRead > 0 && retained.byteLength === 0) throw new Error("Result limit ends before one complete UTF-8 character");
+      return {
+        child,
+        label: artifact.label,
+        offset,
+        ...(nextOffset === undefined ? {} : { nextOffset }),
+        bytes: retained.byteLength,
+        totalBytes: artifact.bytes,
+        sourceTotalBytes: artifact.totalBytes,
+        complete: artifact.complete,
+        sha256: artifact.sha256,
+        text,
+      };
+    } finally {
+      await handle.close();
+    }
   }
 
   async list(sessionId?: string, limit = 50): Promise<BackgroundSubagentRecord[]> {

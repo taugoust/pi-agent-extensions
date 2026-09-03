@@ -5,6 +5,7 @@ import {
   latestSubagentAssistantText,
   piProtocolFailure,
   subagentParentDetails,
+  trustedRetainedSubagentReports,
 } from "./subagent-parent-result.js";
 import { createSubagentStreamState } from "./subagent-stream.js";
 
@@ -197,6 +198,26 @@ const modelContext = {
   assert.match(output, /Subagent result artifact unavailable \[missing\]: persistence denied/);
   assert.match(output, /must not be replayed automatically/);
   assert.equal(output.includes("lower-priority final"), false);
+}
+
+{
+  const streamed = createSubagentStreamState({
+    label: "recovered",
+    messages: [{ role: "assistant", content: [{ type: "text", text: "complete streamed answer" }], stopReason: "stop" }],
+  });
+  const reports = trustedRetainedSubagentReports({
+    results: [
+      { label: "rejected", final: "stale raw success" },
+      { label: "recovered", final: "" },
+    ],
+  }, {
+    results: [
+      { label: "rejected", terminal: { state: "failed", message: "protocol rejected" }, errorMessage: "protocol rejected" },
+      { label: "recovered", terminal: { state: "completed" }, final: "short capsule" },
+    ],
+  }, new Map([["recovered", streamed]]));
+  assert.equal(reports[0].text, "protocol rejected", "rejected stale raw final was retained");
+  assert.equal(reports[1].text, "complete streamed answer", "stream-recovered final was not retained");
 }
 
 console.log("sandbox subagent parent result glue checks passed");

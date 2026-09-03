@@ -666,16 +666,21 @@ artifacts, and Draft lifecycle whenever its backend is active.
 { "chain": [{ "task": "Find files" }, { "task": "Plan from: {previous}" }] }
 { "task": "Run the slower investigation", "background": true }
 { "operation": "wait", "job_id": "subagent-job-...", "wait_ms": 30000 }
-{ "operation": "result", "job_id": "subagent-job-..." }
+{ "operation": "result", "job_id": "subagent-job-...", "child": 1, "offset": 0, "limit": 49152 }
 { "mode": "draft", "task": "Implement and commit the change in an isolated VM" }
 { "mode": "draft", "action": "review", "draft_id": "session-..." }
 ```
 
 Background launches support single, parallel, and chain requests through both
-adaptive backends. They return immediately, retain bounded progress/results in
-a private per-user store, and emit deduplicated active/passive completion
-events. `list`, `status`, `output`, bounded `wait`, `result`, and `cancel` remain
-part of the same tool. Cancelling `wait` does not cancel execution. Because
+adaptive backends. They return immediately, retain a 50 KiB preview plus each
+child's complete terminal report up to 16 MiB in a private per-user store, and
+emit deduplicated active/passive completion events. `result` pages those reports
+by byte `offset` and a limit of at most 48 KiB (leaving room inside the 50 KiB
+parent-response budget); parallel and chain jobs select a one-based `child`.
+`list`, `status`, `output`, bounded `wait`, `result`, and `cancel` remain part of
+the same tool. Artifact identity and SHA-256 are verified before each page is
+returned, and result artifacts are removed with their terminal job record.
+Cancelling `wait` does not cancel execution. Because
 AgentSH authority and native child pipes are bound to the owning Pi process,
 running background subagents are cancelled on orderly session shutdown and are
 reported as `lost` after an unclean Pi restart; terminal records remain

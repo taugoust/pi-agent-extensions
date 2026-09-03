@@ -34,6 +34,7 @@ pkgs.runCommand "subagent-check"
     cp ${self}/subagent/background.ts "$workdir/src/subagent/background.ts"
     cp ${self}/subagent/foreground-handoff.ts "$workdir/src/subagent/foreground-handoff.ts"
     cp ${self}/subagent/parallel-result.ts "$workdir/src/subagent/parallel-result.ts"
+    cp ${self}/subagent/result-artifact.ts "$workdir/src/subagent/result-artifact.ts"
     cp ${self}/shared/agentsh-mode.ts "$workdir/src/shared/agentsh-mode.ts"
 
     grep -A12 'const currentResult: SingleResult' ${self}/subagent/index.ts | grep -Fq 'exitCode: -1,'
@@ -51,6 +52,7 @@ pkgs.runCommand "subagent-check"
       "$workdir/src/subagent/background.ts" \
       "$workdir/src/subagent/foreground-handoff.ts" \
       "$workdir/src/subagent/parallel-result.ts" \
+      "$workdir/src/subagent/result-artifact.ts" \
       "$workdir/src/shared/agentsh-mode.ts"
 
     cat > "$workdir/test.mjs" <<'EOF'
@@ -63,6 +65,7 @@ pkgs.runCommand "subagent-check"
     const mode = await import(pathToFileURL(process.argv[4]).href);
     const background = await import(pathToFileURL(process.argv[5]).href);
     const handoff = await import(pathToFileURL(process.argv[6]).href);
+    const artifacts = await import(pathToFileURL(process.argv[7]).href);
     assert.equal(background.MAX_BACKGROUND_SUBAGENTS, 8);
     const format = imported.formatParallelResultContent ?? imported.default?.formatParallelResultContent;
     const nativeStartup = mode.classifyAgentSHStartup({});
@@ -176,7 +179,7 @@ pkgs.runCommand "subagent-check"
     const success = await manager.start({ sessionId: "session-a", backend: "native", mode: "single", summary: "slow review" }, async (_signal, update) => {
       update("working");
       await new Promise((resolve) => setTimeout(resolve, 80));
-      return { text: "review complete", failed: false };
+      return { text: "review complete", failed: false, reports: [{ label: "review", text: "complete report α\nsecond page" }] };
     });
     assert.match(success.id, background.BACKGROUND_SUBAGENT_ID_PATTERN);
     assert.equal(success.status, "running");
@@ -184,6 +187,20 @@ pkgs.runCommand "subagent-check"
     const completed = await manager.wait(success.id, 2000);
     assert.equal(completed.record.status, "completed");
     assert.equal(completed.record.result, "review complete");
+    assert.equal(completed.record.artifacts.length, 1);
+    assert.match(completed.record.artifacts[0].sha256, /^[0-9a-f]{64}$/);
+    const firstPage = await manager.readResult(success.id, undefined, 0, 18);
+    assert.equal(firstPage.text, "complete report α");
+    assert.equal(firstPage.nextOffset, 18);
+    const secondPage = await manager.readResult(success.id, 1, firstPage.nextOffset, 1024);
+    assert.equal(firstPage.text + secondPage.text, "complete report α\nsecond page");
+    assert.equal(secondPage.nextOffset, undefined);
+    assert.equal(secondPage.complete, true);
+    assert.equal(secondPage.sha256, completed.record.artifacts[0].sha256);
+    const resultPath = stateRoot + "/jobs/" + success.id + "/result-1.md";
+    await writeFile(resultPath, "x".repeat(completed.record.artifacts[0].bytes), { mode: 0o600 });
+    await assert.rejects(manager.readResult(success.id), /checksum mismatch/);
+    await writeFile(resultPath, "complete report α\nsecond page", { mode: 0o600 });
     assert.equal(await manager.markNotified(success.id), true);
     assert.equal(await manager.markNotified(success.id), false);
 
@@ -207,6 +224,36 @@ pkgs.runCommand "subagent-check"
     assert.equal((await manager.wait(failing.id, 2000)).record.status, "failed");
     assert.equal((await manager.list("session-a", 10)).length, 3);
 
+    const parallel = await manager.start({ sessionId: "session-a", backend: "native", mode: "parallel", summary: "two reports" }, async () => ({
+      text: "bounded preview", failed: false,
+      reports: [{ label: "task 1", text: "first full report" }, { label: "task 2", text: "second full report" }],
+    }));
+    await manager.wait(parallel.id, 2000);
+    await assert.rejects(manager.readResult(parallel.id), /require a child number/);
+    assert.equal((await manager.readResult(parallel.id, 2)).text, "second full report");
+
+    const attached = artifacts.attachRetainedSubagentReports({ content: [{ type: "text", text: "preview" }] }, {
+      results: [{ label: "remote", final: "remote complete report" }],
+    });
+    assert.deepEqual(artifacts.extractRetainedSubagentReports(attached), [{ label: "remote", text: "remote complete report", totalBytes: 22, complete: true }]);
+    assert.equal(Object.getOwnPropertySymbols(attached).length, 1);
+    assert.equal(JSON.stringify(attached).includes("remote complete report"), false, "ephemeral complete report leaked into serialized tool result");
+    assert.deepEqual(artifacts.extractRetainedSubagentReports({ results: [
+      { label: "failed", error: "first failed" },
+      { label: "complete", final: "second complete" },
+    ] }).map((report) => [report.label, report.text]), [["failed", "first failed"], ["complete", "second complete"]]);
+    await assert.rejects(manager.readResult(success.id, 1, 17, 8), /UTF-8 character boundary/);
+
+    const longLabel = "λ".repeat(300);
+    const labelled = await manager.start({ sessionId: "session-a", backend: "native", mode: "single", summary: "long label" }, async () => ({
+      text: "preview", failed: false, reports: [{ label: longLabel, text: "report" }],
+    }));
+    const labelledRecord = (await manager.wait(labelled.id, 2000)).record;
+    assert.ok(Buffer.byteLength(labelledRecord.artifacts[0].label, "utf8") <= 256);
+    const reloadedLabels = new background.BackgroundSubagentManager(stateRoot);
+    await reloadedLabels.initialize();
+    assert.equal((await reloadedLabels.get(labelled.id)).artifacts.length, 1);
+
     const staleRoot = stateRoot + "-stale";
     const staleID = "subagent-job-0123456789abcdef01234567";
     await mkdir(staleRoot + "/jobs/" + staleID, { recursive: true, mode: 0o700 });
@@ -221,7 +268,7 @@ pkgs.runCommand "subagent-check"
     assert.equal((await recovered.get(staleID)).status, "lost");
     EOF
 
-    node "$workdir/test.mjs" "$workdir/out/subagent/parallel-result.js" "$workdir/out/subagent/backend.js" "$workdir/out/shared/agentsh-mode.js" "$workdir/out/subagent/background.js" "$workdir/out/subagent/foreground-handoff.js"
+    node "$workdir/test.mjs" "$workdir/out/subagent/parallel-result.js" "$workdir/out/subagent/backend.js" "$workdir/out/shared/agentsh-mode.js" "$workdir/out/subagent/background.js" "$workdir/out/subagent/foreground-handoff.js" "$workdir/out/subagent/result-artifact.js"
     grep -F 'formatParallelResultContent(sections, successCount, MAX_TEXT_PREVIEW_BYTES)' ${self}/subagent/index.ts >/dev/null
     grep -F '(cfg.extensions.sandbox.enable || cfg.extensions.subagent.enable)' ${self}/nix/module.nix >/dev/null
     grep -F 'builtins.elem "sandbox" extensions' ${self}/nix/mk-extension-bundle.nix >/dev/null
@@ -229,6 +276,7 @@ pkgs.runCommand "subagent-check"
     grep -F '"''${extDir}/subagent/background.ts".source = "''${self}/subagent/background.ts";' ${self}/nix/module.nix >/dev/null
     grep -F '"''${extDir}/subagent/foreground-handoff.ts".source = "''${self}/subagent/foreground-handoff.ts";' ${self}/nix/module.nix >/dev/null
     grep -F '"''${extDir}/subagent/parallel-result.ts".source = "''${self}/subagent/parallel-result.ts";' ${self}/nix/module.nix >/dev/null
+    grep -F '"''${extDir}/subagent/result-artifact.ts".source = "''${self}/subagent/result-artifact.ts";' ${self}/nix/module.nix >/dev/null
     if grep -F 'name: "subagent"' ${self}/sandbox/index.ts >/dev/null; then
       echo 'sandbox still registers a duplicate subagent tool' >&2
       exit 1
@@ -243,6 +291,7 @@ pkgs.runCommand "subagent-check"
       test -f "$bundle/subagent/index.ts"
       test -f "$bundle/subagent/background.ts"
       test -f "$bundle/subagent/foreground-handoff.ts"
+      test -f "$bundle/subagent/result-artifact.ts"
       test -f "$bundle/subagent-finalizer/index.ts"
       test -f "$bundle/shared/agentsh-mode.ts"
     done

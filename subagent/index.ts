@@ -32,6 +32,7 @@ import {
 } from "./background.js";
 import { DetachableForegroundExecution } from "./foreground-handoff.js";
 import { formatParallelResultContent } from "./parallel-result.js";
+import { MAX_SUBAGENT_RESULT_PAGE_BYTES, attachRetainedSubagentReports, extractRetainedSubagentReports } from "./result-artifact.js";
 
 const MAX_PARALLEL_TASKS = 8;
 const MAX_CONCURRENCY = 4;
@@ -103,6 +104,15 @@ type BackgroundSubagentDetails = {
   backend?: "native" | "agentsh";
   failed?: boolean;
   timed_out?: boolean;
+  child?: number;
+  offset?: number;
+  next_offset?: number;
+  bytes?: number;
+  total_bytes?: number;
+  source_total_bytes?: number;
+  complete?: boolean;
+  sha256?: string;
+  result_children?: Array<{ child: number; label: string; bytes: number; total_bytes: number; complete: boolean; sha256: string }>;
 };
 
 type ActiveForegroundSubagent = {
@@ -172,10 +182,19 @@ function formatUsageStats(usage: UsageStats | Omit<UsageStats, "contextTokens">,
 }
 
 function truncateByBytes(text: string, maxBytes = MAX_TEXT_PREVIEW_BYTES): string {
-  const bytes = Buffer.byteLength(text, "utf8");
-  if (bytes <= maxBytes) return text;
-  const buf = Buffer.from(text, "utf8");
-  return `${buf.subarray(0, maxBytes).toString("utf8")}\n\n… truncated preview at ${formatTokens(maxBytes)}B (${formatTokens(bytes)}B total)`;
+  const bytes = Buffer.from(text, "utf8");
+  if (bytes.byteLength <= maxBytes) return text;
+  const suffix = Buffer.from(`\n\n… truncated preview at ${formatTokens(maxBytes)}B (${formatTokens(bytes.byteLength)}B total)`, "utf8");
+  let prefix = bytes.subarray(0, Math.max(0, maxBytes - suffix.byteLength));
+  while (prefix.length > 0) {
+    try {
+      new TextDecoder("utf-8", { fatal: true }).decode(prefix);
+      break;
+    } catch {
+      prefix = prefix.subarray(0, -1);
+    }
+  }
+  return Buffer.concat([prefix, suffix]).subarray(0, maxBytes).toString("utf8");
 }
 
 function formatToolCall(toolName: string, args: Record<string, unknown>, themeFg: (color: any, text: string) => string): string {
@@ -761,6 +780,14 @@ function agentResultText(result: any): string {
   return truncateByBytes(text || "(no output)");
 }
 
+function backgroundOutcome(result: any) {
+  return {
+    text: agentResultText(result),
+    failed: result?.isError === true || result?.details?.failed === true,
+    reports: extractRetainedSubagentReports(result),
+  };
+}
+
 function delegationFormCount(params: any): number {
   return Number(typeof params.task === "string" && params.task.trim().length > 0)
     + Number(Array.isArray(params.tasks) && params.tasks.length > 0)
@@ -788,9 +815,13 @@ function requestSummary(params: any): string {
 }
 
 function backgroundRecordText(record: BackgroundSubagentRecord, includeOutput = false): string {
+  const artifacts = includeOutput ? (record.artifacts ?? []).map((artifact) =>
+    `result child ${artifact.child} [${artifact.label}]: ${artifact.bytes}/${artifact.totalBytes} bytes${artifact.complete ? "" : " (incomplete)"}`
+  ) : [];
   return [
     backgroundSubagentLine(record),
     ...(includeOutput ? [record.result ?? record.latest ?? "(no output)"] : []),
+    ...artifacts,
     ...(record.error ? [`error: ${record.error}`] : []),
   ].join("\n");
 }
@@ -843,20 +874,28 @@ function validateBackgroundOperation(params: any): void {
   const launchFields = ["task", "tasks", "chain", "systemPrompt", "model", "tools", "cwd", "action", "draft_id", "background", "mode", "timeout_ms"];
   if (launchFields.some((field) => params[field] !== undefined)) throw new Error("A background subagent operation cannot include launch or Draft disposition fields");
   if (operation === "list") {
-    if (params.job_id !== undefined || params.wait_ms !== undefined) throw new Error("Background subagent list accepts only optional limit");
+    if (params.job_id !== undefined || params.wait_ms !== undefined || params.offset !== undefined || params.child !== undefined) throw new Error("Background subagent list accepts only optional limit");
+    if (params.limit !== undefined && params.limit > 50) throw new Error("Background subagent list limit cannot exceed 50");
     return;
   }
   if (typeof params.job_id !== "string" || !BACKGROUND_SUBAGENT_ID_PATTERN.test(params.job_id)) throw new Error(`${operation} requires a valid job_id`);
   if (operation === "wait") {
-    if (params.limit !== undefined) throw new Error("Background subagent wait accepts only job_id and wait_ms");
-  } else if (params.wait_ms !== undefined || params.limit !== undefined) {
+    if (params.limit !== undefined || params.offset !== undefined || params.child !== undefined) throw new Error("Background subagent wait accepts only job_id and wait_ms");
+  } else if (operation === "result") {
+    if (params.wait_ms !== undefined) throw new Error("Background subagent result does not accept wait_ms");
+    if (params.limit !== undefined && params.limit < 4) throw new Error("Background subagent result limit must be at least 4 bytes");
+  } else if (params.wait_ms !== undefined || params.limit !== undefined || params.offset !== undefined || params.child !== undefined) {
     throw new Error(`${operation} accepts only job_id`);
   }
 }
 
 function validateBackgroundLaunch(params: any): void {
-  if (params.background !== true) return;
-  if (params.operation !== undefined || params.job_id !== undefined || params.wait_ms !== undefined || params.limit !== undefined) throw new Error("Background launch cannot include lifecycle operation fields");
+  const lifecycleFields = ["job_id", "wait_ms", "limit", "offset", "child"];
+  if (params.background !== true) {
+    if (lifecycleFields.some((field) => params[field] !== undefined)) throw new Error("Foreground subagent launch cannot include background lifecycle fields");
+    return;
+  }
+  if (params.operation !== undefined || lifecycleFields.some((field) => params[field] !== undefined)) throw new Error("Background launch cannot include lifecycle operation fields");
   if (params.action !== undefined || params.draft_id !== undefined) throw new Error("Draft review/apply/discard cannot run in the background");
   if (delegationFormCount(params) !== 1) throw new Error("Background launch requires exactly one task, non-empty tasks, or non-empty chain form");
   if (Array.isArray(params.tasks) && params.tasks.length > MAX_PARALLEL_TASKS) throw new Error(`Too many parallel tasks (${params.tasks.length}). Max is ${MAX_PARALLEL_TASKS}.`);
@@ -881,7 +920,9 @@ function subagentParams() {
   operation: Type.Optional(Type.String({ pattern: "^(list|status|output|wait|result|cancel)$", description: "Background subagent lifecycle operation; use instead of task/tasks/chain." })),
   job_id: Type.Optional(Type.String({ pattern: "^subagent-job-[0-9a-f]{24}$", description: "Opaque background subagent execution ID." })),
   wait_ms: Type.Optional(Type.Integer({ minimum: 0, maximum: 30000, description: "Bounded background wait duration; default 1000ms." })),
-  limit: Type.Optional(Type.Integer({ minimum: 1, maximum: 50, description: "Maximum background jobs returned by list." })),
+  limit: Type.Optional(Type.Integer({ minimum: 1, maximum: MAX_SUBAGENT_RESULT_PAGE_BYTES, description: "List count (max 50), or result page byte limit (minimum 4, maximum 48 KiB)." })),
+  offset: Type.Optional(Type.Integer({ minimum: 0, description: "Byte offset for operation=result pagination." })),
+  child: Type.Optional(Type.Integer({ minimum: 1, maximum: 8, description: "One-based child report number for parallel or chain results." })),
   task: Type.Optional(Type.String({ description: "Task to delegate (single mode)" })),
   systemPrompt: Type.Optional(Type.String({ description: "Optional additional system prompt (single mode)" })),
   model: Type.Optional(Type.String({ description: "Optional model id (single mode)" })),
@@ -1126,7 +1167,7 @@ export default function (pi: ExtensionAPI) {
     promptSnippet: "Delegate focused work synchronously or as a durable-in-session background subagent",
     promptGuidelines: [
       "Use background=true when delegated work may take long enough that useful parent work can continue concurrently.",
-      "Before claiming dependent work complete, consume a terminal background subagent result; cancelling a bounded wait does not cancel the subagent.",
+      "Before claiming dependent work complete, consume a terminal background subagent result; operation=result supports child, offset, and bounded byte-limit pagination, while cancelling a bounded wait does not cancel the subagent.",
       "Use operation=cancel explicitly to stop a background subagent. Running subagents are cancelled when their owning Pi session shuts down.",
     ],
     parameters: subagentParams(),
@@ -1159,13 +1200,38 @@ export default function (pi: ExtensionAPI) {
         } else if (operation === "cancel") {
           record = await backgroundManager.cancel(id);
         }
-        const discloseOutput = operation === "output" || operation === "result" || operation === "wait" || operation === "cancel" || (operation === "status" && terminalBackgroundStatus(record.status));
+        const discloseOutput = operation === "output" || operation === "wait" || operation === "cancel" || (operation === "status" && terminalBackgroundStatus(record.status));
         if (discloseOutput && terminalBackgroundStatus(record.status)) await backgroundManager.markNotified(id);
         const waiting = timedOut ? "\nWait timed out; the subagent is still running." : "";
         const notReady = operation === "result" && isBackgroundSubagentActive(record) ? "\nResult is not ready; use a bounded wait or continue other work." : "";
         await updateBackgroundStatus(ctx);
+        if (operation === "result" && terminalBackgroundStatus(record.status)) {
+          const page = await backgroundManager.readResult(id, params.child, params.offset ?? 0, params.limit ?? MAX_SUBAGENT_RESULT_PAGE_BYTES);
+          await backgroundManager.markNotified(id);
+          const retained = page.complete ? "" : `; retained ${page.totalBytes} of ${page.sourceTotalBytes} source bytes`;
+          const continuation = page.nextOffset === undefined ? "" : `\n\n[Use operation=result with job_id=${id}, child=${page.child}, offset=${page.nextOffset} to continue.]`;
+          return {
+            content: [{ type: "text", text: `[${page.label}] bytes ${page.offset}-${page.offset + page.bytes} of ${page.totalBytes}${retained}\n\n${page.text}${continuation}` }],
+            details: {
+              background_subagent: true,
+              operation,
+              job_id: id,
+              status: record.status,
+              backend: record.backend,
+              failed: record.status !== "completed",
+              child: page.child,
+              offset: page.offset,
+              next_offset: page.nextOffset,
+              bytes: page.bytes,
+              total_bytes: page.totalBytes,
+              source_total_bytes: page.sourceTotalBytes,
+              complete: page.complete,
+              sha256: page.sha256,
+            } satisfies BackgroundSubagentDetails,
+          };
+        }
         return {
-          content: [{ type: "text", text: `${backgroundRecordText(record, discloseOutput)}${waiting}${notReady}` }],
+          content: [{ type: "text", text: truncateByBytes(`${backgroundRecordText(record, discloseOutput)}${waiting}${notReady}`) }],
           details: {
             background_subagent: true,
             operation,
@@ -1174,6 +1240,7 @@ export default function (pi: ExtensionAPI) {
             backend: record.backend,
             failed: terminalBackgroundStatus(record.status) && record.status !== "completed",
             timed_out: timedOut,
+            result_children: record.artifacts?.map((artifact) => ({ child: artifact.child, label: artifact.label, bytes: artifact.bytes, total_bytes: artifact.totalBytes, complete: artifact.complete, sha256: artifact.sha256 })),
           } satisfies BackgroundSubagentDetails,
         };
       }
@@ -1195,6 +1262,8 @@ export default function (pi: ExtensionAPI) {
         delete launchedParams.job_id;
         delete launchedParams.wait_ms;
         delete launchedParams.limit;
+        delete launchedParams.offset;
+        delete launchedParams.child;
         const record = await backgroundManager.start({
           sessionId: stableSessionId(ctx),
           backend: backend.kind,
@@ -1202,8 +1271,7 @@ export default function (pi: ExtensionAPI) {
           summary: requestSummary(params),
         }, async (backgroundSignal, update) => {
           const result = await subagentTool.execute(toolCallId, { ...launchedParams, [INTERNAL_MANAGED_EXECUTION]: true }, backgroundSignal, (partial: any) => update(agentResultText(partial)), ctx);
-          const failed = result?.isError === true || result?.details?.failed === true;
-          return { text: agentResultText(result), failed };
+          return backgroundOutcome(result);
         });
         settleReminderArmed = true;
         await updateBackgroundStatus(ctx);
@@ -1217,6 +1285,8 @@ export default function (pi: ExtensionAPI) {
       delete params.job_id;
       delete params.wait_ms;
       delete params.limit;
+      delete params.offset;
+      delete params.child;
       const dispositionError = adaptiveDispositionError(params);
       if (dispositionError) throw new Error(dispositionError);
 
@@ -1264,8 +1334,7 @@ export default function (pi: ExtensionAPI) {
             else backgroundSignal.addEventListener("abort", cancelAdopted, { once: true });
             try {
               const result = await adopted.completion;
-              const failed = result?.isError === true || result?.details?.failed === true;
-              return { text: agentResultText(result), failed };
+              return backgroundOutcome(result);
             } finally {
               unsubscribe();
               backgroundSignal.removeEventListener("abort", cancelAdopted);
@@ -1302,7 +1371,7 @@ export default function (pi: ExtensionAPI) {
           : undefined;
         const result = await bridge!.subagentAdapter!.execute(toolCallId, params, signal, adaptedUpdate, ctx);
         const failed = bridge!.subagentAdapter!.detailsFailed(result?.details);
-        return { ...result, details: withBackend(result?.details, "agentsh", failed) };
+        return attachRetainedSubagentReports({ ...result, details: withBackend(result?.details, "agentsh", failed) }, result);
       }
       const nativeParams = { ...params };
       delete nativeParams.mode;

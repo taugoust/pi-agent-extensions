@@ -13,7 +13,9 @@ let
   cfg = config.programs.pi;
   extDir = ".pi/agent/extensions";
   registry = import ./extension-registry.nix { inherit self pi-mcp-adapter pi-openai-fast-mode; };
-  needsSharedRuntime = lib.any (name: cfg.extensions.${name}.enable) registry.sharedRuntimeExtensionNames;
+  needsSharedRuntime = lib.any (
+    name: cfg.extensions.${name}.enable
+  ) registry.sharedRuntimeExtensionNames;
 in
 {
   options.programs.pi = {
@@ -190,6 +192,7 @@ in
         "${extDir}/subagent/background.ts".source = "${self}/subagent/background.ts";
         "${extDir}/subagent/foreground-handoff.ts".source = "${self}/subagent/foreground-handoff.ts";
         "${extDir}/subagent/parallel-result.ts".source = "${self}/subagent/parallel-result.ts";
+        "${extDir}/subagent/result-artifact.ts".source = "${self}/subagent/result-artifact.ts";
       })
 
       (lib.mkIf

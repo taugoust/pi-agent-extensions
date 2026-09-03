@@ -43,7 +43,8 @@ import {
 import { normalizeSupervisorSubagentCwds } from "./subagent-cwd.js";
 import { inheritSubagentModels } from "./subagent-model.js";
 import { abortSubagentProtocolStream, appendSubagentProtocolChunk, createSubagentProtocolState, finishSubagentProtocolStream } from "./subagent-protocol.js";
-import { boundedSubagentParentOutput, contextWindowForModel, latestSubagentAssistantText, piProtocolFailure, subagentParentDetails } from "./subagent-parent-result.js";
+import { attachRetainedReports } from "../subagent/result-artifact.js";
+import { boundedSubagentParentOutput, contextWindowForModel, latestSubagentAssistantText, piProtocolFailure, subagentParentDetails, trustedRetainedSubagentReports } from "./subagent-parent-result.js";
 import { renderSubagentCall, renderSubagentResult, renderSubagentStream, subagentDetailsFailed } from "./subagent-render.js";
 import { boundSubagentProgressCapsules, createSubagentProgressCapsule } from "./subagent-result.js";
 import { appendSubagentPrefix, appendSubagentRawText, appendSubagentStdoutChunk, createSubagentStreamState, flushSubagentStdout, tailByBytes, truncateByBytes, usageNumber, usageZero, type SubagentStreamState } from "./subagent-stream.js";
@@ -3161,6 +3162,7 @@ export default function sandbox(pi: ExtensionAPI) {
         throw new Error("Draft disposition requires mode=draft.");
       }
       const streamStates = new Map<string, SubagentStreamState>();
+      const rawStreamResults = new Map<string, any>();
       const streamOrder: string[] = [];
       const streamKey = (message: SupervisorMessage) => stringifyData((message as any).label || (message as any).subagent_id || "subagent") || "subagent";
       const streamStateFor = (message: SupervisorMessage) => {
@@ -3230,6 +3232,7 @@ export default function sandbox(pi: ExtensionAPI) {
           } else if (message.event === "subagent_result") {
             flushSubagentStdout(childState);
             const result: any = (message as any).result;
+            rawStreamResults.set(childState.label, result);
             const rawExitCode = result?.exit_code ?? result?.exitCode;
             childState.exitCode = typeof rawExitCode === "number" && Number.isFinite(rawExitCode) ? rawExitCode : 1;
             childState.stopReason = stringifyData(result?.stop_reason || result?.stopReason || (childState.exitCode === 0 ? "completed" : "error"));
@@ -3331,11 +3334,23 @@ export default function sandbox(pi: ExtensionAPI) {
         };
         const details = subagentParentDetails(result, ctx, streamStates) as any;
         const text = boundedSubagentParentOutput(details);
-        return { content: [{ type: "text", text }], details };
+        const rawRetained = {
+          results: streamOrder.map((key) => {
+            const label = streamStates.get(key)?.label ?? key;
+            return rawStreamResults.get(label) ?? { label };
+          }),
+        };
+        return attachRetainedReports(
+          { content: [{ type: "text", text }], details },
+          trustedRetainedSubagentReports(rawRetained, details, streamStates),
+        );
       }
       const details = subagentParentDetails(result, ctx, streamStates) as any;
       const text = boundedSubagentParentOutput(details);
-      return { content: [{ type: "text", text }], details };
+      return attachRetainedReports(
+        { content: [{ type: "text", text }], details },
+        trustedRetainedSubagentReports(result, details, streamStates),
+      );
     },
   };
   if (globalThis.__AGENTSH_PI__) globalThis.__AGENTSH_PI__.subagentAdapter = agentSHSubagentAdapter;
