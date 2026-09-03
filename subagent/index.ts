@@ -781,8 +781,13 @@ function agentResultText(result: any): string {
 }
 
 function backgroundOutcome(result: any) {
+  const preview = agentResultText(result)
+    .split("\n")
+    .filter((line) => !line.startsWith("Full subagent result [") && !line.startsWith("Subagent result artifact unavailable ["))
+    .join("\n")
+    .trim();
   return {
-    text: agentResultText(result),
+    text: preview || "(no output)",
     failed: result?.isError === true || result?.details?.failed === true,
     reports: extractRetainedSubagentReports(result),
   };

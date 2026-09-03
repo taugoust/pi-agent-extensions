@@ -3569,6 +3569,7 @@ in
               if (backgroundWait.details.status !== "running" && backgroundWait.details.status !== "cancelling") break;
             }
             assert(backgroundWait.details.status === "completed", "background AgentSH result did not complete: " + JSON.stringify(backgroundWait.details));
+            assert(!backgroundWait.content[0].text.includes(artifactPath), "background result leaked a backend-specific remote artifact path");
             assert(backgroundWait.details.result_children?.[0]?.sha256?.length === 64, "background result metadata omitted its checksum");
             let reconstructed = "";
             let nextOffset = 0;

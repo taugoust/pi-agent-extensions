@@ -3,6 +3,7 @@ import { constants } from "node:fs";
 import { access, lstat, mkdir, open, readFile, readdir, rename, rm, writeFile } from "node:fs/promises";
 import { dirname, join } from "node:path";
 import {
+  MAX_RETAINED_SUBAGENT_JOB_BYTES,
   MAX_RETAINED_SUBAGENT_REPORT_BYTES,
   MAX_SUBAGENT_RESULT_PAGE_BYTES,
   type RetainedSubagentReport,
@@ -324,10 +325,12 @@ export class BackgroundSubagentManager {
 
   private async persistReports(id: string, reports: RetainedSubagentReport[]): Promise<BackgroundSubagentArtifact[]> {
     const artifacts: BackgroundSubagentArtifact[] = [];
-    for (let index = 0; index < reports.slice(0, 8).length; index++) {
-      const report = reports[index];
+    const selected = reports.slice(0, 8);
+    const fairLimit = Math.min(MAX_RETAINED_SUBAGENT_REPORT_BYTES, Math.floor(MAX_RETAINED_SUBAGENT_JOB_BYTES / Math.max(1, selected.length)));
+    for (let index = 0; index < selected.length; index++) {
+      const report = selected[index];
       const source = Buffer.from(report.text, "utf8");
-      let retained = source.subarray(0, MAX_RETAINED_SUBAGENT_REPORT_BYTES);
+      let retained = source.subarray(0, fairLimit);
       while (retained.length > 0) {
         try {
           new TextDecoder("utf-8", { fatal: true }).decode(retained);

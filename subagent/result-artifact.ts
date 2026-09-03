@@ -1,4 +1,5 @@
 export const MAX_RETAINED_SUBAGENT_REPORT_BYTES = 16 * 1024 * 1024;
+export const MAX_RETAINED_SUBAGENT_JOB_BYTES = 32 * 1024 * 1024;
 // Reserve 2 KiB of the 50 KiB parent response budget for page metadata and continuation guidance.
 export const MAX_SUBAGENT_RESULT_PAGE_BYTES = 48 * 1024;
 
