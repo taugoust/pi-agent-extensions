@@ -699,8 +699,9 @@ a fair 32 MiB aggregate cap per job, and emit deduplicated completion events
 that wake an idle parent or steer an active one. `result` pages those reports
 by byte `offset` and a limit of at most 48 KiB (leaving room inside the 50 KiB
 parent-response budget); parallel and chain jobs select a one-based `child`.
-`list`, `status`, `output`, bounded waits, `result`, and `cancel` remain part of
-the same tool. `wait_any` waits for the next unfinished child in any group,
+`list`, `status`, `output`, bounded waits of up to 24 hours, `result`, and
+`cancel` remain part of the same tool. `wait_any` waits for the next unfinished
+child in any group,
 `wait`/`wait_group` waits for one complete aggregate, and `wait_all` waits for
 all groups that are active when the call begins. Later launches never extend an
 existing wait. `wait_any` is edge-oriented rather than a completion queue:

@@ -20,6 +20,13 @@ for (const operation of ["wait_any", "wait_all"]) {
   assert.throws(() => validateBackgroundOperation({ operation, job_id: jobId }), /accepts only optional wait_ms/);
   assert.throws(() => validateBackgroundOperation({ operation, task: "not a lifecycle request" }), /cannot include launch/);
 }
+const sixHoursMs = 6 * 60 * 60 * 1000;
+for (const operation of ["wait", "wait_group", "wait_any", "wait_all"]) {
+  const params = operation === "wait" || operation === "wait_group" ? { operation, job_id: jobId } : { operation };
+  assert.doesNotThrow(() => validateBackgroundOperation({ ...params, wait_ms: sixHoursMs }));
+  assert.throws(() => validateBackgroundOperation({ ...params, wait_ms: Number.MAX_SAFE_INTEGER }), /wait_ms/);
+  assert.throws(() => validateBackgroundOperation({ ...params, wait_ms: 1.5 }), /wait_ms/);
+}
 
 assert.equal(backgroundChildStatus({ exitCode: -1, backgroundState: "pending" }), "pending");
 assert.equal(backgroundChildStatus({ exitCode: -1, backgroundState: "running" }), "running");
@@ -83,6 +90,7 @@ async function operationCheck() {
   assert.match(tool.parameters.properties.operation.pattern, /wait_group/);
   assert.match(tool.parameters.properties.operation.pattern, /wait_any/);
   assert.match(tool.parameters.properties.operation.pattern, /wait_all/);
+  assert(tool.parameters.properties.wait_ms.maximum >= sixHoursMs, "tool schema does not expose hour-scale waits");
 
   const manager = sharedBackgroundSubagentManager(path.join(agentDir, "state", "background-subagents-v1"));
   const tracker = sharedBackgroundSubagentChildTracker();

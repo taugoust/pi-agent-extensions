@@ -11,6 +11,7 @@ import {
 
 export const BACKGROUND_SUBAGENT_ID_PATTERN = /^subagent-job-[0-9a-f]{24}$/;
 export const MAX_BACKGROUND_SUBAGENTS = 16;
+export const MAX_BACKGROUND_SUBAGENT_WAIT_MS = 24 * 60 * 60 * 1000;
 // Includes the Permission Gate's bounded pre-reload drain plus a full
 // replacement-extension startup window.
 export const BACKGROUND_SUBAGENT_RELOAD_ADOPTION_TIMEOUT_MS = 65_000;

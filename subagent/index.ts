@@ -34,6 +34,7 @@ import { adaptiveDispositionError, nativeSubagentRequestSupported, selectSubagen
 import {
   BACKGROUND_SUBAGENT_ID_PATTERN,
   MAX_BACKGROUND_SUBAGENTS,
+  MAX_BACKGROUND_SUBAGENT_WAIT_MS,
   backgroundSubagentLine,
   backgroundSubagentsSurviveShutdown,
   isBackgroundSubagentActive,
@@ -1134,6 +1135,10 @@ export function validateBackgroundOperation(params: any): void {
   }
   const launchFields = ["task", "tasks", "chain", "systemPrompt", "model", "tools", "cwd", "action", "draft_id", "background", "mode", "timeout_ms"];
   if (launchFields.some((field) => params[field] !== undefined)) throw new Error("A background subagent operation cannot include launch or Draft disposition fields");
+  if (["wait", "wait_group", "wait_any", "wait_all"].includes(operation) && params.wait_ms !== undefined
+    && (!Number.isSafeInteger(params.wait_ms) || params.wait_ms < 0 || params.wait_ms > MAX_BACKGROUND_SUBAGENT_WAIT_MS)) {
+    throw new Error(`Background subagent wait_ms must be an integer between 0 and ${MAX_BACKGROUND_SUBAGENT_WAIT_MS}`);
+  }
   if (operation === "list") {
     if (params.job_id !== undefined || params.wait_ms !== undefined || params.offset !== undefined || params.child !== undefined) throw new Error("Background subagent list accepts only optional limit");
     if (params.limit !== undefined && params.limit > 50) throw new Error("Background subagent list limit cannot exceed 50");
@@ -1187,7 +1192,7 @@ function subagentParams() {
   background: Type.Optional(Type.Boolean({ description: "Return immediately and continue a task/tasks/chain request in the background." })),
   operation: Type.Optional(Type.String({ pattern: "^(list|status|output|wait|wait_group|wait_any|wait_all|result|cancel)$", description: "Background lifecycle operation. wait/wait_group waits for one group, wait_any for one child across groups, and wait_all for all current groups." })),
   job_id: Type.Optional(Type.String({ pattern: "^subagent-job-[0-9a-f]{24}$", description: "Opaque execution ID; required by group-specific operations and omitted for list/wait_any/wait_all." })),
-  wait_ms: Type.Optional(Type.Integer({ minimum: 0, maximum: 30000, description: "Bounded background wait duration; default 1000ms." })),
+  wait_ms: Type.Optional(Type.Integer({ minimum: 0, maximum: MAX_BACKGROUND_SUBAGENT_WAIT_MS, description: "Bounded background wait duration; default 1000ms, maximum 24 hours." })),
   limit: Type.Optional(Type.Integer({ minimum: 1, maximum: MAX_SUBAGENT_RESULT_PAGE_BYTES, description: "List count (max 50), or result page byte limit (minimum 4, maximum 48 KiB)." })),
   offset: Type.Optional(Type.Integer({ minimum: 0, description: "Byte offset for operation=result pagination." })),
   child: Type.Optional(Type.Integer({ minimum: 1, maximum: 8, description: "One-based child report number for parallel or chain results." })),

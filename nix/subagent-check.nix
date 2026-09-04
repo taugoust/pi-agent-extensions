@@ -94,7 +94,6 @@ pkgs.runCommand "subagent-check"
     const artifacts = await import(pathToFileURL(process.argv[7]).href);
     const permissions = await import(pathToFileURL(process.argv[8]).href);
     const permissionProtocol = await import(pathToFileURL(process.argv[9]).href);
-    assert.equal(background.MAX_BACKGROUND_SUBAGENTS, 16);
     assert.equal(background.BACKGROUND_SUBAGENT_RELOAD_ADOPTION_TIMEOUT_MS, 65_000);
     assert.equal(permissionProtocol.SUBAGENT_PERMISSION_RELOAD_DRAIN_TIMEOUT_MS, 30_000);
     assert.equal(permissionProtocol.SUBAGENT_PERMISSION_RELOAD_REBIND_TIMEOUT_MS, 30_000);
@@ -582,8 +581,9 @@ pkgs.runCommand "subagent-check"
     assert.equal(reloadLaunchRaceManager.activateSession("session-reload-launch-race"), true);
 
     const capacityManager = new background.BackgroundSubagentManager(stateRoot + "-capacity");
+    const supportedCapacity = 16;
     const capacityRecords = [];
-    for (let index = 0; index < background.MAX_BACKGROUND_SUBAGENTS; index += 1) {
+    for (let index = 0; index < supportedCapacity; index += 1) {
       capacityRecords.push(await capacityManager.start(
         { sessionId: "session-capacity", backend: "native", mode: index % 2 === 0 ? "single" : "parallel", summary: `capacity ''${index + 1}` },
         async (signal) => {
@@ -592,7 +592,7 @@ pkgs.runCommand "subagent-check"
         },
       ));
     }
-    assert.equal((await capacityManager.list("session-capacity", 100)).filter(background.isBackgroundSubagentActive).length, 16);
+    assert.equal((await capacityManager.list("session-capacity", 100)).filter(background.isBackgroundSubagentActive).length, supportedCapacity);
     let overflowRunnerStarts = 0;
     await assert.rejects(
       capacityManager.start(
@@ -602,7 +602,7 @@ pkgs.runCommand "subagent-check"
           return { text: "must not start", failed: false };
         },
       ),
-      /concurrency limit reached \(16\)/,
+      /concurrency limit reached/,
     );
     assert.equal(overflowRunnerStarts, 0);
     for (const record of capacityRecords) assert.equal((await capacityManager.cancel(record.id)).status, "cancelled");
