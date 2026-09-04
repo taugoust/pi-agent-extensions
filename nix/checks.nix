@@ -2038,6 +2038,7 @@ in
           "$srcdir/subagent/index.ts" \
           "$srcdir/subagent/backend.ts" \
           "$srcdir/subagent/parallel-result.ts" \
+          "$srcdir/subagent/background-wait.test.ts" \
           "$srcdir/sandbox/approval-model.test.ts" \
           "$srcdir/sandbox/command-output.test.ts" \
           "$srcdir/sandbox/exec-result.test.ts" \
@@ -2069,6 +2070,7 @@ in
         node "$outdir/sandbox/subagent-stream.test.js"
         node "$outdir/sandbox/subagent-terminal.test.js"
         node "$outdir/sandbox/workspace-paths.test.js"
+        node "$outdir/subagent/background-wait.test.js"
 
         cat > "$workdir/test.mjs" <<'EOF'
         import fs from "node:fs";

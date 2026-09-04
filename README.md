@@ -681,23 +681,35 @@ required for filesystem, process, network, and descendant enforcement.
 { "tasks": [{ "task": "Find model code", "tools": ["read", "grep", "find"] }] }
 { "chain": [{ "task": "Find files" }, { "task": "Plan from: {previous}" }] }
 { "task": "Run the slower investigation", "background": true }
-{ "operation": "wait", "job_id": "subagent-job-...", "wait_ms": 30000 }
+{ "operation": "wait_any", "wait_ms": 30000 }
+{ "operation": "wait_group", "job_id": "subagent-job-...", "wait_ms": 30000 }
+{ "operation": "wait_all", "wait_ms": 30000 }
 { "operation": "result", "job_id": "subagent-job-...", "child": 1, "offset": 0, "limit": 49152 }
 { "mode": "draft", "task": "Implement and commit the change in an isolated VM" }
 { "mode": "draft", "action": "review", "draft_id": "session-..." }
 ```
 
 Background launches support single, parallel, and chain requests through both
-adaptive backends. They return immediately, retain a 50 KiB preview plus each
-child's complete terminal report up to 16 MiB in a private per-user store, with
+adaptive backends. Parallel and chain groups are capped at eight children; the
+native backend runs at most four siblings concurrently. They return immediately,
+retain a 50 KiB preview plus each child's complete terminal report up to 16 MiB
+in a private per-user store, with
 a fair 32 MiB aggregate cap per job, and emit deduplicated completion events
 that wake an idle parent or steer an active one. `result` pages those reports
 by byte `offset` and a limit of at most 48 KiB (leaving room inside the 50 KiB
 parent-response budget); parallel and chain jobs select a one-based `child`.
-`list`, `status`, `output`, bounded `wait`, `result`, and `cancel` remain part of
-the same tool. Artifact identity and SHA-256 are verified before each page is
-returned, and result artifacts are removed with their terminal job record.
-Cancelling `wait` does not cancel execution. Running background subagents
+`list`, `status`, `output`, bounded waits, `result`, and `cancel` remain part of
+the same tool. `wait_any` waits for the next unfinished child in any group,
+`wait`/`wait_group` waits for one complete aggregate, and `wait_all` waits for
+all groups that are active when the call begins. Later launches never extend an
+existing wait. `wait_any` is edge-oriented rather than a completion queue:
+simultaneous sibling completions remain visible through `status` and `result`.
+A job adopted directly from a pre-child-tracking extension build
+has aggregate-only progress until it terminates; exact per-child wakeups begin
+with jobs launched by this build. Artifact identity and SHA-256 are verified
+before each page is returned, and result artifacts are removed with their
+terminal job record.
+Cancelling any wait does not cancel execution. Running background subagents
 survive a hot `/reload` of the same Pi session: the replacement extension adopts
 the process-owned execution, while guarded child authorization pauses until the
 same parent session rebinds. If the replacement extension does not adopt within

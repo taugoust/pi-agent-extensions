@@ -680,11 +680,96 @@ pkgs.runCommand "subagent-check"
     assert.equal((await manager.get(waitOnly.id)).status, "running", "cancelled wait stopped the subagent");
     assert.equal((await manager.cancel(waitOnly.id)).status, "cancelled");
 
-    const failing = await manager.start({ sessionId: "session-a", backend: "native", mode: "chain", summary: "failure" }, async () => {
-      throw new Error("expected failure");
+    const childTracker = new background.BackgroundSubagentChildTracker();
+    assert.deepEqual(await background.waitForAnyBackgroundSubagentChild(manager, childTracker, [], 10), { timedOut: false, remainingChildren: 0 });
+    assert.deepEqual(await background.waitForAllBackgroundSubagentGroups(manager, [], 10), { records: [], timedOut: false });
+    const preCancelledWait = new AbortController();
+    preCancelledWait.abort(new Error("pre-cancelled wait"));
+    await assert.rejects(background.waitForAnyBackgroundSubagentChild(manager, childTracker, [], 10, preCancelledWait.signal), /pre-cancelled wait/);
+    await assert.rejects(background.waitForAllBackgroundSubagentGroups(manager, [], 10, preCancelledWait.signal), /pre-cancelled wait/);
+    let releaseChildGroup;
+    const childGroup = await manager.start({ sessionId: "session-a", backend: "native", mode: "parallel", summary: "parallel 2: child wait" }, async (signal) => {
+      await new Promise((resolve, reject) => {
+        releaseChildGroup = resolve;
+        signal.addEventListener("abort", () => reject(signal.reason), { once: true });
+      });
+      return { text: "children complete", failed: false };
     });
-    assert.equal((await manager.wait(failing.id, 2000)).record.status, "failed");
-    assert.equal((await manager.list("session-a", 10)).length, 3);
+    childTracker.register(childGroup, [{ label: "task 1", task: "slow" }, { label: "task 2", task: "fast" }]);
+    childTracker.update(childGroup.id, [
+      { child: 1, label: "task 1", task: "slow", status: "running" },
+      { child: 2, label: "task 2", task: "fast", status: "running" },
+    ]);
+    const waitAnyChild = background.waitForAnyBackgroundSubagentChild(manager, childTracker, [childGroup], 1000);
+    setTimeout(() => childTracker.update(childGroup.id, [{ child: 2, label: "task 2", task: "fast", status: "completed" }]), 20);
+    const firstChild = await waitAnyChild;
+    assert.equal(firstChild.record.id, childGroup.id);
+    assert.equal(firstChild.child.child, 2);
+    assert.equal(firstChild.child.status, "completed");
+    assert.equal(firstChild.remainingChildren, 1);
+    const waitAnyTimeout = await background.waitForAnyBackgroundSubagentChild(manager, childTracker, [childGroup], 10);
+    assert.equal(waitAnyTimeout.timedOut, true);
+    assert.equal(waitAnyTimeout.remainingChildren, 1);
+    releaseChildGroup();
+    assert.equal((await manager.wait(childGroup.id, 2000)).record.status, "completed");
+    assert.equal(childTracker.reconcile(await manager.get(childGroup.id))[0].status, "completed");
+    const precedenceTracker = new background.BackgroundSubagentChildTracker();
+    const precedenceRecord = { ...childGroup, id: "subagent-job-ffffffffffffffffffffffff", status: "running" };
+    precedenceTracker.register(precedenceRecord, [{ label: "authoritative terminal" }]);
+    precedenceTracker.update(precedenceRecord.id, [{ child: 1, label: "authoritative terminal", status: "completed" }]);
+    precedenceTracker.update(precedenceRecord.id, [{ child: 1, label: "authoritative terminal", status: "failed" }]);
+    precedenceTracker.update(precedenceRecord.id, [{ child: 1, label: "stale success", status: "completed" }]);
+    assert.equal(precedenceTracker.reconcile(precedenceRecord)[0].status, "failed", "stale success overwrote an authoritative failure");
+    const sharedChildTracker = background.sharedBackgroundSubagentChildTracker();
+    assert.equal(sharedChildTracker, background.sharedBackgroundSubagentChildTracker());
+    const reloadedBackground = await import(pathToFileURL(process.argv[5]).href + "?child-tracker-reload=1");
+    assert.equal(reloadedBackground.sharedBackgroundSubagentChildTracker(), sharedChildTracker, "hot reload replaced process-owned child progress");
+
+    let releaseAllOne;
+    let releaseAllTwo;
+    const allOne = await manager.start({ sessionId: "session-a", backend: "native", mode: "single", summary: "wait all one" }, async () => {
+      await new Promise((resolve) => { releaseAllOne = resolve; });
+      return { text: "all one", failed: false };
+    });
+    const allTwo = await manager.start({ sessionId: "session-a", backend: "native", mode: "single", summary: "wait all two" }, async () => {
+      await new Promise((resolve) => { releaseAllTwo = resolve; });
+      return { text: "all two", failed: false };
+    });
+    const waitAllGroups = background.waitForAllBackgroundSubagentGroups(manager, [allOne, allTwo], 1000);
+    const laterGroup = await manager.start({ sessionId: "session-a", backend: "native", mode: "single", summary: "launched after wait all" }, async (signal) => {
+      await new Promise((resolve, reject) => signal.addEventListener("abort", () => reject(signal.reason), { once: true }));
+      return { text: "unexpected", failed: false };
+    });
+    releaseAllOne();
+    await new Promise((resolve) => setTimeout(resolve, 20));
+    releaseAllTwo();
+    const allGroups = await waitAllGroups;
+    assert.equal(allGroups.timedOut, false);
+    assert.deepEqual(allGroups.records.map((record) => record.status), ["completed", "completed"]);
+    assert.equal((await manager.get(laterGroup.id)).status, "running", "wait_all included a group launched after its snapshot");
+    const timedOutAll = await background.waitForAllBackgroundSubagentGroups(manager, [laterGroup], 10);
+    assert.equal(timedOutAll.timedOut, true);
+    assert.equal((await manager.get(laterGroup.id)).status, "running", "timing out wait_all cancelled its child");
+    childTracker.register(laterGroup, [{ label: "subagent", task: "cancel wait_any only" }]);
+    const cancelledAnyController = new AbortController();
+    const cancelledAnyWait = background.waitForAnyBackgroundSubagentChild(manager, childTracker, [laterGroup], 1000, cancelledAnyController.signal);
+    cancelledAnyController.abort(new Error("cancel wait_any"));
+    await assert.rejects(cancelledAnyWait, /cancel wait_any/);
+    assert.equal((await manager.get(laterGroup.id)).status, "running", "cancelling wait_any cancelled its child");
+    assert.equal((await manager.cancel(laterGroup.id)).status, "cancelled");
+
+    let rejectFailingGroup;
+    const failing = await manager.start({ sessionId: "session-a", backend: "native", mode: "chain", summary: "chain 2: failure" }, async () => {
+      await new Promise((_resolve, reject) => { rejectFailingGroup = reject; });
+      return { text: "unexpected", failed: false };
+    });
+    childTracker.register(failing, [{ label: "step 1" }, { label: "step 2" }]);
+    childTracker.update(failing.id, [{ child: 1, label: "step 1", status: "running" }]);
+    rejectFailingGroup(new Error("expected failure"));
+    const failedGroup = (await manager.wait(failing.id, 2000)).record;
+    assert.equal(failedGroup.status, "failed");
+    assert.deepEqual(childTracker.reconcile(failedGroup).map((child) => child.status), ["failed", "skipped"]);
+    assert.equal((await manager.list("session-a", 10)).length, 7);
 
     const parallel = await manager.start({ sessionId: "session-a", backend: "native", mode: "parallel", summary: "two reports" }, async () => ({
       text: "bounded preview", failed: false,
@@ -732,6 +817,13 @@ pkgs.runCommand "subagent-check"
 
     node "$workdir/test.mjs" "$workdir/out/subagent/parallel-result.js" "$workdir/out/subagent/backend.js" "$workdir/out/shared/agentsh-mode.js" "$workdir/out/subagent/background.js" "$workdir/out/subagent/foreground-handoff.js" "$workdir/out/subagent/result-artifact.js" "$workdir/out/subagent/permission-relay.js" "$workdir/out/shared/subagent-permission.js" "$workdir/out/subagent/permission-proxy.js"
     grep -F 'formatParallelResultContent(sections, successCount, MAX_TEXT_PREVIEW_BYTES)' ${self}/subagent/index.ts >/dev/null
+    grep -F 'waitForAnyBackgroundSubagentChild(backgroundManager, childTracker, snapshot' ${self}/subagent/index.ts >/dev/null
+    grep -F 'waitForAllBackgroundSubagentGroups(backgroundManager, snapshot' ${self}/subagent/index.ts >/dev/null
+    grep -F 'operation === "wait" || operation === "wait_group"' ${self}/subagent/index.ts >/dev/null
+    grep -F 'childProgress.capture(partial)' ${self}/subagent/index.ts >/dev/null
+    grep -F 'backgroundState: "pending"' ${self}/subagent/index.ts >/dev/null
+    grep -F 'releaseForegroundOwnership();' ${self}/subagent/index.ts >/dev/null
+    grep -F '.filter((record) => !this.runtime.pendingLaunches.has(record.id))' ${self}/subagent/background.ts >/dev/null
     grep -F 'args.push("--no-extensions", "--extension", permissionProxyEntrypoint);' ${self}/subagent/index.ts >/dev/null
     grep -F 'const permissionAuthority = currentSubagentPermissionAuthority();' ${self}/subagent/index.ts >/dev/null
     grep -F 'SUBAGENT_PERMISSION_BASH_TOOL' ${self}/subagent/index.ts >/dev/null
@@ -757,7 +849,7 @@ pkgs.runCommand "subagent-check"
     fi
     grep -F 'const committed = this.authority.commit(prepared.ticket, exactRequest);' ${self}/subagent/permission-relay.ts >/dev/null
     grep -F 'Notification: subagent ''${record.id} ''${record.status}. Check its status.' ${self}/subagent/index.ts >/dev/null
-    grep -F 'stageTerminalConsumption(background.job_id)' ${self}/subagent/index.ts >/dev/null
+    grep -F 'backgroundOperationConsumedJobIds(background)' ${self}/subagent/index.ts >/dev/null
     grep -F 'const durableOperations = deliveredOperationIds(entries);' ${self}/subagent/index.ts >/dev/null
     if grep -F 'consumeForOperation' ${self}/subagent/index.ts >/dev/null; then
       echo 'lifecycle operation still marks consumption before Pi accepts its tool result' >&2

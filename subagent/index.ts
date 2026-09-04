@@ -37,8 +37,16 @@ import {
   backgroundSubagentLine,
   backgroundSubagentsSurviveShutdown,
   isBackgroundSubagentActive,
+  isBackgroundSubagentChildActive,
+  sharedBackgroundSubagentChildTracker,
   sharedBackgroundSubagentManager,
   sharedBackgroundSubagentNotificationState,
+  waitForAllBackgroundSubagentGroups,
+  waitForAnyBackgroundSubagentChild,
+  type BackgroundSubagentChild,
+  type BackgroundSubagentChildDescriptor,
+  type BackgroundSubagentChildProgress,
+  type BackgroundSubagentChildStatus,
   type BackgroundSubagentManager,
   type BackgroundSubagentRecord,
 } from "./background.js";
@@ -82,6 +90,7 @@ type SingleResult = {
   label: string;
   task: string;
   exitCode: number;
+  backgroundState?: "pending" | "running";
   messages: Message[];
   stderr: string;
   usage: UsageStats;
@@ -113,13 +122,17 @@ type SubagentDetails = {
 
 type BackgroundSubagentDetails = {
   background_subagent: true;
-  operation: "start" | "list" | "status" | "output" | "wait" | "result" | "cancel";
+  operation: "start" | "list" | "status" | "output" | "wait" | "wait_group" | "wait_any" | "wait_all" | "result" | "cancel";
   job_id?: string;
   status?: BackgroundSubagentRecord["status"];
   backend?: "native" | "agentsh";
   failed?: boolean;
   timed_out?: boolean;
   child?: number;
+  child_status?: BackgroundSubagentChildStatus;
+  remaining_children?: number;
+  groups?: Array<{ job_id: string; status: BackgroundSubagentRecord["status"]; backend: "native" | "agentsh" }>;
+  children?: Array<{ child: number; label: string; status: BackgroundSubagentChildStatus }>;
   offset?: number;
   next_offset?: number;
   bytes?: number;
@@ -584,6 +597,7 @@ async function runSingleSubagent(
     label,
     task: spec.task,
     exitCode: -1,
+    backgroundState: "running",
     messages: [],
     stderr: "",
     usage: usageZero(),
@@ -858,6 +872,7 @@ async function runSingleSubagent(
       };
       if (signal?.aborted) abortHandler();
       else signal?.addEventListener("abort", abortHandler, { once: true });
+      emitUpdate();
     });
 
     if (permissionRelay) {
@@ -969,12 +984,66 @@ function requestSummary(params: any): string {
   return `${requestMode(params)} ${items.length}: ${truncateByBytes(first, 400)}`;
 }
 
-function backgroundRecordText(record: BackgroundSubagentRecord, includeOutput = false): string {
+function backgroundChildDescriptors(params: any): BackgroundSubagentChildDescriptor[] {
+  if (typeof params.task === "string" && params.task.trim()) return [{ label: "subagent", task: params.task }];
+  const chain = Array.isArray(params.chain) ? params.chain : undefined;
+  const items = chain ?? (Array.isArray(params.tasks) ? params.tasks : []);
+  return items.slice(0, MAX_PARALLEL_TASKS).map((item: any, index: number) => ({
+    label: chain ? `step ${index + 1}` : `task ${index + 1}`,
+    ...(typeof item?.task === "string" ? { task: item.task } : {}),
+  }));
+}
+
+export function backgroundChildStatus(result: any): BackgroundSubagentChildStatus {
+  const state = String(result?.terminal?.state ?? "").toLowerCase();
+  const stopReason = String(result?.stopReason ?? result?.stop_reason ?? "").toLowerCase();
+  const rawExitCode = result?.exitCode ?? result?.exit_code;
+  const exitCode = typeof rawExitCode === "number" && Number.isFinite(rawExitCode) ? rawExitCode : -1;
+  if (state === "completed") return "completed";
+  if (state === "cancelled") return "cancelled";
+  if (state === "skipped") return "skipped";
+  if (state === "lost") return "lost";
+  if (["failed", "timed_out"].includes(state)) return "failed";
+  if (exitCode === -1) return result?.backgroundState === "pending" ? "pending" : "running";
+  if (stopReason === "completed") return "completed";
+  if (["aborted", "cancelled"].includes(stopReason)) return "cancelled";
+  if (stopReason === "skipped") return "skipped";
+  if (stopReason === "lost") return "lost";
+  if (["error", "timeout"].includes(stopReason)) return "failed";
+  return exitCode === 0 ? "completed" : "failed";
+}
+
+export function backgroundChildProgress(
+  details: unknown,
+  descriptors: BackgroundSubagentChildDescriptor[] = [],
+): BackgroundSubagentChildProgress[] {
+  const results = details && typeof details === "object" && Array.isArray((details as any).results)
+    ? (details as any).results
+    : [];
+  return results.slice(0, MAX_PARALLEL_TASKS).map((result: any, index: number) => {
+    const label = typeof result?.label === "string" && result.label.trim() ? result.label : `child ${index + 1}`;
+    const labeledIndex = descriptors.findIndex((descriptor) => descriptor.label === label);
+    return {
+      child: labeledIndex >= 0 ? labeledIndex + 1 : index + 1,
+      label,
+      ...(typeof result?.task === "string" && result.task.trim() ? { task: result.task } : {}),
+      status: backgroundChildStatus(result),
+    };
+  });
+}
+
+function backgroundChildLine(jobId: string, child: BackgroundSubagentChild): string {
+  const task = child.task ? `  ${truncateByBytes(child.task, 160).replace(/\s+/g, " ")}` : "";
+  return `${jobId} child ${child.child}  ${child.status}  ${child.label}${task}`;
+}
+
+function backgroundRecordText(record: BackgroundSubagentRecord, includeOutput = false, children: BackgroundSubagentChild[] = []): string {
   const artifacts = includeOutput ? (record.artifacts ?? []).map((artifact) =>
     `result child ${artifact.child} [${artifact.label}]: ${artifact.bytes}/${artifact.totalBytes} bytes${artifact.complete ? "" : " (incomplete)"}`
   ) : [];
   return [
     backgroundSubagentLine(record),
+    ...children.map((child) => backgroundChildLine(record.id, child)),
     ...(includeOutput ? [record.result ?? record.latest ?? "(no output)"] : []),
     ...artifacts,
     ...(record.error ? [`error: ${record.error}`] : []),
@@ -984,7 +1053,7 @@ function backgroundRecordText(record: BackgroundSubagentRecord, includeOutput = 
 function backgroundStartResult(record: BackgroundSubagentRecord, movedFromForeground: boolean) {
   const guidance = movedFromForeground
     ? "Moved to the background by the user without restarting. Continue useful parent work; consume this result before completing dependent work."
-    : "Started without blocking. Continue other work; use subagent operation=wait|status|output|result|cancel with this job_id when needed.";
+    : "Started without blocking. Continue other work; use status/output/result/cancel with this job_id, wait_group for this group, or wait_any/wait_all across current groups.";
   return {
     content: [{ type: "text" as const, text: `${backgroundSubagentLine(record)}\n${guidance}` }],
     details: {
@@ -1000,6 +1069,13 @@ function backgroundStartResult(record: BackgroundSubagentRecord, movedFromForegr
 
 function terminalBackgroundStatus(status: BackgroundSubagentRecord["status"]): boolean {
   return !["running", "cancelling"].includes(status);
+}
+
+function backgroundOperationConsumedJobIds(details: BackgroundSubagentDetails): string[] {
+  if (typeof details.job_id !== "string" || !details.status || !terminalBackgroundStatus(details.status)) return [];
+  return ["status", "output", "wait", "wait_group", "result", "cancel"].includes(details.operation)
+    ? [details.job_id]
+    : [];
 }
 
 function stableSessionId(ctx: any): string {
@@ -1050,9 +1126,12 @@ function persistentAgentDir(ctx: any): string {
   return getAgentDir();
 }
 
-function validateBackgroundOperation(params: any): void {
+export function validateBackgroundOperation(params: any): void {
   const operation = typeof params.operation === "string" ? params.operation : undefined;
   if (!operation) return;
+  if (!["list", "status", "output", "wait", "wait_group", "wait_any", "wait_all", "result", "cancel"].includes(operation)) {
+    throw new Error(`Unknown background subagent operation: ${operation}`);
+  }
   const launchFields = ["task", "tasks", "chain", "systemPrompt", "model", "tools", "cwd", "action", "draft_id", "background", "mode", "timeout_ms"];
   if (launchFields.some((field) => params[field] !== undefined)) throw new Error("A background subagent operation cannot include launch or Draft disposition fields");
   if (operation === "list") {
@@ -1060,9 +1139,15 @@ function validateBackgroundOperation(params: any): void {
     if (params.limit !== undefined && params.limit > 50) throw new Error("Background subagent list limit cannot exceed 50");
     return;
   }
+  if (operation === "wait_any" || operation === "wait_all") {
+    if (params.job_id !== undefined || params.limit !== undefined || params.offset !== undefined || params.child !== undefined) {
+      throw new Error(`Background subagent ${operation} accepts only optional wait_ms`);
+    }
+    return;
+  }
   if (typeof params.job_id !== "string" || !BACKGROUND_SUBAGENT_ID_PATTERN.test(params.job_id)) throw new Error(`${operation} requires a valid job_id`);
-  if (operation === "wait") {
-    if (params.limit !== undefined || params.offset !== undefined || params.child !== undefined) throw new Error("Background subagent wait accepts only job_id and wait_ms");
+  if (operation === "wait" || operation === "wait_group") {
+    if (params.limit !== undefined || params.offset !== undefined || params.child !== undefined) throw new Error(`Background subagent ${operation} accepts only job_id and wait_ms`);
   } else if (operation === "result") {
     if (params.wait_ms !== undefined) throw new Error("Background subagent result does not accept wait_ms");
     if (params.limit !== undefined && params.limit < 4) throw new Error("Background subagent result limit must be at least 4 bytes");
@@ -1081,6 +1166,7 @@ function validateBackgroundLaunch(params: any): void {
   if (params.action !== undefined || params.draft_id !== undefined) throw new Error("Draft review/apply/discard cannot run in the background");
   if (delegationFormCount(params) !== 1) throw new Error("Background launch requires exactly one task, non-empty tasks, or non-empty chain form");
   if (Array.isArray(params.tasks) && params.tasks.length > MAX_PARALLEL_TASKS) throw new Error(`Too many parallel tasks (${params.tasks.length}). Max is ${MAX_PARALLEL_TASKS}.`);
+  if (Array.isArray(params.chain) && params.chain.length > MAX_PARALLEL_TASKS) throw new Error(`Too many chain steps (${params.chain.length}). Max is ${MAX_PARALLEL_TASKS}.`);
   const items = Array.isArray(params.tasks) ? params.tasks : Array.isArray(params.chain) ? params.chain : [];
   if (items.some((item: any) => typeof item?.task !== "string" || item.task.trim().length === 0)) throw new Error("Every background subagent task must be a non-empty string");
 }
@@ -1099,8 +1185,8 @@ function subagentParams() {
   action: Type.Optional(Type.String({ pattern: "^(review|apply|discard)$", description: "AgentSH Draft disposition; use with mode=draft and draft_id instead of task/tasks/chain." })),
   draft_id: Type.Optional(Type.String({ pattern: "^session-[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$", description: "Exact retained AgentSH Draft identity." })),
   background: Type.Optional(Type.Boolean({ description: "Return immediately and continue a task/tasks/chain request in the background." })),
-  operation: Type.Optional(Type.String({ pattern: "^(list|status|output|wait|result|cancel)$", description: "Background subagent lifecycle operation; use instead of task/tasks/chain." })),
-  job_id: Type.Optional(Type.String({ pattern: "^subagent-job-[0-9a-f]{24}$", description: "Opaque background subagent execution ID." })),
+  operation: Type.Optional(Type.String({ pattern: "^(list|status|output|wait|wait_group|wait_any|wait_all|result|cancel)$", description: "Background lifecycle operation. wait/wait_group waits for one group, wait_any for one child across groups, and wait_all for all current groups." })),
+  job_id: Type.Optional(Type.String({ pattern: "^subagent-job-[0-9a-f]{24}$", description: "Opaque execution ID; required by group-specific operations and omitted for list/wait_any/wait_all." })),
   wait_ms: Type.Optional(Type.Integer({ minimum: 0, maximum: 30000, description: "Bounded background wait duration; default 1000ms." })),
   limit: Type.Optional(Type.Integer({ minimum: 1, maximum: MAX_SUBAGENT_RESULT_PAGE_BYTES, description: "List count (max 50), or result page byte limit (minimum 4, maximum 48 KiB)." })),
   offset: Type.Optional(Type.Integer({ minimum: 0, description: "Byte offset for operation=result pagination." })),
@@ -1110,8 +1196,8 @@ function subagentParams() {
   model: Type.Optional(Type.String({ description: "Optional model id (single mode)" })),
   tools: Type.Optional(Type.Array(Type.String(), { description: "Optional tool allowlist (single mode)" })),
   cwd: Type.Optional(Type.String({ description: "Optional working directory (single mode)" })),
-  tasks: Type.Optional(Type.Array(SubagentItem, { description: "Parallel subagent tasks. Max 8, up to 4 run concurrently." })),
-  chain: Type.Optional(Type.Array(SubagentItem, { description: "Sequential subagent steps. Each task may use {previous}." })),
+  tasks: Type.Optional(Type.Array(SubagentItem, { maxItems: MAX_PARALLEL_TASKS, description: "Parallel subagent tasks. Max 8, up to 4 run concurrently." })),
+  chain: Type.Optional(Type.Array(SubagentItem, { maxItems: MAX_PARALLEL_TASKS, description: "Sequential subagent steps. Max 8; each task may use {previous}." })),
     ...(process.env.PI_AGENTSH_EXPOSE_SUBAGENT_TIMEOUT === "1" ? {
       timeout_ms: Type.Optional(Type.Number({ minimum: 1, description: "Optional shorter AgentSH execution timeout in milliseconds." })),
     } : {}),
@@ -1132,6 +1218,24 @@ export default function (pi: ExtensionAPI) {
   let lifecycleClosing = false;
   const notificationState = sharedBackgroundSubagentNotificationState();
   const { idlePending, idleInFlight, deliveryClaims, consumed, consumptionPending } = notificationState;
+  const childTracker = sharedBackgroundSubagentChildTracker();
+  const createChildProgressBridge = (descriptors: BackgroundSubagentChildDescriptor[]) => {
+    const buffered = new Map<number, BackgroundSubagentChildProgress>();
+    let jobId: string | undefined;
+    return {
+      capture(result: any) {
+        for (const child of backgroundChildProgress(result?.details, descriptors)) {
+          buffered.set(child.child, child);
+        }
+        if (jobId) childTracker.update(jobId, [...buffered.values()]);
+      },
+      bind(record: BackgroundSubagentRecord) {
+        jobId = record.id;
+        childTracker.register(record, descriptors);
+        if (buffered.size > 0) childTracker.update(jobId, [...buffered.values()]);
+      },
+    };
+  };
   const activeForegroundSubagents = new Map<string, ActiveForegroundSubagent>();
   const pendingForegroundSubagents = new Map<string, string>();
   const requestedForegroundHandoffs = new Set<string>();
@@ -1182,9 +1286,9 @@ export default function (pi: ExtensionAPI) {
       const details = message?.role === "toolResult" && message.toolName === "subagent" && message.isError !== true
         ? message.details as BackgroundSubagentDetails | undefined
         : undefined;
-      if (details?.background_subagent && typeof details.job_id === "string"
-        && details.operation && details.operation !== "list" && details.status
-        && terminalBackgroundStatus(details.status)) ids.add(details.job_id);
+      if (details?.background_subagent) {
+        for (const id of backgroundOperationConsumedJobIds(details)) ids.add(id);
+      }
     }
     return ids;
   };
@@ -1365,7 +1469,10 @@ export default function (pi: ExtensionAPI) {
         activeForegroundSubagents.delete(id);
       }
       if (survivingReload) backgroundManager.beginReloadAdoption(sessionId);
-      else backgroundManager.requestCancelSession(sessionId);
+      else {
+        backgroundManager.requestCancelSession(sessionId);
+        childTracker.removeSession(sessionId);
+      }
     } catch {}
     pendingForegroundSubagents.clear();
     requestedForegroundHandoffs.clear();
@@ -1469,10 +1576,8 @@ export default function (pi: ExtensionAPI) {
     const details = event.details as SubagentDetails | BackgroundSubagentDetails | undefined;
     const background = details as BackgroundSubagentDetails | undefined;
     if (background?.background_subagent) {
-      if (!event.isError && !lifecycleClosing && sessionContext === ctx
-        && typeof background.job_id === "string" && background.operation !== "list"
-        && background.status && terminalBackgroundStatus(background.status)) {
-        stageTerminalConsumption(background.job_id);
+      if (!event.isError && !lifecycleClosing && sessionContext === ctx) {
+        for (const id of backgroundOperationConsumedJobIds(background)) stageTerminalConsumption(id);
       }
       return;
     }
@@ -1487,14 +1592,16 @@ export default function (pi: ExtensionAPI) {
     description: [
       "Delegate focused work through AgentSH when configured, otherwise through native child Pi processes.",
       "Exactly one request form: single task, parallel tasks, chain steps, a background lifecycle operation, or an AgentSH Draft disposition.",
-      "Set background=true on task/tasks/chain to continue without blocking; inspect it later with operation and job_id.",
+      "Background waits support one child across current groups (wait_any), one entire group (wait/wait_group), or all current groups (wait_all).",
+      "Set background=true on task/tasks/chain to continue without blocking; inspect it later with lifecycle operations (job_id only where required).",
       "In guard-only sessions, native child shell commands use the parent AgentSH Permission Gate and may request approval in the parent UI.",
       "mode defaults to shared; mode=draft requires an active AgentSH supervisor.",
     ].join(" "),
     promptSnippet: "Delegate focused work synchronously or as a durable-in-session background subagent",
     promptGuidelines: [
       "Use background=true when delegated work may take long enough that useful parent work can continue concurrently.",
-      "Before claiming dependent work complete, consume a terminal background subagent result; operation=result supports child, offset, and bounded byte-limit pagination, while cancelling a bounded wait does not cancel the subagent.",
+      "Before claiming dependent work complete, consume terminal background results. wait_any waits for one child across current groups, wait/wait_group waits for one group, and wait_all waits for every current group; cancelling a bounded wait never cancels work.",
+      "operation=result supports child, offset, and bounded byte-limit pagination.",
       "Use operation=cancel explicitly to stop a background subagent. Running background subagents survive hot /reload in the same Pi session, but are cancelled when Pi exits or replaces the session.",
     ],
     parameters: subagentParams(),
@@ -1512,6 +1619,58 @@ export default function (pi: ExtensionAPI) {
             details: { background_subagent: true, operation, failed: false, jobs: records.map((record) => ({ job_id: record.id, status: record.status, backend: record.backend, mode: record.mode })) },
           };
         }
+        if (operation === "wait_any") {
+          const snapshot = (await backgroundManager.list(ownerSessionId, 1000)).filter(isBackgroundSubagentActive).slice(0, MAX_BACKGROUND_SUBAGENTS);
+          const waited = await waitForAnyBackgroundSubagentChild(backgroundManager, childTracker, snapshot, params.wait_ms ?? 1000, signal);
+          await updateBackgroundStatus(ctx);
+          if (!waited.record || !waited.child) {
+            const message = snapshot.length === 0
+              ? "No active background subagents for this Pi session."
+              : waited.timedOut
+                ? `Wait timed out; ${waited.remainingChildren} child subagent${waited.remainingChildren === 1 ? " is" : "s are"} still unfinished across ${snapshot.length} group${snapshot.length === 1 ? "" : "s"}.`
+                : "No unfinished child subagents remain in the active group snapshot.";
+            return {
+              content: [{ type: "text", text: message }],
+              details: { background_subagent: true, operation, failed: false, timed_out: waited.timedOut, remaining_children: waited.remainingChildren },
+            };
+          }
+          return {
+            content: [{ type: "text", text: backgroundChildLine(waited.record.id, waited.child) }],
+            details: {
+              background_subagent: true,
+              operation,
+              job_id: waited.record.id,
+              status: waited.record.status,
+              backend: waited.record.backend,
+              failed: waited.child.status !== "completed",
+              timed_out: false,
+              child: waited.child.child,
+              child_status: waited.child.status,
+              remaining_children: waited.remainingChildren,
+            } satisfies BackgroundSubagentDetails,
+          };
+        }
+        if (operation === "wait_all") {
+          const snapshot = (await backgroundManager.list(ownerSessionId, 1000)).filter(isBackgroundSubagentActive).slice(0, MAX_BACKGROUND_SUBAGENTS);
+          const waited = await waitForAllBackgroundSubagentGroups(backgroundManager, snapshot, params.wait_ms ?? 1000, signal);
+          for (const record of waited.records) childTracker.reconcile(record);
+          await updateBackgroundStatus(ctx);
+          const heading = snapshot.length === 0
+            ? "No active background subagent groups for this Pi session."
+            : waited.timedOut
+              ? `Wait timed out; ${waited.records.filter(isBackgroundSubagentActive).length}/${waited.records.length} background subagent groups are still active.`
+              : `All ${waited.records.length} background subagent group${waited.records.length === 1 ? " is" : "s are"} terminal.`;
+          return {
+            content: [{ type: "text", text: [heading, ...waited.records.map(backgroundSubagentLine)].join("\n") }],
+            details: {
+              background_subagent: true,
+              operation,
+              failed: waited.records.some((record) => terminalBackgroundStatus(record.status) && record.status !== "completed"),
+              timed_out: waited.timedOut,
+              groups: waited.records.map((record) => ({ job_id: record.id, status: record.status, backend: record.backend })),
+            } satisfies BackgroundSubagentDetails,
+          };
+        }
         const id = params.job_id as string;
         const owned = async () => {
           const record = await backgroundManager.get(id);
@@ -1520,14 +1679,14 @@ export default function (pi: ExtensionAPI) {
         };
         let record = await owned();
         let timedOut = false;
-        if (operation === "wait") {
+        if (operation === "wait" || operation === "wait_group") {
           const waited = await backgroundManager.wait(id, params.wait_ms ?? 1000, signal);
           record = waited.record;
           timedOut = waited.timedOut;
         } else if (operation === "cancel") {
           record = await backgroundManager.cancel(id);
         }
-        const discloseOutput = operation === "output" || operation === "wait" || operation === "cancel" || (operation === "status" && terminalBackgroundStatus(record.status));
+        const discloseOutput = operation === "output" || operation === "wait" || operation === "wait_group" || operation === "cancel" || (operation === "status" && terminalBackgroundStatus(record.status));
         const waiting = timedOut ? "\nWait timed out; the subagent is still running." : "";
         const notReady = operation === "result" && isBackgroundSubagentActive(record) ? "\nResult is not ready; use a bounded wait or continue other work." : "";
         await updateBackgroundStatus(ctx);
@@ -1556,7 +1715,7 @@ export default function (pi: ExtensionAPI) {
           };
         }
         return {
-          content: [{ type: "text", text: truncateByBytes(`${backgroundRecordText(record, discloseOutput)}${waiting}${notReady}`) }],
+          content: [{ type: "text", text: truncateByBytes(`${backgroundRecordText(record, discloseOutput, childTracker.reconcile(record))}${waiting}${notReady}`) }],
           details: {
             background_subagent: true,
             operation,
@@ -1565,6 +1724,7 @@ export default function (pi: ExtensionAPI) {
             backend: record.backend,
             failed: terminalBackgroundStatus(record.status) && record.status !== "completed",
             timed_out: timedOut,
+            children: childTracker.reconcile(record).map((child) => ({ child: child.child, label: child.label, status: child.status })),
             result_children: record.artifacts?.map((artifact) => ({ child: artifact.child, label: artifact.label, bytes: artifact.bytes, total_bytes: artifact.totalBytes, complete: artifact.complete, sha256: artifact.sha256 })),
           } satisfies BackgroundSubagentDetails,
         };
@@ -1605,15 +1765,21 @@ export default function (pi: ExtensionAPI) {
         delete launchedParams.child;
         const sessionId = stableSessionId(ctx);
         const executionContext = snapshotSubagentExecutionContext(ctx);
+        const childProgress = createChildProgressBridge(backgroundChildDescriptors(launchedParams));
         const record = await backgroundManager.start({
           sessionId,
           backend: backend.kind,
           mode: requestMode(params),
           summary: requestSummary(params),
         }, async (backgroundSignal, update) => {
-          const result = await subagentTool.execute(toolCallId, { ...launchedParams, [INTERNAL_MANAGED_EXECUTION]: true }, backgroundSignal, (partial: any) => update(agentResultText(partial)), executionContext);
+          const result = await subagentTool.execute(toolCallId, { ...launchedParams, [INTERNAL_MANAGED_EXECUTION]: true }, backgroundSignal, (partial: any) => {
+            childProgress.capture(partial);
+            update(agentResultText(partial));
+          }, executionContext);
+          childProgress.capture(result);
           return backgroundOutcome(result);
         }, signal);
+        childProgress.bind(record);
         completionCheckArmed = true;
         await updateBackgroundStatus(ctx);
         return backgroundStartResult(record, false);
@@ -1648,6 +1814,7 @@ export default function (pi: ExtensionAPI) {
       if (!internalManagedExecution && params.action === undefined && delegationFormCount(params) === 1) {
         const sessionId = stableSessionId(ctx);
         const executionContext = snapshotSubagentExecutionContext(ctx);
+        const childDescriptors = backgroundChildDescriptors(params);
         if (activeForegroundSubagents.has(toolCallId)) throw new Error(`Duplicate active subagent tool-call ID: ${toolCallId}`);
         let execution!: DetachableForegroundExecution<any, any, BackgroundSubagentRecord>;
         execution = new DetachableForegroundExecution(
@@ -1664,31 +1831,50 @@ export default function (pi: ExtensionAPI) {
         if (signal?.aborted) abortForeground();
         else signal?.addEventListener("abort", abortForeground, { once: true });
 
-        const entry: ActiveForegroundSubagent = {
+        let entry!: ActiveForegroundSubagent;
+        const releaseForegroundOwnership = () => {
+          signal?.removeEventListener("abort", abortForeground);
+          if (activeForegroundSubagents.get(toolCallId) === entry) activeForegroundSubagents.delete(toolCallId);
+        };
+        entry = {
           toolCallId,
           sessionId,
           backend: backend.kind,
           mode: requestMode(params),
           summary: requestSummary(params),
           execution,
-          detach: () => execution.detach(async (adopted) => await backgroundManager.start({
-            sessionId,
-            backend: backend.kind,
-            mode: requestMode(params),
-            summary: requestSummary(params),
-          }, async (backgroundSignal, update) => {
-            const unsubscribe = adopted.subscribe((partial) => update(agentResultText(partial)));
-            const cancelAdopted = () => adopted.abort(backgroundSignal.reason);
-            if (backgroundSignal.aborted) cancelAdopted();
-            else backgroundSignal.addEventListener("abort", cancelAdopted, { once: true });
-            try {
-              const result = await adopted.completion;
-              return backgroundOutcome(result);
-            } finally {
-              unsubscribe();
-              backgroundSignal.removeEventListener("abort", cancelAdopted);
-            }
-          })),
+          detach: async () => {
+            const record = await execution.detach(async (adopted) => {
+              const childProgress = createChildProgressBridge(childDescriptors);
+              const backgroundRecord = await backgroundManager.start({
+                sessionId,
+                backend: backend.kind,
+                mode: requestMode(params),
+                summary: requestSummary(params),
+              }, async (backgroundSignal, update) => {
+                const unsubscribe = adopted.subscribe((partial) => {
+                  childProgress.capture(partial);
+                  update(agentResultText(partial));
+                });
+                const cancelAdopted = () => adopted.abort(backgroundSignal.reason);
+                if (backgroundSignal.aborted) cancelAdopted();
+                else backgroundSignal.addEventListener("abort", cancelAdopted, { once: true });
+                try {
+                  const result = await adopted.completion;
+                  childProgress.capture(result);
+                  return backgroundOutcome(result);
+                } finally {
+                  unsubscribe();
+                  backgroundSignal.removeEventListener("abort", cancelAdopted);
+                }
+              });
+              childProgress.bind(backgroundRecord);
+              releaseForegroundOwnership();
+              return backgroundRecord;
+            });
+            if (record) releaseForegroundOwnership();
+            return record;
+          },
         };
         activeForegroundSubagents.set(toolCallId, entry);
         try {
@@ -1746,6 +1932,9 @@ export default function (pi: ExtensionAPI) {
       }
 
       if (hasChain) {
+        if (params.chain.length > MAX_PARALLEL_TASKS) {
+          throw new Error(`Too many chain steps (${params.chain.length}). Max is ${MAX_PARALLEL_TASKS}.`);
+        }
         const results: SingleResult[] = [];
         let previousOutput = "";
 
@@ -1764,6 +1953,10 @@ export default function (pi: ExtensionAPI) {
 
           const result = await runSingleSubagent(ctx.cwd, stepSpec, label, i + 1, signal, chainUpdate, makeDetails("chain"), permissionAuthority);
           results.push(result);
+          onUpdate?.({
+            content: [{ type: "text", text: `Chain: ${results.length}/${params.chain.length} steps finished.` }],
+            details: makeDetails("chain")([...results]),
+          });
 
           if (isFailure(result)) {
             return {
@@ -1791,6 +1984,7 @@ export default function (pi: ExtensionAPI) {
           label: `task ${index + 1}`,
           task: spec.task,
           exitCode: -1,
+          backgroundState: "pending",
           messages: [],
           stderr: "",
           usage: usageZero(),
@@ -1801,10 +1995,11 @@ export default function (pi: ExtensionAPI) {
         }));
 
         const emitParallelUpdate = () => {
-          const running = allResults.filter((r) => r.exitCode === -1).length;
-          const done = allResults.length - running;
+          const pending = allResults.filter((result) => result.exitCode === -1 && result.backgroundState === "pending").length;
+          const running = allResults.filter((result) => result.exitCode === -1 && result.backgroundState !== "pending").length;
+          const done = allResults.length - running - pending;
           onUpdate?.({
-            content: [{ type: "text", text: `Parallel: ${done}/${allResults.length} done, ${running} running...` }],
+            content: [{ type: "text", text: `Parallel: ${done}/${allResults.length} done, ${running} running, ${pending} pending...` }],
             details: makeDetails("parallel")([...allResults]),
           });
         };

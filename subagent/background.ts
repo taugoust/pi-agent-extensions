@@ -22,6 +22,21 @@ const SCHEMA_VERSION = 2;
 
 export type BackgroundSubagentStatus = "running" | "cancelling" | "completed" | "failed" | "cancelled" | "lost";
 export type BackgroundSubagentBackend = "native" | "agentsh";
+export type BackgroundSubagentChildStatus = "pending" | "running" | "completed" | "failed" | "cancelled" | "skipped" | "lost";
+
+export type BackgroundSubagentChildDescriptor = {
+  label: string;
+  task?: string;
+};
+
+export type BackgroundSubagentChildProgress = BackgroundSubagentChildDescriptor & {
+  child: number;
+  status: BackgroundSubagentChildStatus;
+};
+
+export type BackgroundSubagentChild = BackgroundSubagentChildProgress & {
+  updatedAt: string;
+};
 
 export type BackgroundSubagentArtifact = {
   child: number;
@@ -86,6 +101,8 @@ type RuntimeRegistry = {
 const RUNTIME_KEY = "__paeBackgroundSubagentRuntimeV3";
 const NOTIFICATION_STATE_KEY = "__paeBackgroundSubagentNotificationV1";
 const MANAGERS_KEY = "__paeBackgroundSubagentManagersV3";
+const CHILD_TRACKER_KEY = "__paeBackgroundSubagentChildrenV1";
+const MAX_TRACKED_CHILD_GROUPS = 256;
 
 function runtimeRegistry(): RuntimeRegistry {
   const root = globalThis as Record<string, unknown>;
@@ -527,6 +544,7 @@ export class BackgroundSubagentManager {
   async list(sessionId?: string, limit = 50): Promise<BackgroundSubagentRecord[]> {
     await this.initialize();
     return [...this.records.values()]
+      .filter((record) => !this.runtime.pendingLaunches.has(record.id))
       .filter((record) => !sessionId || record.sessionId === sessionId)
       .sort((a, b) => b.createdAt.localeCompare(a.createdAt))
       .slice(0, Math.max(1, Math.min(limit, 1000)))
@@ -689,6 +707,213 @@ export function sharedBackgroundSubagentManager(root: string): BackgroundSubagen
 
 export function isBackgroundSubagentActive(record: BackgroundSubagentRecord): boolean {
   return record.status === "running" || record.status === "cancelling";
+}
+
+export function isBackgroundSubagentChildActive(child: BackgroundSubagentChild): boolean {
+  return child.status === "pending" || child.status === "running";
+}
+
+type TrackedChildGroup = {
+  sessionId: string;
+  children: Map<number, BackgroundSubagentChild>;
+  updatedAt: string;
+};
+
+function inferredChildDescriptors(record: BackgroundSubagentRecord): BackgroundSubagentChildDescriptor[] {
+  const countMatch = record.summary.match(/^(?:parallel|chain) ([1-8]):/);
+  const count = record.mode === "single"
+    ? 1
+    : Math.max(1, record.artifacts?.length ?? 0, Number(countMatch?.[1] ?? 1));
+  return Array.from({ length: Math.min(8, count) }, (_, index) => ({
+    label: record.artifacts?.[index]?.label || (record.mode === "chain" ? `step ${index + 1}` : record.mode === "parallel" ? `task ${index + 1}` : "subagent"),
+  }));
+}
+
+function groupTerminalChildStatus(record: BackgroundSubagentRecord, child: BackgroundSubagentChild, failedPendingChild?: number): BackgroundSubagentChildStatus {
+  if (record.status === "completed") return "completed";
+  if (record.status === "cancelled") return "cancelled";
+  if (record.status === "lost") return "lost";
+  if (record.status === "failed" && child.status === "pending" && record.mode === "chain" && child.child !== failedPendingChild) return "skipped";
+  return "failed";
+}
+
+/** Process-owned child progress, independent of the hot-reloadable manager class ABI. */
+export class BackgroundSubagentChildTracker {
+  private readonly groups = new Map<string, TrackedChildGroup>();
+
+  register(record: BackgroundSubagentRecord, descriptors: BackgroundSubagentChildDescriptor[] = inferredChildDescriptors(record)): void {
+    const selected = descriptors.slice(0, 8);
+    if (selected.length === 0) selected.push({ label: record.mode === "single" ? "subagent" : "child 1" });
+    let group = this.groups.get(record.id);
+    if (!group || group.sessionId !== record.sessionId) {
+      group = { sessionId: record.sessionId, children: new Map(), updatedAt: record.updatedAt };
+      this.groups.set(record.id, group);
+    }
+    const now = new Date().toISOString();
+    for (let index = 0; index < selected.length; index++) {
+      const descriptor = selected[index];
+      const child = index + 1;
+      const existing = group.children.get(child);
+      if (existing) {
+        existing.label = boundedText(descriptor.label, 256) || existing.label;
+        if (descriptor.task?.trim()) existing.task = boundedText(descriptor.task, 2048);
+      } else {
+        group.children.set(child, {
+          child,
+          label: boundedText(descriptor.label, 256) || `child ${child}`,
+          ...(descriptor.task?.trim() ? { task: boundedText(descriptor.task, 2048) } : {}),
+          status: "pending",
+          updatedAt: now,
+        });
+      }
+    }
+    this.reconcile(record);
+    this.prune(record.id);
+  }
+
+  update(jobId: string, progress: BackgroundSubagentChildProgress[]): void {
+    const group = this.groups.get(jobId);
+    if (!group) return;
+    const now = new Date().toISOString();
+    for (const candidate of progress.slice(0, 8)) {
+      if (!Number.isSafeInteger(candidate.child) || candidate.child < 1 || candidate.child > 8) continue;
+      const existing = group.children.get(candidate.child);
+      if (existing && !isBackgroundSubagentChildActive(existing)) {
+        if (isBackgroundSubagentChildActive({ ...existing, status: candidate.status })) continue;
+        if (existing.status !== "completed" || candidate.status === "completed") continue;
+      }
+      const next: BackgroundSubagentChild = {
+        child: candidate.child,
+        label: boundedText(candidate.label, 256) || existing?.label || `child ${candidate.child}`,
+        ...(candidate.task?.trim() ? { task: boundedText(candidate.task, 2048) } : existing?.task ? { task: existing.task } : {}),
+        status: candidate.status,
+        updatedAt: existing?.status === candidate.status ? existing.updatedAt : now,
+      };
+      group.children.set(candidate.child, next);
+      group.updatedAt = now;
+    }
+  }
+
+  reconcile(record: BackgroundSubagentRecord): BackgroundSubagentChild[] {
+    if (!this.groups.has(record.id)) this.register(record, inferredChildDescriptors(record));
+    const group = this.groups.get(record.id)!;
+    if (!isBackgroundSubagentActive(record)) {
+      const now = new Date().toISOString();
+      const failedPendingChild = record.status === "failed" && record.mode === "chain"
+        && ![...group.children.values()].some((child) => ["running", "failed", "cancelled", "lost"].includes(child.status))
+        ? [...group.children.values()].filter((child) => child.status === "pending").sort((a, b) => a.child - b.child)[0]?.child
+        : undefined;
+      for (const child of group.children.values()) {
+        if (!isBackgroundSubagentChildActive(child)) continue;
+        child.status = groupTerminalChildStatus(record, child, failedPendingChild);
+        child.updatedAt = now;
+      }
+      group.updatedAt = now;
+    }
+    const children = [...group.children.values()].sort((a, b) => a.child - b.child).map((child) => structuredClone(child));
+    this.prune(record.id);
+    return children;
+  }
+
+  removeSession(sessionId: string): void {
+    for (const [id, group] of this.groups) if (group.sessionId === sessionId) this.groups.delete(id);
+  }
+
+  private prune(protectedId?: string): void {
+    if (this.groups.size <= MAX_TRACKED_CHILD_GROUPS) return;
+    const oldest = [...this.groups.entries()].sort((a, b) => a[1].updatedAt.localeCompare(b[1].updatedAt));
+    for (const [id, group] of oldest) {
+      if (this.groups.size <= MAX_TRACKED_CHILD_GROUPS) break;
+      if (id !== protectedId && [...group.children.values()].every((child) => !isBackgroundSubagentChildActive(child))) this.groups.delete(id);
+    }
+    for (const [id] of oldest) {
+      if (this.groups.size <= MAX_TRACKED_CHILD_GROUPS) break;
+      if (id !== protectedId) this.groups.delete(id);
+    }
+  }
+}
+
+export function sharedBackgroundSubagentChildTracker(): BackgroundSubagentChildTracker {
+  const root = globalThis as Record<string, unknown>;
+  const existing = root[CHILD_TRACKER_KEY] as BackgroundSubagentChildTracker | undefined;
+  if (existing && typeof existing.register === "function" && typeof existing.update === "function"
+    && typeof existing.reconcile === "function" && typeof existing.removeSession === "function") return existing;
+  const created = new BackgroundSubagentChildTracker();
+  root[CHILD_TRACKER_KEY] = created;
+  return created;
+}
+
+async function waitPollDelay(timeoutMs: number, signal?: AbortSignal): Promise<void> {
+  await new Promise<void>((resolve, reject) => {
+    const done = () => {
+      signal?.removeEventListener("abort", abort);
+      resolve();
+    };
+    const timer = setTimeout(done, Math.max(1, Math.min(100, timeoutMs)));
+    const abort = () => {
+      clearTimeout(timer);
+      signal?.removeEventListener("abort", abort);
+      reject(signal?.reason instanceof Error ? signal.reason : new Error("Background subagent wait cancelled"));
+    };
+    signal?.addEventListener("abort", abort, { once: true });
+    if (signal?.aborted) abort();
+  });
+}
+
+export type BackgroundSubagentWaitAnyResult = {
+  record?: BackgroundSubagentRecord;
+  child?: BackgroundSubagentChild;
+  timedOut: boolean;
+  remainingChildren: number;
+};
+
+export async function waitForAnyBackgroundSubagentChild(
+  manager: BackgroundSubagentManager,
+  tracker: BackgroundSubagentChildTracker,
+  records: BackgroundSubagentRecord[],
+  timeoutMs: number,
+  signal?: AbortSignal,
+): Promise<BackgroundSubagentWaitAnyResult> {
+  if (signal?.aborted) throw signal.reason instanceof Error ? signal.reason : new Error("Background subagent wait cancelled");
+  const activeRecords = records.filter(isBackgroundSubagentActive);
+  const initialChildren = activeRecords.map((record) => ({ record, children: tracker.reconcile(record) }));
+  const candidates = initialChildren.flatMap(({ record, children }) => children
+    .filter(isBackgroundSubagentChildActive)
+    .map((child) => ({ jobId: record.id, child: child.child })));
+  if (candidates.length === 0) return { timedOut: false, remainingChildren: 0 };
+  const deadline = Date.now() + timeoutMs;
+  for (;;) {
+    if (signal?.aborted) throw signal.reason instanceof Error ? signal.reason : new Error("Background subagent wait cancelled");
+    const current = new Map<string, BackgroundSubagentRecord>();
+    for (const record of activeRecords) current.set(record.id, await manager.get(record.id));
+    let remainingChildren = 0;
+    let terminal: { record: BackgroundSubagentRecord; child: BackgroundSubagentChild } | undefined;
+    for (const candidate of candidates) {
+      const record = current.get(candidate.jobId)!;
+      const child = tracker.reconcile(record).find((item) => item.child === candidate.child);
+      if (child && !isBackgroundSubagentChildActive(child)) terminal ??= { record, child };
+      else if (child) remainingChildren += 1;
+    }
+    if (terminal) return { ...terminal, timedOut: false, remainingChildren };
+    if (Date.now() >= deadline) return { timedOut: true, remainingChildren };
+    await waitPollDelay(deadline - Date.now(), signal);
+  }
+}
+
+export async function waitForAllBackgroundSubagentGroups(
+  manager: BackgroundSubagentManager,
+  records: BackgroundSubagentRecord[],
+  timeoutMs: number,
+  signal?: AbortSignal,
+): Promise<{ records: BackgroundSubagentRecord[]; timedOut: boolean }> {
+  if (signal?.aborted) throw signal.reason instanceof Error ? signal.reason : new Error("Background subagent wait cancelled");
+  const active = records.filter(isBackgroundSubagentActive);
+  if (active.length === 0) return { records: [], timedOut: false };
+  const waited = await Promise.all(active.map((record) => manager.wait(record.id, timeoutMs, signal)));
+  return {
+    records: waited.map((entry) => entry.record),
+    timedOut: waited.some((entry) => entry.timedOut),
+  };
 }
 
 export function backgroundSubagentsSurviveShutdown(reason: unknown): boolean {
