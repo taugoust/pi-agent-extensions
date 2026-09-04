@@ -13,6 +13,12 @@ function quote(value: string): string {
   return `'${value.replaceAll("'", `'\\''`)}'`;
 }
 
+export function stripTmuxExitFooter(output: string): string {
+  // Legacy panes may already contain tmux's default footer. Job metadata owns
+  // the exit status; this terminal decoration is not command output.
+  return output.replace(/(?:\r?\n)*Pane is dead \(status -?\d+, [^\r\n]*\)\r?\n*$/, "");
+}
+
 export type PaneState = {
   exists: boolean;
   dead?: boolean;
@@ -160,7 +166,7 @@ export class TmuxBackend implements JobProcessBackend {
     const state = await this.inspect(id, launch);
     if (!state.exists) return "";
     const result = await this.run(["capture-pane", "-p", "-J", "-S", "-2000", "-t", launch.paneId]);
-    return result.stdout;
+    return state.dead ? stripTmuxExitFooter(result.stdout) : result.stdout;
   }
 
   async signal(id: string, launch: JobLaunch, signal: NodeJS.Signals): Promise<void> {

@@ -103,6 +103,9 @@ async function handle(command) {
   }
   commands.push({ type: command.type, message: command.message, streamingBehavior: command.streamingBehavior });
 
+  if (mode === "unexpected-exit") {
+    process.exit(42);
+  }
   if (mode === "invalid-utf8") {
     response("prompt", command.id);
     process.stdout.write(Buffer.from([0xff, 0x0a]));
@@ -306,6 +309,7 @@ function createSession(mode: string, controlTimeoutMs?: number) {
     process: proc,
     onEvent(event) {
       events.push(event);
+      if (mode === "observer-failure") throw new Error("private payload must not be retained");
       if (event.type === "agent_start") started();
     },
     terminateProcess: () => proc.kill("SIGTERM"),
@@ -327,6 +331,11 @@ async function exercise(mode: "steer" | "follow_up" | "interrupt") {
   const exit = await exited;
   assert.equal(exit.code, 0, session.stderr());
   assert.equal(session.rpc.protocolError, undefined, session.stderr());
+  assert.deepEqual(session.rpc.diagnostics.rawExit, { code: 0, signal: null });
+  const trace = session.rpc.diagnostics.trace.map((entry) => entry.event);
+  assert(trace.indexOf("agent_settled") < trace.indexOf("stdin_end"));
+  assert(trace.indexOf("stdin_end") < trace.indexOf("stdout_end"));
+  assert.equal(trace.at(-1), "process_close");
   assert(updates.some((text) => text.includes("controlled \u2028 🌍 answer")), `${mode} response did not stream`);
   assert(updates.every((text) => !text.includes("old response")), `${mode} streamed pre-control assistant text`);
   const fixtureCommands = session.events.findLast((event) => event.type === "fixture_commands")?.commands ?? [];
@@ -482,6 +491,20 @@ async function exerciseProtocolFailure(mode: string, expected: RegExp) {
   assert.match(session.rpc.protocolError?.message ?? "", expected, session.stderr());
 }
 
+async function exerciseExitDiagnostics() {
+  const session = createSession("unexpected-exit");
+  await withTimeout(session.rpc.start("private prompt"), "unexpected exit did not settle");
+  assert.deepEqual(session.rpc.diagnostics.rawExit, { code: 42, signal: null });
+  assert.match(session.rpc.protocolError?.message ?? "", /stdout ended|process exited/);
+  const diagnostics = session.rpc.diagnostics;
+  assert(diagnostics.trace.some((entry) => entry.event === "stdout_end"));
+  assert(diagnostics.trace.some((entry) => entry.event === "process_exit"));
+  assert(diagnostics.trace.length <= 64);
+  assert(!JSON.stringify(diagnostics).includes("private prompt"));
+  diagnostics.trace.length = 0;
+  assert(session.rpc.diagnostics.trace.length > 0, "diagnostics leaked mutable state");
+}
+
 async function exerciseLogicalControlTimeout() {
   const session = createSession("logical-timeout", 50);
   const exited = session.rpc.start("initial task");
@@ -536,11 +559,38 @@ async function waitForLine(stream: NodeJS.ReadableStream): Promise<string> {
   });
 }
 
+async function exerciseSequentialProcessGroups() {
+  if (process.platform === "win32") return;
+  const options = {
+    shellPath: process.env.TEST_POSIX_SHELL ?? "/bin/sh",
+    fifoPath: process.env.TEST_MKFIFO ?? "/usr/bin/mkfifo",
+    termGraceMs: 50,
+  };
+  await (async () => {
+    const first = spawnNativeSubagentProcess(process.execPath, ["-e", "setTimeout(() => {}, 200)"], options);
+    const closed = once(first.process, "close");
+    await first.ready;
+    assert.deepEqual(await closed, [0, null]);
+  })();
+  const next = spawnNativeSubagentProcess(process.execPath, ["-e", "setTimeout(() => {}, 500)"], options);
+  const closed = once(next.process, "close");
+  await next.ready;
+  const gc = setInterval(() => {
+    (globalThis as any).Bun?.gc(true);
+    (globalThis as any).gc?.();
+  }, 10);
+  try {
+    assert.deepEqual(await withTimeout(closed, "successive process group did not close", 2000), [0, null],
+      "collecting a completed child closed a later child's control channel");
+  } finally { clearInterval(gc); next.terminate(); }
+}
+
 async function exerciseProcessGroupEscalation() {
   if (process.platform !== "linux") return;
   const statePath = path.join(root, "descendant.json");
   const owned = spawnNativeSubagentProcess(process.execPath, [processFixture, "leader", statePath], {
     shellPath: process.env.TEST_POSIX_SHELL ?? "/bin/sh",
+    fifoPath: process.env.TEST_MKFIFO ?? "/usr/bin/mkfifo",
     termGraceMs: 500,
   });
   await owned.ready;
@@ -583,7 +633,10 @@ try {
   await exerciseProtocolFailure("non-lf", /non-LF-terminated/);
   await exerciseProtocolFailure("empty-frame", /empty JSONL frame/);
   await exerciseProtocolFailure("unknown-ui", /unsupported extension UI method/);
+  await exerciseProtocolFailure("observer-failure", /event observer failed/);
+  await exerciseExitDiagnostics();
   await exerciseStdoutFailure();
+  await exerciseSequentialProcessGroups();
   await exerciseProcessGroupEscalation();
 } finally {
   await rm(root, { recursive: true, force: true });

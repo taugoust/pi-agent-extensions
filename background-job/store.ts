@@ -172,7 +172,7 @@ export class JobStore {
   async initialize(): Promise<void> {
     await mkdir(this.jobsRoot, { recursive: true, mode: 0o700 });
     await mkdir(this.runtimeRoot, { recursive: true, mode: 0o700 });
-    await writeFile(this.tmuxConfigPath, "set-option -g @pi_background_server v1\nset-option -g remain-on-exit on\nset-option -g history-limit 2000\nset-option -g status off\n", { mode: 0o600 });
+    await writeFile(this.tmuxConfigPath, "set-option -g @pi_background_server v1\nset-option -g remain-on-exit on\nset-option -g remain-on-exit-format ''\nset-option -g history-limit 2000\nset-option -g status off\n", { mode: 0o600 });
     await Promise.all([this.assertPrivateDirectory(this.root), this.assertPrivateDirectory(this.jobsRoot), this.assertPrivateDirectory(this.runtimeRoot)]);
   }
 

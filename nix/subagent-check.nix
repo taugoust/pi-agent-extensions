@@ -89,7 +89,7 @@ pkgs.runCommand "subagent-check"
     EOF
 
     node "$workdir/out/subagent/control.test.js"
-    node "$workdir/out/subagent/native-rpc.test.js"
+    TEST_MKFIFO=${pkgs.coreutils}/bin/mkfifo node "$workdir/out/subagent/native-rpc.test.js"
 
     cat > "$workdir/test.mjs" <<'EOF'
     import assert from "node:assert/strict";

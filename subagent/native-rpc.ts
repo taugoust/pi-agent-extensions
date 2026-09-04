@@ -1,8 +1,11 @@
 import {
   spawn,
+  spawnSync,
   type ChildProcessWithoutNullStreams,
 } from "node:child_process";
-import { readFileSync } from "node:fs";
+import { readFileSync, mkdtempSync, openSync, closeSync, readSync, writeSync, rmSync, constants } from "node:fs";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
 import {
   SubagentControlError,
   type NativeSubagentControlHandle,
@@ -20,7 +23,10 @@ const PROCESS_GROUP_ANCHOR_TIMEOUT_MS = 10_000;
 const POSIX_PROCESS_GROUP_WRAPPER = String.raw`
 set -eu
 term_grace_seconds=$1
-shift
+control_path=$2
+ready_path=$3
+shift 3
+exec 3< "$control_path"
 (
   trap '' HUP INT TERM
   action=
@@ -32,11 +38,10 @@ shift
   sleep "$term_grace_seconds"
   kill -KILL 0
   exit 127
-) 0</dev/null 2>/dev/null 4>&- &
+) 0</dev/null 2>/dev/null &
 anchor_pid=$!
-printf '%s\n' "$anchor_pid" >&4
+printf '%s\n' "$anchor_pid" > "$ready_path"
 exec 3<&-
-exec 4>&-
 exec "$@"
 `;
 
@@ -96,6 +101,11 @@ export type NativeSubagentRpcExit = {
   signal: NodeJS.Signals | null;
 };
 
+export type NativeSubagentRpcDiagnostics = {
+  rawExit?: NativeSubagentRpcExit;
+  trace: Array<{ event: string; elapsedMs: number; streaming: boolean; settledVersion: number; closingInput: boolean; terminationRequested: boolean }>;
+};
+
 export type NativeSubagentRpcOptions = {
   process: ChildProcessWithoutNullStreams;
   onEvent(event: JsonObject): void;
@@ -116,6 +126,8 @@ export type NativeSubagentProcessOptions = {
   env?: NodeJS.ProcessEnv;
   /** Required on POSIX; callers can require an immutable shell for guarded launches. */
   shellPath?: string;
+  /** Immutable mkfifo executable for guarded launches. */
+  fifoPath?: string;
   /** Test override. Production callers leave this at the five-second default. */
   termGraceMs?: number;
 };
@@ -225,11 +237,29 @@ export function spawnNativeSubagentProcess(
   }
 
   if (!options.shellPath) throw new Error("native subagent process-group launch requires a POSIX shell");
-  const child = spawn(options.shellPath, [
+  if (!options.fifoPath) throw new Error("native subagent process-group launch requires mkfifo");
+  // Bun's extra-stdio wrappers can close reused descriptors when a previous
+  // ChildProcess is collected. Never give this lifetime-critical channel to
+  // child_process: own a named FIFO descriptor directly and close it once.
+  const channelDir = mkdtempSync(join(tmpdir(), "pi-subagent-group-"));
+  const controlPath = join(channelDir, "control");
+  const readyPath = join(channelDir, "ready");
+  const fifo = spawnSync(options.fifoPath, ["-m", "600", controlPath], { timeout: 5000, stdio: "ignore" });
+  if (fifo.error || fifo.status !== 0) {
+    rmSync(channelDir, { recursive: true, force: true });
+    throw new Error("could not create native subagent process-group control FIFO");
+  }
+  let controlFd: number;
+  try { controlFd = openSync(controlPath, constants.O_RDWR); }
+  catch (error) { rmSync(channelDir, { recursive: true, force: true }); throw error; }
+  let child: ChildProcessWithoutNullStreams;
+  try { child = spawn(options.shellPath, [
     "-c",
     POSIX_PROCESS_GROUP_WRAPPER,
     "pi-subagent-process-group",
     String(termGraceMs / 1000),
+    controlPath,
+    readyPath,
     command,
     ...args,
   ], {
@@ -237,27 +267,23 @@ export function spawnNativeSubagentProcess(
     env: options.env,
     shell: false,
     detached: true,
-    stdio: ["pipe", "pipe", "pipe", "pipe", "pipe"],
-  }) as ChildProcessWithoutNullStreams;
-  const control = child.stdio[3];
-  const anchorOutput = child.stdio[4];
+    stdio: ["pipe", "pipe", "pipe"],
+  }); } catch (error) {
+    closeSync(controlFd);
+    rmSync(channelDir, { recursive: true, force: true });
+    throw error;
+  }
   let terminating = false;
   let controlFinished = false;
 
-  // These private pipes are infrastructure, not protocol output. Always own
-  // their errors so a concurrent child exit cannot become an uncaught event.
-  control.on("error", () => undefined);
-  anchorOutput.on("error", () => undefined);
-
   const ready = new Promise<void>((resolve, reject) => {
-    let buffer = "";
     let settled = false;
+    let poll: ReturnType<typeof setInterval> | undefined;
     const timer = setTimeout(() => finish(new Error("native subagent process-group anchor did not start in time")), PROCESS_GROUP_ANCHOR_TIMEOUT_MS);
     timer.unref?.();
     const cleanup = () => {
       clearTimeout(timer);
-      anchorOutput.removeListener("data", onData);
-      anchorOutput.removeListener("end", onEnd);
+      if (poll) clearInterval(poll);
       child.removeListener("error", onError);
       child.removeListener("exit", onExit);
     };
@@ -265,7 +291,6 @@ export function spawnNativeSubagentProcess(
       if (settled) return;
       settled = true;
       cleanup();
-      try { anchorOutput.destroy(); } catch {}
       if (error) reject(error);
       else resolve();
     };
@@ -294,22 +319,27 @@ export function spawnNativeSubagentProcess(
       }
       finish();
     };
-    const onData = (chunk: Buffer | string) => {
-      buffer += chunk.toString();
-      if (Buffer.byteLength(buffer, "utf8") > 64) {
-        finish(new Error("native subagent process-group anchor identity is oversized"));
-        return;
+    const readIdentity = () => {
+      try {
+        const fd = openSync(readyPath, constants.O_RDONLY | constants.O_NONBLOCK | constants.O_NOFOLLOW);
+        const bytes = Buffer.alloc(65);
+        let size: number;
+        try { size = readSync(fd, bytes, 0, bytes.length, 0); }
+        finally { closeSync(fd); }
+        if (size > 64) { finish(new Error("native subagent process-group anchor identity is oversized")); return; }
+        const buffer = bytes.subarray(0, size).toString("utf8");
+        if (buffer.endsWith("\n")) verify(buffer.slice(0, -1));
+      } catch (error) {
+        if ((error as NodeJS.ErrnoException).code !== "ENOENT") finish(asError(error));
       }
-      const newline = buffer.indexOf("\n");
-      if (newline >= 0) verify(buffer.slice(0, newline));
     };
-    const onEnd = () => finish(new Error("native subagent process-group anchor ended before reporting its identity"));
     const onError = (error: Error) => finish(new Error(`native subagent process-group launch failed: ${error.message}`));
     const onExit = () => finish(new Error("native subagent exited before its process-group anchor was ready"));
-    anchorOutput.on("data", onData);
-    anchorOutput.once("end", onEnd);
     child.once("error", onError);
     child.once("exit", onExit);
+    poll = setInterval(readIdentity, 10);
+    poll.unref?.();
+    readIdentity();
   });
   // A spawn error can occur before the launcher reaches its explicit await.
   void ready.catch(() => undefined);
@@ -317,17 +347,18 @@ export function spawnNativeSubagentProcess(
   const finishControl = (action: "complete" | "terminate"): Promise<void> => {
     if (controlFinished) return Promise.resolve();
     controlFinished = true;
-    return new Promise<void>((resolve) => {
-      try {
-        control.end(`${action}\n`, () => resolve());
-      } catch {
-        resolve();
-      }
-    });
+    try { writeSync(controlFd, `${action}\n`); }
+    catch { /* EOF also instructs the anchor to clean up its owned group. */ }
+    finally { try { closeSync(controlFd); } catch {} }
+    return Promise.resolve();
   };
 
   child.once("exit", () => {
     if (!terminating) void finishControl("complete");
+  });
+  child.once("close", () => {
+    void finishControl("complete");
+    try { rmSync(channelDir, { recursive: true, force: true }); } catch {}
   });
 
   return {
@@ -399,6 +430,19 @@ export class NativeSubagentRpcSession implements NativeSubagentControlHandle {
   private controlCollector?: LogicalRunCollector;
   private shutdownTimer?: ReturnType<typeof setTimeout>;
   private fatal?: Error;
+  private readonly startedAt = Date.now();
+  private readonly lifecycleTrace: NativeSubagentRpcDiagnostics["trace"] = [];
+  private rawExit?: NativeSubagentRpcExit;
+
+  get diagnostics(): NativeSubagentRpcDiagnostics {
+    return { rawExit: this.rawExit && { ...this.rawExit }, trace: this.lifecycleTrace.map((entry) => ({ ...entry })) };
+  }
+
+  private trace(event: string): void {
+    this.lifecycleTrace.push({ event, elapsedMs: Date.now() - this.startedAt, streaming: this.streaming,
+      settledVersion: this.settledVersion, closingInput: this.closingInput, terminationRequested: this.terminationRequested });
+    if (this.lifecycleTrace.length > 64) this.lifecycleTrace.shift();
+  }
 
   constructor(options: NativeSubagentRpcOptions) {
     this.proc = options.process;
@@ -424,6 +468,10 @@ export class NativeSubagentRpcSession implements NativeSubagentControlHandle {
       }
     });
     this.proc.on("error", (error) => this.fail(new Error(`native subagent process failed: ${error.message}`)));
+    this.proc.on("exit", (code, signal) => {
+      this.rawExit = { code, signal };
+      this.trace("process_exit");
+    });
     this.proc.on("close", (code, signal) => this.handleClose(code, signal));
   }
 
@@ -463,6 +511,7 @@ export class NativeSubagentRpcSession implements NativeSubagentControlHandle {
   terminate(reason: unknown = new Error("native subagent RPC process terminated")): void {
     if (this.closed || this.terminationRequested) return;
     this.terminationRequested = true;
+    this.trace("terminate_requested");
     this.notifyChange();
     try {
       this.terminateProcess();
@@ -778,6 +827,7 @@ export class NativeSubagentRpcSession implements NativeSubagentControlHandle {
   private finishStdout(): void {
     if (this.stdoutEnded) return;
     this.stdoutEnded = true;
+    this.trace("stdout_end");
     if (this.closed || this.fatal) return;
     try {
       this.buffer += this.decoder.decode();
@@ -823,11 +873,17 @@ export class NativeSubagentRpcSession implements NativeSubagentControlHandle {
       this.streaming = false;
       this.settledVersion += 1;
     }
-    this.observeMessageEvent(event, sequence);
+    if (["agent_start", "agent_end", "agent_settled", "message_start", "message_end", "turn_start", "turn_end", "compaction_start", "compaction_end", "auto_retry_start", "auto_retry_end", "extension_error"].includes(event.type)) {
+      this.trace(event.type);
+    }
     try {
+      this.observeMessageEvent(event, sequence);
       this.onEvent(event);
     } catch {
-      // Parent rendering/state observers must not break transport ownership.
+      // State reconstruction failures must be visible, not silently lose output.
+      // Do not copy arbitrary observer errors (which may include payloads).
+      this.fail(new Error("native subagent RPC event observer failed"));
+      return;
     }
     this.notifyChange();
     if (event.type === "agent_settled") queueMicrotask(() => this.maybeCloseInput());
@@ -1069,6 +1125,7 @@ export class NativeSubagentRpcSession implements NativeSubagentControlHandle {
       || this.controlReservations > 0
       || this.pendingCommands.size > 0) return;
     this.closingInput = true;
+    this.trace("stdin_end");
     try {
       this.proc.stdin.end();
     } catch (error) {
@@ -1087,6 +1144,7 @@ export class NativeSubagentRpcSession implements NativeSubagentControlHandle {
   private fail(error: Error): void {
     if (this.closed || this.fatal) return;
     this.fatal = error;
+    this.trace("protocol_failure");
     for (const pending of this.pendingCommands.values()) {
       clearTimeout(pending.timer);
       pending.reject(error);
@@ -1099,6 +1157,8 @@ export class NativeSubagentRpcSession implements NativeSubagentControlHandle {
   private handleClose(code: number | null, signal: NodeJS.Signals | null): void {
     if (this.closed) return;
     this.closed = true;
+    this.rawExit ??= { code, signal };
+    this.trace("process_close");
     if (this.shutdownTimer) clearTimeout(this.shutdownTimer);
     this.shutdownTimer = undefined;
     if (!this.fatal && !this.closingInput && !this.terminationRequested) {

@@ -761,7 +761,16 @@ prompts use RPC `prompt` with `streamingBehavior`, logical completion is
 `agent_settled`, and clean shutdown is stdin/stdout EOF. RPC extension dialogs
 are always answered as cancelled because a native child has no independent
 user-authority channel; guard-only shell approvals continue to use the existing
-authenticated parent Permission Gate relay.
+authenticated parent Permission Gate relay. Progress reconstruction preserves
+content indices across thinking/text/tool blocks, and rendering errors cannot
+interrupt cancellation. Failure reports retain raw process exit code/signal and
+a bounded, metadata-only RPC lifecycle trace. Background completion messages are
+visible in the transcript with a bounded report preview and full-report lookup.
+
+POSIX process-group cleanup uses a private named FIFO and requires `mkfifo`
+(immutable Nix-store executables in guarded sessions). It deliberately avoids
+Bun's extra-stdio pipes: garbage collection of a completed child could close a
+reused descriptor belonging to a later child and trigger an unintended SIGKILL.
 
 Set `PI_SUBAGENT_BIN` to the raw Pi executable selected by your wrapper, e.g.
 `/nix/store/.../bin/pi`. If unset, the extension tries source/dev execution,

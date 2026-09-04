@@ -65,7 +65,7 @@ import {
   type SubagentControlMode,
 } from "./control.js";
 import { DetachableForegroundExecution } from "./foreground-handoff.js";
-import { NativeSubagentRpcSession, spawnNativeSubagentProcess } from "./native-rpc.js";
+import { NativeSubagentRpcSession, spawnNativeSubagentProcess, type NativeSubagentRpcDiagnostics } from "./native-rpc.js";
 import { formatParallelResultContent } from "./parallel-result.js";
 import { NativeSubagentPermissionRelay } from "./permission-relay.js";
 import { MAX_SUBAGENT_RESULT_PAGE_BYTES, attachRetainedReports, extractRetainedSubagentReports } from "./result-artifact.js";
@@ -123,6 +123,7 @@ type SingleResult = {
   command?: string;
   args?: string[];
   childAgentDir?: string;
+  rpcDiagnostics?: NativeSubagentRpcDiagnostics;
   warning?: string;
   lastEvent?: unknown;
   lastToolCall?: {
@@ -325,11 +326,33 @@ function formatToolCall(toolName: string, args: Record<string, unknown>, themeFg
   }
 }
 
+// Keep RPC content indices stable, including thinking blocks and skipped slots.
+export function applyNativeAssistantDelta(message: any, delta: any): void {
+  if (message?.role !== "assistant" || !delta) return;
+  const index = delta.contentIndex;
+  if (!Number.isSafeInteger(index) || index < 0 || index > 4095) {
+    if (delta.type === "start" || delta.type === "done" || delta.type === "error") return;
+    throw new Error("Native subagent RPC returned an invalid content index");
+  }
+  const content = Array.from(message.content ?? [], (part: any) => part ?? { type: "thinking", thinking: "" });
+  while (content.length <= index) content.push({ type: "thinking", thinking: "" });
+  if (delta.type === "text_start") content[index] = { type: "text", text: "" };
+  else if (delta.type === "text_delta") {
+    content[index] = { type: "text", text: `${content[index]?.type === "text" ? content[index].text : ""}${String(delta.delta ?? "")}` };
+  } else if (delta.type === "text_end") {
+    content[index] = { type: "text", text: String(delta.content ?? content[index]?.text ?? "") };
+  } else if (delta.type === "toolcall_start") {
+    content[index] = { type: "toolCall", id: delta.id, name: String(delta.toolName ?? "unknown"), arguments: {} };
+  } else if (delta.type === "toolcall_end" && delta.toolCall) content[index] = delta.toolCall;
+  // Thinking is intentionally not displayed or accumulated in progress snapshots.
+  message.content = content;
+}
+
 export function getFinalOutput(messages: Message[]): string {
   for (let i = messages.length - 1; i >= 0; i--) {
     const msg = messages[i];
     if (msg.role !== "assistant") continue;
-    const textParts = msg.content.filter((part) => part.type === "text");
+    const textParts = msg.content.filter((part) => part?.type === "text" && typeof part.text === "string");
     if (textParts.length > 0) return textParts.map((part) => part.text).join("");
   }
   return "";
@@ -341,7 +364,7 @@ function getLastAssistantText(messages: Message[]): string {
     if (msg.role !== "assistant") continue;
     for (let j = msg.content.length - 1; j >= 0; j--) {
       const part = msg.content[j];
-      if (part.type === "text" && part.text.trim()) return part.text;
+      if (part?.type === "text" && typeof part.text === "string" && part.text.trim()) return part.text;
     }
   }
   return "";
@@ -376,6 +399,7 @@ function compactResultSummary(result: SingleResult): string {
   const lines: string[] = [];
   const status = resultStatus(result);
   lines.push(`Subagent ${status}.`);
+  if (result.rpcDiagnostics) lines.push(`RPC diagnostics: ${JSON.stringify(result.rpcDiagnostics)}`);
   lines.push(`Task: ${result.task}`);
   if (result.model) lines.push(`Model: ${result.model}`);
   if (result.tools?.length) lines.push(`Tools: ${result.tools.join(", ")}`);
@@ -399,8 +423,8 @@ function getDisplayItems(messages: Message[]): DisplayItem[] {
   for (const msg of messages) {
     if (msg.role !== "assistant") continue;
     for (const part of msg.content) {
-      if (part.type === "text") items.push({ type: "text", text: part.text });
-      else if (part.type === "toolCall") items.push({ type: "toolCall", name: part.name, args: part.arguments });
+      if (part?.type === "text") items.push({ type: "text", text: part.text });
+      else if (part?.type === "toolCall") items.push({ type: "toolCall", name: part.name, args: part.arguments });
     }
   }
   return items;
@@ -566,6 +590,16 @@ function nativeProcessGroupShell(requireTrusted: boolean): string | undefined {
   return trusted;
 }
 
+function nativeProcessGroupFifo(requireTrusted: boolean): string | undefined {
+  if (process.platform === "win32") return undefined;
+  const candidate = pathOnPath("mkfifo");
+  if (!candidate) throw new Error("Native subagents require mkfifo for process-group ownership");
+  if (!requireTrusted) return candidate;
+  const trusted = trustedNixStoreFile(candidate, true);
+  if (!trusted) throw new Error("Guarded native subagents require an immutable Nix-store mkfifo");
+  return trusted;
+}
+
 function guardedNativeTools(requested: string[] | undefined): string[] {
   const tools = requested?.length ? requested : [...SUBAGENT_PERMISSION_NATIVE_TOOLS];
   if (new Set(tools).size !== tools.length
@@ -611,6 +645,7 @@ async function runSingleSubagent(
   let permissionRelay: NativeSubagentPermissionRelay | undefined;
   let permissionRelayFailure: Error | undefined;
   let rpcSession: NativeSubagentRpcSession | undefined;
+  let removeAbortListener: (() => void) | undefined;
   let launchCwd: string | undefined;
   let childAgentDir: string | undefined;
   let childSessionDir: string | undefined;
@@ -633,10 +668,17 @@ async function runSingleSubagent(
   };
 
   const emitUpdate = () => {
-    onUpdate?.({
-      content: [{ type: "text", text: truncateByBytes(getFinalOutput(currentResult.messages) || "(running...)") }],
-      details: makeDetails([currentResult]),
-    });
+    try {
+      onUpdate?.({
+        content: [{ type: "text", text: truncateByBytes(getFinalOutput(currentResult.messages) || "(running...)") }],
+        details: makeDetails([currentResult]),
+      });
+    } catch {
+      // UI observers must never interrupt cancellation or process ownership.
+      if (!currentResult.stderr.includes("Subagent progress observer failed.")) {
+        currentResult.stderr += "Subagent progress observer failed.\n";
+      }
+    }
   };
 
   if (signal?.aborted) {
@@ -704,6 +746,7 @@ async function runSingleSubagent(
       cwd: launchCwd,
       env,
       shellPath: nativeProcessGroupShell(Boolean(permissionAuthority)),
+      fifoPath: nativeProcessGroupFifo(Boolean(permissionAuthority)),
     });
     const proc = nativeProcess.process;
 
@@ -711,7 +754,7 @@ async function runSingleSubagent(
     const rememberToolCallFromMessage = (msg: Message) => {
       if (msg.role !== "assistant") return;
       for (const part of msg.content) {
-        if (part.type === "toolCall") currentResult.lastToolCall = { name: part.name, args: part.arguments };
+        if (part?.type === "toolCall") currentResult.lastToolCall = { name: part.name, args: part.arguments };
       }
     };
     const rememberFinalAssistantMetadata = (msg: Message) => {
@@ -749,17 +792,7 @@ async function runSingleSubagent(
       if (!delta || activeMessageIndex === undefined) return;
       const message = currentResult.messages[activeMessageIndex] as any;
       if (message?.role !== "assistant") return;
-      const content = Array.isArray(message.content) ? [...message.content] : [];
-      const index = Number.isSafeInteger(delta.contentIndex) ? delta.contentIndex : 0;
-      if (delta.type === "text_start") content[index] = { type: "text", text: "" };
-      else if (delta.type === "text_delta") {
-        const existing = content[index]?.type === "text" ? content[index].text : "";
-        content[index] = { type: "text", text: `${existing}${String(delta.delta ?? "")}` };
-      } else if (delta.type === "text_end") content[index] = { type: "text", text: String(delta.content ?? content[index]?.text ?? "") };
-      else if (delta.type === "toolcall_start") {
-        content[index] = { type: "toolCall", id: delta.id, name: String(delta.toolName ?? "unknown"), arguments: {} };
-      } else if (delta.type === "toolcall_end" && delta.toolCall) content[index] = delta.toolCall;
-      message.content = content;
+      applyNativeAssistantDelta(message, delta);
       currentResult.messages[activeMessageIndex] = message;
     };
     const processEvent = (event: any) => {
@@ -833,11 +866,12 @@ async function runSingleSubagent(
       wasAborted = true;
       currentResult.stopReason = "aborted";
       currentResult.errorMessage = "Subagent aborted by user.";
-      emitUpdate();
       rpcSession?.terminate(signal?.reason);
+      emitUpdate();
     };
     if (signal?.aborted) abortHandler();
     else signal?.addEventListener("abort", abortHandler, { once: true });
+    removeAbortListener = () => signal?.removeEventListener("abort", abortHandler);
     emitUpdate();
 
     await nativeProcess.ready;
@@ -849,6 +883,7 @@ async function runSingleSubagent(
       }
     }
     const exited = await rpcSession.start(initialPrompt);
+    currentResult.rpcDiagnostics = rpcSession.diagnostics;
     executionSettled = true;
     signal?.removeEventListener("abort", abortHandler);
     let exitCode = exited.code !== null && exited.code !== undefined
@@ -896,6 +931,7 @@ async function runSingleSubagent(
     return currentResult;
   } catch (error) {
     rpcSession?.terminate(error);
+    if (rpcSession) currentResult.rpcDiagnostics = rpcSession.diagnostics;
     const message = error instanceof Error ? error.message : String(error);
     currentResult.exitCode = signal?.aborted ? 130 : 1;
     currentResult.stopReason = signal?.aborted ? "aborted" : "error";
@@ -903,6 +939,7 @@ async function runSingleSubagent(
     currentResult.stderr += `${message}\n`;
     return currentResult;
   } finally {
+    removeAbortListener?.();
     completeSubagentChildren(ownerSessionId, [identity]);
     permissionRelay?.dispose();
     if (tmpPromptPath) await fs.promises.unlink(tmpPromptPath).catch(() => undefined);
@@ -1464,7 +1501,7 @@ export default function (pi: ExtensionAPI) {
 
   const sendLifecycle = (ctx: any, content: string, details: Record<string, unknown>) => {
     pi.sendMessage(
-      { customType: "background-subagent-lifecycle", content, display: false, details },
+      { customType: "background-subagent-lifecycle", content, display: true, details },
       { deliverAs: "steer", triggerTurn: true },
     );
   };
@@ -1558,7 +1595,7 @@ export default function (pi: ExtensionAPI) {
     deliveryClaims.set(record.id, deliveryClaim);
     try {
       if (generation !== sessionGeneration || sessionContext !== ctx) return;
-      const message = `Notification: subagent ${record.id} ${record.status}. Check its status.`;
+      const message = `Notification: subagent ${record.id} ${record.status}. Check its status.\n\n${truncateByBytes(record.result || record.error || "(no output)", 4096)}\n\nFull report: subagent operation=result job_id=${record.id}`;
       if (await backgroundManager.isNotified(record.id)) return;
       if (generation !== sessionGeneration || lifecycleClosing || consumed.has(record.id) || sessionContext !== ctx) return;
       const accepted = ctx.isIdle() ? idlePending : idleInFlight;

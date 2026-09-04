@@ -7,6 +7,7 @@ import backgroundSubagentExtension, {
   backgroundChildStatus,
   decorateChildResultIdentities,
   getFinalOutput,
+  applyNativeAssistantDelta,
   validateBackgroundOperation,
 } from "./index.js";
 import {
@@ -70,6 +71,25 @@ assert.equal(getFinalOutput([
   { role: "assistant", content: [{ type: "text", text: "first " }, { type: "thinking", thinking: "hidden" }, { type: "text", text: "second" }] } as any,
 ]), "first second", "final assistant output dropped a later text block");
 
+const partial: any = { role: "assistant", content: [] };
+for (const delta of [
+  { type: "thinking_start", contentIndex: 0 },
+  { type: "thinking_delta", contentIndex: 0, delta: "not displayed" },
+  { type: "text_start", contentIndex: 1 },
+  { type: "text_delta", contentIndex: 1, delta: "hello" },
+  { type: "text_delta", contentIndex: 1, delta: " world" },
+  { type: "toolcall_start", contentIndex: 3, id: "tool", toolName: "read" },
+]) {
+  applyNativeAssistantDelta(partial, delta);
+  assert.doesNotThrow(() => getFinalOutput([partial]));
+  assert(partial.content.every((part: any) => part && typeof part.type === "string"));
+}
+assert.equal(getFinalOutput([partial]), "hello world");
+assert.equal(getFinalOutput([{ role: "assistant", content: [undefined, null, { type: "text", text: "retained" }] } as any]), "retained");
+for (const contentIndex of [-1, 1.5, 1000000000]) {
+  assert.throws(() => applyNativeAssistantDelta(partial, { type: "text_delta", contentIndex }), /invalid content index/);
+}
+
 assert.equal(backgroundChildStatus({ exitCode: -1, backgroundState: "pending" }), "pending");
 assert.equal(backgroundChildStatus({ exitCode: -1, backgroundState: "running" }), "running");
 assert.equal(backgroundChildStatus({ exitCode: -1, stopReason: "aborted", backgroundState: "running" }), "running");
@@ -113,7 +133,9 @@ assert.throws(() => decorateChildResultIdentities({
 function createPi() {
   const handlers = new Map<string, Array<(event: any, ctx: any) => any>>();
   const tools = new Map<string, any>();
+  const messages: any[] = [];
   return {
+    messages,
     handlers,
     tools,
     on(event: string, handler: (event: any, ctx: any) => any) {
@@ -123,7 +145,7 @@ function createPi() {
     },
     registerTool(tool: any) { tools.set(tool.name, tool); },
     registerCommand() {},
-    sendMessage() {},
+    sendMessage(message: any) { messages.push(message); },
   };
 }
 
@@ -353,6 +375,18 @@ async function operationCheck() {
     /belongs to a different Pi session/,
   );
   await manager.cancel(foreign.id);
+
+  const notificationJob = await manager.start({ sessionId, backend: "native", mode: "single", summary: "visible report" }, async () => ({ text: "completed report body", failed: false }));
+  const notificationDeadline = Date.now() + 4000;
+  while (!pi.messages.some((message) => message.details?.job_id === notificationJob.id)) {
+    assert(Date.now() < notificationDeadline, "completion notification was not delivered");
+    await new Promise((resolve) => setTimeout(resolve, 20));
+  }
+  const completion = pi.messages.find((message) => message.details?.job_id === notificationJob.id);
+  assert.equal(completion.display, true, "completion was hidden from transcript");
+  assert.match(completion.content, /completed report body/);
+  assert.match(completion.content, /operation=result/);
+  assert.equal(pi.messages.filter((message) => message.details?.job_id === notificationJob.id).length, 1);
 
   await emit(pi, "session_shutdown", { reason: "quit" }, ctx);
   await rm(root, { recursive: true, force: true });
