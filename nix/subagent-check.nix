@@ -95,11 +95,148 @@ pkgs.runCommand "subagent-check"
     const permissions = await import(pathToFileURL(process.argv[8]).href);
     const permissionProtocol = await import(pathToFileURL(process.argv[9]).href);
     assert.equal(background.MAX_BACKGROUND_SUBAGENTS, 8);
+    assert.equal(background.BACKGROUND_SUBAGENT_RELOAD_ADOPTION_TIMEOUT_MS, 65_000);
+    assert.equal(permissionProtocol.SUBAGENT_PERMISSION_RELOAD_DRAIN_TIMEOUT_MS, 30_000);
+    assert.equal(permissionProtocol.SUBAGENT_PERMISSION_RELOAD_REBIND_TIMEOUT_MS, 30_000);
+    assert.equal(background.backgroundSubagentsSurviveShutdown("reload"), true);
+    for (const reason of ["quit", "new", "resume", "fork", undefined]) {
+      assert.equal(background.backgroundSubagentsSurviveShutdown(reason), false);
+    }
     assert.equal(artifacts.MAX_RETAINED_SUBAGENT_REPORT_BYTES, 16 * 1024 * 1024);
     assert.equal(artifacts.MAX_RETAINED_SUBAGENT_JOB_BYTES, 32 * 1024 * 1024);
     globalThis[permissionProtocol.SUBAGENT_PERMISSION_SELECTION_KEY] = { protocol: 1, selected: true, conflict: false };
     assert.throws(() => permissionProtocol.currentSubagentPermissionAuthority(), /selected but its authority is unavailable/);
     delete globalThis[permissionProtocol.SUBAGENT_PERMISSION_SELECTION_KEY];
+
+    const permissionRequest = (command) => ({
+      subagentId: "reload-child", label: "reload child", task: "survive reload",
+      toolCallId: "reload-tool", command, cwd: "/workspace",
+    });
+    const reloadAuthority = permissionProtocol.createReloadableSubagentPermissionAuthority(1000);
+    const firstAuthorityOwner = Symbol("first authority owner");
+    let releaseFirstAuthorization;
+    const authorityDelegates = [];
+    reloadAuthority.bind(firstAuthorityOwner, "reload-session", async (request, _callerSignal, sessionSignal) => {
+      authorityDelegates.push(["old", request.command]);
+      if (request.command === "drain-before-reload") {
+        await new Promise((resolve) => { releaseFirstAuthorization = resolve; });
+      }
+      assert.equal(sessionSignal.aborted, false);
+      return { allowed: true, reason: "old authority" };
+    });
+    const stableAuthority = reloadAuthority.authority;
+    const drainingAuthorization = stableAuthority.authorize(permissionRequest("drain-before-reload"));
+    const reloadStarted = reloadAuthority.beginReload(firstAuthorityOwner, "reload-session");
+    await new Promise((resolve) => setImmediate(resolve));
+    assert.equal(reloadAuthority.phase(), "draining");
+    assert.equal(stableAuthority.active, false, "draining authority remained launchable");
+    const queuedAuthorization = stableAuthority.authorize(permissionRequest("after-reload"));
+    await new Promise((resolve) => setImmediate(resolve));
+    assert.deepEqual(authorityDelegates, [["old", "drain-before-reload"]], "reload dispatched a new request through the stale context");
+    releaseFirstAuthorization();
+    assert.equal((await drainingAuthorization).allowed, true);
+    assert.equal(await reloadStarted, true);
+    assert.equal(reloadAuthority.phase(), "reloading");
+    assert.equal(stableAuthority.active, false, "reload gap remained launchable without a bound parent context");
+    const secondAuthorityOwner = Symbol("second authority owner");
+    reloadAuthority.bind(secondAuthorityOwner, "reload-session", async (request, _callerSignal, sessionSignal) => {
+      authorityDelegates.push(["new", request.command]);
+      assert.equal(sessionSignal.aborted, false);
+      return { allowed: true, reason: "new authority" };
+    });
+    assert.equal(reloadAuthority.authority, stableAuthority, "reload replaced the authority captured by a guarded child");
+    assert.equal((await queuedAuthorization).reason, "new authority");
+    assert.deepEqual(authorityDelegates, [["old", "drain-before-reload"], ["new", "after-reload"]]);
+    assert.equal(reloadAuthority.deactivate(firstAuthorityOwner, new Error("stale shutdown")), false, "stale extension revoked the rebound authority");
+    assert.equal(stableAuthority.active, true);
+    assert.equal(reloadAuthority.deactivate(secondAuthorityOwner, new Error("session quit")), true);
+    assert.equal(stableAuthority.active, false);
+    await assert.rejects(stableAuthority.authorize(permissionRequest("after-quit")), /session quit/);
+
+    const ticketedHandoff = permissionProtocol.createReloadableSubagentPermissionAuthority(1000);
+    const ticketedOwner = Symbol("ticketed handoff owner");
+    ticketedHandoff.bind(ticketedOwner, "reload-session", async () => ({ allowed: true, reason: "ticketed allow" }));
+    const ticketRequest = permissionRequest("ticketed-before-reload");
+    const preparedTicket = await ticketedHandoff.authority.prepare(ticketRequest);
+    const ticketedReload = ticketedHandoff.beginReload(ticketedOwner, "reload-session");
+    await new Promise((resolve) => setImmediate(resolve));
+    assert.equal(ticketedHandoff.phase(), "draining", "reload crossed an uncommitted child decision");
+    assert.equal(ticketedHandoff.authority.active, false, "draining ticket authority remained launchable");
+    assert.equal(ticketedHandoff.authority.commit(preparedTicket.ticket, ticketRequest).allowed, true);
+    assert.equal(ticketedHandoff.phase(), "draining", "ticket commit yielded before the relay could queue its response");
+    assert.equal(await ticketedReload, true);
+    ticketedHandoff.bind(Symbol("ticketed replacement"), "reload-session", async () => ({ allowed: true, reason: "new generation" }));
+    assert.throws(() => ticketedHandoff.authority.commit(preparedTicket.ticket, ticketRequest), /invalid or already used/, "authorization ticket replay was accepted after reload");
+
+    const exactTicketAuthority = permissionProtocol.createReloadableSubagentPermissionAuthority(1000);
+    exactTicketAuthority.bind(Symbol("exact ticket owner"), "reload-session", async () => ({ allowed: true, reason: "exact allow" }));
+    const exactTicket = await exactTicketAuthority.authority.prepare(permissionRequest("exact-command"));
+    assert.throws(() => exactTicketAuthority.authority.commit(exactTicket.ticket, permissionRequest("mutated-command")), /does not match the exact request/);
+
+    const commitValidatorAuthority = permissionProtocol.createReloadableSubagentPermissionAuthority(1000);
+    commitValidatorAuthority.bind(
+      Symbol("commit validator owner"),
+      "reload-session",
+      async () => ({ allowed: true, reason: "stale allow" }),
+      () => { throw new Error("command authority changed before commit"); },
+    );
+    const invalidatedCommitRequest = permissionRequest("invalidated-before-commit");
+    const invalidatedCommit = await commitValidatorAuthority.authority.prepare(invalidatedCommitRequest);
+    assert.throws(() => commitValidatorAuthority.authority.commit(invalidatedCommit.ticket, invalidatedCommitRequest), /command authority changed before commit/);
+    assert.equal(commitValidatorAuthority.phase(), "failed");
+    assert.equal(commitValidatorAuthority.authority.revoked.aborted, true);
+
+    const cancelledHandoff = permissionProtocol.createReloadableSubagentPermissionAuthority(1000);
+    const cancelledOwner = Symbol("cancelled handoff owner");
+    cancelledHandoff.bind(cancelledOwner, "reload-session", async () => ({ allowed: true, reason: "unexpected" }));
+    await cancelledHandoff.beginReload(cancelledOwner, "reload-session");
+    const cancelledController = new AbortController();
+    const cancelledAuthorization = cancelledHandoff.authority.authorize(permissionRequest("cancelled-during-reload"), cancelledController.signal);
+    cancelledController.abort(new Error("caller cancelled"));
+    await assert.rejects(cancelledAuthorization, /caller cancelled/);
+    assert.equal(cancelledHandoff.phase(), "reloading", "caller cancellation failed the shared reload handoff");
+    cancelledHandoff.bind(Symbol("cancel replacement"), "reload-session", async () => ({ allowed: true, reason: "replacement" }));
+
+    const mismatchedHandoff = permissionProtocol.createReloadableSubagentPermissionAuthority(1000);
+    const mismatchedOwner = Symbol("mismatched handoff owner");
+    mismatchedHandoff.bind(mismatchedOwner, "reload-session", async () => ({ allowed: true, reason: "unexpected" }));
+    await mismatchedHandoff.beginReload(mismatchedOwner, "reload-session");
+    assert.throws(() => mismatchedHandoff.bind(Symbol("replacement"), "different-session", async () => ({ allowed: true, reason: "unexpected" })), /different Pi session/);
+    assert.equal(mismatchedHandoff.authority.active, false, "cross-session reload mismatch left child authority active");
+
+    const staleOwnerHandoff = permissionProtocol.createReloadableSubagentPermissionAuthority(1000);
+    const staleOwner = Symbol("stale reload owner");
+    staleOwnerHandoff.bind(staleOwner, "reload-session", async () => ({ allowed: true, reason: "unexpected" }));
+    await staleOwnerHandoff.beginReload(staleOwner, "reload-session");
+    assert.throws(() => staleOwnerHandoff.bind(staleOwner, "reload-session", async () => ({ allowed: true, reason: "unexpected" })), /stale extension owner/);
+    assert.equal(staleOwnerHandoff.authority.revoked.aborted, true);
+
+    const timedOutHandoff = permissionProtocol.createReloadableSubagentPermissionAuthority(20);
+    const timedOutOwner = Symbol("timed out handoff owner");
+    timedOutHandoff.bind(timedOutOwner, "reload-session", async () => ({ allowed: true, reason: "unexpected" }));
+    await timedOutHandoff.beginReload(timedOutOwner, "reload-session");
+    await assert.rejects(timedOutHandoff.authority.authorize(permissionRequest("reload-never-rebound")), /did not rebind/);
+    assert.equal(timedOutHandoff.phase(), "failed");
+    assert.equal(timedOutHandoff.authority.active, false);
+
+    const hungDrainHandoff = permissionProtocol.createReloadableSubagentPermissionAuthority(20);
+    const hungDrainOwner = Symbol("hung drain owner");
+    hungDrainHandoff.bind(hungDrainOwner, "reload-session", async () => ({ allowed: true, reason: "uncommitted" }));
+    const hungDrainRequest = permissionRequest("uncommitted-drain");
+    const hungDrainTicket = await hungDrainHandoff.authority.prepare(hungDrainRequest);
+    assert.equal(await hungDrainHandoff.beginReload(hungDrainOwner, "reload-session"), false);
+    assert.equal(hungDrainHandoff.phase(), "failed", "uncommitted authorization held reload past its drain deadline");
+    assert.throws(() => hungDrainHandoff.authority.commit(hungDrainTicket.ticket, hungDrainRequest), /did not drain/);
+
+    const noRequestHandoff = permissionProtocol.createReloadableSubagentPermissionAuthority(20);
+    const noRequestOwner = Symbol("no request handoff owner");
+    noRequestHandoff.bind(noRequestOwner, "reload-session", async () => ({ allowed: true, reason: "unexpected" }));
+    await noRequestHandoff.beginReload(noRequestOwner, "reload-session");
+    if (!noRequestHandoff.authority.revoked.aborted) {
+      await new Promise((resolve) => noRequestHandoff.authority.revoked.addEventListener("abort", resolve, { once: true }));
+    }
+    assert.equal(noRequestHandoff.phase(), "failed", "reload without a waiting request had no central handoff deadline");
+
     const format = imported.formatParallelResultContent ?? imported.default?.formatParallelResultContent;
     const nativeStartup = mode.classifyAgentSHStartup({});
     const fullStartup = mode.classifyAgentSHStartup({ PI_SUPERVISED: "1" });
@@ -158,18 +295,22 @@ pkgs.runCommand "subagent-check"
       socket.on("data", onData);
       socket.once("error", reject);
     });
-    const authorityCalls = [];
-    const authority = {
-      protocol: 1, selected: true, active: true,
-      async authorize(request, signal) {
-        authorityCalls.push(request);
-        if (request.command === "wait-for-cancel") {
-          await new Promise((resolve) => signal.addEventListener("abort", resolve, { once: true }));
-          return { allowed: false, reason: "cancelled" };
-        }
-        return { allowed: request.command === "printf safe", reason: request.command === "printf safe" ? "allowed" : "denied" };
-      },
+    const createTestAuthority = (delegate, timeoutMs = 1000) => {
+      const broker = permissionProtocol.createReloadableSubagentPermissionAuthority(timeoutMs);
+      const owner = Symbol("test authority");
+      broker.bind(owner, "test-session", delegate);
+      return { broker, owner, authority: broker.authority };
     };
+    const authorityCalls = [];
+    const authorityBroker = createTestAuthority(async (request, signal) => {
+      authorityCalls.push(request);
+      if (request.command === "wait-for-cancel") {
+        await new Promise((resolve) => signal.addEventListener("abort", resolve, { once: true }));
+        return { allowed: false, reason: "cancelled" };
+      }
+      return { allowed: request.command === "printf safe", reason: request.command === "printf safe" ? "allowed" : "denied" };
+    });
+    const authority = authorityBroker.authority;
     const relay = await permissions.NativeSubagentPermissionRelay.create({
       authority, subagentId: "native-child-1", label: "task 1", task: "review safely", cwd: "/workspace", tools: ["bash"],
     });
@@ -193,20 +334,101 @@ pkgs.runCommand "subagent-check"
     relaySocket.write(JSON.stringify({ v: 1, type: "authorize", id: "request-2", kind: "bash", command: "wait-for-cancel", cwd: "/workspace", tool_call_id: "tool-2" }) + "\n");
     relaySocket.write(JSON.stringify({ v: 1, type: "cancel", id: "request-2" }) + "\n");
     assert.deepEqual(await readFrame(relaySocket), { v: 1, type: "decision", id: "request-2", allowed: false, reason: "native subagent tool call was aborted", fatal: false });
+
+    assert.equal(await authorityBroker.broker.beginReload(authorityBroker.owner, "test-session"), true);
+    assert.equal(authority.active, false, "reload-suspended authority remained launchable");
+    relaySocket.write(JSON.stringify({ v: 1, type: "authorize", id: "request-after-reload", kind: "bash", command: "printf rebound", cwd: "/workspace", tool_call_id: "tool-rebound" }) + "\n");
+    const reboundFramePromise = readFrame(relaySocket);
+    assert.equal(await Promise.race([
+      reboundFramePromise.then(() => true),
+      new Promise((resolve) => setTimeout(() => resolve(false), 20)),
+    ]), false, "relay emitted a decision while parent authority was suspended");
+    authorityBroker.broker.bind(Symbol("replacement test authority"), "test-session", async (request) => ({
+      allowed: request.command === "printf rebound",
+      reason: "rebound authority",
+    }));
+    assert.deepEqual(await reboundFramePromise, { v: 1, type: "decision", id: "request-after-reload", allowed: true, reason: "rebound authority", fatal: false });
+
     const relayDisconnected = relay.failure;
     relaySocket.destroy();
     await assert.rejects(relayDisconnected, /permission proxy disconnected/);
     await assert.rejects(relay.waitForGracefulShutdown(), /permission proxy disconnected/);
     relay.dispose();
 
-    const proxyCalls = [];
-    const proxyAuthority = {
-      protocol: 1, selected: true, active: true,
-      async authorize(request) {
-        proxyCalls.push(request);
-        return { allowed: request.command === "printf proxied", reason: request.command === "printf proxied" ? "parent allowed" : "parent denied" };
-      },
+    const queuedRelayHandoff = permissionProtocol.createReloadableSubagentPermissionAuthority(1000);
+    const queuedRelayOldOwner = Symbol("queued relay old owner");
+    const queuedRelayNewOwner = Symbol("queued relay new owner");
+    queuedRelayHandoff.bind(queuedRelayOldOwner, "relay-session", async () => ({ allowed: true, reason: "old" }));
+    assert.equal(await queuedRelayHandoff.beginReload(queuedRelayOldOwner, "relay-session"), true);
+    let queuedRelaySettled = false;
+    const queuedRelayPromise = permissions.NativeSubagentPermissionRelay.create({
+      authority: queuedRelayHandoff.authority, subagentId: "native-child-queued-reload", label: "queued reload child",
+      task: "wait for replacement permission owner", cwd: "/workspace", tools: ["bash"],
+    }).finally(() => { queuedRelaySettled = true; });
+    await new Promise((resolve) => setTimeout(resolve, 10));
+    assert.equal(queuedRelaySettled, false, "relay launch did not wait through the permission reload gap");
+    const cancelledQueuedRelayController = new AbortController();
+    const cancelledQueuedRelay = permissions.NativeSubagentPermissionRelay.create({
+      authority: queuedRelayHandoff.authority, subagentId: "native-child-cancelled-queue", label: "cancelled queued child",
+      task: "cancel while waiting for replacement", cwd: "/workspace", tools: ["bash"], signal: cancelledQueuedRelayController.signal,
+    });
+    cancelledQueuedRelayController.abort(new Error("cancel queued relay"));
+    await assert.rejects(cancelledQueuedRelay, /cancel queued relay/);
+    queuedRelayHandoff.bind(queuedRelayNewOwner, "relay-session", async () => ({ allowed: true, reason: "new" }));
+    const queuedRelay = await queuedRelayPromise;
+    queuedRelay.dispose();
+
+    const expiringAuthority = createTestAuthority(async () => ({ allowed: true, reason: "unexpected" }), 30);
+    const expiringRelay = await permissions.NativeSubagentPermissionRelay.create({
+      authority: expiringAuthority.authority, subagentId: "native-child-expiring", label: "expiring child", task: "reload timeout",
+      cwd: "/workspace", tools: ["bash"],
+    });
+    expiringRelay.bindChild(process.pid);
+    const expiringSocket = net.createConnection({ path: expiringRelay.environment[permissionProtocol.SUBAGENT_PERMISSION_SOCKET_ENV] });
+    const expiringSocketClosed = new Promise((resolve) => expiringSocket.once("close", resolve));
+    expiringSocket.write(JSON.stringify({
+      v: 1, type: "hello", token: expiringRelay.environment[permissionProtocol.SUBAGENT_PERMISSION_TOKEN_ENV],
+      subagent_id: "native-child-expiring", pid: process.pid,
+    }) + "\n");
+    assert.equal((await readFrame(expiringSocket)).type, "hello");
+    await expiringRelay.ready;
+    assert.equal(await expiringAuthority.broker.beginReload(expiringAuthority.owner, "test-session"), true);
+    await assert.rejects(expiringRelay.failure, /did not rebind/);
+    await expiringSocketClosed;
+    assert.equal(expiringSocket.destroyed, true, "reload timeout did not close the retained child relay");
+    expiringRelay.dispose();
+
+    const writeFailureAuthority = createTestAuthority(async () => ({ allowed: true, reason: "write should fail" }));
+    const writeFailureRelay = await permissions.NativeSubagentPermissionRelay.create({
+      authority: writeFailureAuthority.authority, subagentId: "native-child-write-failure", label: "write failure child", task: "force relay write failure",
+      cwd: "/workspace", tools: ["bash"],
+    });
+    writeFailureRelay.bindChild(process.pid);
+    const writeFailureSocket = net.createConnection({ path: writeFailureRelay.environment[permissionProtocol.SUBAGENT_PERMISSION_SOCKET_ENV] });
+    writeFailureSocket.write(JSON.stringify({
+      v: 1, type: "hello", token: writeFailureRelay.environment[permissionProtocol.SUBAGENT_PERMISSION_TOKEN_ENV],
+      subagent_id: "native-child-write-failure", pid: process.pid,
+    }) + "\n");
+    assert.equal((await readFrame(writeFailureSocket)).type, "hello");
+    await writeFailureRelay.ready;
+    writeFailureRelay.socket.write = (_frame, callback) => {
+      queueMicrotask(() => callback(new Error("forced relay write failure")));
+      return true;
     };
+    writeFailureSocket.write(JSON.stringify({
+      v: 1, type: "authorize", id: "write-failure-request", kind: "bash", command: "printf safe",
+      cwd: "/workspace", tool_call_id: "write-failure-tool",
+    }) + "\n");
+    await assert.rejects(writeFailureRelay.failure, /forced relay write failure/);
+    await assert.rejects(writeFailureRelay.waitForGracefulShutdown(), /forced relay write failure/);
+    writeFailureSocket.destroy();
+    writeFailureRelay.dispose();
+
+    const proxyCalls = [];
+    const proxyAuthority = createTestAuthority(async (request) => {
+      proxyCalls.push(request);
+      return { allowed: request.command === "printf proxied", reason: request.command === "printf proxied" ? "parent allowed" : "parent denied" };
+    }).authority;
     const proxyRelay = await permissions.NativeSubagentPermissionRelay.create({
       authority: proxyAuthority, subagentId: "native-child-proxy", label: "subagent", task: "exercise proxy",
       cwd: process.cwd(), tools: ["bash"],
@@ -249,10 +471,7 @@ pkgs.runCommand "subagent-check"
     proxyRelay.dispose();
 
     const fatalRelay = await permissions.NativeSubagentPermissionRelay.create({
-      authority: {
-        protocol: 1, selected: true, active: true,
-        async authorize() { throw new Error("authority transport died"); },
-      },
+      authority: createTestAuthority(async () => { throw new Error("authority transport died"); }).authority,
       subagentId: "native-child-fatal", label: "fatal child", task: "exercise fatal authority loss",
       cwd: process.cwd(), tools: ["bash"],
     });
@@ -341,7 +560,84 @@ pkgs.runCommand "subagent-check"
     const stateRoot = `''${process.env.TMPDIR}/background-subagents`;
     const manager = new background.BackgroundSubagentManager(stateRoot);
     await manager.initialize();
-    assert.equal(background.sharedBackgroundSubagentManager(stateRoot + "-shared"), background.sharedBackgroundSubagentManager(stateRoot + "-shared"));
+
+    const launchRaceManager = new background.BackgroundSubagentManager(stateRoot + "-launch-race");
+    let racedRunnerStarts = 0;
+    const racedLaunch = launchRaceManager.start({ sessionId: "session-launch-race", backend: "native", mode: "single", summary: "launch race" }, async () => {
+      racedRunnerStarts += 1;
+      return { text: "must not run", failed: false };
+    });
+    launchRaceManager.requestCancelSession("session-launch-race");
+    await assert.rejects(racedLaunch, /session changed|shut down/);
+    assert.equal(racedRunnerStarts, 0, "session shutdown launched a background runner after cancellation");
+
+    const reloadLaunchRaceManager = new background.BackgroundSubagentManager(stateRoot + "-reload-launch-race");
+    const reloadRacedLaunch = reloadLaunchRaceManager.start({ sessionId: "session-reload-launch-race", backend: "native", mode: "single", summary: "reload launch race" }, async () => {
+      racedRunnerStarts += 1;
+      return { text: "must not run", failed: false };
+    });
+    assert.equal(reloadLaunchRaceManager.beginReloadAdoption("session-reload-launch-race", 100), false);
+    await assert.rejects(reloadRacedLaunch, /session changed|extension reload/);
+    assert.equal(racedRunnerStarts, 0, "reload launched a background runner whose start had not committed");
+    assert.equal(reloadLaunchRaceManager.activateSession("session-reload-launch-race"), true);
+
+    globalThis.__paeBackgroundSubagentManagersV2 = new Map([[stateRoot + "-shared", { legacy: true }]]);
+    const upgradedSharedManager = background.sharedBackgroundSubagentManager(stateRoot + "-shared");
+    assert.equal(typeof upgradedSharedManager.beginReloadAdoption, "function", "hot upgrade reused an incompatible v2 manager singleton");
+    assert.equal(upgradedSharedManager, background.sharedBackgroundSubagentManager(stateRoot + "-shared"));
+    delete globalThis.__paeBackgroundSubagentManagersV2;
+    const legacyPendingNotifications = new Set(["reload-notification"]);
+    const legacyInFlightNotifications = new Set(["reload-notification-in-flight"]);
+    globalThis.__paeBackgroundSubagentNotificationV1 = {
+      idlePending: legacyPendingNotifications,
+      idleInFlight: legacyInFlightNotifications,
+      deliveryClaims: new Set(["legacy-claim"]),
+    };
+    const notificationState = background.sharedBackgroundSubagentNotificationState();
+    assert.equal(notificationState.idlePending, legacyPendingNotifications, "notification migration discarded pending delivery");
+    assert.equal(notificationState.idleInFlight, legacyInFlightNotifications, "notification migration discarded in-flight delivery");
+    assert(notificationState.deliveryClaims instanceof Map, "notification migration retained incompatible claim identity");
+    assert(notificationState.consumed instanceof Set, "notification migration omitted consumption arbitration");
+    assert(notificationState.consumptionPending instanceof Set, "notification migration omitted accepted-result tracking");
+    assert.equal(background.sharedBackgroundSubagentNotificationState(), notificationState);
+    notificationState.idlePending.clear();
+    notificationState.idleInFlight.clear();
+    const reloadManager = background.sharedBackgroundSubagentManager(stateRoot + "-reload");
+    let releaseReloadExecution;
+    const reloadExecution = await reloadManager.start({ sessionId: "session-reload", backend: "native", mode: "single", summary: "reload survival" }, async () => {
+      await new Promise((resolve) => { releaseReloadExecution = resolve; });
+      return { text: "completed after reload", failed: false };
+    });
+    assert.equal(reloadManager.beginReloadAdoption("session-reload", 100), true);
+    const adoptedReloadManager = background.sharedBackgroundSubagentManager(stateRoot + "-reload");
+    assert.equal(adoptedReloadManager, reloadManager, "hot reload did not adopt the process-owned manager");
+    assert.equal(adoptedReloadManager.adoptReload("session-reload"), true, "replacement extension did not clear the reload watchdog");
+    assert.equal((await adoptedReloadManager.get(reloadExecution.id)).status, "running");
+    await new Promise((resolve) => setImmediate(resolve));
+    assert.equal(typeof releaseReloadExecution, "function");
+    releaseReloadExecution();
+    assert.equal((await adoptedReloadManager.wait(reloadExecution.id, 2000)).record.result, "completed after reload");
+
+    const reloadCancelled = await reloadManager.start({ sessionId: "session-reload-cancel", backend: "native", mode: "single", summary: "cancel after adoption" }, async (executionSignal) => {
+      if (!executionSignal.aborted) {
+        await new Promise((resolve) => executionSignal.addEventListener("abort", resolve, { once: true }));
+      }
+      return { text: "cancelled by replacement extension", failed: true };
+    });
+    assert.equal(reloadManager.beginReloadAdoption("session-reload-cancel", 100), true);
+    assert.equal(adoptedReloadManager.adoptReload("session-reload-cancel"), true);
+    assert.equal((await adoptedReloadManager.cancel(reloadCancelled.id)).status, "cancelled", "replacement extension could not cancel adopted work");
+
+    const missingAdopterManager = background.sharedBackgroundSubagentManager(stateRoot + "-missing-adopter");
+    const missingAdopterExecution = await missingAdopterManager.start({ sessionId: "session-missing-adopter", backend: "native", mode: "single", summary: "missing reload adopter" }, async (executionSignal) => {
+      if (!executionSignal.aborted) {
+        await new Promise((resolve) => executionSignal.addEventListener("abort", resolve, { once: true }));
+      }
+      return { text: "cancelled after missing adoption", failed: true };
+    });
+    assert.equal(missingAdopterManager.beginReloadAdoption("session-missing-adopter", 20), true);
+    assert.equal((await missingAdopterManager.wait(missingAdopterExecution.id, 2000)).record.status, "cancelled", "missing reload adopter left background work orphaned");
+
     const success = await manager.start({ sessionId: "session-a", backend: "native", mode: "single", summary: "slow review" }, async (_signal, update) => {
       update("working");
       await new Promise((resolve) => setTimeout(resolve, 80));
@@ -449,7 +745,24 @@ pkgs.runCommand "subagent-check"
       exit 1
     fi
     grep -F 'waitForGracefulShutdown' ${self}/subagent/index.ts >/dev/null
+    grep -F 'backgroundSubagentsSurviveShutdown(event.reason)' ${self}/subagent/index.ts >/dev/null
+    grep -F 'backgroundManager.beginReloadAdoption(sessionId)' ${self}/subagent/index.ts >/dev/null
+    grep -F 'manager.activateSession(sessionId)' ${self}/subagent/index.ts >/dev/null
+    grep -F 'generation !== sessionGeneration || lifecycleClosing || sessionContext !== ctx' ${self}/subagent/index.ts >/dev/null
+    grep -F 'await permissionAuthority.waitUntilActive(signal)' ${self}/subagent/index.ts >/dev/null
+    if grep -F 'permissionAuthority && !permissionAuthority.active' ${self}/subagent/index.ts >/dev/null \
+      || grep -F '!permissionAuthority.active || !installedPermissionProxyEntrypoint()' ${self}/subagent/index.ts >/dev/null; then
+      echo 'native subagent launch still rejects the bounded Permission Gate reload gap' >&2
+      exit 1
+    fi
+    grep -F 'const committed = this.authority.commit(prepared.ticket, exactRequest);' ${self}/subagent/permission-relay.ts >/dev/null
     grep -F 'Notification: subagent ''${record.id} ''${record.status}. Check its status.' ${self}/subagent/index.ts >/dev/null
+    grep -F 'stageTerminalConsumption(background.job_id)' ${self}/subagent/index.ts >/dev/null
+    grep -F 'const durableOperations = deliveredOperationIds(entries);' ${self}/subagent/index.ts >/dev/null
+    if grep -F 'consumeForOperation' ${self}/subagent/index.ts >/dev/null; then
+      echo 'lifecycle operation still marks consumption before Pi accepts its tool result' >&2
+      exit 1
+    fi
     grep -F '{ deliverAs: "steer", triggerTurn: true }' ${self}/subagent/index.ts >/dev/null
     if grep -F 'Do not claim dependent work complete' ${self}/subagent/index.ts >/dev/null \
       || grep -F 'running-reminder' ${self}/subagent/index.ts >/dev/null \

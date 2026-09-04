@@ -242,6 +242,7 @@ type SupervisorState = {
 };
 
 const PROTOCOL_VERSION = 1;
+const RELOAD_RETAINED_CLIENTS_KEY = "__paeAgentSHReloadRetainedClientsV1";
 const CONNECT_TIMEOUT_MS = Number(process.env.PI_AGENTSH_CONNECT_TIMEOUT_MS || "10000");
 const START_TIMEOUT_MS = Number(process.env.PI_AGENTSH_START_TIMEOUT_MS || "30000");
 const WATCH_RECONNECT_MS = Number(process.env.PI_AGENTSH_WATCH_RECONNECT_MS || "1500");
@@ -1303,6 +1304,9 @@ class RestSupervisorClient {
   #detachedRuntime?: DetachedRuntimeStatus;
   #reconnectInFlight?: Promise<SupervisorMetadata>;
   #lifecycleController = new AbortController();
+  #activeSubagentRequests = 0;
+  #activeSubagentStreams = new Set<AbortController>();
+  #subagentIdleWaiters = new Set<() => void>();
 
   constructor(readonly socketPath: string, seedMetadata?: SupervisorMetadata, private readonly connectionEvents: RestConnectionEvents = {}) {
     this.#metadata = seedMetadata;
@@ -1313,8 +1317,26 @@ class RestSupervisorClient {
   get sessionId() { return this.#sessionId; }
 
   async dispose() {
-    this.#lifecycleController.abort();
+    const error = supervisorRequestAborted();
+    this.#lifecycleController.abort(error);
+    for (const controller of this.#activeSubagentStreams) controller.abort(error);
     try { await this.#reconnectInFlight; } catch { /* shutdown owns the terminal state */ }
+  }
+
+  hasActiveSubagentRequests(): boolean {
+    return this.#activeSubagentRequests > 0;
+  }
+
+  async waitForSubagentRequests(): Promise<void> {
+    if (this.#activeSubagentRequests === 0) return;
+    await new Promise<void>((resolve) => this.#subagentIdleWaiters.add(resolve));
+  }
+
+  #finishSubagentRequest(): void {
+    this.#activeSubagentRequests -= 1;
+    if (this.#activeSubagentRequests !== 0) return;
+    for (const resolve of this.#subagentIdleWaiters) resolve();
+    this.#subagentIdleWaiters.clear();
   }
 
   #sessionPath(sessionId = this.#expectedSessionId) {
@@ -2034,6 +2056,7 @@ class RestSupervisorClient {
   }
 
   async spawnSubagent(params: JsonObject, options: SpawnSubagentOptions = {}) {
+    this.#activeSubagentRequests += 1;
     try {
       const body: JsonObject = { ...params };
       const normalizeCwd = (item: JsonObject) => {
@@ -2063,6 +2086,7 @@ class RestSupervisorClient {
       // This lets AgentSH durably distinguish user/parent cancellation from a
       // genuine transport disconnect before it terminates the child process.
       const streamController = new AbortController();
+      this.#activeSubagentStreams.add(streamController);
       const actor = objectField(body.actor);
       const cancellationCause = Number(actor?.subagent_depth || 0) > 0 ? "parent_cancelled" : "user_cancelled";
       let cancellationStarted = false;
@@ -2095,12 +2119,15 @@ class RestSupervisorClient {
         throw error;
       } finally {
         options.signal?.removeEventListener("abort", onCallerAbort);
+        this.#activeSubagentStreams.delete(streamController);
       }
     } catch (error) {
       if (error instanceof RestHTTPError && error.domainCode === "unsupported_endpoint") {
         throw new Error("AgentSH supervisor does not support spawn_subagent; rebuild/deploy a newer AgentSH or disable sandbox subagent registration.");
       }
       throw error;
+    } finally {
+      this.#finishSubagentRequest();
     }
   }
 
@@ -2113,6 +2140,39 @@ class RestSupervisorClient {
     if (!id) return undefined;
     return await this.request("DELETE", `/api/v1/sessions/${encodeURIComponent(id)}`, undefined).catch(() => undefined);
   }
+}
+
+type ReloadRetainedRestClient = {
+  dispose(): Promise<void>;
+  hasActiveSubagentRequests(): boolean;
+  waitForSubagentRequests(): Promise<void>;
+};
+
+function reloadRetainedClients(): Set<ReloadRetainedRestClient> {
+  const root = globalThis as Record<string, unknown>;
+  const existing = root[RELOAD_RETAINED_CLIENTS_KEY];
+  if (existing instanceof Set) return existing as Set<ReloadRetainedRestClient>;
+  if (existing !== undefined) throw new Error("AgentSH reload-retained client registry is malformed");
+  const created = new Set<ReloadRetainedRestClient>();
+  root[RELOAD_RETAINED_CLIENTS_KEY] = created;
+  return created;
+}
+
+function retainClientForSubagentReload(client: ReloadRetainedRestClient): void {
+  const retained = reloadRetainedClients();
+  retained.add(client);
+  void (async () => {
+    await client.waitForSubagentRequests();
+    retained.delete(client);
+    await client.dispose();
+  })().catch(() => undefined);
+}
+
+async function disposeReloadRetainedClients(): Promise<void> {
+  const retained = reloadRetainedClients();
+  const clients = [...retained];
+  retained.clear();
+  await Promise.all(clients.map(async (client) => await client.dispose()));
 }
 
 class CentralApprovalClient implements ApprovalClient {
@@ -2252,9 +2312,13 @@ class RestApprovalWatcher {
   async #poll() {
     if (this.#stopped) return;
     try {
-      this.onApprovals(await this.client.listApprovals());
+      const approvals = await this.client.listApprovals();
+      if (this.#stopped) return;
+      this.onApprovals(approvals);
       this.onConnected();
-    } catch (error) { this.onError(asError(error)); }
+    } catch (error) {
+      if (!this.#stopped) this.onError(asError(error));
+    }
     finally {
       const pollMs = Number(process.env.PI_AGENTSH_APPROVAL_POLL_MS || APPROVAL_POLL_MS);
       if (!this.#stopped) this.#timer = setTimeout(() => void this.#poll(), Number.isFinite(pollMs) ? Math.max(1, pollMs) : APPROVAL_POLL_MS);
@@ -2326,6 +2390,7 @@ async function promptApproval(state: SupervisorState, approval: ApprovalRequest)
     const resolution = resolveChoice(choices, choice);
     const approvalClient = requireApprovalClient(state);
     await approvalClient.resolveApproval(approval.id, resolution);
+    if (controller.signal.aborted || state.shuttingDown) return;
     if (resolution.scope === "session") {
       removePending(state, approval.id);
       try {
@@ -2354,7 +2419,7 @@ async function promptApproval(state: SupervisorState, approval: ApprovalRequest)
 }
 
 function enqueueApproval(state: SupervisorState, approval: ApprovalRequest) {
-  if (state.seenApprovals.has(approval.id) || state.resolving.has(approval.id)) return;
+  if (state.shuttingDown || state.seenApprovals.has(approval.id) || state.resolving.has(approval.id)) return;
   state.seenApprovals.add(approval.id);
   state.pendingIds.add(approval.id);
   updatePending(state, 1);
@@ -2966,6 +3031,7 @@ export default function sandbox(pi: ExtensionAPI) {
   globalThis.__AGENTSH_PI__ = createGlobalAPI(state);
 
   pi.on("session_start", async (_event, ctx) => {
+    state.shuttingDown = false;
     try {
       await attachOrStart(state, ctx, { notifyOnSuccess: false });
     } catch {
@@ -2973,12 +3039,20 @@ export default function sandbox(pi: ExtensionAPI) {
     }
   });
 
-  pi.on("session_shutdown", async () => {
+  pi.on("session_shutdown", async (event) => {
     state.shuttingDown = true;
+    state.watcher?.stop();
+    for (const controller of state.promptAbortControllers.values()) controller.abort();
     const clients = new Set([state.client, state.connectingClient]);
     await Promise.all(Array.from(clients, async (client) => {
-      if (client instanceof RestSupervisorClient) await client.dispose();
+      if (!(client instanceof RestSupervisorClient)) return;
+      if (event.reason === "reload" && client.hasActiveSubagentRequests()) {
+        retainClientForSubagentReload(client);
+        return;
+      }
+      await client.dispose();
     }));
+    if (event.reason !== "reload") await disposeReloadRetainedClients();
     await queueLifecycle(state, async () => {
       resetConnection(state);
       if (state.ctx?.hasUI) state.ctx.ui.setStatus("sandbox", undefined);

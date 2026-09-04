@@ -11,6 +11,9 @@ import {
 
 export const BACKGROUND_SUBAGENT_ID_PATTERN = /^subagent-job-[0-9a-f]{24}$/;
 export const MAX_BACKGROUND_SUBAGENTS = 8;
+// Includes the Permission Gate's bounded pre-reload drain plus a full
+// replacement-extension startup window.
+export const BACKGROUND_SUBAGENT_RELOAD_ADOPTION_TIMEOUT_MS = 65_000;
 export const MAX_BACKGROUND_SUBAGENT_TEXT_BYTES = 50 * 1024;
 const MAX_STATE_BYTES = 128 * 1024;
 const TERMINAL_RETENTION_MS = 7 * 24 * 60 * 60 * 1000;
@@ -71,19 +74,35 @@ export type BackgroundSubagentRunner = (
   update: (text: string) => void,
 ) => Promise<BackgroundSubagentOutcome>;
 
+type BackgroundSessionPhase = "active" | "reloading" | "closed";
+
 type RuntimeRegistry = {
   controllers: Map<string, AbortController>;
   flushTimers: Map<string, NodeJS.Timeout>;
+  pendingLaunches: Map<string, { sessionId: string; controller: AbortController }>;
+  sessions: Map<string, { phase: BackgroundSessionPhase; generation: number }>;
 };
 
-const RUNTIME_KEY = "__paeBackgroundSubagentRuntimeV2";
-const MANAGERS_KEY = "__paeBackgroundSubagentManagersV2";
+const RUNTIME_KEY = "__paeBackgroundSubagentRuntimeV3";
+const NOTIFICATION_STATE_KEY = "__paeBackgroundSubagentNotificationV1";
+const MANAGERS_KEY = "__paeBackgroundSubagentManagersV3";
 
 function runtimeRegistry(): RuntimeRegistry {
   const root = globalThis as Record<string, unknown>;
-  const existing = root[RUNTIME_KEY] as RuntimeRegistry | undefined;
-  if (existing) return existing;
-  const created: RuntimeRegistry = { controllers: new Map(), flushTimers: new Map() };
+  const existing = root[RUNTIME_KEY] as Partial<RuntimeRegistry> | undefined;
+  if (existing) {
+    existing.controllers ??= new Map();
+    existing.flushTimers ??= new Map();
+    existing.pendingLaunches ??= new Map();
+    existing.sessions ??= new Map();
+    return existing as RuntimeRegistry;
+  }
+  const created: RuntimeRegistry = {
+    controllers: new Map(),
+    flushTimers: new Map(),
+    pendingLaunches: new Map(),
+    sessions: new Map(),
+  };
   root[RUNTIME_KEY] = created;
   return created;
 }
@@ -200,10 +219,26 @@ export class BackgroundSubagentManager {
   private readonly records = new Map<string, BackgroundSubagentRecord>();
   private readonly runtime = runtimeRegistry();
   private readonly writeChains = new Map<string, Promise<void>>();
+  private readonly reloadAdoptionTimers = new Map<string, ReturnType<typeof setTimeout>>();
   private initialized?: Promise<void>;
   private ownerStartToken = "";
 
   constructor(readonly root: string) {}
+
+  private sessionState(sessionId: string): { phase: BackgroundSessionPhase; generation: number } {
+    let state = this.runtime.sessions.get(sessionId);
+    if (!state) {
+      state = { phase: "active", generation: 1 };
+      this.runtime.sessions.set(sessionId, state);
+    }
+    return state;
+  }
+
+  private clearReloadWatchdog(sessionId: string): void {
+    const timer = this.reloadAdoptionTimers.get(sessionId);
+    if (timer) clearTimeout(timer);
+    this.reloadAdoptionTimers.delete(sessionId);
+  }
 
   private get jobsRoot(): string { return join(this.root, "jobs"); }
   private jobDir(id: string): string {
@@ -267,8 +302,21 @@ export class BackgroundSubagentManager {
     backend: BackgroundSubagentBackend;
     mode: "single" | "parallel" | "chain";
     summary: string;
-  }, runner: BackgroundSubagentRunner): Promise<BackgroundSubagentRecord> {
+  }, runner: BackgroundSubagentRunner, launchSignal?: AbortSignal): Promise<BackgroundSubagentRecord> {
+    const sessionId = requiredString(input.sessionId, "session id", 512);
+    const session = this.sessionState(sessionId);
+    const launchGeneration = session.generation;
+    if (session.phase !== "active") throw new Error("Owning Pi session is not accepting background subagent launches");
+    if (launchSignal?.aborted) {
+      throw launchSignal.reason instanceof Error ? launchSignal.reason : new Error("Background subagent launch cancelled");
+    }
     await this.initialize();
+    if (session.phase !== "active" || session.generation !== launchGeneration) {
+      throw new Error("Owning Pi session changed before background subagent launch");
+    }
+    if (launchSignal?.aborted) {
+      throw launchSignal.reason instanceof Error ? launchSignal.reason : new Error("Background subagent launch cancelled");
+    }
     const active = [...this.records.values()].filter((record) => record.status === "running" || record.status === "cancelling");
     if (active.length >= MAX_BACKGROUND_SUBAGENTS) throw new Error(`Background subagent concurrency limit reached (${MAX_BACKGROUND_SUBAGENTS})`);
     const now = new Date().toISOString();
@@ -276,7 +324,7 @@ export class BackgroundSubagentManager {
     const record: BackgroundSubagentRecord = {
       schemaVersion: SCHEMA_VERSION,
       id,
-      sessionId: requiredString(input.sessionId, "session id", 512),
+      sessionId,
       backend: input.backend,
       mode: input.mode,
       summary: boundedText(input.summary, 2048) || "subagent task",
@@ -287,18 +335,47 @@ export class BackgroundSubagentManager {
       status: "running",
       latest: "(starting…)",
     };
+    const controller = new AbortController();
+    const abortPendingLaunch = () => controller.abort(
+      launchSignal?.reason instanceof Error ? launchSignal.reason : new Error("Background subagent launch cancelled"),
+    );
+    if (launchSignal) launchSignal.addEventListener("abort", abortPendingLaunch, { once: true });
+    this.runtime.controllers.set(id, controller);
+    this.runtime.pendingLaunches.set(id, { sessionId, controller });
     this.records.set(id, record);
+    const discardPendingLaunch = async () => {
+      launchSignal?.removeEventListener("abort", abortPendingLaunch);
+      this.runtime.pendingLaunches.delete(id);
+      this.runtime.controllers.delete(id);
+      this.records.delete(id);
+      await rm(this.jobDir(id), { recursive: true, force: true }).catch(() => undefined);
+    };
     try {
       await mkdir(this.jobDir(id), { mode: 0o700 });
       await this.persist(record);
     } catch (error) {
-      this.records.delete(id);
-      await rm(this.jobDir(id), { recursive: true, force: true }).catch(() => undefined);
+      await discardPendingLaunch();
       throw error;
     }
-    const controller = new AbortController();
-    this.runtime.controllers.set(id, controller);
-    void Promise.resolve().then(() => runner(controller.signal, (text) => this.updateProgress(id, text))).then(
+    if (controller.signal.aborted || session.phase !== "active" || session.generation !== launchGeneration) {
+      const error = controller.signal.reason instanceof Error
+        ? controller.signal.reason
+        : new Error("Owning Pi session changed before background subagent launch");
+      await discardPendingLaunch();
+      throw error;
+    }
+    launchSignal?.removeEventListener("abort", abortPendingLaunch);
+    this.runtime.pendingLaunches.delete(id);
+    let execution: Promise<BackgroundSubagentOutcome>;
+    try {
+      // Enter the runner before returning the launch record. This closes the
+      // reload/shutdown gap between publishing a running job and acquiring its
+      // backend transport or native child resources.
+      execution = Promise.resolve(runner(controller.signal, (text) => this.updateProgress(id, text)));
+    } catch (error) {
+      execution = Promise.reject(error);
+    }
+    void execution.then(
       (outcome) => this.finish(id, controller.signal.aborted ? "cancelled" : outcome.failed ? "failed" : "completed", outcome.text, undefined, outcome.reports),
       (error) => {
         const message = error instanceof Error ? error.message : String(error);
@@ -371,6 +448,9 @@ export class BackgroundSubagentManager {
     record.updatedAt = new Date().toISOString();
     await this.persist(record);
     this.runtime.controllers.delete(id);
+    if (![...this.records.values()].some(
+      (candidate) => candidate.sessionId === record.sessionId && isBackgroundSubagentActive(candidate),
+    )) this.clearReloadWatchdog(record.sessionId);
     await this.prune();
   }
 
@@ -496,10 +576,67 @@ export class BackgroundSubagentManager {
     return (await this.wait(id, 5000)).record;
   }
 
-  requestCancelSession(sessionId: string): void {
+  beginReloadAdoption(
+    sessionId: string,
+    timeoutMs = BACKGROUND_SUBAGENT_RELOAD_ADOPTION_TIMEOUT_MS,
+  ): boolean {
+    if (!Number.isSafeInteger(timeoutMs) || timeoutMs < 1 || timeoutMs > 120_000) {
+      throw new Error("Background subagent reload adoption timeout must be between 1 and 120000 milliseconds");
+    }
+    const session = this.sessionState(sessionId);
+    session.phase = "reloading";
+    session.generation += 1;
+    const interruptedLaunch = new Error("Background subagent launch was interrupted by extension reload");
+    for (const pending of this.runtime.pendingLaunches.values()) {
+      if (pending.sessionId === sessionId) pending.controller.abort(interruptedLaunch);
+    }
+    const active = [...this.records.values()].some(
+      (record) => record.sessionId === sessionId
+        && !this.runtime.pendingLaunches.has(record.id)
+        && isBackgroundSubagentActive(record),
+    );
+    this.clearReloadWatchdog(sessionId);
+    if (!active) return false;
+    const timer = setTimeout(() => {
+      if (this.reloadAdoptionTimers.get(sessionId) !== timer) return;
+      this.reloadAdoptionTimers.delete(sessionId);
+      this.requestCancelSession(sessionId, new Error("Replacement subagent extension did not adopt running work after reload"));
+    }, timeoutMs);
+    this.reloadAdoptionTimers.set(sessionId, timer);
+    return true;
+  }
+
+  activateSession(sessionId: string): boolean {
+    const session = this.sessionState(sessionId);
+    const adopted = session.phase === "reloading";
+    if (session.phase !== "active") {
+      session.phase = "active";
+      session.generation += 1;
+    }
+    this.clearReloadWatchdog(sessionId);
+    return adopted;
+  }
+
+  adoptReload(sessionId: string): boolean {
+    const session = this.sessionState(sessionId);
+    if (session.phase !== "reloading") return false;
+    session.phase = "active";
+    session.generation += 1;
+    this.clearReloadWatchdog(sessionId);
+    return true;
+  }
+
+  requestCancelSession(sessionId: string, reason = new Error("Owning Pi session shut down")): void {
+    const session = this.sessionState(sessionId);
+    session.phase = "closed";
+    session.generation += 1;
+    this.clearReloadWatchdog(sessionId);
+    for (const pending of this.runtime.pendingLaunches.values()) {
+      if (pending.sessionId === sessionId) pending.controller.abort(reason);
+    }
     for (const record of this.records.values()) {
       if (record.sessionId === sessionId && isBackgroundSubagentActive(record)) {
-        this.runtime.controllers.get(record.id)?.abort(new Error("Owning Pi session shut down"));
+        this.runtime.controllers.get(record.id)?.abort(reason);
       }
     }
   }
@@ -552,6 +689,56 @@ export function sharedBackgroundSubagentManager(root: string): BackgroundSubagen
 
 export function isBackgroundSubagentActive(record: BackgroundSubagentRecord): boolean {
   return record.status === "running" || record.status === "cancelling";
+}
+
+export function backgroundSubagentsSurviveShutdown(reason: unknown): boolean {
+  return reason === "reload";
+}
+
+export type BackgroundSubagentNotificationState = {
+  idlePending: Set<string>;
+  idleInFlight: Set<string>;
+  deliveryClaims: Map<string, symbol>;
+  consumed: Set<string>;
+  consumptionPending: Set<string>;
+};
+
+export function sharedBackgroundSubagentNotificationState(): BackgroundSubagentNotificationState {
+  const root = globalThis as Record<string, unknown>;
+  const existing = root[NOTIFICATION_STATE_KEY] as Partial<BackgroundSubagentNotificationState> | undefined;
+  if (existing?.idlePending instanceof Set && existing.idleInFlight instanceof Set
+    && existing.deliveryClaims instanceof Map && existing.consumed instanceof Set
+    && existing.consumptionPending instanceof Set) {
+    return existing as BackgroundSubagentNotificationState;
+  }
+  if (existing?.idlePending instanceof Set && existing.idleInFlight instanceof Set) {
+    const migrated: BackgroundSubagentNotificationState = {
+      idlePending: existing.idlePending,
+      idleInFlight: existing.idleInFlight,
+      // Legacy state used a Set for transient old-owner claims. Preserve the
+      // accepted-message sets, but claims themselves cannot cross that ABI.
+      deliveryClaims: existing.deliveryClaims instanceof Map
+        ? existing.deliveryClaims
+        : new Map<string, symbol>(),
+      consumed: existing.consumptionPending instanceof Set && existing.consumed instanceof Set
+        ? existing.consumed
+        : new Set<string>(),
+      consumptionPending: existing.consumptionPending instanceof Set
+        ? existing.consumptionPending
+        : new Set<string>(),
+    };
+    root[NOTIFICATION_STATE_KEY] = migrated;
+    return migrated;
+  }
+  const created: BackgroundSubagentNotificationState = {
+    idlePending: new Set<string>(),
+    idleInFlight: new Set<string>(),
+    deliveryClaims: new Map<string, symbol>(),
+    consumed: new Set<string>(),
+    consumptionPending: new Set<string>(),
+  };
+  root[NOTIFICATION_STATE_KEY] = created;
+  return created;
 }
 
 export function backgroundSubagentLine(record: BackgroundSubagentRecord): string {

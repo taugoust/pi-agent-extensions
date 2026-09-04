@@ -697,12 +697,17 @@ parent-response budget); parallel and chain jobs select a one-based `child`.
 `list`, `status`, `output`, bounded `wait`, `result`, and `cancel` remain part of
 the same tool. Artifact identity and SHA-256 are verified before each page is
 returned, and result artifacts are removed with their terminal job record.
-Cancelling `wait` does not cancel execution. Because
-AgentSH authority and native child pipes are bound to the owning Pi process,
-running background subagents are cancelled on orderly session shutdown and are
-reported as `lost` after an unclean Pi restart; terminal records remain
-available for seven days. Draft cancellation never applies or discards a
-retained Draft result.
+Cancelling `wait` does not cancel execution. Running background subagents
+survive a hot `/reload` of the same Pi session: the replacement extension adopts
+the process-owned execution, while guarded child authorization pauses until the
+same parent session rebinds. If the replacement extension does not adopt within
+a bounded 65-second shutdown-and-startup window, the retained execution is
+cancelled rather than left orphaned. The first reload that installs this
+lifecycle support still runs the previously loaded shutdown handler, so work
+started under that older implementation is cancelled rather than adopted. They
+are also cancelled when Pi exits or replaces the session and are reported as
+`lost` after an unclean Pi restart; terminal records remain available for seven
+days. Draft cancellation never applies or discards a retained Draft result.
 
 While foreground subagent calls are blocking the parent, `/background` promotes
 all currently running calls in place. A single, parallel, or chain call remains

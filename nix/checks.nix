@@ -1211,6 +1211,7 @@ in
           return {
             cwd: "/exact/workspace",
             mode: "tui",
+            sessionManager: { getSessionId: () => options.sessionId || "permission-gate-test-session" },
             hasUI: options.hasUI !== false,
             signal: controller.signal,
             controller,
@@ -1232,7 +1233,7 @@ in
 
         async function runInheritedChild(name) {
           assert(process.env.AGENTSH_PERMISSION_GATE_SOCKET === undefined, "gate socket marker was not claimed and deleted during import");
-          const pi = createPi();
+          let pi = createPi();
           let remoteSelections = [];
           let contextOptions = { choice: "Allow" };
           if (name === "local-deny") contextOptions.choice = "Deny";
@@ -1272,7 +1273,7 @@ in
             };
           }
 
-          const ctx = createContext(contextOptions);
+          let ctx = createContext(contextOptions);
           if (name === "transform-order") {
             registerBashCommandTransform("test-wrapper", (command) => `ssh 'test-host' ''${JSON.stringify(command)}`);
           }
@@ -1282,6 +1283,8 @@ in
           const tool = pi.handlers.get("tool_call");
           const results = [];
           let childAuthorization;
+          let authorityStable;
+          let oldAuthorityActive;
           if (name === "local-allow") {
             results.push(await tool({ toolName: "bash", toolCallId: "tool-safe", input: { command: "printf safe" } }, ctx));
           }
@@ -1299,6 +1302,47 @@ in
               cwd: "/child/workspace",
               toolCallId: "child-tool-dangerous",
             }, ctx.signal);
+          } else if (name === "reload-child") {
+            const authority = globalThis.__paeSubagentPermissionAuthorityV1;
+            assert(authority?.active === true, "reload child authority was not active initially");
+            await pi.handlers.get("session_shutdown")({ reason: "reload" }, ctx);
+            assert(authority.active === false, "reload-suspended child authority remained launchable");
+            const pending = authority.authorize({
+              subagentId: "native-child-reload",
+              label: "reload child",
+              task: "request after reload",
+              command: "ssh reload.example.test",
+              cwd: "/child/workspace",
+              toolCallId: "child-tool-after-reload",
+            }, ctx.signal);
+            let settled = false;
+            void pending.finally(() => { settled = true; });
+            await delay(10);
+            assert(!settled, "child authorization did not wait for reload rebinding");
+
+            const reloadedGate = (await import("./out/permission-gate/index.js?hot-reload")).default;
+            pi = createPi();
+            ctx = createContext({ ...contextOptions, sessionId: "permission-gate-test-session" });
+            reloadedGate(pi);
+            authorityStable = globalThis.__paeSubagentPermissionAuthorityV1 === authority;
+            await pi.handlers.get("session_start")({ reason: "reload" }, ctx);
+            childAuthorization = await pending;
+          } else if (name === "new-session-child") {
+            const oldAuthority = globalThis.__paeSubagentPermissionAuthorityV1;
+            await pi.handlers.get("session_shutdown")({ reason: "new" }, ctx);
+            oldAuthorityActive = oldAuthority.active;
+            ctx = createContext({ ...contextOptions, sessionId: "permission-gate-second-session" });
+            await pi.handlers.get("session_start")({ reason: "new" }, ctx);
+            const newAuthority = globalThis.__paeSubagentPermissionAuthorityV1;
+            authorityStable = newAuthority === oldAuthority;
+            childAuthorization = await newAuthority.authorize({
+              subagentId: "native-child-new-session",
+              label: "new session child",
+              task: "request in replacement session",
+              command: "ssh new-session.example.test",
+              cwd: "/child/workspace",
+              toolCallId: "child-tool-new-session",
+            }, ctx.signal);
           } else {
             results.push(await tool({ toolName: "bash", toolCallId: "tool-dangerous", input: { command: "sudo true" } }, ctx));
           }
@@ -1308,6 +1352,8 @@ in
             blocked: results.map((result) => result?.block === true),
             reasons: results.map((result) => result?.reason || ""),
             childAuthorization,
+            authorityStable,
+            oldAuthorityActive,
             childAuthorityActive: globalThis.__paeSubagentPermissionAuthorityV1?.active,
             selections: ctx.selections.map((selection) => ({
               title: selection.title,
@@ -1535,6 +1581,41 @@ in
           assert(childAllowed.selections.length === 1, "child authorization did not surface in the parent UI");
           assert(childAllowed.selections[0].title.includes("Requested by native subagent task 1"), "child authorization prompt omitted its parent-owned origin");
           assert(childAllowed.selections[0].title.includes("inspect the remote safely"), "child authorization prompt omitted its task summary");
+
+          const reloadChild = await spawnInheritedChild("reload-child", async (socket) => {
+            const read = lineReader(socket);
+            await expectHello(read, socket);
+            const request = await read();
+            assert(request.v === 1 && request.type === "authorize" && request.kind === "bash", "reloaded child authority sent an invalid envelope");
+            assert(request.command === "ssh reload.example.test" && request.cwd === "/child/workspace", "reloaded child authority changed the exact command or cwd");
+            assert(request.tool_call_id === "child-tool-after-reload", "reloaded child authority changed the tool call ID");
+            assert(request.session_id === "subagent:native-child-reload", "reloaded child authority changed audit attribution");
+            send(socket, { v: 1, type: "decision", id: request.id, decision: "prompt", prompt: {
+              title: "Reloaded child command requires approval",
+              message: "Detected: ssh",
+              labels: ["ssh"],
+              command_preview: "ssh reload.example.test",
+            } });
+            const resolution = await read();
+            assert(resolution.type === "resolve" && resolution.decision === "allow", "reloaded parent did not approve the child command");
+            send(socket, { v: 1, type: "complete", id: request.id, decision: "allow", reason: "approved after reload" });
+          });
+          assert(reloadChild.authorityStable === true, "hot reload replaced the authority object captured by the child relay");
+          assert(reloadChild.childAuthorization?.allowed === true, "child authorization did not resume after hot reload");
+          assert(reloadChild.childAuthorization?.reason === "approved after reload", "reloaded child lost the audited completion reason");
+          assert(reloadChild.selections.length === 1 && reloadChild.selections[0].title.includes("Reloaded child command requires approval"), "reloaded child authorization used a stale UI context");
+
+          const newSessionChild = await spawnInheritedChild("new-session-child", async (socket) => {
+            const read = lineReader(socket);
+            await expectHello(read, socket);
+            const request = await read();
+            assert(request.v === 1 && request.type === "authorize" && request.command === "ssh new-session.example.test", "replacement Pi session sent an invalid child authorization");
+            assert(request.session_id === "subagent:native-child-new-session", "replacement Pi session changed child audit attribution");
+            send(socket, { v: 1, type: "decision", id: request.id, decision: "allow" });
+          });
+          assert(newSessionChild.oldAuthorityActive === false, "session replacement did not revoke the authority captured by old children");
+          assert(newSessionChild.authorityStable === false, "session replacement reused the old child authority object");
+          assert(newSessionChild.childAuthorityActive === true && newSessionChild.childAuthorization?.allowed === true, "replacement Pi session did not publish a fresh child authority");
 
           const backgroundAllowed = await spawnInheritedChild("background-allow", async (socket) => {
             const read = lineReader(socket);
@@ -2131,10 +2212,10 @@ in
           return event;
         }
 
-        async function shutdownSession(pi) {
+        async function shutdownSession(pi, reason = "quit") {
           const handlers = pi.handlers.get("session_shutdown") ?? [];
           for (const handler of handlers) {
-            await handler({ type: "session_shutdown" }, {});
+            await handler({ type: "session_shutdown", reason }, {});
           }
         }
 
@@ -3377,6 +3458,82 @@ in
             assert(mutatingRequests === 0, "mutation reached a listener for the wrong session");
             assert(globalThis.__AGENTSH_PI__.getSupervisorState().status === "error", "session mismatch did not become terminal");
             await shutdownSession(pi);
+            await supervisor.close();
+          }
+
+          // A hot reload retains the exact REST client while an AgentSH
+          // subagent stream is active, then disposes it after the stream ends.
+          {
+            clearAgentSHEnv();
+            const sessionId = "sess-subagent-reload";
+            let releaseSharedResponse;
+            let releaseDraftResponse;
+            let releaseShutdownResponse;
+            const sharedResponseGate = new Promise((resolve) => { releaseSharedResponse = resolve; });
+            const draftResponseGate = new Promise((resolve) => { releaseDraftResponse = resolve; });
+            const shutdownResponseGate = new Promise((resolve) => { releaseShutdownResponse = resolve; });
+            const terminal = { state: "completed", exit_code: 0, termination: "natural", retryable: false };
+            const supervisor = await withRestSupervisor(async (request) => {
+              if (request.method === "GET" && request.url === "/api/v1/sessions/" + sessionId) {
+                return { id: sessionId, session_id: sessionId, workspace: "/workspace", worktree: "/workspace" };
+              }
+              if (request.method === "GET" && request.url === "/api/v1/approvals") return [];
+              if (request.method === "POST" && request.url === "/api/v1/sessions/" + sessionId + "/tools/spawn_subagent") {
+                await (request.body.task === "terminate on quit"
+                  ? shutdownResponseGate
+                  : request.body.mode === "draft" ? draftResponseGate : sharedResponseGate);
+                const final = request.body.mode === "draft" ? "survived draft reload" : "survived reload";
+                const child = { label: "child", task: request.body.task, exit_code: 0, stop_reason: "completed", model_stop_reason: "stop", terminal, final, protocol_settled: true };
+                return { ndjsonChunks: [Buffer.from([
+                  JSON.stringify({ event: "subagent_result", label: "child", result: child }),
+                  JSON.stringify({ event: "done", ok: true, result: { mode: "single", final, terminal, results: [child] } }),
+                ].join("\n") + "\n")] };
+              }
+              return { statusCode: 404, body: { error: "unexpected supervisor request", request } };
+            });
+            process.env.AGENTSH_SESSION_ID = sessionId;
+            process.env.AGENTSH_SESSION_SUPERVISOR = "unix://" + supervisor.socketPath;
+            const beforeReloadPi = createPi();
+            sandbox(beforeReloadPi);
+            const ctx = createContext();
+            await startSession(beforeReloadPi, ctx);
+            const oldApi = globalThis.__AGENTSH_PI__;
+            let requestSettled = false;
+            const pending = oldApi.spawnSubagent({ task: "survive reload" }).finally(() => { requestSettled = true; });
+            const pendingDraft = oldApi.spawnSubagent({ task: "survive draft reload", mode: "draft" });
+            await waitFor(
+              () => supervisor.requests.filter((request) => request.method === "POST" && request.url.endsWith("/tools/spawn_subagent")).length === 2,
+              "reload fixture did not dispatch its AgentSH subagent",
+            );
+            await shutdownSession(beforeReloadPi, "reload");
+            assert(!requestSettled, "reload terminated the active AgentSH subagent stream");
+            assert(globalThis.__paeAgentSHReloadRetainedClientsV1?.size === 1, "reload did not retain the active AgentSH client");
+
+            const reloadedSandbox = (await import("./out/sandbox/index.js?subagent-reload")).default;
+            const afterReloadPi = createPi();
+            reloadedSandbox(afterReloadPi);
+            await startSession(afterReloadPi, ctx);
+            assert(globalThis.__AGENTSH_PI__ !== oldApi, "reload did not publish a replacement AgentSH frontend");
+            releaseSharedResponse();
+            const result = await pending;
+            assert(result.final === "survived reload", "AgentSH subagent result was lost across reload");
+            assert(globalThis.__paeAgentSHReloadRetainedClientsV1?.size === 1, "shared completion disposed a client still leased by a Draft");
+            releaseDraftResponse();
+            const draftResult = await pendingDraft;
+            assert(draftResult.final === "survived draft reload", "AgentSH Draft result was lost across reload");
+            assert(supervisor.requests.some((request) => request.body?.mode === "draft" && request.body?.task === "survive draft reload"), "reload test did not exercise the Draft transport");
+            await waitFor(() => globalThis.__paeAgentSHReloadRetainedClientsV1?.size === 0, "completed reload-retained AgentSH client was not disposed");
+
+            const terminatedByShutdown = globalThis.__AGENTSH_PI__.spawnSubagent({ task: "terminate on quit" });
+            await waitFor(
+              () => supervisor.requests.some((request) => request.body?.task === "terminate on quit"),
+              "terminal shutdown fixture did not dispatch its AgentSH subagent",
+            );
+            await shutdownSession(afterReloadPi);
+            let terminalShutdownError;
+            try { await terminatedByShutdown; } catch (error) { terminalShutdownError = error; }
+            assert(/aborted|closed|request/i.test(String(terminalShutdownError)), "non-reload shutdown left the retained AgentSH stream open");
+            releaseShutdownResponse();
             await supervisor.close();
           }
 

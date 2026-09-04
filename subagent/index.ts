@@ -35,8 +35,11 @@ import {
   BACKGROUND_SUBAGENT_ID_PATTERN,
   MAX_BACKGROUND_SUBAGENTS,
   backgroundSubagentLine,
+  backgroundSubagentsSurviveShutdown,
   isBackgroundSubagentActive,
   sharedBackgroundSubagentManager,
+  sharedBackgroundSubagentNotificationState,
+  type BackgroundSubagentManager,
   type BackgroundSubagentRecord,
 } from "./background.js";
 import { DetachableForegroundExecution } from "./foreground-handoff.js";
@@ -553,7 +556,7 @@ async function runSingleSubagent(
   const permissionTools = permissionAuthority ? guardedNativeTools(spec.tools) : undefined;
   if (permissionAuthority) {
     const permissionProxyEntrypoint = installedPermissionProxyEntrypoint();
-    if (!permissionAuthority.active) throw new Error("Parent AgentSH Permission Gate is unavailable; refusing native subagent launch");
+    await permissionAuthority.waitUntilActive(signal);
     if (!permissionProxyEntrypoint) throw new Error("Native subagent Permission Gate proxy is not installed; refusing native subagent launch");
     args.push("--no-extensions", "--extension", permissionProxyEntrypoint);
   }
@@ -615,6 +618,7 @@ async function runSingleSubagent(
     currentResult.childAgentDir = childAgentDir;
 
     if (permissionAuthority) {
+      await permissionAuthority.waitUntilActive(signal);
       permissionRelay = await NativeSubagentPermissionRelay.create({
         authority: permissionAuthority,
         subagentId,
@@ -1006,6 +1010,33 @@ function stableSessionId(ctx: any): string {
   return value;
 }
 
+function snapshotSubagentModel(value: unknown): Record<string, unknown> | undefined {
+  if (!value || typeof value !== "object" || Array.isArray(value)) return undefined;
+  const source = value as Record<string, unknown>;
+  return Object.freeze(Object.fromEntries(
+    ["provider", "id", "name", "contextWindow"]
+      .filter((key) => ["string", "number"].includes(typeof source[key]))
+      .map((key) => [key, source[key]]),
+  ));
+}
+
+/** Values needed after launch, without retaining Pi's reload-scoped context. */
+function snapshotSubagentExecutionContext(ctx: any): Record<string, unknown> {
+  const cwd = typeof ctx?.cwd === "string" ? ctx.cwd : process.cwd();
+  const model = snapshotSubagentModel(ctx?.model);
+  const liveModels = ctx?.modelRegistry?.getAll?.();
+  const models = Object.freeze(
+    (Array.isArray(liveModels) ? liveModels : [])
+      .map((candidate: unknown) => snapshotSubagentModel(candidate))
+      .filter(Boolean),
+  );
+  return Object.freeze({
+    cwd,
+    model,
+    modelRegistry: Object.freeze({ getAll: () => models }),
+  });
+}
+
 function persistentAgentDir(ctx: any): string {
   const sessionFile = ctx?.sessionManager?.getSessionFile?.();
   if (typeof sessionFile !== "string" || !path.isAbsolute(sessionFile)) return getAgentDir();
@@ -1093,13 +1124,14 @@ export default function (pi: ExtensionAPI) {
     agentSHRuntimeDisposition(agentSHStartup, bridgeSupervisorState(bridge));
   let backgroundManager = sharedBackgroundSubagentManager(path.join(getAgentDir(), "state", "background-subagents-v1"));
   let sessionContext: any;
+  let activeSessionId: string | undefined;
   let sessionGeneration = 0;
   let pollTimer: NodeJS.Timeout | undefined;
   let pollRunning = false;
   let completionCheckArmed = false;
-  const idlePending = new Set<string>();
-  const idleInFlight = new Set<string>();
-  const deliveryClaims = new Set<string>();
+  let lifecycleClosing = false;
+  const notificationState = sharedBackgroundSubagentNotificationState();
+  const { idlePending, idleInFlight, deliveryClaims, consumed, consumptionPending } = notificationState;
   const activeForegroundSubagents = new Map<string, ActiveForegroundSubagent>();
   const pendingForegroundSubagents = new Map<string, string>();
   const requestedForegroundHandoffs = new Set<string>();
@@ -1121,24 +1153,112 @@ export default function (pi: ExtensionAPI) {
     );
   };
 
-  const deliverTerminal = async (ctx: any, record: BackgroundSubagentRecord) => {
-    if (!terminalBackgroundStatus(record.status) || idlePending.has(record.id) || idleInFlight.has(record.id) || deliveryClaims.has(record.id)) return;
-    deliveryClaims.add(record.id);
+  const sessionEntries = (ctx: any): any[] => {
     try {
-      if (sessionContext !== ctx) return;
-      const message = `Notification: subagent ${record.id} ${record.status}. Check its status.`;
-      if (ctx.isIdle()) {
-        if (await backgroundManager.isNotified(record.id)) return;
-        idlePending.add(record.id);
-        try { sendLifecycle(ctx, message, { kind: "completion", job_id: record.id, status: record.status }); }
-        catch (error) { idlePending.delete(record.id); throw error; }
+      const branch = ctx.sessionManager?.getBranch?.();
+      if (Array.isArray(branch)) return branch;
+      const entries = ctx.sessionManager?.getEntries?.();
+      return Array.isArray(entries) ? entries : [];
+    } catch {
+      return [];
+    }
+  };
+
+  const deliveredLifecycleIds = (entries: any[]): Set<string> => {
+    const ids = new Set<string>();
+    for (const entry of entries) {
+      if (!entry || typeof entry !== "object" || entry.type !== "custom_message"
+        || entry.customType !== "background-subagent-lifecycle") continue;
+      const details = entry.details;
+      if (details?.kind === "completion" && typeof details.job_id === "string") ids.add(details.job_id);
+    }
+    return ids;
+  };
+
+  const deliveredOperationIds = (entries: any[]): Set<string> => {
+    const ids = new Set<string>();
+    for (const entry of entries) {
+      const message = entry?.type === "message" ? entry.message : undefined;
+      const details = message?.role === "toolResult" && message.toolName === "subagent" && message.isError !== true
+        ? message.details as BackgroundSubagentDetails | undefined
+        : undefined;
+      if (details?.background_subagent && typeof details.job_id === "string"
+        && details.operation && details.operation !== "list" && details.status
+        && terminalBackgroundStatus(details.status)) ids.add(details.job_id);
+    }
+    return ids;
+  };
+
+  const reconcileAcceptedNotifications = async (
+    ctx: any,
+    manager: BackgroundSubagentManager,
+    generation: number,
+    sessionId: string,
+  ) => {
+    const current = () => generation === sessionGeneration && !lifecycleClosing && sessionContext === ctx
+      && backgroundManager === manager && activeSessionId === sessionId;
+    if (!current()) return;
+    const entries = sessionEntries(ctx);
+    const durableNotifications = deliveredLifecycleIds(entries);
+    const durableOperations = deliveredOperationIds(entries);
+    for (const id of new Set([...idlePending, ...idleInFlight])) {
+      if (!current()) return;
+      if (!consumed.has(id) && durableNotifications.has(id)) {
+        try { await manager.markNotified(id); }
+        catch { continue; }
+        if (!current()) return;
+      }
+      idlePending.delete(id);
+      idleInFlight.delete(id);
+    }
+    for (const id of [...consumptionPending]) {
+      if (!current()) return;
+      if (durableOperations.has(id)) {
+        try { await manager.markNotified(id); }
+        catch { continue; }
+        if (!current()) return;
       } else {
-        if (!(await backgroundManager.markNotified(record.id))) return;
+        consumed.delete(id);
+      }
+      consumptionPending.delete(id);
+      consumed.delete(id);
+    }
+  };
+
+  const stageTerminalConsumption = (id: string) => {
+    // tool_result fires before Pi emits the durable tool-result message. Keep
+    // this process-local until agent_end; reload reconciles it against the
+    // active session branch rather than suppressing a notification on trust.
+    consumed.add(id);
+    consumptionPending.add(id);
+    idlePending.delete(id);
+    idleInFlight.delete(id);
+  };
+
+  const deliverTerminal = async (ctx: any, record: BackgroundSubagentRecord) => {
+    if (lifecycleClosing || consumed.has(record.id) || !terminalBackgroundStatus(record.status) || idlePending.has(record.id) || idleInFlight.has(record.id) || deliveryClaims.has(record.id)) return;
+    const generation = sessionGeneration;
+    const deliveryClaim = Symbol(record.id);
+    deliveryClaims.set(record.id, deliveryClaim);
+    try {
+      if (generation !== sessionGeneration || sessionContext !== ctx) return;
+      const message = `Notification: subagent ${record.id} ${record.status}. Check its status.`;
+      if (await backgroundManager.isNotified(record.id)) return;
+      if (generation !== sessionGeneration || lifecycleClosing || consumed.has(record.id) || sessionContext !== ctx) return;
+      const accepted = ctx.isIdle() ? idlePending : idleInFlight;
+      accepted.add(record.id);
+      try {
+        // sendMessage is synchronous. Persist the notified marker at agent_end,
+        // after Pi has accepted this message, so reload cannot turn a durable
+        // pre-send marker into a permanently lost completion.
         sendLifecycle(ctx, message, { kind: "completion", job_id: record.id, status: record.status });
+      } catch (error) {
+        accepted.delete(record.id);
+        throw error;
       }
       if (ctx.hasUI) ctx.ui.notify(message, record.status === "completed" ? "info" : "warning");
     } finally {
-      deliveryClaims.delete(record.id);
+      if (deliveryClaims.get(record.id) === deliveryClaim) deliveryClaims.delete(record.id);
     }
   };
 
@@ -1163,62 +1283,114 @@ export default function (pi: ExtensionAPI) {
 
   pi.on("session_start", async (_event, ctx) => {
     sessionGeneration += 1;
+    const generation = sessionGeneration;
+    lifecycleClosing = false;
     sessionContext = ctx;
-    backgroundManager = sharedBackgroundSubagentManager(path.join(persistentAgentDir(ctx), "state", "background-subagents-v1"));
+    const manager = sharedBackgroundSubagentManager(path.join(persistentAgentDir(ctx), "state", "background-subagents-v1"));
+    backgroundManager = manager;
     try {
-      await backgroundManager.initialize();
-      await updateBackgroundStatus(ctx);
+      const sessionId = stableSessionId(ctx);
+      activeSessionId = sessionId;
+      await manager.initialize();
+      if (generation !== sessionGeneration || lifecycleClosing || sessionContext !== ctx
+        || backgroundManager !== manager || activeSessionId !== sessionId) return;
+      manager.activateSession(sessionId);
+      await reconcileAcceptedNotifications(ctx, manager, generation, sessionId);
+      if (generation !== sessionGeneration || lifecycleClosing || sessionContext !== ctx
+        || backgroundManager !== manager || activeSessionId !== sessionId) return;
       if (pollTimer) clearInterval(pollTimer);
       pollTimer = setInterval(() => void pollBackground(), 2000);
       pollTimer.unref();
       void pollBackground();
+      await updateBackgroundStatus(ctx);
     } catch (error) {
-      if (ctx.hasUI) ctx.ui.notify(`Background subagents unavailable: ${error instanceof Error ? error.message : String(error)}`, "warning");
+      if (generation === sessionGeneration && !lifecycleClosing && sessionContext === ctx && ctx.hasUI) {
+        ctx.ui.notify(`Background subagents unavailable: ${error instanceof Error ? error.message : String(error)}`, "warning");
+      }
     }
   });
 
   pi.on("before_agent_start", () => {
+    if (lifecycleClosing) return;
     for (const id of idlePending) idleInFlight.add(id);
     idlePending.clear();
   });
 
   pi.on("agent_end", async (_event, ctx) => {
+    if (lifecycleClosing || sessionContext !== ctx) return;
+    const generation = sessionGeneration;
     const checkCompletions = completionCheckArmed;
     completionCheckArmed = false;
-    if (!checkCompletions && idleInFlight.size === 0) return;
+    if (!checkCompletions && idleInFlight.size === 0 && consumptionPending.size === 0) return;
     try {
       if (checkCompletions) {
         const records = await backgroundManager.list(stableSessionId(ctx), 1000);
+        if (generation !== sessionGeneration || lifecycleClosing || sessionContext !== ctx) return;
         for (const record of records) if (terminalBackgroundStatus(record.status)) await deliverTerminal(ctx, record);
       }
-      for (const id of [...idleInFlight]) {
+      for (const id of [...consumptionPending]) {
+        if (generation !== sessionGeneration || lifecycleClosing || sessionContext !== ctx) return;
         await backgroundManager.markNotified(id);
+        if (generation !== sessionGeneration || lifecycleClosing || sessionContext !== ctx) return;
+        consumptionPending.delete(id);
+        consumed.delete(id);
+      }
+      for (const id of [...idleInFlight]) {
+        if (generation !== sessionGeneration || lifecycleClosing || sessionContext !== ctx) return;
+        await backgroundManager.markNotified(id);
+        if (generation !== sessionGeneration || lifecycleClosing || sessionContext !== ctx) return;
         idleInFlight.delete(id);
       }
     } catch (error) {
-      if (ctx.hasUI) ctx.ui.notify(`Could not check background subagents before settling: ${error instanceof Error ? error.message : String(error)}`, "warning");
+      if (generation === sessionGeneration && !lifecycleClosing && sessionContext === ctx && ctx.hasUI) {
+        ctx.ui.notify(`Could not check background subagents before settling: ${error instanceof Error ? error.message : String(error)}`, "warning");
+      }
     }
   });
 
-  pi.on("session_shutdown", (_event, ctx) => {
+  pi.on("session_shutdown", async (event, ctx) => {
     sessionGeneration += 1;
-    sessionContext = undefined;
+    const generation = sessionGeneration;
+    lifecycleClosing = true;
     completionCheckArmed = false;
-    idlePending.clear();
-    idleInFlight.clear();
-    deliveryClaims.clear();
     if (pollTimer) clearInterval(pollTimer);
     pollTimer = undefined;
+    const survivingReload = backgroundSubagentsSurviveShutdown(event.reason);
+    const shutdownClaims = [...deliveryClaims.entries()];
     try {
-      const sessionId = stableSessionId(ctx);
-      for (const entry of activeForegroundSubagents.values()) {
-        if (entry.sessionId === sessionId) entry.execution.abort(new Error("Owning Pi session shut down"));
+      const sessionId = activeSessionId ?? stableSessionId(ctx);
+      for (const [id, entry] of activeForegroundSubagents) {
+        if (entry.sessionId !== sessionId) continue;
+        entry.execution.abort(new Error("Owning Pi session shut down"));
+        activeForegroundSubagents.delete(id);
       }
-      backgroundManager.requestCancelSession(sessionId);
+      if (survivingReload) backgroundManager.beginReloadAdoption(sessionId);
+      else backgroundManager.requestCancelSession(sessionId);
     } catch {}
-    activeForegroundSubagents.clear();
     pendingForegroundSubagents.clear();
     requestedForegroundHandoffs.clear();
+    if (!survivingReload) {
+      idlePending.clear();
+      idleInFlight.clear();
+      consumed.clear();
+      consumptionPending.clear();
+    }
+
+    // A delivery that already acquired the shared claim may be between its
+    // durable marker check and synchronous sendMessage call. Let it finish while
+    // the old Pi API is still valid so reload neither loses nor duplicates it.
+    const oldClaimsRemain = () => shutdownClaims.some(([id, token]) => deliveryClaims.get(id) === token);
+    const deliveryDeadline = Date.now() + 2000;
+    while (oldClaimsRemain() && Date.now() < deliveryDeadline) {
+      await new Promise((resolve) => setTimeout(resolve, 10));
+    }
+    for (const [id, token] of shutdownClaims) {
+      if (deliveryClaims.get(id) === token) deliveryClaims.delete(id);
+    }
+    if (generation === sessionGeneration) {
+      sessionContext = undefined;
+      activeSessionId = undefined;
+    }
   });
 
   pi.on("tool_call", (event, ctx) => {
@@ -1289,13 +1461,21 @@ export default function (pi: ExtensionAPI) {
     },
   });
 
-  pi.on("tool_result", (event) => {
+  pi.on("tool_result", (event, ctx) => {
     if (event.toolName !== "subagent") return;
     pendingForegroundSubagents.delete(event.toolCallId);
     requestedForegroundHandoffs.delete(event.toolCallId);
     if (event.isError) return;
     const details = event.details as SubagentDetails | BackgroundSubagentDetails | undefined;
-    if ((details as BackgroundSubagentDetails | undefined)?.background_subagent) return;
+    const background = details as BackgroundSubagentDetails | undefined;
+    if (background?.background_subagent) {
+      if (!event.isError && !lifecycleClosing && sessionContext === ctx
+        && typeof background.job_id === "string" && background.operation !== "list"
+        && background.status && terminalBackgroundStatus(background.status)) {
+        stageTerminalConsumption(background.job_id);
+      }
+      return;
+    }
     const foreground = details as SubagentDetails | undefined;
     if (foreground?.failed || (foreground?.backend === "native" && foreground.results.some(isFailure))) return { isError: true };
   });
@@ -1315,7 +1495,7 @@ export default function (pi: ExtensionAPI) {
     promptGuidelines: [
       "Use background=true when delegated work may take long enough that useful parent work can continue concurrently.",
       "Before claiming dependent work complete, consume a terminal background subagent result; operation=result supports child, offset, and bounded byte-limit pagination, while cancelling a bounded wait does not cancel the subagent.",
-      "Use operation=cancel explicitly to stop a background subagent. Running subagents are cancelled when their owning Pi session shuts down.",
+      "Use operation=cancel explicitly to stop a background subagent. Running background subagents survive hot /reload in the same Pi session, but are cancelled when Pi exits or replaces the session.",
     ],
     parameters: subagentParams(),
 
@@ -1348,13 +1528,11 @@ export default function (pi: ExtensionAPI) {
           record = await backgroundManager.cancel(id);
         }
         const discloseOutput = operation === "output" || operation === "wait" || operation === "cancel" || (operation === "status" && terminalBackgroundStatus(record.status));
-        if (discloseOutput && terminalBackgroundStatus(record.status)) await backgroundManager.markNotified(id);
         const waiting = timedOut ? "\nWait timed out; the subagent is still running." : "";
         const notReady = operation === "result" && isBackgroundSubagentActive(record) ? "\nResult is not ready; use a bounded wait or continue other work." : "";
         await updateBackgroundStatus(ctx);
         if (operation === "result" && terminalBackgroundStatus(record.status)) {
           const page = await backgroundManager.readResult(id, params.child, params.offset ?? 0, params.limit ?? MAX_SUBAGENT_RESULT_PAGE_BYTES);
-          await backgroundManager.markNotified(id);
           const retained = page.complete ? "" : `; retained ${page.totalBytes} of ${page.sourceTotalBytes} source bytes`;
           const continuation = page.nextOffset === undefined ? "" : `\n\n[Use operation=result with job_id=${id}, child=${page.child}, offset=${page.nextOffset} to continue.]`;
           return {
@@ -1413,8 +1591,8 @@ export default function (pi: ExtensionAPI) {
           if (!permissionAuthority && (agentSHStartup.kind === "guard-only" || permissionSelection?.selected)) {
             throw new Error("Parent AgentSH Permission Gate was selected but its authority is unavailable; refusing native subagent launch");
           }
-          if (permissionAuthority && (!permissionAuthority.active || !installedPermissionProxyEntrypoint())) {
-            throw new Error("Parent AgentSH Permission Gate or its immutable child proxy is unavailable; refusing native subagent launch");
+          if (permissionAuthority && !installedPermissionProxyEntrypoint()) {
+            throw new Error("Parent AgentSH Permission Gate immutable child proxy is unavailable; refusing native subagent launch");
           }
         }
         const launchedParams = { ...params };
@@ -1425,15 +1603,17 @@ export default function (pi: ExtensionAPI) {
         delete launchedParams.limit;
         delete launchedParams.offset;
         delete launchedParams.child;
+        const sessionId = stableSessionId(ctx);
+        const executionContext = snapshotSubagentExecutionContext(ctx);
         const record = await backgroundManager.start({
-          sessionId: stableSessionId(ctx),
+          sessionId,
           backend: backend.kind,
           mode: requestMode(params),
           summary: requestSummary(params),
         }, async (backgroundSignal, update) => {
-          const result = await subagentTool.execute(toolCallId, { ...launchedParams, [INTERNAL_MANAGED_EXECUTION]: true }, backgroundSignal, (partial: any) => update(agentResultText(partial)), ctx);
+          const result = await subagentTool.execute(toolCallId, { ...launchedParams, [INTERNAL_MANAGED_EXECUTION]: true }, backgroundSignal, (partial: any) => update(agentResultText(partial)), executionContext);
           return backgroundOutcome(result);
-        });
+        }, signal);
         completionCheckArmed = true;
         await updateBackgroundStatus(ctx);
         return backgroundStartResult(record, false);
@@ -1467,6 +1647,7 @@ export default function (pi: ExtensionAPI) {
 
       if (!internalManagedExecution && params.action === undefined && delegationFormCount(params) === 1) {
         const sessionId = stableSessionId(ctx);
+        const executionContext = snapshotSubagentExecutionContext(ctx);
         if (activeForegroundSubagents.has(toolCallId)) throw new Error(`Duplicate active subagent tool-call ID: ${toolCallId}`);
         let execution!: DetachableForegroundExecution<any, any, BackgroundSubagentRecord>;
         execution = new DetachableForegroundExecution(
@@ -1475,7 +1656,7 @@ export default function (pi: ExtensionAPI) {
             { ...params, [INTERNAL_MANAGED_EXECUTION]: true },
             managedSignal,
             managedUpdate,
-            ctx,
+            executionContext,
           ),
           onUpdate,
         );
@@ -1544,9 +1725,6 @@ export default function (pi: ExtensionAPI) {
       const permissionAuthority = currentSubagentPermissionAuthority();
       if (!permissionAuthority && (agentSHStartup.kind === "guard-only" || permissionSelection?.selected)) {
         throw new Error("Parent AgentSH Permission Gate was selected but its authority is unavailable; refusing native subagent launch");
-      }
-      if (permissionAuthority && !permissionAuthority.active) {
-        throw new Error("Parent AgentSH Permission Gate is unavailable; refusing native subagent launch");
       }
       if (permissionAuthority && !installedPermissionProxyEntrypoint()) {
         throw new Error("Native subagent Permission Gate proxy is not installed; refusing native subagent launch");

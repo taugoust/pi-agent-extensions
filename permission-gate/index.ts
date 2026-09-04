@@ -22,7 +22,8 @@ import { applyBashCommandTransforms } from "../shared/bash-command-transform.js"
 import {
   SUBAGENT_PERMISSION_AUTHORITY_KEY,
   SUBAGENT_PERMISSION_SELECTION_KEY,
-  type SubagentPermissionAuthority,
+  createReloadableSubagentPermissionAuthority,
+  type ReloadableSubagentPermissionAuthority,
   type SubagentPermissionRequest,
 } from "../shared/subagent-permission.js";
 import type {
@@ -156,6 +157,7 @@ type GateClaim = {
   startup: AgentSHStartupClassification;
   client?: AgentSHPermissionGateClient;
   error?: Error;
+  subagentAuthority?: ReloadableSubagentPermissionAuthority;
 };
 
 function ownEnvironment(name: string): boolean {
@@ -242,6 +244,20 @@ function gateClient(claim: GateClaim): AgentSHPermissionGateClient {
     claim.error = asError(error);
     throw claim.error;
   }
+}
+
+function gateSubagentAuthority(claim: GateClaim): ReloadableSubagentPermissionAuthority {
+  const existing = claim.subagentAuthority;
+  if (existing?.authorityAbi === 2 && existing.protocol === PROTOCOL_VERSION) {
+    const phase = existing.phase();
+    if (phase === "unbound" || phase === "reloading") return existing;
+    if (phase === "active" || phase === "draining") {
+      existing.fail(new Error("Overlapping Permission Gate extension runtimes cannot share child authority"));
+    }
+  }
+  const created = createReloadableSubagentPermissionAuthority();
+  claim.subagentAuthority = created;
+  return created;
 }
 
 function paseoRemoteSelect(
@@ -985,9 +1001,25 @@ function gateStatus(ctx: ExtensionContext, state: "ready" | "waiting" | "error" 
   ctx.ui.setStatus("permission-gate", ctx.ui.theme.fg(color, text));
 }
 
+function stablePiSessionId(ctx: ExtensionContext): string {
+  const value = (ctx.sessionManager as { getSessionId?(): unknown }).getSessionId?.();
+  if (typeof value !== "string" || value.length === 0 || Buffer.byteLength(value, "utf8") > 512) {
+    throw new Error("AgentSH Permission Gate requires a stable Pi session ID");
+  }
+  return value;
+}
+
 export default function permissionGate(pi: ExtensionAPI) {
   let sessionContext: ExtensionContext | undefined;
-  let subagentAuthority: SubagentPermissionAuthority | undefined;
+  let activePiSessionId: string | undefined;
+  const authorityOwner = Symbol("permission-gate-extension-runtime");
+  let subagentAuthority = inheritedGateClaim ? gateSubagentAuthority(inheritedGateClaim) : undefined;
+  const publishSubagentAuthority = () => {
+    if (subagentAuthority) {
+      (globalThis as Record<string, unknown>)[SUBAGENT_PERMISSION_AUTHORITY_KEY] = subagentAuthority.authority;
+    }
+  };
+  publishSubagentAuthority();
   const commandReceipts = new Map<string, CommandReceipt>();
   const commandAuthority: CommandAuthority = {
     protocol: 1,
@@ -1004,13 +1036,6 @@ export default function permissionGate(pi: ExtensionAPI) {
     if (commandReceipts.size >= MAX_REQUESTS) commandReceipts.clear();
     commandReceipts.set(event.toolCallId, { command, cwd });
   };
-
-  pi.on("session_shutdown", () => {
-    commandAuthority.active = false;
-    if (subagentAuthority) subagentAuthority.active = false;
-    sessionContext = undefined;
-    commandReceipts.clear();
-  });
 
   let enabled = true;
   let failureReported = false;
@@ -1056,8 +1081,13 @@ export default function permissionGate(pi: ExtensionAPI) {
       || disposition.kind === "unavailable";
   };
 
-  const reportGateFailure = (ctx: ExtensionContext, error: unknown) => {
-    if (subagentAuthority) subagentAuthority.active = false;
+  const reportGateFailure = (
+    ctx: ExtensionContext,
+    error: unknown,
+    failedAuthority = subagentAuthority,
+  ) => {
+    failedAuthority?.fail(asError(error));
+    if (sessionContext !== ctx) return;
     gateStatus(ctx, "error");
     if (failureReported) return;
     failureReported = true;
@@ -1066,77 +1096,75 @@ export default function permissionGate(pi: ExtensionAPI) {
     else process.stderr.write(`[permission-gate] ${message}\n`);
   };
 
+  const authorizeSubagent = async (
+    boundAuthority: ReloadableSubagentPermissionAuthority,
+    request: SubagentPermissionRequest,
+    signal: AbortSignal | undefined,
+    sessionSignal: AbortSignal,
+  ) => {
+    if (!inheritedGateClaim) throw new Error("parent AgentSH Permission Gate is not configured");
+    const ctx = sessionContext;
+    if (!ctx || sessionSignal.aborted) {
+      throw new Error("parent AgentSH Permission Gate session is not active");
+    }
+    if (agentSHStartup.kind === "conflict" || runtimeDisposition().kind !== "guard-only") {
+      throw new Error("parent AgentSH Permission Gate is no longer the sole active command authority");
+    }
+    exactUTF8(request.subagentId, "subagent ID", MAX_ID_BYTES - "subagent:".length, false);
+    exactUTF8(request.label, "subagent label", MAX_ID_BYTES, false);
+    exactUTF8(request.task, "subagent task", 2048, false);
+    exactUTF8(request.command, "command", MAX_COMMAND_BYTES, false);
+    exactUTF8(request.cwd, "cwd", MAX_CWD_BYTES);
+    exactUTF8(request.toolCallId, "tool call ID", MAX_ID_BYTES, false);
+
+    const linked = linkedAbortSignal([signal, sessionSignal]);
+    gateStatus(ctx, "waiting");
+    try {
+      const result = await gateClient(inheritedGateClaim).authorize(
+        {
+          command: request.command,
+          cwd: request.cwd,
+          toolCallId: request.toolCallId,
+          sessionId: `subagent:${request.subagentId}`,
+        },
+        linked.signal,
+        async (metadata, timeoutMs, transportSignal) => {
+          pi.events.emit("permission-gate:waiting");
+          try {
+            return await resolveAgentSHPrompt(
+              ctx,
+              childPromptMetadata(metadata, request),
+              timeoutMs,
+              transportSignal,
+              linked.signal,
+            );
+          } finally {
+            pi.events.emit("permission-gate:resolved");
+          }
+        },
+      );
+      if (sessionSignal.aborted || sessionContext !== ctx) {
+        throw new Error("parent AgentSH Permission Gate session ended before authorization completed");
+      }
+      failureReported = false;
+      gateStatus(ctx, "ready");
+      if (runtimeDisposition().kind !== "guard-only") {
+        throw new Error("parent AgentSH Permission Gate ceased to be the sole command authority before execution");
+      }
+      return result;
+    } catch (error) {
+      reportGateFailure(ctx, error, boundAuthority);
+      throw error;
+    } finally {
+      linked.dispose();
+    }
+  };
+
   if (inheritedGateClaim?.client) {
     inheritedGateClaim.client.setFailureHandler((error) => {
-      if (subagentAuthority) subagentAuthority.active = false;
+      subagentAuthority?.fail(error);
       if (sessionContext) reportGateFailure(sessionContext, error);
     });
-  }
-
-  if (inheritedGateClaim) {
-    subagentAuthority = {
-      protocol: 1,
-      selected: true,
-      active: false,
-      async authorize(request, signal) {
-        const ctx = sessionContext;
-        if (!subagentAuthority?.active || !ctx) {
-          throw new Error("parent AgentSH Permission Gate session is not active");
-        }
-        if (agentSHStartup.kind === "conflict" || runtimeDisposition().kind !== "guard-only") {
-          throw new Error("parent AgentSH Permission Gate is no longer the sole active command authority");
-        }
-        exactUTF8(request.subagentId, "subagent ID", MAX_ID_BYTES - "subagent:".length, false);
-        exactUTF8(request.label, "subagent label", MAX_ID_BYTES, false);
-        exactUTF8(request.task, "subagent task", 2048, false);
-        exactUTF8(request.command, "command", MAX_COMMAND_BYTES, false);
-        exactUTF8(request.cwd, "cwd", MAX_CWD_BYTES);
-        exactUTF8(request.toolCallId, "tool call ID", MAX_ID_BYTES, false);
-
-        const linked = linkedAbortSignal([signal]);
-        gateStatus(ctx, "waiting");
-        try {
-          const result = await gateClient(inheritedGateClaim).authorize(
-            {
-              command: request.command,
-              cwd: request.cwd,
-              toolCallId: request.toolCallId,
-              sessionId: `subagent:${request.subagentId}`,
-            },
-            linked.signal,
-            async (metadata, timeoutMs, transportSignal) => {
-              pi.events.emit("permission-gate:waiting");
-              try {
-                return await resolveAgentSHPrompt(
-                  ctx,
-                  childPromptMetadata(metadata, request),
-                  timeoutMs,
-                  transportSignal,
-                  linked.signal,
-                );
-              } finally {
-                pi.events.emit("permission-gate:resolved");
-              }
-            },
-          );
-          if (!subagentAuthority?.active || sessionContext !== ctx) {
-            throw new Error("parent AgentSH Permission Gate session ended before authorization completed");
-          }
-          failureReported = false;
-          gateStatus(ctx, "ready");
-          if (runtimeDisposition().kind !== "guard-only") {
-            throw new Error("parent AgentSH Permission Gate ceased to be the sole command authority before execution");
-          }
-          return result;
-        } catch (error) {
-          reportGateFailure(ctx, error);
-          throw error;
-        } finally {
-          linked.dispose();
-        }
-      },
-    };
-    (globalThis as Record<string, unknown>)[SUBAGENT_PERMISSION_AUTHORITY_KEY] = subagentAuthority;
   }
 
   pi.registerCommand("permission-gate", {
@@ -1178,6 +1206,8 @@ export default function permissionGate(pi: ExtensionAPI) {
   });
 
   pi.on("session_start", async (_event, ctx) => {
+    commandAuthority.active = true;
+    commandReceipts.clear();
     sessionContext = ctx;
     if (inheritedGateClaim) {
       gateStatus(ctx, "waiting");
@@ -1185,11 +1215,34 @@ export default function permissionGate(pi: ExtensionAPI) {
         const client = gateClient(inheritedGateClaim);
         await (eagerInitialization ?? client.initialize());
         if (client.failure) throw client.failure;
-        if (subagentAuthority) subagentAuthority.active = true;
+        if (!subagentAuthority || subagentAuthority.phase() === "inactive" || subagentAuthority.phase() === "failed") {
+          subagentAuthority = gateSubagentAuthority(inheritedGateClaim);
+          publishSubagentAuthority();
+        }
+        const boundAuthority = subagentAuthority;
+        activePiSessionId = stablePiSessionId(ctx);
+        boundAuthority.bind(
+          authorityOwner,
+          activePiSessionId,
+          async (request, signal, sessionSignal) => await authorizeSubagent(
+            boundAuthority,
+            request,
+            signal,
+            sessionSignal,
+          ),
+          () => {
+            if (sessionContext !== ctx) {
+              throw new Error("Parent AgentSH Permission Gate session changed before child authorization commit");
+            }
+            if (client.failure) throw client.failure;
+            if (runtimeDisposition().kind !== "guard-only") {
+              throw new Error("Parent AgentSH Permission Gate ceased to be the sole command authority before child authorization commit");
+            }
+          },
+        );
         failureReported = false;
         gateStatus(ctx, "ready");
       } catch (error) {
-        if (subagentAuthority) subagentAuthority.active = false;
         reportGateFailure(ctx, error);
       }
       return;
@@ -1199,6 +1252,34 @@ export default function permissionGate(pi: ExtensionAPI) {
       ctx.ui.setStatus("permission-gate", ctx.ui.theme.fg("warning", "gate ■"));
     } else {
       ctx.ui.setStatus("permission-gate", undefined);
+    }
+  });
+
+  pi.on("session_shutdown", async (event, ctx) => {
+    commandAuthority.active = false;
+    commandReceipts.clear();
+    try {
+      if (subagentAuthority) {
+        const reason = event.reason ?? "quit";
+        const sessionId = activePiSessionId ?? stablePiSessionId(ctx);
+        if (reason === "reload") {
+          const began = await subagentAuthority.beginReload(authorityOwner, sessionId);
+          if (!began && subagentAuthority.phase() !== "failed" && subagentAuthority.phase() !== "inactive") {
+            subagentAuthority.fail(new Error("Child Permission Gate authority could not enter reload handoff"));
+          }
+        } else {
+          subagentAuthority.deactivate(
+            authorityOwner,
+            new Error(`Parent Pi session shut down (${reason}); child command authority was revoked`),
+          );
+        }
+      }
+    } catch (error) {
+      subagentAuthority?.fail(asError(error));
+      if (ctx.hasUI) gateStatus(ctx, "error");
+    } finally {
+      sessionContext = undefined;
+      activePiSessionId = undefined;
     }
   });
 

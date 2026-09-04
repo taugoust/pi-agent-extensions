@@ -4,6 +4,7 @@ import * as net from "node:net";
 import * as os from "node:os";
 import * as path from "node:path";
 import {
+  SUBAGENT_PERMISSION_AUTHORITY_ABI,
   SUBAGENT_PERMISSION_MAX_COMMAND_BYTES,
   SUBAGENT_PERMISSION_MAX_CWD_BYTES,
   SUBAGENT_PERMISSION_MAX_FRAME_BYTES,
@@ -126,6 +127,7 @@ export class NativeSubagentPermissionRelay {
   private handshakeTimer?: ReturnType<typeof setTimeout>;
   private parentSignal?: AbortSignal;
   private parentAbort?: () => void;
+  private readonly authorityRevoked: () => void;
 
   private constructor(options: {
     root: string;
@@ -173,6 +175,11 @@ export class NativeSubagentPermissionRelay {
     void this.ready.catch(() => undefined);
     this.server = net.createServer((socket) => this.accept(socket));
     this.server.on("error", (error) => this.close(new Error(`subagent permission relay server failed: ${error.message}`)));
+    this.authorityRevoked = () => this.close(asError(
+      this.authority.revoked.reason ?? new Error("parent AgentSH Permission Gate authority was revoked"),
+    ));
+    if (this.authority.revoked.aborted) this.authorityRevoked();
+    else this.authority.revoked.addEventListener("abort", this.authorityRevoked, { once: true });
     if (options.signal) {
       this.parentSignal = options.signal;
       this.parentAbort = () => this.close(asError(options.signal!.reason ?? new Error("parent subagent execution was aborted")));
@@ -191,7 +198,13 @@ export class NativeSubagentPermissionRelay {
     signal?: AbortSignal;
   }): Promise<NativeSubagentPermissionRelay> {
     if (options.signal?.aborted) throw asError(options.signal.reason ?? new Error("parent subagent execution was aborted"));
-    if (!options.authority.active) throw new Error("parent AgentSH Permission Gate is not active");
+    if (options.authority.authorityAbi !== SUBAGENT_PERMISSION_AUTHORITY_ABI) {
+      throw new Error("parent AgentSH Permission Gate authority is incompatible");
+    }
+    // A reload can begin after a waiter resolves but before its continuation
+    // runs. Re-enter the abortable wait rather than treating that handoff race
+    // as terminal authority loss.
+    while (!options.authority.active) await options.authority.waitUntilActive(options.signal);
     const root = secureRuntimeRoot();
     let relay: NativeSubagentPermissionRelay;
     try {
@@ -257,6 +270,7 @@ export class NativeSubagentPermissionRelay {
     if (this.handshakeTimer) clearTimeout(this.handshakeTimer);
     this.handshakeTimer = undefined;
     if (this.parentSignal && this.parentAbort) this.parentSignal.removeEventListener("abort", this.parentAbort);
+    this.authority.revoked.removeEventListener("abort", this.authorityRevoked);
     this.parentSignal = undefined;
     this.parentAbort = undefined;
     for (const pending of this.pending.values()) pending.controller.abort(reason);
@@ -400,41 +414,65 @@ export class NativeSubagentPermissionRelay {
     pending: PendingRequest,
     request: { command: string; cwd: string; toolCallId: string },
   ): Promise<void> {
-    let allowed = false;
-    let reason = "parent AgentSH Permission Gate denied the command";
-    let fatalError: Error | undefined;
+    const exactRequest = {
+      subagentId: this.subagentId,
+      label: this.label,
+      task: this.task,
+      ...request,
+    };
+    let prepared: Awaited<ReturnType<SubagentPermissionAuthority["prepare"]>> | undefined;
     try {
-      if (!this.authority.active) throw new Error("parent AgentSH Permission Gate is no longer active");
-      const result = await this.authority.authorize({
-        subagentId: this.subagentId,
-        label: this.label,
-        task: this.task,
-        ...request,
-      }, pending.controller.signal);
-      allowed = result.allowed;
-      reason = result.reason;
-      if (!this.authority.active) throw new Error("parent AgentSH Permission Gate session ended before authorization completed");
+      prepared = await this.authority.prepare(exactRequest, pending.controller.signal);
+      const { allowed } = prepared.result;
+      const reason = requiredString(
+        prepared.result.reason || (allowed ? "allowed" : "denied"),
+        "decision reason",
+        SUBAGENT_PERMISSION_MAX_REASON_BYTES,
+      );
       if (allowed) this.verifyChildIdentity();
+      if (this.closed || pending.responded || this.pending.get(id) !== pending) {
+        this.authority.abandon(prepared.ticket);
+        return;
+      }
+      const frame = this.encode({ v: 1, type: "decision", id, allowed, reason, fatal: false });
+      const committed = this.authority.commit(prepared.ticket, exactRequest);
+      prepared = undefined;
+      if (committed.allowed !== allowed || committed.reason !== reason) {
+        throw new Error("parent AgentSH Permission Gate changed its prepared authorization during commit");
+      }
+      pending.responded = true;
+      this.pending.delete(id);
+      // commit() and socket.write() deliberately occur in the same JavaScript
+      // turn, with no await that could let reload cross an allow decision.
+      try {
+        await this.sendFrame(frame);
+      } catch (error) {
+        this.close(asError(error));
+      }
+      return;
     } catch (error) {
-      fatalError = asError(error);
-      allowed = false;
-      reason = `parent AgentSH Permission Gate failed closed: ${boundedReason(error)}`;
-    }
-    if (this.closed || pending.responded || this.pending.get(id) !== pending) return;
-    pending.responded = true;
-    this.pending.delete(id);
-    try {
-      await this.send({
-        v: 1,
-        type: "decision",
-        id,
-        allowed,
-        reason: requiredString(reason || (allowed ? "allowed" : "denied"), "decision reason", SUBAGENT_PERMISSION_MAX_REASON_BYTES),
-        fatal: Boolean(fatalError),
-      });
-      if (fatalError) this.close(fatalError);
-    } catch (error) {
-      this.close(asError(error));
+      if (prepared) this.authority.abandon(prepared.ticket);
+      const fatalError = asError(error);
+      if (this.closed || pending.responded || this.pending.get(id) !== pending) return;
+      pending.responded = true;
+      this.pending.delete(id);
+      try {
+        await this.send({
+          v: 1,
+          type: "decision",
+          id,
+          allowed: false,
+          reason: truncateUTF8(
+            `parent AgentSH Permission Gate failed closed: ${boundedReason(fatalError)}`,
+            SUBAGENT_PERMISSION_MAX_REASON_BYTES,
+          ),
+          fatal: true,
+        });
+      } catch (sendError) {
+        this.close(asError(sendError));
+        return;
+      }
+      this.close(fatalError);
     }
   }
 
@@ -449,11 +487,21 @@ export class NativeSubagentPermissionRelay {
     try { fs.rmdirSync(this.root); } catch {}
   }
 
-  private async send(message: JsonObject): Promise<void> {
-    if (this.closed || !this.socket || this.socket.destroyed) throw new Error("native subagent permission relay is unavailable");
+  private encode(message: JsonObject): Buffer {
     const frame = Buffer.from(`${JSON.stringify(message)}\n`, "utf8");
     if (frame.length - 1 > SUBAGENT_PERMISSION_MAX_FRAME_BYTES) throw new Error("native subagent permission relay response is oversized");
-    await new Promise<void>((resolve, reject) => {
+    return frame;
+  }
+
+  private send(message: JsonObject): Promise<void> {
+    return this.sendFrame(this.encode(message));
+  }
+
+  private sendFrame(frame: Buffer): Promise<void> {
+    if (this.closed || !this.socket || this.socket.destroyed) {
+      return Promise.reject(new Error("native subagent permission relay is unavailable"));
+    }
+    return new Promise<void>((resolve, reject) => {
       try {
         this.socket!.write(frame, (error?: Error | null) => error ? reject(error) : resolve());
       } catch (error) {
