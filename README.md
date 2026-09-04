@@ -690,8 +690,9 @@ required for filesystem, process, network, and descendant enforcement.
 ```
 
 Background launches support single, parallel, and chain requests through both
-adaptive backends. Parallel and chain groups are capped at eight children; the
-native backend runs at most four siblings concurrently. They return immediately,
+adaptive backends, with up to sixteen aggregate invocations active at once.
+Parallel and chain groups are capped at eight children; the native backend runs
+at most four siblings concurrently. They return immediately,
 retain a 50 KiB preview plus each child's complete terminal report up to 16 MiB
 in a private per-user store, with
 a fair 32 MiB aggregate cap per job, and emit deduplicated completion events
@@ -728,9 +729,9 @@ Foreground rendering stops, the original execution continues under the existing
 background manager, and each detached tool result explicitly tells the parent
 agent to continue useful work and consume the result before completing dependent
 work. The command does nothing to existing background jobs or unrelated tools.
-It refuses an all-at-once handoff when the eight-job aggregate background limit
-would be exceeded. Escape retains its normal cancellation behavior before a
-successful handoff; afterward, only `operation=cancel` cancels the detached work.
+It refuses an all-at-once handoff when the sixteen-job aggregate background
+limit would be exceeded. Escape retains its normal cancellation behavior before
+a successful handoff; afterward, only `operation=cancel` cancels the detached work.
 
 Set `PI_SUBAGENT_BIN` to the raw Pi executable selected by your wrapper, e.g.
 `/nix/store/.../bin/pi`. If unset, the extension tries source/dev execution,
