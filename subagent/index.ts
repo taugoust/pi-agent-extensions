@@ -1096,7 +1096,7 @@ export default function (pi: ExtensionAPI) {
   let sessionGeneration = 0;
   let pollTimer: NodeJS.Timeout | undefined;
   let pollRunning = false;
-  let settleReminderArmed = false;
+  let completionCheckArmed = false;
   const idlePending = new Set<string>();
   const idleInFlight = new Set<string>();
   const deliveryClaims = new Set<string>();
@@ -1126,7 +1126,7 @@ export default function (pi: ExtensionAPI) {
     deliveryClaims.add(record.id);
     try {
       if (sessionContext !== ctx) return;
-      const message = `Background subagent ${record.id}: ${record.status}. Inspect its result before declaring dependent work complete.`;
+      const message = `Notification: subagent ${record.id} ${record.status}. Check its status.`;
       if (ctx.isIdle()) {
         if (await backgroundManager.isNotified(record.id)) return;
         idlePending.add(record.id);
@@ -1183,18 +1183,13 @@ export default function (pi: ExtensionAPI) {
   });
 
   pi.on("agent_end", async (_event, ctx) => {
-    const remind = settleReminderArmed;
-    settleReminderArmed = false;
-    if (!remind && idleInFlight.size === 0) return;
+    const checkCompletions = completionCheckArmed;
+    completionCheckArmed = false;
+    if (!checkCompletions && idleInFlight.size === 0) return;
     try {
-      if (remind) {
+      if (checkCompletions) {
         const records = await backgroundManager.list(stableSessionId(ctx), 1000);
         for (const record of records) if (terminalBackgroundStatus(record.status)) await deliverTerminal(ctx, record);
-        const running = records.filter(isBackgroundSubagentActive);
-        if (running.length > 0) {
-          const ids = running.slice(0, 8).map((record) => record.id).join(", ");
-          sendLifecycle(ctx, `${running.length} background subagent${running.length === 1 ? " is" : "s are"} still running (${ids}). Do not claim dependent work complete; use a bounded subagent wait/status/result operation.`, { kind: "running-reminder", job_ids: running.slice(0, 8).map((record) => record.id) });
-        }
       }
       for (const id of [...idleInFlight]) {
         await backgroundManager.markNotified(id);
@@ -1208,7 +1203,7 @@ export default function (pi: ExtensionAPI) {
   pi.on("session_shutdown", (_event, ctx) => {
     sessionGeneration += 1;
     sessionContext = undefined;
-    settleReminderArmed = false;
+    completionCheckArmed = false;
     idlePending.clear();
     idleInFlight.clear();
     deliveryClaims.clear();
@@ -1277,7 +1272,7 @@ export default function (pi: ExtensionAPI) {
           }
         }
         if (moved.length > 0) {
-          settleReminderArmed = true;
+          completionCheckArmed = true;
           await updateBackgroundStatus(ctx);
         }
         if (ctx.hasUI) {
@@ -1439,7 +1434,7 @@ export default function (pi: ExtensionAPI) {
           const result = await subagentTool.execute(toolCallId, { ...launchedParams, [INTERNAL_MANAGED_EXECUTION]: true }, backgroundSignal, (partial: any) => update(agentResultText(partial)), ctx);
           return backgroundOutcome(result);
         });
-        settleReminderArmed = true;
+        completionCheckArmed = true;
         await updateBackgroundStatus(ctx);
         return backgroundStartResult(record, false);
       }
@@ -1520,7 +1515,7 @@ export default function (pi: ExtensionAPI) {
             try {
               const record = await entry.detach();
               if (record) {
-                settleReminderArmed = true;
+                completionCheckArmed = true;
                 await updateBackgroundStatus(ctx);
               }
             } catch (error) {
@@ -1529,7 +1524,7 @@ export default function (pi: ExtensionAPI) {
           }
           const decision = await execution.waitForDecision();
           if (decision.kind === "completed") return decision.result;
-          settleReminderArmed = true;
+          completionCheckArmed = true;
           await updateBackgroundStatus(ctx);
           return backgroundStartResult(decision.value, true);
         } finally {

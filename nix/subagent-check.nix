@@ -449,6 +449,12 @@ pkgs.runCommand "subagent-check"
       exit 1
     fi
     grep -F 'waitForGracefulShutdown' ${self}/subagent/index.ts >/dev/null
+    grep -F 'Notification: subagent ''${record.id} ''${record.status}. Check its status.' ${self}/subagent/index.ts >/dev/null
+    if grep -F 'Do not claim dependent work complete' ${self}/subagent/index.ts >/dev/null \
+      || grep -F 'running-reminder' ${self}/subagent/index.ts >/dev/null; then
+      echo 'background lifecycle text leaked internal model guidance or running reminders' >&2
+      exit 1
+    fi
     grep -F '(cfg.extensions.sandbox.enable || cfg.extensions.subagent.enable)' ${self}/nix/module.nix >/dev/null
     grep -F 'builtins.elem "sandbox" extensions' ${self}/nix/mk-extension-bundle.nix >/dev/null
     grep -F '"''${extDir}/subagent/backend.ts".source = "''${self}/subagent/backend.ts";' ${self}/nix/module.nix >/dev/null
