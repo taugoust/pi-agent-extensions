@@ -62,7 +62,7 @@ pkgs.runCommand "background-job-extension-check"
       "$srcdir/background-job/tmux.ts" \
       "$srcdir/background-job/types.ts" \
       "$srcdir/shared/agentsh-mode.ts"
-    cp "$srcdir/background-job/test.mjs" "$outdir/background-job/test.mjs"
+    cp "$srcdir/background-job/"{test.mjs,runner.mjs} "$outdir/background-job/"
 
     export HOME="$workdir/home"
     export TMPDIR="$workdir/tmp"
@@ -143,6 +143,54 @@ pkgs.runCommand "background-job-extension-check"
     }
     if (!receiptBlocked) throw new Error("background start was not bound to an exact Permission Gate receipt");
     delete globalThis.__paeCommandAuthorityV1;
+
+    const reloadContext = {
+      cwd: process.cwd(),
+      hasUI: false,
+      isIdle: () => true,
+      sessionManager: { getSessionId: () => "reload-session" },
+    };
+    const loadHarness = async (suffix) => {
+      const tools = new Map();
+      const handlers = new Map();
+      const loaded = (await import(`./out/background-job/index.js?''${suffix}`)).default;
+      loaded({
+        registerTool(tool) { tools.set(tool.name, tool); },
+        registerCommand() {},
+        on(name, handler) { handlers.set(name, handler); },
+        sendMessage() {},
+      });
+      await handlers.get("session_start")({}, reloadContext);
+      return { tool: tools.get("background_job"), handlers };
+    };
+
+    const beforeReload = await loadHarness("before-reload");
+    const started = await beforeReload.tool.execute(
+      "reload-start",
+      { action: "start", command: "printf 'before-reload\\n'; sleep 1; printf 'after-reload\\n'" },
+      undefined,
+      undefined,
+      reloadContext,
+    );
+    if (!started.details?.job_id || started.details.status !== "running") throw new Error("reload fixture did not start");
+    beforeReload.handlers.get("session_shutdown")();
+
+    const afterReload = await loadHarness("after-reload");
+    const recovered = await afterReload.tool.execute(
+      "reload-wait",
+      { action: "wait", job_id: started.details.job_id, timeout_ms: 5000 },
+      undefined,
+      undefined,
+      reloadContext,
+    );
+    afterReload.handlers.get("session_shutdown")();
+    if (recovered.details?.status !== "completed" || recovered.details?.exit_code !== 0) {
+      throw new Error(`session reload did not recover the running background job: ''${JSON.stringify(recovered.details)} ''${JSON.stringify(recovered.content)}`);
+    }
+    const recoveredText = recovered.content?.find((part) => part.type === "text")?.text ?? "";
+    if (!recoveredText.includes("before-reload") || !recoveredText.includes("after-reload")) {
+      throw new Error("session reload lost background job output");
+    }
     EOF
     PI_CODING_AGENT_DIR="$workdir/agent" node "$workdir/contract.mjs"
 
