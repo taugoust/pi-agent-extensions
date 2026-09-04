@@ -655,8 +655,8 @@ trusted Pi control plane is insufficient.
   and never falls back to native execution.
 
 **Description**: Registers one adaptive `subagent` tool. The parent supplies a
-single task, parallel tasks, a chain, a background lifecycle operation, or an
-AgentSH Draft disposition. Native child Pi state is isolated under
+single task, parallel tasks, a chain, a background lifecycle/control operation,
+or an AgentSH Draft disposition. Native child Pi state is isolated under
 `$PI_CODING_AGENT_DIR/subagents/...`; AgentSH owns policy, streaming, approvals,
 artifacts, and Draft lifecycle whenever its backend is active. In guard-only
 `pi-unsafe` sessions, each native child loads only immutable Nix-store finalizer
@@ -685,6 +685,9 @@ required for filesystem, process, network, and descendant enforcement.
 { "operation": "wait_group", "job_id": "subagent-job-...", "wait_ms": 30000 }
 { "operation": "wait_all", "wait_ms": 30000 }
 { "operation": "result", "job_id": "subagent-job-...", "child": 1, "offset": 0, "limit": 49152 }
+{ "operation": "prompt", "child_id": "subagent-child-...", "message": "Check the failing edge case", "control_mode": "steer" }
+{ "operation": "prompt", "child_id": "subagent-child-...", "message": "After that, summarize", "control_mode": "follow_up" }
+{ "operation": "prompt", "child_id": "subagent-child-...", "message": "Stop and investigate this instead", "control_mode": "interrupt" }
 { "mode": "draft", "task": "Implement and commit the change in an isolated VM" }
 { "mode": "draft", "action": "review", "draft_id": "session-..." }
 ```
@@ -698,7 +701,8 @@ in a private per-user store, with
 a fair 32 MiB aggregate cap per job, and emit deduplicated completion events
 that wake an idle parent or steer an active one. `result` pages those reports
 by byte `offset` and a limit of at most 48 KiB (leaving room inside the 50 KiB
-parent-response budget); parallel and chain jobs select a one-based `child`.
+parent-response budget); parallel and chain jobs select either a one-based
+`child` or its opaque `child_id`.
 `list`, `status`, `output`, bounded waits of up to 24 hours, `result`, and
 `cancel` remain part of the same tool. `wait_any` waits for the next unfinished
 child in any group,
@@ -706,6 +710,24 @@ child in any group,
 all groups that are active when the call begins. Later launches never extend an
 existing wait. `wait_any` is edge-oriented rather than a completion queue:
 simultaneous sibling completions remain visible through `status` and `result`.
+Every newly launched child receives a stable opaque `subagent-child-...` ID.
+Background start, list, status, output, waits, and result metadata expose that
+ID without exposing a PID, transport, or child state directory. The ID remains
+the same through foreground-to-background handoff and hot extension reload.
+While a native child is active, `operation=prompt` is synchronous through the
+child's next logical `agent_settled` boundary, with a 24-hour hard deadline.
+`steer` (the default) delivers at the next turn boundary, `follow_up` waits for
+the current work to finish, and
+`interrupt` clears queued continuations, aborts the current run, then starts the
+replacement prompt. Concurrent controls for one child are serialized because
+Pi events do not carry prompt IDs. If a child command/input extension handles
+an accepted prompt without starting an agent run, control returns an explicit
+`handled` error instead of claiming an empty child response. Once a child
+completes, its ID remains terminal and cannot be used to restart it. AgentSH
+launches keep the same ID metadata, but control requests fail explicitly as
+unsupported because AgentSH
+owns those children and currently exposes no conversation-control capability.
+
 A job adopted directly from a pre-child-tracking extension build
 has aggregate-only progress until it terminates; exact per-child wakeups begin
 with jobs launched by this build. Artifact identity and SHA-256 are verified
@@ -733,6 +755,13 @@ work. The command does nothing to existing background jobs or unrelated tools.
 It refuses an all-at-once handoff when the sixteen-job aggregate background
 limit would be exceeded. Escape retains its normal cancellation behavior before
 a successful handoff; afterward, only `operation=cancel` cancels the detached work.
+
+Native children run over Pi's strict UTF-8, LF-delimited RPC protocol. Parent
+prompts use RPC `prompt` with `streamingBehavior`, logical completion is
+`agent_settled`, and clean shutdown is stdin/stdout EOF. RPC extension dialogs
+are always answered as cancelled because a native child has no independent
+user-authority channel; guard-only shell approvals continue to use the existing
+authenticated parent Permission Gate relay.
 
 Set `PI_SUBAGENT_BIN` to the raw Pi executable selected by your wrapper, e.g.
 `/nix/store/.../bin/pi`. If unset, the extension tries source/dev execution,

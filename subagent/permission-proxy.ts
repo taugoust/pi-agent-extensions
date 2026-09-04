@@ -103,9 +103,8 @@ class ParentPermissionClient {
   constructor(private readonly claim: Claim) {
     validateClaim(claim);
     this.socket = createConnection({ path: claim.socketPath });
-    // Pi print-mode children may otherwise exit after their initial session event,
-    // before the first model turn. Keep this authority channel referenced for the
-    // child's full lifetime; session_shutdown closes it explicitly.
+    // Keep this authority channel referenced for the RPC child's full lifetime;
+    // session_shutdown closes it explicitly after the parent closes RPC stdin.
     this.socket.on("data", (chunk: Buffer) => this.receive(Buffer.from(chunk)));
     this.socket.on("error", (error) => this.fail(new Error(`parent permission relay transport failed: ${error.message}`)));
     this.socket.on("end", () => {

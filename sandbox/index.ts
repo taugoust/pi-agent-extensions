@@ -3238,7 +3238,25 @@ export default function sandbox(pi: ExtensionAPI) {
       const streamStates = new Map<string, SubagentStreamState>();
       const rawStreamResults = new Map<string, any>();
       const streamOrder: string[] = [];
-      const streamKey = (message: SupervisorMessage) => stringifyData((message as any).label || (message as any).subagent_id || "subagent") || "subagent";
+      const streamChildOrdinal = (message: SupervisorMessage): number | undefined => {
+        const source = message as any;
+        if (Number.isSafeInteger(source.child) && source.child >= 1 && source.child <= 8) return Number(source.child);
+        if (hasTasks && Number.isSafeInteger(source.index) && source.index >= 0 && source.index < 8) return Number(source.index) + 1;
+        if (hasChain && Number.isSafeInteger(source.step) && source.step >= 1 && source.step <= 8) return Number(source.step);
+        return undefined;
+      };
+      const streamKey = (message: SupervisorMessage) => {
+        const source = message as any;
+        const backendId = stringifyData(source.subagent_id || source.result?.subagent_id).trim();
+        if (backendId) return `id:${backendId}`;
+        const label = stringifyData(source.label).trim();
+        const matching = label
+          ? streamOrder.filter((key) => streamStates.get(key)?.label === label)
+          : [];
+        if (matching.length === 1) return matching[0];
+        const child = streamChildOrdinal(message);
+        return child === undefined ? `label:${label || "subagent"}` : `child:${child}`;
+      };
       const streamStateFor = (message: SupervisorMessage) => {
         const key = streamKey(message);
         let childState = streamStates.get(key);
@@ -3247,7 +3265,8 @@ export default function sandbox(pi: ExtensionAPI) {
           const usage = usageZero();
           usage.contextWindow = contextWindowForModel(ctx, model);
           childState = createSubagentStreamState({
-            label: key,
+            label: stringifyData((message as any).label || "subagent") || "subagent",
+            child: streamChildOrdinal(message),
             task: typeof (message as any).task === "string" ? (message as any).task : typeof effectiveParams.task === "string" ? effectiveParams.task : undefined,
             cwd: typeof (message as any).cwd === "string" ? (message as any).cwd : typeof effectiveParams.cwd === "string" ? effectiveParams.cwd : undefined,
             tools: Array.isArray((message as any).tools) ? (message as any).tools : Array.isArray(effectiveParams.tools) ? effectiveParams.tools : undefined,
@@ -3257,6 +3276,11 @@ export default function sandbox(pi: ExtensionAPI) {
           streamStates.set(key, childState);
           streamOrder.push(key);
         }
+        const child = streamChildOrdinal(message);
+        if (child !== undefined && childState.child !== undefined && childState.child !== child) {
+          throw new Error("AgentSH subagent stream changed a child's authoritative launch ordinal");
+        }
+        if (child !== undefined) childState.child = child;
         return childState;
       };
       const renderSubagentStreams = () => streamOrder.map((key) => renderSubagentStream(streamStates.get(key)!)).filter(Boolean).join("\n\n");
@@ -3306,7 +3330,7 @@ export default function sandbox(pi: ExtensionAPI) {
           } else if (message.event === "subagent_result") {
             flushSubagentStdout(childState);
             const result: any = (message as any).result;
-            rawStreamResults.set(childState.label, result);
+            rawStreamResults.set(streamKey(message), result);
             const rawExitCode = result?.exit_code ?? result?.exitCode;
             childState.exitCode = typeof rawExitCode === "number" && Number.isFinite(rawExitCode) ? rawExitCode : 1;
             childState.stopReason = stringifyData(result?.stop_reason || result?.stopReason || (childState.exitCode === 0 ? "completed" : "error"));
@@ -3411,7 +3435,7 @@ export default function sandbox(pi: ExtensionAPI) {
         const rawRetained = {
           results: streamOrder.map((key) => {
             const label = streamStates.get(key)?.label ?? key;
-            return rawStreamResults.get(label) ?? { label };
+            return rawStreamResults.get(key) ?? { label };
           }),
         };
         return attachRetainedReports(

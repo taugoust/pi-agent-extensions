@@ -32,13 +32,18 @@ pkgs.runCommand "subagent-check"
     mkdir -p "$workdir/src/subagent" "$workdir/src/shared" "$workdir/out"
     cp ${self}/subagent/backend.ts "$workdir/src/subagent/backend.ts"
     cp ${self}/subagent/background.ts "$workdir/src/subagent/background.ts"
+    cp ${self}/subagent/control.ts "$workdir/src/subagent/control.ts"
+    cp ${self}/subagent/control.test.ts "$workdir/src/subagent/control.test.ts"
     cp ${self}/subagent/foreground-handoff.ts "$workdir/src/subagent/foreground-handoff.ts"
+    cp ${self}/subagent/native-rpc.ts "$workdir/src/subagent/native-rpc.ts"
+    cp ${self}/subagent/native-rpc.test.ts "$workdir/src/subagent/native-rpc.test.ts"
     cp ${self}/subagent/parallel-result.ts "$workdir/src/subagent/parallel-result.ts"
     cp ${self}/subagent/permission-proxy.ts "$workdir/src/subagent/permission-proxy.ts"
     cp ${self}/subagent/permission-relay.ts "$workdir/src/subagent/permission-relay.ts"
     cp ${self}/subagent/result-artifact.ts "$workdir/src/subagent/result-artifact.ts"
     cp ${self}/shared/agentsh-mode.ts "$workdir/src/shared/agentsh-mode.ts"
     cp ${self}/shared/subagent-permission.ts "$workdir/src/shared/subagent-permission.ts"
+    printf '%s\n' '{ "type": "module" }' > "$workdir/src/package.json"
 
     grep -A12 'const currentResult: SingleResult' ${self}/subagent/index.ts | grep -Fq 'exitCode: -1,'
     grep -A4 'function isFailure' ${self}/subagent/index.ts | grep -Fq 'result.exitCode !== -1'
@@ -53,7 +58,11 @@ pkgs.runCommand "subagent-check"
       --outDir "$workdir/out" \
       "$workdir/src/subagent/backend.ts" \
       "$workdir/src/subagent/background.ts" \
+      "$workdir/src/subagent/control.ts" \
+      "$workdir/src/subagent/control.test.ts" \
       "$workdir/src/subagent/foreground-handoff.ts" \
+      "$workdir/src/subagent/native-rpc.ts" \
+      "$workdir/src/subagent/native-rpc.test.ts" \
       "$workdir/src/subagent/parallel-result.ts" \
       "$workdir/src/subagent/permission-proxy.ts" \
       "$workdir/src/subagent/permission-relay.ts" \
@@ -79,11 +88,14 @@ pkgs.runCommand "subagent-check"
     }
     EOF
 
+    node "$workdir/out/subagent/control.test.js"
+    node "$workdir/out/subagent/native-rpc.test.js"
+
     cat > "$workdir/test.mjs" <<'EOF'
     import assert from "node:assert/strict";
     import { createHash } from "node:crypto";
     import net from "node:net";
-    import { mkdir, writeFile } from "node:fs/promises";
+    import { mkdir, readFile, writeFile } from "node:fs/promises";
     import { pathToFileURL } from "node:url";
 
     const imported = await import(pathToFileURL(process.argv[2]).href);
@@ -607,11 +619,80 @@ pkgs.runCommand "subagent-check"
     assert.equal(overflowRunnerStarts, 0);
     for (const record of capacityRecords) assert.equal((await capacityManager.cancel(record.id)).status, "cancelled");
 
-    globalThis.__paeBackgroundSubagentManagersV2 = new Map([[stateRoot + "-shared", { legacy: true }]]);
-    const upgradedSharedManager = background.sharedBackgroundSubagentManager(stateRoot + "-shared");
-    assert.equal(typeof upgradedSharedManager.beginReloadAdoption, "function", "hot upgrade reused an incompatible v2 manager singleton");
-    assert.equal(upgradedSharedManager, background.sharedBackgroundSubagentManager(stateRoot + "-shared"));
-    delete globalThis.__paeBackgroundSubagentManagersV2;
+    const legacyV3Root = stateRoot + "-shared";
+    let unsafeLegacyStorageCalls = 0;
+    let legacyReloadAdoptions = 0;
+    const legacyV3Manager = {
+      root: legacyV3Root,
+      async initialize() { unsafeLegacyStorageCalls += 1; throw new Error("must not initialize V3 through V4"); },
+      async list() { unsafeLegacyStorageCalls += 1; throw new Error("must not list through V3"); },
+      adoptReload(sessionId) {
+        assert.equal(sessionId, "session-v3-upgrade");
+        legacyReloadAdoptions += 1;
+        return true;
+      },
+    };
+    const legacyV3JobId = "subagent-job-333333333333333333333333";
+    const legacyV3SessionId = "session-v3-upgrade";
+    const legacyV3CreatedAt = new Date().toISOString();
+    const processStat = await readFile(`/proc/''${process.pid}/stat`, "utf8");
+    const processStartToken = processStat.slice(processStat.lastIndexOf(")") + 2).split(" ")[19];
+    const legacyV3State = {
+      schemaVersion: 2,
+      id: legacyV3JobId,
+      sessionId: legacyV3SessionId,
+      backend: "native",
+      mode: "single",
+      summary: "running across V3 to V4 reload",
+      createdAt: legacyV3CreatedAt,
+      updatedAt: legacyV3CreatedAt,
+      ownerPid: process.pid,
+      ownerStartToken: processStartToken,
+      status: "running",
+      latest: "V3 runner is active",
+    };
+    await mkdir(`''${legacyV3Root}/jobs/''${legacyV3JobId}`, { recursive: true, mode: 0o700 });
+    await writeFile(`''${legacyV3Root}/jobs/''${legacyV3JobId}/state.json`, JSON.stringify(legacyV3State), { mode: 0o600 });
+    const backgroundRuntime = globalThis.__paeBackgroundSubagentRuntimeV3;
+    backgroundRuntime.controllers.set(legacyV3JobId, new AbortController());
+    backgroundRuntime.sessions.set(legacyV3SessionId, { phase: "reloading", generation: 2 });
+
+    globalThis.__paeBackgroundSubagentManagersV3 = new Map([[legacyV3Root, legacyV3Manager]]);
+    const upgradedSharedManager = background.sharedBackgroundSubagentManager(legacyV3Root);
+    assert.notEqual(upgradedSharedManager, legacyV3Manager, "hot upgrade reused an incompatible V3 manager singleton");
+    assert.equal(upgradedSharedManager.managerAbiVersion, 4);
+    await upgradedSharedManager.initialize();
+    assert.equal((await upgradedSharedManager.get(legacyV3JobId)).status, "running", "V4 manager lost a live V3-owned execution");
+    assert.equal(unsafeLegacyStorageCalls, 0, "V4 manager invoked unsafe V3 storage methods");
+    assert.equal(upgradedSharedManager.activateSession(legacyV3SessionId), true);
+    assert.equal(legacyReloadAdoptions, 1, "V4 manager did not acknowledge the V3 reload watchdog");
+
+    const migratedResult = "completed by the retained V3 runner";
+    const migratedBytes = Buffer.byteLength(migratedResult);
+    const migratedAt = new Date(Date.now() + 1000).toISOString();
+    await writeFile(`''${legacyV3Root}/jobs/''${legacyV3JobId}/result-1.md`, migratedResult, { mode: 0o600 });
+    await writeFile(`''${legacyV3Root}/jobs/''${legacyV3JobId}/state.json`, JSON.stringify({
+      ...legacyV3State,
+      updatedAt: migratedAt,
+      status: "completed",
+      latest: migratedResult,
+      result: migratedResult,
+      artifacts: [{
+        child: 1,
+        label: "result",
+        bytes: migratedBytes,
+        totalBytes: migratedBytes,
+        complete: true,
+        sha256: createHash("sha256").update(migratedResult).digest("hex"),
+      }],
+    }), { mode: 0o600 });
+    assert.equal((await upgradedSharedManager.get(legacyV3JobId)).status, "completed", "V4 manager did not observe the retained V3 runner's result");
+    const migratedPage = await upgradedSharedManager.readResult(legacyV3JobId, 1);
+    assert.equal(migratedPage.text, migratedResult);
+    assert.equal(Object.hasOwn(migratedPage, "childId"), false, "migrated pre-identity result acquired a controllable ID");
+    backgroundRuntime.controllers.delete(legacyV3JobId);
+    assert.equal(upgradedSharedManager, background.sharedBackgroundSubagentManager(legacyV3Root));
+    delete globalThis.__paeBackgroundSubagentManagersV3;
     const legacyPendingNotifications = new Set(["reload-notification"]);
     const legacyInFlightNotifications = new Set(["reload-notification-in-flight"]);
     globalThis.__paeBackgroundSubagentNotificationV1 = {
@@ -635,8 +716,9 @@ pkgs.runCommand "subagent-check"
       return { text: "completed after reload", failed: false };
     });
     assert.equal(reloadManager.beginReloadAdoption("session-reload", 100), true);
-    const adoptedReloadManager = background.sharedBackgroundSubagentManager(stateRoot + "-reload");
-    assert.equal(adoptedReloadManager, reloadManager, "hot reload did not adopt the process-owned manager");
+    const reloadedManagerModule = await import(pathToFileURL(process.argv[5]).href + "?manager-v4-reload=1");
+    const adoptedReloadManager = reloadedManagerModule.sharedBackgroundSubagentManager(stateRoot + "-reload");
+    assert.equal(adoptedReloadManager, reloadManager, "hot reload did not adopt the process-owned V4 manager");
     assert.equal(adoptedReloadManager.adoptReload("session-reload"), true, "replacement extension did not clear the reload watchdog");
     assert.equal((await adoptedReloadManager.get(reloadExecution.id)).status, "running");
     await new Promise((resolve) => setImmediate(resolve));
@@ -797,13 +879,44 @@ pkgs.runCommand "subagent-check"
     assert.deepEqual(childTracker.reconcile(failedGroup).map((child) => child.status), ["failed", "skipped"]);
     assert.equal((await manager.list("session-a", 10)).length, 7);
 
-    const parallel = await manager.start({ sessionId: "session-a", backend: "native", mode: "parallel", summary: "two reports" }, async () => ({
+    const firstParallelChildId = "subagent-child-111111111111111111111111";
+    const secondParallelChildId = "subagent-child-222222222222222222222222";
+    const parallel = await manager.start({
+      sessionId: "session-a", backend: "native", mode: "parallel", summary: "two reports",
+      children: [
+        { childId: firstParallelChildId, label: "worker", task: "first" },
+        { childId: secondParallelChildId, label: "worker", task: "second" },
+      ],
+    }, async () => ({
       text: "bounded preview", failed: false,
-      reports: [{ label: "task 1", text: "first full report" }, { label: "task 2", text: "second full report" }],
+      reports: [
+        { child: 2, childId: secondParallelChildId, label: "worker", text: "second full report" },
+        { child: 1, childId: firstParallelChildId, label: "worker", text: "first full report" },
+      ],
     }));
-    await manager.wait(parallel.id, 2000);
-    await assert.rejects(manager.readResult(parallel.id), /require a child number/);
-    assert.equal((await manager.readResult(parallel.id, 2)).text, "second full report");
+    const completedParallel = (await manager.wait(parallel.id, 2000)).record;
+    assert.deepEqual(completedParallel.artifacts.map((artifact) => [artifact.child, artifact.childId]), [
+      [1, firstParallelChildId], [2, secondParallelChildId],
+    ], "out-of-order reports lost their stable child mapping");
+    await assert.rejects(manager.readResult(parallel.id), /require a child number or child_id/);
+    const firstParallelByNumber = await manager.readResult(parallel.id, 1);
+    assert.equal(firstParallelByNumber.text, "first full report");
+    assert.equal(firstParallelByNumber.childId, firstParallelChildId);
+    const secondParallelById = await manager.readResult(parallel.id, secondParallelChildId);
+    assert.equal(secondParallelById.child, 2);
+    assert.equal(secondParallelById.text, "second full report");
+    assert.equal(secondParallelById.childId, secondParallelChildId);
+
+    const preIdentity = await manager.start({
+      sessionId: "session-a", backend: "native", mode: "single", summary: "legacy identity boundary",
+    }, async () => ({
+      text: "legacy preview", failed: false,
+      reports: [{ child: 1, childId: firstParallelChildId, label: "legacy", text: "legacy report" }],
+    }));
+    const completedPreIdentity = (await manager.wait(preIdentity.id, 2000)).record;
+    assert.equal(Object.hasOwn(completedPreIdentity.artifacts[0], "childId"), false, "pre-identity artifact minted a controllable child ID");
+    assert.equal(Object.hasOwn(await manager.readResult(preIdentity.id, 1), "childId"), false, "pre-identity result exposed a controllable child ID");
+    await assert.rejects(manager.readResult(preIdentity.id, firstParallelChildId), /child_id .* is unavailable/);
 
     const attached = artifacts.attachRetainedSubagentReports({ content: [{ type: "text", text: "preview" }] }, {
       results: [{ label: "remote", final: "remote complete report" }],
@@ -855,7 +968,7 @@ pkgs.runCommand "subagent-check"
     grep -F 'SUBAGENT_PERMISSION_BASH_TOOL' ${self}/subagent/index.ts >/dev/null
     grep -F 'trustedNixStoreFile' ${self}/subagent/index.ts >/dev/null
     if grep -F 'this.socket.unref()' ${self}/subagent/permission-proxy.ts >/dev/null; then
-      echo 'child permission relay socket must keep Pi print mode alive' >&2
+      echo 'child permission relay socket must keep Pi RPC mode alive' >&2
       exit 1
     fi
     if grep -F 'isError:' ${self}/subagent/permission-proxy.ts >/dev/null; then
@@ -863,6 +976,9 @@ pkgs.runCommand "subagent-check"
       exit 1
     fi
     grep -F 'waitForGracefulShutdown' ${self}/subagent/index.ts >/dev/null
+    # The protocol fixture above behaviorally covers steer, follow-up,
+    # interruption, handled prompts, ordering, shutdown, and process cleanup.
+    grep -F '["--mode", "rpc", "--no-session"]' ${self}/subagent/index.ts >/dev/null
     grep -F 'backgroundSubagentsSurviveShutdown(event.reason)' ${self}/subagent/index.ts >/dev/null
     grep -F 'backgroundManager.beginReloadAdoption(sessionId)' ${self}/subagent/index.ts >/dev/null
     grep -F 'manager.activateSession(sessionId)' ${self}/subagent/index.ts >/dev/null
@@ -892,7 +1008,9 @@ pkgs.runCommand "subagent-check"
     grep -F 'builtins.elem "sandbox" extensions' ${self}/nix/mk-extension-bundle.nix >/dev/null
     grep -F '"''${extDir}/subagent/backend.ts".source = "''${self}/subagent/backend.ts";' ${self}/nix/module.nix >/dev/null
     grep -F '"''${extDir}/subagent/background.ts".source = "''${self}/subagent/background.ts";' ${self}/nix/module.nix >/dev/null
+    grep -F '"''${extDir}/subagent/control.ts".source = "''${self}/subagent/control.ts";' ${self}/nix/module.nix >/dev/null
     grep -F '"''${extDir}/subagent/foreground-handoff.ts".source = "''${self}/subagent/foreground-handoff.ts";' ${self}/nix/module.nix >/dev/null
+    grep -F '"''${extDir}/subagent/native-rpc.ts".source = "''${self}/subagent/native-rpc.ts";' ${self}/nix/module.nix >/dev/null
     grep -F '"''${extDir}/subagent/parallel-result.ts".source = "''${self}/subagent/parallel-result.ts";' ${self}/nix/module.nix >/dev/null
     grep -F '"''${extDir}/subagent/permission-proxy.ts".source = "''${self}/subagent/permission-proxy.ts";' ${self}/nix/module.nix >/dev/null
     grep -F '"''${extDir}/subagent/permission-relay.ts".source = "''${self}/subagent/permission-relay.ts";' ${self}/nix/module.nix >/dev/null
@@ -910,7 +1028,9 @@ pkgs.runCommand "subagent-check"
       test "$(jq '[.pi.extensions[] | select(. == "subagent-finalizer")] | length' "$bundle/package.json")" -eq 1
       test -f "$bundle/subagent/index.ts"
       test -f "$bundle/subagent/background.ts"
+      test -f "$bundle/subagent/control.ts"
       test -f "$bundle/subagent/foreground-handoff.ts"
+      test -f "$bundle/subagent/native-rpc.ts"
       test -f "$bundle/subagent/permission-proxy.ts"
       test -f "$bundle/subagent/permission-relay.ts"
       test -f "$bundle/subagent/result-artifact.ts"

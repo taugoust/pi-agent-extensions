@@ -220,4 +220,38 @@ const modelContext = {
   assert.equal(reports[1].text, "complete streamed answer", "stream-recovered final was not retained");
 }
 
+{
+  const first = createSubagentStreamState({
+    label: "duplicate",
+    child: 1,
+    final: "first authoritative result",
+    terminal: { state: "completed" },
+  });
+  const second = createSubagentStreamState({
+    label: "duplicate",
+    child: 2,
+    final: "second authoritative result",
+    terminal: { state: "completed" },
+  });
+  const raw = {
+    mode: "parallel",
+    terminal: { state: "completed" },
+    results: [
+      { subagent_id: "backend-second", label: "duplicate", task: "same task", final: "second authoritative result", terminal: { state: "completed" } },
+      { subagent_id: "backend-first", label: "duplicate", task: "same task", final: "first authoritative result", terminal: { state: "completed" } },
+    ],
+  };
+  const states = new Map([
+    ["id:backend-first", first],
+    ["id:backend-second", second],
+  ]);
+  const details = subagentParentDetails(raw, modelContext, states);
+  assert.deepEqual(details.results.map((result) => result.child), [2, 1], "completion order replaced authoritative launch ordinals");
+  const reports = trustedRetainedSubagentReports(raw, details, states);
+  assert.deepEqual(reports.map((report) => [report.child, report.text]), [
+    [2, "second authoritative result"],
+    [1, "first authoritative result"],
+  ]);
+}
+
 console.log("sandbox subagent parent result glue checks passed");

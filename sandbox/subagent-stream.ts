@@ -69,6 +69,8 @@ export type SubagentCompactionState = {
 
 export type SubagentStreamState = {
   label: string;
+  /** One-based launch ordinal when the supervisor protocol supplied one. */
+  child?: number;
   task?: string;
   cwd?: string;
   tools?: string[];
@@ -482,6 +484,9 @@ export function createSubagentStreamState(initial: SubagentStreamInitialState): 
   for (const key of Object.keys(usage) as Array<keyof SubagentUsage>) usage[key] = usageNumber(initial.usage?.[key]);
   return {
     label: boundedString(initial.label, 256) ?? "subagent",
+    child: Number.isSafeInteger(initial.child) && Number(initial.child) >= 1 && Number(initial.child) <= 8
+      ? Number(initial.child)
+      : undefined,
     task: boundedString(initial.task, MAX_RETAINED_TEXT_BYTES),
     cwd: boundedString(initial.cwd, MAX_METADATA_BYTES),
     tools: Array.isArray(initial.tools) ? initial.tools.slice(0, 32).map((tool) => boundedString(tool, 128)).filter((tool): tool is string => tool !== undefined) : undefined,
@@ -694,6 +699,7 @@ function recordCompactionEvent(state: SubagentStreamState, event: unknown, event
 export function subagentStreamResult(state: SubagentStreamState) {
   return {
     label: state.label,
+    child: state.child,
     task: state.task,
     exitCode: state.exitCode,
     stopReason: state.stopReason || (state.exitCode === -1 ? "running" : "completed"),

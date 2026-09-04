@@ -2,6 +2,7 @@ import { createHash, randomBytes } from "node:crypto";
 import { constants } from "node:fs";
 import { access, lstat, mkdir, open, readFile, readdir, rename, rm, writeFile } from "node:fs/promises";
 import { dirname, join } from "node:path";
+import { SUBAGENT_CHILD_ID_PATTERN } from "./control.js";
 import {
   MAX_RETAINED_SUBAGENT_JOB_BYTES,
   MAX_RETAINED_SUBAGENT_REPORT_BYTES,
@@ -16,21 +17,25 @@ export const MAX_BACKGROUND_SUBAGENT_WAIT_MS = 24 * 60 * 60 * 1000;
 // replacement-extension startup window.
 export const BACKGROUND_SUBAGENT_RELOAD_ADOPTION_TIMEOUT_MS = 65_000;
 export const MAX_BACKGROUND_SUBAGENT_TEXT_BYTES = 50 * 1024;
-const MAX_STATE_BYTES = 128 * 1024;
+export const MAX_STATE_BYTES = 128 * 1024;
 const TERMINAL_RETENTION_MS = 7 * 24 * 60 * 60 * 1000;
 const MAX_TERMINAL_RECORDS = 100;
-const SCHEMA_VERSION = 2;
+const SCHEMA_VERSION = 3;
 
 export type BackgroundSubagentStatus = "running" | "cancelling" | "completed" | "failed" | "cancelled" | "lost";
 export type BackgroundSubagentBackend = "native" | "agentsh";
 export type BackgroundSubagentChildStatus = "pending" | "running" | "completed" | "failed" | "cancelled" | "skipped" | "lost";
 
 export type BackgroundSubagentChildDescriptor = {
+  /** Optional only for records created before per-child identities existed. */
+  childId?: string;
   label: string;
   task?: string;
 };
 
-export type BackgroundSubagentChildProgress = BackgroundSubagentChildDescriptor & {
+export type BackgroundSubagentChildProgress = Omit<BackgroundSubagentChildDescriptor, "childId"> & {
+  /** Optional for update producers loaded before child identities were added. */
+  childId?: string;
   child: number;
   status: BackgroundSubagentChildStatus;
 };
@@ -41,6 +46,8 @@ export type BackgroundSubagentChild = BackgroundSubagentChildProgress & {
 
 export type BackgroundSubagentArtifact = {
   child: number;
+  /** Optional only for artifacts retained before per-child identities existed. */
+  childId?: string;
   label: string;
   bytes: number;
   totalBytes: number;
@@ -49,12 +56,13 @@ export type BackgroundSubagentArtifact = {
 };
 
 export type BackgroundSubagentRecord = {
-  schemaVersion: 2;
+  schemaVersion: 3;
   id: string;
   sessionId: string;
   backend: BackgroundSubagentBackend;
   mode: "single" | "parallel" | "chain";
   summary: string;
+  children?: BackgroundSubagentChildDescriptor[];
   createdAt: string;
   updatedAt: string;
   ownerPid: number;
@@ -74,6 +82,7 @@ export type BackgroundSubagentOutcome = {
 
 export type BackgroundSubagentResultPage = {
   child: number;
+  childId?: string;
   label: string;
   offset: number;
   nextOffset?: number;
@@ -101,7 +110,8 @@ type RuntimeRegistry = {
 
 const RUNTIME_KEY = "__paeBackgroundSubagentRuntimeV3";
 const NOTIFICATION_STATE_KEY = "__paeBackgroundSubagentNotificationV1";
-const MANAGERS_KEY = "__paeBackgroundSubagentManagersV3";
+const LEGACY_MANAGERS_KEY = "__paeBackgroundSubagentManagersV3";
+const MANAGERS_KEY = "__paeBackgroundSubagentManagersV4";
 const CHILD_TRACKER_KEY = "__paeBackgroundSubagentChildrenV1";
 const MAX_TRACKED_CHILD_GROUPS = 256;
 
@@ -151,16 +161,28 @@ function requiredString(value: unknown, label: string, maximum: number): string 
 
 function parseArtifacts(value: unknown): BackgroundSubagentArtifact[] {
   if (!Array.isArray(value) || value.length > 8) throw new Error("invalid background subagent artifacts");
-  return value.map((entry, index) => {
+  const children = new Set<number>();
+  const childIds = new Set<string>();
+  const artifacts = value.map((entry) => {
     if (!entry || typeof entry !== "object" || Array.isArray(entry)) throw new Error("invalid background subagent artifact");
     const artifact = entry as Record<string, unknown>;
-    if (!Number.isSafeInteger(artifact.child) || artifact.child !== index + 1) throw new Error("invalid background subagent artifact child");
+    if (!Number.isSafeInteger(artifact.child) || (artifact.child as number) < 1 || (artifact.child as number) > 8
+      || children.has(artifact.child as number)) throw new Error("invalid background subagent artifact child");
+    children.add(artifact.child as number);
+    const childId = artifact.childId === undefined
+      ? undefined
+      : requiredString(artifact.childId, "background subagent artifact child id", 64);
+    if (childId && (!SUBAGENT_CHILD_ID_PATTERN.test(childId) || childIds.has(childId))) {
+      throw new Error("invalid background subagent artifact child id");
+    }
+    if (childId) childIds.add(childId);
     if (!Number.isSafeInteger(artifact.bytes) || (artifact.bytes as number) < 0 || (artifact.bytes as number) > MAX_RETAINED_SUBAGENT_REPORT_BYTES) throw new Error("invalid background subagent artifact bytes");
     if (!Number.isSafeInteger(artifact.totalBytes) || (artifact.totalBytes as number) < (artifact.bytes as number)) throw new Error("invalid background subagent artifact total bytes");
     if (typeof artifact.complete !== "boolean") throw new Error("invalid background subagent artifact completeness");
     if (typeof artifact.sha256 !== "string" || !/^[0-9a-f]{64}$/.test(artifact.sha256)) throw new Error("invalid background subagent artifact checksum");
     return {
       child: artifact.child as number,
+      ...(childId ? { childId } : {}),
       label: requiredString(artifact.label, "background subagent artifact label", 256),
       bytes: artifact.bytes as number,
       totalBytes: artifact.totalBytes as number,
@@ -168,14 +190,38 @@ function parseArtifacts(value: unknown): BackgroundSubagentArtifact[] {
       sha256: artifact.sha256,
     };
   });
+  return artifacts.sort((a, b) => a.child - b.child);
+}
+
+function parseChildren(value: unknown): BackgroundSubagentChildDescriptor[] {
+  if (!Array.isArray(value) || value.length < 1 || value.length > 8) throw new Error("invalid background subagent children");
+  const ids = new Set<string>();
+  return value.map((entry) => {
+    if (!entry || typeof entry !== "object" || Array.isArray(entry)) throw new Error("invalid background subagent child");
+    const child = entry as Record<string, unknown>;
+    const allowed = new Set(["childId", "label", "task"]);
+    for (const key of Object.keys(child)) if (!allowed.has(key)) throw new Error(`unknown background subagent child field ${key}`);
+    const childId = child.childId === undefined
+      ? undefined
+      : requiredString(child.childId, "background subagent child id", 64);
+    if (childId && (!SUBAGENT_CHILD_ID_PATTERN.test(childId) || ids.has(childId))) {
+      throw new Error("invalid background subagent child id");
+    }
+    if (childId) ids.add(childId);
+    return {
+      ...(childId ? { childId } : {}),
+      label: requiredString(child.label, "background subagent child label", 256),
+      ...(child.task === undefined ? {} : { task: requiredString(child.task, "background subagent child task", 2048) }),
+    };
+  });
 }
 
 function parseRecord(value: unknown): BackgroundSubagentRecord {
   if (!value || typeof value !== "object" || Array.isArray(value)) throw new Error("background subagent state must be an object");
   const data = value as Record<string, unknown>;
-  const allowed = new Set(["schemaVersion", "id", "sessionId", "backend", "mode", "summary", "createdAt", "updatedAt", "ownerPid", "ownerStartToken", "status", "latest", "result", "artifacts", "error"]);
+  const allowed = new Set(["schemaVersion", "id", "sessionId", "backend", "mode", "summary", "children", "createdAt", "updatedAt", "ownerPid", "ownerStartToken", "status", "latest", "result", "artifacts", "error"]);
   for (const key of Object.keys(data)) if (!allowed.has(key)) throw new Error(`unknown background subagent field ${key}`);
-  if (data.schemaVersion !== 1 && data.schemaVersion !== SCHEMA_VERSION) throw new Error("unsupported background subagent state schema");
+  if (![1, 2, SCHEMA_VERSION].includes(data.schemaVersion as number)) throw new Error("unsupported background subagent state schema");
   const id = requiredString(data.id, "background subagent id", 64);
   if (!BACKGROUND_SUBAGENT_ID_PATTERN.test(id)) throw new Error("invalid background subagent id");
   if (data.backend !== "native" && data.backend !== "agentsh") throw new Error("invalid background subagent backend");
@@ -185,7 +231,26 @@ function parseRecord(value: unknown): BackgroundSubagentRecord {
   for (const field of ["createdAt", "updatedAt"] as const) {
     if (!Number.isFinite(Date.parse(requiredString(data[field], field, 64)))) throw new Error(`invalid ${field}`);
   }
-  const artifacts = data.artifacts === undefined ? undefined : parseArtifacts(data.artifacts);
+  if (data.schemaVersion !== SCHEMA_VERSION && data.children !== undefined) {
+    throw new Error("legacy background subagent state cannot contain child identities");
+  }
+  const children = data.children === undefined ? undefined : parseChildren(data.children);
+  const parsedArtifacts = data.artifacts === undefined ? undefined : parseArtifacts(data.artifacts);
+  const artifacts = parsedArtifacts?.map((entry) => {
+    const { childId: artifactChildId, ...artifact } = entry;
+    if (children && entry.child > children.length) throw new Error("background subagent artifact child is outside its group");
+    const descriptorChildId = children?.[entry.child - 1]?.childId;
+    if (artifactChildId && descriptorChildId && artifactChildId !== descriptorChildId) {
+      throw new Error("background subagent artifact child identity does not match its group");
+    }
+    // Child descriptors are the authority for controllable identities. Older
+    // records and artifacts stay addressable by ordinal without acquiring an
+    // identity merely because one appeared in artifact metadata.
+    return {
+      ...artifact,
+      ...(descriptorChildId ? { childId: descriptorChildId } : {}),
+    };
+  });
   return {
     schemaVersion: SCHEMA_VERSION,
     id,
@@ -193,6 +258,7 @@ function parseRecord(value: unknown): BackgroundSubagentRecord {
     backend: data.backend,
     mode: data.mode,
     summary: requiredString(data.summary, "summary", 2048),
+    ...(children ? { children } : {}),
     createdAt: data.createdAt as string,
     updatedAt: data.updatedAt as string,
     ownerPid: data.ownerPid as number,
@@ -225,23 +291,89 @@ async function writeAtomicBytes(path: string, value: string | Buffer): Promise<v
   await rename(temporary, path);
 }
 
-async function writeAtomic(path: string, value: unknown): Promise<void> {
-  await writeAtomicBytes(path, `${JSON.stringify(value)}\n`);
+function serializeBoundedState(record: BackgroundSubagentRecord): string {
+  const snapshot = structuredClone(record);
+  const serialize = () => `${JSON.stringify(snapshot)}\n`;
+  if (Buffer.byteLength(serialize(), "utf8") <= MAX_STATE_BYTES) return serialize();
+
+  // Child tasks are optional diagnostic metadata and are the first fields to
+  // discard; identities and result artifacts remain intact. In terminal records
+  // latest normally duplicates result.
+  if (snapshot.children) {
+    snapshot.children = snapshot.children.map(({ task: _task, ...child }) => child);
+  }
+  if (snapshot.result !== undefined && snapshot.latest === snapshot.result) {
+    snapshot.latest = "(terminal result retained below)";
+  }
+
+  type StringSlot = { owner: Record<string, any>; key: string; minimum: number };
+  const slots = (): StringSlot[] => [
+    ...(snapshot.error === undefined ? [] : [{ owner: snapshot as any, key: "error", minimum: 64 }]),
+    { owner: snapshot as any, key: "summary", minimum: 64 },
+    ...(snapshot.children ?? []).map((child) => ({ owner: child as any, key: "label", minimum: 16 })),
+    ...(snapshot.artifacts ?? []).map((artifact) => ({ owner: artifact as any, key: "label", minimum: 16 })),
+    { owner: snapshot as any, key: "latest", minimum: 64 },
+    ...(snapshot.result === undefined ? [] : [{ owner: snapshot as any, key: "result", minimum: 64 }]),
+  ];
+
+  while (Buffer.byteLength(serialize(), "utf8") > MAX_STATE_BYTES) {
+    let changed = false;
+    for (const slot of slots()) {
+      const value = slot.owner[slot.key];
+      if (typeof value !== "string") continue;
+      const bytes = Buffer.byteLength(value, "utf8");
+      if (bytes <= slot.minimum) continue;
+      const next = boundedText(value, Math.max(slot.minimum, Math.floor(bytes / 2)));
+      slot.owner[slot.key] = next;
+      changed = true;
+      if (Buffer.byteLength(serialize(), "utf8") <= MAX_STATE_BYTES) break;
+    }
+    if (!changed) throw new Error("background subagent state exceeds its serialized size limit");
+  }
+  return serialize();
 }
 
 async function exists(path: string): Promise<boolean> {
   try { await access(path, constants.F_OK); return true; } catch { return false; }
 }
 
+type LegacyReloadAdopter = (sessionId: string) => boolean;
+
+function legacyReloadAdopter(value: unknown, root: string): LegacyReloadAdopter | undefined {
+  try {
+    const candidate = value as {
+      root?: unknown;
+      managerAbiVersion?: unknown;
+      adoptReload?: (sessionId: string) => unknown;
+    } | undefined;
+    // V3 did not carry an ABI marker. Never expose that object as the current
+    // manager or call its storage/lifecycle methods; retain only the narrow
+    // reload acknowledgement needed to disarm its already-running watchdog.
+    if (!candidate || candidate.managerAbiVersion !== undefined || candidate.root !== root
+      || typeof candidate.adoptReload !== "function") return undefined;
+    return (sessionId) => {
+      try { return candidate.adoptReload!.call(candidate, sessionId) === true; }
+      catch { return false; }
+    };
+  } catch {
+    return undefined;
+  }
+}
+
 export class BackgroundSubagentManager {
+  readonly managerAbiVersion = 4;
   private readonly records = new Map<string, BackgroundSubagentRecord>();
   private readonly runtime = runtimeRegistry();
   private readonly writeChains = new Map<string, Promise<void>>();
   private readonly reloadAdoptionTimers = new Map<string, ReturnType<typeof setTimeout>>();
+  private readonly migratedRecordIds = new Set<string>();
+  private readonly adoptLegacyReload?: LegacyReloadAdopter;
   private initialized?: Promise<void>;
   private ownerStartToken = "";
 
-  constructor(readonly root: string) {}
+  constructor(readonly root: string, legacyManager?: unknown) {
+    this.adoptLegacyReload = legacyReloadAdopter(legacyManager, root);
+  }
 
   private sessionState(sessionId: string): { phase: BackgroundSessionPhase; generation: number } {
     let state = this.runtime.sessions.get(sessionId);
@@ -299,6 +431,9 @@ export class BackgroundSubagentManager {
           await this.persist(record);
         }
         this.records.set(record.id, record);
+        if (this.adoptLegacyReload && isBackgroundSubagentActive(record)) {
+          this.migratedRecordIds.add(record.id);
+        }
       } catch {
         // Malformed records are ignored, never trusted or removed automatically.
       }
@@ -306,10 +441,34 @@ export class BackgroundSubagentManager {
     await this.prune();
   }
 
+  private async refreshMigratedRecords(): Promise<void> {
+    if (this.migratedRecordIds.size === 0) return;
+    for (const id of [...this.migratedRecordIds]) {
+      try {
+        const info = await lstat(this.statePath(id));
+        if (!info.isFile() || info.isSymbolicLink() || info.size > MAX_STATE_BYTES) continue;
+        const persisted = parseRecord(JSON.parse(await readFile(this.statePath(id), "utf8")));
+        const current = this.records.get(id);
+        const terminalAdvance = Boolean(current && isBackgroundSubagentActive(current) && !isBackgroundSubagentActive(persisted));
+        const regressesCancellation = current?.status === "cancelling" && persisted.status === "running";
+        if (!current || terminalAdvance
+          || (!regressesCancellation && Date.parse(persisted.updatedAt) > Date.parse(current.updatedAt))) {
+          this.records.set(id, persisted);
+        }
+        if (!isBackgroundSubagentActive(persisted)) this.migratedRecordIds.delete(id);
+      } catch {
+        // A V3 owner may be between its atomic write and rename. Keep the last
+        // trusted snapshot and retry on the next operation.
+      }
+    }
+  }
+
   private async persist(record: BackgroundSubagentRecord): Promise<void> {
     const snapshot = structuredClone(record);
     const previous = this.writeChains.get(record.id) ?? Promise.resolve();
-    const current = previous.catch(() => undefined).then(() => writeAtomic(this.statePath(record.id), snapshot));
+    const current = previous.catch(() => undefined).then(() =>
+      writeAtomicBytes(this.statePath(record.id), serializeBoundedState(snapshot)),
+    );
     this.writeChains.set(record.id, current);
     try { await current; }
     finally { if (this.writeChains.get(record.id) === current) this.writeChains.delete(record.id); }
@@ -320,6 +479,7 @@ export class BackgroundSubagentManager {
     backend: BackgroundSubagentBackend;
     mode: "single" | "parallel" | "chain";
     summary: string;
+    children?: BackgroundSubagentChildDescriptor[];
   }, runner: BackgroundSubagentRunner, launchSignal?: AbortSignal): Promise<BackgroundSubagentRecord> {
     const sessionId = requiredString(input.sessionId, "session id", 512);
     const session = this.sessionState(sessionId);
@@ -329,6 +489,7 @@ export class BackgroundSubagentManager {
       throw launchSignal.reason instanceof Error ? launchSignal.reason : new Error("Background subagent launch cancelled");
     }
     await this.initialize();
+    await this.refreshMigratedRecords();
     if (session.phase !== "active" || session.generation !== launchGeneration) {
       throw new Error("Owning Pi session changed before background subagent launch");
     }
@@ -339,6 +500,7 @@ export class BackgroundSubagentManager {
     if (active.length >= MAX_BACKGROUND_SUBAGENTS) throw new Error(`Background subagent concurrency limit reached (${MAX_BACKGROUND_SUBAGENTS})`);
     const now = new Date().toISOString();
     const id = `subagent-job-${randomBytes(12).toString("hex")}`;
+    const children = input.children === undefined ? undefined : parseChildren(input.children);
     const record: BackgroundSubagentRecord = {
       schemaVersion: SCHEMA_VERSION,
       id,
@@ -346,6 +508,7 @@ export class BackgroundSubagentManager {
       backend: input.backend,
       mode: input.mode,
       summary: boundedText(input.summary, 2048) || "subagent task",
+      ...(children ? { children } : {}),
       createdAt: now,
       updatedAt: now,
       ownerPid: process.pid,
@@ -418,12 +581,72 @@ export class BackgroundSubagentManager {
     this.runtime.flushTimers.set(id, timer);
   }
 
-  private async persistReports(id: string, reports: RetainedSubagentReport[]): Promise<BackgroundSubagentArtifact[]> {
+  private resolveReports(
+    record: BackgroundSubagentRecord,
+    reports: RetainedSubagentReport[],
+  ): Array<RetainedSubagentReport & { child: number; childId?: string }> {
+    const descriptors = record.children ?? [];
+    const hasPersistedChildIdentities = descriptors.some((descriptor) => Boolean(descriptor.childId));
+    const seen = new Set<number>();
+    return reports.slice(0, 8).map((report) => {
+      const explicitChild = report.child;
+      if (explicitChild !== undefined
+        && (!Number.isSafeInteger(explicitChild) || explicitChild < 1 || explicitChild > 8)) {
+        throw new Error("retained subagent report has an invalid child ordinal");
+      }
+      if (report.childId !== undefined && !SUBAGENT_CHILD_ID_PATTERN.test(report.childId)) {
+        throw new Error("retained subagent report has an invalid child identity");
+      }
+      const identityIndex = report.childId
+        ? descriptors.findIndex((descriptor) => descriptor.childId === report.childId)
+        : -1;
+      if (report.childId && hasPersistedChildIdentities && identityIndex < 0) {
+        throw new Error("retained subagent report child identity does not belong to its group");
+      }
+      const labelMatches = descriptors
+        .map((descriptor, index) => descriptor.label === report.label ? index : -1)
+        .filter((index) => index >= 0);
+      const conventional = report.label.match(/^(?:task|step|child) ([1-8])$/i);
+      const child = identityIndex >= 0
+        ? identityIndex + 1
+        : explicitChild
+          ?? (labelMatches.length === 1 ? labelMatches[0] + 1 : undefined)
+          ?? (conventional ? Number(conventional[1]) : undefined)
+          ?? (record.mode === "single" && reports.length === 1 ? 1 : undefined);
+      if (child === undefined) {
+        throw new Error("retained parallel subagent report has no stable child identity");
+      }
+      if (identityIndex >= 0 && explicitChild !== undefined && explicitChild !== child) {
+        throw new Error("retained subagent report child identity and ordinal disagree");
+      }
+      if (seen.has(child)) throw new Error(`duplicate retained subagent report for child ${child}`);
+      seen.add(child);
+      if (descriptors.length > 0 && child > descriptors.length) {
+        throw new Error("retained subagent report child ordinal is outside its group");
+      }
+      const descriptorId = descriptors[child - 1]?.childId;
+      if (report.childId && descriptorId && report.childId !== descriptorId) {
+        throw new Error("retained subagent report child identity and ordinal disagree");
+      }
+      const { childId: _reportedChildId, ...reportWithoutIdentity } = report;
+      return {
+        ...reportWithoutIdentity,
+        child,
+        // Only the identity persisted before launch is controllable. Report
+        // payloads from pre-identity producers cannot mint one retroactively.
+        ...(descriptorId ? { childId: descriptorId } : {}),
+      };
+    }).sort((a, b) => a.child - b.child);
+  }
+
+  private async persistReports(
+    record: BackgroundSubagentRecord,
+    reports: RetainedSubagentReport[],
+  ): Promise<BackgroundSubagentArtifact[]> {
     const artifacts: BackgroundSubagentArtifact[] = [];
-    const selected = reports.slice(0, 8);
+    const selected = this.resolveReports(record, reports);
     const fairLimit = Math.min(MAX_RETAINED_SUBAGENT_REPORT_BYTES, Math.floor(MAX_RETAINED_SUBAGENT_JOB_BYTES / Math.max(1, selected.length)));
-    for (let index = 0; index < selected.length; index++) {
-      const report = selected[index];
+    for (const report of selected) {
       const source = Buffer.from(report.text, "utf8");
       let retained = source.subarray(0, fairLimit);
       while (retained.length > 0) {
@@ -434,10 +657,11 @@ export class BackgroundSubagentManager {
           retained = retained.subarray(0, -1);
         }
       }
-      await writeAtomicBytes(this.artifactPath(id, index + 1), retained);
+      await writeAtomicBytes(this.artifactPath(record.id, report.child), retained);
       artifacts.push({
-        child: index + 1,
-        label: boundedText(report.label, 256) || `result ${index + 1}`,
+        child: report.child,
+        ...(report.childId ? { childId: report.childId } : {}),
+        label: boundedText(report.label, 256) || `result ${report.child}`,
         bytes: retained.byteLength,
         totalBytes: Math.max(source.byteLength, report.totalBytes ?? 0),
         complete: report.complete !== false && retained.byteLength === source.byteLength,
@@ -458,7 +682,9 @@ export class BackgroundSubagentManager {
     if (error) record.error = boundedText(error, 4096);
     try {
       const retainedReports = reports?.filter((report) => report.text.trim()) ?? [];
-      record.artifacts = await this.persistReports(id, retainedReports.length ? retainedReports : [{ label: "result", text: text || record.latest || "(no output)" }]);
+      record.artifacts = await this.persistReports(record, retainedReports.length
+        ? retainedReports
+        : [{ child: 1, label: "result", text: text || record.latest || "(no output)" }]);
     } catch (artifactError) {
       record.error = boundedText([record.error, `Result artifact unavailable: ${artifactError instanceof Error ? artifactError.message : String(artifactError)}`].filter(Boolean).join("\n"), 4096);
     }
@@ -474,30 +700,58 @@ export class BackgroundSubagentManager {
 
   async get(id: string): Promise<BackgroundSubagentRecord> {
     await this.initialize();
+    await this.refreshMigratedRecords();
     const record = this.records.get(id);
     if (!record) throw new Error(`Unknown background subagent: ${id}`);
     return structuredClone(record);
   }
 
-  async readResult(id: string, child: number | undefined = undefined, offset = 0, limit = MAX_SUBAGENT_RESULT_PAGE_BYTES): Promise<BackgroundSubagentResultPage> {
+  async readResult(
+    id: string,
+    childOrId: number | string | undefined = undefined,
+    offset = 0,
+    limit = MAX_SUBAGENT_RESULT_PAGE_BYTES,
+  ): Promise<BackgroundSubagentResultPage> {
     const record = await this.get(id);
     if (isBackgroundSubagentActive(record)) throw new Error("Background subagent result is not ready");
     if (!Number.isSafeInteger(offset) || offset < 0) throw new Error("Result offset must be a non-negative integer");
     if (!Number.isSafeInteger(limit) || limit < 4 || limit > MAX_SUBAGENT_RESULT_PAGE_BYTES) throw new Error(`Result limit must be between 4 and ${MAX_SUBAGENT_RESULT_PAGE_BYTES} bytes`);
+    if (typeof childOrId === "number" && (!Number.isSafeInteger(childOrId) || childOrId < 1 || childOrId > 8)) {
+      throw new Error("Result child must be an integer between 1 and 8");
+    }
+    if (typeof childOrId === "string" && !SUBAGENT_CHILD_ID_PATTERN.test(childOrId)) {
+      throw new Error("Result child_id is invalid");
+    }
     let artifacts = record.artifacts ?? [];
     const legacyResult = record.result || record.latest;
     if (artifacts.length === 0 && legacyResult) {
       const current = this.records.get(id);
       if (!current) throw new Error(`Unknown background subagent: ${id}`);
-      current.artifacts = await this.persistReports(id, [{ label: "result", text: legacyResult, totalBytes: Buffer.byteLength(legacyResult, "utf8") + 1, complete: false }]);
+      current.artifacts = await this.persistReports(current, [{
+        child: 1,
+        label: "result",
+        text: legacyResult,
+        totalBytes: Buffer.byteLength(legacyResult, "utf8") + 1,
+        complete: false,
+      }]);
       await this.persist(current);
       artifacts = current.artifacts;
     }
     if (artifacts.length === 0) throw new Error("No retained result artifact is available for this background subagent");
-    if (artifacts.length > 1 && child === undefined) throw new Error("Parallel and chain results require a child number");
-    child ??= 1;
-    const artifact = artifacts.find((candidate) => candidate.child === child);
-    if (!artifact) throw new Error(`Background subagent result child ${child} is unavailable`);
+    if (artifacts.length > 1 && childOrId === undefined) {
+      throw new Error("Parallel and chain results require a child number or child_id");
+    }
+    let artifact: BackgroundSubagentArtifact | undefined;
+    if (typeof childOrId === "string") {
+      const descriptorIndex = record.children?.findIndex((child) => child.childId === childOrId) ?? -1;
+      if (descriptorIndex >= 0) artifact = artifacts.find((candidate) => candidate.child === descriptorIndex + 1);
+      if (!artifact) throw new Error(`Background subagent result child_id ${childOrId} is unavailable`);
+    } else {
+      const child = childOrId ?? artifacts[0].child;
+      artifact = artifacts.find((candidate) => candidate.child === child);
+      if (!artifact) throw new Error(`Background subagent result child ${child} is unavailable`);
+    }
+    const child = artifact.child;
     if (offset > artifact.bytes) throw new Error(`Result offset ${offset} exceeds retained size ${artifact.bytes}`);
     const path = this.artifactPath(id, child);
     const info = await lstat(path);
@@ -525,8 +779,10 @@ export class BackgroundSubagentManager {
       }
       const nextOffset = offset + retained.byteLength < artifact.bytes ? offset + retained.byteLength : undefined;
       if (bytesRead > 0 && retained.byteLength === 0) throw new Error("Result limit ends before one complete UTF-8 character");
+      const childId = record.children?.[child - 1]?.childId;
       return {
         child,
+        ...(childId ? { childId } : {}),
         label: artifact.label,
         offset,
         ...(nextOffset === undefined ? {} : { nextOffset }),
@@ -544,6 +800,7 @@ export class BackgroundSubagentManager {
 
   async list(sessionId?: string, limit = 50): Promise<BackgroundSubagentRecord[]> {
     await this.initialize();
+    await this.refreshMigratedRecords();
     return [...this.records.values()]
       .filter((record) => !this.runtime.pendingLaunches.has(record.id))
       .filter((record) => !sessionId || record.sessionId === sessionId)
@@ -577,6 +834,7 @@ export class BackgroundSubagentManager {
 
   async cancel(id: string): Promise<BackgroundSubagentRecord> {
     await this.initialize();
+    await this.refreshMigratedRecords();
     const record = this.records.get(id);
     if (!record) throw new Error(`Unknown background subagent: ${id}`);
     if (!isBackgroundSubagentActive(record)) return structuredClone(record);
@@ -626,6 +884,10 @@ export class BackgroundSubagentManager {
   }
 
   activateSession(sessionId: string): boolean {
+    // A deployed V3 manager may still own runner closures and its original
+    // reload watchdog. Ask only its stable adoption boundary to release that
+    // watchdog; never return or invoke it as the current manager ABI.
+    const legacyAdopted = this.adoptLegacyReload?.(sessionId) === true;
     const session = this.sessionState(sessionId);
     const adopted = session.phase === "reloading";
     if (session.phase !== "active") {
@@ -633,12 +895,13 @@ export class BackgroundSubagentManager {
       session.generation += 1;
     }
     this.clearReloadWatchdog(sessionId);
-    return adopted;
+    return legacyAdopted || adopted;
   }
 
   adoptReload(sessionId: string): boolean {
+    const legacyAdopted = this.adoptLegacyReload?.(sessionId) === true;
     const session = this.sessionState(sessionId);
-    if (session.phase !== "reloading") return false;
+    if (session.phase !== "reloading") return legacyAdopted;
     session.phase = "active";
     session.generation += 1;
     this.clearReloadWatchdog(sessionId);
@@ -691,16 +954,28 @@ export class BackgroundSubagentManager {
   }
 }
 
+function compatibleV4Manager(value: unknown, root: string): value is BackgroundSubagentManager {
+  const candidate = value as Record<string, unknown> | undefined;
+  return candidate?.managerAbiVersion === 4 && candidate.root === root
+    && [
+      "initialize", "start", "get", "list", "wait", "cancel", "readResult",
+      "beginReloadAdoption", "activateSession", "adoptReload", "requestCancelSession",
+      "isNotified", "markNotified",
+    ].every((method) => typeof candidate[method] === "function");
+}
+
 export function sharedBackgroundSubagentManager(root: string): BackgroundSubagentManager {
   const globals = globalThis as Record<string, unknown>;
   let managers = globals[MANAGERS_KEY] as Map<string, BackgroundSubagentManager> | undefined;
-  if (!managers) {
+  if (!(managers instanceof Map)) {
     managers = new Map();
     globals[MANAGERS_KEY] = managers;
   }
-  let manager = managers.get(root);
-  if (!manager) {
-    manager = new BackgroundSubagentManager(root);
+  let manager: BackgroundSubagentManager | undefined = managers.get(root);
+  if (!compatibleV4Manager(manager, root)) {
+    const legacyManagers = globals[LEGACY_MANAGERS_KEY];
+    const legacy = legacyManagers instanceof Map ? legacyManagers.get(root) : undefined;
+    manager = new BackgroundSubagentManager(root, legacy);
     managers.set(root, manager);
   }
   return manager;
@@ -721,6 +996,7 @@ type TrackedChildGroup = {
 };
 
 function inferredChildDescriptors(record: BackgroundSubagentRecord): BackgroundSubagentChildDescriptor[] {
+  if (record.children?.length) return record.children.map((child) => ({ ...child }));
   const countMatch = record.summary.match(/^(?:parallel|chain) ([1-8]):/);
   const count = record.mode === "single"
     ? 1
@@ -740,6 +1016,7 @@ function groupTerminalChildStatus(record: BackgroundSubagentRecord, child: Backg
 
 /** Process-owned child progress, independent of the hot-reloadable manager class ABI. */
 export class BackgroundSubagentChildTracker {
+  readonly childIdentityVersion = 2;
   private readonly groups = new Map<string, TrackedChildGroup>();
 
   register(record: BackgroundSubagentRecord, descriptors: BackgroundSubagentChildDescriptor[] = inferredChildDescriptors(record)): void {
@@ -755,11 +1032,17 @@ export class BackgroundSubagentChildTracker {
       const descriptor = selected[index];
       const child = index + 1;
       const existing = group.children.get(child);
+      const childId = SUBAGENT_CHILD_ID_PATTERN.test(descriptor.childId ?? "")
+        ? descriptor.childId
+        : existing?.childId;
       if (existing) {
+        if (existing.childId && childId && existing.childId !== childId) continue;
+        if (!existing.childId && childId) existing.childId = childId;
         existing.label = boundedText(descriptor.label, 256) || existing.label;
         if (descriptor.task?.trim()) existing.task = boundedText(descriptor.task, 2048);
       } else {
         group.children.set(child, {
+          ...(childId ? { childId } : {}),
           child,
           label: boundedText(descriptor.label, 256) || `child ${child}`,
           ...(descriptor.task?.trim() ? { task: boundedText(descriptor.task, 2048) } : {}),
@@ -783,7 +1066,15 @@ export class BackgroundSubagentChildTracker {
         if (isBackgroundSubagentChildActive({ ...existing, status: candidate.status })) continue;
         if (existing.status !== "completed" || candidate.status === "completed") continue;
       }
+      const suppliedChildId = SUBAGENT_CHILD_ID_PATTERN.test(candidate.childId ?? "")
+        ? candidate.childId
+        : undefined;
+      if (existing?.childId && suppliedChildId && existing.childId !== suppliedChildId) continue;
+      // Registration is backed by the persisted group descriptor. Updates may
+      // confirm that identity, but a legacy/pre-identity update cannot create it.
+      const childId = existing?.childId;
       const next: BackgroundSubagentChild = {
+        ...(childId ? { childId } : {}),
         child: candidate.child,
         label: boundedText(candidate.label, 256) || existing?.label || `child ${candidate.child}`,
         ...(candidate.task?.trim() ? { task: boundedText(candidate.task, 2048) } : existing?.task ? { task: existing.task } : {}),
@@ -837,7 +1128,8 @@ export class BackgroundSubagentChildTracker {
 export function sharedBackgroundSubagentChildTracker(): BackgroundSubagentChildTracker {
   const root = globalThis as Record<string, unknown>;
   const existing = root[CHILD_TRACKER_KEY] as BackgroundSubagentChildTracker | undefined;
-  if (existing && typeof existing.register === "function" && typeof existing.update === "function"
+  if (existing?.childIdentityVersion === 2
+    && typeof existing.register === "function" && typeof existing.update === "function"
     && typeof existing.reconcile === "function" && typeof existing.removeSession === "function") return existing;
   const created = new BackgroundSubagentChildTracker();
   root[CHILD_TRACKER_KEY] = created;

@@ -61,10 +61,35 @@ export function piProtocolFailure(state: SubagentStreamState): { failureKind: "m
   return undefined;
 }
 
+function authoritativeChildOrdinal(value: any): number | undefined {
+  if (Number.isSafeInteger(value?.child) && value.child >= 1 && value.child <= 8) return Number(value.child);
+  if (Number.isSafeInteger(value?.step) && value.step >= 1 && value.step <= 8) return Number(value.step);
+  if (Number.isSafeInteger(value?.index) && value.index >= 0 && value.index < 8) return Number(value.index) + 1;
+  return undefined;
+}
+
+function streamedStateForResult(
+  states: Map<string, SubagentStreamState> | undefined,
+  item: any,
+  label: string,
+): SubagentStreamState | undefined {
+  if (!states) return undefined;
+  const backendId = typeof item?.subagent_id === "string" ? item.subagent_id.trim() : "";
+  const byId = backendId ? states.get(`id:${backendId}`) ?? states.get(backendId) : undefined;
+  if (byId) return byId;
+  const child = authoritativeChildOrdinal(item);
+  const candidates = [...states.values()].filter((state) =>
+    child !== undefined ? state.child === child : state.label === label,
+  );
+  if (candidates.length === 1) return candidates[0];
+  if (candidates.length > 1) return undefined;
+  return states.get(label);
+}
+
 export function subagentParentDetails(result: any, ctx?: ExtensionContext, streamedStates?: Map<string, SubagentStreamState>) {
   const detailResult = (item: any) => {
     const label = stringifyData(item?.label || "subagent") || "subagent";
-    const streamed = streamedStates?.get(label);
+    const streamed = streamedStateForResult(streamedStates, item, label);
     const parsed = typeof item?.stdout === "string" ? parseSubagentPiJsonStdout(item.stdout) : undefined;
     const model = item?.model || streamed?.model || parsed?.model;
     const usageCandidates = [streamed?.usage, parsed?.usage, item?.usage].filter((candidate): candidate is any => Boolean(candidate));
@@ -86,6 +111,7 @@ export function subagentParentDetails(result: any, ctx?: ExtensionContext, strea
     const serverFinal = !terminalWasDowngraded && typeof item?.final === "string" && item.final.trim() ? item.final : undefined;
     return createSubagentProgressCapsule({
       label,
+      child: authoritativeChildOrdinal(item) ?? streamed?.child,
       task: item?.task ?? streamed?.task,
       exitCode: item?.exit_code ?? item?.exitCode ?? streamed?.exitCode,
       stopReason: item?.stop_reason ?? item?.stopReason ?? streamed?.stopReason,
@@ -165,7 +191,7 @@ export function trustedRetainedSubagentReports(rawResult: any, details: any, str
   const source = normalized.map((child: any, index: number) => {
     const label = stringifyData(child?.label || `result ${index + 1}`);
     const raw = rawResults[index] ?? {};
-    const streamed = streamedStates?.get(label);
+    const streamed = streamedStateForResult(streamedStates, raw, label);
     const completed = !subagentTerminalFailed(child?.terminal);
     const candidates = completed
       ? [raw?.final, streamed ? latestSubagentAssistantText(streamed) : "", child?.final, child?.lastAssistantText]
@@ -174,6 +200,7 @@ export function trustedRetainedSubagentReports(rawResult: any, details: any, str
       .filter((candidate): candidate is string => typeof candidate === "string" && candidate.trim().length > 0)
       .sort((left, right) => Buffer.byteLength(right, "utf8") - Buffer.byteLength(left, "utf8"))[0];
     return {
+      ...(Number.isSafeInteger(child?.child) ? { child: Number(child.child) } : {}),
       label,
       final: final || "(no visible terminal report)",
       final_truncated: raw?.final_truncated ?? raw?.finalTruncated,

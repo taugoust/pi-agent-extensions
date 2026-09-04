@@ -13,6 +13,8 @@ const MAX_CAPSULE_DIAGNOSTICS = 8;
 
 export type SubagentProgressCapsule = {
   label: string;
+  /** One-based launch ordinal; never inferred from completion order. */
+  child?: number;
   task?: string;
   exitCode: number;
   stopReason: string;
@@ -167,6 +169,9 @@ export function createSubagentProgressCapsule(source: CapsuleSource): SubagentPr
     : undefined;
   const capsule: SubagentProgressCapsule = {
     label: truncateByBytes(String(source.label || "subagent"), 256),
+    child: Number.isSafeInteger(source.child) && Number(source.child) >= 1 && Number(source.child) <= 8
+      ? Number(source.child)
+      : undefined,
     task: source.task ? truncateByBytes(source.task, 1024) : undefined,
     exitCode,
     stopReason,

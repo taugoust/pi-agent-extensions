@@ -4,6 +4,10 @@ export const MAX_RETAINED_SUBAGENT_JOB_BYTES = 32 * 1024 * 1024;
 export const MAX_SUBAGENT_RESULT_PAGE_BYTES = 48 * 1024;
 
 export type RetainedSubagentReport = {
+  /** Stable one-based child ordinal. Optional only for legacy/single reports. */
+  child?: number;
+  /** Stable opaque child identity. Optional for legacy reports. */
+  childId?: string;
   label: string;
   text: string;
   totalBytes?: number;
@@ -74,6 +78,8 @@ export function extractRetainedSubagentReports(source: unknown): RetainedSubagen
   const object = source && typeof source === "object" ? source as any : undefined;
   const symbolReports = object?.[RETAINED_REPORTS];
   if (Array.isArray(symbolReports)) return symbolReports.map((report: any) => ({
+    ...(Number.isSafeInteger(report.child) && report.child >= 1 && report.child <= 8 ? { child: report.child } : {}),
+    ...(typeof report.childId === "string" && /^subagent-child-[0-9a-f]{24}$/.test(report.childId) ? { childId: report.childId } : {}),
     label: String(report.label),
     text: String(report.text),
     ...(Number.isSafeInteger(report.totalBytes) ? { totalBytes: report.totalBytes } : {}),
@@ -93,7 +99,15 @@ export function extractRetainedSubagentReports(source: unknown): RetainedSubagen
     const declaredTotal = Number(result?.final_total_bytes ?? result?.finalTotalBytes);
     const declaredTruncated = result?.final_truncated === true || result?.finalTruncated === true;
     const totalBytes = declaredTruncated && Number.isSafeInteger(declaredTotal) && declaredTotal > rawBytes ? declaredTotal : visibleBytes;
+    const explicitChild = Number.isSafeInteger(result?.child) ? Number(result.child)
+      : Number.isSafeInteger(result?.step) ? Number(result.step)
+        : undefined;
+    const childId = typeof result?.child_id === "string" && /^subagent-child-[0-9a-f]{24}$/.test(result.child_id)
+      ? result.child_id
+      : undefined;
     return {
+      ...(explicitChild !== undefined && explicitChild >= 1 && explicitChild <= 8 ? { child: explicitChild } : {}),
+      ...(childId ? { childId } : {}),
       label,
       text,
       totalBytes,

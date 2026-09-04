@@ -3758,6 +3758,17 @@ in
                     JSON.stringify({ event: "done", ok: true, result: { mode: "single", final: "stale-earlier-answer", terminal: completedTerminal, results: [child] } }),
                   ].join("\n") + "\n", "utf8")] };
                 }
+                if (request.body.tasks?.length === 2 && request.body.tasks.every((task) => task.task === "ordinal-duplicate")) {
+                  const first = { subagent_id: "backend-first", label: "worker", task: "ordinal-duplicate", exit_code: 0, stop_reason: "completed", terminal: completedTerminal, final: "first ordinal", protocol_settled: true };
+                  const second = { subagent_id: "backend-second", label: "worker", task: "ordinal-duplicate", exit_code: 0, stop_reason: "completed", terminal: completedTerminal, final: "second ordinal", protocol_settled: true };
+                  return { ndjsonChunks: [Buffer.from([
+                    JSON.stringify({ event: "subagent_child_start", subagent_id: first.subagent_id, label: first.label, task: first.task }),
+                    JSON.stringify({ event: "subagent_child_start", subagent_id: second.subagent_id, label: second.label, task: second.task }),
+                    JSON.stringify({ event: "subagent_result", label: second.label, index: 1, result: second }),
+                    JSON.stringify({ event: "subagent_result", label: first.label, index: 0, result: first }),
+                    JSON.stringify({ event: "done", ok: true, result: { mode: "parallel", final: "done", terminal: completedTerminal, results: [second, first] } }),
+                  ].join("\n") + "\n", "utf8")] };
+                }
                 if (request.body.task === "partial-transport") {
                   const retained = "completed-before-transport-failure";
                   return { ndjsonChunks: [Buffer.from([
@@ -3884,6 +3895,17 @@ in
             assert(!dishonestToolUseResult.content[0].text.includes("stale-earlier-answer"), "an earlier assistant message was reused as the final answer after tool use");
             assert(dishonestToolUseResult.content[0].text.includes("tool-use"), "tool-use protocol failure diagnostic was not parent-visible");
             assert((await applyToolResultHandlers(pi, "subagent", dishonestToolUseResult, ctx)).isError === true, "dishonest tool-use completion was not marked as an error by the Pi tool-result event path");
+
+            const ordinalResult = await subagentTool.execute("stream-ordinal-duplicates", {
+              tasks: [{ task: "ordinal-duplicate" }, { task: "ordinal-duplicate" }],
+            }, undefined, undefined, ctx);
+            assert(JSON.stringify(ordinalResult.details.results.map((child) => [child.child, child.final])) === JSON.stringify([
+              [2, "second ordinal"], [1, "first ordinal"],
+            ]), "AgentSH completion order replaced authoritative launch ordinals: " + JSON.stringify(ordinalResult.details.results));
+            const ordinalReports = ordinalResult[Symbol.for("pi-agent-extensions.retained-subagent-reports.v1")];
+            assert(JSON.stringify(ordinalReports.map((report) => [report.child, report.text])) === JSON.stringify([
+              [2, "second ordinal"], [1, "first ordinal"],
+            ]), "AgentSH retained reports lost authoritative launch ordinals: " + JSON.stringify(ordinalReports));
 
             const partialTransportResult = await subagentTool.execute("stream-partial-transport", { task: "partial-transport" }, undefined, undefined, ctx);
             assert(partialTransportResult.details.terminal.state === "failed", "missing terminal stream event was not reported as transport failure");
