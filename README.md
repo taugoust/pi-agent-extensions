@@ -690,7 +690,8 @@ required for filesystem, process, network, and descendant enforcement.
 Background launches support single, parallel, and chain requests through both
 adaptive backends. They return immediately, retain a 50 KiB preview plus each
 child's complete terminal report up to 16 MiB in a private per-user store, with
-a fair 32 MiB aggregate cap per job, and emit deduplicated active/passive completion events. `result` pages those reports
+a fair 32 MiB aggregate cap per job, and emit deduplicated completion events
+that wake an idle parent or steer an active one. `result` pages those reports
 by byte `offset` and a limit of at most 48 KiB (leaving room inside the 50 KiB
 parent-response budget); parallel and chain jobs select a one-based `child`.
 `list`, `status`, `output`, bounded `wait`, `result`, and `cancel` remain part of

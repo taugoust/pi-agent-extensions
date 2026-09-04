@@ -1117,7 +1117,7 @@ export default function (pi: ExtensionAPI) {
   const sendLifecycle = (ctx: any, content: string, details: Record<string, unknown>) => {
     pi.sendMessage(
       { customType: "background-subagent-lifecycle", content, display: false, details },
-      { deliverAs: ctx.isIdle() ? "nextTurn" : "steer" },
+      { deliverAs: "steer", triggerTurn: true },
     );
   };
 

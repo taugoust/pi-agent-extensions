@@ -450,8 +450,10 @@ pkgs.runCommand "subagent-check"
     fi
     grep -F 'waitForGracefulShutdown' ${self}/subagent/index.ts >/dev/null
     grep -F 'Notification: subagent ''${record.id} ''${record.status}. Check its status.' ${self}/subagent/index.ts >/dev/null
+    grep -F '{ deliverAs: "steer", triggerTurn: true }' ${self}/subagent/index.ts >/dev/null
     if grep -F 'Do not claim dependent work complete' ${self}/subagent/index.ts >/dev/null \
-      || grep -F 'running-reminder' ${self}/subagent/index.ts >/dev/null; then
+      || grep -F 'running-reminder' ${self}/subagent/index.ts >/dev/null \
+      || grep -F 'deliverAs: ctx.isIdle() ? "nextTurn"' ${self}/subagent/index.ts >/dev/null; then
       echo 'background lifecycle text leaked internal model guidance or running reminders' >&2
       exit 1
     fi
