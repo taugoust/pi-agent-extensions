@@ -48,6 +48,11 @@ const handle = {
 };
 bindNativeSubagentControl(sessionId, nativeChild.childId, handle);
 assert.deepEqual(subagentChildControlState(sessionId, nativeChild.childId), { backend: "native", state: "active" });
+await assert.rejects(
+  controlSubagentChild(sessionId, nativeChild.childId, "steer", "must not block on old handle", undefined, undefined, false),
+  (error: any) => error.code === "capability",
+);
+assert.deepEqual(calls, [], "legacy control was silently invoked for a non-blocking prompt");
 const updates: string[] = [];
 assert.deepEqual(
   await controlSubagentChild(sessionId, nativeChild.childId, "follow_up", "more detail", undefined, (text) => updates.push(text)),

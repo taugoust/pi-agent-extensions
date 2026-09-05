@@ -522,15 +522,24 @@ export class NativeSubagentRpcSession implements NativeSubagentControlHandle {
     }
   }
 
+  async acceptPrompt(mode: SubagentControlMode, message: string, signal?: AbortSignal): Promise<SubagentControlResult> {
+    return await this.control(mode, message, signal, undefined, false);
+  }
+
   async control(
     mode: SubagentControlMode,
     message: string,
     signal?: AbortSignal,
     onUpdate?: (text: string) => void,
+    waitForResponse = true,
   ): Promise<SubagentControlResult> {
     if (signal?.aborted) throw abortError(signal);
     if (!this.isActive()) {
       throw new SubagentControlError("inactive", "The native subagent child is no longer active", "native");
+    }
+
+    if (!waitForResponse && this.controlReservations > 0) {
+      throw new SubagentControlError("busy", "Another child control request is in progress; this prompt was not sent. Continue supervising rather than waiting on that request.", "native");
     }
 
     // Events have no originating prompt ID. Reserve the channel immediately,
@@ -550,6 +559,14 @@ export class NativeSubagentRpcSession implements NativeSubagentControlHandle {
       this.requireOpenControlChannel();
       await this.waitForInitialRun(signal);
       if (signal?.aborted) throw abortError(signal);
+      if (!waitForResponse) {
+        if (mode === "interrupt") await this.abortCurrentRun();
+        await this.sendCommand("prompt", {
+          message,
+          ...(mode === "interrupt" ? {} : { streamingBehavior: mode === "steer" ? "steer" : "followUp" }),
+        });
+        return { accepted: true, text: "Child prompt accepted; not waiting for the child to finish. Acceptance does not mean the message has been processed. Continue supervising and use status/output/result or bounded waits for progress." };
+      }
       const guardedUpdate = onUpdate
         ? (text: string) => { if (!signal?.aborted) onUpdate(text); }
         : undefined;
@@ -629,10 +646,7 @@ export class NativeSubagentRpcSession implements NativeSubagentControlHandle {
     }
   }
 
-  private async interruptAndPrompt(
-    message: string,
-    onUpdate?: (text: string) => void,
-  ): Promise<SubagentControlResult> {
+  private async abortCurrentRun(): Promise<void> {
     // Abort continues queued messages. Clear both queues first so interruption
     // means exactly "stop this logical run, then process the parent message".
     await this.sendCommand("clear_queue", {});
@@ -644,7 +658,13 @@ export class NativeSubagentRpcSession implements NativeSubagentControlHandle {
       ? this.waitFor(() => this.settledVersion > abortSettledVersion)
       : Promise.resolve();
     await Promise.all([abortCommand, abortBoundary]);
+  }
 
+  private async interruptAndPrompt(
+    message: string,
+    onUpdate?: (text: string) => void,
+  ): Promise<SubagentControlResult> {
+    await this.abortCurrentRun();
     this.requireOpenControlChannel();
     const collector = this.armCollector("interrupt", onUpdate);
     try {

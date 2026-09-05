@@ -505,6 +505,28 @@ async function exerciseExitDiagnostics() {
   assert(session.rpc.diagnostics.trace.length > 0, "diagnostics leaked mutable state");
 }
 
+async function exerciseNonBlockingPrompts() {
+  const session = createSession("logical-timeout");
+  const exited = session.rpc.start("long-running supervisor");
+  await session.startedPromise;
+  try {
+    for (const mode of ["steer", "follow_up"] as const) {
+      const result = await withTimeout(session.rpc.acceptPrompt(mode, "continue supervising"), "accepted prompt waited for child completion", 500);
+      assert.equal(result.accepted, true);
+      assert.equal(session.rpc.isActive(), true);
+      assert(!session.events.some(event => event.type === "agent_settled"));
+    }
+    const blocking = session.rpc.control("steer", "explicitly wait for full response");
+    const rejected = assert.rejects(blocking, /no longer active|channel is closed/);
+    await assert.rejects(session.rpc.acceptPrompt("steer", "do not queue behind a full run"), (error: any) => error.code === "busy");
+    session.rpc.terminate();
+    await rejected;
+  } finally {
+    session.rpc.terminate();
+    await withTimeout(exited, "non-blocking test child did not exit");
+  }
+}
+
 async function exerciseLogicalControlTimeout() {
   const session = createSession("logical-timeout", 50);
   const exited = session.rpc.start("initial task");
@@ -628,6 +650,7 @@ try {
   await exerciseHandledControlPrompt();
   await exerciseTransformedPrompt();
   await exerciseCancellationKeepsReservation();
+  await exerciseNonBlockingPrompts();
   await exerciseLogicalControlTimeout();
   await exerciseProtocolFailure("invalid-utf8", /not valid UTF-8/);
   await exerciseProtocolFailure("non-lf", /non-LF-terminated/);

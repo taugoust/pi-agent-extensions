@@ -33,6 +33,8 @@ assert.throws(() => validateBackgroundOperation({ operation: "prompt", child_id:
 assert.throws(() => validateBackgroundOperation({ operation: "prompt", child_id: childId, message: "continue", control_mode: "later" }), /control_mode/);
 assert.doesNotThrow(() => validateBackgroundOperation({ operation: "result", job_id: jobId, child_id: childId }));
 assert.throws(() => validateBackgroundOperation({ operation: "result", job_id: jobId, child: 1, child_id: childId }), /either child or child_id/);
+assert.throws(() => validateBackgroundOperation({ operation: "prompt", child_id: childId, message: "continue", wait_for_response: "false" }), /wait_for_response/);
+assert.throws(() => validateBackgroundOperation({ operation: "status", job_id: jobId, wait_for_response: false }), /prompt-control fields/);
 assert.throws(() => validateBackgroundOperation({ operation: 42 }), /operation must be a non-empty string/);
 assert.throws(() => validateBackgroundOperation({ operation: "prompt", child_id: childId, message: "continue", control_mode: 1 }), /control_mode/);
 assert.doesNotThrow(() => validateBackgroundOperation({ operation: "list", limit: 50 }));
@@ -206,6 +208,7 @@ async function operationCheck() {
   reserveSubagentChildren(sessionId, "native", [nativeIdentity]);
   bindNativeSubagentControl(sessionId, nativeIdentity.childId, {
     isActive: () => true,
+    async acceptPrompt(mode, message) { nativeCalls.push(["accepted", mode, message]); return { accepted: true, text: "accepted without waiting" }; },
     async control(mode, message, _signal, update) {
       nativeCalls.push([mode, message]);
       update?.("native partial");
@@ -218,6 +221,7 @@ async function operationCheck() {
     child_id: nativeIdentity.childId,
     message: "continue natively",
     control_mode: "follow_up",
+    wait_for_response: true,
   }, undefined, (update: any) => nativeUpdates.push(update), ctx);
   assert.equal(nativeControl.isError, undefined);
   assert.equal(nativeControl.details.failed, false);
@@ -225,6 +229,10 @@ async function operationCheck() {
   assert.equal(nativeControl.content[0].text, "native complete");
   assert.deepEqual(nativeCalls, [["follow_up", "continue natively"]]);
   assert.equal(nativeUpdates[0].content[0].text, "native partial");
+  const acceptedControl = await tool.execute("native-accepted", { operation: "prompt", child_id: nativeIdentity.childId, message: "keep working" }, undefined, undefined, ctx);
+  assert.equal(acceptedControl.details.accepted, true);
+  assert.equal(acceptedControl.content[0].text, "accepted without waiting");
+  assert.deepEqual(nativeCalls.at(-1), ["accepted", "steer", "keep working"]);
   completeSubagentChildren(sessionId, [nativeIdentity]);
 
   const managerRoot = path.join(agentDir, "state", "background-subagents-v1");

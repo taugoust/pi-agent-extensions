@@ -181,6 +181,7 @@ type SubagentControlDetails = {
   operation: "prompt";
   child_id: string;
   control_mode: SubagentControlMode;
+  accepted?: boolean;
   backend?: SubagentChildBackend;
   failed: boolean;
   error_code?: SubagentControlError["code"];
@@ -1339,6 +1340,9 @@ export function validateBackgroundOperation(params: any): void {
       || Buffer.byteLength(params.message, "utf8") > MAX_SUBAGENT_CONTROL_MESSAGE_BYTES) {
       throw new Error(`Subagent prompt control message must be non-empty and at most ${MAX_SUBAGENT_CONTROL_MESSAGE_BYTES} UTF-8 bytes`);
     }
+    if (params.wait_for_response !== undefined && typeof params.wait_for_response !== "boolean") {
+      throw new Error("Subagent prompt wait_for_response must be a boolean");
+    }
     if (params.control_mode !== undefined
       && (typeof params.control_mode !== "string" || !["steer", "follow_up", "interrupt"].includes(params.control_mode))) {
       throw new Error("Subagent prompt control_mode must be steer, follow_up, or interrupt");
@@ -1346,7 +1350,7 @@ export function validateBackgroundOperation(params: any): void {
     return;
   }
 
-  if (["message", "control_mode"].some((field) => params[field] !== undefined)
+  if (["message", "control_mode", "wait_for_response"].some((field) => params[field] !== undefined)
     || (params.child_id !== undefined && operation !== "result")) {
     throw new Error("A background subagent operation cannot include child prompt-control fields");
   }
@@ -1403,7 +1407,7 @@ export function validateBackgroundOperation(params: any): void {
 }
 
 function validateBackgroundLaunch(params: any): void {
-  const lifecycleFields = ["job_id", "wait_ms", "limit", "offset", "child", "child_id", "message", "control_mode"];
+  const lifecycleFields = ["job_id", "wait_ms", "limit", "offset", "child", "child_id", "message", "control_mode", "wait_for_response"];
   if (params.background !== true) {
     if (lifecycleFields.some((field) => params[field] !== undefined)) throw new Error("Foreground subagent launch cannot include background lifecycle fields");
     return;
@@ -1436,6 +1440,7 @@ function subagentParams() {
   child_id: Type.Optional(Type.String({ pattern: "^subagent-child-[0-9a-f]{24}$", description: "Opaque per-child ID; required by operation=prompt and accepted instead of child by operation=result." })),
   message: Type.Optional(Type.String({ description: "Parent message for operation=prompt (maximum 64 KiB UTF-8)." })),
   control_mode: Type.Optional(Type.String({ pattern: "^(steer|follow_up|interrupt)$", description: "Prompt delivery: steer at the next turn boundary (default), follow_up after current work, or interrupt current work first." })),
+  wait_for_response: Type.Optional(Type.Boolean({ description: "Prompt only: false (default) returns on acceptance without waiting for the child to finish. True waits through the child's full run and returns its response; avoid for long-running supervisors." })),
   wait_ms: Type.Optional(Type.Integer({ minimum: 0, maximum: MAX_BACKGROUND_SUBAGENT_WAIT_MS, description: "Bounded background wait duration; default 1000ms, maximum 24 hours." })),
   limit: Type.Optional(Type.Integer({ minimum: 1, maximum: MAX_SUBAGENT_RESULT_PAGE_BYTES, description: "List count (max 50), or result page byte limit (minimum 4, maximum 48 KiB)." })),
   offset: Type.Optional(Type.Integer({ minimum: 0, description: "Byte offset for operation=result pagination." })),
@@ -1844,7 +1849,7 @@ export default function (pi: ExtensionAPI) {
     description: [
       "Delegate focused work through AgentSH when configured, otherwise through native child Pi processes.",
       "Exactly one request form: single task, parallel tasks, chain steps, a lifecycle/control operation, or an AgentSH Draft disposition.",
-      "Active children have opaque child_id values; operation=prompt can synchronously steer, follow up with, or interrupt and reprompt an active native child.",
+      "Active children have opaque child_id values; operation=prompt returns on acceptance by default, with wait_for_response=true for a synchronous full child response.",
       "Background waits support one child across current groups (wait_any), one entire group (wait/wait_group), or all current groups (wait_all).",
       "Set background=true on task/tasks/chain to continue without blocking; inspect it later with lifecycle operations (job_id only where required).",
       "In guard-only sessions, native child shell commands use the parent AgentSH Permission Gate and may request approval in the parent UI.",
@@ -1855,7 +1860,7 @@ export default function (pi: ExtensionAPI) {
       "Use background=true when delegated work may take long enough that useful parent work can continue concurrently.",
       "Before claiming dependent work complete, consume terminal background results. wait_any waits for one child across current groups, wait/wait_group waits for one group, and wait_all waits for every current group; cancelling a bounded wait never cancels work.",
       "operation=result supports child, offset, and bounded byte-limit pagination.",
-      "Use operation=prompt with an active child_id for synchronous native-child conversation; choose control_mode=steer, follow_up, or interrupt. Do not retry capability or inactive-child errors by relaunching work.",
+      "Use operation=prompt with an active child_id to send a non-blocking instruction; choose control_mode=steer, follow_up, or interrupt. Set wait_for_response=true only when intentionally waiting for the child's entire run. Acceptance is not task completion. Do not retry capability or inactive-child errors by relaunching work.",
       "Use operation=cancel explicitly to stop a background subagent. Running background subagents and their native control handles survive hot /reload in the same Pi session, but are cancelled when Pi exits or replaces the session.",
     ],
     parameters: subagentParams(),
@@ -1895,6 +1900,7 @@ export default function (pi: ExtensionAPI) {
                     } satisfies SubagentControlDetails,
                   })
                 : undefined,
+              params.wait_for_response === true,
             );
             return {
               content: [{ type: "text", text: truncateByBytes(result.text || "(no output)") }],
@@ -1903,6 +1909,7 @@ export default function (pi: ExtensionAPI) {
                 operation: "prompt",
                 child_id: childId,
                 control_mode: controlMode,
+                accepted: result.accepted,
                 backend: "native",
                 failed: false,
               } satisfies SubagentControlDetails,
@@ -2164,6 +2171,7 @@ export default function (pi: ExtensionAPI) {
       delete params.child_id;
       delete params.message;
       delete params.control_mode;
+      delete params.wait_for_response;
       const dispositionError = adaptiveDispositionError(params);
       if (dispositionError) throw new Error(dispositionError);
 

@@ -714,15 +714,22 @@ Every newly launched child receives a stable opaque `subagent-child-...` ID.
 Background start, list, status, output, waits, and result metadata expose that
 ID without exposing a PID, transport, or child state directory. The ID remains
 the same through foreground-to-background handoff and hot extension reload.
-While a native child is active, `operation=prompt` is synchronous through the
-child's next logical `agent_settled` boundary, with a 24-hour hard deadline.
-`steer` (the default) delivers at the next turn boundary, `follow_up` waits for
-the current work to finish, and
-`interrupt` clears queued continuations, aborts the current run, then starts the
-replacement prompt. Concurrent controls for one child are serialized because
-Pi events do not carry prompt IDs. If a child command/input extension handles
-an accepted prompt without starting an agent run, control returns an explicit
-`handled` error instead of claiming an empty child response. Once a child
+While a native child is active, `operation=prompt` returns when Pi accepts the
+message by default; it does not wait for the child to finish or claim the message
+has been processed. `steer` (the default) queues delivery at the next turn boundary;
+`follow_up` queues delivery after current work. `interrupt` first clears queued
+continuations and waits for the current run to abort, then submits the replacement.
+Use status/output/result or bounded waits to supervise subsequent work.
+
+Set `wait_for_response: true` only for a deliberately synchronous conversation:
+that waits through the child's next logical `agent_settled` boundary, potentially
+its entire long-running task, with a 24-hour hard deadline. It reports `handled`
+when a command/input extension handles the prompt without starting an agent run.
+Non-blocking prompts return `busy` without dispatching if another control request
+still owns the channel, rather than blocking behind it. Cancelling a dispatched
+wait does not retract the message. Children retained from an older implementation
+return an explicit capability error for non-blocking prompts; they are not silently
+treated as supporting the new behavior or automatically relaunched. Once a child
 completes, its ID remains terminal and cannot be used to restart it. AgentSH
 launches keep the same ID metadata, but control requests fail explicitly as
 unsupported because AgentSH

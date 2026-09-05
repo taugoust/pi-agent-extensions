@@ -15,10 +15,12 @@ export type SubagentChildIdentity = {
 
 export type SubagentControlResult = {
   text: string;
+  accepted?: boolean;
 };
 
 export type NativeSubagentControlHandle = {
   isActive(): boolean;
+  acceptPrompt?(mode: SubagentControlMode, message: string, signal?: AbortSignal): Promise<SubagentControlResult>;
   control(
     mode: SubagentControlMode,
     message: string,
@@ -166,6 +168,7 @@ export async function controlSubagentChild(
   message: string,
   signal?: AbortSignal,
   onUpdate?: (text: string) => void,
+  waitForResponse = true,
 ): Promise<SubagentControlResult> {
   const sessionId = requiredSessionId(sessionIdValue);
   const childId = requiredChildId(childIdValue);
@@ -196,6 +199,12 @@ export async function controlSubagentChild(
         : `Subagent child ${childId} is terminal and cannot be prompted again`,
       record.backend,
     );
+  }
+  if (!waitForResponse) {
+    if (!handle.acceptPrompt) {
+      throw new SubagentControlError("capability", "This child was launched with an older control implementation. Non-blocking prompts are unavailable; wait_for_response=true retains the old blocking behavior. Do not relaunch its work.", "native");
+    }
+    return await handle.acceptPrompt(mode, message, signal);
   }
   return await handle.control(mode, message, signal, onUpdate);
 }
