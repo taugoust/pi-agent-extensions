@@ -2039,6 +2039,8 @@ in
           "$srcdir/subagent/backend.ts" \
           "$srcdir/subagent/parallel-result.ts" \
           "$srcdir/subagent/background-wait.test.ts" \
+          "$srcdir/subagent/job-proxy.ts" \
+          "$srcdir/subagent/outcome-proxy.ts" \
           "$srcdir/sandbox/approval-model.test.ts" \
           "$srcdir/sandbox/command-output.test.ts" \
           "$srcdir/sandbox/exec-result.test.ts" \

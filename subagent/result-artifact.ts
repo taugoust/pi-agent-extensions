@@ -93,7 +93,11 @@ export function extractRetainedSubagentReports(source: unknown): RetainedSubagen
     const rawText = typeof result?.final === "string" && result.final.trim()
       ? result.final
       : assistantText(result?.messages) || result?.errorMessage || result?.error || result?.terminal?.message || "(no visible terminal report)";
-    const text = cleanText(rawText) || "(no visible terminal report)";
+    const metadata = [
+      ...(result?.task_outcome ? [`Task outcome (model-reported, not independently verified): ${JSON.stringify(result.taskOutcome ?? result.task_outcome)}`] : []),
+      ...(result?.rpcDiagnostics ? [`RPC diagnostics: ${JSON.stringify(result.rpcDiagnostics)}`] : []),
+    ].join("\n");
+    const text = cleanText([metadata, rawText].filter(Boolean).join("\n\n")) || "(no visible terminal report)";
     const visibleBytes = Buffer.byteLength(text, "utf8");
     const rawBytes = Buffer.byteLength(String(rawText), "utf8");
     const declaredTotal = Number(result?.final_total_bytes ?? result?.finalTotalBytes);

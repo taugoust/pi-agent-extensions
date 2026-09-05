@@ -33,6 +33,8 @@ pkgs.runCommand "subagent-check"
     cp ${self}/subagent/backend.ts "$workdir/src/subagent/backend.ts"
     cp ${self}/subagent/background.ts "$workdir/src/subagent/background.ts"
     cp ${self}/subagent/control.ts "$workdir/src/subagent/control.ts"
+    cp ${self}/subagent/outcome.ts "$workdir/src/subagent/outcome.ts"
+    cp ${self}/subagent/outcome.test.ts "$workdir/src/subagent/outcome.test.ts"
     cp ${self}/subagent/control.test.ts "$workdir/src/subagent/control.test.ts"
     cp ${self}/subagent/foreground-handoff.ts "$workdir/src/subagent/foreground-handoff.ts"
     cp ${self}/subagent/native-rpc.ts "$workdir/src/subagent/native-rpc.ts"
@@ -59,6 +61,8 @@ pkgs.runCommand "subagent-check"
       "$workdir/src/subagent/backend.ts" \
       "$workdir/src/subagent/background.ts" \
       "$workdir/src/subagent/control.ts" \
+      "$workdir/src/subagent/outcome.ts" \
+      "$workdir/src/subagent/outcome.test.ts" \
       "$workdir/src/subagent/control.test.ts" \
       "$workdir/src/subagent/foreground-handoff.ts" \
       "$workdir/src/subagent/native-rpc.ts" \
@@ -89,6 +93,7 @@ pkgs.runCommand "subagent-check"
     EOF
 
     node "$workdir/out/subagent/control.test.js"
+    node "$workdir/out/subagent/outcome.test.js"
     TEST_MKFIFO=${pkgs.coreutils}/bin/mkfifo node "$workdir/out/subagent/native-rpc.test.js"
 
     cat > "$workdir/test.mjs" <<'EOF'
@@ -749,7 +754,7 @@ pkgs.runCommand "subagent-check"
     const success = await manager.start({ sessionId: "session-a", backend: "native", mode: "single", summary: "slow review" }, async (_signal, update) => {
       update("working");
       await new Promise((resolve) => setTimeout(resolve, 80));
-      return { text: "review complete", failed: false, reports: [{ label: "review", text: "complete report α\nsecond page" }] };
+      return { text: "review complete", failed: false, taskOutcomes: [{child:1,state:"partial",reported:true,summary:"validation still pending",next_action:"run validation"}], reports: [{ label: "review", text: "complete report α\nsecond page" }] };
     });
     assert.match(success.id, background.BACKGROUND_SUBAGENT_ID_PATTERN);
     assert.equal(success.status, "running");
@@ -757,6 +762,9 @@ pkgs.runCommand "subagent-check"
     const completed = await manager.wait(success.id, 2000);
     assert.equal(completed.record.status, "completed");
     assert.equal(completed.record.result, "review complete");
+    assert.equal(completed.record.taskOutcomes[0].state, "partial", "execution success was confused with task delivery");
+    const outcomeReload = new background.BackgroundSubagentManager(stateRoot);
+    assert.equal((await outcomeReload.get(success.id)).taskOutcomes[0].state, "partial", "task outcome did not survive reload");
     assert.equal(completed.record.artifacts.length, 1);
     assert.match(completed.record.artifacts[0].sha256, /^[0-9a-f]{64}$/);
     const firstPage = await manager.readResult(success.id, undefined, 0, 18);

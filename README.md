@@ -794,6 +794,17 @@ Unacknowledged events can be redelivered after reload, so consumers must use the
 watch/sequence identity rather than repeat actions blindly. Watches default to
 starting at the current end of the file; `from:"start"` opts into existing output.
 
+Task delivery is separate from execution status. Native children receive a
+`task_outcome` reporting tool with `delivered`, `partial`, `blocked`, and
+`checkpointed` states. Launches may provide an `acceptance` array of criteria.
+`delivered` requires passing evidence for every supplied criterion and no remaining
+work; incomplete states require a next action. Reports remain explicitly
+**model-reported, not independently verified**. A clean exit without a report is
+`unreported`, not a delivery assertion. Full outcome/evidence data accompanies the
+retained result artifact; compact `task_outcomes` are persisted and exposed by
+status/result operations. Existing execution statuses and failure semantics remain
+unchanged.
+
 Native children run over Pi's strict UTF-8, LF-delimited RPC protocol. Parent
 prompts use RPC `prompt` with `streamingBehavior`, logical completion is
 `agent_settled`, and clean shutdown is stdin/stdout EOF. RPC extension dialogs

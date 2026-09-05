@@ -3,6 +3,7 @@ import { constants } from "node:fs";
 import { access, lstat, mkdir, open, readFile, readdir, rename, rm, writeFile } from "node:fs/promises";
 import { dirname, join } from "node:path";
 import { SUBAGENT_CHILD_ID_PATTERN } from "./control.js";
+import { validateOutcomeSummaries, type TaskOutcomeSummary } from "./outcome.js";
 import {
   MAX_RETAINED_SUBAGENT_JOB_BYTES,
   MAX_RETAINED_SUBAGENT_REPORT_BYTES,
@@ -71,6 +72,7 @@ export type BackgroundSubagentRecord = {
   latest: string;
   result?: string;
   artifacts?: BackgroundSubagentArtifact[];
+  taskOutcomes?: TaskOutcomeSummary[];
   error?: string;
 };
 
@@ -78,6 +80,7 @@ export type BackgroundSubagentOutcome = {
   text: string;
   failed: boolean;
   reports?: RetainedSubagentReport[];
+  taskOutcomes?: TaskOutcomeSummary[];
 };
 
 export type BackgroundSubagentResultPage = {
@@ -219,7 +222,7 @@ function parseChildren(value: unknown): BackgroundSubagentChildDescriptor[] {
 function parseRecord(value: unknown): BackgroundSubagentRecord {
   if (!value || typeof value !== "object" || Array.isArray(value)) throw new Error("background subagent state must be an object");
   const data = value as Record<string, unknown>;
-  const allowed = new Set(["schemaVersion", "id", "sessionId", "backend", "mode", "summary", "children", "createdAt", "updatedAt", "ownerPid", "ownerStartToken", "status", "latest", "result", "artifacts", "error"]);
+  const allowed = new Set(["schemaVersion", "id", "sessionId", "backend", "mode", "summary", "children", "createdAt", "updatedAt", "ownerPid", "ownerStartToken", "status", "latest", "result", "artifacts", "error", "taskOutcomes"]);
   for (const key of Object.keys(data)) if (!allowed.has(key)) throw new Error(`unknown background subagent field ${key}`);
   if (![1, 2, SCHEMA_VERSION].includes(data.schemaVersion as number)) throw new Error("unsupported background subagent state schema");
   const id = requiredString(data.id, "background subagent id", 64);
@@ -236,6 +239,7 @@ function parseRecord(value: unknown): BackgroundSubagentRecord {
   }
   const children = data.children === undefined ? undefined : parseChildren(data.children);
   const parsedArtifacts = data.artifacts === undefined ? undefined : parseArtifacts(data.artifacts);
+  const taskOutcomes = data.taskOutcomes === undefined ? undefined : validateOutcomeSummaries(data.taskOutcomes);
   const artifacts = parsedArtifacts?.map((entry) => {
     const { childId: artifactChildId, ...artifact } = entry;
     if (children && entry.child > children.length) throw new Error("background subagent artifact child is outside its group");
@@ -267,6 +271,7 @@ function parseRecord(value: unknown): BackgroundSubagentRecord {
     latest: boundedText(data.latest),
     ...(data.result === undefined ? {} : { result: boundedText(data.result) }),
     ...(artifacts?.length ? { artifacts } : {}),
+    ...(taskOutcomes ? {taskOutcomes} : {}),
     ...(data.error === undefined ? {} : { error: boundedText(data.error, 4096) }),
   };
 }
@@ -557,7 +562,7 @@ export class BackgroundSubagentManager {
       execution = Promise.reject(error);
     }
     void execution.then(
-      (outcome) => this.finish(id, controller.signal.aborted ? "cancelled" : outcome.failed ? "failed" : "completed", outcome.text, undefined, outcome.reports),
+      (outcome) => this.finish(id, controller.signal.aborted ? "cancelled" : outcome.failed ? "failed" : "completed", outcome.text, undefined, outcome.reports, outcome.taskOutcomes),
       (error) => {
         const message = error instanceof Error ? error.message : String(error);
         return this.finish(id, controller.signal.aborted ? "cancelled" : "failed", message, message);
@@ -671,12 +676,13 @@ export class BackgroundSubagentManager {
     return artifacts;
   }
 
-  private async finish(id: string, status: "completed" | "failed" | "cancelled", text: string, error?: string, reports?: RetainedSubagentReport[]): Promise<void> {
+  private async finish(id: string, status: "completed" | "failed" | "cancelled", text: string, error?: string, reports?: RetainedSubagentReport[], taskOutcomes?: TaskOutcomeSummary[]): Promise<void> {
     const record = this.records.get(id);
     if (!record || !["running", "cancelling"].includes(record.status)) return;
     const timer = this.runtime.flushTimers.get(id);
     if (timer) clearTimeout(timer);
     this.runtime.flushTimers.delete(id);
+    if (taskOutcomes) record.taskOutcomes = validateOutcomeSummaries(taskOutcomes);
     record.result = boundedText(text || record.latest || "(no output)");
     record.latest = record.result;
     if (error) record.error = boundedText(error, 4096);

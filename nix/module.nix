@@ -194,6 +194,8 @@ in
         "${extDir}/subagent/foreground-handoff.ts".source = "${self}/subagent/foreground-handoff.ts";
         "${extDir}/subagent/native-rpc.ts".source = "${self}/subagent/native-rpc.ts";
         "${extDir}/subagent/job-proxy.ts".source = "${self}/subagent/job-proxy.ts";
+        "${extDir}/subagent/outcome.ts".source = "${self}/subagent/outcome.ts";
+        "${extDir}/subagent/outcome-proxy.ts".source = "${self}/subagent/outcome-proxy.ts";
         "${extDir}/subagent/parallel-result.ts".source = "${self}/subagent/parallel-result.ts";
         "${extDir}/subagent/permission-proxy.ts".source = "${self}/subagent/permission-proxy.ts";
         "${extDir}/subagent/permission-relay.ts".source = "${self}/subagent/permission-relay.ts";

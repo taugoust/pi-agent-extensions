@@ -67,6 +67,7 @@ import {
 import { DetachableForegroundExecution } from "./foreground-handoff.js";
 import { NativeSubagentRpcSession, spawnNativeSubagentProcess, type NativeSubagentRpcDiagnostics } from "./native-rpc.js";
 import { parentJobBroker, validateJobParams } from "../shared/background-job.js";
+import { validateAcceptance, readTaskOutcome, outcomeSummary, type TaskOutcome, type TaskOutcomeSummary } from "./outcome.js";
 import { formatParallelResultContent } from "./parallel-result.js";
 import { NativeSubagentPermissionRelay } from "./permission-relay.js";
 import { MAX_SUBAGENT_RESULT_PAGE_BYTES, attachRetainedReports, extractRetainedSubagentReports } from "./result-artifact.js";
@@ -86,6 +87,7 @@ type Mode = "single" | "parallel" | "chain";
 
 type SubagentSpec = {
   task: string;
+  acceptance?: string[];
   systemPrompt?: string;
   model?: string;
   tools?: string[];
@@ -125,6 +127,8 @@ type SingleResult = {
   args?: string[];
   childAgentDir?: string;
   rpcDiagnostics?: NativeSubagentRpcDiagnostics;
+  taskOutcome?: TaskOutcome;
+  task_outcome?: TaskOutcomeSummary;
   capabilities?: { background_job: boolean; job_scope: string; tools?: string[] };
   warning?: string;
   lastEvent?: unknown;
@@ -154,6 +158,7 @@ type BackgroundSubagentDetails = {
   child_id?: string;
   child_status?: BackgroundSubagentChildStatus;
   remaining_children?: number;
+  task_outcomes?: TaskOutcomeSummary[];
   jobs?: Array<{
     job_id: string;
     status: BackgroundSubagentRecord["status"];
@@ -402,6 +407,7 @@ function compactResultSummary(result: SingleResult): string {
   const lines: string[] = [];
   const status = resultStatus(result);
   lines.push(`Subagent ${status}.`);
+  if (result.task_outcome) lines.push(`Task outcome: ${result.task_outcome.state} (${result.task_outcome.reported ? "model-reported, not independently verified" : "unreported"}). ${result.task_outcome.summary}`);
   if (result.rpcDiagnostics) lines.push(`RPC diagnostics: ${JSON.stringify(result.rpcDiagnostics)}`);
   lines.push(`Task: ${result.task}`);
   if (result.model) lines.push(`Model: ${result.model}`);
@@ -593,6 +599,13 @@ function nativeProcessGroupShell(requireTrusted: boolean): string | undefined {
   return trusted;
 }
 
+function nativeHelperEntrypoint(name: string, guarded: boolean): string {
+  const directory = path.dirname(LOADED_SUBAGENT_MODULE_PATH);
+  const candidate = [path.join(directory, `${name}.ts`), path.join(directory, `${name}.js`)].find(file => fs.existsSync(file));
+  if (!candidate || (guarded && !trustedNixStoreFile(candidate))) throw new Error(`Native helper ${name} is missing or not immutable`);
+  return candidate;
+}
+
 function nativeProcessGroupFifo(requireTrusted: boolean): string | undefined {
   if (process.platform === "win32") return undefined;
   const candidate = pathOnPath("mkfifo");
@@ -628,11 +641,13 @@ async function runSingleSubagent(
   const jobAvailable = Boolean(parentJobBroker(ownerSessionId));
   const jobEnabled = jobAvailable && (!spec.tools || spec.tools.includes("background_job"));
   if (spec.tools?.includes("background_job") && !jobAvailable) throw new Error("Parent background-job extension is not active; background_job is unavailable");
-  const jobProxy = path.resolve(path.dirname(LOADED_SUBAGENT_MODULE_PATH), "job-proxy.ts");
+  const jobProxy = jobEnabled ? nativeHelperEntrypoint("job-proxy", Boolean(permissionAuthority)) : undefined;
   if (jobEnabled) {
     if (permissionAuthority && !trustedNixStoreFile(jobProxy)) throw new Error("Guarded child job proxy must be immutable Nix-store code");
-    args.push("--extension", jobProxy);
+    args.push("--extension", jobProxy!);
   }
+  const acceptance = validateAcceptance(spec.acceptance);
+  args.push("--extension", nativeHelperEntrypoint("outcome-proxy", Boolean(permissionAuthority)));
   const permissionTools = permissionAuthority ? guardedNativeTools(spec.tools) : undefined;
   if (permissionAuthority) {
     const permissionProxyEntrypoint = installedPermissionProxyEntrypoint();
@@ -646,9 +661,9 @@ async function runSingleSubagent(
   if (permissionTools) {
     // A distinct name prevents a missing/broken proxy from falling back to the
     // built-in Bash implementation under Pi's hard CLI tool allowlist.
-    args.push("--tools", [...permissionTools.map((tool) => tool === "bash" ? SUBAGENT_PERMISSION_BASH_TOOL : tool), ...(jobEnabled ? ["background_job"] : [])].join(","));
+    args.push("--tools", [...permissionTools.map((tool) => tool === "bash" ? SUBAGENT_PERMISSION_BASH_TOOL : tool), ...(jobEnabled ? ["background_job"] : []), "task_outcome"].join(","));
   } else if (spec.tools?.length) {
-    args.push("--tools", spec.tools.join(","));
+    args.push("--tools", [...spec.tools, "task_outcome"].join(","));
   }
 
   let tmpPromptDir: string | null = null;
@@ -660,6 +675,7 @@ async function runSingleSubagent(
   let launchCwd: string | undefined;
   let childAgentDir: string | undefined;
   let childSessionDir: string | undefined;
+  let outcomePath: string | undefined;
 
   const currentResult: SingleResult = {
     child: identity.child,
@@ -708,6 +724,7 @@ async function runSingleSubagent(
     childAgentDir = await prepareChildAgentDir(subagentId);
     childSessionDir = path.join(childAgentDir, "sessions");
     currentResult.childAgentDir = childAgentDir;
+    outcomePath = path.join(childAgentDir, "task-outcome.json");
 
     if (permissionAuthority) {
       await permissionAuthority.waitUntilActive(signal);
@@ -729,9 +746,10 @@ async function runSingleSubagent(
       args.push("--append-system-prompt", tmpPromptPath);
     }
 
+    const taskText = `${spec.task}\n\nAcceptance criteria: ${JSON.stringify(acceptance)}\nBefore returning, call task_outcome with delivered, partial, blocked, or checkpointed and evidence/next action. Execution completion is not task delivery.`;
     const initialPrompt = permissionTools?.includes("bash")
-      ? `Task: ${spec.task}\n\nUse the ${SUBAGENT_PERMISSION_BASH_TOOL} tool for every Bash or shell command.`
-      : `Task: ${spec.task}`;
+      ? `Task: ${taskText}\n\nUse the ${SUBAGENT_PERMISSION_BASH_TOOL} tool for every Bash or shell command.`
+      : `Task: ${taskText}`;
     if (signal?.aborted) {
       currentResult.exitCode = 130;
       currentResult.stopReason = "aborted";
@@ -750,6 +768,7 @@ async function runSingleSubagent(
       PI_CODING_AGENT_DIR: childAgentDir,
       PI_CODING_AGENT_SESSION_DIR: childSessionDir,
       PI_SUBAGENT_ID: subagentId,
+      PI_SUBAGENT_OUTCOME_PATH: outcomePath,
     };
     delete env[SUBAGENT_PERMISSION_SOCKET_ENV];
     delete env[SUBAGENT_PERMISSION_TOKEN_ENV];
@@ -961,6 +980,9 @@ async function runSingleSubagent(
     currentResult.stderr += `${message}\n`;
     return currentResult;
   } finally {
+    try { currentResult.taskOutcome = outcomePath ? readTaskOutcome(outcomePath, acceptance) : undefined; }
+    catch (error) { currentResult.task_outcome = outcomeSummary(identity.child, subagentId, undefined, `Invalid outcome report: ${String(error).slice(0,512)}`); }
+    currentResult.task_outcome ??= outcomeSummary(identity.child, subagentId, currentResult.taskOutcome);
     removeAbortListener?.();
     completeSubagentChildren(ownerSessionId, [identity]);
     permissionRelay?.dispose();
@@ -977,6 +999,7 @@ function normalizeStringArray(values: unknown): string[] | undefined {
 function specFromParams(params: any): SubagentSpec {
   return {
     task: String(params.task ?? ""),
+    acceptance: validateAcceptance(params.acceptance),
     systemPrompt: typeof params.systemPrompt === "string" ? params.systemPrompt : undefined,
     model: typeof params.model === "string" ? params.model : undefined,
     tools: normalizeStringArray(params.tools),
@@ -993,7 +1016,8 @@ function isFailure(result: SingleResult): boolean {
 
 function resultErrorText(result: SingleResult): string {
   if (isFailure(result)) return compactResultSummary(result);
-  return result.errorMessage || result.stderr || getFinalOutput(result.messages) || "(no output)";
+  const task = result.task_outcome;
+  return `${task ? `Task outcome: ${task.state} (${task.reported ? "model-reported, not independently verified" : "unreported"}). ${task.summary}\n\n` : ""}${getFinalOutput(result.messages) || result.errorMessage || result.stderr || "(no output)"}`;
 }
 
 function agentResultText(result: any): string {
@@ -1012,6 +1036,7 @@ function backgroundOutcome(result: any) {
     text: preview || "(no output)",
     failed: result?.isError === true || result?.details?.failed === true,
     reports: extractRetainedSubagentReports(result),
+    taskOutcomes: Array.isArray(result?.details?.results) ? result.details.results.map((r:any,i:number) => r.task_outcome ?? outcomeSummary(r.child ?? i+1, r.child_id)) : undefined,
   };
 }
 
@@ -1242,6 +1267,7 @@ function backgroundRecordText(record: BackgroundSubagentRecord, includeOutput = 
   return [
     backgroundSubagentLine(record),
     ...children.map((child) => backgroundChildLine(record.id, child)),
+    ...(record.taskOutcomes ?? []).map(o => `Task child ${o.child}: ${o.state} (${o.reported ? "model-reported" : "unreported"}) — ${o.summary}`),
     ...(includeOutput ? [record.result ?? record.latest ?? "(no output)"] : []),
     ...artifacts,
     ...(record.error ? [`error: ${record.error}`] : []),
@@ -1342,7 +1368,7 @@ export function validateBackgroundOperation(params: any): void {
   if (!["list", "status", "output", "wait", "wait_group", "wait_any", "wait_all", "result", "cancel", "prompt"].includes(operation)) {
     throw new Error(`Unknown background subagent operation: ${operation}`);
   }
-  const launchFields = ["task", "tasks", "chain", "systemPrompt", "model", "tools", "cwd", "action", "draft_id", "background", "mode", "timeout_ms"];
+  const launchFields = ["acceptance", "task", "tasks", "chain", "systemPrompt", "model", "tools", "cwd", "action", "draft_id", "background", "mode", "timeout_ms"];
   const integerField = (field: string, minimum: number, maximum: number, label: string) => {
     const value = params[field];
     if (value !== undefined && (!Number.isSafeInteger(value) || value < minimum || value > maximum)) {
@@ -1444,6 +1470,7 @@ function validateBackgroundLaunch(params: any): void {
 }
 
 const SubagentItem = Type.Object({
+  acceptance: Type.Optional(Type.Array(Type.String({maxLength:500}), {maxItems:16, description:"Acceptance criteria for the structured task outcome."})),
   task: Type.String({ description: "Task to delegate to this dynamic subagent" }),
   systemPrompt: Type.Optional(Type.String({ description: "Optional additional system prompt for this subagent" })),
   model: Type.Optional(Type.String({ description: "Optional model id for this subagent" })),
@@ -1453,6 +1480,7 @@ const SubagentItem = Type.Object({
 
 function subagentParams() {
   return Type.Object({
+  acceptance: Type.Optional(Type.Array(Type.String({maxLength:500}), {maxItems:16})),
   mode: Type.Optional(Type.String({ pattern: "^(shared|draft)$", description: "Execution isolation. Omitted/shared uses AgentSH when configured, otherwise a native child; draft requires AgentSH." })),
   action: Type.Optional(Type.String({ pattern: "^(review|apply|discard)$", description: "AgentSH Draft disposition; use with mode=draft and draft_id instead of task/tasks/chain." })),
   draft_id: Type.Optional(Type.String({ pattern: "^session-[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$", description: "Exact retained AgentSH Draft identity." })),
@@ -2080,6 +2108,7 @@ export default function (pi: ExtensionAPI) {
               status: record.status,
               backend: record.backend,
               failed: record.status !== "completed",
+              task_outcomes: record.taskOutcomes?.filter(o => o.child === page.child),
               child: page.child,
               ...(page.childId ? { child_id: page.childId } : {}),
               offset: page.offset,
@@ -2101,6 +2130,7 @@ export default function (pi: ExtensionAPI) {
             status: record.status,
             backend: record.backend,
             failed: terminalBackgroundStatus(record.status) && record.status !== "completed",
+            task_outcomes: record.taskOutcomes,
             timed_out: timedOut,
             children: childTracker.reconcile(record).map(backgroundChildMetadata),
             result_children: record.artifacts?.map((artifact) => ({
@@ -2397,7 +2427,7 @@ export default function (pi: ExtensionAPI) {
         }
 
         return {
-          content: [{ type: "text", text: truncateByBytes(getFinalOutput(results[results.length - 1].messages) || "(no output)") }],
+          content: [{ type: "text", text: truncateByBytes(resultErrorText(results[results.length - 1])) }],
           details: makeDetails("chain")(results),
         };
       }
@@ -2460,7 +2490,7 @@ export default function (pi: ExtensionAPI) {
         const sections = results.map((r) => ({
           label: r.label,
           status: isFailure(r) ? "failed" as const : "completed" as const,
-          output: isFailure(r) ? compactResultSummary(r) : getFinalOutput(r.messages) || "(no output)",
+          output: resultErrorText(r),
         }));
         return {
           content: [{ type: "text", text: formatParallelResultContent(sections, successCount, MAX_TEXT_PREVIEW_BYTES) }],
@@ -2478,7 +2508,7 @@ export default function (pi: ExtensionAPI) {
         };
       }
       return {
-        content: [{ type: "text", text: truncateByBytes(getFinalOutput(result.messages) || "(no output)") }],
+        content: [{ type: "text", text: truncateByBytes(resultErrorText(result)) }],
         details: makeDetails("single")([result]),
       };
       } finally {
