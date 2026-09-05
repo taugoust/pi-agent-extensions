@@ -182,11 +182,10 @@ seven days, or beyond the newest 100, are pruned when another job starts.
 
 A cancelled `wait` leaves the underlying job running. `cancel` is the only
 lifecycle action that stops a job. Deduplicated terminal notifications steer an
-active agent to inspect completed or failed work; idle agents receive a durable,
-passive event on their next turn. Reading terminal status/output suppresses a
+active agent to inspect completed or failed work and wake an idle parent. Reading terminal status/output suppresses a
 stale notification. After starting work, one bounded settle-time reminder
 prevents the agent from silently forgetting jobs that are still running without
-creating a reminder loop or waking an otherwise idle session. Starts pass
+creating a repeated reminder loop. Starts pass
 through the same Permission Gate classification as ordinary Bash. Guard-only
 AgentSH can authorize native
 starts, while full AgentSH mode fails closed until it has a dedicated
@@ -776,6 +775,24 @@ an existing same-user Linux process and log within the caller's cwd. Adoption is
 read-only: it verifies process start identity and log inode, never acquires
 signal/cancel authority, and never treats disappearance as successful completion.
 Use adoption instead of relaunching an already-running build.
+
+Persistent monitoring uses `background_job` rather than an LLM polling loop:
+
+```json
+{"action":"watch","job_id":"job-...","patterns":[{"name":"stage","match":"Starting route"},{"name":"failure","match":"ERROR:"}],"from":"end","poll_ms":2000}
+```
+
+Alternatively specify an existing `log_path` within the delegated cwd. Rules are
+bounded literal substrings, not executable expressions or regexes. One durable
+monitor service handles all watches for the parent session. Cursors and a bounded
+128-event journal survive reload/restart; rotation, detectable truncation,
+read errors, and associated job termination are events. `events` reads up to 32
+events after `after_sequence`; `ack` with `through_sequence` acknowledges consumed
+events; `unwatch` stops observation, never the build. Event IDs are monotonic and
+old-journal overflow is explicit. The parent is awakened for new events while idle.
+Unacknowledged events can be redelivered after reload, so consumers must use the
+watch/sequence identity rather than repeat actions blindly. Watches default to
+starting at the current end of the file; `from:"start"` opts into existing output.
 
 Native children run over Pi's strict UTF-8, LF-delimited RPC protocol. Parent
 prompts use RPC `prompt` with `streamingBehavior`, logical completion is

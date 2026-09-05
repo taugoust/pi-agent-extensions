@@ -1,0 +1,32 @@
+import assert from 'node:assert/strict';
+import fs from 'node:fs/promises';
+import os from 'node:os';
+import path from 'node:path';
+import { WatchManager } from './watch.js';
+import { JobStore } from './store.js';
+import { scanWatch } from './watch-runner.mjs';
+const root=await fs.mkdtemp(path.join(os.tmpdir(),'watch-check-'));
+try {
+ const log=path.join(root,'build.log');await fs.writeFile(log,'old stage\n');
+ let starts=0; const records=new Map();
+ const service={store:new JobStore(path.join(root,'state')),async get(id){if(!records.has(id))throw new Error('missing');return records.get(id);},async start(p){starts++;const r={metadata:{id:'job-111111111111111111111111',sessionId:p.sessionId},status:'running'};records.set(r.metadata.id,r);return r;}};
+ const watches=new WatchManager(service,'owner');
+ const w=await watches.create(root,{log_path:log,patterns:[{name:'stage',match:'stage'}],poll_ms:250},'child');
+ const file=path.join(watches.root,w.watch_id+'.json');let now=Date.now();
+ scanWatch(file,now);assert.equal((await watches.events(w.watch_id,0,'child')).events.length,0,'end cursor replayed history');
+ await fs.appendFile(log,'new stage 🌍\n');scanWatch(file,now+=1000);
+ let page=await watches.events(w.watch_id,0,'child');assert.equal(page.events.length,1);assert.match(page.events[0].text,/🌍/);
+ scanWatch(file,now+=1000);assert.equal((await watches.events(w.watch_id,0,'child')).events.length,1,'duplicate event without new bytes');
+ await assert.rejects(watches.events(w.watch_id,0,'sibling'),/another/);
+ await watches.ack(w.watch_id,page.next_sequence,'child');assert.equal((await watches.events(w.watch_id,undefined,'child')).events.length,0);
+ const reloaded=new WatchManager(service,'owner');assert.equal((await reloaded.events(w.watch_id,undefined,'child')).events.length,0,'ack lost on reload');
+ await fs.rename(log,log+'.old');await fs.writeFile(log,'rotated stage\n');scanWatch(file,now+=1000);page=await watches.events(w.watch_id,undefined,'child');assert(page.events.some(e=>e.kind==='rotated'));
+ await fs.writeFile(log,'stage\n');scanWatch(file,now+=1000);assert((await watches.events(w.watch_id,0,'child')).events.some(e=>e.kind==='truncated'));
+ await fs.appendFile(log,'stage\n'.repeat(200));scanWatch(file,now+=1000);page=await watches.events(w.watch_id,0,'child');assert.equal(page.overflow,true);assert(page.events.length<=32);
+ assert((await fs.stat(file)).size<128*1024);
+ await watches.create(root,{log_path:log,patterns:[{name:'literal',match:'['}]},'child');assert.equal(starts,1,'each watch spawned a separate monitor');
+ await watches.stop(w.watch_id,'child');assert.equal(scanWatch(file,now+=1000).status,'stopped');
+ await assert.rejects(watches.create(root,{log_path:log,patterns:[{name:'empty',match:''}]}),/bounded literal/);
+ await assert.rejects(new WatchManager(service,'foreign').events(w.watch_id,0));
+ console.log('persistent watch checks passed');
+} finally {await fs.rm(root,{recursive:true,force:true});}

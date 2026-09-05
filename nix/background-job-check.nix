@@ -44,7 +44,7 @@ pkgs.runCommand "background-job-extension-check"
     srcdir="$workdir/src"
     outdir="$workdir/out"
     mkdir -p "$srcdir/background-job" "$srcdir/shared" "$outdir/background-job" "$workdir/home" "$workdir/tmp"
-    cp ${self}/background-job/{index.ts,manager.ts,store.ts,tmux.ts,types.ts,test.mjs,runner.mjs} "$srcdir/background-job/"
+    cp ${self}/background-job/{index.ts,manager.ts,store.ts,tmux.ts,types.ts,test.mjs,runner.mjs,watch.ts,watch-runner.mjs,watch.test.mjs} "$srcdir/background-job/"
     cp ${self}/shared/agentsh-mode.ts "$srcdir/shared/agentsh-mode.ts"
     cp ${self}/shared/background-job.ts "$srcdir/shared/background-job.ts"
     printf '%s\n' '{"type":"module"}' > "$srcdir/package.json"
@@ -63,13 +63,14 @@ pkgs.runCommand "background-job-extension-check"
       "$srcdir/background-job/tmux.ts" \
       "$srcdir/background-job/types.ts" \
       "$srcdir/shared/agentsh-mode.ts"
-    cp "$srcdir/background-job/"{test.mjs,runner.mjs} "$outdir/background-job/"
+    cp "$srcdir/background-job/"{test.mjs,runner.mjs,watch-runner.mjs,watch.test.mjs} "$outdir/background-job/"
 
     export HOME="$workdir/home"
     export TMPDIR="$workdir/tmp"
     export TEST_TMUX=${pkgs.tmux}/bin/tmux
     export TEST_RUNNER=${package}/background-job/runner.mjs
     node "$outdir/background-job/test.mjs"
+    node "$outdir/background-job/watch.test.mjs"
 
     mkdir -p "$outdir/node_modules/@sinclair/typebox" \
       "$outdir/node_modules/@mariozechner/pi-coding-agent" \
@@ -98,7 +99,7 @@ pkgs.runCommand "background-job-extension-check"
       metadata: { id: "job-0123456789abcdef01234567", createdAt: new Date().toISOString(), command: "test", cwd: "/tmp" },
       result: ["completed", "failed", "cancelled", "lost"].includes(status) ? { status, exitCode } : undefined,
     });
-    if (module.lifecycleDelivery(false) !== "steer" || module.lifecycleDelivery(true) !== "nextTurn") throw new Error("completion delivery is not active-steer/idle-passive");
+    if (module.lifecycleDelivery(false) !== "steer" || module.lifecycleDelivery(true) !== "steer") throw new Error("completion delivery does not wake an idle parent");
     if (!module.completionMessage(fixture("failed", 7)).includes("handle this outcome")) throw new Error("failed completion is not actionable");
     if (!module.completionMessage(fixture("completed", 0)).includes("Inspect output")) throw new Error("successful completion omitted output verification guidance");
     if (module.runningReminder([fixture("completed", 0)]) !== undefined) throw new Error("terminal jobs produced a running reminder");

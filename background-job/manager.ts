@@ -27,6 +27,7 @@ export type StartRequest = {
   name?: string;
   sessionId?: string;
   childId?: string;
+  infrastructure?: boolean;
 };
 
 function result(status: JobResult["status"], exitCode: number | null, reason?: string, signal?: string): JobResult {
@@ -131,9 +132,9 @@ export class BackgroundJobManager {
     return await this.store.withLock(async () => {
       const records = await this.list(1000, false);
       await this.prune(records);
-      const active = records.filter((record) => !record.metadata.observed && (record.status === "starting" || record.status === "running"));
-      if (active.length >= MAX_RUNNING) throw new Error(`Background job limit reached (${MAX_RUNNING} running)`);
-      if (active.filter((record) => record.metadata.cwd === cwd).length >= MAX_RUNNING_PER_CWD) {
+      const active = records.filter((record) => !record.metadata.observed && !record.metadata.infrastructure && (record.status === "starting" || record.status === "running"));
+      if (!request.infrastructure && active.length >= MAX_RUNNING) throw new Error(`Background job limit reached (${MAX_RUNNING} running)`);
+      if (!request.infrastructure && active.filter((record) => record.metadata.cwd === cwd).length >= MAX_RUNNING_PER_CWD) {
         throw new Error(`Background job limit reached for ${cwd} (${MAX_RUNNING_PER_CWD} running)`);
       }
 
@@ -149,6 +150,7 @@ export class BackgroundJobManager {
         ownerPid: process.pid,
         ...(request.sessionId ? { sessionId: request.sessionId } : {}),
         ...(request.childId ? { childId: request.childId } : {}),
+        ...(request.infrastructure ? { infrastructure: true } : {}),
       };
       await this.store.create(metadata, request.command, environment);
       const cancelPath = join(this.store.jobDir(id), "cancel-requested");
