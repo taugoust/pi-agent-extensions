@@ -763,6 +763,20 @@ It refuses an all-at-once handoff when the sixteen-job aggregate background
 limit would be exceeded. Escape retains its normal cancellation behavior before
 a successful handoff; afterward, only `operation=cancel` cancels the detached work.
 
+Native children have a parent-owned `background_job` tool when the parent job
+extension is active (explicit child tool allowlists are honored). Starts are
+executed by the parent, use its durable job store, and pass through the parent
+Permission Gate in guarded mode. Children can inspect/control only their own
+jobs; the parent can supervise all jobs in its session. Launch messages disclose
+whether the broker is available. A broker outage fails explicitly rather than
+falling back to an untracked child process.
+
+`background_job {action:"adopt", pid:123, log_path:"/workspace/build.log"}` registers
+an existing same-user Linux process and log within the caller's cwd. Adoption is
+read-only: it verifies process start identity and log inode, never acquires
+signal/cancel authority, and never treats disappearance as successful completion.
+Use adoption instead of relaunching an already-running build.
+
 Native children run over Pi's strict UTF-8, LF-delimited RPC protocol. Parent
 prompts use RPC `prompt` with `streamingBehavior`, logical completion is
 `agent_settled`, and clean shutdown is stdin/stdout EOF. RPC extension dialogs

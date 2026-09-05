@@ -70,7 +70,7 @@ function iso(value: unknown, label: string): string {
 
 export function parseMetadata(value: unknown): JobMetadata {
   const data = object(value, "job metadata");
-  exactKeys(data, ["schemaVersion", "id", "command", "cwd", "shell", "createdAt", "ownerPid"], ["name", "sessionId"]);
+  exactKeys(data, ["schemaVersion", "id", "command", "cwd", "shell", "createdAt", "ownerPid"], ["name", "sessionId", "childId", "observed"]);
   if (data.schemaVersion !== JOB_SCHEMA_VERSION) throw new Error("unsupported job metadata schema");
   const id = string(data.id, "job id", 64);
   if (!JOB_ID_PATTERN.test(id)) throw new Error("invalid job id");
@@ -84,7 +84,16 @@ export function parseMetadata(value: unknown): JobMetadata {
     createdAt: iso(data.createdAt, "job creation time"),
     ownerPid: integer(data.ownerPid, "owner pid", 1),
     ...(data.sessionId === undefined ? {} : { sessionId: string(data.sessionId, "session id", 512) }),
+    ...(data.childId === undefined ? {} : { childId: string(data.childId, "child id", 128) }),
+    ...(data.observed === undefined ? {} : { observed: parseObserved(data.observed) }),
   };
+}
+
+function parseObserved(value: unknown): NonNullable<JobMetadata["observed"]> {
+  const data = object(value, "observed job");
+  exactKeys(data, ["pid", "startToken", "logPath", "logDevice", "logInode"]);
+  return { pid: integer(data.pid, "pid", 1), startToken: string(data.startToken, "start token", 256),
+    logPath: string(data.logPath, "log path", 4096), logDevice: integer(data.logDevice, "log device"), logInode: integer(data.logInode, "log inode") };
 }
 
 export function parseLaunch(value: unknown): JobLaunch {

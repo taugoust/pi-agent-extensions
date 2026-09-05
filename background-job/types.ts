@@ -19,6 +19,8 @@ export type JobMetadata = {
   createdAt: string;
   ownerPid: number;
   sessionId?: string;
+  childId?: string;
+  observed?: { pid: number; startToken: string; logPath: string; logDevice: number; logInode: number };
 };
 
 export type JobLaunch = {

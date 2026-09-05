@@ -1,7 +1,7 @@
 import { randomBytes } from "node:crypto";
 import { constants, writeFileSync } from "node:fs";
 import { access, lstat, open, readFile, realpath, writeFile } from "node:fs/promises";
-import { delimiter, isAbsolute, join } from "node:path";
+import { delimiter, isAbsolute, join, relative } from "node:path";
 import { processStartToken, type JobProcessBackend } from "./tmux.js";
 import { JobStore } from "./store.js";
 import {
@@ -26,6 +26,7 @@ export type StartRequest = {
   cwd: string;
   name?: string;
   sessionId?: string;
+  childId?: string;
 };
 
 function result(status: JobResult["status"], exitCode: number | null, reason?: string, signal?: string): JobResult {
@@ -130,7 +131,7 @@ export class BackgroundJobManager {
     return await this.store.withLock(async () => {
       const records = await this.list(1000, false);
       await this.prune(records);
-      const active = records.filter((record) => record.status === "starting" || record.status === "running");
+      const active = records.filter((record) => !record.metadata.observed && (record.status === "starting" || record.status === "running"));
       if (active.length >= MAX_RUNNING) throw new Error(`Background job limit reached (${MAX_RUNNING} running)`);
       if (active.filter((record) => record.metadata.cwd === cwd).length >= MAX_RUNNING_PER_CWD) {
         throw new Error(`Background job limit reached for ${cwd} (${MAX_RUNNING_PER_CWD} running)`);
@@ -147,6 +148,7 @@ export class BackgroundJobManager {
         createdAt: new Date().toISOString(),
         ownerPid: process.pid,
         ...(request.sessionId ? { sessionId: request.sessionId } : {}),
+        ...(request.childId ? { childId: request.childId } : {}),
       };
       await this.store.create(metadata, request.command, environment);
       const cancelPath = join(this.store.jobDir(id), "cancel-requested");
@@ -213,11 +215,48 @@ export class BackgroundJobManager {
     catch { return false; }
   }
 
+  async adopt(request: { pid: number; logPath: string; cwd: string; sessionId: string; childId?: string; name?: string }): Promise<JobRecord> {
+    if (process.platform !== "linux" || !Number.isSafeInteger(request.pid) || request.pid < 1) throw new Error("adopt requires a Linux process identity");
+    const cwd = await realpath(request.cwd);
+    const logPath = await realpath(request.logPath);
+    const processCwd = await realpath(`/proc/${request.pid}/cwd`);
+    for (const candidate of [logPath, processCwd]) {
+      const rel = relative(cwd, candidate);
+      if (rel === ".." || rel.startsWith("../") || isAbsolute(rel)) throw new Error("Adopted process and log must be within the delegated cwd");
+    }
+    const owner = await lstat(`/proc/${request.pid}`);
+    const log = await lstat(logPath);
+    if (owner.uid !== process.getuid?.() || log.uid !== process.getuid?.() || !log.isFile()) throw new Error("Adoption requires same-user process and regular log");
+    const startToken = await processStartToken(request.pid);
+    return await this.store.withLock(async () => {
+      const records = await this.list(1000);
+      const existing = records.find(r => r.metadata.sessionId === request.sessionId && r.metadata.childId === request.childId && r.metadata.observed?.pid === request.pid && r.metadata.observed?.startToken === startToken && r.metadata.observed?.logPath === logPath);
+      if (existing) return existing;
+      const metadata: JobMetadata = { schemaVersion: 1, id: `job-${randomBytes(12).toString("hex")}`, name: request.name,
+        command: "(adopted process; observation only)", shell: "", cwd, createdAt: new Date().toISOString(), ownerPid: process.pid,
+        sessionId: request.sessionId, childId: request.childId,
+        observed: { pid: request.pid, startToken, logPath, logDevice: log.dev, logInode: log.ino } };
+      // shell remains nonempty for compatibility with the existing metadata schema.
+      metadata.shell = "(external)";
+      if (await processStartToken(request.pid) !== startToken) throw new Error("Process identity changed during adoption");
+      await this.store.create(metadata, "", Buffer.alloc(0));
+      return { metadata, status: "running" };
+    });
+  }
+
   async get(id: string, reconcile = true): Promise<JobRecord> {
     const metadata = await this.store.readMetadata(id);
     const terminal = await this.store.readResult(id);
     const launch = await this.store.readLaunch(id);
     if (terminal) return { metadata, launch, result: terminal, status: terminal.status };
+    if (metadata.observed) {
+      try {
+        if (await processStartToken(metadata.observed.pid) === metadata.observed.startToken) return { metadata, status: "running" };
+      } catch {}
+      const ended = result("lost", null, "Observed process ended or changed identity; exit status is unavailable (not a success assertion)");
+      if (reconcile) await this.store.publishResult(id, ended);
+      return { metadata, result: ended, status: "lost" };
+    }
     if (!launch) {
       if (reconcile && Date.now() - Date.parse(metadata.createdAt) > STARTING_GRACE_MS) {
         const lost = result("lost", null, "launch metadata was never published");
@@ -252,6 +291,18 @@ export class BackgroundJobManager {
 
   async output(id: string): Promise<OutputSnapshot> {
     const record = await this.get(id);
+    if (record.metadata.observed) {
+      const observed = record.metadata.observed;
+      const fd = await open(observed.logPath, constants.O_RDONLY | constants.O_NOFOLLOW | constants.O_NONBLOCK);
+      try {
+        const info = await fd.stat();
+        if (!info.isFile() || info.dev !== observed.logDevice || info.ino !== observed.logInode) throw new Error("Adopted log identity changed; re-adopt explicitly");
+        const bytes = Buffer.alloc(Math.min(info.size, 64 * 1024));
+        const { bytesRead } = await fd.read(bytes, 0, bytes.length, Math.max(0, info.size - bytes.length));
+        const bounded = boundedTail(bytes.subarray(0, bytesRead).toString("utf8"));
+        return { ...bounded, truncated: bounded.truncated || info.size > bytes.length, source: "log" };
+      } finally { await fd.close(); }
+    }
     let raw = "";
     let source: OutputSnapshot["source"] = "none";
     try {
@@ -293,6 +344,7 @@ export class BackgroundJobManager {
 
   async signal(id: string, signal: "SIGINT" | "SIGTERM"): Promise<JobRecord> {
     const record = await this.get(id);
+    if (record.metadata.observed) throw new Error("Adopted jobs are observation-only; no signal authority was acquired");
     if (record.status !== "running" || !record.launch) throw new Error(`Background job ${id} is not running`);
     try { await this.backend.signal(id, record.launch, signal); }
     catch (error) {
@@ -303,6 +355,7 @@ export class BackgroundJobManager {
 
   async cancel(id: string): Promise<JobRecord> {
     const record = await this.get(id);
+    if (record.metadata.observed) throw new Error("Adopted jobs are observation-only; no cancellation authority was acquired");
     if (record.result) {
       if (record.status === "lost" && await this.commandProcess(id)) {
         await this.signalCommandProcess(id, "SIGKILL");

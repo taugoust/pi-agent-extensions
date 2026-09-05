@@ -66,6 +66,7 @@ import {
 } from "./control.js";
 import { DetachableForegroundExecution } from "./foreground-handoff.js";
 import { NativeSubagentRpcSession, spawnNativeSubagentProcess, type NativeSubagentRpcDiagnostics } from "./native-rpc.js";
+import { parentJobBroker, validateJobParams } from "../shared/background-job.js";
 import { formatParallelResultContent } from "./parallel-result.js";
 import { NativeSubagentPermissionRelay } from "./permission-relay.js";
 import { MAX_SUBAGENT_RESULT_PAGE_BYTES, attachRetainedReports, extractRetainedSubagentReports } from "./result-artifact.js";
@@ -124,6 +125,7 @@ type SingleResult = {
   args?: string[];
   childAgentDir?: string;
   rpcDiagnostics?: NativeSubagentRpcDiagnostics;
+  capabilities?: { background_job: boolean; job_scope: string; tools?: string[] };
   warning?: string;
   lastEvent?: unknown;
   lastToolCall?: {
@@ -602,7 +604,7 @@ function nativeProcessGroupFifo(requireTrusted: boolean): string | undefined {
 }
 
 function guardedNativeTools(requested: string[] | undefined): string[] {
-  const tools = requested?.length ? requested : [...SUBAGENT_PERMISSION_NATIVE_TOOLS];
+  const tools = requested?.length ? requested.filter(tool => tool !== "background_job") : [...SUBAGENT_PERMISSION_NATIVE_TOOLS];
   if (new Set(tools).size !== tools.length
     || tools.some((tool) => !SUBAGENT_PERMISSION_NATIVE_TOOLS.includes(tool as typeof SUBAGENT_PERMISSION_NATIVE_TOOLS[number]))) {
     throw new Error(`Guarded native subagents support only these explicitly loaded tools: ${SUBAGENT_PERMISSION_NATIVE_TOOLS.join(", ")}`);
@@ -623,6 +625,14 @@ async function runSingleSubagent(
 ): Promise<SingleResult> {
   const { childId: subagentId, label } = identity;
   const args: string[] = ["--mode", "rpc", "--no-session"];
+  const jobAvailable = Boolean(parentJobBroker(ownerSessionId));
+  const jobEnabled = jobAvailable && (!spec.tools || spec.tools.includes("background_job"));
+  if (spec.tools?.includes("background_job") && !jobAvailable) throw new Error("Parent background-job extension is not active; background_job is unavailable");
+  const jobProxy = path.resolve(path.dirname(LOADED_SUBAGENT_MODULE_PATH), "job-proxy.ts");
+  if (jobEnabled) {
+    if (permissionAuthority && !trustedNixStoreFile(jobProxy)) throw new Error("Guarded child job proxy must be immutable Nix-store code");
+    args.push("--extension", jobProxy);
+  }
   const permissionTools = permissionAuthority ? guardedNativeTools(spec.tools) : undefined;
   if (permissionAuthority) {
     const permissionProxyEntrypoint = installedPermissionProxyEntrypoint();
@@ -636,7 +646,7 @@ async function runSingleSubagent(
   if (permissionTools) {
     // A distinct name prevents a missing/broken proxy from falling back to the
     // built-in Bash implementation under Pi's hard CLI tool allowlist.
-    args.push("--tools", permissionTools.map((tool) => tool === "bash" ? SUBAGENT_PERMISSION_BASH_TOOL : tool).join(","));
+    args.push("--tools", [...permissionTools.map((tool) => tool === "bash" ? SUBAGENT_PERMISSION_BASH_TOOL : tool), ...(jobEnabled ? ["background_job"] : [])].join(","));
   } else if (spec.tools?.length) {
     args.push("--tools", spec.tools.join(","));
   }
@@ -658,6 +668,7 @@ async function runSingleSubagent(
     task: spec.task,
     exitCode: -1,
     backgroundState: "running",
+    capabilities: { background_job: jobEnabled, job_scope: "parent session / this child only", tools: spec.tools },
     messages: [],
     stderr: "",
     usage: usageZero(),
@@ -846,6 +857,16 @@ async function runSingleSubagent(
     rpcSession = new NativeSubagentRpcSession({
       process: proc,
       onEvent: processEvent,
+      onJobRequest: jobEnabled ? async (request, requestSignal) => {
+        validateJobParams(request.params);
+        const broker = parentJobBroker(ownerSessionId);
+        if (!broker) throw new Error("Parent job broker is unavailable during reload/session shutdown; retry after it is active");
+        const authorize = permissionAuthority ? async (command: string, cwd: string) => {
+          const decision = await permissionAuthority.authorize({ subagentId, label, task: spec.task, toolCallId: request.toolCallId, command, cwd }, requestSignal);
+          if (!decision.allowed) throw new Error(`Parent Permission Gate denied job start: ${decision.reason}`);
+        } : undefined;
+        return await broker.execute({ sessionId: ownerSessionId, childId: subagentId, cwd: launchCwd! }, request.toolCallId, request.params, requestSignal, authorize);
+      } : undefined,
       terminateProcess: () => nativeProcess.terminate(),
     });
     bindNativeSubagentControl(ownerSessionId, subagentId, rpcSession);
@@ -1232,13 +1253,14 @@ function backgroundStartResult(
   movedFromForeground: boolean,
   children: BackgroundSubagentChild[] = [],
 ) {
+  const jobCapability = record.backend === "native" && Boolean(parentJobBroker(record.sessionId));
   const guidance = movedFromForeground
     ? "Moved to the background by the user without restarting. Continue useful parent work; consume this result before completing dependent work."
     : "Started without blocking. Continue other work; use status/output/result/cancel with this job_id, wait_group for this group, or wait_any/wait_all across current groups.";
   return {
     content: [{
       type: "text" as const,
-      text: [backgroundSubagentLine(record), ...children.map((child) => backgroundChildLine(record.id, child)), guidance].join("\n"),
+      text: [backgroundSubagentLine(record), ...children.map((child) => backgroundChildLine(record.id, child)), `Parent-owned background_job capability: ${jobCapability ? "available to default children (explicit tool allowlists still apply)" : "unavailable"}.`, guidance].join("\n"),
     }],
     details: {
       background_subagent: true as const,

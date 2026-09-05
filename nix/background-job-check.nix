@@ -46,6 +46,7 @@ pkgs.runCommand "background-job-extension-check"
     mkdir -p "$srcdir/background-job" "$srcdir/shared" "$outdir/background-job" "$workdir/home" "$workdir/tmp"
     cp ${self}/background-job/{index.ts,manager.ts,store.ts,tmux.ts,types.ts,test.mjs,runner.mjs} "$srcdir/background-job/"
     cp ${self}/shared/agentsh-mode.ts "$srcdir/shared/agentsh-mode.ts"
+    cp ${self}/shared/background-job.ts "$srcdir/shared/background-job.ts"
     printf '%s\n' '{"type":"module"}' > "$srcdir/package.json"
 
     tsc \
@@ -183,6 +184,21 @@ pkgs.runCommand "background-job-extension-check"
       undefined,
       reloadContext,
     );
+    const broker = globalThis.__paeParentJobBrokerV1;
+    const identity = { sessionId: "reload-session", childId: "subagent-child-111111111111111111111111", cwd: process.cwd() };
+    const childJob = await broker.execute(identity, "child-start", { action: "start", command: "printf child-owned" });
+    const childDone = await broker.execute(identity, "child-wait", { action: "wait", job_id: childJob.details.job_id, timeout_ms: 5000 });
+    if (childDone.details.status !== "completed") throw new Error("broker job did not complete");
+    let foreignBlocked = false;
+    try { await broker.execute({ ...identity, childId: "subagent-child-222222222222222222222222" }, "foreign", { action: "output", job_id: childJob.details.job_id }); }
+    catch { foreignBlocked = true; }
+    if (!foreignBlocked) throw new Error("sibling read another child's job");
+    let denied = false;
+    try { await broker.execute(identity, "denied-start", { action: "start", command: "printf forbidden" }, undefined, async () => { throw new Error("denied"); }); }
+    catch { denied = true; }
+    if (!denied) throw new Error("broker ignored command authorization");
+    const parentView = await afterReload.tool.execute("parent-view", { action: "status", job_id: childJob.details.job_id }, undefined, undefined, reloadContext);
+    if (parentView.details.child_id !== identity.childId) throw new Error("parent lost child job ownership metadata");
     afterReload.handlers.get("session_shutdown")();
     if (recovered.details?.status !== "completed" || recovered.details?.exit_code !== 0) {
       throw new Error(`session reload did not recover the running background job: ''${JSON.stringify(recovered.details)} ''${JSON.stringify(recovered.content)}`);

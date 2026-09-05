@@ -10,6 +10,8 @@ import { BackgroundJobManager, resolveExecutable, sanitizeOutput } from "./manag
 import { JobStore } from "./store.js";
 import { TmuxBackend } from "./tmux.js";
 import type { JobRecord } from "./types.js";
+import { JOB_BROKER_KEY, JobParameters, validateJobParams, type JobParams, type ParentJobBroker } from "../shared/background-job.js";
+const INTERNAL_JOB_CALL = Symbol("parent-job-call");
 
 const ACTION_PATTERN = "^(start|list|status|output|wait|signal|cancel)$";
 const JOB_PATTERN = "^job-[0-9a-f]{24}$";
@@ -22,16 +24,7 @@ type CommandAuthority = {
   consume(toolCallId: string, command: string, cwd: string): boolean;
 };
 
-type Params = {
-  action: "start" | "list" | "status" | "output" | "wait" | "signal" | "cancel";
-  command?: string;
-  name?: string;
-  job_id?: string;
-  timeout_ms?: number;
-  lines?: number;
-  limit?: number;
-  signal?: "SIGINT" | "SIGTERM";
-};
+type Params = JobParams;
 
 function runtimeState(): AgentSHRuntimeState | undefined {
   const api = (globalThis as Record<string, any>).__AGENTSH_PI__;
@@ -158,11 +151,13 @@ function publicDetails(record: JobRecord): Record<string, unknown> {
     status: record.status,
     exit_code: record.result?.exitCode,
     signal: record.result?.signal,
+    child_id: record.metadata.childId,
+    observation_only: Boolean(record.metadata.observed),
   };
 }
 
-function assertOwned(record: JobRecord, ownerSessionId: string): void {
-  if (record.metadata.sessionId !== ownerSessionId) {
+function assertOwned(record: JobRecord, ownerSessionId: string, childId?: string): void {
+  if (record.metadata.sessionId !== ownerSessionId || (childId !== undefined && record.metadata.childId !== childId)) {
     throw new Error(`Background job ${record.metadata.id} belongs to a different Pi session`);
   }
 }
@@ -211,6 +206,7 @@ export default function backgroundJob(pi: ExtensionAPI) {
   const idlePending = new Set<string>();
   const idleInFlight = new Set<string>();
   const deliveryClaims = new Set<string>();
+  let broker: ParentJobBroker | undefined;
 
   const manager = () => {
     if (!managerPromise) managerPromise = (async () => {
@@ -302,6 +298,14 @@ export default function backgroundJob(pi: ExtensionAPI) {
   pi.on("session_start", async (_event, ctx) => {
     sessionGeneration += 1;
     sessionContext = ctx;
+    const owner = sessionId(ctx);
+    broker = { protocol: 1, sessionId: owner, async execute(identity, callId, params, signal, authorize) {
+      if (sessionContext?.sessionManager.getSessionId() !== owner || identity.sessionId !== owner) throw new Error("Parent job authority is unavailable for this session");
+      if (!/^subagent-(?:child|task)-[0-9a-f]{24}$/.test(identity.childId)) throw new Error("Invalid delegated job owner");
+      return await jobTool.execute(callId, { ...params, [INTERNAL_JOB_CALL]: { childId: identity.childId, authorize } }, signal, undefined,
+        { cwd: identity.cwd, hasUI: false, sessionManager: { getSessionId: () => owner } } as any);
+    } };
+    (globalThis as any)[JOB_BROKER_KEY] = broker;
     await updateStatus(ctx);
     if (pollTimer) clearInterval(pollTimer);
     pollTimer = setInterval(() => void poll(), POLL_MS);
@@ -315,6 +319,7 @@ export default function backgroundJob(pi: ExtensionAPI) {
   });
 
   pi.on("session_shutdown", () => {
+    if ((globalThis as any)[JOB_BROKER_KEY] === broker) delete (globalThis as any)[JOB_BROKER_KEY];
     sessionGeneration += 1;
     sessionContext = undefined;
     runningReminderArmed = false;
@@ -347,56 +352,55 @@ export default function backgroundJob(pi: ExtensionAPI) {
     }
   });
 
-  pi.registerTool({
+  const jobTool = {
     name: "background_job",
     label: "Background Job",
-    description: "Manage durable native background shell jobs. Actions: start, list, status, output, bounded wait, signal, and cancel. Jobs survive Pi exit. Cancelling wait never cancels the job. Output is limited to the last 50 KiB/2000 lines.",
+    description: "Manage durable native background shell jobs. Start jobs or adopt existing same-user processes and logs for read-only observation; list/status/output/wait inspect, signal/cancel control only owned launches. Jobs survive Pi exit. Cancelling wait never cancels execution. Output is limited to 50 KiB/2000 lines.",
     promptSnippet: "Start, inspect, wait for, signal, or cancel durable background shell jobs",
     promptGuidelines: [
       "Use background_job for commands that should continue across turns or Pi exits; use bash for short foreground commands.",
       "Cancelling a background_job wait only stops waiting; use background_job cancel to stop the job.",
     ],
-    parameters: Type.Object({
-      action: Type.String({ pattern: ACTION_PATTERN, description: "Lifecycle action." }),
-      command: Type.Optional(Type.String({ description: "Shell command; required only for start." })),
-      name: Type.Optional(Type.String({ maxLength: 80, description: "Optional start label." })),
-      job_id: Type.Optional(Type.String({ pattern: JOB_PATTERN, description: "Opaque job ID for non-list actions." })),
-      timeout_ms: Type.Optional(Type.Integer({ minimum: 0, maximum: 30_000, description: "Bounded wait duration; default 1000ms." })),
-      lines: Type.Optional(Type.Integer({ minimum: 1, maximum: 2000, description: "Output tail line count." })),
-      limit: Type.Optional(Type.Integer({ minimum: 1, maximum: 50, description: "Maximum jobs returned by list." })),
-      signal: Type.Optional(Type.String({ pattern: "^(SIGINT|SIGTERM)$", description: "Signal for the signal action." })),
-    }),
+    parameters: JobParameters,
     async execute(toolCallId, rawParams, signal, _onUpdate, ctx) {
       const params = rawParams as Params;
-      validate(params);
+      validateJobParams(params);
       requireNativeExecution(startup);
+      const internal = (rawParams as any)[INTERNAL_JOB_CALL] as { childId: string; authorize?: (command: string, cwd: string) => Promise<void> } | undefined;
       const ownerSessionId = sessionId(ctx);
-      if (params.action === "start") requireStartAuthorization(startup, toolCallId, params.command!, ctx.cwd);
+      if (params.action === "start" && !internal?.authorize) requireStartAuthorization(startup, toolCallId, params.command!, ctx.cwd);
       const service = await manager();
+      if (params.action === "start" && internal?.authorize) await internal.authorize(params.command!, ctx.cwd);
+      const owned = (record: JobRecord) => assertOwned(record, ownerSessionId, internal?.childId);
       let response;
       switch (params.action) {
         case "start": {
-          const record = await service.start({ command: params.command!, cwd: ctx.cwd, name: params.name, sessionId: ownerSessionId }, signal);
+          const record = await service.start({ command: params.command!, cwd: ctx.cwd, name: params.name, sessionId: ownerSessionId, childId: internal?.childId }, signal);
           runningReminderArmed = record.status === "running" || record.status === "starting";
           response = toolResult(`${recordText(record)}\nStarted in an extension-owned tmux server. Before declaring dependent work complete, use bounded wait/status/output checks.`, { action: params.action, ...publicDetails(record) });
           break;
         }
+        case "adopt": {
+          const record = await service.adopt({ pid: params.pid!, logPath: params.log_path!, cwd: ctx.cwd, sessionId: ownerSessionId, childId: internal?.childId, name: params.name });
+          response = toolResult(`${recordText(record)}\nObservation only. This does not acquire signal/cancel authority or infer success when the PID exits.`, { action: params.action, ...publicDetails(record) });
+          break;
+        }
         case "list": {
-          const records = (await service.list(1000)).filter((record) => record.metadata.sessionId === ownerSessionId).slice(0, params.limit ?? 20);
+          const records = (await service.list(1000)).filter((record) => record.metadata.sessionId === ownerSessionId && (!internal || record.metadata.childId === internal.childId)).slice(0, params.limit ?? 20);
           for (const record of records) if (record.result) await service.store.markNotified(record.metadata.id);
           response = toolResult(records.length ? records.map(recordLine).join("\n") : "No background jobs for this Pi session.", { action: params.action, jobs: records.map(publicDetails) });
           break;
         }
         case "status": {
           const record = await service.get(requireJobId(params));
-          assertOwned(record, ownerSessionId);
+          owned(record);
           if (record.result) await service.store.markNotified(record.metadata.id);
           response = toolResult(recordText(record), { action: params.action, ...publicDetails(record) });
           break;
         }
         case "output": {
           const id = requireJobId(params);
-          assertOwned(await service.get(id), ownerSessionId);
+          owned(await service.get(id));
           const snapshot = await service.output(id);
           const record = await service.get(id);
           if (record.result) await service.store.markNotified(id);
@@ -405,7 +409,7 @@ export default function backgroundJob(pi: ExtensionAPI) {
         }
         case "wait": {
           const id = requireJobId(params);
-          assertOwned(await service.get(id), ownerSessionId);
+          owned(await service.get(id));
           const waited = await service.wait(id, params.timeout_ms ?? 1000, signal);
           const snapshot = await service.output(id);
           const current = await service.get(id);
@@ -418,14 +422,14 @@ export default function backgroundJob(pi: ExtensionAPI) {
         }
         case "signal": {
           const id = requireJobId(params);
-          assertOwned(await service.get(id), ownerSessionId);
+          owned(await service.get(id));
           const record = await service.signal(id, params.signal!);
           response = toolResult(`Sent ${params.signal} to ${record.metadata.id}.`, { action: params.action, ...publicDetails(record), signal: params.signal });
           break;
         }
         case "cancel": {
           const id = requireJobId(params);
-          assertOwned(await service.get(id), ownerSessionId);
+          owned(await service.get(id));
           const record = await service.cancel(id);
           if (record.result) await service.store.markNotified(id);
           response = toolResult(recordText(record), { action: params.action, ...publicDetails(record) });
@@ -445,7 +449,8 @@ export default function backgroundJob(pi: ExtensionAPI) {
       const text = result.content.find((part: any) => part.type === "text")?.text ?? "";
       return new Text(text, 0, 0);
     },
-  });
+  };
+  pi.registerTool(jobTool);
 
   pi.registerCommand("background-jobs", {
     description: "Inspect and manage extension-owned background jobs",

@@ -60,6 +60,23 @@ try {
   assert(output.text.includes(`cwd=${root}`) && output.text.includes("env=exact value with spaces") && output.text.includes("done"), "job output/cwd/environment was not preserved");
   assert(!(await store.markNotified(first.metadata.id)), "reading completed output did not suppress the pending completion notification");
 
+  if (process.platform === "linux") {
+    const previousCwd = process.cwd();
+    process.chdir(root);
+    try {
+      const log = path.join(root, "external.log"); fs.writeFileSync(log, "stage: ready\n");
+      const adopted = await manager.adopt({ pid: process.pid, logPath: log, cwd: root, sessionId: "test-session", childId: "child-a" });
+      assert(adopted.metadata.observed?.pid === process.pid, "adoption lost process identity");
+      assert((await manager.output(adopted.metadata.id)).text.includes("stage: ready"), "adopted log could not be read");
+      assert((await manager.get(adopted.metadata.id)).metadata.childId === "child-a", "delegated job ownership was not persisted");
+      let denied = false; try { await manager.cancel(adopted.metadata.id); } catch (error) { denied = String(error).includes("observation-only"); }
+      assert(denied, "adoption acquired destructive authority");
+      fs.renameSync(log, log + ".old"); fs.writeFileSync(log, "replaced");
+      denied = false; try { await manager.output(adopted.metadata.id); } catch (error) { denied = String(error).includes("identity changed"); }
+      assert(denied, "adoption silently followed a replaced log");
+    } finally { process.chdir(previousCwd); }
+  }
+
   const failing = await manager.start({ command: "printf 'failure output\\n'; exit 7", cwd: root });
   const failed = await manager.wait(failing.metadata.id, 5000);
   assert(failed.record.status === "failed" && failed.record.result?.exitCode === 7, "nonzero exit was not preserved");
@@ -99,7 +116,7 @@ try {
   assert(escaped.text === "beforeredafter", "terminal controls were not removed from output");
 
   const ids = await store.listIds();
-  assert(ids.length === 5 && ids.every((id) => /^job-[0-9a-f]{24}$/.test(id)), "opaque persisted job IDs are malformed");
+  assert(ids.length === (process.platform === "linux" ? 6 : 5) && ids.every((id) => /^job-[0-9a-f]{24}$/.test(id)), "opaque persisted job IDs are malformed");
 
   const raceStore = new JobStore(path.join(root, "race-state"), path.join(root, "race-runtime"));
   let releaseLaunch;

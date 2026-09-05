@@ -97,6 +97,21 @@ function expectedBehavior(command) {
   return command.message.includes("follow_up") ? "followUp" : "steer";
 }
 async function handle(command) {
+  if (mode === "parent-job" && command.type === "extension_ui_response") {
+    const result = JSON.parse(command.value);
+    assistantEnd(result.content?.[0]?.text ?? result.error);
+    agentStreaming = false;
+    send({ type: "agent_settled" });
+    return;
+  }
+  if (mode === "parent-job" && command.type === "prompt" && initial) {
+    initial = false;
+    response("prompt", command.id);
+    agentStreaming = true;
+    send({ type: "agent_start" }); userEnd(command.message);
+    send({ type: "extension_ui_request", id: "owned-job", method: "input", title: "pi-parent-background-job-v1", placeholder: JSON.stringify({toolCallId:"job-call",params:{action:"start",command:"printf fixture"}}) });
+    return;
+  }
   if (command.type === "get_state") {
     stateResponse(command.id);
     return;
@@ -298,7 +313,7 @@ if (process.argv[2] === "descendant") {
 }
 `, { mode: 0o600 });
 
-function createSession(mode: string, controlTimeoutMs?: number) {
+function createSession(mode: string, controlTimeoutMs?: number, onJobRequest?: any) {
   const proc = spawn(process.execPath, [fixture, mode], { stdio: ["pipe", "pipe", "pipe"] });
   let stderr = "";
   proc.stderr.on("data", (chunk) => { stderr += chunk.toString(); });
@@ -307,6 +322,7 @@ function createSession(mode: string, controlTimeoutMs?: number) {
   const startedPromise = new Promise<void>((resolve) => { started = resolve; });
   const rpc = new NativeSubagentRpcSession({
     process: proc,
+    onJobRequest,
     onEvent(event) {
       events.push(event);
       if (mode === "observer-failure") throw new Error("private payload must not be retained");
@@ -640,6 +656,19 @@ async function exerciseProcessGroupEscalation() {
 }
 
 try {
+  let jobRequestSeen = false;
+  const jobSession = createSession("parent-job", undefined, async (request: any, signal: AbortSignal) => {
+    assert.equal(request.params.command, "printf fixture");
+    assert.equal(signal.aborted, false);
+    jobRequestSeen = true;
+    return { content: [{ type: "text", text: "parent-owned job accepted" }] };
+  });
+  assert.equal((await jobSession.rpc.start("job fixture")).code, 0);
+  assert(jobRequestSeen);
+  assert(jobSession.events.some(event => event.message?.content?.[0]?.text === "parent-owned job accepted"));
+  const deniedJob = createSession("parent-job");
+  assert.equal((await deniedJob.rpc.start("no broker")).code, 0);
+  assert(deniedJob.events.some(event => event.message?.content?.[0]?.text?.includes("unavailable")));
   await exercise("steer");
   await exercise("follow_up");
   await exercise("interrupt");
