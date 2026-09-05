@@ -71,6 +71,7 @@ import { validateAcceptance, readTaskOutcome, outcomeSummary, type TaskOutcome, 
 import { NativeTaskStore, createTaskId, TASK_ID_PATTERN, type NativeTaskRecord } from "./resume.js";
 import { registerTaskDashboard } from "./dashboard.js";
 import { taskListText, outcomeLabel } from "../shared/task-presentation.js";
+import { installQuietState } from '../shared/quiet-state.js';
 const INTERNAL_TASK_RESUME = Symbol("subagent-task-resume");
 const INTERNAL_RESUME_MESSAGE = Symbol("subagent-resume-message");
 const INTERNAL_RESUME_COMPACT = Symbol("subagent-resume-compact");
@@ -1305,7 +1306,7 @@ function backgroundRecordText(record: BackgroundSubagentRecord, includeOutput = 
   return [
     backgroundSubagentLine(record),
     ...children.map((child) => backgroundChildLine(record.id, child)),
-    ...(record.taskOutcomes ?? []).map(o => `Task child ${o.child}: ${o.state} (${o.reported ? "model-reported" : "unreported"}) — ${o.summary}`),
+    ...(record.taskOutcomes ?? []).map(o => `Task child ${o.child}: ${o.state} (${o.reported ? "model-reported" : "unreported"})${includeOutput ? ` — ${o.summary}` : ""}`),
     ...(includeOutput ? [record.result ?? record.latest ?? "(no output)"] : []),
     ...artifacts,
     ...(record.error ? [`error: ${record.error}`] : []),
@@ -1345,6 +1346,7 @@ function terminalBackgroundStatus(status: BackgroundSubagentRecord["status"]): b
 }
 
 function backgroundOperationConsumedJobIds(details: BackgroundSubagentDetails): string[] {
+  if (details.operation === 'wait_all') return (details.groups ?? []).filter(group=>terminalBackgroundStatus(group.status)).map(group=>group.job_id);
   if (typeof details.job_id !== "string" || !details.status || !terminalBackgroundStatus(details.status)) return [];
   return ["status", "output", "wait", "wait_group", "result", "cancel"].includes(details.operation)
     ? [details.job_id]
@@ -1563,6 +1565,7 @@ function subagentParams() {
 }
 
 export default function (pi: ExtensionAPI) {
+  const quietState = installQuietState(pi);
   const agentSHStartup = classifyAgentSHStartup(process.env);
   const bridgeDisposition = (bridge: AgentSHBridge | undefined) =>
     agentSHRuntimeDisposition(agentSHStartup, bridgeSupervisorState(bridge));
@@ -1606,13 +1609,6 @@ export default function (pi: ExtensionAPI) {
     } catch {
       ctx.ui.setStatus("background-subagents", ctx.ui.theme.fg("error", "subagents ✗"));
     }
-  };
-
-  const sendLifecycle = (ctx: any, content: string, details: Record<string, unknown>) => {
-    pi.sendMessage(
-      { customType: "background-subagent-lifecycle", content, display: true, details },
-      { deliverAs: "steer", triggerTurn: true },
-    );
   };
 
   const sessionEntries = (ctx: any): any[] => {
@@ -1687,7 +1683,8 @@ export default function (pi: ExtensionAPI) {
     }
   };
 
-  const stageTerminalConsumption = (id: string) => {
+  const stageTerminalConsumption = (id: string, ctx: any) => {
+    quietState.consume(ctx,'subagent',id);
     // tool_result fires before Pi emits the durable tool-result message. Keep
     // this process-local until agent_end; reload reconciles it against the
     // active session branch rather than suppressing a notification on trust.
@@ -1698,32 +1695,12 @@ export default function (pi: ExtensionAPI) {
   };
 
   const deliverTerminal = async (ctx: any, record: BackgroundSubagentRecord) => {
-    if (lifecycleClosing || consumed.has(record.id) || !terminalBackgroundStatus(record.status) || idlePending.has(record.id) || idleInFlight.has(record.id) || deliveryClaims.has(record.id)) return;
-    const generation = sessionGeneration;
-    const deliveryClaim = Symbol(record.id);
-    deliveryClaims.set(record.id, deliveryClaim);
-    try {
-      if (generation !== sessionGeneration || sessionContext !== ctx) return;
-      const taskLabels = (record.taskOutcomes ?? []).map(o=>`${outcomeLabel(o.state)}${o.attempt ? ` · attempt ${o.attempt}` : ""}`);
-      const heading = record.status === "completed" ? (taskLabels.length ? taskLabels.join("; ") : "Worker response finished — outcome not reported") : `Worker execution ${record.status}`;
-      const message = `Notification: ${heading}\n${record.summary.split("\n")[0]}\n\n${truncateByBytes(record.result || record.error || "(no output)", 2500)}\n\nTask dashboard: /tasks\nFull report: subagent operation=result job_id=${record.id}`;
-      if (await backgroundManager.isNotified(record.id)) return;
-      if (generation !== sessionGeneration || lifecycleClosing || consumed.has(record.id) || sessionContext !== ctx) return;
-      const accepted = ctx.isIdle() ? idlePending : idleInFlight;
-      accepted.add(record.id);
-      try {
-        // sendMessage is synchronous. Persist the notified marker at agent_end,
-        // after Pi has accepted this message, so reload cannot turn a durable
-        // pre-send marker into a permanently lost completion.
-        sendLifecycle(ctx, message, { kind: "completion", job_id: record.id, status: record.status });
-      } catch (error) {
-        accepted.delete(record.id);
-        throw error;
-      }
-      if (ctx.hasUI) ctx.ui.notify(message, record.status === "completed" ? "info" : "warning");
-    } finally {
-      if (deliveryClaims.get(record.id) === deliveryClaim) deliveryClaims.delete(record.id);
-    }
+    if (lifecycleClosing || consumed.has(record.id) || !terminalBackgroundStatus(record.status) || sessionContext !== ctx) return;
+    const generation=sessionGeneration;
+    if (await backgroundManager.isNotified(record.id)) return;
+    if(generation!==sessionGeneration||lifecycleClosing||sessionContext!==ctx||consumed.has(record.id))return;
+    quietState.enqueue(ctx,{kind:'subagent',id:record.id,state:record.status,
+      outcomes:record.taskOutcomes?.map(o=>({child:o.child,task_id:o.task_id,attempt:o.attempt,state:o.state}))});
   };
 
   const pollBackground = async () => {
@@ -1807,7 +1784,7 @@ export default function (pi: ExtensionAPI) {
       }
     } catch (error) {
       if (generation === sessionGeneration && !lifecycleClosing && sessionContext === ctx && ctx.hasUI) {
-        ctx.ui.notify(`Could not check background subagents before settling: ${error instanceof Error ? error.message : String(error)}`, "warning");
+        ctx.ui.setStatus('background-subagents',ctx.ui.theme.fg('error','subagents ✗'));
       }
     }
   });
@@ -1940,7 +1917,7 @@ export default function (pi: ExtensionAPI) {
     const background = details as BackgroundSubagentDetails | undefined;
     if (background?.background_subagent) {
       if (!event.isError && !lifecycleClosing && sessionContext === ctx) {
-        for (const id of backgroundOperationConsumedJobIds(background)) stageTerminalConsumption(id);
+        for (const id of backgroundOperationConsumedJobIds(background)) stageTerminalConsumption(id, ctx);
       }
       return;
     }
@@ -1966,6 +1943,7 @@ export default function (pi: ExtensionAPI) {
       "Use background=true when delegated work may take long enough that useful parent work can continue concurrently.",
       "Before claiming dependent work complete, consume terminal background results. wait_any waits for one child across current groups, wait/wait_group waits for one group, and wait_all waits for every current group; cancelling a bounded wait never cancels work.",
       "operation=result supports child, offset, and bounded byte-limit pagination.",
+      "Treat harness state batches as internal routing data, not requests for a user-facing recap. Fetch worker reports/output only when needed; do not paste routine completion reports into the conversation.",
       "Use operation=prompt with an active child_id to send a non-blocking instruction; choose control_mode=steer, follow_up, or interrupt. Set wait_for_response=true only when intentionally waiting for the child's entire run. Acceptance is not task completion. Do not retry capability or inactive-child errors by relaunching work.",
       "Use operation=resume with a task_id to continue a terminal native task from its saved session, not a fresh reconstructed assignment. Resume is explicit, returns a new background group/child ID, preserves task ownership, and compacts context checkpoints before continuing.",
       "Use operation=cancel explicitly to stop a background subagent. Running background subagents and their native control handles survive hot /reload in the same Pi session, but are cancelled when Pi exits or replaces the session.",
@@ -2171,7 +2149,7 @@ export default function (pi: ExtensionAPI) {
         } else if (operation === "cancel") {
           record = await backgroundManager.cancel(id);
         }
-        const discloseOutput = operation === "output" || operation === "wait" || operation === "wait_group" || operation === "cancel" || (operation === "status" && terminalBackgroundStatus(record.status));
+        const discloseOutput = operation === "output";
         const waiting = timedOut ? "\nWait timed out; the subagent is still running." : "";
         const notReady = operation === "result" && isBackgroundSubagentActive(record) ? "\nResult is not ready; use a bounded wait or continue other work." : "";
         await updateBackgroundStatus(ctx);

@@ -49,9 +49,11 @@ export function watchDeliveryCursors(entries: unknown[]): Map<string,number> {
   const cursors=new Map<string,number>();
   for(const raw of entries){
     const entry=raw as any;
-    if(entry?.type!=="custom_message"||entry.customType!=="background-job-watch")continue;
+    if(entry?.type!=="custom_message"||!["background-job-watch","harness-state"].includes(entry.customType))continue;
     const detail=entry.details;
-    const deliveries=Array.isArray(detail?.watches)?detail.watches:[detail];
+    const deliveries=entry.customType==='harness-state'
+      ? (Array.isArray(detail?.updates)?detail.updates:[]).filter((d:any)=>d?.kind==='watch').map((d:any)=>({watch_id:d.id,through_sequence:d.through_sequence}))
+      : Array.isArray(detail?.watches)?detail.watches:[detail];
     for(const item of deliveries){
       if(!/^watch-[0-9a-f]{24}$/.test(item?.watch_id??"")||!Number.isSafeInteger(item?.through_sequence)||item.through_sequence<0)continue;
       cursors.set(item.watch_id,Math.max(cursors.get(item.watch_id)??0,item.through_sequence));

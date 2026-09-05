@@ -41,6 +41,8 @@ pkgs.runCommand "subagent-check"
     cp ${self}/subagent/dashboard.test.ts "$workdir/src/subagent/dashboard.test.ts"
     cp ${self}/shared/task-presentation.ts "$workdir/src/shared/task-presentation.ts"
     cp ${self}/shared/watch-menu.ts "$workdir/src/shared/watch-menu.ts"
+    cp ${self}/shared/quiet-state.ts "$workdir/src/shared/quiet-state.ts"
+    cp ${self}/shared/quiet-state.test.ts "$workdir/src/shared/quiet-state.test.ts"
     cp ${self}/subagent/control.test.ts "$workdir/src/subagent/control.test.ts"
     cp ${self}/subagent/foreground-handoff.ts "$workdir/src/subagent/foreground-handoff.ts"
     cp ${self}/subagent/native-rpc.ts "$workdir/src/subagent/native-rpc.ts"
@@ -73,6 +75,7 @@ pkgs.runCommand "subagent-check"
       "$workdir/src/subagent/resume.test.ts" \
       "$workdir/src/subagent/dashboard.ts" \
       "$workdir/src/subagent/dashboard.test.ts" \
+      "$workdir/src/shared/quiet-state.test.ts" \
       "$workdir/src/subagent/control.test.ts" \
       "$workdir/src/subagent/foreground-handoff.ts" \
       "$workdir/src/subagent/native-rpc.ts" \
@@ -106,6 +109,7 @@ pkgs.runCommand "subagent-check"
     node "$workdir/out/subagent/outcome.test.js"
     node "$workdir/out/subagent/resume.test.js"
     node "$workdir/out/subagent/dashboard.test.js"
+    node "$workdir/out/shared/quiet-state.test.js"
     TEST_MKFIFO=${pkgs.coreutils}/bin/mkfifo node "$workdir/out/subagent/native-rpc.test.js"
 
     cat > "$workdir/test.mjs" <<'EOF'
@@ -1010,14 +1014,14 @@ pkgs.runCommand "subagent-check"
       exit 1
     fi
     grep -F 'const committed = this.authority.commit(prepared.ticket, exactRequest);' ${self}/subagent/permission-relay.ts >/dev/null
-    grep -F 'Task dashboard: /tasks' ${self}/subagent/index.ts >/dev/null
+    grep -F 'quietState.enqueue' ${self}/subagent/index.ts >/dev/null
     grep -F 'backgroundOperationConsumedJobIds(background)' ${self}/subagent/index.ts >/dev/null
     grep -F 'const durableOperations = deliveredOperationIds(entries);' ${self}/subagent/index.ts >/dev/null
     if grep -F 'consumeForOperation' ${self}/subagent/index.ts >/dev/null; then
       echo 'lifecycle operation still marks consumption before Pi accepts its tool result' >&2
       exit 1
     fi
-    grep -F '{ deliverAs: "steer", triggerTurn: true }' ${self}/subagent/index.ts >/dev/null
+    grep -F "deliverAs:'followUp',triggerTurn:true" ${self}/shared/quiet-state.ts >/dev/null
     if grep -F 'Do not claim dependent work complete' ${self}/subagent/index.ts >/dev/null \
       || grep -F 'running-reminder' ${self}/subagent/index.ts >/dev/null \
       || grep -F 'deliverAs: ctx.isIdle() ? "nextTurn"' ${self}/subagent/index.ts >/dev/null; then

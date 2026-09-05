@@ -182,11 +182,11 @@ and per-working-directory concurrency is four; adopted panes do not consume laun
 seven days, or beyond the newest 100, are pruned when another job starts.
 
 A cancelled `wait` leaves the underlying job running. `cancel` is the only
-lifecycle action that stops a job. Deduplicated terminal notifications steer an
-active agent to inspect completed or failed work and wake an idle parent. Reading terminal status/output suppresses a
-stale notification. After starting work, one bounded settle-time reminder
-prevents the agent from silently forgetting jobs that are still running without
-creating a repeated reminder loop. Starts pass
+lifecycle action that stops a job. Routine completions update state silently:
+no full reports or toasts are posted automatically. The supervisor receives a
+small hidden state batch after its current work settles, not an interruption or
+request for a user-facing recap. Explicit output/result reads fetch reports when
+needed; waits are status-only unless output lines are explicitly requested. Starts pass
 through the same Permission Gate classification as ordinary Bash. Guard-only
 AgentSH can authorize native
 starts, while full AgentSH mode fails closed until it has a dedicated
@@ -698,8 +698,9 @@ Parallel and chain groups are capped at eight children; the native backend runs
 at most four siblings concurrently. They return immediately,
 retain a 50 KiB preview plus each child's complete terminal report up to 16 MiB
 in a private per-user store, with
-a fair 32 MiB aggregate cap per job, and emit deduplicated completion events
-that wake an idle parent or steer an active one. `result` pages those reports
+a fair 32 MiB aggregate cap per job. Completion updates are coalesced into a
+compact, hidden supervisor state batch at a natural idle boundary; they do not
+post worker reports in the conversation or interrupt an active supervisor. `result` pages those reports
 by byte `offset` and a limit of at most 48 KiB (leaving room inside the 50 KiB
 parent-response budget); parallel and chain jobs select either a one-based
 `child` or its opaque `child_id`.
@@ -819,9 +820,10 @@ monitor service handles all watches for the parent session. Cursors and a bounde
 read errors, and associated job termination are events. `events` reads up to 32
 events after `after_sequence`; `ack` with `through_sequence` acknowledges consumed
 events; `unwatch` stops observation, never the build. Event IDs are monotonic and
-old-journal overflow is explicit. The parent is awakened for new events while idle.
-Unacknowledged events can be redelivered after reload, so consumers must use the
-watch/sequence identity rather than repeat actions blindly. Watches default to
+old-journal overflow is explicit. New event availability is included in the same
+quiet supervisor state batches, without log text or user notifications. Delivered
+state batches are deduplicated across reload; unread journal entries remain
+available until acknowledged. Watches default to
 starting at the current end of the file; `from:"start"` opts into existing output.
 
 Task delivery is separate from execution status. Native children receive a
@@ -886,8 +888,8 @@ user-authority channel; guard-only shell approvals continue to use the existing
 authenticated parent Permission Gate relay. Progress reconstruction preserves
 content indices across thinking/text/tool blocks, and rendering errors cannot
 interrupt cancellation. Failure reports retain raw process exit code/signal and
-a bounded, metadata-only RPC lifecycle trace. Background completion messages are
-visible in the transcript with a bounded report preview and full-report lookup.
+a bounded, metadata-only RPC lifecycle trace. Background reports remain available on demand; automatic state updates contain
+only IDs, execution/outcome states, and event cursors, and are hidden from the transcript.
 
 POSIX process-group cleanup uses a private named FIFO and requires `mkfifo`
 (immutable Nix-store executables in guarded sessions). It deliberately avoids

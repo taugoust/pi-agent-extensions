@@ -49,6 +49,7 @@ pkgs.runCommand "background-job-extension-check"
     cp ${self}/shared/background-job.ts "$srcdir/shared/background-job.ts"
     cp ${self}/shared/task-presentation.ts "$srcdir/shared/task-presentation.ts"
     cp ${self}/shared/watch-menu.ts "$srcdir/shared/watch-menu.ts"
+    cp ${self}/shared/quiet-state.ts "$srcdir/shared/quiet-state.ts"
     printf '%s\n' '{"type":"module"}' > "$srcdir/package.json"
 
     tsc \
@@ -113,7 +114,7 @@ pkgs.runCommand "background-job-extension-check"
     const pi = {
       registerTool(tool) { tools.set(tool.name, tool); },
       registerCommand(name, command) { commands.set(name, command); },
-      on(name, handler) { handlers.set(name, handler); },
+      on(name, handler) { const previous=handlers.get(name); handlers.set(name, previous ? async (...args)=>{await previous(...args);await handler(...args);} : handler); },
       sendMessage() {},
     };
     extension(pi);
@@ -162,7 +163,7 @@ pkgs.runCommand "background-job-extension-check"
       loaded({
         registerTool(tool) { tools.set(tool.name, tool); },
         registerCommand() {},
-        on(name, handler) { handlers.set(name, handler); },
+        on(name, handler) { const previous=handlers.get(name); handlers.set(name, previous ? async (...args)=>{await previous(...args);await handler(...args);} : handler); },
         sendMessage() {},
       });
       await handlers.get("session_start")({}, reloadContext);
@@ -178,12 +179,12 @@ pkgs.runCommand "background-job-extension-check"
       reloadContext,
     );
     if (!started.details?.job_id || started.details.status !== "running") throw new Error("reload fixture did not start");
-    beforeReload.handlers.get("session_shutdown")();
+    await beforeReload.handlers.get("session_shutdown")({reason:'reload'},reloadContext);
 
     const afterReload = await loadHarness("after-reload");
     const recovered = await afterReload.tool.execute(
       "reload-wait",
-      { action: "wait", job_id: started.details.job_id, timeout_ms: 5000 },
+      { action: "wait", job_id: started.details.job_id, timeout_ms: 5000, lines: 100 },
       undefined,
       undefined,
       reloadContext,
@@ -203,7 +204,7 @@ pkgs.runCommand "background-job-extension-check"
     if (!denied) throw new Error("broker ignored command authorization");
     const parentView = await afterReload.tool.execute("parent-view", { action: "status", job_id: childJob.details.job_id }, undefined, undefined, reloadContext);
     if (parentView.details.child_id !== identity.childId) throw new Error("parent lost child job ownership metadata");
-    afterReload.handlers.get("session_shutdown")();
+    await afterReload.handlers.get("session_shutdown")({reason:'quit'},reloadContext);
     if (recovered.details?.status !== "completed" || recovered.details?.exit_code !== 0) {
       throw new Error(`session reload did not recover the running background job: ''${JSON.stringify(recovered.details)} ''${JSON.stringify(recovered.content)}`);
     }

@@ -391,16 +391,18 @@ async function operationCheck() {
   await manager.cancel(foreign.id);
 
   const notificationJob = await manager.start({ sessionId, backend: "native", mode: "single", summary: "visible report" }, async () => ({ text: "completed report body", failed: false }));
-  const notificationDeadline = Date.now() + 4000;
-  while (!pi.messages.some((message) => message.details?.job_id === notificationJob.id)) {
+  ctx.isIdle = () => true;
+  await emit(pi, "agent_settled", {}, ctx);
+  const notificationDeadline = Date.now() + 5000;
+  while (!pi.messages.some((message) => message.details?.updates?.some((update:any)=>update.id===notificationJob.id))) {
     assert(Date.now() < notificationDeadline, "completion notification was not delivered");
     await new Promise((resolve) => setTimeout(resolve, 20));
   }
-  const completion = pi.messages.find((message) => message.details?.job_id === notificationJob.id);
-  assert.equal(completion.display, true, "completion was hidden from transcript");
-  assert.match(completion.content, /completed report body/);
-  assert.match(completion.content, /operation=result/);
-  assert.equal(pi.messages.filter((message) => message.details?.job_id === notificationJob.id).length, 1);
+  const completion = pi.messages.find((message) => message.details?.updates?.some((update:any)=>update.id===notificationJob.id));
+  assert.equal(completion.display, false, "routine completion leaked into the transcript");
+  assert.doesNotMatch(completion.content, /completed report body/);
+  assert.equal(completion.customType, 'harness-state');
+  assert.equal(pi.messages.filter((message) => message.details?.updates?.some((update:any)=>update.id===notificationJob.id)).length, 1);
 
   await emit(pi, "session_shutdown", { reason: "quit" }, ctx);
   await rm(root, { recursive: true, force: true });

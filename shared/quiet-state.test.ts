@@ -1,0 +1,33 @@
+import assert from 'node:assert/strict';
+import { installQuietState } from './quiet-state.js';
+const pause=()=>new Promise(resolve=>setTimeout(resolve,20));
+const entries:any[]=[];let idle=false;
+const ctx:any={isIdle:()=>idle,hasPendingMessages:()=>false,sessionManager:{getSessionId:()=>`quiet-test-${process.pid}`,getBranch:()=>entries}};
+function fixture(){
+ const handlers=new Map<string,any[]>();const messages:any[]=[];
+ const pi:any={on(name:string,handler:any){handlers.set(name,[...(handlers.get(name)??[]),handler]);},sendMessage(message:any,options:any){messages.push({message,options});entries.push({type:'custom_message',customType:message.customType,details:message.details});}};
+ return {pi,messages,async emit(name:string,event:any={}){for(const h of handlers.get(name)??[])await h(event,ctx);}};
+}
+const first=fixture();const jobs=installQuietState(first.pi,5);const workers=installQuietState(first.pi,5);
+await first.emit('session_start');
+jobs.enqueue(ctx,{kind:'job',id:'job-one',state:'completed'});
+workers.enqueue(ctx,{kind:'subagent',id:'worker-one',state:'completed',outcomes:[{child:1,state:'partial'}]});
+jobs.enqueue(ctx,{kind:'watch',id:'watch-one',through_sequence:1,count:1});
+jobs.enqueue(ctx,{kind:'watch',id:'watch-one',through_sequence:2,count:2});
+await pause();assert.equal(first.messages.length,0,'busy supervisor was interrupted');
+idle=true;await first.emit('agent_settled');await pause();assert.equal(first.messages.length,1,'producers did not coalesce into one batch');
+const sent=first.messages[0];assert.equal(sent.message.display,false);assert.equal(sent.options.deliverAs,'followUp');assert.equal(sent.message.details.updates.length,3);
+assert.equal(sent.message.details.updates.find((u:any)=>u.kind==='watch').through_sequence,2);
+assert.match(sent.message.content,/not a user request/);
+assert.doesNotMatch(sent.message.content,/full worker report|Task dashboard|Next:/);
+await first.emit('before_agent_start');
+jobs.enqueue(ctx,{kind:'job',id:'job-two',state:'failed'});
+await first.emit('ui_prompt_start');await first.emit('agent_settled');await pause();assert.equal(first.messages.length,1,'user decision was interrupted');
+await first.emit('ui_prompt_end');await pause();assert.equal(first.messages.length,2);
+await first.emit('session_shutdown',{reason:'reload'});
+const next=fixture();const restored=installQuietState(next.pi,5);await next.emit('session_start',{reason:'reload'});
+restored.enqueue(ctx,{kind:'job',id:'job-one',state:'completed'});await pause();assert.equal(next.messages.length,0,'consumed state replayed after reload');
+restored.enqueue(ctx,{kind:'job',id:'job-three',state:'completed'});restored.consume(ctx,'job','job-three');await pause();assert.equal(next.messages.length,0,'explicitly read state generated another notification');
+restored.enqueue(ctx,{kind:'watch',id:'watch-two',through_sequence:8,count:8});restored.consume(ctx,'watch','watch-two',4);await pause();assert.equal(next.messages.length,1,'acknowledgement hid newer unseen events');
+await next.emit('session_shutdown',{reason:'quit'});
+console.log('quiet supervisor batching checks passed');
