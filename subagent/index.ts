@@ -68,6 +68,10 @@ import { DetachableForegroundExecution } from "./foreground-handoff.js";
 import { NativeSubagentRpcSession, spawnNativeSubagentProcess, type NativeSubagentRpcDiagnostics } from "./native-rpc.js";
 import { parentJobBroker, validateJobParams } from "../shared/background-job.js";
 import { validateAcceptance, readTaskOutcome, outcomeSummary, type TaskOutcome, type TaskOutcomeSummary } from "./outcome.js";
+import { NativeTaskStore, createTaskId, TASK_ID_PATTERN, type NativeTaskRecord } from "./resume.js";
+const INTERNAL_TASK_RESUME = Symbol("subagent-task-resume");
+const INTERNAL_RESUME_MESSAGE = Symbol("subagent-resume-message");
+const INTERNAL_RESUME_COMPACT = Symbol("subagent-resume-compact");
 import { formatParallelResultContent } from "./parallel-result.js";
 import { NativeSubagentPermissionRelay } from "./permission-relay.js";
 import { MAX_SUBAGENT_RESULT_PAGE_BYTES, attachRetainedReports, extractRetainedSubagentReports } from "./result-artifact.js";
@@ -88,6 +92,9 @@ type Mode = "single" | "parallel" | "chain";
 type SubagentSpec = {
   task: string;
   acceptance?: string[];
+  resumeTask?: NativeTaskRecord;
+  resumeMessage?: string;
+  compactBeforePrompt?: boolean;
   systemPrompt?: string;
   model?: string;
   tools?: string[];
@@ -129,6 +136,8 @@ type SingleResult = {
   rpcDiagnostics?: NativeSubagentRpcDiagnostics;
   taskOutcome?: TaskOutcome;
   task_outcome?: TaskOutcomeSummary;
+  task_id?: string;
+  attempt?: number;
   capabilities?: { background_job: boolean; job_scope: string; tools?: string[] };
   warning?: string;
   lastEvent?: unknown;
@@ -617,7 +626,7 @@ function nativeProcessGroupFifo(requireTrusted: boolean): string | undefined {
 }
 
 function guardedNativeTools(requested: string[] | undefined): string[] {
-  const tools = requested?.length ? requested.filter(tool => tool !== "background_job") : [...SUBAGENT_PERMISSION_NATIVE_TOOLS];
+  const tools = requested !== undefined ? requested.filter(tool => tool !== "background_job") : [...SUBAGENT_PERMISSION_NATIVE_TOOLS];
   if (new Set(tools).size !== tools.length
     || tools.some((tool) => !SUBAGENT_PERMISSION_NATIVE_TOOLS.includes(tool as typeof SUBAGENT_PERMISSION_NATIVE_TOOLS[number]))) {
     throw new Error(`Guarded native subagents support only these explicitly loaded tools: ${SUBAGENT_PERMISSION_NATIVE_TOOLS.join(", ")}`);
@@ -637,9 +646,10 @@ async function runSingleSubagent(
   ownerSessionId: string,
 ): Promise<SingleResult> {
   const { childId: subagentId, label } = identity;
-  const args: string[] = ["--mode", "rpc", "--no-session"];
+  const args: string[] = ["--mode", "rpc"];
   const jobAvailable = Boolean(parentJobBroker(ownerSessionId));
   const jobEnabled = jobAvailable && (!spec.tools || spec.tools.includes("background_job"));
+  const effectiveTools = spec.tools ?? [...SUBAGENT_PERMISSION_NATIVE_TOOLS, ...(jobEnabled ? ["background_job"] : [])];
   if (spec.tools?.includes("background_job") && !jobAvailable) throw new Error("Parent background-job extension is not active; background_job is unavailable");
   const jobProxy = jobEnabled ? nativeHelperEntrypoint("job-proxy", Boolean(permissionAuthority)) : undefined;
   if (jobEnabled) {
@@ -662,8 +672,8 @@ async function runSingleSubagent(
     // A distinct name prevents a missing/broken proxy from falling back to the
     // built-in Bash implementation under Pi's hard CLI tool allowlist.
     args.push("--tools", [...permissionTools.map((tool) => tool === "bash" ? SUBAGENT_PERMISSION_BASH_TOOL : tool), ...(jobEnabled ? ["background_job"] : []), "task_outcome"].join(","));
-  } else if (spec.tools?.length) {
-    args.push("--tools", [...spec.tools, "task_outcome"].join(","));
+  } else {
+    args.push("--tools", [...effectiveTools, "task_outcome"].join(","));
   }
 
   let tmpPromptDir: string | null = null;
@@ -676,6 +686,8 @@ async function runSingleSubagent(
   let childAgentDir: string | undefined;
   let childSessionDir: string | undefined;
   let outcomePath: string | undefined;
+  let taskStore: NativeTaskStore | undefined;
+  let taskRecord: NativeTaskRecord | undefined;
 
   const currentResult: SingleResult = {
     child: identity.child,
@@ -684,7 +696,7 @@ async function runSingleSubagent(
     task: spec.task,
     exitCode: -1,
     backgroundState: "running",
-    capabilities: { background_job: jobEnabled, job_scope: "parent session / this child only", tools: spec.tools },
+    capabilities: { background_job: jobEnabled, job_scope: "parent session / this retained task only", tools: effectiveTools },
     messages: [],
     stderr: "",
     usage: usageZero(),
@@ -721,6 +733,15 @@ async function runSingleSubagent(
     launchCwd = await fs.promises.realpath(requestedCwd);
     const cwdInfo = await fs.promises.stat(launchCwd);
     if (!cwdInfo.isDirectory()) throw new Error(`Native subagent cwd is not a directory: ${requestedCwd}`);
+    taskStore = new NativeTaskStore(path.join(getAgentDir(), "state", "native-tasks-v1"));
+    identity.taskId ??= createTaskId();
+    taskRecord = spec.resumeTask
+      ? taskStore.get(ownerSessionId, identity.taskId)
+      : await taskStore.create(ownerSessionId, identity.taskId, { task: spec.task, cwd: launchCwd, model: spec.model, tools: effectiveTools, systemPrompt: spec.systemPrompt, acceptance }, subagentId);
+    if (taskRecord.childId !== subagentId || taskRecord.state !== "running") throw new Error("Native task attempt is not owned by this child");
+    currentResult.task_id = taskRecord.taskId;
+    currentResult.attempt = taskRecord.attempt;
+    args.push("--session", taskStore.sessionPath(taskRecord.taskId));
     childAgentDir = await prepareChildAgentDir(subagentId);
     childSessionDir = path.join(childAgentDir, "sessions");
     currentResult.childAgentDir = childAgentDir;
@@ -746,7 +767,7 @@ async function runSingleSubagent(
       args.push("--append-system-prompt", tmpPromptPath);
     }
 
-    const taskText = `${spec.task}\n\nAcceptance criteria: ${JSON.stringify(acceptance)}\nBefore returning, call task_outcome with delivered, partial, blocked, or checkpointed and evidence/next action. Execution completion is not task delivery.`;
+    const taskText = `${spec.task}${spec.resumeTask ? `\n\nThis is a continuation, not a new assignment. Latest parent instruction (supersedes prior step instructions): ${spec.resumeMessage ?? taskRecord?.nextAction ?? "Continue from the saved checkpoint."}` : ""}\n\nAcceptance criteria: ${JSON.stringify(acceptance)}\nBefore returning, call task_outcome with delivered, partial, blocked, or checkpointed and evidence/next action. Execution completion is not task delivery.`;
     const initialPrompt = permissionTools?.includes("bash")
       ? `Task: ${taskText}\n\nUse the ${SUBAGENT_PERMISSION_BASH_TOOL} tool for every Bash or shell command.`
       : `Task: ${taskText}`;
@@ -884,11 +905,12 @@ async function runSingleSubagent(
           const decision = await permissionAuthority.authorize({ subagentId, label, task: spec.task, toolCallId: request.toolCallId, command, cwd }, requestSignal);
           if (!decision.allowed) throw new Error(`Parent Permission Gate denied job start: ${decision.reason}`);
         } : undefined;
-        return await broker.execute({ sessionId: ownerSessionId, childId: subagentId, cwd: launchCwd! }, request.toolCallId, request.params, requestSignal, authorize);
+        return await broker.execute({ sessionId: ownerSessionId, childId: identity.taskId ?? subagentId, cwd: launchCwd! }, request.toolCallId, request.params, requestSignal, authorize);
       } : undefined,
       terminateProcess: () => nativeProcess.terminate(),
     });
     bindNativeSubagentControl(ownerSessionId, subagentId, rpcSession);
+    if (proc.pid) await taskStore!.bindChild(ownerSessionId, identity.taskId!, subagentId, proc.pid);
     permissionRelay?.bindChild(proc.pid);
 
     let executionSettled = false;
@@ -923,7 +945,7 @@ async function runSingleSubagent(
         rpcSession.terminate(permissionRelayFailure);
       }
     }
-    const exited = await rpcSession.start(initialPrompt);
+    const exited = await rpcSession.start(initialPrompt, spec.compactBeforePrompt === true);
     currentResult.rpcDiagnostics = rpcSession.diagnostics;
     executionSettled = true;
     signal?.removeEventListener("abort", abortHandler);
@@ -983,6 +1005,10 @@ async function runSingleSubagent(
     try { currentResult.taskOutcome = outcomePath ? readTaskOutcome(outcomePath, acceptance) : undefined; }
     catch (error) { currentResult.task_outcome = outcomeSummary(identity.child, subagentId, undefined, `Invalid outcome report: ${String(error).slice(0,512)}`); }
     currentResult.task_outcome ??= outcomeSummary(identity.child, subagentId, currentResult.taskOutcome);
+    if (taskStore && taskRecord) {
+      try { await taskStore.finish(ownerSessionId, taskRecord.taskId, subagentId, {outcome:currentResult.taskOutcome?.state,contextTokens:currentResult.usage.contextTokens,contextWindow:currentResult.rpcDiagnostics?.contextWindow,nextAction:currentResult.taskOutcome?.next_action}); }
+      catch (error) { currentResult.stderr += `Task checkpoint persistence failed: ${String(error)}\n`; }
+    }
     removeAbortListener?.();
     completeSubagentChildren(ownerSessionId, [identity]);
     permissionRelay?.dispose();
@@ -1000,6 +1026,9 @@ function specFromParams(params: any): SubagentSpec {
   return {
     task: String(params.task ?? ""),
     acceptance: validateAcceptance(params.acceptance),
+    resumeTask: params[INTERNAL_TASK_RESUME],
+    resumeMessage: params[INTERNAL_RESUME_MESSAGE],
+    compactBeforePrompt: params[INTERNAL_RESUME_COMPACT],
     systemPrompt: typeof params.systemPrompt === "string" ? params.systemPrompt : undefined,
     model: typeof params.model === "string" ? params.model : undefined,
     tools: normalizeStringArray(params.tools),
@@ -1066,14 +1095,15 @@ function requestSummary(params: any): string {
   return `${requestMode(params)} ${items.length}: ${truncateByBytes(first, 400)}`;
 }
 
-function createChildIdentities(params: any): SubagentChildIdentity[] {
+function createChildIdentities(params: any, native = true): SubagentChildIdentity[] {
   if (typeof params.task === "string" && params.task.trim()) {
-    return [{ childId: createSubagentChildId(), child: 1, label: "subagent", task: params.task }];
+    return [{ childId: createSubagentChildId(), ...(native ? {taskId:createTaskId()} : {}), child: 1, label: "subagent", task: params.task }];
   }
   const chain = Array.isArray(params.chain) ? params.chain : undefined;
   const items = chain ?? (Array.isArray(params.tasks) ? params.tasks : []);
   return items.slice(0, MAX_PARALLEL_TASKS).map((item: any, index: number) => ({
     childId: createSubagentChildId(),
+    ...(native ? {taskId:createTaskId()} : {}),
     child: index + 1,
     label: chain ? `step ${index + 1}` : `task ${index + 1}`,
     ...(typeof item?.task === "string" ? { task: item.task } : {}),
@@ -1081,8 +1111,9 @@ function createChildIdentities(params: any): SubagentChildIdentity[] {
 }
 
 function childDescriptors(children: readonly SubagentChildIdentity[]): BackgroundSubagentChildDescriptor[] {
-  return children.map(({ childId, label, task }) => ({
+  return children.map(({ childId, taskId, label, task }) => ({
     childId,
+    ...(taskId ? {taskId} : {}),
     label: truncateByBytes(label, 256),
     ...(task === undefined ? {} : { task: truncateByBytes(task, 2048) }),
   }));
@@ -1249,13 +1280,14 @@ function backgroundChildMetadata(child: BackgroundSubagentChild) {
   return {
     child: child.child,
     ...(child.childId ? { child_id: child.childId } : {}),
+    ...(child.taskId ? { task_id: child.taskId } : {}),
     label: child.label,
     status: child.status,
   };
 }
 
 function backgroundChildLine(jobId: string, child: BackgroundSubagentChild): string {
-  const identity = child.childId ? `  ${child.childId}` : "";
+  const identity = `${child.childId ? `  ${child.childId}` : ""}${child.taskId ? `  ${child.taskId}` : ""}`;
   const task = child.task ? `  ${truncateByBytes(child.task, 160).replace(/\s+/g, " ")}` : "";
   return `${jobId} child ${child.child}${identity}  ${child.status}  ${child.label}${task}`;
 }
@@ -1365,9 +1397,21 @@ export function validateBackgroundOperation(params: any): void {
     throw new Error("Background subagent operation must be a non-empty string");
   }
   const operation = params.operation;
-  if (!["list", "status", "output", "wait", "wait_group", "wait_any", "wait_all", "result", "cancel", "prompt"].includes(operation)) {
+  if (!["list", "status", "output", "wait", "wait_group", "wait_any", "wait_all", "result", "cancel", "prompt", "resume", "tasks"].includes(operation)) {
     throw new Error(`Unknown background subagent operation: ${operation}`);
   }
+  if (operation === "tasks") {
+    if (Object.keys(params).some(k=>!["operation","limit"].includes(k)) || (params.limit!==undefined&&(!Number.isSafeInteger(params.limit)||params.limit<1||params.limit>50))) throw new Error("tasks accepts only optional limit (1–50)");
+    return;
+  }
+  if (operation === "resume") {
+    if (Object.keys(params).some(k => !["operation","task_id","message","compact"].includes(k))) throw new Error("resume accepts only task_id, optional message and compact");
+    if (typeof params.task_id !== "string" || !TASK_ID_PATTERN.test(params.task_id)) throw new Error("resume requires a valid task_id");
+    if (params.message !== undefined && (typeof params.message !== "string" || !params.message.trim() || Buffer.byteLength(params.message) > 64*1024)) throw new Error("Invalid resume message");
+    if (params.compact !== undefined && typeof params.compact !== "boolean") throw new Error("compact must be boolean");
+    return;
+  }
+  if (params.task_id !== undefined || params.compact !== undefined) throw new Error("task_id and compact are resume-only fields");
   const launchFields = ["acceptance", "task", "tasks", "chain", "systemPrompt", "model", "tools", "cwd", "action", "draft_id", "background", "mode", "timeout_ms"];
   const integerField = (field: string, minimum: number, maximum: number, label: string) => {
     const value = params[field];
@@ -1455,7 +1499,7 @@ export function validateBackgroundOperation(params: any): void {
 }
 
 function validateBackgroundLaunch(params: any): void {
-  const lifecycleFields = ["job_id", "wait_ms", "limit", "offset", "child", "child_id", "message", "control_mode", "wait_for_response"];
+  const lifecycleFields = ["job_id", "wait_ms", "limit", "offset", "child", "child_id", "message", "control_mode", "wait_for_response", "task_id", "compact"];
   if (params.background !== true) {
     if (lifecycleFields.some((field) => params[field] !== undefined)) throw new Error("Foreground subagent launch cannot include background lifecycle fields");
     return;
@@ -1481,11 +1525,13 @@ const SubagentItem = Type.Object({
 function subagentParams() {
   return Type.Object({
   acceptance: Type.Optional(Type.Array(Type.String({maxLength:500}), {maxItems:16})),
+  task_id: Type.Optional(Type.String({pattern:"^subagent-task-[0-9a-f]{24}$",description:"Stable native task ID for explicit resume after a child terminates."})),
+  compact: Type.Optional(Type.Boolean({description:"Resume only: compact the retained session before continuing; required for context checkpoints and selected automatically for them."})),
   mode: Type.Optional(Type.String({ pattern: "^(shared|draft)$", description: "Execution isolation. Omitted/shared uses AgentSH when configured, otherwise a native child; draft requires AgentSH." })),
   action: Type.Optional(Type.String({ pattern: "^(review|apply|discard)$", description: "AgentSH Draft disposition; use with mode=draft and draft_id instead of task/tasks/chain." })),
   draft_id: Type.Optional(Type.String({ pattern: "^session-[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$", description: "Exact retained AgentSH Draft identity." })),
   background: Type.Optional(Type.Boolean({ description: "Return immediately and continue a task/tasks/chain request in the background." })),
-  operation: Type.Optional(Type.String({ pattern: "^(list|status|output|wait|wait_group|wait_any|wait_all|result|cancel|prompt)$", description: "Lifecycle operation, or prompt to converse with an active child. wait/wait_group waits for one group, wait_any for one child across groups, and wait_all for all current groups." })),
+  operation: Type.Optional(Type.String({ pattern: "^(list|status|output|wait|wait_group|wait_any|wait_all|result|cancel|prompt|resume|tasks)$", description: "Lifecycle operation, or prompt to converse with an active child. wait/wait_group waits for one group, wait_any for one child across groups, and wait_all for all current groups." })),
   job_id: Type.Optional(Type.String({ pattern: "^subagent-job-[0-9a-f]{24}$", description: "Opaque execution ID; required by group-specific operations and omitted for list/wait_any/wait_all." })),
   child_id: Type.Optional(Type.String({ pattern: "^subagent-child-[0-9a-f]{24}$", description: "Opaque per-child ID; required by operation=prompt and accepted instead of child by operation=result." })),
   message: Type.Optional(Type.String({ description: "Parent message for operation=prompt (maximum 64 KiB UTF-8)." })),
@@ -1911,6 +1957,7 @@ export default function (pi: ExtensionAPI) {
       "Before claiming dependent work complete, consume terminal background results. wait_any waits for one child across current groups, wait/wait_group waits for one group, and wait_all waits for every current group; cancelling a bounded wait never cancels work.",
       "operation=result supports child, offset, and bounded byte-limit pagination.",
       "Use operation=prompt with an active child_id to send a non-blocking instruction; choose control_mode=steer, follow_up, or interrupt. Set wait_for_response=true only when intentionally waiting for the child's entire run. Acceptance is not task completion. Do not retry capability or inactive-child errors by relaunching work.",
+      "Use operation=resume with a task_id to continue a terminal native task from its saved session, not a fresh reconstructed assignment. Resume is explicit, returns a new background group/child ID, preserves task ownership, and compacts context checkpoints before continuing.",
       "Use operation=cancel explicitly to stop a background subagent. Running background subagents and their native control handles survive hot /reload in the same Pi session, but are cancelled when Pi exits or replaces the session.",
     ],
     parameters: subagentParams(),
@@ -1926,7 +1973,30 @@ export default function (pi: ExtensionAPI) {
       validateBackgroundOperation(params);
       if (params.operation) {
         const ownerSessionId = stableSessionId(ctx);
-        const operation = params.operation as BackgroundSubagentDetails["operation"] | "prompt";
+        const operation = params.operation as BackgroundSubagentDetails["operation"] | "prompt" | "resume" | "tasks";
+        if (operation === "tasks") {
+          const store = new NativeTaskStore(path.join(getAgentDir(), "state", "native-tasks-v1"));
+          const tasks = store.list(ownerSessionId, params.limit ?? 20);
+          return {content:[{type:"text",text:JSON.stringify(tasks,null,2)}],details:{operation:"tasks",tasks}};
+        }
+        if (operation === "resume") {
+          const backend = selectSubagentBackend(agentSHBridge(), agentSHStartup);
+          if (backend.kind !== "native") throw new Error("Retained task resume is native-only; no backend fallback is allowed");
+          const store = new NativeTaskStore(path.join(getAgentDir(), "state", "native-tasks-v1"));
+          const prior = store.get(ownerSessionId, params.task_id);
+          if (prior.requiresCompaction && params.compact === false) throw new Error("A context checkpoint must be compacted before resuming");
+          const identity: SubagentChildIdentity = {child:1,childId:createSubagentChildId(),taskId:prior.taskId,label:"subagent",task:prior.spec.task};
+          const resumed = await store.beginResume(ownerSessionId, prior.taskId, identity.childId);
+          try {
+            return await subagentTool.execute(toolCallId, { ...resumed.spec, background:true,
+              [INTERNAL_TASK_RESUME]:resumed,[INTERNAL_RESUME_MESSAGE]:params.message,
+              [INTERNAL_RESUME_COMPACT]:params.compact ?? Boolean(resumed.requiresCompaction),
+              [INTERNAL_CHILD_IDENTITIES]:[identity] }, signal, onUpdate, ctx);
+          } catch (error) {
+            await store.finish(ownerSessionId, prior.taskId, identity.childId, {outcome:"blocked",nextAction:"Retry after resolving the launch failure"});
+            throw error;
+          }
+        }
         if (operation === "prompt") {
           const controlMode = (params.control_mode ?? "steer") as SubagentControlMode;
           const childId = params.child_id as string;
@@ -2181,7 +2251,7 @@ export default function (pi: ExtensionAPI) {
         delete launchedParams.child;
         const sessionId = stableSessionId(ctx);
         const executionContext = snapshotSubagentExecutionContext(ctx);
-        const childIdentities = createChildIdentities(launchedParams);
+        const childIdentities = internalChildIdentities ?? createChildIdentities(launchedParams, backend.kind === "native");
         const descriptors = childDescriptors(childIdentities);
         const childProgress = createChildProgressBridge(descriptors);
         const record = await backgroundManager.start({
@@ -2244,7 +2314,7 @@ export default function (pi: ExtensionAPI) {
       if (!internalManagedExecution && params.action === undefined && delegationFormCount(params) === 1) {
         const sessionId = stableSessionId(ctx);
         const executionContext = snapshotSubagentExecutionContext(ctx);
-        const childIdentities = createChildIdentities(params);
+        const childIdentities = createChildIdentities(params, backend.kind === "native");
         const descriptors = childDescriptors(childIdentities);
         if (activeForegroundSubagents.has(toolCallId)) throw new Error(`Duplicate active subagent tool-call ID: ${toolCallId}`);
         let execution!: DetachableForegroundExecution<any, any, BackgroundSubagentRecord>;
@@ -2337,7 +2407,7 @@ export default function (pi: ExtensionAPI) {
         }
       }
 
-      const executionChildren = internalChildIdentities ?? createChildIdentities(params);
+      const executionChildren = internalChildIdentities ?? createChildIdentities(params, backend.kind === "native");
       const executionSessionId = internalOwnerSessionId ?? stableSessionId(ctx);
       if (executionChildren.length > 0) reserveSubagentChildren(executionSessionId, backend.kind, executionChildren);
 

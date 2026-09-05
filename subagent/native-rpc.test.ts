@@ -112,6 +112,11 @@ async function handle(command) {
     send({ type: "extension_ui_request", id: "owned-job", method: "input", title: "pi-parent-background-job-v1", placeholder: JSON.stringify({toolCallId:"job-call",params:{action:"start",command:"printf fixture"}}) });
     return;
   }
+  if (command.type === "compact") {
+    send({type:"fixture_compacted"});
+    response("compact", command.id, {summary:"saved checkpoint"});
+    return;
+  }
   if (command.type === "get_state") {
     stateResponse(command.id);
     return;
@@ -675,6 +680,9 @@ try {
   await exerciseSettleRace();
   await exerciseSerialization();
   await exerciseHandledInitialPrompt();
+  const compacted = createSession("handled-initial");
+  assert.equal((await compacted.rpc.start("continue retained task", true)).code, 0);
+  assert(compacted.events.some(event => event.type === "fixture_compacted"));
   await exerciseControlReservedWhileInitialPromptIsHandled();
   await exerciseHandledControlPrompt();
   await exerciseTransformedPrompt();

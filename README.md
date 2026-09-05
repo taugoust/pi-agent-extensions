@@ -805,6 +805,27 @@ retained result artifact; compact `task_outcomes` are persisted and exposed by
 status/result operations. Existing execution statuses and failure semantics remain
 unchanged.
 
+Native launches also expose a stable `task_id`, distinct from each attempt's
+`child_id` and background group ID. The private task registry retains the original
+specification, acceptance criteria, session JSONL, attempt history, and checkpoint
+metadata. Use `subagent {operation:"tasks"}` to list this parent's retained tasks,
+then `subagent {operation:"resume",task_id:"subagent-task-...",message:"Continue validation"}`
+to start a new background attempt in the **same saved conversation**. Resume never
+accepts an arbitrary session path or widens the task's tools/cwd. Parent-session
+ownership and process start identities prevent foreign or concurrent resumes.
+Task-owned background jobs remain accessible to successor attempts.
+
+Resume is always explicit, including after a failure or the existing 90% context
+finalizer. A measured high-context exit selects compaction before the next prompt
+(bounded to five minutes); `compact:true` can request this explicitly. Disabling
+required high-context compaction is rejected. A model-reported checkpoint at low
+context remains resumable without forcing unnecessary compaction.
+Children created before retained-task support have no task ID and cannot be
+resumed this way. Runtime controls still target only active child IDs. A parent
+crash does not automatically relaunch work; recovery waits for previous-child
+exit and a cleanup grace before admitting a successor. Retained session files can
+contain sensitive project history and stay in the private parent agent directory.
+
 Native children run over Pi's strict UTF-8, LF-delimited RPC protocol. Parent
 prompts use RPC `prompt` with `streamingBehavior`, logical completion is
 `agent_settled`, and clean shutdown is stdin/stdout EOF. RPC extension dialogs

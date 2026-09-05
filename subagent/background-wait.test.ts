@@ -25,6 +25,12 @@ import {
 
 const jobId = "subagent-job-0123456789abcdef01234567";
 const childId = "subagent-child-0123456789abcdef01234567";
+const taskId = "subagent-task-0123456789abcdef01234567";
+assert.doesNotThrow(() => validateBackgroundOperation({operation:"resume",task_id:taskId,message:"continue"}));
+assert.throws(() => validateBackgroundOperation({operation:"resume",task_id:taskId,cwd:"/other"}), /accepts only/);
+assert.throws(() => validateBackgroundOperation({operation:"resume",task_id:taskId,compact:"false"}), /boolean/);
+assert.throws(() => validateBackgroundOperation({operation:"resume",task_id:"../session"}), /valid task_id/);
+assert.doesNotThrow(() => validateBackgroundOperation({operation:"tasks",limit:20}));
 assert.throws(() => validateBackgroundOperation({ operation: "wait_everything" }), /Unknown background subagent operation/);
 assert.doesNotThrow(() => validateBackgroundOperation({ operation: "prompt", child_id: childId, message: "continue" }));
 assert.doesNotThrow(() => validateBackgroundOperation({ operation: "prompt", child_id: childId, message: "continue", control_mode: "interrupt" }));

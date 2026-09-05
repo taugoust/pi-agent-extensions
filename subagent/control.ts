@@ -8,6 +8,7 @@ export type SubagentChildBackend = "native" | "agentsh";
 
 export type SubagentChildIdentity = {
   childId: string;
+  taskId?: string;
   child: number;
   label: string;
   task?: string;

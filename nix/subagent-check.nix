@@ -35,6 +35,8 @@ pkgs.runCommand "subagent-check"
     cp ${self}/subagent/control.ts "$workdir/src/subagent/control.ts"
     cp ${self}/subagent/outcome.ts "$workdir/src/subagent/outcome.ts"
     cp ${self}/subagent/outcome.test.ts "$workdir/src/subagent/outcome.test.ts"
+    cp ${self}/subagent/resume.ts "$workdir/src/subagent/resume.ts"
+    cp ${self}/subagent/resume.test.ts "$workdir/src/subagent/resume.test.ts"
     cp ${self}/subagent/control.test.ts "$workdir/src/subagent/control.test.ts"
     cp ${self}/subagent/foreground-handoff.ts "$workdir/src/subagent/foreground-handoff.ts"
     cp ${self}/subagent/native-rpc.ts "$workdir/src/subagent/native-rpc.ts"
@@ -63,6 +65,8 @@ pkgs.runCommand "subagent-check"
       "$workdir/src/subagent/control.ts" \
       "$workdir/src/subagent/outcome.ts" \
       "$workdir/src/subagent/outcome.test.ts" \
+      "$workdir/src/subagent/resume.ts" \
+      "$workdir/src/subagent/resume.test.ts" \
       "$workdir/src/subagent/control.test.ts" \
       "$workdir/src/subagent/foreground-handoff.ts" \
       "$workdir/src/subagent/native-rpc.ts" \
@@ -94,6 +98,7 @@ pkgs.runCommand "subagent-check"
 
     node "$workdir/out/subagent/control.test.js"
     node "$workdir/out/subagent/outcome.test.js"
+    node "$workdir/out/subagent/resume.test.js"
     TEST_MKFIFO=${pkgs.coreutils}/bin/mkfifo node "$workdir/out/subagent/native-rpc.test.js"
 
     cat > "$workdir/test.mjs" <<'EOF'
@@ -986,7 +991,7 @@ pkgs.runCommand "subagent-check"
     grep -F 'waitForGracefulShutdown' ${self}/subagent/index.ts >/dev/null
     # The protocol fixture above behaviorally covers steer, follow-up,
     # interruption, handled prompts, ordering, shutdown, and process cleanup.
-    grep -F '["--mode", "rpc", "--no-session"]' ${self}/subagent/index.ts >/dev/null
+    grep -F '["--mode", "rpc"]' ${self}/subagent/index.ts >/dev/null
     grep -F 'backgroundSubagentsSurviveShutdown(event.reason)' ${self}/subagent/index.ts >/dev/null
     grep -F 'backgroundManager.beginReloadAdoption(sessionId)' ${self}/subagent/index.ts >/dev/null
     grep -F 'manager.activateSession(sessionId)' ${self}/subagent/index.ts >/dev/null

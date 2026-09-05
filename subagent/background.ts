@@ -30,6 +30,7 @@ export type BackgroundSubagentChildStatus = "pending" | "running" | "completed" 
 export type BackgroundSubagentChildDescriptor = {
   /** Optional only for records created before per-child identities existed. */
   childId?: string;
+  taskId?: string;
   label: string;
   task?: string;
 };
@@ -202,7 +203,7 @@ function parseChildren(value: unknown): BackgroundSubagentChildDescriptor[] {
   return value.map((entry) => {
     if (!entry || typeof entry !== "object" || Array.isArray(entry)) throw new Error("invalid background subagent child");
     const child = entry as Record<string, unknown>;
-    const allowed = new Set(["childId", "label", "task"]);
+    const allowed = new Set(["childId", "taskId", "label", "task"]);
     for (const key of Object.keys(child)) if (!allowed.has(key)) throw new Error(`unknown background subagent child field ${key}`);
     const childId = child.childId === undefined
       ? undefined
@@ -211,8 +212,11 @@ function parseChildren(value: unknown): BackgroundSubagentChildDescriptor[] {
       throw new Error("invalid background subagent child id");
     }
     if (childId) ids.add(childId);
+    const taskId = child.taskId;
+    if (taskId !== undefined && (typeof taskId !== "string" || !/^subagent-task-[0-9a-f]{24}$/.test(taskId))) throw new Error("Invalid task identity");
     return {
       ...(childId ? { childId } : {}),
+      ...(taskId ? { taskId: taskId as string } : {}),
       label: requiredString(child.label, "background subagent child label", 256),
       ...(child.task === undefined ? {} : { task: requiredString(child.task, "background subagent child task", 2048) }),
     };
@@ -1044,11 +1048,13 @@ export class BackgroundSubagentChildTracker {
       if (existing) {
         if (existing.childId && childId && existing.childId !== childId) continue;
         if (!existing.childId && childId) existing.childId = childId;
+        if (descriptor.taskId) existing.taskId = descriptor.taskId;
         existing.label = boundedText(descriptor.label, 256) || existing.label;
         if (descriptor.task?.trim()) existing.task = boundedText(descriptor.task, 2048);
       } else {
         group.children.set(child, {
           ...(childId ? { childId } : {}),
+          ...(descriptor.taskId ? {taskId:descriptor.taskId} : {}),
           child,
           label: boundedText(descriptor.label, 256) || `child ${child}`,
           ...(descriptor.task?.trim() ? { task: boundedText(descriptor.task, 2048) } : {}),

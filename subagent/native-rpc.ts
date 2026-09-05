@@ -102,6 +102,7 @@ export type NativeSubagentRpcExit = {
 };
 
 export type NativeSubagentRpcDiagnostics = {
+  contextWindow?: number;
   rawExit?: NativeSubagentRpcExit;
   trace: Array<{ event: string; elapsedMs: number; streaming: boolean; settledVersion: number; closingInput: boolean; terminationRequested: boolean }>;
 };
@@ -438,9 +439,10 @@ export class NativeSubagentRpcSession implements NativeSubagentControlHandle {
   private readonly startedAt = Date.now();
   private readonly lifecycleTrace: NativeSubagentRpcDiagnostics["trace"] = [];
   private rawExit?: NativeSubagentRpcExit;
+  private contextWindow?: number;
 
   get diagnostics(): NativeSubagentRpcDiagnostics {
-    return { rawExit: this.rawExit && { ...this.rawExit }, trace: this.lifecycleTrace.map((entry) => ({ ...entry })) };
+    return { contextWindow: this.contextWindow, rawExit: this.rawExit && { ...this.rawExit }, trace: this.lifecycleTrace.map((entry) => ({ ...entry })) };
   }
 
   private trace(event: string): void {
@@ -494,12 +496,13 @@ export class NativeSubagentRpcSession implements NativeSubagentControlHandle {
       && (this.settledVersion === 0 || this.streaming || this.controlReservations > 0);
   }
 
-  async start(initialMessage: string): Promise<NativeSubagentRpcExit> {
+  async start(initialMessage: string, compactBeforePrompt = false): Promise<NativeSubagentRpcExit> {
     if (this.initialPromptSent) throw new Error("native subagent RPC initial prompt was already sent");
     this.initialPromptSent = true;
     this.notifyChange();
     const collector = this.armCollector("initial");
     try {
+      if (compactBeforePrompt) await this.sendCommand("compact", {}, undefined, 5 * 60 * 1000);
       const receipt = await this.sendCommand("prompt", { message: initialMessage }, collector);
       const disposition = await this.acceptedPromptDisposition(collector, receipt);
       this.initialPromptHandled = disposition === "handled";
@@ -712,6 +715,7 @@ export class NativeSubagentRpcSession implements NativeSubagentControlHandle {
     _receipt: CommandReceipt,
   ): Promise<"delivered" | "handled"> {
     const state = (await this.sendCommand("get_state", {})).response.data;
+    if (Number.isSafeInteger(state?.model?.contextWindow) && state.model.contextWindow > 0) this.contextWindow = state.model.contextWindow;
     if (!state || typeof state.isStreaming !== "boolean" || !Number.isSafeInteger(state.pendingMessageCount)) {
       const error = new Error("native subagent RPC get_state returned invalid prompt state");
       this.fail(error);
@@ -1115,6 +1119,7 @@ export class NativeSubagentRpcSession implements NativeSubagentControlHandle {
     command: string,
     fields: JsonObject,
     collector?: LogicalRunCollector,
+    timeoutMs = RPC_COMMAND_TIMEOUT_MS,
   ): Promise<CommandReceipt> {
     if (this.closed || this.closingInput || this.fatal || this.terminationRequested) {
       return Promise.reject(this.fatal ?? new Error("native subagent RPC control channel is closed"));
@@ -1128,7 +1133,7 @@ export class NativeSubagentRpcSession implements NativeSubagentControlHandle {
         const error = new Error(`native subagent RPC ${command} command timed out`);
         pending.reject(error);
         this.fail(error);
-      }, RPC_COMMAND_TIMEOUT_MS);
+      }, timeoutMs);
       timer.unref?.();
         this.pendingCommands.set(id, { command, collector, resolve, reject, timer });
       if (collector) {
@@ -1174,7 +1179,8 @@ export class NativeSubagentRpcSession implements NativeSubagentControlHandle {
       || (this.settledVersion === 0 && !this.initialPromptHandled)
       || this.streaming
       || this.controlReservations > 0
-      || this.pendingCommands.size > 0) return;
+      || this.pendingCommands.size > 0
+      || !this.initialPromptAccepted) return;
     this.closingInput = true;
     this.trace("stdin_end");
     try {
