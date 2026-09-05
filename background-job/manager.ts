@@ -4,6 +4,7 @@ import { access, lstat, open, readFile, realpath, writeFile } from "node:fs/prom
 import { delimiter, isAbsolute, join, relative } from "node:path";
 import { processStartToken, type JobProcessBackend } from "./tmux.js";
 import { JobStore } from "./store.js";
+import { inspectPane, capturePane, claimPane, cancelPane, signalPane, requireSamePane, requireAvailablePane, PaneGoneError } from './external-pane.js';
 import {
   JOB_SCHEMA_VERSION,
   type JobMetadata,
@@ -115,6 +116,7 @@ export async function resolveExecutable(name: string, environment: NodeJS.Proces
 }
 
 export class BackgroundJobManager {
+  private readonly paneCaptureAt = new Map<string,number>();
   constructor(readonly store: JobStore, readonly backend: JobProcessBackend) {}
 
   async start(request: StartRequest, signal?: AbortSignal): Promise<JobRecord> {
@@ -132,7 +134,7 @@ export class BackgroundJobManager {
     return await this.store.withLock(async () => {
       const records = await this.list(1000, false);
       await this.prune(records);
-      const active = records.filter((record) => !record.metadata.observed && !record.metadata.infrastructure && (record.status === "starting" || record.status === "running"));
+      const active = records.filter((record) => !record.metadata.observed && !record.metadata.pane && !record.metadata.infrastructure && (record.status === "starting" || record.status === "running"));
       if (!request.infrastructure && active.length >= MAX_RUNNING) throw new Error(`Background job limit reached (${MAX_RUNNING} running)`);
       if (!request.infrastructure && active.filter((record) => record.metadata.cwd === cwd).length >= MAX_RUNNING_PER_CWD) {
         throw new Error(`Background job limit reached for ${cwd} (${MAX_RUNNING_PER_CWD} running)`);
@@ -148,6 +150,7 @@ export class BackgroundJobManager {
         shell,
         createdAt: new Date().toISOString(),
         ownerPid: process.pid,
+        ownerToken: await processStartToken(process.pid),
         ...(request.sessionId ? { sessionId: request.sessionId } : {}),
         ...(request.childId ? { childId: request.childId } : {}),
         ...(request.infrastructure ? { infrastructure: true } : {}),
@@ -217,6 +220,49 @@ export class BackgroundJobManager {
     catch { return false; }
   }
 
+  async adoptPane(request:{paneId:string;socket?:string;logPath?:string;cwd:string;sessionId:string;childId?:string;name?:string}):Promise<JobRecord> {
+    if(!request.sessionId||Buffer.byteLength(request.sessionId)>512||request.name!==undefined&&(!request.name.trim()||Buffer.byteLength(request.name)>80))throw new Error('Invalid pane adoption owner/name');
+    const tmux=await resolveExecutable('tmux');
+    const pane=await inspectPane(tmux,request.paneId,request.socket);
+    const cwd=await realpath(request.cwd);
+    const currentSocket=process.env.TMUX?.split(',')[0];
+    if(process.env.TMUX_PANE===pane.identity.paneId&&currentSocket&&await realpath(currentSocket).catch(()=>currentSocket)===pane.identity.socket)throw new Error('Cannot adopt the pane hosting this Pi session');
+    await requireAvailablePane(pane);
+    const within=(value:string)=>{const rel=relative(cwd,value);if(rel==='..'||rel.startsWith('../')||isAbsolute(rel))throw new Error('Pane and optional log must be within the delegated cwd');};
+    return await this.store.withLock(async()=>{
+      const records=await this.list(1000);
+      const existing=records.find(r=>r.metadata.pane?.socket===pane.identity.socket&&r.metadata.pane?.paneId===pane.identity.paneId)
+        ?? records.find(r=>this.store.socketPath===pane.identity.socket&&r.launch?.paneId===pane.identity.paneId&&r.launch.panePid===pane.identity.panePid);
+      if(existing?.metadata.pane)requireSamePane(existing.metadata.pane,pane);
+      else if(existing?.launch&&!pane.dead&&existing.launch.paneStartToken!==pane.identity.paneToken)throw new PaneGoneError('Saved native pane process identity changed');
+      within(await realpath(pane.cwd||existing?.metadata.cwd||''));
+      if(existing){
+        let liveOwner:string|undefined;try{liveOwner=await processStartToken(existing.metadata.ownerPid);}catch{}
+        if(existing.metadata.ownerPid!==process.pid&&liveOwner&&(!existing.metadata.ownerToken||liveOwner===existing.metadata.ownerToken))throw new Error('Pane is managed by another live Pi session');
+        if(request.childId&&existing.metadata.sessionId===request.sessionId&&existing.metadata.childId!==request.childId)throw new Error('Pane belongs to another task in this session');
+        if(existing.metadata.sessionId===request.sessionId&&existing.metadata.ownerPid===process.pid)return existing;
+        const metadata={...existing.metadata,sessionId:request.sessionId,childId:request.childId,ownerPid:process.pid,ownerToken:await processStartToken(process.pid)};
+        if(metadata.pane)metadata.pane=await claimPane(tmux,pane,randomBytes(16).toString('hex'));
+        await this.store.replaceMetadata(metadata);
+        return await this.get(metadata.id);
+      }
+      let observed:JobMetadata['observed'];
+      if(request.logPath){const logPath=await realpath(request.logPath);within(logPath);const info=await lstat(logPath);if(!info.isFile()||info.uid!==process.getuid?.())throw new Error('Log must be a same-user regular file');observed={pid:pane.identity.panePid,startToken:pane.identity.paneToken??'(ended pane)',logPath,logDevice:info.dev,logInode:info.ino};}
+      const id=`job-${randomBytes(12).toString('hex')}`;
+      const identity=await claimPane(tmux,pane,randomBytes(16).toString('hex'));
+      const metadata:JobMetadata={schemaVersion:1,id,name:request.name??`Tmux pane ${pane.identity.paneId}`,command:`(adopted tmux pane ${pane.identity.paneId})`,shell:'(existing)',cwd,createdAt:new Date().toISOString(),ownerPid:process.pid,ownerToken:await processStartToken(process.pid),sessionId:request.sessionId,childId:request.childId,pane:identity,observed};
+      await this.store.create(metadata,'',Buffer.alloc(0));
+      return await this.get(id);
+    });
+  }
+
+  private async cachePane(metadata:JobMetadata,tmux:string):Promise<void>{
+    if(!metadata.pane||Date.now()-(this.paneCaptureAt.get(metadata.id)??0)<2000)return;
+    this.paneCaptureAt.set(metadata.id,Date.now());
+    const text=boundedTail(await capturePane(tmux,metadata.pane)).text;
+    await writeFile(this.store.path(metadata.id,'output.log'),text,{mode:0o600});
+  }
+
   async adopt(request: { pid: number; logPath: string; cwd: string; sessionId: string; childId?: string; name?: string }): Promise<JobRecord> {
     if (process.platform !== "linux" || !Number.isSafeInteger(request.pid) || request.pid < 1) throw new Error("adopt requires a Linux process identity");
     const cwd = await realpath(request.cwd);
@@ -251,6 +297,18 @@ export class BackgroundJobManager {
     const terminal = await this.store.readResult(id);
     const launch = await this.store.readLaunch(id);
     if (terminal) return { metadata, launch, result: terminal, status: terminal.status };
+    if(metadata.pane){
+      try{
+        const tmux=await resolveExecutable('tmux');const pane=await inspectPane(tmux,metadata.pane.paneId,metadata.pane.socket);requireSamePane(metadata.pane,pane);
+        let observationError:string|undefined;try{await this.cachePane(metadata,tmux);}catch(e){observationError=String(e);}
+        if(!pane.dead)return {metadata,status:'running',observationError};
+        const ended=result(pane.exitCode===undefined?'lost':pane.exitCode===0?'completed':'failed',pane.exitCode??null,'Adopted pane root process finished; task delivery is a separate outcome');
+        if(reconcile)await this.store.publishResult(id,ended);return {metadata,result:ended,status:ended.status};
+      }catch(error){
+        if(!(error instanceof PaneGoneError))return {metadata,status:'unavailable',observationError:String(error)};
+        const lost=result('lost',null,String(error));if(reconcile)await this.store.publishResult(id,lost);return {metadata,result:lost,status:'lost'};
+      }
+    }
     if (metadata.observed) {
       try {
         if (await processStartToken(metadata.observed.pid) === metadata.observed.startToken) return { metadata, status: "running" };
@@ -346,6 +404,7 @@ export class BackgroundJobManager {
 
   async signal(id: string, signal: "SIGINT" | "SIGTERM"): Promise<JobRecord> {
     const record = await this.get(id);
+    if(record.metadata.pane){await signalPane(await resolveExecutable('tmux'),record.metadata.pane,signal);return await this.get(id);}
     if (record.metadata.observed) throw new Error("Adopted jobs are observation-only; no signal authority was acquired");
     if (record.status !== "running" || !record.launch) throw new Error(`Background job ${id} is not running`);
     try { await this.backend.signal(id, record.launch, signal); }
@@ -357,6 +416,13 @@ export class BackgroundJobManager {
 
   async cancel(id: string): Promise<JobRecord> {
     const record = await this.get(id);
+    if(record.metadata.pane){
+      if(record.result)return record;
+      const tmux=await resolveExecutable('tmux');await this.cachePane(record.metadata,tmux).catch(()=>undefined);
+      await cancelPane(tmux,record.metadata.pane);
+      await this.store.publishResult(id,result('cancelled',null,'The adopted tmux pane was closed by request; independently detached work is outside that pane'));
+      return await this.get(id);
+    }
     if (record.metadata.observed) throw new Error("Adopted jobs are observation-only; no cancellation authority was acquired");
     if (record.result) {
       if (record.status === "lost" && await this.commandProcess(id)) {

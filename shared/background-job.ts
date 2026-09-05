@@ -6,6 +6,7 @@ export type JobParams = {
   action: "start" | "adopt" | "list" | "status" | "output" | "wait" | "signal" | "cancel" | "watch" | "watches" | "events" | "ack" | "unwatch";
   command?: string; name?: string; job_id?: string; timeout_ms?: number; lines?: number; limit?: number;
   signal?: "SIGINT" | "SIGTERM"; pid?: number; log_path?: string;
+  pane_id?: string; tmux_socket?: string;
   watch_id?: string; patterns?: Array<{name:string;match:string}>; from?: "start"|"end"; poll_ms?: number;
   watch_timeout_ms?: number; after_sequence?: number; through_sequence?: number;
 };
@@ -29,6 +30,8 @@ export const JobParameters = Type.Object({
   limit: Type.Optional(Type.Integer({ minimum: 1, maximum: 50 })),
   signal: Type.Optional(Type.String({ pattern: "^(SIGINT|SIGTERM)$" })),
   pid: Type.Optional(Type.Integer({ minimum: 1, description: "Existing process to observe (adopt only; no control authority is acquired)." })),
+  pane_id: Type.Optional(Type.String({pattern:"^%[0-9]+$",description:"adopt only: exact existing tmux pane ID. No input or restart is sent."})),
+  tmux_socket: Type.Optional(Type.String({maxLength:4096,description:"adopt pane: explicit tmux socket; defaults to the current/default tmux server."})),
   log_path: Type.Optional(Type.String({ description: "Existing output log for read-only adoption or a persistent watch." })),
   watch_id: Type.Optional(Type.String({ pattern: "^watch-[0-9a-f]{24}$" })),
   patterns: Type.Optional(Type.Array(Type.Object({ name: Type.String({maxLength:64}), match: Type.String({maxLength:256}) }), {minItems:1,maxItems:16})),
@@ -41,7 +44,7 @@ export const JobParameters = Type.Object({
 export function validateJobParams(p: JobParams): void {
   if (!p || typeof p !== "object" || Array.isArray(p)) throw new Error("Invalid background job parameters");
   const allowed: Record<string,string[]> = {
-    start:["command","name"], adopt:["pid","log_path","name"], list:["limit"], status:["job_id"],
+    start:["command","name"], adopt:["pid","log_path","name","pane_id","tmux_socket"], list:["limit"], status:["job_id"],
     watch:["log_path","patterns","from","poll_ms","watch_timeout_ms","job_id"], watches:[], events:["watch_id","after_sequence"], ack:["watch_id","through_sequence"], unwatch:["watch_id"],
     output:["job_id","lines"], wait:["job_id","timeout_ms","lines"], signal:["job_id","signal"], cancel:["job_id"],
   };
@@ -58,5 +61,13 @@ export function validateJobParams(p: JobParams): void {
   for (const k of ["after_sequence","through_sequence"] as const) if(p[k]!==undefined&&(!Number.isSafeInteger(p[k])||p[k]!<0))throw new Error(`Invalid ${k}`);
   if(p.action==='ack'&&p.through_sequence===undefined)throw new Error('ack requires through_sequence');
   if(p.action==='watch'&&typeof p.log_path!=='string'&&!/^job-[0-9a-f]{24}$/.test(p.job_id??''))throw new Error('watch requires log_path or an owned job_id');
-  if (p.action==="adopt" && (!p.pid || typeof p.log_path!=="string" || !p.log_path || Buffer.byteLength(p.log_path)>4096)) throw new Error("adopt requires pid and log_path");
+  if (p.action==="adopt") {
+    if(p.pane_id!==undefined){
+      if(typeof p.pane_id!=="string"||!/^%[0-9]+$/.test(p.pane_id)||p.pid!==undefined)throw new Error('Pane adoption requires pane_id, not pid');
+      if(p.tmux_socket!==undefined&&(typeof p.tmux_socket!=='string'||!p.tmux_socket||Buffer.byteLength(p.tmux_socket)>4096))throw new Error('Invalid tmux_socket');
+      if(p.log_path!==undefined&&(typeof p.log_path!=='string'||!p.log_path||Buffer.byteLength(p.log_path)>4096))throw new Error('Invalid log_path');
+    } else {
+      if(p.tmux_socket!==undefined||!p.pid||typeof p.log_path!=="string"||!p.log_path||Buffer.byteLength(p.log_path)>4096)throw new Error('adopt requires pid and log_path, or pane_id with optional tmux_socket');
+    }
+  }
 }

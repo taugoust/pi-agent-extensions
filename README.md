@@ -174,10 +174,11 @@ extensions have stopped.
 without overriding Pi's Bash tool. Jobs, private metadata, and a bounded 1 MiB
 output tail live under Pi's private agent state directory and survive turns,
 compaction, extension reload, session replacement, and Pi exit. Model-facing
-operations are bound to the creating Pi session and expose only opaque job IDs;
-they cannot provide tmux targets or tmux commands. Output returned to the model
-is further limited to 50 KiB/2000 lines. Aggregate concurrency is eight jobs
-and per-working-directory concurrency is four. Terminal records older than
+control operations are bound to the owning Pi session and use opaque job IDs.
+Only adoption accepts an exact existing tmux pane ID/server; no API accepts
+arbitrary tmux commands. Output returned to the model
+is further limited to 50 KiB/2000 lines. New-command concurrency is eight jobs
+and per-working-directory concurrency is four; adopted panes do not consume launch slots. Terminal records older than
 seven days, or beyond the newest 100, are pruned when another job starts.
 
 A cancelled `wait` leaves the underlying job running. `cancel` is the only
@@ -770,6 +771,35 @@ jobs; the parent can supervise all jobs in its session. Launch messages disclose
 whether the broker is available. A broker outage fails explicitly rather than
 falling back to an untracked child process.
 
+### Existing tmux work and full Pi restarts
+
+An agent can attach any eligible existing pane as a managed background job:
+
+```json
+{"action":"adopt","pane_id":"%329","tmux_socket":"/run/user/2016/tmux-2016/default","name":"Helios route"}
+```
+
+Only `pane_id` is required when using the current/default tmux server. Registration
+never restarts the process or sends terminal input. The returned `job_id` supports
+normal status, output, wait, signal, and cancel operations. Output is captured for
+later inspection. `cancel` closes the selected adopted pane; SIGINT sends Ctrl-C
+to its foreground terminal work, and SIGTERM targets its original root process.
+Independently detached work is outside that pane's cancellation scope.
+
+For a handoff, save the **pane ID, tmux socket, meaningful name, and optional log
+path** in the project notes. After fully restarting Pi, the new agent calls the
+same `adopt` action. No descriptor from a previous harness version is required.
+The harness records/verifies identities internally, reuses a retained job record
+when available, and transfers management only after the previous Pi owner is gone
+(or within the same Pi process after a session change). It refuses another live
+controller's pane and the pane hosting Pi itself. Only same-user panes within the
+agent's workspace can be adopted; unrelated panes are not modified.
+
+A live interactive shell does not imply that a build inside it is still running.
+For reliable stage alerts, provide the build's append-only `log_path` at adoption
+or create a watch on that log explicitly; pane snapshots are not an append-only
+stream. The pane's own termination is tracked automatically.
+
 `background_job {action:"adopt", pid:123, log_path:"/workspace/build.log"}` registers
 an existing same-user Linux process and log within the caller's cwd. Adoption is
 read-only: it verifies process start identity and log inode, never acquires
@@ -827,6 +857,26 @@ resumed this way. Runtime controls still target only active child IDs. A parent
 crash does not automatically relaunch work; recovery waits for previous-child
 exit and a cleanup grace before admitting a successor. Retained session files can
 contain sensitive project history and stay in the private parent agent directory.
+
+### Human task dashboard
+
+Use `/tasks` in Pi or Paseo to manage work by task title rather than copying IDs.
+Each task view groups its current attempt, delivery outcome, next step, report,
+registered builds, and watches. Actions include **Resume saved task**, **Open build
+output**, **View unread alerts**, **Acknowledge displayed alerts**, and **Stop
+watching — keep build running**. Resume requires an idle parent and confirmation;
+acknowledgement affects only the displayed sequence range. Menus are mirrored to
+Paseo using its existing choice UI. IDs and attempt history remain available under
+**Technical details**. `/watches` provides the same alert controls for all watches
+in the session, including ones not linked to a task. Watches created for a
+task-owned job appear under that task. `/background-jobs` manages this session's jobs and hides the
+internal watcher service so it cannot be mistaken for a user build.
+
+Outcome labels distinguish **Needs continuation**, **Blocked**, **Checkpoint
+saved**, **Outcome not reported**, and **Reported delivered**. Working tasks are
+never shown as delivered merely because a previous attempt reported success.
+Watch alerts already persisted in the session are not replayed by reload, while
+undelivered alerts remain recoverable and explicit acknowledgements remain durable.
 
 Native children run over Pi's strict UTF-8, LF-delimited RPC protocol. Parent
 prompts use RPC `prompt` with `streamingBehavior`, logical completion is

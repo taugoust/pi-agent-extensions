@@ -1,4 +1,5 @@
 import { constants } from "node:fs";
+import { validatePaneIdentity } from './external-pane.js';
 import {
   access,
   link,
@@ -70,7 +71,7 @@ function iso(value: unknown, label: string): string {
 
 export function parseMetadata(value: unknown): JobMetadata {
   const data = object(value, "job metadata");
-  exactKeys(data, ["schemaVersion", "id", "command", "cwd", "shell", "createdAt", "ownerPid"], ["name", "sessionId", "childId", "observed", "infrastructure"]);
+  exactKeys(data, ["schemaVersion", "id", "command", "cwd", "shell", "createdAt", "ownerPid"], ["name", "sessionId", "childId", "observed", "infrastructure", "pane", "ownerToken"]);
   if (data.schemaVersion !== JOB_SCHEMA_VERSION) throw new Error("unsupported job metadata schema");
   const id = string(data.id, "job id", 64);
   if (!JOB_ID_PATTERN.test(id)) throw new Error("invalid job id");
@@ -83,6 +84,8 @@ export function parseMetadata(value: unknown): JobMetadata {
     shell: string(data.shell, "job shell", 4096),
     createdAt: iso(data.createdAt, "job creation time"),
     ownerPid: integer(data.ownerPid, "owner pid", 1),
+    ...(data.ownerToken === undefined ? {} : {ownerToken:string(data.ownerToken,'owner token',256)}),
+    ...(data.pane === undefined ? {} : {pane:validatePaneIdentity(data.pane)}),
     ...(data.sessionId === undefined ? {} : { sessionId: string(data.sessionId, "session id", 512) }),
     ...(data.childId === undefined ? {} : { childId: string(data.childId, "child id", 128) }),
     ...(data.observed === undefined ? {} : { observed: parseObserved(data.observed) }),
@@ -270,6 +273,11 @@ export class JobStore {
     const target = `${source}.removing-${process.pid}`;
     await rename(source, target);
     await rm(target, { recursive: true, force: true });
+  }
+
+  async replaceMetadata(metadata: JobMetadata): Promise<void> {
+    const valid = parseMetadata(metadata);
+    await writeAtomic(this.path(valid.id, 'metadata.json'), valid);
   }
 
   async withLock<T>(operation: () => Promise<T>): Promise<T> {

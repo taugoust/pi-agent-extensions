@@ -6,7 +6,7 @@ import { execFileSync } from 'node:child_process';
 export const TASK_ID_PATTERN=/^subagent-task-[0-9a-f]{24}$/;
 export const createTaskId=()=>`subagent-task-${randomBytes(12).toString('hex')}`;
 export type NativeTaskSpec={task:string;cwd:string;model?:string;tools?:string[];systemPrompt?:string;acceptance?:string[]};
-export type NativeTaskRecord={version:1;taskId:string;ownerSessionId:string;sessionId:string;spec:NativeTaskSpec;state:'running'|'idle';attempt:number;childId:string;ownerPid:number;ownerToken:string;childPid?:number;childToken?:string;createdAt:string;updatedAt:string;contextTokens?:number;contextWindow?:number;checkpointed?:boolean;requiresCompaction?:boolean;nextAction?:string;recoveryAfter?:number;history:Array<{attempt:number;childId:string;finishedAt:string;outcome?:string}>};
+export type NativeTaskRecord={version:1;taskId:string;ownerSessionId:string;sessionId:string;spec:NativeTaskSpec;state:'running'|'idle';attempt:number;childId:string;ownerPid:number;ownerToken:string;childPid?:number;childToken?:string;createdAt:string;updatedAt:string;contextTokens?:number;contextWindow?:number;checkpointed?:boolean;requiresCompaction?:boolean;nextAction?:string;latestSummary?:string;latestSummaryAttempt?:number;recoveryAfter?:number;history:Array<{attempt:number;childId:string;finishedAt:string;outcome?:string;execution?:string}>};
 function token(pid:number):string|undefined {
  try {
   if(process.platform==='linux'){const s=readFileSync(`/proc/${pid}/stat`,'utf8');return s.slice(s.lastIndexOf(')')+2).split(' ')[19];}
@@ -45,7 +45,21 @@ export class NativeTaskStore {
  }
  list(owner:string,limit=50){
   if(!Number.isSafeInteger(limit)||limit<1||limit>50)throw new Error('Invalid task list limit');
-  return readdirSync(this.root).filter(id=>TASK_ID_PATTERN.test(id)).flatMap(id=>{try{const r=this.get(owner,id);return [{task_id:id,child_id:r.childId,attempt:r.attempt,state:r.state==='running'&&token(r.ownerPid)!==r.ownerToken?'interrupted':r.state,checkpointed:r.checkpointed??false,requires_compaction:r.requiresCompaction??false,next_action:r.nextAction,updated_at:r.updatedAt}];}catch{return [];}}).sort((a,b)=>b.updated_at.localeCompare(a.updated_at)).slice(0,limit);
+  return readdirSync(this.root).filter(id=>TASK_ID_PATTERN.test(id)).flatMap(id=>{
+   try {
+    const r=this.get(owner,id);
+    const state=r.state==='running'&&token(r.ownerPid)!==r.ownerToken?'interrupted':r.state;
+    const last=r.history.at(-1);
+    return [{task_id:id,child_id:r.childId,attempt:r.attempt,state,
+      title:r.spec.task.split('\n')[0].slice(0,140),
+      outcome:last?.childId===r.childId?last.outcome:undefined,
+      execution:last?.childId===r.childId?last.execution:undefined,
+      summary:r.latestSummaryAttempt===r.attempt?r.latestSummary:undefined,
+      can_resume:state!=='running'&&!(r.childPid&&r.childToken&&token(r.childPid)===r.childToken),
+      checkpointed:r.checkpointed??false,requires_compaction:r.requiresCompaction??false,
+      next_action:r.nextAction,updated_at:r.updatedAt}];
+   }catch{return [];}
+  }).sort((a,b)=>b.updated_at.localeCompare(a.updated_at)).slice(0,limit);
  }
  async create(owner:string,id:string,spec:NativeTaskSpec,childId:string):Promise<NativeTaskRecord>{
   if(!owner||Buffer.byteLength(owner)>512||!/^subagent-child-[0-9a-f]{24}$/.test(childId)||!spec.task.trim()||Buffer.byteLength(JSON.stringify(spec))>96*1024)throw new Error('Invalid retained task specification');
@@ -77,11 +91,11 @@ export class NativeTaskStore {
   });
  }
  async bindChild(owner:string,id:string,childId:string,pid:number){await this.lock(id,()=>{const r=this.get(owner,id);if(r.state!=='running'||r.childId!==childId)throw new Error('Task attempt ownership changed');r.childPid=pid;r.childToken=token(pid);this.save(r);});}
- async finish(owner:string,id:string,childId:string,info:{outcome?:string;contextTokens?:number;contextWindow?:number;nextAction?:string}={}){
+ async finish(owner:string,id:string,childId:string,info:{outcome?:string;contextTokens?:number;contextWindow?:number;nextAction?:string;summary?:string;execution?:string}={}){
   await this.lock(id,()=>{const r=this.get(owner,id);if(r.childId!==childId)return;r.state='idle';r.updatedAt=new Date().toISOString();
    if(Number.isSafeInteger(info.contextTokens)&&info.contextTokens!>=0)r.contextTokens=info.contextTokens;if(info.contextWindow)r.contextWindow=info.contextWindow;
-   r.requiresCompaction=Boolean(r.contextWindow&&r.contextTokens!>=r.contextWindow*.8);r.checkpointed=info.outcome==='checkpointed'||r.requiresCompaction;r.nextAction=info.nextAction?.slice(0,2000);
-   r.history.push({attempt:r.attempt,childId,finishedAt:r.updatedAt,outcome:info.outcome});r.history=r.history.slice(-32);this.save(r);
+   r.requiresCompaction=Boolean(r.contextWindow&&r.contextTokens!>=r.contextWindow*.8);r.checkpointed=info.outcome==='checkpointed'||r.requiresCompaction;r.nextAction=info.nextAction?.slice(0,2000);r.latestSummary=info.summary?.slice(0,2000);r.latestSummaryAttempt=r.attempt;
+   r.history.push({attempt:r.attempt,childId,finishedAt:r.updatedAt,outcome:info.outcome,execution:info.execution});r.history=r.history.slice(-32);this.save(r);
   });
  }
 }

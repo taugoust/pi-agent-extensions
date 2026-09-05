@@ -9,6 +9,8 @@ import { agentSHRuntimeDisposition, classifyAgentSHStartup, type AgentSHRuntimeS
 import { BackgroundJobManager, resolveExecutable, sanitizeOutput } from "./manager.js";
 import { JobStore } from "./store.js";
 import { WatchManager } from "./watch.js";
+import { jobStatusLabel, watchResultText, watchDeliveryCursors, taskChoice, remoteTaskUiConnected, uiText } from "../shared/task-presentation.js";
+import { watchMenu } from '../shared/watch-menu.js';
 import { TmuxBackend } from "./tmux.js";
 import type { JobRecord } from "./types.js";
 import { JOB_BROKER_KEY, JobParameters, validateJobParams, type JobParams, type ParentJobBroker } from "../shared/background-job.js";
@@ -134,7 +136,7 @@ function preview(command: string, maximum = 100): string {
 
 function recordLine(record: JobRecord): string {
   const code = record.result?.exitCode === null || record.result?.exitCode === undefined ? "" : ` exit=${record.result.exitCode}`;
-  return `${record.metadata.id}  ${record.status}${code}  ${age(record)}  ${record.metadata.name ? preview(record.metadata.name, 80) : preview(record.metadata.command)}`;
+  return `${record.metadata.id}  ${jobStatusLabel(record.status, Boolean(record.metadata.observed && !record.metadata.pane))}${code}  ${age(record)}  ${record.metadata.name ? preview(record.metadata.name, 80) : preview(record.metadata.command)}`;
 }
 
 function recordText(record: JobRecord): string {
@@ -143,6 +145,7 @@ function recordText(record: JobRecord): string {
     `cwd: ${sanitizeOutput(record.metadata.cwd)}`,
     `command: ${preview(record.metadata.command, 200)}`,
     ...(record.result?.reason ? [`reason: ${record.result.reason}`] : []),
+    ...(record.observationError ? [`Observation: ${record.observationError}`] : []),
   ].join("\n");
 }
 
@@ -153,7 +156,9 @@ function publicDetails(record: JobRecord): Record<string, unknown> {
     exit_code: record.result?.exitCode,
     signal: record.result?.signal,
     child_id: record.metadata.childId,
-    observation_only: Boolean(record.metadata.observed),
+    observation_only: Boolean(record.metadata.observed && !record.metadata.pane),
+    ...(record.metadata.pane ? {pane_id:record.metadata.pane.paneId,tmux_socket:record.metadata.pane.socket,tracking_kind:'tmux-pane',adopted:true} : {}),
+    name: record.metadata.name ? preview(record.metadata.name,80) : preview(record.metadata.command,80),
   };
 }
 
@@ -178,6 +183,7 @@ function toolResult(text: string, details: Record<string, unknown>) {
 }
 
 export function completionMessage(record: JobRecord): string {
+  if (record.metadata.observed && !record.metadata.pane) return `Observation ended: ${record.metadata.name ?? record.metadata.id}. The process exit status is unknown; this is not a success or failure assertion. Inspect the retained output.`;
   const outcome = `${record.status}${record.result?.exitCode === null || record.result?.exitCode === undefined ? "" : ` (exit ${record.result.exitCode})`}`;
   const action = record.status === "completed"
     ? "Inspect output before declaring dependent work complete."
@@ -190,7 +196,7 @@ export function lifecycleDelivery(isIdle: boolean): "steer" | "nextTurn" {
 }
 
 export function runningReminder(records: readonly JobRecord[]): string | undefined {
-  const running = records.filter((record) => record.status === "running" || record.status === "starting");
+  const running = records.filter((record) => !record.metadata.infrastructure && (record.status === "running" || record.status === "starting"));
   if (running.length === 0) return undefined;
   const ids = running.slice(0, 8).map((record) => record.metadata.id).join(", ");
   return `${running.length} background job${running.length === 1 ? " is" : "s are"} still running (${ids}). Do not claim dependent work is complete; use a bounded background_job wait/status/output check. Intentionally long-lived services may remain running.`;
@@ -226,7 +232,7 @@ export default function backgroundJob(pi: ExtensionAPI) {
     if (!ctx.hasUI) return;
     try {
       const ownerSessionId = sessionId(ctx);
-      const running = (await (await manager()).list()).filter((record) => record.metadata.sessionId === ownerSessionId && (record.status === "running" || record.status === "starting")).length;
+      const running = (await (await manager()).list()).filter((record) => record.metadata.sessionId === ownerSessionId && !record.metadata.infrastructure && (record.status === "running" || record.status === "starting")).length;
       ctx.ui.setStatus("background-jobs", running > 0 ? ctx.ui.theme.fg("accent", `jobs ${running}`) : undefined);
     } catch {
       ctx.ui.setStatus("background-jobs", ctx.ui.theme.fg("error", "jobs ✗"));
@@ -289,7 +295,8 @@ export default function backgroundJob(pi: ExtensionAPI) {
       let delivered = 0;
       for (const watch of await watches.list()) {
         if (generation !== sessionGeneration || sessionContext !== ctx || delivered >= 8) break;
-        const page = await watches.events(watch.watch_id, watchNotified.get(watch.watch_id));
+        let page = await watches.events(watch.watch_id, watchNotified.get(watch.watch_id));
+        if (page.acknowledged_through > (watchNotified.get(watch.watch_id) ?? 0)) page = await watches.events(watch.watch_id, page.acknowledged_through);
         if (!page.events.length && !page.overflow) continue;
         const summary = page.events.slice(0,8).map((e:any) => `#${e.sequence} ${e.kind}${e.rule ? ` (${e.rule})` : ""}: ${sanitizeOutput(e.text ?? e.status ?? "").slice(0,256)}`).join("\n");
         pi.sendMessage({ customType: "background-job-watch", display: true,
@@ -314,6 +321,8 @@ export default function backgroundJob(pi: ExtensionAPI) {
   pi.on("session_start", async (_event, ctx) => {
     sessionGeneration += 1;
     sessionContext = ctx;
+    watchNotified.clear();
+    for (const [id, sequence] of watchDeliveryCursors(ctx.sessionManager.getBranch?.() ?? [])) watchNotified.set(id, sequence);
     const owner = sessionId(ctx);
     broker = { protocol: 1, sessionId: owner, async execute(identity, callId, params, signal, authorize) {
       if (sessionContext?.sessionManager.getSessionId() !== owner || identity.sessionId !== owner) throw new Error("Parent job authority is unavailable for this session");
@@ -372,7 +381,7 @@ export default function backgroundJob(pi: ExtensionAPI) {
   const jobTool = {
     name: "background_job",
     label: "Background Job",
-    description: "Manage durable native background shell jobs. Start jobs or adopt existing same-user processes and logs for read-only observation; list/status/output/wait inspect, signal/cancel control only owned launches. Jobs survive Pi exit. watch creates a persistent literal-pattern log watcher (default starts at end); events reads its journal, ack acknowledges a sequence, unwatch stops monitoring only, watches lists watches. Watch events wake the parent; no LLM polling is required. Cancelling wait never cancels execution. Output is limited to 50 KiB/2000 lines.",
+    description: "Manage durable native background shell jobs. Start jobs or adopt an existing tmux pane as a managed job without restarting it: adopt pane_id and optional tmux_socket/log_path/name. No descriptor is needed. Status/output/wait/signal/cancel then work through its job_id; cancel closes the adopted pane. Re-adopt after a full Pi restart to recover management. Alternatively pid+log_path adoption is read-only. Jobs survive Pi exit. watch creates a persistent literal-pattern log watcher (default starts at end); events reads its journal, ack acknowledges a sequence, unwatch stops monitoring only, watches lists watches. Watch events wake the parent; no LLM polling is required. Cancelling wait never cancels execution. Output is limited to 50 KiB/2000 lines.",
     promptSnippet: "Start, inspect, wait for, signal, or cancel durable background shell jobs",
     promptGuidelines: [
       "Use background_job for commands that should continue across turns or Pi exits; use bash for short foreground commands.",
@@ -400,7 +409,7 @@ export default function backgroundJob(pi: ExtensionAPI) {
           else if (params.action === "events") data = await watches.events(params.watch_id!, params.after_sequence, internal?.childId);
           else if (params.action === "ack") data = await watches.ack(params.watch_id!, params.through_sequence!, internal?.childId);
           else data = await watches.stop(params.watch_id!, internal?.childId);
-          response = toolResult(sanitizeOutput(JSON.stringify(data, null, 2)), { action: params.action, ...data });
+          response = toolResult(watchResultText(params.action, data), { action: params.action, ...data });
           break;
         }
         case "start": {
@@ -410,8 +419,13 @@ export default function backgroundJob(pi: ExtensionAPI) {
           break;
         }
         case "adopt": {
-          const record = await service.adopt({ pid: params.pid!, logPath: params.log_path!, cwd: ctx.cwd, sessionId: ownerSessionId, childId: internal?.childId, name: params.name });
-          response = toolResult(`${recordText(record)}\nObservation only. This does not acquire signal/cancel authority or infer success when the PID exits.`, { action: params.action, ...publicDetails(record) });
+          const record = params.pane_id
+            ? await service.adoptPane({paneId:params.pane_id,socket:params.tmux_socket,logPath:params.log_path,cwd:ctx.cwd,sessionId:ownerSessionId,childId:internal?.childId,name:params.name})
+            : await service.adopt({ pid: params.pid!, logPath: params.log_path!, cwd: ctx.cwd, sessionId: ownerSessionId, childId: internal?.childId, name: params.name });
+          const guidance = record.metadata.pane
+            ? `Linked the existing pane without restarting it or sending input. Use this job_id for status/output/wait/signal/cancel. Cancel closes the adopted pane.\nSave for the next agent: pane_id=${record.metadata.pane.paneId}, tmux_socket=${record.metadata.pane.socket}. Re-adopt those values after Pi restarts; no descriptor is required. Tracks the pane's root process: choose the actual command/runner pane, not a separate tail/log viewer. A live interactive shell is not proof that a build inside it is still running.`
+            : "Observation only. This does not acquire signal/cancel authority or infer success when the PID exits.";
+          response = toolResult(`${recordText(record)}\n${guidance}`, { action: params.action, ...publicDetails(record) });
           break;
         }
         case "list": {
@@ -473,43 +487,75 @@ export default function backgroundJob(pi: ExtensionAPI) {
       const subject = params.action === "start" ? params.name ?? preview(params.command ?? "") : params.job_id ?? "";
       return new Text(`${theme.fg("toolTitle", theme.bold("background_job"))} ${theme.fg("muted", params.action)}${subject ? ` ${theme.fg("dim", subject)}` : ""}`, 0, 0);
     },
-    renderResult(result, { isPartial }, theme) {
+    renderResult(result, { isPartial, expanded }, theme) {
       if (isPartial) return new Text(theme.fg("warning", "Working…"), 0, 0);
-      const text = result.content.find((part: any) => part.type === "text")?.text ?? "";
+      let text = result.content.find((part: any) => part.type === "text")?.text ?? "";
+      if (!expanded) {
+        if (result.details?.jobs) text = result.details.jobs.map((j:any)=>`${jobStatusLabel(j.status,j.observation_only)} · ${uiText(j.name,90)}`).join("\n") || "No background jobs.";
+        else if (result.details?.name && ["start","status","adopt"].includes(result.details.action)) text = `${jobStatusLabel(result.details.status,result.details.observation_only)} · ${uiText(result.details.name,100)}`;
+        const lines=text.split("\n");
+        if(lines.length>10)text=lines.slice(0,10).join("\n")+"\nExpand output for more.";
+      }
       return new Text(text, 0, 0);
     },
   };
   pi.registerTool(jobTool);
+  let watchUiOpen=false;
+  pi.registerCommand('watches',{
+    description:'Review and acknowledge build alerts, or stop watching without stopping builds',
+    handler:async(_args,ctx)=>{
+      if(!ctx.hasUI)return;
+      if(watchUiOpen){ctx.ui.notify('The watch manager is already open.','warning');return;}
+      watchUiOpen=true;
+      const show=async(title:string,body:string)=>{
+        if(ctx.mode==='tui'&&!remoteTaskUiConnected())await ctx.ui.editor(`${title} — view only; edits are not saved`,uiText(body,24000));
+        else pi.sendMessage({customType:'background-job-view',content:`${title}\n\n${uiText(body,24000)}`,display:true},{deliverAs:'steer',triggerTurn:false});
+      };
+      try {await watchMenu(ctx,params=>jobTool.execute(`watch-ui-${Date.now()}`,params,undefined,undefined,ctx),show);}
+      catch(error){await show('Watch action unavailable',uiText(error instanceof Error?error.message:error,2000));}
+      finally{watchUiOpen=false;}
+    }
+  });
 
   pi.registerCommand("background-jobs", {
     description: "Inspect and manage extension-owned background jobs",
     handler: async (_args, ctx) => {
       if (!ctx.hasUI) return;
+      try {
       const service = await manager();
-      const records = await service.list(50);
-      if (records.length === 0) { ctx.ui.notify("No background jobs", "info"); return; }
-      const labels = records.map(recordLine);
-      const selected = await ctx.ui.select("Background jobs", labels);
+      const records = (await service.list(1000)).filter(record=>!record.metadata.infrastructure && record.metadata.sessionId===sessionId(ctx)).slice(0,50);
+      const show = async (title:string, body:string) => {
+        if(ctx.mode==='tui'&&!remoteTaskUiConnected()) await ctx.ui.editor(`${title} — view only; edits are not saved`,body);
+        else pi.sendMessage({customType:'background-job-view',content:`${title}\n\n${uiText(body,24000)}`,display:true},{deliverAs:'steer',triggerTurn:false});
+      };
+      if (records.length === 0) { await show('Background jobs','No background jobs in this session.'); return; }
+      const labels = records.map((r,i)=>`${i+1}. ${jobStatusLabel(r.status,Boolean(r.metadata.observed && !r.metadata.pane))} · ${preview(r.metadata.name??r.metadata.command,90)}`);
+      const selected = await taskChoice(ctx, "Background jobs", labels);
       if (!selected) return;
       const record = records[labels.indexOf(selected)];
       if (!record) return;
-      const actions = record.status === "running" ? ["Show output", "Show status", "Show attach command", "Cancel job"] : ["Show output", "Show status", "Remove record"];
-      const action = await ctx.ui.select(record.metadata.id, actions);
+      const actions = ["Show output", "Show status",
+        ...(record.status === 'running' && (!record.metadata.observed || record.metadata.pane) ? [...(record.metadata.pane ? [] : ['Show attach command']), 'Cancel job'] : []),
+        ...(record.result ? ['Remove record'] : [])];
+      const action = await taskChoice(ctx, labels[labels.indexOf(selected)], actions);
       if (action === "Show output") {
         const snapshot = await service.output(record.metadata.id);
-        await ctx.ui.editor(`${record.metadata.id} output`, outputText(snapshot));
+        await show(`${preview(record.metadata.name??record.metadata.command,100)} — output`, outputText(snapshot));
       } else if (action === "Show status") {
-        await ctx.ui.editor(`${record.metadata.id} status`, `${recordText(await service.get(record.metadata.id))}\nattach: ${service.backend.attachCommand()}`);
+        await show('Job details', `${recordText(await service.get(record.metadata.id))}${record.metadata.observed||record.metadata.pane?'':`\nattach: ${service.backend.attachCommand()}`}`);
       } else if (action === "Show attach command") {
-        ctx.ui.notify(service.backend.attachCommand(), "info");
-      } else if (action === "Cancel job" && await ctx.ui.confirm("Cancel background job?", recordLine(record))) {
+        await show('Attach to job terminals', service.backend.attachCommand());
+      } else if (action === "Cancel job" && await taskChoice(ctx, record.metadata.pane ? `Close adopted pane ${record.metadata.pane.paneId}? Its terminal work will stop; captured output remains available.` : `Cancel this job? ${preview(record.metadata.command,120)}`, ['Cancel job','Keep running']) === 'Cancel job') {
         await service.cancel(record.metadata.id);
-        ctx.ui.notify(`Cancelled ${record.metadata.id}`, "info");
-      } else if (action === "Remove record" && await ctx.ui.confirm("Remove background job record?", recordLine(record))) {
+        await show('Job cancelled', preview(record.metadata.name??record.metadata.command,120));
+      } else if (action === "Remove record" && await taskChoice(ctx, 'Remove this finished job record?', ['Remove record','Keep record']) === 'Remove record') {
         await service.remove(record.metadata.id);
-        ctx.ui.notify(`Removed ${record.metadata.id}`, "info");
+        await show('Record removed', 'Only the finished job record was removed.');
       }
       await updateStatus(ctx);
+      } catch(error) {
+        pi.sendMessage({customType:'background-job-view',content:`Job action unavailable: ${uiText(error instanceof Error?error.message:error,2000)}`,display:true},{deliverAs:'steer',triggerTurn:false});
+      }
     },
   });
 }

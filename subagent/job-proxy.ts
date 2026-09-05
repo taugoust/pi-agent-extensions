@@ -4,7 +4,7 @@ import { JobParameters, JOB_REQUEST_TITLE, validateJobParams } from "../shared/b
 export default function parentOwnedJobs(pi: ExtensionAPI) {
   pi.registerTool({
     name: "background_job", label: "Parent-owned background job",
-    description: "Start and observe durable jobs through the parent harness. Jobs remain visible to the parent and survive this child's exit. You may inspect/control only jobs belonging to this task. Adopted processes are observation-only. Use this instead of handwritten tmux runners.",
+    description: "Start and observe durable jobs through the parent harness. Jobs remain visible to the parent and survive this child's exit. You may inspect/control only jobs belonging to this task. adopt pane_id links an existing tmux pane as a managed job without restarting it; cancellation closes that pane. pid+log_path adoption remains observation-only. Use this instead of handwritten tmux runners.",
     parameters: JobParameters,
     async execute(toolCallId, params, signal, _update, ctx) {
       if (ctx.mode !== "rpc" || !process.env.PI_SUBAGENT_ID) throw new Error("Parent job broker is available only to native RPC children");

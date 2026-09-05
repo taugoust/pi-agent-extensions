@@ -1,6 +1,6 @@
 import { randomBytes, createHash } from 'node:crypto';
 import { mkdir, realpath, stat, readdir, writeFile, readFile } from 'node:fs/promises';
-import { join, relative, isAbsolute } from 'node:path';
+import { join, relative, isAbsolute, basename } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { JobStore } from './store.js';
 import { BackgroundJobManager, resolveExecutable } from './manager.js';
@@ -29,7 +29,7 @@ export class WatchManager {
     if(p.from!==undefined&&!['start','end'].includes(p.from))throw new Error('Invalid from');
     const base=await realpath(cwd);
     let resultPath:string|undefined;let jobLog:string|undefined;
-    if(p.job_id){const job=await this.jobs.get(p.job_id);if(job.metadata.sessionId!==this.owner||(childId!==undefined&&job.metadata.childId!==childId))throw new Error('Associated job belongs to another owner');resultPath=this.jobs.store.path(p.job_id,'result.json');jobLog=job.metadata.observed?.logPath??this.jobs.store.path(p.job_id,'output.log');}
+    if(p.job_id){const job=await this.jobs.get(p.job_id);if(job.metadata.sessionId!==this.owner||(childId!==undefined&&job.metadata.childId!==childId))throw new Error('Associated job belongs to another owner');childId??=job.metadata.childId;if(job.metadata.pane&&!job.metadata.observed&&!p.log_path)throw new Error('For stage alerts on a tmux pane, provide its append-only log_path. Pane lifetime and output are already tracked without a watcher.');resultPath=this.jobs.store.path(p.job_id,'result.json');jobLog=job.metadata.observed?.logPath??this.jobs.store.path(p.job_id,'output.log');}
     const file=await realpath(p.log_path??jobLog??'');const rel=relative(base,file);
     if(file!==jobLog&&(rel==='..'||rel.startsWith('../')||isAbsolute(rel)))throw new Error('Watched log must be within delegated cwd or belong to an owned job');
     const info=await stat(file);if(!info.isFile()||info.uid!==process.getuid?.())throw new Error('Watch requires a same-user regular log');
@@ -46,7 +46,7 @@ export class WatchManager {
       return this.summary(w);
     });
   }
-  private summary(w:any){return {watch_id:w.id,status:w.status,log_path:w.path,sequence:w.sequence,dropped_through:w.droppedThrough,child_id:w.childId};}
+  private summary(w:any){return {watch_id:w.id,status:w.status,log_path:w.path,label:basename(w.path),sequence:w.sequence,dropped_through:w.droppedThrough,child_id:w.childId};}
   private async ensureRunner(){
     try{const id=(await readFile(join(this.root,'service'),'utf8')).trim();const r=await this.jobs.get(id);if(r.metadata.sessionId===this.owner&&['starting','running'].includes(r.status))return;}catch{}
     const node=await resolveExecutable('node');const runner=fileURLToPath(new URL('./watch-runner.mjs',import.meta.url));
@@ -61,10 +61,12 @@ export class WatchManager {
   }
   async events(id:string,after?:number,childId?:string):Promise<any>{
     const w=this.load(id,childId);
-    if(after===undefined){try{after=Number(await readFile(this.file(id)+'.ack','utf8'));}catch{after=0;}}
+    let acknowledged=0;try{acknowledged=Number(await readFile(this.file(id)+'.ack','utf8'));}catch{}
+    if(!Number.isSafeInteger(acknowledged)||acknowledged<0)throw new Error('Invalid acknowledged cursor');
+    if(after===undefined)after=acknowledged;
     if(!Number.isSafeInteger(after)||after!<0)throw new Error('Invalid event cursor');
     const events=w.events.filter((e:any)=>e.sequence>after!).slice(0,32);
-    return {...this.summary(w),events,next_sequence:events.at(-1)?.sequence??after,overflow:after!<w.droppedThrough};
+    return {...this.summary(w),events,acknowledged_through:acknowledged,next_sequence:events.at(-1)?.sequence??after,overflow:after!<w.droppedThrough};
   }
   async ack(id:string,through:number,childId?:string){
     const w=this.load(id,childId);if(!Number.isSafeInteger(through)||through<0||through>w.sequence)throw new Error('Invalid acknowledgement cursor');

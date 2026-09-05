@@ -37,6 +37,10 @@ pkgs.runCommand "subagent-check"
     cp ${self}/subagent/outcome.test.ts "$workdir/src/subagent/outcome.test.ts"
     cp ${self}/subagent/resume.ts "$workdir/src/subagent/resume.ts"
     cp ${self}/subagent/resume.test.ts "$workdir/src/subagent/resume.test.ts"
+    cp ${self}/subagent/dashboard.ts "$workdir/src/subagent/dashboard.ts"
+    cp ${self}/subagent/dashboard.test.ts "$workdir/src/subagent/dashboard.test.ts"
+    cp ${self}/shared/task-presentation.ts "$workdir/src/shared/task-presentation.ts"
+    cp ${self}/shared/watch-menu.ts "$workdir/src/shared/watch-menu.ts"
     cp ${self}/subagent/control.test.ts "$workdir/src/subagent/control.test.ts"
     cp ${self}/subagent/foreground-handoff.ts "$workdir/src/subagent/foreground-handoff.ts"
     cp ${self}/subagent/native-rpc.ts "$workdir/src/subagent/native-rpc.ts"
@@ -67,6 +71,8 @@ pkgs.runCommand "subagent-check"
       "$workdir/src/subagent/outcome.test.ts" \
       "$workdir/src/subagent/resume.ts" \
       "$workdir/src/subagent/resume.test.ts" \
+      "$workdir/src/subagent/dashboard.ts" \
+      "$workdir/src/subagent/dashboard.test.ts" \
       "$workdir/src/subagent/control.test.ts" \
       "$workdir/src/subagent/foreground-handoff.ts" \
       "$workdir/src/subagent/native-rpc.ts" \
@@ -99,6 +105,7 @@ pkgs.runCommand "subagent-check"
     node "$workdir/out/subagent/control.test.js"
     node "$workdir/out/subagent/outcome.test.js"
     node "$workdir/out/subagent/resume.test.js"
+    node "$workdir/out/subagent/dashboard.test.js"
     TEST_MKFIFO=${pkgs.coreutils}/bin/mkfifo node "$workdir/out/subagent/native-rpc.test.js"
 
     cat > "$workdir/test.mjs" <<'EOF'
@@ -1003,7 +1010,7 @@ pkgs.runCommand "subagent-check"
       exit 1
     fi
     grep -F 'const committed = this.authority.commit(prepared.ticket, exactRequest);' ${self}/subagent/permission-relay.ts >/dev/null
-    grep -F 'Notification: subagent ''${record.id} ''${record.status}. Check its status.' ${self}/subagent/index.ts >/dev/null
+    grep -F 'Task dashboard: /tasks' ${self}/subagent/index.ts >/dev/null
     grep -F 'backgroundOperationConsumedJobIds(background)' ${self}/subagent/index.ts >/dev/null
     grep -F 'const durableOperations = deliveredOperationIds(entries);' ${self}/subagent/index.ts >/dev/null
     if grep -F 'consumeForOperation' ${self}/subagent/index.ts >/dev/null; then

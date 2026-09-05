@@ -69,6 +69,8 @@ import { NativeSubagentRpcSession, spawnNativeSubagentProcess, type NativeSubage
 import { parentJobBroker, validateJobParams } from "../shared/background-job.js";
 import { validateAcceptance, readTaskOutcome, outcomeSummary, type TaskOutcome, type TaskOutcomeSummary } from "./outcome.js";
 import { NativeTaskStore, createTaskId, TASK_ID_PATTERN, type NativeTaskRecord } from "./resume.js";
+import { registerTaskDashboard } from "./dashboard.js";
+import { taskListText, outcomeLabel } from "../shared/task-presentation.js";
 const INTERNAL_TASK_RESUME = Symbol("subagent-task-resume");
 const INTERNAL_RESUME_MESSAGE = Symbol("subagent-resume-message");
 const INTERNAL_RESUME_COMPACT = Symbol("subagent-resume-compact");
@@ -168,6 +170,9 @@ type BackgroundSubagentDetails = {
   child_status?: BackgroundSubagentChildStatus;
   remaining_children?: number;
   task_outcomes?: TaskOutcomeSummary[];
+  task_title?: string;
+  task_id?: string;
+  attempt?: number;
   jobs?: Array<{
     job_id: string;
     status: BackgroundSubagentRecord["status"];
@@ -1005,8 +1010,9 @@ async function runSingleSubagent(
     try { currentResult.taskOutcome = outcomePath ? readTaskOutcome(outcomePath, acceptance) : undefined; }
     catch (error) { currentResult.task_outcome = outcomeSummary(identity.child, subagentId, undefined, `Invalid outcome report: ${String(error).slice(0,512)}`); }
     currentResult.task_outcome ??= outcomeSummary(identity.child, subagentId, currentResult.taskOutcome);
+    currentResult.task_outcome = {...currentResult.task_outcome,task_id:currentResult.task_id,attempt:currentResult.attempt};
     if (taskStore && taskRecord) {
-      try { await taskStore.finish(ownerSessionId, taskRecord.taskId, subagentId, {outcome:currentResult.taskOutcome?.state,contextTokens:currentResult.usage.contextTokens || currentResult.rpcDiagnostics?.contextTokensAfterCompaction,contextWindow:currentResult.rpcDiagnostics?.contextWindow,nextAction:currentResult.taskOutcome?.next_action}); }
+      try { await taskStore.finish(ownerSessionId, taskRecord.taskId, subagentId, {outcome:currentResult.taskOutcome?.state,contextTokens:currentResult.usage.contextTokens || currentResult.rpcDiagnostics?.contextTokensAfterCompaction,contextWindow:currentResult.rpcDiagnostics?.contextWindow,nextAction:currentResult.taskOutcome?.next_action,summary:currentResult.taskOutcome?.summary,execution:resultStatus(currentResult)}); }
       catch (error) { currentResult.stderr += `Task checkpoint persistence failed: ${String(error)}\n`; }
     }
     removeAbortListener?.();
@@ -1327,6 +1333,8 @@ function backgroundStartResult(
       status: record.status,
       backend: record.backend,
       failed: false,
+      task_title: record.summary,
+      ...(children.length === 1 && children[0].taskId ? {task_id:children[0].taskId} : {}),
       children: children.map(backgroundChildMetadata),
     } satisfies BackgroundSubagentDetails,
   };
@@ -1696,7 +1704,9 @@ export default function (pi: ExtensionAPI) {
     deliveryClaims.set(record.id, deliveryClaim);
     try {
       if (generation !== sessionGeneration || sessionContext !== ctx) return;
-      const message = `Notification: subagent ${record.id} ${record.status}. Check its status.\n\n${truncateByBytes(record.result || record.error || "(no output)", 4096)}\n\nFull report: subagent operation=result job_id=${record.id}`;
+      const taskLabels = (record.taskOutcomes ?? []).map(o=>`${outcomeLabel(o.state)}${o.attempt ? ` · attempt ${o.attempt}` : ""}`);
+      const heading = record.status === "completed" ? (taskLabels.length ? taskLabels.join("; ") : "Worker response finished — outcome not reported") : `Worker execution ${record.status}`;
+      const message = `Notification: ${heading}\n${record.summary.split("\n")[0]}\n\n${truncateByBytes(record.result || record.error || "(no output)", 2500)}\n\nTask dashboard: /tasks\nFull report: subagent operation=result job_id=${record.id}`;
       if (await backgroundManager.isNotified(record.id)) return;
       if (generation !== sessionGeneration || lifecycleClosing || consumed.has(record.id) || sessionContext !== ctx) return;
       const accepted = ctx.isIdle() ? idlePending : idleInFlight;
@@ -1977,7 +1987,7 @@ export default function (pi: ExtensionAPI) {
         if (operation === "tasks") {
           const store = new NativeTaskStore(path.join(getAgentDir(), "state", "native-tasks-v1"));
           const tasks = store.list(ownerSessionId, params.limit ?? 20);
-          return {content:[{type:"text",text:JSON.stringify(tasks,null,2)}],details:{operation:"tasks",tasks}};
+          return {content:[{type:"text",text:taskListText(tasks)}],details:{operation:"tasks",tasks}};
         }
         if (operation === "resume") {
           const backend = selectSubagentBackend(agentSHBridge(), agentSHStartup);
@@ -1988,10 +1998,11 @@ export default function (pi: ExtensionAPI) {
           const identity: SubagentChildIdentity = {child:1,childId:createSubagentChildId(),taskId:prior.taskId,label:"subagent",task:prior.spec.task};
           const resumed = await store.beginResume(ownerSessionId, prior.taskId, identity.childId);
           try {
-            return await subagentTool.execute(toolCallId, { ...resumed.spec, background:true,
+            const result = await subagentTool.execute(toolCallId, { ...resumed.spec, background:true,
               [INTERNAL_TASK_RESUME]:resumed,[INTERNAL_RESUME_MESSAGE]:params.message,
               [INTERNAL_RESUME_COMPACT]:params.compact ?? Boolean(resumed.requiresCompaction),
               [INTERNAL_CHILD_IDENTITIES]:[identity] }, signal, onUpdate, ctx);
+            return {...result,details:{...result.details,task_id:resumed.taskId,attempt:resumed.attempt,task_title:resumed.spec.task.slice(0,500)}};
           } catch (error) {
             await store.finish(ownerSessionId, prior.taskId, identity.childId, {outcome:"blocked",nextAction:"Retry after resolving the launch failure"});
             throw error;
@@ -2627,6 +2638,7 @@ export default function (pi: ExtensionAPI) {
     },
 
     renderResult(result, options, theme) {
+      if (result.details?.operation === "tasks") return new Text(taskListText(result.details.tasks ?? [], options.expanded), 0, 0);
       if ((result.details as BackgroundSubagentDetails | undefined)?.background_subagent
         || (result.details as SubagentControlDetails | undefined)?.subagent_control) {
         const text = result.content.find((part: any) => part?.type === "text")?.text ?? "(no output)";
@@ -2664,10 +2676,12 @@ export default function (pi: ExtensionAPI) {
         return text.trimEnd();
       };
 
+      const outcomeText = (r:SingleResult) => r.stopReason === 'aborted' ? (r.exitCode === -1 ? 'Stopping' : 'Cancelled') : r.exitCode === -1 ? "Working" : isFailure(r) ? "Execution failed" : outcomeLabel(r.task_outcome?.state);
+      const resultIcon = (r:SingleResult) => isFailure(r) ? theme.fg("error", "✗") : r.exitCode === -1 ? theme.fg("warning", "⏳") : r.task_outcome?.state === "delivered" ? theme.fg("success", "✓") : theme.fg("warning", "◌");
       const renderOneExpanded = (container: Container, r: SingleResult, title: string) => {
         const failed = isFailure(r);
-        const icon = failed ? theme.fg("error", "✗") : r.exitCode === -1 ? theme.fg("warning", "⏳") : theme.fg("success", "✓");
-        container.addChild(new Text(`${icon} ${theme.fg("toolTitle", theme.bold(title))}`, 0, 0));
+        const icon = resultIcon(r);
+        container.addChild(new Text(`${icon} ${theme.fg("toolTitle", theme.bold(title))} · ${outcomeText(r)}${r.attempt ? ` · attempt ${r.attempt}` : ""}`, 0, 0));
         container.addChild(new Text(theme.fg("muted", "Status: ") + theme.fg(failed ? "error" : "dim", `${resultStatus(r)} (exit ${r.exitCode})`), 0, 0));
         container.addChild(new Text(theme.fg("muted", "Task: ") + theme.fg("dim", r.task), 0, 0));
         if (r.model) container.addChild(new Text(theme.fg("muted", "Model: ") + theme.fg("dim", r.model), 0, 0));
@@ -2722,9 +2736,9 @@ export default function (pi: ExtensionAPI) {
           return container;
         }
         const failed = isFailure(r);
-        const icon = failed ? theme.fg("error", "✗") : theme.fg("success", "✓");
+        const icon = resultIcon(r);
         const displayItems = getDisplayItems(r.messages);
-        let text = `${icon} ${theme.fg("toolTitle", theme.bold("subagent"))}`;
+        let text = `${icon} ${theme.fg("toolTitle", theme.bold("subagent"))} · ${outcomeText(r)}${r.attempt ? ` · attempt ${r.attempt}` : ""}`;
         if (failed) {
           text += `\n${theme.fg("error", compactResultSummary(r).split("\n").slice(0, 14).join("\n"))}`;
         } else if (displayItems.length === 0) text += `\n${theme.fg("muted", "(no output)")}`;
@@ -2737,9 +2751,9 @@ export default function (pi: ExtensionAPI) {
       const running = details.results.filter((r) => r.exitCode === -1).length;
       const successCount = details.results.filter((r) => r.exitCode !== -1 && !isFailure(r)).length;
       const failCount = details.results.filter((r) => r.exitCode !== -1 && isFailure(r)).length;
-      const icon = running > 0 ? theme.fg("warning", "⏳") : failCount > 0 ? theme.fg("warning", "◐") : theme.fg("success", "✓");
-      const noun = details.mode === "chain" ? "steps" : "tasks";
-      const status = running > 0 ? `${successCount + failCount}/${details.results.length} done, ${running} running` : `${successCount}/${details.results.length} ${noun}`;
+      const delivered = details.results.filter(r=>r.exitCode!==-1&&!isFailure(r)&&r.task_outcome?.state==='delivered').length;
+      const icon = running > 0 ? theme.fg("warning", "⏳") : delivered === details.results.length ? theme.fg("success", "✓") : theme.fg("warning", "◐");
+      const status = running > 0 ? `${successCount + failCount}/${details.results.length} responses finished, ${running} working` : `${details.results.length} responses finished · ${delivered} reported delivered`;
 
       if (expanded && running === 0) {
         const container = new Container();
@@ -2758,9 +2772,9 @@ export default function (pi: ExtensionAPI) {
 
       let text = `${icon} ${theme.fg("toolTitle", theme.bold(`${details.mode} `))}${theme.fg("accent", status)}`;
       for (const r of details.results) {
-        const rIcon = r.exitCode === -1 ? theme.fg("warning", "⏳") : isFailure(r) ? theme.fg("error", "✗") : theme.fg("success", "✓");
+        const rIcon = resultIcon(r);
         const displayItems = getDisplayItems(r.messages);
-        text += `\n\n${theme.fg("muted", "─── ")}${theme.fg("accent", details.mode === "chain" ? `step ${r.step ?? "?"}` : r.label)} ${rIcon}`;
+        text += `\n\n${theme.fg("muted", "─── ")}${theme.fg("accent", details.mode === "chain" ? `step ${r.step ?? "?"}` : r.label)} ${rIcon} ${outcomeText(r)}`;
         if (isFailure(r)) text += `\n${theme.fg("error", compactResultSummary(r).split("\n").slice(0, 10).join("\n"))}`;
         else if (displayItems.length === 0) text += `\n${theme.fg("muted", r.exitCode === -1 ? "(running...)" : "(no output)")}`;
         else text += `\n${renderDisplayItems(displayItems, 5)}`;
@@ -2774,4 +2788,27 @@ export default function (pi: ExtensionAPI) {
     },
   };
   pi.registerTool(subagentTool);
+  const taskStore = () => new NativeTaskStore(path.join(getAgentDir(), "state", "native-tasks-v1"));
+  registerTaskDashboard(pi, {
+    async list(ctx) { return taskStore().list(stableSessionId(ctx), 50); },
+    async record(ctx, id) { return taskStore().get(stableSessionId(ctx), id); },
+    async resume(ctx, id) { return await subagentTool.execute(`task-ui-resume-${Date.now()}`, {operation:"resume",task_id:id}, undefined, undefined, ctx); },
+    async report(ctx, id) {
+      const owner = stableSessionId(ctx);
+      const task = taskStore().get(owner, id);
+      const groups = await backgroundManager.list(owner, 1000);
+      const group = groups.find(record => record.children?.some(child => child.childId === task.childId));
+      if (!group) return `${task.spec.task}\n\nNo retained attempt report is available.\nNext: ${task.nextAction ?? "not recorded"}`;
+      if (isBackgroundSubagentActive(group)) return `Working · attempt ${task.attempt}\n\n${group.latest || "No visible progress yet."}`;
+      const page = await backgroundManager.readResult(group.id, task.childId);
+      return page.text + (page.nextOffset === undefined ? "" : `\n\n[Report preview; full result remains available for ${group.id}, offset ${page.nextOffset}.]`);
+    },
+    async jobs(ctx, id, params) {
+      const owner = stableSessionId(ctx);
+      const task = taskStore().get(owner, id);
+      const broker = parentJobBroker(owner);
+      if (!broker) throw new Error("The background-job service is not active in this session.");
+      return await broker.execute({sessionId:owner,childId:id,cwd:task.spec.cwd},`task-ui-${Date.now()}`,params);
+    },
+  });
 }
