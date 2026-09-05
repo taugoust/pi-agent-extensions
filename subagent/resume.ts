@@ -79,7 +79,7 @@ export class NativeTaskStore {
  async bindChild(owner:string,id:string,childId:string,pid:number){await this.lock(id,()=>{const r=this.get(owner,id);if(r.state!=='running'||r.childId!==childId)throw new Error('Task attempt ownership changed');r.childPid=pid;r.childToken=token(pid);this.save(r);});}
  async finish(owner:string,id:string,childId:string,info:{outcome?:string;contextTokens?:number;contextWindow?:number;nextAction?:string}={}){
   await this.lock(id,()=>{const r=this.get(owner,id);if(r.childId!==childId)return;r.state='idle';r.updatedAt=new Date().toISOString();
-   if(info.contextTokens)r.contextTokens=info.contextTokens;if(info.contextWindow)r.contextWindow=info.contextWindow;
+   if(Number.isSafeInteger(info.contextTokens)&&info.contextTokens!>=0)r.contextTokens=info.contextTokens;if(info.contextWindow)r.contextWindow=info.contextWindow;
    r.requiresCompaction=Boolean(r.contextWindow&&r.contextTokens!>=r.contextWindow*.8);r.checkpointed=info.outcome==='checkpointed'||r.requiresCompaction;r.nextAction=info.nextAction?.slice(0,2000);
    r.history.push({attempt:r.attempt,childId,finishedAt:r.updatedAt,outcome:info.outcome});r.history=r.history.slice(-32);this.save(r);
   });

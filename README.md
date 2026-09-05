@@ -819,7 +819,9 @@ Resume is always explicit, including after a failure or the existing 90% context
 finalizer. A measured high-context exit selects compaction before the next prompt
 (bounded to five minutes); `compact:true` can request this explicitly. Disabling
 required high-context compaction is rejected. A model-reported checkpoint at low
-context remains resumable without forcing unnecessary compaction.
+context remains resumable without forcing unnecessary compaction. Explicit
+compaction on a session Pi considers too small is a no-op unless high-context
+compaction is required; other compaction errors remain failures.
 Children created before retained-task support have no task ID and cannot be
 resumed this way. Runtime controls still target only active child IDs. A parent
 crash does not automatically relaunch work; recovery waits for previous-child

@@ -113,6 +113,7 @@ async function handle(command) {
     return;
   }
   if (command.type === "compact") {
+    if (mode === "compact-small") { send({id:command.id,type:"response",command:"compact",success:false,error:"Nothing to compact (session too small)"}); return; }
     send({type:"fixture_compacted"});
     response("compact", command.id, {summary:"saved checkpoint"});
     return;
@@ -155,7 +156,7 @@ async function handle(command) {
   }
   if (command.type === "prompt" && initial) {
     initial = false;
-    if (mode === "handled-initial" || mode === "handled-initial-pending") {
+    if (mode === "handled-initial" || mode === "handled-initial-pending" || mode === "compact-small") {
       if (mode === "handled-initial-pending") await new Promise((resolve) => setTimeout(resolve, 30));
       response("prompt", command.id);
       return;
@@ -683,6 +684,12 @@ try {
   const compacted = createSession("handled-initial");
   assert.equal((await compacted.rpc.start("continue retained task", true)).code, 0);
   assert(compacted.events.some(event => event.type === "fixture_compacted"));
+  const small = createSession("compact-small");
+  assert.equal((await small.rpc.start("small resume", true)).code, 0);
+  assert.equal(small.rpc.protocolError, undefined);
+  const required = createSession("compact-small");
+  await required.rpc.start("required compaction", true, true);
+  assert.match(required.rpc.protocolError?.message ?? "", /Nothing to compact/);
   await exerciseControlReservedWhileInitialPromptIsHandled();
   await exerciseHandledControlPrompt();
   await exerciseTransformedPrompt();

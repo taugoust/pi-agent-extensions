@@ -1087,6 +1087,7 @@ export class BackgroundSubagentChildTracker {
       const childId = existing?.childId;
       const next: BackgroundSubagentChild = {
         ...(childId ? { childId } : {}),
+        ...(existing?.taskId ? {taskId:existing.taskId} : {}),
         child: candidate.child,
         label: boundedText(candidate.label, 256) || existing?.label || `child ${candidate.child}`,
         ...(candidate.task?.trim() ? { task: boundedText(candidate.task, 2048) } : existing?.task ? { task: existing.task } : {}),
@@ -1101,6 +1102,10 @@ export class BackgroundSubagentChildTracker {
   reconcile(record: BackgroundSubagentRecord): BackgroundSubagentChild[] {
     if (!this.groups.has(record.id)) this.register(record, inferredChildDescriptors(record));
     const group = this.groups.get(record.id)!;
+    for (const child of group.children.values()) {
+      const descriptor = record.children?.[child.child - 1];
+      if (descriptor?.taskId && descriptor.childId === child.childId) child.taskId = descriptor.taskId;
+    }
     if (!isBackgroundSubagentActive(record)) {
       const now = new Date().toISOString();
       const failedPendingChild = record.status === "failed" && record.mode === "chain"

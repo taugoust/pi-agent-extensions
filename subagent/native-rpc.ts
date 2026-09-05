@@ -103,6 +103,7 @@ export type NativeSubagentRpcExit = {
 
 export type NativeSubagentRpcDiagnostics = {
   contextWindow?: number;
+  contextTokensAfterCompaction?: number;
   rawExit?: NativeSubagentRpcExit;
   trace: Array<{ event: string; elapsedMs: number; streaming: boolean; settledVersion: number; closingInput: boolean; terminationRequested: boolean }>;
 };
@@ -440,9 +441,10 @@ export class NativeSubagentRpcSession implements NativeSubagentControlHandle {
   private readonly lifecycleTrace: NativeSubagentRpcDiagnostics["trace"] = [];
   private rawExit?: NativeSubagentRpcExit;
   private contextWindow?: number;
+  private contextTokensAfterCompaction?: number;
 
   get diagnostics(): NativeSubagentRpcDiagnostics {
-    return { contextWindow: this.contextWindow, rawExit: this.rawExit && { ...this.rawExit }, trace: this.lifecycleTrace.map((entry) => ({ ...entry })) };
+    return { contextWindow: this.contextWindow, contextTokensAfterCompaction: this.contextTokensAfterCompaction, rawExit: this.rawExit && { ...this.rawExit }, trace: this.lifecycleTrace.map((entry) => ({ ...entry })) };
   }
 
   private trace(event: string): void {
@@ -496,13 +498,19 @@ export class NativeSubagentRpcSession implements NativeSubagentControlHandle {
       && (this.settledVersion === 0 || this.streaming || this.controlReservations > 0);
   }
 
-  async start(initialMessage: string, compactBeforePrompt = false): Promise<NativeSubagentRpcExit> {
+  async start(initialMessage: string, compactBeforePrompt = false, requireCompaction = false): Promise<NativeSubagentRpcExit> {
     if (this.initialPromptSent) throw new Error("native subagent RPC initial prompt was already sent");
     this.initialPromptSent = true;
     this.notifyChange();
     const collector = this.armCollector("initial");
     try {
-      if (compactBeforePrompt) await this.sendCommand("compact", {}, undefined, 5 * 60 * 1000);
+      if (compactBeforePrompt) {
+        try { await this.sendCommand("compact", {}, undefined, 5 * 60 * 1000); }
+        catch (error) {
+          if (requireCompaction || asError(error).message !== "native subagent RPC compact failed: Nothing to compact (session too small)") throw error;
+          this.trace("compaction_skipped_small_session");
+        }
+      }
       const receipt = await this.sendCommand("prompt", { message: initialMessage }, collector);
       const disposition = await this.acceptedPromptDisposition(collector, receipt);
       this.initialPromptHandled = disposition === "handled";
@@ -898,6 +906,9 @@ export class NativeSubagentRpcSession implements NativeSubagentControlHandle {
       return;
     }
 
+    if (event.type === "compaction_end" && Number.isSafeInteger(event.result?.estimatedTokensAfter) && event.result.estimatedTokensAfter >= 0) {
+      this.contextTokensAfterCompaction = event.result.estimatedTokensAfter;
+    }
     if (event.type === "agent_start") {
       this.streaming = true;
     } else if (event.type === "agent_settled") {

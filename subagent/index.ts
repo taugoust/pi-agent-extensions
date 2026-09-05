@@ -902,7 +902,7 @@ async function runSingleSubagent(
         const broker = parentJobBroker(ownerSessionId);
         if (!broker) throw new Error("Parent job broker is unavailable during reload/session shutdown; retry after it is active");
         const authorize = permissionAuthority ? async (command: string, cwd: string) => {
-          const decision = await permissionAuthority.authorize({ subagentId, label, task: spec.task, toolCallId: request.toolCallId, command, cwd }, requestSignal);
+          const decision = await permissionAuthority.authorize({ subagentId, label, task: truncateByBytes(spec.task, 2048), toolCallId: request.toolCallId, command, cwd }, requestSignal);
           if (!decision.allowed) throw new Error(`Parent Permission Gate denied job start: ${decision.reason}`);
         } : undefined;
         return await broker.execute({ sessionId: ownerSessionId, childId: identity.taskId ?? subagentId, cwd: launchCwd! }, request.toolCallId, request.params, requestSignal, authorize);
@@ -945,7 +945,7 @@ async function runSingleSubagent(
         rpcSession.terminate(permissionRelayFailure);
       }
     }
-    const exited = await rpcSession.start(initialPrompt, spec.compactBeforePrompt === true);
+    const exited = await rpcSession.start(initialPrompt, spec.compactBeforePrompt === true, spec.resumeTask?.requiresCompaction === true);
     currentResult.rpcDiagnostics = rpcSession.diagnostics;
     executionSettled = true;
     signal?.removeEventListener("abort", abortHandler);
@@ -1006,7 +1006,7 @@ async function runSingleSubagent(
     catch (error) { currentResult.task_outcome = outcomeSummary(identity.child, subagentId, undefined, `Invalid outcome report: ${String(error).slice(0,512)}`); }
     currentResult.task_outcome ??= outcomeSummary(identity.child, subagentId, currentResult.taskOutcome);
     if (taskStore && taskRecord) {
-      try { await taskStore.finish(ownerSessionId, taskRecord.taskId, subagentId, {outcome:currentResult.taskOutcome?.state,contextTokens:currentResult.usage.contextTokens,contextWindow:currentResult.rpcDiagnostics?.contextWindow,nextAction:currentResult.taskOutcome?.next_action}); }
+      try { await taskStore.finish(ownerSessionId, taskRecord.taskId, subagentId, {outcome:currentResult.taskOutcome?.state,contextTokens:currentResult.usage.contextTokens || currentResult.rpcDiagnostics?.contextTokensAfterCompaction,contextWindow:currentResult.rpcDiagnostics?.contextWindow,nextAction:currentResult.taskOutcome?.next_action}); }
       catch (error) { currentResult.stderr += `Task checkpoint persistence failed: ${String(error)}\n`; }
     }
     removeAbortListener?.();
