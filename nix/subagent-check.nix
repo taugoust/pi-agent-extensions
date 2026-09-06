@@ -791,6 +791,14 @@ pkgs.runCommand "subagent-check"
     assert.equal(secondPage.nextOffset, undefined);
     assert.equal(secondPage.complete, true);
     assert.equal(secondPage.sha256, completed.record.artifacts[0].sha256);
+    const diagnosticReport = 'Task outcome (model-reported, not independently verified): {"state":"delivered"}\nRPC diagnostics: {"trace":[]}\n\nOK α';
+    const diagnosticJob = await manager.start({ sessionId: "metadata-probe", backend: "native", mode: "single", summary: "answer-only view" }, async () => ({ text: "OK α", failed: false, reports: [{label:"worker",text:diagnosticReport}] }));
+    await manager.wait(diagnosticJob.id, 2000);
+    assert.equal((await manager.readResult(diagnosticJob.id)).text, "OK α");
+    assert.equal((await manager.readResult(diagnosticJob.id, undefined, 0, 4096, true)).text, diagnosticReport);
+    const answerFirst = await manager.readResult(diagnosticJob.id, undefined, 0, 4);
+    assert.equal(answerFirst.text, "OK ");
+    assert.equal((await manager.readResult(diagnosticJob.id, undefined, answerFirst.nextOffset, 4)).text, "α");
     const resultPath = stateRoot + "/jobs/" + success.id + "/result-1.md";
     await writeFile(resultPath, "x".repeat(completed.record.artifacts[0].bytes), { mode: 0o600 });
     await assert.rejects(manager.readResult(success.id), /checksum mismatch/);

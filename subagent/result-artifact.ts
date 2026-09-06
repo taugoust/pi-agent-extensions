@@ -74,6 +74,26 @@ function assistantText(messages: unknown): string {
   return "";
 }
 
+/** Remove only the generated, leading metadata envelope; retain the stored report unchanged. */
+export function answerOnlyReport(text: string): string {
+  let rest = text;
+  let removed = false;
+  for (let i = 0; i < 2; i++) {
+    const end = rest.indexOf("\n");
+    const line = end < 0 ? rest : rest.slice(0, end);
+    const prefix = ["Task outcome (model-reported, not independently verified): ", "RPC diagnostics: "]
+      .find(value => line.startsWith(value));
+    if (!prefix) break;
+    try {
+      const value = JSON.parse(line.slice(prefix.length));
+      if (!value || typeof value !== "object" || Array.isArray(value)) break;
+    } catch { break; }
+    rest = end < 0 ? "" : rest.slice(end + 1);
+    removed = true;
+  }
+  return removed && /^\r?\n/.test(rest) ? rest.replace(/^\r?\n/, "") : text;
+}
+
 export function extractRetainedSubagentReports(source: unknown): RetainedSubagentReport[] {
   const object = source && typeof source === "object" ? source as any : undefined;
   const symbolReports = object?.[RETAINED_REPORTS];

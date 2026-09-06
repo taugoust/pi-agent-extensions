@@ -9,6 +9,7 @@ import {
   MAX_RETAINED_SUBAGENT_REPORT_BYTES,
   MAX_SUBAGENT_RESULT_PAGE_BYTES,
   type RetainedSubagentReport,
+  answerOnlyReport,
 } from "./result-artifact.js";
 
 export const BACKGROUND_SUBAGENT_ID_PATTERN = /^subagent-job-[0-9a-f]{24}$/;
@@ -721,6 +722,7 @@ export class BackgroundSubagentManager {
     childOrId: number | string | undefined = undefined,
     offset = 0,
     limit = MAX_SUBAGENT_RESULT_PAGE_BYTES,
+    diagnostics = false,
   ): Promise<BackgroundSubagentResultPage> {
     const record = await this.get(id);
     if (isBackgroundSubagentActive(record)) throw new Error("Background subagent result is not ready");
@@ -762,7 +764,6 @@ export class BackgroundSubagentManager {
       if (!artifact) throw new Error(`Background subagent result child ${child} is unavailable`);
     }
     const child = artifact.child;
-    if (offset > artifact.bytes) throw new Error(`Result offset ${offset} exceeds retained size ${artifact.bytes}`);
     const path = this.artifactPath(id, child);
     const info = await lstat(path);
     if (!info.isFile() || info.isSymbolicLink() || info.size !== artifact.bytes) throw new Error("Retained background subagent result identity is invalid");
@@ -775,9 +776,11 @@ export class BackgroundSubagentManager {
       if (!opened.isFile() || opened.size !== artifact.bytes || opened.dev !== info.dev || opened.ino !== info.ino) throw new Error("Retained background subagent result identity changed");
       const completeArtifact = await handle.readFile();
       if (createHash("sha256").update(completeArtifact).digest("hex") !== artifact.sha256) throw new Error("Retained background subagent result checksum mismatch");
-      if (offset < artifact.bytes && (completeArtifact[offset] & 0xc0) === 0x80) throw new Error(`Result offset ${offset} is not a UTF-8 character boundary`);
-      const bytesRead = Math.min(limit, artifact.bytes - offset);
-      let retained = completeArtifact.subarray(offset, offset + bytesRead);
+      const view = diagnostics ? completeArtifact : Buffer.from(answerOnlyReport(completeArtifact.toString("utf8")), "utf8");
+      if (offset > view.byteLength) throw new Error(`Result offset ${offset} exceeds retained size ${view.byteLength}`);
+      if (offset < view.byteLength && (view[offset] & 0xc0) === 0x80) throw new Error(`Result offset ${offset} is not a UTF-8 character boundary`);
+      const bytesRead = Math.min(limit, view.byteLength - offset);
+      let retained = view.subarray(offset, offset + bytesRead);
       let text = "";
       while (retained.length > 0) {
         try {
@@ -787,7 +790,7 @@ export class BackgroundSubagentManager {
           retained = retained.subarray(0, -1);
         }
       }
-      const nextOffset = offset + retained.byteLength < artifact.bytes ? offset + retained.byteLength : undefined;
+      const nextOffset = offset + retained.byteLength < view.byteLength ? offset + retained.byteLength : undefined;
       if (bytesRead > 0 && retained.byteLength === 0) throw new Error("Result limit ends before one complete UTF-8 character");
       const childId = record.children?.[child - 1]?.childId;
       return {
@@ -797,10 +800,10 @@ export class BackgroundSubagentManager {
         offset,
         ...(nextOffset === undefined ? {} : { nextOffset }),
         bytes: retained.byteLength,
-        totalBytes: artifact.bytes,
-        sourceTotalBytes: artifact.totalBytes,
+        totalBytes: view.byteLength,
+        sourceTotalBytes: Math.max(view.byteLength, artifact.totalBytes - (artifact.bytes - view.byteLength)),
         complete: artifact.complete,
-        sha256: artifact.sha256,
+        sha256: diagnostics ? artifact.sha256 : createHash("sha256").update(view).digest("hex"),
         text,
       };
     } finally {
@@ -988,6 +991,9 @@ export function sharedBackgroundSubagentManager(root: string): BackgroundSubagen
     manager = new BackgroundSubagentManager(root, legacy);
     managers.set(root, manager);
   }
+  // ABI-compatible reader refresh: keep live runners and their manager intact,
+  // but do not retain the old presentation behavior across extension reload.
+  manager.readResult = BackgroundSubagentManager.prototype.readResult;
   return manager;
 }
 

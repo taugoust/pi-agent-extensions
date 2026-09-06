@@ -195,6 +195,7 @@ type BackgroundSubagentDetails = {
   source_total_bytes?: number;
   complete?: boolean;
   sha256?: string;
+  diagnostics?: boolean;
   result_children?: Array<{ child: number; child_id?: string; label: string; bytes: number; total_bytes: number; complete: boolean; sha256: string }>;
 };
 
@@ -1409,6 +1410,9 @@ function persistentAgentDir(ctx: any): string {
 }
 
 export function validateBackgroundOperation(params: any): void {
+  if (params?.diagnostics !== undefined && (params.operation !== "result" || typeof params.diagnostics !== "boolean")) {
+    throw new Error("diagnostics is a boolean option for operation=result only");
+  }
   if (params?.operation === undefined) return;
   if (typeof params.operation !== "string" || !params.operation) {
     throw new Error("Background subagent operation must be a non-empty string");
@@ -1556,7 +1560,8 @@ function subagentParams() {
   wait_for_response: Type.Optional(Type.Boolean({ description: "Prompt only: false (default) returns on acceptance without waiting for the child to finish. True waits through the child's full run and returns its response; avoid for long-running supervisors." })),
   wait_ms: Type.Optional(Type.Integer({ minimum: 0, maximum: MAX_BACKGROUND_SUBAGENT_WAIT_MS, description: "Bounded background wait duration; default 1000ms, maximum 24 hours." })),
   limit: Type.Optional(Type.Integer({ minimum: 1, maximum: MAX_SUBAGENT_RESULT_PAGE_BYTES, description: "List count (max 50), or result page byte limit (minimum 4, maximum 48 KiB)." })),
-  offset: Type.Optional(Type.Integer({ minimum: 0, description: "Byte offset for operation=result pagination." })),
+  offset: Type.Optional(Type.Integer({ minimum: 0, description: "Byte offset within the selected operation=result view." })),
+  diagnostics: Type.Optional(Type.Boolean({ description: "Result only: include retained task metadata and RPC diagnostics. Default returns the worker answer only." })),
   child: Type.Optional(Type.Integer({ minimum: 1, maximum: 8, description: "One-based child report number for parallel or chain results." })),
   task: Type.Optional(Type.String({ description: "Task to delegate (single mode)" })),
   systemPrompt: Type.Optional(Type.String({ description: "Optional additional system prompt (single mode)" })),
@@ -1949,7 +1954,7 @@ export default function (pi: ExtensionAPI) {
     promptGuidelines: [
       "Use background=true when delegated work may take long enough that useful parent work can continue concurrently.",
       "Before claiming dependent work complete, consume terminal background results. wait_any waits for one child across current groups, wait/wait_group waits for one group, and wait_all waits for every current group; cancelling a bounded wait never cancels work.",
-      "operation=result supports child, offset, and bounded byte-limit pagination.",
+      "operation=result returns the worker answer by default; diagnostics=true includes retained task metadata and RPC traces. Pagination offsets apply to the selected view. Child selection and bounded byte limits are supported.",
       "Treat harness state batches as internal routing data, not requests for a user-facing recap. Fetch worker reports/output only when needed; do not paste routine completion reports into the conversation.",
       "Use operation=prompt with an active child_id to send a non-blocking instruction; choose control_mode=steer, follow_up, or interrupt. Set wait_for_response=true only when intentionally waiting for the child's entire run. Acceptance is not task completion. Do not retry capability or inactive-child errors by relaunching work.",
       "Use operation=resume with a task_id to continue a terminal native task from its saved session, not a fresh reconstructed assignment. Resume is explicit, returns a new background group/child ID, preserves task ownership, and compacts context checkpoints before continuing.",
@@ -2161,10 +2166,10 @@ export default function (pi: ExtensionAPI) {
         const notReady = operation === "result" && isBackgroundSubagentActive(record) ? "\nResult is not ready; use a bounded wait or continue other work." : "";
         await updateBackgroundStatus(ctx);
         if (operation === "result" && terminalBackgroundStatus(record.status)) {
-          const page = await backgroundManager.readResult(id, params.child_id ?? params.child, params.offset ?? 0, params.limit ?? MAX_SUBAGENT_RESULT_PAGE_BYTES);
+          const page = await backgroundManager.readResult(id, params.child_id ?? params.child, params.offset ?? 0, params.limit ?? MAX_SUBAGENT_RESULT_PAGE_BYTES, params.diagnostics === true);
           const retained = page.complete ? "" : `; retained ${page.totalBytes} of ${page.sourceTotalBytes} source bytes`;
           const continuationSelector = page.childId ? `child_id=${page.childId}` : `child=${page.child}`;
-          const continuation = page.nextOffset === undefined ? "" : `\n\n[Use operation=result with job_id=${id}, ${continuationSelector}, offset=${page.nextOffset} to continue.]`;
+          const continuation = page.nextOffset === undefined ? "" : `\n\n[Use operation=result with job_id=${id}, ${continuationSelector}, offset=${page.nextOffset}${params.diagnostics ? ", diagnostics=true" : ""} to continue.]`;
           return {
             content: [{ type: "text", text: `[${page.label}] bytes ${page.offset}-${page.offset + page.bytes} of ${page.totalBytes}${retained}\n\n${page.text}${continuation}` }],
             details: {
@@ -2184,6 +2189,7 @@ export default function (pi: ExtensionAPI) {
               source_total_bytes: page.sourceTotalBytes,
               complete: page.complete,
               sha256: page.sha256,
+              diagnostics: params.diagnostics === true,
             } satisfies BackgroundSubagentDetails,
           };
         }

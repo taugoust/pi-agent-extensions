@@ -700,7 +700,12 @@ retain a 50 KiB preview plus each child's complete terminal report up to 16 MiB
 in a private per-user store, with
 a fair 32 MiB aggregate cap per job. Completion updates are coalesced into a
 compact, hidden supervisor state batch at a natural idle boundary; they do not
-post worker reports in the conversation or interrupt an active supervisor. `result` pages those reports
+post worker reports in the conversation or interrupt an active supervisor. `result`
+returns the worker answer by default, without the generated task-outcome JSON or
+RPC diagnostics. Use `operation=result, diagnostics=true` to include that retained
+metadata. This also applies to older stored reports; the original artifacts remain
+unchanged. Pagination offsets and checksums refer to the selected view, so keep the
+same `diagnostics` setting across pages. Results are paged
 by byte `offset` and a limit of at most 48 KiB (leaving room inside the 50 KiB
 parent-response budget); parallel and chain jobs select either a one-based
 `child` or its opaque `child_id`.
