@@ -628,6 +628,13 @@ function nativeProcessGroupFifo(requireTrusted: boolean): string | undefined {
   if (!requireTrusted) return candidate;
   const trusted = trustedNixStoreFile(candidate, true);
   if (!trusted) throw new Error("Guarded native subagents require an immutable Nix-store mkfifo");
+  // Preserve multicall dispatch through an immutable alias, never the mutable
+  // PATH entry. This also works with launch helpers retained across reload.
+  if (path.basename(trusted) === "coreutils") {
+    const alias = path.join(path.dirname(trusted), "mkfifo");
+    if (trustedNixStoreFile(alias, true) !== trusted) throw new Error("Nix-store mkfifo alias does not match the validated executable");
+    return alias;
+  }
   return trusted;
 }
 
