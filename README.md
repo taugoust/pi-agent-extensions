@@ -177,8 +177,8 @@ compaction, extension reload, session replacement, and Pi exit. Model-facing
 control operations are bound to the owning Pi session and use opaque job IDs.
 Only adoption accepts an exact existing tmux pane ID/server; no API accepts
 arbitrary tmux commands. Output returned to the model
-is further limited to 50 KiB/2000 lines. New-command concurrency is eight jobs
-and per-working-directory concurrency is four; adopted panes do not consume launch slots.
+is further limited to 50 KiB/2000 lines. New-command concurrency is 64 jobs
+and per-working-directory concurrency is 32; adopted panes do not consume launch slots.
 User-job records are eligible for automatic cleanup only after seven days from
 completion and after their terminal status/output has been explicitly read.
 Infrastructure services have a separate 20-terminal-record retention limit; they
