@@ -458,9 +458,15 @@ export class BackgroundJobManager {
   private async prune(records: JobRecord[]): Promise<void> {
     const terminal = records
       .filter((record) => record.result)
-      .sort((a, b) => b.metadata.createdAt.localeCompare(a.metadata.createdAt));
+      .sort((a, b) => b.result!.finishedAt.localeCompare(a.result!.finishedAt));
     const cutoff = Date.now() - 7 * 24 * 60 * 60 * 1000;
-    const expired = terminal.filter((record, index) => index >= 100 || Date.parse(record.result!.finishedAt) < cutoff);
+    // Disposable watcher services must never evict real jobs. Keep every recent
+    // user job and every unread outcome, regardless of infrastructure churn.
+    const infrastructure = terminal.filter(record => record.metadata.infrastructure);
+    const expired = infrastructure.filter((record, index) => index >= 20 || Date.parse(record.result!.finishedAt) < cutoff);
+    for (const record of terminal) {
+      if (!record.metadata.infrastructure && Date.parse(record.result!.finishedAt) < cutoff && await this.store.isNotified(record.metadata.id)) expired.push(record);
+    }
     for (const record of expired) {
       if (record.launch) await this.backend.kill(record.metadata.id, record.launch).catch(() => undefined);
       await this.store.remove(record.metadata.id).catch(() => undefined);

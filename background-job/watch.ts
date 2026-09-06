@@ -48,8 +48,13 @@ export class WatchManager {
   }
   private summary(w:any){return {watch_id:w.id,status:w.status,log_path:w.path,label:basename(w.path),sequence:w.sequence,dropped_through:w.droppedThrough,child_id:w.childId};}
   private async ensureRunner(){
-    try{const id=(await readFile(join(this.root,'service'),'utf8')).trim();const r=await this.jobs.get(id);if(r.metadata.sessionId===this.owner&&['starting','running'].includes(r.status))return;}catch{}
-    const node=await resolveExecutable('node');const runner=fileURLToPath(new URL('./watch-runner.mjs',import.meta.url));
+    let previous;
+    try{const id=(await readFile(join(this.root,'service'),'utf8')).trim();previous=await this.jobs.get(id);}catch{}
+    if(previous?.metadata.sessionId===this.owner){
+      if(['starting','running'].includes(previous.status))return;
+      if(previous.result && Date.parse(previous.result.finishedAt)-Date.parse(previous.metadata.createdAt)<1000 && Date.now()-Date.parse(previous.result.finishedAt)<30000)throw new Error('Watch runner exited during startup; automatic restart is delayed 30 seconds');
+    }
+    const node=await resolveExecutable('node');const runner=await realpath(fileURLToPath(new URL('./watch-runner.mjs',import.meta.url)));
     const job=await this.jobs.start({command:`${quote(node)} ${quote(runner)} ${quote(this.root)}`,cwd:this.root,sessionId:this.owner,name:'Persistent log watch service',infrastructure:true});
     await writeFile(join(this.root,'service'),job.metadata.id,{mode:0o600});
   }

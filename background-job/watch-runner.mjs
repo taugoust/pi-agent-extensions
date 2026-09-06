@@ -61,6 +61,10 @@ async function main(root) {
     await new Promise(resolve=>setTimeout(resolve,250));
   }
 }
-if(process.argv[1] && path.resolve(process.argv[1])===fileURLToPath(import.meta.url)) {
+function isEntrypoint() {
+  try { return Boolean(process.argv[1]) && fs.realpathSync(process.argv[1]) === fs.realpathSync(fileURLToPath(import.meta.url)); }
+  catch { return false; } // Importing from embedded runtimes has no filesystem argv[1].
+}
+if(isEntrypoint()) {
   main(process.argv[2]).catch(error=>{console.error(String(error));process.exitCode=1;});
 }

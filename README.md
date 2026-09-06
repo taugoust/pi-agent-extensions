@@ -178,8 +178,12 @@ control operations are bound to the owning Pi session and use opaque job IDs.
 Only adoption accepts an exact existing tmux pane ID/server; no API accepts
 arbitrary tmux commands. Output returned to the model
 is further limited to 50 KiB/2000 lines. New-command concurrency is eight jobs
-and per-working-directory concurrency is four; adopted panes do not consume launch slots. Terminal records older than
-seven days, or beyond the newest 100, are pruned when another job starts.
+and per-working-directory concurrency is four; adopted panes do not consume launch slots.
+User-job records are eligible for automatic cleanup only after seven days from
+completion and after their terminal status/output has been explicitly read.
+Infrastructure services have a separate 20-terminal-record retention limit; they
+never displace recent user jobs or unread outcomes. Watcher startup resolves
+symlinked entrypoints and backs off 30 seconds after an immediate startup exit.
 
 A cancelled `wait` leaves the underlying job running. `cancel` is the only
 lifecycle action that stops a job. Routine completions update state silently:

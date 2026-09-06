@@ -118,6 +118,18 @@ try {
   const ids = await store.listIds();
   assert(ids.length === (process.platform === "linux" ? 6 : 5) && ids.every((id) => /^job-[0-9a-f]{24}$/.test(id)), "opaque persisted job IDs are malformed");
 
+  // A crash-looping infrastructure service must not evict a recently completed
+  // user handle, even when the user already read its result.
+  for (let index = 1; index <= 110; index++) {
+    const id = 'job-' + index.toString(16).padStart(24, '0');
+    await store.create({ ...first.metadata, id, command: ':', infrastructure: true, createdAt: new Date().toISOString() }, ':', Buffer.alloc(0));
+    await store.publishResult(id, { ...finished.record.result, finishedAt: new Date().toISOString() });
+  }
+  const afterChurn = await manager.start({ command: 'printf retention-trigger', cwd: root, sessionId: 'test-session' });
+  await manager.wait(afterChurn.metadata.id, 5000);
+  assert((await manager.wait(first.metadata.id, 0)).record.status === 'completed', 'infrastructure churn evicted user metadata');
+  assert((await manager.output(first.metadata.id)).text.includes('done'), 'infrastructure churn removed user output');
+
   const raceStore = new JobStore(path.join(root, "race-state"), path.join(root, "race-runtime"));
   let releaseLaunch;
   let killed = false;
