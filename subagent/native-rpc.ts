@@ -247,7 +247,9 @@ export function spawnNativeSubagentProcess(
   const channelDir = mkdtempSync(join(tmpdir(), "pi-subagent-group-"));
   const controlPath = join(channelDir, "control");
   const readyPath = join(channelDir, "ready");
-  const fifo = spawnSync(options.fifoPath, ["-m", "600", controlPath], { timeout: 5000, stdio: ["ignore", "ignore", "pipe"], maxBuffer: 4096 });
+  // Guarded launches canonicalize the executable. Nix's mkfifo may resolve to
+  // the coreutils multicall binary, which still needs argv[0] for dispatch.
+  const fifo = spawnSync(options.fifoPath, ["-m", "600", controlPath], { argv0: "mkfifo", timeout: 5000, stdio: ["ignore", "ignore", "pipe"], maxBuffer: 4096 });
   if (fifo.error || fifo.status !== 0) {
     rmSync(channelDir, { recursive: true, force: true });
     throw new Error(`could not create native subagent process-group control FIFO: ${fifo.error?.message ?? `exit=${fifo.status} signal=${fifo.signal} ${String(fifo.stderr ?? "").slice(0, 512)}`}`);

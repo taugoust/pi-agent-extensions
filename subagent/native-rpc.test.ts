@@ -1,7 +1,7 @@
 import assert from "node:assert/strict";
 import { spawn } from "node:child_process";
 import { once } from "node:events";
-import { mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
+import { mkdtemp, readFile, realpath, rm, writeFile } from "node:fs/promises";
 import os from "node:os";
 import path from "node:path";
 import { NativeSubagentRpcSession, spawnNativeSubagentProcess } from "./native-rpc.js";
@@ -607,7 +607,8 @@ async function exerciseSequentialProcessGroups() {
   if (process.platform === "win32") return;
   const options = {
     shellPath: process.env.TEST_POSIX_SHELL ?? "/bin/sh",
-    fifoPath: process.env.TEST_MKFIFO ?? "/usr/bin/mkfifo",
+    // Match guarded resolution, including Nix's multicall coreutils target.
+    fifoPath: await realpath(process.env.TEST_MKFIFO ?? "/usr/bin/mkfifo"),
     termGraceMs: 50,
   };
   await (async () => {
