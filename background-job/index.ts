@@ -26,6 +26,7 @@ type CommandAuthority = {
   protocol: 1;
   active: boolean;
   consume(toolCallId: string, command: string, cwd: string): boolean;
+  authorize?(toolCallId: string, command: string, cwd: string, ownerSessionId: string, signal?: AbortSignal): Promise<void>;
 };
 
 type Params = JobParams;
@@ -296,7 +297,8 @@ export default function backgroundJob(pi: ExtensionAPI) {
     broker = { protocol: 1, sessionId: owner, async execute(identity, callId, params, signal, authorize) {
       if (sessionContext?.sessionManager.getSessionId() !== owner || identity.sessionId !== owner) throw new Error("Parent job authority is unavailable for this session");
       if (!/^subagent-(?:child|task)-[0-9a-f]{24}$/.test(identity.childId)) throw new Error("Invalid delegated job owner");
-      return await jobTool.execute(callId, { ...params, [INTERNAL_JOB_CALL]: { childId: identity.childId, authorize } }, signal, undefined,
+      const delegatedCallId = `child-job-${createHash("sha256").update(identity.childId + "\0" + callId).digest("hex")}`;
+      return await jobTool.execute(delegatedCallId, { ...params, [INTERNAL_JOB_CALL]: { childId: identity.childId, authorize } }, signal, undefined,
         { cwd: identity.cwd, hasUI: false, sessionManager: { getSessionId: () => owner } } as any);
     } };
     (globalThis as any)[JOB_BROKER_KEY] = broker;
@@ -364,9 +366,19 @@ export default function backgroundJob(pi: ExtensionAPI) {
       requireNativeExecution(startup);
       const internal = (rawParams as any)[INTERNAL_JOB_CALL] as { childId: string; authorize?: (command: string, cwd: string) => Promise<void> } | undefined;
       const ownerSessionId = sessionId(ctx);
+      if (params.action === "start" && internal && !internal.authorize) {
+        // Brokered calls have no parent tool_call event. Obtain a receipt from
+        // the same gate rather than treating delegation itself as approval.
+        const authority = (globalThis as Record<string, unknown>)[COMMAND_AUTHORITY_KEY] as CommandAuthority | undefined;
+        if (authority?.protocol === 1) {
+          if (!authority.active || !authority.authorize) throw new Error("Parent Permission Gate lacks active delegated job authorization; reload the parent");
+          await authority.authorize(toolCallId, params.command!, ctx.cwd, ownerSessionId, signal);
+        }
+      }
       if (params.action === "start" && !internal?.authorize) requireStartAuthorization(startup, toolCallId, params.command!, ctx.cwd);
       const service = await manager();
       if (params.action === "start" && internal?.authorize) await internal.authorize(params.command!, ctx.cwd);
+      if (params.action === "start" && signal?.aborted) throw new Error("Background job start cancelled before launch");
       const owned = (record: JobRecord) => assertOwned(record, ownerSessionId, internal?.childId);
       let response;
       switch (params.action) {

@@ -142,6 +142,7 @@ type CommandAuthority = {
   protocol: 1;
   active: boolean;
   consume(toolCallId: string, command: string, cwd: string): boolean;
+  authorize(toolCallId: string, command: string, cwd: string, ownerSessionId: string, signal?: AbortSignal): Promise<void>;
 };
 
 type FrameWaiter = {
@@ -1024,6 +1025,22 @@ export default function permissionGate(pi: ExtensionAPI) {
   const commandAuthority: CommandAuthority = {
     protocol: 1,
     active: true,
+    async authorize(toolCallId, command, cwd, ownerSessionId, signal) {
+      const context = sessionContext;
+      if (!commandAuthority.active || !context || stablePiSessionId(context) !== ownerSessionId) throw new Error("Parent command authority is unavailable for this session");
+      if (signal?.aborted) throw new Error("Delegated command authorization was cancelled");
+      try {
+        const decision = await authorizeCommand(
+          { toolName: "background_job", toolCallId, input: { action: "start", command } },
+          { ...context, cwd, signal: signal ?? context.signal },
+        );
+        if (!commandAuthority.active || sessionContext !== context || signal?.aborted) throw new Error("Parent command authority changed or request was cancelled during authorization");
+        if (decision?.block) throw new Error(decision.reason);
+      } catch (error) {
+        commandReceipts.delete(toolCallId);
+        throw error;
+      }
+    },
     consume(toolCallId, command, cwd) {
       const receipt = commandReceipts.get(toolCallId);
       commandReceipts.delete(toolCallId);
@@ -1283,7 +1300,7 @@ export default function permissionGate(pi: ExtensionAPI) {
     }
   });
 
-  pi.on("tool_call", async (event, ctx) => {
+  const authorizeCommand = async (event: any, ctx: ExtensionContext) => {
     const input = event.input as { action?: unknown; command?: unknown };
     const isBash = event.toolName === "bash";
     const isBackgroundStart = event.toolName === "background_job" && input.action === "start";
@@ -1417,5 +1434,6 @@ export default function permissionGate(pi: ExtensionAPI) {
     authorizeBackgroundStart(event, command, ctx.cwd);
     sealAuthorizedBashInput();
     return undefined;
-  });
+  };
+  pi.on("tool_call", authorizeCommand);
 }
