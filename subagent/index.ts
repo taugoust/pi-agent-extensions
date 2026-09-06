@@ -1538,7 +1538,7 @@ const SubagentItem = Type.Object({
   acceptance: Type.Optional(Type.Array(Type.String({maxLength:500}), {maxItems:16, description:"Acceptance criteria for the structured task outcome."})),
   task: Type.String({ description: "Task to delegate to this dynamic subagent" }),
   systemPrompt: Type.Optional(Type.String({ description: "Optional additional system prompt for this subagent" })),
-  model: Type.Optional(Type.String({ description: "Optional model id for this subagent" })),
+  model: Type.Optional(Type.String({ description: "Model override, optionally provider/id:thinking. Default: openai-codex/gpt-6-astra:low." })),
   tools: Type.Optional(Type.Array(Type.String(), { description: "Optional tool allowlist, e.g. ['read','grep','find','ls']" })),
   cwd: Type.Optional(Type.String({ description: "Optional working directory for this subagent process" })),
 });
@@ -1565,7 +1565,7 @@ function subagentParams() {
   child: Type.Optional(Type.Integer({ minimum: 1, maximum: 8, description: "One-based child report number for parallel or chain results." })),
   task: Type.Optional(Type.String({ description: "Task to delegate (single mode)" })),
   systemPrompt: Type.Optional(Type.String({ description: "Optional additional system prompt (single mode)" })),
-  model: Type.Optional(Type.String({ description: "Optional model id (single mode)" })),
+  model: Type.Optional(Type.String({ description: "Model override (single mode), optionally provider/id:thinking. Default: openai-codex/gpt-6-astra:low." })),
   tools: Type.Optional(Type.Array(Type.String(), { description: "Optional tool allowlist (single mode)" })),
   cwd: Type.Optional(Type.String({ description: "Optional working directory (single mode)" })),
   tasks: Type.Optional(Type.Array(SubagentItem, { maxItems: MAX_PARALLEL_TASKS, description: "Parallel subagent tasks. Max 8, up to 4 run concurrently." })),
@@ -2219,6 +2219,17 @@ export default function (pi: ExtensionAPI) {
       }
 
       validateBackgroundLaunch(params);
+      // Set launch defaults before routing to either backend. Explicit model
+      // selections (including Pi's :thinking suffix) remain authoritative.
+      const withDefaultModel = (spec: any) => {
+        const model = spec.model ?? "openai-codex/gpt-6-astra";
+        return { ...spec, model: /:(off|minimal|low|medium|high|xhigh|max)$/.test(model) ? model : `${model}:low` };
+      };
+      if (!params.action) {
+        if (Array.isArray(params.tasks)) params = { ...params, tasks: params.tasks.map(withDefaultModel) };
+        else if (Array.isArray(params.chain)) params = { ...params, chain: params.chain.map(withDefaultModel) };
+        else params = withDefaultModel(params);
+      }
       if (params.background === true) {
         if (signal?.aborted) throw signal.reason instanceof Error ? signal.reason : new Error("Background subagent launch cancelled");
         const dispositionError = adaptiveDispositionError(params);

@@ -692,6 +692,10 @@ required for filesystem, process, network, and descendant enforcement.
 { "mode": "draft", "action": "review", "draft_id": "session-..." }
 ```
 
+New subagents default to `openai-codex/gpt-6-astra` with **low** thinking across
+single, parallel, and chain launches on both backends. An explicit `model` changes
+the model; append `:medium`, `:high`, etc. to override thinking as well.
+
 Background launches support single, parallel, and chain requests through both
 adaptive backends, with up to sixteen aggregate invocations active at once.
 Parallel and chain groups are capped at eight children; the native backend runs
