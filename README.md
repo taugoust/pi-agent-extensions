@@ -692,6 +692,17 @@ required for filesystem, process, network, and descendant enforcement.
 { "mode": "draft", "action": "review", "draft_id": "session-..." }
 ```
 
+Native workers can call `notify_parent({message, requires_guidance?})` without
+ending their task. Findings are hidden and batched; guidance requests steer the
+parent at its next model boundary. The parent replies using `subagent`
+`operation=prompt` and the supplied `child_id`. Acceptance means queued, not a
+parent decision; the worker does not automatically pause or wait. Use background
+workers for this interaction: in-flight parent tools are not interrupted.
+Messages are limited to 1000 characters/2000 bytes and five per minute per child.
+Notifications are retained in private session entries and deduplicated on replay.
+Existing workers acquire the tool only on a new launch/resume; AgentSH-backed
+workers do not yet expose this native notification channel.
+
 New subagents default to `openai-codex/gpt-6-astra` with **low** thinking across
 single, parallel, and chain launches on both backends. An explicit `model` changes
 the model; append `:medium`, `:high`, etc. to override thinking as well.

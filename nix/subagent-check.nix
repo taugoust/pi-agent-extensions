@@ -1029,7 +1029,7 @@ pkgs.runCommand "subagent-check"
       echo 'lifecycle operation still marks consumption before Pi accepts its tool result' >&2
       exit 1
     fi
-    grep -F "deliverAs:'followUp',triggerTurn:true" ${self}/shared/quiet-state.ts >/dev/null
+    grep -F "requires_guidance)?'steer':'followUp'" ${self}/shared/quiet-state.ts >/dev/null
     if grep -F 'Do not claim dependent work complete' ${self}/subagent/index.ts >/dev/null \
       || grep -F 'running-reminder' ${self}/subagent/index.ts >/dev/null \
       || grep -F 'deliverAs: ctx.isIdle() ? "nextTurn"' ${self}/subagent/index.ts >/dev/null; then

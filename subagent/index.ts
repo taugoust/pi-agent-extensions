@@ -71,7 +71,7 @@ import { validateAcceptance, readTaskOutcome, outcomeSummary, type TaskOutcome, 
 import { NativeTaskStore, createTaskId, TASK_ID_PATTERN, type NativeTaskRecord } from "./resume.js";
 import { registerTaskDashboard } from "./dashboard.js";
 import { taskListText, outcomeLabel } from "../shared/task-presentation.js";
-import { installQuietState } from '../shared/quiet-state.js';
+import { installQuietState, notifyParent } from '../shared/quiet-state.js';
 const INTERNAL_TASK_RESUME = Symbol("subagent-task-resume");
 const INTERNAL_RESUME_MESSAGE = Symbol("subagent-resume-message");
 const INTERNAL_RESUME_COMPACT = Symbol("subagent-resume-compact");
@@ -640,7 +640,7 @@ function nativeProcessGroupFifo(requireTrusted: boolean): string | undefined {
 }
 
 function guardedNativeTools(requested: string[] | undefined): string[] {
-  const tools = requested !== undefined ? requested.filter(tool => tool !== "background_job") : [...SUBAGENT_PERMISSION_NATIVE_TOOLS];
+  const tools = requested !== undefined ? requested.filter(tool => tool !== "background_job" && tool !== "notify_parent") : [...SUBAGENT_PERMISSION_NATIVE_TOOLS];
   if (new Set(tools).size !== tools.length
     || tools.some((tool) => !SUBAGENT_PERMISSION_NATIVE_TOOLS.includes(tool as typeof SUBAGENT_PERMISSION_NATIVE_TOOLS[number]))) {
     throw new Error(`Guarded native subagents support only these explicitly loaded tools: ${SUBAGENT_PERMISSION_NATIVE_TOOLS.join(", ")}`);
@@ -672,6 +672,7 @@ async function runSingleSubagent(
   }
   const acceptance = validateAcceptance(spec.acceptance);
   args.push("--extension", nativeHelperEntrypoint("outcome-proxy", Boolean(permissionAuthority)));
+  args.push("--extension", nativeHelperEntrypoint("notify-proxy", Boolean(permissionAuthority)));
   const permissionTools = permissionAuthority ? guardedNativeTools(spec.tools) : undefined;
   if (permissionAuthority) {
     const permissionProxyEntrypoint = installedPermissionProxyEntrypoint();
@@ -685,9 +686,9 @@ async function runSingleSubagent(
   if (permissionTools) {
     // A distinct name prevents a missing/broken proxy from falling back to the
     // built-in Bash implementation under Pi's hard CLI tool allowlist.
-    args.push("--tools", [...permissionTools.map((tool) => tool === "bash" ? SUBAGENT_PERMISSION_BASH_TOOL : tool), ...(jobEnabled ? ["background_job"] : []), "task_outcome"].join(","));
+    args.push("--tools", [...permissionTools.map((tool) => tool === "bash" ? SUBAGENT_PERMISSION_BASH_TOOL : tool), ...(jobEnabled ? ["background_job"] : []), "task_outcome", "notify_parent"].join(","));
   } else {
-    args.push("--tools", [...effectiveTools, "task_outcome"].join(","));
+    args.push("--tools", [...effectiveTools, "task_outcome", "notify_parent"].join(","));
   }
 
   let tmpPromptDir: string | null = null;
@@ -781,7 +782,7 @@ async function runSingleSubagent(
       args.push("--append-system-prompt", tmpPromptPath);
     }
 
-    const taskText = `${spec.task}${spec.resumeTask ? `\n\nThis is a continuation, not a new assignment. Latest parent instruction (supersedes prior step instructions): ${spec.resumeMessage ?? taskRecord?.nextAction ?? "Continue from the saved checkpoint."}` : ""}\n\nAcceptance criteria: ${JSON.stringify(acceptance)}\nBefore returning, call task_outcome with delivered, partial, blocked, or checkpointed and evidence/next action. Execution completion is not task delivery.`;
+    const taskText = `${spec.task}${spec.resumeTask ? `\n\nThis is a continuation, not a new assignment. Latest parent instruction (supersedes prior step instructions): ${spec.resumeMessage ?? taskRecord?.nextAction ?? "Continue from the saved checkpoint."}` : ""}\n\nAcceptance criteria: ${JSON.stringify(acceptance)}\nUse notify_parent for concise discoveries or blockers while continuing work; requires_guidance=true requests parent steering. Acceptance means queued, not answered. Do not repeat routine updates or act on a decision before receiving guidance. Before returning, call task_outcome with delivered, partial, blocked, or checkpointed and evidence/next action. Execution completion is not task delivery.`;
     const initialPrompt = permissionTools?.includes("bash")
       ? `Task: ${taskText}\n\nUse the ${SUBAGENT_PERMISSION_BASH_TOOL} tool for every Bash or shell command.`
       : `Task: ${taskText}`;
@@ -911,6 +912,10 @@ async function runSingleSubagent(
     rpcSession = new NativeSubagentRpcSession({
       process: proc,
       onEvent: processEvent,
+      onParentNotification: async (request, requestSignal) => {
+        if (requestSignal.aborted) throw new Error("Parent notification cancelled");
+        return notifyParent(ownerSessionId, subagentId, request.toolCallId, request.params);
+      },
       onJobRequest: jobEnabled ? async (request, requestSignal) => {
         validateJobParams(request.params);
         const broker = parentJobBroker(ownerSessionId);
@@ -1958,6 +1963,7 @@ export default function (pi: ExtensionAPI) {
       "Treat harness state batches as internal routing data, not requests for a user-facing recap. Fetch worker reports/output only when needed; do not paste routine completion reports into the conversation.",
       "Use operation=prompt with an active child_id to send a non-blocking instruction; choose control_mode=steer, follow_up, or interrupt. Set wait_for_response=true only when intentionally waiting for the child's entire run. Acceptance is not task completion. Do not retry capability or inactive-child errors by relaunching work.",
       "Use operation=resume with a task_id to continue a terminal native task from its saved session, not a fresh reconstructed assignment. Resume is explicit, returns a new background group/child ID, preserves task ownership, and compacts context checkpoints before continuing.",
+      "Native workers can notify_parent without stopping. Findings arrive in hidden batches; requires_guidance requests steer at the next model boundary. Reply with operation=prompt and child_id. Use background workers for interactive supervision; in-flight parent tools are not interrupted. Existing workers need a fresh launch/resume to acquire notify_parent.",
       "Use operation=cancel explicitly to stop a background subagent. Running background subagents and their native control handles survive hot /reload in the same Pi session, but are cancelled when Pi exits or replaces the session.",
     ],
     parameters: subagentParams(),

@@ -112,6 +112,7 @@ export type NativeSubagentRpcOptions = {
   process: ChildProcessWithoutNullStreams;
   onEvent(event: JsonObject): void;
   onJobRequest?(request: { toolCallId: string; params: any }, signal: AbortSignal): Promise<any>;
+  onParentNotification?(request: { toolCallId: string; params: any }, signal: AbortSignal): Promise<any>;
   terminateProcess(): void;
   /** Test override. Production control prompts have a 24-hour hard bound. */
   controlTimeoutMs?: number;
@@ -407,6 +408,7 @@ export class NativeSubagentRpcSession implements NativeSubagentControlHandle {
   private readonly proc: ChildProcessWithoutNullStreams;
   private readonly onEvent: (event: JsonObject) => void;
   private readonly onJobRequest?: NativeSubagentRpcOptions["onJobRequest"];
+  private readonly onParentNotification?: NativeSubagentRpcOptions["onParentNotification"];
   private readonly serviceAbort = new AbortController();
   private readonly serviceIds = new Set<string>();
   private serviceRequests = 0;
@@ -460,6 +462,7 @@ export class NativeSubagentRpcSession implements NativeSubagentControlHandle {
     this.proc = options.process;
     this.onEvent = options.onEvent;
     this.onJobRequest = options.onJobRequest;
+    this.onParentNotification = options.onParentNotification;
     this.terminateProcess = options.terminateProcess;
     this.controlTimeoutMs = options.controlTimeoutMs ?? MAX_NATIVE_SUBAGENT_CONTROL_MS;
     if (!Number.isSafeInteger(this.controlTimeoutMs) || this.controlTimeoutMs < 1
@@ -1093,7 +1096,7 @@ export class NativeSubagentRpcSession implements NativeSubagentControlHandle {
       this.fail(new Error("native subagent RPC returned an invalid extension UI request ID"));
       return;
     }
-    if (method === "input" && request.title === "pi-parent-background-job-v1") {
+    if (method === "input" && ["pi-parent-background-job-v1", "pi-parent-notification-v1"].includes(request.title)) {
       if (this.serviceIds.has(id) || this.serviceIds.size >= 4096 || this.serviceRequests >= 16) {
         this.fail(new Error("native child job request replay or capacity exceeded"));
         return;
@@ -1103,11 +1106,12 @@ export class NativeSubagentRpcSession implements NativeSubagentControlHandle {
       void (async () => {
         let result: any;
         try {
-          if (!this.onJobRequest) throw new Error("Parent-owned jobs are unavailable for this child");
+          const handler = request.title === "pi-parent-notification-v1" ? this.onParentNotification : this.onJobRequest;
+          if (!handler) throw new Error("Requested parent service is unavailable for this child");
           if (typeof request.placeholder !== "string" || Buffer.byteLength(request.placeholder) > 48 * 1024) throw new Error("Invalid child job request");
           const value = JSON.parse(request.placeholder);
           if (!value || Object.keys(value).some(k => !["toolCallId", "params"].includes(k)) || typeof value.toolCallId !== "string" || !value.toolCallId || value.toolCallId.length > 256) throw new Error("Invalid child job envelope");
-          result = await this.onJobRequest(value, this.serviceAbort.signal);
+          result = await handler(value, this.serviceAbort.signal);
         } catch (error) { result = { error: boundedProtocolError(error) }; }
         finally { this.serviceRequests--; }
         if (this.closed || this.terminationRequested) return;

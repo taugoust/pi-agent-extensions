@@ -1,11 +1,11 @@
 import assert from 'node:assert/strict';
-import { installQuietState } from './quiet-state.js';
+import { installQuietState, notifyParent } from './quiet-state.js';
 const pause=()=>new Promise(resolve=>setTimeout(resolve,20));
 const entries:any[]=[];let idle=false;
 const ctx:any={isIdle:()=>idle,hasPendingMessages:()=>false,sessionManager:{getSessionId:()=>`quiet-test-${process.pid}`,getBranch:()=>entries}};
 function fixture(){
  const handlers=new Map<string,any[]>();const messages:any[]=[];
- const pi:any={on(name:string,handler:any){handlers.set(name,[...(handlers.get(name)??[]),handler]);},sendMessage(message:any,options:any){messages.push({message,options});entries.push({type:'custom_message',customType:message.customType,details:message.details});}};
+ const pi:any={appendEntry(customType:string,data:any){entries.push({type:'custom',customType,data});},on(name:string,handler:any){handlers.set(name,[...(handlers.get(name)??[]),handler]);},sendMessage(message:any,options:any){messages.push({message,options});entries.push({type:'custom_message',customType:message.customType,details:message.details});}};
  return {pi,messages,async emit(name:string,event:any={}){for(const h of handlers.get(name)??[])await h(event,ctx);}};
 }
 const first=fixture();const jobs=installQuietState(first.pi,5);const workers=installQuietState(first.pi,5);
@@ -29,5 +29,22 @@ const next=fixture();const restored=installQuietState(next.pi,5);await next.emit
 restored.enqueue(ctx,{kind:'job',id:'job-one',state:'completed'});await pause();assert.equal(next.messages.length,0,'consumed state replayed after reload');
 restored.enqueue(ctx,{kind:'job',id:'job-three',state:'completed'});restored.consume(ctx,'job','job-three');await pause();assert.equal(next.messages.length,0,'explicitly read state generated another notification');
 restored.enqueue(ctx,{kind:'watch',id:'watch-two',through_sequence:8,count:8});restored.consume(ctx,'watch','watch-two',4);await pause();assert.equal(next.messages.length,1,'acknowledgement hid newer unseen events');
+idle=false;await next.emit('before_agent_start');
+const child='subagent-child-'+'a'.repeat(24);const owner=ctx.sessionManager.getSessionId();
+notifyParent(owner,child,'finding',{message:'A concise discovery'});
+await pause();assert.equal(next.messages.length,1,'routine child finding interrupted active work');
+notifyParent(owner,child,'question',{message:'Which shared interface should I use?',requires_guidance:true});
+await new Promise(resolve=>setTimeout(resolve,1100));
+assert.equal(next.messages.length,2);assert.equal(next.messages[1].options.deliverAs,'steer');assert.equal(next.messages[1].message.display,false);
+assert.equal(next.messages[1].message.details.updates.filter((u:any)=>u.kind==='notification').length,2);
+const count=entries.length;notifyParent(owner,child,'finding',{message:'A concise discovery'});assert.equal(entries.length,count,'retry duplicated a durable notification');
+assert.throws(()=>notifyParent('other-session',child,'x',{message:'no'}),/unavailable/);
+assert.throws(()=>notifyParent(owner,child,'bad',{message:'x',child_id:'forged'}),/Invalid/);
+for(let i=0;i<3;i++)notifyParent(owner,child,'pending'+i,{message:'Pending finding '+i});
+assert.throws(()=>notifyParent(owner,child,'excess',{message:'too many'}),/rate limit/);
 await next.emit('session_shutdown',{reason:'quit'});
-console.log('quiet supervisor batching checks passed');
+idle=true;const restarted=fixture();installQuietState(restarted.pi,5);await restarted.emit('session_start');await pause();
+assert.equal(restarted.messages.length,1,'pending discoveries were lost across process-state reset');
+assert.deepEqual(restarted.messages[0].message.details.updates.map((u:any)=>u.message),['Pending finding 0','Pending finding 1','Pending finding 2']);
+await restarted.emit('session_shutdown',{reason:'quit'});
+console.log('quiet supervisor batching and child notification checks passed');
