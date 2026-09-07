@@ -13,6 +13,10 @@ assert.equal(watchDeliveryCursors([
  {type:'custom_message',customType:'background-job-watch',details:{watch_id:watchId,through_sequence:2}},
  {type:'custom_message',customType:'background-job-watch',details:{watch_id:watchId,through_sequence:5}},
 ]).get(watchId),5);
+assert.equal(watchDeliveryCursors([
+ {type:'custom',customType:'harness-state-receipt',data:{v:1,state:'recorded',update:{kind:'watch',id:watchId,through_sequence:8}}},
+ {type:'custom',customType:'harness-state-receipt',data:{v:1,state:'queued',update:{kind:'watch',id:watchId,through_sequence:10}}},
+]).get(watchId),8);
 assert.match(watchResultText('unwatch',{watch_id:watchId}),/NOT been cancelled/);
 assert.match(readableTaskReport('Task outcome (model-reported): {"state":"partial","summary":"Still needs work","acceptance":[],"remaining":["test"],"next_action":"run tests"}\nRPC diagnostics: {"rawExit":{"code":0}}'),/Remaining: test/);
 

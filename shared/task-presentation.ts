@@ -49,9 +49,12 @@ export function watchDeliveryCursors(entries: unknown[]): Map<string,number> {
   const cursors=new Map<string,number>();
   for(const raw of entries){
     const entry=raw as any;
-    if(entry?.type!=="custom_message"||!["background-job-watch","harness-state"].includes(entry.customType))continue;
+    const receipt=entry?.type==='custom'&&entry.customType==='harness-state-receipt'
+      &&entry.data?.v===1&&['recorded','delivered','consumed'].includes(entry.data.state)&&entry.data.update?.kind==='watch'
+      ? entry.data.update : undefined;
+    if(!receipt&&(entry?.type!=="custom_message"||!["background-job-watch","harness-state"].includes(entry.customType)))continue;
     const detail=entry.details;
-    const deliveries=entry.customType==='harness-state'
+    const deliveries=receipt ? [{watch_id:receipt.id,through_sequence:receipt.through_sequence}] : entry.customType==='harness-state'
       ? (Array.isArray(detail?.updates)?detail.updates:[]).filter((d:any)=>d?.kind==='watch').map((d:any)=>({watch_id:d.id,through_sequence:d.through_sequence}))
       : Array.isArray(detail?.watches)?detail.watches:[detail];
     for(const item of deliveries){

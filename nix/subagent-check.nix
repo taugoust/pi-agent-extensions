@@ -1029,7 +1029,9 @@ pkgs.runCommand "subagent-check"
       echo 'lifecycle operation still marks consumption before Pi accepts its tool result' >&2
       exit 1
     fi
-    grep -F "requires_guidance)?'steer':'followUp'" ${self}/shared/quiet-state.ts >/dev/null
+    # Behavior (routine state never triggers a model request) is exercised by
+    # quiet-state.test above; avoid pinning the obsolete wake-on-every-batch code.
+    grep -F 'harness-state-receipt' ${self}/shared/quiet-state.ts >/dev/null
     if grep -F 'Do not claim dependent work complete' ${self}/subagent/index.ts >/dev/null \
       || grep -F 'running-reminder' ${self}/subagent/index.ts >/dev/null \
       || grep -F 'deliverAs: ctx.isIdle() ? "nextTurn"' ${self}/subagent/index.ts >/dev/null; then

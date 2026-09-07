@@ -187,9 +187,9 @@ symlinked entrypoints and backs off 30 seconds after an immediate startup exit.
 
 A cancelled `wait` leaves the underlying job running. `cancel` is the only
 lifecycle action that stops a job. Routine completions update state silently:
-no full reports or toasts are posted automatically. The supervisor receives a
-small hidden state batch after its current work settles, not an interruption or
-request for a user-facing recap. Explicit output/result reads fetch reports when
+no full reports or toasts are posted automatically. Routine state deltas are
+persisted outside the model conversation and never schedule model turns.
+Explicit output/result reads fetch reports when
 needed; waits are status-only unless output lines are explicitly requested. Starts pass
 through the same Permission Gate classification as ordinary Bash. Guard-only
 AgentSH can authorize native
@@ -697,13 +697,29 @@ required for filesystem, process, network, and descendant enforcement.
 ```
 
 Native workers can call `notify_parent({message, requires_guidance?})` without
-ending their task. Findings are hidden and batched; guidance requests steer the
-parent at its next model boundary. The parent replies using `subagent`
+ending their task. Routine findings are retained outside model context;
+only explicit guidance requests are eligible for a bounded, rate-limited parent wake-up. The parent replies using `subagent`
 `operation=prompt` and the supplied `child_id`. Acceptance means queued, not a
 parent decision; the worker does not automatically pause or wait. Use background
 workers for this interaction: in-flight parent tools are not interrupted.
 Messages are limited to 1000 characters/2000 bytes and five per minute per child.
 Notifications are retained in private session entries and deduplicated on replay.
+Guidance wake-ups have a 30-second minimum interval, a bounded UTF-8 payload,
+and a conservative 20-guidance-update quota between explicit operator resets.
+Delivery receipts are reserved before scheduling the model: ambiguous failures
+may leave a request available only for explicit review, rather than replay it.
+
+Operator controls (do not cancel builds or workers):
+- `/harness-state status` — queue, deduplication, delivery and circuit-breaker counters.
+- `/harness-state show` — explicitly display the last 25 retained child notifications.
+- `/harness-state disable` — persistently disable automatic delivery for this session.
+- `/harness-state enable` — explicitly re-enable guidance and reset its quota.
+- `PAE_QUIET_STATE_DISABLED=1` — startup environment kill switch.
+
+Compaction pauses guidance delivery and leaves it disabled until explicitly
+re-enabled, preventing automatic compaction/retry loops from rearming delivery.
+Routine job/watch state and full outputs remain available through their tools;
+receipt routing is not an acknowledgement for job-retention purposes.
 Existing workers acquire the tool only on a new launch/resume; AgentSH-backed
 workers do not yet expose this native notification channel.
 
@@ -717,8 +733,8 @@ Parallel and chain groups are capped at eight children; the native backend runs
 at most four siblings concurrently. They return immediately,
 retain a 50 KiB preview plus each child's complete terminal report up to 16 MiB
 in a private per-user store, with
-a fair 32 MiB aggregate cap per job. Completion updates are coalesced into a
-compact, hidden supervisor state batch at a natural idle boundary; they do not
+a fair 32 MiB aggregate cap per job. Completion updates are coalesced into
+private durable state deltas; they do not trigger model requests, add context,
 post worker reports in the conversation or interrupt an active supervisor. `result`
 returns the worker answer by default, without the generated task-outcome JSON or
 RPC diagnostics. Use `operation=result, diagnostics=true` to include that retained
@@ -845,8 +861,9 @@ read errors, and associated job termination are events. `events` reads up to 32
 events after `after_sequence`; `ack` with `through_sequence` acknowledges consumed
 events; `unwatch` stops observation, never the build. Event IDs are monotonic and
 old-journal overflow is explicit. New event availability is included in the same
-quiet supervisor state batches, without log text or user notifications. Delivered
-state batches are deduplicated across reload; unread journal entries remain
+private durable state deltas, without log text, user notifications, or model
+wake-ups. Use explicit job waits and watch event reads for supervision.
+State deltas are deduplicated across reload; unread journal entries remain
 available until acknowledged. Watches default to
 starting at the current end of the file; `from:"start"` opts into existing output.
 
@@ -913,7 +930,7 @@ authenticated parent Permission Gate relay. Progress reconstruction preserves
 content indices across thinking/text/tool blocks, and rendering errors cannot
 interrupt cancellation. Failure reports retain raw process exit code/signal and
 a bounded, metadata-only RPC lifecycle trace. Background reports remain available on demand; automatic state updates contain
-only IDs, execution/outcome states, and event cursors, and are hidden from the transcript.
+only IDs, execution/outcome states, and event cursors, and stay outside model context.
 
 POSIX process-group cleanup uses a private named FIFO and requires `mkfifo`
 (immutable Nix-store executables in guarded sessions). It deliberately avoids
