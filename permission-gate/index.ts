@@ -159,6 +159,8 @@ type GateClaim = {
   client?: AgentSHPermissionGateClient;
   error?: Error;
   subagentAuthority?: ReloadableSubagentPermissionAuthority;
+  // Runtime authority, NOT reconstructed from model-writable session entries.
+  promptMode?: { sessionId: string; enabled: boolean };
 };
 
 function ownEnvironment(name: string): boolean {
@@ -1055,6 +1057,32 @@ export default function permissionGate(pi: ExtensionAPI) {
   };
 
   let enabled = true;
+  const modeChanges = new Set<AbortController>();
+  const promptsEnabled = () => inheritedGateClaim?.promptMode?.sessionId !== activePiSessionId
+    || inheritedGateClaim?.promptMode?.enabled !== false;
+  const resolveSessionPrompt = async (
+    ctx: ExtensionContext, metadata: PromptMetadata, timeoutMs: number,
+    transportSignal: AbortSignal, callerSignal: AbortSignal | undefined = ctx.signal,
+  ): Promise<PromptResolution> => {
+    if (callerSignal?.aborted) return { kind: "cancel", reason: "caller aborted" };
+    if (transportSignal.aborted) throw transportSignal.reason;
+    if (!promptsEnabled()) return { kind: "resolve", decision: "allow" };
+    const changed = new AbortController();
+    modeChanges.add(changed);
+    const linked = linkedAbortSignal([callerSignal, changed.signal]);
+    try {
+      const resolution = await resolveAgentSHPrompt(ctx, metadata, timeoutMs, transportSignal, linked.signal);
+      // Mode changes dismiss local/mirrored UI, not the AgentSH request. Its
+      // exact pending ID is still resolved and its authoritative receipt checked.
+      if (changed.signal.aborted && !callerSignal?.aborted && !transportSignal.aborted && !promptsEnabled()) {
+        return { kind: "resolve", decision: "allow" };
+      }
+      return resolution;
+    } finally {
+      linked.dispose();
+      modeChanges.delete(changed);
+    }
+  };
   let failureReported = false;
   const agentSHStartup = inheritedGateClaim
     ? inheritedGateClaim.startup
@@ -1148,7 +1176,7 @@ export default function permissionGate(pi: ExtensionAPI) {
         async (metadata, timeoutMs, transportSignal) => {
           pi.events.emit("permission-gate:waiting");
           try {
-            return await resolveAgentSHPrompt(
+            return await resolveSessionPrompt(
               ctx,
               childPromptMetadata(metadata, request),
               timeoutMs,
@@ -1185,16 +1213,30 @@ export default function permissionGate(pi: ExtensionAPI) {
   }
 
   pi.registerCommand("permission-gate", {
-    description: "Toggle the legacy dangerous-command gate or show AgentSH gate status",
-    handler: async (_args, ctx) => {
+    description: "Permission prompts: off|on|status (guard-only: parent and all children)",
+    handler: async (args, ctx) => {
       if (!ctx.hasUI) return;
+      const action = args.trim().toLowerCase();
+      if (action && !["off", "on", "status"].includes(action)) {
+        ctx.ui.notify("Usage: /permission-gate off|on|status", "warning");
+        return;
+      }
       if (inheritedGateClaim) {
         const failure = inheritedGateClaim.error ?? inheritedGateClaim.client?.failure;
+        if (runtimeDisposition().kind !== "guard-only" || !activePiSessionId
+          || stablePiSessionId(ctx) !== activePiSessionId || !sessionContext) {
+          ctx.ui.notify("Permission prompt mode unavailable; full AgentSH sandbox policy is unchanged", "error");
+          return;
+        }
+        if (action === "off" || action === "on") {
+          inheritedGateClaim.promptMode = { sessionId: activePiSessionId, enabled: action === "on" };
+          if (action === "off") for (const controller of modeChanges) controller.abort();
+        }
         gateStatus(ctx, failure ? "error" : "ready");
+        ctx.ui.setStatus("permission-gate-mode", promptsEnabled() ? undefined : "AgentSH prompts OFF (session + children)");
         ctx.ui.notify(
-          failure
-            ? `AgentSH Permission Gate is mandatory and failed closed: ${boundedError(failure)}`
-            : "AgentSH Permission Gate is launcher-owned and cannot be disabled in this session",
+          `AgentSH permission prompts ${promptsEnabled() ? "on" : "off"} for parent and all children; authorization remains mandatory.`
+            + (failure ? ` Failed closed: ${boundedError(failure)}` : ""),
           failure ? "error" : "info",
         );
         return;
@@ -1211,7 +1253,7 @@ export default function permissionGate(pi: ExtensionAPI) {
         return;
       }
 
-      enabled = !enabled;
+      enabled = action === "on" ? true : action === "off" ? false : action === "status" ? enabled : !enabled;
       if (enabled) {
         ctx.ui.setStatus("permission-gate", ctx.ui.theme.fg("warning", "gate ■"));
         ctx.ui.notify("Permission gate enabled — dangerous commands require approval", "info");
@@ -1238,6 +1280,10 @@ export default function permissionGate(pi: ExtensionAPI) {
         }
         const boundAuthority = subagentAuthority;
         activePiSessionId = stablePiSessionId(ctx);
+        if (inheritedGateClaim.promptMode?.sessionId !== activePiSessionId) {
+          inheritedGateClaim.promptMode = { sessionId: activePiSessionId, enabled: true };
+        }
+        if (ctx.hasUI) ctx.ui.setStatus("permission-gate-mode", promptsEnabled() ? undefined : "AgentSH prompts OFF (session + children)");
         boundAuthority.bind(
           authorityOwner,
           activePiSessionId,
@@ -1275,6 +1321,7 @@ export default function permissionGate(pi: ExtensionAPI) {
   pi.on("session_shutdown", async (event, ctx) => {
     commandAuthority.active = false;
     commandReceipts.clear();
+    if (inheritedGateClaim && event.reason !== "reload") inheritedGateClaim.promptMode = undefined;
     try {
       if (subagentAuthority) {
         const reason = event.reason ?? "quit";
@@ -1346,7 +1393,7 @@ export default function permissionGate(pi: ExtensionAPI) {
           async (metadata, timeoutMs, transportSignal) => {
             pi.events.emit("permission-gate:waiting");
             try {
-              return await resolveAgentSHPrompt(ctx, metadata, timeoutMs, transportSignal);
+              return await resolveSessionPrompt(ctx, metadata, timeoutMs, transportSignal);
             } finally {
               pi.events.emit("permission-gate:resolved");
             }

@@ -229,8 +229,19 @@ closed with an actionable diagnostic.
 - **Source**:
   [permission-gate/](https://github.com/rytswd/pi-agent-extensions/tree/main/permission-gate)
 - **License**: MIT
-- **Command**: `/permission-gate` toggles only the unsupervised legacy gate;
-  AgentSH-owned gates cannot be disabled from Pi
+- **Command**: `/permission-gate off|on|status` controls guard-only approval
+  prompts for the parent and **all existing and future children**. Default: on.
+  With no argument, guard-only reports status; the unsupervised legacy gate toggles.
+  Off auto-resolves AgentSH prompts as allow; every command still goes through
+  authorize/resolve, exact receipt validation, and fail-closed transport handling.
+  Pending UI is dismissed when off is selected (including mirrored prompts).
+  On affects subsequent resolutions, not commands already authorized.
+  The operator command is not exposed as a model tool or child authority API.
+  Mode lives in the parent guard claim, bound to the Pi session ID, surviving
+  `/reload` only. New/fork/resume/restart sessions default on; copied or edited
+  custom session entries cannot disable it. Trusted in-process extensions remain
+  inside the trust boundary. Full AgentSH sandbox policy is **unchanged**:
+  this command does not disable sandbox enforcement or its approvals.
 - **Status bar**: `gate ■` in legacy mode, or `AgentSH gate ■` / `?` / `✗`
   with an inherited AgentSH gate
 

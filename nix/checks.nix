@@ -1280,6 +1280,14 @@ in
           gate(pi);
           assert(JSON.stringify(globalThis.__paeSubagentPermissionSelectionV1) === JSON.stringify({ protocol: 1, selected: true, conflict: false }), "guard selection was not published before session start");
           await pi.handlers.get("session_start")({}, ctx);
+          if (["mode-off", "mode-on", "reload-child", "new-session-child"].includes(name)) {
+            await pi.commands.get("permission-gate").handler("off", ctx);
+            if (name === "mode-on") await pi.commands.get("permission-gate").handler("on", ctx);
+          }
+          if (name === "pending-off") contextOptions.onSelect = async (_title, _choices, settings) => {
+            await pi.commands.get("permission-gate").handler("off", ctx);
+            assert(settings.signal.aborted, "off did not dismiss pending UI");
+          };
           const tool = pi.handlers.get("tool_call");
           const results = [];
           let childAuthorization;
@@ -1529,6 +1537,22 @@ in
         }
 
         async function runInheritedChecks() {
+          for (const name of ["mode-off", "mode-on", "pending-off"]) {
+            const result = await spawnInheritedChild(name, async (socket, stdout) => {
+              const read = lineReader(socket);
+              await expectHello(read, socket);
+              const request = await read();
+              assertAuthorize(request, "sudo true", "tool-dangerous");
+              send(socket, { v: 1, type: "decision", id: request.id, decision: "prompt", prompt });
+              const resolution = await read();
+              assert(resolution.type === "resolve" && resolution.decision === "allow" && resolution.id === request.id, "mode lost exact resolve");
+              await delay(25);
+              assert(stdout() === "", "off bypassed authoritative receipt");
+              send(socket, { v: 1, type: "complete", id: request.id, decision: "allow", reason: "operator mode test" });
+            });
+            assert(result.allowed[0], name + " blocked");
+            assert(result.selections.length === (name === "mode-off" ? 0 : 1), name + " incorrect UI count");
+          }
           const allowed = await spawnInheritedChild("local-allow", async (socket, stdout) => {
             const read = lineReader(socket);
             await expectHello(read, socket, true);
@@ -1603,7 +1627,7 @@ in
           assert(reloadChild.authorityStable === true, "hot reload replaced the authority object captured by the child relay");
           assert(reloadChild.childAuthorization?.allowed === true, "child authorization did not resume after hot reload");
           assert(reloadChild.childAuthorization?.reason === "approved after reload", "reloaded child lost the audited completion reason");
-          assert(reloadChild.selections.length === 1 && reloadChild.selections[0].title.includes("Reloaded child command requires approval"), "reloaded child authorization used a stale UI context");
+          assert(reloadChild.selections.length === 0, "off did not survive reload for existing children");
 
           const newSessionChild = await spawnInheritedChild("new-session-child", async (socket) => {
             const read = lineReader(socket);
@@ -1611,8 +1635,12 @@ in
             const request = await read();
             assert(request.v === 1 && request.type === "authorize" && request.command === "ssh new-session.example.test", "replacement Pi session sent an invalid child authorization");
             assert(request.session_id === "subagent:native-child-new-session", "replacement Pi session changed child audit attribution");
-            send(socket, { v: 1, type: "decision", id: request.id, decision: "allow" });
+            send(socket, { v: 1, type: "decision", id: request.id, decision: "prompt", prompt });
+            const resolution = await read();
+            assert(resolution.type === "resolve" && resolution.decision === "allow", "new session prompt not resolved");
+            send(socket, { v: 1, type: "complete", id: request.id, decision: "allow", reason: "new session approval" });
           });
+          assert(newSessionChild.selections.length === 1, "off leaked into an independent new session");
           assert(newSessionChild.oldAuthorityActive === false, "session replacement did not revoke the authority captured by old children");
           assert(newSessionChild.authorityStable === false, "session replacement reused the old child authority object");
           assert(newSessionChild.childAuthorityActive === true && newSessionChild.childAuthorization?.allowed === true, "replacement Pi session did not publish a fresh child authority");
