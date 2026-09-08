@@ -39,10 +39,18 @@ try {
  assert.match((await manager.output(originalId)).text,/existing-work/);
  assert.equal((await manager.wait(originalId,10)).timedOut,true);
  await assert.rejects(exec(process.execPath,['--input-type=module','-e',makeController('competing-parent')],{timeout:15000}),/another live Pi/);
+ // Adopted pane ownership also follows an intact window across sessions.
+ const originalWindow=await call('display-message','-p','-t',pane,'#{window_id}');
+ const promotedSession=await call('new-session','-d','-P','-F','#{session_id}','-s','promoted','-c',root,process.execPath,'-e','setInterval(()=>{},1000)');
+ await call('move-window','-s',originalWindow,'-t',`${promotedSession}:`);
+ assert.equal((await manager.get(originalId)).status,'running','adopted job was lost after whole-window promotion');
  const cancelled=await manager.cancel(originalId);assert.equal(cancelled.status,'cancelled');
- assert.equal(await call('display-message','-p','-t',pane,'#{pane_pid}').catch(()=>''),'','cancel did not close the adopted pane');
+ assert.equal(await call('display-message','-p','-t',pane,'#{pane_dead}'),'1','cancel did not retain the adopted pane');
  assert.match((await manager.output(originalId)).text,/existing-work/,'cancel lost captured output');
  assert.equal(await call('display-message','-p','-t',untouched,'#{pane_pid}'),untouchedPid,'cancel affected an unrelated pane');
+ await manager.reap(originalId);
+ assert.equal(await call('display-message','-p','-t',pane,'#{pane_pid}').catch(()=>''),'','reap did not close the adopted pane');
+ assert.equal(await call('display-message','-p','-t',untouched,'#{pane_pid}'),untouchedPid,'reap affected an unrelated pane');
  const signalJob=await manager.adoptPane({paneId:untouched,socket,cwd:root,sessionId:'new-parent'});
  await manager.signal(signalJob.metadata.id,'SIGTERM');
  const end=Date.now()+3000;let terminal;
@@ -53,6 +61,8 @@ try {
  const protectedPid=await call('display-message','-p','-t',protectedPane,'#{pane_pid}');
  await call('set-option','-p','-t',protectedPane,'@pi_managed_job_token','00000000000000000000000000000000');
  assert.equal((await manager.cancel(protectedJob.metadata.id)).status,'lost');
+ await assert.rejects(manager.reap(protectedJob.metadata.id),/identity changed/);
+ assert(await fs.stat(store.jobDir(protectedJob.metadata.id)), 'failed reap released runtime');
  assert.equal(await call('display-message','-p','-t',protectedPane,'#{pane_pid}'),protectedPid,'identity mismatch cancelled replacement work');
  console.log('LIVE pane adoption: no restart, parent exit/re-registration, idempotence, output/wait, signal/cancel, identity guards and unrelated-pane preservation passed');
 } finally {await exec(tmux,['-S',socket,'kill-server']).catch(()=>{});await exec(tmux,['-S',path.join(runtime,'tmux.sock'),'kill-server']).catch(()=>{});await fs.rm(root,{recursive:true,force:true});}

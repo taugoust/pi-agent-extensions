@@ -106,15 +106,20 @@
             ;
         })
         // {
-          background-job = import ./nix/background-job-check.nix { inherit self pkgs; };
           openai-fast-mode = import ./nix/openai-fast-mode-check.nix {
             inherit self pkgs pi-openai-fast-mode;
           };
           agentsh-mode = import ./nix/agentsh-mode-check.nix { inherit self pkgs; };
           auto = import ./nix/auto-check.nix { inherit self pkgs; };
           modal-editor = import ./nix/modal-editor-check.nix { inherit self pkgs; };
-          subagent = import ./nix/subagent-check.nix { inherit self pkgs; };
+          subagent = import ./nix/subagent-check.nix {
+            inherit self pkgs;
+            piPackage = if pkgs.stdenv.hostPlatform.isLinux then self.packages.${system}.pi else null;
+          };
           subagent-finalizer = import ./nix/subagent-finalizer-check.nix { inherit self pkgs; };
+        }
+        // pkgs.lib.optionalAttrs pkgs.stdenv.hostPlatform.isLinux {
+          background-job = import ./nix/background-job-check.nix { inherit self pkgs; };
         }
       );
 

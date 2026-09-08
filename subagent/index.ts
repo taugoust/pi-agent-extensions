@@ -10,6 +10,7 @@ import * as fs from "node:fs";
 import * as os from "node:os";
 import * as path from "node:path";
 import { fileURLToPath } from "node:url";
+import { TuiNativeManager } from "./tui-native.ts";
 import type { Message } from "@mariozechner/pi-ai";
 import type { AgentToolResult, ExtensionAPI } from "@mariozechner/pi-coding-agent";
 import { getAgentDir, getMarkdownTheme } from "@mariozechner/pi-coding-agent";
@@ -66,6 +67,7 @@ import {
 } from "./control.js";
 import { DetachableForegroundExecution } from "./foreground-handoff.js";
 import { NativeSubagentRpcSession, spawnNativeSubagentProcess, type NativeSubagentRpcDiagnostics } from "./native-rpc.js";
+import { waitForGroupSnapshot } from "./group-wait.ts";
 import { parentJobBroker, validateJobParams } from "../shared/background-job.js";
 import { validateAcceptance, readTaskOutcome, outcomeSummary, type TaskOutcome, type TaskOutcomeSummary } from "./outcome.js";
 import { NativeTaskStore, createTaskId, TASK_ID_PATTERN, type NativeTaskRecord } from "./resume.js";
@@ -1423,7 +1425,7 @@ export function validateBackgroundOperation(params: any): void {
     throw new Error("Background subagent operation must be a non-empty string");
   }
   const operation = params.operation;
-  if (!["list", "status", "output", "wait", "wait_group", "wait_any", "wait_all", "result", "cancel", "prompt", "resume", "tasks"].includes(operation)) {
+  if (!["list", "status", "output", "wait", "wait_group", "wait_any", "wait_all", "result", "cancel", "reap", "promote", "prompt", "resume", "tasks"].includes(operation)) {
     throw new Error(`Unknown background subagent operation: ${operation}`);
   }
   if (operation === "tasks") {
@@ -1557,7 +1559,7 @@ function subagentParams() {
   action: Type.Optional(Type.String({ pattern: "^(review|apply|discard)$", description: "AgentSH Draft disposition; use with mode=draft and draft_id instead of task/tasks/chain." })),
   draft_id: Type.Optional(Type.String({ pattern: "^session-[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$", description: "Exact retained AgentSH Draft identity." })),
   background: Type.Optional(Type.Boolean({ description: "Return immediately and continue a task/tasks/chain request in the background." })),
-  operation: Type.Optional(Type.String({ pattern: "^(list|status|output|wait|wait_group|wait_any|wait_all|result|cancel|prompt|resume|tasks)$", description: "Lifecycle operation, or prompt to converse with an active child. wait/wait_group waits for one group, wait_any for one child across groups, and wait_all for all current groups." })),
+  operation: Type.Optional(Type.String({ pattern: "^(list|status|output|wait|wait_group|wait_any|wait_all|result|cancel|reap|promote|prompt|resume|tasks)$", description: "Lifecycle operation, or prompt to converse with an active child. wait/wait_group waits for one group, wait_any for one child across groups, and wait_all for all current groups." })),
   job_id: Type.Optional(Type.String({ pattern: "^subagent-job-[0-9a-f]{24}$", description: "Opaque execution ID; required by group-specific operations and omitted for list/wait_any/wait_all." })),
   child_id: Type.Optional(Type.String({ pattern: "^subagent-child-[0-9a-f]{24}$", description: "Opaque per-child ID; required by operation=prompt and accepted instead of child by operation=result." })),
   message: Type.Optional(Type.String({ description: "Parent message for operation=prompt (maximum 64 KiB UTF-8)." })),
@@ -1587,6 +1589,35 @@ export default function (pi: ExtensionAPI) {
   const bridgeDisposition = (bridge: AgentSHBridge | undefined) =>
     agentSHRuntimeDisposition(agentSHStartup, bridgeSupervisorState(bridge));
   let backgroundManager = sharedBackgroundSubagentManager(path.join(getAgentDir(), "state", "background-subagents-v1"));
+  let tuiNative: TuiNativeManager | undefined;
+  const nativeDisposition = () => {
+    const disposition = bridgeDisposition(agentSHBridge()).kind;
+    const selection = currentSubagentPermissionSelection();
+    if (selection?.conflict) return "unavailable" as const;
+    return disposition === "native" && selection?.selected ? "guard-only" as const : disposition;
+  };
+  const nativeTui = (ctx: any) => {
+    if (process.platform !== "linux") return undefined;
+    if (!tuiNative) {
+      tuiNative = new TuiNativeManager(process.env.PI_TUI_WORKER_STATE_ROOT ?? path.join(os.homedir(), ".local", "state", "pi-tui"),
+        nativeDisposition,
+        () => {
+          try { return nativeDisposition() === "native" || currentSubagentPermissionAuthority()?.active === true; }
+          catch { return false; }
+        }, MAX_BACKGROUND_SUBAGENTS);
+      tuiNative.activate(stableSessionId(ctx), (update) => {
+        if (lifecycleClosing) return false;
+        return quietState.enqueue(ctx, update);
+      });
+    }
+    return tuiNative;
+  };
+  const releaseOperator = pi.events?.on?.("permission-gate:mode-changed", (event: any) => {
+    if (typeof event?.enabled !== "boolean" || event.sessionId !== activeSessionId) return;
+    void tuiNative?.operatorMode(event.sessionId, event.enabled).catch(error => {
+      if (sessionContext?.hasUI) sessionContext.ui.notify(`Child permission mode propagation failed: ${String(error)}`, "error");
+    });
+  });
   let sessionContext: any;
   let activeSessionId: string | undefined;
   let sessionGeneration = 0;
@@ -1749,6 +1780,7 @@ export default function (pi: ExtensionAPI) {
     try {
       const sessionId = stableSessionId(ctx);
       activeSessionId = sessionId;
+      nativeTui(ctx);
       await manager.initialize();
       if (generation !== sessionGeneration || lifecycleClosing || sessionContext !== ctx
         || backgroundManager !== manager || activeSessionId !== sessionId) return;
@@ -1814,6 +1846,9 @@ export default function (pi: ExtensionAPI) {
     if (pollTimer) clearInterval(pollTimer);
     pollTimer = undefined;
     const survivingReload = backgroundSubagentsSurviveShutdown(event.reason);
+    await tuiNative?.shutdown(true);
+    tuiNative = undefined;
+    if (typeof releaseOperator === "function") releaseOperator();
     const shutdownClaims = [...deliveryClaims.entries()];
     try {
       const sessionId = activeSessionId ?? stableSessionId(ctx);
@@ -1869,6 +1904,8 @@ export default function (pi: ExtensionAPI) {
       }
       try {
         const sessionId = stableSessionId(ctx);
+        const tuiMoved = await nativeTui(ctx)?.promoteForeground(sessionId) ?? 0;
+        if (tuiMoved && ctx.hasUI) ctx.ui.notify(`Moved ${tuiMoved} native TUI group(s) to the background without restarting Pi.`, "info");
         const targetIds = new Set<string>();
         for (const [toolCallId, pendingSessionId] of pendingForegroundSubagents) {
           if (pendingSessionId === sessionId) targetIds.add(toolCallId);
@@ -1877,7 +1914,7 @@ export default function (pi: ExtensionAPI) {
           if (entry.sessionId === sessionId && entry.execution.detachable) targetIds.add(entry.toolCallId);
         }
         if (targetIds.size === 0) {
-          if (ctx.hasUI) ctx.ui.notify("No foreground subagents are currently running.", "info");
+          if (!tuiMoved && ctx.hasUI) ctx.ui.notify("No foreground subagents are currently running.", "info");
           return;
         }
         const existing = (await backgroundManager.list(sessionId, 1000)).filter(isBackgroundSubagentActive).length;
@@ -1928,6 +1965,7 @@ export default function (pi: ExtensionAPI) {
     pendingForegroundSubagents.delete(event.toolCallId);
     requestedForegroundHandoffs.delete(event.toolCallId);
     if (event.isError) return;
+    if ((event.details as any)?.tui_subagent && !(event.details as any)?.background_subagent) return (event.details as any).failed ? { isError: true } : undefined;
     const details = event.details as SubagentDetails | BackgroundSubagentDetails | SubagentControlDetails | undefined;
     const control = details as SubagentControlDetails | undefined;
     if (control?.subagent_control) return control.failed ? { isError: true } : undefined;
@@ -1952,7 +1990,7 @@ export default function (pi: ExtensionAPI) {
       "Active children have opaque child_id values; operation=prompt returns on acceptance by default, with wait_for_response=true for a synchronous full child response.",
       "Background waits support one child across current groups (wait_any), one entire group (wait/wait_group), or all current groups (wait_all).",
       "Set background=true on task/tasks/chain to continue without blocking; inspect it later with lifecycle operations (job_id only where required).",
-      "In guard-only sessions, native child shell commands use the parent AgentSH Permission Gate and may request approval in the parent UI.",
+      "On Linux native children are real interactive Pi TUI processes with their own local tools and guard-only service. Parent control, human keyboard and Paseo share that one session; model control does not execute slash commands.",
       "mode defaults to shared; mode=draft requires an active AgentSH supervisor.",
     ].join(" "),
     promptSnippet: "Delegate focused work synchronously or as a durable-in-session background subagent",
@@ -1964,7 +2002,8 @@ export default function (pi: ExtensionAPI) {
       "Use operation=prompt with an active child_id to send a non-blocking instruction; choose control_mode=steer, follow_up, or interrupt. Set wait_for_response=true only when intentionally waiting for the child's entire run. Acceptance is not task completion. Do not retry capability or inactive-child errors by relaunching work.",
       "Use operation=resume with a task_id to continue a terminal native task from its saved session, not a fresh reconstructed assignment. Resume is explicit, returns a new background group/child ID, preserves task ownership, and compacts context checkpoints before continuing.",
       "Native workers can notify_parent without stopping. Routine findings are retained outside model context; only requires_guidance requests are eligible for rate-limited parent wake-ups. Reply with operation=prompt and child_id. Use background workers for interactive supervision; in-flight parent tools are not interrupted. Existing workers need a fresh launch/resume to acquire notify_parent.",
-      "Use operation=cancel explicitly to stop a background subagent. Running background subagents and their native control handles survive hot /reload in the same Pi session, but are cancelled when Pi exits or replaces the session.",
+      "Linux native background groups survive parent exit/crash and reconnect from durable manifests. Foreground groups stage on the same tmux server; /background or operation=promote moves the whole group window without restarting children. Other backends keep their existing lifetime semantics.",
+      "Completion retains a messageable Pi and reports. Inspect operation=status/result, then explicitly operation=reap when finished with the panes. Reap rejects active human/agent work; operation=cancel only stops work. Never automatically reap on a final reply or task completion.",
     ],
     parameters: subagentParams(),
 
@@ -1977,6 +2016,45 @@ export default function (pi: ExtensionAPI) {
         ? params[INTERNAL_OWNER_SESSION_ID] as string
         : undefined;
       validateBackgroundOperation(params);
+      if (params.operation && process.platform === "linux") {
+        const owner = stableSessionId(ctx);
+        const native = nativeTui(ctx)!;
+        if (["wait_any", "wait_all"].includes(params.operation) && native.hasOwnedGroups(owner)) {
+          const waited = await waitForGroupSnapshot(async () => {
+            const tui = await native.operation({ operation: "list", limit: 1000 }, owner, signal);
+            const legacy = await backgroundManager.list(owner, 1000);
+            return [...(tui?.details.groups ?? []), ...legacy.map(record => ({
+              job_id: record.id, status: record.status, backend: record.backend,
+              children: childTracker.reconcile(record).map(backgroundChildMetadata),
+            }))];
+          }, params.operation, params.wait_ms ?? 1000, signal);
+          return { content: [{ type: "text", text: truncateByBytes([
+            waited.timed_out ? "Wait timed out; work remains running." : "Snapshot wait complete.",
+            ...waited.groups.map(group => `${group.job_id} ${group.status}`),
+          ].join("\n")) }], details: { tui_subagent: true, background_subagent: true,
+            operation: params.operation, ...waited,
+            failed: params.operation === "wait_any" ? Boolean(waited.terminal && waited.terminal.child?.status !== "completed")
+              : waited.groups.some(group => terminalBackgroundStatus(group.status) && group.status !== "completed"),
+            ...(waited.terminal ? { job_id: waited.terminal.group?.job_id, child: waited.terminal.child?.child,
+              child_id: waited.terminal.child?.child_id, child_status: waited.terminal.child?.status } : {}) } };
+        }
+        const result = await native.operation(params, owner, signal);
+        if (result) {
+          if (params.operation === "list") {
+            const legacy = await backgroundManager.list(owner, params.limit ?? 20);
+            if (legacy.length) {
+              result.content[0].text += "\n\nRetained AgentSH/legacy groups:\n" + legacy.map(record => backgroundRecordText(record, false, childTracker.reconcile(record))).join("\n");
+              result.details.legacy_groups = legacy.map(record => ({ job_id: record.id, backend: record.backend, status: record.status }));
+            }
+          } else if (params.operation === "tasks") {
+            const legacy = new NativeTaskStore(path.join(getAgentDir(), "state", "native-tasks-v1")).list(owner, params.limit ?? 20);
+            result.details.tasks = [...(result.details.tasks ?? []), ...legacy].slice(0, params.limit ?? 20);
+            result.content[0].text = taskListText(result.details.tasks);
+          }
+          return result;
+        }
+        if (["reap", "promote"].includes(params.operation)) throw new Error(`${params.operation} requires an owned native TUI group`);
+      }
       if (params.operation) {
         const ownerSessionId = stableSessionId(ctx);
         const operation = params.operation as BackgroundSubagentDetails["operation"] | "prompt" | "resume" | "tasks";
@@ -2235,6 +2313,17 @@ export default function (pi: ExtensionAPI) {
         if (Array.isArray(params.tasks)) params = { ...params, tasks: params.tasks.map(withDefaultModel) };
         else if (Array.isArray(params.chain)) params = { ...params, chain: params.chain.map(withDefaultModel) };
         else params = withDefaultModel(params);
+      }
+      if (process.platform === "linux") {
+        const selected = selectSubagentBackend(agentSHBridge(), agentSHStartup);
+        if (selected.kind === "unavailable") throw new Error(selected.message);
+        if (selected.kind === "native") {
+          if (!nativeSubagentRequestSupported(params)) throw new Error("Draft execution requires AgentSH; native fallback disabled");
+          const selection = currentSubagentPermissionSelection();
+          if (agentSHStartup.kind === "conflict" || selection?.conflict) throw new Error("Conflicting command authorities; native TUI launch refused");
+          pendingForegroundSubagents.delete(toolCallId);
+          return await nativeTui(ctx)!.launch(params, stableSessionId(ctx), ctx.cwd, signal, onUpdate);
+        }
       }
       if (params.background === true) {
         if (signal?.aborted) throw signal.reason instanceof Error ? signal.reason : new Error("Background subagent launch cancelled");
@@ -2646,6 +2735,7 @@ export default function (pi: ExtensionAPI) {
     },
 
     renderResult(result, options, theme) {
+      if (result.details?.tui_subagent) return new Text(result.content.find((p: any) => p.type === "text")?.text ?? "(no output)", 0, 0);
       if (result.details?.operation === "tasks") return new Text(taskListText(result.details.tasks ?? [], options.expanded), 0, 0);
       if ((result.details as BackgroundSubagentDetails | undefined)?.background_subagent
         || (result.details as SubagentControlDetails | undefined)?.subagent_control) {
@@ -2798,11 +2888,19 @@ export default function (pi: ExtensionAPI) {
   pi.registerTool(subagentTool);
   const taskStore = () => new NativeTaskStore(path.join(getAgentDir(), "state", "native-tasks-v1"));
   registerTaskDashboard(pi, {
-    async list(ctx) { return taskStore().list(stableSessionId(ctx), 50); },
-    async record(ctx, id) { return taskStore().get(stableSessionId(ctx), id); },
+    async list(ctx) {
+      const owner = stableSessionId(ctx); await nativeTui(ctx)?.refresh(owner);
+      return [...(nativeTui(ctx)?.taskList(owner) ?? []), ...taskStore().list(owner, 50)].slice(0, 50);
+    },
+    async record(ctx, id) { return nativeTui(ctx)?.taskRecord(stableSessionId(ctx), id) ?? taskStore().get(stableSessionId(ctx), id); },
     async resume(ctx, id) { return await subagentTool.execute(`task-ui-resume-${Date.now()}`, {operation:"resume",task_id:id}, undefined, undefined, ctx); },
     async report(ctx, id) {
       const owner = stableSessionId(ctx);
+      const tuiTask = nativeTui(ctx)?.taskRecord(owner, id);
+      if (tuiTask) {
+        const result = await nativeTui(ctx)!.operation({ operation: "result", child_id: tuiTask.childId }, owner);
+        return result?.content[0]?.text ?? "TUI report not ready";
+      }
       const task = taskStore().get(owner, id);
       const groups = await backgroundManager.list(owner, 1000);
       const group = groups.find(record => record.children?.some(child => child.childId === task.childId));
@@ -2813,6 +2911,7 @@ export default function (pi: ExtensionAPI) {
     },
     async jobs(ctx, id, params) {
       const owner = stableSessionId(ctx);
+      if (nativeTui(ctx)?.taskRecord(owner, id)) return await nativeTui(ctx)!.jobs(owner, id, params);
       const task = taskStore().get(owner, id);
       const broker = parentJobBroker(owner);
       if (!broker) throw new Error("The background-job service is not active in this session.");

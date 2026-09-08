@@ -1,10 +1,11 @@
 import { randomBytes } from "node:crypto";
+import type { JobPlacement } from '../shared/background-job.js';
 import { constants, writeFileSync } from "node:fs";
 import { access, lstat, open, readFile, realpath, writeFile } from "node:fs/promises";
 import { delimiter, isAbsolute, join, relative } from "node:path";
 import { processStartToken, type JobProcessBackend } from "./tmux.js";
 import { JobStore } from "./store.js";
-import { inspectPane, capturePane, claimPane, cancelPane, signalPane, requireSamePane, requireAvailablePane, PaneGoneError } from './external-pane.js';
+import { inspectPane, capturePane, claimPane, cancelPane, reapPane, signalPane, requireSamePane, requireAvailablePane, PaneGoneError } from './external-pane.js';
 import {
   JOB_SCHEMA_VERSION,
   type JobMetadata,
@@ -29,6 +30,7 @@ export type StartRequest = {
   sessionId?: string;
   childId?: string;
   infrastructure?: boolean;
+  placement?: JobPlacement;
 };
 
 function result(status: JobResult["status"], exitCode: number | null, reason?: string, signal?: string): JobResult {
@@ -170,7 +172,7 @@ export class BackgroundJobManager {
           await this.store.publishResult(id, cancelled);
           throw abortError();
         }
-        const launch = await this.backend.launch(id, cwd, this.store.jobDir(id), shell);
+        const launch = await this.backend.launch(id, cwd, this.store.jobDir(id), shell, {placement: request.placement, infrastructure: request.infrastructure});
         await this.store.writeLaunch(id, launch);
         const cancelled = await this.store.readResult(id);
         if (cancelled || signal?.aborted || await this.store.exists(join(this.store.jobDir(id), "cancel-requested"))) {
@@ -232,7 +234,7 @@ export class BackgroundJobManager {
     return await this.store.withLock(async()=>{
       const records=await this.list(1000);
       const existing=records.find(r=>r.metadata.pane?.socket===pane.identity.socket&&r.metadata.pane?.paneId===pane.identity.paneId)
-        ?? records.find(r=>this.store.socketPath===pane.identity.socket&&r.launch?.paneId===pane.identity.paneId&&r.launch.panePid===pane.identity.panePid);
+        ?? records.find(r=>(r.launch?.socketPath??this.store.socketPath)===pane.identity.socket&&r.launch?.paneId===pane.identity.paneId&&r.launch.panePid===pane.identity.panePid);
       if(existing?.metadata.pane)requireSamePane(existing.metadata.pane,pane);
       else if(existing?.launch&&!pane.dead&&existing.launch.paneStartToken!==pane.identity.paneToken)throw new PaneGoneError('Saved native pane process identity changed');
       within(await realpath(pane.cwd||existing?.metadata.cwd||''));
@@ -420,7 +422,7 @@ export class BackgroundJobManager {
       if(record.result)return record;
       const tmux=await resolveExecutable('tmux');await this.cachePane(record.metadata,tmux).catch(()=>undefined);
       await cancelPane(tmux,record.metadata.pane);
-      await this.store.publishResult(id,result('cancelled',null,'The adopted tmux pane was closed by request; independently detached work is outside that pane'));
+      await this.store.publishResult(id,result('cancelled',null,'The adopted tmux pane was cancelled and retained for inspection; explicit reap closes it. Independently detached work is outside that pane'));
       return await this.get(id);
     }
     if (record.metadata.observed) throw new Error("Adopted jobs are observation-only; no cancellation authority was acquired");
@@ -464,21 +466,24 @@ export class BackgroundJobManager {
     // user job and every unread outcome, regardless of infrastructure churn.
     const infrastructure = terminal.filter(record => record.metadata.infrastructure);
     const expired = infrastructure.filter((record, index) => index >= 20 || Date.parse(record.result!.finishedAt) < cutoff);
-    for (const record of terminal) {
-      if (!record.metadata.infrastructure && Date.parse(record.result!.finishedAt) < cutoff && await this.store.isNotified(record.metadata.id)) expired.push(record);
-    }
+    // User jobs (including read/notified outcomes) are never garbage-collected.
     for (const record of expired) {
-      if (record.launch) await this.backend.kill(record.metadata.id, record.launch).catch(() => undefined);
-      await this.store.remove(record.metadata.id).catch(() => undefined);
+      try { await this.reap(record.metadata.id); } catch { /* retain on uncertain identity */ }
     }
   }
 
-  async remove(id: string): Promise<void> {
+  async reap(id: string): Promise<void> {
     const record = await this.get(id);
-    if (record.status === "starting" || record.status === "running") {
-      throw new Error(`Background job ${id} is still running; cancel it first`);
+    if (!record.result) throw new Error(`Background job ${id} is not terminal; cancel it first`);
+    if (await this.commandProcess(id)) throw new Error(`Background job ${id} command is still running; cancel it first`);
+    if (record.metadata.pane) await reapPane(await resolveExecutable('tmux'), record.metadata.pane);
+    if (record.launch) {
+      if (!this.backend.reap) throw new Error('Backend does not support explicit pane reap');
+      await this.backend.reap(id, record.launch);
     }
-    if (record.launch) await this.backend.kill(id, record.launch).catch(() => undefined);
     await this.store.remove(id);
   }
+
+  // Compatibility for explicit UI removal only; never called by read/ack.
+  async remove(id: string): Promise<void> { await this.reap(id); }
 }

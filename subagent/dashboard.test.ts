@@ -22,11 +22,11 @@ assert.match(readableTaskReport('Task outcome (model-reported): {"state":"partia
 
 const commands=new Map<string,any>();const messages:any[]=[];const requests:any[]=[];
 const task:any={task_id:taskId,title:'Fix timing',attempt:1,state:'idle',outcome:'partial',can_resume:true,next_action:'Verify output'};
-let watching=true;let resumed=0;let shown=0;
+let watching=true;let resumed=0;let shown=0;let jobRunning=true;
 const decisions=[
  'first','Review alerts','first','View unread alerts','Acknowledge displayed alerts through #2',
  'Stop watching — keep build running','Stop watching',undefined,'Resume saved task','Resume saved task',
- 'Open build output','first','Close',
+ 'Open build output','first','Back','Close',
 ];
 const oldBridge=(globalThis as any).__piPaseoRemoteUiV1;
 (globalThis as any).__piPaseoRemoteUiV1={isConnected:()=>true,async selectMirrored(_title:string,options:string[]){
@@ -46,7 +46,9 @@ registerTaskDashboard(pi,{
   if(params.action==='events')return {details:{watch_id:watchId,log_path:'build.log',next_sequence:2,events:[{sequence:1,kind:'match',text:'stage one'},{sequence:2,kind:'match',text:'stage two'}]}};
   if(params.action==='ack'){assert.equal(params.through_sequence,2);return {};}
   if(params.action==='unwatch'){watching=false;return {};}
-  if(params.action==='list')return {details:{jobs:[{job_id:'job',name:'Synthesis',status:'running'}]}};
+  if(params.action==='list')return {details:{jobs:[{job_id:'job',name:'Synthesis',status:jobRunning?'running':'cancelled'}]}};
+  if(params.action==='cancel'){jobRunning=false;return {content:[{type:'text',text:'Cancelled; retained pane'}]};}
+  if(params.action==='reap')return {content:[{type:'text',text:'Owned job reaped'}]};
   if(params.action==='output')return {content:[{type:'text',text:'build output'}]};
   throw new Error(`Unexpected/destructive action ${params.action}`);
  }
@@ -57,5 +59,13 @@ try {
  assert(requests.every(r=>!['start','cancel','signal'].includes(r.action)));
  assert(messages.every(m=>m.options.triggerTurn===false));
  assert(messages.some(m=>m.message.content.includes('build is still running')));
+ decisions.push('Open build output','first','Cancel job — keep pane and output','Cancel job','Close');
+ await commands.get('tasks').handler(taskId,ctx);
+ decisions.push('Open build output','first','Reap job — close pane and delete job output','Reap job','Close');
+ await commands.get('tasks').handler(taskId,ctx);
+ assert.equal(requests.filter(r=>r.action==='cancel').length,1);
+ assert.equal(requests.filter(r=>r.action==='reap').length,1);
+ assert(messages.every(m=>m.options.triggerTurn===false));
+ assert.equal(decisions.length,0);
  console.log('task dashboard UX checks passed');
 } finally {(globalThis as any).__piPaseoRemoteUiV1=oldBridge;}

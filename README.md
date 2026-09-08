@@ -161,17 +161,20 @@ extensions have stopped.
 
 </details>
 <details>
-<summary><strong>background-job</strong> - Durable native shell jobs in controlled tmux windows</summary>
+<summary><strong>background-job</strong> - Durable shell jobs in the calling agent's tmux window</summary>
 <br>
 
 - **Source**: `background-job/`
 - **Tool**: `background_job` with `start`, `list`, `status`, `output`, bounded
-  `wait`, `signal`, and `cancel`
+  `wait`, `signal`, `cancel`, and explicit `reap`
 - **Command**: `/background-jobs`
 - **Dependencies**: tmux and Node.js (installed by the Home Manager module)
 
-**Description**: Runs long native commands in an extension-owned tmux server
-without overriding Pi's Bash tool. Jobs, private metadata, and a bounded 1 MiB
+**Description**: On Linux, runs long native commands as panes in the calling
+agent's tmux window, without overriding Pi's Bash tool. The caller must be in
+tmux; placement is resolved from its actual pane, not the user's current focus.
+Child Pi TUIs therefore place their jobs beside themselves. Infrastructure
+watchers retain a separate private backend. Jobs, private metadata, and a bounded 1 MiB
 output tail live under Pi's private agent state directory and survive turns,
 compaction, extension reload, session replacement, and Pi exit. Model-facing
 control operations are bound to the owning Pi session and use opaque job IDs.
@@ -179,14 +182,16 @@ Only adoption accepts an exact existing tmux pane ID/server; no API accepts
 arbitrary tmux commands. Output returned to the model
 is further limited to 50 KiB/2000 lines. New-command concurrency is 64 jobs
 and per-working-directory concurrency is 32; adopted panes do not consume launch slots.
-User-job records are eligible for automatic cleanup only after seven days from
-completion and after their terminal status/output has been explicitly read.
+User jobs are never automatically pruned merely because they completed or their
+output was read. Completion and cancellation retain inspectable panes and records.
+`reap` explicitly removes a terminal job's verified owned pane and runtime state;
+it rejects running jobs and does not remove sibling panes.
 Infrastructure services have a separate 20-terminal-record retention limit; they
 never displace recent user jobs or unread outcomes. Watcher startup resolves
 symlinked entrypoints and backs off 30 seconds after an immediate startup exit.
 
-A cancelled `wait` leaves the underlying job running. `cancel` is the only
-lifecycle action that stops a job. Routine completions update state silently:
+A cancelled `wait` leaves the underlying job running. `cancel` stops execution
+without reaping its pane; `reap` is a separate cleanup operation. Routine completions update state silently:
 no full reports or toasts are posted automatically. Routine state deltas are
 persisted outside the model conversation and never schedule model turns.
 Explicit output/result reads fetch reports when
@@ -194,9 +199,9 @@ needed; waits are status-only unless output lines are explicitly requested. Star
 through the same Permission Gate classification as ordinary Bash. Guard-only
 AgentSH can authorize native
 starts, while full AgentSH mode fails closed until it has a dedicated
-background-job backend. Interactive pane input and tmux coordinates are
-intentionally not exposed to the model; users can obtain the fixed private-server
-attach command through `/background-jobs`.
+background-job backend. Arbitrary tmux commands and pane input are not exposed as
+job-tool operations. Reaping revalidates server, process and pane ownership; stale
+identities fail closed rather than risking an unrelated pane.
 
 </details>
 <details>
@@ -792,7 +797,42 @@ has aggregate-only progress until it terminates; exact per-child wakeups begin
 with jobs launched by this build. Artifact identity and SHA-256 are verified
 before each page is returned, and result artifacts are removed with their
 terminal job record.
-Cancelling any wait does not cancel execution. Running background subagents
+Cancelling any wait does not cancel execution.
+
+### Linux native TUI workers
+
+Linux native subagents run as **actual interactive Pi TUIs**, using the configured
+`PI_TUI_WORKER_LAUNCHER` and `PI_TUI_WORKER_LAUNCH_MODE`. The calling Pi must run in
+tmux. A guarded worker gets its own AgentSH guard process; losing the parent does
+not remove its authorization checks or close its terminal. Full AgentSH/Draft
+backends keep their existing execution model and never silently fall back to native.
+
+- A background single task gets a new window in the caller's tmux session.
+- Parallel/chain children share their group's window as panes.
+- Foreground workers stage in an infrastructure session on the same tmux server.
+  `/background` or `operation=promote` moves the group window, preserving Pi PIDs,
+  conversations, and sibling job panes.
+- Keyboard input, Paseo messages and parent control all reach the same Pi process.
+  Parent control is labelled supervising-agent input and never executes slash
+  commands; direct human instructions take precedence.
+- Launched background workers survive parent exit/crash. Returning to the same
+  parent session reattaches through private manifests. Pending group scheduling
+  resumes with the parent; it is not a separate autonomous supervisor.
+- Completion or cancellation retains the Pi TUI and reports. `operation=reap`
+  explicitly closes verified owned panes and rejects active human/model work.
+  Reaping is never triggered by a final reply, reading a report, or hiding a UI tab.
+- Explicit resume can reuse a live idle worker; resuming a reaped task creates a
+  new owned attempt from retained context after confirming the old worker ended.
+- Ordinary state updates stay outside model context, using the bounded quiet-state
+  delivery path. No routine completion notification schedules a model turn.
+
+The launcher/worker protocol is Linux-only. Update the shared Nix configuration
+and start fresh Pi parents to acquire the immutable launcher environment.
+
+### Legacy execution lifetime
+
+The older RPC/native execution path outside the Linux TUI implementation and
+non-TUI backends retain their prior lifecycle. Running legacy background subagents
 survive a hot `/reload` of the same Pi session: the replacement extension adopts
 the process-owned execution, while guarded child authorization pauses until the
 same parent session rebinds. If the replacement extension does not adopt within
@@ -805,7 +845,9 @@ are also cancelled when Pi exits or replaces the session and are reported as
 days. Draft cancellation never applies or discards a retained Draft result.
 
 While foreground subagent calls are blocking the parent, `/background` promotes
-all currently running calls in place. A single, parallel, or chain call remains
+all currently running calls in place. For Linux TUI workers this moves their
+existing window, not their process or conversation. In the legacy execution path,
+a single, parallel, or chain call remains
 one aggregate job; multiple sibling `subagent` calls receive separate job IDs.
 Foreground rendering stops, the original execution continues under the existing
 background manager, and each detached tool result explicitly tells the parent

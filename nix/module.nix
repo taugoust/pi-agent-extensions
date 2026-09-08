@@ -203,6 +203,13 @@ in
         "${extDir}/subagent/permission-proxy.ts".source = "${self}/subagent/permission-proxy.ts";
         "${extDir}/subagent/permission-relay.ts".source = "${self}/subagent/permission-relay.ts";
         "${extDir}/subagent/result-artifact.ts".source = "${self}/subagent/result-artifact.ts";
+        "${extDir}/subagent/group-wait.ts".source = "${self}/subagent/group-wait.ts";
+        "${extDir}/subagent/tui-native.ts".source = "${self}/subagent/tui-native.ts";
+        "${extDir}/subagent/tui-worker-client.ts".source = "${self}/subagent/tui-worker-client.ts";
+        "${extDir}/subagent/tui-worker-extension.ts".source = "${self}/subagent/tui-worker-extension.ts";
+        "${extDir}/subagent/tui-worker-server.ts".source = "${self}/subagent/tui-worker-server.ts";
+        "${extDir}/subagent/tui-worker-store.ts".source = "${self}/subagent/tui-worker-store.ts";
+        "${extDir}/subagent/tui-worker-tmux.ts".source = "${self}/subagent/tui-worker-tmux.ts";
       })
 
       (lib.mkIf

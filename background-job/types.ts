@@ -31,6 +31,12 @@ export type JobMetadata = {
 
 export type JobLaunch = {
   schemaVersion: typeof JOB_SCHEMA_VERSION;
+  socketPath?: string;
+  // Original launch session; move-window may promote the intact owned window.
+  sessionId?: string;
+  serverPid?: number;
+  serverStartToken?: string;
+  ownershipToken?: string;
   windowId: string;
   paneId: string;
   panePid: number;

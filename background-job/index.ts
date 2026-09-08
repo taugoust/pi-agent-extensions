@@ -14,10 +14,10 @@ import { watchMenu } from '../shared/watch-menu.js';
 import { installQuietState } from '../shared/quiet-state.js';
 import { TmuxBackend } from "./tmux.js";
 import type { JobRecord } from "./types.js";
-import { JOB_BROKER_KEY, JobParameters, validateJobParams, type JobParams, type ParentJobBroker } from "../shared/background-job.js";
+import { JOB_BROKER_KEY, LOCAL_JOB_CONTROLLER_KEY, JobParameters, validateJobParams, type JobParams, type JobPlacement, type ParentJobBroker, type LocalJobController } from "../shared/background-job.js";
 const INTERNAL_JOB_CALL = Symbol("parent-job-call");
 
-const ACTION_PATTERN = "^(start|list|status|output|wait|signal|cancel)$";
+const ACTION_PATTERN = "^(start|list|status|output|wait|signal|cancel|reap)$";
 const JOB_PATTERN = "^job-[0-9a-f]{24}$";
 const POLL_MS = 2000;
 const COMMAND_AUTHORITY_KEY = "__paeCommandAuthorityV1";
@@ -159,6 +159,8 @@ function publicDetails(record: JobRecord): Record<string, unknown> {
     signal: record.result?.signal,
     child_id: record.metadata.childId,
     observation_only: Boolean(record.metadata.observed && !record.metadata.pane),
+    retention: 'until-explicit-reap',
+    ...(record.launch ? {pane_id:record.launch.paneId, tmux_socket:record.launch.socketPath, tmux_session:record.launch.sessionId, tmux_window:record.launch.windowId} : {}),
     ...(record.metadata.pane ? {pane_id:record.metadata.pane.paneId,tmux_socket:record.metadata.pane.socket,tracking_kind:'tmux-pane',adopted:true} : {}),
     name: record.metadata.name ? preview(record.metadata.name,80) : preview(record.metadata.command,80),
   };
@@ -217,6 +219,7 @@ export default function backgroundJob(pi: ExtensionAPI) {
   const idleInFlight = new Set<string>();
   const deliveryClaims = new Set<string>();
   let broker: ParentJobBroker | undefined;
+  let localController: LocalJobController | undefined;
   const watchNotified = new Map<string, number>();
 
   const manager = () => {
@@ -298,10 +301,21 @@ export default function backgroundJob(pi: ExtensionAPI) {
       if (sessionContext?.sessionManager.getSessionId() !== owner || identity.sessionId !== owner) throw new Error("Parent job authority is unavailable for this session");
       if (!/^subagent-(?:child|task)-[0-9a-f]{24}$/.test(identity.childId)) throw new Error("Invalid delegated job owner");
       const delegatedCallId = `child-job-${createHash("sha256").update(identity.childId + "\0" + callId).digest("hex")}`;
-      return await jobTool.execute(delegatedCallId, { ...params, [INTERNAL_JOB_CALL]: { childId: identity.childId, authorize } }, signal, undefined,
+      return await jobTool.execute(delegatedCallId, { ...params, [INTERNAL_JOB_CALL]: { childId: identity.childId, placement: identity.placement, authorize } }, signal, undefined,
         { cwd: identity.cwd, hasUI: false, sessionManager: { getSessionId: () => owner } } as any);
     } };
     (globalThis as any)[JOB_BROKER_KEY] = broker;
+    localController = { protocol: 1, sessionId: owner, async execute(callId, params, signal) {
+      if (sessionContext !== ctx || ctx.sessionManager.getSessionId() !== owner) throw new Error("Local job controller session is unavailable");
+      validateJobParams(params);
+      if (!["list", "status", "output", "wait", "cancel", "reap", "watches", "events", "ack", "unwatch"].includes(params.action)) throw new Error("Local controller only manages existing jobs and watches");
+      // Use exactly the ordinary local tool scope. No INTERNAL_JOB_CALL, foreign
+      // session override or command authorization callback enters this adapter.
+      return await jobTool.execute(`local-job-${createHash("sha256").update(callId).digest("hex")}`,
+        Object.fromEntries(Object.entries(params)), signal, undefined,
+        { cwd: ctx.cwd, hasUI: false, sessionManager: { getSessionId: () => owner } } as any);
+    } };
+    (globalThis as any)[LOCAL_JOB_CONTROLLER_KEY] = localController;
     await updateStatus(ctx);
     if (pollTimer) clearInterval(pollTimer);
     pollTimer = setInterval(() => void poll(), POLL_MS);
@@ -316,6 +330,7 @@ export default function backgroundJob(pi: ExtensionAPI) {
 
   pi.on("session_shutdown", () => {
     if ((globalThis as any)[JOB_BROKER_KEY] === broker) delete (globalThis as any)[JOB_BROKER_KEY];
+    if ((globalThis as any)[LOCAL_JOB_CONTROLLER_KEY] === localController) delete (globalThis as any)[LOCAL_JOB_CONTROLLER_KEY];
     sessionGeneration += 1;
     sessionContext = undefined;
     runningReminderArmed = false;
@@ -351,11 +366,11 @@ export default function backgroundJob(pi: ExtensionAPI) {
   const jobTool = {
     name: "background_job",
     label: "Background Job",
-    description: "Manage durable native background shell jobs (64 running overall, 32 per working directory; adopted panes and infrastructure do not consume these slots). Start jobs or adopt an existing tmux pane as a managed job without restarting it: adopt pane_id and optional tmux_socket/log_path/name. No descriptor is needed. Status/output/wait/signal/cancel then work through its job_id; cancel closes the adopted pane. Re-adopt after a full Pi restart to recover management. Alternatively pid+log_path adoption is read-only. Jobs survive Pi exit. Recent user jobs and unread outcomes are protected from automatic cleanup; infrastructure retention is separate. watch creates a persistent literal-pattern log watcher (default starts at end); events reads its journal, ack acknowledges a sequence, unwatch stops monitoring only, watches lists watches. Watch events are retained outside model context and do not wake the parent. Use bounded job waits and explicit events reads for supervision. Cancelling wait never cancels execution. Output is limited to 50 KiB/2000 lines.",
-    promptSnippet: "Start, inspect, wait for, signal, or cancel durable background shell jobs",
+    description: "Manage durable native background shell jobs (64 running overall, 32 per working directory; adopted panes and infrastructure do not consume these slots). Start jobs or adopt an existing tmux pane as a managed job without restarting it: adopt pane_id and optional tmux_socket/log_path/name. No descriptor is needed. Status/output/wait/signal/cancel/reap work through its job_id. Start requires Pi inside tmux and splits the caller window. Cancel stops work but retains the pane; reap explicitly closes only the owned terminal pane and deletes retained runtime/output. Re-adopt after a full Pi restart to recover management. Alternatively pid+log_path adoption is read-only. Jobs survive Pi exit. All user jobs and panes remain until explicit reap, even after output is read; infrastructure retention is separate. watch creates a persistent literal-pattern log watcher (default starts at end); events reads its journal, ack acknowledges a sequence, unwatch stops monitoring only, watches lists watches. Watch events are retained outside model context and do not wake the parent. Use bounded job waits and explicit events reads for supervision. Cancelling wait never cancels execution. Output is limited to 50 KiB/2000 lines.",
+    promptSnippet: "Start, inspect, wait for, cancel, or explicitly reap durable background shell jobs",
     promptGuidelines: [
       "Use background_job for commands that should continue across turns or Pi exits; use bash for short foreground commands.",
-      "Cancelling a background_job wait only stops waiting; use background_job cancel to stop the job.",
+      "Cancelling a background_job wait only stops waiting; background_job cancel stops execution but retains the pane/output. Only explicit background_job reap closes a terminal job pane and releases its retained runtime; reading output never authorizes cleanup.",
       "Use background_job watch for log/stage/failure observation instead of repeatedly launching monitoring subagents. Consume events then ack their through_sequence; unwatch never cancels the build.",
       "Harness state updates are internal routing data, not user requests. Do not narrate routine job completion or paste reports into chat; read output/events only when needed. Wait is status-only unless lines is explicitly requested.",
     ],
@@ -364,7 +379,7 @@ export default function backgroundJob(pi: ExtensionAPI) {
       const params = rawParams as Params;
       validateJobParams(params);
       requireNativeExecution(startup);
-      const internal = (rawParams as any)[INTERNAL_JOB_CALL] as { childId: string; authorize?: (command: string, cwd: string) => Promise<void> } | undefined;
+      const internal = (rawParams as any)[INTERNAL_JOB_CALL] as { childId: string; placement?: JobPlacement; authorize?: (command: string, cwd: string) => Promise<void> } | undefined;
       const ownerSessionId = sessionId(ctx);
       if (params.action === "start" && internal && !internal.authorize) {
         // Brokered calls have no parent tool_call event. Obtain a receipt from
@@ -394,9 +409,10 @@ export default function backgroundJob(pi: ExtensionAPI) {
           break;
         }
         case "start": {
-          const record = await service.start({ command: params.command!, cwd: ctx.cwd, name: params.name, sessionId: ownerSessionId, childId: internal?.childId }, signal);
+          if (internal && !internal.placement) throw new Error('Delegated background start requires trusted caller tmux placement; reload the child bridge');
+          const record = await service.start({ command: params.command!, cwd: ctx.cwd, name: params.name, sessionId: ownerSessionId, childId: internal?.childId, placement: internal?.placement }, signal);
           runningReminderArmed = record.status === "running" || record.status === "starting";
-          response = toolResult(`${recordText(record)}\nStarted in an extension-owned tmux server. Before declaring dependent work complete, use bounded wait/status/output checks.`, { action: params.action, ...publicDetails(record) });
+          response = toolResult(`${recordText(record)}\nStarted in a retained pane in the caller's tmux window. Cancel stops execution; only explicit reap closes the pane and removes runtime/output. Before declaring dependent work complete, use bounded wait/status/output checks.`, { action: params.action, ...publicDetails(record) });
           break;
         }
         case "adopt": {
@@ -404,7 +420,7 @@ export default function backgroundJob(pi: ExtensionAPI) {
             ? await service.adoptPane({paneId:params.pane_id,socket:params.tmux_socket,logPath:params.log_path,cwd:ctx.cwd,sessionId:ownerSessionId,childId:internal?.childId,name:params.name})
             : await service.adopt({ pid: params.pid!, logPath: params.log_path!, cwd: ctx.cwd, sessionId: ownerSessionId, childId: internal?.childId, name: params.name });
           const guidance = record.metadata.pane
-            ? `Linked the existing pane without restarting it or sending input. Use this job_id for status/output/wait/signal/cancel. Cancel closes the adopted pane.\nSave for the next agent: pane_id=${record.metadata.pane.paneId}, tmux_socket=${record.metadata.pane.socket}. Re-adopt those values after Pi restarts; no descriptor is required. Tracks the pane's root process: choose the actual command/runner pane, not a separate tail/log viewer. A live interactive shell is not proof that a build inside it is still running.`
+            ? `Linked the existing pane without restarting it or sending input. Use this job_id for status/output/wait/signal/cancel/reap. Cancel stops execution and retains the pane; explicit reap closes it.\nSave for the next agent: pane_id=${record.metadata.pane.paneId}, tmux_socket=${record.metadata.pane.socket}. Re-adopt those values after Pi restarts; no descriptor is required. Tracks the pane's root process: choose the actual command/runner pane, not a separate tail/log viewer. A live interactive shell is not proof that a build inside it is still running.`
             : "Observation only. This does not acquire signal/cancel authority or infer success when the PID exits.";
           response = toolResult(`${recordText(record)}\n${guidance}`, { action: params.action, ...publicDetails(record) });
           break;
@@ -449,6 +465,14 @@ export default function backgroundJob(pi: ExtensionAPI) {
           owned(await service.get(id));
           const record = await service.signal(id, params.signal!);
           response = toolResult(`Sent ${params.signal} to ${record.metadata.id}.`, { action: params.action, ...publicDetails(record), signal: params.signal });
+          break;
+        }
+        case "reap": {
+          const id = requireJobId(params);
+          owned(await service.get(id));
+          await service.reap(id);
+          quietState.consume(ctx, 'job', id);
+          response = toolResult(`Reaped ${id}: owned pane (if any) and retained job runtime removed; external source logs and sibling panes untouched.`, {action: params.action, job_id: id, reaped: true});
           break;
         }
         case "cancel": {
@@ -525,21 +549,21 @@ export default function backgroundJob(pi: ExtensionAPI) {
       if (!record) return;
       const actions = ["Show output", "Show status",
         ...(record.status === 'running' && (!record.metadata.observed || record.metadata.pane) ? [...(record.metadata.pane ? [] : ['Show attach command']), 'Cancel job'] : []),
-        ...(record.result ? ['Remove record'] : [])];
+        ...(record.result ? ['Reap job'] : [])];
       const action = await taskChoice(ctx, labels[labels.indexOf(selected)], actions);
       if (action === "Show output") {
         const snapshot = await service.output(record.metadata.id);
         await show(`${preview(record.metadata.name??record.metadata.command,100)} — output`, outputText(snapshot));
       } else if (action === "Show status") {
-        await show('Job details', `${recordText(await service.get(record.metadata.id))}${record.metadata.observed||record.metadata.pane?'':`\nattach: ${service.backend.attachCommand()}`}`);
+        await show('Job details', `${recordText(await service.get(record.metadata.id))}${record.metadata.observed||record.metadata.pane?'':`\nattach: ${service.backend.attachCommand(record.launch)}`}`);
       } else if (action === "Show attach command") {
-        await show('Attach to job terminals', service.backend.attachCommand());
-      } else if (action === "Cancel job" && await taskChoice(ctx, record.metadata.pane ? `Close adopted pane ${record.metadata.pane.paneId}? Its terminal work will stop; captured output remains available.` : `Cancel this job? ${preview(record.metadata.command,120)}`, ['Cancel job','Keep running']) === 'Cancel job') {
+        await show('Attach to job terminals', service.backend.attachCommand(record.launch));
+      } else if (action === "Cancel job" && await taskChoice(ctx, record.metadata.pane ? `Cancel adopted pane ${record.metadata.pane.paneId}? Its terminal work will stop; pane and output remain until reap.` : `Cancel this job? ${preview(record.metadata.command,120)}`, ['Cancel job','Keep running']) === 'Cancel job') {
         await service.cancel(record.metadata.id);
         await show('Job cancelled', preview(record.metadata.name??record.metadata.command,120));
-      } else if (action === "Remove record" && await taskChoice(ctx, 'Remove this finished job record?', ['Remove record','Keep record']) === 'Remove record') {
-        await service.remove(record.metadata.id);
-        await show('Record removed', 'Only the finished job record was removed.');
+      } else if (action === "Reap job" && await taskChoice(ctx, 'Close this finished job pane and delete retained output/runtime?', ['Reap job','Keep job']) === 'Reap job') {
+        await service.reap(record.metadata.id);
+        await show('Job reaped', 'Owned pane and retained job runtime removed; external source logs and sibling panes untouched.');
       }
       await updateStatus(ctx);
       } catch(error) {

@@ -1189,15 +1189,23 @@ in
         const assert = (condition, message) => { if (!condition) throw new Error(message); };
         const delay = (milliseconds) => new Promise((resolve) => setTimeout(resolve, milliseconds));
 
+        const rejectsMode = (call) => {
+          let failed = false;
+          try { call(); } catch { failed = true; }
+          assert(failed, "invalid operator authority accepted");
+        };
+
         function createPi() {
           const handlers = new Map();
           const commands = new Map();
           const emitted = [];
+          const modeEvents = [];
           return {
             handlers,
             commands,
             emitted,
-            events: { emit(name) { emitted.push(name); } },
+            modeEvents,
+            events: { emit(name, data) { emitted.push(name); if (name === "permission-gate:mode-changed") modeEvents.push(data); } },
             registerCommand(name, definition) { commands.set(name, definition); },
             on(name, handler) { handlers.set(name, handler); },
           };
@@ -1279,13 +1287,43 @@ in
           }
           gate(pi);
           assert(JSON.stringify(globalThis.__paeSubagentPermissionSelectionV1) === JSON.stringify({ protocol: 1, selected: true, conflict: false }), "guard selection was not published before session start");
+          const operator = globalThis.__PAE_PERMISSION_GATE_OPERATOR_V1__;
+          const sessionId = ctx.sessionManager.getSessionId();
+          assert(operator?.version === 1 && Object.isFrozen(operator), "missing versioned operator service");
+          rejectsMode(() => operator.applyMode(sessionId, false));
           await pi.handlers.get("session_start")({}, ctx);
+          if (!["bad-hello", "transport-eof"].includes(name) && globalThis.__paeSubagentPermissionAuthorityV1.active) {
+            assert(operator.status(sessionId).enabled, "independent session did not default on");
+            rejectsMode(() => operator.status("stale-session"));
+            rejectsMode(() => operator.applyMode("stale-session", false));
+            rejectsMode(() => operator.applyMode(sessionId, "off"));
+          }
+          if (name === "operator-off") {
+            const commandAuthority = globalThis.__paeCommandAuthorityV1;
+            commandAuthority.active = false;
+            rejectsMode(() => operator.applyMode(sessionId, false));
+            commandAuthority.active = true;
+            globalThis.__paeCommandAuthorityV1 = {};
+            rejectsMode(() => operator.status(sessionId));
+            globalThis.__paeCommandAuthorityV1 = commandAuthority;
+            globalThis.__AGENTSH_PI__ = { getSupervisorState: () => ({ configured: true, active: true, protocol: "rest" }), exec() {} };
+            rejectsMode(() => operator.applyMode(sessionId, false));
+            delete globalThis.__AGENTSH_PI__;
+            assert(operator.status(sessionId).enabled, "authority loss changed prompt mode");
+            assert(pi.modeEvents.length === 0, "rejected mode operation emitted an event");
+            assert(operator.applyMode(sessionId, false).enabled === false, "operator mode not applied");
+            assert(operator.status(sessionId).enabled === false, "operator status not updated");
+            assert(JSON.stringify(pi.modeEvents) === JSON.stringify([{ sessionId, enabled: false }]), "operator event lost exact mode");
+            assert(ctx.statuses.some((entry) => entry.name === "permission-gate-mode" && entry.value?.includes("OFF")), "operator UI not updated");
+          }
           if (["mode-off", "mode-on", "reload-child", "new-session-child"].includes(name)) {
             await pi.commands.get("permission-gate").handler("off", ctx);
+            assert(JSON.stringify(pi.modeEvents[0]) === JSON.stringify({ sessionId, enabled: false }), "command did not use operator mode helper");
             if (name === "mode-on") await pi.commands.get("permission-gate").handler("on", ctx);
           }
-          if (name === "pending-off") contextOptions.onSelect = async (_title, _choices, settings) => {
-            await pi.commands.get("permission-gate").handler("off", ctx);
+          if (name === "pending-off" || name === "operator-pending-off") contextOptions.onSelect = async (_title, _choices, settings) => {
+            if (name === "operator-pending-off") operator.applyMode(sessionId, false);
+            else await pi.commands.get("permission-gate").handler("off", ctx);
             assert(settings.signal.aborted, "off did not dismiss pending UI");
           };
           const tool = pi.handlers.get("tool_call");
@@ -1315,6 +1353,8 @@ in
             assert(authority?.active === true, "reload child authority was not active initially");
             await pi.handlers.get("session_shutdown")({ reason: "reload" }, ctx);
             assert(authority.active === false, "reload-suspended child authority remained launchable");
+            rejectsMode(() => operator.status(sessionId));
+            rejectsMode(() => operator.applyMode(sessionId, false));
             const pending = authority.authorize({
               subagentId: "native-child-reload",
               label: "reload child",
@@ -1334,6 +1374,9 @@ in
             reloadedGate(pi);
             authorityStable = globalThis.__paeSubagentPermissionAuthorityV1 === authority;
             await pi.handlers.get("session_start")({ reason: "reload" }, ctx);
+            rejectsMode(() => operator.applyMode(sessionId, true));
+            assert(globalThis.__PAE_PERMISSION_GATE_OPERATOR_V1__ !== operator, "reload reused stale operator handle");
+            assert(globalThis.__PAE_PERMISSION_GATE_OPERATOR_V1__.status(sessionId).enabled === false, "reload forgot mode");
             childAuthorization = await pending;
           } else if (name === "new-session-child") {
             const oldAuthority = globalThis.__paeSubagentPermissionAuthorityV1;
@@ -1341,6 +1384,8 @@ in
             oldAuthorityActive = oldAuthority.active;
             ctx = createContext({ ...contextOptions, sessionId: "permission-gate-second-session" });
             await pi.handlers.get("session_start")({ reason: "new" }, ctx);
+            rejectsMode(() => operator.applyMode(sessionId, false));
+            assert(globalThis.__PAE_PERMISSION_GATE_OPERATOR_V1__.status(ctx.sessionManager.getSessionId()).enabled, "new session inherited off mode");
             const newAuthority = globalThis.__paeSubagentPermissionAuthorityV1;
             authorityStable = newAuthority === oldAuthority;
             childAuthorization = await newAuthority.authorize({
@@ -1537,7 +1582,7 @@ in
         }
 
         async function runInheritedChecks() {
-          for (const name of ["mode-off", "mode-on", "pending-off"]) {
+          for (const name of ["mode-off", "mode-on", "pending-off", "operator-off", "operator-pending-off"]) {
             const result = await spawnInheritedChild(name, async (socket, stdout) => {
               const read = lineReader(socket);
               await expectHello(read, socket);
@@ -1551,7 +1596,7 @@ in
               send(socket, { v: 1, type: "complete", id: request.id, decision: "allow", reason: "operator mode test" });
             });
             assert(result.allowed[0], name + " blocked");
-            assert(result.selections.length === (name === "mode-off" ? 0 : 1), name + " incorrect UI count");
+            assert(result.selections.length === (["mode-off", "operator-off"].includes(name) ? 0 : 1), name + " incorrect UI count");
           }
           const allowed = await spawnInheritedChild("local-allow", async (socket, stdout) => {
             const read = lineReader(socket);

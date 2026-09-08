@@ -33,6 +33,18 @@ import type {
 
 const GATE_CLAIM_KEY = "__paeAgentSHPermissionGateClaimV1";
 const COMMAND_AUTHORITY_KEY = "__paeCommandAuthorityV1";
+export const PERMISSION_GATE_OPERATOR_KEY = "__PAE_PERMISSION_GATE_OPERATOR_V1__";
+
+export type PermissionGateMode = { sessionId: string; enabled: boolean };
+/** Trusted in-process API only. A worker must authenticate its separate operator
+ * credential before calling; never dispatch model prompts/tools through this API.
+ * Reacquire the service after reload. Unavailable/stale authority throws.
+ */
+export type PermissionGateOperatorV1 = {
+  readonly version: 1;
+  status(sessionId: string): PermissionGateMode;
+  applyMode(sessionId: string, enabled: boolean): PermissionGateMode;
+};
 const PASEO_REMOTE_UI_KEY = "__piPaseoRemoteUiV1";
 const GATE_SOCKET_ENV = "AGENTSH_PERMISSION_GATE_SOCKET";
 const GATE_TIMEOUT_ENV = "PI_AGENTSH_PERMISSION_GATE_TIMEOUT_MS";
@@ -1212,6 +1224,41 @@ export default function permissionGate(pi: ExtensionAPI) {
     });
   }
 
+  const operatorContext = (sessionId: string): ExtensionContext => {
+    const root = globalThis as Record<string, unknown>;
+    const ctx = sessionContext;
+    if (root[PERMISSION_GATE_OPERATOR_KEY] !== operatorService
+      || root[COMMAND_AUTHORITY_KEY] !== commandAuthority || !commandAuthority.active
+      || !ctx || !activePiSessionId || sessionId !== activePiSessionId
+      || stablePiSessionId(ctx) !== sessionId || !inheritedGateClaim
+      || inheritedGateClaim.error || inheritedGateClaim.client?.failure
+      || subagentAuthority?.phase() !== "active"
+      || root[SUBAGENT_PERMISSION_AUTHORITY_KEY] !== subagentAuthority.authority
+      || runtimeDisposition().kind !== "guard-only") {
+      throw new Error("Permission prompt mode unavailable for this active guard-only session");
+    }
+    return ctx;
+  };
+  const operatorService: PermissionGateOperatorV1 = Object.freeze({
+    version: 1 as const,
+    status(sessionId: string): PermissionGateMode {
+      operatorContext(sessionId);
+      return { sessionId, enabled: promptsEnabled() };
+    },
+    applyMode(sessionId: string, enabled: boolean): PermissionGateMode {
+      const ctx = operatorContext(sessionId);
+      if (typeof enabled !== "boolean") throw new Error("Permission prompt mode requires a boolean");
+      inheritedGateClaim!.promptMode = { sessionId, enabled };
+      if (!enabled) for (const controller of modeChanges) controller.abort();
+      gateStatus(ctx, "ready");
+      if (ctx.hasUI) ctx.ui.setStatus("permission-gate-mode", enabled ? undefined : "AgentSH prompts OFF (session + children)");
+      pi.events.emit("permission-gate:mode-changed", { sessionId, enabled });
+      return { sessionId, enabled };
+    },
+  });
+  // Identity checking revokes captured old handles even if teardown was skipped.
+  (globalThis as Record<string, unknown>)[PERMISSION_GATE_OPERATOR_KEY] = operatorService;
+
   pi.registerCommand("permission-gate", {
     description: "Permission prompts: off|on|status (guard-only: parent and all children)",
     handler: async (args, ctx) => {
@@ -1223,14 +1270,14 @@ export default function permissionGate(pi: ExtensionAPI) {
       }
       if (inheritedGateClaim) {
         const failure = inheritedGateClaim.error ?? inheritedGateClaim.client?.failure;
-        if (runtimeDisposition().kind !== "guard-only" || !activePiSessionId
-          || stablePiSessionId(ctx) !== activePiSessionId || !sessionContext) {
-          ctx.ui.notify("Permission prompt mode unavailable; full AgentSH sandbox policy is unchanged", "error");
+        try {
+          const sessionId = stablePiSessionId(ctx);
+          if (action === "off" || action === "on") operatorService.applyMode(sessionId, action === "on");
+          else operatorService.status(sessionId);
+        } catch (error) {
+          gateStatus(ctx, "error");
+          ctx.ui.notify(`Permission prompt mode unavailable; full AgentSH sandbox policy is unchanged: ${boundedError(error)}`, "error");
           return;
-        }
-        if (action === "off" || action === "on") {
-          inheritedGateClaim.promptMode = { sessionId: activePiSessionId, enabled: action === "on" };
-          if (action === "off") for (const controller of modeChanges) controller.abort();
         }
         gateStatus(ctx, failure ? "error" : "ready");
         ctx.ui.setStatus("permission-gate-mode", promptsEnabled() ? undefined : "AgentSH prompts OFF (session + children)");

@@ -114,6 +114,9 @@ try {
   try { readFileSync(cancelPath); throw new Error("launch was cancelled"); }
   catch (error) { if (error?.code !== "ENOENT") throw error; }
   const environment = parseEnvironment(readFileSync(environmentPath));
+  // The actual tmux-created runner pane wins over the controller snapshot.
+  if (process.env.TMUX) environment.TMUX = process.env.TMUX;
+  if (process.env.TMUX_PANE) environment.TMUX_PANE = process.env.TMUX_PANE;
   const command = readFileSync(commandPath, "utf8");
   rmSync(environmentPath, { force: true });
   rmSync(commandPath, { force: true });

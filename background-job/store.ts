@@ -102,13 +102,23 @@ function parseObserved(value: unknown): NonNullable<JobMetadata["observed"]> {
 
 export function parseLaunch(value: unknown): JobLaunch {
   const data = object(value, "job launch");
-  exactKeys(data, ["schemaVersion", "windowId", "paneId", "panePid", "paneStartToken", "launchedAt"]);
+  exactKeys(data, ["schemaVersion", "windowId", "paneId", "panePid", "paneStartToken", "launchedAt"], ["socketPath", "sessionId", "serverPid", "serverStartToken", "ownershipToken"]);
+  if (data.socketPath === undefined && ['sessionId','serverPid','serverStartToken','ownershipToken'].some(key => data[key] !== undefined)) throw new Error('Incomplete saved tmux placement');
+  const placement = data.socketPath === undefined ? {} : {
+    socketPath: string(data.socketPath, "socket path", 4096),
+    sessionId: string(data.sessionId, "tmux session id", 64),
+    serverPid: integer(data.serverPid, "tmux server pid", 1),
+    serverStartToken: string(data.serverStartToken, "server start token", 256),
+    ownershipToken: string(data.ownershipToken, "ownership token", 64),
+  };
+  if (data.socketPath !== undefined && (!String(data.socketPath).startsWith('/') || String(data.socketPath).includes('\0') || !/^\$[0-9]+$/.test(String(data.sessionId)) || !/^[a-f0-9]{32}$/.test(String(data.ownershipToken)))) throw new Error('Invalid saved tmux placement');
   if (data.schemaVersion !== JOB_SCHEMA_VERSION) throw new Error("unsupported job launch schema");
   const windowId = string(data.windowId, "window id", 64);
   const paneId = string(data.paneId, "pane id", 64);
   if (!/^@[0-9]+$/.test(windowId) || !/^%[0-9]+$/.test(paneId)) throw new Error("invalid tmux identity");
   return {
     schemaVersion: JOB_SCHEMA_VERSION,
+    ...placement,
     windowId,
     paneId,
     panePid: integer(data.panePid, "pane pid", 1),

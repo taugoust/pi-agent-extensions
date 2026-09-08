@@ -34,6 +34,7 @@ pkgs.runCommand "background-job-extension-check"
       pkgs.jq
       pkgs.nodejs
       pkgs.tmux
+      pkgs.procps
       pkgs.typescript
     ];
   }
@@ -190,7 +191,12 @@ pkgs.runCommand "background-job-extension-check"
       reloadContext,
     );
     const broker = globalThis.__paeParentJobBrokerV1;
-    const identity = { sessionId: "reload-session", childId: "subagent-child-111111111111111111111111", cwd: process.cwd() };
+    const {resolveLocalPlacement} = await import('./out/background-job/tmux.js');
+    const identity = { sessionId: "reload-session", childId: "subagent-child-111111111111111111111111", cwd: process.cwd(), placement: await resolveLocalPlacement(process.env.TEST_TMUX) };
+    let placementBlocked = false;
+    try { await broker.execute({...identity,placement:undefined}, 'no-placement', {action:'start',command:':' }); }
+    catch(error) { placementBlocked = /trusted caller tmux placement/.test(String(error)); }
+    if (!placementBlocked) throw new Error('delegated start guessed the parent pane');
     const childJob = await broker.execute(identity, "child-start", { action: "start", command: "printf child-owned" });
     const childDone = await broker.execute(identity, "child-wait", { action: "wait", job_id: childJob.details.job_id, timeout_ms: 5000 });
     if (childDone.details.status !== "completed") throw new Error("broker job did not complete");
@@ -204,6 +210,10 @@ pkgs.runCommand "background-job-extension-check"
     if (!denied) throw new Error("broker ignored command authorization");
     const parentView = await afterReload.tool.execute("parent-view", { action: "status", job_id: childJob.details.job_id }, undefined, undefined, reloadContext);
     if (parentView.details.child_id !== identity.childId) throw new Error("parent lost child job ownership metadata");
+    const reaped = await broker.execute(identity, 'child-reap', {action:'reap',job_id:childJob.details.job_id});
+    if (!reaped.details.reaped) throw new Error('explicit reap tool action failed');
+    const retained = await afterReload.tool.execute('parent-retained', {action:'status',job_id:started.details.job_id}, undefined, undefined, reloadContext);
+    if (retained.details.status !== 'completed' || retained.details.retention !== 'until-explicit-reap') throw new Error('child reap removed sibling job or omitted retention policy');
     await afterReload.handlers.get("session_shutdown")({reason:'quit'},reloadContext);
     if (recovered.details?.status !== "completed" || recovered.details?.exit_code !== 0) {
       throw new Error(`session reload did not recover the running background job: ''${JSON.stringify(recovered.details)} ''${JSON.stringify(recovered.content)}`);
@@ -213,7 +223,10 @@ pkgs.runCommand "background-job-extension-check"
       throw new Error("session reload lost background job output");
     }
     EOF
-    PI_CODING_AGENT_DIR="$workdir/agent" node "$workdir/contract.mjs"
+    contractSocket="$workdir/contract.sock"
+    caller=$(tmux -S "$contractSocket" -f /dev/null new-session -d -P -F '#{pane_id}' -x 240 -y 200 -s caller 'sleep 120')
+    trap 'tmux -S "$contractSocket" kill-server 2>/dev/null || true' EXIT
+    TMUX="$contractSocket,0,0" TMUX_PANE="$caller" PI_CODING_AGENT_DIR="$workdir/agent" node "$workdir/contract.mjs"
 
     test -d ${moduleFiles.".pi/agent/extensions/background-job".source}
     test -f ${moduleFiles.".pi/agent/extensions/background-job".source}/index.ts

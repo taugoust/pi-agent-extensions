@@ -1,4 +1,9 @@
-{ self, pkgs }:
+{
+  self,
+  pkgs,
+  piPackage ? null,
+  tuiWorkerLauncher ? null,
+}:
 
 let
   mkExtensionBundle = import ./mk-extension-bundle.nix {
@@ -23,6 +28,7 @@ pkgs.runCommand "subagent-check"
       pkgs.jq
       pkgs.nodejs
       pkgs.typescript
+      pkgs.tmux
     ];
   }
   ''
@@ -111,6 +117,29 @@ pkgs.runCommand "subagent-check"
     node "$workdir/out/subagent/dashboard.test.js"
     node "$workdir/out/shared/quiet-state.test.js"
     TEST_MKFIFO=${pkgs.coreutils}/bin/mkfifo node "$workdir/out/subagent/native-rpc.test.js"
+
+    # Native TUI tests use Node's TS stripping and the real Pi when supplied by
+    # the parent check composition. No model/API requests: provider is local.
+    mkdir -p "$workdir/tui-runtime"
+    cp -R ${self}/subagent ${self}/shared ${self}/permission-gate ${self}/background-job "$workdir/tui-runtime/"
+    chmod -R u+rwX "$workdir/tui-runtime"
+    ${pkgs.lib.optionalString (piPackage != null) ''
+      export PI_TUI_TEST_PI=${pkgs.lib.getExe piPackage}
+      export PI_TUI_ROOT_LAUNCHER=${
+        if tuiWorkerLauncher != null then pkgs.lib.getExe tuiWorkerLauncher else pkgs.lib.getExe piPackage
+      }
+      export PI_TUI_ROOT_MODE=${if tuiWorkerLauncher != null then "guard-only" else "none"}
+    ''}
+    node --experimental-strip-types --test \
+      "$workdir/tui-runtime/subagent/group-wait.test.ts" \
+      "$workdir/tui-runtime/subagent/tui-native-observe.test.ts" \
+      "$workdir/tui-runtime/subagent/tui-worker-jobs.test.ts" \
+      "$workdir/tui-runtime/subagent/tui-worker-protocol.test.ts" \
+      "$workdir/tui-runtime/subagent/tui-worker-server.test.ts" \
+      "$workdir/tui-runtime/subagent/tui-worker-extension.test.ts" \
+      "$workdir/tui-runtime/subagent/tui-worker-seal.test.ts" \
+      "$workdir/tui-runtime/subagent/tui-worker-tmux.test.ts" \
+      "$workdir/tui-runtime/subagent/tui-root.test.ts"
 
     cat > "$workdir/test.mjs" <<'EOF'
     import assert from "node:assert/strict";

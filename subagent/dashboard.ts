@@ -49,6 +49,24 @@ export function registerTaskDashboard(pi:ExtensionAPI, services:DashboardService
     const index=labels.indexOf(selected);if(index<0)return;
     const output=await services.jobs(ctx,id,{action:'output',job_id:jobs[index].job_id,lines:250});
     await show(ctx,labels[index],output.content?.[0]?.text??'(no output)');
+    const job=jobs[index];
+    const action=await taskChoice(ctx,'Task build controls',['Back','Show status',
+      ...(job.status==='running'&&!job.observation_only?['Cancel job — keep pane and output']:[]),
+      ...(job.status!=='running'?['Reap job — close pane and delete job output']:[])]);
+    if(action==='Show status'){
+      const status=await services.jobs(ctx,id,{action:'status',job_id:job.job_id});
+      await show(ctx,'Build status',status.content?.[0]?.text??'(no status)');
+    }else if(action?.startsWith('Cancel job')){
+      if(await taskChoice(ctx,'Stop this owned build? Its pane and output remain.',['Cancel job','Keep running'])==='Cancel job'){
+        const result=await services.jobs(ctx,id,{action:'cancel',job_id:job.job_id});
+        await show(ctx,'Build cancellation',result.content?.[0]?.text??'Cancellation requested; pane and output retained.');
+      }
+    }else if(action?.startsWith('Reap job')){
+      if(await taskChoice(ctx,'Close this finished owned pane and delete its retained job output?',['Reap job','Keep job'])==='Reap job'){
+        const result=await services.jobs(ctx,id,{action:'reap',job_id:job.job_id});
+        await show(ctx,'Build cleanup',result.content?.[0]?.text??'Owned job reaped.');
+      }
+    }
   };
   pi.registerCommand('tasks',{
     description:'Task dashboard: outcomes, reports, resume, build output, and alerts',
