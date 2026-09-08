@@ -40,6 +40,7 @@ test("real Pi TUI: local keyboard, observer crash, same-process promotion, retai
     const callerPane = await tmux("display-message", "-p", "-t", "parent:", "#{pane_id}");
     const backend = new TuiWorkerTmux();
     const caller = await backend.resolveCaller({ TMUX: `${socket},1,0`, TMUX_PANE: callerPane });
+    const callerRename = await tmux("show-option", "-wqv", "-t", caller.windowId, "automatic-rename");
     const workerDir = join(root, "worker");
     // Launcher process is distinct and actually SIGKILLed after it reports the
     // committed manifest. Nothing in it owns Pi's terminal/control socket.
@@ -47,7 +48,7 @@ test("real Pi TUI: local keyboard, observer crash, same-process promotion, retai
     const input = { directory: workerDir, ownerSessionId: "parent-session", taskId: "task-1",
       groupId: `subagent-job-${"1".repeat(24)}`, childId: `subagent-child-${"2".repeat(24)}`,
       attempt: 1, cwd: root, caller, foreground: true, parentDisposition: "native", launcher: rawPi,
-      launchMode: "none", model: "harness-test/mock" };
+      launchMode: "none", model: "harness-test/mock", windowName: "agt-parser-review", paneTitle: "agt-review-tests" };
     const code = `const {TuiWorkerTmux}=await import(${JSON.stringify(launcherModule)}); const t=new TuiWorkerTmux(); const m=await t.launch(${JSON.stringify(input)}); await t.waitReady(m); console.log('READY'); setInterval(()=>{},1000);`;
     const parent = spawn(process.execPath, ["--experimental-strip-types", "--input-type=module", "-e", code], { stdio: ["ignore", "pipe", "pipe"] });
     let output = "", error = "";
@@ -63,6 +64,10 @@ test("real Pi TUI: local keyboard, observer crash, same-process promotion, retai
     }
     const store = new TuiWorkerStore(workerDir);
     let manifest = store.readManifest();
+    const display = (pane: string, format: string) => tmux("display-message", "-p", "-t", pane, format);
+    assert.equal(await display(manifest.placement.paneId, "#{window_name}|#{pane_title}"), "agt-parser-review|agt-review-tests");
+    assert.equal(await tmux("show-option", "-wqv", "-t", manifest.placement.windowId, "automatic-rename"), "off");
+    assert.equal(await tmux("show-option", "-wqv", "-t", caller.windowId, "automatic-rename"), callerRename);
     const initial = await callTuiWorker(manifest, { operation: "status" });
     assert.ok(initial.ok);
     const piPid = (initial.data as any).pid;
@@ -78,14 +83,17 @@ test("real Pi TUI: local keyboard, observer crash, same-process promotion, retai
     const sibling = await tmux("split-window", "-d", "-P", "-F", "#{pane_id}", "-t", manifest.placement.windowId, "sleep 120");
     const siblingPid = await tmux("display-message", "-p", "-t", sibling, "#{pane_pid}");
     const second = await backend.launch({ ...input, launcher: rawPi!, parentDisposition: "native", launchMode: "none",
-      directory: join(root, "second"), childId: `subagent-child-${"3".repeat(24)}`, groupWindowId: manifest.placement.windowId });
+      directory: join(root, "second"), childId: `subagent-child-${"3".repeat(24)}`, groupWindowId: manifest.placement.windowId,
+      windowName: "agt-must-not-rename", paneTitle: "agt-second-task" });
     await backend.waitReady(second);
     assert.equal(second.placement.windowId, manifest.placement.windowId);
+    assert.equal(await display(second.placement.paneId, "#{window_name}|#{pane_title}"), "agt-parser-review|agt-second-task");
     assert.notEqual(second.placement.paneId, manifest.placement.paneId);
     const secondPid = (await callTuiWorker(second, { operation: "status" }) as any).data.pid;
     const sessionFile = manifest.sessionFile;
     const promoted = await backend.promote([manifest, second], caller);
     manifest = promoted[0];
+    assert.equal(await display(manifest.placement.paneId, "#{window_name}|#{pane_title}"), "agt-parser-review|agt-review-tests");
     parent.kill("SIGKILL");
     await new Promise<void>(resolve => parent.once("close", () => resolve()));
     assert.equal((await callTuiWorker(manifest, { operation: "status" }) as any).data.pid, piPid);
@@ -130,6 +138,7 @@ test("real Pi TUI: local keyboard, observer crash, same-process promotion, retai
       groupId: `subagent-job-${"5".repeat(24)}`, foreground: false });
     await backend.waitReady(single);
     assert.equal(single.placement.sessionId, caller.sessionId);
+    assert.equal(await display(single.placement.paneId, "#{window_name}|#{pane_title}"), "agt-parser-review|agt-review-tests");
     assert.notEqual(single.placement.windowId, caller.windowId);
     assert.notEqual(single.placement.windowId, manifest.placement.windowId);
     await backend.reap(single);

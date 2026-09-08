@@ -9,6 +9,7 @@ import { TUI_WORKER_DISCOVERY_ENV, TUI_WORKER_MANIFEST_ENV } from "../shared/tui
 import type { TuiWorkerManifest, TuiWorkerPlacement } from "../shared/tui-worker-protocol.ts";
 import { TuiWorkerStore, atomicPrivateJson, readPrivateJson } from "./tui-worker-store.ts";
 import { callTuiWorker } from "./tui-worker-client.ts";
+import { subagentTmuxName } from "./tui-names.ts";
 
 const exec = promisify(execFile);
 const quote = (s: string) => `'${s.replaceAll("'", `'\\''`)}'`;
@@ -34,6 +35,9 @@ export type TuiWorkerLaunch = {
   foreground: boolean;
   /** Join a verified same-group window, including a staged foreground window. */
   groupWindowId?: string;
+  /** Presentation only; supplied at creation, never used to locate workers. */
+  windowName?: string;
+  paneTitle?: string;
   /** Trusted actual parent runtime disposition, NOT a tool parameter. */
   parentDisposition: "native" | "guard-only" | "full" | "unavailable";
   launcher: string;
@@ -99,6 +103,9 @@ export class TuiWorkerTmux {
     return { dead: dead === "1", panePid: Number(pid), placement: await this.locate(p.socketPath, p.paneId, p.ownershipNonce) };
   }
   async launch(input: TuiWorkerLaunch): Promise<TuiWorkerManifest> {
+    const windowName = input.windowName ?? subagentTmuxName("");
+    const paneTitle = input.paneTitle ?? windowName;
+    if (![windowName, paneTitle].every(name => /^agt-[a-z0-9]+(?:-[a-z0-9]+)*$/.test(name) && name.trim() === name && name.length <= 32)) throw new Error("Invalid native TUI display name");
     if (input.parentDisposition === "full" || input.parentDisposition === "unavailable"
       || input.launchMode !== (input.parentDisposition === "guard-only" ? "guard-only" : "none")) throw new Error("Worker launcher mode does not match parent authority; native fallback disabled");
     if (!isAbsolute(input.launcher)) throw new Error("Worker launcher must be an absolute trusted executable");
@@ -163,9 +170,9 @@ export class TuiWorkerTmux {
       // One staging session per group avoids cross-parent naming/creation races.
       const sessionName = `pi-stage-${input.groupId}`;
       paneId = await this.run(caller.socketPath, ["new-session", "-d", "-P", "-F", format, "-s", sessionName,
-        "-n", input.groupId, "-c", cwd, "-x", "120", "-y", "35", shell]);
+        "-n", windowName, "-c", cwd, "-x", "120", "-y", "35", shell]);
     } else {
-      paneId = await this.run(caller.socketPath, ["new-window", "-d", "-P", "-F", format, "-t", `${caller.sessionId}:`, "-n", input.groupId, "-c", cwd, shell]);
+      paneId = await this.run(caller.socketPath, ["new-window", "-d", "-P", "-F", format, "-t", `${caller.sessionId}:`, "-n", windowName, "-c", cwd, shell]);
     }
     if (!/^%[0-9]+$/.test(paneId)) throw new Error("Invalid launched pane identity");
     const placement = await this.locate(caller.socketPath, paneId, nonce);
@@ -173,6 +180,13 @@ export class TuiWorkerTmux {
     const panePid = Number(await this.run(caller.socketPath, ["display-message", "-p", "-t", paneId, "#{pane_pid}"]));
     const paneProcessToken = await processIdentity(panePid);
     atomicPrivateJson(store.path("launch-pane.json"), placement);
+    // Freeze only newly allocated presentation; never rename joined/live windows.
+    if (!input.groupWindowId) {
+      await this.run(caller.socketPath, ["set-option", "-w", "-t", placement.windowId, "automatic-rename", "off"]);
+      await this.run(caller.socketPath, ["set-option", "-w", "-t", placement.windowId, "allow-rename", "off"]);
+    }
+    await this.run(caller.socketPath, ["set-option", "-p", "-t", paneId, "allow-set-title", "off"]);
+    await this.run(caller.socketPath, ["select-pane", "-t", paneId, "-T", paneTitle]);
     // Ownership is pane-local; remain-on-exit is local, never a server option.
     await this.run(caller.socketPath, ["set-option", "-p", "-t", paneId, NONCE, nonce]);
     await this.run(caller.socketPath, ["set-option", "-p", "-t", paneId, GROUP, input.groupId]);

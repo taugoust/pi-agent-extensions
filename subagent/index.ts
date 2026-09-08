@@ -71,6 +71,7 @@ import { waitForGroupSnapshot } from "./group-wait.ts";
 import { parentJobBroker, validateJobParams } from "../shared/background-job.js";
 import { validateAcceptance, readTaskOutcome, outcomeSummary, type TaskOutcome, type TaskOutcomeSummary } from "./outcome.js";
 import { NativeTaskStore, createTaskId, TASK_ID_PATTERN, type NativeTaskRecord } from "./resume.js";
+import { SUBAGENT_NAME_MAX_LENGTH, SUBAGENT_NAME_PATTERN, validateSubagentName, withoutSubagentNames } from "./tui-names.js";
 import { registerTaskDashboard } from "./dashboard.js";
 import { taskListText, outcomeLabel } from "../shared/task-presentation.js";
 import { installQuietState, notifyParent } from '../shared/quiet-state.js';
@@ -1440,7 +1441,7 @@ export function validateBackgroundOperation(params: any): void {
     return;
   }
   if (params.task_id !== undefined || params.compact !== undefined) throw new Error("task_id and compact are resume-only fields");
-  const launchFields = ["acceptance", "task", "tasks", "chain", "systemPrompt", "model", "tools", "cwd", "action", "draft_id", "background", "mode", "timeout_ms"];
+  const launchFields = ["name", "acceptance", "task", "tasks", "chain", "systemPrompt", "model", "tools", "cwd", "action", "draft_id", "background", "mode", "timeout_ms"];
   const integerField = (field: string, minimum: number, maximum: number, label: string) => {
     const value = params[field];
     if (value !== undefined && (!Number.isSafeInteger(value) || value < minimum || value > maximum)) {
@@ -1527,6 +1528,10 @@ export function validateBackgroundOperation(params: any): void {
 }
 
 function validateBackgroundLaunch(params: any): void {
+  validateSubagentName(params.name);
+  for (const items of [params.tasks, params.chain]) {
+    if (Array.isArray(items)) for (const item of items) validateSubagentName(item?.name);
+  }
   const lifecycleFields = ["job_id", "wait_ms", "limit", "offset", "child", "child_id", "message", "control_mode", "wait_for_response", "task_id", "compact"];
   if (params.background !== true) {
     if (lifecycleFields.some((field) => params[field] !== undefined)) throw new Error("Foreground subagent launch cannot include background lifecycle fields");
@@ -1541,7 +1546,11 @@ function validateBackgroundLaunch(params: any): void {
   if (items.some((item: any) => typeof item?.task !== "string" || item.task.trim().length === 0)) throw new Error("Every background subagent task must be a non-empty string");
 }
 
+const SubagentName = Type.Optional(Type.String({ minLength: 1, maxLength: SUBAGENT_NAME_MAX_LENGTH, pattern: SUBAGENT_NAME_PATTERN,
+  description: "Optional concise native tmux label (1–28 ASCII lowercase kebab-case characters, without agt- prefix). Root names the group; per-task names title panes. Ignored by other backends." }));
+
 const SubagentItem = Type.Object({
+  name: SubagentName,
   acceptance: Type.Optional(Type.Array(Type.String({maxLength:500}), {maxItems:16, description:"Acceptance criteria for the structured task outcome."})),
   task: Type.String({ description: "Task to delegate to this dynamic subagent" }),
   systemPrompt: Type.Optional(Type.String({ description: "Optional additional system prompt for this subagent" })),
@@ -1552,6 +1561,7 @@ const SubagentItem = Type.Object({
 
 function subagentParams() {
   return Type.Object({
+  name: SubagentName,
   acceptance: Type.Optional(Type.Array(Type.String({maxLength:500}), {maxItems:16})),
   task_id: Type.Optional(Type.String({pattern:"^subagent-task-[0-9a-f]{24}$",description:"Stable native task ID for explicit resume after a child terminates."})),
   compact: Type.Optional(Type.Boolean({description:"Resume only: compact the retained session before continuing; required for context checkpoints and selected automatically for them."})),
@@ -2534,7 +2544,7 @@ export default function (pi: ExtensionAPI) {
                 onUpdate({ ...partial, details });
               }
             : undefined;
-          const result = await bridge!.subagentAdapter!.execute(toolCallId, params, signal, adaptedUpdate, ctx);
+          const result = await bridge!.subagentAdapter!.execute(toolCallId, withoutSubagentNames(params), signal, adaptedUpdate, ctx);
           const failed = bridge!.subagentAdapter!.detailsFailed(result?.details);
           const details = decorateChildResultIdentities(withBackend(result?.details, "agentsh", failed), executionChildren, true);
           const decoratedResult = { ...result, details };

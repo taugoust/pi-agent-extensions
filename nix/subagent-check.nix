@@ -131,6 +131,7 @@ pkgs.runCommand "subagent-check"
       export PI_TUI_ROOT_MODE=${if tuiWorkerLauncher != null then "guard-only" else "none"}
     ''}
     node --experimental-strip-types --test \
+      "$workdir/tui-runtime/subagent/tui-names.test.ts" \
       "$workdir/tui-runtime/subagent/group-wait.test.ts" \
       "$workdir/tui-runtime/subagent/tui-native-observe.test.ts" \
       "$workdir/tui-runtime/subagent/tui-worker-jobs.test.ts" \

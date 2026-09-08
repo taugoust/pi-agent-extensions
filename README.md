@@ -809,6 +809,16 @@ backends keep their existing execution model and never silently fall back to nat
 
 - A background single task gets a new window in the caller's tmux session.
 - Parallel/chain children share their group's window as panes.
+- New windows and pane titles use `agt-<label>` (at most 32 characters).
+  Optional launch `name` selects the group label; `tasks[].name` / `chain[].name`
+  select each pane label. Labels are 1–28 ASCII lowercase kebab-case characters,
+  without the `agt-` prefix. Without a name, up to four words from task text form
+  a short slug (non-ASCII/empty slugs fall back to `agt-worker`). The group's
+  default is its first task's label, fixed at creation, including for chains.
+  Names are presentation-only and may repeat; opaque IDs still control ownership.
+  Promotion preserves the window name; existing live windows/panes are not renamed.
+  Automatic window renaming and application pane-title changes are disabled only
+  on newly allocated worker windows/panes. Other backends ignore these labels.
 - Foreground workers stage in an infrastructure session on the same tmux server.
   `/background` or `operation=promote` moves the group window, preserving Pi PIDs,
   conversations, and sibling job panes.

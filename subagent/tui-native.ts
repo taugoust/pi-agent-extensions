@@ -3,6 +3,7 @@ import { waitForGroupSnapshot } from "./group-wait.ts";
 import { readdirSync, existsSync, readFileSync, writeFileSync, unlinkSync } from "node:fs";
 import { join, resolve } from "node:path";
 import { validateAcceptance } from "./outcome.ts";
+import { subagentTmuxName, validateSubagentName } from "./tui-names.ts";
 import { TuiWorkerTmux, tuiWorkerLaunchContract, processIdentity } from "./tui-worker-tmux.ts";
 import { TuiWorkerStore, privateDirectory, atomicPrivateJson, readPrivateJson } from "./tui-worker-store.ts";
 import { callTuiWorker, applyTuiWorkerOperatorMode } from "./tui-worker-client.ts";
@@ -12,13 +13,13 @@ import type { TuiWorkerManifest, TuiWorkerPlacement } from "../shared/tui-worker
 
 const id = (prefix: string) => `${prefix}-${randomBytes(12).toString("hex")}`;
 const pause = (ms: number) => new Promise(resolve => setTimeout(resolve, ms));
-type Spec = { task: string; cwd: string; model?: string; tools?: string[]; systemPrompt?: string; acceptance?: string[] };
+type Spec = { name?: string; task: string; cwd: string; model?: string; tools?: string[]; systemPrompt?: string; acceptance?: string[] };
 type Child = { childId: string; taskId: string; attempt: number; directory: string; spec: Spec;
   resumeSessionFile?: string; resumeMessage?: string; compactBeforePrompt?: boolean;
   state: "pending" | "launching" | "running" | "completed" | "failed" | "cancelled" | "lost" | "skipped";
   operatorCapability: string; started: boolean; reaped?: boolean; error?: string; report?: string;
   notifiedSequence: number; lastOutcome?: unknown; requiresCompaction?: boolean; };
-type Group = { version: 1; id: string; owner: string; createdAt: string; mode: "single" | "parallel" | "chain";
+type Group = { windowName?: string; version: 1; id: string; owner: string; createdAt: string; mode: "single" | "parallel" | "chain";
   background: boolean; cancelled: boolean; children: Child[]; caller: TuiWorkerPlacement;
   parentOwnerToken: string;
   operatorEnabled: boolean; launcher: string; launchMode: "none" | "guard-only"; promotionPending?: boolean; };
@@ -263,6 +264,8 @@ export class TuiNativeManager {
               const manifest = await this.tmux.launch({ directory: c.directory, ownerSessionId: owner, taskId: c.taskId,
                 groupId: g.id, childId: c.childId, attempt: c.attempt ?? 1, caller: g.caller, cwd: c.spec.cwd,
                 foreground: !g.background, groupWindowId: existing?.placement.windowId,
+                windowName: g.windowName ?? subagentTmuxName(g.children[0].spec.task, g.children[0].spec.name),
+                paneTitle: subagentTmuxName(c.spec.task, c.spec.name),
                 parentDisposition: this.disposition(), launcher: g.launcher, launchMode: g.launchMode,
                 model: c.spec.model, tools: c.spec.tools, systemPrompt: c.spec.systemPrompt, acceptance: c.spec.acceptance, resumeSessionFile: c.resumeSessionFile,
                 operatorCapabilityHash: createHash("sha256").update(c.operatorCapability).digest("hex") });
@@ -287,7 +290,7 @@ export class TuiNativeManager {
       if (s.systemPrompt !== undefined && (typeof s.systemPrompt !== "string" || Buffer.byteLength(s.systemPrompt) > 64 * 1024)) throw new Error("Invalid system prompt");
       if (s.model !== undefined && (typeof s.model !== "string" || Buffer.byteLength(s.model) > 512)) throw new Error("Invalid model");
       if (s.tools !== undefined && (!Array.isArray(s.tools) || s.tools.length > 64 || s.tools.some((tool: any) => typeof tool !== "string" || !/^[a-zA-Z0-9_-]{1,128}$/.test(tool)))) throw new Error("Invalid tool selection");
-      return { task: s.task, cwd: resolve(s.cwd ?? cwd), model: s.model, tools: s.tools, systemPrompt: s.systemPrompt, acceptance: validateAcceptance(s.acceptance) };
+      return { name: validateSubagentName(s.name), task: s.task, cwd: resolve(s.cwd ?? cwd), model: s.model, tools: s.tools, systemPrompt: s.systemPrompt, acceptance: validateAcceptance(s.acceptance) };
     });
     if (specs.length > 8) throw new Error("At most eight subagent children are allowed");
     if (signal?.aborted || this.closed) throw new Error("Subagent launch cancelled");
@@ -296,7 +299,7 @@ export class TuiNativeManager {
     const enabled = contract.launchMode === "guard-only" ? this.liveOperatorMode(owner) : true;
     if (typeof enabled !== "boolean") throw new Error("Parent operator authority unavailable");
     const groupId = id("subagent-job");
-    const g: Group = { version: 1, id: groupId, owner, createdAt: new Date().toISOString(), mode: params.chain ? "chain" : params.tasks ? "parallel" : "single",
+    const g: Group = { windowName: subagentTmuxName(specs[0].task, validateSubagentName(params.name) ?? specs[0].name), version: 1, id: groupId, owner, createdAt: new Date().toISOString(), mode: params.chain ? "chain" : params.tasks ? "parallel" : "single",
       background: params.background === true, cancelled: false, parentOwnerToken: this.processToken(process.pid)!, operatorEnabled: enabled, ...contract,
       caller: await this.tmux.resolveCaller(), children: specs.map(spec => ({ childId: id("subagent-child"), taskId: resume?.child.taskId ?? id("subagent-task"), attempt: resume ? (resume.child.attempt ?? 1) + 1 : 1,
         ...(resume ? { resumeSessionFile: resume.sessionFile, compactBeforePrompt: resume.compact, resumeMessage: resume.message } : {}),
