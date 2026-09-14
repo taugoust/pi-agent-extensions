@@ -2057,7 +2057,14 @@ export default function (pi: ExtensionAPI) {
           if (params.operation === "list") {
             const legacy = await backgroundManager.list(owner, params.limit ?? 20);
             if (legacy.length) {
-              result.content[0].text += "\n\nRetained AgentSH/legacy groups:\n" + legacy.map(record => backgroundRecordText(record, false, childTracker.reconcile(record))).join("\n");
+              for (const backend of ["native", "agentsh"] as const) {
+                const records = legacy.filter(record => record.backend === backend);
+                if (!records.length) continue;
+                const heading = backend === "native"
+                  ? "Retained legacy native groups (reap removes terminal records/reports only; never processes or panes):"
+                  : "Retained AgentSH groups (reap unsupported here; use AgentSH lifecycle controls):";
+                result.content[0].text += "\n\n" + heading + "\n" + records.map(record => backgroundRecordText(record, false, childTracker.reconcile(record))).join("\n");
+              }
               result.details.legacy_groups = legacy.map(record => ({ job_id: record.id, backend: record.backend, status: record.status }));
             }
           } else if (params.operation === "tasks") {
@@ -2067,7 +2074,15 @@ export default function (pi: ExtensionAPI) {
           }
           return result;
         }
-        if (["reap", "promote"].includes(params.operation)) throw new Error(`${params.operation} requires an owned native TUI group`);
+        if (params.operation === "promote") throw new Error("promote requires an owned native TUI group; legacy native records and AgentSH groups cannot be promoted");
+      }
+      if (params.operation === "reap") {
+        if (typeof backgroundManager.reapNative !== "function") {
+          throw new Error("The retained legacy manager predates safe reap; restart Pi before retrying. No work was cancelled or removed.");
+        }
+        const record = await backgroundManager.reapNative(params.job_id, stableSessionId(ctx));
+        return { content: [{ type: "text", text: `Reaped legacy native group ${record.id}: removed retained record/reports only. No processes or panes were touched.` }],
+          details: { background_subagent: true, operation: "reap", job_id: record.id, backend: "native", reaped: true, records_only: true } };
       }
       if (params.operation) {
         const ownerSessionId = stableSessionId(ctx);
@@ -2163,7 +2178,11 @@ export default function (pi: ExtensionAPI) {
             content: [{
               type: "text",
               text: records.length
-                ? truncateByBytes(records.map((record) => backgroundRecordText(record, false, childTracker.reconcile(record))).join("\n"))
+                ? truncateByBytes([
+                    ...(records.some(record => record.backend === "native") ? ["Legacy native groups: reap removes terminal records/reports only, never processes or panes."] : []),
+                    ...(records.some(record => record.backend === "agentsh") ? ["AgentSH groups: reap is unsupported here; use AgentSH lifecycle controls."] : []),
+                    ...records.map((record) => backgroundRecordText(record, false, childTracker.reconcile(record))),
+                  ].join("\n"))
                 : "No background subagents for this Pi session.",
             }],
             details: {

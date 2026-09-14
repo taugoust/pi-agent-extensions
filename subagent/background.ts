@@ -1,5 +1,5 @@
 import { createHash, randomBytes } from "node:crypto";
-import { constants } from "node:fs";
+import { constants, closeSync, fstatSync, lstatSync, openSync, readFileSync, readdirSync, rmdirSync, unlinkSync } from "node:fs";
 import { access, lstat, mkdir, open, readFile, readdir, rename, rm, writeFile } from "node:fs/promises";
 import { dirname, join } from "node:path";
 import { SUBAGENT_CHILD_ID_PATTERN } from "./control.js";
@@ -111,6 +111,8 @@ type RuntimeRegistry = {
   flushTimers: Map<string, NodeJS.Timeout>;
   pendingLaunches: Map<string, { sessionId: string; controller: AbortController }>;
   sessions: Map<string, { phase: BackgroundSessionPhase; generation: number }>;
+  storageReaders: Map<string, number>;
+  reaped: Set<string>;
 };
 
 const RUNTIME_KEY = "__paeBackgroundSubagentRuntimeV3";
@@ -128,6 +130,8 @@ function runtimeRegistry(): RuntimeRegistry {
     existing.flushTimers ??= new Map();
     existing.pendingLaunches ??= new Map();
     existing.sessions ??= new Map();
+    existing.storageReaders ??= new Map();
+    existing.reaped ??= new Set();
     return existing as RuntimeRegistry;
   }
   const created: RuntimeRegistry = {
@@ -135,6 +139,8 @@ function runtimeRegistry(): RuntimeRegistry {
     flushTimers: new Map(),
     pendingLaunches: new Map(),
     sessions: new Map(),
+    storageReaders: new Map(),
+    reaped: new Set(),
   };
   root[RUNTIME_KEY] = created;
   return created;
@@ -433,6 +439,7 @@ export class BackgroundSubagentManager {
         const info = await lstat(this.statePath(entry.name));
         if (!info.isFile() || info.isSymbolicLink() || info.size > MAX_STATE_BYTES) continue;
         const record = parseRecord(JSON.parse(await readFile(this.statePath(entry.name), "utf8")));
+        if (record.id !== entry.name) continue;
         if ((record.status === "running" || record.status === "cancelling") &&
             (!this.runtime.controllers.has(record.id) || record.ownerPid !== process.pid || record.ownerStartToken !== this.ownerStartToken)) {
           record.status = "lost";
@@ -476,9 +483,10 @@ export class BackgroundSubagentManager {
   private async persist(record: BackgroundSubagentRecord): Promise<void> {
     const snapshot = structuredClone(record);
     const previous = this.writeChains.get(record.id) ?? Promise.resolve();
-    const current = previous.catch(() => undefined).then(() =>
-      writeAtomicBytes(this.statePath(record.id), serializeBoundedState(snapshot)),
-    );
+    const current = previous.catch(() => undefined).then(() => {
+      if (this.runtime.reaped.has(this.jobDir(record.id))) throw new Error(`Reaped background subagent: ${record.id}`);
+      return writeAtomicBytes(this.statePath(record.id), serializeBoundedState(snapshot));
+    });
     this.writeChains.set(record.id, current);
     try { await current; }
     finally { if (this.writeChains.get(record.id) === current) this.writeChains.delete(record.id); }
@@ -713,11 +721,28 @@ export class BackgroundSubagentManager {
     await this.initialize();
     await this.refreshMigratedRecords();
     const record = this.records.get(id);
-    if (!record) throw new Error(`Unknown background subagent: ${id}`);
+    if (!record || this.runtime.reaped.has(this.jobDir(id))) throw new Error(`Unknown background subagent: ${id}`);
     return structuredClone(record);
   }
 
   async readResult(
+    id: string,
+    childOrId: number | string | undefined = undefined,
+    offset = 0,
+    limit = MAX_SUBAGENT_RESULT_PAGE_BYTES,
+    diagnostics = false,
+  ): Promise<BackgroundSubagentResultPage> {
+    const key = this.jobDir(id);
+    this.runtime.storageReaders.set(key, (this.runtime.storageReaders.get(key) ?? 0) + 1);
+    try { return await this.readResultPage(id, childOrId, offset, limit, diagnostics); }
+    finally {
+      const remaining = (this.runtime.storageReaders.get(key) ?? 1) - 1;
+      if (remaining) this.runtime.storageReaders.set(key, remaining);
+      else this.runtime.storageReaders.delete(key);
+    }
+  }
+
+  private async readResultPage(
     id: string,
     childOrId: number | string | undefined = undefined,
     offset = 0,
@@ -815,7 +840,7 @@ export class BackgroundSubagentManager {
     await this.initialize();
     await this.refreshMigratedRecords();
     return [...this.records.values()]
-      .filter((record) => !this.runtime.pendingLaunches.has(record.id))
+      .filter((record) => !this.runtime.pendingLaunches.has(record.id) && !this.runtime.reaped.has(this.jobDir(record.id)))
       .filter((record) => !sessionId || record.sessionId === sessionId)
       .sort((a, b) => b.createdAt.localeCompare(a.createdAt))
       .slice(0, Math.max(1, Math.min(limit, 1000)))
@@ -843,6 +868,84 @@ export class BackgroundSubagentManager {
         if (signal?.aborted) abort();
       });
     }
+  }
+
+  /** Legacy subprocess records have no child PID/pane identity. Reap storage only. */
+  async reapNative(id: string, sessionId: string): Promise<BackgroundSubagentRecord> {
+    await this.initialize();
+    await this.refreshMigratedRecords();
+    // No awaits below: validation and deletion cannot interleave with local
+    // finish/progress/result migration, reload, notification, or another reap.
+    const current = this.records.get(id);
+    if (!current) throw new Error(`Unknown background subagent: ${id}`);
+    if (!sessionId || current.sessionId !== sessionId) throw new Error("Legacy subagent belongs to another Pi session");
+    if (current.backend !== "native") throw new Error("AgentSH groups cannot be reaped here; use AgentSH's supported lifecycle controls. No state was removed.");
+    const directory = this.jobDir(id);
+    if (isBackgroundSubagentActive(current) || this.runtime.controllers.has(id)
+      || this.runtime.pendingLaunches.has(id) || this.runtime.flushTimers.has(id)
+      || this.writeChains.has(id) || this.runtime.storageReaders.has(directory)) {
+      throw new Error("Legacy native group is active or its retained storage is busy; wait for terminal completion and retry reap. Reap never cancels work.");
+    }
+    const privateEntry = (file: string, directory = false) => {
+      const info = lstatSync(file);
+      if (info.isSymbolicLink() || (directory ? !info.isDirectory() : !info.isFile())
+        || (process.getuid && info.uid !== process.getuid()) || (info.mode & 0o077) !== 0) {
+        throw new Error("Legacy native storage identity is invalid or not private");
+      }
+      return info;
+    };
+    privateEntry(this.root, true);
+    privateEntry(this.jobsRoot, true);
+    privateEntry(directory, true);
+    const stateInfo = privateEntry(this.statePath(id));
+    if (stateInfo.size > MAX_STATE_BYTES) throw new Error("Legacy native state is too large");
+    const fd = openSync(this.statePath(id), constants.O_RDONLY | (constants.O_NOFOLLOW ?? 0));
+    let persisted: BackgroundSubagentRecord;
+    try {
+      const opened = fstatSync(fd);
+      if (opened.dev !== stateInfo.dev || opened.ino !== stateInfo.ino) throw new Error("Legacy native state identity changed");
+      persisted = parseRecord(JSON.parse(readFileSync(fd, "utf8")));
+    } finally { closeSync(fd); }
+    if (persisted.id !== id || persisted.sessionId !== sessionId || persisted.backend !== "native"
+      || persisted.createdAt !== current.createdAt || persisted.ownerPid !== current.ownerPid
+      || persisted.ownerStartToken !== current.ownerStartToken || isBackgroundSubagentActive(persisted)
+      || persisted.status !== current.status || persisted.updatedAt !== current.updatedAt) {
+      throw new Error("Legacy native state changed or ownership does not match; no state was removed");
+    }
+    // Another live executor can still write the record even after reporting a
+    // terminal status. Lost is not proof of death. Fail closed on unknown PID
+    // identity; never signal a PID from this pre-child-identity schema.
+    if (persisted.ownerPid !== process.pid || persisted.status === "lost" || this.adoptLegacyReload) {
+      let alive = true;
+      try {
+        if (process.platform === "linux") {
+          const stat = readFileSync(`/proc/${persisted.ownerPid}/stat`, "utf8");
+          const close = stat.lastIndexOf(")");
+          const token = close >= 0 ? stat.slice(close + 2).split(" ")[19] : undefined;
+          // PID reuse grants no authority over the new process. Only two valid
+          // Linux start-tick identities can prove reuse; historical pid:time
+          // fallback tokens and malformed /proc data must fail closed.
+          if (token && /^[0-9]+$/.test(token) && /^[0-9]+$/.test(persisted.ownerStartToken)
+            && token !== persisted.ownerStartToken) alive = false;
+        } else {
+          process.kill(persisted.ownerPid, 0);
+        }
+      } catch (error) {
+        if (["ENOENT", "ESRCH"].includes((error as NodeJS.ErrnoException).code ?? "")) alive = false;
+      }
+      if (alive) throw new Error("Legacy executor may still be alive; reap refused. Stop/exit that executor separately, then restart Pi and retry. No process was signalled or state removed.");
+    }
+    const files = readdirSync(directory);
+    for (const file of files) {
+      if (!/^(?:state\.json|notified|result-[1-8]\.md)$/.test(file)) throw new Error("Unexpected legacy storage entry; no state was removed");
+      privateEntry(join(directory, file));
+    }
+    this.runtime.reaped.add(directory);
+    for (const file of files) unlinkSync(join(directory, file));
+    rmdirSync(directory);
+    this.records.delete(id);
+    this.migratedRecordIds.delete(id);
+    return structuredClone(persisted);
   }
 
   async cancel(id: string): Promise<BackgroundSubagentRecord> {
@@ -955,7 +1058,10 @@ export class BackgroundSubagentManager {
 
   private async prune(): Promise<void> {
     const terminal = [...this.records.values()]
-      .filter((record) => !isBackgroundSubagentActive(record))
+      // Native records now have explicit ownership-checked cleanup. In
+      // particular, an old/lost foreign native record must not bypass reap's
+      // executor checks through age/count pruning during initialize or finish.
+      .filter((record) => record.backend !== "native" && !isBackgroundSubagentActive(record))
       .sort((a, b) => b.updatedAt.localeCompare(a.updatedAt));
     const cutoff = Date.now() - TERMINAL_RETENTION_MS;
     for (let index = 0; index < terminal.length; index++) {

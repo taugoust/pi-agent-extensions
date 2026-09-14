@@ -38,6 +38,7 @@ pkgs.runCommand "subagent-check"
     mkdir -p "$workdir/src/subagent" "$workdir/src/shared" "$workdir/out"
     cp ${self}/subagent/backend.ts "$workdir/src/subagent/backend.ts"
     cp ${self}/subagent/background.ts "$workdir/src/subagent/background.ts"
+    cp ${self}/subagent/legacy-reap.test.ts "$workdir/src/subagent/legacy-reap.test.ts"
     cp ${self}/subagent/control.ts "$workdir/src/subagent/control.ts"
     cp ${self}/subagent/outcome.ts "$workdir/src/subagent/outcome.ts"
     cp ${self}/subagent/outcome.test.ts "$workdir/src/subagent/outcome.test.ts"
@@ -74,6 +75,7 @@ pkgs.runCommand "subagent-check"
       --outDir "$workdir/out" \
       "$workdir/src/subagent/backend.ts" \
       "$workdir/src/subagent/background.ts" \
+      "$workdir/src/subagent/legacy-reap.test.ts" \
       "$workdir/src/subagent/control.ts" \
       "$workdir/src/subagent/outcome.ts" \
       "$workdir/src/subagent/outcome.test.ts" \
@@ -111,6 +113,7 @@ pkgs.runCommand "subagent-check"
     }
     EOF
 
+    node --test "$workdir/out/subagent/legacy-reap.test.js"
     node "$workdir/out/subagent/control.test.js"
     node "$workdir/out/subagent/outcome.test.js"
     node "$workdir/out/subagent/resume.test.js"
