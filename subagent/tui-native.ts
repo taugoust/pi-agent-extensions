@@ -18,13 +18,14 @@ type Child = { childId: string; taskId: string; attempt: number; directory: stri
   resumeSessionFile?: string; resumeMessage?: string; compactBeforePrompt?: boolean;
   state: "pending" | "launching" | "running" | "completed" | "failed" | "cancelled" | "lost" | "skipped";
   operatorCapability: string; started: boolean; reaped?: boolean; error?: string; report?: string;
-  notifiedSequence: number; lastOutcome?: unknown; requiresCompaction?: boolean; };
+  notifiedSequence: number; runSequence?: number; terminalNotification?: string; lastOutcome?: unknown; requiresCompaction?: boolean; };
 type Group = { windowName?: string; version: 1; id: string; owner: string; createdAt: string; mode: "single" | "parallel" | "chain";
   background: boolean; cancelled: boolean; children: Child[]; caller: TuiWorkerPlacement;
   parentOwnerToken: string;
   operatorEnabled: boolean; launcher: string; launchMode: "none" | "guard-only"; promotionPending?: boolean; };
 type Disposition = "native" | "guard-only" | "full" | "unavailable";
 const active = (child: Child) => ["pending", "launching", "running"].includes(child.state);
+const terminalToken = (child: Child) => child.report ?? `terminal:${child.attempt ?? 1}:${child.runSequence ?? 0}`;
 const messageText = (message: any) => typeof message?.content === "string" ? message.content : (message?.content ?? []).filter((p: any) => p.type === "text").map((p: any) => p.text).join("\n");
 const response = (text: string, data: Record<string, unknown> = {}) => ({ content: [{ type: "text" as const, text: Buffer.from(text).subarray(0, 48 * 1024).toString("utf8") }], details: { tui_subagent: true, backend: "native", ...data } });
 
@@ -63,6 +64,9 @@ export class TuiNativeManager {
         if (g.version !== 1 || `${g.id}.json` !== name || typeof g.owner !== "string" || !Array.isArray(g.children) || g.children.length > 8) continue;
         if (g.children.some(c => !/^subagent-child-[a-f0-9]{24}$/.test(c.childId) || !/^subagent-task-[a-f0-9]{24}$/.test(c.taskId)
           || !/^[a-f0-9]{64}$/.test(c.operatorCapability) || !c.directory.startsWith(`${join(this.root, "workers")}/`))) continue;
+        // Old already-terminal records were previously observed without wakes.
+        // Baseline them instead of replaying historical completions on upgrade.
+        for (const c of g.children) if (c.terminalNotification === undefined) c.terminalNotification = active(c) ? '' : terminalToken(c);
         this.groups.set(g.id, g);
       } catch { /* Invalid records never authorize launch/control/deletion. */ }
     }
@@ -170,7 +174,7 @@ export class TuiNativeManager {
       if (!result.ok) { c.error = result.code; return; }
       c.error = undefined;
       const state = result.data as any;
-      if (state.active) c.state = "running";
+      if (state.active) { c.state = "running"; c.runSequence = state.sequence; }
       else if (state.lastReport) {
         c.report = state.lastReport;
         const report = readPrivateJson(c.report!) as any;
@@ -188,7 +192,7 @@ export class TuiNativeManager {
       if (events.ok) {
         for (const event of (events.data as any)?.events ?? []) {
           if (event.kind === "running" && event.sequence > state.sequence) {
-            c.state = "running"; c.lastOutcome = undefined; c.report = undefined; c.requiresCompaction = false;
+            c.state = "running"; c.runSequence = event.sequence; c.lastOutcome = undefined; c.report = undefined; c.requiresCompaction = false;
           }
           if (event.kind === "notification" || event.kind === "outcome") {
             const artifact = event.data?.artifact;
@@ -203,8 +207,8 @@ export class TuiNativeManager {
               if (this.notify && !this.notify(update)) break;
             }
           }
-          if (event.kind === "settled" && this.notify && !this.notify({ kind: "subagent", id: `${g.id}:${c.childId}:${event.sequence}`,
-            child_id: c.childId, state: "settled", through_sequence: event.sequence })) break;
+          // Completion is emitted from the current terminal snapshot below,
+          // not historical settled events (which may precede a newer human turn).
           c.notifiedSequence = Math.max(c.notifiedSequence, event.sequence);
         }
       }
@@ -277,9 +281,21 @@ export class TuiNativeManager {
             if (g.mode === "chain") break;
           }
         }
+        for (const c of g.children) this.notifyTerminal(g, c);
         this.save(g);
       }
     });
+  }
+  private notifyTerminal(g: Group, c: Child): void {
+    if (active(c) || c.reaped) return;
+    const token = terminalToken(c);
+    if (c.terminalNotification === token) return;
+    // Foreground callers receive their result directly. Persist the baseline
+    // so promotion/restart cannot turn an already-observed result into a wake.
+    if (!g.background) { c.terminalNotification = token; return; }
+    const identity = createHash("sha256").update(token).digest("hex").slice(0, 24);
+    if (this.notify?.({ kind: "subagent", id: `${g.id}:${c.childId}:terminal:${identity}`,
+      job_id: g.id, child_id: c.childId, state: c.state, completion: true })) c.terminalNotification = token;
   }
   async launch(params: any, owner: string, cwd: string, signal?: AbortSignal, update?: (value: any) => void,
     resume?: { child: Child; sessionFile: string; compact: boolean; message?: string }) {
@@ -303,7 +319,7 @@ export class TuiNativeManager {
       background: params.background === true, cancelled: false, parentOwnerToken: this.processToken(process.pid)!, operatorEnabled: enabled, ...contract,
       caller: await this.tmux.resolveCaller(), children: specs.map(spec => ({ childId: id("subagent-child"), taskId: resume?.child.taskId ?? id("subagent-task"), attempt: resume ? (resume.child.attempt ?? 1) + 1 : 1,
         ...(resume ? { resumeSessionFile: resume.sessionFile, compactBeforePrompt: resume.compact, resumeMessage: resume.message } : {}),
-        directory: join(this.root, "workers", randomBytes(12).toString("hex")), spec, state: "pending", operatorCapability: randomBytes(32).toString("hex"), started: false, notifiedSequence: 0 })) };
+        directory: join(this.root, "workers", randomBytes(12).toString("hex")), spec, state: "pending", operatorCapability: randomBytes(32).toString("hex"), started: false, notifiedSequence: 0, terminalNotification: '' })) };
     await this.serial(async () => {
       if (signal?.aborted || this.closed) throw new Error("Launch cancelled before commit");
       if ([...this.groups.values()].filter(group => group.owner === owner && group.children.some(active)).length >= this.groupLimit) throw new Error(`Subagent concurrency limit reached (${this.groupLimit})`);

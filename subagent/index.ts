@@ -1757,7 +1757,7 @@ export default function (pi: ExtensionAPI) {
     const generation=sessionGeneration;
     if (await backgroundManager.isNotified(record.id)) return;
     if(generation!==sessionGeneration||lifecycleClosing||sessionContext!==ctx||consumed.has(record.id))return;
-    quietState.enqueue(ctx,{kind:'subagent',id:record.id,state:record.status,
+    quietState.enqueue(ctx,{kind:'subagent',id:record.id,state:record.status,completion:true,
       outcomes:record.taskOutcomes?.map(o=>({child:o.child,task_id:o.task_id,attempt:o.attempt,state:o.state}))});
   };
 
@@ -1975,7 +1975,11 @@ export default function (pi: ExtensionAPI) {
     pendingForegroundSubagents.delete(event.toolCallId);
     requestedForegroundHandoffs.delete(event.toolCallId);
     if (event.isError) return;
-    if ((event.details as any)?.tui_subagent && !(event.details as any)?.background_subagent) return (event.details as any).failed ? { isError: true } : undefined;
+    if ((event.details as any)?.tui_subagent && !(event.details as any)?.background_subagent) {
+      const native = event.details as any;
+      if (native.operation === 'result' && native.job_id && native.artifact && native.child_id) quietState.consumeCompletion(ctx, native.job_id, native.child_id);
+      return native.failed ? { isError: true } : undefined;
+    }
     const details = event.details as SubagentDetails | BackgroundSubagentDetails | SubagentControlDetails | undefined;
     const control = details as SubagentControlDetails | undefined;
     if (control?.subagent_control) return control.failed ? { isError: true } : undefined;
@@ -2011,7 +2015,7 @@ export default function (pi: ExtensionAPI) {
       "Treat harness state batches as internal routing data, not requests for a user-facing recap. Fetch worker reports/output only when needed; do not paste routine completion reports into the conversation.",
       "Use operation=prompt with an active child_id to send a non-blocking instruction; choose control_mode=steer, follow_up, or interrupt. Set wait_for_response=true only when intentionally waiting for the child's entire run. Acceptance is not task completion. Do not retry capability or inactive-child errors by relaunching work.",
       "Use operation=resume with a task_id to continue a terminal native task from its saved session, not a fresh reconstructed assignment. Resume is explicit, returns a new background group/child ID, preserves task ownership, and compacts context checkpoints before continuing.",
-      "Native workers can notify_parent without stopping. Routine findings are retained outside model context; only requires_guidance requests are eligible for rate-limited parent wake-ups. Reply with operation=prompt and child_id. Use background workers for interactive supervision; in-flight parent tools are not interrupted. Existing workers need a fresh launch/resume to acquire notify_parent.",
+      "Native workers can notify_parent without stopping. Routine findings are retained outside model context. Background terminal completions (including failures) wake idle parents or queue at a tool-safe turn boundary; consume operation=result before relying on the work. Explicit requires_guidance requests separately receive rate-limited wake-ups. Reply with operation=prompt and child_id. Use background workers for interactive supervision; in-flight parent tools are not interrupted. Existing workers need a fresh launch/resume to acquire notify_parent.",
       "Linux native background groups survive parent exit/crash and reconnect from durable manifests. Foreground groups stage on the same tmux server; /background or operation=promote moves the whole group window without restarting children. Other backends keep their existing lifetime semantics.",
       "Completion retains a messageable Pi and reports. Inspect operation=status/result, then explicitly operation=reap when finished with the panes. Reap rejects active human/agent work; operation=cancel only stops work. Never automatically reap on a final reply or task completion.",
     ],

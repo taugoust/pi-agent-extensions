@@ -714,15 +714,26 @@ required for filesystem, process, network, and descendant enforcement.
 
 Native workers can call `notify_parent({message, requires_guidance?})` without
 ending their task. Routine findings are retained outside model context;
-only explicit guidance requests are eligible for a bounded, rate-limited parent wake-up. The parent replies using `subagent`
+explicit guidance requests receive bounded, rate-limited parent wake-ups. The parent replies using `subagent`
 `operation=prompt` and the supplied `child_id`. Acceptance means queued, not a
 parent decision; the worker does not automatically pause or wait. Use background
 workers for this interaction: in-flight parent tools are not interrupted.
 Messages are limited to 1000 characters/2000 bytes and five per minute per child.
 Notifications are retained in private session entries and deduplicated on replay.
+Background child execution completion (including failure, cancellation, or a lost
+native worker) separately wakes an idle parent with `triggerTurn: true`, or queues
+at the next tool-safe turn boundary. Foreground results are returned directly;
+`task_outcome` alone does not wake the parent before execution settles. Completion
+messages contain result-routing metadata, not report bodies or guidance requests.
+Read `subagent operation=result` before relying on the work, then explicitly reap
+when its retained panes are no longer needed. Completion batches are bounded and
+deduplicated durably; failed sends remain queued for retry. They do not share the
+guidance quota or 30-second throttle. Historical terminal records do not replay
+on upgrade/reload, and routine progress/findings remain silent.
+
 Guidance wake-ups have a 30-second minimum interval, a bounded UTF-8 payload,
 and a conservative 20-guidance-update quota between explicit operator resets.
-Delivery receipts are reserved before scheduling the model: ambiguous failures
+Guidance delivery receipts are reserved before scheduling the model: ambiguous failures
 may leave a request available only for explicit review, rather than replay it.
 
 Operator controls (do not cancel builds or workers):

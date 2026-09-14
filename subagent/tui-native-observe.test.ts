@@ -23,13 +23,18 @@ test("direct human turn clears old outcome; aborted assistant cancels chain inst
   const child = { childId: manifest.childId, taskId: manifest.taskId, directory, spec: { task: "first" }, state: "running", started: true, notifiedSequence: 0 };
   const next = { childId: `subagent-child-${"f".repeat(24)}`, taskId: "next", directory: join(root, "workers", "f".repeat(24)), spec: { task: "next" }, state: "pending", notifiedSequence: 0 };
   const group = { id: manifest.groupId, owner: "parent", background: true, mode: "chain", launchMode: "none", caller: manifest.placement, children: [child, next] };
+  const notifications: any[] = [];
+  manager.notify = (update: any) => { notifications.push(update); return true; };
   let launches = 0;
   manager.tmux.resolveCaller = async () => manifest.placement;
   manager.tmux.launch = async () => { launches++; throw new Error("Must not advance"); };
   manager.groups.set(group.id, group);
   try {
     await server.start(); server.running(true);
-    server.outcome({ state: "delivered" }); server.settled({ assistant: { stopReason: "stop" } });
+    server.outcome({ state: "delivered" });
+    await manager.refresh('parent');
+    assert.equal(notifications.filter(u=>u.completion).length,0,'outcome woke parent before settlement');
+    server.settled({ assistant: { stopReason: "stop" } });
     await manager.observe(group, child);
     assert.equal((child as any).lastOutcome.state, "delivered");
     server.running(true); await manager.observe(group, child);
@@ -38,6 +43,11 @@ test("direct human turn clears old outcome; aborted assistant cancels chain inst
     server.settled({ assistant: { stopReason: "aborted" } });
     await manager.refresh("parent");
     assert.equal(child.state, "cancelled"); assert.equal(next.state, "skipped"); assert.equal(launches, 0);
+    assert.equal(notifications.filter(u=>u.completion&&u.child_id===child.childId).length,1,'replayed old settlement or missed cancellation');
+    const completion = notifications.find(u=>u.completion&&u.child_id===child.childId);
+    assert.equal(completion.state,'cancelled'); assert.equal(completion.job_id,group.id);
+    await manager.refresh('parent');
+    assert.equal(notifications.filter(u=>u.completion&&u.child_id===child.childId).length,1,'duplicate terminal snapshot wake');
     assert.equal(manager.publicGroup(group).status, "cancelled");
     assert.equal((await manager.jobs("parent", "task", { action: "list" })).content[0].text, "local jobs");
     await assert.rejects(manager.jobs("foreign", "task", { action: "list" }), /different Pi session/);
@@ -45,5 +55,12 @@ test("direct human turn clears old outcome; aborted assistant cancels chain inst
     (child as any).reaped = true;
     await assert.rejects(manager.jobs("parent", "task", { action: "list" }), /reaped/);
     assert.equal(jobCalls, 1);
+    (child as any).reaped = false;
+    server.running(true);await manager.observe(group,child);
+    await server.close();
+    manager.tmux.inspect = async () => ({ dead: true });
+    await manager.refresh('parent');
+    assert.equal(child.state,'lost');
+    assert.equal(notifications.filter(u=>u.completion&&u.state==='lost').length,1,'worker crash without settled event failed to notify');
   } finally { await server.close(); await manager.shutdown(false); await rm(root, { recursive: true, force: true }); }
 });

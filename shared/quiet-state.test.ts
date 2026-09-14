@@ -16,13 +16,13 @@ const ctx:any={
   },
   sessionManager:{getSessionId:()=>sessionName,getBranch:()=>entries,getEntries:()=>entries},
 };
-function fixture(failReceipt=false){
+function fixture(failReceipt=false,failSends=0){
  const handlers=new Map<string,any[]>();const messages:any[]=[];const commands=new Map<string,any>();
  const pi:any={
    appendEntry(customType:string,data:any){if(failReceipt&&customType===QUIET_STATE_RECEIPT_CUSTOM_TYPE)throw new Error('persist failed');entries.push({type:'custom',customType,data});},
    on(name:string,handler:any){handlers.set(name,[...(handlers.get(name)??[]),handler]);},
    registerCommand(name:string,value:any){commands.set(name,value);},
-   sendMessage(message:any,options:any){messages.push({message,options});entries.push({type:'custom_message',customType:message.customType,details:message.details});},
+   sendMessage(message:any,options:any){if(failSends-->0)throw new Error('send failed');messages.push({message,options});entries.push({type:'custom_message',customType:message.customType,details:message.details});},
  };
  return {pi,messages,commands,async emit(name:string,event:any={}){for(const h of handlers.get(name)??[])await h(event,ctx);}};
 }
@@ -55,7 +55,7 @@ quietReload.consume(ctx,'watch','watch-one',8);await pause(40);
 assert.equal(reload.messages.length,1,'consumed guidance generated another wake');
 assert.equal(entries.filter(e=>e.customType===QUIET_STATE_RECEIPT_CUSTOM_TYPE).at(-1).data.state,'delivered');
 
-// Explicit guidance is the only model wakeup and is coalesced.
+// Explicit guidance retains its separate quota and is coalesced.
 entries=[];sessionName=`quiet-guidance-${process.pid}`;const guidance=fixture();const quietGuidance=installQuietState(guidance.pi,5);await guidance.emit('session_start');
 quietGuidance.enqueue(ctx,{kind:'job',id:'needs-help',state:'failed',requires_guidance:true});
 quietGuidance.enqueue(ctx,{kind:'subagent',id:'needs-help-2',state:'partial',requires_guidance:true});
@@ -111,4 +111,69 @@ assert.equal(quietFail.enqueue(ctx,{kind:'job',id:'no-receipt-guidance',requires
 await pause(1200);assert.equal(fail.messages.length,0);
 
 await fail.emit('session_shutdown',{reason:'quit'});
+
+// Terminal execution explicitly opts in: idle wake, batch, stable identity,
+// result consumption, active tool-safe delivery, and restart deduplication.
+entries=[];idle=true;sessionName=`quiet-completion-${process.pid}`;
+const terminal=fixture();const terminalQuiet=installQuietState(terminal.pi,5);await terminal.emit('session_start');
+terminalQuiet.enqueue(ctx,{kind:'subagent',id:'done',state:'completed',completion:true});
+terminalQuiet.enqueue(ctx,{kind:'subagent',id:'failed',state:'failed',completion:true});
+await pause(80);
+assert.equal(terminal.messages.length,1);
+assert.deepEqual(terminal.messages[0].options,{deliverAs:'followUp',triggerTurn:true});
+assert.equal(terminal.messages[0].message.details.updates.length,2);
+assert.equal(terminal.messages[0].message.details.updates.some((u:any)=>u.requires_guidance),false);
+assert.match(terminal.messages[0].message.content,/child completion/);
+terminalQuiet.enqueue(ctx,{kind:'subagent',id:'done',state:'completed',completion:true,outcomes:[{child:1,state:'delivered'}]});
+await pause(80);assert.equal(terminal.messages.length,1,'metadata changes replayed completion');
+idle=false;
+terminalQuiet.enqueue(ctx,{kind:'subagent',id:'busy-done',state:'lost',completion:true});
+await pause(80);assert.deepEqual(terminal.messages[1].options,{deliverAs:'steer',triggerTurn:true});
+terminalQuiet.enqueue(ctx,{kind:'subagent',id:'read-first',job_id:'group',child_id:'child',completion:true});
+terminalQuiet.consumeCompletion(ctx,'group','child');await pause(80);
+assert.equal(terminal.messages.length,2,'result consumed before delivery still woke parent');
+await terminal.emit('session_shutdown',{reason:'reload'});
+const terminalReload=fixture();const terminalReloadQuiet=installQuietState(terminalReload.pi,5);await terminalReload.emit('session_start');
+terminalReloadQuiet.enqueue(ctx,{kind:'subagent',id:'done',state:'completed',completion:true});await pause(80);
+assert.equal(terminalReload.messages.length,0,'delivered completion replayed on reload');
+// Guidance exhaustion and compaction must not silently disable completions.
+for(let i=0;i<20;i++)entries.push({type:'custom',customType:QUIET_STATE_RECEIPT_CUSTOM_TYPE,data:{v:1,key:`job:quota-${i}`,revision:'rev',state:'delivered',at:Date.now(),update:{kind:'job',id:`quota-${i}`,requires_guidance:true}}});
+await terminalReload.emit('agent_settled');
+terminalReloadQuiet.enqueue(ctx,{kind:'job',id:'quota-blocked',requires_guidance:true});
+terminalReloadQuiet.enqueue(ctx,{kind:'subagent',id:'quota-completion',completion:true});await pause(80);
+assert.equal(terminalReload.messages.length,1,'guidance quota blocked completion');
+await terminalReload.emit('session_before_compact');
+terminalReloadQuiet.enqueue(ctx,{kind:'subagent',id:'compact-completion',completion:true});await pause(80);
+assert.equal(terminalReload.messages.length,1);
+await terminalReload.emit('session_compact');await pause(80);
+assert.equal(terminalReload.messages.length,2,'completion failed to resume after compaction');
+await terminalReload.emit('session_shutdown',{reason:'quit'});
+
+// A failed send stays queued durably and can retry after restart.
+entries=[];idle=true;sessionName=`quiet-send-fail-${process.pid}`;
+const sendFail=fixture(false,1);const sendQuiet=installQuietState(sendFail.pi,5);await sendFail.emit('session_start');
+sendQuiet.enqueue(ctx,{kind:'subagent',id:'retry',completion:true});await pause(80);
+assert.equal(sendFail.messages.length,0);
+assert.equal(entries.at(-1).data.state,'queued','failed send prematurely acknowledged');
+await sendFail.emit('session_shutdown',{reason:'reload'});
+const retry=fixture();installQuietState(retry.pi,5);await retry.emit('session_start');await pause(80);
+assert.equal(retry.messages.length,1,'failed send was lost on reload');
+await retry.emit('session_shutdown',{reason:'quit'});
+
+entries=[];sessionName=`quiet-many-completions-${process.pid}`;
+const many=fixture();const manyQuiet=installQuietState(many.pi,5);await many.emit('session_start');
+for(let i=0;i<25;i++){
+  manyQuiet.enqueue(ctx,{kind:'subagent',id:`terminal-${i}`,completion:true});
+  await pause(15);
+}
+assert.equal(many.messages.length,25,'completion inherited guidance throttle/quota');
+pending=true;manyQuiet.enqueue(ctx,{kind:'subagent',id:'pending-messages',completion:true});await pause(30);
+assert.equal(many.messages.length,25);
+pending=false;await pause(1100);assert.equal(many.messages.length,26,'pending messages stalled completion permanently');
+await many.emit('ui_prompt_start');manyQuiet.enqueue(ctx,{kind:'subagent',id:'ui-wait',completion:true});await pause(30);
+assert.equal(many.messages.length,26);await many.emit('ui_prompt_end');await pause(30);assert.equal(many.messages.length,27);
+await many.commands.get('harness-state').handler('disable',ctx);
+assert.equal(manyQuiet.enqueue(ctx,{kind:'subagent',id:'disabled-completion',completion:true}),false);
+await pause(30);assert.equal(many.messages.length,27,'explicit disable did not suppress completion');
+await many.emit('session_shutdown',{reason:'quit'});
 console.log('quiet-state remediation tests passed');
