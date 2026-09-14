@@ -1028,7 +1028,7 @@ pkgs.runCommand "subagent-check"
     grep -F 'childProgress.capture(partial)' ${self}/subagent/index.ts >/dev/null
     grep -F 'backgroundState: "pending"' ${self}/subagent/index.ts >/dev/null
     grep -F 'releaseForegroundOwnership();' ${self}/subagent/index.ts >/dev/null
-    grep -F '.filter((record) => !this.runtime.pendingLaunches.has(record.id))' ${self}/subagent/background.ts >/dev/null
+    grep -F '.filter((record) => !this.runtime.pendingLaunches.has(record.id) && !this.runtime.reaped.has(this.jobDir(record.id)))' ${self}/subagent/background.ts >/dev/null
     grep -F 'args.push("--no-extensions", "--extension", permissionProxyEntrypoint);' ${self}/subagent/index.ts >/dev/null
     grep -F 'const permissionAuthority = currentSubagentPermissionAuthority();' ${self}/subagent/index.ts >/dev/null
     grep -F 'SUBAGENT_PERMISSION_BASH_TOOL' ${self}/subagent/index.ts >/dev/null
