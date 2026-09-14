@@ -2,7 +2,11 @@
 
 ## Status
 
-Implemented and validated in the working tree. No commit requested.
+Resolved for live-child pre-reap cleanup. Existing orphan recovery remains explicitly scoped below.
+
+## Resolution
+
+Implemented in `b072f71` (Clean child-owned jobs before reaping native subagents).
 
 ## Implemented behavior
 

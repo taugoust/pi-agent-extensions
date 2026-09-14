@@ -1,7 +1,11 @@
 # Native subagent reap races with pane process exit
 
 ## Status
-Fix implemented locally and tested; not published or deployed.
+Resolved.
+
+## Resolution
+
+Fixed by `b072f71` (Clean child-owned jobs before reaping native subagents). Deployment is separate.
 
 ## Evidence and mechanism
 Rose session `49397c02-bb99-45b7-a6fc-42e726cd636c` recorded `subagent reap` for `subagent-job-5b7b2557d40488b2309d3c3d` failing at 2026-09-14T18:25:32.386Z with ENOENT reading `/proc/1520964/stat`. The retained group now records its child completed/reaped after a later successful attempt. Inspection was read-only.
