@@ -6,7 +6,7 @@ import type { ExtensionAPI, ExtensionContext } from "@mariozechner/pi-coding-age
 import { getAgentDir } from "@mariozechner/pi-coding-agent";
 import { Text } from "@mariozechner/pi-tui";
 import { agentSHRuntimeDisposition, classifyAgentSHStartup, type AgentSHRuntimeState } from "../shared/agentsh-mode.js";
-import { BackgroundJobManager, resolveExecutable, sanitizeOutput } from "./manager.js";
+import { BackgroundJobManager, ReapReservation, resolveExecutable, sanitizeOutput } from "./manager.js";
 import { JobStore } from "./store.js";
 import { WatchManager } from "./watch.js";
 import { jobStatusLabel, watchResultText, watchDeliveryCursors, taskChoice, remoteTaskUiConnected, uiText } from "../shared/task-presentation.js";
@@ -221,6 +221,7 @@ export default function backgroundJob(pi: ExtensionAPI) {
   const deliveryClaims = new Set<string>();
   let broker: ParentJobBroker | undefined;
   let localController: LocalJobController | undefined;
+  const reapReservation = new ReapReservation();
   const watchNotified = new Map<string, number>();
 
   const manager = () => {
@@ -268,7 +269,8 @@ export default function backgroundJob(pi: ExtensionAPI) {
       const service = await manager();
       const records = (await service.list(1000)).filter((record) => record.metadata.sessionId === ownerSessionId && !record.metadata.infrastructure);
       const watches = new WatchManager(service, ownerSessionId);
-      await watches.recover();
+      const releaseRecovery = reapReservation.enter();
+      try { await watches.recover(); } finally { releaseRecovery(); }
       let delivered = 0;
       for (const watch of await watches.list()) {
         if (generation !== sessionGeneration || sessionContext !== ctx || delivered >= 8) break;
@@ -306,7 +308,29 @@ export default function backgroundJob(pi: ExtensionAPI) {
         { cwd: identity.cwd, hasUI: false, sessionManager: { getSessionId: () => owner } } as any);
     } };
     (globalThis as any)[JOB_BROKER_KEY] = broker;
-    localController = { protocol: 1, sessionId: owner, async execute(callId, params, signal) {
+    localController = { protocol: 1, sessionId: owner,
+      async prepareReap(preserve) {
+        const deadline = performance.now() + 20_000;
+        const assertSession = () => {
+          if (performance.now() >= deadline) throw new Error('Background job cleanup exceeded its 20 second deadline; retry cleanup');
+          if (sessionContext !== ctx || ctx.sessionManager.getSessionId() !== owner) throw new Error('Local job controller session is unavailable');
+        };
+        assertSession();
+        return reapReservation.prepare(async () => {
+          const service = await manager();
+          assertSession();
+          const watches = await new WatchManager(service, owner).list(undefined, true);
+          const active = watches.filter(watch => watch.status === 'running');
+          if (active.length) throw new Error(`Cannot prepare worker reap: active watches: ${active.map(watch => watch.watch_id).join(', ')}`);
+          await service.reapSession(owner, async records => {
+            assertSession();
+            await preserve(records);
+            assertSession();
+          }, assertSession);
+          assertSession();
+        });
+      },
+      async execute(callId, params, signal) {
       if (sessionContext !== ctx || ctx.sessionManager.getSessionId() !== owner) throw new Error("Local job controller session is unavailable");
       validateJobParams(params);
       if (!["list", "status", "output", "wait", "cancel", "reap", "watches", "events", "ack", "unwatch"].includes(params.action)) throw new Error("Local controller only manages existing jobs and watches");
@@ -378,6 +402,8 @@ export default function backgroundJob(pi: ExtensionAPI) {
     ],
     parameters: JobParameters,
     async execute(toolCallId, rawParams, signal, _onUpdate, ctx) {
+      const releaseOperation = reapReservation.enter();
+      try {
       const params = rawParams as Params;
       validateJobParams(params);
       requireNativeExecution(startup);
@@ -496,6 +522,7 @@ export default function backgroundJob(pi: ExtensionAPI) {
       }
       await updateStatus(ctx);
       return response!;
+      } finally { releaseOperation(); }
     },
     renderCall(args, theme) {
       const params = args as Params;
@@ -536,7 +563,9 @@ export default function backgroundJob(pi: ExtensionAPI) {
     description: "Inspect and manage extension-owned background jobs",
     handler: async (_args, ctx) => {
       if (!ctx.hasUI) return;
+      let releaseOperation: (() => void) | undefined;
       try {
+      releaseOperation = reapReservation.enter();
       const service = await manager();
       const records = (await service.list(1000)).filter(record=>!record.metadata.infrastructure && record.metadata.sessionId===sessionId(ctx)).slice(0,50);
       const show = async (title:string, body:string) => {
@@ -570,7 +599,7 @@ export default function backgroundJob(pi: ExtensionAPI) {
       await updateStatus(ctx);
       } catch(error) {
         pi.sendMessage({customType:'background-job-view',content:`Job action unavailable: ${uiText(error instanceof Error?error.message:error,2000)}`,display:true},{deliverAs:'steer',triggerTurn:false});
-      }
+      } finally { releaseOperation?.(); }
     },
   });
 }

@@ -5,7 +5,8 @@ import type { TuiWorkerJobParams } from "./tui-worker-protocol.ts";
  * session. Never accepts a model-selected session or delegated owner override. */
 export const LOCAL_JOB_CONTROLLER_KEY = "__paeLocalJobControllerV1";
 export type LocalJobController = { protocol: 1; sessionId: string;
-  execute(callId: string, params: TuiWorkerJobParams, signal?: AbortSignal): Promise<any> };
+  execute(callId: string, params: TuiWorkerJobParams, signal?: AbortSignal): Promise<any>;
+  prepareReap?(preserve: (records: unknown) => Promise<void>): Promise<() => void> };
 export function localJobController(sessionId: string): LocalJobController | undefined {
   const controller = (globalThis as any)[LOCAL_JOB_CONTROLLER_KEY] as LocalJobController | undefined;
   return controller?.protocol === 1 && controller.sessionId === sessionId ? controller : undefined;

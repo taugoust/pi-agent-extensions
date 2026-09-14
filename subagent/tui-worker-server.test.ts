@@ -26,7 +26,8 @@ test("child-hosted control reconnects, deduplicates, observes direct work and se
   manifest.operatorCapabilityHash = createHash("sha256").update(operator).digest("hex");
   store.writeManifest(manifest);
   let idle = true, sends = 0, shutdowns = 0, mode: boolean | undefined;
-  let server = new TuiWorkerServer(store, { isIdle: () => idle,
+  const prepareJobReap = async (preserve: (report: unknown) => Promise<void>) => { await preserve({ jobs: [] }); return () => {}; };
+  let server = new TuiWorkerServer(store, { isIdle: () => idle, prepareJobReap,
     send: () => { sends++; idle = false; }, abort: () => { idle = true; },
     shutdown: () => { shutdowns++; }, applyOperatorMode: enabled => { mode = enabled; } });
   try {
@@ -57,7 +58,7 @@ test("child-hosted control reconnects, deduplicates, observes direct work and se
     server.settled({ final: "second report" });
     await server.close();
     // Extension reload keeps receipts and reports, without restarting the Pi process.
-    server = new TuiWorkerServer(store, { isIdle: () => idle, send: () => { sends++; }, abort: () => {}, shutdown: () => { shutdowns++; } });
+    server = new TuiWorkerServer(store, { isIdle: () => idle, prepareJobReap, send: () => { sends++; }, abort: () => {}, shutdown: () => { shutdowns++; } });
     await server.start();
     assert.deepEqual(await callTuiWorker(manifest, prompt, { requestId: "same" }), receipt);
     assert.equal(sends, 1);

@@ -6,6 +6,7 @@ import { TuiWorkerStore } from "./tui-worker-store.ts";
 import { TuiWorkerServer } from "./tui-worker-server.ts";
 import { processIdentity } from "./tui-worker-tmux.ts";
 import { validateTaskOutcome } from "./outcome.ts";
+import type { LocalJobController } from "../shared/background-job.ts";
 
 /** Explicit -e entry point, loaded inside the one interactive child Pi process. */
 export default function tuiWorkerExtension(pi: ExtensionAPI): void {
@@ -18,9 +19,13 @@ export default function tuiWorkerExtension(pi: ExtensionAPI): void {
   let ownerWatch: ReturnType<typeof setInterval> | undefined;
   let announcedReap = false;
   let notificationTimes: number[] = [];
-  const allowed = () => Boolean(worker && !failed && !worker.sealed && (worker.manifest.launchMode !== "guard-only"
+  const allowed = () => Boolean(worker && !failed && !worker.sealed && !worker.preparingReap && (worker.manifest.launchMode !== "guard-only"
     || currentSubagentPermissionAuthority()?.active === true));
-  const stop = (ctx: ExtensionContext) => { void ctx.abort(); ctx.shutdown(); };
+  const stop = (ctx: ExtensionContext) => {
+    // A cleanup refusal must leave the controller available for repair/retry.
+    if (worker?.preparingReap) { worker.running(); return; }
+    void ctx.abort(); ctx.shutdown();
+  };
   const fail = (ctx: ExtensionContext, error: unknown) => {
     failed = true;
     if (ctx.hasUI) ctx.ui.notify(`TUI worker failed closed: ${error instanceof Error ? error.message : String(error)}`, "error");
@@ -50,6 +55,12 @@ export default function tuiWorkerExtension(pi: ExtensionAPI): void {
           if (!context || controller?.protocol !== 1 || controller.sessionId !== context.sessionManager.getSessionId()
             || typeof controller.execute !== "function") throw new Error("Child-local job controller unavailable for this session");
           return await controller.execute(`tui:${worker!.manifest.workerEpoch}:${requestId}`, params);
+        },
+        prepareJobReap: async preserve => {
+          const session = context;
+          const controller = (globalThis as any).__paeLocalJobControllerV1 as LocalJobController | undefined;
+          if (!session || controller?.protocol !== 1 || controller.sessionId !== session.sessionManager.getSessionId() || !controller.prepareReap) throw new Error("Child-local job cleanup controller unavailable for this session; reload/recover the child before reaping");
+          return await controller.prepareReap(preserve);
         },
         abort: () => context?.abort(),
         shutdown: () => {
@@ -93,7 +104,11 @@ export default function tuiWorkerExtension(pi: ExtensionAPI): void {
     } catch (error) { fail(ctx, error); }
   });
   pi.on("input", (_event, ctx) => {
-    if (!allowed()) { if (worker?.sealed || failed) stop(ctx); return { action: "handled" as const }; }
+    if (!allowed()) {
+      if (worker?.preparingReap && ctx.hasUI) ctx.ui.notify("Child job cleanup in progress; retry input after cleanup finishes", "warning");
+      else if (worker?.sealed || failed) stop(ctx);
+      return { action: "handled" as const };
+    }
     try { worker!.running(); } catch (error) { fail(ctx, error); return { action: "handled" as const }; }
     return { action: "continue" as const };
   });

@@ -86,7 +86,8 @@ export type TuiWorkerOperation =
   | { operation: "cancel" }
   | { operation: "compact" }
   | { operation: "jobs"; params: TuiWorkerJobParams }
-  // prepare_reap seals the input/control boundary before a launcher kills the
+  // prepare_reap reserves input while the child controller preserves/cleans
+  // owned terminal jobs, then seals the boundary before a launcher removes the
   // verified pane. It must reject a busy child; cancel is never implicit.
   | { operation: "prepare_reap" }
   | { operation: "promote"; placement: TuiWorkerPlacement };

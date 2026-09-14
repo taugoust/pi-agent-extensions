@@ -93,14 +93,30 @@ export class TuiWorkerTmux {
   }
   async inspect(m: TuiWorkerManifest): Promise<{ dead: boolean; panePid: number; placement: TuiWorkerPlacement }> {
     const p = m.placement;
-    if (await this.epoch(p.socketPath) !== p.serverEpoch) throw new Error("Tmux server identity changed");
-    const line = await this.run(p.socketPath, ["display-message", "-p", "-t", p.paneId,
-      `#{${NONCE}}|#{${GROUP}}|#{pane_dead}|#{pane_pid}`]);
-    const [nonce, group, dead, pid] = line.split("|");
-    if (nonce !== p.ownershipNonce || group !== m.groupId || !["0", "1"].includes(dead) || !/^[1-9][0-9]*$/.test(pid)
-      || (m.panePid !== undefined && Number(pid) !== m.panePid)) throw new Error("Worker pane ownership changed");
-    if (dead === "0" && m.paneProcessToken && await processIdentity(Number(pid)) !== m.paneProcessToken) throw new Error("Worker pane process identity changed");
-    return { dead: dead === "1", panePid: Number(pid), placement: await this.locate(p.socketPath, p.paneId, p.ownershipNonce) };
+    for (let attempt = 0; ; attempt++) {
+      if (await this.epoch(p.socketPath) !== p.serverEpoch) throw new Error("Tmux server identity changed");
+      const line = await this.run(p.socketPath, ["display-message", "-p", "-t", p.paneId,
+        `#{${NONCE}}|#{${GROUP}}|#{pane_dead}|#{pane_pid}`]);
+      const [nonce, group, dead, pid] = line.split("|");
+      if (nonce !== p.ownershipNonce || group !== m.groupId || !["0", "1"].includes(dead) || !/^[1-9][0-9]*$/.test(pid)
+        || (m.panePid !== undefined && Number(pid) !== m.panePid)) throw new Error("Worker pane ownership changed");
+      if (dead === "0" && m.paneProcessToken) {
+        let token: string;
+        try { token = await processIdentity(Number(pid)); }
+        catch (error) {
+          // The process may exit after tmux's live snapshot but before /proc is
+          // read. Missing /proc is NOT proof of an owned dead pane: obtain a
+          // fresh snapshot and revalidate every identity, with bounded retries.
+          if ((error as NodeJS.ErrnoException).code !== "ENOENT" || attempt >= 2) throw error;
+          await pause(25);
+          continue;
+        }
+        if (token !== m.paneProcessToken) throw new Error("Worker pane process identity changed");
+      }
+      const placement = await this.locate(p.socketPath, p.paneId, p.ownershipNonce);
+      if (placement.serverEpoch !== p.serverEpoch) throw new Error("Tmux server identity changed");
+      return { dead: dead === "1", panePid: Number(pid), placement };
+    }
   }
   async launch(input: TuiWorkerLaunch): Promise<TuiWorkerManifest> {
     const windowName = input.windowName ?? subagentTmuxName("");
@@ -264,6 +280,17 @@ export class TuiWorkerTmux {
       if (tombstone.workerEpoch !== manifest.workerEpoch || tombstone.paneId !== manifest.placement.paneId) throw new Error("Reap tombstone identity mismatch");
       return;
     } catch (error) { if ((error as NodeJS.ErrnoException).code !== "ENOENT") throw error; }
+    const verifyCleanup = () => {
+      const state = store.readState();
+      if (!state.sealed || !state.reapReservation || state.jobCleanup?.workerEpoch !== manifest.workerEpoch
+        || typeof state.jobCleanup.artifact !== "string") {
+        throw new Error("Worker exited without verified child-local job cleanup; job inventory is unknown. Recover the child controller or explicitly inspect/adopt its retained jobs with user authorization before recovery; refusing reap");
+      }
+      const artifactName = state.jobCleanup.artifact.slice(store.directory.length + 1);
+      if (store.path(artifactName) !== state.jobCleanup.artifact) throw new Error("Invalid child job cleanup artifact");
+      const cleanup = readPrivateJson(state.jobCleanup.artifact) as { workerEpoch?: string };
+      if (cleanup.workerEpoch !== manifest.workerEpoch) throw new Error("Child job cleanup receipt identity mismatch; refusing reap");
+    };
     let info;
     try { info = await this.inspect(manifest); }
     catch (error) {
@@ -274,16 +301,21 @@ export class TuiWorkerTmux {
         || await this.epoch(manifest.placement.socketPath) !== manifest.placement.serverEpoch) throw error;
       const panes = (await this.run(manifest.placement.socketPath, ["list-panes", "-a", "-F", "#{pane_id}"])).split("\n");
       if (panes.includes(manifest.placement.paneId)) throw error;
+      verifyCleanup();
       atomicPrivateJson(store.path("reaped.json"), { ...intent, reapedAt: new Date().toISOString() });
       return;
     }
     if (!info.dead) {
-      const response = await callTuiWorker(manifest, { operation: "prepare_reap" }, { requestId: `reap:${manifest.workerEpoch}` });
-      if (!response.ok) throw new Error(`Worker reap rejected: ${response.code}`);
+      const response = await callTuiWorker(manifest, { operation: "prepare_reap" }, { requestId: `reap:${manifest.workerEpoch}`, timeoutMs: 30_000 });
+      if (!response.ok) throw new Error(`Worker reap rejected: ${response.code}: ${response.message}`);
       const deadline = Date.now() + timeoutMs;
       while (!info.dead && Date.now() < deadline) { await pause(50); info = await this.inspect(manifest); }
       if (!info.dead) throw new Error("Worker has not exited after idle cleanup reservation; refusing to kill a live Pi");
     }
+    // A dead worker cannot delegate cleanup. Never infer an empty job inventory
+    // from death (or inspect another session's job store using parent authority).
+    // Only a child-written seal + cleanup receipt proves pre-reap verification.
+    verifyCleanup();
     // Reverify immediately before the sole destructive tmux operation.
     info = await this.inspect(manifest);
     if (!info.dead) throw new Error("Worker is active; refusing reap");

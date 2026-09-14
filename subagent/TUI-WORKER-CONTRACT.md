@@ -49,13 +49,17 @@ Live idle resume continues in the same Pi process. Dead/reaped resume is explici
 
 ## Cancel versus reap
 
-Cancel aborts work but never closes a pane. Idle-only `prepare_reap` synchronously seals input, persists the receipt and requests graceful Pi shutdown. On the sealed path only, the worker emits:
+Cancel aborts work but never closes a pane. Idle-only `prepare_reap` synchronously reserves input before asynchronously requesting cleanup through the authenticated child's session-bound `LocalJobController.prepareReap`. The local controller reserves ordinary job operations and watch recovery, inventories all session jobs, and refuses running/starting jobs, adopted/observation records, active watches and in-flight operations. Refusals expose blocking IDs (bounded with omitted/total counts), never automatically cancel work, and leave the child controller available for repair/retry.
+
+Before deleting owned terminal jobs, the worker retains their status and bounded UTF-8-safe output tails in private immutable `job-cleanup-*.json` artifacts (16 KiB per job, 256 KiB aggregate output). The controller rechecks ownership, invokes ordinary terminal pane/process safety checks and verifies no jobs remain. Its 20-second deadline is checked between awaited operations; individual operations retain their existing timeouts. Preservation failure prevents deletion; partial cleanup failure retains already-written snapshots and allows retry of remaining jobs. Only verified cleanup followed by another idle/activity check durably seals input, records the epoch-bound cleanup artifact and requests graceful Pi shutdown. On this sealed path only, the worker emits:
 
 ```ts
 pi.events.emit('harness-runtime-reaping', { runtimeId, childId, workerEpoch });
 ```
 
-Ordinary exit/failure/cancellation is not reap. Bridge/server owners handle the public tombstone and managed-agent archival. The launcher waits for real process exit; it will not kill a live Pi to satisfy reap. It verifies server epoch, pane identity/nonce, process identity and dead state at the destructive tmux boundary. Retried deletion uses a retained intent/tombstone. Parent, sibling worker/job panes and reports remain intact.
+Ordinary exit/failure/cancellation is not reap. Bridge/server owners handle the public tombstone and managed-agent archival. The launcher waits for real process exit; it will not kill a live Pi to satisfy reap. It verifies server epoch, pane identity/nonce, process identity and dead state at the destructive tmux boundary. Retried deletion uses a retained intent/tombstone. Before deleting a dead worker pane, the launcher also verifies its durable seal and epoch-bound cleanup artifact. Parent and unrelated sibling worker/job panes and retained reports remain intact; the child's owned terminal job panes were explicitly cleaned before its exit.
+
+Missing or old controllers never prove an empty job inventory: reload a live worker or use a new launch to acquire support. A worker already dead without verified cleanup refuses reap rather than silently orphaning unknown jobs. Recovery requires the child's controller or explicit user-authorized inspection/adoption of surviving jobs; there is no parent cross-session fallback and no automatic recovery of existing orphans. Reservations are local to the worker process, not coordination authority for arbitrary separate processes deliberately reusing its session ID. Unreadable/corrupt inventory fails closed rather than guessing ownership.
 
 ## Trusted child-local Jobs dashboard
 
@@ -63,7 +67,7 @@ With parent authorization, `background-job/index.ts` now publishes a distinct in
 
 The dashboard resolves an owned task/attempt, authenticates to its child-hosted TUI endpoint with the complete parent/worker epoch identity, then requests `jobs` operations. The worker verifies that its local controller belongs to the worker's actual current Pi session. This supports list/status/output/bounded wait/cancel/reap and watches/events/ack/unwatch only. Start, adopt, signal, commands, arbitrary log paths and session/cwd overrides are rejected. Mutations retain durable request deduplication. No model turn is started or tool allowlist changed.
 
-The human dashboard shows build output/status and offers separately confirmed cancellation (retaining pane/output) and reap (explicit cleanup). Root-local or sibling job IDs fail the existing ownership checks. An unavailable or reaped child is reported clearly; its jobs are not implicitly stopped and there is no parent-wide fallback. Re-adopting surviving job panes in a live Pi remains an explicit recovery path.
+The human dashboard shows build output/status and offers separately confirmed cancellation (retaining pane/output) and reap (explicit cleanup). Root-local or sibling job IDs fail the existing ownership checks. An unavailable or reaped child is reported clearly; jobs are never implicitly cancelled and there is no parent-wide fallback. Explicit native child reap now includes the verified terminal-only cleanup described above, not cancellation or implicit adoption. Re-adopting surviving job panes in a live Pi remains an explicit recovery path.
 
 ## Validation and packaging
 
@@ -73,9 +77,9 @@ No billed provider requests: `tui-worker-test-provider.ts` is an explicit local 
 - `tui-native-observe.test.ts`: real control-server observation, new-turn outcome clearing, aborted settlement, skipped chain successor, cancelled aggregate and owned/foreign/reaped dashboard job routing.
 - `tui-worker-jobs.test.ts`: bounded existing-job actions and rejection of shell/start/adopt/signal/foreign-scope overrides.
 - `dashboard.test.ts`: output, separately confirmed cancel/reap and watch controls without model turns.
-- `tui-worker-{protocol,server,extension,seal}.test.ts`: validation/auth/dedup, guard failure, source/tool restrictions, sealed-only reap event and retained resources.
+- `tui-worker-{protocol,server,extension,seal,reap}.test.ts`: validation/auth/dedup, guard failure, source/tool restrictions, temporary cleanup/input races, bounded refusal messages, failed-cleanup retry and preservation, sealed-only reap event and retained resources.
 - `tui-worker-tmux.test.ts`: real Pi TUI/keyboard, group placement, observer crash, PID-preserving promotion, live input/reap races, retained reports and sibling safety.
-- `tui-root.test.ts` / `tui-root-test-extension.ts`: actual registered root tool in real Pi, parent SIGKILL/rehydration, same-PID live resume, explicit reaped new attempt, readonly tools, outcomes/quiet receipts, guarded bash and operator propagation, real keyboard Esc and no chain advance. Legacy-manager fixtures exercise the actual mixed root wait entry point. Real background-job fixtures exercise child-local creation through the normal guarded model tool, parent-local cross-session denial, authenticated list/output/cancel/wait/reap, and unchanged child PID/activity sequence.
+- `tui-root.test.ts` / `tui-root-test-extension.ts`: actual registered root tool in real Pi, parent SIGKILL/rehydration, same-PID live resume, explicit reaped new attempt, readonly tools, outcomes/quiet receipts, guarded bash and operator propagation, real keyboard Esc and no chain advance. Legacy-manager fixtures exercise the actual mixed root wait entry point. Real background-job fixtures exercise child-local creation through the normal guarded model tool, parent-local cross-session denial, authenticated list/output/cancel/wait, active-job reap refusal with retained controller, terminal-job cleanup on parent reap with preserved output, removed child job pane, and unchanged child PID/activity sequence before reap.
 
 Guarded root command:
 

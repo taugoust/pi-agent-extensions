@@ -343,10 +343,19 @@ export class BackgroundJobManager {
   async list(limit = 50, reconcile = true): Promise<JobRecord[]> {
     if (!Number.isSafeInteger(limit) || limit < 1 || limit > 1000) throw new Error("List limit must be between 1 and 1000");
     const ids = await this.store.listIds();
-    const records: JobRecord[] = [];
-    for (const id of ids) {
-      try { records.push(await this.get(id, reconcile)); } catch {}
-    }
+    // Retained jobs are unbounded. Serial filesystem/tmux probes made the
+    // quota scan inside start's state lock exceed its 5s acquisition deadline
+    // even when every retained job had already finished. Bound concurrency to
+    // avoid flooding the filesystem or spawning one tmux client per record.
+    const scanned: (JobRecord | undefined)[] = new Array(ids.length);
+    let next = 0;
+    await Promise.all(Array.from({ length: Math.min(8, ids.length) }, async () => {
+      while (next < ids.length) {
+        const index = next++;
+        try { scanned[index] = await this.get(ids[index], reconcile); } catch {}
+      }
+    }));
+    const records = scanned.filter((record): record is JobRecord => record !== undefined);
     records.sort((a, b) => b.metadata.createdAt.localeCompare(a.metadata.createdAt));
     return records.slice(0, limit);
   }
@@ -472,6 +481,58 @@ export class BackgroundJobManager {
     }
   }
 
+  /** Fail closed even on unreadable foreign metadata: ownership cannot safely
+   * be established then. Unlike list(), never truncate or silently skip errors. */
+  async sessionInventory(sessionId: string, assertAvailable: () => void = () => {}): Promise<JobRecord[]> {
+    const records: JobRecord[] = [];
+    for (const id of await this.store.listIds()) {
+      assertAvailable();
+      const metadata = await this.store.readMetadata(id);
+      if (metadata.sessionId !== sessionId) continue;
+      const record = await this.get(id);
+      if (record.metadata.sessionId !== sessionId) throw new Error(`Background job ${id} changed owner during cleanup`);
+      records.push(record);
+    }
+    return records;
+  }
+
+  /** Caller must reserve local creators, including watch recovery, throughout. */
+  async reapSession(sessionId: string, preserve: (records: unknown) => Promise<void>, assertAvailable: () => void = () => {}): Promise<void> {
+    assertAvailable();
+    const records = await this.sessionInventory(sessionId, assertAvailable);
+    const blocked = records.filter(record => !record.result || record.status === 'running' || record.status === 'starting' || record.metadata.pane || record.metadata.observed);
+    const ids = (records: JobRecord[]) => records.slice(0, 100).map(record => record.metadata.id).join(', ')
+      + (records.length > 100 ? `; ${records.length - 100} more (${records.length} total); inspect the child job inventory` : '');
+    if (blocked.length) throw new Error(`Cannot prepare worker reap: active/starting or adopted background jobs: ${ids(blocked)}`);
+    let remaining = 256 * 1024;
+    const jobs = [];
+    for (const record of records) {
+      assertAvailable();
+      const snapshot = await this.output(record.metadata.id);
+      const bytes = Buffer.from(snapshot.text);
+      const budget = Math.min(16 * 1024, remaining);
+      let start = Math.max(0, bytes.length - budget);
+      // Keep the final errors, without splitting a UTF-8 code point.
+      while (start < bytes.length && (bytes[start] & 0xc0) === 0x80) start++;
+      const output = bytes.subarray(start).toString('utf8');
+      remaining -= bytes.length - start;
+      jobs.push({ metadata: record.metadata, status: record.status, result: record.result, output, outputTruncated: snapshot.truncated || bytes.length > budget });
+    }
+    assertAvailable();
+    await preserve({ jobs });
+    for (const record of records) {
+      assertAvailable();
+      const current = await this.get(record.metadata.id);
+      assertAvailable();
+      if (current.metadata.sessionId !== sessionId || current.metadata.pane || current.metadata.observed) throw new Error(`Background job ${record.metadata.id} changed owner during cleanup`);
+      await this.reap(record.metadata.id);
+    }
+    assertAvailable();
+    const remainingJobs = await this.sessionInventory(sessionId, assertAvailable);
+    assertAvailable();
+    if (remainingJobs.length) throw new Error(`Background jobs remain after cleanup: ${ids(remainingJobs)}`);
+  }
+
   async reap(id: string): Promise<void> {
     const record = await this.get(id);
     if (!record.result) throw new Error(`Background job ${id} is not terminal; cancel it first`);
@@ -486,4 +547,29 @@ export class BackgroundJobManager {
 
   // Compatibility for explicit UI removal only; never called by read/ack.
   async remove(id: string): Promise<void> { await this.reap(id); }
+}
+
+/** In-process exclusion: enter/reserve run before callers' first await. */
+export class ReapReservation {
+  private reserved = false;
+  private operations = 0;
+
+  enter(): () => void {
+    if (this.reserved) throw new Error('Background job cleanup is reserved; new operations are unavailable');
+    this.operations++;
+    let released = false;
+    return () => { if (!released) { released = true; this.operations--; } };
+  }
+
+  async prepare(cleanup: () => Promise<void>): Promise<() => void> {
+    if (this.reserved) throw new Error('Background job cleanup is already reserved');
+    this.reserved = true;
+    let released = false;
+    const release = () => { if (!released) { released = true; this.reserved = false; } };
+    try {
+      if (this.operations) throw new Error(`Background job operations are still in flight (${this.operations}); retry cleanup after they finish`);
+      await cleanup();
+      return release;
+    } catch (error) { release(); throw error; }
+  }
 }

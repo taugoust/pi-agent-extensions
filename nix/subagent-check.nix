@@ -141,6 +141,7 @@ pkgs.runCommand "subagent-check"
       "$workdir/tui-runtime/subagent/tui-worker-jobs.test.ts" \
       "$workdir/tui-runtime/subagent/tui-worker-protocol.test.ts" \
       "$workdir/tui-runtime/subagent/tui-worker-server.test.ts" \
+      "$workdir/tui-runtime/subagent/tui-worker-reap.test.ts" \
       "$workdir/tui-runtime/subagent/tui-worker-extension.test.ts" \
       "$workdir/tui-runtime/subagent/tui-worker-seal.test.ts" \
       "$workdir/tui-runtime/subagent/tui-worker-tmux.test.ts" \

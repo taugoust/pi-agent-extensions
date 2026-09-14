@@ -59,10 +59,10 @@ export class WatchManager {
     const job=await this.jobs.start({command:`${quote(node)} ${quote(runner)} ${quote(this.root)}`,cwd:this.root,sessionId:this.owner,name:'Persistent log watch service',infrastructure:true});
     await writeFile(join(this.root,'service'),job.metadata.id,{mode:0o600});
   }
-  async list(childId?:string):Promise<any[]>{
-    let names:string[];try{names=await readdir(this.root);}catch{return [];}
+  async list(childId?:string,strict=false):Promise<any[]>{
+    let names:string[];try{names=await readdir(this.root);}catch(error){if(strict&&(error as NodeJS.ErrnoException).code!=='ENOENT')throw error;return [];}
     const result=[];
-    for(const name of names.filter(n=>/^watch-[0-9a-f]{24}\.json$/.test(n))){try{result.push(this.summary(this.load(name.slice(0,-5),childId)));}catch{}}
+    for(const name of names.filter(n=>/^watch-[0-9a-f]{24}\.json$/.test(n))){try{result.push(this.summary(this.load(name.slice(0,-5),childId)));}catch(error){if(strict)throw error;}}
     return result;
   }
   async events(id:string,after?:number,childId?:string):Promise<any>{

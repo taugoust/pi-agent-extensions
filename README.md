@@ -847,6 +847,15 @@ backends keep their existing execution model and never silently fall back to nat
   resumes with the parent; it is not a separate autonomous supervisor.
 - Completion or cancellation retains the Pi TUI and reports. `operation=reap`
   explicitly closes verified owned panes and rejects active human/model work.
+  Before closing a native child, its authenticated local job controller preserves
+  bounded terminal status/output in retained `job-cleanup-*.json` artifacts and
+  reaps its owned terminal background jobs. Active/starting jobs, adopted jobs,
+  active watches, or unverifiable cleanup refuse reap with blocking IDs; no work
+  is automatically cancelled. Failed cleanup leaves the child available for repair.
+  Old workers need a reload/new launch to acquire cleanup support. An already-dead
+  child without a verified cleanup receipt is not automatically recovered: inspect
+  and explicitly adopt retained jobs with user authorization, or recover its child
+  controller. Missing controllers never imply an empty inventory.
   Reaping is never triggered by a final reply, reading a report, or hiding a UI tab.
 - Explicit resume can reuse a live idle worker; resuming a reaped task creates a
   new owned attempt from retained context after confirming the old worker ended.

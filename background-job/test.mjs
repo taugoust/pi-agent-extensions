@@ -3,7 +3,7 @@ import os from "node:os";
 import path from "node:path";
 import { execFile } from "node:child_process";
 import { promisify } from "node:util";
-import { BackgroundJobManager, boundedTail } from "./manager.js";
+import { BackgroundJobManager, boundedTail, ReapReservation } from "./manager.js";
 import { JobStore } from "./store.js";
 import { TmuxBackend, resolveLocalPlacement } from "./tmux.js";
 
@@ -15,6 +15,64 @@ const assert = (condition, message) => { if (!condition) throw new Error(message
 async function assertReject(promise, pattern) {
   try { await promise; } catch(error) { assert(pattern.test(String(error)), `wrong rejection: ${error}`); return; }
   throw new Error(`Expected rejection ${pattern}`);
+}
+
+// Cleanup exclusion is acquired before any await, and failures keep it usable.
+{
+  const gate = new ReapReservation();
+  const finish = gate.enter();
+  await assertReject(gate.prepare(async () => { throw new Error('must not run'); }), /in flight/);
+  finish();
+  let finishCleanup;
+  const preparing = gate.prepare(() => new Promise(resolve => { finishCleanup = resolve; }));
+  try { gate.enter(); throw new Error('reservation missing'); } catch (error) { assert(/reserved/.test(String(error)), String(error)); }
+  await assertReject(gate.prepare(async () => {}), /already reserved/);
+  finishCleanup();
+  const release = await preparing;
+  try { gate.enter(); throw new Error('reservation released too soon'); } catch (error) { assert(/reserved/.test(String(error)), String(error)); }
+  release(); release(); gate.enter()();
+  await assertReject(gate.prepare(async () => { throw new Error('preserve failed'); }), /preserve failed/);
+  gate.enter()();
+}
+
+// Use real cleanup orchestration with a fake backend inventory: >list maximum,
+// foreign ownership, adopted/running refusal, and preservation before deletion.
+{
+  const records = new Map(Array.from({length: 1002}, (_, i) => {
+    const id = `job-${i.toString(16).padStart(24, '0')}`;
+    return [id, { metadata: { id, sessionId: i === 1001 ? 'foreign' : 'owner' }, status: 'completed', result: { status: 'completed' } }];
+  }));
+  const fake = new BackgroundJobManager({listIds: async () => [...records.keys()], readMetadata: async id => records.get(id).metadata}, {});
+  fake.get = async id => records.get(id);
+  fake.output = async () => ({text: '界'.repeat(20000) + 'FINAL ERROR MARKER', truncated: false});
+  let preserved = false;
+  fake.reap = async id => { assert(preserved, 'deleted before preservation'); assert(records.get(id).metadata.sessionId === 'owner', 'foreign deletion'); records.delete(id); };
+  const first = records.values().next().value;
+  first.metadata.observed = {};
+  await assertReject(fake.reapSession('owner', async () => {}), /adopted.*job-/);
+  delete first.metadata.observed;
+  first.status = 'starting';
+  await assertReject(fake.reapSession('owner', async () => {}), /starting.*job-/);
+  first.status = 'completed';
+  for (const record of records.values()) record.status = 'running';
+  await assertReject(fake.reapSession('owner', async () => {}), /901 more \(1001 total\)/);
+  for (const record of records.values()) record.status = 'completed';
+  await assertReject(fake.reapSession('owner', async () => { throw new Error('disk full'); }), /disk full/);
+  assert(records.size === 1002, 'preservation failure deleted jobs');
+  await assertReject(fake.reapSession('owner', async () => {}, () => { throw new Error('cleanup deadline'); }), /cleanup deadline/);
+  assert(records.size === 1002, 'deadline failure deleted jobs');
+  let expired = false;
+  await assertReject(fake.reapSession('owner', async () => { expired = true; }, () => { if (expired) throw new Error('cleanup deadline'); }), /cleanup deadline/);
+  assert(records.size === 1002, 'deadline after preservation deleted jobs');
+  await fake.reapSession('owner', async payload => {
+    assert(payload.jobs.length === 1001, 'cleanup truncated inventory');
+    assert(payload.jobs[0].output.endsWith('FINAL ERROR MARKER'), 'cleanup dropped final error output');
+    assert(!payload.jobs[0].output.includes('\ufffd') && payload.jobs[0].outputTruncated, 'cleanup split UTF-8 or lost truncation flag');
+    assert(payload.jobs.reduce((n, job) => n + Buffer.byteLength(job.output), 0) <= 256 * 1024, 'output budget exceeded');
+    assert(payload.jobs.every(job => Buffer.byteLength(job.output) <= 16 * 1024), 'per-job budget exceeded');
+    preserved = true;
+  });
+  assert(records.size === 1, 'foreign job was not retained');
 }
 
 const root = fs.mkdtempSync(path.join(os.tmpdir(), "background-job-test-"));
@@ -34,6 +92,49 @@ async function cleanup() {
 }
 
 try {
+  // Model slow network-home reads of retained terminal jobs. A second start
+  // must acquire the same real filesystem lock within its existing 5s budget.
+  const scanStore = new JobStore(path.join(root, "scan-state"));
+  const retained = Array.from({ length: 80 }, (_, index) => `job-${index.toString(16).padStart(24, "0")}`);
+  const retainedSet = new Set(retained);
+  const listIds = scanStore.listIds.bind(scanStore);
+  scanStore.listIds = async () => [...retained, ...await listIds()];
+  let scanning;
+  const scanStarted = new Promise(resolve => { scanning = resolve; });
+  let activeReads = 0, maximumReads = 0, scannedCount = 0;
+  const scanBackend = {
+    async launch() { return { schemaVersion: 1, windowId: "@1", paneId: "%1", panePid: process.pid, paneStartToken: "fixture", launchedAt: new Date().toISOString() }; },
+    async paneState() { return { exists: true, dead: false }; },
+  };
+  const scanManager = new BackgroundJobManager(scanStore, scanBackend);
+  const get = scanManager.get.bind(scanManager);
+  scanManager.get = async (id, reconcile) => {
+    if (!retainedSet.has(id)) return await get(id, reconcile);
+    activeReads++;
+    maximumReads = Math.max(maximumReads, activeReads);
+    scanning();
+    try {
+      await new Promise(resolve => setTimeout(resolve, 80));
+      scannedCount++;
+      // Corrupt retained entries must not abort the remaining scan.
+      if (id === retained[5]) throw new Error("fixture corrupt metadata");
+      return { metadata: { id, createdAt: "2026-01-01T00:00:00Z" }, status: "completed", result: { status: "completed", finishedAt: "2026-01-01T00:00:00Z" } };
+    } finally { activeReads--; }
+  };
+  const scanAt = Date.now();
+  const firstScan = scanManager.start({ command: ":", cwd: root });
+  await scanStarted;
+  const scans = await Promise.allSettled([firstScan, scanManager.start({ command: ":", cwd: root })]);
+  const startsElapsedMs = Date.now() - scanAt;
+  assert(scans.every(result => result.status === "fulfilled"), `retained-job scan caused start lock contention: ${scans.map(result => result.reason).join(", ")}`);
+  assert(maximumReads > 1 && maximumReads <= 8, `unbounded or serial scan: ${maximumReads}`);
+  assert(scannedCount === 160, "start quota scans skipped retained entries");
+  const limited = await scanManager.list(3, false);
+  assert(limited.length === 3, "list limit changed");
+  // Newly created real jobs sort first; equal-timestamp fixtures keep ID-list order.
+  assert(limited[2].metadata.id === retained[0], "concurrent list changed stable ordering");
+  console.log(`PASS bounded retained-job scans: two starts in ${startsElapsedMs}ms, ${maximumReads} maximum concurrent reads (including corrupt entries); ordering/limits preserved`);
+
   await execFileAsync(tmux, ["-S", sentinelSocket, "-f", "/dev/null", "new-session", "-d", "-x", "240", "-y", "1000", "-s", "sentinel", "sleep", "60"]);
   const caller = (await execFileAsync(tmux, ['-S', sentinelSocket, 'display-message', '-p', '-t', 'sentinel', '#{pane_id}'])).stdout.trim();
   process.env.TMUX = `${sentinelSocket},0,0`;

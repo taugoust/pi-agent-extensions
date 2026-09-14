@@ -16,6 +16,9 @@ test("initial tools/source attribution and explicit reap event are distinct from
     presentation: "background", placement: { socketPath: "/tmp/tmux", serverEpoch: "1:2", sessionId: "$1", windowId: "@1", paneId: "%1", ownershipNonce: "e".repeat(64) } });
   const manifest = store.readManifest();
   const previous = process.env.PI_TUI_WORKER_MANIFEST;
+  const oldController = (globalThis as any).__paeLocalJobControllerV1;
+  (globalThis as any).__paeLocalJobControllerV1 = { protocol: 1, sessionId: "child-session",
+    async prepareReap(preserve: (report: unknown) => Promise<void>) { await preserve({ jobs: [] }); return () => {}; } };
   process.env.PI_TUI_WORKER_MANIFEST = store.path("manifest.json");
   const handlers = new Map<string, Function>(), events: any[] = [], messages: any[] = [];
   let tools: string[] = [], shutdown = 0;
@@ -32,6 +35,26 @@ test("initial tools/source attribution and explicit reap event are distinct from
     assert.match(handlers.get("before_agent_start")!({ systemPrompt: "base" }, ctx).systemPrompt, /Direct human instructions.*take precedence/);
     await callTuiWorker(manifest, { operation: "cancel" });
     assert.equal(events.length, 0); assert.equal(shutdown, 0);
+    const controller = (globalThis as any).__paeLocalJobControllerV1;
+    controller.sessionId = "different-session";
+    const foreign = await callTuiWorker(manifest, { operation: "prepare_reap" });
+    assert.equal(foreign.ok, false);
+    assert.equal(shutdown, 0);
+    controller.sessionId = "child-session";
+    const prepare = controller.prepareReap;
+    let entered!: () => void, finish!: () => void;
+    const started = new Promise<void>(resolve => { entered = resolve; });
+    const pending = new Promise<void>(resolve => { finish = resolve; });
+    controller.prepareReap = async () => { entered(); await pending; throw new Error("active job-fixture"); };
+    const blockedReap = callTuiWorker(manifest, { operation: "prepare_reap" });
+    await started;
+    assert.equal(handlers.get("input")!({ source: "interactive" }, ctx).action, "handled");
+    assert.equal(handlers.get("tool_call")!({}, ctx).block, true);
+    assert.equal(shutdown, 0, "temporary cleanup reservation must not shut down the controller on input");
+    finish();
+    assert.equal((await blockedReap).ok, false);
+    assert.equal(shutdown, 0);
+    controller.prepareReap = prepare;
     assert.ok((await callTuiWorker(manifest, { operation: "prepare_reap" })).ok);
     await new Promise(resolve => setTimeout(resolve, 50));
     assert.equal(events.length, 1);
@@ -41,6 +64,8 @@ test("initial tools/source attribution and explicit reap event are distinct from
     assert.equal(handlers.get("tool_call")!({}, ctx).block, true);
   } finally {
     await handlers.get("session_shutdown")?.({}, ctx);
+    if (oldController === undefined) delete (globalThis as any).__paeLocalJobControllerV1;
+    else (globalThis as any).__paeLocalJobControllerV1 = oldController;
     if (previous === undefined) delete process.env.PI_TUI_WORKER_MANIFEST; else process.env.PI_TUI_WORKER_MANIFEST = previous;
     await rm(root, { recursive: true, force: true });
   }

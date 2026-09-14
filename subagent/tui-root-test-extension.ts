@@ -118,14 +118,24 @@ export default function rootTest(pi: ExtensionAPI) {
     await assert.rejects(rootController.execute("foreign-job", { action: "output", job_id: job }), /different|own|session/i);
     await assert.rejects(rootController.execute("no-start", { action: "start", command: "false" }), /existing jobs/);
     assert.equal((await callTuiWorker({ ...jobsWorker, ownerSessionId: "foreign-parent" }, { operation: "jobs", params: { action: "list" } })).ok, false);
+    await assert.rejects(execute(ctx, { operation: "reap", job_id: localJobs.details.job_id }), error => {
+      assert.match(String(error), new RegExp(job));
+      return true;
+    });
+    assert.equal((await callTuiWorker(jobsWorker, { operation: "status" }) as any).data.pid, localPid,
+      "active-job refusal must retain the authenticated child controller");
     assert.ok((await callTuiWorker(jobsWorker, { operation: "jobs", params: { action: "cancel", job_id: job } })).ok);
     const jobDone = await callTuiWorker(jobsWorker, { operation: "jobs", params: { action: "wait", job_id: job, timeout_ms: 5000 } }, { timeoutMs: 10_000 });
     assert.equal((jobDone as any).data.details.status, "cancelled");
-    assert.ok((await callTuiWorker(jobsWorker, { operation: "jobs", params: { action: "reap", job_id: job } })).ok);
     const afterJobs = (await callTuiWorker(jobsWorker, { operation: "status" }) as any).data;
     assert.equal(afterJobs.pid, localPid);
     assert.equal(afterJobs.sequence, beforeJobs.sequence, "Job controls must not start a model turn");
     await execute(ctx, { operation: "reap", job_id: localJobs.details.job_id });
+    const cleanup = new TuiWorkerStore(dirname(jobsWorker.sessionFile)).readState().jobCleanup;
+    assert.ok(cleanup, "parent reap must retain the child-local job cleanup receipt");
+    assert.match(await readFile(cleanup.artifact, "utf8"), /child-job-marker/);
+    const panes = (await promisify(execFile)("tmux", ["-S", jobsWorker.placement.socketPath, "list-panes", "-a", "-F", "#{pane_id}"])).stdout.split("\n");
+    assert.ok(!panes.includes(ownedJobs[0].pane_id), "parent reap left the child-owned job pane orphaned");
     const parallel = await execute(ctx, { tasks: [
       { task: "ASSERT_READ_ONLY", model: "harness-test/mock:off", tools: ["read"] },
       { task: `${gate ? "RUN GUARDED CHECK " : ""}REPORT_OUTCOME`, model: "harness-test/mock:off", acceptance: ["fixture"] },

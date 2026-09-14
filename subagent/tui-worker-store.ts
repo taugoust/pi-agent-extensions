@@ -10,6 +10,7 @@ export type WorkerState = {
   phase: "ready" | "running" | "settled" | "closing";
   receipts: Record<string, WorkerReceipt>; events: TuiWorkerEvent[];
   lastReport?: string; lastOutcome?: string; reapReservation?: string;
+  jobCleanup?: { workerEpoch: string; artifact: string };
 };
 export const MAX_WORKER_STATE_BYTES = 16 * 1024 * 1024;
 
@@ -118,7 +119,7 @@ export class TuiWorkerStore {
   }
   writeState(state: WorkerState): void { atomicPrivateJson(this.path("state.json"), state); }
   report(sequence: number, report: unknown): string { return this.artifact("report", sequence, report); }
-  artifact(kind: "report" | "notification" | "outcome", sequence: number, report: unknown): string {
+  artifact(kind: "report" | "notification" | "outcome" | "job-cleanup", sequence: number, report: unknown): string {
     const name = `${kind}-${sequence}-${randomBytes(8).toString("hex")}.json`;
     // Reports are independent immutable snapshots, not the bounded event ring.
     // Random suffix also retains a report orphaned by a crash before state commit.

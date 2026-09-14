@@ -2005,6 +2005,7 @@ export default function (pi: ExtensionAPI) {
       "Background waits support one child across current groups (wait_any), one entire group (wait/wait_group), or all current groups (wait_all).",
       "Set background=true on task/tasks/chain to continue without blocking; inspect it later with lifecycle operations (job_id only where required).",
       "On Linux native children are real interactive Pi TUI processes with their own local tools and guard-only service. Parent control, human keyboard and Paseo share that one session; model control does not execute slash commands.",
+      "Native reap preserves bounded terminal job output, then cleans the child's owned finished background jobs before closing its pane; active jobs, adopted jobs and active watches block reap without cancellation. Old or already-dead workers without cleanup verification require explicit recovery.",
       "mode defaults to shared; mode=draft requires an active AgentSH supervisor.",
     ].join(" "),
     promptSnippet: "Delegate focused work synchronously or as a durable-in-session background subagent",
@@ -2017,7 +2018,7 @@ export default function (pi: ExtensionAPI) {
       "Use operation=resume with a task_id to continue a terminal native task from its saved session, not a fresh reconstructed assignment. Resume is explicit, returns a new background group/child ID, preserves task ownership, and compacts context checkpoints before continuing.",
       "Native workers can notify_parent without stopping. Routine findings are retained outside model context. Background terminal completions (including failures) wake idle parents or queue at a tool-safe turn boundary; consume operation=result before relying on the work. Explicit requires_guidance requests separately receive rate-limited wake-ups. Reply with operation=prompt and child_id. Use background workers for interactive supervision; in-flight parent tools are not interrupted. Existing workers need a fresh launch/resume to acquire notify_parent.",
       "Linux native background groups survive parent exit/crash and reconnect from durable manifests. Foreground groups stage on the same tmux server; /background or operation=promote moves the whole group window without restarting children. Other backends keep their existing lifetime semantics.",
-      "Completion retains a messageable Pi and reports. Inspect operation=status/result, then explicitly operation=reap when finished with the panes. Reap rejects active human/agent work; operation=cancel only stops work. Never automatically reap on a final reply or task completion.",
+      "Completion retains a messageable Pi and reports. Inspect operation=status/result, then explicitly operation=reap when finished with the panes. Native reap preserves bounded child job status/output and cleans owned terminal jobs through the child's authenticated controller. Active human/agent work, running/starting jobs, adopted jobs and active watches block reap; resolve the listed IDs explicitly, never auto-cancel. Missing/old controllers require reload or a new launch; already-dead unverified workers require explicit recovery/adoption with user authorization. operation=cancel only stops work. Never automatically reap on a final reply or task completion.",
     ],
     parameters: subagentParams(),
 

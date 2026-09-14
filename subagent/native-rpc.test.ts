@@ -539,13 +539,18 @@ async function exerciseNonBlockingPrompts() {
       assert(!session.events.some(event => event.type === "agent_settled"));
     }
     const blocking = session.rpc.control("steer", "explicitly wait for full response");
-    const rejected = assert.rejects(blocking, /no longer active|channel is closed/);
+    // Termination can win before dispatch, during a pending RPC command, or
+    // while waiting for the logical run. All must reject, not hang or succeed.
+    const rejected = assert.rejects(blocking, { message: /no longer active|channel is closed|^native subagent RPC process exited$/ });
     await assert.rejects(session.rpc.acceptPrompt("steer", "do not queue behind a full run"), (error: any) => error.code === "busy");
     session.rpc.terminate();
     await rejected;
   } finally {
     session.rpc.terminate();
     await withTimeout(exited, "non-blocking test child did not exit");
+    assert.equal(session.rpc.isActive(), false);
+    assert.equal(session.rpc.protocolError, undefined, "deliberate termination became a protocol failure");
+    assert(session.rpc.diagnostics.trace.some(entry => entry.event === "process_close"));
   }
 }
 

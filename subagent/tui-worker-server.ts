@@ -15,6 +15,9 @@ export type TuiWorkerAdapter = {
   /** Gracefully exit this idle Pi, retaining its tmux pane. */
   shutdown(): void;
   compact?(): Promise<void>;
+  /** Reserve job creation, preserve terminal results, clean only owned terminal jobs.
+   * Return a release callback; failures must release the local reservation. */
+  prepareJobReap?(preserve: (report: unknown) => Promise<void>): Promise<() => void>;
   jobs?(params: import("../shared/tui-worker-protocol.ts").TuiWorkerJobParams, requestId: string): Promise<unknown>;
   applyOperatorMode?(enabled: boolean): unknown | Promise<unknown>;
 };
@@ -31,6 +34,8 @@ export class TuiWorkerServer {
   private queue: Promise<unknown> = Promise.resolve();
   private closing = false;
   private failed = false;
+  preparingReap = false;
+  private reapInterrupted = false;
   readonly store: TuiWorkerStore;
   private adapter: TuiWorkerAdapter;
   constructor(store: TuiWorkerStore, adapter: TuiWorkerAdapter) {
@@ -52,6 +57,7 @@ export class TuiWorkerServer {
   }
   /** Call synchronously from input/before_agent_start, before awaiting anything. */
   running(newTurn = false): boolean {
+    if (this.preparingReap) { this.reapInterrupted = true; void this.adapter.abort(); return false; }
     if (this.sealed) { void this.adapter.abort(); return false; }
     if (newTurn || this.state.phase !== "running") {
       this.state.lastOutcome = undefined;
@@ -63,7 +69,7 @@ export class TuiWorkerServer {
     return true;
   }
   settled(report: unknown): void {
-    if (this.closing || this.failed || !this.adapter.isIdle()) return;
+    if (this.closing || this.failed || this.preparingReap || !this.adapter.isIdle()) return;
     this.state.lastReport = this.store.report(this.state.sequence + 1, report);
     this.state.active = false;
     this.state.phase = "settled";
@@ -82,7 +88,7 @@ export class TuiWorkerServer {
     return { active: this.state.active || !this.adapter.isIdle(), sealed: this.sealed, phase: this.state.phase,
       lastReport: this.state.lastReport, lastOutcome: this.state.lastOutcome, sequence: this.state.sequence, pid: process.pid,
       sessionFile: this.manifest.sessionFile, presentation: this.manifest.presentation,
-      readyForPrompts: !this.sealed && (this.adapter.canRun?.() ?? true), permissionPromptsEnabled: this.adapter.permissionMode?.() };
+      readyForPrompts: !this.sealed && !this.preparingReap && (this.adapter.canRun?.() ?? true), permissionPromptsEnabled: this.adapter.permissionMode?.() };
   }
   private authenticated(r: TuiWorkerRequest): boolean {
     const expected = Buffer.from(this.manifest.controlToken);
@@ -141,6 +147,7 @@ export class TuiWorkerServer {
         || old.ownershipNonce !== next.ownershipNonce) return fail("invalid", "Promotion must preserve server and owned pane");
     }
     if (mutation && Object.keys(this.state.receipts).length >= 4096) return fail("unavailable", "Worker receipt capacity exhausted");
+    if (r.operation === "prepare_reap") return await this.prepareReap(r, receiptKey, digest);
     // Persist intent before side effects. A lost post-dispatch write is explicitly ambiguous.
     this.state.receipts[receiptKey] = { digest };
     this.persist();
@@ -176,13 +183,6 @@ export class TuiWorkerServer {
         this.event("cancelled");
         data = this.snapshot();
         break;
-      case "prepare_reap":
-        // No await between live idle check above and input seal. JS event handlers
-        // observe the seal before any later keyboard/Paseo/parent input can run.
-        this.state.sealed = true;
-        this.state.reapReservation ??= randomBytes(16).toString("hex");
-        data = { reservation: this.state.reapReservation };
-        break;
       case "promote":
         this.manifest.placement = r.placement;
         this.manifest.presentation = "background";
@@ -192,12 +192,55 @@ export class TuiWorkerServer {
     const response = this.response(r, { ok: true, receipt: r.operation === "prompt" ? "accepted" : "applied", sequence: this.state.sequence, ...(data === undefined ? {} : { data }) });
     this.state.receipts[receiptKey].response = response;
     this.persist();
-    if (r.operation === "prepare_reap") {
-      // Give the socket receipt a chance to flush. The seal is already durable.
-      // Launcher MUST wait for actual pane death before removing it.
-      setTimeout(() => this.adapter.shutdown(), 25);
-    }
     return response;
+  }
+  private async prepareReap(r: TuiWorkerRequest, receiptKey: string, digest: string): Promise<TuiWorkerResponse> {
+    // Temporary reservation is synchronous with the idle check in dispatch.
+    // Unlike the durable seal it must not cause input handlers to shut Pi down.
+    this.preparingReap = true;
+    this.reapInterrupted = false;
+    let release: (() => void) | undefined;
+    let artifact: string | undefined;
+    try {
+      if (!this.adapter.prepareJobReap) throw new Error("Child-local job cleanup controller unavailable; keep worker alive and reload/recover its controller");
+      release = await this.adapter.prepareJobReap(async report => {
+        artifact = this.store.artifact("job-cleanup", this.state.sequence + 1, {
+          workerEpoch: this.manifest.workerEpoch, retainedAt: new Date().toISOString(), report,
+        });
+      });
+      if (!artifact) throw new Error("Child-local job cleanup did not preserve a verification report");
+      if (this.reapInterrupted || this.state.active || !this.adapter.isIdle() || this.closing || this.failed) {
+        throw new Error("Worker activity changed during job cleanup; refusing reap");
+      }
+      this.state.sealed = true;
+      this.state.reapReservation ??= randomBytes(16).toString("hex");
+      this.state.jobCleanup = { workerEpoch: this.manifest.workerEpoch, artifact };
+      const response = this.response(r, { ok: true, receipt: "applied", sequence: this.state.sequence,
+        data: { reservation: this.state.reapReservation, jobCleanup: artifact } });
+      this.state.receipts[receiptKey] = { digest, response };
+      this.persist();
+      // Leave job creation reserved until process shutdown. The parent only
+      // removes the owned pane after observing actual process death.
+      release = undefined;
+      setTimeout(() => this.adapter.shutdown(), 25);
+      return response;
+    } catch (error) {
+      if (!this.failed) {
+        this.state.sealed = false;
+        delete this.state.reapReservation;
+        delete this.state.jobCleanup;
+        delete this.state.receipts[receiptKey];
+      }
+      const message = `Worker reap refused: ${error instanceof Error ? error.message : String(error)}`;
+      const bytes = Buffer.from(message);
+      let end = Math.min(bytes.length, 8192);
+      while (end < bytes.length && end > 0 && (bytes[end] & 0xc0) === 0x80) end--;
+      return this.response(r, { ok: false, code: "cleanup_failed",
+        message: bytes.subarray(0, end).toString("utf8") + (end < bytes.length ? " [truncated; inspect child job inventory]" : "") });
+    } finally {
+      release?.();
+      this.preparingReap = false;
+    }
   }
   /** Distinct capability, namespace and handler: never accepts model control token. */
   private async operator(value: unknown): Promise<TuiWorkerResponse> {
