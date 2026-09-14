@@ -2,7 +2,7 @@
 
 ## Status
 
-Implemented in working tree; awaiting review and commit.
+Resolved.
 
 ## Problem
 
@@ -14,4 +14,8 @@ Explicit background execution completion now has a bounded, deduplicated wake pa
 
 ## Validation
 
-Focused quiet-state and native observer/completion tests cover idle triggerTurn delivery, active turn-safe steering, routine silence, duplicate/reload suppression, send retry, guidance quota independence, compaction, foreground/background distinctions, and terminal failure snapshots. No commit/deployment made as requested; add fixing commit hash when resolving this issue.
+Focused quiet-state and native observer/completion tests cover idle triggerTurn delivery, active turn-safe steering, routine silence, duplicate/reload suppression, send retry, guidance quota independence, compaction, foreground/background distinctions, and terminal failure snapshots. Quiet-state tests and six native tests passed. No deployment performed.
+
+## Resolution
+
+Fixed by `4b563e5` (Wake supervising parents on background child completion).
