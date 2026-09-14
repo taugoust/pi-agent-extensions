@@ -45,7 +45,7 @@ pkgs.runCommand "background-job-extension-check"
     srcdir="$workdir/src"
     outdir="$workdir/out"
     mkdir -p "$srcdir/background-job" "$srcdir/shared" "$outdir/background-job" "$workdir/home" "$workdir/tmp"
-    cp ${self}/background-job/{index.ts,manager.ts,store.ts,tmux.ts,types.ts,test.mjs,runner.mjs,watch.ts,watch-runner.mjs,watch.test.mjs,external-pane.ts,pane.test.mjs} "$srcdir/background-job/"
+    cp ${self}/background-job/{index.ts,manager.ts,store.ts,tmux.ts,types.ts,test.mjs,runner.mjs,watch.ts,watch-runner.mjs,watch.test.mjs,external-pane.ts,pane.test.mjs,runtime-path.ts,startup.test.mjs} "$srcdir/background-job/"
     cp ${self}/shared/agentsh-mode.ts "$srcdir/shared/agentsh-mode.ts"
     cp ${self}/shared/background-job.ts "$srcdir/shared/background-job.ts"
     cp ${self}/shared/task-presentation.ts "$srcdir/shared/task-presentation.ts"
@@ -67,12 +67,13 @@ pkgs.runCommand "background-job-extension-check"
       "$srcdir/background-job/tmux.ts" \
       "$srcdir/background-job/types.ts" \
       "$srcdir/shared/agentsh-mode.ts"
-    cp "$srcdir/background-job/"{test.mjs,runner.mjs,watch-runner.mjs,watch.test.mjs,pane.test.mjs} "$outdir/background-job/"
+    cp "$srcdir/background-job/"{test.mjs,runner.mjs,watch-runner.mjs,watch.test.mjs,pane.test.mjs,startup.test.mjs} "$outdir/background-job/"
 
     export HOME="$workdir/home"
     export TMPDIR="$workdir/tmp"
     export TEST_TMUX=${pkgs.tmux}/bin/tmux
     export TEST_RUNNER=${package}/background-job/runner.mjs
+    node "$outdir/background-job/startup.test.mjs"
     node "$outdir/background-job/test.mjs"
     node "$outdir/background-job/watch.test.mjs"
     node "$outdir/background-job/pane.test.mjs"

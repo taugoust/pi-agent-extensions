@@ -1,12 +1,13 @@
 import { randomBytes, createHash } from 'node:crypto';
 import { mkdir, realpath, stat, readdir, writeFile, readFile } from 'node:fs/promises';
 import { join, relative, isAbsolute, basename } from 'node:path';
-import { fileURLToPath } from 'node:url';
+import { pinRuntimePath } from './runtime-path.js';
 import { JobStore } from './store.js';
 import { BackgroundJobManager, resolveExecutable } from './manager.js';
 import { readWatch, saveWatch } from './watch-runner.mjs';
 
 export type WatchRequest={log_path?:string;patterns:Array<{name:string;match:string}>;from?:'start'|'end';poll_ms?:number;watch_timeout_ms?:number;job_id?:string};
+const runnerPath=pinRuntimePath(new URL('./watch-runner.mjs',import.meta.url),'background-job watch runner');
 const validId=(id:string)=>{if(!/^watch-[0-9a-f]{24}$/.test(id))throw new Error('Invalid watch_id');return id;};
 const quote=(s:string)=>`'${s.replaceAll("'", "'\\''")}'`;
 export class WatchManager {
@@ -54,7 +55,7 @@ export class WatchManager {
       if(['starting','running'].includes(previous.status))return;
       if(previous.result && Date.parse(previous.result.finishedAt)-Date.parse(previous.metadata.createdAt)<1000 && Date.now()-Date.parse(previous.result.finishedAt)<30000)throw new Error('Watch runner exited during startup; automatic restart is delayed 30 seconds');
     }
-    const node=await resolveExecutable('node');const runner=await realpath(fileURLToPath(new URL('./watch-runner.mjs',import.meta.url)));
+    const node=await resolveExecutable('node');const runner=runnerPath();
     const job=await this.jobs.start({command:`${quote(node)} ${quote(runner)} ${quote(this.root)}`,cwd:this.root,sessionId:this.owner,name:'Persistent log watch service',infrastructure:true});
     await writeFile(join(this.root,'service'),job.metadata.id,{mode:0o600});
   }

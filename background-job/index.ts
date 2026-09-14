@@ -1,5 +1,5 @@
 import { createHash } from "node:crypto";
-import { fileURLToPath } from "node:url";
+import { pinRuntimePath } from "./runtime-path.js";
 import { isAbsolute, join } from "node:path";
 import { Type } from "@sinclair/typebox";
 import type { ExtensionAPI, ExtensionContext } from "@mariozechner/pi-coding-agent";
@@ -16,6 +16,7 @@ import { TmuxBackend } from "./tmux.js";
 import type { JobRecord } from "./types.js";
 import { JOB_BROKER_KEY, LOCAL_JOB_CONTROLLER_KEY, JobParameters, validateJobParams, type JobParams, type JobPlacement, type ParentJobBroker, type LocalJobController } from "../shared/background-job.js";
 const INTERNAL_JOB_CALL = Symbol("parent-job-call");
+const runnerPath = pinRuntimePath(new URL("./runner.mjs", import.meta.url), "background-job runner");
 
 const ACTION_PATTERN = "^(start|list|status|output|wait|signal|cancel|reap)$";
 const JOB_PATTERN = "^job-[0-9a-f]{24}$";
@@ -228,7 +229,7 @@ export default function backgroundJob(pi: ExtensionAPI) {
       const store = new JobStore(stateRoot, runtimeRoot(stateRoot));
       await store.initialize();
       const [tmux, node] = await Promise.all([resolveExecutable("tmux"), resolveExecutable("node")]);
-      const runner = fileURLToPath(new URL("./runner.mjs", import.meta.url));
+      const runner = runnerPath();
       return new BackgroundJobManager(store, new TmuxBackend(store, tmux, node, runner));
     })();
     return managerPromise;

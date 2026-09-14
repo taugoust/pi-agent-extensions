@@ -1,6 +1,8 @@
 import { execFile } from "node:child_process";
 import { lstat, realpath, rm } from "node:fs/promises";
 import { randomBytes } from "node:crypto";
+import { constants } from "node:fs";
+import { validateRuntimePath } from "./runtime-path.js";
 import type { JobPlacement } from "../shared/background-job.js";
 import { promisify } from "node:util";
 import type { JobLaunch } from "./types.js";
@@ -127,6 +129,10 @@ export class TmuxBackend implements JobProcessBackend {
 
   async launch(id: string, cwd: string, jobDir: string, shell: string, options?: { placement?: JobPlacement; infrastructure?: boolean }): Promise<JobLaunch> {
     if (process.platform !== "linux") throw new Error("Background job launch is supported only on Linux");
+    // Fail before creating a pane: otherwise a missing interpreter/script can
+    // exit before finishLaunch reads /proc, obscuring the actionable error.
+    validateRuntimePath(this.nodePath, "Node executable", constants.X_OK);
+    validateRuntimePath(this.runnerPath, "background-job runner");
     if (!options?.infrastructure) {
       const placement = options?.placement ?? await resolveLocalPlacement(this.tmuxPath);
       await validatePlacement(this.tmuxPath, placement);
