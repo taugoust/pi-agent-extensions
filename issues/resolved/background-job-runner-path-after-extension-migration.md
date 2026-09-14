@@ -2,7 +2,7 @@
 
 ## Status
 
-Fix implemented and locally tested; awaiting commit and deployment verification.
+Resolved.
 
 ## Report and confirmed diagnosis
 
@@ -26,4 +26,6 @@ This does not resurrect an already-loaded extension whose old discovery path has
 - Existing `background-job/test.mjs` integration coverage includes durable reload, output, cancellation descendants, orphan recovery, explicit reap, and cancel-during-launch.
 - Full `nix build --no-link "path:$PWD#checks.x86_64-linux.background-job"` passed, including startup regressions, native jobs, persistent watches, pane adoption, and extension contracts. Standalone host `pane.test.mjs` failed its unrelated late protected-pane cwd check; the isolated Nix check passed without modifying pane-adoption code.
 
-No commit or remote mutation was performed for this investigation. Move this issue to `issues/resolved/`, set status to `Resolved.`, and record the fixing commit hash when committed.
+## Resolution
+
+Fixed by `7c4512c` (Pin background job runners across extension migrations). Rose was inspected read-only; deployment verification is separate.

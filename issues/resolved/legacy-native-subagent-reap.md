@@ -2,7 +2,7 @@
 
 ## Status
 
-Implemented locally; pending review and commit.
+Resolved.
 
 ## Problem
 
@@ -35,5 +35,7 @@ and result migration, stale-manager resurrection, changed disk records, native
 retention, executor death/PID reuse, and unsafe storage entries. Included in
 `nix/subagent-check.nix`.
 
-No commit/deployment is part of this task. Move to `issues/resolved/` and record
-the fixing commit after review/commit.
+## Resolution
+
+Fixed by `c1ca685` (Allow safe cleanup of legacy native subagent records).
+All 20 focused cleanup regressions passed. No legacy records on Rose were removed.
