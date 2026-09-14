@@ -252,9 +252,9 @@ export default function backgroundJob(pi: ExtensionAPI) {
     record: JobRecord,
   ): Promise<void> => {
     const id=record.metadata.id;
-    if(!record.result||record.metadata.infrastructure||sessionContext!==ctx)return;
+    if(!record.result||record.metadata.infrastructure||record.metadata.sessionId!==sessionId(ctx)||sessionContext!==ctx)return;
     if(await service.store.isNotified(id))return;
-    if(sessionContext===ctx)quietState.enqueue(ctx,{kind:'job',id,state:record.status});
+    if(sessionContext===ctx)quietState.enqueue(ctx,{kind:'job',id,state:record.status,completion:true});
   };
 
   const poll = async () => {
@@ -367,12 +367,13 @@ export default function backgroundJob(pi: ExtensionAPI) {
   const jobTool = {
     name: "background_job",
     label: "Background Job",
-    description: "Manage durable native background shell jobs (64 running overall, 32 per working directory; adopted panes and infrastructure do not consume these slots). Start jobs or adopt an existing tmux pane as a managed job without restarting it: adopt pane_id and optional tmux_socket/log_path/name. No descriptor is needed. Status/output/wait/signal/cancel/reap work through its job_id. Start requires Pi inside tmux and splits the caller window. Cancel stops work but retains the pane; reap explicitly closes only the owned terminal pane and deletes retained runtime/output. Re-adopt after a full Pi restart to recover management. Alternatively pid+log_path adoption is read-only. Jobs survive Pi exit. All user jobs and panes remain until explicit reap, even after output is read; infrastructure retention is separate. watch creates a persistent literal-pattern log watcher (default starts at end); events reads its journal, ack acknowledges a sequence, unwatch stops monitoring only, watches lists watches. Watch events are retained outside model context and do not wake the parent. Use bounded job waits and explicit events reads for supervision. Cancelling wait never cancels execution. Output is limited to 50 KiB/2000 lines.",
+    description: "Manage durable native background shell jobs (64 running overall, 32 per working directory; adopted panes and infrastructure do not consume these slots). Start jobs or adopt an existing tmux pane as a managed job without restarting it: adopt pane_id and optional tmux_socket/log_path/name. No descriptor is needed. Status/output/wait/signal/cancel/reap work through its job_id. Start requires Pi inside tmux and splits the caller window. Cancel stops work but retains the pane; reap explicitly closes only the owned terminal pane and deletes retained runtime/output. Re-adopt after a full Pi restart to recover management. Alternatively pid+log_path adoption is read-only. Jobs survive Pi exit. All user jobs and panes remain until explicit reap, even after output is read; infrastructure retention is separate. watch creates a persistent literal-pattern log watcher (default starts at end); events reads its journal, ack acknowledges a sequence, unwatch stops monitoring only, watches lists watches. User shell job termination wakes an idle parent or queues at a tool-safe boundary; inspect status/output before relying on the work. Infrastructure jobs and watch events do not wake the parent. Use bounded job waits and explicit events reads for supervision. Cancelling wait never cancels execution. Output is limited to 50 KiB/2000 lines.",
     promptSnippet: "Start, inspect, wait for, cancel, or explicitly reap durable background shell jobs",
     promptGuidelines: [
       "Use background_job for commands that should continue across turns or Pi exits; use bash for short foreground commands.",
       "Cancelling a background_job wait only stops waiting; background_job cancel stops execution but retains the pane/output. Only explicit background_job reap closes a terminal job pane and releases its retained runtime; reading output never authorizes cleanup.",
       "Use background_job watch for log/stage/failure observation instead of repeatedly launching monitoring subagents. Consume events then ack their through_sequence; unwatch never cancels the build.",
+      "User shell job completion wakes an idle parent or queues at a tool-safe boundary. Consume background_job status/output before relying on dependent work; explicitly reap only when authorized and no longer needed. Infrastructure jobs and watch events stay silent.",
       "Harness state updates are internal routing data, not user requests. Do not narrate routine job completion or paste reports into chat; read output/events only when needed. Wait is status-only unless lines is explicitly requested.",
     ],
     parameters: JobParameters,

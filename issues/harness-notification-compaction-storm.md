@@ -12,9 +12,33 @@ User-supplied incident report (2026-09-06/07 UTC), session `01a038e9-bca5-73ce-a
 This source mechanism does not require Paseo to reinject messages. The previous bridge-only foreground visibility fix addressed stale UI notifications, not model request scheduling or transcript growth.
 
 ## Required behavior
-Persist bounded routine deltas outside conversation/model context. Deduplicate durably without a smaller-than-poll history eviction loop, including reload and compaction. Only explicit actionable guidance may request a model turn, with coalescing, byte/rate limits and backpressure. Expose counters and an operator delivery kill switch without cancelling workers or builds. Keep notification routing separate from explicit result observation/retention acknowledgement. Regression coverage must exercise thousands of terminal records and repeated polling, reload, compaction and guidance.
+Persist bounded routine deltas outside conversation/model context. Deduplicate durably without a smaller-than-poll history eviction loop, including reload and compaction. Explicit actionable guidance and producer-confirmed background execution completion may request a model turn. Guidance uses coalescing, byte/rate limits and backpressure; completion uses bounded batches and durable deduplication, independently of the guidance quota. Expose counters and an operator delivery kill switch without cancelling workers or builds. Keep notification routing separate from explicit result observation/retention acknowledgement. Regression coverage must exercise thousands of terminal records and repeated polling, reload, compaction and guidance.
 
 ## Implementation and validation
 Routine state is persisted as private `harness-state-receipt` custom entries, not model messages. Durable receipts replace the evicting 512-key memory. Guidance wakeups use bounded UTF-8 batches, a 30-second interval, a conservative quota, and at-most-once reservation before scheduling. `/harness-state disable|enable|status|show` provides operator controls; `PAE_QUIET_STATE_DISABLED=1` is the environment kill switch. Compaction leaves guidance disabled until explicit operator re-enablement. Watch cursors restore from private receipts without acknowledging job results for retention.
 
-Final focused quiet-state regressions and the extension package build passed. Broader subagent/background-job checks encountered failures in native-RPC and tmux-adoption tests; a full green suite is not claimed. Deployment must preserve the incident JSONL and use a fresh parent session, not resume the incident session.
+### Shell completion wakeup gap (source follow-up, uncommitted)
+
+The shell producer omitted `completion:true`, and the shared completion classifier
+accepted subagents only. User shell terminal records now opt into the same idle
+wake/tool-safe delivery path with shell-specific `background_job status/output`
+guidance and explicit reap only when authorized. Infrastructure jobs and watcher
+updates remain silent. Owner/session checks remain enforced. Terminal tool reads
+persist consumption even before enqueue, closing the asynchronous `isNotified`
+race; running status reads do not suppress later completion. Historical terminal
+routine receipts remain no-replay tombstones to prevent an upgrade storm.
+No deployment, push, or commit is part of this follow-up.
+
+Validation: `nix build --offline --no-link -L
+'path:.#checks.x86_64-linux.background-job'` passed, including startup, manager,
+persistent-watch, live pane-adoption, shared quiet-state and shell completion
+producer tests. A focused shared quiet-state run compiled with TypeScript and
+executed with Node in an offline Nix shell also passed. The incident's deployment
+and live-observation work remains open; no resolution commit exists yet.
+The broader subagent check was also attempted twice: both runs stopped in
+`native-rpc.test.ts` because its shutdown assertion expected `no longer active`
+or `channel is closed`, but received `native subagent RPC process exited`.
+The legacy cleanup and shared quiet-state tests passed before that failure;
+a full green subagent suite is not claimed for this follow-up.
+
+Prior remediation validation: focused quiet-state regressions and the extension package build passed. Broader subagent/background-job checks encountered failures in native-RPC and tmux-adoption tests; a full green suite is not claimed. Deployment must preserve the incident JSONL and use a fresh parent session, not resume the incident session.

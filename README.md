@@ -191,11 +191,17 @@ never displace recent user jobs or unread outcomes. Watcher startup resolves
 symlinked entrypoints and backs off 30 seconds after an immediate startup exit.
 
 A cancelled `wait` leaves the underlying job running. `cancel` stops execution
-without reaping its pane; `reap` is a separate cleanup operation. Routine completions update state silently:
-no full reports or toasts are posted automatically. Routine state deltas are
-persisted outside the model conversation and never schedule model turns.
-Explicit output/result reads fetch reports when
-needed; waits are status-only unless output lines are explicitly requested. Starts pass
+without reaping its pane; `reap` is a separate cleanup operation. User shell job
+termination (including failure, cancellation, or loss) wakes an idle parent or
+queues at a tool-safe boundary without interrupting active tools. The bounded
+internal completion message routes the parent to `background_job action=status`
+and `action=output` to verify dependent work, then explicit `action=reap` only
+when authorized and no longer needed. No full reports or toasts are posted
+automatically. Infrastructure jobs, watcher events, and routine progress remain
+outside model context and never schedule turns. Completion receipts deduplicate
+polling and reload; terminal tool reads suppress queued or late completion wakes.
+Historical terminal routine receipts are not replayed when upgrading.
+Waits are status-only unless output lines are explicitly requested. Starts pass
 through the same Permission Gate classification as ordinary Bash. Guard-only
 AgentSH can authorize native
 starts, while full AgentSH mode fails closed until it has a dedicated
@@ -844,8 +850,9 @@ backends keep their existing execution model and never silently fall back to nat
   Reaping is never triggered by a final reply, reading a report, or hiding a UI tab.
 - Explicit resume can reuse a live idle worker; resuming a reaped task creates a
   new owned attempt from retained context after confirming the old worker ended.
-- Ordinary state updates stay outside model context, using the bounded quiet-state
-  delivery path. No routine completion notification schedules a model turn.
+- Ordinary state updates stay outside model context. Producer-confirmed background
+  completion uses the bounded quiet-state wakeup path described above; result
+  consumption and durable receipts suppress duplicate delivery.
 
 The launcher/worker protocol is Linux-only. Update the shared Nix configuration
 and start fresh Pi parents to acquire the immutable launcher environment.

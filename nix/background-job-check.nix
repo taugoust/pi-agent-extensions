@@ -45,12 +45,13 @@ pkgs.runCommand "background-job-extension-check"
     srcdir="$workdir/src"
     outdir="$workdir/out"
     mkdir -p "$srcdir/background-job" "$srcdir/shared" "$outdir/background-job" "$workdir/home" "$workdir/tmp"
-    cp ${self}/background-job/{index.ts,manager.ts,store.ts,tmux.ts,types.ts,test.mjs,runner.mjs,watch.ts,watch-runner.mjs,watch.test.mjs,external-pane.ts,pane.test.mjs,runtime-path.ts,startup.test.mjs} "$srcdir/background-job/"
+    cp ${self}/background-job/{index.ts,manager.ts,store.ts,tmux.ts,types.ts,test.mjs,runner.mjs,watch.ts,watch-runner.mjs,watch.test.mjs,external-pane.ts,pane.test.mjs,runtime-path.ts,startup.test.mjs,completion.test.mjs} "$srcdir/background-job/"
     cp ${self}/shared/agentsh-mode.ts "$srcdir/shared/agentsh-mode.ts"
     cp ${self}/shared/background-job.ts "$srcdir/shared/background-job.ts"
     cp ${self}/shared/task-presentation.ts "$srcdir/shared/task-presentation.ts"
     cp ${self}/shared/watch-menu.ts "$srcdir/shared/watch-menu.ts"
     cp ${self}/shared/quiet-state.ts "$srcdir/shared/quiet-state.ts"
+    cp ${self}/shared/quiet-state.test.ts "$srcdir/shared/quiet-state.test.ts"
     printf '%s\n' '{"type":"module"}' > "$srcdir/package.json"
 
     tsc \
@@ -66,8 +67,9 @@ pkgs.runCommand "background-job-extension-check"
       "$srcdir/background-job/store.ts" \
       "$srcdir/background-job/tmux.ts" \
       "$srcdir/background-job/types.ts" \
-      "$srcdir/shared/agentsh-mode.ts"
-    cp "$srcdir/background-job/"{test.mjs,runner.mjs,watch-runner.mjs,watch.test.mjs,pane.test.mjs,startup.test.mjs} "$outdir/background-job/"
+      "$srcdir/shared/agentsh-mode.ts" \
+      "$srcdir/shared/quiet-state.test.ts"
+    cp "$srcdir/background-job/"{test.mjs,runner.mjs,watch-runner.mjs,watch.test.mjs,pane.test.mjs,startup.test.mjs,completion.test.mjs} "$outdir/background-job/"
 
     export HOME="$workdir/home"
     export TMPDIR="$workdir/tmp"
@@ -96,6 +98,8 @@ pkgs.runCommand "background-job-extension-check"
     cat > "$outdir/node_modules/@mariozechner/pi-tui/index.js" <<'EOF'
     export class Text { constructor(text) { this.text = text; } }
     EOF
+    node "$outdir/shared/quiet-state.test.js"
+    PI_CODING_AGENT_DIR="$workdir/completion-agent" node "$outdir/background-job/completion.test.mjs"
     cat > "$workdir/contract.mjs" <<'EOF'
     process.env.PI_SUPERVISED = "1";
     const module = await import("./out/background-job/index.js");

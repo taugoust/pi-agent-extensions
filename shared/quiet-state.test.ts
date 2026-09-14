@@ -42,7 +42,8 @@ assert.ok(Buffer.byteLength(JSON.stringify(entries.find(e=>e.customType===QUIET_
 // Polling historical state after reload dedups from durable receipts, not a bounded in-memory seen set.
 await first.emit('session_shutdown',{reason:'reload'});
 const reload=fixture();const quietReload=installQuietState(reload.pi,5);await reload.emit('session_start',{reason:'reload'});
-for(let i=0;i<1000;i++)quietReload.enqueue(ctx,{kind:'job',id:`job-${i}`,state:'completed'});
+// Old producers recorded terminal jobs without completion:true. Upgrading must not replay them.
+for(let i=0;i<1000;i++)quietReload.enqueue(ctx,{kind:'job',id:`job-${i}`,state:'completed',completion:true});
 await pause(80);
 assert.equal(reload.messages.length,0,'restored routine receipts replayed into model');
 assert.equal(entries.filter(e=>e.customType===QUIET_STATE_RECEIPT_CUSTOM_TYPE).length,2000,'duplicate routine receipts appended on reload');
@@ -176,4 +177,32 @@ await many.commands.get('harness-state').handler('disable',ctx);
 assert.equal(manyQuiet.enqueue(ctx,{kind:'subagent',id:'disabled-completion',completion:true}),false);
 await pause(30);assert.equal(many.messages.length,27,'explicit disable did not suppress completion');
 await many.emit('session_shutdown',{reason:'quit'});
+// Shell completion uses the same safe delivery path, but backend-specific instructions.
+entries=[];idle=true;pending=false;sessionName=`quiet-shell-${process.pid}`;
+const shell=fixture();const shellQuiet=installQuietState(shell.pi,5);await shell.emit('session_start');
+shellQuiet.consume(ctx,'job','read-before-enqueue');
+shellQuiet.enqueue(ctx,{kind:'job',id:'read-before-enqueue',state:'completed',completion:true});
+shellQuiet.enqueue(ctx,{kind:'watch',id:'terminal-watch',state:'completed',completion:true});
+await pause(30);assert.equal(shell.messages.length,0);
+await shell.emit('ui_prompt_start');
+shellQuiet.enqueue(ctx,{kind:'job',id:'shell-ui',state:'failed',completion:true});
+await pause(30);assert.equal(shell.messages.length,0);
+await shell.emit('ui_prompt_end');await pause(30);
+assert.equal(shell.messages.length,1);
+assert.match(shell.messages[0].message.content,/background_job action=status and action=output/);
+assert.match(shell.messages[0].message.content,/reap only when authorized/);
+assert.doesNotMatch(shell.messages[0].message.content,/subagent operation=result/);
+pending=true;shellQuiet.enqueue(ctx,{kind:'job',id:'shell-pending',state:'cancelled',completion:true});
+await pause(30);assert.equal(shell.messages.length,1);
+pending=false;await pause(1100);assert.equal(shell.messages.length,2);
+await shell.emit('session_before_compact');
+shellQuiet.enqueue(ctx,{kind:'job',id:'shell-compact',state:'lost',completion:true});
+await pause(30);assert.equal(shell.messages.length,2);
+await shell.emit('session_compact');await pause(30);assert.equal(shell.messages.length,3);
+// Mixed batches retain both backend routes, never tell shell jobs to use subagent result.
+shellQuiet.enqueue(ctx,{kind:'job',id:'shell-mixed',completion:true});
+shellQuiet.enqueue(ctx,{kind:'subagent',id:'child-mixed',completion:true});
+await pause(30);assert.match(shell.messages[3].message.content,/subagent operation=result/);
+assert.match(shell.messages[3].message.content,/background_job action=status/);
+await shell.emit('session_shutdown',{reason:'quit'});
 console.log('quiet-state remediation tests passed');
