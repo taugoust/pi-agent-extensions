@@ -188,7 +188,12 @@ export default function rootTest(pi: ExtensionAPI) {
     const parentSession = await readFile(ctx.sessionManager.getSessionFile()!, "utf8");
     assert.doesNotMatch(parentSession, /tui-subagent-update/);
     const entries = parentSession.split("\n").filter(Boolean).map(line => JSON.parse(line));
-    assert.equal(entries.filter(entry => entry.type === "custom_message" && entry.customType === "harness-state").length, 0);
+    const notifications = entries.filter(entry => entry.type === "custom_message" && entry.customType === "harness-state");
+    assert.ok(notifications.length > 0, "background completion must notify the parent");
+    assert.ok(notifications.every(entry => Array.isArray(entry.details?.updates)
+      && entry.details.updates.length > 0
+      && entry.details.updates.every((update: any) => update.kind === "subagent" && update.completion === true)),
+      "routine child updates must remain quiet");
     assert.ok(entries.some(entry => entry.type === "custom" && entry.customType === "harness-state-receipt"));
     return { rootTool: true, guard: Boolean(gate), survivorPid: saved.childPid, parallel: parallel.details.job_id, chain: chain.details.job_id, resume: resumed.details.job_id };
   });
