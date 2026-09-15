@@ -1,18 +1,18 @@
 import { randomBytes } from "node:crypto";
-import type { JobPlacement } from '../shared/background-job.js';
+import type { JobPlacement } from '../shared/background-job.ts';
 import { constants, writeFileSync } from "node:fs";
 import { access, lstat, open, readFile, realpath, writeFile } from "node:fs/promises";
 import { delimiter, isAbsolute, join, relative } from "node:path";
-import { processStartToken, type JobProcessBackend } from "./tmux.js";
-import { JobStore } from "./store.js";
-import { inspectPane, capturePane, claimPane, cancelPane, reapPane, signalPane, requireSamePane, requireAvailablePane, PaneGoneError } from './external-pane.js';
+import { processStartToken, type JobProcessBackend } from "./tmux.ts";
+import { JobStore } from "./store.ts";
+import { inspectPane, capturePane, claimPane, cancelPane, reapPane, signalPane, requireSamePane, requireAvailablePane, PaneGoneError } from './external-pane.ts';
 import {
   JOB_SCHEMA_VERSION,
   type JobMetadata,
   type JobRecord,
   type JobResult,
   type OutputSnapshot,
-} from "./types.js";
+} from "./types.ts";
 
 const MAX_COMMAND_BYTES = 32 * 1024;
 const MAX_ENVIRONMENT_BYTES = 1024 * 1024;

@@ -1,9 +1,9 @@
 import { randomBytes, createHash } from 'node:crypto';
 import { mkdir, realpath, stat, readdir, writeFile, readFile } from 'node:fs/promises';
 import { join, relative, isAbsolute, basename } from 'node:path';
-import { pinRuntimePath } from './runtime-path.js';
-import { JobStore } from './store.js';
-import { BackgroundJobManager, resolveExecutable } from './manager.js';
+import { pinRuntimePath } from './runtime-path.ts';
+import { JobStore } from './store.ts';
+import { BackgroundJobManager, resolveExecutable } from './manager.ts';
 import { readWatch, saveWatch } from './watch-runner.mjs';
 
 export type WatchRequest={log_path?:string;patterns:Array<{name:string;match:string}>;from?:'start'|'end';poll_ms?:number;watch_timeout_ms?:number;job_id?:string};

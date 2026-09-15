@@ -170,6 +170,9 @@ extensions have stopped.
 - **Wait limit**: `timeout_ms` accepts up to `43200000` (12 hours). Wait returns
   early on completion; cancelling a wait does not cancel the job. Inspect output
   before claiming dependent work complete.
+- **Reload safety**: source imports in this extension use explicit `.ts` paths so
+  Pi reload picks up changed Nix installation symlinks rather than stale `.js`
+  resolution. After activation, reload each affected live session separately.
 - **Command**: `/background-jobs`
 - **Dependencies**: tmux and Node.js (installed by the Home Manager module)
 

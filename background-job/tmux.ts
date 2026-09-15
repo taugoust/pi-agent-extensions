@@ -2,11 +2,11 @@ import { execFile } from "node:child_process";
 import { lstat, realpath, rm } from "node:fs/promises";
 import { randomBytes } from "node:crypto";
 import { constants } from "node:fs";
-import { validateRuntimePath } from "./runtime-path.js";
-import type { JobPlacement } from "../shared/background-job.js";
+import { validateRuntimePath } from "./runtime-path.ts";
+import type { JobPlacement } from "../shared/background-job.ts";
 import { promisify } from "node:util";
-import type { JobLaunch } from "./types.js";
-import type { JobStore } from "./store.js";
+import type { JobLaunch } from "./types.ts";
+import type { JobStore } from "./store.ts";
 
 const execFileAsync = promisify(execFile);
 const TMUX_TIMEOUT_MS = 5_000;

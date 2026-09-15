@@ -66,6 +66,7 @@ pkgs.runCommand "subagent-check"
     grep -A4 'function isFailure' ${self}/subagent/index.ts | grep -Fq 'result.exitCode !== -1'
 
     tsc \
+      --rewriteRelativeImportExtensions \
       --noCheck \
       --skipLibCheck \
       --module nodenext \
@@ -127,6 +128,7 @@ pkgs.runCommand "subagent-check"
     cp -R ${self}/subagent ${self}/shared ${self}/permission-gate ${self}/background-job "$workdir/tui-runtime/"
     chmod -R u+rwX "$workdir/tui-runtime"
     ${pkgs.lib.optionalString (piPackage != null) ''
+      PI_BIN=${pkgs.lib.getExe piPackage} ${pkgs.python3}/bin/python3 ${self}/background-job/reload.test.py
       export PI_TUI_TEST_PI=${pkgs.lib.getExe piPackage}
       export PI_TUI_ROOT_LAUNCHER=${
         if tuiWorkerLauncher != null then pkgs.lib.getExe tuiWorkerLauncher else pkgs.lib.getExe piPackage

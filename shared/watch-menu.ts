@@ -1,4 +1,4 @@
-import { taskChoice, uiText, watchResultText } from './task-presentation.js';
+import { taskChoice, uiText, watchResultText } from './task-presentation.ts';
 
 export async function watchMenu(ctx:any, execute:(params:any)=>Promise<any>, show:(title:string,body:string)=>Promise<void>):Promise<void>{
   for(;;){

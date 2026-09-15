@@ -1,5 +1,5 @@
 import { constants } from "node:fs";
-import { validatePaneIdentity } from './external-pane.js';
+import { validatePaneIdentity } from './external-pane.ts';
 import {
   access,
   link,
@@ -21,7 +21,7 @@ import {
   type JobMetadata,
   type JobProcess,
   type JobResult,
-} from "./types.js";
+} from "./types.ts";
 
 const MAX_JSON_BYTES = 128 * 1024;
 const LOCK_STALE_MS = 30_000;

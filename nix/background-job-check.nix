@@ -55,6 +55,7 @@ pkgs.runCommand "background-job-extension-check"
     printf '%s\n' '{"type":"module"}' > "$srcdir/package.json"
 
     tsc \
+      --rewriteRelativeImportExtensions \
       --noCheck \
       --skipLibCheck \
       --module nodenext \

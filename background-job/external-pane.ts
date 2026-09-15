@@ -3,7 +3,7 @@ import { createHash } from 'node:crypto';
 import { promisify } from 'node:util';
 import { lstat, realpath } from 'node:fs/promises';
 import { isAbsolute } from 'node:path';
-import { processStartToken, stripTmuxExitFooter } from './tmux.js';
+import { processStartToken, stripTmuxExitFooter } from './tmux.ts';
 const exec=promisify(execFile);
 export type PaneIdentity={socket:string;sessionId?:string;windowId?:string;serverPid:number;serverToken:string;paneId:string;panePid:number;paneToken?:string;created:string;controlToken?:string};
 export type PaneObservation={identity:PaneIdentity;dead:boolean;exitCode?:number;cwd:string;owner?:string;piPid?:number};

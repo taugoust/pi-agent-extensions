@@ -1,4 +1,4 @@
-import type { PaneIdentity } from './external-pane.js';
+import type { PaneIdentity } from './external-pane.ts';
 
 export const JOB_SCHEMA_VERSION = 1 as const;
 export const JOB_ID_PATTERN = /^job-[0-9a-f]{24}$/;
