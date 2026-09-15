@@ -39,7 +39,7 @@ export const JobParameters = Type.Object({
   command: Type.Optional(Type.String({ description: "Shell command for start." })),
   name: Type.Optional(Type.String({ maxLength: 80 })),
   job_id: Type.Optional(Type.String({ pattern: "^job-[0-9a-f]{24}$" })),
-  timeout_ms: Type.Optional(Type.Integer({ minimum: 0, maximum: 30000 })),
+  timeout_ms: Type.Optional(Type.Integer({ minimum: 0, maximum: 43_200_000, description: "Maximum wait in milliseconds (up to 12 hours); returns early when the job finishes." })),
   lines: Type.Optional(Type.Integer({ minimum: 1, maximum: 2000 })),
   limit: Type.Optional(Type.Integer({ minimum: 1, maximum: 50 })),
   signal: Type.Optional(Type.String({ pattern: "^(SIGINT|SIGTERM)$" })),
@@ -64,7 +64,7 @@ export function validateJobParams(p: JobParams): void {
   };
   if (!allowed[p.action]) throw new Error("Unknown background job action");
   for (const k of Object.keys(p)) if (k!=="action" && !allowed[p.action].includes(k)) throw new Error(`${p.action} does not accept ${k}`);
-  for (const [k,min,max] of [["timeout_ms",0,30000],["lines",1,2000],["limit",1,50],["pid",1,Number.MAX_SAFE_INTEGER]] as const) {
+  for (const [k,min,max] of [["timeout_ms",0,43_200_000],["lines",1,2000],["limit",1,50],["pid",1,Number.MAX_SAFE_INTEGER]] as const) {
     if (p[k]!==undefined && (!Number.isSafeInteger(p[k]) || p[k]!<min || p[k]!>max)) throw new Error(`Invalid ${k}`);
   }
   if (["status","output","wait","signal","cancel","reap"].includes(p.action) && !/^job-[0-9a-f]{24}$/.test(p.job_id??"")) throw new Error("A valid job_id is required");

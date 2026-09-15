@@ -20,7 +20,7 @@ const MAX_OUTPUT_BYTES = 50 * 1024;
 const MAX_OUTPUT_LINES = 2000;
 const MAX_RUNNING = 64;
 const MAX_RUNNING_PER_CWD = 32;
-const MAX_WAIT_MS = 30_000;
+const MAX_WAIT_MS = 12 * 60 * 60 * 1000;
 const STARTING_GRACE_MS = 30_000;
 
 export type StartRequest = {

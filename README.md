@@ -167,6 +167,9 @@ extensions have stopped.
 - **Source**: `background-job/`
 - **Tool**: `background_job` with `start`, `list`, `status`, `output`, bounded
   `wait`, `signal`, `cancel`, and explicit `reap`
+- **Wait limit**: `timeout_ms` accepts up to `43200000` (12 hours). Wait returns
+  early on completion; cancelling a wait does not cancel the job. Inspect output
+  before claiming dependent work complete.
 - **Command**: `/background-jobs`
 - **Dependencies**: tmux and Node.js (installed by the Home Manager module)
 

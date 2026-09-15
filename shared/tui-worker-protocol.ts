@@ -73,7 +73,7 @@ export function parseTuiWorkerJobParams(value: unknown): TuiWorkerJobParams {
   exactKeys(data, ["action", ...required, ...optional.filter(key => Object.hasOwn(data, key))]);
   if (data.job_id !== undefined) text(data.job_id, 64, /^job-[a-f0-9]{24}$/);
   if (data.watch_id !== undefined) text(data.watch_id, 64, /^watch-[a-f0-9]{24}$/);
-  for (const [key, min, max] of [["limit", 1, 50], ["lines", 1, 2000], ["timeout_ms", 0, 30000], ["after_sequence", 0, Number.MAX_SAFE_INTEGER], ["through_sequence", 0, Number.MAX_SAFE_INTEGER]] as const) {
+  for (const [key, min, max] of [["limit", 1, 50], ["lines", 1, 2000], ["timeout_ms", 0, 43_200_000], ["after_sequence", 0, Number.MAX_SAFE_INTEGER], ["through_sequence", 0, Number.MAX_SAFE_INTEGER]] as const) {
     if (data[key] !== undefined && integer(data[key], min) > max) throw new Error(`Invalid ${key}`);
   }
   return { ...data } as TuiWorkerJobParams;

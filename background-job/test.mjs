@@ -156,13 +156,14 @@ try {
   const controller = new AbortController();
   controller.abort();
   let aborted = false;
-  try { await manager.wait(first.metadata.id, 1000, controller.signal); }
+  try { await manager.wait(first.metadata.id, 43_200_000, controller.signal); }
   catch (error) { aborted = error?.name === "AbortError" && String(error.message).includes("still running"); }
   assert(aborted, "aborted wait did not report that the job remains running");
 
   const reloadedStore = new JobStore(stateRoot, runtimeRoot);
   const reloaded = new BackgroundJobManager(reloadedStore, new TmuxBackend(reloadedStore, tmux, process.execPath, runner));
-  const finished = await reloaded.wait(first.metadata.id, 5000);
+  await assertReject(reloaded.wait(first.metadata.id, 43_200_001), /Wait timeout/);
+  const finished = await reloaded.wait(first.metadata.id, 43_200_000);
   assert(!finished.timedOut && finished.record.status === "completed" && finished.record.result?.exitCode === 0, "reloaded manager did not recover completed job");
   const output = await reloaded.output(first.metadata.id);
   assert(output.text.includes(`cwd=${root}`) && output.text.includes("env=exact value with spaces") && output.text.includes("done"), "job output/cwd/environment was not preserved");

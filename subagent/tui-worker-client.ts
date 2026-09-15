@@ -19,7 +19,7 @@ export async function callTuiWorker(manifest: TuiWorkerManifest, operation: TuiW
 export async function exchangeTuiWorker(socketPath: string, request: { requestId: string }, workerEpoch: string,
   options: { timeoutMs?: number; signal?: AbortSignal } = {}): Promise<TuiWorkerResponse> {
   const timeoutMs = options.timeoutMs ?? 10_000;
-  if (!Number.isSafeInteger(timeoutMs) || timeoutMs < 1 || timeoutMs > 30_000) throw new Error("Invalid worker timeout");
+  if (!Number.isSafeInteger(timeoutMs) || timeoutMs < 1 || timeoutMs > 12 * 60 * 60 * 1000 + 5000) throw new Error("Invalid worker timeout");
   if (options.signal?.aborted) throw options.signal.reason ?? new Error("Worker observation cancelled");
   const frame = `${JSON.stringify(request)}\n`;
   if (Buffer.byteLength(frame) > TUI_WORKER_MAX_FRAME_BYTES) throw new Error("Worker request is oversized");
