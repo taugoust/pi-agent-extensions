@@ -14,6 +14,8 @@ import { TuiNativeManager } from "./tui-native.ts";
 import type { Message } from "@mariozechner/pi-ai";
 import type { AgentToolResult, ExtensionAPI } from "@mariozechner/pi-coding-agent";
 import { getAgentDir, getMarkdownTheme } from "@mariozechner/pi-coding-agent";
+import { readSubagentModelSettings, resolveSubagentModel } from "./config.js";
+
 import { Container, Markdown, Spacer, Text } from "@mariozechner/pi-tui";
 import { Type } from "@sinclair/typebox";
 import {
@@ -86,7 +88,9 @@ const MAX_PARALLEL_TASKS = 8;
 const MAX_CONCURRENCY = 4;
 const COLLAPSED_ITEM_COUNT = 10;
 const MAX_TEXT_PREVIEW_BYTES = 50 * 1024;
-const CONFIG_FILES = ["settings.json", "models.json", "auth.json", "oauth.json", "AGENTS.md"];
+const subagentModelSettings = readSubagentModelSettings(getAgentDir());
+const defaultSubagentModel = resolveSubagentModel(undefined, subagentModelSettings);
+const CONFIG_FILES = ["settings.json", "subagent.json", "models.json", "auth.json", "oauth.json", "AGENTS.md"];
 // Resolve once before the model can mutate replaceable Home Manager symlinks.
 const LOADED_SUBAGENT_MODULE_PATH = fs.realpathSync(fileURLToPath(import.meta.url));
 const INTERNAL_MANAGED_EXECUTION = Symbol("subagent-internal-managed-execution");
@@ -1554,7 +1558,7 @@ const SubagentItem = Type.Object({
   acceptance: Type.Optional(Type.Array(Type.String({maxLength:500}), {maxItems:16, description:"Acceptance criteria for the structured task outcome."})),
   task: Type.String({ description: "Task to delegate to this dynamic subagent" }),
   systemPrompt: Type.Optional(Type.String({ description: "Optional additional system prompt for this subagent" })),
-  model: Type.Optional(Type.String({ description: "Model override, optionally provider/id:thinking. Default: openai-codex/gpt-6-astra:low." })),
+  model: Type.Optional(Type.String({ description: `Model override, optionally provider/id:thinking. Default: ${defaultSubagentModel}.` })),
   tools: Type.Optional(Type.Array(Type.String(), { description: "Optional tool allowlist, e.g. ['read','grep','find','ls']" })),
   cwd: Type.Optional(Type.String({ description: "Optional working directory for this subagent process" })),
 });
@@ -1582,7 +1586,7 @@ function subagentParams() {
   child: Type.Optional(Type.Integer({ minimum: 1, maximum: 8, description: "One-based child report number for parallel or chain results." })),
   task: Type.Optional(Type.String({ description: "Task to delegate (single mode)" })),
   systemPrompt: Type.Optional(Type.String({ description: "Optional additional system prompt (single mode)" })),
-  model: Type.Optional(Type.String({ description: "Model override (single mode), optionally provider/id:thinking. Default: openai-codex/gpt-6-astra:low." })),
+  model: Type.Optional(Type.String({ description: `Model override (single mode), optionally provider/id:thinking. Default: ${defaultSubagentModel}.` })),
   tools: Type.Optional(Type.Array(Type.String(), { description: "Optional tool allowlist (single mode)" })),
   cwd: Type.Optional(Type.String({ description: "Optional working directory (single mode)" })),
   tasks: Type.Optional(Type.Array(SubagentItem, { maxItems: MAX_PARALLEL_TASKS, description: "Parallel subagent tasks. Max 8, up to 4 run concurrently." })),
@@ -2340,8 +2344,7 @@ export default function (pi: ExtensionAPI) {
       // Set launch defaults before routing to either backend. Explicit model
       // selections (including Pi's :thinking suffix) remain authoritative.
       const withDefaultModel = (spec: any) => {
-        const model = spec.model ?? "openai-codex/gpt-6-astra";
-        return { ...spec, model: /:(off|minimal|low|medium|high|xhigh|max)$/.test(model) ? model : `${model}:low` };
+        return { ...spec, model: resolveSubagentModel(spec.model, subagentModelSettings) };
       };
       if (!params.action) {
         if (Array.isArray(params.tasks)) params = { ...params, tasks: params.tasks.map(withDefaultModel) };

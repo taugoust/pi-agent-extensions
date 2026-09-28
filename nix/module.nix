@@ -51,7 +51,32 @@ in
       };
 
       sandbox.enable = lib.mkEnableOption "sandbox extension — AgentSH supervisor backend; also installs the adaptive subagent and its child finalizer";
-      subagent.enable = lib.mkEnableOption "adaptive subagent extension — native child Pi or AgentSH backend; also installs its child finalizer";
+      subagent = {
+        enable = lib.mkEnableOption "adaptive subagent extension — native child Pi or AgentSH backend; also installs its child finalizer";
+        defaultProvider = lib.mkOption {
+          type = lib.types.str;
+          default = "openai-codex";
+          description = "Default provider for new subagents, independent of the main agent.";
+        };
+        defaultModel = lib.mkOption {
+          type = lib.types.str;
+          default = "gpt-6-astra";
+          description = "Default model ID for new subagents. Explicit task models take precedence.";
+        };
+        defaultThinkingLevel = lib.mkOption {
+          type = lib.types.enum [
+            "off"
+            "minimal"
+            "low"
+            "medium"
+            "high"
+            "xhigh"
+            "max"
+          ];
+          default = "low";
+          description = "Subagent thinking level unless the task model includes a thinking suffix.";
+        };
+      };
       subagent-finalizer.enable = lib.mkEnableOption "standalone subagent-finalizer extension — automatically included with sandbox or subagent";
       mcp-adapter.enable = lib.mkEnableOption "pi-mcp-adapter extension — MCP proxy/direct-tools integration";
     };
@@ -187,6 +212,10 @@ in
       })
 
       (lib.mkIf (cfg.extensions.sandbox.enable || cfg.extensions.subagent.enable) {
+        ".pi/agent/subagent.json".text = builtins.toJSON {
+          inherit (cfg.extensions.subagent) defaultProvider defaultModel defaultThinkingLevel;
+        };
+        "${extDir}/subagent/config.ts".source = "${self}/subagent/config.ts";
         "${extDir}/subagent/index.ts".source = "${self}/subagent/index.ts";
         "${extDir}/subagent/backend.ts".source = "${self}/subagent/backend.ts";
         "${extDir}/subagent/background.ts".source = "${self}/subagent/background.ts";

@@ -149,7 +149,9 @@ export class TuiWorkerTmux {
     const manifestPath = store.path("manifest.json");
     const extension = input.workerExtension ?? fileURLToPath(new URL("./tui-worker-extension.ts", import.meta.url));
     const argv = [launcher, "--session", sessionFile, "--extension", extension];
-    argv.push("--model", input.model ?? "openai-codex/gpt-6-astra:low");
+    // New tasks arrive with their configured model resolved by the router.
+    // Legacy resumes without a recorded model must retain Pi's session choice.
+    if (input.model) argv.push("--model", input.model);
     if (input.systemPrompt) {
       const promptPath = store.path("system-prompt.txt");
       await writeFile(promptPath, input.systemPrompt, { flag: "wx", mode: 0o600 });

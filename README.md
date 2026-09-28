@@ -762,9 +762,24 @@ receipt routing is not an acknowledgement for job-retention purposes.
 Existing workers acquire the tool only on a new launch/resume; AgentSH-backed
 workers do not yet expose this native notification channel.
 
-New subagents default to `openai-codex/gpt-6-astra` with **low** thinking across
-single, parallel, and chain launches on both backends. An explicit `model` changes
-the model; append `:medium`, `:high`, etc. to override thinking as well.
+New subagents read `subagent.json` in Pi's agent directory (`~/.pi/agent`, or
+`PI_CODING_AGENT_DIR`), independently of the main agent's `settings.json`:
+
+```json
+{
+  "defaultProvider": "openai-codex",
+  "defaultModel": "gpt-6-luna",
+  "defaultThinkingLevel": "low"
+}
+```
+
+Home Manager exposes the same three fields under
+`programs.pi.extensions.subagent`. They apply to single, parallel, and chain
+launches on both backends, including nested children. An explicit task `model`
+takes precedence; append `:medium`, `:high`, etc. to override thinking as well.
+Unconfigured fields retain the historical Astra/low defaults. Invalid configuration
+is reported rather than silently ignored. Restart Pi or `/reload` after changes;
+existing/resumed children retain their recorded model.
 
 Background launches support single, parallel, and chain requests through both
 adaptive backends, with up to sixteen aggregate invocations active at once.
