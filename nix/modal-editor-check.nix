@@ -30,7 +30,14 @@ pkgs.runCommand "modal-editor-check"
     EOF
 
     cat > "$outdir/node_modules/@mariozechner/pi-coding-agent/index.js" <<'EOF'
-    export class CustomEditor {}
+    export class CustomEditor {
+      constructor(tui) { this.tui = tui; }
+      getPaddingX() { return 0; }
+      getCursor() { return { line: 0, col: 0 }; }
+      getLines() { return [this.tui.text ?? ""]; }
+      handleInput() {}
+      render() { return [...this.tui.renderLines]; }
+    }
     export function copyToClipboard() {}
     EOF
 
@@ -43,9 +50,12 @@ pkgs.runCommand "modal-editor-check"
     EOF
 
     cat > "$outdir/node_modules/@mariozechner/pi-tui/index.js" <<'EOF'
-    export function matchesKey() { return false; }
-    export function truncateToWidth(value) { return String(value); }
-    export function visibleWidth(value) { return [...String(value)].length; }
+    export const CURSOR_MARKER = "\x1b_pi:c\x07";
+    export function matchesKey(data, key) { return key === "escape" && data === "\x1b"; }
+    export function truncateToWidth(value, width) { return String(value).slice(0, width); }
+    export function visibleWidth(value) {
+      return [...String(value).replaceAll(CURSOR_MARKER, "").replace(/\x1b\[[0-9;]*m/g, "")].length;
+    }
     EOF
 
     tsc \
@@ -169,6 +179,95 @@ pkgs.runCommand "modal-editor-check"
     assert.deepEqual(writes, [], "non-interactive session wrote terminal control bytes to stdout");
     for (const [event, count] of listenerCounts) {
       assert.equal(process.listenerCount(event), count, `non-interactive session registered a ''${event} listener`);
+    }
+    EOF
+
+    cat >> "$workdir/test.mjs" <<'EOF'
+
+    // Model Pi 0.85.0 Editor.render's cursor contract: the marker immediately
+    // precedes an inverse-video grapheme (or a space at EOL).
+    const marker = "\x1b_pi:c\x07";
+    const reverse = (text) => "\x1b[7m" + text + "\x1b[0m";
+    let hardwareCursor = true;
+    const tui = {
+      getShowHardwareCursor: () => hardwareCursor,
+      renderLines: [],
+      text: "",
+    };
+    let editor;
+    const previousListeners = new Map(
+      ["exit", "SIGINT", "SIGTERM"].map((event) => [event, process.listeners(event)]),
+    );
+    const cursorWrites = [];
+    process.stdout.write = function (chunk) {
+      cursorWrites.push(String(chunk));
+      return true;
+    };
+    try {
+      await sessionHandlers[0]({}, {
+        hasUI: true,
+        ui: { setEditorComponent(factory) { editor = factory(tui, {}, {}); } },
+      });
+      // Let startup cursor capture finish so it cannot race the mode assertions.
+      await new Promise((resolve) => setTimeout(resolve, 200));
+      assert.ok(editor, "interactive session did not configure an editor");
+
+      const setFixture = (grapheme, focused = true) => {
+        tui.text = grapheme.trim();
+        tui.renderLines = ["-".repeat(40),
+          (focused ? marker : "") + reverse(grapheme) + " tail",
+          "-".repeat(40)];
+      };
+      const assertCursor = (grapheme, mode) => {
+        setFixture(grapheme);
+        const lines = editor.render(40);
+        assert.equal(lines[1], marker + (hardwareCursor ? grapheme : reverse(grapheme)) + " tail",
+          mode + ": wrong cursor owner");
+        assert.ok(lines.at(-1).includes(mode), "wrong mode label");
+      };
+      for (const enabled of [true, false]) {
+        hardwareCursor = enabled;
+        for (const grapheme of ["a", " ", "界", "e\u0301", "👩‍💻"]) {
+          assertCursor(grapheme, "INSERT");
+          editor.handleInput("\x1b");
+          assert.equal(cursorWrites.at(-1), "\x1b[2 q", "normal did not select hardware block");
+          assertCursor(grapheme, "NORMAL");
+          editor.handleInput("i");
+          assert.equal(cursorWrites.at(-1), "\x1b[6 q", "insert did not select hardware bar");
+        }
+      }
+
+      hardwareCursor = true;
+      setFixture("a", false);
+      assert.equal(editor.render(40)[1], reverse("a") + " tail", "unfocused output was modified");
+      setFixture("a");
+      tui.renderLines[1] = reverse("other") + tui.renderLines[1] + reverse("more");
+      tui.renderLines.splice(2, 0, reverse("autocomplete"));
+      const unrelated = editor.render(40);
+      assert.equal(unrelated[1], reverse("other") + marker + "a tail" + reverse("more"),
+        "stripped unrelated reverse video or lost cursor marker");
+      assert.equal(unrelated[2], reverse("autocomplete"), "modified autocomplete selection");
+
+      // Visual selection still owns its highlighting; remove only the base
+      // editor cursor before applying that selection in either visual mode.
+      for (const key of ["v", "V"]) {
+        setFixture("a");
+        editor.handleInput("\x1b");
+        editor.handleInput(key);
+        const lines = editor.render(40);
+        assert.ok(lines[1].includes(marker), "visual mode lost cursor marker");
+        assert.ok(lines[1].includes("\x1b[7m"), "visual selection highlight disappeared");
+        editor.handleInput("\x1b");
+        assertCursor("a", "NORMAL");
+        editor.handleInput("i");
+      }
+    } finally {
+      for (const [event, previous] of previousListeners) {
+        for (const listener of process.listeners(event)) {
+          if (!previous.includes(listener)) process.removeListener(event, listener);
+        }
+      }
+      process.stdout.write = originalWrite;
     }
     EOF
 

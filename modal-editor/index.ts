@@ -20,7 +20,7 @@
 import { execFileSync } from "child_process";
 import { platform } from "os";
 import { copyToClipboard, CustomEditor, type ExtensionAPI } from "@mariozechner/pi-coding-agent";
-import { matchesKey, truncateToWidth, visibleWidth } from "@mariozechner/pi-tui";
+import { CURSOR_MARKER, matchesKey, truncateToWidth, visibleWidth } from "@mariozechner/pi-tui";
 
 // ---------------------------------------------------------------------------
 // Word-wrap helper (mirrors Editor's internal wordWrapLine, inlined for
@@ -1776,18 +1776,20 @@ class ModalEditor extends CustomEditor {
 
 		const rendered = super.render(width);
 
-		// In INSERT mode, strip the fake block cursor (\x1b[7m...\x1b[0m) that
-		// the editor always renders. The hardware cursor (a line/bar via DECSCUSR)
-		// will show at the CURSOR_MARKER position instead, giving a visual line
-		// cursor. In NORMAL/VISUAL mode we keep the fake block as-is.
-		if (this.mode === "insert") {
+		// Use one cursor renderer: DECSCUSR supplies the hardware bar/block in
+		// every mode. Keeping the software block underneath a hardware block can
+		// cancel its contrast. If hardware cursors are disabled, keep the software
+		// cursor as a fallback, including in INSERT mode.
+		if (this.tui.getShowHardwareCursor()) {
 			for (let i = 0; i < rendered.length; i++) {
 				const line = rendered[i]!;
-				if (line.includes("\x1b[7m")) {
-					// Replace the fake cursor (reverse-video char + reset) with just the char.
-					// Pattern: CURSOR_MARKER? + \x1b[7m + <char(s)> + \x1b[0m
-					rendered[i] = line.replace(/\x1b\[7m([\s\S]*?)\x1b\[0m/, "$1");
-				}
+				const markerIndex = line.indexOf(CURSOR_MARKER);
+				if (markerIndex === -1) continue;
+				const cursorStart = markerIndex + CURSOR_MARKER.length;
+				// Anchor to the focused cursor, not unrelated reverse-video content.
+				// Preserve the marker for TUI positioning and the entire grapheme.
+				rendered[i] = line.slice(0, cursorStart)
+					+ line.slice(cursorStart).replace(/^\x1b\[7m([\s\S]*?)\x1b\[0m/, "$1");
 			}
 		}
 
