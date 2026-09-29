@@ -2,7 +2,7 @@
 
 ## Status
 
-Implemented; final integration validation and deployment pending.
+Implemented and validated; deployment and live Paseo visual confirmation pending.
 
 ## Contract
 
@@ -14,4 +14,4 @@ The first version lists up to 50 direct session-owned items. Unsupported non-nat
 
 ## Tests
 
-Regression coverage includes foreign-owner filtering, no initialization, no result/notification writes, stale service calls, retained task/report filtering, private artifact fields, and UTF-8 boundaries. The bridge/plugin consumer is maintained in `paseo-bridge-pi`; deployment remains a separate operation.
+Regression coverage includes foreign-owner filtering, no initialization, no result/notification writes, stale service calls, retained task/report filtering, private artifact fields, and UTF-8 boundaries. After rebasing onto the current XDG-state fixes, both Nix background-job and subagent checks passed, including 38/38 native TUI tests and the same-process reload regression. The bridge/plugin consumer is maintained in `paseo-bridge-pi`; deployment remains a separate operation.
