@@ -37,6 +37,11 @@ test("direct human turn clears old outcome; aborted assistant cancels chain inst
     assert.equal(durableWrites, 1, "first observation must persist the group");
     await manager.refresh("parent");
     assert.equal(durableWrites, 1, "unchanged refresh rewrote durable state");
+    const restored = new TuiNativeManager(root, () => "native", () => true, 16) as any;
+    restored.persistenceWriter = (file: string, value: unknown) => { durableWrites++; atomicPrivateJson(file, value); };
+    await restored.refresh("parent");
+    assert.equal(durableWrites, 1, "unchanged reload rewrote durable state");
+    await restored.shutdown(false);
     child.report = "transition";
     await manager.refresh("parent");
     assert.equal(durableWrites, 2, "changed transition was not persisted");
