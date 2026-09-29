@@ -10,4 +10,4 @@ Native TUI subagent state defaults to `~/.local/state/pi-tui` instead of honorin
 
 ## Resolution
 
-Implemented in the native state-root and persistence changes; verified by the focused Linux subagent Nix check.
+Fixed by commit `4aa5d7f`.
