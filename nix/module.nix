@@ -216,6 +216,7 @@ in
           inherit (cfg.extensions.subagent) defaultProvider defaultModel defaultThinkingLevel;
         };
         "${extDir}/subagent/config.ts".source = "${self}/subagent/config.ts";
+        "${extDir}/subagent/state-root.ts".source = "${self}/subagent/state-root.ts";
         "${extDir}/subagent/index.ts".source = "${self}/subagent/index.ts";
         "${extDir}/subagent/backend.ts".source = "${self}/subagent/backend.ts";
         "${extDir}/subagent/background.ts".source = "${self}/subagent/background.ts";
