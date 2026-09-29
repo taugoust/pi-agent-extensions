@@ -11,6 +11,7 @@ import * as os from "node:os";
 import * as path from "node:path";
 import { fileURLToPath } from "node:url";
 import { TuiNativeManager } from "./tui-native.ts";
+import { nativeTuiStateRoot } from "./state-root.ts";
 import type { Message } from "@mariozechner/pi-ai";
 import type { AgentToolResult, ExtensionAPI } from "@mariozechner/pi-coding-agent";
 import { getAgentDir, getMarkdownTheme } from "@mariozechner/pi-coding-agent";
@@ -1613,7 +1614,7 @@ export default function (pi: ExtensionAPI) {
   const nativeTui = (ctx: any) => {
     if (process.platform !== "linux") return undefined;
     if (!tuiNative) {
-      tuiNative = new TuiNativeManager(process.env.PI_TUI_WORKER_STATE_ROOT ?? path.join(os.homedir(), ".local", "state", "pi-tui"),
+      tuiNative = new TuiNativeManager(nativeTuiStateRoot(process.env, os.homedir()),
         nativeDisposition,
         () => {
           try { return nativeDisposition() === "native" || currentSubagentPermissionAuthority()?.active === true; }

@@ -3,7 +3,7 @@ import { test } from "node:test";
 import { mkdtemp, rm } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { TuiWorkerStore } from "./tui-worker-store.ts";
+import { TuiWorkerStore, atomicPrivateJson } from "./tui-worker-store.ts";
 import { TuiWorkerServer } from "./tui-worker-server.ts";
 import { TuiNativeManager } from "./tui-native.ts";
 
@@ -30,6 +30,16 @@ test("direct human turn clears old outcome; aborted assistant cancels chain inst
   manager.tmux.launch = async () => { launches++; throw new Error("Must not advance"); };
   manager.groups.set(group.id, group);
   try {
+    const groupFile = join(root, "groups", `${group.id}.json`);
+    let durableWrites = 0;
+    manager.persistenceWriter = (file: string, value: unknown) => { durableWrites++; atomicPrivateJson(file, value); };
+    await manager.refresh("parent");
+    assert.equal(durableWrites, 1, "first observation must persist the group");
+    await manager.refresh("parent");
+    assert.equal(durableWrites, 1, "unchanged refresh rewrote durable state");
+    child.report = "transition";
+    await manager.refresh("parent");
+    assert.equal(durableWrites, 2, "changed transition was not persisted");
     await server.start(); server.running(true);
     server.outcome({ state: "delivered" });
     await manager.refresh('parent');

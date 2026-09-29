@@ -34,6 +34,8 @@ export class TuiNativeManager {
   readonly root: string;
   readonly tmux = new TuiWorkerTmux();
   private groups = new Map<string, Group>();
+  private savedGroups = new Map<string, string>();
+  private persistenceWriter = atomicPrivateJson;
   private queue: Promise<unknown> = Promise.resolve();
   private modeQueue: Promise<unknown> = Promise.resolve();
   private timer?: ReturnType<typeof setInterval>;
@@ -61,6 +63,7 @@ export class TuiNativeManager {
       if (!/^subagent-job-[a-f0-9]{24}\.json$/.test(name)) continue;
       try {
         const g = readPrivateJson(join(this.root, "groups", name)) as Group;
+        const persistedGroup = JSON.stringify(g);
         if (g.version !== 1 || `${g.id}.json` !== name || typeof g.owner !== "string" || !Array.isArray(g.children) || g.children.length > 8) continue;
         if (g.children.some(c => !/^subagent-child-[a-f0-9]{24}$/.test(c.childId) || !/^subagent-task-[a-f0-9]{24}$/.test(c.taskId)
           || !/^[a-f0-9]{64}$/.test(c.operatorCapability) || !c.directory.startsWith(`${join(this.root, "workers")}/`))) continue;
@@ -68,12 +71,21 @@ export class TuiNativeManager {
         // Baseline them instead of replaying historical completions on upgrade.
         for (const c of g.children) if (c.terminalNotification === undefined) c.terminalNotification = active(c) ? '' : terminalToken(c);
         this.groups.set(g.id, g);
+        // Seed the persistence baseline from disk so constructor normalization is
+        // durable only when it actually changed the record.
+        this.savedGroups.set(g.id, persistedGroup);
       } catch { /* Invalid records never authorize launch/control/deletion. */ }
     }
   }
   private disposition: () => Disposition;
   private ready: () => boolean;
-  private save(g: Group) { atomicPrivateJson(join(this.root, "groups", `${g.id}.json`), g); }
+  private save(g: Group) {
+    const file = join(this.root, "groups", `${g.id}.json`);
+    const text = JSON.stringify(g);
+    if (this.savedGroups.get(g.id) === text) return;
+    this.persistenceWriter(file, g);
+    this.savedGroups.set(g.id, text);
+  }
   private serial<T>(run: () => Promise<T>): Promise<T> {
     const next = this.queue.catch(() => undefined).then(run); this.queue = next; return next;
   }
