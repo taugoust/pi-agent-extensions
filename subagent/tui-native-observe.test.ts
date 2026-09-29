@@ -7,6 +7,43 @@ import { TuiWorkerStore, atomicPrivateJson } from "./tui-worker-store.ts";
 import { TuiWorkerServer } from "./tui-worker-server.ts";
 import { TuiNativeManager } from "./tui-native.ts";
 
+test("read-only native task snapshot/report avoids refresh and excludes private artifact fields", async () => {
+  const root = await mkdtemp(join(tmpdir(), "pi-readonly-task-"));
+  const manager: any = new TuiNativeManager(root, () => "native", () => true, 16);
+  const directory = join(root, "workers", "a".repeat(24));
+  const store = new TuiWorkerStore(directory, true);
+  const manifest: any = { protocol: 1, ownerSessionId: "parent", taskId: `subagent-task-${"a".repeat(24)}`, runtimeId: "runtime-public", groupId: `subagent-job-${"b".repeat(24)}`,
+    childId: `subagent-child-${"c".repeat(24)}`, attempt: 2, workerEpoch: "d".repeat(32), controlToken: "e".repeat(64),
+    controlSocket: join(directory, "control.sock"), sessionFile: join(directory, "session.jsonl"), launchMode: "none", presentation: "background",
+    placement: { socketPath: "/tmp/tmux", serverEpoch: "1:2", sessionId: "$1", windowId: "@1", paneId: "%1", ownershipNonce: "f".repeat(64) } };
+  store.writeManifest(manifest);
+  const report = store.report(9, { sessionFile: "/secret/session.jsonl", timestamp: "2026-01-02T03:04:05.000Z", contextTokens: 100, assistant: { content: [
+    { type: "toolCall", id: "private-call", name: "bash", arguments: { command: "secret" } },
+    { type: "text", text: "Final answer 🌍" },
+  ] } });
+  manager.owner = "parent";
+  const child: any = { childId: manifest.childId, taskId: manifest.taskId, attempt: 2, directory, report, spec: { task: "Review feature" }, state: "completed", lastOutcome: undefined };
+  manager.groups.set(manifest.groupId, { id: manifest.groupId, owner: "parent", createdAt: "2026-01-01T00:00:00.000Z", children: [child] });
+  manager.refresh = async () => { throw new Error("read-only call must not refresh"); };
+  try {
+    const tasks = manager.readonlyTaskList("parent");
+    assert.equal(tasks.length, 1);
+    assert.equal(tasks[0].runtimeId, "runtime-public");
+    assert.equal(tasks[0].attempt, 2);
+    assert.equal(tasks[0].lastUpdated, null);
+    assert.equal(JSON.stringify(tasks).includes("controlToken"), false);
+    const answer = manager.readonlyTaskReport("parent", manifest.taskId, 48 * 1024);
+    assert.equal(answer.text, "Final answer 🌍");
+    assert.equal(answer.lastUpdated, "2026-01-02T03:04:05.000Z");
+    for (const privateValue of ["/secret/session.jsonl", "private-call", "secret", "contextTokens"]) assert.equal(answer.text.includes(privateValue), false);
+    const clipped = manager.readonlyTaskReport("parent", manifest.taskId, 13);
+    assert.equal(clipped.text, "Final answer ");
+    assert.equal(clipped.truncated, true);
+    assert.equal(Buffer.from(clipped.text).toString("utf8").includes("�"), false);
+    assert.throws(() => manager.readonlyTaskList("foreign"), /another Pi session/);
+  } finally { await manager.shutdown(false); await rm(root, { recursive: true, force: true }); }
+});
+
 test("direct human turn clears old outcome; aborted assistant cancels chain instead of launching successor", async () => {
   const root = await mkdtemp(join(tmpdir(), "pi-observe-"));
   const manager: any = new TuiNativeManager(root, () => "native", () => true, 16);

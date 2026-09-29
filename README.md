@@ -9,6 +9,19 @@ are configured for global auto-discovery and loaded on every pi session.
 By default, pi\'s extension system enables all the extensions. Using
 `pi config` command, extensions can be disabled per user.
 
+## Read-only harness API
+
+The background-job and native-subagent extensions publish the optional,
+versioned `globalThis.__paeHarnessReadOnlyV1` service described in
+[`shared/harness-readonly.ts`](shared/harness-readonly.ts). Every request must
+supply its exact owning Pi `sessionId`. It exposes only bounded job snapshots
+and output, plus native task snapshots and answer-only reports. It does not
+provide control, reconciliation, migration, notification acknowledgement, or
+cleanup operations. AgentSH subagent tasks are reported as unsupported rather
+than as an empty native task list. Public native-worker identifiers are for
+navigation only; private control capabilities and persisted state are never
+part of this contract.
+
 ## Installation
 
 Choose one of the following methods:

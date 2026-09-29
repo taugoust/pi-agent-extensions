@@ -302,7 +302,8 @@ export class BackgroundJobManager {
     if(metadata.pane){
       try{
         const tmux=await resolveExecutable('tmux');const pane=await inspectPane(tmux,metadata.pane.paneId,metadata.pane.socket);requireSamePane(metadata.pane,pane);
-        let observationError:string|undefined;try{await this.cachePane(metadata,tmux);}catch(e){observationError=String(e);}
+        let observationError:string|undefined;
+        if (reconcile) { try{await this.cachePane(metadata,tmux);}catch(e){observationError=String(e);} }
         if(!pane.dead)return {metadata,status:'running',observationError};
         const ended=result(pane.exitCode===undefined?'lost':pane.exitCode===0?'completed':'failed',pane.exitCode??null,'Adopted pane root process finished; task delivery is a separate outcome');
         if(reconcile)await this.store.publishResult(id,ended);return {metadata,result:ended,status:ended.status};
@@ -360,8 +361,44 @@ export class BackgroundJobManager {
     return records.slice(0, limit);
   }
 
+  async listReadOnly(sessionId: string, limit = 50): Promise<JobRecord[]> {
+    if (!sessionId || !Number.isSafeInteger(limit) || limit < 1 || limit > 1000) throw new Error("Invalid read-only list scope or limit");
+    const ids = await this.store.listIdsReadOnly();
+    // Establish ownership from metadata before any pane/process observation.
+    const owned: Array<{ id: string; createdAt: string }> = [];
+    for (const id of ids) {
+      try {
+        const metadata = await this.store.readMetadata(id);
+        if (metadata.sessionId === sessionId && !metadata.childId && !metadata.infrastructure) owned.push({ id, createdAt: metadata.createdAt });
+      } catch { /* Invalid retained records cannot authorize observation. */ }
+    }
+    owned.sort((a, b) => b.createdAt.localeCompare(a.createdAt));
+    const ownedIds = owned.slice(0, limit).map(record => record.id);
+    const scanned: (JobRecord | undefined)[] = new Array(ownedIds.length);
+    let next = 0;
+    await Promise.all(Array.from({ length: Math.min(8, ownedIds.length) }, async () => {
+      while (next < ownedIds.length) {
+        const index = next++;
+        try { scanned[index] = await this.get(ownedIds[index], false); } catch {}
+      }
+    }));
+    const records = scanned.filter((record): record is JobRecord => record !== undefined
+      && record.metadata.sessionId === sessionId && !record.metadata.childId && !record.metadata.infrastructure);
+    records.sort((a, b) => b.metadata.createdAt.localeCompare(a.metadata.createdAt));
+    return records.slice(0, limit);
+  }
+
   async output(id: string): Promise<OutputSnapshot> {
-    const record = await this.get(id);
+    return await this.readOutput(id, true);
+  }
+
+  /** Read existing output without result reconciliation or notification writes. */
+  async outputReadOnly(id: string): Promise<OutputSnapshot> {
+    return await this.readOutput(id, false);
+  }
+
+  private async readOutput(id: string, notify: boolean): Promise<OutputSnapshot> {
+    const record = await this.get(id, notify);
     if (record.metadata.observed) {
       const observed = record.metadata.observed;
       const fd = await open(observed.logPath, constants.O_RDONLY | constants.O_NOFOLLOW | constants.O_NONBLOCK);
@@ -391,7 +428,7 @@ export class BackgroundJobManager {
       source = raw ? "pane" : "none";
     }
     const bounded = boundedTail(raw);
-    if (record.result) await this.store.markNotified(id);
+    if (notify && record.result) await this.store.markNotified(id);
     return { ...bounded, source };
   }
 

@@ -278,6 +278,12 @@ export class JobStore {
     return entries.filter((entry) => entry.isDirectory() && JOB_ID_PATTERN.test(entry.name)).map((entry) => entry.name);
   }
 
+  /** Enumerate already-initialized retained jobs without creating/changing state. */
+  async listIdsReadOnly(): Promise<string[]> {
+    const entries = await readdir(this.jobsRoot, { withFileTypes: true });
+    return entries.filter((entry) => entry.isDirectory() && JOB_ID_PATTERN.test(entry.name)).map((entry) => entry.name);
+  }
+
   async remove(id: string): Promise<void> {
     const source = this.jobDir(id);
     const target = `${source}.removing-${process.pid}`;

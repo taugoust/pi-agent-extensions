@@ -8,6 +8,7 @@ import { TuiWorkerTmux, tuiWorkerLaunchContract, processIdentity } from "./tui-w
 import { TuiWorkerStore, privateDirectory, atomicPrivateJson, readPrivateJson } from "./tui-worker-store.ts";
 import { callTuiWorker, applyTuiWorkerOperatorMode } from "./tui-worker-client.ts";
 import { publicTuiWorkerManifest, parseTuiWorkerJobParams } from "../shared/tui-worker-protocol.ts";
+import { truncateUtf8 } from "../shared/harness-readonly.ts";
 import type { QuietUpdate } from "../shared/quiet-state.ts";
 import type { TuiWorkerManifest, TuiWorkerPlacement } from "../shared/tui-worker-protocol.ts";
 
@@ -405,6 +406,46 @@ export class TuiNativeManager {
       nextAction: (c.lastOutcome as any)?.next_action, latestSummary: (c.lastOutcome as any)?.summary,
       history: [...this.groups.values()].filter(group => group.owner === owner).flatMap(group => group.children.filter(child => child.taskId === taskId)
         .map(child => ({ attempt: child.attempt ?? 1, childId: child.childId, finishedAt: group.createdAt, outcome: (child.lastOutcome as any)?.state, execution: child.state }))) };
+  }
+  /** Return only retained in-memory native task snapshots; never refresh/observe or write. */
+  readonlyTaskList(owner: string): any[] {
+    if (this.owner !== owner) throw new Error("Native task snapshots belong to another Pi session");
+    return [...this.groups.values()].filter(g => g.owner === owner).flatMap(g => g.children.map(c => {
+      const manifest = this.manifest(c);
+      return { taskId: c.taskId, childId: c.childId, groupId: g.id, runtimeId: manifest?.runtimeId ?? null,
+        attempt: c.attempt ?? 1, status: c.state, title: c.spec.task.slice(0, 140),
+        summary: typeof (c.lastOutcome as any)?.summary === "string" ? (c.lastOutcome as any).summary.slice(0, 2000) : undefined,
+        lastUpdated: null, stale: true };
+    })).slice(-50);
+  }
+  readonlyTaskReport(owner: string, taskId: string, maxBytes = 48 * 1024): any {
+    if (this.owner !== owner) throw new Error("Native task snapshots belong to another Pi session");
+    if (!Number.isSafeInteger(maxBytes) || maxBytes < 1 || maxBytes > 48 * 1024) throw new Error("Invalid report byte limit");
+    const found = this.byChild(owner, taskId);
+    if (!found) return undefined;
+    const { group: g, child: c } = found;
+    let text = "";
+    let lastUpdated: string | null = null;
+    if (c.report) {
+      try {
+        const reportPath = resolve(c.report);
+        if (!reportPath.startsWith(`${resolve(c.directory)}/`) || !/^report-[0-9]+-[a-f0-9]{16}\.json$/.test(reportPath.slice(reportPath.lastIndexOf("/") + 1))) throw new Error("Invalid retained report identity");
+        const artifact = readPrivateJson(reportPath) as any;
+        // Report artifact shape is { sessionFile, assistant, contextTokens, contextWindow, timestamp }.
+        // Return text content only: no session path, model metadata, tool calls, or diagnostics.
+        if (typeof artifact?.timestamp === "string" && Number.isFinite(Date.parse(artifact.timestamp))) lastUpdated = artifact.timestamp;
+        const assistant = artifact?.assistant;
+        text = typeof assistant?.content === "string" ? assistant.content
+          : Array.isArray(assistant?.content) ? assistant.content.filter((part: any) => part?.type === "text" && typeof part.text === "string").map((part: any) => part.text).join("\n") : "";
+      } catch {}
+    }
+    text = text.replace(/\x1b\][\s\S]*?(?:\x07|\x1b\\)/g, "").replace(/(?:\x1b\[|\x9b)[0-?]*[ -/]*[@-~]/g, "").replace(/[\x00-\x08\x0b-\x1f\x7f-\x9f]/g, "");
+    const bounded = truncateUtf8(text, maxBytes);
+    text = bounded.text;
+    const truncated = bounded.truncated;
+    const manifest = this.manifest(c);
+    return { taskId: c.taskId, childId: c.childId, groupId: g.id, runtimeId: manifest?.runtimeId ?? null,
+      attempt: c.attempt ?? 1, text, truncated, lastUpdated, stale: true };
   }
   taskList(owner: string): any[] {
     const tasks = new Map<string, any>();

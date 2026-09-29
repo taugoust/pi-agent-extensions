@@ -47,7 +47,7 @@ pkgs.runCommand "background-job-extension-check"
     mkdir -p "$srcdir/background-job" "$srcdir/shared" "$outdir/background-job" "$workdir/home" "$workdir/tmp"
     cp ${self}/background-job/{index.ts,manager.ts,store.ts,tmux.ts,types.ts,test.mjs,runner.mjs,watch.ts,watch-runner.mjs,watch.test.mjs,external-pane.ts,pane.test.mjs,runtime-path.ts,startup.test.mjs,completion.test.mjs} "$srcdir/background-job/"
     cp ${self}/shared/agentsh-mode.ts "$srcdir/shared/agentsh-mode.ts"
-    cp ${self}/shared/background-job.ts "$srcdir/shared/background-job.ts"
+    cp ${self}/shared/background-job.ts ${self}/shared/harness-readonly.ts "$srcdir/shared/"
     cp ${self}/shared/task-presentation.ts "$srcdir/shared/task-presentation.ts"
     cp ${self}/shared/watch-menu.ts "$srcdir/shared/watch-menu.ts"
     cp ${self}/shared/quiet-state.ts "$srcdir/shared/quiet-state.ts"
@@ -186,9 +186,22 @@ pkgs.runCommand "background-job-extension-check"
       reloadContext,
     );
     if (!started.details?.job_id || started.details.status !== "running") throw new Error("reload fixture did not start");
+    const oldReadonly = globalThis.__paeHarnessReadOnlyV1;
+    if (oldReadonly?.protocol !== 1 || oldReadonly.jobs?.sessionId !== "reload-session") throw new Error("read-only jobs API was not published for the owner session");
+    const ownedSnapshot = await oldReadonly.jobs.list({sessionId:"reload-session",limit:10});
+    if (!ownedSnapshot.items.some(job=>job.jobId===started.details.job_id)) throw new Error("read-only list omitted owner job");
+    await new Promise(resolve => setTimeout(resolve, 300));
+    const ownerOutput = await oldReadonly.jobs.output({sessionId:"reload-session",jobId:started.details.job_id,maxBytes:100});
+    if (!ownerOutput.item?.text.includes("before-reload")) throw new Error("read-only output omitted job output");
+    let foreignOutputBlocked = false;
+    try { await oldReadonly.jobs.output({sessionId:"other-session",jobId:started.details.job_id}); } catch { foreignOutputBlocked = true; }
+    if (!foreignOutputBlocked) throw new Error("read-only output accepted foreign session");
     await beforeReload.handlers.get("session_shutdown")({reason:'reload'},reloadContext);
 
     const afterReload = await loadHarness("after-reload");
+    let staleServiceRejected = false;
+    try { await oldReadonly.jobs.list({sessionId:"reload-session",limit:10}); } catch { staleServiceRejected = true; }
+    if (!staleServiceRejected) throw new Error("stale read-only service survived reload");
     const recovered = await afterReload.tool.execute(
       "reload-wait",
       { action: "wait", job_id: started.details.job_id, timeout_ms: 5000, lines: 100 },

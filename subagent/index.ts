@@ -77,6 +77,7 @@ import { NativeTaskStore, createTaskId, TASK_ID_PATTERN, type NativeTaskRecord }
 import { SUBAGENT_NAME_MAX_LENGTH, SUBAGENT_NAME_PATTERN, validateSubagentName, withoutSubagentNames } from "./tui-names.js";
 import { registerTaskDashboard } from "./dashboard.js";
 import { taskListText, outcomeLabel } from "../shared/task-presentation.js";
+import { HARNESS_READONLY_KEY, HARNESS_READONLY_PROTOCOL, type HarnessReadOnlyRegistry, type HarnessReadOnlySubagents } from "../shared/harness-readonly.ts";
 import { installQuietState, notifyParent } from '../shared/quiet-state.js';
 const INTERNAL_TASK_RESUME = Symbol("subagent-task-resume");
 const INTERNAL_RESUME_MESSAGE = Symbol("subagent-resume-message");
@@ -1605,6 +1606,7 @@ export default function (pi: ExtensionAPI) {
     agentSHRuntimeDisposition(agentSHStartup, bridgeSupervisorState(bridge));
   let backgroundManager = sharedBackgroundSubagentManager(path.join(getAgentDir(), "state", "background-subagents-v1"));
   let tuiNative: TuiNativeManager | undefined;
+  const readonlySubagentsByContext = new WeakMap<object, HarnessReadOnlySubagents>();
   const nativeDisposition = () => {
     const disposition = bridgeDisposition(agentSHBridge()).kind;
     const selection = currentSubagentPermissionSelection();
@@ -1795,7 +1797,35 @@ export default function (pi: ExtensionAPI) {
     try {
       const sessionId = stableSessionId(ctx);
       activeSessionId = sessionId;
-      nativeTui(ctx);
+      const native = nativeTui(ctx);
+      const readonlyGeneration = generation;
+      const assertReadonlyOwner = () => {
+        if (sessionContext !== ctx || activeSessionId !== sessionId || sessionGeneration !== readonlyGeneration
+          || (globalThis as any)[HARNESS_READONLY_KEY]?.subagents !== readonlySubagentsByContext.get(ctx as object)) throw new Error("Read-only subagents service is stale or unavailable");
+      };
+      const readonlySubagents: HarnessReadOnlySubagents = {
+        protocol: HARNESS_READONLY_PROTOCOL, sessionId,
+        async list(input) {
+          if (input.sessionId !== sessionId) throw new Error("Read-only subagents unavailable for this Pi session");
+          assertReadonlyOwner();
+          const limit = input.limit ?? 50;
+          if (!Number.isSafeInteger(limit) || limit < 1 || limit > 50 || input.cursor !== undefined) throw new Error("Invalid read-only subagent page");
+          if (!native || nativeDisposition() === "full" || nativeDisposition() === "unavailable") return { protocol: HARNESS_READONLY_PROTOCOL, state: "unsupported", sessionId, items: [], lastUpdated: null, stale: true, message: "Native subagent snapshots are unavailable in the selected backend." };
+          const items = native.readonlyTaskList(sessionId).slice(0, limit);
+          return { protocol: HARNESS_READONLY_PROTOCOL, state: "available", sessionId, items, lastUpdated: items[0]?.lastUpdated ?? null, stale: true };
+        },
+        async report(input) {
+          if (input.sessionId !== sessionId) throw new Error("Read-only subagents unavailable for this Pi session");
+          assertReadonlyOwner();
+          if (!/^subagent-task-[0-9a-f]{24}$/.test(input.taskId) || (input.maxBytes !== undefined && (!Number.isSafeInteger(input.maxBytes) || input.maxBytes < 1 || input.maxBytes > 48 * 1024))) throw new Error("Invalid read-only task report request");
+          if (!native || nativeDisposition() === "full" || nativeDisposition() === "unavailable") return { protocol: HARNESS_READONLY_PROTOCOL, state: "unsupported", sessionId, lastUpdated: null, stale: true, message: "Native task reports are unavailable in the selected backend." };
+          const item = native.readonlyTaskReport(sessionId, input.taskId, input.maxBytes);
+          return item ? { protocol: HARNESS_READONLY_PROTOCOL, state: "available", sessionId, item, lastUpdated: item.lastUpdated, stale: true }
+            : { protocol: HARNESS_READONLY_PROTOCOL, state: "available", sessionId, lastUpdated: null, stale: true, message: "Task not found in this Pi session." };
+        },
+      };
+      const registry = ((globalThis as any)[HARNESS_READONLY_KEY] ?? { protocol: HARNESS_READONLY_PROTOCOL }) as HarnessReadOnlyRegistry;
+      if (registry.protocol === HARNESS_READONLY_PROTOCOL) { readonlySubagentsByContext.set(ctx as object, readonlySubagents); registry.subagents = readonlySubagents; (globalThis as any)[HARNESS_READONLY_KEY] = registry; }
       await manager.initialize();
       if (generation !== sessionGeneration || lifecycleClosing || sessionContext !== ctx
         || backgroundManager !== manager || activeSessionId !== sessionId) return;
@@ -1854,6 +1884,10 @@ export default function (pi: ExtensionAPI) {
   });
 
   pi.on("session_shutdown", async (event, ctx) => {
+    const readonlyRegistry = (globalThis as any)[HARNESS_READONLY_KEY] as HarnessReadOnlyRegistry | undefined;
+    const readonlySubagents = readonlySubagentsByContext.get(ctx as object);
+    if (readonlySubagents && readonlyRegistry?.subagents === readonlySubagents) { delete readonlyRegistry.subagents; if (!readonlyRegistry.jobs) delete (globalThis as any)[HARNESS_READONLY_KEY]; }
+    readonlySubagentsByContext.delete(ctx as object);
     sessionGeneration += 1;
     const generation = sessionGeneration;
     lifecycleClosing = true;

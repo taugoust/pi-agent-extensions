@@ -15,6 +15,7 @@ import { installQuietState } from '../shared/quiet-state.ts';
 import { TmuxBackend } from "./tmux.ts";
 import type { JobRecord } from "./types.ts";
 import { JOB_BROKER_KEY, LOCAL_JOB_CONTROLLER_KEY, JobParameters, validateJobParams, type JobParams, type JobPlacement, type ParentJobBroker, type LocalJobController } from "../shared/background-job.ts";
+import { HARNESS_READONLY_KEY, HARNESS_READONLY_PROTOCOL, truncateUtf8, type HarnessReadOnlyJobs, type HarnessReadOnlyRegistry } from "../shared/harness-readonly.ts";
 const INTERNAL_JOB_CALL = Symbol("parent-job-call");
 const runnerPath = pinRuntimePath(new URL("./runner.mjs", import.meta.url), "background-job runner");
 
@@ -221,6 +222,7 @@ export default function backgroundJob(pi: ExtensionAPI) {
   const deliveryClaims = new Set<string>();
   let broker: ParentJobBroker | undefined;
   let localController: LocalJobController | undefined;
+  const readonlyJobsByContext = new WeakMap<object, HarnessReadOnlyJobs>();
   const reapReservation = new ReapReservation();
   const watchNotified = new Map<string, number>();
 
@@ -300,6 +302,51 @@ export default function backgroundJob(pi: ExtensionAPI) {
     watchNotified.clear();
     for (const [id, sequence] of watchDeliveryCursors(ctx.sessionManager.getBranch?.() ?? [])) watchNotified.set(id, sequence);
     const owner = sessionId(ctx);
+    const readonlyGeneration = sessionGeneration;
+    let readonlyJobs!: HarnessReadOnlyJobs;
+    const assertReadonlyOwner = () => {
+      if (sessionContext !== ctx || sessionId(ctx) !== owner || sessionGeneration !== readonlyGeneration
+        || (globalThis as any)[HARNESS_READONLY_KEY]?.jobs !== readonlyJobs) throw new Error("Read-only jobs service is stale or unavailable");
+    };
+    readonlyJobs = {
+      protocol: HARNESS_READONLY_PROTOCOL, sessionId: owner,
+      async list(input) {
+        if (input.sessionId !== owner) throw new Error("Read-only jobs unavailable for this Pi session");
+        assertReadonlyOwner();
+        const limit = input.limit ?? 50;
+        if (!Number.isSafeInteger(limit) || limit < 1 || limit > 50 || input.cursor !== undefined) throw new Error("Invalid read-only jobs page");
+        if (!managerPromise) return { protocol: HARNESS_READONLY_PROTOCOL, state: "unavailable" as const, sessionId: owner, items: [], lastUpdated: null, stale: true, message: "Background-job service has not initialized." };
+        const service = await managerPromise;
+        assertReadonlyOwner();
+        const records = await service.listReadOnly(owner, limit);
+        assertReadonlyOwner();
+        const observedLiveState = records.some(record => record.status === "running" || record.status === "starting");
+        const lastUpdated = observedLiveState ? new Date().toISOString() : null;
+        return { protocol: HARNESS_READONLY_PROTOCOL, state: "available" as const, sessionId: owner,
+          items: records.map(record => ({ jobId: record.metadata.id, status: record.status, name: record.metadata.name, createdAt: record.metadata.createdAt, updatedAt: record.result?.finishedAt ?? null, observationOnly: Boolean(record.metadata.observed && !record.metadata.pane) })),
+          lastUpdated, stale: !observedLiveState || records.some(record => record.status === "unavailable") };
+      },
+      async output(input) {
+        if (input.sessionId !== owner) throw new Error("Read-only jobs unavailable for this Pi session");
+        assertReadonlyOwner();
+        if (!/^job-[0-9a-f]{24}$/.test(input.jobId) || (input.maxBytes !== undefined && (!Number.isSafeInteger(input.maxBytes) || input.maxBytes < 1 || input.maxBytes > 48 * 1024))) throw new Error("Invalid read-only job output request");
+        if (!managerPromise) return { protocol: HARNESS_READONLY_PROTOCOL, state: "unavailable" as const, sessionId: owner, lastUpdated: null, stale: true, message: "Background-job service has not initialized." };
+        const service = await managerPromise;
+        assertReadonlyOwner();
+        const metadata = await service.store.readMetadata(input.jobId);
+        if (metadata.sessionId !== owner || metadata.childId || metadata.infrastructure) throw new Error("Background job belongs to another owner");
+        const record = await service.get(input.jobId, false);
+        const snapshot = await service.outputReadOnly(input.jobId);
+        assertReadonlyOwner();
+        let text = snapshot.text, truncated = snapshot.truncated;
+        if (input.maxBytes !== undefined) { const bounded = truncateUtf8(text, input.maxBytes, true); text = bounded.text; truncated ||= bounded.truncated; }
+        return { protocol: HARNESS_READONLY_PROTOCOL, state: "available" as const, sessionId: owner,
+          item: { jobId: input.jobId, text, truncated, source: snapshot.source, lastUpdated: record.result?.finishedAt ?? null, stale: !record.result },
+          lastUpdated: record.result?.finishedAt ?? null, stale: !record.result };
+      },
+    };
+    const registry = ((globalThis as any)[HARNESS_READONLY_KEY] ?? { protocol: HARNESS_READONLY_PROTOCOL }) as HarnessReadOnlyRegistry;
+    if (registry.protocol === HARNESS_READONLY_PROTOCOL) { readonlyJobsByContext.set(ctx as object, readonlyJobs); registry.jobs = readonlyJobs; (globalThis as any)[HARNESS_READONLY_KEY] = registry; }
     broker = { protocol: 1, sessionId: owner, async execute(identity, callId, params, signal, authorize) {
       if (sessionContext?.sessionManager.getSessionId() !== owner || identity.sessionId !== owner) throw new Error("Parent job authority is unavailable for this session");
       if (!/^subagent-(?:child|task)-[0-9a-f]{24}$/.test(identity.childId)) throw new Error("Invalid delegated job owner");
@@ -353,9 +400,14 @@ export default function backgroundJob(pi: ExtensionAPI) {
     idlePending.clear();
   });
 
-  pi.on("session_shutdown", () => {
+  pi.on("session_shutdown", (_event, ctx) => {
     if ((globalThis as any)[JOB_BROKER_KEY] === broker) delete (globalThis as any)[JOB_BROKER_KEY];
     if ((globalThis as any)[LOCAL_JOB_CONTROLLER_KEY] === localController) delete (globalThis as any)[LOCAL_JOB_CONTROLLER_KEY];
+    const registry = (globalThis as any)[HARNESS_READONLY_KEY] as HarnessReadOnlyRegistry | undefined;
+    const readonlyJobs = readonlyJobsByContext.get(ctx as object);
+    if (readonlyJobs && registry?.jobs === readonlyJobs) { delete registry.jobs; if (!registry.subagents) delete (globalThis as any)[HARNESS_READONLY_KEY]; }
+    readonlyJobsByContext.delete(ctx as object);
+
     sessionGeneration += 1;
     sessionContext = undefined;
     runningReminderArmed = false;

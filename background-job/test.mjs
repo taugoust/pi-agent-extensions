@@ -94,6 +94,9 @@ async function cleanup() {
 try {
   // Model slow network-home reads of retained terminal jobs. A second start
   // must acquire the same real filesystem lock within its existing 5s budget.
+  const untouchedStore = new JobStore(path.join(root, "never-initialize"));
+  await assertReject(untouchedStore.listIdsReadOnly(), /ENOENT/);
+  assert(!fs.existsSync(untouchedStore.root), "read-only ID enumeration initialized storage");
   const scanStore = new JobStore(path.join(root, "scan-state"));
   const retained = Array.from({ length: 80 }, (_, index) => `job-${index.toString(16).padStart(24, "0")}`);
   const retainedSet = new Set(retained);
@@ -165,6 +168,31 @@ try {
   await assertReject(reloaded.wait(first.metadata.id, 43_200_001), /Wait timeout/);
   const finished = await reloaded.wait(first.metadata.id, 43_200_000);
   assert(!finished.timedOut && finished.record.status === "completed" && finished.record.result?.exitCode === 0, "reloaded manager did not recover completed job");
+  const notifiedPath = store.path(first.metadata.id, "notified");
+  fs.rmSync(notifiedPath, { force: true });
+  const metadataBefore = fs.readFileSync(store.path(first.metadata.id, "metadata.json"), "utf8");
+  const resultBefore = fs.readFileSync(store.path(first.metadata.id, "result.json"), "utf8");
+  fs.rmSync(store.path(first.metadata.id, "result.json"));
+  const metadataMtimeBefore = fs.statSync(store.path(first.metadata.id, "metadata.json")).mtimeMs;
+  const inferred = await reloaded.get(first.metadata.id, false);
+  assert(inferred.status === "lost" && !fs.existsSync(store.path(first.metadata.id, "result.json")), "non-reconciling observation persisted inferred terminal state");
+  assert(fs.statSync(store.path(first.metadata.id, "metadata.json")).mtimeMs === metadataMtimeBefore, "non-reconciling observation changed metadata mtime");
+  fs.writeFileSync(store.path(first.metadata.id, "result.json"), resultBefore);
+  const readonlyOutput = await reloaded.outputReadOnly(first.metadata.id);
+  assert(readonlyOutput.text.includes("done") && !fs.existsSync(notifiedPath), "read-only output wrote notification state");
+  assert(fs.readFileSync(store.path(first.metadata.id, "metadata.json"), "utf8") === metadataBefore, "read-only output changed metadata");
+  assert(fs.readFileSync(store.path(first.metadata.id, "result.json"), "utf8") === resultBefore, "read-only output changed terminal result");
+  const foreignId = `job-${"f".repeat(24)}`;
+  await store.create({ schemaVersion: 1, id: foreignId, command: "secret command", cwd: root, shell: "/bin/bash", createdAt: new Date().toISOString(), ownerPid: process.pid, sessionId: "other-session" }, "secret command", Buffer.alloc(0));
+  const observedIds = [];
+  const originalGet = reloaded.get.bind(reloaded);
+  reloaded.get = async (id, reconcile) => { observedIds.push(id); return await originalGet(id, reconcile); };
+  const readonlyJobs = await reloaded.listReadOnly("test-session", 50);
+  assert(!observedIds.includes(foreignId), "read-only list observed a foreign-owner job before filtering");
+  assert(readonlyJobs.some(record => record.metadata.id === first.metadata.id), "read-only owner list omitted own job");
+  assert(readonlyJobs.every(record => record.metadata.sessionId === "test-session" && !record.metadata.childId && !record.metadata.infrastructure), "read-only owner list leaked foreign/child/infrastructure jobs");
+  assert(!fs.existsSync(notifiedPath), "read-only list wrote notification state");
+  await store.remove(foreignId);
   const output = await reloaded.output(first.metadata.id);
   assert(output.text.includes(`cwd=${root}`) && output.text.includes("env=exact value with spaces") && output.text.includes("done"), "job output/cwd/environment was not preserved");
   assert(!(await store.markNotified(first.metadata.id)), "reading completed output did not suppress the pending completion notification");
