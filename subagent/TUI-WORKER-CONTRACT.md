@@ -33,7 +33,7 @@ The guarded launcher starts a fresh `agentsh permission-gate run -- rawPi` for e
 
 Operator mode has a separate capability/hash and request namespace. The generic control token cannot change permission mode. Every new initial application, pending launch and resumed attempt queries the current live parent `__PAE_PERMISSION_GATE_OPERATOR_V1__.status(owner)` and validates its exact session identity. Retained `operatorEnabled` JSON is observational, never authority to restore prompts-off. Existing children may retain previously authorized mode. Explicit live operator events propagate through a separate serialized queue, not behind slow model launches.
 
-Parent/model instructions use custom `harness-control` messages prefixed **“Supervising-agent instructions (not direct user input)”**. They do not enter slash-command dispatch. Child guidance gives direct human TUI/Paseo instructions precedence and requests parent notification on material scope changes. Human keyboard/Paseo remains actual user input. Owned session switching/forking is blocked to preserve session identity.
+Parent/model instructions use custom `harness-control` messages prefixed **“Parent instructions:”**. They do not enter slash-command dispatch. Child guidance gives direct human TUI/Paseo instructions precedence and requests parent notification on material scope changes. Human keyboard/Paseo remains actual user input. Owned session switching/forking is blocked to preserve session identity.
 
 ## Control, results and waits
 

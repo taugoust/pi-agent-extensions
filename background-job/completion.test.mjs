@@ -54,8 +54,9 @@ try {
   assert.equal(h.messages.length,1);
   assert.deepEqual(h.messages[0].options,{deliverAs:'followUp',triggerTurn:true});
   assert.deepEqual(h.messages[0].message.details.updates.map(u=>u.state),['completed','failed','cancelled','lost']);
-  assert.match(h.messages[0].message.content,/background_job action=status and action=output/);
-  assert.doesNotMatch(h.messages[0].message.content,/subagent operation=result/);
+  assert.match(h.messages[0].message.content,/output/i);
+  assert.match(h.messages[0].message.content,/reap/i);
+  assert.ok(h.messages[0].message.details.updates.every(u=>u.kind==='job'));
   poll(); await pause(1150); assert.equal(h.messages.length,1,'repeated polling replayed completion');
   idle=false; records.push(record()); poll(); await pause(1150);
   assert.deepEqual(h.messages[1].options,{deliverAs:'steer',triggerTurn:true});

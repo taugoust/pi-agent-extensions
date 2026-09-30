@@ -173,7 +173,7 @@ export class TuiNativeManager {
       text += `\n${i + 1}. ${c.childId} task_id=${c.taskId} ${c.state}${c.reaped ? " [reaped]" : ""}${c.error ? `: ${c.error}` : ""}`;
       if (output && c.report) { try { text += `\n${messageText((readPrivateJson(c.report) as any).assistant)}`; } catch {} }
     }
-    return `${text}\nCompletion leaves Pi messageable. Inspect status/result, then explicitly operation=reap when its panes are no longer needed; cancel only stops work.`;
+    return text;
   }
   private async observe(g: Group, c: Child): Promise<void> {
     if (c.reaped || c.state === "pending") return;
@@ -253,7 +253,7 @@ export class TuiNativeManager {
     }
     const task = c.resumeSessionFile ? `Continue the retained session, not a new assignment. Latest parent instruction: ${c.resumeMessage ?? "Continue from the saved checkpoint."}`
       : g.mode === "chain" ? c.spec.task.replaceAll("{previous}", previous) : c.spec.task;
-    const prompt = `Task: ${task}\n\nAcceptance criteria: ${JSON.stringify(c.spec.acceptance ?? [])}\nUse notify_parent for concise discoveries and task_outcome before returning. Execution completion is not task delivery. The parent will inspect results and explicitly reap this pane when done; do not close the TUI yourself.`;
+    const prompt = `Task: ${task}\n\nAcceptance criteria: ${JSON.stringify(c.spec.acceptance ?? [])}\nReport useful findings with notify_parent and your outcome with task_outcome. The parent handles pane cleanup.`;
     const accepted = await callTuiWorker(m, { operation: "prompt", mode: "steer", message: prompt }, { requestId: `initial:${c.childId}` });
     if (!accepted.ok) throw new Error(`Initial prompt not confirmed: ${accepted.code}`);
     c.started = true; c.state = "running"; this.save(g);
@@ -545,7 +545,7 @@ export class TuiNativeManager {
     }
     if (op === "result") {
       const c = child ?? g.children[(params.child ?? 1) - 1];
-      if (!c?.report) return response("Result not ready; use bounded wait/status.", { operation: op, job_id: g.id });
+      if (!c?.report) return response("Result not ready. Use wait.", { operation: op, job_id: g.id });
       const raw = readPrivateJson(c.report) as any;
       const text = params.diagnostics ? JSON.stringify(raw, null, 2)
         : [c.error ? `Worker failed: ${c.error}` : "", messageText(raw.assistant)].filter(Boolean).join("\n\n");

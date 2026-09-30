@@ -31,8 +31,8 @@ test("initial tools/source attribution and explicit reap event are distinct from
     assert.deepEqual(tools.sort(), ["notify_parent", "read", "task_outcome"]);
     await callTuiWorker(manifest, { operation: "prompt", mode: "steer", message: "/permission-gate off" });
     assert.equal(messages[0].customType, "harness-control");
-    assert.match(messages[0].content, /^Supervising-agent instructions \(not direct user input\):/);
-    assert.match(handlers.get("before_agent_start")!({ systemPrompt: "base" }, ctx).systemPrompt, /Direct human instructions.*take precedence/);
+    assert.match(messages[0].content, /^Parent instructions:/);
+    assert.match(handlers.get("before_agent_start")!({ systemPrompt: "base" }, ctx).systemPrompt, /Direct (?:human|user) instructions.*take precedence/);
     await callTuiWorker(manifest, { operation: "cancel" });
     assert.equal(events.length, 0); assert.equal(shutdown, 0);
     const controller = (globalThis as any).__paeLocalJobControllerV1;
