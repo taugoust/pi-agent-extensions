@@ -192,7 +192,13 @@ export class TuiNativeManager {
         c.report = state.lastReport;
         const report = readPrivateJson(c.report!) as any;
         c.requiresCompaction = Number.isFinite(report.contextTokens) && Number.isFinite(report.contextWindow) && report.contextTokens >= report.contextWindow * 0.8;
-        c.state = report.assistant?.stopReason === "error" ? "failed"
+        // A terminating tool block can settle with toolUse, not an assistant
+        // error/final answer. Retain explicit failures and recognize old workers
+        // whose report predates that field. Tool-only success remains supported.
+        c.error = typeof report.error === "string" ? report.error.slice(0, 2000)
+          : report.assistant?.stopReason === "toolUse" && state.readyForPrompts === false
+            ? "Worker command authority unavailable" : undefined;
+        c.state = c.error || report.assistant?.stopReason === "error" ? "failed"
           : report.assistant?.stopReason === "aborted" || g.cancelled ? "cancelled" : "completed";
         // Settlement is reported through the replay cursor below, never a text injection.
       }
@@ -541,7 +547,8 @@ export class TuiNativeManager {
       const c = child ?? g.children[(params.child ?? 1) - 1];
       if (!c?.report) return response("Result not ready; use bounded wait/status.", { operation: op, job_id: g.id });
       const raw = readPrivateJson(c.report) as any;
-      const text = params.diagnostics ? JSON.stringify(raw, null, 2) : messageText(raw.assistant);
+      const text = params.diagnostics ? JSON.stringify(raw, null, 2)
+        : [c.error ? `Worker failed: ${c.error}` : "", messageText(raw.assistant)].filter(Boolean).join("\n\n");
       const bytes = Buffer.from(text), offset = params.offset ?? 0, limit = params.limit ?? 48 * 1024;
       return response(bytes.subarray(offset, offset + limit).toString("utf8"), { operation: op, job_id: g.id, child_id: c.childId,
         artifact: c.report, offset, next_offset: Math.min(bytes.length, offset + limit), complete: offset + limit >= bytes.length, task_outcome: c.lastOutcome });

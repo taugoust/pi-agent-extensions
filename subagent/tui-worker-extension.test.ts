@@ -1,6 +1,6 @@
 import assert from "node:assert/strict";
 import { test } from "node:test";
-import { mkdtemp, rm } from "node:fs/promises";
+import { mkdtemp, readFile, rm } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import workerExtension from "./tui-worker-extension.ts";
@@ -24,6 +24,7 @@ test("worker extension with missing selected guard authority never dispatches pr
   let sent = 0, aborted = 0, shutdown = 0;
   const ctx = { mode: "tui", hasUI: false, isIdle: () => true, hasPendingMessages: () => false,
     abort: () => { aborted++; }, shutdown: () => { shutdown++; },
+    getContextUsage: () => undefined,
     sessionManager: { getSessionFile: () => manifest.sessionFile, getSessionId: () => "child-session" } };
   try {
     workerExtension({ registerTool() {}, on: (name: string, handler: Function) => handlers.set(name, handler), sendMessage: () => { sent++; } } as any);
@@ -33,8 +34,16 @@ test("worker extension with missing selected guard authority never dispatches pr
     assert.equal((status.data as any).readyForPrompts, false);
     const result = await callTuiWorker(manifest, { operation: "prompt", mode: "steer", message: "run command" });
     assert.equal(result.ok, false);
+    assert.equal(result.code, "unavailable");
     assert.equal(sent, 0);
+    assert.equal(store.readState().active, false, "rejected prompt left a phantom running worker");
+    assert.equal(store.readState().phase, "ready");
+    assert.equal(Object.keys(store.readState().receipts).length, 0, "known rejection created an ambiguous dispatch intent");
     assert.equal(handlers.get("tool_call")!({}, ctx).block, true);
+    handlers.get("message_end")!({ message: { role: "assistant", stopReason: "toolUse", content: [] } }, ctx);
+    handlers.get("agent_settled")!({}, ctx);
+    const report = JSON.parse(await readFile(store.readState().lastReport!, "utf8"));
+    assert.match(report.error, /authority unavailable/i, "authority loss was retained as a successful settlement");
     assert.equal(handlers.get("input")!({}, ctx).action, "handled");
     handlers.get("before_agent_start")!({}, ctx);
     assert.ok(aborted > 0);

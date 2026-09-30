@@ -1397,8 +1397,14 @@ export default function permissionGate(pi: ExtensionAPI) {
   const authorizeCommand = async (event: any, ctx: ExtensionContext) => {
     const input = event.input as { action?: unknown; command?: unknown };
     const isBash = event.toolName === "bash";
-    const isBackgroundStart = event.toolName === "background_job" && input.action === "start";
+    const isBackgroundStart = event.toolName === "background_job" && input?.action === "start";
     if (!isBash && !isBackgroundStart) return undefined;
+    // Tool input is untrusted, not evidence that the trusted transform or gate
+    // transport is broken. Reject it before transforms without revoking the
+    // session's authority; the model can correct the next call normally.
+    if (!input || Array.isArray(input) || typeof input.command !== "string" || !input.command.trim()) {
+      return { block: true, reason: "Command must be a non-empty string" };
+    }
     const sealAuthorizedBashInput = () => {
       if (isBash) Object.freeze(input);
     };

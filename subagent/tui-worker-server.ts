@@ -139,6 +139,9 @@ export class TuiWorkerServer {
       try { return this.response(r, { ok: true, receipt: "applied", sequence: this.state.sequence, data: await this.adapter.jobs!(r.params, r.requestId) }); }
       catch (error) { return fail("unavailable", error instanceof Error ? error.message : "Local job query failed"); }
     }
+    // Known authority loss is a refusal, not an uncertain dispatch. Check it
+    // before reserving activity/intent, otherwise an unsent prompt looks live.
+    if (r.operation === "prompt" && this.adapter.canRun?.() === false) return fail("unavailable", "Worker command authority unavailable");
     if (r.operation === "compact" && (!this.adapter.compact || this.state.active || !this.adapter.isIdle())) return fail("busy", "Compaction requires an idle capable worker");
     if (r.operation === "prepare_reap" && (this.state.active || !this.adapter.isIdle())) return fail("busy", "Worker is active; reap never cancels work");
     if (r.operation === "promote") {
@@ -164,6 +167,16 @@ export class TuiWorkerServer {
           await this.adapter.abort();
           if (this.closing || this.failed) return fail("unavailable", "Worker closed during interrupt");
           if (!this.adapter.isIdle()) return fail("busy", "Abort has not reached idle; dispatch remains ambiguous");
+          if (this.adapter.canRun?.() === false) {
+            // Authority may disappear while abort is awaited. Nothing has been
+            // sent, so retain a definitive refusal and release the reservation.
+            this.state.active = false;
+            this.state.phase = this.state.lastReport ? "settled" : "ready";
+            const refused = fail("unavailable", "Worker command authority unavailable after interrupt");
+            this.state.receipts[receiptKey].response = refused;
+            this.persist();
+            return refused;
+          }
         }
         // abort() can emit agent_settled while awaited above. Re-reserve activity
         // before enqueueing the replacement so a queued reap cannot see idle.

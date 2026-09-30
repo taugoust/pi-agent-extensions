@@ -138,6 +138,7 @@ export default function tuiWorkerExtension(pi: ExtensionAPI): void {
   pi.on("agent_settled", (_event, ctx) => {
     if (!worker || failed || worker.sealed) return;
     try { worker.settled({ sessionFile: ctx.sessionManager.getSessionFile(), assistant: lastAssistant ?? null,
+      ...(!allowed() ? { error: "Worker command authority unavailable at settlement" } : {}),
       contextTokens: ctx.getContextUsage()?.tokens, contextWindow: ctx.model?.contextWindow, timestamp: new Date().toISOString() }); }
     catch (error) { fail(ctx, error); }
   });

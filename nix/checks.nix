@@ -1285,6 +1285,8 @@ in
           if (name === "transform-order") {
             registerBashCommandTransform("test-wrapper", (command) => `ssh 'test-host' ''${JSON.stringify(command)}`);
           }
+          if (name === "invalid-command") registerBashCommandTransform("ssh-target", (command) => command);
+          if (name === "broken-transform") registerBashCommandTransform("broken", () => "");
           gate(pi);
           assert(JSON.stringify(globalThis.__paeSubagentPermissionSelectionV1) === JSON.stringify({ protocol: 1, selected: true, conflict: false }), "guard selection was not published before session start");
           const operator = globalThis.__PAE_PERMISSION_GATE_OPERATOR_V1__;
@@ -1328,6 +1330,20 @@ in
           };
           const tool = pi.handlers.get("tool_call");
           const results = [];
+          if (name === "invalid-command") {
+            const invalid = [undefined, null, {}, { command: 42 }, { command: "" }, { command: " \n\t" }];
+            for (const input of invalid) {
+              const denied = await tool({ toolName: "bash", toolCallId: "invalid-bash", input }, ctx);
+              assert(denied?.block === true && denied.terminate !== true, "invalid Bash did not return a recoverable rejection");
+              assert(globalThis.__paeSubagentPermissionAuthorityV1.active, "invalid Bash poisoned child authority");
+            }
+            for (const command of [undefined, null, 42, "", " \n\t"]) {
+              const denied = await tool({ toolName: "background_job", toolCallId: "invalid-job", input: { action: "start", command } }, ctx);
+              assert(denied?.block === true && denied.terminate !== true, "invalid job did not return a recoverable rejection");
+              assert(globalThis.__paeSubagentPermissionAuthorityV1.active, "invalid job poisoned child authority");
+            }
+            assert(operator.status(sessionId).enabled, "invalid input disabled the operator service");
+          }
           let childAuthorization;
           let authorityStable;
           let oldAuthorityActive;
@@ -1618,6 +1634,22 @@ in
           assert(allowed.selections[0].choices.join(",") === "Deny,Allow", "AgentSH prompt was not deny-first");
           assert(allowed.selections[0].signal, "AgentSH terminal prompt omitted cancellation signal");
           assert(allowed.selections[0].title.includes("Dangerous command requires approval") && allowed.selections[0].title.includes("sudo true"), "AgentSH prompt metadata was not rendered");
+
+          const recovered = await spawnInheritedChild("invalid-command", async (socket) => {
+            const read = lineReader(socket);
+            await expectHello(read, socket);
+            // Invalid inputs must not reach the broker. The next valid command
+            // still needs an authoritative decision; no unguarded fallback.
+            const request = await read();
+            assertAuthorize(request, "sudo true", "tool-dangerous");
+            send(socket, { v: 1, type: "decision", id: request.id, decision: "allow" });
+          });
+          assert(recovered.allowed[0] && recovered.childAuthorityActive, "valid command could not continue after malformed input");
+          const brokenTransform = await spawnInheritedChild("broken-transform", async (socket) => {
+            const read = lineReader(socket);
+            await expectHello(read, socket);
+          });
+          assert(brokenTransform.blocked[0] && brokenTransform.childAuthorityActive === false, "genuine transform failure did not fail closed");
 
           const transformed = await spawnInheritedChild("transform-order", async (socket) => {
             const read = lineReader(socket);

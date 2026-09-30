@@ -116,3 +116,43 @@ test("direct human turn clears old outcome; aborted assistant cancels chain inst
     assert.equal(notifications.filter(u=>u.completion&&u.state==='lost').length,1,'worker crash without settled event failed to notify');
   } finally { await server.close(); await manager.shutdown(false); await rm(root, { recursive: true, force: true }); }
 });
+
+test("authority loss is a failed native result, including old tool-only reports", async () => {
+  const root = await mkdtemp(join(tmpdir(), "pi-failed-report-"));
+  const manager: any = new TuiNativeManager(root, () => "native", () => true, 16);
+  const directory = join(root, "workers", "a".repeat(24));
+  const store = new TuiWorkerStore(directory, true);
+  const manifest: any = { protocol: 1, ownerSessionId: "parent", taskId: "task", runtimeId: "runtime", groupId: `subagent-job-${"a".repeat(24)}`,
+    childId: `subagent-child-${"b".repeat(24)}`, attempt: 1, workerEpoch: "c".repeat(32), controlToken: "d".repeat(64),
+    controlSocket: join(directory, "control.sock"), sessionFile: join(directory, "session.jsonl"), launchMode: "none", presentation: "background",
+    placement: { socketPath: "/tmp/tmux", serverEpoch: "1:2", sessionId: "$1", windowId: "@1", paneId: "%1", ownershipNonce: "e".repeat(64) } };
+  store.writeManifest(manifest);
+  let available = false;
+  const server = new TuiWorkerServer(store, { isIdle: () => true, canRun: () => available, send() {}, abort() {}, shutdown() {} });
+  const child: any = { childId: manifest.childId, taskId: manifest.taskId, directory, spec: { task: "work" }, state: "running", started: true, notifiedSequence: 0 };
+  const group: any = { id: manifest.groupId, owner: "parent", background: true, mode: "single", launchMode: "none", caller: manifest.placement, children: [child] };
+  manager.groups.set(group.id, group);
+  const assistant = { role: "assistant", stopReason: "toolUse", content: [{ type: "toolCall", name: "bash", arguments: { command: "" } }] };
+  try {
+    await server.start();
+    for (const error of [undefined, "Worker command authority unavailable at settlement"]) {
+      server.running(true);
+      server.settled({ assistant, ...(error ? { error } : {}) });
+      await manager.observe(group, child);
+      assert.equal(child.state, "failed");
+      assert.match(child.error, /authority unavailable/i);
+      assert.equal(manager.publicGroup(group).status, "failed");
+      const result = await manager.operation({ operation: "result", job_id: group.id }, "parent");
+      assert.match(result.content[0].text, /authority unavailable/i, "failed worker returned an empty answer");
+    }
+    // A recovered live authority must not erase a retained execution failure.
+    available = true;
+    await manager.observe(group, child);
+    assert.equal(child.state, "failed");
+    // Successful terminating tools remain legitimate; toolUse alone is not failure.
+    server.running(true); server.settled({ assistant });
+    await manager.observe(group, child);
+    assert.equal(child.state, "completed");
+    assert.equal(child.error, undefined);
+  } finally { await server.close(); await manager.shutdown(false); await rm(root, { recursive: true, force: true }); }
+});
