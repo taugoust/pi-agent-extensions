@@ -2,7 +2,11 @@
 
 ## Status
 
-Implementation and validation complete; publication pending.
+Resolved.
+
+## Resolution
+
+Implemented in `a635107`: shorter routine messaging and consistent default cleanup guidance, with runtime control and safety behavior retained.
 
 ## Scope
 
