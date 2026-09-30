@@ -78,7 +78,7 @@ import { SUBAGENT_NAME_MAX_LENGTH, SUBAGENT_NAME_PATTERN, validateSubagentName, 
 import { registerTaskDashboard } from "./dashboard.js";
 import { taskListText, outcomeLabel } from "../shared/task-presentation.js";
 import { HARNESS_READONLY_KEY, HARNESS_READONLY_PROTOCOL, type HarnessReadOnlyRegistry, type HarnessReadOnlySubagents } from "../shared/harness-readonly.ts";
-import { installQuietState, notifyParent } from '../shared/quiet-state.js';
+import { installQuietState, notifyParent } from '../shared/quiet-state.ts';
 const INTERNAL_TASK_RESUME = Symbol("subagent-task-resume");
 const INTERNAL_RESUME_MESSAGE = Symbol("subagent-resume-message");
 const INTERNAL_RESUME_COMPACT = Symbol("subagent-resume-compact");

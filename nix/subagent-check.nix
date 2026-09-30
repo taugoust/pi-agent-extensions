@@ -133,6 +133,7 @@ pkgs.runCommand "subagent-check"
     chmod -R u+rwX "$workdir/tui-runtime"
     ${pkgs.lib.optionalString (piPackage != null) ''
       PI_BIN=${pkgs.lib.getExe piPackage} ${pkgs.python3}/bin/python3 ${self}/background-job/reload.test.py
+      PI_BIN=${pkgs.lib.getExe piPackage} ${pkgs.python3}/bin/python3 ${self}/subagent/quiet-state-reload.test.py
       export PI_TUI_TEST_PI=${pkgs.lib.getExe piPackage}
       export PI_TUI_ROOT_LAUNCHER=${
         if tuiWorkerLauncher != null then pkgs.lib.getExe tuiWorkerLauncher else pkgs.lib.getExe piPackage
