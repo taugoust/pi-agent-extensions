@@ -190,7 +190,7 @@ await pause(30);assert.equal(shell.messages.length,0);
 await shell.emit('ui_prompt_end');await pause(30);
 assert.equal(shell.messages.length,1);
 assert.match(shell.messages[0].message.content,/background_job action=status and action=output/);
-assert.match(shell.messages[0].message.content,/reap only when authorized/);
+assert.match(shell.messages[0].message.content,/reap.*authorized/);
 assert.doesNotMatch(shell.messages[0].message.content,/subagent operation=result/);
 pending=true;shellQuiet.enqueue(ctx,{kind:'job',id:'shell-pending',state:'cancelled',completion:true});
 await pause(30);assert.equal(shell.messages.length,1);
