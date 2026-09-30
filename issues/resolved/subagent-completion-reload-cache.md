@@ -2,7 +2,11 @@
 
 ## Status
 
-Fix implemented and validated; publication pending.
+Resolved.
+
+## Resolution
+
+Fixed in `a9565ce` by using the reload-safe source import and exercising the real subagent import graph in a same-process Pi regression.
 
 ## Evidence
 
