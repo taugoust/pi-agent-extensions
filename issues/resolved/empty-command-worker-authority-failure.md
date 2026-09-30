@@ -2,7 +2,11 @@
 
 ## Status
 
-Fix implemented and validated; publication pending.
+Resolved.
+
+## Resolution
+
+Implemented in `ec16242`: reject invalid commands without poisoning authority, retain/surface worker authority failures, and refuse unavailable prompt dispatch without phantom activity. Genuine authority failures and uncertain dispatch still fail closed.
 
 ## Evidence
 
