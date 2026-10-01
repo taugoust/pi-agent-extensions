@@ -81,7 +81,16 @@ function restore(h:Hub,ctx:any){
     if(entry?.type==='custom'&&entry.customType===CONTROL_CUSTOM&&entry.data?.v===1){if(typeof entry.data.disabled==='boolean'){if(['guidance-quota','compaction-pause'].includes(entry.data.reason))h.guidanceDisabled=entry.data.disabled;else {h.localDisabled=entry.data.disabled;if(!entry.data.disabled)h.guidanceDisabled=false;}}if(typeof entry.data.quotaResetAt==='number')h.quotaResetAt=entry.data.quotaResetAt;}
     const r=receiptFrom(entry);if(r){h.receipts.set(r.key,r);continue;}
     // Backward compatibility: pre-remediation hidden messages count as delivered and must never replay.
-    if(entry?.type==='custom_message'&&entry.customType===MESSAGE_CUSTOM&&Array.isArray(entry.details?.updates))for(const data of entry.details.updates){if(validUpdate(data)){const item=toItem(data);h.receipts.set(item.key,{v:1,key:item.key,revision:item.revision,state:'delivered',at:Date.now(),update:item.data});}}
+    if(entry?.type==='custom_message'&&entry.customType===MESSAGE_CUSTOM&&Array.isArray(entry.details?.updates))for(const data of entry.details.updates){if(validUpdate(data)){
+      const item=toItem(data),prior=h.receipts.get(item.key);
+      // A historical message is delivery evidence, not a new delivery now.
+      // Preserve explicit receipts (including consumption), and never let an
+      // older message acknowledge a newer revision of a queued request.
+      if(prior&&(prior.state!=='queued'||prior.revision!==item.revision))continue;
+      const timestamp=typeof entry.timestamp==='string'?Date.parse(entry.timestamp):entry.timestamp;
+      const at=typeof timestamp==='number'&&Number.isFinite(timestamp)?timestamp:prior?.at??0;
+      h.receipts.set(item.key,{v:1,key:item.key,revision:item.revision,state:'delivered',at,update:item.data});
+    }}
   }
   for(const r of h.receipts.values()){if(r.state==='delivered'&&r.update.requires_guidance===true&&r.at>=h.quotaResetAt){h.stats.guidanceDelivered++;h.stats.guidanceBytes+=bytes(JSON.stringify(r.update));h.lastGuidanceAt=Math.max(h.lastGuidanceAt,r.at);}if(r.state==='queued'&&(r.update.requires_guidance===true||isCompletion(r.update)))h.pending.set(r.key,toItem(r.update,r.at));}
   // Report sequence, not receipt time, orders child turns. Consuming an older

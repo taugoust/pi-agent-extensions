@@ -776,6 +776,10 @@ Operator controls (do not cancel builds or workers):
 - `/harness-state enable` — explicitly re-enable guidance and reset its quota.
 - `PAE_QUIET_STATE_DISABLED=1` — startup environment kill switch.
 
+When Pi exposes numbered aliases because both job and subagent extensions register
+the shared command, use `/harness-state:1` in place of `/harness-state` (for
+example, `/harness-state:1 status`). Unqualified ambiguous names are not commands.
+
 Compaction temporarily pauses guidance delivery and resumes after successful or failed compaction. Older persisted compaction pauses remain disabled until `/harness-state enable` explicitly clears them.
 Routine job/watch state and full outputs remain available through their tools;
 receipt routing is not an acknowledgement for job-retention purposes.

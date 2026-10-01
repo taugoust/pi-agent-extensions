@@ -141,6 +141,22 @@ await legacyFx.commands.get('harness-state').handler('status',ctx);assert.match(
 await legacyFx.commands.get('harness-state').handler('enable',ctx);await pause(1200);assert.equal(legacyFx.messages.length,1);
 await legacyFx.emit('session_shutdown',{reason:'quit'});
 
+// Legacy messages keep their original delivery time, not each restore's time.
+entries=[{type:'custom_message',customType:'harness-state',timestamp:'2020-01-01T00:00:00.000Z',details:{updates:[{kind:'notification',id:'historic-help',requires_guidance:true,message:'old'}]}}];
+sessionName=`quiet-historic-quota-${process.pid}`;
+const historic=fixture();const historicQuiet=installQuietState(historic.pi,5);await historic.emit('session_start');
+await historic.commands.get('harness-state').handler('enable',ctx);
+await historic.emit('agent_settled');
+const historicHub=(globalThis as any).__paeQuietHarnessStateV2.get(sessionName);
+assert.equal(historicHub.stats.guidanceDelivered,0,'restoring historical messages re-exhausted the reset quota');
+historicQuiet.enqueue(ctx,{kind:'notification',id:'current-help',requires_guidance:true,message:'current'});await pause(80);
+assert.equal(historic.messages.length,1);
+const deliveryTime=historicHub.receipts.get('notification:current-help').at;
+await historic.emit('agent_settled');
+assert.equal(historicHub.stats.guidanceDelivered,1);
+assert.equal(historicHub.receipts.get('notification:current-help').at,deliveryTime,'message restore replaced an explicit receipt timestamp');
+await historic.emit('session_shutdown',{reason:'quit'});
+
 // Receipt persistence failure fails closed: no successful enqueue/dedup claim and no wakeup.
 entries=[];sessionName=`quiet-fail-${process.pid}`;const fail=fixture(true);const quietFail=installQuietState(fail.pi,5);await fail.emit('session_start');
 assert.equal(quietFail.enqueue(ctx,{kind:'job',id:'no-receipt',state:'completed'}),false);
