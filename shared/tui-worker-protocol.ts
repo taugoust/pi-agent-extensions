@@ -1,8 +1,8 @@
 /**
- * Shared contract for a control endpoint hosted INSIDE a native Pi TUI.
- * No RPC-mode Pi, terminal keystroke injection, process spawning, or command
- * authorization belongs in this protocol. Transport authentication and durable
- * receipt storage are mandatory responsibilities of its eventual server.
+ * Shared authenticated control contract for native workers. TUI workers retain
+ * tmux placement; rpc-headless foreground workers deliberately have none. RPC
+ * process launch remains a trusted-launcher responsibility, while this protocol
+ * provides the child-hosted control socket and durable receipts/interactions.
  */
 export const TUI_WORKER_PROTOCOL = 1 as const;
 export const TUI_WORKER_MAX_FRAME_BYTES = 128 * 1024;
@@ -30,7 +30,7 @@ export type TuiWorkerPlacement = {
 };
 
 /** Private discovery data: never include controlToken in tool results or logs. */
-export type TuiWorkerManifest = {
+type TuiWorkerManifestBase = {
   protocol: typeof TUI_WORKER_PROTOCOL;
   ownerSessionId: string;
   taskId: string;
@@ -48,11 +48,14 @@ export type TuiWorkerManifest = {
   acceptance?: string[];
   tools?: string[];
   sessionFile: string;
-  placement: TuiWorkerPlacement;
-  panePid?: number;
-  paneProcessToken?: string;
-  presentation: "foreground-staged" | "background";
 };
+export type TuiWorkerManifest = TuiWorkerManifestBase & (
+  | { execution: "rpc-headless"; presentation: "headless-foreground"; placement?: never; processPid: number; processToken: string; runtimePid?: number; runtimeProcessToken?: string; fifoPath: string; panePid?: never; paneProcessToken?: never }
+  | { execution?: "tmux"; presentation: "foreground-staged" | "background"; placement: TuiWorkerPlacement; panePid?: number; paneProcessToken?: string; processPid?: never; processToken?: never; fifoPath?: never }
+);
+
+export type TuiPlacedWorkerManifest = Extract<TuiWorkerManifest, { placement: TuiWorkerPlacement }>;
+export type HeadlessWorkerManifest = Extract<TuiWorkerManifest, { execution: "rpc-headless" }>;
 
 export type TuiWorkerIdentity = Pick<TuiWorkerManifest,
   "ownerSessionId" | "taskId" | "runtimeId" | "groupId" | "childId" | "attempt" | "workerEpoch">;
@@ -83,6 +86,8 @@ export type TuiWorkerOperation =
   | { operation: "status" }
   | { operation: "events"; afterSequence: number }
   | { operation: "prompt"; mode: "steer" | "follow_up" | "interrupt"; message: string }
+  /** Parent-panel user input; not exposed in model tool parameters. */
+  | { operation: "user_prompt"; message: string }
   | { operation: "cancel" }
   | { operation: "compact" }
   | { operation: "jobs"; params: TuiWorkerJobParams }
@@ -90,7 +95,8 @@ export type TuiWorkerOperation =
   // owned terminal jobs, then seals the boundary before a launcher removes the
   // verified pane. It must reject a busy child; cancel is never implicit.
   | { operation: "prepare_reap" }
-  | { operation: "promote"; placement: TuiWorkerPlacement };
+  | { operation: "promote"; placement: TuiWorkerPlacement }
+  | { operation: "respond_interaction"; interactionId: string; answer: import("./foreground-tasks.ts").TaskInteractionAnswer };
 
 export type TuiWorkerRequest = TuiWorkerIdentity & TuiWorkerOperation & {
   protocol: typeof TUI_WORKER_PROTOCOL;
@@ -112,7 +118,7 @@ export type TuiWorkerEvent = {
   workerEpoch: string;
   sequence: number;
   timestamp: string;
-  kind: "ready" | "running" | "settled" | "notification" | "outcome" | "cancelled" | "closing";
+  kind: "ready" | "running" | "settled" | "notification" | "outcome" | "cancelled" | "closing" | "interaction_pending" | "interaction_resolved" | "interaction_cancelled";
   data?: unknown;
 };
 
@@ -153,8 +159,9 @@ export function parseTuiWorkerRequest(value: unknown): TuiWorkerRequest {
   const data = object(value);
   const base = ["protocol", "requestId", "token", "ownerSessionId", "taskId", "runtimeId", "groupId", "childId", "attempt", "workerEpoch", "operation"];
   const fields: Record<string, string[]> = {
-    status: [], events: ["afterSequence"], prompt: ["mode", "message"],
+    status: [], events: ["afterSequence"], prompt: ["mode", "message"], user_prompt: ["message"],
     cancel: [], compact: [], jobs: ["params"], prepare_reap: [], promote: ["placement"],
+    respond_interaction: ["interactionId", "answer"],
   };
   const operation = text(data.operation, 32);
   if (!Object.hasOwn(fields, operation)) throw new Error("Unknown worker operation");
@@ -175,6 +182,11 @@ export function parseTuiWorkerRequest(value: unknown): TuiWorkerRequest {
   switch (operation) {
     case "jobs": return { ...identity, operation, params: parseTuiWorkerJobParams(data.params) };
     case "events": return { ...identity, operation, afterSequence: integer(data.afterSequence, 0) };
+    case "user_prompt": {
+      const message = text(data.message, TUI_WORKER_MAX_MESSAGE_BYTES);
+      if (!message.trim()) throw new Error("Empty prompt");
+      return { ...identity, operation, message };
+    }
     case "prompt": {
       const mode = data.mode;
       if (mode !== "steer" && mode !== "follow_up" && mode !== "interrupt") throw new Error("Invalid prompt mode");
@@ -183,6 +195,13 @@ export function parseTuiWorkerRequest(value: unknown): TuiWorkerRequest {
       return { ...identity, operation, mode, message };
     }
     case "promote": return { ...identity, operation, placement: parseTuiWorkerPlacement(data.placement) };
+    case "respond_interaction": {
+      const interactionId = text(data.interactionId, 128, /^[a-zA-Z0-9._:-]+$/);
+      const answer = data.answer as any;
+      if (!answer || !["permission", "questionnaire"].includes(answer.kind) || typeof answer.cancelled !== "boolean"
+        || Buffer.byteLength(JSON.stringify(answer)) > 24 * 1024) throw new Error("Invalid interaction answer");
+      return { ...identity, operation, interactionId, answer };
+    }
     case "status": case "cancel": case "compact": case "prepare_reap": return { ...identity, operation };
     default: throw new Error("Unknown worker operation");
   }
@@ -202,7 +221,10 @@ export function publicTuiWorkerManifest(manifest: TuiWorkerManifest): Omit<TuiWo
   return structuredClone({ protocol: manifest.protocol, ownerSessionId: manifest.ownerSessionId,
     taskId: manifest.taskId, runtimeId: manifest.runtimeId, groupId: manifest.groupId,
     childId: manifest.childId, attempt: manifest.attempt, workerEpoch: manifest.workerEpoch,
-    controlSocket: manifest.controlSocket, sessionFile: manifest.sessionFile, placement: manifest.placement,
-    presentation: manifest.presentation, launchMode: manifest.launchMode,
-    panePid: manifest.panePid, paneProcessToken: manifest.paneProcessToken, tools: manifest.tools });
+    controlSocket: manifest.controlSocket, sessionFile: manifest.sessionFile,
+    ...(manifest.placement ? { placement: manifest.placement } : {}),
+    presentation: manifest.presentation, execution: manifest.execution, launchMode: manifest.launchMode,
+    ...(manifest.execution === "rpc-headless" ? { processPid: manifest.processPid, processToken: manifest.processToken,
+        ...(manifest.runtimePid !== undefined ? { runtimePid: manifest.runtimePid, runtimeProcessToken: manifest.runtimeProcessToken } : {}) } :
+      { panePid: manifest.panePid, paneProcessToken: manifest.paneProcessToken }), tools: manifest.tools });
 }

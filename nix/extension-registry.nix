@@ -44,6 +44,7 @@ let
     "fetch"
     "pdf"
     "permission-gate"
+    "questionnaire"
     "sandbox"
     "ssh"
     "subagent"

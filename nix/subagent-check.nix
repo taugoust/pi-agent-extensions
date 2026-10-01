@@ -129,7 +129,7 @@ pkgs.runCommand "subagent-check"
     # Native TUI tests use Node's TS stripping and the real Pi when supplied by
     # the parent check composition. No model/API requests: provider is local.
     mkdir -p "$workdir/tui-runtime"
-    cp -R ${self}/subagent ${self}/shared ${self}/permission-gate ${self}/background-job "$workdir/tui-runtime/"
+    cp -R ${self}/subagent ${self}/shared ${self}/permission-gate ${self}/background-job ${self}/questionnaire "$workdir/tui-runtime/"
     chmod -R u+rwX "$workdir/tui-runtime"
     ${pkgs.lib.optionalString (piPackage != null) ''
       PI_BIN=${pkgs.lib.getExe piPackage} ${pkgs.python3}/bin/python3 ${self}/background-job/reload.test.py
@@ -151,6 +151,7 @@ pkgs.runCommand "subagent-check"
       "$workdir/tui-runtime/subagent/tui-worker-server.test.ts" \
       "$workdir/tui-runtime/subagent/tui-worker-reap.test.ts" \
       "$workdir/tui-runtime/subagent/tui-worker-extension.test.ts" \
+      "$workdir/tui-runtime/subagent/headless-foreground.test.ts" \
       "$workdir/tui-runtime/subagent/tui-worker-seal.test.ts" \
       "$workdir/tui-runtime/subagent/tui-worker-tmux.test.ts" \
       "$workdir/tui-runtime/subagent/tui-root.test.ts"

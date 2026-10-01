@@ -89,7 +89,9 @@ export default function(pi) {{
                     return
             if select.select([process.stdout], [], [], max(0, deadline - time.monotonic()))[0]:
                 data = os.read(process.stdout.fileno(), 65536)
-                assert data, "Pi exited before replying"
+                if not data:
+                    stderr = process.stderr.read().decode("utf-8", errors="replace")
+                    raise AssertionError(f"Pi exited before replying (returncode={process.poll()}): {stderr[-8000:]}")
                 buffered += data
         raise AssertionError(f"{name}: reply={replied}, expected={expected}, observed={observed}")
 

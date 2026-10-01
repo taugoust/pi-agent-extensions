@@ -19,6 +19,7 @@ import {
   type AgentSHStartupClassification,
 } from "../shared/agentsh-mode.js";
 import { applyBashCommandTransforms } from "../shared/bash-command-transform.js";
+import { workerInteractionsService } from "../shared/foreground-tasks.js";
 import {
   SUBAGENT_PERMISSION_AUTHORITY_KEY,
   SUBAGENT_PERMISSION_SELECTION_KEY,
@@ -950,12 +951,32 @@ async function resolveAgentSHPrompt(
   transportSignal: AbortSignal,
   callerSignal: AbortSignal | undefined = ctx.signal,
 ): Promise<PromptResolution> {
-  if (!ctx.hasUI) return { kind: "cancel", reason: "no UI available" };
-
   const deadline = promptDeadline([callerSignal, transportSignal], timeoutMs);
   try {
     const title = promptTitle(metadata);
     const options = [DENY_CHOICE, ALLOW_CHOICE];
+    const interactions = workerInteractionsService();
+    if (interactions) {
+      try {
+        const answer = await interactions.request({
+          kind: "permission",
+          title: safePromptText(metadata.title),
+          detail: title,
+          options,
+        }, deadline.signal);
+        if (callerSignal?.aborted) return { kind: "cancel", reason: "caller aborted" };
+        if (transportSignal.aborted) throw transportSignal.reason ?? new Error("Permission Gate transport failed");
+        if (deadline.timedOut()) return { kind: "cancel", reason: "authorization prompt timed out" };
+        if (!answer || answer.kind !== "permission" || typeof answer.cancelled !== "boolean") return { kind: "cancel", reason: "authorization prompt returned an invalid response" };
+        if (answer.cancelled) return { kind: "cancel", reason: "authorization prompt cancelled" };
+        if (answer.value === ALLOW_CHOICE) return { kind: "resolve", decision: "allow" };
+        if (answer.value === DENY_CHOICE) return { kind: "resolve", decision: "deny" };
+        return { kind: "cancel", reason: "authorization prompt returned an invalid option" };
+      } catch {
+        return { kind: "cancel", reason: callerSignal?.aborted ? "caller aborted" : transportSignal.aborted ? "transport failed" : deadline.timedOut() ? "authorization prompt timed out" : "authorization prompt failed" };
+      }
+    }
+    if (!ctx.hasUI) return { kind: "cancel", reason: "no UI available" };
     const localSelect = (signal: AbortSignal) => ctx.ui.select(title, options, { signal });
     const remote = paseoRemoteSelect(title, options, localSelect, deadline.signal);
     let choice: string | undefined;

@@ -16,6 +16,7 @@ import {
 } from "@mariozechner/pi-tui";
 import { Type } from "@sinclair/typebox";
 import { answerQuestionnaireInPaseo } from "./paseo.js";
+import { workerInteractionsService } from "../shared/foreground-tasks.js";
 
 // Types
 interface QuestionOption {
@@ -188,21 +189,62 @@ export default function questionnaire(pi: ExtensionAPI) {
     parameters: QuestionnaireParams,
 
     async execute(_toolCallId, params, signal, _onUpdate, ctx) {
-      if (!ctx.hasUI) {
-        return errorResult(
-          "Error: UI not available (running in non-interactive mode)",
-        );
-      }
       if (params.questions.length === 0) {
         return errorResult("Error: No questions provided");
       }
 
-      // Normalize questions with defaults
       const questions: Question[] = params.questions.map((q, i) => ({
         ...q,
         label: q.label || `Q${i + 1}`,
         allowOther: q.allowOther !== false,
       }));
+      const interactions = workerInteractionsService();
+      if (interactions) {
+        if (signal?.aborted) return errorResult("Error: Questionnaire aborted", questions);
+        try {
+          const answer = await interactions.request({
+            kind: "questionnaire",
+            questions: questions.map(({ id, label, prompt, options, allowOther }) => ({ id, label, prompt, options, allowOther })),
+          }, signal);
+          if (signal?.aborted) return errorResult("Error: Questionnaire aborted", questions);
+          if (!answer || answer.kind !== "questionnaire" || typeof answer.cancelled !== "boolean") {
+            return errorResult("Error: Headless questionnaire returned an invalid response", questions);
+          }
+          if (answer.cancelled) return errorResult("User cancelled the questionnaire", questions);
+          const byId = new Map(questions.map((question) => [question.id, question]));
+          if (!Array.isArray(answer.answers) || answer.answers.length !== questions.length) {
+            return errorResult("Error: Headless questionnaire returned incomplete answers", questions);
+          }
+          const answers: Answer[] = [];
+          const seen = new Set<string>();
+          for (const item of answer.answers) {
+            const question = item && byId.get(item.id);
+            if (!question || seen.has(item.id) || typeof item.value !== "string" || typeof item.wasCustom !== "boolean") {
+              return errorResult("Error: Headless questionnaire returned an invalid answer", questions);
+            }
+            seen.add(item.id);
+            const optionIndex = question.options.findIndex((option) => option.value === item.value);
+            if (optionIndex >= 0) {
+              answers.push({ id: item.id, value: item.value, label: question.options[optionIndex].label, wasCustom: false, index: optionIndex + 1 });
+            } else if (item.wasCustom && question.allowOther && item.value.trim()) {
+              answers.push({ id: item.id, value: item.value, label: item.value, wasCustom: true });
+            } else {
+              return errorResult("Error: Headless questionnaire returned an unknown choice", questions);
+            }
+          }
+          const result = { questions, answers, cancelled: false };
+          return { content: [{ type: "text", text: answers.map((a) => `${a.id}: ${a.wasCustom ? `user wrote: ${a.label}` : `user selected: ${a.index}. ${a.label}`}`).join("\n") }], details: result };
+        } catch (error) {
+          return errorResult(`Error: Headless questionnaire interaction failed: ${String(error)}`, questions);
+        }
+      }
+      if (ctx.mode === "rpc") return errorResult("Error: Headless questionnaire interaction service unavailable", questions);
+      if (!ctx.hasUI) {
+        return errorResult(
+          "Error: UI not available (running in non-interactive mode)",
+        );
+      }
+      // Normalize questions with defaults
 
       const isMulti = questions.length > 1;
       const totalTabs = questions.length + 1; // questions + Submit

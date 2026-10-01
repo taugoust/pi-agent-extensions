@@ -1,13 +1,17 @@
 import type { ExtensionAPI } from "@mariozechner/pi-coding-agent";
 import assert from "node:assert/strict";
-import { writeFile, readFile } from "node:fs/promises";
+import { writeFile, readFile, lstat, readlink } from "node:fs/promises";
 import { dirname, join } from "node:path";
 import { getAgentDir } from "@mariozechner/pi-coding-agent";
 import { sharedBackgroundSubagentManager } from "./background.ts";
 import { execFile } from "node:child_process";
 import { promisify } from "node:util";
 import subagent from "./index.ts";
-import { TuiWorkerStore } from "./tui-worker-store.ts";
+import { TuiWorkerStore, discoverTuiWorkers } from "./tui-worker-store.ts";
+import { FOREGROUND_TASKS_KEY } from "../shared/foreground-tasks.ts";
+import { HARNESS_READONLY_KEY } from "../shared/harness-readonly.ts";
+import type { TuiWorkerManifest } from "../shared/tui-worker-protocol.ts";
+import { processIdentity } from "./tui-worker-tmux.ts";
 import { callTuiWorker } from "./tui-worker-client.ts";
 
 /** Explicit real-root integration fixture. Never enabled outside tests. */
@@ -20,6 +24,9 @@ export default function rootTest(pi: ExtensionAPI) {
     const value = Reflect.get(target, property); return typeof value === "function" ? value.bind(target) : value;
   } });
   subagent(proxy);
+  pi.on("session_start", (_event, ctx) => {
+    if (ctx.hasUI) ctx.ui.setStatus("root-test-ready", "ROOT_FIXTURE_READY");
+  });
   const output = process.env.PI_TUI_ROOT_RESULT!;
   const backgroundFile = `${output}.background`;
   const sleep = (ms: number) => new Promise(resolve => setTimeout(resolve, ms));
@@ -38,10 +45,238 @@ export default function rootTest(pi: ExtensionAPI) {
     assert.equal(value.details.group.status, "completed", JSON.stringify(value));
     return value.details.group;
   };
+  const answerHeadlessInteraction = async (ctx: any, marker: string, answer: any, kind: string) => {
+    const pendingRun = tool.execute(`root-test-interaction-${marker}-${Date.now()}`, { task: marker, model: "harness-test/mock:off" }, undefined, undefined, ctx);
+    void pendingRun.catch(() => undefined);
+    const service = (globalThis as any)[FOREGROUND_TASKS_KEY];
+    const deadline = Date.now() + 30_000;
+    let target: any, interaction: any;
+    while (Date.now() < deadline) {
+      const listed = await service.execute({ sessionId: service.sessionId, epoch: service.epoch, operation: "list" });
+      const task = listed.tasks?.find((item: any) => item.title.includes(marker));
+      if (task) {
+        target = { taskId: task.taskId, childId: task.childId, workerEpoch: task.workerEpoch };
+        const view = await service.execute({ sessionId: service.sessionId, epoch: service.epoch, operation: "view", target });
+        interaction = view.view?.interactions?.find((item: any) => item.request.kind === kind);
+        if (interaction) break;
+      }
+      await sleep(100);
+    }
+    if (!interaction) {
+      const finalList = await service.execute({ sessionId: service.sessionId, epoch: service.epoch, operation: "list" });
+      const finalTask = finalList.tasks?.find((item: any) => item.childId === target?.childId);
+      const finalView = target ? await service.execute({ sessionId: service.sessionId, epoch: service.epoch, operation: "view", target }) : undefined;
+      const worker = target ? discoverTuiWorkers(join(process.env.PI_TUI_WORKER_STATE_ROOT!, "workers"), ctx.sessionManager.getSessionId())
+        .find(item => item.childId === target.childId) : undefined;
+      const diagnostic: any = { finalTask, interactions: finalView?.view?.interactions,
+        messages: finalView?.view?.messages?.slice(-8), worker: worker && { workerEpoch: worker.workerEpoch, runtimePid: worker.runtimePid, execution: worker.execution } };
+      if (worker) {
+        const store = new TuiWorkerStore(dirname(worker.sessionFile));
+        try { diagnostic.status = await callTuiWorker(worker, { operation: "status" }); } catch (error) { diagnostic.statusError = String(error); }
+        try { diagnostic.workerState = store.readState(false); } catch (error) { diagnostic.workerStateError = String(error); }
+        try { diagnostic.stderr = store.readRpcLogTail("stderr", 12 * 1024); } catch (error) { diagnostic.stderrError = String(error); }
+        try { diagnostic.stdout = store.readRpcLogTail("stdout", 12 * 1024).split("\\n").slice(-20).join("\\n"); } catch (error) { diagnostic.stdoutError = String(error); }
+      }
+      throw new Error(`Headless ${kind} adapter did not publish its typed pending request: ${JSON.stringify(diagnostic).slice(0, 20_000)}`);
+    }
+    const receipt = await service.execute({ sessionId: service.sessionId, epoch: service.epoch, operation: "respond",
+      target, requestId: `root-answer-${marker}`, interactionId: interaction.id, answer });
+    assert.equal(receipt.accepted, true, JSON.stringify(receipt));
+    const result = await pendingRun;
+    assert.equal(result.details.group.status, "completed", JSON.stringify(result));
+    return result;
+  };
   register("tui-root-background", async ctx => {
     pi.setSessionName("tui-root-test");
     const gate = (globalThis as any).__PAE_PERMISSION_GATE_OPERATOR_V1__;
     gate?.applyMode(ctx.sessionManager.getSessionId(), false);
+    const paneSnapshot = async () => (await promisify(execFile)("tmux", ["list-panes", "-a", "-F", "#{pane_id}"])).stdout.trim().split("\n").filter(Boolean).sort();
+    const panesBeforeHeadless = await paneSnapshot();
+    const foreground = await execute(ctx, { task: "REPORT_OUTCOME", model: "harness-test/mock:off", acceptance: ["fixture"] });
+    assert.equal(foreground.details.group.status, "completed", JSON.stringify(foreground));
+    const foregroundId = foreground.details.group.children[0].task_id;
+    const headless = discoverTuiWorkers(join(process.env.PI_TUI_WORKER_STATE_ROOT!, "workers"), ctx.sessionManager.getSessionId())
+      .find(worker => worker.taskId === foregroundId)!;
+    assert.ok(headless, "default foreground launch did not commit a discoverable worker");
+    assert.equal(headless.execution, "rpc-headless");
+    assert.equal(headless.presentation, "headless-foreground");
+    assert.equal(Object.hasOwn(headless, "placement"), false, "headless manifest fabricated tmux placement");
+    assert.equal((await lstat(headless.fifoPath!)).isFIFO(), true);
+    assert.ok(headless.runtimePid && headless.runtimeProcessToken, "worker-ready handshake must authenticate the actual Pi PID");
+    assert.equal(await readlink(`/proc/${headless.runtimePid}/fd/0`), headless.fifoPath, "child Pi did not retain its own FIFO stdin descriptor");
+    assert.equal(await processIdentity(headless.runtimePid!), headless.runtimeProcessToken);
+    const workerDirectory = dirname(headless.sessionFile);
+    const runtimePolicy = await readFile(join(workerDirectory, "system-prompt.txt"), "utf8");
+    assert.match(runtimePolicy, /flat helper and MUST NOT call the subagent tool/);
+    assert.match(runtimePolicy, /harness-user-control/);
+    for (const name of ["rpc.stdout.log", "rpc.stderr.log"]) {
+      const log = await lstat(join(workerDirectory, name));
+      assert.equal((log.mode & 0o077), 0, "RPC diagnostics must remain private");
+      assert.ok(log.size <= 512 * 1024, "RPC diagnostics must be byte-bounded");
+    }
+    const childEnvironment = (await readFile(`/proc/${headless.runtimePid}/environ`)).toString("utf8").split("\0");
+    assert.ok(!childEnvironment.some(entry => entry.startsWith("TMUX=") || entry.startsWith("TMUX_PANE=")), "headless worker inherited tmux targeting");
+    assert.equal(childEnvironment.find(entry => entry.startsWith("PI_PASEO_BRIDGE_NO_IMPORT=")), "PI_PASEO_BRIDGE_NO_IMPORT=1");
+    assert.ok(!childEnvironment.some(entry => /^PI_PASEO_(?!BRIDGE_NO_IMPORT=)/.test(entry)), "parent Paseo identity/force/control variables leaked into worker");
+    assert.equal(process.env.PI_PASEO_EXISTING_AGENT_ID, "malicious-parent-agent", "headless launch mutated parent Paseo binding");
+    const foregroundState = await callTuiWorker(headless, { operation: "status" });
+    assert.equal((foregroundState.data as any).active, false);
+    assert.ok((foregroundState.data as any).lastReport);
+    const service = (globalThis as any)[FOREGROUND_TASKS_KEY];
+    const page = await service.execute({ sessionId: service.sessionId, epoch: service.epoch, operation: "list" });
+    assert.equal(page.state, "available");
+    const headlessTask = page.tasks.find((task: any) => task.taskId === foregroundId)!;
+    assert.ok(headlessTask);
+    const view = await service.execute({ sessionId: service.sessionId, epoch: service.epoch, operation: "view",
+      target: { taskId: headlessTask.taskId, childId: headlessTask.childId, workerEpoch: headlessTask.workerEpoch } });
+    assert.equal(view.state, "available", JSON.stringify(view));
+    assert.ok(view.view.messages.some((message: any) => message.role === "assistant"), JSON.stringify(view));
+    const readonlyService = (globalThis as any)[HARNESS_READONLY_KEY]?.subagents;
+    assert.ok(readonlyService, "root read-only dashboard service was not installed");
+    const groupRecordPath = join(process.env.PI_TUI_WORKER_STATE_ROOT!, "headless-groups", `${foreground.details.job_id}.json`);
+    const groupRecordBefore = await readFile(groupRecordPath, "utf8");
+    const readonlyPage = await readonlyService.list({ sessionId: ctx.sessionManager.getSessionId(), limit: 50 });
+    assert.ok(readonlyPage.items.some((item: any) => item.taskId === foregroundId));
+    const readonlyReport = await readonlyService.report({ sessionId: ctx.sessionManager.getSessionId(), taskId: foregroundId });
+    assert.equal(readonlyReport.state, "available");
+    assert.equal(readonlyReport.item.stale, true);
+    assert.doesNotMatch(readonlyReport.item.text, /session\.jsonl|control\.sock/);
+    assert.equal(await readFile(groupRecordPath, "utf8"), groupRecordBefore, "read-only Paseo snapshot reconciled/wrote headless state");
+    const resultPage1 = await execute(ctx, { operation: "result", job_id: foreground.details.job_id, child: 1, offset: 0, limit: 8 });
+    assert.equal(resultPage1.details.offset, 0);
+    assert.equal(resultPage1.details.next_offset, 8);
+    assert.equal(resultPage1.details.complete, false);
+    const resultPage2 = await execute(ctx, { operation: "result", job_id: foreground.details.job_id, child: 1, offset: 8, limit: 8 });
+    assert.equal(resultPage2.details.offset, 8);
+    assert.ok(resultPage2.content[0].text.length > 0);
+    const childOnlyResult = await execute(ctx, { operation: "result", child_id: headlessTask.childId, offset: 0, limit: 8 });
+    assert.equal(childOnlyResult.details.child_id, headlessTask.childId);
+    await assert.rejects(execute(ctx, { operation: "result", job_id: foreground.details.job_id, child_id: `subagent-child-${"f".repeat(24)}` }), /child_id does not belong/i);
+    const promptRequest = { sessionId: service.sessionId, epoch: service.epoch, operation: "prompt",
+      target: { taskId: headlessTask.taskId, childId: headlessTask.childId, workerEpoch: headlessTask.workerEpoch },
+      requestId: "root-panel-followup", message: "User panel follow-up" };
+    const promptReceipt = await service.execute(promptRequest);
+    assert.equal(promptReceipt.accepted, true, JSON.stringify(promptReceipt));
+    assert.deepEqual(await service.execute(promptRequest), promptReceipt, "replayed parent prompt must be idempotent");
+    const followupDeadline = Date.now() + 20_000;
+    let followupStatus: any;
+    while (Date.now() < followupDeadline) {
+      followupStatus = await callTuiWorker(headless, { operation: "status" });
+      if (followupStatus.ok && !(followupStatus.data as any).active && (followupStatus.data as any).lastReport !== (foregroundState.data as any).lastReport) break;
+      await sleep(100);
+    }
+    assert.notEqual((followupStatus.data as any).lastReport, (foregroundState.data as any).lastReport, "parent follow-up did not run in retained Pi session");
+    const refreshedView = await service.execute({ sessionId: service.sessionId, epoch: service.epoch, operation: "view",
+      target: { taskId: headlessTask.taskId, childId: headlessTask.childId, workerEpoch: headlessTask.workerEpoch } });
+    assert.equal(refreshedView.state, "available");
+    assert.ok(refreshedView.view.messages.some((message: any) => message.role === "user" && message.text.includes("Direct user instruction from Paseo")),
+      "trusted panel input must be retained with user origin");
+    await execute(ctx, { operation: "reap", job_id: foreground.details.job_id });
+    const questionnaire = await answerHeadlessInteraction(ctx, "ASK_QUESTIONNAIRE", { kind: "questionnaire", cancelled: false,
+      answers: [{ id: "continue", value: "yes", wasCustom: false }] }, "questionnaire");
+    assert.equal(questionnaire.details.group.status, "completed");
+    await execute(ctx, { operation: "reap", job_id: questionnaire.details.group.job_id });
+    if (gate) {
+      gate.applyMode(ctx.sessionManager.getSessionId(), true);
+      const permission = await answerHeadlessInteraction(ctx, "ASK_GUARDED_PERMISSION", { kind: "permission", cancelled: false, value: "Allow" }, "permission");
+      assert.equal(permission.details.group.status, "completed", JSON.stringify(permission));
+      const permissionManifest = discoverTuiWorkers(join(process.env.PI_TUI_WORKER_STATE_ROOT!, "workers"), ctx.sessionManager.getSessionId())
+        .find(worker => worker.taskId === permission.details.group.children[0].task_id)!;
+      assert.match(await readFile(permissionManifest.sessionFile, "utf8"), /guarded-panel-approval/);
+      assert.equal((await lstat(process.env.PI_TUI_ROOT_PERMISSION_FILE!)).mode & 0o777, 0o777,
+        "the dangerous command must execute only after the structured permission interaction is approved");
+      await execute(ctx, { operation: "reap", job_id: permission.details.group.job_id });
+      gate.applyMode(ctx.sessionManager.getSessionId(), false);
+    }
+    assert.deepEqual(await paneSnapshot(), panesBeforeHeadless, "headless foreground launch changed tmux topology");
+    const headlessResume = await execute(ctx, { operation: "resume", task_id: foregroundId, message: "Continue the retained headless session." });
+    assert.equal(headlessResume.details.group.children[0].task_id, foregroundId);
+    assert.equal(headlessResume.details.group.children[0].attempt, 2);
+    await execute(ctx, { operation: "reap", job_id: headlessResume.details.job_id });
+    const concurrentResume = execute(ctx, { operation: "resume", task_id: foregroundId, message: "One successor attempt only." });
+    await sleep(25);
+    await assert.rejects(execute(ctx, { operation: "resume", task_id: foregroundId, message: "Duplicate successor attempt." }), /resume is already in progress/i);
+    const headlessAttempt3 = await concurrentResume;
+    assert.equal(headlessAttempt3.details.group.children[0].attempt, 3);
+    await execute(ctx, { operation: "reap", job_id: headlessAttempt3.details.job_id });
+    process.env.PI_TUI_TEST_HEADLESS_START_DELAY_MS = "2000";
+    const startupStop = tool.execute(`root-test-startup-stop-${Date.now()}`, { task: "STARTUP_STOP_SENTINEL", model: "harness-test/mock:off" }, undefined, undefined, ctx);
+    void startupStop.catch(() => undefined);
+    let delayedTask: any;
+    const delayedDeadline = Date.now() + 10_000;
+    while (Date.now() < delayedDeadline) {
+      const page = await service.execute({ sessionId: service.sessionId, epoch: service.epoch, operation: "list" });
+      delayedTask = page.tasks?.find((task: any) => task.title.includes("STARTUP_STOP_SENTINEL"));
+      if (delayedTask?.canStop) break;
+      await sleep(50);
+    }
+    assert.ok(delayedTask?.canStop, "delayed launcher did not expose a safe startup Stop");
+    assert.equal(delayedTask.canPrompt, false, "user prompt must remain disabled before initial prompt acceptance");
+    const startupStopped = await service.execute({ sessionId: service.sessionId, epoch: service.epoch, operation: "stop",
+      target: { taskId: delayedTask.taskId, childId: delayedTask.childId, workerEpoch: delayedTask.workerEpoch }, requestId: "stop-before-first-prompt" });
+    assert.equal(startupStopped.accepted, true, JSON.stringify(startupStopped));
+    delete process.env.PI_TUI_TEST_HEADLESS_START_DELAY_MS;
+    const startupResult = await startupStop;
+    assert.equal(startupResult.details.group.children[0].status, "cancelled");
+    const startupManifest = discoverTuiWorkers(join(process.env.PI_TUI_WORKER_STATE_ROOT!, "workers"), ctx.sessionManager.getSessionId())
+      .find(worker => worker.childId === delayedTask.childId)!;
+    assert.ok(startupManifest);
+    const startupTranscript = await readFile(startupManifest.sessionFile, "utf8");
+    assert.doesNotMatch(startupTranscript, /STARTUP_STOP_SENTINEL/, "accepted startup Stop must prevent initial task dispatch");
+    const startupState = new TuiWorkerStore(dirname(startupManifest.sessionFile)).readState(false);
+    assert.equal(startupState.sealed, true);
+    assert.ok(startupState.jobCleanup);
+    let orphanFailure: string | undefined;
+    const orphanTask = tool.execute(`root-test-owner-loss-${Date.now()}`, { task: "WAIT_FOR_PARENT OWNER_LOSS_HEADLESS", model: "harness-test/mock:off" }, undefined, undefined, ctx);
+    void orphanTask.catch(error => { orphanFailure = String(error); });
+    let orphanManifest: TuiWorkerManifest | undefined;
+    let orphanStatusError: string | undefined;
+    const orphanDeadline = Date.now() + 30_000;
+    while (Date.now() < orphanDeadline) {
+      const tasks = await service.execute({ sessionId: service.sessionId, epoch: service.epoch, operation: "list" });
+      const child = tasks.tasks?.find((task: any) => task.title.includes("OWNER_LOSS_HEADLESS"));
+      if (child) orphanManifest = discoverTuiWorkers(join(process.env.PI_TUI_WORKER_STATE_ROOT!, "workers"), ctx.sessionManager.getSessionId()).find(worker => worker.childId === child.childId);
+      if (orphanManifest) {
+        try {
+          const status = await callTuiWorker(orphanManifest, { operation: "status" });
+          if (status.ok && (status.data as any).active) break;
+        } catch (error) { orphanStatusError = String(error); }
+      }
+      await sleep(100);
+    }
+    assert.ok(orphanManifest, `could not discover owner-bound headless helper: ${orphanFailure ?? "pending"}`);
+    const activeOrphan = await callTuiWorker(orphanManifest, { operation: "status" });
+    assert.equal(activeOrphan.ok && (activeOrphan.data as any).active, true, `owner-loss helper was not active before parent termination: ${orphanStatusError ?? JSON.stringify(activeOrphan)}`);
+    const orphanTaskDto = (await service.execute({ sessionId: service.sessionId, epoch: service.epoch, operation: "list" })).tasks
+      .find((task: any) => task.childId === orphanManifest!.childId)!;
+    const orphanTarget = { taskId: orphanTaskDto.taskId, childId: orphanTaskDto.childId, workerEpoch: orphanTaskDto.workerEpoch };
+    const queuedBeforeStop = await service.execute({ sessionId: service.sessionId, epoch: service.epoch, operation: "prompt",
+      target: orphanTarget, requestId: "queued-before-stop", message: "STOP_QUEUE_SENTINEL must not run after Stop" });
+    assert.equal(queuedBeforeStop.accepted, true, JSON.stringify(queuedBeforeStop));
+    const stopped = await service.execute({ sessionId: service.sessionId, epoch: service.epoch, operation: "stop",
+      target: orphanTarget, requestId: "stop-without-reap" });
+    assert.equal(stopped.accepted, true, JSON.stringify(stopped));
+    const orphanStore = new TuiWorkerStore(dirname(orphanManifest.sessionFile));
+    assert.equal(orphanStore.readState(false).sealed, false, "human Stop must not implicitly seal/reap");
+    assert.equal(await processIdentity(orphanManifest.runtimePid!), orphanManifest.runtimeProcessToken, "human Stop must keep Pi alive");
+    const stoppedStatus = await callTuiWorker(orphanManifest, { operation: "status" });
+    assert.equal((stoppedStatus.data as any).active, false, "Stop must not return while the Pi run is still active");
+    await sleep(8500);
+    const afterStopSettled = await callTuiWorker(orphanManifest, { operation: "status" });
+    assert.equal((afterStopSettled.data as any).active, false, "cleared queued work restarted after Stop");
+    assert.equal((afterStopSettled.data as any).lastReport, (stoppedStatus.data as any).lastReport, "queued pre-Stop instruction ran after cancellation");
+    const afterStopView = await service.execute({ sessionId: service.sessionId, epoch: service.epoch, operation: "view", target: orphanTarget });
+    assert.equal(afterStopView.state, "available", JSON.stringify(afterStopView));
+    const resumedUserInput = await service.execute({ sessionId: service.sessionId, epoch: service.epoch, operation: "prompt",
+      target: orphanTarget, requestId: "panel-after-stop", message: "WAIT_FOR_PARENT OWNER_LOSS_HEADLESS after Stop" });
+    assert.equal(resumedUserInput.accepted, true, JSON.stringify(resumedUserInput));
+    const activeAgainDeadline = Date.now() + 10_000;
+    while (Date.now() < activeAgainDeadline) {
+      const current = await callTuiWorker(orphanManifest, { operation: "status" }).catch(() => undefined);
+      if (current?.ok && (current.data as any).active) break;
+      await sleep(100);
+    }
+    assert.ok((await callTuiWorker(orphanManifest, { operation: "status" })).data?.active, "trusted user prompt after Stop must run");
     const started = await execute(ctx, { task: "WAIT_FOR_PARENT", model: "harness-test/mock:off", background: true });
     const deadline = Date.now() + 30_000;
     let group: any;
@@ -53,13 +288,20 @@ export default function rootTest(pi: ExtensionAPI) {
     const manifest = manifestFor(group);
     const status = await callTuiWorker(manifest, { operation: "status" });
     assert.ok(status.ok);
-    const saved = { rootPid: process.pid, job: started.details.job_id, childPid: (status.data as any).pid, sessionId: ctx.sessionManager.getSessionId() };
+    const saved = { rootPid: process.pid, job: started.details.job_id, childPid: (status.data as any).pid, sessionId: ctx.sessionManager.getSessionId(),
+      headlessPid: orphanManifest.runtimePid, headlessToken: orphanManifest.runtimeProcessToken, headlessEpoch: orphanManifest.workerEpoch };
     await writeFile(backgroundFile, JSON.stringify(saved));
     return saved;
   });
   register("tui-root-check", async ctx => {
     const saved = JSON.parse(await readFile(backgroundFile, "utf8"));
     assert.equal(saved.sessionId, ctx.sessionManager.getSessionId());
+    const ownerLost = discoverTuiWorkers(join(process.env.PI_TUI_WORKER_STATE_ROOT!, "workers"), saved.sessionId)
+      .find(worker => worker.workerEpoch === saved.headlessEpoch);
+    assert.ok(ownerLost, "owner-loss headless worker manifest was not retained");
+    const ownerLostState = new TuiWorkerStore(dirname(ownerLost.sessionFile)).readState();
+    assert.equal(ownerLostState.sealed, true, "owner-loss helper exited without a durable cleanup seal");
+    assert.equal(ownerLostState.jobCleanup?.workerEpoch, saved.headlessEpoch);
     let group = (await execute(ctx, { operation: "status", job_id: saved.job })).details.group;
     assert.notEqual(group.children[0].status, "lost");
     const survivor = manifestFor(group);
@@ -211,14 +453,20 @@ export default function rootTest(pi: ExtensionAPI) {
     assert.equal(chainGroup.children[0].runtime.placement.windowId, chainGroup.children[1].runtime.placement.windowId);
     assert.match(await readFile(chainGroup.children[1].runtime.sessionFile, "utf8"), /Second chain step uses Deterministic/);
     await execute(ctx, { operation: "reap", job_id: chain.details.job_id });
-    // Foreground still waits until explicit promotion; no second Pi is launched.
-    const foreground = execute(ctx, { task: "WAIT_FOR_PARENT foreground", model: "harness-test/mock:off" });
-    await sleep(100);
-    await commands.get("background").handler("", ctx);
-    const moved = await foreground;
-    assert.equal(moved.details.group.background, true);
-    await wait(ctx, moved.details.job_id);
-    await execute(ctx, { operation: "reap", job_id: moved.details.job_id });
+    // Default foreground is headless and cannot be promoted into a background TUI group.
+    let foregroundJobId: string | undefined;
+    const foreground = tool.execute(`root-test-headless-promote-${Date.now()}`, { task: "WAIT_FOR_PARENT foreground", model: "harness-test/mock:off" }, undefined,
+      (partial: any) => { foregroundJobId = partial.details?.job_id ?? foregroundJobId; }, ctx);
+    const foregroundDeadline = Date.now() + 10_000;
+    while (!foregroundJobId && Date.now() < foregroundDeadline) await sleep(50);
+    assert.ok(foregroundJobId, "headless foreground did not expose its committed group ID");
+    const foregroundTasks = await (globalThis as any)[FOREGROUND_TASKS_KEY].execute({ sessionId: (globalThis as any)[FOREGROUND_TASKS_KEY].sessionId,
+      epoch: (globalThis as any)[FOREGROUND_TASKS_KEY].epoch, operation: "list" });
+    assert.ok(foregroundTasks.tasks.some((task: any) => task.groupId === foregroundJobId), JSON.stringify({ foregroundJobId, foregroundTasks }));
+    await assert.rejects(execute(ctx, { operation: "promote", job_id: foregroundJobId }), /headless foreground workers cannot be promoted/i);
+    const stillForeground = await foreground;
+    assert.equal(stillForeground.details.group.background, false);
+    await execute(ctx, { operation: "reap", job_id: stillForeground.details.job_id });
     const parentSession = await readFile(ctx.sessionManager.getSessionFile()!, "utf8");
     assert.doesNotMatch(parentSession, /tui-subagent-update/);
     const entries = parentSession.split("\n").filter(Boolean).map(line => JSON.parse(line));

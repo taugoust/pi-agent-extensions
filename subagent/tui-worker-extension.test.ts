@@ -5,6 +5,7 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import workerExtension from "./tui-worker-extension.ts";
 import { TuiWorkerStore } from "./tui-worker-store.ts";
+import { processIdentity } from "./tui-worker-tmux.ts";
 import { callTuiWorker } from "./tui-worker-client.ts";
 import type { TuiWorkerManifest } from "../shared/tui-worker-protocol.ts";
 
@@ -67,6 +68,40 @@ test("Pi's exact too-small compaction error is an explicit idempotent no-op only
     const invalidHistory = await callTuiWorker(manifest, request, { requestId: "already-lookalike" });
     assert.equal(invalidHistory.ok, false);
     assert.equal(invalidHistory.code, "compact_failed");
+  } finally {
+    await handlers.get("session_shutdown")?.({}, ctx);
+    if (previous === undefined) delete process.env.PI_TUI_WORKER_MANIFEST; else process.env.PI_TUI_WORKER_MANIFEST = previous;
+    await rm(root, { recursive: true, force: true });
+  }
+});
+
+test("headless RPC workers require child-local AgentSH authority before prompts or delegation", async () => {
+  const root = await mkdtemp(join(tmpdir(), "pi-headless-guard-"));
+  const store = new TuiWorkerStore(root);
+  const manifest = { protocol: 1 as const, ownerSessionId: "parent", taskId: "task", runtimeId: "runtime",
+    groupId: `subagent-job-${"a".repeat(24)}`, childId: `subagent-child-${"b".repeat(24)}`, attempt: 1,
+    workerEpoch: "c".repeat(32), controlToken: "d".repeat(64), controlSocket: join(root, "control.sock"), sessionFile: join(root, "session.jsonl"),
+    launchMode: "guard-only" as const, operatorCapabilityHash: "f".repeat(64), presentation: "headless-foreground" as const,
+    execution: "rpc-headless" as const, processPid: process.pid + 1, processToken: `${process.pid + 1}:1`, fifoPath: join(root, "stdin.fifo"),
+    foregroundOwner: { pid: process.pid, token: await processIdentity(process.pid) } };
+  store.writeManifest(manifest as any);
+  const previous = process.env.PI_TUI_WORKER_MANIFEST;
+  process.env.PI_TUI_WORKER_MANIFEST = store.path("manifest.json");
+  const handlers = new Map<string, Function>();
+  const ctx = { mode: "rpc", hasUI: true, isIdle: () => true, hasPendingMessages: () => false,
+    abort: () => {}, shutdown: () => {}, sessionManager: { getSessionFile: () => manifest.sessionFile, getSessionId: () => "headless-child" } };
+  let sent = 0;
+  try {
+    workerExtension({ registerTool() {}, on: (name: string, handler: Function) => handlers.set(name, handler), sendMessage: () => { sent++; } } as any);
+    await handlers.get("session_start")!({}, ctx);
+    assert.equal((await callTuiWorker(manifest as any, { operation: "status" })).data?.readyForPrompts, false);
+    const rejected = await callTuiWorker(manifest as any, { operation: "prompt", mode: "steer", message: "must fail closed" });
+    assert.equal(rejected.ok, false);
+    assert.equal(rejected.code, "unavailable");
+    assert.equal(sent, 0);
+    assert.equal(handlers.get("tool_call")!({ toolName: "subagent" }, ctx).block, true);
+    assert.equal(handlers.get("tool_call")!({ toolName: "background_job" }, ctx).block, true);
+    assert.equal(store.readState().active, false);
   } finally {
     await handlers.get("session_shutdown")?.({}, ctx);
     if (previous === undefined) delete process.env.PI_TUI_WORKER_MANIFEST; else process.env.PI_TUI_WORKER_MANIFEST = previous;

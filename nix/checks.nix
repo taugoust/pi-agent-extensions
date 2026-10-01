@@ -269,13 +269,21 @@ in
         outdir="$workdir/out"
         mkdir -p "$srcdir/questionnaire" "$outdir"
         cp ${self}/questionnaire/paseo.ts "$srcdir/questionnaire/paseo.ts"
+        cp ${self}/questionnaire/index.ts "$srcdir/questionnaire/index.ts"
+        mkdir -p "$srcdir/shared"
+        cp ${self}/shared/foreground-tasks.ts "$srcdir/shared/foreground-tasks.ts"
 
-        test ${toString (builtins.length (builtins.attrNames moduleFiles))} = 2
+        test ${toString (builtins.length (builtins.attrNames moduleFiles))} = 3
+        test -f ${moduleFiles.".pi/agent/extensions/shared".source}/foreground-tasks.ts
+        test -f ${questionnaireBundle}/shared/foreground-tasks.ts
         test -f ${moduleFiles.".pi/agent/extensions/questionnaire/index.ts".source}
         test -f ${moduleFiles.".pi/agent/extensions/questionnaire/paseo.ts".source}
         test -f ${questionnaireBundle}/questionnaire/index.ts
         test -f ${questionnaireBundle}/questionnaire/paseo.ts
 
+        # Keep the existing strict helper check. The entrypoint has host-only
+        # SDK/UI imports; transpile it separately and exercise its real execute
+        # path with explicit UI stubs below, rather than weakening that check.
         tsc \
           --strict \
           --skipLibCheck \
@@ -284,7 +292,24 @@ in
           --target es2022 \
           --rootDir "$srcdir" \
           --outDir "$outdir" \
-          "$srcdir/questionnaire/paseo.ts"
+          "$srcdir/questionnaire/paseo.ts" "$srcdir/shared/foreground-tasks.ts"
+        tsc --noCheck --skipLibCheck --module nodenext --moduleResolution nodenext \
+          --target es2022 --rootDir "$srcdir" --outDir "$outdir" "$srcdir/questionnaire/index.ts"
+        mkdir -p "$outdir/node_modules/@mariozechner/pi-tui" "$outdir/node_modules/@sinclair/typebox"
+        printf '%s\n' '{"type":"module","main":"index.js"}' > "$outdir/node_modules/@mariozechner/pi-tui/package.json"
+        cat > "$outdir/node_modules/@mariozechner/pi-tui/index.js" <<'EOF'
+        export class Editor { constructor() { throw new Error("Unexpected TUI editor construction"); } }
+        export class Text { constructor(text) { this.text = text; } }
+        export const Key = {};
+        export const matchesKey = () => false;
+        export const truncateToWidth = value => value;
+        EOF
+        printf '%s\n' '{"type":"module","main":"index.js"}' > "$outdir/node_modules/@sinclair/typebox/package.json"
+        cat > "$outdir/node_modules/@sinclair/typebox/index.js" <<'EOF'
+        export const Type = { Object: properties => ({type:"object",properties}), String: () => ({type:"string"}),
+          Boolean: () => ({type:"boolean"}), Optional: value => value, Array: items => ({type:"array",items}) };
+        EOF
+        node ${self}/questionnaire/headless.test.mjs "$outdir"
 
         cat > "$workdir/test.mjs" <<'EOF'
         import { pathToFileURL } from "node:url";
@@ -1160,6 +1185,7 @@ in
         cp ${self}/shared/agentsh-mode.ts "$workdir/src/shared/agentsh-mode.ts"
         cp ${self}/shared/bash-command-transform.ts "$workdir/src/shared/bash-command-transform.ts"
         cp ${self}/shared/subagent-permission.ts "$workdir/src/shared/subagent-permission.ts"
+        cp ${self}/shared/foreground-tasks.ts "$workdir/src/shared/foreground-tasks.ts"
         printf '%s\n' '{"type":"module"}' > "$workdir/src/package.json"
         tsc \
           --noCheck \
@@ -1172,7 +1198,8 @@ in
           "$workdir/src/permission-gate/index.ts" \
           "$workdir/src/shared/agentsh-mode.ts" \
           "$workdir/src/shared/bash-command-transform.ts" \
-          "$workdir/src/shared/subagent-permission.ts"
+          "$workdir/src/shared/subagent-permission.ts" \
+          "$workdir/src/shared/foreground-tasks.ts"
 
         cat > "$workdir/test.mjs" <<'EOF'
         import { spawn } from "node:child_process";
@@ -1243,6 +1270,7 @@ in
           assert(process.env.AGENTSH_PERMISSION_GATE_SOCKET === undefined, "gate socket marker was not claimed and deleted during import");
           let pi = createPi();
           let remoteSelections = [];
+          const structuredSelections = [];
           let contextOptions = { choice: "Allow" };
           if (name === "local-deny") contextOptions.choice = "Deny";
           if (name === "cancel") contextOptions.choice = undefined;
@@ -1282,6 +1310,32 @@ in
           }
 
           let ctx = createContext(contextOptions);
+          if (name.startsWith("structured-")) {
+            ctx.mode = "rpc";
+            ctx.ui.select = async () => { throw new Error("Structured headless permission used terminal UI"); };
+            globalThis.__paeWorkerInteractionsV1 = {
+              protocol: 1, mode: "headless", workerEpoch: "test-worker",
+              async request(input, signal) {
+                structuredSelections.push({ input, signal: Boolean(signal) });
+                assert(signal && input.kind === "permission" && input.options.join(",") === "Deny,Allow", "invalid structured permission schema");
+                assert(input.detail.includes("sudo true"), "structured approval omitted the command");
+                if (name === "structured-pending-off") {
+                  operator.applyMode(sessionId, false);
+                  assert(signal.aborted, "mode change did not dismiss structured request");
+                  throw new Error("mode changed");
+                }
+                if (["structured-abort", "structured-transport-eof", "structured-timeout"].includes(name)) {
+                  if (name === "structured-abort") setTimeout(() => ctx.controller.abort(), 5);
+                  await new Promise((resolve) => signal.aborted ? resolve() : signal.addEventListener("abort", resolve, { once: true }));
+                  throw new Error("structured request aborted");
+                }
+                if (name === "structured-failure") throw new Error("UI unavailable");
+                if (name === "structured-invalid") return { kind: "permission", cancelled: false, value: "unexpected" };
+                if (name === "structured-cancel") return { kind: "permission", cancelled: true };
+                return { kind: "permission", cancelled: false, value: name === "structured-deny" ? "Deny" : "Allow" };
+              },
+            };
+          }
           if (name === "transform-order") {
             registerBashCommandTransform("test-wrapper", (command) => `ssh 'test-host' ''${JSON.stringify(command)}`);
           }
@@ -1318,7 +1372,7 @@ in
             assert(JSON.stringify(pi.modeEvents) === JSON.stringify([{ sessionId, enabled: false }]), "operator event lost exact mode");
             assert(ctx.statuses.some((entry) => entry.name === "permission-gate-mode" && entry.value?.includes("OFF")), "operator UI not updated");
           }
-          if (["mode-off", "mode-on", "reload-child", "new-session-child"].includes(name)) {
+          if (["mode-off", "mode-on", "reload-child", "new-session-child", "structured-mode-off"].includes(name)) {
             await pi.commands.get("permission-gate").handler("off", ctx);
             assert(JSON.stringify(pi.modeEvents[0]) === JSON.stringify({ sessionId, enabled: false }), "command did not use operator mode helper");
             if (name === "mode-on") await pi.commands.get("permission-gate").handler("on", ctx);
@@ -1416,7 +1470,9 @@ in
             results.push(await tool({ toolName: "bash", toolCallId: "tool-dangerous", input: { command: "sudo true" } }, ctx));
           }
           delete globalThis.__piPaseoRemoteUiV1;
+          delete globalThis.__paeWorkerInteractionsV1;
           process.stdout.write(JSON.stringify({
+            structuredSelections,
             allowed: results.map((result) => result === undefined),
             blocked: results.map((result) => result?.block === true),
             reasons: results.map((result) => result?.reason || ""),
@@ -1740,6 +1796,38 @@ in
 
           const cancelled = await spawnInheritedChild("cancel", (socket) => promptedBroker(socket, { type: "cancel", reason: "authorization prompt cancelled" }));
           assert(cancelled.blocked[0], "dismissed AgentSH prompt did not fail closed");
+
+          for (const [name, finish, allowed, count] of [
+            ["structured-allow", { type: "resolve", decision: "allow" }, true, 1],
+            ["structured-deny", { type: "resolve", decision: "deny" }, false, 1],
+            ["structured-cancel", { type: "cancel", reason: "authorization prompt cancelled" }, false, 1],
+            ["structured-invalid", { type: "cancel", reason: "authorization prompt returned an invalid option" }, false, 1],
+            ["structured-failure", { type: "cancel", reason: "authorization prompt failed" }, false, 1],
+            ["structured-abort", { type: "cancel", reason: "caller aborted" }, false, 1],
+            ["structured-timeout", { type: "cancel", reason: "authorization prompt timed out" }, false, 1],
+            ["structured-mode-off", { type: "resolve", decision: "allow" }, true, 0],
+            ["structured-pending-off", { type: "resolve", decision: "allow" }, true, 1],
+          ]) {
+            const structured = await spawnInheritedChild(name, socket => promptedBroker(socket, finish), name === "structured-timeout" ? 40 : undefined);
+            assert(structured.allowed[0] === allowed, name + " authorization mismatch");
+            assert(structured.structuredSelections.length === count, name + " structured UI call count mismatch");
+            assert(structured.selections.length === 0, name + " invoked a terminal selector");
+          }
+          const structuredTransport = await spawnInheritedChild("structured-transport-eof", async socket => {
+            const read = lineReader(socket); await expectHello(read, socket);
+            const request = await read(); assertAuthorize(request, "sudo true", "tool-dangerous");
+            send(socket, { v: 1, type: "decision", id: request.id, decision: "prompt", prompt });
+            await delay(10); socket.end();
+          });
+          assert(structuredTransport.blocked[0], "structured transport failure authorized execution");
+          const structuredDeniedReceipt = await spawnInheritedChild("structured-allow-denied-receipt", async socket => {
+            const read = lineReader(socket); await expectHello(read, socket);
+            const request = await read(); assertAuthorize(request, "sudo true", "tool-dangerous");
+            send(socket, { v: 1, type: "decision", id: request.id, decision: "prompt", prompt });
+            const finish = await read(); assert(finish.type === "resolve" && finish.decision === "allow", "structured UI did not submit allow");
+            send(socket, { v: 1, type: "complete", id: request.id, decision: "deny", reason: "Authoritative policy denied" });
+          });
+          assert(structuredDeniedReceipt.blocked[0], "structured UI bypassed authoritative AgentSH receipt");
 
           const headless = await spawnInheritedChild("headless", (socket) => promptedBroker(socket, { type: "cancel", reason: "no UI available" }));
           assert(headless.blocked[0], "headless AgentSH prompt did not fail closed");

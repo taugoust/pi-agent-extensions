@@ -55,7 +55,7 @@ function bytes(text:string):number{return Buffer.byteLength(text,'utf8');}
 function keyOf(data:Pick<QuietUpdate,'kind'|'id'>):string{return `${data.kind}:${data.id}`;}
 function clone<T>(value:T):T{return JSON.parse(JSON.stringify(value));}
 function envDisabled():boolean{return /^(1|true|yes|on)$/i.test(process.env.PAE_QUIET_STATE_DISABLED??process.env.PI_QUIET_STATE_DISABLED??'');}
-function disabled(h?:Hub):boolean{return envDisabled()||h?.localDisabled===true||h?.deliveryFailures>=3;}
+function disabled(h?:Hub):boolean{return envDisabled()||h?.localDisabled===true||(h?.deliveryFailures??0)>=3;}
 function validUpdate(data:any):data is QuietUpdate{return data&&['job','subagent','watch','notification'].includes(data.kind)&&typeof data.id==='string';}
 function toItem(data:QuietUpdate,queuedAt=Date.now()):Item{const updateText=JSON.stringify(data);return {key:keyOf(data),revision:revision(data),bytes:bytes(updateText),data:clone(data),queuedAt};}
 function clearTimer(h:Hub){if(h.timer)clearTimeout(h.timer);if(h.completionTimer)clearTimeout(h.completionTimer);h.timer=undefined;h.completionTimer=undefined;}
@@ -242,7 +242,7 @@ export function notifyParent(ownerSessionId:string,childId:string,toolCallId:str
   const h=hubs().get(ownerSessionId);if(!h?.pi||!h.ctx||session(h.ctx)!==ownerSessionId||disabled(h))throw new Error('Parent notification service is unavailable; preserve the finding for your final report');
   const id=createHash('sha256').update(childId+'\0'+toolCallId).digest('hex').slice(0,24);const data:QuietUpdate={kind:'notification',id,child_id:childId,message:params.message.trim(),requires_guidance:params.requires_guidance===true};
   const entries=(h.ctx.sessionManager.getBranch?.()??[]).filter((e:any)=>e.type==='custom'&&e.customType===NOTIFICATION_CUSTOM);const previous=entries.find((e:any)=>e.data?.update?.id===id);
-  if(previous&&revision(previous.data.update)!==revision(data))throw new Error('Notification ID was reused with different contents');
+  if(previous?.type==='custom'&&revision((previous.data as {update:QuietUpdate}).update)!==revision(data))throw new Error('Notification ID was reused with different contents');
   if(!previous){if(h.pending.size>=MAX_PENDING)throw new Error('Parent notification queue is full; retain the finding and retry later');if(entries.filter((e:any)=>e.data?.update?.child_id===childId&&e.data.at>Date.now()-60000).length>=5)throw new Error('Notification rate limit: at most five per minute per child; batch findings');h.pi.appendEntry(NOTIFICATION_CUSTOM,{at:Date.now(),update:data});const item=toItem(data);if(data.requires_guidance===true){if(!appendReceipt(h,item,'queued'))throw new Error('Parent notification receipt could not be persisted; preserve the finding for your final report');h.pending.set(item.key,item);}else if(!appendReceipt(h,item,'recorded'))throw new Error('Parent notification receipt could not be persisted; preserve the finding for your final report');}
   schedule(h,1000);return {content:[{type:'text',text:'Queued for the parent; no reply yet.'}],details:{notification_id:id,accepted:true,requires_guidance:data.requires_guidance}};
 }

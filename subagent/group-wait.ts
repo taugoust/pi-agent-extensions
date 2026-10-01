@@ -1,12 +1,13 @@
 export type WaitGroup = { job_id: string; status: string; background?: boolean; children: Array<{ child: number; status: string; [key: string]: unknown }>; [key: string]: unknown };
-const active = (status: string) => ["pending", "launching", "running", "cancelling"].includes(status);
+const active = (status: string) => ["pending", "launching", "running", "waiting-input", "waiting-permission", "cancelling"].includes(status);
+const waitable = (group: WaitGroup) => group.background !== false || group.execution === "rpc-headless";
 /** One bounded observation over both backends. New groups/old finished children
  * never join the snapshot; cancelling observation never cancels execution. */
 export async function waitForGroupSnapshot(read: () => Promise<WaitGroup[]>, operation: "wait_any" | "wait_all", timeoutMs: number, signal?: AbortSignal) {
   const deadline = Date.now() + timeoutMs;
   const check = () => { if (signal?.aborted) throw signal.reason ?? new Error("Wait cancelled; work remains running"); };
   check();
-  const initial = (await read()).filter(g => g.background !== false && active(g.status));
+  const initial = (await read()).filter(g => waitable(g) && active(g.status));
   const candidates = initial.flatMap(g => g.children.filter(c => active(c.status)).map(c => ({ job: g.job_id, child: c.child })));
   let groups = initial;
   for (;;) {

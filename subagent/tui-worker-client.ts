@@ -41,6 +41,7 @@ export async function exchangeTuiWorker(socketPath: string, request: { requestId
     socket.on("close", () => finish(new Error("Worker disconnected without receipt; dispatch may have been accepted")));
     socket.on("connect", () => socket.write(frame));
     socket.on("data", bytes => {
+      if (typeof bytes === "string") { finish(new Error("Worker response transport unexpectedly decoded text")); return; }
       buffer = Buffer.concat([buffer, bytes]);
       if (buffer.length > TUI_WORKER_MAX_FRAME_BYTES) { finish(new Error("Oversized worker response")); return; }
       const newline = buffer.indexOf(10);

@@ -2,11 +2,12 @@
 
 ## Implemented boundary
 
-**The Linux native route is wired into the actual `subagent/index.ts` tool execution and dashboard adapters.** `TuiNativeManager` handles single/parallel/chain launches, discovery, notifications, control, waits, cancellation, promotion, retained results and explicit resume/reap. This is one real interactive Pi per child, not an RPC console or a second Pi renderer. Full AgentSH execution retains its previous backend; this work adds no Darwin route.
+**The Linux native route is wired into the actual `subagent/index.ts` tool execution and dashboard adapters.** Default `background=false` native launches now use a genuinely headless Pi RPC process; `background=true` retains the existing native-TUI/tmux path. `HeadlessForegroundManager` handles foreground worker launch/control/status/results/recovery; `TuiNativeManager` remains responsible for TUI placement, promotion, and verified pane reap. Full AgentSH execution retains its previous backend; this work adds no Darwin route.
 
 Runtime files:
 
-- `subagent/tui-native.ts`: durable session-owned groups/attempts, serialized scheduler, task projections and parent lifecycle integration.
+- `subagent/headless-foreground.ts`: default foreground RPC launches, owner-bound lifetime, authenticated task API, bounded session history, interactions and explicit headless reap.
+- `subagent/tui-native.ts`: background TUI groups/attempts, serialized scheduler, task projections and parent lifecycle integration.
 - `subagent/group-wait.ts`: one snapshot/deadline across native and legacy groups; previously finished children and newly started groups do not join a wait.
 - `shared/tui-worker-protocol.ts`: bounded authenticated control and public discovery allowlist.
 - `subagent/tui-worker-store.ts`: private manifests, atomic/fsynced state and retained artifacts.
@@ -14,6 +15,14 @@ Runtime files:
 - `subagent/tui-worker-extension.ts`: real TUI input/session/report hooks and mandatory local notification/outcome tools.
 - `subagent/tui-worker-client.ts`: control and distinct operator-capability clients.
 - `subagent/tui-worker-tmux.ts`: immutable launcher contract, owned placement, promotion and verified dead-pane reap.
+
+## Headless foreground first release
+
+Default native foreground tasks use `pi --mode rpc` through the same immutable trusted launcher and authority disposition checks as native TUI workers. Each worker has a private, child-owned FIFO opened O_RDWR by a gate-waiting launcher before `exec`; the Pi retains that FIFO as stdin so RPC mode never sees accidental EOF. The parent never owns a stdin pipe or writes FIFO frames: prompts, abort, status, pending typed interactions and resolution travel through the authenticated child-hosted Unix socket. RPC stdout/stderr are not lifetime-critical pipes. The worker manifest carries `execution: "rpc-headless"` and process PID/start token, and omits `placement` entirely.
+
+The trusted launcher still removes inherited AgentSH capabilities and starts child-local authorization when guard-only mode is selected. RPC `ctx.hasUI` is not a usable custom UI (`ctx.ui.custom()` is unsupported); questionnaire/permission adapters use `__paeWorkerInteractionsV1` and typed pending DTOs instead. Pending requests are committed before display, remain durable while Paseo is closed, and accept only authenticated, schema-valid, one-shot answers. Cancellation/timeout can never approve a permission. `__paeForegroundTasksV1` exposes exact session/epoch/task/child/worker targets for parent UI prompt/respond/stop/view; the Paseo bridge must additionally validate its own parent capability. History is read from the Pi session file with a bounded tail and bounded cursor pages; live assistant text comes from worker message-update hooks. User interactions are never added as model tool parameters.
+
+Headless helpers are flat: the worker blocks the `subagent` tool, and tmux-only operations fail visibly with “no pane exists”; there is no fallback to a pane. A background TUI child may create its own direct headless foreground helpers. Promotion of headless work is unsupported; no process restart or original-task replay is allowed. Explicit resume of a still-live worker uses its endpoint; a dead worker requires verified PID/start-token death and an explicit new attempt from its retained session. Uncertain initial dispatch is not replayed. Parent shutdown cancels and seals/reaps owned headless workers; background TUI lifetime is unchanged.
 
 ## Placement, scheduling and lifetime
 

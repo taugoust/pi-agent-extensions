@@ -6,7 +6,7 @@ import { dirname, isAbsolute, join } from "node:path";
 import { fileURLToPath } from "node:url";
 import { randomBytes } from "node:crypto";
 import { TUI_WORKER_DISCOVERY_ENV, TUI_WORKER_MANIFEST_ENV } from "../shared/tui-worker-protocol.ts";
-import type { TuiWorkerManifest, TuiWorkerPlacement } from "../shared/tui-worker-protocol.ts";
+import type { TuiPlacedWorkerManifest, TuiWorkerManifest, TuiWorkerPlacement } from "../shared/tui-worker-protocol.ts";
 import { TuiWorkerStore, atomicPrivateJson, readPrivateJson } from "./tui-worker-store.ts";
 import { callTuiWorker } from "./tui-worker-client.ts";
 import { subagentTmuxName } from "./tui-names.ts";
@@ -16,6 +16,10 @@ const quote = (s: string) => `'${s.replaceAll("'", `'\\''`)}'`;
 const pause = (ms: number) => new Promise(resolve => setTimeout(resolve, ms));
 const NONCE = "@pi_tui_worker_nonce";
 const GROUP = "@pi_subagent_group_id";
+function requiredPlacement(manifest: TuiWorkerManifest): TuiWorkerPlacement {
+  if (manifest.execution === "rpc-headless" || !manifest.placement) throw new Error("Headless worker has no tmux placement");
+  return manifest.placement;
+}
 
 export async function processIdentity(pid: number): Promise<string> {
   if (process.platform === "linux") {
@@ -25,6 +29,15 @@ export async function processIdentity(pid: number): Promise<string> {
     return `${pid}:${token}`;
   }
   throw new Error("Native TUI worker process identities are Linux-only");
+}
+/** Unlike identity reads used to verify tmux snapshots, a zombie is not live work. */
+export async function processIsAlive(pid: number, expectedToken: string): Promise<boolean> {
+  if (process.platform !== "linux") return false;
+  try {
+    const stat = await readFile(`/proc/${pid}/stat`, "utf8");
+    const fields = stat.slice(stat.lastIndexOf(")") + 2).split(" ");
+    return fields[0] !== "Z" && fields[0] !== "X" && `${pid}:${fields[19]}` === expectedToken;
+  } catch { return false; }
 }
 
 export type TuiWorkerLaunch = {
@@ -52,7 +65,7 @@ export type TuiWorkerLaunch = {
 };
 
 /** Capture from trusted extension runtime, not from model-supplied tool args. */
-export function tuiWorkerLaunchContract(parentDisposition: TuiWorkerLaunch["parentDisposition"], env: NodeJS.ProcessEnv = process.env) {
+export function tuiWorkerLaunchContract(parentDisposition: TuiWorkerLaunch["parentDisposition"], env: NodeJS.ProcessEnv = process.env): { launcher: string; launchMode: "guard-only" | "none" } {
   const launcher = env.PI_TUI_WORKER_LAUNCHER;
   const launchMode = env.PI_TUI_WORKER_LAUNCH_MODE;
   if (!launcher || !isAbsolute(launcher) || (launchMode !== "guard-only" && launchMode !== "none")
@@ -92,7 +105,7 @@ export class TuiWorkerTmux {
     return { socketPath, serverEpoch: await this.epoch(socketPath), sessionId, windowId, paneId, ownershipNonce };
   }
   async inspect(m: TuiWorkerManifest): Promise<{ dead: boolean; panePid: number; placement: TuiWorkerPlacement }> {
-    const p = m.placement;
+    const p = requiredPlacement(m);
     for (let attempt = 0; ; attempt++) {
       if (await this.epoch(p.socketPath) !== p.serverEpoch) throw new Error("Tmux server identity changed");
       const line = await this.run(p.socketPath, ["display-message", "-p", "-t", p.paneId,
@@ -216,7 +229,7 @@ export class TuiWorkerTmux {
     const m: TuiWorkerManifest = { protocol: 1, ownerSessionId: input.ownerSessionId, taskId: input.taskId,
       groupId: input.groupId, childId: input.childId, attempt: input.attempt, runtimeId, workerEpoch,
       controlSocket, controlToken: randomBytes(32).toString("hex"), sessionFile, placement, panePid, paneProcessToken,
-      presentation: input.foreground ? "foreground-staged" : "background", launchMode: input.launchMode,
+      presentation: input.foreground ? "foreground-staged" : "background", execution: "tmux", launchMode: input.launchMode,
       acceptance: input.acceptance ?? [], tools: input.tools,
       ...(input.foreground ? { foregroundOwner: { pid: process.pid, token: await processIdentity(process.pid) } } : {}),
       ...(input.operatorCapabilityHash ? { operatorCapabilityHash: input.operatorCapabilityHash } : {}) };
@@ -239,31 +252,37 @@ export class TuiWorkerTmux {
   /** Move the entire staged group window, including its local background jobs. */
   async promote(manifests: TuiWorkerManifest[], target: TuiWorkerPlacement): Promise<TuiWorkerManifest[]> {
     if (!manifests.length) throw new Error("No workers to promote");
-    const first = await this.inspect(manifests[0]);
-    if (target.socketPath !== first.placement.socketPath || target.serverEpoch !== first.placement.serverEpoch) throw new Error("Promotion must use the same tmux server");
-    for (const manifest of manifests) {
+    const placed = manifests.map(manifest => {
+      if (manifest.execution === "rpc-headless" || !manifest.placement) throw new Error("Headless workers cannot be promoted to tmux");
+      return manifest as TuiPlacedWorkerManifest;
+    });
+    const firstManifest = placed[0]!;
+    const firstPlacement = requiredPlacement(firstManifest);
+    const first = await this.inspect(firstManifest);
+    if (target.socketPath !== firstPlacement.socketPath || target.serverEpoch !== firstPlacement.serverEpoch) throw new Error("Promotion must use the same tmux server");
+    for (const manifest of placed) {
       const info = await this.inspect(manifest);
-      if (info.placement.windowId !== first.placement.windowId || manifest.groupId !== manifests[0].groupId) throw new Error("Promotion requires one group window");
+      if (info.placement.windowId !== firstPlacement.windowId || manifest.groupId !== firstManifest.groupId) throw new Error("Promotion requires one group window");
     }
-    const childPanes = (await this.run(target.socketPath, ["list-panes", "-t", first.placement.windowId,
+    const childPanes = (await this.run(target.socketPath, ["list-panes", "-t", firstPlacement.windowId,
       "-F", `#{pane_id}|#{${NONCE}}`])).split("\n").filter(line => line.split("|")[1]).map(line => line.split("|")[0]);
-    if (childPanes.some(pane => !manifests.some(manifest => manifest.placement.paneId === pane))) throw new Error("Promotion requires every worker manifest in the staged group window");
+    if (childPanes.some(pane => !placed.some(manifest => requiredPlacement(manifest).paneId === pane))) throw new Error("Promotion requires every worker manifest in the staged group window");
     if (!/^\$[0-9]+$/.test(target.sessionId)) throw new Error("Invalid target session");
     // Durable lifetime transfer precedes the UI move: parent death in the gap
     // leaves a recoverable staged durable worker, never a killed promoted task.
-    for (const manifest of manifests) {
-      new TuiWorkerStore(dirname(manifest.sessionFile)).writeManifest({ ...manifest, presentation: "background", foregroundOwner: undefined });
+    for (const manifest of placed) {
+      new TuiWorkerStore(dirname(manifest.sessionFile)).writeManifest({ ...manifest, presentation: "background", execution: "tmux", foregroundOwner: undefined });
     }
-    if (first.placement.sessionId !== target.sessionId) await this.run(target.socketPath,
-      ["move-window", "-d", "-s", first.placement.windowId, "-t", `${target.sessionId}:`]);
-    await this.run(target.socketPath, ["set-option", "-w", "-t", first.placement.windowId, "@pi_infrastructure", "0"]);
-    const promoted: TuiWorkerManifest[] = [];
-    for (const manifest of manifests) {
+    if (firstPlacement.sessionId !== target.sessionId) await this.run(target.socketPath,
+      ["move-window", "-d", "-s", firstPlacement.windowId, "-t", `${target.sessionId}:`]);
+    await this.run(target.socketPath, ["set-option", "-w", "-t", firstPlacement.windowId, "@pi_infrastructure", "0"]);
+    const promoted: TuiPlacedWorkerManifest[] = [];
+    for (const manifest of placed) {
       const actual = await this.inspect(manifest);
       const placement = actual.placement;
       // Launcher updates discovery even if an observer disconnects mid-promotion.
       // Worker independently validates that the live pane identity is preserved.
-      const next = { ...manifest, placement, presentation: "background" as const, foregroundOwner: undefined };
+      const next: TuiPlacedWorkerManifest = { ...manifest, placement, presentation: "background", execution: "tmux", foregroundOwner: undefined };
       const store = new TuiWorkerStore(dirname(manifest.sessionFile));
       store.writeManifest(next);
       if (!actual.dead) {
@@ -279,7 +298,7 @@ export class TuiWorkerTmux {
     // A prior verified deletion is idempotent. No other pane is sought by name.
     try {
       const tombstone = readPrivateJson(store.path("reaped.json")) as { workerEpoch?: string; paneId?: string };
-      if (tombstone.workerEpoch !== manifest.workerEpoch || tombstone.paneId !== manifest.placement.paneId) throw new Error("Reap tombstone identity mismatch");
+      if (tombstone.workerEpoch !== manifest.workerEpoch || tombstone.paneId !== requiredPlacement(manifest).paneId) throw new Error("Reap tombstone identity mismatch");
       return;
     } catch (error) { if ((error as NodeJS.ErrnoException).code !== "ENOENT") throw error; }
     const verifyCleanup = () => {
@@ -299,10 +318,10 @@ export class TuiWorkerTmux {
       // Crash after verified kill-pane but before tombstone publication: only
       // reconcile an exact durable intent on the same still-live server.
       const intent = readPrivateJson(store.path("reap-intent.json")) as { workerEpoch?: string; paneId?: string };
-      if (intent.workerEpoch !== manifest.workerEpoch || intent.paneId !== manifest.placement.paneId
-        || await this.epoch(manifest.placement.socketPath) !== manifest.placement.serverEpoch) throw error;
-      const panes = (await this.run(manifest.placement.socketPath, ["list-panes", "-a", "-F", "#{pane_id}"])).split("\n");
-      if (panes.includes(manifest.placement.paneId)) throw error;
+      if (intent.workerEpoch !== manifest.workerEpoch || intent.paneId !== requiredPlacement(manifest).paneId
+        || await this.epoch(requiredPlacement(manifest).socketPath) !== requiredPlacement(manifest).serverEpoch) throw error;
+      const panes = (await this.run(requiredPlacement(manifest).socketPath, ["list-panes", "-a", "-F", "#{pane_id}"])).split("\n");
+      if (panes.includes(requiredPlacement(manifest).paneId)) throw error;
       verifyCleanup();
       atomicPrivateJson(store.path("reaped.json"), { ...intent, reapedAt: new Date().toISOString() });
       return;
@@ -321,12 +340,13 @@ export class TuiWorkerTmux {
     // Reverify immediately before the sole destructive tmux operation.
     info = await this.inspect(manifest);
     if (!info.dead) throw new Error("Worker is active; refusing reap");
-    atomicPrivateJson(store.path("reap-intent.json"), { workerEpoch: manifest.workerEpoch, paneId: manifest.placement.paneId });
-    const p = manifest.placement;
+    const placement = requiredPlacement(manifest);
+    atomicPrivateJson(store.path("reap-intent.json"), { workerEpoch: manifest.workerEpoch, paneId: placement.paneId });
+    const p = placement;
     const condition = `#{&&:#{&&:#{==:#{${NONCE}},${p.ownershipNonce}},#{==:#{pane_pid},${info.panePid}}},#{pane_dead}}`;
     const removed = await this.run(p.socketPath, ["if-shell", "-F", "-t", p.paneId, condition,
       `kill-pane -t ${p.paneId}`, "display-message -p PI_REAP_REFUSED"]);
     if (removed.includes("PI_REAP_REFUSED")) throw new Error("Worker pane changed at reap boundary");
-    atomicPrivateJson(store.path("reaped.json"), { workerEpoch: manifest.workerEpoch, paneId: manifest.placement.paneId, reapedAt: new Date().toISOString() });
+    atomicPrivateJson(store.path("reaped.json"), { workerEpoch: manifest.workerEpoch, paneId: placement.paneId, reapedAt: new Date().toISOString() });
   }
 }

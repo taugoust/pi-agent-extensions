@@ -290,7 +290,7 @@ export class TuiNativeManager {
               g.launcher = contract.launcher; // disk executable paths never authorize new launches
               const manifest = await this.tmux.launch({ directory: c.directory, ownerSessionId: owner, taskId: c.taskId,
                 groupId: g.id, childId: c.childId, attempt: c.attempt ?? 1, caller: g.caller, cwd: c.spec.cwd,
-                foreground: !g.background, groupWindowId: existing?.placement.windowId,
+                foreground: !g.background, groupWindowId: existing?.placement?.windowId,
                 windowName: g.windowName ?? subagentTmuxName(g.children[0].spec.task, g.children[0].spec.name),
                 paneTitle: subagentTmuxName(c.spec.task, c.spec.name),
                 parentDisposition: this.disposition(), launcher: g.launcher, launchMode: g.launchMode,

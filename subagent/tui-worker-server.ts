@@ -10,7 +10,8 @@ export type TuiWorkerAdapter = {
   isIdle(): boolean;
   canRun?(): boolean;
   permissionMode?(): boolean | undefined;
-  send(message: string, mode: "steer" | "follow_up"): void;
+  send(message: string, mode: "steer" | "follow_up", source?: "parent" | "user"): void;
+  clearQueue?(): void | Promise<void>;
   abort(): void | Promise<void>;
   /** Gracefully exit this idle Pi, retaining its tmux pane. */
   shutdown(): void;
@@ -21,7 +22,7 @@ export type TuiWorkerAdapter = {
   jobs?(params: import("../shared/tui-worker-protocol.ts").TuiWorkerJobParams, requestId: string): Promise<unknown>;
   applyOperatorMode?(enabled: boolean): unknown | Promise<unknown>;
 };
-const MUTATIONS = new Set(["prompt", "cancel", "compact", "prepare_reap", "promote"]);
+const MUTATIONS = new Set(["prompt", "user_prompt", "cancel", "compact", "prepare_reap", "promote", "respond_interaction"]);
 
 /** Runs inside the actual TUI process. Observers own no lifetime-critical fd. */
 export class TuiWorkerServer {
@@ -39,11 +40,13 @@ export class TuiWorkerServer {
   private reapInterrupted = false;
   readonly store: TuiWorkerStore;
   private adapter: TuiWorkerAdapter;
+  private interactionWaiters = new Map<string, { resolve(answer: import("../shared/foreground-tasks.ts").TaskInteractionAnswer): void; reject(error: Error): void }>();
+  private currentLiveText = "";
   constructor(store: TuiWorkerStore, adapter: TuiWorkerAdapter) {
     this.store = store;
     this.adapter = adapter;
     this.manifest = store.readManifest();
-    this.state = store.readState();
+    this.state = store.readState(true);
   }
   get sealed(): boolean { return this.state.sealed || this.closing || this.failed; }
   private persist(): void {
@@ -51,8 +54,13 @@ export class TuiWorkerServer {
     catch (error) { this.failed = true; void this.adapter.abort(); throw error; }
   }
   private event(kind: TuiWorkerEvent["kind"], data?: unknown): void {
-    this.state.events.push({ protocol: 1, workerEpoch: this.manifest.workerEpoch, sequence: ++this.state.sequence,
-      timestamp: new Date().toISOString(), kind, ...(data === undefined ? {} : { data }) });
+    const event: TuiWorkerEvent = { protocol: 1, workerEpoch: this.manifest.workerEpoch, sequence: ++this.state.sequence,
+      timestamp: new Date().toISOString(), kind, ...(data === undefined ? {} : { data }) };
+    if (this.manifest.execution === "rpc-headless") {
+      try { this.store.appendTimeline(event); }
+      catch (error) { this.failed = true; void this.adapter.abort(); throw error; }
+    }
+    this.state.events.push(event);
     this.state.events = this.state.events.slice(-256);
     this.persist();
   }
@@ -78,6 +86,13 @@ export class TuiWorkerServer {
     this.state.phase = "settled";
     this.event("settled", { report: this.state.lastReport });
   }
+  liveText(value: string): void {
+    if (typeof value !== "string") return;
+    const bytes = Buffer.from(value);
+    let end = Math.min(bytes.length, 16 * 1024);
+    while (end > 0 && end < bytes.length && (bytes[end]! & 0xc0) === 0x80) end--;
+    this.currentLiveText = bytes.subarray(0, end).toString("utf8");
+  }
   notification(data: unknown): void {
     const artifact = this.store.artifact("notification", this.state.sequence + 1, data);
     this.event("notification", { artifact });
@@ -91,6 +106,8 @@ export class TuiWorkerServer {
     return { active: this.state.active || !this.adapter.isIdle(), sealed: this.sealed, phase: this.state.phase,
       lastReport: this.state.lastReport, lastOutcome: this.state.lastOutcome, sequence: this.state.sequence, pid: process.pid,
       sessionFile: this.manifest.sessionFile, presentation: this.manifest.presentation,
+      interactions: (this.state.interactions ?? []).filter(item => !item.answer && !item.cancelledAt).slice(-2)
+        .map(({ id, workerEpoch, createdAt, request }) => ({ id, workerEpoch, createdAt, request })), liveText: this.currentLiveText,
       readyForPrompts: !this.sealed && !this.preparingReap && (this.adapter.canRun?.() ?? true), permissionPromptsEnabled: this.adapter.permissionMode?.() };
   }
   private authenticated(r: TuiWorkerRequest): boolean {
@@ -144,10 +161,11 @@ export class TuiWorkerServer {
     }
     // Known authority loss is a refusal, not an uncertain dispatch. Check it
     // before reserving activity/intent, otherwise an unsent prompt looks live.
-    if (r.operation === "prompt" && this.adapter.canRun?.() === false) return fail("unavailable", "Worker command authority unavailable");
+    if ((r.operation === "prompt" || r.operation === "user_prompt") && this.adapter.canRun?.() === false) return fail("unavailable", "Worker command authority unavailable");
     if (r.operation === "compact" && (!this.adapter.compact || this.state.active || !this.adapter.isIdle())) return fail("busy", "Compaction requires an idle capable worker");
     if (r.operation === "prepare_reap" && (this.state.active || !this.adapter.isIdle())) return fail("busy", "Worker is active; reap never cancels work");
     if (r.operation === "promote") {
+      if (this.manifest.execution === "rpc-headless" || !this.manifest.placement) return fail("invalid", "Headless worker promotion is unsupported");
       const old = this.manifest.placement, next = r.placement;
       if (old.socketPath !== next.socketPath || old.serverEpoch !== next.serverEpoch || old.paneId !== next.paneId
         || old.ownershipNonce !== next.ownershipNonce) return fail("invalid", "Promotion must preserve server and owned pane");
@@ -162,11 +180,12 @@ export class TuiWorkerServer {
       case "jobs":
         data = await this.adapter.jobs!(r.params, r.requestId);
         break;
+      case "user_prompt":
       case "prompt":
         this.state.active = true;
         this.state.phase = "running";
         this.persist();
-        if (r.mode === "interrupt") {
+        if (r.operation === "prompt" && r.mode === "interrupt") {
           await this.adapter.abort();
           if (this.closing || this.failed) return fail("unavailable", "Worker closed during interrupt");
           if (!this.adapter.isIdle()) return fail("busy", "Abort has not reached idle; dispatch remains ambiguous");
@@ -190,7 +209,8 @@ export class TuiWorkerServer {
         this.state.active = true;
         this.state.phase = "running";
         this.persist();
-        this.adapter.send(r.message, r.mode === "follow_up" ? "follow_up" : "steer");
+        this.adapter.send(r.message, r.operation === "user_prompt" ? "steer" : r.mode === "follow_up" ? "follow_up" : "steer",
+          r.operation === "user_prompt" ? "user" : "parent");
         break;
       case "compact": {
         const activityGeneration = this.activityGeneration;
@@ -227,21 +247,113 @@ export class TuiWorkerServer {
         break;
       }
       case "cancel":
+        await this.adapter.clearQueue?.();
         await this.adapter.abort();
         this.state.active = !this.adapter.isIdle();
         this.event("cancelled");
         data = this.snapshot();
         break;
       case "promote":
+        if (!this.manifest.placement) return fail("invalid", "Headless worker promotion is unsupported");
         this.manifest.placement = r.placement;
         this.manifest.presentation = "background";
         this.store.writeManifest(this.manifest);
         break;
+      case "respond_interaction": {
+        const interaction = (this.state.interactions ?? []).find(item => item.id === r.interactionId);
+        if (!interaction) return fail("stale", "Interaction is no longer pending");
+        const waiter = this.interactionWaiters.get(r.interactionId);
+        if (!waiter) return fail("stale", "Interaction has no live waiter");
+        if (!this.validAnswer(interaction.request, r.answer)) return fail("invalid", "Answer does not match interaction schema");
+        interaction.resolvedAt = new Date().toISOString();
+        interaction.answer = structuredClone(r.answer);
+        try {
+          this.event("interaction_resolved", { id: r.interactionId, kind: r.answer.kind, cancelled: r.answer.cancelled });
+          this.persist();
+        } catch (error) {
+          this.interactionWaiters.delete(r.interactionId);
+          waiter.reject(error instanceof Error ? error : new Error("Interaction resolution persistence failed"));
+          throw error;
+        }
+        this.interactionWaiters.delete(r.interactionId);
+        waiter.resolve(r.answer);
+        data = { accepted: true };
+        break;
+      }
     }
-    const response = this.response(r, { ok: true, receipt: r.operation === "prompt" ? "accepted" : "applied", sequence: this.state.sequence, ...(data === undefined ? {} : { data }) });
+    const response = this.response(r, { ok: true, receipt: r.operation === "prompt" || r.operation === "user_prompt" ? "accepted" : "applied", sequence: this.state.sequence, ...(data === undefined ? {} : { data }) });
     this.state.receipts[receiptKey].response = response;
     this.persist();
     return response;
+  }
+  private validInput(input: any): boolean {
+    if (!input || Buffer.byteLength(JSON.stringify(input)) > 24 * 1024) return false;
+    if (input.kind === "permission") return typeof input.title === "string" && input.title.length > 0 && Buffer.byteLength(input.title) <= 2048
+      && Array.isArray(input.options) && input.options.length > 0 && input.options.length <= 12
+      && input.options.every((value: any) => typeof value === "string" && value.length > 0 && Buffer.byteLength(value) <= 256)
+      && new Set(input.options).size === input.options.length
+      && (input.detail === undefined || typeof input.detail === "string" && Buffer.byteLength(input.detail) <= 8192);
+    if (input.kind !== "questionnaire" || !Array.isArray(input.questions) || input.questions.length < 1 || input.questions.length > 16) return false;
+    const ids = new Set<string>();
+    return input.questions.every((question: any) => {
+      if (!question || typeof question.id !== "string" || !/^[a-zA-Z0-9._:-]{1,128}$/.test(question.id) || ids.has(question.id)
+        || typeof question.prompt !== "string" || !question.prompt.length || Buffer.byteLength(question.prompt) > 4096
+        || typeof question.allowOther !== "boolean" || !Array.isArray(question.options) || question.options.length > 12) return false;
+      ids.add(question.id);
+      const values = new Set<string>();
+      return question.options.every((option: any) => option && typeof option.value === "string" && option.value.length > 0
+        && Buffer.byteLength(option.value) <= 256 && !values.has(option.value) && (values.add(option.value), true)
+        && typeof option.label === "string" && Buffer.byteLength(option.label) <= 512
+        && (option.description === undefined || typeof option.description === "string" && Buffer.byteLength(option.description) <= 1024));
+    });
+  }
+  private validAnswer(input: any, answer: any): boolean {
+    if (!answer || typeof answer.cancelled !== "boolean" || answer.kind !== input?.kind) return false;
+    if (input.kind === "permission") return answer.cancelled
+      ? answer.value === undefined
+      : typeof answer.value === "string" && input.options.includes(answer.value);
+    if (!Array.isArray(answer.answers) || answer.answers.length > input.questions.length
+      || (!answer.cancelled && answer.answers.length !== input.questions.length)) return false;
+    const answered = new Set<string>();
+    return answer.answers.every((entry: any) => {
+      const question = input.questions.find((item: any) => item.id === entry?.id);
+      if (!question || answered.has(entry.id) || typeof entry.value !== "string" || Buffer.byteLength(entry.value) > 4096
+        || typeof entry.wasCustom !== "boolean" || (entry.wasCustom ? !question.allowOther || !entry.value.trim()
+          : !question.options.some((option: any) => option.value === entry.value))) return false;
+      answered.add(entry.id);
+      return true;
+    });
+  }
+  async requestInteraction(input: import("../shared/foreground-tasks.ts").TaskInteractionInput, signal?: AbortSignal): Promise<import("../shared/foreground-tasks.ts").TaskInteractionAnswer> {
+    if (this.sealed || this.manifest.execution !== "rpc-headless" || !this.validInput(input)) throw new Error("Headless worker interaction service unavailable or malformed");
+    if ((this.state.interactions ?? []).filter(item => !item.answer && !item.cancelledAt).length >= 4) throw new Error("Headless worker pending interaction capacity reached");
+    const id = `interaction:${randomBytes(16).toString("hex")}`;
+    const interaction = { id, workerEpoch: this.manifest.workerEpoch, createdAt: new Date().toISOString(), request: structuredClone(input) };
+    const promise = new Promise<import("../shared/foreground-tasks.ts").TaskInteractionAnswer>((resolve, reject) => this.interactionWaiters.set(id, { resolve, reject }));
+    this.state.interactions ??= [];
+    while (this.state.interactions.length >= 64) {
+      const oldestResolved = this.state.interactions.findIndex(item => item.answer !== undefined || item.cancelledAt !== undefined);
+      if (oldestResolved < 0) throw new Error("Headless worker interaction history capacity reached");
+      this.state.interactions.splice(oldestResolved, 1);
+    }
+    this.state.interactions.push(interaction);
+    try { this.event("interaction_pending", { id, kind: input.kind }); }
+    catch (error) { this.interactionWaiters.delete(id); throw error; }
+    const abort = () => {
+      const waiter = this.interactionWaiters.get(id);
+      if (!waiter) return;
+      this.interactionWaiters.delete(id);
+      try {
+        const stored = this.state.interactions?.find(item => item.id === id);
+        if (stored) stored.cancelledAt = new Date().toISOString();
+        this.event("interaction_cancelled", { id, kind: input.kind });
+        this.persist();
+      } catch { /* Cancellation stays fail closed even if persistence is unavailable. */ }
+      finally { waiter.reject(signal?.reason instanceof Error ? signal.reason : new Error("Interaction cancelled")); }
+    };
+    signal?.addEventListener("abort", abort, { once: true });
+    if (signal?.aborted) abort();
+    try { return await promise; } finally { signal?.removeEventListener("abort", abort); }
   }
   private async prepareReap(r: TuiWorkerRequest, receiptKey: string, digest: string): Promise<TuiWorkerResponse> {
     // Temporary reservation is synchronous with the idle check in dispatch.
@@ -342,7 +454,7 @@ export class TuiWorkerServer {
       socket.on("close", () => this.sockets.delete(socket));
       let bytes = Buffer.alloc(0), received = false;
       socket.on("data", chunk => {
-        if (received) { socket.destroy(); return; }
+        if (received || typeof chunk === "string") { socket.destroy(); return; }
         bytes = Buffer.concat([bytes, chunk]);
         if (bytes.length > TUI_WORKER_MAX_FRAME_BYTES) { socket.destroy(); return; }
         const newline = bytes.indexOf(10);
@@ -385,6 +497,16 @@ export class TuiWorkerServer {
   async close(): Promise<void> {
     if (this.closing) return;
     this.closing = true;
+    if (this.interactionWaiters.size) {
+      const error = new Error("Headless worker is shutting down");
+      for (const [id, waiter] of this.interactionWaiters) {
+        const stored = this.state.interactions?.find(item => item.id === id);
+        if (stored) stored.cancelledAt = new Date().toISOString();
+        waiter.reject(error);
+      }
+      this.interactionWaiters.clear();
+      try { this.persist(); } catch { /* Close still releases authenticated transport. */ }
+    }
     // Drain in-flight dispatch before releasing the exclusive writer lock. A
     // replacement extension must never race writes from its old instance.
     await this.queue.catch(() => undefined);

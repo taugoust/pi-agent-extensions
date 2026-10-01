@@ -18,6 +18,16 @@ test("mixed wait_all waits both snapshot backends and excludes newly started gro
   }, "wait_all", 1000);
   assert.equal(reads, 3); assert.equal(result.groups.length, 2); assert.equal(result.timed_out, false);
 });
+test("foreground RPC helpers are included in global waits without making staged TUI groups waitable", async () => {
+  let reads = 0;
+  const result = await waitForGroupSnapshot(async () => [
+    { job_id: "staged-tui", background: false, status: "running", children: [{ child: 1, status: "running" }] },
+    { job_id: "headless", background: false, execution: "rpc-headless", status: "running",
+      children: [{ child: 1, child_id: "subagent-child-" + "a".repeat(24), status: reads++ === 0 ? "waiting-input" : "completed" }] },
+  ], "wait_any", 1000);
+  assert.equal(result.terminal?.group?.job_id, "headless");
+  assert.equal(result.timed_out, false);
+});
 test("wait timeout, empty snapshot and cancellation are observation-only", async () => {
   assert.equal((await waitForGroupSnapshot(async () => [group("live", ["running"])], "wait_any", 0)).timed_out, true);
   assert.equal((await waitForGroupSnapshot(async () => [], "wait_any", 0)).timed_out, false);

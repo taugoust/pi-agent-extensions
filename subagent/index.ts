@@ -12,6 +12,10 @@ import * as path from "node:path";
 import { fileURLToPath } from "node:url";
 import { TuiNativeManager } from "./tui-native.ts";
 import { nativeTuiStateRoot } from "./state-root.ts";
+import { HeadlessForegroundManager } from "./headless-foreground.ts";
+import { FOREGROUND_TASKS_KEY } from "../shared/foreground-tasks.ts";
+import { TUI_WORKER_MANIFEST_ENV } from "../shared/tui-worker-protocol.ts";
+import { TuiWorkerStore } from "./tui-worker-store.ts";
 import type { Message } from "@mariozechner/pi-ai";
 import type { AgentToolResult, ExtensionAPI } from "@mariozechner/pi-coding-agent";
 import { getAgentDir, getMarkdownTheme } from "@mariozechner/pi-coding-agent";
@@ -1504,6 +1508,16 @@ export function validateBackgroundOperation(params: any): void {
     return;
   }
 
+  if (operation === "result" && params.job_id === undefined && params.child_id !== undefined) {
+    if (params.wait_ms !== undefined) throw new Error("Background subagent result does not accept wait_ms");
+    if (params.child !== undefined) throw new Error("Background subagent result accepts either child or child_id, not both");
+    if (typeof params.child_id !== "string" || !SUBAGENT_CHILD_ID_PATTERN.test(params.child_id)) {
+      throw new Error("Background subagent result child_id is invalid");
+    }
+    integerField("offset", 0, Number.MAX_SAFE_INTEGER, "Background subagent result offset");
+    integerField("limit", 4, MAX_SUBAGENT_RESULT_PAGE_BYTES, "Background subagent result limit");
+    return;
+  }
   if (typeof params.job_id !== "string" || !BACKGROUND_SUBAGENT_ID_PATTERN.test(params.job_id)) {
     throw new Error(`${operation} requires a valid job_id`);
   }
@@ -1606,12 +1620,34 @@ export default function (pi: ExtensionAPI) {
     agentSHRuntimeDisposition(agentSHStartup, bridgeSupervisorState(bridge));
   let backgroundManager = sharedBackgroundSubagentManager(path.join(getAgentDir(), "state", "background-subagents-v1"));
   let tuiNative: TuiNativeManager | undefined;
+  let headlessForeground: HeadlessForegroundManager | undefined;
   const readonlySubagentsByContext = new WeakMap<object, HarnessReadOnlySubagents>();
   const nativeDisposition = () => {
     const disposition = bridgeDisposition(agentSHBridge()).kind;
     const selection = currentSubagentPermissionSelection();
     if (selection?.conflict) return "unavailable" as const;
     return disposition === "native" && selection?.selected ? "guard-only" as const : disposition;
+  };
+  const isHeadlessWorkerRuntime = (ctx: any): boolean => {
+    if (ctx.mode !== "rpc") return false;
+    const manifestPath = process.env[TUI_WORKER_MANIFEST_ENV];
+    try {
+      if (!manifestPath) return false;
+      const manifest = new TuiWorkerStore(path.dirname(path.resolve(manifestPath))).readManifest();
+      return manifest.execution === "rpc-headless" && manifest.processPid === process.pid
+        && path.resolve(manifest.sessionFile) === path.resolve(ctx.sessionManager.getSessionFile());
+    } catch { return false; }
+  };
+  const headlessNative = (ctx: any) => {
+    if (process.platform !== "linux" || isHeadlessWorkerRuntime(ctx)) return undefined;
+    if (!headlessForeground) {
+      headlessForeground = new HeadlessForegroundManager(nativeTuiStateRoot(process.env, os.homedir()), nativeDisposition,
+        () => { try { return nativeDisposition() === "native" || currentSubagentPermissionAuthority()?.active === true; } catch { return false; } }, MAX_BACKGROUND_SUBAGENTS,
+        update => lifecycleClosing ? false : quietState.enqueue(ctx, update));
+      headlessForeground.activate(stableSessionId(ctx));
+      (globalThis as any)[FOREGROUND_TASKS_KEY] = headlessForeground.service();
+    }
+    return headlessForeground;
   };
   const nativeTui = (ctx: any) => {
     if (process.platform !== "linux") return undefined;
@@ -1631,7 +1667,7 @@ export default function (pi: ExtensionAPI) {
   };
   const releaseOperator = pi.events?.on?.("permission-gate:mode-changed", (event: any) => {
     if (typeof event?.enabled !== "boolean" || event.sessionId !== activeSessionId) return;
-    void tuiNative?.operatorMode(event.sessionId, event.enabled).catch(error => {
+    void Promise.all([tuiNative?.operatorMode(event.sessionId, event.enabled), headlessForeground?.operatorMode(event.sessionId, event.enabled)]).catch(error => {
       if (sessionContext?.hasUI) sessionContext.ui.notify(`Child permission mode propagation failed: ${String(error)}`, "error");
     });
   });
@@ -1797,7 +1833,9 @@ export default function (pi: ExtensionAPI) {
     try {
       const sessionId = stableSessionId(ctx);
       activeSessionId = sessionId;
-      const native = nativeTui(ctx);
+      const headlessWorker = isHeadlessWorkerRuntime(ctx);
+      const native = headlessWorker ? undefined : nativeTui(ctx);
+      const foreground = !headlessWorker && process.platform === "linux" ? headlessNative(ctx) : undefined;
       const readonlyGeneration = generation;
       const assertReadonlyOwner = () => {
         if (sessionContext !== ctx || activeSessionId !== sessionId || sessionGeneration !== readonlyGeneration
@@ -1810,16 +1848,17 @@ export default function (pi: ExtensionAPI) {
           assertReadonlyOwner();
           const limit = input.limit ?? 50;
           if (!Number.isSafeInteger(limit) || limit < 1 || limit > 50 || input.cursor !== undefined) throw new Error("Invalid read-only subagent page");
-          if (!native || nativeDisposition() === "full" || nativeDisposition() === "unavailable") return { protocol: HARNESS_READONLY_PROTOCOL, state: "unsupported", sessionId, items: [], lastUpdated: null, stale: true, message: "Native subagent snapshots are unavailable in the selected backend." };
-          const items = native.readonlyTaskList(sessionId).slice(0, limit);
+          if ((!native && !foreground) || nativeDisposition() === "full" || nativeDisposition() === "unavailable") return { protocol: HARNESS_READONLY_PROTOCOL, state: "unsupported", sessionId, items: [], lastUpdated: null, stale: true, message: "Native subagent snapshots are unavailable in the selected backend." };
+          const items = [...(foreground?.readonlyTaskList(sessionId, limit) ?? []), ...(native?.readonlyTaskList(sessionId) ?? [])].slice(0, limit);
           return { protocol: HARNESS_READONLY_PROTOCOL, state: "available", sessionId, items, lastUpdated: items[0]?.lastUpdated ?? null, stale: true };
         },
         async report(input) {
           if (input.sessionId !== sessionId) throw new Error("Read-only subagents unavailable for this Pi session");
           assertReadonlyOwner();
           if (!/^subagent-task-[0-9a-f]{24}$/.test(input.taskId) || (input.maxBytes !== undefined && (!Number.isSafeInteger(input.maxBytes) || input.maxBytes < 1 || input.maxBytes > 48 * 1024))) throw new Error("Invalid read-only task report request");
-          if (!native || nativeDisposition() === "full" || nativeDisposition() === "unavailable") return { protocol: HARNESS_READONLY_PROTOCOL, state: "unsupported", sessionId, lastUpdated: null, stale: true, message: "Native task reports are unavailable in the selected backend." };
-          const item = native.readonlyTaskReport(sessionId, input.taskId, input.maxBytes);
+          if ((!native && !foreground) || nativeDisposition() === "full" || nativeDisposition() === "unavailable") return { protocol: HARNESS_READONLY_PROTOCOL, state: "unsupported", sessionId, lastUpdated: null, stale: true, message: "Native task reports are unavailable in the selected backend." };
+          const item = foreground?.readonlyTaskReport(sessionId, input.taskId, input.maxBytes)
+            ?? native?.readonlyTaskReport(sessionId, input.taskId, input.maxBytes);
           return item ? { protocol: HARNESS_READONLY_PROTOCOL, state: "available", sessionId, item, lastUpdated: item.lastUpdated, stale: true }
             : { protocol: HARNESS_READONLY_PROTOCOL, state: "available", sessionId, lastUpdated: null, stale: true, message: "Task not found in this Pi session." };
         },
@@ -1897,6 +1936,10 @@ export default function (pi: ExtensionAPI) {
     const survivingReload = backgroundSubagentsSurviveShutdown(event.reason);
     await tuiNative?.shutdown(true);
     tuiNative = undefined;
+    const foregroundService = (globalThis as any)[FOREGROUND_TASKS_KEY];
+    if (foregroundService?.sessionId === activeSessionId) delete (globalThis as any)[FOREGROUND_TASKS_KEY];
+    await headlessForeground?.shutdown(true);
+    headlessForeground = undefined;
     if (typeof releaseOperator === "function") releaseOperator();
     const shutdownClaims = [...deliveryClaims.entries()];
     try {
@@ -1945,7 +1988,7 @@ export default function (pi: ExtensionAPI) {
   });
 
   pi.registerCommand("background", {
-    description: "Move all currently running foreground subagents to the background",
+    description: "Move compatible foreground subagents to the background; headless RPC workers cannot be promoted.",
     handler: async (args, ctx) => {
       if (args.trim()) {
         if (ctx.hasUI) ctx.ui.notify("Usage: /background", "warning");
@@ -1955,6 +1998,7 @@ export default function (pi: ExtensionAPI) {
         const sessionId = stableSessionId(ctx);
         const tuiMoved = await nativeTui(ctx)?.promoteForeground(sessionId) ?? 0;
         if (tuiMoved && ctx.hasUI) ctx.ui.notify(`Moved ${tuiMoved} native TUI group(s) to the background without restarting Pi.`, "info");
+        if (headlessForeground?.hasActive(sessionId) && ctx.hasUI) ctx.ui.notify("Headless foreground workers cannot be promoted; no worker is restarted or replayed.", "warning");
         const targetIds = new Set<string>();
         for (const [toolCallId, pendingSessionId] of pendingForegroundSubagents) {
           if (pendingSessionId === sessionId) targetIds.add(toolCallId);
@@ -2069,12 +2113,64 @@ export default function (pi: ExtensionAPI) {
       validateBackgroundOperation(params);
       if (params.operation && process.platform === "linux") {
         const owner = stableSessionId(ctx);
+        if (isHeadlessWorkerRuntime(ctx)) {
+          if (["jobs", "promote"].includes(params.operation)) throw new Error("Tmux-only subagent operation is unavailable in a headless foreground helper; no pane exists");
+          throw new Error("Headless foreground helpers cannot invoke subagent lifecycle controls");
+        }
+        const foreground = await headlessForeground?.operation(params, owner, signal);
+        if ((params.operation === "list" || params.operation === "tasks") && foreground) {
+          const native = nativeTui(ctx)!;
+          const result = await native.operation(params, owner, signal);
+          if (result) {
+            if (params.operation === "list") {
+              const legacy = await backgroundManager.list(owner, params.limit ?? 20);
+              if (legacy.length) {
+                for (const backend of ["native", "agentsh"] as const) {
+                  const records = legacy.filter(record => record.backend === backend);
+                  if (!records.length) continue;
+                  const heading = backend === "native"
+                    ? "Retained legacy native groups (reap removes terminal records/reports only; never processes or panes):"
+                    : "Retained AgentSH groups (reap unsupported here; use AgentSH lifecycle controls):";
+                  result.content[0].text += "\n\n" + heading + "\n" + records.map(record => backgroundRecordText(record, false, childTracker.reconcile(record))).join("\n");
+                }
+                result.details.legacy_groups = legacy.map(record => ({ job_id: record.id, backend: record.backend, status: record.status }));
+              }
+            } else if (params.operation === "tasks") {
+              const legacy = new NativeTaskStore(path.join(getAgentDir(), "state", "native-tasks-v1")).list(owner, params.limit ?? 20);
+              result.details.tasks = [...(result.details.tasks ?? []), ...legacy].slice(0, params.limit ?? 20);
+              result.content[0].text = taskListText(result.details.tasks);
+            }
+            return { ...result, content: [{ type: "text", text: [foreground.content?.[0]?.text, result.content?.[0]?.text].filter(Boolean).join("\n\n") }],
+              details: { ...result.details, foreground_tasks: foreground.details?.tasks ?? [] } };
+          }
+          if (foreground && params.operation === "list") {
+            const legacy = await backgroundManager.list(owner, params.limit ?? 20);
+            if (legacy.length) {
+              for (const backend of ["native", "agentsh"] as const) {
+                const records = legacy.filter(record => record.backend === backend);
+                if (!records.length) continue;
+                const heading = backend === "native"
+                  ? "Retained legacy native groups (reap removes retained records only; no workers or panes are killed)."
+                  : "Retained AgentSH groups (reap is unavailable here; use AgentSH lifecycle controls).";
+                foreground.content[0].text += "\n\n" + heading + "\n" + records.map(record => backgroundRecordText(record, false, childTracker.reconcile(record))).join("\n");
+              }
+              foreground.details.legacy_groups = legacy.map(record => ({ job_id: record.id, backend: record.backend, status: record.status }));
+            }
+          } else if (foreground && params.operation === "tasks") {
+            const legacy = new NativeTaskStore(path.join(getAgentDir(), "state", "native-tasks-v1")).list(owner, params.limit ?? 20);
+            foreground.details.tasks = [...(foreground.details.tasks ?? []), ...legacy].slice(0, params.limit ?? 20);
+            foreground.content[0].text = taskListText(foreground.details.tasks);
+          }
+          return foreground;
+        }
+        if (foreground !== undefined) return foreground;
         const native = nativeTui(ctx)!;
-        if (["wait_any", "wait_all"].includes(params.operation) && native.hasOwnedGroups(owner)) {
+        if (["wait_any", "wait_all"].includes(params.operation)) {
           const waited = await waitForGroupSnapshot(async () => {
             const tui = await native.operation({ operation: "list", limit: 1000 }, owner, signal);
+            const headless = await headlessForeground?.waitGroups(owner) ?? [];
             const legacy = await backgroundManager.list(owner, 1000);
-            return [...(tui?.details.groups ?? []), ...legacy.map(record => ({
+            return [...(tui?.details.groups ?? []), ...headless, ...legacy.map(record => ({
               job_id: record.id, status: record.status, backend: record.backend,
               children: childTracker.reconcile(record).map(backgroundChildMetadata),
             }))];
@@ -2389,9 +2485,30 @@ export default function (pi: ExtensionAPI) {
         if (selected.kind === "native") {
           if (!nativeSubagentRequestSupported(params)) throw new Error("Draft execution requires AgentSH; native fallback disabled");
           const selection = currentSubagentPermissionSelection();
-          if (agentSHStartup.kind === "conflict" || selection?.conflict) throw new Error("Conflicting command authorities; native TUI launch refused");
+          if (agentSHStartup.kind === "conflict" || selection?.conflict) throw new Error("Conflicting command authorities; native worker launch refused");
           pendingForegroundSubagents.delete(toolCallId);
-          return await nativeTui(ctx)!.launch(params, stableSessionId(ctx), ctx.cwd, signal, onUpdate);
+          if (isHeadlessWorkerRuntime(ctx) && params.operation) {
+            if (["jobs", "promote"].includes(params.operation)) throw new Error("Tmux-only subagent operation is unavailable in a headless foreground helper; no pane exists");
+            throw new Error("Headless foreground helpers cannot invoke subagent lifecycle controls");
+          }
+          if (params.operation) {
+            if (params.operation === "list" || params.operation === "tasks") {
+              const foregroundOperation = await headlessForeground?.operation(params, stableSessionId(ctx), signal);
+              const tuiOperation = await nativeTui(ctx)!.operation(params, stableSessionId(ctx), signal);
+              if (foregroundOperation && tuiOperation) return { ...tuiOperation,
+                content: [{ type: "text", text: [foregroundOperation.content?.[0]?.text, tuiOperation.content?.[0]?.text].filter(Boolean).join("\n\n") }],
+                details: { ...tuiOperation.details, foreground_tasks: foregroundOperation.details?.tasks ?? [] } };
+              return foregroundOperation ?? tuiOperation;
+            }
+            const foregroundOperation = await headlessForeground?.operation(params, stableSessionId(ctx), signal);
+            if (foregroundOperation !== undefined) return foregroundOperation;
+            return await nativeTui(ctx)!.operation(params, stableSessionId(ctx), signal);
+          }
+          if (params.background === true) return await nativeTui(ctx)!.launch(params, stableSessionId(ctx), ctx.cwd, signal, onUpdate);
+          if (isHeadlessWorkerRuntime(ctx)) throw new Error("Headless foreground helpers cannot delegate further");
+          const headless = headlessNative(ctx);
+          if (!headless) throw new Error("Headless foreground runtime unavailable; refusing tmux fallback");
+          return await headless.launch(params, stableSessionId(ctx), ctx.cwd, signal, onUpdate);
         }
       }
       if (params.background === true) {

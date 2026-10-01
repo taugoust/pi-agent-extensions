@@ -861,9 +861,35 @@ before each page is returned, and result artifacts are removed with their
 terminal job record.
 Cancelling any wait does not cancel execution.
 
+### Headless foreground helpers
+
+On Linux, new native calls without `background:true` run a real Pi RPC worker
+without creating any tmux pane, window, staging session, or separate Paseo agent.
+The parent waits for the single/parallel/chain request. Use the **Foreground**
+composer button in the companion Paseo plugin to inspect bounded conversation
+history, send direct user instructions, answer questionnaires or individual
+permission requests, and stop a helper. The button indicates pending attention.
+Closing the temporary popover/bottom sheet only hides it; reopening observes the
+same task. Direct user instructions are distinct from parent guidance and take
+precedence within the task's existing tool/authorization boundaries.
+
+The runtime retains an authenticated worker socket, session history and typed
+pending interactions. Missing, stale, cancelled or invalid responses never grant
+permission. AgentSH authorization and explicit prompt-mode settings remain in
+force. `Stop` aborts the helper's run; explicit `reap` is separate. Reaped task
+history remains readable, with control actions disabled. Foreground execution is
+owner-bound: parent shutdown/reload or cancellation of the owning foreground call
+can stop it. A client disconnect or closing the task view does not.
+
+Background TUI agents may launch foreground helpers. Foreground helpers cannot
+delegate further or use tmux-only background-job tools; use synchronous commands
+or return that work to the visible parent. Headless promotion is explicitly
+unsupported rather than restarting/replaying a task in a terminal. Existing
+workers are not migrated. Full AgentSH/Draft execution keeps its existing backend.
+
 ### Linux native TUI workers
 
-Linux native subagents run as **actual interactive Pi TUIs**, using the configured
+Linux native **background** subagents run as **actual interactive Pi TUIs**, using the configured
 `PI_TUI_WORKER_LAUNCHER` and `PI_TUI_WORKER_LAUNCH_MODE`. The calling Pi must run in
 tmux. A guarded worker gets its own AgentSH guard process; losing the parent does
 not remove its authorization checks or close its terminal. Full AgentSH/Draft
@@ -881,9 +907,10 @@ backends keep their existing execution model and never silently fall back to nat
   Promotion preserves the window name; existing live windows/panes are not renamed.
   Automatic window renaming and application pane-title changes are disabled only
   on newly allocated worker windows/panes. Other backends ignore these labels.
-- Foreground workers stage in an infrastructure session on the same tmux server.
-  `/background` or `operation=promote` moves the group window, preserving Pi PIDs,
-  conversations, and sibling job panes.
+- Retained foreground TUI workers from before the headless runtime keep their
+  staging sessions. `/background` or `operation=promote` can still move those
+  legacy group windows while preserving Pi PIDs, conversations and sibling jobs.
+  New foreground helpers never create staging sessions.
 - Keyboard input, Paseo messages and parent control all reach the same Pi process.
   Parent control is labelled supervising-agent input and never executes slash
   commands; direct human instructions take precedence.
@@ -926,8 +953,9 @@ are also cancelled when Pi exits or replaces the session and are reported as
 `lost` after an unclean Pi restart; terminal records remain available for seven
 days. Draft cancellation never applies or discards a retained Draft result.
 
-While foreground subagent calls are blocking the parent, `/background` promotes
-all currently running calls in place. For Linux TUI workers this moves their
+For compatible legacy foreground calls, `/background` promotes running calls in
+place. New headless helpers reject promotion without changing execution. For
+retained Linux TUI workers this moves their
 existing window, not their process or conversation. In the legacy execution path,
 a single, parallel, or chain call remains
 one aggregate job; multiple sibling `subagent` calls receive separate job IDs.

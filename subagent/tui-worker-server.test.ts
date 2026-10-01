@@ -26,9 +26,10 @@ test("child-hosted control reconnects, deduplicates, observes direct work and se
   manifest.operatorCapabilityHash = createHash("sha256").update(operator).digest("hex");
   store.writeManifest(manifest);
   let idle = true, sends = 0, shutdowns = 0, mode: boolean | undefined;
+  const cancellations: string[] = [];
   const prepareJobReap = async (preserve: (report: unknown) => Promise<void>) => { await preserve({ jobs: [] }); return () => {}; };
   let server = new TuiWorkerServer(store, { isIdle: () => idle, prepareJobReap,
-    send: () => { sends++; idle = false; }, abort: () => { idle = true; },
+    send: () => { sends++; idle = false; }, clearQueue: () => { cancellations.push("clear_queue"); }, abort: () => { cancellations.push("abort"); idle = true; },
     shutdown: () => { shutdowns++; }, applyOperatorMode: enabled => { mode = enabled; } });
   try {
     await server.start();
@@ -46,6 +47,8 @@ test("child-hosted control reconnects, deduplicates, observes direct work and se
     assert.equal((await applyTuiWorkerOperatorMode(manifest, operator, false)).ok, true);
     assert.equal(mode, false);
     await callTuiWorker(manifest, { operation: "cancel" });
+    assert.deepEqual(cancellations, ["clear_queue", "abort"], "queued instructions must be cleared before abort");
+    assert.equal(store.readState().sealed, false, "Stop/cancel must not seal or reap the worker");
     assert.equal(shutdowns, 0);
     server.settled({ final: "retained report" });
     const retained = store.readState().lastReport;
@@ -68,6 +71,45 @@ test("child-hosted control reconnects, deduplicates, observes direct work and se
     assert.equal(store.readState().sealed, true);
     await new Promise(resolve => setTimeout(resolve, 50));
     assert.ok(shutdowns >= 1);
+  } finally { await server.close(); await rm(directory, { recursive: true, force: true }); }
+});
+
+test("headless interactions persist, authenticate, validate, and resolve idempotently", async () => {
+  const directory = await mkdtemp(join(tmpdir(), "pi-worker-interaction-"));
+  const store = new TuiWorkerStore(directory);
+  const manifest = { ...manifestAt(directory), placement: undefined, execution: "rpc-headless" as const,
+    presentation: "headless-foreground" as const, processPid: process.pid, processToken: "pid:start", fifoPath: join(directory, "stdin.fifo"), foregroundOwner: { pid: process.pid + 1, token: "owner:start" } } as any;
+  store.writeManifest(manifest);
+  const server = new TuiWorkerServer(store, { isIdle: () => false, send: () => {}, abort: () => {}, shutdown: () => {} });
+  try {
+    await server.start();
+    const input = { kind: "questionnaire" as const, questions: [{ id: "continue", prompt: "Continue?", options: [{ value: "yes", label: "Yes" }], allowOther: false }] };
+    const waiting = server.requestInteraction(input);
+    const pending = store.readState().interactions?.[0];
+    assert.ok(pending);
+    assert.equal(pending.workerEpoch, manifest.workerEpoch);
+    const status = await callTuiWorker(manifest, { operation: "status" });
+    assert.equal((status.data as any).interactions.length, 1);
+    const answer = { kind: "questionnaire" as const, cancelled: false, answers: [{ id: "continue", value: "yes", wasCustom: false }] };
+    const response = await callTuiWorker(manifest, { operation: "respond_interaction", interactionId: pending.id, answer }, { requestId: "ui:answer-1" });
+    assert.equal(response.ok, true);
+    assert.deepEqual(await waiting, answer);
+    assert.deepEqual(await callTuiWorker(manifest, { operation: "respond_interaction", interactionId: pending.id, answer }, { requestId: "ui:answer-1" }), response);
+    assert.equal((store.readState().interactions?.[0] as any).answer.answers[0].value, "yes");
+    const timeline = store.readTimeline();
+    assert.ok(timeline.some(event => event.kind === "interaction_pending"));
+    assert.ok(timeline.some(event => event.kind === "interaction_resolved"));
+    assert.deepEqual(timeline.map(event => event.sequence), [...timeline.map(event => event.sequence)].sort((a, b) => a - b));
+    const forged = await callTuiWorker({ ...manifest, controlToken: "0".repeat(64) }, { operation: "respond_interaction", interactionId: pending.id, answer }, { requestId: "ui:answer-forged" });
+    assert.equal(forged.ok, false);
+    const permissionWait = server.requestInteraction({ kind: "permission", title: "Allow?", options: ["allow", "deny"] });
+    const permission = store.readState().interactions?.at(-1)!;
+    const denied = { kind: "permission" as const, cancelled: true };
+    const deniedReceipt = await callTuiWorker(manifest, { operation: "respond_interaction", interactionId: permission.id, answer: denied }, { requestId: "ui:deny-2" });
+    assert.equal(deniedReceipt.ok, true);
+    assert.deepEqual(await permissionWait, denied);
+    const invalid = await callTuiWorker(manifest, { operation: "respond_interaction", interactionId: permission.id, answer: { kind: "permission", cancelled: false, value: "approve" } as any }, { requestId: "ui:invalid-3" });
+    assert.equal(invalid.ok, false);
   } finally { await server.close(); await rm(directory, { recursive: true, force: true }); }
 });
 

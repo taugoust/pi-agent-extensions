@@ -51,6 +51,12 @@ test("placement requires exact server/session/window/pane identities", () => {
     { ...identity, operation: "promote", placement });
 });
 
+test("panel user prompts have a separate authenticated origin from parent instructions", () => {
+  const user = parseTuiWorkerRequest({ ...identity, operation: "user_prompt", message: "Direct user correction" });
+  assert.deepEqual(user, { ...identity, operation: "user_prompt", message: "Direct user correction" });
+  assert.throws(() => parseTuiWorkerRequest({ ...identity, operation: "user_prompt", message: "/permission-gate off", mode: "interrupt" }));
+});
+
 test("cancel and idle-reap reservation are distinct operations", () => {
   assert.equal(parseTuiWorkerRequest({ ...identity, operation: "cancel" }).operation, "cancel");
   assert.equal(parseTuiWorkerRequest({ ...identity, operation: "prepare_reap" }).operation, "prepare_reap");
