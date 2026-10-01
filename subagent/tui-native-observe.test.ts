@@ -173,6 +173,44 @@ test("selected result observes fresh worker status without global refresh and re
   } finally { manager.refreshFlight = undefined; await worker.close(); await manager.shutdown(false); await rm(root, { recursive: true, force: true }); }
 });
 
+test("failed checkpoint compaction stays observable and reports the cause before explicit retry", async () => {
+  const root = await mkdtemp(join(tmpdir(), "pi-resume-compact-failure-"));
+  const manager: any = new TuiNativeManager(root, () => "native", () => true, 16);
+  const directory = join(root, "workers", "a".repeat(24));
+  const store = new TuiWorkerStore(directory, true);
+  const manifest: any = { protocol: 1, ownerSessionId: "parent", taskId: "task", runtimeId: "runtime", groupId: `subagent-job-${"a".repeat(24)}`,
+    childId: `subagent-child-${"b".repeat(24)}`, attempt: 1, workerEpoch: "c".repeat(32), controlToken: "d".repeat(64),
+    controlSocket: join(directory, "control.sock"), sessionFile: join(directory, "session.jsonl"), launchMode: "none", presentation: "background",
+    placement: { socketPath: "/tmp/tmux", serverEpoch: "1:2", sessionId: "$1", windowId: "@1", paneId: "%1", ownershipNonce: "e".repeat(64) } };
+  store.writeManifest(manifest);
+  let failCompaction = true, compactions = 0, sends = 0;
+  const worker = new TuiWorkerServer(store, {
+    isIdle: () => true, send() { sends++; }, abort() {}, shutdown() {},
+    async compact() { compactions++; if (failCompaction) throw new Error("Compaction provider temporarily unavailable"); },
+  });
+  const child: any = { childId: manifest.childId, taskId: manifest.taskId, directory, state: "completed", spec: { task: "work" }, started: true, notifiedSequence: 0, operatorCapability: "f".repeat(64) };
+  const group: any = { id: manifest.groupId, owner: "parent", background: true, mode: "single", launchMode: "none", caller: manifest.placement, children: [child] };
+  manager.owner = "parent"; manager.groups.set(group.id, group);
+  manager.tmux.inspect = async () => ({ dead: false });
+  try {
+    await worker.start();
+    worker.outcome({ version: 1, state: "checkpointed", summary: "First milestone" });
+    worker.settled({ assistant: { stopReason: "stop", content: [{ type: "text", text: "Retained milestone" }] } });
+    const originalReport = worker.state.lastReport;
+    await assert.rejects(manager.operation({ operation: "resume", task_id: child.taskId, message: "Continue" }, "parent"), /Resume compaction failed:.*Compaction provider temporarily unavailable/);
+    assert.equal(compactions, 1); assert.equal(sends, 0, "failed compaction dispatched a continuation");
+    assert.equal(worker.state.active, false);
+    assert.equal(worker.state.lastReport, originalReport);
+    const status = await manager.operation({ operation: "status", job_id: group.id }, "parent");
+    assert.equal(status.details.group.children[0].status, "completed", "parent still sees idle child as running");
+    assert.equal(status.details.group.children[0].task_outcome.state, "checkpointed");
+    await assert.rejects(manager.operation({ operation: "resume", task_id: child.taskId, compact: false }, "parent"), /requires compaction/);
+    failCompaction = false;
+    await manager.operation({ operation: "resume", task_id: child.taskId, message: "Explicit retry" }, "parent");
+    assert.equal(compactions, 2); assert.equal(sends, 1);
+  } finally { await worker.close(); await manager.shutdown(false); await rm(root, { recursive: true, force: true }); }
+});
+
 test("native refresh coalesces callers behind one slow scan", async () => {
   const root = await mkdtemp(join(tmpdir(), "pi-refresh-singleflight-"));
   const manager: any = new TuiNativeManager(root, () => "native", () => true, 16);

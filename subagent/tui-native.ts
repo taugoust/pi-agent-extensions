@@ -250,7 +250,7 @@ export class TuiNativeManager {
     const previous = index > 0 && g.children[index - 1].report ? messageText((readPrivateJson(g.children[index - 1].report!) as any).assistant) : "";
     if (c.compactBeforePrompt) {
       const compacted = await callTuiWorker(m, { operation: "compact" }, { requestId: `resume-compact:${c.childId}`, timeoutMs: 30_000 });
-      if (!compacted.ok) throw new Error(`Resume compaction not confirmed: ${compacted.code}`);
+      if (!compacted.ok) throw new Error(`Resume compaction not confirmed: ${compacted.code}: ${compacted.message}`);
     }
     const task = c.resumeSessionFile ? `Continue the retained session, not a new assignment. Latest parent instruction: ${c.resumeMessage ?? "Continue from the saved checkpoint."}`
       : g.mode === "chain" ? c.spec.task.replaceAll("{previous}", previous) : c.spec.task;
@@ -569,7 +569,7 @@ export class TuiNativeManager {
       }
       if (op === "resume" && (params.compact === true || checkpoint)) {
         const compacted = await callTuiWorker(m!, { operation: "compact" }, { timeoutMs: 30_000 });
-        if (!compacted.ok) throw new Error(`Resume compaction failed: ${compacted.code}`);
+        if (!compacted.ok) throw new Error(`Resume compaction failed: ${compacted.code}: ${compacted.message}`);
       }
       const result = await callTuiWorker(m!, { operation: "prompt", mode: params.control_mode ?? "steer", message: params.message ?? "Continue from the saved task context." });
       if (!result.ok) throw new Error(`Worker prompt failed: ${result.code}`);

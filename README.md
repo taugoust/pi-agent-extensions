@@ -1020,12 +1020,18 @@ ownership and process start identities prevent foreign or concurrent resumes.
 Task-owned background jobs remain accessible to successor attempts.
 
 Resume is always explicit, including after a failure or the existing 90% context
-finalizer. A measured high-context exit selects compaction before the next prompt
-(bounded to five minutes); `compact:true` can request this explicitly. Disabling
-required high-context compaction is rejected. A model-reported checkpoint at low
-context remains resumable without forcing unnecessary compaction. Explicit
-compaction on a session Pi considers too small is a no-op unless high-context
-compaction is required; other compaction errors remain failures.
+finalizer. Native TUI checkpoint resumes request compaction before continuing;
+`compact:true` also requests it explicitly. Pi's exact “Nothing to compact (session
+too small)” error is an acknowledged no-op: the saved context is retained and the
+continuation proceeds. Other compaction errors return a durable `compact_failed`
+receipt with the cause and restore the worker's actual activity state. Repeating
+the same request ID does not repeat compaction; a new retry remains explicit.
+A new parent-controlled turn clears the previous turn's report and outcome.
+
+Legacy RPC resumes derive required compaction from measured high context (bounded
+to five minutes), not a low-context model checkpoint alone. Disabling required
+compaction is rejected; their too-small no-op is allowed only when high-context
+compaction is not required.
 Children created before retained-task support have no task ID and cannot be
 resumed this way. Runtime controls still target only active child IDs. A parent
 crash does not automatically relaunch work; recovery waits for previous-child

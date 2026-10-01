@@ -104,7 +104,7 @@ export type TuiWorkerResponse = {
   workerEpoch: string;
 } & (
   | { ok: true; receipt: "accepted" | "applied"; sequence: number; data?: unknown }
-  | { ok: false; code: "unauthorized" | "stale" | "invalid" | "busy" | "sealed" | "ambiguous" | "unavailable"; message: string }
+  | { ok: false; code: "unauthorized" | "stale" | "invalid" | "busy" | "sealed" | "ambiguous" | "unavailable" | "compact_failed"; message: string; receipt?: "failed" }
 );
 
 export type TuiWorkerEvent = {

@@ -77,6 +77,30 @@ export default function rootTest(pi: ExtensionAPI) {
     assert.equal(resumedGroup.children[0].attempt, 2);
     assert.notEqual((await callTuiWorker(manifestFor(resumedGroup), { operation: "status" }) as any).data.pid, saved.childPid);
     await execute(ctx, { operation: "reap", job_id: resumed.details.job_id });
+    // The real Pi compactor rejects this deliberately tiny checkpoint. That
+    // precise no-op must allow mandatory checkpoint resume, without losing
+    // context or leaving the worker's activity reservation latched.
+    const small = await execute(ctx, { task: "CHECKPOINT_SMALL", model: "harness-test/mock:off", background: true });
+    const smallGroup = await wait(ctx, small.details.job_id);
+    assert.equal(smallGroup.children[0].task_outcome?.state, "checkpointed");
+    const smallWorker = manifestFor(smallGroup);
+    const smallBefore = (await callTuiWorker(smallWorker, { operation: "status" }) as any).data;
+    const smallTranscript = await readFile(smallWorker.sessionFile, "utf8");
+    const smallNoOp = await callTuiWorker(smallWorker, { operation: "compact" });
+    assert.ok(smallNoOp.ok, JSON.stringify(smallNoOp));
+    assert.deepEqual(smallNoOp.data, { compaction: "not-needed", reason: "nothing-to-compact" });
+    await execute(ctx, { operation: "resume", task_id: smallGroup.children[0].task_id, message: "Continue after the small checkpoint" });
+    const smallResumed = await wait(ctx, small.details.job_id);
+    const smallAfter = (await callTuiWorker(smallWorker, { operation: "status" }) as any).data;
+    assert.equal(smallAfter.pid, smallBefore.pid);
+    assert.equal(smallAfter.active, false);
+    assert.notEqual(smallAfter.lastReport, smallBefore.lastReport);
+    assert.equal(smallResumed.children[0].task_outcome, undefined);
+    const retainedTranscript = await readFile(smallWorker.sessionFile, "utf8");
+    assert.ok(retainedTranscript.startsWith(smallTranscript), "small compaction rewrote retained session history");
+    assert.match(retainedTranscript, /Continue after the small checkpoint/);
+    assert.equal(retainedTranscript.split("\n").filter(Boolean).map(line => JSON.parse(line)).some(entry => entry.type === "compaction"), false, "small-session no-op unexpectedly compacted context");
+    await execute(ctx, { operation: "reap", job_id: small.details.job_id });
     // Real root API inventory/waits must cover the legacy manager as well.
     const nativeWait = await execute(ctx, { task: "WAIT_FOR_PARENT mixed waits", model: "harness-test/mock:off", background: true });
     const legacyManager = sharedBackgroundSubagentManager(join(getAgentDir(), "state", "background-subagents-v1"));

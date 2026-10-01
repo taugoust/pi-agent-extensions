@@ -71,6 +71,137 @@ test("child-hosted control reconnects, deduplicates, observes direct work and se
   } finally { await server.close(); await rm(directory, { recursive: true, force: true }); }
 });
 
+test("compact failures restore idle state and persist non-replayable failure receipts", async () => {
+  const directory = await mkdtemp(join(tmpdir(), "pi-worker-compact-failure-"));
+  const store = new TuiWorkerStore(directory);
+  const manifest = manifestAt(directory);
+  store.writeManifest(manifest);
+  let idle = true, compactCalls = 0, sends = 0, shutdowns = 0;
+  let compactBehavior: () => Promise<void | { compaction: "not-needed"; reason: "nothing-to-compact" }> = () => { throw new Error("Nothing to compact (session too small): provider unavailable"); };
+  const prepareJobReap = async (preserve: (report: unknown) => Promise<void>) => { await preserve({ jobs: [] }); return () => {}; };
+  const server = new TuiWorkerServer(store, { isIdle: () => idle, prepareJobReap,
+    compact: () => { compactCalls++; return compactBehavior(); },
+    send: () => { sends++; idle = false; }, abort: () => { idle = true; }, shutdown: () => { shutdowns++; } });
+  try {
+    await server.start();
+    const compact = { operation: "compact" as const };
+    const syncFailure = await callTuiWorker(manifest, compact, { requestId: "compact-sync" });
+    assert.equal(syncFailure.ok, false); assert.equal(syncFailure.code, "compact_failed");
+    assert.match(syncFailure.message ?? "", /Compaction failed: Nothing to compact \(session too small\): provider unavailable/);
+    assert.deepEqual(await callTuiWorker(manifest, compact, { requestId: "compact-sync" }), syncFailure);
+    assert.equal(compactCalls, 1, "failed compact was replayed");
+    assert.equal((await callTuiWorker(manifest, { operation: "status" })).data?.active, false);
+    assert.equal(store.readState().active, false);
+    assert.equal(store.readState().phase, "ready");
+    assert.deepEqual(store.readState().receipts["model:compact-sync"].response, syncFailure);
+
+    compactBehavior = async () => { throw new Error("provider rejected compact"); };
+    const asyncFailure = await callTuiWorker(manifest, compact, { requestId: "compact-async" });
+    assert.equal(asyncFailure.code, "compact_failed");
+    assert.deepEqual(await callTuiWorker(manifest, compact, { requestId: "compact-async" }), asyncFailure);
+    assert.equal(compactCalls, 2);
+    assert.equal(store.readState().active, false);
+
+    compactBehavior = async () => { throw new Error("界".repeat(3000)); };
+    const longFailure = await callTuiWorker(manifest, compact, { requestId: "compact-long-error" });
+    assert.equal(longFailure.code, "compact_failed");
+    assert.ok(Buffer.byteLength(longFailure.message ?? "") <= 2048, "failure response exceeded UTF-8 byte bound");
+    assert.ok(longFailure.message?.endsWith(" [truncated]"));
+    assert.deepEqual(await callTuiWorker(manifest, compact, { requestId: "compact-long-error" }), longFailure);
+    assert.equal(compactCalls, 3);
+
+    compactBehavior = async () => ({ compaction: "not-needed", reason: "nothing-to-compact" });
+    const noOp = await callTuiWorker(manifest, compact, { requestId: "compact-noop" });
+    assert.equal(noOp.ok, true);
+    assert.deepEqual(noOp.data, { compaction: "not-needed", reason: "nothing-to-compact" });
+    assert.deepEqual(await callTuiWorker(manifest, compact, { requestId: "compact-noop" }), noOp);
+    assert.equal(compactCalls, 4, "no-op receipt replay re-invoked compact");
+    compactBehavior = async () => {};
+    assert.equal((await callTuiWorker(manifest, compact, { requestId: "compact-success" })).ok, true);
+    assert.equal(store.readState().active, false);
+    assert.equal((await callTuiWorker(manifest, { operation: "prompt", mode: "steer", message: "resume" })).ok, true);
+    assert.equal(sends, 1);
+    await callTuiWorker(manifest, { operation: "cancel" });
+    assert.equal(store.readState().active, false);
+
+    idle = false; server.running();
+    assert.equal((await callTuiWorker(manifest, { operation: "prepare_reap" })).code, "busy");
+    idle = true; server.settled({ final: "human turn settled" });
+    assert.equal((await callTuiWorker(manifest, { operation: "prepare_reap" })).ok, true);
+    await new Promise(resolve => setTimeout(resolve, 50));
+    assert.equal(shutdowns, 1);
+  } finally { await server.close(); await rm(directory, { recursive: true, force: true }); }
+});
+
+test("parent prompt invalidates prior turn receipt before custom-message agent_start", async () => {
+  const directory = await mkdtemp(join(tmpdir(), "pi-worker-prompt-turn-"));
+  const store = new TuiWorkerStore(directory);
+  const manifest = manifestAt(directory);
+  store.writeManifest(manifest);
+  let idle = true, sends = 0;
+  let server!: TuiWorkerServer;
+  server = new TuiWorkerServer(store, { isIdle: () => idle,
+    send: () => { sends++; idle = false; server.running(); }, abort: () => { idle = true; }, shutdown() {} });
+  try {
+    await server.start();
+    server.settled({ final: "previous checkpoint turn" });
+    server.outcome({ version: 1, state: "checkpointed" });
+    assert.ok(store.readState().lastReport);
+    assert.ok(store.readState().lastOutcome);
+
+    const prompt = { operation: "prompt" as const, mode: "follow_up" as const, message: "resume checkpoint" };
+    assert.equal((await callTuiWorker(manifest, prompt, { requestId: "resume-new-turn" })).ok, true);
+    assert.equal(sends, 1);
+    assert.equal(store.readState().active, true);
+    assert.equal(store.readState().phase, "running");
+    assert.equal(store.readState().lastReport, undefined);
+    assert.equal(store.readState().lastOutcome, undefined);
+  } finally { await server.close(); await rm(directory, { recursive: true, force: true }); }
+});
+
+test("human activity starting during pending compaction stays authoritative after rejection", async () => {
+  const directory = await mkdtemp(join(tmpdir(), "pi-worker-compact-race-"));
+  const store = new TuiWorkerStore(directory);
+  const manifest = manifestAt(directory);
+  store.writeManifest(manifest);
+  let idle = true, compactCalls = 0;
+  let entered!: () => void, rejectCompact!: (error: Error) => void;
+  const compactPending = new Promise<void>((_resolve, reject) => { rejectCompact = reject; });
+  const started = new Promise<void>(resolve => { entered = resolve; });
+  const prepareJobReap = async (preserve: (report: unknown) => Promise<void>) => { await preserve({ jobs: [] }); return () => {}; };
+  const server = new TuiWorkerServer(store, { isIdle: () => idle, prepareJobReap,
+    compact: () => { compactCalls++; entered(); return compactPending; },
+    send: () => {}, abort: () => { idle = true; }, shutdown() {} });
+  try {
+    await server.start();
+    server.settled({ previous: "report" });
+    server.outcome({ previous: "outcome" });
+    assert.ok(store.readState().lastReport);
+    assert.ok(store.readState().lastOutcome);
+
+    const request = { operation: "compact" as const };
+    const pending = callTuiWorker(manifest, request, { requestId: "compact-race" });
+    await started;
+    // Pi can announce input/before_agent_start before its streaming idle signal
+    // flips; the explicit generation/state reservation must remain authoritative.
+    assert.equal(idle, true);
+    assert.equal(server.running(true), true, "human activity was not accepted during compact");
+    rejectCompact(new Error("Compaction provider temporarily unavailable"));
+    const failure = await pending;
+    assert.equal(failure.code, "compact_failed");
+    assert.equal(compactCalls, 1);
+    assert.equal(store.readState().active, true);
+    assert.equal(store.readState().phase, "running");
+    assert.equal(store.readState().lastReport, undefined, "prior turn report survived new human turn");
+    assert.equal(store.readState().lastOutcome, undefined, "prior turn outcome survived new human turn");
+    assert.equal((await callTuiWorker(manifest, { operation: "prepare_reap" })).code, "busy");
+
+    idle = true;
+    server.settled({ final: "human turn" });
+    assert.equal((await callTuiWorker(manifest, { operation: "prepare_reap" })).ok, true);
+  } finally { await server.close(); await rm(directory, { recursive: true, force: true }); }
+});
+
 test("known prompt refusal stays idle; uncertain dispatch remains non-replayable", async () => {
   const directory = await mkdtemp(join(tmpdir(), "pi-worker-refusal-"));
   const store = new TuiWorkerStore(directory);

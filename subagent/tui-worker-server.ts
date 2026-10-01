@@ -14,7 +14,7 @@ export type TuiWorkerAdapter = {
   abort(): void | Promise<void>;
   /** Gracefully exit this idle Pi, retaining its tmux pane. */
   shutdown(): void;
-  compact?(): Promise<void>;
+  compact?(): Promise<void | { compaction: "not-needed"; reason: "nothing-to-compact" }>;
   /** Reserve job creation, preserve terminal results, clean only owned terminal jobs.
    * Return a release callback; failures must release the local reservation. */
   prepareJobReap?(preserve: (report: unknown) => Promise<void>): Promise<() => void>;
@@ -34,6 +34,7 @@ export class TuiWorkerServer {
   private queue: Promise<unknown> = Promise.resolve();
   private closing = false;
   private failed = false;
+  private activityGeneration = 0;
   preparingReap = false;
   private reapInterrupted = false;
   readonly store: TuiWorkerStore;
@@ -59,6 +60,7 @@ export class TuiWorkerServer {
   running(newTurn = false): boolean {
     if (this.preparingReap) { this.reapInterrupted = true; void this.adapter.abort(); return false; }
     if (this.sealed) { void this.adapter.abort(); return false; }
+    this.activityGeneration++;
     if (newTurn || this.state.phase !== "running") {
       this.state.lastOutcome = undefined;
       this.state.lastReport = undefined;
@@ -70,6 +72,7 @@ export class TuiWorkerServer {
   }
   settled(report: unknown): void {
     if (this.closing || this.failed || this.preparingReap || !this.adapter.isIdle()) return;
+    this.activityGeneration++;
     this.state.lastReport = this.store.report(this.state.sequence + 1, report);
     this.state.active = false;
     this.state.phase = "settled";
@@ -178,18 +181,51 @@ export class TuiWorkerServer {
             return refused;
           }
         }
-        // abort() can emit agent_settled while awaited above. Re-reserve activity
-        // before enqueueing the replacement so a queued reap cannot see idle.
+        // The custom-message dispatch starts a new assistant turn without going
+        // through the TUI before_agent_start hook. Invalidate the previous turn's
+        // checkpoint immediately before sending, after interrupt/authority checks
+        // so a known refusal preserves the old terminal report and outcome.
+        this.state.lastOutcome = undefined;
+        this.state.lastReport = undefined;
         this.state.active = true;
         this.state.phase = "running";
         this.persist();
         this.adapter.send(r.message, r.mode === "follow_up" ? "follow_up" : "steer");
         break;
-      case "compact":
-        this.state.active = true; this.persist();
-        await this.adapter.compact!();
-        this.state.active = !this.adapter.isIdle();
+      case "compact": {
+        const activityGeneration = this.activityGeneration;
+        this.state.active = true; this.state.phase = "running"; this.persist();
+        const reconcileActivity = () => {
+          const idle = this.adapter.isIdle();
+          const activityChanged = activityGeneration !== this.activityGeneration;
+          this.state.active = activityChanged ? this.state.active || !idle : !idle;
+          // When a real activity event intervened, its phase/report are more
+          // authoritative than the temporary compact reservation.
+          if (!activityChanged || this.state.active) this.state.phase = this.state.active ? "running" : this.state.lastReport ? "settled" : "ready";
+        };
+        try {
+          const compactResult = await this.adapter.compact!();
+          if (compactResult?.compaction === "not-needed") data = compactResult;
+          reconcileActivity();
+        } catch (error) {
+          // A reported compaction failure is definitive: release the reservation
+          // from live activity, and persist the failure as the terminal receipt.
+          // Replaying this request ID must never invoke compact a second time.
+          reconcileActivity();
+          const detail = error instanceof Error ? error.message : String(error);
+          const explanation = `Compaction failed: ${detail}`;
+          const bytes = Buffer.from(explanation);
+          const suffix = " [truncated]";
+          let end = Math.min(bytes.length, bytes.length > 2048 ? 2048 - Buffer.byteLength(suffix) : 2048);
+          while (end > 0 && end < bytes.length && (bytes[end]! & 0xc0) === 0x80) end--;
+          const message = bytes.subarray(0, end).toString("utf8") + (end < bytes.length ? suffix : "");
+          const response = this.response(r, { ok: false, code: "compact_failed", receipt: "failed", sequence: this.state.sequence, message });
+          this.state.receipts[receiptKey].response = response;
+          this.persist();
+          return response;
+        }
         break;
+      }
       case "cancel":
         await this.adapter.abort();
         this.state.active = !this.adapter.isIdle();

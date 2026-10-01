@@ -71,9 +71,19 @@ export default function tuiWorkerExtension(pi: ExtensionAPI): void {
           }
           context?.shutdown();
         },
-        compact: () => new Promise<void>((resolve, reject) => {
+        compact: () => new Promise<void | { compaction: "not-needed"; reason: "nothing-to-compact" }>((resolve, reject) => {
           if (!context || !allowed()) { reject(new Error("Compaction authority unavailable")); return; }
-          context.compact({ onComplete: () => resolve(), onError: error => reject(error) });
+          const handleError = (error: unknown) => {
+            // Pi throws this exact error when the session has no compactable
+            // history. That is a successful no-op for the parent checkpoint
+            // request; all other errors remain explicit failures.
+            if (error instanceof Error && error.message === "Nothing to compact (session too small)") {
+              resolve({ compaction: "not-needed", reason: "nothing-to-compact" });
+            } else reject(error);
+          };
+          try {
+            context.compact({ onComplete: () => resolve(), onError: handleError });
+          } catch (error) { handleError(error); }
         }),
         send: (message, mode) => {
           if (!allowed()) throw new Error("Worker or child-local command authority unavailable");
