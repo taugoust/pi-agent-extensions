@@ -76,7 +76,7 @@ function latestReceipt(h:Hub,key:string){return h.receipts.get(key);}
 function isDone(h:Hub,key:string,rev:string){const r=latestReceipt(h,key);return r?.revision===rev&&(r.state==='recorded'||r.state==='delivered'||r.state==='consumed');}
 function restore(h:Hub,ctx:any){
   const entries=ctx.sessionManager.getBranch?.()??ctx.sessionManager.getEntries?.()??[];
-  h.receipts.clear();h.pending.clear();h.inFlight.clear();h.localDisabled=false;h.guidanceDisabled=false;h.compacting=false;h.quotaResetAt=0;h.lastGuidanceAt=0;h.stats.guidanceDelivered=0;h.stats.guidanceBytes=0;
+  h.receipts.clear();h.pending.clear();h.inFlight.clear();h.localDisabled=false;h.guidanceDisabled=false;h.quotaResetAt=0;h.lastGuidanceAt=0;h.stats.guidanceDelivered=0;h.stats.guidanceBytes=0;
   for(const entry of entries){
     if(entry?.type==='custom'&&entry.customType===CONTROL_CUSTOM&&entry.data?.v===1){if(typeof entry.data.disabled==='boolean'){if(['guidance-quota','compaction-pause'].includes(entry.data.reason))h.guidanceDisabled=entry.data.disabled;else {h.localDisabled=entry.data.disabled;if(!entry.data.disabled)h.guidanceDisabled=false;}}if(typeof entry.data.quotaResetAt==='number')h.quotaResetAt=entry.data.quotaResetAt;}
     const r=receiptFrom(entry);if(r){h.receipts.set(r.key,r);continue;}
@@ -97,22 +97,28 @@ function restore(h:Hub,ctx:any){
   }
 }
 function guidancePending(h:Hub){return [...h.pending.values()].some(i=>i.data.requires_guidance===true);}
-function refreshStatus(h:Hub){const ctx=h.ctx;if(!ctx?.hasUI)return;const guidance=[...h.pending.values()].filter(i=>i.data.requires_guidance).length;const text=disabled(h)?'quiet off':guidance?`quiet guidance ${guidance}`:undefined;try{ctx.ui.setStatus('quiet-state',text);}catch{}}
+function refreshStatus(h:Hub){const ctx=h.ctx;if(!ctx?.hasUI)return;const guidance=[...h.pending.values()].filter(i=>i.data.requires_guidance).length;const text=disabled(h)?'quiet off':h.compacting?'quiet compacting':h.guidanceDisabled?'quiet guidance paused':h.stats.guidanceDelivered>=MAX_GUIDANCE_PER_SESSION?'quiet guidance quota':guidance?`quiet guidance ${guidance}`:undefined;try{ctx.ui.setStatus('quiet-state',text);}catch{}}
 function notificationEntries(ctx:any):QuietUpdate[]{return (ctx.sessionManager.getBranch?.()??ctx.sessionManager.getEntries?.()??[]).map((e:any)=>e?.type==='custom'&&e.customType===NOTIFICATION_CUSTOM?e.data?.update:undefined).filter(validUpdate);}
 const commandApis:WeakSet<object>=new WeakSet();
 function installCommands(pi:any){
   if(typeof pi.registerCommand!=='function'||commandApis.has(pi))return;commandApis.add(pi);
   pi.registerCommand('harness-state',{description:'Show quiet harness-state status/notifications or disable/enable quiet model wakeups',handler:async(args:string,ctx:any)=>{
-    const current=hub(ctx);restore(current,ctx);const mode=(args||'status').trim().split(/\s+/)[0];
+    const current=hub(ctx);restore(current,ctx);const parts=(args||'status').trim().split(/\s+/);const mode=parts[0];
     if(mode==='show'){
       const notes=notificationEntries(ctx).slice(-25).map((u,i)=>`${i+1}. ${u.requires_guidance?'[guidance]':'[finding]'} ${u.child_id??u.id}: ${u.message??''}`);
       const content=notes.length?notes.join('\n'):'No retained child notifications.';
       pi.sendMessage({customType:'harness-state-view',display:true,content,details:{count:notes.length}},{deliverAs:'nextTurn',triggerTurn:false});
       return;
     }
+    if(mode==='dismiss-guidance'){
+      const scope=parts[1];if(parts.length!==2||(scope!=='all'&&(!scope||!/^subagent-child-[0-9a-f]{24}$/.test(scope)))){ctx.ui.notify('Usage: /harness-state dismiss-guidance all|<exact child_id>','warning');return;}
+      const targets=[...current.pending.values()].filter(i=>i.data.requires_guidance===true&&!isCompletion(i.data)&&(scope==='all'||i.data.child_id===scope));let consumed=0;
+      for(const item of targets){if(appendReceipt(current,item,'consumed')){current.pending.delete(item.key);consumed++;}}
+      ctx.ui.notify(`Dismissed ${consumed} pending guidance request(s)${scope==='all'?'':' for '+scope}; retained histories unchanged.`,'info');refreshStatus(current);return;
+    }
     if(mode==='disable'||mode==='off'){current.localDisabled=true;current.pending.clear();clearTimer(current);pi.appendEntry(CONTROL_CUSTOM,{v:1,disabled:true,at:Date.now()});ctx.ui.notify('harness-state disabled for this session. Re-enable with /harness-state enable. Env kill switch: PAE_QUIET_STATE_DISABLED=1','warning');refreshStatus(current);return;}
-    if(mode==='enable'||mode==='on'){current.localDisabled=false;current.guidanceDisabled=false;current.deliveryFailures=0;current.lastGuidanceAt=0;current.stats.guidanceDelivered=0;current.quotaResetAt=Date.now();pi.appendEntry(CONTROL_CUSTOM,{v:1,disabled:false,quotaResetAt:current.quotaResetAt,at:Date.now()});ctx.ui.notify('harness-state completion/guidance wakeups enabled for this session; guidance quota reset.','info');schedule(current,0);return;}
-    ctx.ui.notify(`harness-state: pendingCompletions=${[...current.pending.values()].filter(i=>isCompletion(i.data)).length} pendingGuidance=${[...current.pending.values()].filter(i=>i.data.requires_guidance).length} receipts=${current.receipts.size} deliveredUpdates=${current.stats.guidanceDelivered}/${MAX_GUIDANCE_PER_SESSION} guidanceBytes=${current.stats.guidanceBytes} schedulingAttempts=${current.stats.schedulingAttempts} routineRecorded=${current.stats.routineRecorded} duplicates=${current.stats.duplicate} dropped=${current.stats.dropped} receiptFailed=${current.stats.receiptFailed} circuitBreaks=${current.stats.circuitBreaks} disabled=${disabled(current)} envKillSwitch=PAE_QUIET_STATE_DISABLED=1`,'info');
+    if(mode==='enable'||mode==='on'){current.localDisabled=false;current.guidanceDisabled=false;current.deliveryFailures=0;current.lastGuidanceAt=0;current.stats.guidanceDelivered=0;current.quotaResetAt=Date.now();pi.appendEntry(CONTROL_CUSTOM,{v:1,disabled:false,quotaResetAt:current.quotaResetAt,at:Date.now()});ctx.ui.notify('harness-state completion/guidance wakeups enabled for this session; guidance quota reset.','info');refreshStatus(current);schedule(current,0);return;}
+    ctx.ui.notify(`harness-state: status=${disabled(current)?'disabled':current.guidanceDisabled?'guidance-paused':'active'} reason=${envDisabled()?'environment kill switch':current.localDisabled?'operator disable':current.deliveryFailures>=3?'delivery circuit breaker':current.guidanceDisabled?'persisted guidance pause':current.compacting?'compaction':current.stats.guidanceDelivered>=MAX_GUIDANCE_PER_SESSION?'guidance quota':'none'} pendingCompletions=${[...current.pending.values()].filter(i=>isCompletion(i.data)).length} pendingGuidance=${[...current.pending.values()].filter(i=>i.data.requires_guidance).length} receipts=${current.receipts.size} deliveredUpdates=${current.stats.guidanceDelivered}/${MAX_GUIDANCE_PER_SESSION} guidanceBytes=${current.stats.guidanceBytes} schedulingAttempts=${current.stats.schedulingAttempts} routineRecorded=${current.stats.routineRecorded} duplicates=${current.stats.duplicate} dropped=${current.stats.dropped} receiptFailed=${current.stats.receiptFailed} circuitBreaks=${current.stats.circuitBreaks} disabled=${disabled(current)} envKillSwitch=PAE_QUIET_STATE_DISABLED=1`,'info');
   }});
 }
 function batchBytes(updates:QuietUpdate[]):number{return bytes(GUIDANCE_PREFIX+JSON.stringify(updates))+bytes(JSON.stringify({updates}));}
@@ -178,9 +184,9 @@ function schedule(h:Hub,delayMs:number){
 export function installQuietState(pi:ExtensionAPI,delayMs=1000){
   const writer=Symbol('quiet-harness-writer');
   installCommands(pi);
-  pi.on('session_start',async(_event,ctx)=>{const h=hub(ctx);clearTimer(h);h.writer=writer;h.pi=pi;h.ctx=ctx;h.ui=false;restore(h,ctx);schedule(h,delayMs);});
+  pi.on('session_start',async(_event,ctx)=>{const h=hub(ctx);clearTimer(h);h.writer=writer;h.pi=pi;h.ctx=ctx;h.ui=false;h.compacting=false;restore(h,ctx);schedule(h,delayMs);});
   pi.on('agent_settled',async(_event,ctx)=>{const h=hub(ctx);if(h.writer===writer){h.ctx=ctx;restore(h,ctx);schedule(h,delayMs);}});
-  pi.on('session_before_compact',async(_event,ctx)=>{const h=hub(ctx);if(h.writer===writer){h.compacting=true;h.guidanceDisabled=true;clearTimer(h);try{h.pi?.appendEntry?.(CONTROL_CUSTOM,{v:1,disabled:true,reason:'compaction-pause',at:Date.now()});}catch{}refreshStatus(h);}});
+  pi.on('session_before_compact',async(_event,ctx)=>{const h=hub(ctx);if(h.writer===writer){h.compacting=true;clearTimer(h);refreshStatus(h);}});
   pi.on('session_compact',async(_event,ctx)=>{const h=hub(ctx);if(h.writer===writer){h.compacting=false;restore(h,ctx);schedule(h,delayMs);}});
   pi.on('session_compact_failed',async(_event,ctx)=>{const h=hub(ctx);if(h.writer===writer){h.compacting=false;restore(h,ctx);schedule(h,delayMs);}});
   pi.on('ui_prompt_start',async(_event,ctx)=>{const h=hub(ctx);if(h.writer===writer){h.ui=true;clearTimer(h);refreshStatus(h);}});

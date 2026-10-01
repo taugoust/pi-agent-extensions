@@ -71,7 +71,7 @@ export default function tuiWorkerExtension(pi: ExtensionAPI): void {
           }
           context?.shutdown();
         },
-        compact: () => new Promise<void | { compaction: "not-needed"; reason: "nothing-to-compact" }>((resolve, reject) => {
+        compact: () => new Promise<void | { compaction: "not-needed"; reason: "nothing-to-compact" | "already-compacted" }>((resolve, reject) => {
           if (!context || !allowed()) { reject(new Error("Compaction authority unavailable")); return; }
           const handleError = (error: unknown) => {
             // Pi throws this exact error when the session has no compactable
@@ -79,6 +79,10 @@ export default function tuiWorkerExtension(pi: ExtensionAPI): void {
             // request; all other errors remain explicit failures.
             if (error instanceof Error && error.message === "Nothing to compact (session too small)") {
               resolve({ compaction: "not-needed", reason: "nothing-to-compact" });
+            } else if (error instanceof Error && error.message === "Already compacted") {
+              // Pi emits this before dispatch when the current leaf is already
+              // a compaction entry. Reuse it; never drop or compact twice.
+              resolve({ compaction: "not-needed", reason: "already-compacted" });
             } else reject(error);
           };
           try {

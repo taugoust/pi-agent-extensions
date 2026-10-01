@@ -56,6 +56,17 @@ test("Pi's exact too-small compaction error is an explicit idempotent no-op only
     assert.match(lookalike.message ?? "", /provider temporarily unavailable/);
     assert.equal(compactCalls, 3);
     assert.equal(store.readState().active, false);
+    compactError = new Error("Already compacted");
+    const existing = await callTuiWorker(manifest, request, { requestId: "already" });
+    assert.equal(existing.ok, true);
+    assert.deepEqual(existing.data, { compaction: "not-needed", reason: "already-compacted" });
+    assert.deepEqual(await callTuiWorker(manifest, request, { requestId: "already" }), existing);
+    assert.equal(compactCalls, 4);
+    assert.equal(store.readState().active, false);
+    compactError = new Error("Already compacted: invalid history");
+    const invalidHistory = await callTuiWorker(manifest, request, { requestId: "already-lookalike" });
+    assert.equal(invalidHistory.ok, false);
+    assert.equal(invalidHistory.code, "compact_failed");
   } finally {
     await handlers.get("session_shutdown")?.({}, ctx);
     if (previous === undefined) delete process.env.PI_TUI_WORKER_MANIFEST; else process.env.PI_TUI_WORKER_MANIFEST = previous;

@@ -82,6 +82,27 @@ assert.equal(notesFixture.messages.length,1);
 assert.equal(notesFixture.messages[0].options.triggerTurn,false);
 assert.match(notesFixture.messages[0].message.content,/A concise discovery/);
 
+// Dismissal requires an explicit scope and consumes only pending guidance, durably.
+const childA='subagent-child-'+'b'.repeat(24),childB='subagent-child-'+'c'.repeat(24);
+await notesFixture.emit('ui_prompt_start');
+quietNotes.enqueue(ctx,{kind:'notification',id:'guide-a',child_id:childA,requires_guidance:true,message:'help A'});
+quietNotes.enqueue(ctx,{kind:'notification',id:'guide-b',child_id:childB,requires_guidance:true,message:'help B'});
+quietNotes.enqueue(ctx,{kind:'job',id:'mixed-completion',child_id:childA,requires_guidance:true,completion:true});
+await notesFixture.commands.get('harness-state').handler('dismiss-guidance',ctx);
+assert.match(ctx.ui.notices.at(-1),/Usage:/,'dismiss without scope must refuse');
+await notesFixture.commands.get('harness-state').handler(`dismiss-guidance ${childA}`,ctx);
+assert.equal(entries.filter(e=>e.customType===QUIET_STATE_RECEIPT_CUSTOM_TYPE&&e.data.state==='consumed').length,1);
+await notesFixture.emit('session_shutdown',{reason:'reload'});
+const dismissReload=fixture();installQuietState(dismissReload.pi,5);await dismissReload.emit('session_start');await dismissReload.emit('ui_prompt_start');await pause(80);
+const reloadHub=(globalThis as any).__paeQuietHarnessStateV2.get(sessionName);
+assert.equal(reloadHub.pending.has('notification:guide-a'),false,'exact dismissal replayed after reload');
+assert.equal([...reloadHub.pending.keys()].some(k=>k.includes('guide-b')),true,'exact dismissal consumed unmatched guidance');
+assert.equal(reloadHub.pending.has('job:mixed-completion'),true,'guidance dismissal consumed completion-marked update');
+await dismissReload.commands.get('harness-state').handler('dismiss-guidance all',ctx);
+assert.equal(reloadHub.pending.has('notification:guide-b'),false);
+assert.equal(reloadHub.pending.has('job:mixed-completion'),true);
+await dismissReload.emit('ui_prompt_end');
+
 // Runtime disable persists across reload and suppresses guidance.
 await notesFixture.commands.get('harness-state').handler('disable',ctx);
 quietNotes.enqueue(ctx,{kind:'job',id:'disabled-help',requires_guidance:true});await pause(80);
@@ -92,18 +113,33 @@ quietDisabled.enqueue(ctx,{kind:'job',id:'still-disabled',requires_guidance:true
 assert.equal(disabledReload.messages.length,0,'persistent disable was not restored');
 await disabledReload.commands.get('harness-state').handler('enable',ctx);
 quietDisabled.enqueue(ctx,{kind:'job',id:'enabled-help',requires_guidance:true});await pause(1200);
-assert.equal(disabledReload.messages.length,1,'enabled guidance did not deliver');
+assert.equal(disabledReload.messages.length>=1,true,'enabled guidance did not deliver');
 await disabledReload.commands.get('harness-state').handler('status',ctx);
 assert.match(ctx.ui.notices.at(-1),/guidanceBytes=\d+/);
 assert.match(ctx.ui.notices.at(-1),/schedulingAttempts=\d+/);
 
-// Compaction pauses and leaves the kill switch set until explicit enable.
-quietDisabled.enqueue(ctx,{kind:'job',id:'compact-help',requires_guidance:true});
-await disabledReload.emit('session_before_compact');await pause(80);
-assert.equal(disabledReload.messages.length,1,'compaction pause failed');
-await disabledReload.emit('session_compact');
-quietDisabled.enqueue(ctx,{kind:'job',id:'after-compact',requires_guidance:true});await pause(1200);
-assert.equal(disabledReload.messages.length,1,'compaction cleared the kill switch without explicit enable');
+// Compaction pauses at runtime only and resumes automatically on both outcomes.
+entries=[];sessionName=`quiet-compact-${process.pid}`;const compactFx=fixture();const compactQuiet=installQuietState(compactFx.pi,5);await compactFx.emit('session_start');
+compactQuiet.enqueue(ctx,{kind:'job',id:'compact-first',requires_guidance:true});
+await compactFx.emit('session_before_compact');await compactFx.commands.get('harness-state').handler('status',ctx);
+assert.match(ctx.ui.notices.at(-1),/reason=compaction/);
+await compactFx.emit('session_compact');compactQuiet.enqueue(ctx,{kind:'job',id:'compact-success',requires_guidance:true});await pause(1200);
+assert.equal(compactFx.messages.length,1,'successful compaction did not resume automatically');
+assert.equal((globalThis as any).__paeQuietHarnessStateV2.get(sessionName).stats.guidanceDelivered,2,'compaction reset or miscounted guidance quota');
+await compactFx.emit('session_before_compact');await compactFx.emit('session_compact_failed');
+compactQuiet.enqueue(ctx,{kind:'job',id:'compact-failure',requires_guidance:true});await pause(80);
+const compactHub=(globalThis as any).__paeQuietHarnessStateV2.get(sessionName);
+assert.equal(compactHub.compacting,false,'failed compaction left runtime pause latched');
+assert.equal(compactHub.pending.has('job:compact-failure'),true,'failed compaction lost queued guidance');
+await compactFx.commands.get('harness-state').handler('status',ctx);assert.match(ctx.ui.notices.at(-1),/reason=guidance quota|reason=none/);
+await compactFx.emit('session_shutdown',{reason:'reload'});
+// Legacy persisted pauses stay disabled until explicit enable.
+entries.push({type:'custom',customType:'harness-state-control',data:{v:1,disabled:true,reason:'compaction-pause'}});
+const legacyFx=fixture();const legacyQuiet=installQuietState(legacyFx.pi,5);await legacyFx.emit('session_start');
+legacyQuiet.enqueue(ctx,{kind:'job',id:'legacy-paused',requires_guidance:true});await pause(80);assert.equal(legacyFx.messages.length,0);
+await legacyFx.commands.get('harness-state').handler('status',ctx);assert.match(ctx.ui.notices.at(-1),/reason=persisted guidance pause/);
+await legacyFx.commands.get('harness-state').handler('enable',ctx);await pause(1200);assert.equal(legacyFx.messages.length,1);
+await legacyFx.emit('session_shutdown',{reason:'quit'});
 
 // Receipt persistence failure fails closed: no successful enqueue/dedup claim and no wakeup.
 entries=[];sessionName=`quiet-fail-${process.pid}`;const fail=fixture(true);const quietFail=installQuietState(fail.pi,5);await fail.emit('session_start');

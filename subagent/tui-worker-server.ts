@@ -14,7 +14,7 @@ export type TuiWorkerAdapter = {
   abort(): void | Promise<void>;
   /** Gracefully exit this idle Pi, retaining its tmux pane. */
   shutdown(): void;
-  compact?(): Promise<void | { compaction: "not-needed"; reason: "nothing-to-compact" }>;
+  compact?(): Promise<void | { compaction: "not-needed"; reason: "nothing-to-compact" | "already-compacted" }>;
   /** Reserve job creation, preserve terminal results, clean only owned terminal jobs.
    * Return a release callback; failures must release the local reservation. */
   prepareJobReap?(preserve: (report: unknown) => Promise<void>): Promise<() => void>;

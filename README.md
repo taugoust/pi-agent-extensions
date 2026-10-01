@@ -769,14 +769,14 @@ Guidance delivery receipts are reserved before scheduling the model: ambiguous f
 may leave a request available only for explicit review, rather than replay it.
 
 Operator controls (do not cancel builds or workers):
-- `/harness-state status` — queue, deduplication, delivery and circuit-breaker counters.
+- `/harness-state status` — queue, deduplication, delivery and circuit-breaker counters, including guidance pause/reason.
+- `/harness-state dismiss-guidance all` or `/harness-state dismiss-guidance <exact child_id>` — durably consume only pending guidance requests in the explicit scope; completions and routine findings are never dismissed.
 - `/harness-state show` — explicitly display the last 25 retained child notifications.
 - `/harness-state disable` — persistently disable automatic delivery for this session.
 - `/harness-state enable` — explicitly re-enable guidance and reset its quota.
 - `PAE_QUIET_STATE_DISABLED=1` — startup environment kill switch.
 
-Compaction pauses guidance delivery and leaves it disabled until explicitly
-re-enabled, preventing automatic compaction/retry loops from rearming delivery.
+Compaction temporarily pauses guidance delivery and resumes after successful or failed compaction. Older persisted compaction pauses remain disabled until `/harness-state enable` explicitly clears them.
 Routine job/watch state and full outputs remain available through their tools;
 receipt routing is not an acknowledgement for job-retention purposes.
 Existing workers acquire the tool only on a new launch/resume; AgentSH-backed
@@ -1023,7 +1023,9 @@ Resume is always explicit, including after a failure or the existing 90% context
 finalizer. Native TUI checkpoint resumes request compaction before continuing;
 `compact:true` also requests it explicitly. Pi's exact “Nothing to compact (session
 too small)” error is an acknowledged no-op: the saved context is retained and the
-continuation proceeds. Other compaction errors return a durable `compact_failed`
+continuation proceeds. The exact “Already compacted” error is also an acknowledged
+no-op, preserving the existing compacted session without compacting it again.
+Other compaction errors return a durable `compact_failed`
 receipt with the cause and restore the worker's actual activity state. Repeating
 the same request ID does not repeat compaction; a new retry remains explicit.
 A new parent-controlled turn clears the previous turn's report and outcome.
