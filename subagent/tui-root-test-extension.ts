@@ -77,9 +77,9 @@ export default function rootTest(pi: ExtensionAPI) {
     assert.equal(resumedGroup.children[0].attempt, 2);
     assert.notEqual((await callTuiWorker(manifestFor(resumedGroup), { operation: "status" }) as any).data.pid, saved.childPid);
     await execute(ctx, { operation: "reap", job_id: resumed.details.job_id });
-    // The real Pi compactor rejects this deliberately tiny checkpoint. That
-    // precise no-op must allow mandatory checkpoint resume, without losing
-    // context or leaving the worker's activity reservation latched.
+    // An explicit compact of this tiny session is a safe no-op. Its subsequent
+    // low-context checkpoint resume must continue normally, retaining history
+    // without leaving the worker's activity reservation latched.
     const small = await execute(ctx, { task: "CHECKPOINT_SMALL", model: "harness-test/mock:off", background: true });
     const smallGroup = await wait(ctx, small.details.job_id);
     assert.equal(smallGroup.children[0].task_outcome?.state, "checkpointed");

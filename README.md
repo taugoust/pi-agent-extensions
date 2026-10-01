@@ -1024,8 +1024,10 @@ ownership and process start identities prevent foreign or concurrent resumes.
 Task-owned background jobs remain accessible to successor attempts.
 
 Resume is always explicit, including after a failure or the existing 90% context
-finalizer. Native TUI checkpoint resumes request compaction before continuing;
-`compact:true` also requests it explicitly. Pi's exact “Nothing to compact (session
+finalizer. Native TUI resumes request compaction only when measured usage reaches
+80% of the context window, or when `compact:true` requests it explicitly. A
+`checkpointed` outcome alone does not trigger compaction. Compaction requests
+have a five-minute deadline rather than the ordinary short control timeout. Pi's exact “Nothing to compact (session
 too small)” error is an acknowledged no-op: the saved context is retained and the
 continuation proceeds. The exact “Already compacted” error is also an acknowledged
 no-op, preserving the existing compacted session without compacting it again.

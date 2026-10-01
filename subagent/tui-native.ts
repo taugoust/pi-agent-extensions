@@ -249,7 +249,7 @@ export class TuiNativeManager {
     const index = g.children.indexOf(c);
     const previous = index > 0 && g.children[index - 1].report ? messageText((readPrivateJson(g.children[index - 1].report!) as any).assistant) : "";
     if (c.compactBeforePrompt) {
-      const compacted = await callTuiWorker(m, { operation: "compact" }, { requestId: `resume-compact:${c.childId}`, timeoutMs: 30_000 });
+      const compacted = await callTuiWorker(m, { operation: "compact" }, { requestId: `resume-compact:${c.childId}`, timeoutMs: 300_000 });
       if (!compacted.ok) throw new Error(`Resume compaction not confirmed: ${compacted.code}: ${compacted.message}`);
     }
     const task = c.resumeSessionFile ? `Continue the retained session, not a new assignment. Latest parent instruction: ${c.resumeMessage ?? "Continue from the saved checkpoint."}`
@@ -549,8 +549,9 @@ export class TuiNativeManager {
     if (op === "prompt" || op === "resume") {
       if (this.disposition() !== (g.launchMode === "guard-only" ? "guard-only" : "native") || !this.ready()) throw new Error("Current authority does not permit native child prompts");
       const c = child!; const m = this.manifest(c);
-      const checkpoint = c.requiresCompaction || (c.lastOutcome as any)?.state === "checkpointed";
-      if (op === "resume" && checkpoint && params.compact === false) throw new Error("Checkpoint continuation requires compaction");
+      // A model checkpoint records progress, not measured context pressure.
+      const requiresCompaction = c.requiresCompaction === true;
+      if (op === "resume" && requiresCompaction && params.compact === false) throw new Error("High-context continuation requires compaction");
       const dead = !m || c.reaped || (await this.tmux.inspect(m)).dead;
       if (dead) {
         if (op !== "resume" || !m) throw new Error("Worker is closed; use explicit operation=resume with task_id");
@@ -564,11 +565,11 @@ export class TuiNativeManager {
         this.resuming.add(c.taskId);
         try {
           return await this.launch({ ...c.spec, background: true }, owner, c.spec.cwd, signal, undefined,
-            { child: c, sessionFile: m.sessionFile, compact: params.compact ?? checkpoint, message: params.message });
+            { child: c, sessionFile: m.sessionFile, compact: params.compact ?? requiresCompaction, message: params.message });
         } finally { this.resuming.delete(c.taskId); }
       }
-      if (op === "resume" && (params.compact === true || checkpoint)) {
-        const compacted = await callTuiWorker(m!, { operation: "compact" }, { timeoutMs: 30_000 });
+      if (op === "resume" && (params.compact === true || requiresCompaction)) {
+        const compacted = await callTuiWorker(m!, { operation: "compact" }, { timeoutMs: 300_000, signal });
         if (!compacted.ok) throw new Error(`Resume compaction failed: ${compacted.code}: ${compacted.message}`);
       }
       const result = await callTuiWorker(m!, { operation: "prompt", mode: params.control_mode ?? "steer", message: params.message ?? "Continue from the saved task context." });
