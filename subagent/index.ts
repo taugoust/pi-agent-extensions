@@ -2016,7 +2016,7 @@ export default function (pi: ExtensionAPI) {
     if (event.isError) return;
     if ((event.details as any)?.tui_subagent && !(event.details as any)?.background_subagent) {
       const native = event.details as any;
-      if (native.operation === 'result' && native.job_id && native.artifact && native.child_id) quietState.consumeCompletion(ctx, native.job_id, native.child_id);
+      if (native.operation === 'result' && native.job_id && native.artifact && native.child_id) quietState.consumeCompletion(ctx, native.job_id, native.child_id, native.terminal_id, native.report_sequence);
       return native.failed ? { isError: true } : undefined;
     }
     const details = event.details as SubagentDetails | BackgroundSubagentDetails | SubagentControlDetails | undefined;

@@ -38,6 +38,7 @@ export class TuiNativeManager {
   private savedGroups = new Map<string, string>();
   private persistenceWriter = atomicPrivateJson;
   private queue: Promise<unknown> = Promise.resolve();
+  private refreshFlight?: Promise<void>;
   private modeQueue: Promise<unknown> = Promise.resolve();
   private timer?: ReturnType<typeof setInterval>;
   private closed = false;
@@ -259,7 +260,10 @@ export class TuiNativeManager {
     c.started = true; c.state = "running"; this.save(g);
   }
   async refresh(owner: string): Promise<void> {
-    return await this.serial(async () => {
+    // A timer tick (or an impatient caller) joins the in-flight pass instead of
+    // appending another full-group scan to the serialized mutation queue.
+    if (this.refreshFlight) return this.refreshFlight;
+    const flight = this.serial(async () => {
       if (this.closed) return;
       for (const g of this.groups.values()) {
         if (g.owner !== owner) continue;
@@ -304,6 +308,8 @@ export class TuiNativeManager {
         this.save(g);
       }
     });
+    this.refreshFlight = flight;
+    try { await flight; } finally { if (this.refreshFlight === flight) this.refreshFlight = undefined; }
   }
   private notifyTerminal(g: Group, c: Child): void {
     if (active(c) || c.reaped) return;
@@ -314,7 +320,8 @@ export class TuiNativeManager {
     if (!g.background) { c.terminalNotification = token; return; }
     const identity = createHash("sha256").update(token).digest("hex").slice(0, 24);
     if (this.notify?.({ kind: "subagent", id: `${g.id}:${c.childId}:terminal:${identity}`,
-      job_id: g.id, child_id: c.childId, state: c.state, completion: true })) c.terminalNotification = token;
+      job_id: g.id, child_id: c.childId, state: c.state, completion: true,
+      through_sequence: Number(c.report?.match(/report-(\d+)-[a-f0-9]{16}\.json$/)?.[1]) || c.runSequence || 0 })) c.terminalNotification = token;
   }
   async launch(params: any, owner: string, cwd: string, signal?: AbortSignal, update?: (value: any) => void,
     resume?: { child: Child; sessionFile: string; compact: boolean; message?: string }) {
@@ -489,7 +496,47 @@ export class TuiNativeManager {
     if (selected && params.job_id && selected.id !== params.job_id) throw new Error("Child does not belong to the requested group");
     const globalOp = ["list", "tasks", "wait_any", "wait_all"].includes(op);
     if (!selected && (!globalOp || !ownedGroups.length)) return;
-    await this.refresh(owner);
+    let retainedResult = false;
+    // Selected result reads observe only their selected child, outside the
+    // global refresh queue. An unrelated slow worker must not delay a result.
+    if (op === "result" && selected) {
+      child ??= selected.children[(params.child ?? 1) - 1];
+      if (!child) return response("Unknown child result.", { operation: op, job_id: selected.id });
+      if (signal?.aborted) throw new Error("Result observation cancelled");
+      // Observe a bounded selected-child status without mutating shared state
+      // or waiting for the manager refresh queue. Never return an old report
+      // while the worker reports an active turn.
+      if (!child.reaped) {
+        const manifest = this.manifest(child);
+        let status;
+        if (manifest) {
+          try { status = await callTuiWorker(manifest, { operation: "status" }, { timeoutMs: 1000, signal }); }
+          catch (error) { if (signal?.aborted) throw error; }
+        }
+        if (signal?.aborted) throw new Error("Result observation cancelled");
+        if (!status?.ok) {
+          if (!child.report) return response("Worker status unavailable; no retained result.", { operation: op, job_id: selected.id, unavailable: true });
+          retainedResult = true;
+        } else {
+          const snapshot = status.data as any;
+          if (snapshot.active || !snapshot.lastReport) return response("Result not ready. Use wait.", { operation: op, job_id: selected.id });
+          const reportPath = snapshot.lastReport;
+          const artifactPath = (path: unknown, kind: string): path is string => typeof path === "string"
+            && resolve(path).startsWith(`${resolve(child!.directory)}/`)
+            && new RegExp(`^${kind}-[0-9]+-[a-f0-9]{16}\\.json$`).test(resolve(path).slice(resolve(child!.directory).length + 1));
+          if (!artifactPath(reportPath, "report")) return response("Worker returned an invalid report; retained result not substituted.", { operation: op, job_id: selected.id, unavailable: true });
+          // Work on a private snapshot: concurrent scheduler observations retain
+          // ownership of manager state and event cursors.
+          child = { ...child, report: reportPath, error: undefined, lastOutcome: undefined, runSequence: snapshot.sequence };
+          if (artifactPath(snapshot.lastOutcome, "outcome")) child.lastOutcome = readPrivateJson(snapshot.lastOutcome);
+          const artifact = readPrivateJson(reportPath) as any;
+          child.error = typeof artifact.error === "string" ? artifact.error.slice(0, 2000)
+            : artifact.assistant?.stopReason === "toolUse" && snapshot.readyForPrompts === false ? "Worker command authority unavailable"
+            : artifact.assistant?.stopReason === "error" ? "Worker reported an error" : undefined;
+          child.state = child.error ? "failed" : artifact.assistant?.stopReason === "aborted" ? "cancelled" : "completed";
+        }
+      }
+    } else await this.refresh(owner);
     if (op === "list" || op === "tasks") return response(ownedGroups.slice(-(params.limit ?? 20)).map(g => this.text(g)).join("\n\n"), { operation: op, groups: ownedGroups.map(g => this.publicGroup(g)), ...(op === "tasks" ? { tasks: this.taskList(owner) } : {}) });
     if (op === "wait_any" || op === "wait_all") {
       const waited = await waitForGroupSnapshot(async () => {
@@ -548,10 +595,12 @@ export class TuiNativeManager {
       if (!c?.report) return response("Result not ready. Use wait.", { operation: op, job_id: g.id });
       const raw = readPrivateJson(c.report) as any;
       const text = params.diagnostics ? JSON.stringify(raw, null, 2)
-        : [c.error ? `Worker failed: ${c.error}` : "", messageText(raw.assistant)].filter(Boolean).join("\n\n");
+        : [retainedResult ? "Worker status unavailable; retained result may be stale." : "", c.error ? `Worker failed: ${c.error}` : "", messageText(raw.assistant)].filter(Boolean).join("\n\n");
       const bytes = Buffer.from(text), offset = params.offset ?? 0, limit = params.limit ?? 48 * 1024;
       return response(bytes.subarray(offset, offset + limit).toString("utf8"), { operation: op, job_id: g.id, child_id: c.childId,
-        artifact: c.report, offset, next_offset: Math.min(bytes.length, offset + limit), complete: offset + limit >= bytes.length, task_outcome: c.lastOutcome });
+        artifact: c.report, retained: retainedResult, terminal_id: createHash("sha256").update(terminalToken(c)).digest("hex").slice(0, 24),
+        report_sequence: Number(c.report.match(/report-(\d+)-[a-f0-9]{16}\.json$/)?.[1]) || c.runSequence || 0,
+        offset, next_offset: Math.min(bytes.length, offset + limit), complete: offset + limit >= bytes.length, task_outcome: c.lastOutcome });
     }
     return response(this.text(g, op === "output"), { operation: op, job_id: g.id, group: this.publicGroup(g) });
   }

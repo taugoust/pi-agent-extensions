@@ -59,7 +59,9 @@ try {
   assert.ok(h.messages[0].message.details.updates.every(u=>u.kind==='job'));
   poll(); await pause(1150); assert.equal(h.messages.length,1,'repeated polling replayed completion');
   idle=false; records.push(record()); poll(); await pause(1150);
-  assert.deepEqual(h.messages[1].options,{deliverAs:'steer',triggerTurn:true});
+  assert.equal(h.messages.length,1,'busy parent received an obsolete-prone completion steer');
+  idle=true; await pause(1150);
+  assert.deepEqual(h.messages[1].options,{deliverAs:'followUp',triggerTurn:true});
   // Each existing consuming tool must remove a queued completion before it wakes.
   for(const action of ['status','output','wait','cancel','list','reap']) {
     const r=record(); records.push(r); poll(); await pause();

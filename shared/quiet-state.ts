@@ -31,6 +31,14 @@ const MAX_GUIDANCE_PER_SESSION=20;
 const COMPLETION_PREFIX='Background subagent finished. Read its result, then reap it when follow-up is complete.\n';
 const JOB_COMPLETION_PREFIX='Background job finished. Inspect its output, then reap it when no longer needed.\n';
 const isCompletion=(data:QuietUpdate)=>(data.kind==='subagent'||data.kind==='job')&&data.completion===true;
+const completionIdentity=(data:QuietUpdate)=>JSON.stringify([data.kind,data.job_id??data.id,data.child_id??data.id]);
+const hasSequence=(data:QuietUpdate)=>Number.isSafeInteger(data.through_sequence)&&data.through_sequence!>=0;
+function completionSuperseded(h:Hub,data:QuietUpdate):boolean{
+  if(!isCompletion(data)||!hasSequence(data))return false;
+  const identity=completionIdentity(data);
+  return [...h.receipts.values()].some(r=>isCompletion(r.update)&&completionIdentity(r.update)===identity
+    &&(r.state==='consumed'||r.state==='delivered')&&hasSequence(r.update)&&r.update.through_sequence!>=data.through_sequence!);
+}
 function completionPrefix(updates:QuietUpdate[]):string{
   const children=updates.some(u=>u.kind==='subagent'),jobs=updates.some(u=>u.kind==='job');
   if(children&&jobs)return 'Background work finished. Read each job’s output or subagent’s result, then reap it when no longer needed.\n';
@@ -76,6 +84,9 @@ function restore(h:Hub,ctx:any){
     if(entry?.type==='custom_message'&&entry.customType===MESSAGE_CUSTOM&&Array.isArray(entry.details?.updates))for(const data of entry.details.updates){if(validUpdate(data)){const item=toItem(data);h.receipts.set(item.key,{v:1,key:item.key,revision:item.revision,state:'delivered',at:Date.now(),update:item.data});}}
   }
   for(const r of h.receipts.values()){if(r.state==='delivered'&&r.update.requires_guidance===true&&r.at>=h.quotaResetAt){h.stats.guidanceDelivered++;h.stats.guidanceBytes+=bytes(JSON.stringify(r.update));h.lastGuidanceAt=Math.max(h.lastGuidanceAt,r.at);}if(r.state==='queued'&&(r.update.requires_guidance===true||isCompletion(r.update)))h.pending.set(r.key,toItem(r.update,r.at));}
+  // Report sequence, not receipt time, orders child turns. Consuming an older
+  // result later must not suppress a newer unseen completion after reload.
+  for(const [key,item]of h.pending)if(completionSuperseded(h,item.data))h.pending.delete(key);
   // Retained child notifications are operator-visible records. Routine notifications stay retained only; explicit guidance is re-queued until delivered/consumed.
   for(const entry of entries){
     const data=entry?.type==='custom'&&entry.customType===NOTIFICATION_CUSTOM?entry.data?.update:undefined;
@@ -113,22 +124,40 @@ function scheduleCompletions(h:Hub,delayMs:number){
     h.completionTimer=undefined;
     if(h.ui||h.compacting||!h.pi||!h.ctx||disabled(h))return;
     // Let existing queued messages drain; never abort or interrupt active tools.
-    if(h.ctx.hasPendingMessages?.()){scheduleCompletions(h,Math.max(delayMs,1000));return;}
+    if(h.ctx.hasPendingMessages?.()||!h.ctx.isIdle()){scheduleCompletions(h,Math.max(delayMs,1000));return;}
+    const latest=new Map<string,Item>();
+    for(const [key,item]of h.pending)if(isCompletion(item.data)){
+      if(completionSuperseded(h,item.data)){h.pending.delete(key);continue;}
+      const identity=completionIdentity(item.data),prior=latest.get(identity);
+      // Legacy reports have no sequence; retain their enqueue order. New
+      // native reports are monotonic even when reads race scheduler polling.
+      if(!prior||(hasSequence(prior.data)&&hasSequence(item.data)
+        ?prior.data.through_sequence!<=item.data.through_sequence!:prior.queuedAt<=item.queuedAt))latest.set(identity,item);
+    }
     const items:Item[]=[];
-    for(const item of h.pending.values()){
-      if(!isCompletion(item.data))continue;
+    for(const item of latest.values()){
       const updates=[...items,item].map(i=>i.data);
       if(items.length>=MAX_BATCH_ITEMS||bytes(completionPrefix(updates)+JSON.stringify(updates))+bytes(JSON.stringify({updates}))>MAX_BATCH_BYTES)break;
       items.push(item);
     }
     if(!items.length)return;
-    const updates=items.map(i=>i.data);
+    // Supersede every older queued revision for a child before delivery.
+    // Safe idle-only dispatch means no historical completion steers an active
+    // long tool run; sent messages cannot be retracted.
+    for(const [key,item] of h.pending){
+      if(!isCompletion(item.data))continue;
+      const current=latest.get(completionIdentity(item.data));
+      if(current&&current.revision!==item.revision&&appendReceipt(h,item,'consumed'))h.pending.delete(key);
+    }
+    const deliver=items.filter(item=>h.pending.get(item.key)?.revision===item.revision);
+    if(!deliver.length){scheduleCompletions(h,Math.max(delayMs,1000));return;}
+    const updates=deliver.map(i=>i.data);
     try{
       h.pi.sendMessage({customType:MESSAGE_CUSTOM,display:false,content:completionPrefix(updates)+JSON.stringify(updates),details:{updates}},
-        {deliverAs:h.ctx.isIdle()?'followUp':'steer',triggerTurn:true});
+        {deliverAs:'followUp',triggerTurn:true});
     }catch{h.deliveryFailures++;scheduleCompletions(h,Math.max(delayMs,1000));return;}
     h.deliveryFailures=0;
-    for(const item of items){
+    for(const item of deliver){
       // Only acknowledge accepted sends. The persisted message also deduplicates
       // recovery if appending the receipt fails after sendMessage succeeds.
       if(!appendReceipt(h,item,'delivered'))h.receipts.set(item.key,{v:1,key:item.key,revision:item.revision,state:'delivered',at:Date.now(),update:item.data});
@@ -161,13 +190,24 @@ export function installQuietState(pi:ExtensionAPI,delayMs=1000){
     enqueue(ctx:ExtensionContext,data:QuietUpdate):boolean{
       const h=hub(ctx);h.pi=pi;h.ctx=ctx;if(disabled(h)){h.stats.disabled++;return false;}
       const item=toItem(data);if(item.bytes>MAX_UPDATE_BYTES||(isCompletion(data)&&bytes(completionPrefix([data])+JSON.stringify([data]))+bytes(JSON.stringify({updates:[data]}))>MAX_BATCH_BYTES))throw new Error('Quiet state update exceeds its metadata budget');
-      if(isDone(h,item.key,item.revision)||(isCompletion(data)&&['recorded','delivered','consumed'].includes(latestReceipt(h,item.key)?.state??''))||h.pending.get(item.key)?.revision===item.revision){h.stats.duplicate++;return true;}
+      const superseded=completionSuperseded(h,data);
+      if(superseded||isDone(h,item.key,item.revision)||(isCompletion(data)&&['recorded','delivered','consumed'].includes(latestReceipt(h,item.key)?.state??''))||h.pending.get(item.key)?.revision===item.revision){h.stats.duplicate++;return true;}
       if(h.pending.size>=MAX_PENDING&&!h.pending.has(item.key)){h.stats.dropped++;return false;}
       h.stats.accepted++;
       if(data.requires_guidance===true||isCompletion(data)){if(!appendReceipt(h,item,'queued'))return false;h.pending.set(item.key,item);schedule(h,delayMs);return true;}
       h.pending.delete(item.key);if(!appendReceipt(h,item,'recorded'))return false;h.stats.routineRecorded++;refreshStatus(h);return true;
     },
-    consumeCompletion(ctx:ExtensionContext,jobId:string,childId?:string){const h=hub(ctx);for(const item of h.pending.values())if(isCompletion(item.data)&&(item.data.job_id??item.data.id)===jobId&&(!childId||item.data.child_id===childId)){if(appendReceipt(h,item,'consumed'))h.pending.delete(item.key);}refreshStatus(h);},
+    consumeCompletion(ctx:ExtensionContext,jobId:string,childId?:string,terminalId?:string,throughSequence?:number){
+      const h=hub(ctx);if(!childId||!terminalId)return;
+      const data:QuietUpdate={kind:'subagent',id:`${jobId}:${childId}:terminal:${terminalId}`,job_id:jobId,child_id:childId,completion:true,through_sequence:throughSequence};
+      const key=keyOf(data),existing=h.pending.get(key);
+      const target=toItem({...existing?.data,...data,through_sequence:throughSequence??existing?.data.through_sequence});
+      // Persist even when the direct result read wins the race with polling.
+      // Unknown/legacy sequence numbers authorize consuming only this exact ID.
+      if(!appendReceipt(h,target,'consumed'))return;
+      for(const [pendingKey,item]of h.pending)if(pendingKey===key||completionSuperseded(h,item.data))h.pending.delete(pendingKey);
+      refreshStatus(h);
+    },
     consume(ctx:ExtensionContext,kind:QuietUpdate['kind'],id:string,through?:number){
       const h=hub(ctx);const key=`${kind}:${id}`;
       // Job callers consume only terminal reads/reap, never running status.

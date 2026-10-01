@@ -211,8 +211,9 @@ symlinked entrypoints and backs off 30 seconds after an immediate startup exit.
 
 A cancelled `wait` leaves the underlying job running. `cancel` stops execution
 without reaping its pane; `reap` is a separate cleanup operation. User shell job
-termination (including failure, cancellation, or loss) wakes an idle parent or
-queues at a tool-safe boundary without interrupting active tools. The bounded
+termination (including failure, cancellation, or loss) wakes an idle parent.
+While the parent is busy, completions remain in the harness until it settles;
+reading the output first consumes the wake without interrupting active tools. The bounded
 internal completion message routes the parent to `background_job action=status`
 and `action=output` to verify dependent work, then explicit `action=reap` only
 when authorized and no longer needed. No full reports or toasts are posted
@@ -746,8 +747,11 @@ workers for this interaction: in-flight parent tools are not interrupted.
 Messages are limited to 1000 characters/2000 bytes and five per minute per child.
 Notifications are retained in private session entries and deduplicated on replay.
 Background child execution completion (including failure, cancellation, or a lost
-native worker) separately wakes an idle parent with `triggerTurn: true`, or queues
-at the next tool-safe turn boundary. Foreground results are returned directly;
+native worker) separately wakes an idle parent with `triggerTurn: true`. While
+the parent is busy, completions remain in the harness rather than accumulating
+stale Pi steering messages. Only the newest pending report per child wakes the
+parent after it settles; reading a result consumes that report and older wakes,
+not a newer unseen report. Foreground results are returned directly;
 `task_outcome` alone does not wake the parent before execution settles. Completion
 messages contain result-routing metadata, not report bodies or guidance requests.
 Read `subagent operation=result` before relying on the work, then explicitly reap
@@ -755,6 +759,9 @@ when its retained panes are no longer needed. Completion batches are bounded and
 deduplicated durably; failed sends remain queued for retry. They do not share the
 guidance quota or 30-second throttle. Historical terminal records do not replay
 on upgrade/reload, and routine progress/findings remain silent.
+Native polling is single-flight: slow refreshes cannot accumulate timer work.
+Result reads check only the selected worker with a bounded, abortable status
+request, without waiting behind unrelated child polling.
 
 Guidance wake-ups have a 30-second minimum interval, a bounded UTF-8 payload,
 and a conservative 20-guidance-update quota between explicit operator resets.

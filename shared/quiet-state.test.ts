@@ -114,11 +114,11 @@ await pause(1200);assert.equal(fail.messages.length,0);
 await fail.emit('session_shutdown',{reason:'quit'});
 
 // Terminal execution explicitly opts in: idle wake, batch, stable identity,
-// result consumption, active tool-safe delivery, and restart deduplication.
+// result consumption, busy-parent deferral, and restart deduplication.
 entries=[];idle=true;sessionName=`quiet-completion-${process.pid}`;
 const terminal=fixture();const terminalQuiet=installQuietState(terminal.pi,5);await terminal.emit('session_start');
-terminalQuiet.enqueue(ctx,{kind:'subagent',id:'done',state:'completed',completion:true});
-terminalQuiet.enqueue(ctx,{kind:'subagent',id:'failed',state:'failed',completion:true});
+terminalQuiet.enqueue(ctx,{kind:'subagent',id:'done',state:'completed',completion:true,job_id:'group-done',child_id:'child-done'});
+terminalQuiet.enqueue(ctx,{kind:'subagent',id:'failed',state:'failed',completion:true,job_id:'group-failed',child_id:'child-failed'});
 await pause(80);
 assert.equal(terminal.messages.length,1);
 assert.deepEqual(terminal.messages[0].options,{deliverAs:'followUp',triggerTurn:true});
@@ -126,30 +126,79 @@ assert.equal(terminal.messages[0].message.details.updates.length,2);
 assert.equal(terminal.messages[0].message.details.updates.some((u:any)=>u.requires_guidance),false);
 assert.match(terminal.messages[0].message.content,/result/i);
 assert.match(terminal.messages[0].message.content,/reap/i);
-terminalQuiet.enqueue(ctx,{kind:'subagent',id:'done',state:'completed',completion:true,outcomes:[{child:1,state:'delivered'}]});
+terminalQuiet.enqueue(ctx,{kind:'subagent',id:'done',state:'completed',completion:true,job_id:'group-done',child_id:'child-done',outcomes:[{child:1,state:'delivered'}]});
 await pause(80);assert.equal(terminal.messages.length,1,'metadata changes replayed completion');
 idle=false;
 terminalQuiet.enqueue(ctx,{kind:'subagent',id:'busy-done',state:'lost',completion:true});
-await pause(80);assert.deepEqual(terminal.messages[1].options,{deliverAs:'steer',triggerTurn:true});
-terminalQuiet.enqueue(ctx,{kind:'subagent',id:'read-first',job_id:'group',child_id:'child',completion:true});
-terminalQuiet.consumeCompletion(ctx,'group','child');await pause(80);
+await pause(80);assert.equal(terminal.messages.length,1,'busy parent received a completion steer');
+idle=true;await pause(1100);assert.deepEqual(terminal.messages[1].options,{deliverAs:'followUp',triggerTurn:true});
+terminalQuiet.enqueue(ctx,{kind:'subagent',id:'read-first',job_id:'group',child_id:'child',completion:true,through_sequence:5});
+terminalQuiet.consumeCompletion(ctx,'group','child','different-report',4);
+assert.equal([...((globalThis as any).__paeQuietHarnessStateV2.get(sessionName).pending.values())].some((i:any)=>i.data.id==='read-first'),true,'consumption of a different report hid this completion');
+terminalQuiet.consumeCompletion(ctx,'group','child','read-first',5);await pause(80);
 assert.equal(terminal.messages.length,2,'result consumed before delivery still woke parent');
+// A newer terminal snapshot supersedes the stale pending completion for the same child.
+terminalQuiet.enqueue(ctx,{kind:'subagent',id:'old-report',job_id:'coalesce-group',child_id:'coalesce-child',completion:true});
+terminalQuiet.enqueue(ctx,{kind:'subagent',id:'new-report',job_id:'coalesce-group',child_id:'coalesce-child',completion:true,state:'completed'});
+await pause(80);
+assert.equal(terminal.messages.length,3);
+assert.deepEqual(terminal.messages[2].message.details.updates.map((u:any)=>u.id),['new-report']);
+// A result consumed before its completion event is enqueued leaves a durable sequence tombstone.
+terminalQuiet.consumeCompletion(ctx,'race-group','race-child','race-terminal',10);
+terminalQuiet.enqueue(ctx,{kind:'subagent',id:'race-group:race-child:terminal:race-terminal',job_id:'race-group',child_id:'race-child',completion:true,through_sequence:10});
+assert.equal([...((globalThis as any).__paeQuietHarnessStateV2.get(sessionName).pending.values())].some((i:any)=>i.data.child_id==='race-child'),false);
+// Consuming sequence 10 removes older wakes but leaves a later unseen sequence intact.
+terminalQuiet.enqueue(ctx,{kind:'subagent',id:'seq-9',job_id:'seq-group',child_id:'seq-child',completion:true,through_sequence:9});
+terminalQuiet.enqueue(ctx,{kind:'subagent',id:'seq-11',job_id:'seq-group',child_id:'seq-child',completion:true,through_sequence:11});
+terminalQuiet.consumeCompletion(ctx,'seq-group','seq-child','seq-10',10);
+const seqPending=[...((globalThis as any).__paeQuietHarnessStateV2.get(sessionName).pending.values())].filter((i:any)=>i.data.child_id==='seq-child');
+assert.deepEqual(seqPending.map((i:any)=>i.data.through_sequence),[11]);
 await terminal.emit('session_shutdown',{reason:'reload'});
 const terminalReload=fixture();const terminalReloadQuiet=installQuietState(terminalReload.pi,5);await terminalReload.emit('session_start');
-terminalReloadQuiet.enqueue(ctx,{kind:'subagent',id:'done',state:'completed',completion:true});await pause(80);
-assert.equal(terminalReload.messages.length,0,'delivered completion replayed on reload');
+terminalReloadQuiet.enqueue(ctx,{kind:'subagent',id:'done',state:'completed',completion:true,job_id:'group-done',child_id:'child-done'});await pause(80);
+assert.equal(terminalReload.messages.length,1,'reload must deliver the newer unseen report only');
+assert.deepEqual(terminalReload.messages[0].message.details.updates.map((u:any)=>u.id),['seq-11']);
+// Delayed older events must not replay after a newer report was delivered.
+terminalReloadQuiet.enqueue(ctx,{kind:'subagent',id:'delayed-seq-8',job_id:'seq-group',child_id:'seq-child',completion:true,through_sequence:8});
+terminalReloadQuiet.enqueue(ctx,{kind:'subagent',id:'race-group:race-child:terminal:race-terminal',job_id:'race-group',child_id:'race-child',completion:true,through_sequence:10});
+await pause(80);assert.equal(terminalReload.messages.length,1,'consumed or superseded reports replayed after reload');
 // Guidance exhaustion and compaction must not silently disable completions.
 for(let i=0;i<20;i++)entries.push({type:'custom',customType:QUIET_STATE_RECEIPT_CUSTOM_TYPE,data:{v:1,key:`job:quota-${i}`,revision:'rev',state:'delivered',at:Date.now(),update:{kind:'job',id:`quota-${i}`,requires_guidance:true}}});
 await terminalReload.emit('agent_settled');
 terminalReloadQuiet.enqueue(ctx,{kind:'job',id:'quota-blocked',requires_guidance:true});
 terminalReloadQuiet.enqueue(ctx,{kind:'subagent',id:'quota-completion',completion:true});await pause(80);
-assert.equal(terminalReload.messages.length,1,'guidance quota blocked completion');
+assert.equal(terminalReload.messages.length,2,'guidance quota blocked completion');
 await terminalReload.emit('session_before_compact');
 terminalReloadQuiet.enqueue(ctx,{kind:'subagent',id:'compact-completion',completion:true});await pause(80);
-assert.equal(terminalReload.messages.length,1);
+assert.equal(terminalReload.messages.length,2);
 await terminalReload.emit('session_compact');await pause(80);
-assert.equal(terminalReload.messages.length,2,'completion failed to resume after compaction');
+assert.equal(terminalReload.messages.length,3,'completion failed to resume after compaction');
 await terminalReload.emit('session_shutdown',{reason:'quit'});
+
+// Report order survives out-of-order polling, consumed older results, and reload.
+entries=[];idle=false;sessionName=`quiet-order-${process.pid}`;
+const ordered=fixture();const orderedQuiet=installQuietState(ordered.pi,5);await ordered.emit('session_start');
+const completion=(sequence:number)=>({kind:'subagent' as const,id:`ordered:child:terminal:r${sequence}`,job_id:'ordered',child_id:'child',completion:true,through_sequence:sequence});
+orderedQuiet.enqueue(ctx,completion(20));orderedQuiet.enqueue(ctx,completion(19));
+await pause(80);assert.equal(ordered.messages.length,0,'busy parent must not accumulate Pi steering messages');
+orderedQuiet.consumeCompletion(ctx,'ordered','child','r18',18);
+await ordered.emit('session_shutdown',{reason:'reload'});
+const orderedReload=fixture();const orderedReloadQuiet=installQuietState(orderedReload.pi,5);await orderedReload.emit('session_start');
+idle=true;await pause(80);
+assert.deepEqual(orderedReload.messages.flatMap(m=>m.message.details.updates.map((u:any)=>u.through_sequence)),[20]);
+await orderedReload.emit('agent_settled');await pause(80);
+assert.equal(orderedReload.messages.length,1,'consumed older report won by receipt timestamp');
+orderedReloadQuiet.enqueue(ctx,completion(21));await pause(80);
+assert.equal(orderedReload.messages.length,2,'a genuine later completion failed to wake');
+orderedReloadQuiet.consumeCompletion(ctx,'ordered','child','r22',22);
+orderedReloadQuiet.enqueue(ctx,completion(22));await pause(80);
+assert.equal(orderedReload.messages.length,2,'read-before-enqueue race replayed completion');
+// Sequence-free legacy reports cannot consume an unrelated later turn.
+orderedReloadQuiet.consumeCompletion(ctx,'legacy','child','first');
+orderedReloadQuiet.enqueue(ctx,{kind:'subagent',id:'legacy:child:terminal:first',job_id:'legacy',child_id:'child',completion:true});
+orderedReloadQuiet.enqueue(ctx,{kind:'subagent',id:'legacy:child:terminal:second',job_id:'legacy',child_id:'child',completion:true});
+await pause(80);assert.deepEqual(orderedReload.messages[2].message.details.updates.map((u:any)=>u.id),['legacy:child:terminal:second']);
+await orderedReload.emit('session_shutdown',{reason:'quit'});
 
 // A failed send stays queued durably and can retry after restart.
 entries=[];idle=true;sessionName=`quiet-send-fail-${process.pid}`;

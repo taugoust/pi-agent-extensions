@@ -117,6 +117,75 @@ test("direct human turn clears old outcome; aborted assistant cancels chain inst
   } finally { await server.close(); await manager.shutdown(false); await rm(root, { recursive: true, force: true }); }
 });
 
+test("selected result observes fresh worker status without global refresh and respects abort", async () => {
+  const root = await mkdtemp(join(tmpdir(), "pi-result-fast-"));
+  const manager: any = new TuiNativeManager(root, () => "native", () => true, 16);
+  const directory = join(root, "workers", "a".repeat(24));
+  const store = new TuiWorkerStore(directory, true);
+  const manifest: any = { protocol: 1, ownerSessionId: "parent", taskId: "task", runtimeId: "runtime", groupId: `subagent-job-${"a".repeat(24)}`,
+    childId: `subagent-child-${"b".repeat(24)}`, attempt: 1, workerEpoch: "c".repeat(32), controlToken: "d".repeat(64),
+    controlSocket: join(directory, "control.sock"), sessionFile: join(directory, "session.jsonl"), launchMode: "none", presentation: "background",
+    placement: { socketPath: "/tmp/tmux", serverEpoch: "1:2", sessionId: "$1", windowId: "@1", paneId: "%1", ownershipNonce: "e".repeat(64) } };
+  store.writeManifest(manifest);
+  const oldReport = store.report(1, { assistant: { stopReason: "stop", content: [{ type: "text", text: "old answer" }] } });
+  const child: any = { childId: manifest.childId, taskId: manifest.taskId, directory, report: oldReport, state: "completed", spec: { task: "work" }, started: true, notifiedSequence: 0, operatorCapability: "f".repeat(64) };
+  const group: any = { id: manifest.groupId, owner: "parent", background: true, mode: "parallel", launchMode: "none", caller: manifest.placement, children: [child] };
+  manager.owner = "parent"; manager.groups.set(group.id, group);
+  // Worker protocol server provides real bounded status RPCs.
+  const worker = new TuiWorkerServer(store, { isIdle: () => true, send() {}, abort() {}, shutdown() {} });
+  try {
+    await worker.start();
+    worker.running(true);
+    // Default job_id child, numeric child selector, and explicit child_id all bypass a stuck global refresh.
+    manager.refreshFlight = new Promise(() => {});
+    let result = await manager.operation({ operation: "result", job_id: group.id }, "parent");
+    assert.match(result.content[0].text, /not ready/i, "active newer human turn must not return cached report");
+    worker.running(false); worker.settled({ error: "new failure", assistant: { stopReason: "error", content: [{ type: "text", text: "new answer" }] } });
+    // The scheduler still knows only the old report; direct status must find the
+    // new artifact without refreshing or mutating that shared snapshot.
+    manager.refresh = async () => { throw new Error("result waited for global refresh"); };
+    result = await manager.operation({ operation: "result", job_id: group.id, child: 1 }, "parent");
+    assert.match(result.content[0].text, /new answer/);
+    assert.match(result.content[0].text, /new failure/);
+    assert.equal(child.report, oldReport, "direct result mutated scheduler state");
+    group.children.unshift({ ...child, childId: "other-child", taskId: "other-task" });
+    result = await manager.operation({ operation: "result", job_id: group.id, child: 2 }, "parent");
+    assert.match(result.content[0].text, /new answer/);
+    result = await manager.operation({ operation: "result", child_id: child.childId }, "parent");
+    assert.match(result.content[0].text, /new answer/);
+    const snapshot = (worker as any).snapshot.bind(worker);
+    (worker as any).snapshot = () => ({ ...snapshot(), lastReport: undefined });
+    result = await manager.operation({ operation: "result", child_id: child.childId }, "parent");
+    assert.match(result.content[0].text, /not ready/i, "empty current report substituted an old result");
+    (worker as any).snapshot = snapshot;
+
+    // Abort in-flight observation propagates to the worker RPC.
+    manager.tmux.inspect = async () => ({ dead: false });
+    const controller = new AbortController();
+    const pending = manager.operation({ operation: "result", child_id: child.childId }, "parent", controller.signal);
+    controller.abort();
+    await assert.rejects(pending, /cancel|abort/i);
+    await worker.close();
+    result = await manager.operation({ operation: "result", child_id: child.childId }, "parent");
+    assert.equal(result.details.retained, true);
+    assert.match(result.content[0].text, /retained result may be stale/);
+    assert.match(result.content[0].text, /old answer/);
+  } finally { manager.refreshFlight = undefined; await worker.close(); await manager.shutdown(false); await rm(root, { recursive: true, force: true }); }
+});
+
+test("native refresh coalesces callers behind one slow scan", async () => {
+  const root = await mkdtemp(join(tmpdir(), "pi-refresh-singleflight-"));
+  const manager: any = new TuiNativeManager(root, () => "native", () => true, 16);
+  let release!: () => void; let scans = 0;
+  manager.serial = (run: any) => { scans++; return new Promise<void>(resolve => { release = () => { void run().then(resolve); }; }); };
+  try {
+    const first = manager.refresh("parent"), second = manager.refresh("parent"), third = manager.refresh("parent");
+    assert.equal(scans, 1, "poll bursts queued multiple global scans");
+    release(); await Promise.all([first, second, third]);
+    assert.equal(scans, 1);
+  } finally { await manager.shutdown(false); await rm(root, { recursive: true, force: true }); }
+});
+
 test("authority loss is a failed native result, including old tool-only reports", async () => {
   const root = await mkdtemp(join(tmpdir(), "pi-failed-report-"));
   const manager: any = new TuiNativeManager(root, () => "native", () => true, 16);
