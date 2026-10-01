@@ -12,7 +12,9 @@ Enabling guidance without first acknowledging the obsolete requests would replay
 
 ## Resolution
 
-Implemented in `8c70879`. Nix subagent, background-job and permission-gate checks passed, including 47 native tests.
+Implemented in `8c70879`, with historical quota restoration corrected in `9d8d4ca`. Nix subagent, background-job and permission-gate checks passed, including 47 native tests.
+
+Live recovery exposed a second legacy issue: old custom-message delivery evidence was assigned the current time on every restore, incorrectly exhausting even an explicitly reset quota. Restore now preserves explicit receipts and uses the message's original timestamp for legacy delivery evidence. Operator reset therefore survives subsequent turns and reloads.
 
 Add an operator-only `/harness-state dismiss-guidance all|<exact child_id>` command. It durably consumes only pending guidance, retains history, preserves completion notifications and unrelated children, and requires explicit scope. Footer/status output exposes paused guidance, compaction and quota state.
 
