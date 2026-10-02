@@ -21,8 +21,20 @@ async function assertReject(promise, pattern) {
 {
   const gate = new ReapReservation();
   const finish = gate.enter();
-  await assertReject(gate.prepare(async () => { throw new Error('must not run'); }), /in flight/);
-  finish();
+  const finishSecond = gate.enter();
+  let cleanupRan = false;
+  let drained = false;
+  const draining = gate.prepare(async () => { cleanupRan = true; }, 1000).then(release => { drained = true; return release; });
+  await Promise.resolve();
+  assert(!cleanupRan, 'cleanup ran before an entered operation drained');
+  try { gate.enter(); throw new Error('reservation missing while draining'); } catch (error) { assert(/reserved/.test(String(error)), String(error)); }
+  finish(); finish(); // release is idempotent, and another operation still owns the barrier
+  await Promise.resolve();
+  assert(!cleanupRan, 'cleanup ran while a second operation was still active');
+  finishSecond();
+  const drainRelease = await draining;
+  assert(drained && cleanupRan, 'cleanup did not proceed after drain');
+  drainRelease();
   let finishCleanup;
   const preparing = gate.prepare(() => new Promise(resolve => { finishCleanup = resolve; }));
   try { gate.enter(); throw new Error('reservation missing'); } catch (error) { assert(/reserved/.test(String(error)), String(error)); }
@@ -32,6 +44,18 @@ async function assertReject(promise, pattern) {
   try { gate.enter(); throw new Error('reservation released too soon'); } catch (error) { assert(/reserved/.test(String(error)), String(error)); }
   release(); release(); gate.enter()();
   await assertReject(gate.prepare(async () => { throw new Error('preserve failed'); }), /preserve failed/);
+  const stuck = gate.enter();
+  let timedOutCleanupRan = false;
+  await assertReject(gate.prepare(async () => { timedOutCleanupRan = true; }, 5), /did not finish before cleanup deadline/);
+  gate.enter()(); // timeout released the reservation even while the old operation remains unsettled
+  let nextCleanupRan = false;
+  const next = gate.prepare(async () => { nextCleanupRan = true; }, 1000);
+  assert(!nextCleanupRan, 'a fresh reservation ignored the old operation');
+  stuck();
+  const releaseNext = await next;
+  assert(nextCleanupRan && !timedOutCleanupRan, 'late drain resurrected timed-out cleanup');
+  try { gate.enter(); throw new Error('fresh reservation released too soon'); } catch (error) { assert(/reserved/.test(String(error)), String(error)); }
+  releaseNext();
   gate.enter()();
 }
 

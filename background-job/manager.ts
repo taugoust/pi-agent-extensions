@@ -590,23 +590,43 @@ export class BackgroundJobManager {
 export class ReapReservation {
   private reserved = false;
   private operations = 0;
+  private resolveIdle?: () => void;
 
   enter(): () => void {
     if (this.reserved) throw new Error('Background job cleanup is reserved; new operations are unavailable');
     this.operations++;
     let released = false;
-    return () => { if (!released) { released = true; this.operations--; } };
+    return () => {
+      if (!released) {
+        released = true;
+        this.operations--;
+        if (this.operations === 0) this.resolveIdle?.();
+      }
+    };
   }
 
-  async prepare(cleanup: () => Promise<void>): Promise<() => void> {
+  async prepare(cleanup: () => Promise<void>, timeoutMs = 20_000): Promise<() => void> {
     if (this.reserved) throw new Error('Background job cleanup is already reserved');
     this.reserved = true;
     let released = false;
+    const idle = new Promise<void>(resolve => { this.resolveIdle = resolve; });
+    let timer: ReturnType<typeof setTimeout> | undefined;
     const release = () => { if (!released) { released = true; this.reserved = false; } };
     try {
-      if (this.operations) throw new Error(`Background job operations are still in flight (${this.operations}); retry cleanup after they finish`);
+      if (this.operations) {
+        const timeout = new Promise<never>((_, reject) => {
+          timer = setTimeout(() => reject(new Error('Background job operations did not finish before cleanup deadline')), timeoutMs);
+        });
+        await Promise.race([idle, timeout]);
+      }
+      if (timer !== undefined) clearTimeout(timer);
+      this.resolveIdle = undefined;
       await cleanup();
       return release;
     } catch (error) { release(); throw error; }
+    finally {
+      if (timer !== undefined) clearTimeout(timer);
+      this.resolveIdle = undefined;
+    }
   }
 }
