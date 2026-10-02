@@ -19,7 +19,7 @@ import {
   type AgentSHStartupClassification,
 } from "../shared/agentsh-mode.js";
 import { applyBashCommandTransforms } from "../shared/bash-command-transform.js";
-import { workerInteractionsService } from "../shared/foreground-tasks.js";
+import { workerInteractionsService } from "../shared/foreground-tasks.ts";
 import {
   SUBAGENT_PERMISSION_AUTHORITY_KEY,
   SUBAGENT_PERMISSION_SELECTION_KEY,

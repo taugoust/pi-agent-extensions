@@ -16,7 +16,7 @@ import {
 } from "@mariozechner/pi-tui";
 import { Type } from "@sinclair/typebox";
 import { answerQuestionnaireInPaseo } from "./paseo.js";
-import { workerInteractionsService } from "../shared/foreground-tasks.js";
+import { workerInteractionsService } from "../shared/foreground-tasks.ts";
 
 // Types
 interface QuestionOption {

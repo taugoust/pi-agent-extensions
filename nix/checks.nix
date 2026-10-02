@@ -294,6 +294,7 @@ in
           --outDir "$outdir" \
           "$srcdir/questionnaire/paseo.ts" "$srcdir/shared/foreground-tasks.ts"
         tsc --noCheck --skipLibCheck --module nodenext --moduleResolution nodenext \
+          --rewriteRelativeImportExtensions \
           --target es2022 --rootDir "$srcdir" --outDir "$outdir" "$srcdir/questionnaire/index.ts"
         mkdir -p "$outdir/node_modules/@mariozechner/pi-tui" "$outdir/node_modules/@sinclair/typebox"
         printf '%s\n' '{"type":"module","main":"index.js"}' > "$outdir/node_modules/@mariozechner/pi-tui/package.json"
@@ -1192,6 +1193,7 @@ in
           --skipLibCheck \
           --module nodenext \
           --moduleResolution nodenext \
+          --rewriteRelativeImportExtensions \
           --target es2022 \
           --rootDir "$workdir/src" \
           --outDir "$workdir/out" \
