@@ -2,6 +2,7 @@
 import { linkSync, readFileSync, renameSync, rmSync, unlinkSync, writeFileSync, writeSync } from "node:fs";
 import { spawn, spawnSync } from "node:child_process";
 import { join } from "node:path";
+import { randomBytes } from "node:crypto";
 
 const [, , jobDir, shell, maximumRaw = "1048576"] = process.argv;
 const maximum = Number(maximumRaw);
@@ -17,18 +18,39 @@ const processPath = join(jobDir, "process.json");
 const resultPath = join(jobDir, "result.json");
 const cancelPath = join(jobDir, "cancel-requested");
 const launchReadyPath = join(jobDir, "launch-ready");
+const runnerReadyPath = join(jobDir, "runner-ready");
+const metadataPath = join(jobDir, "metadata.json");
 
 function sleep(milliseconds) {
   return new Promise((resolve) => setTimeout(resolve, milliseconds));
 }
 
 async function waitForLaunchReady() {
-  const deadline = Date.now() + 10_000;
+  const metadata = JSON.parse(readFileSync(metadataPath, "utf8"));
+  const deadline = Date.now() + 120_000;
   for (;;) {
-    try { readFileSync(launchReadyPath); return; } catch {}
-    if (Date.now() >= deadline) throw new Error("launch gate timed out");
+    try { readFileSync(launchReadyPath); return; }
+    catch (error) { if (error?.code !== "ENOENT") throw error; }
+    try { readFileSync(cancelPath); throw new Error("launch was cancelled"); }
+    catch (error) { if (error?.code !== "ENOENT") throw error; }
+    try { readFileSync(resultPath); throw new Error("launch controller published a terminal result"); }
+    catch (error) { if (error?.code !== "ENOENT") throw error; }
+    if (Date.now() >= deadline) throw new Error("launch controller handshake timed out");
+    if (!controllerIsAlive(metadata.ownerPid, metadata.ownerToken)) throw new Error("launch controller exited before opening launch gate");
     await sleep(25);
   }
+}
+
+function controllerIsAlive(pid, expectedToken) {
+  if (process.platform === "linux") {
+    try {
+      const text = readFileSync(`/proc/${pid}/stat`, "utf8"), close = text.lastIndexOf(")");
+      const fields = text.slice(close + 2).trim().split(/\s+/);
+      return fields[19] && `linux-proc:${fields[19]}` === expectedToken;
+    } catch { return false; }
+  }
+  const result = spawnSync("ps", ["-o", "lstart=", "-p", String(pid)], { encoding: "utf8" });
+  return !!result.stdout?.trim() && `ps-lstart:${result.stdout.trim().replace(/\s+/g, " ")}` === expectedToken;
 }
 
 function parseEnvironment(bytes) {
@@ -108,8 +130,13 @@ function publishResult(result) {
 }
 
 let child;
+let childClosed;
 let requestedSignal;
 try {
+  const runnerIdentity = { schemaVersion: 1, pid: process.pid, startToken: processStartToken(process.pid), startedAt: new Date().toISOString() };
+  const readyTemporary = `${runnerReadyPath}.tmp-${process.pid}`;
+  writeFileSync(readyTemporary, `${JSON.stringify(runnerIdentity)}\n`, { mode: 0o600, flag: "wx" });
+  renameSync(readyTemporary, runnerReadyPath);
   await waitForLaunchReady();
   try { readFileSync(cancelPath); throw new Error("launch was cancelled"); }
   catch (error) { if (error?.code !== "ENOENT") throw error; }
@@ -120,16 +147,24 @@ try {
   const command = readFileSync(commandPath, "utf8");
   rmSync(environmentPath, { force: true });
   rmSync(commandPath, { force: true });
-  child = spawn(shell, ["-c", command, "background-job"], {
+  // Hold the command behind stdin until its process identity is durably saved.
+  // The gate avoids SIGCONT-before-SIGSTOP scheduling races entirely.
+  const gateToken = randomBytes(24).toString("hex");
+  const quotedShell = `'${shell.replaceAll("'", `'\\''`)}'`;
+  const quotedCommand = `'${command.replaceAll("'", `'\\''`)}'`;
+  const quotedToken = `'${gateToken}'`;
+  child = spawn(shell, ["-c", `IFS= read -r gate <&3 || exit 125; exec 3<&-; [ \"$gate\" = ${quotedToken} ] || exit 125; exec ${quotedShell} -c ${quotedCommand} background-job`], {
     cwd: process.cwd(),
     env: environment,
     detached: true,
-    stdio: ["inherit", "pipe", "pipe"],
+    stdio: ["inherit", "pipe", "pipe", "pipe"],
   });
   if (!child.pid) throw new Error("command process has no PID");
-  publishProcess(child.pid);
+  childClosed = new Promise(resolve => child.once("close", resolve));
+  child.on("error", error => capture(Buffer.from(`background-job spawn failed: ${error.message}\\n`), 2));
   child.stdout.on("data", (chunk) => capture(chunk, 1));
   child.stderr.on("data", (chunk) => capture(chunk, 2));
+  publishProcess(child.pid);
   for (const signal of ["SIGINT", "SIGTERM"]) {
     process.on(signal, () => {
       requestedSignal = signal;
@@ -139,9 +174,6 @@ try {
   process.on("SIGUSR2", () => {
     requestedSignal = "SIGKILL";
     try { process.kill(-child.pid, "SIGKILL"); } catch {}
-  });
-  child.on("error", (error) => {
-    capture(Buffer.from(`background-job spawn failed: ${error.message}\n`), 2);
   });
   child.on("close", (code, signal) => {
     if (flushTimer) clearTimeout(flushTimer);
@@ -159,8 +191,16 @@ try {
     });
     process.exit(status === "completed" ? 0 : effectiveCode ?? 128);
   });
+  await new Promise((resolve, reject) => {
+    child.stdio[3].once("error", reject);
+    child.stdio[3].end(`${gateToken}\n`, resolve);
+  });
 } catch (error) {
-  if (child?.pid) { try { process.kill(-child.pid, "SIGKILL"); } catch {} }
+  if (child?.pid) {
+    try { process.kill(-child.pid, "SIGKILL"); } catch {}
+    try { child.kill("SIGKILL"); } catch {}
+    if (childClosed) await childClosed;
+  }
   rmSync(environmentPath, { force: true });
   rmSync(commandPath, { force: true });
   capture(Buffer.from(`background-job runner failed: ${error instanceof Error ? error.message : String(error)}\n`), 2);

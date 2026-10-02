@@ -1,5 +1,5 @@
 import { execFile } from "node:child_process";
-import { lstat, realpath, rm } from "node:fs/promises";
+import { lstat, realpath, rm, readFile } from "node:fs/promises";
 import { randomBytes } from "node:crypto";
 import { constants } from "node:fs";
 import { validateRuntimePath } from "./runtime-path.ts";
@@ -137,19 +137,33 @@ export class TmuxBackend implements JobProcessBackend {
       const placement = options?.placement ?? await resolveLocalPlacement(this.tmuxPath);
       await validatePlacement(this.tmuxPath, placement);
       const command = `${quote(this.nodePath)} ${quote(this.runnerPath)} ${quote(jobDir)} ${quote(shell)} 1048576`;
+      const ownershipToken = randomBytes(16).toString('hex');
       const split = ['split-window', '-d', '-P', '-F', '#{window_id}|#{pane_id}|#{pane_pid}', '-t', placement.paneId, '-c', cwd, command].map(quote).join(' ');
       const guard = [
         `#{==:#{pane_pid},${placement.panePid}}`, `#{==:#{pane_dead},0}`,
         `#{==:#{window_id},${placement.windowId}}`, `#{==:#{session_id},${placement.sessionId}}`,
       ].reduce((left,right) => `#{&&:${left},${right}}`);
-      const result = await this.run(['if-shell', '-F', '-t', placement.paneId, guard, split, 'display-message -p pi-job-placement-mismatch'], false, placement.socketPath);
+      let result;
+      try { result = await this.run(['if-shell', '-F', '-t', placement.paneId, guard, split, 'display-message -p pi-job-placement-mismatch'], false, placement.socketPath); }
+      catch (error) {
+        const message = String(error);
+        if (!/no space for new pane|pane too small/i.test(message)) throw error;
+        // The failed split is definitive (tmux rejected it); recover geometry
+        // only in the caller's existing window, then retry exactly once.
+        const current = await this.run(['display-message','-p','-t',placement.paneId,'#{pane_pid}|#{window_id}|#{session_id}|#{pane_dead}'],true,placement.socketPath);
+        if (current.code !== 0 || current.stdout.trim() !== `${placement.panePid}|${placement.windowId}|${placement.sessionId}|0`) throw error;
+        await this.run(['select-layout','-t',placement.windowId,'tiled'],false,placement.socketPath);
+        result = await this.run(['if-shell', '-F', '-t', placement.paneId, guard, split, 'display-message -p pi-job-placement-mismatch'], false, placement.socketPath);
+      }
       if (result.stdout.includes('pi-job-placement-mismatch')) throw new Error('Caller tmux placement changed before launch');
-      return await this.finishLaunch(id, result.stdout, placement.socketPath, placement);
+      try { return await this.finishLaunch(id, result.stdout, placement.socketPath, placement, ownershipToken); }
+      catch (error) { await this.cleanupFailedLaunch(id, result.stdout, placement.socketPath, ownershipToken); throw error; }
     }
     let exists = await this.sessionExists();
     if (!exists) await this.removeStaleSocket();
     const format = "#{window_id}|#{pane_id}|#{pane_pid}";
     const command = `${quote(this.nodePath)} ${quote(this.runnerPath)} ${quote(jobDir)} ${quote(shell)} 1048576`;
+    const ownershipToken = randomBytes(16).toString('hex');
     const args = exists
       ? ["new-window", "-d", "-P", "-F", format, "-t", `${SESSION}:`, "-n", id, "-c", cwd, command]
       : ["new-session", "-d", "-P", "-F", format, "-s", SESSION, "-n", id, "-c", cwd, command];
@@ -162,10 +176,19 @@ export class TmuxBackend implements JobProcessBackend {
         result = await this.run(["new-window", "-d", "-P", "-F", format, "-t", `${SESSION}:`, "-n", id, "-c", cwd, command]);
       } else throw error;
     }
-    return await this.finishLaunch(id, result.stdout, this.store.socketPath);
+    try { return await this.finishLaunch(id, result.stdout, this.store.socketPath, undefined, ownershipToken); }
+    catch (error) { await this.cleanupFailedLaunch(id, result.stdout, this.store.socketPath, ownershipToken); throw error; }
   }
 
-  private async finishLaunch(id: string, output: string, socketPath: string, placement?: JobPlacement): Promise<JobLaunch> {
+  private async cleanupFailedLaunch(id: string, output: string, socketPath: string, ownershipToken: string): Promise<void> {
+    const [windowId, paneId, pidRaw] = output.trim().split("|");
+    const pid = Number(pidRaw);
+    if (!/^@[0-9]+$/.test(windowId ?? "") || !/^%[0-9]+$/.test(paneId ?? "") || !Number.isSafeInteger(pid) || pid < 1) return;
+    const guard = `#{&&:#{==:#{@pi_background_job_id},${id}},#{&&:#{==:#{@pi_background_job_token},${ownershipToken}},#{&&:#{==:#{pane_pid},${pid}},#{==:#{window_id},${windowId}}}}}`;
+    await this.run(["if-shell", "-F", "-t", paneId, guard, `kill-pane -t ${paneId}`, "display-message -p pi-job-launch-identity-mismatch"], true, socketPath).catch(() => undefined);
+  }
+
+  private async finishLaunch(id: string, output: string, socketPath: string, placement: JobPlacement | undefined, ownershipToken: string): Promise<JobLaunch> {
     const [windowId, paneId, pidRaw] = output.trim().split("|");
     const panePid = Number(pidRaw);
     if (!windowId || !paneId || !Number.isSafeInteger(panePid) || panePid < 1) {
@@ -173,17 +196,29 @@ export class TmuxBackend implements JobProcessBackend {
     }
     // The runner waits for launch-ready: set pane-local retention and ownership
     // before opening that gate. Never alter the caller's window options.
-    const ownershipToken = randomBytes(16).toString('hex');
-    await this.run(['set-option', '-p', '-t', paneId, 'remain-on-exit', 'on'], false, socketPath);
-    await this.run(['set-option', '-p', '-t', paneId, 'remain-on-exit-format', ''], false, socketPath);
-    await this.run(['set-option', '-p', '-t', paneId, '@pi_background_job_id', id], false, socketPath);
-    await this.run(['set-option', '-p', '-t', paneId, '@pi_background_job_token', ownershipToken], false, socketPath);
+    await this.run([
+      'set-option','-p','-t',paneId,'@pi_background_job_id',id,';','set-option','-p','-t',paneId,'@pi_background_job_token',ownershipToken,';','set-option','-p','-t',paneId,'remain-on-exit','on',';','set-option','-p','-t',paneId,'remain-on-exit-format','',
+    ], false, socketPath);
     const identity = await this.run(['display-message', '-p', '-t', paneId, '#{pid}|#{session_id}|#{window_id}'], false, socketPath);
     const [serverRaw, sessionId, actualWindow] = identity.stdout.trim().split('|');
     if (!/^\$[0-9]+$/.test(sessionId ?? '') || actualWindow !== windowId || placement && (windowId !== placement.windowId || sessionId !== placement.sessionId)) throw new Error('Tmux launch placement changed');
     const serverPid = Number(serverRaw);
     const serverStartToken = await processStartToken(serverPid);
+    const readyPath = this.store.path(id, 'runner-ready');
+    const deadline = Date.now() + 30_000;
+    let ready: { schemaVersion: number; pid: number; startToken: string; startedAt: string } | undefined;
+    while (!ready && Date.now() < deadline) {
+      try { ready = JSON.parse(await readFile(readyPath, 'utf8')); }
+      catch (error) { if ((error as NodeJS.ErrnoException).code !== 'ENOENT') throw error; }
+      if (!ready) await new Promise(resolve => setTimeout(resolve, 20));
+    }
+    if (!ready || ready.schemaVersion !== 1 || ready.pid !== panePid || !Number.isSafeInteger(ready.pid) || typeof ready.startToken !== 'string' || !/^linux-proc:[0-9]+$/.test(ready.startToken) || !Number.isFinite(Date.parse(ready.startedAt))) {
+      throw new Error('background-job runner did not publish a matching startup identity');
+    }
+    // Runner remains behind launch-ready until this controller validates its
+    // identity, so the token must still match a live proc entry here.
     const paneStartToken = await processStartToken(panePid);
+    if (paneStartToken !== ready.startToken) throw new Error('background-job runner process identity changed during startup');
     await this.run(['set-option', '-p', '-t', paneId, '@pi_background_job_start_token', paneStartToken], false, socketPath);
     // Repeated splits must not shrink the caller to an unsplittable sliver.
     // Layout failure does not invalidate an otherwise successfully owned job.

@@ -227,7 +227,11 @@ AgentSH can authorize native
 starts, while full AgentSH mode fails closed until it has a dedicated
 background-job backend. Arbitrary tmux commands and pane input are not exposed as
 job-tool operations. Reaping revalidates server, process and pane ownership; stale
-identities fail closed rather than risking an unrelated pane.
+identities fail closed rather than risking an unrelated pane. Startup uses a
+runner/controller identity handshake and a bounded, cancellation-aware launch
+gate. If a caller-window split is explicitly rejected for lack of space, the
+backend may retile that same window and retry once; it never creates a hidden
+visible-job session or closes an unrelated pane.
 
 </details>
 <details>
