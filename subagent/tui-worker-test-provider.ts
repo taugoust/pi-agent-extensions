@@ -1,4 +1,6 @@
 import type { ExtensionAPI } from "@mariozechner/pi-coding-agent";
+import { getCurrentTools } from "@earendil-works/pi-ai";
+import { writeFileSync } from "node:fs";
 import { TUI_WORKER_MANIFEST_ENV } from "../shared/tui-worker-protocol.ts";
 
 /** Explicit integration-test fixture only. Never auto-discovered or deployed. */
@@ -14,7 +16,9 @@ export default function deterministicWorkerProvider(pi: ExtensionAPI): void {
     streamSimple: (_model: unknown, context: any, options: any) => {
       const source = JSON.stringify(context.messages);
       const results = context.messages.filter((m: any) => m.role === "toolResult");
-      let content: any[] = [{ type: "text", text: source.includes("ASSERT_READ_ONLY") ? `TOOLS:${(context.tools ?? []).map((t: any) => t.name).sort().join(",")}` : "Deterministic completed task." }];
+      let content: any[] = [{ type: "text", text: source.includes("ASSERT_READ_ONLY") ? `TOOLS:${getCurrentTools(context.messages).map((t: any) => t.name).sort().join(",")}` : "Deterministic completed task." }];
+      const pauseBeforeOutcome = source.includes("PAUSE_BEFORE_TASK_OUTCOME") && !results.some((r: any) => r.toolName === "task_outcome");
+      if (pauseBeforeOutcome) content = [{ type: "toolCall", id: "fixture-paused-outcome", name: "task_outcome", arguments: { version: 1, state: "delivered", summary: "Must not execute before stream completion", acceptance: [], artifacts: [], remaining: [] } }];
       if (source.includes("ASK_QUESTIONNAIRE") && !results.some((r: any) => r.toolName === "questionnaire")) content = [{ type: "toolCall", id: "fixture-questionnaire", name: "questionnaire", arguments: { questions: [{ id: "continue", prompt: "Continue?", options: [{ value: "yes", label: "Yes" }, { value: "no", label: "No" }], allowOther: false }] } }];
       else if (source.includes("ASK_GUARDED_PERMISSION") && !results.some((r: any) => r.toolName === "bash")) {
         const target = process.env.PI_TUI_ROOT_PERMISSION_FILE;
@@ -34,8 +38,22 @@ export default function deterministicWorkerProvider(pi: ExtensionAPI): void {
       return {
         async *[Symbol.asyncIterator]() {
           yield { type: "start", partial: message };
+          // Provider emitted a partial tool-call frame but never completed the
+          // assistant response. Pi must not dispatch the tool until stream done.
+          if (pauseBeforeOutcome) {
+            const manifestPath = process.env[TUI_WORKER_MANIFEST_ENV];
+            if (!manifestPath) throw new Error("Paused-stream fixture requires a worker manifest");
+            writeFileSync(`${manifestPath}.paused-stream.json`, JSON.stringify({ emitted: true, toolName: "task_outcome", toolCallId: "fixture-paused-outcome", timestamp: Date.now() }), { mode: 0o600 });
+            await new Promise<void>(resolve => {
+              const timer = setTimeout(done, 60_000);
+              const abort = () => done();
+              function done() { clearTimeout(timer); options?.signal?.removeEventListener("abort", abort); resolve(); }
+              options?.signal?.addEventListener("abort", abort, { once: true });
+              if (options?.signal?.aborted) done();
+            });
+          }
           // Long enough to exercise active reaping against genuine direct turns.
-          if (source.includes("OWNER_LOSS_HEADLESS")) {
+          else if (source.includes("OWNER_LOSS_HEADLESS")) {
             await new Promise<void>(resolve => {
               const timer = setTimeout(done, 60_000);
               const abort = () => done();

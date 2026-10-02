@@ -152,6 +152,7 @@ pkgs.runCommand "subagent-check"
       "$workdir/tui-runtime/subagent/tui-worker-server.test.ts" \
       "$workdir/tui-runtime/subagent/tui-worker-reap.test.ts" \
       "$workdir/tui-runtime/subagent/tui-worker-extension.test.ts" \
+      "$workdir/tui-runtime/subagent/model-inactivity.test.ts" \
       "$workdir/tui-runtime/subagent/headless-foreground.test.ts" \
       "$workdir/tui-runtime/subagent/tui-worker-seal.test.ts" \
       "$workdir/tui-runtime/subagent/tui-worker-tmux.test.ts" \
@@ -1094,6 +1095,7 @@ pkgs.runCommand "subagent-check"
     grep -F '"''${extDir}/subagent/permission-proxy.ts".source = "''${self}/subagent/permission-proxy.ts";' ${self}/nix/module.nix >/dev/null
     grep -F '"''${extDir}/subagent/permission-relay.ts".source = "''${self}/subagent/permission-relay.ts";' ${self}/nix/module.nix >/dev/null
     grep -F '"''${extDir}/subagent/result-artifact.ts".source = "''${self}/subagent/result-artifact.ts";' ${self}/nix/module.nix >/dev/null
+    grep -F '"''${extDir}/subagent/model-inactivity.ts".source = "''${self}/subagent/model-inactivity.ts";' ${self}/nix/module.nix >/dev/null
     if grep -F 'name: "subagent"' ${self}/sandbox/index.ts >/dev/null; then
       echo 'sandbox still registers a duplicate subagent tool' >&2
       exit 1
@@ -1109,6 +1111,7 @@ pkgs.runCommand "subagent-check"
       test -f "$bundle/subagent/background.ts"
       test -f "$bundle/subagent/control.ts"
       test -f "$bundle/subagent/foreground-handoff.ts"
+      test -f "$bundle/subagent/model-inactivity.ts"
       test -f "$bundle/subagent/native-rpc.ts"
       test -f "$bundle/subagent/permission-proxy.ts"
       test -f "$bundle/subagent/permission-relay.ts"

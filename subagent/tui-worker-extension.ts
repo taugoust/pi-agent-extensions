@@ -10,6 +10,7 @@ import { TuiWorkerServer } from "./tui-worker-server.ts";
 import { callTuiWorker } from "./tui-worker-client.ts";
 import { processIsAlive } from "./tui-worker-tmux.ts";
 import { validateTaskOutcome } from "./outcome.ts";
+import { ModelInactivityWatch } from "./model-inactivity.ts";
 import type { LocalJobController } from "../shared/background-job.ts";
 
 /** Explicit -e entry point, loaded inside the one interactive child Pi process. */
@@ -25,6 +26,20 @@ export default function tuiWorkerExtension(pi: ExtensionAPI): void {
   let rpcLogTrimTimer: ReturnType<typeof setInterval> | undefined;
   let announcedReap = false;
   let notificationTimes: number[] = [];
+  const clearModelInactivityStatus = () => {
+    try { if (context?.hasUI) context.ui.setStatus("subagent-model-inactivity", undefined); } catch { /* A stale TUI must not affect worker execution. */ }
+  };
+  const modelInactivity = new ModelInactivityWatch(() => {
+    if (!worker || worker.sealed) return;
+    const message = "No assistant stream progress for 5 minutes while awaiting the model. Work has not been cancelled; inspect the child and steer or cancel explicitly if needed.";
+    try { worker.notification({ message, requires_guidance: true }); } catch { /* Best-effort observability only. */ }
+    try {
+      if (context?.hasUI) {
+        context.ui.setStatus("subagent-model-inactivity", context.ui.theme.fg("warning", "model stalled · awaiting progress"));
+        context.ui.notify(message, "warning");
+      }
+    } catch { /* A stale TUI must not affect worker execution. */ }
+  }, undefined, undefined, undefined, clearModelInactivityStatus);
   const boundedSuffix = (text: string, maxBytes = 16 * 1024) => {
     const bytes = Buffer.from(text); let start = Math.max(0, bytes.length - maxBytes);
     while (start < bytes.length && (bytes[start]! & 0xc0) === 0x80) start++;
@@ -248,10 +263,15 @@ export default function tuiWorkerExtension(pi: ExtensionAPI): void {
   });
   pi.on("session_before_switch", () => ({ cancel: true }));
   pi.on("session_before_fork", () => ({ cancel: true }));
+  pi.on("turn_start", () => { modelInactivity.start(); });
+  pi.on("turn_end", () => { modelInactivity.end(); });
+  pi.on("tool_execution_start", () => { modelInactivity.end(); });
+  pi.on("agent_end", () => { modelInactivity.end(); });
   pi.on("message_start", (event: any) => {
     if (event.message?.role === "assistant") { liveAssistantText = ""; worker?.liveText(""); }
   });
   pi.on("message_update", (event: any) => {
+    if (event.message?.role === "assistant") modelInactivity.progress();
     if (!worker || worker.manifest.execution !== "rpc-headless") return;
     if (event.message?.role === "assistant") {
       const text = typeof event.message.content === "string" ? event.message.content : Array.isArray(event.message.content)
@@ -265,6 +285,7 @@ export default function tuiWorkerExtension(pi: ExtensionAPI): void {
   });
   pi.on("message_end", (event) => {
     if (event.message.role === "assistant") {
+      modelInactivity.end();
       lastAssistant = event.message;
       const text = typeof event.message.content === "string" ? event.message.content : Array.isArray(event.message.content)
         ? event.message.content.filter((part: any) => part?.type === "text").map((part: any) => part.text ?? "").join("") : "";
@@ -273,6 +294,7 @@ export default function tuiWorkerExtension(pi: ExtensionAPI): void {
     }
   });
   pi.on("agent_settled", (_event, ctx) => {
+    modelInactivity.end();
     if (!worker || failed || worker.sealed) return;
     try { worker.settled({ sessionFile: ctx.sessionManager.getSessionFile(), assistant: lastAssistant ?? null,
       ...(!allowed() ? { error: "Worker command authority unavailable at settlement" } : {}),
@@ -302,6 +324,7 @@ export default function tuiWorkerExtension(pi: ExtensionAPI): void {
       return { content: [{ type: "text", text: `Recorded ${outcome.state}; execution completion and explicit reap remain separate.` }], details: { task_outcome: outcome } };
     } });
   pi.on("session_shutdown", async () => {
+    modelInactivity.shutdown();
     if (ownerWatch) clearInterval(ownerWatch);
     if (rpcLogTrimTimer) clearInterval(rpcLogTrimTimer);
     context = undefined;

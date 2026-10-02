@@ -142,8 +142,10 @@ function createPi() {
   const handlers = new Map<string, Array<(event: any, ctx: any) => any>>();
   const tools = new Map<string, any>();
   const messages: any[] = [];
+  const entries: any[] = [];
   return {
     messages,
+    entries,
     handlers,
     tools,
     on(event: string, handler: (event: any, ctx: any) => any) {
@@ -154,6 +156,9 @@ function createPi() {
     registerTool(tool: any) { tools.set(tool.name, tool); },
     registerCommand() {},
     sendMessage(message: any) { messages.push(message); },
+    appendEntry(customType: string, data: unknown) {
+      entries.push({ type: "custom", customType, data, timestamp: Date.now() });
+    },
   };
 }
 
@@ -175,7 +180,7 @@ async function operationCheck() {
     sessionManager: {
       getSessionId: () => sessionId,
       getSessionFile: () => path.join(agentDir, "sessions", "session.jsonl"),
-      getBranch: () => [],
+      getBranch: () => pi.entries,
     },
     modelRegistry: { getAll: () => [] },
   };
@@ -402,6 +407,9 @@ async function operationCheck() {
   assert.equal(completion.display, false, "routine completion leaked into the transcript");
   assert.doesNotMatch(completion.content, /completed report body/);
   assert.equal(completion.customType, 'harness-state');
+  const completionReceiptDelivered = pi.entries.some((entry: any) => entry.customType === "harness-state-receipt"
+    && entry.data?.update?.id === notificationJob.id && entry.data?.state === "delivered");
+  assert.equal(completionReceiptDelivered, true, "completion delivery must persist its durable receipt");
   assert.equal(pi.messages.filter((message) => message.details?.updates?.some((update:any)=>update.id===notificationJob.id)).length, 1);
 
   await emit(pi, "session_shutdown", { reason: "quit" }, ctx);

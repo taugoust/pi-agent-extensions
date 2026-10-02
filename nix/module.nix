@@ -239,6 +239,7 @@ in
         "${extDir}/subagent/tui-names.ts".source = "${self}/subagent/tui-names.ts";
         "${extDir}/subagent/tui-worker-client.ts".source = "${self}/subagent/tui-worker-client.ts";
         "${extDir}/subagent/tui-worker-extension.ts".source = "${self}/subagent/tui-worker-extension.ts";
+        "${extDir}/subagent/model-inactivity.ts".source = "${self}/subagent/model-inactivity.ts";
         "${extDir}/subagent/tui-worker-server.ts".source = "${self}/subagent/tui-worker-server.ts";
         "${extDir}/subagent/tui-worker-store.ts".source = "${self}/subagent/tui-worker-store.ts";
         "${extDir}/subagent/tui-worker-tmux.ts".source = "${self}/subagent/tui-worker-tmux.ts";

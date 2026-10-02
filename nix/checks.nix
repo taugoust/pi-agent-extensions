@@ -2053,7 +2053,8 @@ in
         workdir="$TMPDIR/sandbox-check"
         srcdir="$workdir/src"
         outdir="$workdir/out"
-        mkdir -p "$srcdir" "$outdir"
+        mkdir -p "$srcdir" "$outdir" "$TMPDIR/home"
+        export HOME="$TMPDIR/home"
 
         cp -r ${self}/sandbox "$srcdir/"
         cp -r ${self}/subagent "$srcdir/"
@@ -2252,6 +2253,11 @@ in
           "$srcdir/sandbox/subagent-terminal.test.ts" \
           "$srcdir/sandbox/workspace-paths.test.ts"
 
+        # subagent/index.ts keeps a runtime import of tui-native.ts; retain the
+        # source tree for that local TypeScript dependency in this JS harness.
+        cp -r "$srcdir/subagent" "$outdir/"
+        cp -r "$srcdir/shared" "$outdir/"
+
         node "$outdir/sandbox/approval-model.test.js"
         node "$outdir/sandbox/command-output.test.js"
         node "$outdir/sandbox/exec-result.test.js"
@@ -2395,6 +2401,7 @@ in
         }
 
         async function startSession(pi, ctx) {
+          pi.context = ctx;
           const handlers = pi.handlers.get("session_start") ?? [];
           for (const handler of handlers) {
             await handler({ type: "session_start", reason: "startup" }, ctx);
@@ -2414,7 +2421,7 @@ in
         async function shutdownSession(pi, reason = "quit") {
           const handlers = pi.handlers.get("session_shutdown") ?? [];
           for (const handler of handlers) {
-            await handler({ type: "session_shutdown", reason }, {});
+            await handler({ type: "session_shutdown", reason }, pi.context ?? {});
           }
         }
 
@@ -2661,6 +2668,14 @@ in
         }
 
         async function main() {
+          const agentConfigDir = fs.mkdtempSync(path.join(os.tmpdir(), "sandbox-agent-config-"));
+          fs.writeFileSync(path.join(agentConfigDir, "subagent.json"), JSON.stringify({
+            defaultProvider: "fixture-provider",
+            defaultModel: "configured-default",
+            defaultThinkingLevel: "medium",
+          }));
+          process.env.PI_TEST_AGENT_DIR = agentConfigDir;
+          process.once("exit", () => fs.rmSync(agentConfigDir, { recursive: true, force: true }));
           delete process.env.PI_AGENTSH_APPROVAL_POLL_MS;
           process.env.AGENTSH_APPROVAL_PROMPT_WATCH_MS = "10";
           process.env.PI_AGENTSH_RECONNECT_TIMEOUT_MS = "300";
@@ -3736,7 +3751,7 @@ in
             await supervisor.close();
           }
 
-          // Subagents inherit the trusted parent's active model unless a child selects one explicitly.
+          // Configured subagent defaults apply consistently across backends; explicit child models win.
           {
             clearAgentSHEnv();
             const supervisor = await withRestSupervisor(async (request) => {
@@ -3782,10 +3797,10 @@ in
 
             const spawnRequests = supervisor.requests.filter((request) => request.method === "POST" && request.url.endsWith("/tools/spawn_subagent"));
             assert(spawnRequests.length === 8, "unexpected subagent request count");
-            assert(spawnRequests[0].body.model === "openai-codex/gpt-5.5", "single child did not inherit parent model");
-            assert(spawnRequests[1].body.model === "google/gemini-pro", "explicit child model was overwritten");
-            assert(spawnRequests[2].body.tasks[0].model === "openai-codex/gpt-5.5", "parallel child did not inherit parent model");
-            assert(spawnRequests[2].body.tasks[1].model === "anthropic/claude-sonnet", "parallel explicit model was overwritten");
+            assert(spawnRequests[0].body.model === "fixture-provider/configured-default:medium", "single child ignored configured subagent defaults");
+            assert(spawnRequests[1].body.model === "google/gemini-pro:medium", "explicit child model was overwritten");
+            assert(spawnRequests[2].body.tasks[0].model === "fixture-provider/configured-default:medium", "parallel child ignored configured subagent defaults");
+            assert(spawnRequests[2].body.tasks[1].model === "anthropic/claude-sonnet:medium", "parallel explicit model was overwritten");
             assert(spawnRequests[3].body.cwd === "/workspace/project/rtl/package", "single relative cwd was not resolved from the parent Pi cwd");
             assert(spawnRequests[4].body.cwd === "/workspace/project", "parallel request omitted the parent Pi cwd");
             assert(spawnRequests[4].body.tasks[0].cwd === undefined, "parallel child without cwd was rewritten unnecessarily");

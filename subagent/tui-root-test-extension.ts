@@ -119,6 +119,38 @@ export default function rootTest(pi: ExtensionAPI) {
     assert.equal(childEnvironment.find(entry => entry.startsWith("PI_PASEO_BRIDGE_NO_IMPORT=")), "PI_PASEO_BRIDGE_NO_IMPORT=1");
     assert.ok(!childEnvironment.some(entry => /^PI_PASEO_(?!BRIDGE_NO_IMPORT=)/.test(entry)), "parent Paseo identity/force/control variables leaked into worker");
     assert.equal(process.env.PI_PASEO_EXISTING_AGENT_ID, "malicious-parent-agent", "headless launch mutated parent Paseo binding");
+    const paused = await execute(ctx, { task: "PAUSE_BEFORE_TASK_OUTCOME", model: "harness-test/mock:off", background: true });
+    const pauseDeadline = Date.now() + 30_000;
+    let pausedWorker: any, pausedState: any, pausedMarker: any;
+    while (Date.now() < pauseDeadline) {
+      const group = (await execute(ctx, { operation: "status", job_id: paused.details.job_id })).details.group;
+      const child = group.children?.[0];
+      if (child?.task_id) {
+        pausedWorker = discoverTuiWorkers(join(process.env.PI_TUI_WORKER_STATE_ROOT!, "workers"), ctx.sessionManager.getSessionId())
+          .find(item => item.taskId === child.task_id);
+        if (pausedWorker) {
+          pausedState = await callTuiWorker(pausedWorker, { operation: "status" });
+          try { pausedMarker = JSON.parse(await readFile(`${dirname(pausedWorker.sessionFile)}/manifest.json.paused-stream.json`, "utf8")); } catch {}
+          if (pausedState.data?.active && pausedMarker?.emitted === true) break;
+        }
+      }
+      await sleep(100);
+    }
+    assert.ok(pausedWorker && pausedState?.data?.active && pausedMarker?.emitted === true,
+      `paused provider never emitted its partial tool call while active: ${JSON.stringify({ launched: paused.details, pausedWorker, pausedState, pausedMarker }).slice(0, 4000)}`);
+    assert.equal(pausedMarker.toolName, "task_outcome", "fixture marker must attest to the exact partial task_outcome call");
+    assert.equal(pausedMarker.toolCallId, "fixture-paused-outcome");
+    assert.equal(pausedState.data.lastOutcome, undefined, "partial tool call was falsely recorded as an outcome");
+    assert.equal(pausedState.data.phase, "running");
+    const abortStarted = Date.now();
+    const cancelled = await execute(ctx, { operation: "cancel", job_id: paused.details.job_id });
+    assert.equal(cancelled.details.group.status, "cancelled", JSON.stringify(cancelled));
+    assert.ok(Date.now() - abortStarted < 10_000, "abort/control did not respond promptly to paused stream");
+    const pausedFinal = await callTuiWorker(pausedWorker, { operation: "status" });
+    assert.equal(pausedFinal.data?.lastOutcome, undefined, "abort fabricated a successful outcome");
+    assert.ok(!new TuiWorkerStore(dirname(pausedWorker.sessionFile)).readState().events.some((event: any) => event.kind === "outcome"), "task_outcome ran before model stream completed");
+    await execute(ctx, { operation: "reap", job_id: paused.details.job_id });
+
     const foregroundState = await callTuiWorker(headless, { operation: "status" });
     assert.equal((foregroundState.data as any).active, false);
     assert.ok((foregroundState.data as any).lastReport);

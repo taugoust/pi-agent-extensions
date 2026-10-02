@@ -938,6 +938,11 @@ backends keep their existing execution model and never silently fall back to nat
 - Ordinary state updates stay outside model context. Producer-confirmed background
   completion uses the bounded quiet-state wakeup path described above; result
   consumption and durable receipts suppress duplicate delivery.
+- After five minutes without assistant-stream progress while awaiting a model,
+  workers retain a parent guidance request and show a persistent TUI warning.
+  This distinguishes a stalled model response from an executing tool. Progress
+  or a lifecycle transition clears the warning. The monitor never cancels,
+  retries, or reports success for the work; control and abort remain explicit.
 
 The launcher/worker protocol is Linux-only. Update the shared Nix configuration
 and start fresh Pi parents to acquire the immutable launcher environment.
