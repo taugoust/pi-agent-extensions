@@ -13,14 +13,18 @@ export function taskLabel(task: any): string {
   if (task.execution === "timed out") return "Worker timed out";
   return outcomeLabel(task.outcome);
 }
-export function taskListText(tasks: any[], includeIds = true): string {
-  if (!tasks.length) return "No retained tasks in this session yet.";
-  return tasks.map(task => [
+export function taskListText(tasks: any[], includeIds = true, descendants: any[] = []): string {
+  const direct = !tasks.length ? "No retained tasks in this session yet." : tasks.map(task => [
     `${taskLabel(task)} · ${uiText(task.title || "Untitled task", 110)} · attempt ${task.attempt}`,
     ...(task.summary ? [`  ${uiText(task.summary, 220)}`] : []),
     ...(task.next_action ? [`  Next: ${uiText(task.next_action, 180)}`] : []),
     ...(includeIds ? [`  ${task.task_id}`] : []),
   ].join("\n")).join("\n\n");
+  const nested = descendants.flatMap(group => (group.children ?? []).filter((child: any) => !child.reaped).map((child: any) => [
+    `Descendant · ${uiText(child.status, 32)} · ${uiText(child.task || "Untitled task", 110)}`,
+    ...(includeIds ? [`  ${uiText(group.job_id, 80)} · ${uiText(child.child_id, 80)} · ${uiText(child.task_id, 80)}`] : []),
+  ].join("\n")));
+  return [direct, ...nested].join("\n\n");
 }
 export function jobStatusLabel(status: string, observed = false): string {
   if (status === 'unavailable') return 'Temporarily unavailable';

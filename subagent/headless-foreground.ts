@@ -953,7 +953,19 @@ export class HeadlessForegroundManager {
         for (const child of group.children) {
           if (child.reaped) continue;
           const manifest = this.manifest(child);
-          if (!manifest) throw new Error(`Foreground descendant manifest unavailable: ${group.id}/${child.childId}`);
+          if (!manifest) {
+            // A cancelled chain successor may never have entered launchWorker.
+            // Require both untouched launch metadata and an absent worker
+            // directory: a missing manifest after any launch attempt is unsafe.
+            let untouched = false;
+            if (child.status === "cancelled" && !child.started && !child.launching && !child.initialPromptDispatching
+              && !child.workerAlive && child.launcherPid === undefined && child.launcherToken === undefined) {
+              try { lstatSync(child.directory); }
+              catch (error) { if ((error as NodeJS.ErrnoException).code === "ENOENT") untouched = true; else throw error; }
+            }
+            if (untouched) { child.reaped = true; continue; }
+            throw new Error(`Foreground descendant manifest unavailable: ${group.id}/${child.childId}`);
+          }
           await this.sealAndReap(group, child, manifest);
         }
         this.persist(group);

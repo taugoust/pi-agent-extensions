@@ -1,13 +1,13 @@
 import type { ExtensionAPI } from "@mariozechner/pi-coding-agent";
 import assert from "node:assert/strict";
-import { writeFile, readFile, lstat, readlink } from "node:fs/promises";
+import { writeFile, readFile, lstat, readlink, rm } from "node:fs/promises";
 import { dirname, join } from "node:path";
 import { getAgentDir } from "@mariozechner/pi-coding-agent";
 import { sharedBackgroundSubagentManager } from "./background.ts";
 import { execFile } from "node:child_process";
 import { promisify } from "node:util";
 import subagent from "./index.ts";
-import { TuiWorkerStore, discoverTuiWorkers } from "./tui-worker-store.ts";
+import { TuiWorkerStore, discoverTuiWorkers, atomicPrivateJson } from "./tui-worker-store.ts";
 import { FOREGROUND_TASKS_KEY } from "../shared/foreground-tasks.ts";
 import { HARNESS_READONLY_KEY } from "../shared/harness-readonly.ts";
 import type { TuiWorkerManifest } from "../shared/tui-worker-protocol.ts";
@@ -350,6 +350,22 @@ export default function rootTest(pi: ExtensionAPI) {
     const survivor = manifestFor(group);
     assert.equal((await callTuiWorker(survivor, { operation: "status" }) as any).data.pid, saved.childPid);
     await wait(ctx, saved.job);
+    // Exercise the actual root tasks merge, not only the native manager DTO.
+    // This is an unlaunched terminal inventory row; no nested worker is spawned.
+    const nestedId = `subagent-job-${"d".repeat(24)}`;
+    const nestedPath = join(process.env.PI_TUI_WORKER_STATE_ROOT!, "groups", `${nestedId}.json`);
+    const retained = JSON.parse(await readFile(join(process.env.PI_TUI_WORKER_STATE_ROOT!, "groups", `${saved.job}.json`), "utf8"));
+    const childSession = JSON.parse((await readFile(survivor.sessionFile, "utf8")).split("\n")[0]).id;
+    atomicPrivateJson(nestedPath, { ...retained, id: nestedId, owner: childSession,
+      children: [{ ...retained.children[0], childId: `subagent-child-${"d".repeat(24)}`, taskId: `subagent-task-${"d".repeat(24)}`,
+        directory: join(process.env.PI_TUI_WORKER_STATE_ROOT!, "workers", "d".repeat(24)),
+        spec: { task: "NESTED_TASK_RENDER_FIXTURE", cwd: ctx.cwd }, state: "cancelled", started: false, reaped: false, report: undefined }] });
+    try {
+      const tasks = await execute(ctx, { operation: "tasks" });
+      assert.ok(tasks.details.descendants.some((nested: any) => nested.job_id === nestedId));
+      assert.match(tasks.content[0].text, /Descendant · cancelled · NESTED_TASK_RENDER_FIXTURE/);
+      assert.match(tasks.content[0].text, new RegExp(nestedId));
+    } finally { await rm(nestedPath); }
     // Resume a still-live idle task preserves the exact Pi process.
     await execute(ctx, { operation: "resume", task_id: group.children[0].task_id, message: "Continue briefly", compact: false });
     assert.equal((await callTuiWorker(survivor, { operation: "status" }) as any).data.pid, saved.childPid);

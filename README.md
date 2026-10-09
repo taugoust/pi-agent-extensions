@@ -955,7 +955,7 @@ backends keep their existing execution model and never silently fall back to nat
   active watches, or unverifiable cleanup refuse reap with blocking IDs; no work
   is automatically cancelled. Cleanup also reserves delegation, preserves descendant
   results and recursively reaps terminal native/headless subagents. Active descendants
-  block ancestor cleanup. Root `list` exposes reachable nested groups, including
+  block ancestor cleanup. Root `list` and `tasks` expose reachable nested groups, including
   descendants of retained/reaped ancestors; their results remain readable and stopped
   parents' stale group state is reconciled without replaying prompts or notifications.
   An ancestor can reap an orphan only through verified retained session ancestry and

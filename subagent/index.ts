@@ -2165,7 +2165,7 @@ export default function (pi: ExtensionAPI) {
             } else if (params.operation === "tasks") {
               const legacy = new NativeTaskStore(path.join(getAgentDir(), "state", "native-tasks-v1")).list(owner, params.limit ?? 20);
               result.details.tasks = [...(result.details.tasks ?? []), ...legacy].slice(0, params.limit ?? 20);
-              result.content[0].text = taskListText(result.details.tasks);
+              result.content[0].text = taskListText(result.details.tasks, true, result.details.descendants);
             }
             return { ...result, content: [{ type: "text", text: [foreground.content?.[0]?.text, result.content?.[0]?.text].filter(Boolean).join("\n\n") }],
               details: { ...result.details, foreground_tasks: foreground.details?.tasks ?? [] } };
@@ -2230,7 +2230,7 @@ export default function (pi: ExtensionAPI) {
           } else if (params.operation === "tasks") {
             const legacy = new NativeTaskStore(path.join(getAgentDir(), "state", "native-tasks-v1")).list(owner, params.limit ?? 20);
             result.details.tasks = [...(result.details.tasks ?? []), ...legacy].slice(0, params.limit ?? 20);
-            result.content[0].text = taskListText(result.details.tasks);
+            result.content[0].text = taskListText(result.details.tasks, true, result.details.descendants);
           }
           return result;
         }
@@ -2958,7 +2958,7 @@ export default function (pi: ExtensionAPI) {
 
     renderResult(result, options, theme) {
       if (result.details?.tui_subagent) return new Text(result.content.find((p: any) => p.type === "text")?.text ?? "(no output)", 0, 0);
-      if (result.details?.operation === "tasks") return new Text(taskListText(result.details.tasks ?? [], options.expanded), 0, 0);
+      if (result.details?.operation === "tasks") return new Text(taskListText(result.details.tasks ?? [], options.expanded, result.details.descendants), 0, 0);
       if ((result.details as BackgroundSubagentDetails | undefined)?.background_subagent
         || (result.details as SubagentControlDetails | undefined)?.subagent_control) {
         const text = result.content.find((part: any) => part?.type === "text")?.text ?? "(no output)";

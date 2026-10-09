@@ -1,6 +1,6 @@
 import assert from "node:assert/strict";
 import { test } from "node:test";
-import { mkdtemp, rm, writeFile } from "node:fs/promises";
+import { mkdtemp, mkdir, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { createHash } from "node:crypto";
@@ -10,6 +10,7 @@ import { TuiNativeManager } from "./tui-native.ts";
 import { TuiWorkerTmux } from "./tui-worker-tmux.ts";
 import { HeadlessForegroundManager } from "./headless-foreground.ts";
 import { callTuiWorker } from "./tui-worker-client.ts";
+import { taskListText } from "../shared/task-presentation.ts";
 
 async function fixture() {
   const root = await mkdtemp(join(tmpdir(), "pi-tree-"));
@@ -47,6 +48,55 @@ async function fixture() {
   return { root, groups, server, manager, reaped, stores, manifests,
     close: async () => { await server.close(); await manager.shutdown(false); await rm(root, { recursive: true, force: true }); } };
 }
+
+test("tasks presentation retains descendant blockers and IDs without granting resume authority", () => {
+  const descendants = [{ job_id: "nested-job", children: [
+    { child_id: "nested-child", task_id: "nested-task", status: "running", task: "nested blocker", reaped: false },
+    { task_id: "old-task", status: "completed", task: "old reaped", reaped: true },
+  ] }];
+  const text = taskListText([{ task_id: "direct", title: "direct task", state: "running", attempt: 1 }], true, descendants);
+  assert.match(text, /direct task/); assert.match(text, /Descendant · running · nested blocker/);
+  for (const id of ["nested-job", "nested-child", "nested-task"]) assert.ok(text.includes(id));
+  assert.doesNotMatch(text, /old reaped/);
+  assert.match(taskListText([], false, descendants), /Descendant · running · nested blocker/);
+});
+
+test("headless cleanup skips only provably never-launched cancelled successors", async () => {
+  const root = await mkdtemp(join(tmpdir(), "pi-unlaunched-clean-"));
+  const initial = new HeadlessForegroundManager(root, () => "native", () => true);
+  await initial.shutdown(false);
+  const id = "a".repeat(24), directory = join(root, "workers", id);
+  const child = { taskId: `subagent-task-${id}`, childId: `subagent-child-${id}`, attempt: 1, directory,
+    spec: { task: "cancelled chain successor", cwd: root }, status: "cancelled", started: false,
+    ownerToken: "owner-token", operatorCapability: "b".repeat(64) };
+  const group = { version: 1, id: `subagent-job-${id}`, owner: "owner", ownerToken: "owner-token", mode: "chain", cancelled: true, children: [child] };
+  const file = join(root, "headless-groups", `${group.id}.json`);
+  try {
+    for (const evidence of ["untouched", "started", "launcher", "launching", "directory"] as const) {
+      const candidate: any = structuredClone(group);
+      if (evidence === "started") candidate.children[0].started = true;
+      if (evidence === "launcher") { candidate.children[0].launcherPid = process.pid; candidate.children[0].launcherToken = "uncertain-token"; }
+      if (evidence === "launching") candidate.children[0].launching = true;
+      if (evidence === "directory") await mkdir(directory, { mode: 0o700 });
+      atomicPrivateJson(file, candidate);
+      const manager: any = new HeadlessForegroundManager(root, () => "native", () => true);
+      manager.owner = "owner";
+      let snapshots = 0;
+      try {
+        if (evidence === "untouched") {
+          const release = await manager.prepareReap("owner", async () => { snapshots++; });
+          assert.equal(snapshots, 1);
+          assert.equal((readPrivateJson(file) as any).children[0].reaped, true);
+          release();
+        } else {
+          await assert.rejects(manager.prepareReap("owner", async () => {}), /manifest unavailable/);
+          assert.equal(manager.reapReserved, false);
+          assert.notEqual((readPrivateJson(file) as any).children[0].reaped, true);
+        }
+      } finally { await manager.shutdown(false); }
+    }
+  } finally { await rm(root, { recursive: true, force: true }); }
+});
 
 test("root discovers multilevel orphan, blocks active ancestor reap, reconciles settlement and retains result", async () => {
   const f = await fixture();
