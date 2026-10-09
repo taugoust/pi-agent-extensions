@@ -22,6 +22,7 @@ const MAX_RUNNING = 64;
 const MAX_RUNNING_PER_CWD = 32;
 const MAX_WAIT_MS = 12 * 60 * 60 * 1000;
 const STARTING_GRACE_MS = 30_000;
+import { retrieveAndSchedule } from "./retention.ts";
 
 export type StartRequest = {
   command: string;
@@ -428,7 +429,10 @@ export class BackgroundJobManager {
       source = raw ? "pane" : "none";
     }
     const bounded = boundedTail(raw);
-    if (notify && record.result) await this.store.markNotified(id);
+    if (notify && record.result) {
+      await this.store.markNotified(id);
+      await retrieveAndSchedule(record, this.store);
+    }
     return { ...bounded, source };
   }
 

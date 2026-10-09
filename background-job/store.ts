@@ -188,7 +188,7 @@ export class JobStore {
     return join(this.jobsRoot, id);
   }
 
-  path(id: string, name: "metadata.json" | "launch.json" | "process.json" | "result.json" | "result.lock" | "command" | "environment" | "output.log" | "notified"): string {
+  path(id: string, name: "metadata.json" | "launch.json" | "process.json" | "result.json" | "result.lock" | "command" | "environment" | "output.log" | "notified" | "retrieved-at"): string {
     return join(this.jobDir(id), name);
   }
 
@@ -255,6 +255,19 @@ export class JobStore {
     } finally {
       await rm(temporary, { force: true });
     }
+  }
+
+  async readRetrieved(id: string): Promise<number | undefined> {
+    try {
+      const raw = await readFile(this.path(id, "retrieved-at"), "utf8");
+      const value = Number(raw.trim());
+      if (!Number.isSafeInteger(value) || value < 0) throw new Error("Invalid retrieval timestamp");
+      return value;
+    } catch (error) { if ((error as NodeJS.ErrnoException).code === "ENOENT") return undefined; throw error; }
+  }
+
+  async markRetrieved(id: string, at = Date.now()): Promise<void> {
+    await writeAtomic(this.path(id, "retrieved-at"), at);
   }
 
   async isNotified(id: string): Promise<boolean> {

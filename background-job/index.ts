@@ -7,6 +7,7 @@ import { getAgentDir } from "@mariozechner/pi-coding-agent";
 import { Text } from "@mariozechner/pi-tui";
 import { agentSHRuntimeDisposition, classifyAgentSHStartup, type AgentSHRuntimeState } from "../shared/agentsh-mode.ts";
 import { BackgroundJobManager, ReapReservation, resolveExecutable, sanitizeOutput } from "./manager.ts";
+import { reapExpiredRetrieved, retrieveAndSchedule } from "./retention.ts";
 import { JobStore } from "./store.ts";
 import { WatchManager } from "./watch.ts";
 import { jobStatusLabel, watchResultText, watchDeliveryCursors, taskChoice, remoteTaskUiConnected, uiText } from "../shared/task-presentation.ts";
@@ -249,6 +250,8 @@ export default function backgroundJob(pi: ExtensionAPI) {
     try {
       const ownerSessionId = sessionId(ctx);
       const service = await manager();
+      await reapExpiredRetrieved(service, service.store);
+      await reapExpiredRetrieved(service, service.store);
       const records = (await service.list(1000)).filter((record) => record.metadata.sessionId === ownerSessionId && !record.metadata.infrastructure);
       const watches = new WatchManager(service, ownerSessionId);
       const releaseRecovery = reapReservation.enter();
@@ -494,7 +497,7 @@ export default function backgroundJob(pi: ExtensionAPI) {
         case "status": {
           const record = await service.get(requireJobId(params));
           owned(record);
-          if (record.result) await service.store.markNotified(record.metadata.id);
+          if (record.result) { await service.store.markNotified(record.metadata.id); await retrieveAndSchedule(record, service.store); }
           response = toolResult(recordText(record), { action: params.action, ...publicDetails(record) });
           break;
         }
@@ -503,7 +506,7 @@ export default function backgroundJob(pi: ExtensionAPI) {
           owned(await service.get(id));
           const snapshot = await service.output(id);
           const record = await service.get(id);
-          if (record.result) await service.store.markNotified(id);
+          if (record.result) { await service.store.markNotified(id); await retrieveAndSchedule(record, service.store); }
           response = toolResult(`${recordLine(record)}\n${outputText(snapshot, params.lines)}`, { action: params.action, ...publicDetails(record), source: snapshot.source, truncated: snapshot.truncated });
           break;
         }
@@ -513,7 +516,7 @@ export default function backgroundJob(pi: ExtensionAPI) {
           const waited = await service.wait(id, params.timeout_ms ?? 1000, signal);
           const current = await service.get(id);
           const snapshot = params.lines === undefined ? undefined : await service.output(id);
-          if (current.result) await service.store.markNotified(id);
+          if (current.result) { await service.store.markNotified(id); if (snapshot) await retrieveAndSchedule(current, service.store); }
           const deadlineText = waited.timedOut
             ? current.result ? "Job completed just after the wait deadline.\n" : "Wait timed out; job is still running.\n"
             : "";
