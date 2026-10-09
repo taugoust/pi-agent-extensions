@@ -174,7 +174,8 @@ export default function tuiWorkerExtension(pi: ExtensionAPI): void {
           } catch (error) { releaseSubagents(); throw error; }
         },
         clearQueue: () => sendRpcCommand("clear_queue"),
-        abort: async () => { if (manifest.execution === "rpc-headless") await sendRpcCommand("abort"); await context?.abort(); },
+        // TUI abort is void: the server waits for agent_settled/live idle.
+        abort: async () => { if (manifest.execution === "rpc-headless") await sendRpcCommand("abort"); context?.abort(); },
         shutdown: () => {
           if (worker?.state.sealed && !announcedReap) {
             announcedReap = true;

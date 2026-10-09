@@ -781,7 +781,10 @@ native worker) separately wakes an idle parent with `triggerTurn: true`. While
 the parent is busy, completions remain in the harness rather than accumulating
 stale Pi steering messages. Only the newest pending report per child wakes the
 parent after it settles; reading a result consumes that report and older wakes,
-not a newer unseen report. Foreground results are returned directly;
+not a newer unseen report. Accepted native prompts and observed newer running
+turns durably invalidate older pending terminal notices for that worker attempt,
+including across reload; later completions still notify. Already-sent messages
+cannot be retracted. Foreground results are returned directly;
 `task_outcome` alone does not wake the parent before execution settles. Completion
 messages contain result-routing metadata, not report bodies or guidance requests.
 Read `subagent operation=result` before relying on the work, then explicitly reap
@@ -868,7 +871,16 @@ message by default; it does not wait for the child to finish or claim the messag
 has been processed. `steer` (the default) queues delivery at the next turn boundary;
 `follow_up` queues delivery after current work. `interrupt` first clears queued
 continuations and waits for the current run to abort, then submits the replacement.
-Use status/output/result or bounded waits to supervise subsequent work.
+Native worker interrupts allow up to five seconds for confirmed idle and recheck
+local command authority before replacement. If cancellation was requested but the
+replacement was not dispatched, `interrupt_incomplete` retains that partial result:
+same-request-ID retries return the receipt without repeating cancellation or sending.
+Inspect worker state before explicitly retrying with a new request (the model tool
+creates a new request ID per prompt). Lost dispatch/persistence remains ambiguous,
+not a side-effect-free busy refusal.
+Use status/output/result or bounded waits to supervise subsequent work. Native
+headless group waits also honor the requested duration up to 24 hours, returning
+early on completion; cancelling a wait leaves workers running.
 
 Set `wait_for_response: true` only for a deliberately synchronous conversation:
 that waits through the child's next logical `agent_settled` boundary, potentially
@@ -1182,8 +1194,11 @@ guard process.
 
 **Description**: After a continuing subagent turn (`toolUse` or `length`), this
 extension checks Pi's current context usage. Once usage exceeds 90%, it sends one
-urgent steering message telling the child to stop using tools and return its best
-answer to the original task immediately. Steering is delivered before the next
+urgent steering message telling the child to stop investigating and return its
+answer to the original task immediately. If `task_outcome` is available and the
+current outcome is not yet reported, it permits one truthful outcome call first,
+including partial, blocked, or checkpointed work; cutoff never requires claiming
+delivery. Steering is delivered before the next
 model call, giving the child a final response turn before threshold compaction can
 discard detailed task context. AgentSH children also receive one warning before
 their authoritative execution deadline. Long runs retain the five-minute lead;

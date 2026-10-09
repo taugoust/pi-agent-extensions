@@ -46,6 +46,14 @@ pkgs.runCommand "subagent-finalizer-check"
     assert.equal(typeof subagentFinalizer, "function", "subagent-finalizer did not export an extension function");
     assert.match(message, /Finish now and return your answer/);
     assert.match(deadlineMessage, /execution deadline is near/);
+    for (const cutoffMessage of [message, deadlineMessage]) {
+      assert.match(cutoffMessage, /if task_outcome is available and you have not reported the current outcome/);
+      assert.match(cutoffMessage, /one truthful task_outcome call, then return/);
+      assert.match(cutoffMessage, /partial, blocked, or checkpointed/);
+      assert.match(cutoffMessage, /never claim delivered just to finish/);
+      assert.match(cutoffMessage, /Stop investigating/);
+      assert.doesNotMatch(cutoffMessage, /Do not make any more tool calls/);
+    }
     assert.equal(deadlineLead, 300000, "maximum deadline warning lead is not five minutes");
     assert.equal(deadlineWarningAt(1000, 121000), 91000, "two-minute deadline did not retain three quarters of its runtime before warning");
     assert.equal(deadlineWarningAt(1000, 7201000), 6901000, "long deadline did not retain the five-minute warning lead");

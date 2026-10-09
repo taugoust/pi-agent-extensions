@@ -38,13 +38,17 @@ export class TuiWorkerServer {
   private closing = false;
   private failed = false;
   private activityGeneration = 0;
+  private runningGeneration = 0;
+  private idleWaiters = new Set<() => void>();
   preparingReap = false;
   private reapInterrupted = false;
   readonly store: TuiWorkerStore;
   private adapter: TuiWorkerAdapter;
   private interactionWaiters = new Map<string, { resolve(answer: import("../shared/foreground-tasks.ts").TaskInteractionAnswer): void; reject(error: Error): void }>();
   private currentLiveText = "";
-  constructor(store: TuiWorkerStore, adapter: TuiWorkerAdapter) {
+  private interruptTimeoutMs: number;
+  constructor(store: TuiWorkerStore, adapter: TuiWorkerAdapter, interruptTimeoutMs = 5000) {
+    this.interruptTimeoutMs = interruptTimeoutMs;
     this.store = store;
     this.adapter = adapter;
     this.manifest = store.readManifest();
@@ -71,6 +75,8 @@ export class TuiWorkerServer {
     if (this.preparingReap) { this.reapInterrupted = true; void this.adapter.abort(); return false; }
     if (this.sealed) { void this.adapter.abort(); return false; }
     this.activityGeneration++;
+    this.runningGeneration++;
+    for (const check of this.idleWaiters) check();
     if (newTurn || this.state.phase !== "running") {
       this.state.lastOutcome = undefined;
       this.state.lastReport = undefined;
@@ -87,6 +93,38 @@ export class TuiWorkerServer {
     this.state.active = false;
     this.state.phase = "settled";
     this.event("settled", { report: this.state.lastReport });
+    for (const check of this.idleWaiters) check();
+  }
+  private interruptBlocker(generation: number): string | undefined {
+    if (this.sealed) return "Worker closed during interrupt";
+    try {
+      if (this.adapter.canRun?.() === false) return "Worker command authority unavailable after interrupt";
+    } catch { return "Worker command authority unavailable after interrupt"; }
+    if (generation !== this.runningGeneration) return "New worker activity started during interrupt";
+  }
+  /** ExtensionContext.abort() requests cancellation but returns void. Install
+   * the waiter first; only live idle (and any asynchronous adapter ack) permits
+   * replacement. New local input, authority loss, or shutdown wins the race. */
+  private abortAndIdle(): Promise<string | undefined> {
+    const generation = this.runningGeneration;
+    return new Promise(resolve => {
+      let done = false, acknowledged = false;
+      const finish = (reason?: string) => {
+        if (done) return;
+        done = true; clearTimeout(timer); this.idleWaiters.delete(check); resolve(reason);
+      };
+      const check = () => {
+        const blocker = this.interruptBlocker(generation);
+        if (blocker) finish(blocker);
+        else if (acknowledged && this.adapter.isIdle()) finish();
+      };
+      const timer = setTimeout(() => finish("Abort did not reach confirmed idle before the interrupt timeout"), this.interruptTimeoutMs);
+      this.idleWaiters.add(check);
+      try {
+        Promise.resolve(this.adapter.abort()).then(() => { acknowledged = true; check(); },
+          () => finish("Abort request failed; cancellation may have occurred"));
+      } catch { finish("Abort request failed; cancellation may have occurred"); }
+    });
   }
   liveText(value: string): void {
     if (typeof value !== "string") return;
@@ -189,29 +227,27 @@ export class TuiWorkerServer {
         this.state.phase = "running";
         this.persist();
         if (r.operation === "prompt" && r.mode === "interrupt") {
-          await this.adapter.abort();
-          if (this.closing || this.failed) return fail("unavailable", "Worker closed during interrupt");
-          if (!this.adapter.isIdle()) return fail("busy", "Abort has not reached idle; dispatch remains ambiguous");
-          if (this.adapter.canRun?.() === false) {
-            // Authority may disappear while abort is awaited. Nothing has been
-            // sent, so retain a definitive refusal and release the reservation.
-            this.state.active = false;
-            this.state.phase = this.state.lastReport ? "settled" : "ready";
-            const refused = fail("unavailable", "Worker command authority unavailable after interrupt");
-            this.state.receipts[receiptKey].response = refused;
+          const generation = this.runningGeneration;
+          const reason = await this.abortAndIdle();
+          // Recheck after awaiting: settlement does not preserve command authority.
+          const incomplete = reason ?? this.interruptBlocker(generation)
+            ?? (!this.adapter.isIdle() ? "Worker activity changed during interrupt" : undefined);
+          if (incomplete) {
+            this.state.active = generation !== this.runningGeneration ? this.state.active || !this.adapter.isIdle() : !this.adapter.isIdle();
+            this.state.phase = this.state.active ? "running" : this.state.lastReport ? "settled" : "ready";
+            const response = this.response(r, { ok: false, code: "interrupt_incomplete", receipt: "failed", sequence: this.state.sequence,
+              message: `${incomplete}. Cancellation was requested; replacement was not dispatched. Same request ID returns this receipt without retrying. Inspect worker state, then use a new request ID to explicitly retry.`,
+              data: { abortRequested: true, replacementDispatched: false } });
+            this.state.receipts[receiptKey].response = response;
             this.persist();
-            return refused;
+            return response;
           }
         }
         // The custom-message dispatch starts a new assistant turn without going
         // through the TUI before_agent_start hook. Invalidate the previous turn's
         // checkpoint immediately before sending, after interrupt/authority checks
         // so a known refusal preserves the old terminal report and outcome.
-        this.state.lastOutcome = undefined;
-        this.state.lastReport = undefined;
-        this.state.active = true;
-        this.state.phase = "running";
-        this.persist();
+        this.running(true);
         this.adapter.send(r.message, r.operation === "user_prompt" ? "steer" : r.mode === "follow_up" ? "follow_up" : "steer",
           r.operation === "user_prompt" ? "user" : "parent");
         break;
@@ -500,6 +536,7 @@ export class TuiWorkerServer {
   async close(): Promise<void> {
     if (this.closing) return;
     this.closing = true;
+    for (const check of this.idleWaiters) check();
     if (this.interactionWaiters.size) {
       const error = new Error("Headless worker is shutting down");
       for (const [id, waiter] of this.interactionWaiters) {

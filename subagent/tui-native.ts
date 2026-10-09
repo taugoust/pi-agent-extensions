@@ -327,11 +327,13 @@ export class TuiNativeManager {
       c.lastOutcome = state.lastOutcome ? this.retainedArtifact(c, state.lastOutcome, "outcome") : undefined;
       if (!state.lastReport) { c.report = undefined; c.requiresCompaction = false; }
       if (observationOnly) return; // Ancestor observation never consumes/reroutes notifications or dispatches work.
+      if (state.active) this.notifyActivity(g, c, state.sequence);
       const events = await callTuiWorker(m, { operation: "events", afterSequence: c.notifiedSequence }, { timeoutMs: 1000 });
       if (events.ok) {
         for (const event of (events.data as any)?.events ?? []) {
           if (event.kind === "running" && event.sequence > state.sequence) {
             c.state = "running"; c.runSequence = event.sequence; c.lastOutcome = undefined; c.report = undefined; c.requiresCompaction = false;
+            this.notifyActivity(g, c, event.sequence);
           }
           if (event.kind === "notification" || event.kind === "outcome") {
             const artifact = event.data?.artifact;
@@ -360,6 +362,11 @@ export class TuiNativeManager {
       // Parent/observer failure alone never marks a live TUI lost.
     }
   }
+  private notifyActivity(g: Group, c: Child, sequence: number): void {
+    // group/child IDs identify this worker attempt; task IDs may span attempts.
+    this.notify?.({ kind: "subagent", id: `${g.id}:${c.childId}:activity`, job_id: g.id,
+      child_id: c.childId, activity: true, through_sequence: sequence });
+  }
   private async startPrompt(g: Group, c: Child, m: TuiWorkerManifest): Promise<void> {
     if (this.closed || this.reapReserved || g.cancelled || !this.ready() || (g.launchMode === "guard-only" ? this.disposition() !== "guard-only" : this.disposition() !== "native")) return;
     if (g.launchMode === "guard-only") {
@@ -376,6 +383,7 @@ export class TuiNativeManager {
     const prompt = `Task: ${task}\n\nAcceptance criteria: ${JSON.stringify(c.spec.acceptance ?? [])}\nReport useful findings with notify_parent and your outcome with task_outcome. The parent handles pane cleanup.`;
     const accepted = await callTuiWorker(m, { operation: "prompt", mode: "steer", message: prompt }, { requestId: `initial:${c.childId}` });
     if (!accepted.ok) throw new Error(`Initial prompt not confirmed: ${accepted.code}`);
+    this.notifyActivity(g, c, accepted.sequence);
     c.started = true; c.state = "running"; this.save(g);
   }
   async refresh(owner: string): Promise<void> {
@@ -772,7 +780,8 @@ export class TuiNativeManager {
         if (!compacted.ok) throw new Error(`Resume compaction failed: ${compacted.code}: ${compacted.message}`);
       }
       const result = await callTuiWorker(m!, { operation: "prompt", mode: params.control_mode ?? "steer", message: params.message ?? "Continue from the saved task context." });
-      if (!result.ok) throw new Error(`Worker prompt failed: ${result.code}`);
+      if (!result.ok) throw new Error(`Worker prompt failed: ${result.code}: ${result.message}`);
+      this.notifyActivity(g, c, result.sequence);
       c.state = "running"; g.cancelled = false; this.save(g);
       if (params.wait_for_response) {
         while (active(c)) { if (signal?.aborted) throw new Error("Prompt observation cancelled; child continues"); await pause(200); await this.refresh(owner); }

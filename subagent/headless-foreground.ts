@@ -1061,8 +1061,17 @@ export class HeadlessForegroundManager {
       return this.result(group, child, { operation: op, offset: params.offset, limit: params.limit, diagnostics: params.diagnostics === true, retained });
     }
     if (op === "wait" || op === "wait_group" || op === "wait_any" || op === "wait_all") {
-      const deadline = Date.now() + Math.min(60_000, params.wait_ms ?? 1000);
-      while (group.children.some(active) && Date.now() < deadline) { if (signal?.aborted) throw new Error("Wait cancelled; worker continues"); await Promise.all(group.children.map(item => this.observe(group!, item))); await pause(100); }
+      const waitMs = params.wait_ms ?? 1000;
+      if (!Number.isSafeInteger(waitMs) || waitMs < 0 || waitMs > 86_400_000) throw new Error("Invalid wait_ms: expected 0–86400000 milliseconds");
+      const deadline = Date.now() + waitMs;
+      while (group.children.some(active) && Date.now() < deadline) {
+        if (signal?.aborted) throw new Error("Wait cancelled; worker continues");
+        await Promise.all(group.children.map(item => this.observe(group!, item)));
+        if (signal?.aborted) throw new Error("Wait cancelled; worker continues");
+        if (!group.children.some(active)) break;
+        await pause(Math.min(100, Math.max(0, deadline - Date.now())));
+      }
+      if (signal?.aborted) throw new Error("Wait cancelled; worker continues");
       return this.result(group);
     }
     if (op === "prompt" || op === "resume") {
@@ -1107,7 +1116,7 @@ export class HeadlessForegroundManager {
         }
         this.bumpGeneration(child);
         const sent = await callTuiWorker(manifest, { operation: "prompt", mode: params.control_mode ?? "follow_up", message: params.message ?? "Continue from the saved task context." }, { requestId: `model:${params.request_id ?? randomBytes(8).toString("hex")}` });
-        if (!sent.ok) throw new Error(`Headless worker prompt rejected: ${sent.code}`);
+        if (!sent.ok) throw new Error(`Headless worker prompt rejected: ${sent.code}: ${sent.message}`);
         group.cancelled = false; child.status = "running"; child.workerAlive = true; child.updatedAt = new Date().toISOString(); this.persist(group);
         if (params.wait_for_response) while (active(child)) { if (signal?.aborted) throw new Error("Prompt observation cancelled; worker continues"); await this.observe(group, child); await pause(100); }
         return this.result(group, child);

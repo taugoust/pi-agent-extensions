@@ -15,11 +15,13 @@ const MAX_TIMER_DELAY_MS = 2_147_483_647;
 
 export const SUBAGENT_FINALIZE_MESSAGE =
   "URGENT: Context usage has exceeded 90%. Finish now and return your answer to the original task immediately. " +
-  "Do not make any more tool calls or continue investigating. Give the best complete answer you can from the work already done before automatic compaction.";
+  "Stop investigating and making work/tool calls, except: if task_outcome is available and you have not reported the current outcome, make one truthful task_outcome call, then return. " +
+  "Use partial, blocked, or checkpointed when work is incomplete; never claim delivered just to finish. Report only evidence already obtained and any remaining work before automatic compaction.";
 
 export const SUBAGENT_DEADLINE_FINALIZE_MESSAGE =
   "URGENT: Your execution deadline is near. Finish now and return your answer to the original task immediately. " +
-  "Do not make any more tool calls or continue investigating. Give the best complete answer you can from the work already done before the supervisor ends this subagent.";
+  "Stop investigating and making work/tool calls, except: if task_outcome is available and you have not reported the current outcome, make one truthful task_outcome call, then return. " +
+  "Use partial, blocked, or checkpointed when work is incomplete; never claim delivered just to finish. Report only evidence already obtained and any remaining work before the supervisor ends this subagent.";
 
 export function isSubagentProcess(env: NodeJS.ProcessEnv = process.env): boolean {
   return Boolean(env.AGENTSH_SUBAGENT_ID?.trim() || env.PI_SUBAGENT_ID?.trim());

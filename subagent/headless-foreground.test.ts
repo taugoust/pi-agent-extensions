@@ -14,6 +14,36 @@ import { parseTuiWorkerRequest, publicTuiWorkerManifest } from "../shared/tui-wo
 const identity = { protocol: 1, requestId: "request-1", token: "a".repeat(64), ownerSessionId: "owner-session", taskId: "subagent-task-" + "1".repeat(24),
   runtimeId: "rpc-" + "2".repeat(24), groupId: "subagent-job-" + "3".repeat(24), childId: "subagent-child-" + "4".repeat(24), attempt: 1, workerEpoch: "5".repeat(32) };
 
+test("headless group waits honor validated durations above 60 seconds, early completion and observation cancellation", async (t) => {
+  const root = await mkdtemp(join(tmpdir(), "headless-wait-"));
+  const manager:any = new HeadlessForegroundManager(root, () => "native", () => true);
+  manager.owner = "wait-owner";
+  const child:any = { status: "running" }, group:any = { id: "wait-group", owner: "wait-owner", children: [child] };
+  manager.groups.set(group.id, group);
+  manager.manifest = () => undefined;
+  manager.result = () => ({ status: child.status });
+  let now = 0, observations = 0;
+  t.mock.method(Date, "now", () => now);
+  const wait = (wait_ms: number, signal?: AbortSignal) => manager.operation({ operation: "wait_group", job_id: group.id, wait_ms }, group.owner, signal);
+  try {
+    // Accelerate only the clock, not the manager's completion/cancel predicates.
+    manager.observe = async () => { observations++; now += 61_000; };
+    assert.equal((await wait(120_000)).status, "running");
+    assert.equal(observations, 2, "requested duration was silently capped at 60 seconds");
+    now = 0; observations = 0;
+    manager.observe = async () => { now += 61_000; if (++observations === 2) child.status = "completed"; };
+    assert.equal((await wait(86_400_000)).status, "completed");
+    assert.equal(observations, 2, "24h wait failed to return on early completion");
+    child.status = "running"; observations = 0;
+    await wait(0); assert.equal(observations, 0);
+    for (const value of [-1, 86_400_001, 1.5, NaN, Infinity]) await assert.rejects(wait(value), /Invalid wait_ms/);
+    const cancel = new AbortController();
+    manager.observe = async () => { cancel.abort(); };
+    await assert.rejects(wait(86_400_000, cancel.signal), /Wait cancelled; worker continues/);
+    assert.equal(child.status, "running", "cancelling observation stopped work");
+  } finally { t.mock.restoreAll(); await manager.shutdown(false); await rm(root, { recursive: true, force: true }); }
+});
+
 test("headless manifest is placement-free and public discovery omits FIFO path", async () => {
   const root = await mkdtemp(join(tmpdir(), "headless-manifest-"));
   try {

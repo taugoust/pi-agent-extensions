@@ -9,6 +9,49 @@ import { processIdentity } from "./tui-worker-tmux.ts";
 import { callTuiWorker } from "./tui-worker-client.ts";
 import type { TuiWorkerManifest } from "../shared/tui-worker-protocol.ts";
 
+test("TUI void abort waits for delayed settlement before sending replacement exactly once", async () => {
+  const root = await mkdtemp(join(tmpdir(), "pi-void-abort-")), store = new TuiWorkerStore(root);
+  const manifest: TuiWorkerManifest = {
+    protocol: 1, ownerSessionId: "parent", taskId: "task", runtimeId: "runtime", groupId: `subagent-job-${"a".repeat(24)}`,
+    childId: `subagent-child-${"b".repeat(24)}`, attempt: 1, workerEpoch: "c".repeat(32), controlToken: "d".repeat(64),
+    controlSocket: join(root, "control.sock"), sessionFile: join(root, "session.jsonl"), launchMode: "none",
+    presentation: "background", placement: { socketPath: "/tmp/tmux", serverEpoch: "1:2", sessionId: "$1", windowId: "@1", paneId: "%1", ownershipNonce: "e".repeat(64) },
+  };
+  store.writeManifest(manifest);
+  const previous = process.env.PI_TUI_WORKER_MANIFEST;
+  process.env.PI_TUI_WORKER_MANIFEST = store.path("manifest.json");
+  const handlers = new Map<string, Function>();
+  let idle = false, sends = 0, aborts = 0, entered!: () => void;
+  const abortStarted = new Promise<void>(resolve => { entered = resolve; });
+  const ctx = { mode: "tui", hasUI: false, isIdle: () => idle, hasPendingMessages: () => false,
+    abort() { aborts++; entered(); }, shutdown() {}, getContextUsage: () => undefined,
+    sessionManager: { getSessionFile: () => manifest.sessionFile, getSessionId: () => "child-session" } };
+  try {
+    workerExtension({ registerTool() {}, on: (name: string, fn: Function) => handlers.set(name, fn),
+      sendMessage() { assert.equal(idle, true); sends++; idle = false; } } as any);
+    await handlers.get("session_start")!({}, ctx);
+    handlers.get("agent_start")!({}, ctx);
+    const request = { operation: "prompt" as const, mode: "interrupt" as const, message: "replacement" };
+    const pending = callTuiWorker(manifest, request, { requestId: "void-interrupt" });
+    await abortStarted;
+    await new Promise(resolve => setTimeout(resolve, 30));
+    assert.equal(sends, 0, "void abort was mistaken for settled cancellation");
+    idle = true;
+    handlers.get("message_end")!({ message: { role: "assistant", stopReason: "error", errorMessage: "The operation was aborted.", content: [] } }, ctx);
+    handlers.get("agent_settled")!({}, ctx);
+    const accepted = await pending;
+    assert.equal(accepted.ok, true); assert.equal(sends, 1); assert.equal(aborts, 1);
+    assert.equal(store.readState().lastReport, undefined);
+    assert.equal(store.readState().active, true);
+    assert.deepEqual(await callTuiWorker(manifest, request, { requestId: "void-interrupt" }), accepted);
+    assert.equal(sends, 1); assert.equal(aborts, 1);
+  } finally {
+    await handlers.get("session_shutdown")?.({}, ctx);
+    if (previous === undefined) delete process.env.PI_TUI_WORKER_MANIFEST; else process.env.PI_TUI_WORKER_MANIFEST = previous;
+    await rm(root, { recursive: true, force: true });
+  }
+});
+
 test("Pi's exact too-small compaction error is an explicit idempotent no-op only", async () => {
   const root = await mkdtemp(join(tmpdir(), "pi-compact-noop-"));
   const store = new TuiWorkerStore(root);

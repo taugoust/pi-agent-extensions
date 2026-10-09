@@ -310,4 +310,26 @@ assert.match(shell.messages[3].message.content,/output/i);
 assert.match(shell.messages[3].message.content,/result/i);
 assert.match(shell.messages[3].message.content,/reap/i);
 await shell.emit('session_shutdown',{reason:'quit'});
+// Activity invalidates only earlier completions of the same worker attempt,
+// including while delivery is disabled; a later completion remains eligible.
+entries=[];idle=true;pending=false;sessionName=`quiet-activity-${process.pid}`;
+const activityFx=fixture(),activityQuiet=installQuietState(activityFx.pi,5);await activityFx.emit('session_start');
+await activityFx.emit('ui_prompt_start');
+const activityCompletion=(seq:number,child='worker-a')=>({kind:'subagent' as const,id:`activity:${child}:${seq}`,job_id:'activity-group',child_id:child,completion:true,through_sequence:seq});
+activityQuiet.enqueue(ctx,activityCompletion(3));
+activityQuiet.enqueue(ctx,activityCompletion(3,'worker-b'));
+activityQuiet.enqueue(ctx,{kind:'subagent',id:'arbitrary',job_id:'activity-group',child_id:'worker-a',activity:true,through_sequence:4});
+await activityFx.emit('session_shutdown',{reason:'reload'});
+const activityReload=fixture(),activityReloadQuiet=installQuietState(activityReload.pi,5);await activityReload.emit('session_start');await pause(40);
+assert.equal(activityReload.messages.length,1);
+assert.deepEqual(activityReload.messages[0].message.details.updates.map((u:any)=>u.child_id),['worker-b']);
+activityReloadQuiet.enqueue(ctx,activityCompletion(5));await pause(40);
+assert.equal(activityReload.messages.length,2,'activity suppressed genuine later completion');
+await activityReload.commands.get('harness-state').handler('disable',ctx);
+activityReloadQuiet.enqueue(ctx,{kind:'subagent',id:'arbitrary',job_id:'activity-group',child_id:'worker-a',activity:true,through_sequence:8});
+await activityReload.commands.get('harness-state').handler('enable',ctx);
+activityReloadQuiet.enqueue(ctx,activityCompletion(7));await pause(40);
+assert.equal(activityReload.messages.length,2,'disabled delivery lost activity invalidation');
+await activityReload.emit('session_shutdown',{reason:'exit'});
+
 console.log('quiet-state remediation tests passed');

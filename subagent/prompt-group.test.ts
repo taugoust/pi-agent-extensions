@@ -25,9 +25,10 @@ for (const kind of ["tui", "headless"] as const) {
     };
     store.writeManifest(manifest);
     const messages: string[] = [];
+    let idle = true, aborts = 0;
     const server = new TuiWorkerServer(store, {
-      isIdle: () => true, send(message) { messages.push(message); }, abort() {}, shutdown() {},
-    });
+      isIdle: () => idle, send(message) { messages.push(message); }, abort() { aborts++; }, shutdown() {},
+    }, 25);
     const now = new Date().toISOString();
     const child = { childId: manifest.childId, taskId: manifest.taskId, attempt: 1, directory: store.directory,
       spec: { task: "saved task", cwd: root }, state: "completed", status: "completed", started: true,
@@ -60,6 +61,11 @@ for (const kind of ["tui", "headless"] as const) {
       group.owner = "parent";
       assert.equal(messages.length, 2, "failed identity assertion sent a message");
       assert.equal(launches, 0, "prompt relaunched work");
+      idle = false;
+      await assert.rejects(manager.operation({ ...request, control_mode: "interrupt" }, "parent"),
+        /interrupt_incomplete:.*Cancellation was requested; replacement was not dispatched.*new request ID/);
+      assert.equal(aborts, 1);
+      assert.equal(messages.length, 2, "partial interrupt dispatched the replacement");
     } finally {
       manager.groups.clear();
       await server.close();

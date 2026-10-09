@@ -6,6 +6,8 @@ export type QuietUpdate = {
   child_id?:string; job_id?:string; message?:string; requires_guidance?:boolean;
   /** Producer-confirmed background execution terminal state, not task delivery. */
   completion?:boolean;
+  /** New running generation, scoped by job_id + child_id (worker attempt). */
+  activity?:boolean;
   outcomes?:Array<{child:number;task_id?:string;attempt?:number;state:string}>;
   through_sequence?:number; count?:number; overflow?:boolean;
 };
@@ -36,8 +38,9 @@ const hasSequence=(data:QuietUpdate)=>Number.isSafeInteger(data.through_sequence
 function completionSuperseded(h:Hub,data:QuietUpdate):boolean{
   if(!isCompletion(data)||!hasSequence(data))return false;
   const identity=completionIdentity(data);
-  return [...h.receipts.values()].some(r=>isCompletion(r.update)&&completionIdentity(r.update)===identity
-    &&(r.state==='consumed'||r.state==='delivered')&&hasSequence(r.update)&&r.update.through_sequence!>=data.through_sequence!);
+  return [...h.receipts.values()].some(r=>completionIdentity(r.update)===identity&&hasSequence(r.update)
+    &&(r.update.activity===true&&r.state==='recorded'&&r.update.through_sequence!>data.through_sequence!
+      ||isCompletion(r.update)&&(r.state==='consumed'||r.state==='delivered')&&r.update.through_sequence!>=data.through_sequence!));
 }
 function completionPrefix(updates:QuietUpdate[]):string{
   const children=updates.some(u=>u.kind==='subagent'),jobs=updates.some(u=>u.kind==='job');
@@ -203,7 +206,19 @@ export function installQuietState(pi:ExtensionAPI,delayMs=1000){
   pi.on('session_shutdown',async(event,ctx)=>{const h=hub(ctx);if(h.writer!==writer)return;clearTimer(h);restore(h,ctx);h.writer=undefined;h.pi=undefined;h.ctx=undefined;if(event.reason!=='reload')hubs().delete(session(ctx));});
   return {
     enqueue(ctx:ExtensionContext,data:QuietUpdate):boolean{
-      const h=hub(ctx);h.pi=pi;h.ctx=ctx;if(disabled(h)){h.stats.disabled++;return false;}
+      const h=hub(ctx);h.pi=pi;h.ctx=ctx;
+      // Activity invalidation must persist even while delivery is disabled, and
+      // never move backwards when an older async observation arrives late.
+      if(data.activity===true){
+        if(data.kind!=='subagent'||!data.job_id||!data.child_id||!hasSequence(data))throw new Error('Invalid worker activity identity');
+        const item=toItem({...data,id:`${data.job_id}:${data.child_id}:activity`,completion:false,requires_guidance:false});
+        const prior=latestReceipt(h,item.key);
+        if(prior?.update.activity===true&&hasSequence(prior.update)&&prior.update.through_sequence!>=data.through_sequence!)return true;
+        if(!appendReceipt(h,item,'recorded'))return false;
+        for(const [key,pending]of h.pending)if(completionSuperseded(h,pending.data))h.pending.delete(key);
+        return true;
+      }
+      if(disabled(h)){h.stats.disabled++;return false;}
       const item=toItem(data);if(item.bytes>MAX_UPDATE_BYTES||(isCompletion(data)&&bytes(completionPrefix([data])+JSON.stringify([data]))+bytes(JSON.stringify({updates:[data]}))>MAX_BATCH_BYTES))throw new Error('Quiet state update exceeds its metadata budget');
       const superseded=completionSuperseded(h,data);
       if(superseded||isDone(h,item.key,item.revision)||(isCompletion(data)&&['recorded','delivered','consumed'].includes(latestReceipt(h,item.key)?.state??''))||h.pending.get(item.key)?.revision===item.revision){h.stats.duplicate++;return true;}

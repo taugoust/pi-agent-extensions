@@ -6,7 +6,7 @@ import { join } from "node:path";
 import { createHash } from "node:crypto";
 import { TuiWorkerStore } from "./tui-worker-store.ts";
 import { TuiWorkerServer } from "./tui-worker-server.ts";
-import { callTuiWorker, applyTuiWorkerOperatorMode } from "./tui-worker-client.ts";
+import { callTuiWorker, applyTuiWorkerOperatorMode, workerRequest } from "./tui-worker-client.ts";
 import type { TuiWorkerManifest } from "../shared/tui-worker-protocol.ts";
 
 export function manifestAt(directory: string): TuiWorkerManifest {
@@ -71,6 +71,44 @@ test("child-hosted control reconnects, deduplicates, observes direct work and se
     assert.equal(store.readState().sealed, true);
     await new Promise(resolve => setTimeout(resolve, 50));
     assert.ok(shutdowns >= 1);
+  } finally { await server.close(); await rm(directory, { recursive: true, force: true }); }
+});
+
+test("interrupt barrier retains partial receipts on timeout, abort error, shutdown, and new local activity", async () => {
+  const directory = await mkdtemp(join(tmpdir(), "pi-interrupt-"));
+  const store = new TuiWorkerStore(directory), manifest = manifestAt(directory);
+  store.writeManifest(manifest);
+  let idle = false, sends = 0, aborts = 0;
+  let behavior = () => {};
+  const adapter = { isIdle: () => idle, send() { sends++; }, abort() { aborts++; behavior(); }, shutdown() {} };
+  let server = new TuiWorkerServer(store, adapter, 25);
+  const request = (id: string) => workerRequest(manifest, { operation: "prompt", mode: "interrupt", message: "replacement" }, id);
+  try {
+    const timeout = await server.handle(request("timeout"));
+    assert.equal(timeout.code, "interrupt_incomplete");
+    assert.match(timeout.message, /timeout/);
+    assert.deepEqual(timeout.data, { abortRequested: true, replacementDispatched: false });
+    assert.equal(store.readState().active, true);
+    idle = true; server.settled({ final: "eventually cancelled" });
+    await server.close();
+    server = new TuiWorkerServer(store, adapter, 25);
+    assert.deepEqual(await server.handle(request("timeout")), timeout, "reload replay lost definitive partial receipt");
+    assert.equal(aborts, 1); assert.equal(sends, 0);
+    assert.equal((await server.handle(request("explicit-retry"))).ok, true, "explicit new-ID retry at idle failed");
+    assert.equal(sends, 1);
+    idle = false;
+    behavior = () => { throw new Error("abort failed"); };
+    const failed = await server.handle(request("abort-error"));
+    assert.equal(failed.code, "interrupt_incomplete"); assert.match(failed.message, /cancellation may have occurred/);
+    behavior = () => { idle = true; server.running(true); };
+    const raced = await server.handle(request("local-input"));
+    assert.equal(raced.code, "interrupt_incomplete");
+    assert.equal(server.state.active, true, "new local input reservation was lost");
+    behavior = () => { void server.close(); };
+    const closed = await server.handle(request("shutdown"));
+    assert.equal(closed.code, "interrupt_incomplete");
+    assert.equal(store.readState().receipts["model:shutdown"].response?.code, "interrupt_incomplete");
+    assert.equal(sends, 1);
   } finally { await server.close(); await rm(directory, { recursive: true, force: true }); }
 });
 
@@ -269,7 +307,8 @@ test("known prompt refusal stays idle; uncertain dispatch remains non-replayable
     available = true; revokeOnAbort = true; idle = false; server.running(true);
     const prompt = { operation: "prompt" as const, mode: "interrupt" as const, message: "replacement" };
     const refused = await callTuiWorker(manifest, prompt, { requestId: "interrupt" });
-    assert.equal(refused.ok, false); assert.equal(refused.code, "unavailable");
+    assert.equal(refused.ok, false); assert.equal(refused.code, "interrupt_incomplete");
+    assert.match(refused.message, /Cancellation was requested; replacement was not dispatched/);
     assert.equal(sends, 0); assert.equal(aborts, 1);
     assert.equal(store.readState().active, false);
     assert.deepEqual(await callTuiWorker(manifest, prompt, { requestId: "interrupt" }), refused);
