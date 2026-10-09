@@ -31,6 +31,17 @@ export default function deterministicWorkerProvider(pi: ExtensionAPI): void {
       else if (source.includes("RUN GUARDED CHECK") && !results.some((r: any) => r.toolName === "bash")) content = [{ type: "toolCall", id: "fixture-bash", name: "bash", arguments: { command: "printf guard-ok" } }];
       else if (source.includes("REPORT_OUTCOME") && !results.some((r: any) => r.toolName === "task_outcome")) content = [{ type: "toolCall", id: "fixture-outcome", name: "task_outcome", arguments: { version: 1, state: "delivered", summary: "Fixture outcome", acceptance: [{ criterion: "fixture", status: "passed", evidence: "Deterministic test" }], artifacts: [], remaining: [] } }];
       else if (source.includes("REPORT_OUTCOME") && !results.some((r: any) => r.toolName === "notify_parent")) content = [{ type: "toolCall", id: "fixture-note", name: "notify_parent", arguments: { message: "Routine fixture finding", requires_guidance: false } }];
+      if (source.includes("AUTO_ROUTINE")) {
+        const count = results.filter((r: any) => r.toolName === "task_outcome").length;
+        const continued = source.includes("One automatic continuation of the same assignment.");
+        if (count === 0 || continued && count === 1) {
+          const partial = count === 0 || source.includes("AUTO_REPEAT");
+          content = [{ type: "toolCall", id: `fixture-auto-${count}`, name: "task_outcome", arguments: {
+            version: 1, state: partial ? "partial" : "delivered", summary: partial ? "Routine fixture work remains" : "Automatic continuation finished",
+            acceptance: [{ criterion: "Routine continuation runs once", status: partial ? "not_run" : "passed", ...(!partial ? { evidence: "Continuation marker observed by provider" } : {}) }],
+            artifacts: [], remaining: partial ? ["Finish routine fixture"] : [], ...(partial ? { next_action: "Finish routine fixture", continuation: "routine" } : {}) } }];
+        }
+      }
       const message = { role: "assistant", content,
         api: "openai-completions", provider: "harness-test", model: "mock", stopReason: content[0]?.type === "toolCall" ? "toolUse" : "stop", timestamp: Date.now(),
         usage: { input: 1, output: 1, cacheRead: 0, cacheWrite: 0, totalTokens: 2,

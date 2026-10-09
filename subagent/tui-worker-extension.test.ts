@@ -9,6 +9,57 @@ import { processIdentity } from "./tui-worker-tmux.ts";
 import { callTuiWorker } from "./tui-worker-client.ts";
 import type { TuiWorkerManifest } from "../shared/tui-worker-protocol.ts";
 
+test("final boundary continues routine partial once, never blockers, errors or intervention", async () => {
+  for (const scenario of ["routine", "legacy-partial", "needs-input", "blocked", "checkpointed", "error", "aborted", "pending", "guidance", "ui", "user-input", "tool-error", "cancel", "sealed"] ) {
+    const root = await mkdtemp(join(tmpdir(), "pi-boundary-")), store = new TuiWorkerStore(root);
+    const manifest: TuiWorkerManifest = {
+      protocol: 1, ownerSessionId: "parent", taskId: "task", runtimeId: "runtime", groupId: `subagent-job-${"a".repeat(24)}`,
+      childId: `subagent-child-${"b".repeat(24)}`, attempt: 1, workerEpoch: "c".repeat(32), controlToken: "d".repeat(64),
+      controlSocket: join(root, "control.sock"), sessionFile: join(root, "session.jsonl"), launchMode: "none",
+      presentation: "background", placement: { socketPath: "/tmp/tmux", serverEpoch: "1:2", sessionId: "$1", windowId: "@1", paneId: "%1", ownershipNonce: "e".repeat(64) },
+    };
+    store.writeManifest(manifest);
+    const previous = process.env.PI_TUI_WORKER_MANIFEST;
+    process.env.PI_TUI_WORKER_MANIFEST = store.path("manifest.json");
+    const handlers = new Map<string, Function>(), tools = new Map<string, any>();
+    const ctx = { mode: "tui", hasUI: false, isIdle: () => true, hasPendingMessages: () => scenario === "pending",
+      abort() {}, shutdown() {}, getContextUsage: () => undefined,
+      sessionManager: { getSessionFile: () => manifest.sessionFile, getSessionId: () => "child-session" } };
+    try {
+      workerExtension({ registerTool(tool: any) { tools.set(tool.name, tool); }, on: (name: string, fn: Function) => handlers.set(name, fn) } as any);
+      await handlers.get("session_start")!({}, ctx);
+      handlers.get("agent_start")!({}, ctx);
+      const state = ["blocked", "checkpointed"].includes(scenario) ? scenario : "partial";
+      const outcome = { version: 1, state, summary: "Work remains", acceptance: [], artifacts: [], remaining: ["test"], next_action: "Run tests",
+        ...(state === "partial" && scenario !== "legacy-partial" ? { continuation: scenario === "needs-input" ? "needs_input" : "routine" } : {}) };
+      await tools.get("task_outcome").execute("outcome", outcome);
+      if (scenario === "guidance") await tools.get("notify_parent").execute("notify", { message: "Need decision", requires_guidance: true });
+      if (scenario === "ui") handlers.get("ui_prompt_start")!({}, ctx);
+      if (scenario === "user-input") {
+        handlers.get("input")!({ text: "User intervention", source: "interactive" }, ctx);
+        assert.equal(store.readState().autoContinuation?.inhibited, true);
+      }
+      if (scenario === "tool-error") handlers.get("tool_result")!({ isError: true }, ctx);
+      if (scenario === "cancel") await callTuiWorker(manifest, { operation: "cancel" });
+      if (scenario === "sealed") { await handlers.get("session_shutdown")!({}, ctx); }
+      const event = { outcome: ["error", "aborted"].includes(scenario) ? scenario : "completed", continue: false, context: { canContinue: false, pendingMessages: [] } };
+      const result = handlers.get("agent_before_settle")!(event, ctx);
+      assert.equal(result?.continue, scenario === "routine" ? true : undefined, scenario);
+      if (scenario === "routine") {
+        assert.equal(result.entries.length, 1);
+        assert.equal(store.readState().lastReport, undefined);
+        // A repeat outcome and another boundary cannot schedule a second request.
+        await tools.get("task_outcome").execute("outcome2", outcome);
+        assert.equal(handlers.get("agent_before_settle")!(event, ctx), undefined);
+      }
+    } finally {
+      await handlers.get("session_shutdown")?.({}, ctx);
+      if (previous === undefined) delete process.env.PI_TUI_WORKER_MANIFEST; else process.env.PI_TUI_WORKER_MANIFEST = previous;
+      await rm(root, { recursive: true, force: true });
+    }
+  }
+});
+
 test("TUI void abort waits for delayed settlement before sending replacement exactly once", async () => {
   const root = await mkdtemp(join(tmpdir(), "pi-void-abort-")), store = new TuiWorkerStore(root);
   const manifest: TuiWorkerManifest = {

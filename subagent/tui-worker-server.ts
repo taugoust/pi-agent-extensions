@@ -4,6 +4,7 @@ import { createHash, randomBytes, timingSafeEqual } from "node:crypto";
 import { decodeTuiWorkerRequest, TUI_WORKER_MAX_FRAME_BYTES } from "../shared/tui-worker-protocol.ts";
 import type { TuiWorkerEvent, TuiWorkerManifest, TuiWorkerRequest, TuiWorkerResponse } from "../shared/tui-worker-protocol.ts";
 import { TuiWorkerStore } from "./tui-worker-store.ts";
+import { readTaskOutcome } from "./outcome.ts";
 import type { WorkerState } from "./tui-worker-store.ts";
 
 export type TuiWorkerAdapter = {
@@ -87,7 +88,8 @@ export class TuiWorkerServer {
     return true;
   }
   settled(report: unknown): void {
-    if (this.closing || this.failed || this.preparingReap || !this.adapter.isIdle()) return;
+    if (this.closing || this.failed || this.preparingReap || !this.adapter.isIdle()
+      || this.state.phase === "settled" && !this.state.active) return;
     this.activityGeneration++;
     this.state.lastReport = this.store.report(this.state.sequence + 1, report);
     this.state.active = false;
@@ -134,6 +136,7 @@ export class TuiWorkerServer {
     this.currentLiveText = bytes.subarray(0, end).toString("utf8");
   }
   notification(data: unknown): void {
+    if ((data as any)?.requires_guidance === true) this.inhibitAutoContinuation();
     const artifact = this.store.artifact("notification", this.state.sequence + 1, data);
     this.event("notification", { artifact });
   }
@@ -141,6 +144,25 @@ export class TuiWorkerServer {
     const artifact = this.store.artifact("outcome", this.state.sequence + 1, data);
     this.state.lastOutcome = artifact;
     this.event("outcome", { artifact });
+  }
+  /** An external intervention closes this assignment's automatic-continuation window. */
+  inhibitAutoContinuation(): void {
+    this.state.autoContinuation = { used: this.state.autoContinuation?.used ?? false, inhibited: true };
+    this.persist();
+  }
+  /** Synchronous reservation before Pi's final actionable boundary. No replay after
+   * a crash between durable reservation and Pi accepting the continuation. */
+  claimAutoContinuation(): string | undefined {
+    if (this.sealed || this.preparingReap || this.state.phase !== "running"
+      || this.state.autoContinuation?.used || this.state.autoContinuation?.inhibited
+      || this.adapter.canRun?.() === false || !this.state.lastOutcome) return;
+    const outcome = readTaskOutcome(this.state.lastOutcome, this.manifest.acceptance ?? []);
+    if (outcome?.state !== "partial" || outcome.continuation !== "routine") return;
+    this.state.autoContinuation = { used: true, inhibited: false };
+    this.state.lastOutcome = undefined;
+    this.state.lastReport = undefined;
+    this.persist();
+    return "One automatic continuation of the same assignment. Continue only the routine remaining work already authorized by the original task and acceptance criteria. No additional authority is granted. Stop and report blocked if external input, permissions, safety decisions or scope changes are needed. This budget is now exhausted; report an updated task_outcome before returning. Recorded next action (model-reported): " + outcome.next_action;
   }
   private snapshot() {
     return { active: this.state.active || !this.adapter.isIdle(), sealed: this.sealed, phase: this.state.phase,
@@ -223,6 +245,7 @@ export class TuiWorkerServer {
         break;
       case "user_prompt":
       case "prompt":
+        if (r.operation === "user_prompt" || this.state.phase !== "ready") this.inhibitAutoContinuation();
         this.state.active = true;
         this.state.phase = "running";
         this.persist();
@@ -286,6 +309,7 @@ export class TuiWorkerServer {
         break;
       }
       case "cancel":
+        this.inhibitAutoContinuation();
         await this.adapter.clearQueue?.();
         await this.adapter.abort();
         this.state.active = !this.adapter.isIdle();
@@ -471,6 +495,7 @@ export class TuiWorkerServer {
     this.persist();
     // Ignore service return values: a service must throw on failure and must not
     // leak its capabilities into an otherwise public receipt.
+    if (this.state.phase !== "ready") this.inhibitAutoContinuation();
     await this.adapter.applyOperatorMode(r.enabled);
     const result = response({ ok: true, receipt: "applied", sequence: this.state.sequence });
     this.state.receipts[id].response = result;

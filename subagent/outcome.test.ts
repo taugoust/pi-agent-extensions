@@ -2,7 +2,7 @@ import assert from 'node:assert/strict';
 import { mkdtempSync, rmSync, symlinkSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
-import { validateTaskOutcome, validateAcceptance, writeTaskOutcome, readTaskOutcome, outcomeSummary } from './outcome.js';
+import { validateTaskOutcome, validateAcceptance, requireAcceptance, writeTaskOutcome, readTaskOutcome, outcomeSummary } from './outcome.js';
 const complete={version:1,state:'delivered',summary:'Implemented and tested',acceptance:[{criterion:'test passes',status:'passed',evidence:'test.log'}],artifacts:[{path:'test.log'}],remaining:[]};
 assert.equal(validateTaskOutcome(complete,['test passes']).state,'delivered');
 assert.throws(()=>validateTaskOutcome(complete,['missing criterion']),/all acceptance/);
@@ -12,6 +12,17 @@ assert.throws(()=>validateTaskOutcome({...complete,state:'partial'}),/next_actio
 assert.throws(()=>validateTaskOutcome({...complete,extra:true}),/fields/);
 assert.throws(()=>validateAcceptance([42]),/criterion/);
 assert.equal(outcomeSummary(1,undefined).state,'unreported');
+for(const missing of [undefined, []]) assert.throws(()=>requireAcceptance(missing),/New delegation requires acceptance/);
+assert.deepEqual(validateAcceptance(undefined),[], 'legacy criteria remain readable');
+assert.deepEqual(requireAcceptance(['Test the requested behavior']),['Test the requested behavior']);
+assert.throws(()=>requireAcceptance(['same',' same ']),/Duplicate/);
+assert.throws(()=>requireAcceptance(['  ']),/criterion/);
+const partial={...complete,state:'partial',remaining:['Run final tests'],next_action:'Run tests',continuation:'routine'};
+assert.equal(validateTaskOutcome(partial).continuation,'routine');
+for(const state of ['delivered','blocked','checkpointed']) assert.throws(()=>validateTaskOutcome({...partial,state}));
+assert.throws(()=>validateTaskOutcome({...partial,remaining:[]}),/requires remaining/);
+assert.throws(()=>validateTaskOutcome({...partial,acceptance:[{criterion:'test',status:'failed'}]}),/failed/);
+assert.throws(()=>validateTaskOutcome({...partial,continuation:'guess'}),/continuation/);
 const root=mkdtempSync(join(tmpdir(),'outcome-test-'));
 try {
  const file=join(root,'outcome.json');assert.equal(readTaskOutcome(file),undefined);

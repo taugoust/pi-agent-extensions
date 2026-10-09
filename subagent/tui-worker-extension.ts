@@ -250,7 +250,10 @@ export default function tuiWorkerExtension(pi: ExtensionAPI): void {
       else if (worker?.sealed || failed) stop(ctx);
       return { action: "handled" as const };
     }
-    try { worker!.running(); } catch (error) { fail(ctx, error); return { action: "handled" as const }; }
+    try {
+      if (worker!.state.phase !== "ready") worker!.inhibitAutoContinuation();
+      worker!.running();
+    } catch (error) { fail(ctx, error); return { action: "handled" as const }; }
     return { action: "continue" as const };
   });
   pi.on("before_agent_start", (event, ctx) => {
@@ -311,6 +314,29 @@ export default function tuiWorkerExtension(pi: ExtensionAPI): void {
       worker?.liveText(liveAssistantText);
     }
   });
+  pi.on("tool_result", (event, ctx) => {
+    if (event.isError) {
+      try { worker?.inhibitAutoContinuation(); } catch (error) { fail(ctx, error); }
+    }
+  });
+  pi.on("ui_prompt_start", (_event, ctx) => {
+    try { worker?.inhibitAutoContinuation(); } catch (error) { fail(ctx, error); }
+  });
+  pi.on("agent_before_settle", (event, ctx) => {
+    if (!worker || !allowed()) return;
+    try {
+      if (event.outcome !== "completed" || event.context.pendingMessages.length || ctx.hasPendingMessages()) {
+        worker.inhibitAutoContinuation();
+        return;
+      }
+      // A final assistant message is not runnable until our custom-message draft
+      // is appended. Pi evaluates canContinue again after applying boundary drafts.
+      if (event.continue) return;
+      const message = worker.claimAutoContinuation();
+      if (message) return { continue: true, entries: [{ type: "custom_message" as const,
+        customType: "harness-auto-continuation", content: message, display: true }] };
+    } catch (error) { fail(ctx, error); }
+  });
   pi.on("agent_settled", (_event, ctx) => {
     modelInactivity.end();
     if (!worker || failed || worker.sealed) return;
@@ -330,10 +356,10 @@ export default function tuiWorkerExtension(pi: ExtensionAPI): void {
       worker.notification({ message: params.message, requires_guidance: params.requires_guidance === true });
       return { content: [{ type: "text", text: "Queued for the parent; no reply yet." }], details: {} };
     } });
-  pi.registerTool({ name: "task_outcome", label: "Report task outcome", description: "Report what you delivered, with evidence. If incomplete, include remaining work and the next action.",
+  pi.registerTool({ name: "task_outcome", label: "Report task outcome", description: "Report delivery with evidence. Incomplete outcomes require remaining work and next_action. For partial only, continuation=routine explicitly attests that all remaining work is routine and already authorized, with no external dependency, failed check, safety decision or user input needed; permits at most one automatic continuation. Otherwise omit continuation or use needs_input; genuine blockers must use blocked. This is not new authority.",
     parameters: { type: "object", properties: { version: { type: "integer", const: 1 }, state: { type: "string", enum: ["delivered", "partial", "blocked", "checkpointed"] }, summary: { type: "string", maxLength: 2000 },
       acceptance: { type: "array", maxItems: 16, items: { type: "object", properties: { criterion: { type: "string" }, status: { type: "string", enum: ["passed", "failed", "not_run"] }, evidence: { type: "string" } }, required: ["criterion", "status"] } },
-      artifacts: { type: "array", maxItems: 16, items: { type: "object", properties: { path: { type: "string" }, sha256: { type: "string" } }, required: ["path"] } }, remaining: { type: "array", maxItems: 16, items: { type: "string" } }, next_action: { type: "string" } },
+      artifacts: { type: "array", maxItems: 16, items: { type: "object", properties: { path: { type: "string" }, sha256: { type: "string" } }, required: ["path"] } }, remaining: { type: "array", maxItems: 16, items: { type: "string" } }, next_action: { type: "string" }, continuation: { type: "string", enum: ["routine", "needs_input"] } },
       required: ["version", "state", "summary", "acceptance", "artifacts", "remaining"], additionalProperties: false } as any,
     async execute(_id, params: any) {
       if (!worker || worker.sealed) throw new Error("Worker outcome unavailable");

@@ -18,6 +18,81 @@ export function manifestAt(directory: string): TuiWorkerManifest {
     presentation: "background", launchMode: "none" };
 }
 
+test("routine continuation is durably single-use and interventions win before dispatch", async () => {
+  const directory = await mkdtemp(join(tmpdir(), "pi-continuation-"));
+  const store = new TuiWorkerStore(directory), manifest = manifestAt(directory);
+  store.writeManifest(manifest);
+  let authority = true;
+  const adapter = { isIdle: () => true, canRun: () => authority, send() {}, abort() {}, shutdown() {} };
+  let server = new TuiWorkerServer(store, adapter);
+  const partial = { version: 1, state: "partial", summary: "Routine tests remain", acceptance: [], artifacts: [], remaining: ["test"], next_action: "Run tests", continuation: "routine" };
+  try {
+    server.running(true); server.outcome(partial);
+    authority = false;
+    assert.equal(server.claimAutoContinuation(), undefined);
+    authority = true;
+    const first = server.claimAutoContinuation();
+    assert.match(first!, /No additional authority/);
+    assert.equal(store.readState().autoContinuation?.used, true);
+    assert.equal(store.readState().lastOutcome, undefined);
+    assert.equal(store.readState().lastReport, undefined, "no intermediate completion published");
+    assert.equal(server.claimAutoContinuation(), undefined);
+    await server.close();
+    server = new TuiWorkerServer(store, adapter);
+    server.running(true); server.outcome(partial);
+    assert.equal(server.claimAutoContinuation(), undefined, "reload must not replenish budget");
+    server.settled({ final: "Only final result" });
+    const settledSequence = store.readState().sequence, report = store.readState().lastReport;
+    server.settled({ final: "Duplicate boundary" });
+    assert.equal(store.readState().sequence, settledSequence, "duplicate settled event must not wake parent twice");
+    assert.equal(store.readState().lastReport, report);
+    await server.close();
+    server = new TuiWorkerServer(store, adapter);
+    server.settled({ final: "Reload replay" });
+    assert.equal(store.readState().sequence, settledSequence);
+    // A fresh explicit assignment is a new worker state, not a repeated report.
+    store.writeState({ version: 1, sequence: 0, active: false, sealed: false, phase: "ready", receipts: {}, events: [] });
+    server = new TuiWorkerServer(store, adapter);
+    server.running(true); server.outcome(partial);
+    await server.handle(workerRequest(manifest, { operation: "cancel" }, "cancel"));
+    assert.equal(server.claimAutoContinuation(), undefined);
+    assert.equal(store.readState().autoContinuation?.inhibited, true);
+    await server.close();
+    server = new TuiWorkerServer(store, adapter);
+    server.running(true); server.outcome(partial);
+    assert.equal(server.claimAutoContinuation(), undefined, "cancel inhibition survives reload and new outcomes");
+  } finally { await server.close(); await rm(directory, { recursive: true, force: true }); }
+});
+
+test("cancel intent inhibits continuation before asynchronous queue clearing; failed persistence fails closed", async () => {
+  const directory = await mkdtemp(join(tmpdir(), "pi-continuation-race-"));
+  const store = new TuiWorkerStore(directory), manifest = manifestAt(directory);
+  store.writeManifest(manifest);
+  let release!: () => void, started!: () => void, aborts = 0;
+  const entered = new Promise<void>(resolve => { started = resolve; });
+  const adapter = { isIdle: () => true, send() {}, abort() { aborts++; }, shutdown() {},
+    clearQueue() { started(); return new Promise<void>(resolve => { release = resolve; }); } };
+  const server = new TuiWorkerServer(store, adapter);
+  try {
+    server.running(true);
+    server.outcome({ version: 1, state: "partial", summary: "Routine work", acceptance: [], artifacts: [], remaining: ["test"], next_action: "test", continuation: "routine" });
+    const cancelling = server.handle(workerRequest(manifest, { operation: "cancel" }, "cancel-race"));
+    await entered;
+    assert.equal(server.claimAutoContinuation(), undefined, "cancel must win while clearQueue is pending");
+    assert.equal(store.readState().autoContinuation?.inhibited, true);
+    release(); await cancelling;
+    assert.equal(aborts, 1);
+    // Persistence failure before a boundary reservation must never dispatch.
+    server.state.autoContinuation = undefined;
+    const originalWrite = store.writeState.bind(store);
+    store.writeState = () => { throw new Error("disk failed"); };
+    assert.throws(() => server.claimAutoContinuation(), /disk failed/);
+    assert.equal(server.sealed, true);
+    assert.equal(server.claimAutoContinuation(), undefined);
+    store.writeState = originalWrite;
+  } finally { release?.(); await server.close(); await rm(directory, { recursive: true, force: true }); }
+});
+
 test("child-hosted control reconnects, deduplicates, observes direct work and seals idle reap", async () => {
   const directory = await mkdtemp(join(tmpdir(), "pi-worker-"));
   const store = new TuiWorkerStore(directory);

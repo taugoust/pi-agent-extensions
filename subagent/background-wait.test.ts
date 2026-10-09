@@ -510,7 +510,7 @@ async function agentSHIdentityCheck() {
     const tool = pi.tools.get("subagent");
     const started = await tool.execute("identity-background", {
       background: true,
-      tasks: [{ task: "duplicate source task" }, { task: "duplicate source task" }],
+      tasks: [{ task: "duplicate source task", acceptance: ["First child result retains its identity"] }, { task: "duplicate source task", acceptance: ["Second child result retains its identity"] }],
     }, undefined, undefined, ctx);
     assert.equal(started.details.backend, "agentsh");
     assert.deepEqual(started.details.children.map((child: any) => child.child), [1, 2]);

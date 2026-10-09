@@ -46,7 +46,7 @@ export default function rootTest(pi: ExtensionAPI) {
     return value.details.group;
   };
   const answerHeadlessInteraction = async (ctx: any, marker: string, answer: any, kind: string) => {
-    const pendingRun = tool.execute(`root-test-interaction-${marker}-${Date.now()}`, { task: marker, model: "harness-test/mock:off" }, undefined, undefined, ctx);
+    const pendingRun = tool.execute(`root-test-interaction-${marker}-${Date.now()}`, { task: marker, model: "harness-test/mock:off", acceptance: ["The requested typed interaction is answered and the worker completes"] }, undefined, undefined, ctx);
     void pendingRun.catch(() => undefined);
     const service = (globalThis as any)[FOREGROUND_TASKS_KEY];
     const deadline = Date.now() + 30_000;
@@ -119,7 +119,46 @@ export default function rootTest(pi: ExtensionAPI) {
     assert.equal(childEnvironment.find(entry => entry.startsWith("PI_PASEO_BRIDGE_NO_IMPORT=")), "PI_PASEO_BRIDGE_NO_IMPORT=1");
     assert.ok(!childEnvironment.some(entry => /^PI_PASEO_(?!BRIDGE_NO_IMPORT=)/.test(entry)), "parent Paseo identity/force/control variables leaked into worker");
     assert.equal(process.env.PI_PASEO_EXISTING_AGENT_ID, "malicious-parent-agent", "headless launch mutated parent Paseo binding");
-    const paused = await execute(ctx, { task: "PAUSE_BEFORE_TASK_OUTCOME", model: "harness-test/mock:off", background: true });
+    // Public launch API must reject missing/empty requirements without a worker.
+    const workersBeforeInvalid = discoverTuiWorkers(join(process.env.PI_TUI_WORKER_STATE_ROOT!, "workers"), ctx.sessionManager.getSessionId()).length;
+    for (const acceptance of [undefined, []]) {
+      const invalid = { task: "MUST_NOT_LAUNCH", acceptance, model: "harness-test/mock:off" };
+      await assert.rejects(() => execute(ctx, invalid), /requires acceptance/);
+      for (const shape of ["tasks", "chain"]) await assert.rejects(() => execute(ctx, { [shape]: [
+        { task: "VALID_BUT_MUST_NOT_LAUNCH", acceptance: ["No worker starts when another item is invalid"], model: "harness-test/mock:off" }, invalid], background: true }), /requires acceptance/);
+    }
+    assert.equal(discoverTuiWorkers(join(process.env.PI_TUI_WORKER_STATE_ROOT!, "workers"), ctx.sessionManager.getSessionId()).length, workersBeforeInvalid);
+    for (const background of [false, true]) {
+      const launched = await execute(ctx, { task: `AUTO_ROUTINE ${background ? "AUTO_REPEAT" : ""}`,
+        model: "harness-test/mock:off", acceptance: ["Routine continuation runs once"], background });
+      const group = background ? await wait(ctx, launched.details.job_id) : launched.details.group;
+      const autoWorker = discoverTuiWorkers(join(process.env.PI_TUI_WORKER_STATE_ROOT!, "workers"), ctx.sessionManager.getSessionId())
+        .find(worker => worker.taskId === group.children[0].task_id)!;
+      const autoStore = new TuiWorkerStore(dirname(autoWorker.sessionFile));
+      const state = autoStore.readState();
+      assert.equal(state.autoContinuation?.used, true, `real Pi did not request the bounded continuation: ${JSON.stringify({state, stdout: background ? undefined : autoStore.readRpcLogTail("stdout", 24000), transcript: await readFile(autoWorker.sessionFile, "utf8")}).slice(-30000)}`);
+      assert.equal(state.events.filter(event => event.kind === "settled").length, 1, "intermediate partial emitted completion");
+      const session = (await readFile(autoWorker.sessionFile, "utf8")).split("\n").filter(Boolean).map(line => JSON.parse(line));
+      assert.equal(session.filter(entry => entry.type === "custom_message" && entry.customType === "harness-auto-continuation").length, 1);
+      const finalOutcome = JSON.parse(await readFile(state.lastOutcome!, "utf8"));
+      assert.equal(finalOutcome.state, background ? "partial" : "delivered");
+      assert.deepEqual(autoWorker.acceptance, ["Routine continuation runs once"]);
+      if (background) {
+        const beforeReload = state.sequence;
+        const placement = autoWorker.placement!;
+        await promisify(execFile)("tmux", ["-S", placement.socketPath, "send-keys", "-t", placement.paneId, "-l", "/reload"]);
+        await promisify(execFile)("tmux", ["-S", placement.socketPath, "send-keys", "-t", placement.paneId, "Enter"]);
+        const deadline = Date.now() + 30_000;
+        while (Date.now() < deadline && !autoStore.readState().events.some(event => event.kind === "ready" && event.sequence > beforeReload)) await sleep(100);
+        const reloaded = autoStore.readState();
+        assert.ok(reloaded.events.some(event => event.kind === "ready" && event.sequence > beforeReload), "actual worker extension reload did not complete");
+        assert.equal(reloaded.autoContinuation?.used, true, "worker reload replenished consumed budget");
+        assert.equal(reloaded.events.filter(event => event.kind === "settled").length, 1, "reload duplicated final settlement");
+        assert.equal(reloaded.lastOutcome, state.lastOutcome);
+      }
+      await execute(ctx, { operation: "reap", job_id: launched.details.job_id });
+    }
+    const paused = await execute(ctx, { task: "PAUSE_BEFORE_TASK_OUTCOME", model: "harness-test/mock:off", background: true, acceptance: ["Cancellation does not record the incomplete streamed outcome"] });
     const pauseDeadline = Date.now() + 30_000;
     let pausedWorker: any, pausedState: any, pausedMarker: any;
     while (Date.now() < pauseDeadline) {
@@ -243,7 +282,7 @@ export default function rootTest(pi: ExtensionAPI) {
     assert.equal(headlessAttempt3.details.group.children[0].attempt, 3);
     await execute(ctx, { operation: "reap", job_id: headlessAttempt3.details.job_id });
     process.env.PI_TUI_TEST_HEADLESS_START_DELAY_MS = "2000";
-    const startupStop = tool.execute(`root-test-startup-stop-${Date.now()}`, { task: "STARTUP_STOP_SENTINEL", model: "harness-test/mock:off" }, undefined, undefined, ctx);
+    const startupStop = tool.execute(`root-test-startup-stop-${Date.now()}`, { task: "STARTUP_STOP_SENTINEL", model: "harness-test/mock:off", acceptance: ["Stop before startup prevents the initial task from running"] }, undefined, undefined, ctx);
     void startupStop.catch(() => undefined);
     let delayedTask: any;
     const delayedDeadline = Date.now() + 10_000;
@@ -270,7 +309,7 @@ export default function rootTest(pi: ExtensionAPI) {
     assert.equal(startupState.sealed, true);
     assert.ok(startupState.jobCleanup);
     let orphanFailure: string | undefined;
-    const orphanTask = tool.execute(`root-test-owner-loss-${Date.now()}`, { task: "WAIT_FOR_PARENT OWNER_LOSS_HEADLESS", model: "harness-test/mock:off" }, undefined, undefined, ctx);
+    const orphanTask = tool.execute(`root-test-owner-loss-${Date.now()}`, { task: "WAIT_FOR_PARENT OWNER_LOSS_HEADLESS", model: "harness-test/mock:off", acceptance: ["Owner loss safely terminates the headless worker"] }, undefined, undefined, ctx);
     void orphanTask.catch(error => { orphanFailure = String(error); });
     let orphanManifest: TuiWorkerManifest | undefined;
     let orphanStatusError: string | undefined;
@@ -320,7 +359,7 @@ export default function rootTest(pi: ExtensionAPI) {
       await sleep(100);
     }
     assert.ok((await callTuiWorker(orphanManifest, { operation: "status" })).data?.active, "trusted user prompt after Stop must run");
-    const started = await execute(ctx, { task: "WAIT_FOR_PARENT", model: "harness-test/mock:off", background: true });
+    const started = await execute(ctx, { task: "WAIT_FOR_PARENT", model: "harness-test/mock:off", background: true, acceptance: ["The worker survives parent reload and accepts explicit follow-up"] });
     const deadline = Date.now() + 30_000;
     let group: any;
     while (Date.now() < deadline) {
@@ -381,7 +420,7 @@ export default function rootTest(pi: ExtensionAPI) {
     // An explicit compact of this tiny session is a safe no-op. Its subsequent
     // low-context checkpoint resume must continue normally, retaining history
     // without leaving the worker's activity reservation latched.
-    const small = await execute(ctx, { task: "CHECKPOINT_SMALL", model: "harness-test/mock:off", background: true });
+    const small = await execute(ctx, { task: "CHECKPOINT_SMALL", model: "harness-test/mock:off", background: true, acceptance: ["A small checkpoint resumes without duplicate compaction"] });
     const smallGroup = await wait(ctx, small.details.job_id);
     assert.equal(smallGroup.children[0].task_outcome?.state, "checkpointed");
     const smallWorker = manifestFor(smallGroup);
@@ -403,7 +442,7 @@ export default function rootTest(pi: ExtensionAPI) {
     assert.equal(retainedTranscript.split("\n").filter(Boolean).map(line => JSON.parse(line)).some(entry => entry.type === "compaction"), false, "small-session no-op unexpectedly compacted context");
     await execute(ctx, { operation: "reap", job_id: small.details.job_id });
     // Real root API inventory/waits must cover the legacy manager as well.
-    const nativeWait = await execute(ctx, { task: "WAIT_FOR_PARENT mixed waits", model: "harness-test/mock:off", background: true });
+    const nativeWait = await execute(ctx, { task: "WAIT_FOR_PARENT mixed waits", model: "harness-test/mock:off", background: true, acceptance: ["Mixed backend waits retain the same live worker"] });
     const legacyManager = sharedBackgroundSubagentManager(join(getAgentDir(), "state", "background-subagents-v1"));
     let finishLegacy!: (value: any) => void;
     const legacy = await legacyManager.start({ sessionId: ctx.sessionManager.getSessionId(), backend: "agentsh", mode: "single", summary: "Deterministic legacy wait fixture", children: [{ label: "legacy fixture" }] }, () => new Promise(resolve => { finishLegacy = resolve; }));
@@ -426,7 +465,7 @@ export default function rootTest(pi: ExtensionAPI) {
     await execute(ctx, { operation: "reap", job_id: nativeWait.details.job_id });
     const gate = (globalThis as any).__PAE_PERMISSION_GATE_OPERATOR_V1__;
     gate?.applyMode(ctx.sessionManager.getSessionId(), false);
-    const localJobs = await execute(ctx, { task: "RUN_LOCAL_JOB", model: "harness-test/mock:off", background: true });
+    const localJobs = await execute(ctx, { task: "RUN_LOCAL_JOB", model: "harness-test/mock:off", background: true, acceptance: ["Child-local jobs remain inspectable and clean up on reap"] });
     const jobsGroup = await wait(ctx, localJobs.details.job_id);
     const jobsWorker = manifestFor(jobsGroup);
     const beforeJobs = (await callTuiWorker(jobsWorker, { operation: "status" }) as any).data;
@@ -462,7 +501,7 @@ export default function rootTest(pi: ExtensionAPI) {
     const panes = (await promisify(execFile)("tmux", ["-S", jobsWorker.placement.socketPath, "list-panes", "-a", "-F", "#{pane_id}"])).stdout.split("\n");
     assert.ok(!panes.includes(ownedJobs[0].pane_id), "parent reap left the child-owned job pane orphaned");
     const parallel = await execute(ctx, { tasks: [
-      { task: "ASSERT_READ_ONLY", model: "harness-test/mock:off", tools: ["read"] },
+      { task: "ASSERT_READ_ONLY", model: "harness-test/mock:off", tools: ["read"], acceptance: ["Only read and harness reporting tools are exposed"] },
       { task: `${gate ? "RUN GUARDED CHECK " : ""}REPORT_OUTCOME`, model: "harness-test/mock:off", acceptance: ["fixture"] },
     ], background: true });
     const parallelGroup = await wait(ctx, parallel.details.job_id);
@@ -494,8 +533,8 @@ export default function rootTest(pi: ExtensionAPI) {
     await execute(ctx, { operation: "reap", job_id: parallel.details.job_id });
     // Esc on the first chain step must not advance to the next assignment.
     const cancelledChain = await execute(ctx, { chain: [
-      { task: "WAIT_FOR_PARENT human Esc", model: "harness-test/mock:off" },
-      { task: "Must never start", model: "harness-test/mock:off" },
+      { task: "WAIT_FOR_PARENT human Esc", model: "harness-test/mock:off", acceptance: ["Human Escape cancels the active chain step"] },
+      { task: "Must never start", model: "harness-test/mock:off", acceptance: ["The cancelled chain never starts this step"] },
     ], background: true });
     const waiting = (await execute(ctx, { operation: "status", job_id: cancelledChain.details.job_id })).details.group;
     await sleep(400); await keys(manifestFor(waiting), "Escape");
@@ -505,8 +544,8 @@ export default function rootTest(pi: ExtensionAPI) {
     assert.equal(cancelled.children[1].runtime, undefined);
     await execute(ctx, { operation: "reap", job_id: cancelledChain.details.job_id });
     const chain = await execute(ctx, { chain: [
-      { task: "First chain step", model: "harness-test/mock:off" },
-      { task: "Second chain step uses {previous}", model: "harness-test/mock:off" },
+      { task: "First chain step", model: "harness-test/mock:off", acceptance: ["First step completes before second step starts"] },
+      { task: "Second chain step uses {previous}", model: "harness-test/mock:off", acceptance: ["Previous result is substituted into the second step"] },
     ], background: true });
     const chainGroup = await wait(ctx, chain.details.job_id);
     assert.equal(chainGroup.children[0].runtime.placement.windowId, chainGroup.children[1].runtime.placement.windowId);
@@ -514,7 +553,7 @@ export default function rootTest(pi: ExtensionAPI) {
     await execute(ctx, { operation: "reap", job_id: chain.details.job_id });
     // Default foreground is headless and cannot be promoted into a background TUI group.
     let foregroundJobId: string | undefined;
-    const foreground = tool.execute(`root-test-headless-promote-${Date.now()}`, { task: "WAIT_FOR_PARENT foreground", model: "harness-test/mock:off" }, undefined,
+    const foreground = tool.execute(`root-test-headless-promote-${Date.now()}`, { task: "WAIT_FOR_PARENT foreground", model: "harness-test/mock:off", acceptance: ["Headless foreground work remains controllable without a pane"] }, undefined,
       (partial: any) => { foregroundJobId = partial.details?.job_id ?? foregroundJobId; }, ctx);
     const foregroundDeadline = Date.now() + 10_000;
     while (!foregroundJobId && Date.now() < foregroundDeadline) await sleep(50);

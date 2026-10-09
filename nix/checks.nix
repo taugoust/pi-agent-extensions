@@ -3778,13 +3778,13 @@ in
             assert(subagentTool, "REST mode did not register subagent tool");
             assert(!("timeout_ms" in subagentTool.parameters.properties), "model-facing subagent timeout override was exposed by default");
 
-            await subagentTool.execute("inherit-model", { task: "ok" }, undefined, undefined, ctx);
-            await subagentTool.execute("explicit-model", { task: "ok", model: "google/gemini-pro" }, undefined, undefined, ctx);
-            await subagentTool.execute("parallel-model", { tasks: [{ task: "one" }, { task: "two", model: "anthropic/claude-sonnet" }] }, undefined, undefined, ctx);
-            await subagentTool.execute("relative-single-cwd", { task: "ok", cwd: "rtl/package" }, undefined, undefined, ctx);
-            await subagentTool.execute("relative-parallel-cwd", { tasks: [{ task: "one" }, { task: "two", cwd: "../shared" }] }, undefined, undefined, ctx);
-            await subagentTool.execute("short-timeout", { task: "ok", timeout_ms: 1234 }, undefined, undefined, ctx);
-            await subagentTool.execute("long-timeout", { task: "ok", timeout_ms: 10800000 }, undefined, undefined, ctx);
+            await subagentTool.execute("inherit-model", { task: "ok", acceptance: ["Configured default model is passed to the backend"] }, undefined, undefined, ctx);
+            await subagentTool.execute("explicit-model", { task: "ok", model: "google/gemini-pro", acceptance: ["Explicit model selection is preserved"] }, undefined, undefined, ctx);
+            await subagentTool.execute("parallel-model", { tasks: [{ task: "one", acceptance: ["Default model is preserved"] }, { task: "two", model: "anthropic/claude-sonnet", acceptance: ["Explicit model is preserved"] }] }, undefined, undefined, ctx);
+            await subagentTool.execute("relative-single-cwd", { task: "ok", cwd: "rtl/package", acceptance: ["Relative working directory resolves against parent cwd"] }, undefined, undefined, ctx);
+            await subagentTool.execute("relative-parallel-cwd", { tasks: [{ task: "one", acceptance: ["Parent cwd is preserved"] }, { task: "two", cwd: "../shared", acceptance: ["Relative cwd resolves against parent cwd"] }] }, undefined, undefined, ctx);
+            await subagentTool.execute("short-timeout", { task: "ok", timeout_ms: 1234, acceptance: ["Short explicit timeout is forwarded"] }, undefined, undefined, ctx);
+            await subagentTool.execute("long-timeout", { task: "ok", timeout_ms: 10800000, acceptance: ["Long explicit timeout is forwarded"] }, undefined, undefined, ctx);
 
             process.env.PI_AGENTSH_EXPOSE_SUBAGENT_TIMEOUT = "1";
             const timeoutOptInPi = createPi();
@@ -3792,7 +3792,7 @@ in
             await startSession(timeoutOptInPi, ctx);
             const timeoutOptInTool = timeoutOptInPi.tools.get("subagent");
             assert(timeoutOptInTool && "timeout_ms" in timeoutOptInTool.parameters.properties, "operator opt-in did not expose the model-facing subagent timeout override");
-            await timeoutOptInTool.execute("opt-in-timeout", { task: "ok", timeout_ms: 1234 }, undefined, undefined, ctx);
+            await timeoutOptInTool.execute("opt-in-timeout", { task: "ok", timeout_ms: 1234, acceptance: ["Opt-in timeout is exposed and forwarded"] }, undefined, undefined, ctx);
             delete process.env.PI_AGENTSH_EXPOSE_SUBAGENT_TIMEOUT;
 
             const spawnRequests = supervisor.requests.filter((request) => request.method === "POST" && request.url.endsWith("/tools/spawn_subagent"));
@@ -4020,7 +4020,7 @@ in
 
             const subagentTool = pi.tools.get("subagent");
             const updates = [];
-            const toolResult = await subagentTool.execute("stream-utf8", { task: "utf8" }, undefined, (update) => updates.push(update), ctx);
+            const toolResult = await subagentTool.execute("stream-utf8", { task: "utf8", acceptance: ["Streaming retains valid UTF-8 text"] }, undefined, (update) => updates.push(update), ctx);
             const serializedUpdates = JSON.stringify(updates);
             assert(serializedUpdates.includes(visible), "split UTF-8 child answer was not preserved in streamed updates");
             assert(!serializedUpdates.includes("�"), "split UTF-8 introduced a replacement character");
@@ -4035,7 +4035,7 @@ in
             assert(toolResult.content[0].text.includes(visible), "parent-facing result omitted the retained live final answer");
             assert((await applyToolResultHandlers(pi, "subagent", toolResult, ctx)).isError === false, "completed typed terminal was marked as an error");
 
-            const artifactToolResult = await subagentTool.execute("stream-artifact", { task: "artifact-overflow" }, undefined, undefined, ctx);
+            const artifactToolResult = await subagentTool.execute("stream-artifact", { task: "artifact-overflow", acceptance: ["Oversized output is retained in an artifact"] }, undefined, undefined, ctx);
             assert(artifactToolResult.details.results[0].fullResultPath === artifactPath, "remote subagent artifact path was not retained");
             assert(artifactToolResult.details.fullResultPath === artifactPath, "single-result top-level artifact path was not mirrored");
             assert(artifactToolResult.content[0].text.includes(artifactPath), "parent-facing result omitted remote artifact path");
@@ -4043,7 +4043,7 @@ in
             const artifactSpawnRequest = supervisor.requests.find((request) => request.method === "POST" && request.url.endsWith("/tools/spawn_subagent") && request.body.task === "artifact-overflow");
             assert(artifactSpawnRequest?.body.result_artifact_threshold_bytes === 4096, "extension did not request the 4 KiB remote artifact threshold");
 
-            const backgroundStart = await subagentTool.execute("background-artifact", { task: "artifact-overflow", background: true }, undefined, undefined, ctx);
+            const backgroundStart = await subagentTool.execute("background-artifact", { task: "artifact-overflow", background: true, acceptance: ["Background output is retained in a paginated artifact"] }, undefined, undefined, ctx);
             const backgroundID = backgroundStart.details.job_id;
             assert(/^subagent-job-[0-9a-f]{24}$/.test(backgroundID), "background AgentSH launch omitted its opaque job ID");
             let backgroundWait;
@@ -4073,13 +4073,13 @@ in
             const readArtifactResult = await readTool.execute("read-artifact", { path: artifactPath }, undefined, undefined, ctx);
             assert(readArtifactResult.content[0].text.includes(artifactTail), "supervised read did not retrieve remote artifact tail");
 
-            const failedToolResult = await subagentTool.execute("stream-failure", { task: "typed-failure" }, undefined, undefined, ctx);
+            const failedToolResult = await subagentTool.execute("stream-failure", { task: "typed-failure", acceptance: ["Typed backend failure is reported without claiming delivery"] }, undefined, undefined, ctx);
             assert(failedToolResult.details.terminal.state === "failed", "typed failed terminal was not preserved");
             assert(failedToolResult.details.results[0].terminal.failureKind === "model", "child failure kind was not normalized");
             assert(failedToolResult.content[0].text.includes("model failed"), "typed failure diagnostic was reduced to a generic stop reason");
             assert((await applyToolResultHandlers(pi, "subagent", failedToolResult, ctx)).isError === true, "failed child task was not marked as an error by the Pi tool-result event path");
 
-            const typedTimeoutResult = await subagentTool.execute("stream-typed-timeout", { task: "typed-timeout", timeout_ms: 40 }, undefined, undefined, ctx);
+            const typedTimeoutResult = await subagentTool.execute("stream-typed-timeout", { task: "typed-timeout", timeout_ms: 40, acceptance: ["Typed timeout remains distinct from delivery"] }, undefined, undefined, ctx);
             assert(typedTimeoutResult.details.terminal.state === "timed_out", "server execution deadline was not preserved as a typed timeout");
             assert(typedTimeoutResult.details.terminal.failureKind === "process", "server execution timeout was replaced by a client transport timeout while awaiting HTTP EOF");
             assert(typedTimeoutResult.details.terminal.cancellationCause === "request_timeout", "server timeout lost its cancellation cause");
@@ -4089,7 +4089,7 @@ in
             const typedTimeoutRequest = supervisor.requests.find((request) => request.method === "POST" && request.url.endsWith("/tools/spawn_subagent") && request.body.task === "typed-timeout");
             assert(typedTimeoutRequest?.body.timeout_ms === 40, "explicit execution deadline was not sent to AgentSH");
 
-            const clientTimeoutResult = await subagentTool.execute("stream-client-timeout", { tasks: [{ task: "completed" }, { task: "client-timeout" }], timeout_ms: 40 }, undefined, undefined, ctx);
+            const clientTimeoutResult = await subagentTool.execute("stream-client-timeout", { tasks: [{ task: "completed", acceptance: ["Completed sibling result is retained"] }, { task: "client-timeout", acceptance: ["Timed-out sibling remains distinguishable"] }], timeout_ms: 40 }, undefined, undefined, ctx);
             assert(clientTimeoutResult.details.terminal.state === "timed_out", "client transport deadline was reported as a generic failure");
             assert(clientTimeoutResult.details.terminal.failureKind === "transport", "client transport timeout lost its fallback classification");
             assert(clientTimeoutResult.details.terminal.cancellationCause === "request_timeout", "client transport timeout lost its deadline cause");
@@ -4100,7 +4100,7 @@ in
             assert(clientTimeoutResult.content[0].text.includes("subagent timed out"), "client timeout was rendered as a generic transport failure");
             assert((await applyToolResultHandlers(pi, "subagent", clientTimeoutResult, ctx)).isError === true, "client timeout was not marked as an error by the Pi tool-result event path");
 
-            const dishonestToolUseResult = await subagentTool.execute("stream-dishonest-tool-use", { task: "dishonest-tool-use" }, undefined, undefined, ctx);
+            const dishonestToolUseResult = await subagentTool.execute("stream-dishonest-tool-use", { task: "dishonest-tool-use", acceptance: ["Unsettled tool-use output cannot claim completion"] }, undefined, undefined, ctx);
             assert(dishonestToolUseResult.details.terminal.state === "failed", "tool-use message_end was accepted as completed parent result");
             assert(dishonestToolUseResult.details.results[0].terminal.failureKind === "protocol", "tool-use completion was not classified as a protocol failure");
             assert(dishonestToolUseResult.details.results[0].modelStopReason === "toolUse", "tool-use model stop reason was lost");
@@ -4109,7 +4109,7 @@ in
             assert((await applyToolResultHandlers(pi, "subagent", dishonestToolUseResult, ctx)).isError === true, "dishonest tool-use completion was not marked as an error by the Pi tool-result event path");
 
             const ordinalResult = await subagentTool.execute("stream-ordinal-duplicates", {
-              tasks: [{ task: "ordinal-duplicate" }, { task: "ordinal-duplicate" }],
+              tasks: [{ task: "ordinal-duplicate", acceptance: ["First ordinal retains its identity"] }, { task: "ordinal-duplicate", acceptance: ["Second ordinal retains its identity"] }],
             }, undefined, undefined, ctx);
             assert(JSON.stringify(ordinalResult.details.results.map((child) => [child.child, child.final])) === JSON.stringify([
               [2, "second ordinal"], [1, "first ordinal"],
@@ -4119,7 +4119,7 @@ in
               [2, "second ordinal"], [1, "first ordinal"],
             ]), "AgentSH retained reports lost authoritative launch ordinals: " + JSON.stringify(ordinalReports));
 
-            const partialTransportResult = await subagentTool.execute("stream-partial-transport", { task: "partial-transport" }, undefined, undefined, ctx);
+            const partialTransportResult = await subagentTool.execute("stream-partial-transport", { task: "partial-transport", acceptance: ["Partial transport retains completed output"] }, undefined, undefined, ctx);
             assert(partialTransportResult.details.terminal.state === "failed", "missing terminal stream event was not reported as transport failure");
             assert(partialTransportResult.details.results[0].terminal.state === "completed", "outer transport failure overwrote an already-completed parallel child");
             assert(partialTransportResult.details.results[0].lastAssistantText === "completed-before-transport-failure", "completed child answer was lost during parallel cancellation reduction");
@@ -4129,7 +4129,7 @@ in
 
             const abortController = new AbortController();
             const abortTimer = setTimeout(() => abortController.abort(), 500);
-            const cancelledToolResult = await subagentTool.execute("stream-cancel", { tasks: [{ task: "cancel-stream" }, { task: "wait-for-cancel" }] }, abortController.signal, (update) => {
+            const cancelledToolResult = await subagentTool.execute("stream-cancel", { tasks: [{ task: "cancel-stream", acceptance: ["Completed output survives sibling cancellation"] }, { task: "wait-for-cancel", acceptance: ["Cancellation terminates the pending sibling"] }] }, abortController.signal, (update) => {
               const children = update?.details?.results ?? [];
               if (children.some((child) => child.label === "task 1" && child.terminal?.state === "completed") && children.some((child) => child.label === "task 2")) abortController.abort();
             }, ctx);
@@ -4367,7 +4367,7 @@ in
             assert(malformed.includes("AgentSH request failed") && !malformed.includes("raw-internal-secret") && !malformed.includes("private/shadow") && !malformed.includes("HTTP 500"), "malformed response leaked raw diagnostics: " + malformed);
             const ambiguous = await capture(() => readTool.execute("domain-ambiguous", { path: "/workspace/ambiguous.txt" }, undefined, undefined, ctx));
             assert(ambiguous.includes("AgentSH request failed") && !ambiguous.includes("File not found") && !ambiguous.includes("does not support") && !ambiguous.includes("private/shadow"), "ambiguous legacy 404 was misclassified: " + ambiguous);
-            const unsupportedResult = await subagentTool.execute("domain-subagent", { task: "unsupported" }, undefined, undefined, ctx);
+            const unsupportedResult = await subagentTool.execute("domain-subagent", { task: "unsupported", acceptance: ["Unsupported backend operation reports a domain error"] }, undefined, undefined, ctx);
             const unsupported = JSON.stringify(unsupportedResult);
             assert((await applyToolResultHandlers(pi, "subagent", unsupportedResult, ctx)).isError === true && unsupported.includes("does not support spawn_subagent") && !unsupported.includes("HTTP 404"), "typed unsupported endpoint was not actionable or marked as a Pi tool error: " + unsupported);
             const sessionLost = await capture(() => readTool.execute("domain-session", { path: "/workspace/session.txt" }, undefined, undefined, ctx));

@@ -76,7 +76,7 @@ import { DetachableForegroundExecution } from "./foreground-handoff.js";
 import { NativeSubagentRpcSession, spawnNativeSubagentProcess, type NativeSubagentRpcDiagnostics } from "./native-rpc.js";
 import { waitForGroupSnapshot } from "./group-wait.ts";
 import { parentJobBroker, validateJobParams } from "../shared/background-job.js";
-import { validateAcceptance, readTaskOutcome, outcomeSummary, type TaskOutcome, type TaskOutcomeSummary } from "./outcome.js";
+import { validateAcceptance, requireAcceptance, readTaskOutcome, outcomeSummary, type TaskOutcome, type TaskOutcomeSummary } from "./outcome.js";
 import { NativeTaskStore, createTaskId, TASK_ID_PATTERN, type NativeTaskRecord } from "./resume.js";
 import { SUBAGENT_NAME_MAX_LENGTH, SUBAGENT_NAME_PATTERN, validateSubagentName, withoutSubagentNames } from "./tui-names.js";
 import { registerTaskDashboard } from "./dashboard.js";
@@ -1577,7 +1577,7 @@ const SubagentName = Type.Optional(Type.String({ minLength: 1, maxLength: SUBAGE
 
 const SubagentItem = Type.Object({
   name: SubagentName,
-  acceptance: Type.Optional(Type.Array(Type.String({maxLength:500}), {maxItems:16, description:"Acceptance criteria for the structured task outcome."})),
+  acceptance: Type.Array(Type.String({minLength:1, maxLength:500}), {minItems:1, maxItems:16, description:"Required for each new task: explicit task-specific, verifiable completion criteria. Preserved verbatim; never inferred from the prompt."}),
   task: Type.String({ description: "Task to delegate to this dynamic subagent" }),
   systemPrompt: Type.Optional(Type.String({ description: "Optional additional system prompt for this subagent" })),
   model: Type.Optional(Type.String({ description: `Model override, optionally provider/id:thinking. Default: ${defaultSubagentModel}.` })),
@@ -1591,7 +1591,7 @@ function subagentParams() {
   // Launch overrides must never be silently dropped from a resume/control call.
   return Type.Object({
   name: SubagentName,
-  acceptance: Type.Optional(Type.Array(Type.String({maxLength:500}), {maxItems:16, description:"Launch only: acceptance criteria for the structured task outcome."})),
+  acceptance: Type.Optional(Type.Array(Type.String({minLength:1, maxLength:500}), {minItems:1, maxItems:16, description:"Launch only: required for a new single task; explicit task-specific, verifiable completion criteria. Controls/resumes retain stored criteria, including legacy tasks."})),
   task_id: Type.Optional(Type.String({pattern:"^subagent-task-[0-9a-f]{24}$",description:"Resume only: required stable native task ID. Use operation=resume with only task_id, optional message and compact; never task/model/background."})),
   compact: Type.Optional(Type.Boolean({description:"Resume only: explicitly request compaction before continuing. High measured context usage selects it automatically; a checkpointed outcome alone does not require it."})),
   mode: Type.Optional(Type.String({ pattern: "^(shared|draft)$", description: "Launch/Draft disposition only, never with operation: execution isolation. Omitted/shared uses AgentSH when configured, otherwise a native child; draft requires AgentSH." })),
@@ -1614,8 +1614,8 @@ function subagentParams() {
   model: Type.Optional(Type.String({ description: `Launch only: model override (single mode), optionally provider/id:thinking. Default: ${defaultSubagentModel}. Not accepted by resume; it retains the saved model.` })),
   tools: Type.Optional(Type.Array(Type.String(), { description: "Launch only: optional tool allowlist (single mode). Not accepted by resume." })),
   cwd: Type.Optional(Type.String({ description: "Launch only: optional working directory (single mode). Not accepted by resume." })),
-  tasks: Type.Optional(Type.Array(SubagentItem, { maxItems: MAX_PARALLEL_TASKS, description: "Launch only: parallel subagent tasks. Max 8, up to 4 run concurrently." })),
-  chain: Type.Optional(Type.Array(SubagentItem, { maxItems: MAX_PARALLEL_TASKS, description: "Launch only: sequential subagent steps. Max 8; each task may use {previous}." })),
+  tasks: Type.Optional(Type.Array(SubagentItem, { maxItems: MAX_PARALLEL_TASKS, description: "Launch only: parallel subagent tasks; each item requires acceptance criteria. Max 8, up to 4 run concurrently." })),
+  chain: Type.Optional(Type.Array(SubagentItem, { maxItems: MAX_PARALLEL_TASKS, description: "Launch only: sequential subagent steps; each item requires acceptance criteria. Max 8; each task may use {previous}." })),
     ...(process.env.PI_AGENTSH_EXPOSE_SUBAGENT_TIMEOUT === "1" ? {
       timeout_ms: Type.Optional(Type.Number({ minimum: 1, description: "Launch only: optional shorter AgentSH execution timeout in milliseconds." })),
     } : {}),
@@ -2108,6 +2108,8 @@ export default function (pi: ExtensionAPI) {
     label: "Subagent",
     description: [
       "Delegate a task, parallel tasks, or a chain through AgentSH or native Pi workers.",
+      "Every new single task and each parallel/chain item requires nonempty explicit acceptance criteria; missing criteria reject before launch. Retained resumes preserve existing criteria.",
+      "Linux native workers may continue once in the same session for explicitly routine authorized partial work; blockers/intervention return immediately. Other backends retain explicit parent control.",
       "For new launches omit operation; set background=true to continue while they run. Never mix launch options with operation.",
       'Resume shape: {operation:"resume",task_id,message?,compact?}; saved model/tools/cwd are preserved; execution placement follows the retained backend, not launch overrides. Use message, not task.',
       'Prompt shape: {operation:"prompt",child_id,message,job_id?,control_mode?,wait_for_response?}; optional job_id must match the child’s group.',
@@ -2508,7 +2510,7 @@ export default function (pi: ExtensionAPI) {
       // Set launch defaults before routing to either backend. Explicit model
       // selections (including Pi's :thinking suffix) remain authoritative.
       const withDefaultModel = (spec: any) => {
-        return { ...spec, model: resolveSubagentModel(spec.model, subagentModelSettings) };
+        return { ...spec, ...(!params.operation ? { acceptance: requireAcceptance(spec.acceptance) } : {}), model: resolveSubagentModel(spec.model, subagentModelSettings) };
       };
       if (!params.action) {
         if (Array.isArray(params.tasks)) params = { ...params, tasks: params.tasks.map(withDefaultModel) };

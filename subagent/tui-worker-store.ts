@@ -10,6 +10,8 @@ export type WorkerState = {
   phase: "ready" | "running" | "settled" | "closing";
   receipts: Record<string, WorkerReceipt>; events: TuiWorkerEvent[];
   lastReport?: string; lastOutcome?: string; reapReservation?: string;
+  /** Durable fail-closed budget: never replenished by reload, steering or repeated outcomes. */
+  autoContinuation?: { used: boolean; inhibited: boolean };
   jobCleanup?: { workerEpoch: string; artifact: string };
   interactions?: Array<import("../shared/foreground-tasks.ts").TaskInteraction & { resolvedAt?: string; cancelledAt?: string; answer?: import("../shared/foreground-tasks.ts").TaskInteractionAnswer }>;
 };
@@ -131,6 +133,7 @@ export class TuiWorkerStore {
       || typeof s.sealed !== "boolean" || !Array.isArray(s.events) || s.events.length > 256
       || !s.receipts || typeof s.receipts !== "object" || Array.isArray(s.receipts)
       || Object.keys(s.receipts).length > 4096 || !["ready", "running", "settled", "closing"].includes(s.phase)) throw new Error("Invalid worker state");
+    if (s.autoContinuation !== undefined && (!s.autoContinuation || typeof s.autoContinuation.used !== "boolean" || typeof s.autoContinuation.inhibited !== "boolean")) throw new Error("Invalid worker continuation state");
     if (s.interactions !== undefined && (!Array.isArray(s.interactions) || s.interactions.length > 64
       || s.interactions.some(item => !item || typeof item.id !== "string" || typeof item.workerEpoch !== "string"
         || item.workerEpoch !== this.readManifest().workerEpoch || !item.request || !["permission", "questionnaire"].includes(item.request.kind)))) throw new Error("Invalid worker interactions");

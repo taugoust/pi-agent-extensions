@@ -1,11 +1,18 @@
 import { constants, openSync, closeSync, readSync, writeFileSync, renameSync } from 'node:fs';
 export type TaskOutcomeState='delivered'|'partial'|'blocked'|'checkpointed';
-export type TaskOutcome={version:1;state:TaskOutcomeState;summary:string;acceptance:Array<{criterion:string;status:'passed'|'failed'|'not_run';evidence?:string}>;artifacts:Array<{path:string;sha256?:string}>;remaining:string[];next_action?:string};
+export type TaskOutcome={version:1;state:TaskOutcomeState;summary:string;acceptance:Array<{criterion:string;status:'passed'|'failed'|'not_run';evidence?:string}>;artifacts:Array<{path:string;sha256?:string}>;remaining:string[];next_action?:string;continuation?:'routine'|'needs_input'};
 export type TaskOutcomeSummary={child:number;child_id?:string;task_id?:string;attempt?:number;state:TaskOutcomeState|'unreported';reported:boolean;summary:string;next_action?:string};
 function str(v:any,n:number,label:string){if(typeof v!=='string'||!v.trim()||v.includes('\0')||Buffer.byteLength(v)>n)throw new Error(`Invalid ${label}`);return v;}
 export function validateAcceptance(value:unknown):string[]{if(value===undefined)return [];if(!Array.isArray(value)||value.length>16)throw new Error('acceptance must contain at most 16 criteria');return value.map(v=>str(v,500,'acceptance criterion'));}
+/** Fresh tool launches require explicit requirements; retained legacy tasks remain readable. */
+export function requireAcceptance(value:unknown):string[]{
+ const criteria=validateAcceptance(value);
+ if(!criteria.length)throw new Error('New delegation requires acceptance: supply 1–16 explicit, task-specific, verifiable completion criteria. No worker was launched. Retained legacy tasks may still be resumed without adding requirements.');
+ if(new Set(criteria.map(v=>v.trim())).size!==criteria.length)throw new Error('Duplicate acceptance criteria');
+ return criteria;
+}
 export function validateTaskOutcome(v:any, expected:string[]=[]):TaskOutcome {
- if(!v||typeof v!=='object'||Array.isArray(v)||Object.keys(v).some(k=>!['version','state','summary','acceptance','artifacts','remaining','next_action'].includes(k)))throw new Error('Invalid task outcome fields');
+ if(!v||typeof v!=='object'||Array.isArray(v)||Object.keys(v).some(k=>!['version','state','summary','acceptance','artifacts','remaining','next_action','continuation'].includes(k)))throw new Error('Invalid task outcome fields');
  if(v.version!==1||!['delivered','partial','blocked','checkpointed'].includes(v.state))throw new Error('Invalid task outcome state/version');
  str(v.summary,2000,'outcome summary');
  if(!Array.isArray(v.acceptance)||v.acceptance.length>16||!Array.isArray(v.artifacts)||v.artifacts.length>16||!Array.isArray(v.remaining)||v.remaining.length>16)throw new Error('Invalid task outcome arrays');
@@ -15,6 +22,8 @@ export function validateTaskOutcome(v:any, expected:string[]=[]):TaskOutcome {
  v.remaining.forEach((x:any)=>str(x,500,'remaining work'));if(v.next_action!==undefined)str(v.next_action,2000,'next action');
  if(v.state==='delivered'&&(!v.acceptance.length||v.remaining.length||v.acceptance.some((a:any)=>a.status!=='passed'||!a.evidence)||expected.some(c=>!v.acceptance.some((a:any)=>a.criterion===c&&a.status==='passed'))))throw new Error('delivered requires evidence for all acceptance criteria and no remaining work');
  if(['partial','blocked','checkpointed'].includes(v.state)&&!v.next_action)throw new Error('Incomplete outcomes require next_action');
+ if(v.continuation!==undefined&&(!['routine','needs_input'].includes(v.continuation)||v.state!=='partial'))throw new Error('continuation is only valid on partial outcomes (routine or needs_input)');
+ if(v.continuation==='routine'&&(!v.remaining.length||v.acceptance.some((a:any)=>a.status==='failed')))throw new Error('Routine continuation requires remaining work and no failed acceptance checks');
  if(Buffer.byteLength(JSON.stringify(v))>16384)throw new Error('Outcome exceeds 16 KiB');
  return JSON.parse(JSON.stringify(v));
 }

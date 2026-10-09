@@ -1089,7 +1089,15 @@ starting at the current end of the file; `from:"start"` opts into existing outpu
 
 Task delivery is separate from execution status. Native children receive a
 `task_outcome` reporting tool with `delivered`, `partial`, `blocked`, and
-`checkpointed` states. Launches may provide an `acceptance` array of criteria.
+`checkpointed` states. Every new tool delegation requires an explicit nonempty
+`acceptance` array (1–16 unique, nonblank criteria, at most 500 UTF-8 bytes each),
+on the single task or on **each** parallel/chain task. Supply task-specific,
+verifiable completion conditions; the harness never invents requirements from
+prose. Missing/empty criteria reject the launch with an actionable error before
+starting workers. Controls and retained legacy resumes remain compatible with
+stored empty criteria; they do not silently acquire new requirements. Criteria
+are preserved verbatim. Validation checks structure and reported coverage, not
+whether a criterion is substantively meaningful.
 `delivered` requires passing evidence for every supplied criterion and no remaining
 work; incomplete states require a next action. Reports remain explicitly
 **model-reported, not independently verified**. A clean exit without a report is
@@ -1097,6 +1105,25 @@ work; incomplete states require a next action. Reports remain explicitly
 retained result artifact; compact `task_outcomes` are persisted and exposed by
 status/result operations. Existing execution statuses and failure semantics remain
 unchanged.
+
+Linux native workers (TUI and headless foreground) may automatically continue
+**once per worker assignment** before publishing completion. An eligible
+`partial` outcome must explicitly set `continuation:"routine"`, include remaining
+work and a next action, and contain no failed acceptance checks. This attests
+that all remaining work is routine and already authorized—not a dependency,
+permission request, safety decision, or scope expansion. Ambiguous partials omit
+this field (or use `"needs_input"`) and return immediately; genuine external or
+authority blockers use `blocked`. This is model-reported eligibility, not semantic
+proof of authorization; existing tool/permission restrictions still apply.
+
+The continuation uses Pi's final actionable boundary in the same process/session,
+with unchanged tools, model and reasoning settings. No intermediate settled result
+or completion wake is published. Its budget is durably consumed **before** requesting
+the next model call, survives reload, and is never automatically replayed after an
+ambiguous crash. Repeated partial reports cannot loop. Errors, aborts, checkpointed
+or blocked outcomes, parent guidance requests, user dialogs/input, steering,
+queued messages, authority loss and reap prevent automatic continuation. Existing
+legacy RPC/AgentSH execution paths do not gain automatic continuation.
 
 Native launches also expose a stable `task_id`, distinct from each attempt's
 `child_id` and background group ID. The private task registry retains the original
@@ -1115,8 +1142,9 @@ widens the task's tools/cwd. Parent-session
 ownership and process start identities prevent foreign or concurrent resumes.
 Task-owned background jobs remain accessible to successor attempts.
 
-Resume is always explicit, including after a failure or the existing 90% context
-finalizer. Native TUI resumes request compaction only when measured usage reaches
+Resume is explicit after a failure, exhausted/ineligible continuation or the existing 90% context
+finalizer. A successor attempt created by explicit resume starts a new automatic
+continuation budget; live-worker steering/resume does not replenish its budget. Native TUI resumes request compaction only when measured usage reaches
 80% of the context window, or when `compact:true` requests it explicitly. A
 `checkpointed` outcome alone does not trigger compaction. Compaction requests
 have a five-minute deadline rather than the ordinary short control timeout. Pi's exact “Nothing to compact (session
