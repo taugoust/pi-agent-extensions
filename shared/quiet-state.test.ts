@@ -16,10 +16,10 @@ const ctx:any={
   },
   sessionManager:{getSessionId:()=>sessionName,getBranch:()=>entries,getEntries:()=>entries},
 };
-function fixture(failReceipt=false,failSends=0){
+function fixture(failReceipt:boolean|(()=>boolean)=false,failSends=0){
  const handlers=new Map<string,any[]>();const messages:any[]=[];const commands=new Map<string,any>();
  const pi:any={
-   appendEntry(customType:string,data:any){if(failReceipt&&customType===QUIET_STATE_RECEIPT_CUSTOM_TYPE)throw new Error('persist failed');entries.push({type:'custom',customType,data});},
+   appendEntry(customType:string,data:any){if((typeof failReceipt==='function'?failReceipt():failReceipt)&&customType===QUIET_STATE_RECEIPT_CUSTOM_TYPE)throw new Error('persist failed');entries.push({type:'custom',customType,data});},
    on(name:string,handler:any){handlers.set(name,[...(handlers.get(name)??[]),handler]);},
    registerCommand(name:string,value:any){commands.set(name,value);},
    sendMessage(message:any,options:any){if(failSends-->0)throw new Error('send failed');messages.push({message,options});entries.push({type:'custom_message',customType:message.customType,details:message.details});},
@@ -331,5 +331,38 @@ await activityReload.commands.get('harness-state').handler('enable',ctx);
 activityReloadQuiet.enqueue(ctx,activityCompletion(7));await pause(40);
 assert.equal(activityReload.messages.length,2,'disabled delivery lost activity invalidation');
 await activityReload.emit('session_shutdown',{reason:'exit'});
+
+// Failed activity receipts suppress immediately, remain retryable across reload,
+// and recover without a new observation or a permanent delivery circuit break.
+entries=[];idle=true;sessionName=`quiet-activity-failure-${process.pid}`;
+let rejectActivityReceipt=false;
+const activityFailure=fixture(()=>rejectActivityReceipt),failureQuiet=installQuietState(activityFailure.pi,5);
+await activityFailure.emit('session_start');await activityFailure.emit('ui_prompt_start');
+const failureCompletion=(seq:number,child='worker')=>({kind:'subagent' as const,id:`retry:${child}:${seq}`,job_id:'retry-group',child_id:child,completion:true,through_sequence:seq});
+failureQuiet.enqueue(ctx,failureCompletion(3));
+failureQuiet.enqueue(ctx,failureCompletion(3,'other'));
+const failedActivity={kind:'subagent' as const,id:'retry-activity',job_id:'retry-group',child_id:'worker',activity:true,through_sequence:4};
+rejectActivityReceipt=true;
+for(let i=0;i<4;i++)assert.equal(failureQuiet.enqueue(ctx,failedActivity),false,'failed persistence was reported as durable');
+await activityFailure.emit('session_shutdown',{reason:'reload'});
+// The next writer can persist other receipts, but the activity write still fails.
+const failureReload=fixture(),originalAppend=failureReload.pi.appendEntry;
+failureReload.pi.appendEntry=(type:string,data:any)=>{if(rejectActivityReceipt&&data.update?.activity)throw new Error('activity still unavailable');originalAppend(type,data);};
+const failureReloadQuiet=installQuietState(failureReload.pi,5);await failureReload.emit('session_start');
+failureReloadQuiet.enqueue(ctx,failureCompletion(5));
+await pause(40);
+assert.equal(failureReload.messages.length,1,'unrelated worker was blocked by another worker’s failed invalidation');
+assert.deepEqual(failureReload.messages[0].message.details.updates.map((u:any)=>u.child_id),['other']);
+assert.equal(failureReloadQuiet.enqueue(ctx,{...failedActivity,through_sequence:2}),false,'older observation bypassed pending high-water persistence');
+rejectActivityReceipt=false;
+await pause(1100);
+assert.ok(entries.some(e=>e.data?.update?.activity&&e.data.update.through_sequence===4),'retry high-water was lost across reload');
+assert.equal(failureReload.messages.length,2,'later completion did not resume automatically after storage recovery');
+assert.equal(failureReload.messages[1].message.details.updates[0].through_sequence,5);
+await failureReload.emit('session_shutdown',{reason:'exit'});
+// Now discard even the global hub, as on a process restart: durable receipts suffice.
+const durableReload=fixture();installQuietState(durableReload.pi,5);await durableReload.emit('session_start');await pause(40);
+assert.equal(durableReload.messages.length,0,'old completion reappeared after retry persisted and memory was discarded');
+await durableReload.emit('session_shutdown',{reason:'exit'});
 
 console.log('quiet-state remediation tests passed');

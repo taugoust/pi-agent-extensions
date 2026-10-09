@@ -783,7 +783,10 @@ stale Pi steering messages. Only the newest pending report per child wakes the
 parent after it settles; reading a result consumes that report and older wakes,
 not a newer unseen report. Accepted native prompts and observed newer running
 turns durably invalidate older pending terminal notices for that worker attempt,
-including across reload; later completions still notify. Already-sent messages
+including active snapshots observed by a selected result read. If invalidation
+persistence fails, that worker's notices stay suppressed/held while the receipt is
+retried; the retry obligation survives manager restart and extension reload.
+Later completions still notify after recovery. Already-sent messages
 cannot be retracted. Foreground results are returned directly;
 `task_outcome` alone does not wake the parent before execution settles. Completion
 messages contain result-routing metadata, not report bodies or guidance requests.

@@ -16,7 +16,7 @@ type Item={key:string;revision:string;bytes:number;data:QuietUpdate;queuedAt:num
 export type QuietStateReceiptState='recorded'|'queued'|'delivered'|'consumed';
 export type QuietStateReceipt={v:1;key:string;revision:string;state:QuietStateReceiptState;at:number;update:QuietUpdate};
 type Stats={accepted:number;duplicate:number;dropped:number;routineRecorded:number;guidanceDelivered:number;guidanceBytes:number;schedulingAttempts:number;disabled:number;receiptFailed:number;circuitBreaks:number};
-type Hub={pending:Map<string,Item>;inFlight:Map<string,Item>;receipts:Map<string,QuietStateReceipt>;writer?:symbol;pi?:ExtensionAPI;ctx?:ExtensionContext;timer?:ReturnType<typeof setTimeout>;completionTimer?:ReturnType<typeof setTimeout>;guidanceDisabled?:boolean;ui:boolean;compacting:boolean;lastGuidanceAt:number;localDisabled:boolean;quotaResetAt:number;deliveryFailures:number;stats:Stats};
+type Hub={pending:Map<string,Item>;inFlight:Map<string,Item>;receipts:Map<string,QuietStateReceipt>;activityRetries?:Map<string,Item>;activityTimer?:ReturnType<typeof setTimeout>;writer?:symbol;pi?:ExtensionAPI;ctx?:ExtensionContext;timer?:ReturnType<typeof setTimeout>;completionTimer?:ReturnType<typeof setTimeout>;guidanceDisabled?:boolean;ui:boolean;compacting:boolean;lastGuidanceAt:number;localDisabled:boolean;quotaResetAt:number;deliveryFailures:number;stats:Stats};
 
 const KEY='__paeQuietHarnessStateV2';
 const MESSAGE_CUSTOM='harness-state';
@@ -38,6 +38,9 @@ const hasSequence=(data:QuietUpdate)=>Number.isSafeInteger(data.through_sequence
 function completionSuperseded(h:Hub,data:QuietUpdate):boolean{
   if(!isCompletion(data)||!hasSequence(data))return false;
   const identity=completionIdentity(data);
+  // Failed persistence must not make an already-observed old generation live
+  // again. The retry high-water mark survives same-process extension reload.
+  if([...h.activityRetries?.values()??[]].some(item=>completionIdentity(item.data)===identity&&item.data.through_sequence!>data.through_sequence!))return true;
   return [...h.receipts.values()].some(r=>completionIdentity(r.update)===identity&&hasSequence(r.update)
     &&(r.update.activity===true&&r.state==='recorded'&&r.update.through_sequence!>data.through_sequence!
       ||isCompletion(r.update)&&(r.state==='consumed'||r.state==='delivered')&&r.update.through_sequence!>=data.through_sequence!));
@@ -61,7 +64,7 @@ function envDisabled():boolean{return /^(1|true|yes|on)$/i.test(process.env.PAE_
 function disabled(h?:Hub):boolean{return envDisabled()||h?.localDisabled===true||(h?.deliveryFailures??0)>=3;}
 function validUpdate(data:any):data is QuietUpdate{return data&&['job','subagent','watch','notification'].includes(data.kind)&&typeof data.id==='string';}
 function toItem(data:QuietUpdate,queuedAt=Date.now()):Item{const updateText=JSON.stringify(data);return {key:keyOf(data),revision:revision(data),bytes:bytes(updateText),data:clone(data),queuedAt};}
-function clearTimer(h:Hub){if(h.timer)clearTimeout(h.timer);if(h.completionTimer)clearTimeout(h.completionTimer);h.timer=undefined;h.completionTimer=undefined;}
+function clearTimer(h:Hub){if(h.timer)clearTimeout(h.timer);if(h.completionTimer)clearTimeout(h.completionTimer);if(h.activityTimer)clearTimeout(h.activityTimer);h.timer=undefined;h.completionTimer=undefined;h.activityTimer=undefined;}
 function receiptFrom(entry:any):QuietStateReceipt|undefined{
   if(entry?.type!=='custom'||entry.customType!==QUIET_STATE_RECEIPT_CUSTOM_TYPE)return undefined;
   const d=entry.data;
@@ -70,10 +73,29 @@ function receiptFrom(entry:any):QuietStateReceipt|undefined{
 }
 function appendReceipt(h:Hub,item:Item,state:QuietStateReceiptState):boolean{
   const receipt:QuietStateReceipt={v:1,key:item.key,revision:item.revision,state,at:Date.now(),update:clone(item.data)};
-  if(bytes(JSON.stringify(receipt))>MAX_ITEM_BYTES||typeof h.pi?.appendEntry!=='function'){h.stats.receiptFailed++;h.deliveryFailures++;return false;}
-  try{h.pi.appendEntry(QUIET_STATE_RECEIPT_CUSTOM_TYPE,receipt);}catch{h.stats.receiptFailed++;h.deliveryFailures++;return false;}
+  // Activity has its own fail-closed retry path; transient storage failures
+  // must not trip the unrelated delivery circuit permanently after recovery.
+  const failed=()=>{h.stats.receiptFailed++;if(item.data.activity!==true)h.deliveryFailures++;return false;};
+  if(bytes(JSON.stringify(receipt))>MAX_ITEM_BYTES||typeof h.pi?.appendEntry!=='function')return failed();
+  try{h.pi.appendEntry(QUIET_STATE_RECEIPT_CUSTOM_TYPE,receipt);}catch{return failed();}
   h.receipts.set(item.key,receipt);
   return true;
+}
+function retryActivity(h:Hub):void{
+  for(const [key,item]of h.activityRetries??[]){
+    const prior=h.receipts.get(key);
+    if(prior?.update.activity===true&&hasSequence(prior.update)&&prior.update.through_sequence!>=item.data.through_sequence!
+      ||appendReceipt(h,item,'recorded'))h.activityRetries!.delete(key);
+  }
+}
+function scheduleActivity(h:Hub,delayMs:number):void{
+  if(h.activityTimer||!h.activityRetries?.size||!h.pi||!h.ctx)return;
+  h.activityTimer=setTimeout(()=>{
+    h.activityTimer=undefined;
+    if(!h.pi||!h.ctx)return;
+    retryActivity(h);
+    schedule(h,Math.max(delayMs,1000));
+  },delayMs);h.activityTimer.unref?.();
 }
 function latestReceipt(h:Hub,key:string){return h.receipts.get(key);}
 function isDone(h:Hub,key:string,rev:string){const r=latestReceipt(h,key);return r?.revision===rev&&(r.state==='recorded'||r.state==='delivered'||r.state==='consumed');}
@@ -146,7 +168,11 @@ function scheduleCompletions(h:Hub,delayMs:number){
     const latest=new Map<string,Item>();
     for(const [key,item]of h.pending)if(isCompletion(item.data)){
       if(completionSuperseded(h,item.data)){h.pending.delete(key);continue;}
-      const identity=completionIdentity(item.data),prior=latest.get(identity);
+      const identity=completionIdentity(item.data);
+      // Hold even a later completion for this worker until its invalidation is
+      // durable. Other workers remain independently deliverable.
+      if([...h.activityRetries?.values()??[]].some(retry=>completionIdentity(retry.data)===identity))continue;
+      const prior=latest.get(identity);
       // Legacy reports have no sequence; retain their enqueue order. New
       // native reports are monotonic even when reads race scheduler polling.
       if(!prior||(hasSequence(prior.data)&&hasSequence(item.data)
@@ -185,6 +211,7 @@ function scheduleCompletions(h:Hub,delayMs:number){
   },delayMs);h.completionTimer.unref?.();
 }
 function schedule(h:Hub,delayMs:number){
+  scheduleActivity(h,delayMs);
   scheduleCompletions(h,delayMs);
   refreshStatus(h);if(h.timer||h.ui||h.compacting||!h.pi||!h.ctx||disabled(h)||h.guidanceDisabled||!guidancePending(h)||h.ctx.hasPendingMessages?.())return;
   if(h.stats.guidanceDelivered>=MAX_GUIDANCE_PER_SESSION)return;
@@ -211,12 +238,19 @@ export function installQuietState(pi:ExtensionAPI,delayMs=1000){
       // never move backwards when an older async observation arrives late.
       if(data.activity===true){
         if(data.kind!=='subagent'||!data.job_id||!data.child_id||!hasSequence(data))throw new Error('Invalid worker activity identity');
-        const item=toItem({...data,id:`${data.job_id}:${data.child_id}:activity`,completion:false,requires_guidance:false});
+        let item=toItem({...data,id:`${data.job_id}:${data.child_id}:activity`,completion:false,requires_guidance:false});
+        const retries=h.activityRetries??=new Map();
+        const retry=retries.get(item.key);
+        if(retry&&retry.data.through_sequence!>item.data.through_sequence!)item=retry;
         const prior=latestReceipt(h,item.key);
-        if(prior?.update.activity===true&&hasSequence(prior.update)&&prior.update.through_sequence!>=data.through_sequence!)return true;
-        if(!appendReceipt(h,item,'recorded'))return false;
+        if(prior?.update.activity===true&&hasSequence(prior.update)&&prior.update.through_sequence!>=item.data.through_sequence!){retries.delete(item.key);return true;}
+        // Reserve suppression before attempting the durable write, not after.
+        retries.set(item.key,item);
+        const persisted=appendReceipt(h,item,'recorded');
+        if(persisted)retries.delete(item.key);
         for(const [key,pending]of h.pending)if(completionSuperseded(h,pending.data))h.pending.delete(key);
-        return true;
+        schedule(h,delayMs);
+        return persisted;
       }
       if(disabled(h)){h.stats.disabled++;return false;}
       const item=toItem(data);if(item.bytes>MAX_UPDATE_BYTES||(isCompletion(data)&&bytes(completionPrefix([data])+JSON.stringify([data]))+bytes(JSON.stringify({updates:[data]}))>MAX_BATCH_BYTES))throw new Error('Quiet state update exceeds its metadata budget');

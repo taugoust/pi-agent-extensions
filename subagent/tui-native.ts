@@ -19,7 +19,7 @@ type Child = { childId: string; taskId: string; attempt: number; directory: stri
   resumeSessionFile?: string; resumeMessage?: string; compactBeforePrompt?: boolean;
   state: "pending" | "launching" | "running" | "completed" | "failed" | "cancelled" | "lost" | "skipped";
   operatorCapability: string; started: boolean; reaped?: boolean; error?: string; report?: string;
-  notifiedSequence: number; runSequence?: number; terminalNotification?: string; lastOutcome?: unknown; requiresCompaction?: boolean; };
+  notifiedSequence: number; runSequence?: number; pendingActivitySequence?: number; terminalNotification?: string; lastOutcome?: unknown; requiresCompaction?: boolean; };
 type Group = { windowName?: string; version: 1; id: string; owner: string; createdAt: string; mode: "single" | "parallel" | "chain";
   background: boolean; cancelled: boolean; children: Child[]; caller: TuiWorkerPlacement;
   parentOwnerToken: string;
@@ -109,6 +109,11 @@ export class TuiNativeManager {
     }
     this.ownerLock = lock;
     this.owner = owner; this.notify = notify;
+    // Restore fail-closed suppression synchronously, before quiet-state timers
+    // can dispatch an older receipt after a parent restart/reload.
+    for (const g of this.groups.values()) if (g.owner === owner) for (const c of g.children) {
+      if (Number.isSafeInteger(c.pendingActivitySequence) && c.pendingActivitySequence! >= 0) this.notifyActivity(g, c, c.pendingActivitySequence!);
+    }
     if (this.timer) clearInterval(this.timer);
     this.timer = setInterval(() => { void this.refresh(owner).catch(() => undefined); }, 1000);
     this.timer.unref?.();
@@ -277,6 +282,8 @@ export class TuiNativeManager {
     return readPrivateJson(path);
   }
   private async observe(g: Group, c: Child, observationOnly = false): Promise<void> {
+    // Retry even if the worker settled, died, or was reaped since observation.
+    if (!observationOnly && c.pendingActivitySequence !== undefined) this.notifyActivity(g, c, c.pendingActivitySequence);
     if (c.reaped || c.state === "pending") return;
     const m = this.manifest(c);
     if (!m) {
@@ -364,8 +371,18 @@ export class TuiNativeManager {
   }
   private notifyActivity(g: Group, c: Child, sequence: number): void {
     // group/child IDs identify this worker attempt; task IDs may span attempts.
-    this.notify?.({ kind: "subagent", id: `${g.id}:${c.childId}:activity`, job_id: g.id,
+    sequence = Math.max(sequence, c.pendingActivitySequence ?? 0);
+    const accepted = this.notify?.({ kind: "subagent", id: `${g.id}:${c.childId}:activity`, job_id: g.id,
       child_id: c.childId, activity: true, through_sequence: sequence });
+    if (!accepted) {
+      // Quiet-state holds volatile suppression immediately. Keep a second,
+      // durable retry obligation so a process restart cannot lose it.
+      c.pendingActivitySequence = sequence;
+      this.save(g);
+    } else if (c.pendingActivitySequence !== undefined) {
+      delete c.pendingActivitySequence;
+      this.save(g);
+    }
   }
   private async startPrompt(g: Group, c: Child, m: TuiWorkerManifest): Promise<void> {
     if (this.closed || this.reapReserved || g.cancelled || !this.ready() || (g.launchMode === "guard-only" ? this.disposition() !== "guard-only" : this.disposition() !== "native")) return;
@@ -722,6 +739,7 @@ export class TuiNativeManager {
           retainedResult = true;
         } else {
           const snapshot = status.data as any;
+          if (snapshot.active) this.notifyActivity(selected, child, snapshot.sequence);
           if (snapshot.active || !snapshot.lastReport) return response("Result not ready. Use wait.", { operation: op, job_id: selected.id });
           const reportPath = snapshot.lastReport;
           const artifactPath = (path: unknown, kind: string): path is string => typeof path === "string"
