@@ -150,11 +150,28 @@ export default function tuiWorkerExtension(pi: ExtensionAPI): void {
             || typeof controller.execute !== "function") throw new Error("Child-local job controller unavailable for this session");
           return await controller.execute(`tui:${worker!.manifest.workerEpoch}:${requestId}`, params);
         },
+        recursiveCleanup: true,
         prepareJobReap: async preserve => {
           const session = context;
           const controller = (globalThis as any).__paeLocalJobControllerV1 as LocalJobController | undefined;
           if (!session || controller?.protocol !== 1 || controller.sessionId !== session.sessionManager.getSessionId() || !controller.prepareReap) throw new Error("Child-local job cleanup controller unavailable for this session; reload/recover the child before reaping");
-          return await controller.prepareReap(preserve);
+          // Flat RPC helpers enforce a subagent tool-call prohibition below and
+          // never expose delegation. Their inventory is empty by construction,
+          // not inferred from an absent controller or a dead parent.
+          if (manifest.execution === "rpc-headless") return await controller.prepareReap(async report => {
+            await preserve({ ...report as Record<string, unknown>, subagents: { groups: [], flatHeadless: true } });
+          });
+          const subagents = (globalThis as any).__paeLocalSubagentControllerV1;
+          if (subagents?.protocol !== 1 || subagents.sessionId !== session.sessionManager.getSessionId() || typeof subagents.prepareReap !== "function") throw new Error(`Child-local subagent cleanup controller unavailable (${!subagents ? "missing" : subagents.sessionId !== session.sessionManager.getSessionId() ? "session changed" : "unsupported contract"}); reload/recover the child before reaping`);
+          let subagentReport: unknown;
+          const releaseSubagents = await subagents.prepareReap(async (report: unknown) => {
+            subagentReport = report;
+            await preserve({ subagents: report });
+          });
+          try {
+            const releaseJobs = await controller.prepareReap(async report => { await preserve({ ...report as Record<string, unknown>, subagents: subagentReport }); });
+            return () => { releaseJobs(); releaseSubagents(); };
+          } catch (error) { releaseSubagents(); throw error; }
         },
         clearQueue: () => sendRpcCommand("clear_queue"),
         abort: async () => { if (manifest.execution === "rpc-headless") await sendRpcCommand("abort"); await context?.abort(); },

@@ -309,8 +309,9 @@ export class TuiWorkerTmux {
       }
       const artifactName = state.jobCleanup.artifact.slice(store.directory.length + 1);
       if (store.path(artifactName) !== state.jobCleanup.artifact) throw new Error("Invalid child job cleanup artifact");
-      const cleanup = readPrivateJson(state.jobCleanup.artifact) as { workerEpoch?: string };
+      const cleanup = readPrivateJson(state.jobCleanup.artifact) as { workerEpoch?: string; report?: { subagents?: unknown } };
       if (cleanup.workerEpoch !== manifest.workerEpoch) throw new Error("Child job cleanup receipt identity mismatch; refusing reap");
+      if (!cleanup.report?.subagents) throw new Error("Worker lacks verified recursive subagent cleanup; recover its controller before reap");
     };
     let info;
     try { info = await this.inspect(manifest); }
@@ -327,6 +328,8 @@ export class TuiWorkerTmux {
       return;
     }
     if (!info.dead) {
+      const status = await callTuiWorker(manifest, { operation: "status" }, { timeoutMs: 1000 });
+      if (!status.ok || (status.data as any)?.recursiveCleanup !== true) throw new Error("Worker lacks recursive subagent cleanup support; reload the live worker before reap");
       const response = await callTuiWorker(manifest, { operation: "prepare_reap" }, { requestId: `reap:${manifest.workerEpoch}`, timeoutMs: 30_000 });
       if (!response.ok) throw new Error(`Worker reap rejected: ${response.code}: ${response.message}`);
       const deadline = Date.now() + timeoutMs;

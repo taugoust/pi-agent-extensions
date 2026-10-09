@@ -111,7 +111,7 @@ test("dead launcher identity cannot authorize resume or reap while authenticated
     assert.equal(await processIsAlive(runtime.pid!, runtimeToken), true);
 
     const groupId = `subagent-job-${"6".repeat(24)}`, taskId = `subagent-task-${"7".repeat(24)}`, childId = `subagent-child-${"8".repeat(24)}`;
-    const directory = join(root, "workers", "wrapper-death");
+    const directory = join(root, "workers", "5".repeat(24));
     await mkdir(directory, { mode: 0o700 });
     const store = new TuiWorkerStore(directory);
     await writeFile(store.path("session.jsonl"), "", { mode: 0o600 });

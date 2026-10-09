@@ -953,8 +953,15 @@ backends keep their existing execution model and never silently fall back to nat
   bounded terminal status/output in retained `job-cleanup-*.json` artifacts and
   reaps its owned terminal background jobs. Active/starting jobs, adopted jobs,
   active watches, or unverifiable cleanup refuse reap with blocking IDs; no work
-  is automatically cancelled. Failed cleanup leaves the child available for repair.
-  Old workers need a reload/new launch to acquire cleanup support. An already-dead
+  is automatically cancelled. Cleanup also reserves delegation, preserves descendant
+  results and recursively reaps terminal native/headless subagents. Active descendants
+  block ancestor cleanup. Root `list` exposes reachable nested groups, including
+  descendants of retained/reaped ancestors; their results remain readable and stopped
+  parents' stale group state is reconciled without replaying prompts or notifications.
+  An ancestor can reap an orphan only through verified retained session ancestry and
+  a stopped-owner lease; live parents retain their own lifecycle authority.
+  Failed cleanup leaves the child available for repair.
+  Old workers need a reload/new launch to acquire recursive cleanup support. An already-dead
   child without a verified cleanup receipt is not automatically recovered: inspect
   and explicitly adopt retained jobs with user authorization, or recover its child
   controller. Missing controllers never imply an empty inventory.

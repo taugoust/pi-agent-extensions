@@ -91,6 +91,8 @@ test("headless RPC workers require child-local AgentSH authority before prompts 
   const ctx = { mode: "rpc", hasUI: true, isIdle: () => true, hasPendingMessages: () => false,
     abort: () => {}, shutdown: () => {}, sessionManager: { getSessionFile: () => manifest.sessionFile, getSessionId: () => "headless-child" } };
   let sent = 0;
+  const oldJobs = (globalThis as any).__paeLocalJobControllerV1;
+  const oldSubagents = (globalThis as any).__paeLocalSubagentControllerV1;
   try {
     workerExtension({ registerTool() {}, on: (name: string, handler: Function) => handlers.set(name, handler), sendMessage: () => { sent++; } } as any);
     await handlers.get("session_start")!({}, ctx);
@@ -102,7 +104,17 @@ test("headless RPC workers require child-local AgentSH authority before prompts 
     assert.equal(handlers.get("tool_call")!({ toolName: "subagent" }, ctx).block, true);
     assert.equal(handlers.get("tool_call")!({ toolName: "background_job" }, ctx).block, true);
     assert.equal(store.readState().active, false);
+    delete (globalThis as any).__paeLocalSubagentControllerV1;
+    (globalThis as any).__paeLocalJobControllerV1 = { protocol: 1, sessionId: "headless-child",
+      async prepareReap(preserve: (report: unknown) => Promise<void>) { await preserve({ jobs: [] }); return () => {}; } };
+    assert.equal((await callTuiWorker(manifest as any, { operation: "prepare_reap" })).ok, true);
+    const cleanup = JSON.parse(await readFile(store.readState().jobCleanup!.artifact, "utf8"));
+    assert.deepEqual(cleanup.report.subagents, { groups: [], flatHeadless: true });
   } finally {
+    if (oldJobs === undefined) delete (globalThis as any).__paeLocalJobControllerV1;
+    else (globalThis as any).__paeLocalJobControllerV1 = oldJobs;
+    if (oldSubagents === undefined) delete (globalThis as any).__paeLocalSubagentControllerV1;
+    else (globalThis as any).__paeLocalSubagentControllerV1 = oldSubagents;
     await handlers.get("session_shutdown")?.({}, ctx);
     if (previous === undefined) delete process.env.PI_TUI_WORKER_MANIFEST; else process.env.PI_TUI_WORKER_MANIFEST = previous;
     await rm(root, { recursive: true, force: true });

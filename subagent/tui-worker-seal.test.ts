@@ -7,7 +7,7 @@ import workerExtension from "./tui-worker-extension.ts";
 import { TuiWorkerStore } from "./tui-worker-store.ts";
 import { callTuiWorker } from "./tui-worker-client.ts";
 
-test("initial tools/source attribution and explicit reap event are distinct from cancellation", async () => {
+test("initial tools/source attribution and explicit reap event are distinct from cancellation", { timeout: 10_000 }, async () => {
   const root = await mkdtemp(join(tmpdir(), "pi-seal-"));
   const store = new TuiWorkerStore(root);
   store.writeManifest({ protocol: 1, ownerSessionId: "parent", taskId: "task", runtimeId: "runtime", groupId: `subagent-job-${"a".repeat(24)}`,
@@ -17,6 +17,12 @@ test("initial tools/source attribution and explicit reap event are distinct from
   const manifest = store.readManifest();
   const previous = process.env.PI_TUI_WORKER_MANIFEST;
   const oldController = (globalThis as any).__paeLocalJobControllerV1;
+  const oldSubagents = (globalThis as any).__paeLocalSubagentControllerV1;
+  let subagentReleases = 0;
+  (globalThis as any).__paeLocalSubagentControllerV1 = { protocol: 1, sessionId: "child-session",
+    async prepareReap(preserve: (report: unknown) => Promise<void>) {
+      await preserve({ groups: [] }); return () => { subagentReleases++; };
+    } };
   (globalThis as any).__paeLocalJobControllerV1 = { protocol: 1, sessionId: "child-session",
     async prepareReap(preserve: (report: unknown) => Promise<void>) { await preserve({ jobs: [] }); return () => {}; } };
   process.env.PI_TUI_WORKER_MANIFEST = store.path("manifest.json");
@@ -41,6 +47,11 @@ test("initial tools/source attribution and explicit reap event are distinct from
     assert.equal(foreign.ok, false);
     assert.equal(shutdown, 0);
     controller.sessionId = "child-session";
+    const subagents = (globalThis as any).__paeLocalSubagentControllerV1;
+    subagents.sessionId = "foreign-session";
+    assert.equal((await callTuiWorker(manifest, { operation: "prepare_reap" })).ok, false);
+    assert.equal(shutdown, 0);
+    subagents.sessionId = "child-session";
     const prepare = controller.prepareReap;
     let entered!: () => void, finish!: () => void;
     const started = new Promise<void>(resolve => { entered = resolve; });
@@ -54,6 +65,7 @@ test("initial tools/source attribution and explicit reap event are distinct from
     finish();
     assert.equal((await blockedReap).ok, false);
     assert.equal(shutdown, 0);
+    assert.equal(subagentReleases, 1, "job-cleanup refusal must release the subagent reservation");
     controller.prepareReap = prepare;
     assert.ok((await callTuiWorker(manifest, { operation: "prepare_reap" })).ok);
     await new Promise(resolve => setTimeout(resolve, 50));
@@ -64,6 +76,8 @@ test("initial tools/source attribution and explicit reap event are distinct from
     assert.equal(handlers.get("tool_call")!({}, ctx).block, true);
   } finally {
     await handlers.get("session_shutdown")?.({}, ctx);
+    if (oldSubagents === undefined) delete (globalThis as any).__paeLocalSubagentControllerV1;
+    else (globalThis as any).__paeLocalSubagentControllerV1 = oldSubagents;
     if (oldController === undefined) delete (globalThis as any).__paeLocalJobControllerV1;
     else (globalThis as any).__paeLocalJobControllerV1 = oldController;
     if (previous === undefined) delete process.env.PI_TUI_WORKER_MANIFEST; else process.env.PI_TUI_WORKER_MANIFEST = previous;

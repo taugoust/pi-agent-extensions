@@ -1845,6 +1845,21 @@ export default function (pi: ExtensionAPI) {
       const headlessWorker = isHeadlessWorkerRuntime(ctx);
       const native = headlessWorker ? undefined : nativeTui(ctx);
       const foreground = !headlessWorker && process.platform === "linux" ? headlessNative(ctx) : undefined;
+      (globalThis as any).__paeLocalSubagentControllerV1 = {
+        protocol: 1, sessionId,
+        prepareReap: async (preserve: (report: unknown) => Promise<void>) => {
+          if (lifecycleClosing || activeSessionId !== sessionId) throw new Error("Subagent cleanup session changed");
+          const releases: (() => void)[] = [];
+          const reports: unknown[] = [];
+          const retain = async (report: unknown) => { reports.push(report); await preserve({ subagents: reports }); };
+          try {
+            if (foreground) releases.push(await foreground.prepareReap(sessionId, retain));
+            if (native) releases.push(await native.prepareReap(sessionId, retain));
+            if (!foreground && !native) await retain({ groups: [] });
+            return () => { for (const release of releases.reverse()) release(); };
+          } catch (error) { for (const release of releases.reverse()) release(); throw error; }
+        },
+      };
       const readonlyGeneration = generation;
       const assertReadonlyOwner = () => {
         if (sessionContext !== ctx || activeSessionId !== sessionId || sessionGeneration !== readonlyGeneration
@@ -1939,6 +1954,7 @@ export default function (pi: ExtensionAPI) {
     sessionGeneration += 1;
     const generation = sessionGeneration;
     lifecycleClosing = true;
+    if ((globalThis as any).__paeLocalSubagentControllerV1?.sessionId === activeSessionId) delete (globalThis as any).__paeLocalSubagentControllerV1;
     completionCheckArmed = false;
     if (pollTimer) clearInterval(pollTimer);
     pollTimer = undefined;

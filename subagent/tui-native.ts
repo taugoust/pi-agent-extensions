@@ -1,7 +1,7 @@
 import { randomBytes, createHash } from "node:crypto";
 import { waitForGroupSnapshot } from "./group-wait.ts";
-import { readdirSync, existsSync, readFileSync, writeFileSync, unlinkSync } from "node:fs";
-import { join, resolve } from "node:path";
+import { readdirSync, existsSync, readFileSync, writeFileSync, unlinkSync, openSync, closeSync, readSync, constants } from "node:fs";
+import { join, resolve, basename } from "node:path";
 import { validateAcceptance } from "./outcome.ts";
 import { subagentTmuxName, validateSubagentName } from "./tui-names.ts";
 import { TuiWorkerTmux, tuiWorkerLaunchContract, processIdentity } from "./tui-worker-tmux.ts";
@@ -35,6 +35,7 @@ export class TuiNativeManager {
   readonly root: string;
   readonly tmux = new TuiWorkerTmux();
   private groups = new Map<string, Group>();
+  private inventoryErrors: string[] = [];
   private savedGroups = new Map<string, string>();
   private persistenceWriter = atomicPrivateJson;
   private queue: Promise<unknown> = Promise.resolve();
@@ -42,6 +43,7 @@ export class TuiNativeManager {
   private modeQueue: Promise<unknown> = Promise.resolve();
   private timer?: ReturnType<typeof setInterval>;
   private closed = false;
+  private reapReserved = false;
   private owner?: string;
   private notify?: (update: QuietUpdate) => boolean;
   private foregroundWaits = new Set<string>();
@@ -66,9 +68,10 @@ export class TuiNativeManager {
       try {
         const g = readPrivateJson(join(this.root, "groups", name)) as Group;
         const persistedGroup = JSON.stringify(g);
-        if (g.version !== 1 || `${g.id}.json` !== name || typeof g.owner !== "string" || !Array.isArray(g.children) || g.children.length > 8) continue;
+        if (g.version !== 1 || `${g.id}.json` !== name || typeof g.owner !== "string" || !Array.isArray(g.children) || g.children.length > 8) throw new Error("Invalid retained group");
         if (g.children.some(c => !/^subagent-child-[a-f0-9]{24}$/.test(c.childId) || !/^subagent-task-[a-f0-9]{24}$/.test(c.taskId)
-          || !/^[a-f0-9]{64}$/.test(c.operatorCapability) || !c.directory.startsWith(`${join(this.root, "workers")}/`))) continue;
+          || !/^[a-f0-9]{64}$/.test(c.operatorCapability) || typeof c.directory !== "string"
+          || !/^[a-f0-9]{24}$/.test(basename(c.directory)) || c.directory !== join(this.root, "workers", basename(c.directory)))) throw new Error("Invalid retained child");
         // Old already-terminal records were previously observed without wakes.
         // Baseline them instead of replaying historical completions on upgrade.
         for (const c of g.children) if (c.terminalNotification === undefined) c.terminalNotification = active(c) ? '' : terminalToken(c);
@@ -76,7 +79,7 @@ export class TuiNativeManager {
         // Seed the persistence baseline from disk so constructor normalization is
         // durable only when it actually changed the record.
         this.savedGroups.set(g.id, persistedGroup);
-      } catch { /* Invalid records never authorize launch/control/deletion. */ }
+      } catch { this.inventoryErrors.push(name); /* Invalid records never authorize launch/control/deletion. */ }
     }
   }
   private disposition: () => Disposition;
@@ -159,6 +162,98 @@ export class TuiNativeManager {
       if (child) { if (g.owner !== owner) throw new Error("Subagent belongs to a different Pi session"); return { group: g, child }; }
     }
   }
+  /** Derive reachability only from validated worker identity and its exact retained
+   * session header. Pane names, cwd and model-supplied owner IDs confer no authority. */
+  private descendantGroups(owner: string, roots?: Group[]): Group[] {
+    const disk = new TuiNativeManager(this.root, this.disposition, () => false, this.groupLimit);
+    const result: Group[] = [];
+    const seen = new Set<string>([owner]);
+    const visit = (groups: Group[], depth: number) => {
+      if (depth > 32) throw new Error("Subagent ancestry depth exceeds cleanup safety limit");
+      for (const g of groups) for (const c of g.children) {
+        const m = this.manifest(c);
+        if (!m) continue;
+        if (m.ownerSessionId !== g.owner || m.groupId !== g.id || m.attempt !== (c.attempt ?? 1)
+          || m.sessionFile !== join(c.directory, "session.jsonl")) throw new Error("Subagent ancestry identity mismatch");
+        let sessionId: string;
+        let fd: number;
+        try { fd = openSync(m.sessionFile, constants.O_RDONLY | constants.O_NOFOLLOW); }
+        catch (error) { if ((error as NodeJS.ErrnoException).code === "ENOENT") continue; throw error; }
+        try {
+          const bytes = Buffer.alloc(8192); const n = readSync(fd, bytes, 0, bytes.length, 0);
+          const header = JSON.parse(bytes.subarray(0, n).toString("utf8").split("\n")[0]);
+          if (header.type !== "session" || typeof header.id !== "string" || !header.id || header.id.length > 512) throw new Error("Invalid descendant session header");
+          sessionId = header.id;
+        } finally { closeSync(fd); }
+        if (seen.has(sessionId)) continue;
+        seen.add(sessionId);
+        const nested = [...disk.groups.values()].filter(candidate => candidate.owner === sessionId);
+        result.push(...nested); visit(nested, depth + 1);
+      }
+    };
+    visit(roots ?? [...this.groups.values()].filter(g => g.owner === owner), 0);
+    return result;
+  }
+  /** Never overwrite a live parent's scheduler state. A stopped parent's groups
+   * can be reconciled under the same PID/start-token lock, without activating a scheduler. */
+  private observerLease(owner: string): (() => void) | undefined {
+    const lock = join(this.root, `owner-${createHash("sha256").update(owner).digest("hex").slice(0, 32)}.lock`);
+    for (let retry = 0; retry < 2; retry++) {
+      try {
+        writeFileSync(lock, JSON.stringify({ pid: process.pid, token: this.processToken(process.pid) }), { flag: "wx", mode: 0o600 });
+        return () => {
+          const current = readPrivateJson(lock) as any;
+          if (current.pid !== process.pid || current.token !== this.processToken(process.pid)) throw new Error("Descendant observer lease changed");
+          unlinkSync(lock);
+        };
+      } catch (error) {
+        if ((error as NodeJS.ErrnoException).code !== "EEXIST") throw error;
+        const prior = readPrivateJson(lock) as any;
+        if (!Number.isSafeInteger(prior.pid) || typeof prior.token !== "string" || this.processToken(prior.pid) === prior.token) return;
+        unlinkSync(lock);
+      }
+    }
+    return;
+  }
+  private async observeDescendants(owner: string): Promise<Group[]> {
+    const groups = this.descendantGroups(owner);
+    for (const session of new Set(groups.map(g => g.owner))) {
+      const release = this.observerLease(session);
+      try {
+        const fresh = release ? new TuiNativeManager(this.root, this.disposition, () => false, this.groupLimit) : undefined;
+        for (let index = 0; index < groups.length; index++) {
+          if (groups[index].owner !== session) continue;
+          // Re-read after acquiring the lock: the prior owner may have
+          // committed a final snapshot between ancestry discovery and leasing.
+          const g = fresh ? fresh.groups.get(groups[index].id) : groups[index];
+          if (!g || g.owner !== session) throw new Error("Descendant ownership changed during reconciliation");
+          if (release) this.savedGroups.set(g.id, JSON.stringify(g));
+          groups[index] = g;
+          for (const c of g.children) await this.observe(g, c, true);
+          if (release) this.save(g);
+        }
+      } finally { release?.(); }
+    }
+    return groups;
+  }
+  private async reapStoppedDescendants(groups: Group[]): Promise<void> {
+    for (let nested of [...groups].reverse()) {
+      const release = this.observerLease(nested.owner);
+      if (!release) continue; // Live parents recurse through their own cleanup boundary.
+      try {
+        const fresh = new TuiNativeManager(this.root, this.disposition, () => false, this.groupLimit).groups.get(nested.id);
+        if (!fresh || fresh.owner !== nested.owner) throw new Error("Descendant ownership changed before reap");
+        nested = fresh;
+        for (const c of nested.children) {
+          await this.observe(nested, c, true);
+          if (active(c)) throw new Error(`Active descendant blocks reap: ${nested.id}/${c.childId}`);
+          if (c.report) this.retainedArtifact(c, c.report, "report");
+          const m = this.manifest(c);
+          if (m && !c.reaped) { await this.tmux.reap(m); c.reaped = true; this.save(nested); }
+        }
+      } finally { release(); }
+    }
+  }
   private publicGroup(g: Group) {
     return { job_id: g.id, mode: g.mode, background: g.background, created_at: g.createdAt,
       status: g.children.some(active) ? "running" : g.cancelled || g.children.some(c => c.state === "cancelled") ? "cancelled" : g.children.some(c => ["failed", "lost"].includes(c.state)) ? "failed" : "completed",
@@ -176,7 +271,12 @@ export class TuiNativeManager {
     }
     return text;
   }
-  private async observe(g: Group, c: Child): Promise<void> {
+  private retainedArtifact(c: Child, path: unknown, kind: "report" | "outcome"): any {
+    if (typeof path !== "string" || path !== join(c.directory, basename(path))
+      || !new RegExp(`^${kind}-[0-9]+-[a-f0-9]{16}\\.json$`).test(basename(path))) throw new Error("Worker artifact identity mismatch");
+    return readPrivateJson(path);
+  }
+  private async observe(g: Group, c: Child, observationOnly = false): Promise<void> {
     if (c.reaped || c.state === "pending") return;
     const m = this.manifest(c);
     if (!m) {
@@ -184,14 +284,33 @@ export class TuiNativeManager {
       return;
     }
     try {
+      try {
+        const tombstone = readPrivateJson(new TuiWorkerStore(c.directory).path("reaped.json")) as any;
+        if (tombstone.workerEpoch !== m.workerEpoch || tombstone.paneId !== m.placement?.paneId) throw new Error("Reap tombstone identity mismatch");
+        c.reaped = true;
+        // The report remains independently retained after pane cleanup.
+        if (active(c)) {
+          const state = new TuiWorkerStore(c.directory).readState();
+          if (state.lastReport) {
+            const report = this.retainedArtifact(c, state.lastReport, "report");
+            c.report = state.lastReport;
+            c.error = typeof report.error === "string" ? report.error.slice(0, 2000) : undefined;
+            c.state = c.error || report.assistant?.stopReason === "error" ? "failed"
+              : report.assistant?.stopReason === "aborted" || g.cancelled ? "cancelled" : "completed";
+            c.lastOutcome = state.lastOutcome ? this.retainedArtifact(c, state.lastOutcome, "outcome") : undefined;
+          }
+          else { c.state = "lost"; c.error = "Reaped worker has no retained settlement"; }
+        }
+        return;
+      } catch (error) { if ((error as NodeJS.ErrnoException).code !== "ENOENT") throw error; }
       const result = await callTuiWorker(m, { operation: "status" }, { timeoutMs: 1000 });
       if (!result.ok) { c.error = result.code; return; }
       c.error = undefined;
       const state = result.data as any;
       if (state.active) { c.state = "running"; c.runSequence = state.sequence; }
       else if (state.lastReport) {
+        const report = this.retainedArtifact(c, state.lastReport, "report");
         c.report = state.lastReport;
-        const report = readPrivateJson(c.report!) as any;
         c.requiresCompaction = Number.isFinite(report.contextTokens) && Number.isFinite(report.contextWindow) && report.contextTokens >= report.contextWindow * 0.8;
         // A terminating tool block can settle with toolUse, not an assistant
         // error/final answer. Retain explicit failures and recognize old workers
@@ -205,9 +324,9 @@ export class TuiNativeManager {
       }
       // Current-turn state is authoritative even after a replay gap. Only
       // newer events may supersede this snapshot (a human can act mid-poll).
-      c.lastOutcome = typeof state.lastOutcome === "string" && state.lastOutcome.startsWith(`${c.directory}/`)
-        ? readPrivateJson(state.lastOutcome) : undefined;
+      c.lastOutcome = state.lastOutcome ? this.retainedArtifact(c, state.lastOutcome, "outcome") : undefined;
       if (!state.lastReport) { c.report = undefined; c.requiresCompaction = false; }
+      if (observationOnly) return; // Ancestor observation never consumes/reroutes notifications or dispatches work.
       const events = await callTuiWorker(m, { operation: "events", afterSequence: c.notifiedSequence }, { timeoutMs: 1000 });
       if (events.ok) {
         for (const event of (events.data as any)?.events ?? []) {
@@ -242,7 +361,7 @@ export class TuiNativeManager {
     }
   }
   private async startPrompt(g: Group, c: Child, m: TuiWorkerManifest): Promise<void> {
-    if (this.closed || g.cancelled || !this.ready() || (g.launchMode === "guard-only" ? this.disposition() !== "guard-only" : this.disposition() !== "native")) return;
+    if (this.closed || this.reapReserved || g.cancelled || !this.ready() || (g.launchMode === "guard-only" ? this.disposition() !== "guard-only" : this.disposition() !== "native")) return;
     if (g.launchMode === "guard-only") {
       await this.sendMode(g, c, m);
     }
@@ -268,15 +387,15 @@ export class TuiNativeManager {
       for (const g of this.groups.values()) {
         if (g.owner !== owner) continue;
         if (!g.background && g.parentOwnerToken !== this.processToken(process.pid) && !g.cancelled) await this.cancelGroup(g);
-        if (g.children.some(c => c.state === "pending") && !g.cancelled) {
+        if (!this.reapReserved && g.children.some(c => c.state === "pending") && !g.cancelled) {
           const caller = await this.tmux.resolveCaller();
           if (caller.socketPath === g.caller.socketPath && caller.serverEpoch === g.caller.serverEpoch) g.caller = caller;
         }
         for (const c of g.children) await this.observe(g, c);
-        if (!g.cancelled && this.ready() && (g.launchMode === "guard-only" ? this.disposition() === "guard-only" : this.disposition() === "native")) {
+        if (!this.reapReserved && !g.cancelled && this.ready() && (g.launchMode === "guard-only" ? this.disposition() === "guard-only" : this.disposition() === "native")) {
           let running = g.children.filter(c => c.state === "running" || c.state === "launching").length;
           for (const [index, c] of g.children.entries()) {
-            if (this.closed || c.state !== "pending" || running >= 4) continue;
+            if (this.closed || this.reapReserved || c.state !== "pending" || running >= 4) continue;
             if (g.mode === "chain" && index > 0) {
               const prior = g.children[index - 1];
               if (active(prior)) break;
@@ -307,6 +426,7 @@ export class TuiNativeManager {
         for (const c of g.children) this.notifyTerminal(g, c);
         this.save(g);
       }
+      await this.observeDescendants(owner);
     });
     this.refreshFlight = flight;
     try { await flight; } finally { if (this.refreshFlight === flight) this.refreshFlight = undefined; }
@@ -335,7 +455,7 @@ export class TuiNativeManager {
       return { name: validateSubagentName(s.name), task: s.task, cwd: resolve(s.cwd ?? cwd), model: s.model, tools: s.tools, systemPrompt: s.systemPrompt, acceptance: validateAcceptance(s.acceptance) };
     });
     if (specs.length > 8) throw new Error("At most eight subagent children are allowed");
-    if (signal?.aborted || this.closed) throw new Error("Subagent launch cancelled");
+    if (signal?.aborted || this.closed || this.reapReserved) throw new Error("Subagent launch cancelled or cleanup reserved");
     if (!this.ready()) throw new Error("Parent authority is not active; refusing native TUI launch");
     const contract = tuiWorkerLaunchContract(this.disposition());
     const enabled = contract.launchMode === "guard-only" ? this.liveOperatorMode(owner) : true;
@@ -347,7 +467,7 @@ export class TuiNativeManager {
         ...(resume ? { resumeSessionFile: resume.sessionFile, compactBeforePrompt: resume.compact, resumeMessage: resume.message } : {}),
         directory: join(this.root, "workers", randomBytes(12).toString("hex")), spec, state: "pending", operatorCapability: randomBytes(32).toString("hex"), started: false, notifiedSequence: 0, terminalNotification: '' })) };
     await this.serial(async () => {
-      if (signal?.aborted || this.closed) throw new Error("Launch cancelled before commit");
+      if (signal?.aborted || this.closed || this.reapReserved) throw new Error("Launch cancelled before commit");
       if ([...this.groups.values()].filter(group => group.owner === owner && group.children.some(active)).length >= this.groupLimit) throw new Error(`Subagent concurrency limit reached (${this.groupLimit})`);
       this.groups.set(g.id, g); this.save(g);
     });
@@ -482,12 +602,87 @@ export class TuiNativeManager {
     if (!result.ok) throw new Error(`Child-local job control ${result.code}: ${result.message}`);
     return result.data;
   }
+  /** Reserve delegation until the enclosing worker either seals or releases cleanup.
+   * Every child reap uses its own authenticated cleanup boundary recursively. */
+  async prepareReap(owner: string, preserve: (report: unknown) => Promise<void>): Promise<() => void> {
+    if (this.owner !== owner || this.closed || this.reapReserved) throw new Error("Subagent cleanup authority unavailable");
+    this.reapReserved = true;
+    try {
+      await this.serial(async () => {
+        const inventory = new TuiNativeManager(this.root, this.disposition, () => false, this.groupLimit);
+        if (inventory.inventoryErrors.length) throw new Error(`Subagent inventory is unverifiable: ${inventory.inventoryErrors.slice(0, 16).join(", ")}`);
+        const groups = [...this.groups.values()].filter(g => g.owner === owner);
+        for (const g of groups) {
+          for (const c of g.children) await this.observe(g, c);
+          this.save(g);
+        }
+        const blockers = groups.flatMap(g => g.children.filter(active).map(c => `${g.id}/${c.childId} ${c.state}`));
+        if (blockers.length) throw new Error(`Active descendant subagents block reap: ${blockers.slice(0, 32).join(", ")}`);
+        // Reports are retained before any pane is removed. Never treat a model
+        // task_outcome as execution settlement; observe() checks live activity.
+        await preserve({ groups: groups.map(g => this.publicGroup(g)), results: groups.flatMap(g => g.children.map(c => ({
+          job_id: g.id, child_id: c.childId, report: c.report ? readPrivateJson(c.report) : undefined,
+        }))) });
+        for (const g of groups) for (const c of g.children) {
+          const m = this.manifest(c);
+          if (m && !c.reaped) { await this.tmux.reap(m); c.reaped = true; this.save(g); }
+          else if (!m && !c.reaped && c.started) throw new Error(`Descendant manifest unavailable: ${g.id}/${c.childId}`);
+        }
+      });
+      return () => { this.reapReserved = false; };
+    } catch (error) { this.reapReserved = false; throw error; }
+  }
   hasOwnedGroups(owner: string): boolean { return [...this.groups.values()].some(g => g.owner === owner); }
   async operation(params: any, owner: string, signal?: AbortSignal): Promise<any | undefined> {
     const op = params.operation;
     if (!op) return;
-    if (this.closed) throw new Error("Native TUI controller is closing");
+    if (this.closed || this.reapReserved) throw new Error("Native TUI controller is closing or cleanup reserved");
+    if (op === "reap") {
+      const inventory = new TuiNativeManager(this.root, this.disposition, () => false, this.groupLimit);
+      if (inventory.inventoryErrors.length) throw new Error(`Subagent inventory is unverifiable: ${inventory.inventoryErrors.slice(0, 16).join(", ")}`);
+    }
     const ownedGroups = [...this.groups.values()].filter(g => g.owner === owner);
+    const directTarget = ownedGroups.some(g => params.job_id ? g.id === params.job_id
+      : g.children.some(c => c.childId === params.child_id || c.taskId === params.task_id));
+    const descendantRead = ["list", "tasks", "reap"].includes(op) || !directTarget && ["status", "output", "result"].includes(op);
+    const descendants = descendantRead ? await this.observeDescendants(owner) : [];
+    let descendant = descendants.find(g => params.job_id ? g.id === params.job_id
+      : g.children.some(c => c.childId === params.child_id || c.taskId === params.task_id));
+    if (descendant) {
+      if (params.child_id && !descendant.children.some(c => c.childId === params.child_id)
+        || params.task_id && !descendant.children.some(c => c.taskId === params.task_id)) throw new Error("Descendant target identity mismatch");
+      if (op === "reap") {
+        const nestedIds = new Set(this.descendantGroups(descendant.owner, [descendant]).map(group => group.id));
+        const nested = descendants.filter(group => nestedIds.has(group.id));
+        const blockers = [descendant, ...nested].flatMap(group => group.children.filter(active).map(c => `${group.id}/${c.childId} ${c.state}`));
+        if (blockers.length) throw new Error(`Active descendants block ancestor reap: ${blockers.slice(0, 32).join(", ")}`);
+        const release = this.observerLease(descendant.owner);
+        if (!release) throw new Error(`Descendant owner is live; ask its parent to reap ${descendant.id}`);
+        try {
+          const fresh = new TuiNativeManager(this.root, this.disposition, () => false, this.groupLimit).groups.get(descendant.id);
+          if (!fresh || fresh.owner !== descendant.owner) throw new Error("Descendant ownership changed before reap");
+          descendant = fresh;
+          for (const c of descendant.children) await this.observe(descendant, c, true);
+          if (descendant.children.some(active)) throw new Error(`Active descendant blocks reap: ${descendant.id}`);
+          await this.reapStoppedDescendants(nested);
+          for (const c of descendant.children) {
+            if (c.report) readPrivateJson(c.report); // Require readable retained results before deletion.
+            const manifest = this.manifest(c);
+            if (manifest && !c.reaped) { await this.tmux.reap(manifest); c.reaped = true; this.save(descendant); }
+          }
+        } finally { release(); }
+      }
+      const c = descendant.children.find(c => c.childId === params.child_id || c.taskId === params.task_id)
+        ?? descendant.children[(params.child ?? 1) - 1];
+      if (op === "result") {
+        if (!c || active(c) || !c.report) return response("Descendant result not ready.", { operation: op, job_id: descendant.id });
+        const bytes = Buffer.from(messageText((readPrivateJson(c.report) as any).assistant));
+        const offset = params.offset ?? 0, limit = params.limit ?? 48 * 1024;
+        return response(bytes.subarray(offset, offset + limit).toString("utf8"), { operation: op, job_id: descendant.id, child_id: c.childId,
+          descendant: true, artifact: c.report, offset, next_offset: Math.min(bytes.length, offset + limit), complete: offset + limit >= bytes.length });
+      }
+      return response(this.text(descendant, op === "output"), { operation: op, job_id: descendant.id, descendant: true, group: this.publicGroup(descendant) });
+    }
     let selected: Group | undefined;
     let child: Child | undefined;
     if (params.child_id || params.task_id) {
@@ -537,7 +732,11 @@ export class TuiNativeManager {
         }
       }
     } else await this.refresh(owner);
-    if (op === "list" || op === "tasks") return response(ownedGroups.slice(-(params.limit ?? 20)).map(g => this.text(g)).join("\n\n"), { operation: op, groups: ownedGroups.map(g => this.publicGroup(g)), ...(op === "tasks" ? { tasks: this.taskList(owner) } : {}) });
+    if (op === "list" || op === "tasks") return response([
+      ...ownedGroups.slice(-(params.limit ?? 20)).map(g => this.text(g)),
+      ...descendants.filter(g => g.children.some(c => !c.reaped)).map(g => `Descendant: ${this.text(g)}`),
+    ].join("\n\n"), { operation: op, groups: ownedGroups.map(g => this.publicGroup(g)),
+      descendants: descendants.map(g => this.publicGroup(g)), ...(op === "tasks" ? { tasks: this.taskList(owner) } : {}) });
     if (op === "wait_any" || op === "wait_all") {
       const waited = await waitForGroupSnapshot(async () => {
         await this.refresh(owner);
@@ -585,6 +784,13 @@ export class TuiNativeManager {
     if (op === "reap") await this.serial(async () => {
       if (g.children.some(c => c.state === "running")) throw new Error("Group is busy; reap never cancels active work");
       if (g.children.some(c => c.state === "pending" || c.state === "launching")) throw new Error("Pending group work must finish or be explicitly cancelled before reap");
+      const nestedIds = new Set(this.descendantGroups(owner, [g]).map(group => group.id));
+      const blockers = descendants.filter(group => nestedIds.has(group.id)).flatMap(group => group.children.filter(active).map(c => `${group.id}/${c.childId} ${c.state}`));
+      if (blockers.length) throw new Error(`Active descendants block ancestor reap: ${blockers.slice(0, 32).join(", ")}`);
+      // Stopped/reaped intermediate parents no longer run a scheduler. Recover
+      // only their proven descendants, deepest first; live parents perform
+      // their own recursive cleanup through prepare_reap instead.
+      await this.reapStoppedDescendants(descendants.filter(group => nestedIds.has(group.id)));
       for (const c of g.children) { const m = this.manifest(c); if (m && !c.reaped) { await this.tmux.reap(m); c.reaped = true; this.save(g); } }
     });
     if (op === "wait" || op === "wait_group") {

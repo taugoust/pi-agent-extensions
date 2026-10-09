@@ -1,7 +1,7 @@
 import { spawn, execFile } from "node:child_process";
 import { promisify } from "node:util";
 import { constants, chmodSync, closeSync, fstatSync, lstatSync, openSync, readFileSync, readdirSync, readSync, unlinkSync, writeFileSync } from "node:fs";
-import { dirname, join, resolve } from "node:path";
+import { basename, dirname, join, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 import { createHash, randomBytes } from "node:crypto";
 import { TUI_WORKER_DISCOVERY_ENV, TUI_WORKER_MANIFEST_ENV, type HeadlessWorkerManifest, type TuiWorkerEvent } from "../shared/tui-worker-protocol.ts";
@@ -91,10 +91,12 @@ function readBoundedTail(path: string, maximum: number): { text: string; truncat
 export class HeadlessForegroundManager {
   readonly root: string;
   private groups = new Map<string, Group>();
+  private inventoryErrors: string[] = [];
   private epoch = randomBytes(16).toString("hex");
   private owner?: string;
   private ownerToken?: string;
   private closed = false;
+  private reapReserved = false;
   private ownerLock?: string;
   private queue: Promise<unknown> = Promise.resolve();
   private inFlight = new Set<Promise<unknown>>();
@@ -122,13 +124,15 @@ export class HeadlessForegroundManager {
       if (!/^subagent-job-[a-f0-9]{24}\.json$/.test(file)) continue;
       try {
         const group = readPrivateJson(join(root, "headless-groups", file)) as Group;
-        if (group.version === 1 && `${group.id}.json` === file && Array.isArray(group.children) && group.children.length <= 8
+        if (group.version === 1 && typeof group.owner === "string" && `${group.id}.json` === file && Array.isArray(group.children) && group.children.length <= 8
           && group.children.every(child => /^subagent-child-[a-f0-9]{24}$/.test(child.childId) && /^subagent-task-[a-f0-9]{24}$/.test(child.taskId)
             && /^[a-f0-9]{64}$/.test(child.operatorCapability)
             && ((child.launcherPid === undefined && child.launcherToken === undefined)
               || Number.isSafeInteger(child.launcherPid) && child.launcherPid! > 0 && typeof child.launcherToken === "string" && /^[a-zA-Z0-9:._-]{1,256}$/.test(child.launcherToken))
-            && child.directory.startsWith(`${join(root, "workers")}/`))) this.groups.set(group.id, group);
-      } catch { /* Invalid manifests never authorize execution or deletion. */ }
+            && typeof child.directory === "string" && /^[a-f0-9]{24}$/.test(basename(child.directory))
+            && child.directory === join(this.root, "workers", basename(child.directory)))) this.groups.set(group.id, group);
+        else this.inventoryErrors.push(file);
+      } catch { this.inventoryErrors.push(file); /* Invalid manifests never authorize execution or deletion. */ }
     }
   }
   private persist(group: Group): void { atomicPrivateJson(join(this.root, "headless-groups", `${group.id}.json`), group); }
@@ -487,7 +491,7 @@ export class HeadlessForegroundManager {
   }
   private async launchImpl(params: any, owner: string, cwd: string, signal?: AbortSignal, update?: (value: any) => void,
     resume?: { taskId: string; sessionFile: string; attempt: number; spec: Spec; message?: string; compact?: boolean }) {
-    if (this.owner !== owner || this.closed) throw new Error("Headless foreground manager is not active for this session");
+    if (this.owner !== owner || this.closed || this.reapReserved) throw new Error("Headless foreground manager is not active for this session or cleanup reserved");
     const forms = [typeof params.task === "string" && params.task.trim(), Array.isArray(params.tasks) && params.tasks.length, Array.isArray(params.chain) && params.chain.length].filter(Boolean);
     if (forms.length !== 1) throw new Error("Provide exactly one task/tasks/chain form");
     const specs: Spec[] = (params.tasks ?? params.chain ?? [params]).map((spec: any) => {
@@ -511,7 +515,7 @@ export class HeadlessForegroundManager {
         ownerToken: this.ownerToken!, operatorCapability: randomBytes(32).toString("hex"), resumeMessage: resume?.message, compactBeforePrompt: resume?.compact,
         notifiedSequence: 0 })) };
     await this.serial(async () => {
-      if (signal?.aborted || this.closed) throw new Error("Launch cancelled before commit");
+      if (signal?.aborted || this.closed || this.reapReserved) throw new Error("Launch cancelled before commit");
       if ([...this.groups.values()].filter(g => g.owner === owner && g.children.some(active)).length >= this.groupLimit) throw new Error(`Foreground task concurrency limit reached (${this.groupLimit})`);
       this.groups.set(group.id, group); this.persist(group);
     });
@@ -815,7 +819,7 @@ export class HeadlessForegroundManager {
   }
   private async executeImpl(request: ForegroundTaskRequest): Promise<ForegroundTaskResponse> {
     const base = { protocol: FOREGROUND_TASKS_PROTOCOL, sessionId: this.owner ?? "", epoch: this.epoch } as const;
-    if (this.closed || request.sessionId !== this.owner || request.epoch !== this.epoch) return { ...base, state: "unavailable", message: "Foreground task session or epoch is stale" };
+    if (this.closed || this.reapReserved || request.sessionId !== this.owner || request.epoch !== this.epoch) return { ...base, state: "unavailable", message: "Foreground task session or epoch is stale" };
     if (request.operation === "list") {
       for (const group of this.groups.values()) if (group.owner === request.sessionId) await Promise.all(group.children.map(child => this.observe(group, child)));
       return { ...base, state: "available", tasks: [...this.groups.values()].filter(g => g.owner === request.sessionId).flatMap(g => g.children.map(c => this.task(g, c))).slice(-100) };
@@ -930,8 +934,36 @@ export class HeadlessForegroundManager {
         : group.children.some(child => ["failed", "lost"].includes(child.status)) ? "failed" : "completed",
       children: group.children.map((child, index) => ({ child: index + 1, child_id: child.childId, task_id: child.taskId, status: child.status })) }));
   }
+  async prepareReap(owner: string, preserve: (report: unknown) => Promise<void>): Promise<() => void> {
+    if (this.owner !== owner || this.closed || this.reapReserved) throw new Error("Foreground cleanup authority unavailable");
+    this.reapReserved = true;
+    try {
+      if (this.activeLaunches.size || this.inFlight.size || this.resuming.size) throw new Error("In-flight foreground subagent operations block reap");
+      const inventory = new HeadlessForegroundManager(this.root, this.disposition, () => false, this.groupLimit);
+      if (inventory.inventoryErrors.length) throw new Error(`Foreground subagent inventory is unverifiable: ${inventory.inventoryErrors.slice(0, 16).join(", ")}`);
+      const groups = [...this.groups.values()].filter(group => group.owner === owner);
+      for (const group of groups) for (const child of group.children) await this.observe(group, child);
+      const blockers = groups.flatMap(group => group.children.filter(active).map(child => `${group.id}/${child.childId} ${child.status}`));
+      if (blockers.length) throw new Error(`Active foreground descendants block reap: ${blockers.slice(0, 32).join(", ")}`);
+      await preserve({ groups: groups.map(group => ({ job_id: group.id, children: group.children.map(child => ({
+        child_id: child.childId, task_id: child.taskId, status: child.status, outcome: child.outcome,
+        report: child.report ? readPrivateJson(child.report) : undefined,
+      })) })) });
+      for (const group of groups) {
+        for (const child of group.children) {
+          if (child.reaped) continue;
+          const manifest = this.manifest(child);
+          if (!manifest) throw new Error(`Foreground descendant manifest unavailable: ${group.id}/${child.childId}`);
+          await this.sealAndReap(group, child, manifest);
+        }
+        this.persist(group);
+      }
+      return () => { this.reapReserved = false; };
+    } catch (error) { this.reapReserved = false; throw error; }
+  }
   async operation(params: any, owner: string, signal?: AbortSignal): Promise<any | undefined> {
     if (!params.operation) return undefined;
+    if (this.reapReserved) throw new Error("Foreground subagent cleanup reserved");
     if (this.owner !== owner) return undefined;
     const op = params.operation;
     if (op === "list" || op === "tasks") {

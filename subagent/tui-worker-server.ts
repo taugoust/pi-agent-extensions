@@ -19,6 +19,8 @@ export type TuiWorkerAdapter = {
   /** Reserve job creation, preserve terminal results, clean only owned terminal jobs.
    * Return a release callback; failures must release the local reservation. */
   prepareJobReap?(preserve: (report: unknown) => Promise<void>): Promise<() => void>;
+  /** Adapter includes session-bound recursive subagent cleanup, not only jobs. */
+  recursiveCleanup?: boolean;
   jobs?(params: import("../shared/tui-worker-protocol.ts").TuiWorkerJobParams, requestId: string): Promise<unknown>;
   applyOperatorMode?(enabled: boolean): unknown | Promise<unknown>;
 };
@@ -108,6 +110,7 @@ export class TuiWorkerServer {
       sessionFile: this.manifest.sessionFile, presentation: this.manifest.presentation,
       interactions: (this.state.interactions ?? []).filter(item => !item.answer && !item.cancelledAt).slice(-2)
         .map(({ id, workerEpoch, createdAt, request }) => ({ id, workerEpoch, createdAt, request })), liveText: this.currentLiveText,
+      recursiveCleanup: this.adapter.recursiveCleanup === true,
       readyForPrompts: !this.sealed && !this.preparingReap && (this.adapter.canRun?.() ?? true), permissionPromptsEnabled: this.adapter.permissionMode?.() };
   }
   private authenticated(r: TuiWorkerRequest): boolean {

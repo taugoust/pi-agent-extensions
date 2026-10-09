@@ -59,7 +59,7 @@ test("inspection retries vanished /proc only with fresh owned tmux death evidenc
       const state = store.readState();
       state.sealed = true; state.reapReservation = "verified-reservation";
       state.jobCleanup = { workerEpoch: manifest.workerEpoch,
-        artifact: store.artifact("job-cleanup", 1, { workerEpoch: manifest.workerEpoch, report: { jobs: [] } }) };
+        artifact: store.artifact("job-cleanup", 1, { workerEpoch: manifest.workerEpoch, report: { jobs: [], subagents: { groups: [] } } }) };
       store.writeState(state);
       await f.backend.reap(manifest);
       assert.equal(f.reads(), 3, "reap must reverify immediately before deletion");
@@ -72,6 +72,17 @@ test("inspection retries vanished /proc only with fresh owned tmux death evidenc
       await rm(join(root, "state.json"), { force: true });
       const f = fixture([dead]);
       await assert.rejects(f.backend.reap(manifest), /inventory is unknown.*explicitly inspect\/adopt/);
+      assert.equal(f.kills(), 0);
+    });
+    await t.test("old job-only cleanup proof cannot authorize deletion with unknown descendants", async () => {
+      const f = fixture([dead]);
+      const store = new TuiWorkerStore(root);
+      const state = store.readState();
+      state.sealed = true; state.reapReservation = "old-reservation";
+      state.jobCleanup = { workerEpoch: manifest.workerEpoch,
+        artifact: store.artifact("job-cleanup", 2, { workerEpoch: manifest.workerEpoch, report: { jobs: [] } }) };
+      store.writeState(state);
+      await assert.rejects(f.backend.reap(manifest), /recursive subagent cleanup/);
       assert.equal(f.kills(), 0);
     });
     for (const [name, snapshot] of [
