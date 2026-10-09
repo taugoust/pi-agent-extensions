@@ -333,7 +333,7 @@ export default function tuiWorkerExtension(pi: ExtensionAPI): void {
       // is appended. Pi evaluates canContinue again after applying boundary drafts.
       if (event.continue) return;
       const message = worker.claimAutoContinuation();
-      if (message) return { continue: true, entries: [{ type: "custom_message" as const,
+      if (message) return { continue: true, entries: [...event.entries, { type: "custom_message" as const,
         customType: "harness-auto-continuation", content: message, display: true }] };
     } catch (error) { fail(ctx, error); }
   });

@@ -42,11 +42,19 @@ test("final boundary continues routine partial once, never blockers, errors or i
       if (scenario === "tool-error") handlers.get("tool_result")!({ isError: true }, ctx);
       if (scenario === "cancel") await callTuiWorker(manifest, { operation: "cancel" });
       if (scenario === "sealed") { await handlers.get("session_shutdown")!({}, ctx); }
-      const event = { outcome: ["error", "aborted"].includes(scenario) ? scenario : "completed", continue: false, context: { canContinue: false, pendingMessages: [] } };
+      // Pi composes boundary handlers by replacing entries with each returned
+      // array. Simulate drafts supplied by an earlier extension in the chain.
+      const earlierDrafts = [{ type: "custom", customType: "earlier-extension-state", data: { preserved: true } },
+        { type: "custom_message", customType: "earlier-extension-guidance", content: "Preserve this guidance", display: false }];
+      const event = { outcome: ["error", "aborted"].includes(scenario) ? scenario : "completed", entries: earlierDrafts,
+        continue: false, context: { canContinue: false, pendingMessages: [] } };
       const result = handlers.get("agent_before_settle")!(event, ctx);
       assert.equal(result?.continue, scenario === "routine" ? true : undefined, scenario);
       if (scenario === "routine") {
-        assert.equal(result.entries.length, 1);
+        assert.equal(result.entries.length, 3);
+        assert.deepEqual(result.entries.slice(0, 2), earlierDrafts, "continuation must preserve preceding extensions' boundary drafts in order");
+        assert.equal(result.entries[2].customType, "harness-auto-continuation");
+        assert.equal(event.entries.length, 2, "boundary composition must not mutate the incoming drafts");
         assert.equal(store.readState().lastReport, undefined);
         // A repeat outcome and another boundary cannot schedule a second request.
         await tools.get("task_outcome").execute("outcome2", outcome);
