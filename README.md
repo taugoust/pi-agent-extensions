@@ -740,12 +740,33 @@ required for filesystem, process, network, and descendant enforcement.
 { "operation": "wait_group", "job_id": "subagent-job-...", "wait_ms": 30000 }
 { "operation": "wait_all", "wait_ms": 30000 }
 { "operation": "result", "job_id": "subagent-job-...", "child": 1, "offset": 0, "limit": 49152 }
-{ "operation": "prompt", "child_id": "subagent-child-...", "message": "Check the failing edge case", "control_mode": "steer" }
+{ "operation": "prompt", "child_id": "subagent-child-...", "job_id": "subagent-job-...", "message": "Check the failing edge case", "control_mode": "steer" }
 { "operation": "prompt", "child_id": "subagent-child-...", "message": "After that, summarize", "control_mode": "follow_up" }
 { "operation": "prompt", "child_id": "subagent-child-...", "message": "Stop and investigate this instead", "control_mode": "interrupt" }
+{ "operation": "resume", "task_id": "subagent-task-...", "message": "Continue validation", "compact": false }
 { "mode": "draft", "task": "Implement and commit the change in an isolated VM" }
 { "mode": "draft", "action": "review", "draft_id": "session-..." }
 ```
+
+The tool keeps a flat parameter schema for provider compatibility; its field
+and operation descriptions define the accepted combinations. Omit `operation`
+for a new launch or Draft disposition. Never combine an operation with launch
+options (`task`, `tasks`, `chain`, `model`, `background`, `tools`, `cwd`, etc.).
+
+| Operation | Fields besides `operation` (`?` means optional) |
+|---|---|
+| `resume` | `task_id`, `message?`, `compact?` |
+| `prompt` | `child_id`, `message`, `job_id?`, `control_mode?`, `wait_for_response?` |
+| `list`, `tasks` | `limit?` (1–50) |
+| `status`, `output`, `cancel`, `reap`, `promote` | `job_id` |
+| `wait`, `wait_group` | `job_id`, `wait_ms?` |
+| `wait_any`, `wait_all` | `wait_ms?` |
+| `result` | `job_id?`, `child_id?`, `child?`, `offset?`, `limit?`, `diagnostics?`; require `job_id` or `child_id`; never both `child` and `child_id` |
+
+For `prompt`, optional `job_id` is a checked assertion that the child belongs to
+that group, not a second target. Unknown, foreign, or mismatched identities fail
+before delivery; omitting it retains child-only control. A rejected control call
+never relaunches the task.
 
 Native workers can call `notify_parent({message, requires_guidance?})` without
 ending their task. Routine findings are retained outside model context;
@@ -1060,8 +1081,15 @@ Native launches also expose a stable `task_id`, distinct from each attempt's
 specification, acceptance criteria, session JSONL, attempt history, and checkpoint
 metadata. Use `subagent {operation:"tasks"}` to list this parent's retained tasks,
 then `subagent {operation:"resume",task_id:"subagent-task-...",message:"Continue validation"}`
-to start a new background attempt in the **same saved conversation**. Resume never
-accepts an arbitrary session path or widens the task's tools/cwd. Parent-session
+to continue the **same saved conversation**. Resume reuses a live worker where
+supported; only a verified closed worker needs a successor attempt. It preserves
+the saved launch configuration and execution kind (headless foreground remains
+headless; native TUI successors run in the background). Only `task_id`, optional
+`message`, and `compact` are accepted besides `operation`. Use `message`, not
+`task`, for continuation instructions. `model` and `background` are launch-only;
+resume rejects them explicitly rather than silently ignoring overrides or
+starting unrelated work. Resume never accepts an arbitrary session path or
+widens the task's tools/cwd. Parent-session
 ownership and process start identities prevent foreign or concurrent resumes.
 Task-owned background jobs remain accessible to successor attempts.
 

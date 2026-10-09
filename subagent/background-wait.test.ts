@@ -34,7 +34,19 @@ assert.doesNotThrow(() => validateBackgroundOperation({operation:"tasks",limit:2
 assert.throws(() => validateBackgroundOperation({ operation: "wait_everything" }), /Unknown background subagent operation/);
 assert.doesNotThrow(() => validateBackgroundOperation({ operation: "prompt", child_id: childId, message: "continue" }));
 assert.doesNotThrow(() => validateBackgroundOperation({ operation: "prompt", child_id: childId, message: "continue", control_mode: "interrupt" }));
-assert.throws(() => validateBackgroundOperation({ operation: "prompt", child_id: childId, message: "continue", job_id: jobId }), /cannot include/);
+assert.doesNotThrow(() => validateBackgroundOperation({ operation: "prompt", child_id: childId, message: "continue", job_id: jobId }));
+assert.throws(() => validateBackgroundOperation({ operation: "prompt", child_id: childId, message: "continue", job_id: "../group" }), /valid group ID/);
+assert.throws(() => validateBackgroundOperation({ operation: "prompt", child_id: childId, message: "continue", task: "replacement" }), /cannot include/);
+assert.throws(() => validateBackgroundOperation({ operation: "prompt", child_id: childId, message: "continue", unexpected: true }), /unsupported fields: unexpected/);
+// Exact reported resume misuse: consequential launch fields must not be ignored
+// or interpreted as a fresh launch. The advertised correction is message.
+const resumeMisuse = { operation: "resume", task_id: taskId, model: "provider/model:high", background: true, task: "Continue validation" };
+assert.throws(() => validateBackgroundOperation(resumeMisuse), /unsupported fields: model, background, task.*Use message \(not task\).*No work was started/);
+for (const override of [{ model: "provider/model:high" }, { background: false }, { task: "continue" }, { job_id: jobId }, { wait_for_response: true }]) {
+  assert.throws(() => validateBackgroundOperation({ operation: "resume", task_id: taskId, ...override }), /accepts only/);
+}
+assert.doesNotThrow(() => validateBackgroundOperation({ operation: "resume", task_id: taskId }));
+assert.doesNotThrow(() => validateBackgroundOperation({ operation: "resume", task_id: taskId, message: "Continue validation", compact: false }));
 assert.throws(() => validateBackgroundOperation({ operation: "prompt", child_id: childId, message: "" }), /message must be non-empty/);
 assert.throws(() => validateBackgroundOperation({ operation: "prompt", child_id: childId, message: "continue", control_mode: "later" }), /control_mode/);
 assert.doesNotThrow(() => validateBackgroundOperation({ operation: "result", job_id: jobId, child_id: childId }));
@@ -195,6 +207,16 @@ async function operationCheck() {
   assert.match(tool.parameters.properties.child_id.pattern, /subagent-child/);
   assert.match(tool.parameters.properties.control_mode.pattern, /follow_up/);
   assert(tool.parameters.properties.wait_ms.maximum >= sixHoursMs, "tool schema does not expose hour-scale waits");
+  assert.match(tool.description, /Resume shape:.*task_id,message\?,compact\?/);
+  assert.match(tool.parameters.properties.operation.description, /resume \{task_id, message\?, compact\?\}/);
+  assert.match(tool.parameters.properties.operation.description, /prompt \{child_id, message, job_id\?/);
+  for (const field of ["task", "model", "background", "cwd", "tools", "systemPrompt", "name", "acceptance", "tasks", "chain"]) {
+    assert.match(tool.parameters.properties[field].description, /Launch only/i, `${field} must not advertise a resume override`);
+  }
+  assert.match(tool.parameters.properties.message.description, /resume/);
+  assert.match(tool.parameters.properties.job_id.description, /Optional for prompt.*mismatch rejects before delivery/);
+  // Validation must run before looking up or launching the retained task.
+  await assert.rejects(tool.execute("resume-misuse", resumeMisuse, undefined, undefined, ctx), /unsupported fields: model, background, task/);
 
   const unsupportedIdentity = {
     childId: createSubagentChildId(), child: 1, label: "subagent", task: "AgentSH-owned work",
@@ -244,10 +266,32 @@ async function operationCheck() {
   assert.equal(acceptedControl.details.accepted, true);
   assert.equal(acceptedControl.content[0].text, "accepted without waiting");
   assert.deepEqual(nativeCalls.at(-1), ["accepted", "steer", "keep working"]);
-  completeSubagentChildren(sessionId, [nativeIdentity]);
-
   const managerRoot = path.join(agentDir, "state", "background-subagents-v1");
   const manager = sharedBackgroundSubagentManager(managerRoot);
+  const descriptor = { childId: nativeIdentity.childId, label: nativeIdentity.label, task: nativeIdentity.task };
+  const controlGroup = await manager.start({ sessionId, backend: "native", mode: "single", summary: "control fixture", children: [descriptor] },
+    async () => ({ text: "fixture", failed: false }));
+  const foreignControlGroup = await manager.start({ sessionId: "foreign", backend: "native", mode: "single", summary: "foreign fixture", children: [descriptor] },
+    async () => ({ text: "fixture", failed: false }));
+  const groupedPrompt = { operation: "prompt", child_id: nativeIdentity.childId, job_id: controlGroup.id, message: "same group" };
+  const groupedControl = await tool.execute("grouped-prompt", groupedPrompt, undefined, undefined, ctx);
+  assert.equal(groupedControl.details.accepted, true);
+  assert.deepEqual(nativeCalls.at(-1), ["accepted", "steer", "same group"]);
+  const callCount = nativeCalls.length;
+  for (const request of [
+    { ...groupedPrompt, child_id: createSubagentChildId() },
+    { ...groupedPrompt, job_id: foreignControlGroup.id },
+    { ...groupedPrompt, job_id: jobId },
+  ]) {
+    const rejected = await tool.execute("wrong-group", request, undefined, undefined, ctx);
+    assert.equal(rejected.isError, true);
+  }
+  assert.equal(nativeCalls.length, callCount, "rejected group assertion delivered a prompt");
+  await manager.wait(controlGroup.id, 1000);
+  await manager.wait(foreignControlGroup.id, 1000);
+  await manager.reapNative(controlGroup.id, sessionId);
+  await manager.reapNative(foreignControlGroup.id, "foreign");
+  completeSubagentChildren(sessionId, [nativeIdentity]);
   const reloadedBackground = await import("./background.js?background-wait-v4-reload");
   assert.equal(reloadedBackground.sharedBackgroundSubagentManager(managerRoot), manager, "same-process reload replaced the V4 manager");
   const tracker = sharedBackgroundSubagentChildTracker();

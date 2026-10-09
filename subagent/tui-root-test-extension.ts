@@ -203,6 +203,17 @@ export default function rootTest(pi: ExtensionAPI) {
     assert.equal(refreshedView.state, "available");
     assert.ok(refreshedView.view.messages.some((message: any) => message.role === "user" && message.text.includes("Direct user instruction from Paseo")),
       "trusted panel input must be retained with user origin");
+    // Model-facing control accepts the same group+child identity pair returned
+    // by the harness; bad assertions/launch overrides must not deliver or restart.
+    await assert.rejects(execute(ctx, { operation: "prompt", child_id: headlessTask.childId,
+      job_id: `subagent-job-${"f".repeat(24)}`, message: "MUST_NOT_DELIVER" }), /does not belong/i);
+    await assert.rejects(execute(ctx, { operation: "resume", task_id: foregroundId,
+      model: "harness-test/mock:off", background: true, task: "MUST_NOT_RELAUNCH" }), /unsupported fields: model, background, task/);
+    const groupedPrompt = await execute(ctx, { operation: "prompt", child_id: headlessTask.childId,
+      job_id: foreground.details.job_id, message: "Group-asserted parent follow-up", wait_for_response: true });
+    assert.equal(groupedPrompt.details.job_id, foreground.details.job_id);
+    assert.equal(groupedPrompt.details.child_id, headlessTask.childId);
+    assert.equal((await callTuiWorker(headless, { operation: "status" }) as any).data.pid, (foregroundState.data as any).pid);
     await execute(ctx, { operation: "reap", job_id: foreground.details.job_id });
     const questionnaire = await answerHeadlessInteraction(ctx, "ASK_QUESTIONNAIRE", { kind: "questionnaire", cancelled: false,
       answers: [{ id: "continue", value: "yes", wasCustom: false }] }, "questionnaire");
