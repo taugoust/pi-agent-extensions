@@ -45,7 +45,7 @@ pkgs.runCommand "background-job-extension-check"
     srcdir="$workdir/src"
     outdir="$workdir/out"
     mkdir -p "$srcdir/background-job" "$srcdir/shared" "$outdir/background-job" "$workdir/home" "$workdir/tmp"
-    cp ${self}/background-job/{index.ts,manager.ts,store.ts,tmux.ts,types.ts,test.mjs,runner.mjs,watch.ts,watch-runner.mjs,watch.test.mjs,external-pane.ts,pane.test.mjs,runtime-path.ts,startup.test.mjs,completion.test.mjs} "$srcdir/background-job/"
+    cp ${self}/background-job/{index.ts,manager.ts,retention.ts,retention.test.mjs,retention-races.test.mjs,store.ts,tmux.ts,types.ts,test.mjs,runner.mjs,watch.ts,watch-runner.mjs,watch.test.mjs,external-pane.ts,pane.test.mjs,runtime-path.ts,startup.test.mjs,completion.test.mjs} "$srcdir/background-job/"
     cp ${self}/shared/agentsh-mode.ts "$srcdir/shared/agentsh-mode.ts"
     cp ${self}/shared/background-job.ts ${self}/shared/harness-readonly.ts "$srcdir/shared/"
     cp ${self}/shared/task-presentation.ts "$srcdir/shared/task-presentation.ts"
@@ -65,12 +65,13 @@ pkgs.runCommand "background-job-extension-check"
       --outDir "$outdir" \
       "$srcdir/background-job/index.ts" \
       "$srcdir/background-job/manager.ts" \
+      "$srcdir/background-job/retention.ts" \
       "$srcdir/background-job/store.ts" \
       "$srcdir/background-job/tmux.ts" \
       "$srcdir/background-job/types.ts" \
       "$srcdir/shared/agentsh-mode.ts" \
       "$srcdir/shared/quiet-state.test.ts"
-    cp "$srcdir/background-job/"{test.mjs,runner.mjs,watch-runner.mjs,watch.test.mjs,pane.test.mjs,startup.test.mjs,completion.test.mjs} "$outdir/background-job/"
+    cp "$srcdir/background-job/"{test.mjs,retention.test.mjs,retention-races.test.mjs,runner.mjs,watch-runner.mjs,watch.test.mjs,pane.test.mjs,startup.test.mjs,completion.test.mjs} "$outdir/background-job/"
 
     export HOME="$workdir/home"
     export TMPDIR="$workdir/tmp"
@@ -101,6 +102,8 @@ pkgs.runCommand "background-job-extension-check"
     EOF
     node "$outdir/shared/quiet-state.test.js"
     PI_CODING_AGENT_DIR="$workdir/completion-agent" node "$outdir/background-job/completion.test.mjs"
+    PI_CODING_AGENT_DIR="$workdir/retention-agent" node "$outdir/background-job/retention.test.mjs"
+    PI_CODING_AGENT_DIR="$workdir/retention-races-agent" node "$outdir/background-job/retention-races.test.mjs"
     cat > "$workdir/contract.mjs" <<'EOF'
     process.env.PI_SUPERVISED = "1";
     const module = await import("./out/background-job/index.js");
@@ -222,7 +225,7 @@ pkgs.runCommand "background-job-extension-check"
     const reaped = await broker.execute(identity, 'child-reap', {action:'reap',job_id:childJob.details.job_id});
     if (!reaped.details.reaped) throw new Error('explicit reap tool action failed');
     const retained = await afterReload.tool.execute('parent-retained', {action:'status',job_id:started.details.job_id}, undefined, undefined, reloadContext);
-    if (retained.details.status !== 'completed' || retained.details.retention !== 'until-explicit-reap') throw new Error('child reap removed sibling job or omitted retention policy');
+    if (retained.details.status !== 'completed' || retained.details.retention !== 'five-minutes-after-output-retrieval') throw new Error('child reap removed sibling job or omitted retention policy');
     await afterReload.handlers.get("session_shutdown")({reason:'quit'},reloadContext);
     if (recovered.details?.status !== "completed" || recovered.details?.exit_code !== 0) {
       throw new Error(`session reload did not recover the running background job: ''${JSON.stringify(recovered.details)} ''${JSON.stringify(recovered.content)}`);

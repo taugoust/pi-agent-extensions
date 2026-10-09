@@ -66,11 +66,11 @@ async function assertReject(promise, pattern) {
     const id = `job-${i.toString(16).padStart(24, '0')}`;
     return [id, { metadata: { id, sessionId: i === 1001 ? 'foreign' : 'owner' }, status: 'completed', result: { status: 'completed' } }];
   }));
-  const fake = new BackgroundJobManager({listIds: async () => [...records.keys()], readMetadata: async id => records.get(id).metadata}, {});
+  const fake = new BackgroundJobManager({withRetentionLock: async operation => operation(), listIds: async () => [...records.keys()], readMetadata: async id => records.get(id).metadata}, {});
   fake.get = async id => records.get(id);
-  fake.output = async () => ({text: '界'.repeat(20000) + 'FINAL ERROR MARKER', truncated: false});
+  fake.readOutput = async () => ({text: '界'.repeat(20000) + 'FINAL ERROR MARKER', truncated: false});
   let preserved = false;
-  fake.reap = async id => { assert(preserved, 'deleted before preservation'); assert(records.get(id).metadata.sessionId === 'owner', 'foreign deletion'); records.delete(id); };
+  fake.reapLocked = async id => { assert(preserved, 'deleted before preservation'); assert(records.get(id).metadata.sessionId === 'owner', 'foreign deletion'); records.delete(id); };
   const first = records.values().next().value;
   first.metadata.observed = {};
   await assertReject(fake.reapSession('owner', async () => {}), /adopted.*job-/);

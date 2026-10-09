@@ -22,7 +22,6 @@ const MAX_RUNNING = 64;
 const MAX_RUNNING_PER_CWD = 32;
 const MAX_WAIT_MS = 12 * 60 * 60 * 1000;
 const STARTING_GRACE_MS = 30_000;
-import { retrieveAndSchedule } from "./retention.ts";
 
 export type StartRequest = {
   command: string;
@@ -232,7 +231,9 @@ export class BackgroundJobManager {
     if(process.env.TMUX_PANE===pane.identity.paneId&&currentSocket&&await realpath(currentSocket).catch(()=>currentSocket)===pane.identity.socket)throw new Error('Cannot adopt the pane hosting this Pi session');
     await requireAvailablePane(pane);
     const within=(value:string)=>{const rel=relative(cwd,value);if(rel==='..'||rel.startsWith('../')||isAbsolute(rel))throw new Error('Pane and optional log must be within the delegated cwd');};
-    return await this.store.withLock(async()=>{
+    // Keep ownership transfer from racing global expiry of a native pane that
+    // already has a retained record. Lock order matches start/prune.
+    return await this.store.withLock(() => this.store.withRetentionLock(async()=>{
       const records=await this.list(1000);
       const existing=records.find(r=>r.metadata.pane?.socket===pane.identity.socket&&r.metadata.pane?.paneId===pane.identity.paneId)
         ?? records.find(r=>(r.launch?.socketPath??this.store.socketPath)===pane.identity.socket&&r.launch?.paneId===pane.identity.paneId&&r.launch.panePid===pane.identity.panePid);
@@ -256,7 +257,7 @@ export class BackgroundJobManager {
       const metadata:JobMetadata={schemaVersion:1,id,name:request.name??`Tmux pane ${pane.identity.paneId}`,command:`(adopted tmux pane ${pane.identity.paneId})`,shell:'(existing)',cwd,createdAt:new Date().toISOString(),ownerPid:process.pid,ownerToken:await processStartToken(process.pid),sessionId:request.sessionId,childId:request.childId,pane:identity,observed};
       await this.store.create(metadata,'',Buffer.alloc(0));
       return await this.get(id);
-    });
+    }));
   }
 
   private async cachePane(metadata:JobMetadata,tmux:string):Promise<void>{
@@ -390,7 +391,7 @@ export class BackgroundJobManager {
   }
 
   async output(id: string): Promise<OutputSnapshot> {
-    return await this.readOutput(id, true);
+    return await this.store.withRetentionLock(() => this.readOutput(id, true));
   }
 
   /** Read existing output without result reconciliation or notification writes. */
@@ -414,6 +415,7 @@ export class BackgroundJobManager {
     }
     let raw = "";
     let source: OutputSnapshot["source"] = "none";
+    const snapshotWasTerminal = Boolean(record.result);
     try {
       const outputPath = this.store.path(id, "output.log");
       const info = await lstat(outputPath);
@@ -429,9 +431,13 @@ export class BackgroundJobManager {
       source = raw ? "pane" : "none";
     }
     const bounded = boundedTail(raw);
-    if (notify && record.result) {
+    if (notify && snapshotWasTerminal) {
       await this.store.markNotified(id);
-      await retrieveAndSchedule(record, this.store);
+      // The snapshot must have started in terminal state. Completion during a
+      // running read does not authorize disposal of output we may not have seen.
+      if (record.launch && !record.metadata.pane && !record.metadata.infrastructure) {
+        await this.store.markRetrieved(id);
+      }
     }
     return { ...bounded, source };
   }
@@ -516,7 +522,7 @@ export class BackgroundJobManager {
     // user job and every unread outcome, regardless of infrastructure churn.
     const infrastructure = terminal.filter(record => record.metadata.infrastructure);
     const expired = infrastructure.filter((record, index) => index >= 20 || Date.parse(record.result!.finishedAt) < cutoff);
-    // User jobs (including read/notified outcomes) are never garbage-collected.
+    // User jobs are handled only by retrieval-based expiry, never quota/age pruning.
     for (const record of expired) {
       try { await this.reap(record.metadata.id); } catch { /* retain on uncertain identity */ }
     }
@@ -539,6 +545,12 @@ export class BackgroundJobManager {
 
   /** Caller must reserve local creators, including watch recovery, throughout. */
   async reapSession(sessionId: string, preserve: (records: unknown) => Promise<void>, assertAvailable: () => void = () => {}): Promise<void> {
+    // Global expiry in another Pi session must not delete records between our
+    // inventory and durable preservation. Use the same cross-process lock.
+    return await this.store.withRetentionLock(() => this.reapSessionLocked(sessionId, preserve, assertAvailable));
+  }
+
+  private async reapSessionLocked(sessionId: string, preserve: (records: unknown) => Promise<void>, assertAvailable: () => void): Promise<void> {
     assertAvailable();
     const records = await this.sessionInventory(sessionId, assertAvailable);
     const blocked = records.filter(record => !record.result || record.status === 'running' || record.status === 'starting' || record.metadata.pane || record.metadata.observed);
@@ -549,7 +561,7 @@ export class BackgroundJobManager {
     const jobs = [];
     for (const record of records) {
       assertAvailable();
-      const snapshot = await this.output(record.metadata.id);
+      const snapshot = await this.readOutput(record.metadata.id, false);
       const bytes = Buffer.from(snapshot.text);
       const budget = Math.min(16 * 1024, remaining);
       let start = Math.max(0, bytes.length - budget);
@@ -566,7 +578,7 @@ export class BackgroundJobManager {
       const current = await this.get(record.metadata.id);
       assertAvailable();
       if (current.metadata.sessionId !== sessionId || current.metadata.pane || current.metadata.observed) throw new Error(`Background job ${record.metadata.id} changed owner during cleanup`);
-      await this.reap(record.metadata.id);
+      await this.reapLocked(record.metadata.id);
     }
     assertAvailable();
     const remainingJobs = await this.sessionInventory(sessionId, assertAvailable);
@@ -574,7 +586,25 @@ export class BackgroundJobManager {
     if (remainingJobs.length) throw new Error(`Background jobs remain after cleanup: ${ids(remainingJobs)}`);
   }
 
+  async reapExpired(id: string, now: number, retentionMs: number): Promise<void> {
+    // Most records are unread. Avoid serial lock churn on every polling tick;
+    // this is only a hint, and the authoritative timestamp is checked below.
+    const candidate = await this.store.readRetrieved(id);
+    if (candidate === undefined || now - candidate < retentionMs) return;
+    await this.store.withRetentionLock(async () => {
+      const record = await this.get(id);
+      if (!record.result || !record.launch || record.metadata.infrastructure || record.metadata.observed || record.metadata.pane) return;
+      const retrieved = await this.store.readRetrieved(id);
+      if (retrieved === undefined || now - retrieved < retentionMs) return;
+      await this.reapLocked(id);
+    });
+  }
+
   async reap(id: string): Promise<void> {
+    await this.store.withRetentionLock(() => this.reapLocked(id));
+  }
+
+  private async reapLocked(id: string): Promise<void> {
     const record = await this.get(id);
     if (!record.result) throw new Error(`Background job ${id} is not terminal; cancel it first`);
     if (await this.commandProcess(id)) throw new Error(`Background job ${id} command is still running; cancel it first`);

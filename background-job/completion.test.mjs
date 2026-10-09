@@ -8,6 +8,10 @@ import { WatchManager } from './watch.js';
 const pause = (ms = 30) => new Promise(resolve => setTimeout(resolve, ms));
 let records = [], notified = new Set(), poll, deferNotified;
 JobStore.prototype.initialize = async () => {};
+JobStore.prototype.withRetentionLock = async operation => operation();
+JobStore.prototype.markRetrieved = async () => {};
+JobStore.prototype.readRetrieved = async () => undefined;
+JobStore.prototype.listIds = async () => records.map(record => record.metadata.id);
 JobStore.prototype.isNotified = async function(id) {
   const value = notified.has(id);
   if (deferNotified) { const wait = deferNotified; deferNotified = undefined; await wait; }

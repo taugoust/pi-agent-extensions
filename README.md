@@ -201,11 +201,16 @@ Only adoption accepts an exact existing tmux pane ID/server; no API accepts
 arbitrary tmux commands. Output returned to the model
 is further limited to 50 KiB/2000 lines. New-command concurrency is 64 jobs
 and per-working-directory concurrency is 32; adopted panes do not consume launch slots.
-User jobs are never automatically pruned merely because they completed or their
-output was read. Completion and cancellation retain inspectable panes and records.
+User jobs are not automatically pruned merely because they completed. Completion and
+cancellation retain inspectable panes and records. Terminal native jobs are fully
+reaped (owned pane, output, and metadata) five minutes after their most recent
+output inspection. `output` and `wait` with `lines` start/reset this persistent timer;
+status, list, status-only waits, read-only UI previews, and notifications do not.
+Unread results, active jobs, and adopted panes/processes are excluded. Expiry is
+checked while Pi is running and on the next session start after Pi exits.
 `reap` explicitly removes a terminal job's verified owned pane and runtime state;
-it rejects running jobs and does not remove sibling panes.
-Infrastructure services have a separate 20-terminal-record retention limit; they
+it rejects running jobs and does not remove sibling panes. Infrastructure services
+have a separate 20-terminal-record retention limit; they
 never displace recent user jobs or unread outcomes. Watcher startup resolves
 symlinked entrypoints and backs off 30 seconds after an immediate startup exit.
 

@@ -1,4 +1,6 @@
 import { constants } from "node:fs";
+import { randomBytes } from "node:crypto";
+import { processStartToken } from "./tmux.ts";
 import { validatePaneIdentity } from './external-pane.ts';
 import {
   access,
@@ -10,6 +12,7 @@ import {
   readdir,
   rename,
   rm,
+  rmdir,
   stat,
   writeFile,
 } from "node:fs/promises";
@@ -266,8 +269,60 @@ export class JobStore {
     } catch (error) { if ((error as NodeJS.ErrnoException).code === "ENOENT") return undefined; throw error; }
   }
 
+  /** Caller must hold withRetentionLock from snapshot through this write. */
   async markRetrieved(id: string, at = Date.now()): Promise<void> {
     await writeAtomic(this.path(id, "retrieved-at"), at);
+  }
+
+  /** Cross-process exclusion for snapshots, expiry and session preservation.
+   * Publish a nonempty lock directory atomically. Never steal a live owner's
+   * lock based on age (a paused process may still be inside its critical section).
+   */
+  async withRetentionLock<T>(operation: () => Promise<T>): Promise<T> {
+    const lock = join(this.root, ".retention-lock");
+    const ownerFile = `owner-${process.pid}-${randomBytes(16).toString("hex")}`;
+    const candidate = `${lock}.${ownerFile}`;
+    const deadline = Date.now() + LOCK_WAIT_MS;
+    await mkdir(candidate, { mode: 0o700 });
+    try {
+      await writeFile(join(candidate, ownerFile), await processStartToken(process.pid), { mode: 0o600, flag: "wx" });
+      for (;;) {
+        try { await rename(candidate, lock); break; }
+        catch (error) {
+          if (!["EEXIST", "ENOTEMPTY"].includes((error as NodeJS.ErrnoException).code ?? "")) throw error;
+          await this.releaseDeadRetentionOwner(lock);
+          if (Date.now() >= deadline) throw new Error("Timed out acquiring background-job retention lock");
+          await new Promise(resolve => setTimeout(resolve, 25));
+        }
+      }
+      try { return await operation(); }
+      finally {
+        // Remove only our unique owner file. Concurrent dead-owner recovery
+        // cannot remove a successor: its atomically published dir is nonempty.
+        await rm(join(lock, ownerFile), { force: true });
+        await rmdir(lock).catch(() => undefined);
+      }
+    } finally { await rm(candidate, { recursive: true, force: true }); }
+  }
+
+  private async releaseDeadRetentionOwner(lock: string): Promise<void> {
+    try {
+      const owners = await readdir(lock);
+      if (owners.length !== 1) return;
+      const match = /^owner-([0-9]+)-[a-f0-9]{32}$/.exec(owners[0]);
+      if (!match) return;
+      const pid = Number(match[1]);
+      const savedToken = await readFile(join(lock, owners[0]), "utf8");
+      let dead = false;
+      try { dead = await processStartToken(pid) !== savedToken; }
+      catch {
+        try { process.kill(pid, 0); }
+        catch (error) { dead = (error as NodeJS.ErrnoException).code === "ESRCH"; }
+      }
+      if (!dead) return;
+      await rm(join(lock, owners[0]), { force: true });
+      await rmdir(lock).catch(() => undefined);
+    } catch { /* Unknown ownership retains the lock; callers time out safely. */ }
   }
 
   async isNotified(id: string): Promise<boolean> {
