@@ -1,7 +1,7 @@
 import { readFileSync } from "node:fs";
 import { homedir } from "node:os";
 import { join } from "node:path";
-import type { ExtensionAPI } from "@mariozechner/pi-coding-agent";
+import type { ExtensionAPI } from "@earendil-works/pi-coding-agent";
 
 const REMOTE_UI_KEY = "__piPaseoRemoteUiV1";
 const REMOTE_PROMPT_KEY = "__piPaseoIdlePromptV1";
