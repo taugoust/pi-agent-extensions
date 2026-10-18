@@ -77,6 +77,7 @@ export default function (pi: ExtensionAPI) {
     check: async () => "continue",
   };
   const globals = globalThis as Record<string, unknown>;
+  globals[REMOTE_PREFLIGHT_KEY] = capability;
   pi.on("session_start", (_event, ctx) => {
     capability.check = (signal) => check(ctx, signal);
     capability.ready = true;

@@ -8,6 +8,9 @@ function setup(choice: string) {
   register(pi);
   const old = Date.now() - 60 * 60_000;
   const text = "  preserve this draft exactly  ";
+  const globals = globalThis as Record<string, any>;
+  const initialCapability = globals[REMOTE_PREFLIGHT_KEY];
+  const initiallyReady = initialCapability.ready;
   const ctx = {
     hasUI: true,
     mode: "tui",
@@ -23,8 +26,7 @@ function setup(choice: string) {
     },
   };
   handlers.session_start({ type: "session_start", reason: "startup" }, ctx);
-  const globals = globalThis as Record<string, any>;
-  return { handlers, ctx, text, uiCalls, globals, capability: globals[REMOTE_PREFLIGHT_KEY] };
+  return { handlers, ctx, text, uiCalls, globals, initialCapability, initiallyReady, capability: globals[REMOTE_PREFLIGHT_KEY] };
 }
 
 describe("idle warning input handling", () => {
@@ -41,6 +43,12 @@ describe("idle warning input handling", () => {
     const { handlers, ctx, text, uiCalls, globals } = setup("Ignore");
     expect(await handlers.input({ source: "interactive", text }, ctx)).toBeUndefined();
     expect(uiCalls[0].options).toEqual(["Cancel", "Ignore"]);
+    delete globals[REMOTE_PREFLIGHT_KEY];
+  });
+  it("registers an explicit preflight capability before session readiness", () => {
+    const { initialCapability, initiallyReady, capability, globals } = setup("Cancel");
+    expect(initialCapability).toBe(capability);
+    expect(initiallyReady).toBe(false);
     delete globals[REMOTE_PREFLIGHT_KEY];
   });
   it("registered bridge capability includes model, token count, percent, and honors abort signals", async () => {
