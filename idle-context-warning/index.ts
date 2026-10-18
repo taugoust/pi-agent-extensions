@@ -44,12 +44,19 @@ export default function (pi: ExtensionAPI) {
     const globals = globalThis as Record<string, any>;
     const remotePrompt = globals[REMOTE_PROMPT_KEY];
     if (event.source === "extension" && !remotePrompt) return; // never intercept automatic extension continuations
+    const finishRemotePrompt = (approved: boolean) => remotePrompt?.resolve?.(approved);
     const settings = config();
-    if (!ctx.hasUI || !ctx.sessionManager || event.streamingBehavior) return;
+    if (!ctx.hasUI || !ctx.sessionManager || event.streamingBehavior) {
+      finishRemotePrompt(true);
+      return;
+    }
     const idleAt = lastModelActivity(ctx.sessionManager.getBranch());
     const usage = ctx.getContextUsage();
     const now = Date.now();
-    if (!shouldWarn(idleAt, now, usage?.percent, settings)) return;
+    if (!shouldWarn(idleAt, now, usage?.percent, settings)) {
+      finishRemotePrompt(true);
+      return;
+    }
 
     const minutes = Math.floor((now - idleAt!) / 60_000);
     const percentage = Math.round(usage!.percent!);
@@ -65,8 +72,9 @@ export default function (pi: ExtensionAPI) {
       else choice = await local(new AbortController().signal);
     } catch { choice = undefined; }
 
-    if (remotePrompt) remotePrompt.result = choice === "Ignore";
-    if (choice === "Ignore") return;
+    const approved = choice === "Ignore";
+    finishRemotePrompt(approved);
+    if (approved) return;
     // Handled submissions never reach the agent. Restore the exact text into the editor,
     // so cancellation does not discard the user's draft.
     if (event.source === "interactive" && ctx.mode === "tui") ctx.ui.setEditorText(event.text);

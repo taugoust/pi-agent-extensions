@@ -40,11 +40,12 @@ describe("idle warning input handling", () => {
   it("gates an explicitly dispatched Paseo prompt and reports Cancel to the bridge", async () => {
     const { handler, ctx, text, uiCalls } = setup("Cancel");
     const globals = globalThis as Record<string, any>;
-    const marker = { result: true };
+    let approved: boolean | undefined;
+    const marker = { resolve: (value: boolean) => { approved = value; } };
     globals.__piPaseoIdlePromptV1 = marker;
     try {
       expect(await handler({ source: "extension", text }, ctx)).toEqual({ action: "handled" });
-      expect(marker.result).toBe(false);
+      expect(approved).toBe(false);
       expect(uiCalls).toEqual(["Cancel|Ignore"]);
     } finally { delete globals.__piPaseoIdlePromptV1; }
   });
