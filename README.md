@@ -142,7 +142,7 @@ an already attached client), not merely that AgentSH was configured or attempted
 
 ### idle-context-warning
 
-Warns before sending a prompt when the last model response on the active session branch was at least 30 minutes ago and current context usage is at least 20%. The warning states that the model cache may have expired (Pi's cache-warming decision does not prove a warm occurred) and offers exactly **Cancel** (default) or **Ignore**. Ignore applies to that submission only. Cancel consumes the submission and restores its text to the terminal editor. Paseo-connected sessions mirror the same selector.
+Warns before sending a prompt when the last model response on the active session branch was at least 30 minutes ago and current context usage is at least 20%. The warning displays the selected model, idle duration, token count, and context percentage, and offers exactly **Cancel** (default) or **Ignore**. Ignore applies to that submission only. Cancel consumes the submission and restores its text to the terminal editor. Paseo-connected sessions mirror the same selector. Pi does not expose confirmation that cache warming actually occurred, so the warning describes possible cache expiry rather than claiming the cache is cold.
 
 Thresholds are configurable in `~/.pi/agent/extensions/idle-context-warning.json`:
 

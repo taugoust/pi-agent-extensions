@@ -1,52 +1,83 @@
 import { describe, expect, it } from "bun:test";
-import register from "./index.ts";
+import register, { REMOTE_PREFLIGHT_KEY } from "./index.ts";
 
 function setup(choice: string) {
-  let handler: ((event: any, ctx: any) => Promise<any>) | undefined;
-  const uiCalls: string[] = [];
-  const pi: any = { on(name: string, fn: any) { if (name === "input") handler = fn; } };
+  const handlers: Record<string, (event: any, ctx: any) => Promise<any> | void> = {};
+  const uiCalls: any[] = [];
+  const pi: any = { on(name: string, fn: any) { handlers[name] = fn; } };
   register(pi);
   const old = Date.now() - 60 * 60_000;
   const text = "  preserve this draft exactly  ";
   const ctx = {
     hasUI: true,
     mode: "tui",
-    sessionManager: { getBranch: () => [{ type: "message", timestamp: new Date(old).toISOString(), message: { role: "assistant", model: "model", timestamp: old } }] },
+    model: { provider: "example", id: "model-1" },
+    sessionManager: { getBranch: () => [{ type: "message", timestamp: new Date(old).toISOString(), message: { role: "assistant", model: "model-1", timestamp: old } }] },
     getContextUsage: () => ({ tokens: 30, contextWindow: 100, percent: 30 }),
     ui: {
-      select: async (_title: string, options: string[]) => { uiCalls.push(options.join("|")); return choice; },
-      setEditorText: (value: string) => uiCalls.push(`draft:${value}`),
+      select: async (title: string, options: string[], settings?: { signal?: AbortSignal }) => {
+        uiCalls.push({ title, options, signal: settings?.signal });
+        return choice;
+      },
+      setEditorText: (value: string) => uiCalls.push({ draft: value }),
     },
   };
-  return { handler: handler!, ctx, text, uiCalls };
+  handlers.session_start({ type: "session_start", reason: "startup" }, ctx);
+  const globals = globalThis as Record<string, any>;
+  return { handlers, ctx, text, uiCalls, globals, capability: globals[REMOTE_PREFLIGHT_KEY] };
 }
 
 describe("idle warning input handling", () => {
-  it("Cancel consumes the input and restores the exact terminal draft", async () => {
-    const { handler, ctx, text, uiCalls } = setup("Cancel");
-    expect(await handler({ source: "interactive", text }, ctx)).toEqual({ action: "handled" });
-    expect(uiCalls).toEqual(["Cancel|Ignore", `draft:${text}`]);
+  it("Cancel consumes interactive input and restores its exact terminal text", async () => {
+    const { handlers, ctx, text, uiCalls, globals } = setup("Cancel");
+    expect(await handlers.input({ source: "interactive", text }, ctx)).toEqual({ action: "handled" });
+    expect(uiCalls[0].options).toEqual(["Cancel", "Ignore"]);
+    expect(uiCalls[0].signal).toBeInstanceOf(AbortSignal);
+    expect(uiCalls[1].draft).toBe(text);
+    handlers.session_shutdown?.({ type: "session_shutdown" }, ctx);
+    expect(globals[REMOTE_PREFLIGHT_KEY]).toBeUndefined();
   });
-  it("Ignore continues this input without altering the draft", async () => {
-    const { handler, ctx, text, uiCalls } = setup("Ignore");
-    expect(await handler({ source: "interactive", text }, ctx)).toBeUndefined();
-    expect(uiCalls).toEqual(["Cancel|Ignore"]);
+  it("Ignore continues without changing the input", async () => {
+    const { handlers, ctx, text, uiCalls, globals } = setup("Ignore");
+    expect(await handlers.input({ source: "interactive", text }, ctx)).toBeUndefined();
+    expect(uiCalls[0].options).toEqual(["Cancel", "Ignore"]);
+    delete globals[REMOTE_PREFLIGHT_KEY];
+  });
+  it("registered bridge capability includes model, token count, percent, and honors abort signals", async () => {
+    const { capability, uiCalls, globals } = setup("Cancel");
+    const controller = new AbortController();
+    expect(capability.ready).toBe(true);
+    expect(await capability.check(controller.signal)).toBe("cancel");
+    expect(uiCalls[0].title).toContain("example/model-1");
+    expect(uiCalls[0].title).toContain("30 / 100 tokens (30%). The model cache may have expired.");
+    expect(uiCalls[0].signal).toBe(controller.signal);
+    delete globals[REMOTE_PREFLIGHT_KEY];
+  });
+  it("passes cancellation signals through the mirrored Paseo selector", async () => {
+    const { capability, globals } = setup("Cancel");
+    let received: AbortSignal | undefined;
+    const previous = globals.__piPaseoRemoteUiV1;
+    globals.__piPaseoRemoteUiV1 = {
+      isConnected: () => true,
+      selectMirrored: async (_title: string, _options: string[], _local: any, settings: { signal?: AbortSignal }) => {
+        received = settings.signal;
+        return "Cancel";
+      },
+    };
+    const controller = new AbortController();
+    try {
+      expect(await capability.check(controller.signal)).toBe("cancel");
+      expect(received).toBe(controller.signal);
+    } finally {
+      if (previous === undefined) delete globals.__piPaseoRemoteUiV1;
+      else globals.__piPaseoRemoteUiV1 = previous;
+      delete globals[REMOTE_PREFLIGHT_KEY];
+    }
   });
   it("does not gate automatic extension-originated prompts", async () => {
-    const { handler, ctx, text, uiCalls } = setup("Cancel");
-    expect(await handler({ source: "extension", text }, ctx)).toBeUndefined();
+    const { handlers, ctx, text, uiCalls, globals } = setup("Cancel");
+    expect(await handlers.input({ source: "extension", text }, ctx)).toBeUndefined();
     expect(uiCalls).toEqual([]);
-  });
-  it("gates an explicitly dispatched Paseo prompt and reports Cancel to the bridge", async () => {
-    const { handler, ctx, text, uiCalls } = setup("Cancel");
-    const globals = globalThis as Record<string, any>;
-    let approved: boolean | undefined;
-    const marker = { resolve: (value: boolean) => { approved = value; } };
-    globals.__piPaseoIdlePromptV1 = marker;
-    try {
-      expect(await handler({ source: "extension", text }, ctx)).toEqual({ action: "handled" });
-      expect(approved).toBe(false);
-      expect(uiCalls).toEqual(["Cancel|Ignore"]);
-    } finally { delete globals.__piPaseoIdlePromptV1; }
+    delete globals[REMOTE_PREFLIGHT_KEY];
   });
 });
