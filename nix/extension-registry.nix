@@ -11,6 +11,7 @@ let
     "direnv"
     "fence"
     "fetch"
+    "idle-context-warning"
     "mac-system-theme"
     "modal-editor"
     "pager"

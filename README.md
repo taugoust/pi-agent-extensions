@@ -140,6 +140,17 @@ an already attached client), not merely that AgentSH was configured or attempted
 
 ## ✨ Extensions
 
+### idle-context-warning
+
+Warns before sending a prompt when the last model response on the active session branch was at least 30 minutes ago and current context usage is at least 20%. The warning states that the model cache may have expired (Pi's cache-warming decision does not prove a warm occurred) and offers exactly **Cancel** (default) or **Ignore**. Ignore applies to that submission only. Cancel consumes the submission and restores its text to the terminal editor. Paseo-connected sessions mirror the same selector.
+
+Thresholds are configurable in `~/.pi/agent/extensions/idle-context-warning.json`:
+
+```json
+{ "idleMinutes": 30, "contextPercent": 20 }
+```
+
+
 <details>
 <summary><strong>openai-fast-mode</strong> - OpenAI priority inference toggle</summary>
 <br>

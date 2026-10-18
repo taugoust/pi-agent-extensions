@@ -32,6 +32,7 @@ in
       direnv.enable = lib.mkEnableOption "direnv extension — refreshes environment via direnv export";
       fence.enable = lib.mkEnableOption "fence extension — blocks write/edit outside cwd";
       fetch.enable = lib.mkEnableOption "adaptive fetch extension — native HTTP outside AgentSH and supervised curl when AgentSH is active";
+      idle-context-warning.enable = lib.mkEnableOption "idle-context-warning extension — warn before sending prompts to an idle, context-heavy model";
       questionnaire.enable = lib.mkEnableOption "questionnaire extension — LLM-driven multi-question UI tool";
       modal-editor.enable = lib.mkEnableOption "modal-editor extension — vim-style modal input";
       mac-system-theme.enable = lib.mkEnableOption "mac-system-theme extension — syncs pi theme to macOS system appearance";
@@ -185,6 +186,10 @@ in
             ]
         )
       ))
+
+      (lib.mkIf cfg.extensions.idle-context-warning.enable {
+        "${extDir}/idle-context-warning/index.ts".source = "${self}/idle-context-warning/index.ts";
+      })
 
       (lib.mkIf cfg.extensions.slow-mode.enable {
         "${extDir}/slow-mode/index.ts".text =
