@@ -129,6 +129,7 @@
           agentsh-mode = import ./nix/agentsh-mode-check.nix { inherit self pkgs; };
           auto = import ./nix/auto-check.nix { inherit self pkgs; };
           modal-editor = import ./nix/modal-editor-check.nix { inherit self pkgs; };
+          idle-context-warning = import ./nix/idle-context-warning-check.nix { inherit self pkgs; };
           subagent = import ./nix/subagent-check.nix {
             inherit self pkgs;
             piPackage = if pkgs.stdenv.hostPlatform.isLinux then self.packages.${system}.pi else null;

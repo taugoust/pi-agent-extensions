@@ -144,10 +144,42 @@ an already attached client), not merely that AgentSH was configured or attempted
 
 Warns before sending a prompt when the last model response on the active session branch was at least 30 minutes ago and current context usage is at least 20%. The warning displays the selected model, idle duration, token count, and context percentage, and offers exactly **Cancel** (default) or **Ignore**. Ignore applies to that submission only. Cancel consumes the submission and restores its text to the terminal editor. Paseo-connected sessions mirror the same selector. Pi does not expose confirmation that cache warming actually occurred, so the warning describes possible cache expiry rather than claiming the cache is cold.
 
-Thresholds are configurable in `~/.pi/agent/extensions/idle-context-warning.json`:
+Thresholds and optional cheap compaction are configurable in `~/.pi/agent/extensions/idle-context-warning.json`:
 
 ```json
-{ "idleMinutes": 30, "contextPercent": 20 }
+{
+  "idleMinutes": 30,
+  "contextPercent": 20,
+  "cheapCompactionModel": "openai/gpt-6-luna:low"
+}
+```
+
+`cheapCompactionModel` defaults to `null` (normal Pi compaction). When configured, manual `/compact`, RPC/extension compaction, and automatic threshold/overflow compaction use this model **at or above `idleMinutes`**, regardless of context percentage or UI availability. Below that idle threshold, Pi compacts normally with its selected conversation model. The 20% `contextPercent` gate applies only to the prompt warning. This does not trigger compaction merely because a session is idle, and does not change the warning's Cancel/Ignore choices.
+
+The selector is an exact `provider/model[:thinking]`, compatible with subagent selectors. Thinking defaults to `low`; supported suffixes are `off`, `minimal`, `low`, `medium`, `high`, `xhigh`, and `max`. Nested model IDs and non-thinking colon suffixes are retained. Configure a model/provider already available to Pi with sufficient context capacity; the extension does not infer price, truncate the prepared conversation to fit a smaller model, or choose an alternative model. Nix can derive the selector from the configured subagent default without coupling runtime compaction to subagent settings.
+
+The conversation model and thinking level remain unchanged. Cheap compaction reuses Pi's native algorithm and the event's prepared token budgets, retained-message boundary, previous summary, custom instructions, split-turn handling, file tracking, and usage accounting. Credentials and provider headers are resolved through Pi's model registry. Cumulative native file lists survive subsequent cheap or normal compactions while the extension is enabled. Idle time always comes from the latest model response on the active persisted branch, including restored sessions; user/tool activity, cache warming, and compaction itself do not reset it.
+
+Unknown models, authentication/provider errors, empty or incomplete summaries, and aborts **cancel compaction without falling back to the conversation model**. Diagnostics appear in UI notifications or stderr in headless mode. Invalid selector values cancel when the cheap route is selected; unreadable/malformed config files cancel compaction conservatively (a missing config file retains defaults). Fix the configuration/provider and retry; explicitly set the option to `null` to restore normal compaction.
+
+Home Manager installs the extension's helpers and generates the JSON selector:
+
+```nix
+programs.pi.extensions.idle-context-warning = {
+  enable = true;
+  cheapCompactionModel = "openai/gpt-6-luna:low"; # nullable string; default null
+};
+```
+
+Validation (with the Pi 1.0.0 SDK and its Node types available in `node_modules`):
+
+```sh
+nix shell nixpkgs#bun nixpkgs#typescript --command sh -c '
+  bun test idle-context-warning &&
+  tsc --noEmit --skipLibCheck --strict --module esnext --moduleResolution bundler \
+    --target es2023 --allowImportingTsExtensions idle-context-warning/index.ts
+'
+nix build .#checks.x86_64-linux.idle-context-warning
 ```
 
 

@@ -20,6 +20,15 @@ describe("idle context warning thresholds", () => {
     expect(shouldWarn(undefined, start + 60 * 60_000, 50, settings)).toBe(false);
     expect(shouldWarn(start, start + 60 * 60_000, null, settings)).toBe(false);
   });
+  it("uses persisted ISO timestamps when message timestamps are absent and skips invalid entries", () => {
+    const branch = [
+      { type: "message", timestamp: new Date(1000).toISOString(), message: { role: "assistant", model: "m" } },
+      { type: "message", timestamp: "invalid", message: { role: "assistant", model: "m", timestamp: "invalid" } },
+      { type: "message", timestamp: new Date(2000).toISOString(), message: { role: "assistant" } },
+    ];
+    expect(lastModelActivity(branch)).toBe(1000);
+    expect(shouldWarn(1000, 999, 100, settings)).toBe(false);
+  });
   it("honors configurable thresholds", () => {
     expect(shouldWarn(0, 5 * 60_000, 50, { idleMinutes: 5, contextPercent: 50 })).toBe(true);
     expect(shouldWarn(0, 5 * 60_000, 49, { idleMinutes: 5, contextPercent: 50 })).toBe(false);

@@ -32,7 +32,15 @@ in
       direnv.enable = lib.mkEnableOption "direnv extension — refreshes environment via direnv export";
       fence.enable = lib.mkEnableOption "fence extension — blocks write/edit outside cwd";
       fetch.enable = lib.mkEnableOption "adaptive fetch extension — native HTTP outside AgentSH and supervised curl when AgentSH is active";
-      idle-context-warning.enable = lib.mkEnableOption "idle-context-warning extension — warn before sending prompts to an idle, context-heavy model";
+      idle-context-warning = {
+        enable = lib.mkEnableOption "idle-context-warning extension — warn before idle prompts and optionally use cheap idle compaction";
+        cheapCompactionModel = lib.mkOption {
+          type = lib.types.nullOr lib.types.str;
+          default = null;
+          example = "openai/gpt-6-luna:low";
+          description = "Exact provider/model[:thinking] for compaction at or above the idle warning threshold, independently of context usage. Null keeps normal Pi compaction; failures cancel without default-model fallback. Omitted thinking defaults to low.";
+        };
+      };
       questionnaire.enable = lib.mkEnableOption "questionnaire extension — LLM-driven multi-question UI tool";
       modal-editor.enable = lib.mkEnableOption "modal-editor extension — vim-style modal input";
       mac-system-theme.enable = lib.mkEnableOption "mac-system-theme extension — syncs pi theme to macOS system appearance";
@@ -189,6 +197,11 @@ in
 
       (lib.mkIf cfg.extensions.idle-context-warning.enable {
         "${extDir}/idle-context-warning/index.ts".source = "${self}/idle-context-warning/index.ts";
+        "${extDir}/idle-context-warning/policy.ts".source = "${self}/idle-context-warning/policy.ts";
+        "${extDir}/idle-context-warning/compaction.ts".source = "${self}/idle-context-warning/compaction.ts";
+        "${extDir}/idle-context-warning.json".text = builtins.toJSON {
+          inherit (cfg.extensions.idle-context-warning) cheapCompactionModel;
+        };
       })
 
       (lib.mkIf cfg.extensions.slow-mode.enable {
