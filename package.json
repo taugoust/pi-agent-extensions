@@ -35,6 +35,8 @@
       "fence",
       "permission-gate",
       "fetch",
+      "openai-accounts",
+      "openai-usage",
       "pdf",
       "mac-system-theme",
       "modal-editor",

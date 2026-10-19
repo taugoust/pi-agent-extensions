@@ -12,6 +12,8 @@ let
     "fence"
     "fetch"
     "idle-context-warning"
+    "openai-accounts"
+    "openai-usage"
     "stamp"
     "progress"
     "cache-hit-monitor"
@@ -55,6 +57,8 @@ let
     "sandbox"
     "ssh"
     "subagent"
+    "openai-accounts"
+    "openai-usage"
   ];
 
   upstreamExtensions = {

@@ -2,7 +2,7 @@
 
 ## Status
 
-Phase 1 is implemented and automated checks pass: Stamp, Progress, and Cache monitor, with Paseo Activity views. Deployment and native iOS acceptance remain pending. Later phases remain planned, not authorized by phase-one implementation.
+Phase 1 is deployed; the user approved the unified Activity redesign. Phase 2 is authorized for OpenAI/ChatGPT accounts and usage status first. Later phases remain planned.
 
 ## Phase-one implementation evidence
 
@@ -11,7 +11,15 @@ Phase 1 is implemented and automated checks pass: Stamp, Progress, and Cache mon
 - Paseo Activity has three read-only views, using agent/session/runtime-bound private transport and schema validation. Stamps are a separate metadata view rather than original-bubble decorations.
 - 55 focused unit tests, strict TypeScript, a real-Pi deterministic-provider smoke, and 22 guarded-compaction runtime tests with all three extensions loaded passed. No paid model calls were used.
 - Nix module checks passed. Companion bridge: 133 regression tests passed (9 optional skipped), typecheck passed; compiled-plugin suite passed 23 tests (1 optional skipped).
-- Native iOS acceptance remains open; implementation is not yet deployed. See `OBSERVABILITY.md` for commands, limitations, and the read-only contract.
+- Deployed on Matebook. Activity was subsequently redesigned as a unified native-style dashboard and approved by the user; native progress cards were added in the daemon. See `OBSERVABILITY.md` for commands and the read-only contract.
+
+## Phase-two decisions
+
+- OpenAI/ChatGPT only in the initial implementation.
+- Exclude the experimental Codex companion source. Show effective credential configuration and official usage links, without fabricated quota values.
+- Account switching changes credentials only: no model call, forced compaction, or conversation-context change. The user decides whether to compact or send afterward; the existing idle guard otherwise remains unchanged.
+- Add/login/manage credentials in the native Pi TUI; Paseo initially switches existing accounts through a separate authenticated control channel.
+- Deploy local working-tree inputs for review. Do not commit or push until the user approves the deployed result; pull remote fixes before publishing.
 
 ## Source and scope
 

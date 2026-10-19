@@ -205,6 +205,29 @@ nix build .#checks.x86_64-linux.idle-context-warning
 
 
 <details>
+<summary><strong>openai-accounts</strong> - Native OpenAI account manager</summary>
+<br>
+
+- **Command**: `/accounts` (native Pi TUI only)
+- **Accounts**: named native OpenAI ChatGPT OAuth grants and API keys
+- **Selection**: per session, with an explicit restore-default-Pi-login action
+- **Home Manager**: `programs.pi.extensions.accounts.enable = true;`
+- **Storage**: private atomic `pi-accounts.json`; the runtime lock dependencies are included in the extension layout.
+
+Paseo sees safe account labels/status and may switch an existing account only while idle. It never receives credential values or login/add/remove operations. Switching sends no model call and preserves conversation context. A request-time OpenAI Responses gate covers ordinary OpenAI calls, guarded physical Astra dispatch, and direct Luna compaction; stale selection or failed activation blocks dispatch. The account store preserves other provider sections but this extension enables only Pi's built-in native `openai` (not Codex); if another extension registers a custom native provider under `openai`, the account extension refuses the gate without replacing that provider.
+
+</details>
+<details>
+<summary><strong>openai-usage</strong> - OpenAI credential status and official settings link</summary>
+<br>
+
+- **Command**: `/usage`
+- **Home Manager**: `programs.pi.extensions.usage.enable = true;`
+
+Shows the locally effective credential kind and official OpenAI/ChatGPT usage-settings link. It makes no quota calls and displays no fabricated numeric limits. `api-key-configured` means local configuration only; it does not assert remote validity or entitlement.
+
+</details>
+<details>
 <summary><strong>openai-fast-mode</strong> - OpenAI priority inference toggle</summary>
 <br>
 

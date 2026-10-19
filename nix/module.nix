@@ -14,7 +14,17 @@ let
   extDir = ".pi/agent/extensions";
   registry = import ./extension-registry.nix { inherit self pi-mcp-adapter pi-openai-fast-mode; };
   needsSharedRuntime = lib.any (
-    name: cfg.extensions.${name}.enable
+    name:
+    let
+      optionName =
+        if name == "openai-accounts" then
+          "accounts"
+        else if name == "openai-usage" then
+          "usage"
+        else
+          name;
+    in
+    cfg.extensions.${optionName}.enable
   ) registry.sharedRuntimeExtensionNames;
 in
 {
@@ -60,6 +70,8 @@ in
       permission-gate.enable = lib.mkEnableOption "permission-gate extension — AgentSH rendezvous or legacy dangerous Bash authorization";
       ssh.enable = lib.mkEnableOption "ssh extension — run read/write/edit/bash tools on a remote host via --ssh";
       openai-fast-mode.enable = lib.mkEnableOption "pi-openai-fast-mode extension — toggle OpenAI priority inference with /fast";
+      accounts.enable = lib.mkEnableOption "native OpenAI account manager — named OAuth/API-key accounts scoped to Pi sessions";
+      usage.enable = lib.mkEnableOption "OpenAI effective-credential status and official settings link (no quota queries)";
 
       slow-mode = {
         enable = lib.mkEnableOption "slow-mode extension — review gate for write/edit tool calls";
@@ -195,6 +207,13 @@ in
 
       (lib.mkIf cfg.extensions.ssh.enable {
         "${extDir}/ssh/index.ts".source = "${self}/ssh/index.ts";
+      })
+
+      (lib.mkIf cfg.extensions.accounts.enable {
+        "${extDir}/openai-accounts".source = "${self}/openai-accounts";
+      })
+      (lib.mkIf cfg.extensions.usage.enable {
+        "${extDir}/openai-usage".source = "${self}/openai-usage";
       })
 
       (lib.mkIf cfg.extensions.openai-fast-mode.enable (

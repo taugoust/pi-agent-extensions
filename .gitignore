@@ -1,5 +1,8 @@
 # npm dependencies
 node_modules/
+# Runtime source-contained dependency required by the immutable OpenAI extension layout.
+!openai-accounts/node_modules/
+!openai-accounts/node_modules/**
 package-lock.json
 
 # Temporary files

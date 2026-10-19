@@ -130,6 +130,12 @@
           auto = import ./nix/auto-check.nix { inherit self pkgs; };
           modal-editor = import ./nix/modal-editor-check.nix { inherit self pkgs; };
           idle-context-warning = import ./nix/idle-context-warning-check.nix { inherit self pkgs; };
+          openai-accounts-module = import ./nix/openai-accounts-module-check.nix { inherit self pkgs; };
+          openai-accounts-runtime = import ./nix/openai-accounts-runtime-check.nix {
+            inherit pkgs;
+            piPackage = self.packages.${system}.pi;
+            extensionBundle = self.packages.${system}.default;
+          };
           observability = import ./nix/observability-check.nix { inherit self pkgs; };
           subagent = import ./nix/subagent-check.nix {
             inherit self pkgs;
