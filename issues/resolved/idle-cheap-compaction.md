@@ -2,7 +2,7 @@
 
 ## Status
 
-Implemented and validated; awaiting parent publication. No commit created in this implementation task. After publication, add the fixing commit hash and move this issue to `issues/resolved/`.
+Resolved.
 
 ## Problem
 
@@ -26,4 +26,8 @@ The nullable Home Manager option is `programs.pi.extensions.idle-context-warning
 - Strict production TypeScript check passed against the existing Pi 1.0.0 SDK (`tsc --noEmit --skipLibCheck --strict --module esnext --moduleResolution bundler --target es2023 --allowImportingTsExtensions idle-context-warning/index.ts`).
 - `nix build 'path:.#checks.x86_64-linux.idle-context-warning' --no-link` passed: selector/null JSON, disabled extension behavior, and installed helper files.
 - Installed Pi 1.0.0 loaded the extension and native `compact` import in an isolated RPC session. No model calls were made.
-- `git diff --check` passed. No commits, pushes, or deployment performed.
+- `git diff --check` passed. No deployment performed.
+
+## Resolution
+
+Implemented and published in `b62d974`. Shared Nix configuration wires the selector to the subagent default; activation remains separate.
