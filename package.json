@@ -28,6 +28,9 @@
     "extensions": [
       "auto",
       "background-job",
+      "stamp",
+      "progress",
+      "cache-hit-monitor",
       "direnv",
       "fence",
       "permission-gate",

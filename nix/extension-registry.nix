@@ -12,6 +12,9 @@ let
     "fence"
     "fetch"
     "idle-context-warning"
+    "stamp"
+    "progress"
+    "cache-hit-monitor"
     "mac-system-theme"
     "modal-editor"
     "pager"
@@ -40,6 +43,9 @@ let
   # These extensions import the canonical AgentSH startup/runtime classifier
   # from the package-level shared directory.
   sharedRuntimeExtensionNames = [
+    "stamp"
+    "progress"
+    "cache-hit-monitor"
     "background-job"
     "direnv"
     "fetch"

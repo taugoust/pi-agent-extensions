@@ -72,7 +72,7 @@ async function fixture(options = {}) {
     registerCompaction(pi, () => config, guard.compactionProof);
   };
   async function create({ sessionManager, sessionStartEvent }) {
-    const loader = new DefaultResourceLoader({ cwd: dir, agentDir: dir, settingsManager: settings, noExtensions: true, noSkills: true, noPromptTemplates: true, noThemes: true, noContextFiles: true, extensionFactories: [extension] });
+    const loader = new DefaultResourceLoader({ cwd: dir, agentDir: dir, settingsManager: settings, noExtensions: true, noSkills: true, noPromptTemplates: true, noThemes: true, noContextFiles: true, extensionFactories: [extension], additionalExtensionPaths: process.env.PI_TEST_OBSERVABILITY === '1' ? ['stamp', 'progress', 'cache-hit-monitor'].map(name => join(dirname(fileURLToPath(import.meta.url)), '..', name, 'index.ts')) : [] });
     await loader.reload();
     const result = await createAgentSession({ cwd: dir, agentDir: dir, modelRuntime, sessionManager, settingsManager: settings, resourceLoader: loader, noTools: 'builtin', sessionStartEvent });
     return { ...result, services: { cwd: dir, agentDir: dir, modelRuntime, settingsManager: settings, resourceLoader: loader, diagnostics: [] }, diagnostics: [] };

@@ -32,12 +32,17 @@ in
       direnv.enable = lib.mkEnableOption "direnv extension — refreshes environment via direnv export";
       fence.enable = lib.mkEnableOption "fence extension — blocks write/edit outside cwd";
       fetch.enable = lib.mkEnableOption "adaptive fetch extension — native HTTP outside AgentSH and supervised curl when AgentSH is active";
+      stamp.enable = lib.mkEnableOption "response stamps and Paseo metadata";
+      progress.enable = lib.mkEnableOption "branch-aware progress and Paseo snapshots";
+      cache-hit-monitor.enable = lib.mkEnableOption "observed cache diagnostics and Paseo snapshots";
       idle-context-warning = {
         enable = lib.mkEnableOption "idle-context-warning extension — warn before idle prompts and optionally use cheap idle compaction";
         guardedModels = lib.mkOption {
           type = lib.types.attrsOf lib.types.str;
           default = { };
-          example = { astra = "openai/gpt-6-astra"; };
+          example = {
+            astra = "openai/gpt-6-astra";
+          };
           description = "Selectable idle-guard/<name> models mapped to exact physical provider/model IDs. Selected thinking is forwarded unchanged. Idle recovery uses cheapCompactionModel; only selected guarded models are protected.";
         };
         cheapCompactionModel = lib.mkOption {
@@ -137,6 +142,15 @@ in
       (lib.mkIf needsSharedRuntime {
         "${extDir}/shared".source = "${self}/shared";
       })
+      (lib.mkIf cfg.extensions.stamp.enable {
+        "${extDir}/stamp".source = "${self}/stamp";
+      })
+      (lib.mkIf cfg.extensions.progress.enable {
+        "${extDir}/progress".source = "${self}/progress";
+      })
+      (lib.mkIf cfg.extensions.cache-hit-monitor.enable {
+        "${extDir}/cache-hit-monitor".source = "${self}/cache-hit-monitor";
+      })
       (lib.mkIf cfg.extensions.background-job.enable {
         "${extDir}/background-job".source = "${self}/background-job";
       })
@@ -204,7 +218,8 @@ in
       (lib.mkIf cfg.extensions.idle-context-warning.enable {
         "${extDir}/idle-context-warning/index.ts".source = "${self}/idle-context-warning/index.ts";
         "${extDir}/idle-context-warning/policy.ts".source = "${self}/idle-context-warning/policy.ts";
-        "${extDir}/idle-context-warning/compaction.ts".source = "${self}/idle-context-warning/compaction.ts";
+        "${extDir}/idle-context-warning/compaction.ts".source =
+          "${self}/idle-context-warning/compaction.ts";
         "${extDir}/idle-context-warning/guard.ts".source = "${self}/idle-context-warning/guard.ts";
         "${extDir}/idle-context-warning.json".text = builtins.toJSON {
           inherit (cfg.extensions.idle-context-warning) cheapCompactionModel guardedModels;

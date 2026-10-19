@@ -9,6 +9,14 @@ are configured for global auto-discovery and loaded on every pi session.
 By default, pi\'s extension system enables all the extensions. Using
 `pi config` command, extensions can be disabled per user.
 
+## Stamp, Progress, and Cache diagnostics
+
+The `stamp`, `progress`, and `cache-hit-monitor` extensions provide response metadata,
+branch-aware progress, and observed cache accounting in Pi and through the companion
+Paseo **Activity** panel. See [OBSERVABILITY.md](OBSERVABILITY.md) for configuration,
+commands, lifecycle/privacy boundaries, and validation. Native iOS verification remains
+pending deployment. Adapted upstream source is credited in [THIRD_PARTY.md](THIRD_PARTY.md).
+
 ## Read-only harness API
 
 The background-job and native-subagent extensions publish the optional,

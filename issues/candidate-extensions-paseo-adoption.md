@@ -2,7 +2,16 @@
 
 ## Status
 
-Planned. Implementation and deployment have not started. This document records the reviewed shortlist and proposed order, not authorization to implement every optional extension.
+Phase 1 is implemented and automated checks pass: Stamp, Progress, and Cache monitor, with Paseo Activity views. Deployment and native iOS acceptance remain pending. Later phases remain planned, not authorized by phase-one implementation.
+
+## Phase-one implementation evidence
+
+- Adapted upstream collectors, validators, persistence, progress context restoration, and cache calculations with MIT notices retained. Native dialogs/lightweight rendering avoid the full toolkit dependency.
+- Stamp collects in TUI/RPC/headless modes. Progress exports structured saved state. Cache snapshots work independently of widget visibility and retain unknown-cache usage in aggregate totals without inventing cache misses.
+- Paseo Activity has three read-only views, using agent/session/runtime-bound private transport and schema validation. Stamps are a separate metadata view rather than original-bubble decorations.
+- 55 focused unit tests, strict TypeScript, a real-Pi deterministic-provider smoke, and 22 guarded-compaction runtime tests with all three extensions loaded passed. No paid model calls were used.
+- Nix module checks passed. Companion bridge: 133 regression tests passed (9 optional skipped), typecheck passed; compiled-plugin suite passed 23 tests (1 optional skipped).
+- Native iOS acceptance remains open; implementation is not yet deployed. See `OBSERVABILITY.md` for commands, limitations, and the read-only contract.
 
 ## Source and scope
 
