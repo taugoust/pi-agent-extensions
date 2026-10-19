@@ -150,15 +150,26 @@ Thresholds and optional cheap compaction are configurable in `~/.pi/agent/extens
 {
   "idleMinutes": 30,
   "contextPercent": 20,
-  "cheapCompactionModel": "openai/gpt-6-luna:low"
+  "cheapCompactionModel": "openai/gpt-6-luna:low",
+  "guardedModels": {
+    "astra": "openai/gpt-6-astra"
+  }
 }
 ```
 
-`cheapCompactionModel` defaults to `null` (normal Pi compaction). When configured, manual `/compact`, RPC/extension compaction, and automatic threshold/overflow compaction use this model **at or above `idleMinutes`**, regardless of context percentage or UI availability. Below that idle threshold, Pi compacts normally with its selected conversation model. The 20% `contextPercent` gate applies only to the prompt warning. This does not trigger compaction merely because a session is idle, and does not change the warning's Cancel/Ignore choices.
+`guardedModels` defaults to `{}`. Each key names a selectable `idle-guard/<key>` model; its value is the exact physical `provider/model` (without a thinking suffix). Select the guarded name, not the physical model, to enable the dispatch guard. The selection's thinking level is forwarded to the physical model. The cheap summary selector is independent and may include its own thinking suffix.
 
-The selector is an exact `provider/model[:thinking]`, compatible with subagent selectors. Thinking defaults to `low`; supported suffixes are `off`, `minimal`, `low`, `medium`, `high`, `xhigh`, and `max`. Nested model IDs and non-thinking colon suffixes are retained. Configure a model/provider already available to Pi with sufficient context capacity; the extension does not infer price, truncate the prepared conversation to fit a smaller model, or choose an alternative model. Nix can derive the selector from the configured subagent default without coupling runtime compaction to subagent settings.
+The guarded selection uses a virtual alias plus a private `idle-guard-proxy` provider. The proxy checks idle state again immediately before delegating to the real model registry, including after Pi's automatic-compaction awaits. It also rechecks in the provider's `onPayload` callback after authentication and earlier payload callbacks, before the HTTP send. Custom physical providers must honor Pi's documented `onPayload`-before-send contract, as the built-in providers do. It does not replace the real provider: real credentials, headers, usage and physical response identity stay with that provider. Do not select the private proxy directly. For guarded selections, the idle threshold is independent of `contextPercent`, and the older Cancel/Ignore warning is bypassed—the guard, not a dialog choice, controls dispatch.
 
-The conversation model and thinking level remain unchanged. Cheap compaction reuses Pi's native algorithm and the event's prepared token budgets, retained-message boundary, previous summary, custom instructions, split-turn handling, file tracking, and usage accounting. Credentials and provider headers are resolved through Pi's model registry. Cumulative native file lists survive subsequent cheap or normal compactions while the extension is enabled. Idle time always comes from the latest model response on the active persisted branch, including restored sessions; user/tool activity, cache warming, and compaction itself do not reset it.
+Cold requests stop locally. Recovery uses native cheap compaction after the run settles; the gate reopens only after validating the persisted compaction and recording its authorization. Cancellation, failed summaries and intervening session/input changes leave the gate closed. Failed/cancelled compaction latches survive reload and do not repeatedly call the cheap model on subsequent input. Fix the cause and use `/idle-guard-retry` to retry compaction without bypassing the gate. Selecting the unguarded physical model explicitly bypasses this protection.
+
+Alias names are remembered in additive files under `~/.pi/agent/idle-guard-aliases.json.d/` so removing a mapping leaves a closed alias rather than silently restoring the last physical model. Keep this runtime state and the extension installed while restoring guarded sessions; disabling/removing the extension itself is outside the guard's protection.
+
+`cheapCompactionModel` defaults to `null` (normal Pi compaction). When configured, manual `/compact`, RPC/extension compaction, and automatic threshold/overflow compaction use this model **at or above `idleMinutes`**, regardless of context percentage or UI availability. Below that idle threshold, unguarded selections compact normally with their selected conversation model. Guarded selections preserve the same warm policy: native automatic/manual compaction uses their exact underlying physical conversation model and selected thinking level, without routing through the alias. Cold compaction and explicit guard recovery use `cheapCompactionModel`. A warm summary that crosses the idle deadline during authentication or payload preparation cancels locally rather than sending cold history; the gate stays closed until explicit recovery succeeds. The 20% `contextPercent` gate applies only to the prompt warning. For unguarded selections, this setting alone does not trigger compaction merely because a session is idle and does not change the warning's Cancel/Ignore choices. Guarded selections start recovery when a cold request reaches their dispatch gate.
+
+The selector is an exact `provider/model[:thinking]`, compatible with subagent selectors. Thinking defaults to `low`; supported suffixes are `off`, `minimal`, `low`, `medium`, `high`, `xhigh`, and `max`. Nested model IDs and non-thinking colon suffixes are retained. Configure a direct physical model/provider already available to Pi with sufficient context capacity (virtual and guarded summary selectors are rejected to prevent recursive routing); the extension does not infer price, truncate the prepared conversation to fit a smaller model, or choose an alternative model. Nix can derive the selector from the configured subagent default without coupling runtime compaction to subagent settings.
+
+The conversation model and thinking level remain unchanged. Cheap compaction reuses Pi's native algorithm and the event's prepared token budgets, retained-message boundary, previous summary, custom instructions, split-turn handling, file tracking, and usage accounting. Credentials and provider headers are resolved through Pi's model registry. Cumulative native file lists survive subsequent cheap or normal compactions while the extension is enabled. Idle time always comes from the latest non-error, non-aborted model response on the active persisted branch, including restored sessions; failed routing/provider requests, user/tool activity, cache warming, and compaction itself do not reset it.
 
 Unknown models, authentication/provider errors, empty or incomplete summaries, and aborts **cancel compaction without falling back to the conversation model**. Diagnostics appear in UI notifications or stderr in headless mode. Invalid selector values cancel when the cheap route is selected; unreadable/malformed config files cancel compaction conservatively (a missing config file retains defaults). Fix the configuration/provider and retry; explicitly set the option to `null` to restore normal compaction.
 
@@ -168,10 +179,11 @@ Home Manager installs the extension's helpers and generates the JSON selector:
 programs.pi.extensions.idle-context-warning = {
   enable = true;
   cheapCompactionModel = "openai/gpt-6-luna:low"; # nullable string; default null
+  guardedModels.astra = "openai/gpt-6-astra"; # attrs of exact model IDs; default {}
 };
 ```
 
-Validation (with the Pi 1.0.0 SDK and its Node types available in `node_modules`):
+Validation (with the Pi 1.0.0 SDK, its matching `@earendil-works/pi-ai` dependency, and Node types available in `node_modules`):
 
 ```sh
 nix shell nixpkgs#bun nixpkgs#typescript --command sh -c '
@@ -179,6 +191,7 @@ nix shell nixpkgs#bun nixpkgs#typescript --command sh -c '
   tsc --noEmit --skipLibCheck --strict --module esnext --moduleResolution bundler \
     --target es2023 --allowImportingTsExtensions idle-context-warning/index.ts
 '
+node --test idle-context-warning/runtime-integration.mjs
 nix build .#checks.x86_64-linux.idle-context-warning
 ```
 

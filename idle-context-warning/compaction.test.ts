@@ -40,10 +40,42 @@ function fixture(reason: SessionBeforeCompactEvent["reason"] = "manual") {
       settings: { enabled: true, reserveTokens: 10000, keepRecentTokens: 20000 },
     },
   };
+  ctx.sessionManager = { getSessionId: () => "unit-session", getBranch: () => event.branchEntries };
   return { event, ctx, calls, notices, controller, selectedModel };
 }
 
 describe("idle compaction routing", () => {
+  it("preserves warm physical-model compaction and selected thinking without requiring a cheap selector", async () => {
+    const f = fixture();
+    const physical = { ...model, provider: "expensive", id: "conversation" };
+    f.ctx.model = { provider: "idle-guard", id: "alias" };
+    f.ctx.thinkingLevel = "high";
+    f.ctx.modelRegistry.find = (provider: string, id: string) => provider === physical.provider && id === physical.id ? physical : undefined;
+    f.event.branchEntries = [message(Date.now())];
+    expect((await beforeCompact(f.event, f.ctx, () => ({ ...settings, cheapCompactionModel: null, guardedModels: { alias: "expensive/conversation" } })))?.compaction).toBeDefined();
+    expect(f.calls).toHaveLength(1);
+    expect(f.calls[0].target).toBe(physical);
+    expect(f.calls[0].options.reasoning).toBe("high");
+  });
+  it("explicit guard recovery uses cheap thinking even if physical activity is warm", async () => {
+    const f = fixture();
+    f.ctx.model = { provider: "idle-guard", id: "alias" };
+    f.ctx.thinkingLevel = "high";
+    f.event.branchEntries = [message(Date.now())];
+    const proof = { version: 1 as const, mode: "cheap" as const, attempt: "recovery", session: "unit-session", alias: "alias", target: "expensive/conversation", idleAt: Date.now(), sourceLeaf: null };
+    expect((await beforeCompact(f.event, f.ctx, () => settings, () => proof))?.compaction).toBeDefined();
+    expect(f.calls).toHaveLength(1);
+    expect(f.calls[0].target).toBe(model);
+    expect(f.calls[0].options.reasoning).toBe("low");
+  });
+  it("rejects virtual or guarded summary models without recursive dispatch", async () => {
+    for (const target of [{ ...model, api: "pi-virtual" }, { ...model, provider: "idle-guard" }, { ...model, provider: "idle-guard-proxy" }]) {
+      const f = fixture();
+      f.ctx.modelRegistry.find = () => target;
+      expect(await beforeCompact(f.event, f.ctx, () => settings)).toEqual({ cancel: true });
+      expect(f.calls).toHaveLength(0);
+    }
+  });
   for (const reason of ["manual", "threshold", "overflow"] as const) {
     it(`${reason}: uses cheap model after idle independently of context usage/UI`, async () => {
       const f = fixture(reason);

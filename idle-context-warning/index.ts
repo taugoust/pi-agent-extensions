@@ -3,6 +3,7 @@ import { homedir } from "node:os";
 import { join } from "node:path";
 import type { ExtensionAPI, ExtensionContext } from "@earendil-works/pi-coding-agent";
 import { registerCompaction } from "./compaction.ts";
+import { GUARD_PROVIDER, registerGuard } from "./guard.ts";
 import { lastModelActivity, shouldWarn, type Config } from "./policy.ts";
 export { lastModelActivity, shouldWarn } from "./policy.ts";
 
@@ -27,6 +28,7 @@ export function readConfig(path = CONFIG_PATH, strict = false): Config {
       // Validate only when selected; malformed selectors must cancel, not fall
       // back to the conversation model.
       cheapCompactionModel: parsed.cheapCompactionModel,
+      guardedModels: parsed.guardedModels,
     };
   } catch (error) {
     if (strict && (error as NodeJS.ErrnoException).code !== "ENOENT") {
@@ -39,8 +41,11 @@ function valid(value: unknown, fallback: number, min: number, max: number): numb
   return typeof value === "number" && Number.isFinite(value) && value >= min && value <= max ? value : fallback;
 }
 
-async function check(ctx: ExtensionContext, signal?: AbortSignal): Promise<Decision> {
-  const settings = readConfig();
+async function check(ctx: ExtensionContext, signal?: AbortSignal, readSettings: () => Config = () => readConfig()): Promise<Decision> {
+  // Guarded selections use the non-bypassable final dispatch gate, not Ignore.
+  if (ctx.model?.provider === GUARD_PROVIDER) return "continue";
+  let settings: Config;
+  try { settings = readSettings(); } catch { return "cancel"; }
   if (!ctx.hasUI || !ctx.sessionManager || signal?.aborted) return "continue";
   const idleAt = lastModelActivity(ctx.sessionManager.getBranch());
   const usage = ctx.getContextUsage();
@@ -69,8 +74,10 @@ async function check(ctx: ExtensionContext, signal?: AbortSignal): Promise<Decis
   return choice === "Ignore" ? "continue" : "cancel";
 }
 
-export default function (pi: ExtensionAPI) {
-  registerCompaction(pi, () => readConfig(CONFIG_PATH, true));
+export default function (pi: ExtensionAPI, options: { readSettings?: () => Config; tombstonePath?: string } = {}) {
+  const settings = options.readSettings ?? (() => readConfig(CONFIG_PATH, true));
+  const guard = registerGuard(pi, settings, { tombstonePath: options.tombstonePath });
+  registerCompaction(pi, settings, guard.compactionProof);
   const capability: PreflightCapability = {
     ready: false,
     check: async () => "continue",
@@ -78,7 +85,7 @@ export default function (pi: ExtensionAPI) {
   const globals = globalThis as Record<string, unknown>;
   globals[REMOTE_PREFLIGHT_KEY] = capability;
   pi.on("session_start", (_event, ctx) => {
-    capability.check = (signal) => check(ctx, signal);
+    capability.check = (signal) => check(ctx, signal, settings);
     capability.ready = true;
     globals[REMOTE_PREFLIGHT_KEY] = capability;
   });
@@ -89,8 +96,8 @@ export default function (pi: ExtensionAPI) {
   pi.on("input", async (event, ctx) => {
     // Paseo-originated prompts go through the bridge's explicit preflight. Other
     // extension-originated inputs (including automatic continuations) bypass it.
-    if (event.source === "extension") return;
-    const decision = await check(ctx);
+    if (event.source === "extension" || ctx.model?.provider === GUARD_PROVIDER) return;
+    const decision = await check(ctx, undefined, settings);
     if (decision === "continue") return;
     if (event.source === "interactive" && ctx.mode === "tui") ctx.ui.setEditorText(event.text);
     return { action: "handled" as const };

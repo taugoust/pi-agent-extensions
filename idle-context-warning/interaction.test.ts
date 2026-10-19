@@ -1,11 +1,14 @@
 import { describe, expect, it } from "bun:test";
+import { randomUUID } from "node:crypto";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
 import register, { REMOTE_PREFLIGHT_KEY } from "./index.ts";
 
 function setup(choice: string) {
   const handlers: Record<string, (event: any, ctx: any) => Promise<any> | void> = {};
   const uiCalls: any[] = [];
   const pi: any = { on(name: string, fn: any) { handlers[name] = fn; } };
-  register(pi);
+  register(pi, { readSettings: () => ({ idleMinutes: 30, contextPercent: 20 }), tombstonePath: join(tmpdir(), `idle-guard-test-${randomUUID()}.json`) });
   const old = Date.now() - 60 * 60_000;
   const text = "  preserve this draft exactly  ";
   const globals = globalThis as Record<string, any>;
@@ -30,6 +33,14 @@ function setup(choice: string) {
 }
 
 describe("idle warning input handling", () => {
+  it("leaves guarded aliases to the authoritative dispatch gate rather than Cancel/Ignore", async () => {
+    const { handlers, ctx, text, uiCalls, capability, globals } = setup("Cancel");
+    ctx.model = { provider: "idle-guard", id: "alias" };
+    expect(await handlers.input({ source: "interactive", text }, ctx)).toBeUndefined();
+    expect(await capability.check()).toBe("continue");
+    expect(uiCalls).toHaveLength(0);
+    delete globals[REMOTE_PREFLIGHT_KEY];
+  });
   it("Cancel consumes interactive input and restores its exact terminal text", async () => {
     const { handlers, ctx, text, uiCalls, globals } = setup("Cancel");
     expect(await handlers.input({ source: "interactive", text }, ctx)).toEqual({ action: "handled" });

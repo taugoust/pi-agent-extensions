@@ -3,6 +3,7 @@ import { mkdtempSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { readConfig } from "./index.ts";
+import { parseGuardedModels } from "./guard.ts";
 
 const directories: string[] = [];
 function file(text?: string): string {
@@ -21,6 +22,18 @@ describe("idle context configuration", () => {
   it("accepts the Nix-generated selector independently of default thresholds", () => {
     expect(readConfig(file('{"cheapCompactionModel":"openai/gpt-6-luna:low"}'), true)).toEqual({ idleMinutes: 30, contextPercent: 20, cheapCompactionModel: "openai/gpt-6-luna:low" });
     expect(readConfig(file('{"cheapCompactionModel":null}'), true).cheapCompactionModel).toBeNull();
+  });
+  it("retains guarded model mappings for strict runtime validation", () => {
+    const guardedModels = { astra: "openai/gpt-6-astra", nested: "openrouter/vendor/model" };
+    expect(readConfig(file(JSON.stringify({ guardedModels })), true).guardedModels).toEqual(guardedModels);
+    expect(parseGuardedModels(guardedModels)).toEqual(guardedModels);
+    expect(parseGuardedModels(undefined)).toEqual({});
+    expect(readConfig(file('{"guardedModels":false}'), true).guardedModels).toBe(false);
+  });
+  it("rejects malformed, recursive and thinking-suffixed guard mappings", () => {
+    for (const value of [false, [], "model", { alias: "model" }, { alias: "p/m:high" }, { alias: "idle-guard/other" }, { alias: "idle-guard-proxy/other" }, { "bad alias": "p/m" }, { alias: "p/has space" }]) {
+      expect(() => parseGuardedModels(value)).toThrow();
+    }
   });
   it("retains configurable thresholds and existing numeric bounds", () => {
     expect(readConfig(file('{"idleMinutes":5,"contextPercent":50}'), true)).toMatchObject({ idleMinutes: 5, contextPercent: 50 });

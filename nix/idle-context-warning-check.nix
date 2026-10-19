@@ -15,6 +15,7 @@ let
             extensions.idle-context-warning = {
               enable = enabled;
               cheapCompactionModel = model;
+              guardedModels = if model == null then { } else { astra = "openai/gpt-6-astra"; };
             };
           };
         })
@@ -26,13 +27,17 @@ let
   configFile = ".pi/agent/extensions/idle-context-warning.json";
   sourceDir = ".pi/agent/extensions/idle-context-warning";
 in
-assert builtins.fromJSON configured.${configFile}.text == { cheapCompactionModel = "openai/gpt-6-luna:low"; };
-assert builtins.fromJSON defaults.${configFile}.text == { cheapCompactionModel = null; };
+assert builtins.fromJSON configured.${configFile}.text == {
+  cheapCompactionModel = "openai/gpt-6-luna:low";
+  guardedModels = { astra = "openai/gpt-6-astra"; };
+};
+assert builtins.fromJSON defaults.${configFile}.text == { cheapCompactionModel = null; guardedModels = { }; };
 assert !(disabled ? ${configFile});
-assert lib.all (file: configured ? ${sourceDir + "/" + file}) [ "index.ts" "policy.ts" "compaction.ts" ];
+assert lib.all (file: configured ? ${sourceDir + "/" + file}) [ "index.ts" "policy.ts" "compaction.ts" "guard.ts" ];
 pkgs.runCommand "idle-context-warning-config-check" { } ''
   test -f ${configured.${sourceDir + "/index.ts"}.source}
   test -f ${configured.${sourceDir + "/policy.ts"}.source}
   test -f ${configured.${sourceDir + "/compaction.ts"}.source}
+  test -f ${configured.${sourceDir + "/guard.ts"}.source}
   touch "$out"
 ''

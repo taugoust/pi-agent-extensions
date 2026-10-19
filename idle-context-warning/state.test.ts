@@ -12,6 +12,17 @@ describe("idle context warning thresholds", () => {
     expect(lastModelActivity(branch)).toBe(20_000);
     expect(lastModelActivity(branch.slice(0, 2))).toBe(1_000);
   });
+  it("does not reset idle activity on routing/provider errors or aborted requests", () => {
+    const success = { type: "message", message: { role: "assistant", model: "physical", timestamp: 1000, stopReason: "stop" } };
+    const failures = [
+      { type: "message", message: { role: "assistant", model: "guarded", timestamp: 2000, stopReason: "error" } },
+      { type: "message", message: { role: "assistant", model: "physical", timestamp: 3000, stopReason: "error" } },
+      { type: "message", message: { role: "assistant", model: "physical", timestamp: 4000, stopReason: "aborted" } },
+    ];
+    expect(lastModelActivity([success, ...failures])).toBe(1000);
+    expect(lastModelActivity(failures)).toBeUndefined();
+    expect(shouldWarn(lastModelActivity([success, ...failures]), 1000 + 30 * 60_000, 20, settings)).toBe(true);
+  });
   it("warns at the exact idle and context thresholds, not below either", () => {
     const start = 1_000;
     expect(shouldWarn(start, start + 30 * 60_000, 20, settings)).toBe(true);

@@ -34,6 +34,12 @@ in
       fetch.enable = lib.mkEnableOption "adaptive fetch extension — native HTTP outside AgentSH and supervised curl when AgentSH is active";
       idle-context-warning = {
         enable = lib.mkEnableOption "idle-context-warning extension — warn before idle prompts and optionally use cheap idle compaction";
+        guardedModels = lib.mkOption {
+          type = lib.types.attrsOf lib.types.str;
+          default = { };
+          example = { astra = "openai/gpt-6-astra"; };
+          description = "Selectable idle-guard/<name> models mapped to exact physical provider/model IDs. Selected thinking is forwarded unchanged. Idle recovery uses cheapCompactionModel; only selected guarded models are protected.";
+        };
         cheapCompactionModel = lib.mkOption {
           type = lib.types.nullOr lib.types.str;
           default = null;
@@ -199,8 +205,9 @@ in
         "${extDir}/idle-context-warning/index.ts".source = "${self}/idle-context-warning/index.ts";
         "${extDir}/idle-context-warning/policy.ts".source = "${self}/idle-context-warning/policy.ts";
         "${extDir}/idle-context-warning/compaction.ts".source = "${self}/idle-context-warning/compaction.ts";
+        "${extDir}/idle-context-warning/guard.ts".source = "${self}/idle-context-warning/guard.ts";
         "${extDir}/idle-context-warning.json".text = builtins.toJSON {
-          inherit (cfg.extensions.idle-context-warning) cheapCompactionModel;
+          inherit (cfg.extensions.idle-context-warning) cheapCompactionModel guardedModels;
         };
       })
 
