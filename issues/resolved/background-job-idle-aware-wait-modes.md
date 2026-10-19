@@ -2,7 +2,11 @@
 
 ## Status
 
-Wait modes remain unimplemented. A guarded selectable model alternative is implemented and runtime-tested in `idle-context-warning`. Existing background-job wait behavior is unchanged.
+Resolved through the user-approved guarded-model alternative. Short/long wait modes were superseded, not implemented; existing job and subagent wait APIs remain unchanged.
+
+## Resolution
+
+Published in `476dd55`. Guarded selection protects continuation requests across both job and subagent waits without core changes or parent restart. Runtime integration tests pass; deployment remains separate.
 
 ## Requested behavior
 
