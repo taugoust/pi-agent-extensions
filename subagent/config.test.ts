@@ -12,8 +12,8 @@ function fixture(t: any, value?: unknown) {
   return dir;
 }
 
-test("missing config preserves historical defaults", t => {
-  assert.equal(resolveSubagentModel(undefined, readSubagentModelSettings(fixture(t))), "openai-codex/gpt-6-astra:low");
+test("missing config uses the supported OpenAI provider", t => {
+  assert.equal(resolveSubagentModel(undefined, readSubagentModelSettings(fixture(t))), "openai/gpt-6-luna:low");
 });
 test("child defaults are independent of main settings", t => {
   const dir = fixture(t, { defaultProvider: "openai-codex", defaultModel: "gpt-6-luna", defaultThinkingLevel: "low" });
@@ -26,7 +26,7 @@ test("child defaults are independent of main settings", t => {
 });
 test("partial config and configured thinking are respected", t => {
   const settings = readSubagentModelSettings(fixture(t, { defaultThinkingLevel: "medium" }));
-  assert.equal(resolveSubagentModel(undefined, settings), "openai-codex/gpt-6-astra:medium");
+  assert.equal(resolveSubagentModel(undefined, settings), "openai/gpt-6-luna:medium");
 });
 test("invalid config fails visibly", t => {
   for (const value of [null, [], { defaultModel: "" }, { defaultModel: 1 }, { defaultThinkingLevel: "invalid" }]) {

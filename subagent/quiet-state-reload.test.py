@@ -29,7 +29,12 @@ with tempfile.TemporaryDirectory(prefix="pi-completion-reload-") as tmp:
         # Expose the entrypoint's actual imported binding to the fixture, without
         # initializing the subagent launcher or changing production exports.
         entry = root / version / "subagent/index.ts"
-        entry.write_text(entry.read_text() + "\nexport { installQuietState as reloadProbe };\n")
+        entry.write_text(entry.read_text() + "\nexport { installQuietState as reloadProbe, requireAcceptance as acceptanceProbe, defaultSubagentModel as modelProbe };\n")
+    old_config = root / "old/subagent/config.ts"
+    old_config.write_text(old_config.read_text().replace('defaultModel: "gpt-6-luna"', 'defaultModel: "legacy-default"'))
+    old_outcome = root / "old/subagent/outcome.ts"
+    old_outcome.write_text(old_outcome.read_text().replace(
+        "export function requireAcceptance(", "function priorRequireAcceptance("))
     (root / "old/shared/quiet-state.ts").write_text('''
 export function installQuietState(pi) {
   return { enqueue(ctx, update) {
@@ -43,7 +48,7 @@ export function notifyParent() { throw new Error("not used by this fixture"); }
     for folder in folders:
         (live / folder).symlink_to(root / "old" / folder)
     (extensions / "probe.ts").write_text(f'''
-import {{ reloadProbe }} from {json.dumps(str(live / "subagent/index.ts"))};
+import {{ reloadProbe, acceptanceProbe, modelProbe }} from {json.dumps(str(live / "subagent/index.ts"))};
 export default function(pi) {{
   let current;
   let sequence = 0;
@@ -55,6 +60,16 @@ export default function(pi) {{
   pi.registerCommand("probe", {{handler: async (_, ctx) => {{
     current = ctx;
     quiet.enqueue(ctx, {{kind:"subagent", id:"reload-probe-" + (++sequence), completion:true, state:"completed"}});
+  }}}});
+  pi.registerCommand("modelprobe", {{handler: async (_, ctx) => {{ ctx.ui.notify(modelProbe); }}}});
+  pi.registerCommand("acceptance", {{handler: async (_, ctx) => {{
+    if (typeof acceptanceProbe !== "function") {{ ctx.ui.notify("OLD-ACCEPTANCE"); return; }}
+    const criteria = acceptanceProbe(["Verify reload behavior"]);
+    if (criteria[0] !== "Verify reload behavior") throw new Error("acceptance lost");
+    let rejected = false;
+    try {{ acceptanceProbe(undefined); }} catch {{ rejected = true; }}
+    if (!rejected) throw new Error("missing acceptance was allowed");
+    ctx.ui.notify("NEW-ACCEPTANCE");
   }}}});
   pi.registerCommand("reloadtest", {{handler: async (_, ctx) => {{ await ctx.reload(); }} }});
 }}
@@ -98,12 +113,16 @@ export default function(pi) {{
     try:
         pid = process.pid
         command("probe", "SILENT")
+        command("acceptance", "OLD-ACCEPTANCE")
+        command("modelprobe", "openai/legacy-default:low")
         for folder in folders:
             link = live / folder
             link.unlink()
             link.symlink_to(root / "new" / folder)
         command("reloadtest")
         command("probe", "WAKE")
+        command("acceptance", "NEW-ACCEPTANCE")
+        command("modelprobe", "openai/gpt-6-luna:low")
         assert process.pid == pid and process.poll() is None
         print("PASS: same-process subagent reload refreshed completion wake behavior")
     finally:

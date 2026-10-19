@@ -19,7 +19,7 @@ import { TuiWorkerStore } from "./tui-worker-store.ts";
 import type { Message } from "@mariozechner/pi-ai";
 import type { AgentToolResult, ExtensionAPI } from "@mariozechner/pi-coding-agent";
 import { getAgentDir, getMarkdownTheme } from "@mariozechner/pi-coding-agent";
-import { readSubagentModelSettings, resolveSubagentModel } from "./config.js";
+import { readSubagentModelSettings, resolveSubagentModel } from "./config.ts";
 
 import { Container, Markdown, Spacer, Text } from "@mariozechner/pi-tui";
 import { Type } from "@sinclair/typebox";
@@ -76,7 +76,7 @@ import { DetachableForegroundExecution } from "./foreground-handoff.js";
 import { NativeSubagentRpcSession, spawnNativeSubagentProcess, type NativeSubagentRpcDiagnostics } from "./native-rpc.js";
 import { waitForGroupSnapshot } from "./group-wait.ts";
 import { parentJobBroker, validateJobParams } from "../shared/background-job.js";
-import { validateAcceptance, requireAcceptance, readTaskOutcome, outcomeSummary, type TaskOutcome, type TaskOutcomeSummary } from "./outcome.js";
+import { validateAcceptance, requireAcceptance, readTaskOutcome, outcomeSummary, type TaskOutcome, type TaskOutcomeSummary } from "./outcome.ts";
 import { NativeTaskStore, createTaskId, TASK_ID_PATTERN, type NativeTaskRecord } from "./resume.js";
 import { SUBAGENT_NAME_MAX_LENGTH, SUBAGENT_NAME_PATTERN, validateSubagentName, withoutSubagentNames } from "./tui-names.js";
 import { registerTaskDashboard } from "./dashboard.js";

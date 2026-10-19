@@ -3,7 +3,7 @@ import { constants, closeSync, fstatSync, lstatSync, openSync, readFileSync, rea
 import { access, lstat, mkdir, open, readFile, readdir, rename, rm, writeFile } from "node:fs/promises";
 import { dirname, join } from "node:path";
 import { SUBAGENT_CHILD_ID_PATTERN } from "./control.js";
-import { validateOutcomeSummaries, type TaskOutcomeSummary } from "./outcome.js";
+import { validateOutcomeSummaries, type TaskOutcomeSummary } from "./outcome.ts";
 import {
   MAX_RETAINED_SUBAGENT_JOB_BYTES,
   MAX_RETAINED_SUBAGENT_REPORT_BYTES,

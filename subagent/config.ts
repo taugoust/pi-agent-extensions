@@ -7,10 +7,10 @@ export interface SubagentModelSettings {
   defaultThinkingLevel: string;
 }
 
-// Preserve the historical defaults for installations without configuration.
+// Match the managed configuration; never silently fall back to deprecated Codex auth.
 const defaults: SubagentModelSettings = {
-  defaultProvider: "openai-codex",
-  defaultModel: "gpt-6-astra",
+  defaultProvider: "openai",
+  defaultModel: "gpt-6-luna",
   defaultThinkingLevel: "low",
 };
 const thinkingSuffix = /:(off|minimal|low|medium|high|xhigh|max)$/;

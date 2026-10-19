@@ -1,6 +1,6 @@
 import type { ExtensionAPI } from '@mariozechner/pi-coding-agent';
 import { Type } from '@sinclair/typebox';
-import { writeTaskOutcome } from './outcome.js';
+import { writeTaskOutcome } from './outcome.ts';
 const file=process.env.PI_SUBAGENT_OUTCOME_PATH;
 delete process.env.PI_SUBAGENT_OUTCOME_PATH;
 export default function taskOutcomeTool(pi:ExtensionAPI){

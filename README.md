@@ -891,7 +891,7 @@ New subagents read `subagent.json` in Pi's agent directory (`~/.pi/agent`, or
 
 ```json
 {
-  "defaultProvider": "openai-codex",
+  "defaultProvider": "openai",
   "defaultModel": "gpt-6-luna",
   "defaultThinkingLevel": "low"
 }
@@ -901,7 +901,7 @@ Home Manager exposes the same three fields under
 `programs.pi.extensions.subagent`. They apply to single, parallel, and chain
 launches on both backends, including nested children. An explicit task `model`
 takes precedence; append `:medium`, `:high`, etc. to override thinking as well.
-Unconfigured fields retain the historical Astra/low defaults. Invalid configuration
+Unconfigured fields default to OpenAI/Luna/low; there is no automatic Codex fallback. Invalid configuration
 is reported rather than silently ignored. Restart Pi or `/reload` after changes;
 existing/resumed children retain their recorded model.
 
@@ -1040,8 +1040,11 @@ backends keep their existing execution model and never silently fall back to nat
   An ancestor can reap an orphan only through verified retained session ancestry and
   a stopped-owner lease; live parents retain their own lifecycle authority.
   Failed cleanup leaves the child available for repair.
-  Old workers need a reload/new launch to acquire recursive cleanup support. An already-dead
-  child without a verified cleanup receipt is not automatically recovered: inspect
+  Legacy workers may have an immutable `--extension` entrypoint pinned to the old
+  controller: ordinary reload or resume does not necessarily upgrade that controller.
+  Do not repeatedly reload or kill such panes to bypass missing cleanup proof. A new
+  worker uses the current protocol, but does not clean up the old worker's resources.
+  An already-dead child without a verified cleanup receipt is not automatically recovered: inspect
   and explicitly adopt retained jobs with user authorization, or recover its child
   controller. Missing controllers never imply an empty inventory.
   Reaping is never triggered by a final reply, reading a report, or hiding a UI tab.

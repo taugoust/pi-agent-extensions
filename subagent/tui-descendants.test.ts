@@ -186,7 +186,7 @@ test("old live worker cannot be stopped by reap without recursive cleanup capabi
     const tmux: any = new TuiWorkerTmux();
     tmux.inspect = async () => ({ dead: false, panePid: 123 });
     tmux.run = async () => { throw new Error("No tmux mutation is permitted"); };
-    await assert.rejects(tmux.reap(f.manifests[2]), /reload the live worker/);
+    await assert.rejects(tmux.reap(f.manifests[2]), /pinned to an old immutable.*ordinary reload\/resume may not upgrade/);
     assert.equal(f.server.state.sealed, false);
     assert.equal(f.server.state.reapReservation, undefined);
   } finally { await f.close(); }

@@ -75,12 +75,12 @@ in
         enable = lib.mkEnableOption "adaptive subagent extension — native child Pi or AgentSH backend; also installs its child finalizer";
         defaultProvider = lib.mkOption {
           type = lib.types.str;
-          default = "openai-codex";
+          default = "openai";
           description = "Default provider for new subagents, independent of the main agent.";
         };
         defaultModel = lib.mkOption {
           type = lib.types.str;
-          default = "gpt-6-astra";
+          default = "gpt-6-luna";
           description = "Default model ID for new subagents. Explicit task models take precedence.";
         };
         defaultThinkingLevel = lib.mkOption {

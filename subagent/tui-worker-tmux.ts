@@ -329,7 +329,8 @@ export class TuiWorkerTmux {
     }
     if (!info.dead) {
       const status = await callTuiWorker(manifest, { operation: "status" }, { timeoutMs: 1000 });
-      if (!status.ok || (status.data as any)?.recursiveCleanup !== true) throw new Error("Worker lacks recursive subagent cleanup support; reload the live worker before reap");
+      if (!status.ok) throw new Error(`Worker cleanup capability query failed (${status.code}); recover its controller before retrying reap. No pane was killed`);
+      if ((status.data as any)?.recursiveCleanup !== true) throw new Error("Worker lacks recursive subagent cleanup support. A legacy worker may be pinned to an old immutable --extension entrypoint, so ordinary reload/resume may not upgrade it. Preserve the pane and recover a current child-local controller with verified job/subagent cleanup before reaping; no pane was killed");
       const response = await callTuiWorker(manifest, { operation: "prepare_reap" }, { requestId: `reap:${manifest.workerEpoch}`, timeoutMs: 30_000 });
       if (!response.ok) throw new Error(`Worker reap rejected: ${response.code}: ${response.message}`);
       const deadline = Date.now() + timeoutMs;
