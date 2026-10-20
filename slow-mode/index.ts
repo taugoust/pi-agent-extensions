@@ -101,6 +101,22 @@ function buildRemoteReview(
 export default function slowMode(pi: ExtensionAPI) {
   // State: whether slow mode is currently enabled
   let enabled = false;
+  let controlContext: ExtensionContext | undefined;
+  const controlKey = "__piSlowModeControlV1";
+  const control = {
+    version: 1,
+    status(sessionId: string) {
+      if (!controlContext || controlContext.sessionManager.getSessionId() !== sessionId) throw new Error("Stale review context");
+      return { sessionId, enabled, available: controlContext.hasUI && controlContext.mode === "tui" };
+    },
+    setEnabled(sessionId: string, value: boolean) {
+      if (typeof value !== "boolean" || !this.status(sessionId).available) throw new Error("Review control unavailable");
+      enabled = value;
+      controlContext!.ui.setStatus("slow-mode", enabled ? controlContext!.ui.theme.fg("warning", "slow ■") : undefined);
+      return this.status(sessionId);
+    },
+  };
+  pi.on("session_start", (_event, ctx) => { controlContext = ctx; (globalThis as any)[controlKey] = control; });
 
   // Track tool calls where content was edited
   // Maps toolCallId -> { originalContent, editedContent }
@@ -113,6 +129,8 @@ export default function slowMode(pi: ExtensionAPI) {
 
   // Clean up staging directory on session shutdown
   pi.on("session_shutdown", async () => {
+    controlContext = undefined;
+    if ((globalThis as any)[controlKey] === control) delete (globalThis as any)[controlKey];
     try {
       rmSync(tmpDir, { recursive: true });
     } catch {
