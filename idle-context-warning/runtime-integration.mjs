@@ -95,6 +95,36 @@ async function fixture(options = {}) {
   };
 }
 
+test('SDK input hook returns before deferred compact and success is persisted', async () => {
+  let compactPromiseResolve, compactPromiseReject;
+  const compacted = new Promise((resolve, reject) => { compactPromiseResolve = resolve; compactPromiseReject = reject; });
+  const f = await fixture({ persisted: true, register(pi) {
+    pi.on('session_compact', event => compactPromiseResolve(event.compactionEntry));
+    pi.on('session_compact_failed', event => compactPromiseReject(new Error(event.errorMessage ?? 'failed')));
+    pi.on('input', (event, ctx) => {
+      if (event.text !== 'deferred compact request') return;
+      const sessionId = ctx.sessionManager.getSessionId();
+      const forced = { sessionId, token: crypto.randomUUID() };
+      globalThis.__piIdleContextForceCheapV1 = forced;
+      setTimeout(() => ctx.compact({
+        onComplete: () => { if (globalThis.__piIdleContextForceCheapV1 === forced) delete globalThis.__piIdleContextForceCheapV1; },
+        onError: () => { if (globalThis.__piIdleContextForceCheapV1 === forced) delete globalThis.__piIdleContextForceCheapV1; },
+      }), 0);
+      return { action: 'handled' };
+    });
+  } });
+  try {
+    await f.session.setModel(f.modelRuntime.getModel('physical-probe', 'model'));
+    await f.session.prompt('create a completed turn');
+    await f.session.waitForIdle();
+    f.cold();
+    await Promise.race([f.session.prompt('deferred compact request'), new Promise((_, reject) => setTimeout(() => reject(new Error('input event deadlocked')), 5000))]);
+    const entry = await Promise.race([compacted, new Promise((_, reject) => setTimeout(() => reject(new Error('deferred compact timed out')), 5000))]);
+    assert.ok(entry?.fromHook);
+    assert.ok(f.session.sessionManager.getBranch().some(saved => saved.type === 'compaction' && saved.id === entry.id));
+  } finally { await f.close(); }
+});
+
 for (const outcome of ['failure', 'abort']) test(`post-route auto-compaction crosses idle, cheap ${outcome}, zero physical dispatch`, async () => {
   const f = await fixture({ compact: true,
     register(pi, clock) { pi.on('session_before_compact', async () => { await Promise.resolve(); clock.cold(); }); },

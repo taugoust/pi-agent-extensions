@@ -117,6 +117,42 @@ test("direct human turn clears old outcome; aborted assistant cancels chain inst
   } finally { await server.close(); await manager.shutdown(false); await rm(root, { recursive: true, force: true }); }
 });
 
+test("native idle request notifies parent, appears in status, and resolves only matching request", async () => {
+  const root = await mkdtemp(join(tmpdir(), "pi-idle-notify-"));
+  const manager: any = new TuiNativeManager(root, () => "native", () => true, 16);
+  const directory = join(root, "workers", "a".repeat(24));
+  const store = new TuiWorkerStore(directory, true);
+  const manifest: any = { protocol: 1, ownerSessionId: "parent", taskId: `subagent-task-${"a".repeat(24)}`, runtimeId: "runtime", groupId: `subagent-job-${"b".repeat(24)}`,
+    childId: `subagent-child-${"c".repeat(24)}`, attempt: 1, workerEpoch: "d".repeat(32), controlToken: "e".repeat(64), controlSocket: join(directory, "control.sock"),
+    sessionFile: join(directory, "session.jsonl"), launchMode: "none", presentation: "background", placement: { socketPath: "/tmp/tmux", serverEpoch: "1:2", sessionId: "$1", windowId: "@1", paneId: "%1", ownershipNonce: "f".repeat(64) } };
+  store.writeManifest(manifest);
+  const worker = new TuiWorkerServer(store, { isIdle: () => true, send() {}, abort() {}, shutdown() {} });
+  const child: any = { childId: manifest.childId, taskId: manifest.taskId, attempt: 1, directory, spec: { task: "idle warning" }, state: "running", started: true, notifiedSequence: 0 };
+  const group: any = { id: manifest.groupId, owner: "parent", background: true, mode: "single", launchMode: "none", caller: manifest.placement, children: [child] };
+  const notifications: any[] = [];
+  manager.owner = "parent"; manager.notify = (update: any) => (notifications.push(update), true); manager.groups.set(group.id, group);
+  try {
+    await worker.start();
+    const pending = worker.requestIdleDecision({ model: "provider/model", idleMinutes: 31, contextPercent: 86 });
+    void pending.catch(() => undefined);
+    await manager.observe(group, child, true);
+    assert.equal(notifications.length, 0, "ancestor observation cannot route the parent's decision");
+    await manager.observe(group, child);
+    await manager.observe(group, child);
+    const guidance = notifications.filter(item => item.requires_guidance === true);
+    assert.equal(guidance.length, 1);
+    assert.match(guidance[0].message, /provider\/model.*31m.*86%/);
+    assert.ok(guidance[0].message.includes(`worker_epoch=${manifest.workerEpoch}`));
+    assert.equal(manager.publicGroup(group).children[0].idle_decision.model, "provider/model");
+    assert.equal(manager.publicGroup(group).children[0].idle_decision.workerEpoch, manifest.workerEpoch);
+    const result = await manager.operation({ operation: "idle_decision", child_id: child.childId, request_id: (worker as any).idleDecisions.keys().next().value, worker_epoch: manifest.workerEpoch, choice: "ignore" }, "parent");
+    assert.equal(result.details.operation, "idle_decision");
+    assert.equal(await pending, "ignore");
+    assert.equal(manager.publicGroup(group).children[0].idle_decision, undefined);
+    await assert.rejects(manager.operation({ operation: "idle_decision", child_id: child.childId, request_id: "idle:" + "0".repeat(32), choice: "cancel" }, "parent"), /stale|pending/);
+  } finally { await worker.close(); await manager.shutdown(false); await rm(root, { recursive: true, force: true }); }
+});
+
 test("selected result observes fresh worker status without global refresh and respects abort", async () => {
   const root = await mkdtemp(join(tmpdir(), "pi-result-fast-"));
   const manager: any = new TuiNativeManager(root, () => "native", () => true, 16);

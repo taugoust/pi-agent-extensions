@@ -25,7 +25,7 @@ export type TuiWorkerAdapter = {
   jobs?(params: import("../shared/tui-worker-protocol.ts").TuiWorkerJobParams, requestId: string): Promise<unknown>;
   applyOperatorMode?(enabled: boolean): unknown | Promise<unknown>;
 };
-const MUTATIONS = new Set(["prompt", "user_prompt", "cancel", "compact", "prepare_reap", "promote", "respond_interaction"]);
+const MUTATIONS = new Set(["prompt", "user_prompt", "cancel", "compact", "prepare_reap", "promote", "respond_interaction", "idle_decision"]);
 
 /** Runs inside the actual TUI process. Observers own no lifetime-critical fd. */
 export class TuiWorkerServer {
@@ -46,6 +46,8 @@ export class TuiWorkerServer {
   readonly store: TuiWorkerStore;
   private adapter: TuiWorkerAdapter;
   private interactionWaiters = new Map<string, { resolve(answer: import("../shared/foreground-tasks.ts").TaskInteractionAnswer): void; reject(error: Error): void }>();
+  private idleDecisions = new Map<string, { resolve(choice: "ignore" | "compact" | "cancel"): void; reject(error: Error): void }>();
+  private idleDecisionHistory = new Map<string, { model: string; idleMinutes: number; contextPercent: number }>();
   private currentLiveText = "";
   private interruptTimeoutMs: number;
   constructor(store: TuiWorkerStore, adapter: TuiWorkerAdapter, interruptTimeoutMs = 5000) {
@@ -165,13 +167,17 @@ export class TuiWorkerServer {
     return "One automatic continuation of the same assignment. Continue only the routine remaining work already authorized by the original task and acceptance criteria. No additional authority is granted. Stop and report blocked if external input, permissions, safety decisions or scope changes are needed. This budget is now exhausted; report an updated task_outcome before returning. Recorded next action (model-reported): " + outcome.next_action;
   }
   private snapshot() {
-    return { active: this.state.active || !this.adapter.isIdle(), sealed: this.sealed, phase: this.state.phase,
+    return { active: this.state.active || !this.adapter.isIdle() || this.idleDecisions.size > 0, sealed: this.sealed, phase: this.state.phase,
       lastReport: this.state.lastReport, lastOutcome: this.state.lastOutcome, sequence: this.state.sequence, pid: process.pid,
       sessionFile: this.manifest.sessionFile, presentation: this.manifest.presentation,
       interactions: (this.state.interactions ?? []).filter(item => !item.answer && !item.cancelledAt).slice(-2)
-        .map(({ id, workerEpoch, createdAt, request }) => ({ id, workerEpoch, createdAt, request })), liveText: this.currentLiveText,
+        .map(({ id, workerEpoch, createdAt, request }) => ({ id, workerEpoch, createdAt, request })),
+      idleDecision: [...this.idleDecisions.keys()].map(requestId => {
+        const pending = this.state.events.findLast(event => event.kind === "idle_decision_pending" && (event.data as any)?.requestId === requestId);
+        return { ...this.idleDecisionHistory.get(requestId), ...pending?.data as object, requestId, workerEpoch: this.manifest.workerEpoch };
+      }).at(-1), liveText: this.currentLiveText,
       recursiveCleanup: this.adapter.recursiveCleanup === true,
-      readyForPrompts: !this.sealed && !this.preparingReap && (this.adapter.canRun?.() ?? true), permissionPromptsEnabled: this.adapter.permissionMode?.() };
+      readyForPrompts: !this.sealed && !this.preparingReap && this.idleDecisions.size === 0 && (this.adapter.canRun?.() ?? true), permissionPromptsEnabled: this.adapter.permissionMode?.() };
   }
   private authenticated(r: TuiWorkerRequest): boolean {
     const expected = Buffer.from(this.manifest.controlToken);
@@ -226,7 +232,7 @@ export class TuiWorkerServer {
     // before reserving activity/intent, otherwise an unsent prompt looks live.
     if ((r.operation === "prompt" || r.operation === "user_prompt") && this.adapter.canRun?.() === false) return fail("unavailable", "Worker command authority unavailable");
     if (r.operation === "compact" && (!this.adapter.compact || this.state.active || !this.adapter.isIdle())) return fail("busy", "Compaction requires an idle capable worker");
-    if (r.operation === "prepare_reap" && (this.state.active || !this.adapter.isIdle())) return fail("busy", "Worker is active; reap never cancels work");
+    if (r.operation === "prepare_reap" && (this.state.active || this.idleDecisions.size > 0 || !this.adapter.isIdle())) return fail("busy", "Worker is active or awaiting a parent idle decision; reap never cancels work");
     if (r.operation === "promote") {
       if (this.manifest.execution === "rpc-headless" || !this.manifest.placement) return fail("invalid", "Headless worker promotion is unsupported");
       const old = this.manifest.placement, next = r.placement;
@@ -310,6 +316,7 @@ export class TuiWorkerServer {
       }
       case "cancel":
         this.inhibitAutoContinuation();
+        this.cancelPendingIdleDecisions(new Error("Worker cancelled by parent"));
         await this.adapter.clearQueue?.();
         await this.adapter.abort();
         this.state.active = !this.adapter.isIdle();
@@ -322,6 +329,16 @@ export class TuiWorkerServer {
         this.manifest.presentation = "background";
         this.store.writeManifest(this.manifest);
         break;
+      case "idle_decision": {
+        const pending = this.idleDecisions.get(r.decisionRequestId);
+        if (!pending) return fail("stale", "Idle decision request is no longer pending");
+        this.event("idle_decision_resolved", { requestId: r.decisionRequestId, choice: r.choice });
+        this.idleDecisions.delete(r.decisionRequestId);
+        this.idleDecisionHistory.delete(r.decisionRequestId);
+        pending.resolve(r.choice);
+        data = { accepted: true, decisionRequestId: r.decisionRequestId };
+        break;
+      }
       case "respond_interaction": {
         const interaction = (this.state.interactions ?? []).find(item => item.id === r.interactionId);
         if (!interaction) return fail("stale", "Interaction is no longer pending");
@@ -348,6 +365,36 @@ export class TuiWorkerServer {
     this.state.receipts[receiptKey].response = response;
     this.persist();
     return response;
+  }
+  private cancelPendingIdleDecisions(reason: Error): void {
+    for (const [id, waiter] of this.idleDecisions) {
+      this.idleDecisions.delete(id);
+      this.idleDecisionHistory.delete(id);
+      try { this.event("idle_decision_cancelled", { requestId: id }); } catch { /* Cancellation must still reject the waiter. */ }
+      waiter.reject(reason);
+    }
+  }
+  async requestIdleDecision(details: { model: string; idleMinutes: number; contextPercent: number }, signal?: AbortSignal): Promise<"ignore" | "compact" | "cancel"> {
+    if (this.sealed || !/^.{1,256}$/.test(details.model)
+      || !Number.isFinite(details.idleMinutes) || details.idleMinutes < 0 || !Number.isFinite(details.contextPercent) || details.contextPercent < 0 || details.contextPercent > 10_000)
+      throw new Error("Parent idle-decision service unavailable or malformed");
+    if (this.idleDecisions.size) throw new Error("An idle-decision request is already pending");
+    if (signal?.aborted) throw signal.reason instanceof Error ? signal.reason : new Error("Idle decision aborted");
+    const requestId = `idle:${randomBytes(16).toString("hex")}`;
+    const promise = new Promise<"ignore" | "compact" | "cancel">((resolve, reject) => this.idleDecisions.set(requestId, { resolve, reject }));
+    this.idleDecisionHistory.set(requestId, details);
+    try { this.event("idle_decision_pending", { requestId, ...details }); }
+    catch (error) { this.idleDecisions.delete(requestId); this.idleDecisionHistory.delete(requestId); throw error; }
+    const abort = () => {
+      const waiter = this.idleDecisions.get(requestId);
+      if (!waiter) return;
+      this.idleDecisions.delete(requestId);
+      this.idleDecisionHistory.delete(requestId);
+      try { this.event("idle_decision_cancelled", { requestId }); } catch { /* Abort remains fail-closed. */ }
+      waiter.reject(signal?.reason instanceof Error ? signal.reason : new Error("Idle decision aborted"));
+    };
+    signal?.addEventListener("abort", abort, { once: true });
+    try { return await promise; } finally { signal?.removeEventListener("abort", abort); }
   }
   private validInput(input: any): boolean {
     if (!input || Buffer.byteLength(JSON.stringify(input)) > 24 * 1024) return false;
@@ -562,6 +609,13 @@ export class TuiWorkerServer {
     if (this.closing) return;
     this.closing = true;
     for (const check of this.idleWaiters) check();
+    for (const [id, waiter] of this.idleDecisions) {
+      this.idleDecisionHistory.delete(id);
+      try { this.event("idle_decision_cancelled", { requestId: id }); } catch { /* Shutdown still rejects the waiter. */ }
+      waiter.reject(new Error("Worker is shutting down"));
+    }
+    this.idleDecisions.clear();
+    this.idleDecisionHistory.clear();
     if (this.interactionWaiters.size) {
       const error = new Error("Headless worker is shutting down");
       for (const [id, waiter] of this.interactionWaiters) {

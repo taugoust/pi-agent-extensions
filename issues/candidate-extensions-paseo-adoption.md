@@ -2,13 +2,13 @@
 
 ## Status
 
-Phase 1 is deployed; the user approved the unified Activity redesign. Phase 2 is authorized for OpenAI/ChatGPT accounts and usage status first. Later phases remain planned.
+Phase 1 is deployed and approved. Phase 2 is published (`a027008` core, `b5d74fd` bridge, `0635190` Nix); Accounts header visibility on the user's device remains unresolved. Phase 3 BTW is copied/adapted and deployed locally for Paseo. Phase 4 Worktree + Goal is copied/adapted and deployed locally, with SDK/compiled UI/transport tests, Nix validation, and a successful live disposable-workspace/Luna Goal check. Publication of phase 3/4 was approved on 2026-10-20. Native-device coverage remains limited to the interactions actually reported by the user. Later phases remain planned.
 
 ## Phase-one implementation evidence
 
 - Adapted upstream collectors, validators, persistence, progress context restoration, and cache calculations with MIT notices retained. Native dialogs/lightweight rendering avoid the full toolkit dependency.
 - Stamp collects in TUI/RPC/headless modes. Progress exports structured saved state. Cache snapshots work independently of widget visibility and retain unknown-cache usage in aggregate totals without inventing cache misses.
-- Paseo Activity has three read-only views, using agent/session/runtime-bound private transport and schema validation. Stamps are a separate metadata view rather than original-bubble decorations.
+- Paseo Activity has one dashboard containing Progress, Cache, and Recent responses, using agent/session/runtime-bound private transport and schema validation. Response stamps are expandable rows rather than original-bubble decorations.
 - 55 focused unit tests, strict TypeScript, a real-Pi deterministic-provider smoke, and 22 guarded-compaction runtime tests with all three extensions loaded passed. No paid model calls were used.
 - Nix module checks passed. Companion bridge: 133 regression tests passed (9 optional skipped), typecheck passed; compiled-plugin suite passed 23 tests (1 optional skipped).
 - Deployed on Matebook. Activity was subsequently redesigned as a unified native-style dashboard and approved by the user; native progress cards were added in the daemon. See `OBSERVABILITY.md` for commands and the read-only contract.

@@ -2,6 +2,8 @@
 
 The following files were copied/adapted from https://github.com/narumiruna/pi-extensions at reviewed commit `012c08dc` under the MIT license. Original license notices are retained.
 
+- `workflows/worktree/*.ts` and `workflows/goal/*.ts`: copied/adapted from `packages/pi-worktree/src` and `packages/pi-goal/src` at `012c08dc9c17f7ef4adaf92c6a5fe1d036653c7c`. Native dialogs replace toolkit menus; Goal defaults and Pi 1.0 compatibility are adapted. Original licenses are retained in both subdirectories.
+- `btw/{side-thread,conversation-context}.ts`: copied from `packages/pi-btw/src` at `012c08dc9c17f7ef4adaf92c6a5fe1d036653c7c`, with a separate Paseo-facing service; see `btw/LICENSE`.
 - `stamp/{stamp,format,metadata,settings}.ts`, `stamp/{format,metadata}.test.ts`: `packages/pi-stamp/src` and `test`; see `stamp/LICENSE`.
 - `progress/{progress-widget,progress-state,settings}.ts`, `progress/settings.test.ts`: `packages/pi-progress/src` and `test`; see `progress/LICENSE`.
 - `cache-hit-monitor/{cache-hit-monitor,metrics}.ts`, `cache-hit-monitor/metrics.test.ts`: `packages/pi-cache-hit-monitor/src` and `test`; see `cache-hit-monitor/LICENSE`.

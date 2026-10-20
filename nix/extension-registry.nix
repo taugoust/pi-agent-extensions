@@ -7,6 +7,8 @@
 let
   localExtensionNames = [
     "auto"
+    "btw"
+    "workflows"
     "background-job"
     "direnv"
     "fence"

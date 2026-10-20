@@ -173,7 +173,7 @@ type SubagentDetails = {
 
 type BackgroundSubagentDetails = {
   background_subagent: true;
-  operation: "start" | "list" | "status" | "output" | "wait" | "wait_group" | "wait_any" | "wait_all" | "result" | "cancel";
+  operation: "start" | "list" | "status" | "output" | "wait" | "wait_group" | "wait_any" | "wait_all" | "result" | "cancel" | "idle_decision";
   job_id?: string;
   status?: BackgroundSubagentRecord["status"];
   backend?: "native" | "agentsh";
@@ -1427,6 +1427,12 @@ function persistentAgentDir(ctx: any): string {
   return getAgentDir();
 }
 
+export async function dispatchIdleDecision(manager: { operation(params: any, owner: string, signal?: AbortSignal): Promise<any> }, params: any, owner: string, signal?: AbortSignal): Promise<any> {
+  return await manager.operation({ operation: "idle_decision", child_id: params.child_id,
+    request_id: params.request_id, worker_epoch: params.worker_epoch, choice: params.choice,
+    ...(params.job_id ? { job_id: params.job_id } : {}) }, owner, signal);
+}
+
 export function validateBackgroundOperation(params: any): void {
   if (params?.diagnostics !== undefined && (params.operation !== "result" || typeof params.diagnostics !== "boolean")) {
     throw new Error("diagnostics is a boolean option for operation=result only");
@@ -1436,7 +1442,7 @@ export function validateBackgroundOperation(params: any): void {
     throw new Error("Background subagent operation must be a non-empty string");
   }
   const operation = params.operation;
-  if (!["list", "status", "output", "wait", "wait_group", "wait_any", "wait_all", "result", "cancel", "reap", "promote", "prompt", "resume", "tasks"].includes(operation)) {
+  if (!["list", "status", "output", "wait", "wait_group", "wait_any", "wait_all", "result", "cancel", "reap", "promote", "prompt", "resume", "tasks", "idle_decision"].includes(operation)) {
     throw new Error(`Unknown background subagent operation: ${operation}`);
   }
   if (operation === "tasks") {
@@ -1460,6 +1466,15 @@ export function validateBackgroundOperation(params: any): void {
     }
   };
 
+  if (operation === "idle_decision") {
+    if (launchFields.some((field) => params[field] !== undefined) || typeof params.child_id !== "string" || !SUBAGENT_CHILD_ID_PATTERN.test(params.child_id)
+      || typeof params.request_id !== "string" || !/^idle:[a-f0-9]{32}$/.test(params.request_id)
+      || typeof params.worker_epoch !== "string" || !/^[a-f0-9]{32}$/.test(params.worker_epoch)
+      || !["ignore", "compact", "cancel"].includes(params.choice)
+      || Object.keys(params).some(k => !["operation", "child_id", "job_id", "request_id", "worker_epoch", "choice"].includes(k)))
+      throw new Error("idle_decision requires child_id, request_id and choice (ignore, compact, cancel); no launch options are accepted");
+    return;
+  }
   if (operation === "prompt") {
     if (launchFields.some((field) => params[field] !== undefined)
       || ["wait_ms", "limit", "offset", "child"].some((field) => params[field] !== undefined)) {
@@ -1598,9 +1613,12 @@ function subagentParams() {
   action: Type.Optional(Type.String({ pattern: "^(review|apply|discard)$", description: "AgentSH Draft disposition; use with mode=draft and draft_id instead of task/tasks/chain." })),
   draft_id: Type.Optional(Type.String({ pattern: "^session-[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$", description: "Exact retained AgentSH Draft identity." })),
   background: Type.Optional(Type.Boolean({ description: "Launch only (omit operation): return immediately and continue a task/tasks/chain request in the background. Not accepted by resume; execution placement follows the retained backend, not a new launch option." })),
-  operation: Type.Optional(Type.String({ pattern: "^(list|status|output|wait|wait_group|wait_any|wait_all|result|cancel|reap|promote|prompt|resume|tasks)$", description: "Omit for new launches/Draft disposition. Accepted fields besides operation: resume {task_id, message?, compact?}; prompt {child_id, message, job_id?, control_mode?, wait_for_response?}; list/tasks {limit?}; status/output/cancel/reap/promote {job_id}; wait/wait_group {job_id, wait_ms?}; wait_any/wait_all {wait_ms?}; result {job_id?, child_id?, child?, offset?, limit?, diagnostics?} (job_id or child_id required; child and child_id exclusive). No launch fields with any operation." })),
+  operation: Type.Optional(Type.String({ pattern: "^(list|status|output|wait|wait_group|wait_any|wait_all|result|cancel|reap|promote|prompt|resume|tasks|idle_decision)$", description: "Omit for new launches/Draft disposition. Accepted fields besides operation: resume {task_id, message?, compact?}; prompt {child_id, message, job_id?, control_mode?, wait_for_response?}; idle_decision {child_id, request_id, worker_epoch, choice, job_id?}; list/tasks {limit?}; status/output/cancel/reap/promote {job_id}; wait/wait_group {job_id, wait_ms?}; wait_any/wait_all {wait_ms?}; result {job_id?, child_id?, child?, offset?, limit?, diagnostics?} (job_id or child_id required; child and child_id exclusive). No launch fields with any operation." })),
   job_id: Type.Optional(Type.String({ pattern: "^subagent-job-[0-9a-f]{24}$", description: "Required for status/output/cancel/reap/promote/wait/wait_group; result needs job_id or child_id. Optional for prompt as an assertion that child_id belongs to this group (mismatch rejects before delivery). Omit for resume/list/tasks/wait_any/wait_all." })),
-  child_id: Type.Optional(Type.String({ pattern: "^subagent-child-[0-9a-f]{24}$", description: "Opaque per-child ID; required by operation=prompt and accepted instead of child by operation=result." })),
+  child_id: Type.Optional(Type.String({ pattern: "^subagent-child-[0-9a-f]{24}$", description: "Opaque per-child ID; required by operation=prompt/idle_decision and accepted instead of child by operation=result." })),
+  request_id: Type.Optional(Type.String({ pattern: "^idle:[a-f0-9]{32}$", description: "idle_decision only: exact pending idle-warning request reported by child status/notification." })),
+  worker_epoch: Type.Optional(Type.String({ pattern: "^[a-f0-9]{32}$", description: "idle_decision only: worker epoch matching the exact pending request." })),
+  choice: Type.Optional(Type.String({ pattern: "^(ignore|compact|cancel)$", description: "idle_decision only: parent decision for that exact pending warning." })),
   message: Type.Optional(Type.String({ minLength: 1, description: "Required for prompt; optional continuation instructions for resume (not task). Non-empty, maximum 64 KiB UTF-8; resume defaults to continuing saved context." })),
   control_mode: Type.Optional(Type.String({ pattern: "^(steer|follow_up|interrupt)$", description: "Prompt delivery: steer at the next turn boundary (default), follow_up after current work, or interrupt current work first." })),
   wait_for_response: Type.Optional(Type.Boolean({ description: "Prompt only: false (default) returns on acceptance without waiting for the child to finish. True waits through the child's full run and returns its response; avoid for long-running supervisors." })),
@@ -2249,6 +2267,13 @@ export default function (pi: ExtensionAPI) {
       if (params.operation) {
         const ownerSessionId = stableSessionId(ctx);
         const operation = params.operation as BackgroundSubagentDetails["operation"] | "prompt" | "resume" | "tasks";
+        if (operation === "idle_decision") {
+          const native = nativeTui(ctx);
+          if (!native) throw new Error("Parent idle decisions are unavailable on the selected backend; native TUI workers only");
+          const result = await dispatchIdleDecision(native, params, stableSessionId(ctx), signal);
+          if (result) return result;
+          throw new Error("Unknown native child identity or parent idle-decision channel unavailable");
+        }
         if (operation === "tasks") {
           const store = new NativeTaskStore(path.join(getAgentDir(), "state", "native-tasks-v1"));
           const tasks = store.list(ownerSessionId, params.limit ?? 20);

@@ -24,6 +24,7 @@ export default function tuiWorkerExtension(pi: ExtensionAPI): void {
   let liveAssistantText = "";
   let ownerWatch: ReturnType<typeof setInterval> | undefined;
   let rpcLogTrimTimer: ReturnType<typeof setInterval> | undefined;
+  let parentIdleCapability: { request: (details: { model: string; idleMinutes: number; contextPercent: number }, signal?: AbortSignal) => Promise<"ignore" | "compact" | "cancel"> } | undefined;
   let announcedReap = false;
   let notificationTimes: number[] = [];
   const clearModelInactivityStatus = () => {
@@ -218,6 +219,12 @@ export default function tuiWorkerExtension(pi: ExtensionAPI): void {
         },
       });
       await worker.start();
+      if (manifest.execution !== "rpc-headless" && process.env.PI_SUBAGENT_ID) {
+        const globals = globalThis as Record<string, any>;
+        parentIdleCapability = { request: (details: { model: string; idleMinutes: number; contextPercent: number }, decisionSignal?: AbortSignal) =>
+          !worker?.sealed ? worker.requestIdleDecision(details, decisionSignal) : Promise.reject(new Error("Parent idle-decision channel unavailable")) };
+        globals["__piIdleContextParentV1"] = parentIdleCapability;
+      }
       if (manifest.execution === "rpc-headless") {
         (globalThis as any)[WORKER_INTERACTIONS_KEY] = { protocol: 1, mode: "headless", workerEpoch: manifest.workerEpoch,
           request: (input: any, interactionSignal?: AbortSignal) => worker?.requestInteraction(input, interactionSignal) ?? Promise.reject(new Error("Worker interaction service closed")) };
@@ -374,6 +381,8 @@ export default function tuiWorkerExtension(pi: ExtensionAPI): void {
     context = undefined;
     const interactions = (globalThis as any)[WORKER_INTERACTIONS_KEY];
     if (interactions?.workerEpoch === worker?.manifest.workerEpoch) delete (globalThis as any)[WORKER_INTERACTIONS_KEY];
+    if ((globalThis as any).__piIdleContextParentV1 === parentIdleCapability) delete (globalThis as any).__piIdleContextParentV1;
+    parentIdleCapability = undefined;
     await worker?.close();
     worker = undefined;
   });

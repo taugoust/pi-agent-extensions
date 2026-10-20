@@ -14,6 +14,36 @@ const usageModule = await createJiti(import.meta.url).import("../openai-usage/in
 const compactionModule = await createJiti(import.meta.url).import("../idle-context-warning/compaction.ts");
 const guardModule = await createJiti(import.meta.url).import("../idle-context-warning/guard.ts");
 const { AccountStore, InMemoryAccountStorageBackend } = accountModule;
+const { createBtwService } = await createJiti(import.meta.url).import("../btw/service.ts");
+
+test("BTW inherits the parent named account and blocks switching during a real registry side stream", async () => {
+  const { randomUUID } = await import("node:crypto");
+  const f = await fixture();
+  let btw, pause;
+  try {
+    const selected = await switchRequest(f, "alpha", randomUUID());
+    assert.equal(selected.ok, true);
+    const mainModel = f.ctx.model, branch = structuredClone(f.branch);
+    btw = createBtwService(f.ctx);
+    pause = f.pauseProvider();
+    const threadId = randomUUID();
+    btw.handle({ operation: "start", requestId: randomUUID(), threadId, sessionId: btw.sessionId, serviceEpoch: btw.serviceEpoch,
+      model: "openai/gpt-6-luna", question: "Side question", context: "recent" });
+    await pause.started;
+    const busy = await f.service.getSnapshot({ sessionId: f.sessionId });
+    assert.equal(busy.busy, true);
+    const switched = await switchRequest(f, "beta", randomUUID(), busy.selectionRevision);
+    assert.equal(switched.ok, false); assert.equal(switched.reason, "busy");
+    pause.release();
+    await new Promise(resolve => setImmediate(resolve));
+    const snapshot = btw.handle({ operation: "snapshot", sessionId: btw.sessionId, serviceEpoch: btw.serviceEpoch, threadId });
+    assert.equal(snapshot.threads[0].state, "idle");
+    assert.equal(f.delegated.at(-1).id, "gpt-6-luna");
+    assert.equal(f.delegated.at(-1).apiKey, "fixture-secret-alpha");
+    assert.equal(f.ctx.model, mainModel); assert.deepEqual(f.branch, branch);
+    assert.equal(JSON.stringify(snapshot).includes("fixture-secret"), false);
+  } finally { pause?.release(); btw?.dispose(); await dispose(f); }
+});
 
 async function fixture(options = {}) {
   const root = await mkdtemp(join(tmpdir(), "pae-openai-runtime-"));

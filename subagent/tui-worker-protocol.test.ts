@@ -19,6 +19,9 @@ const placement = {
 
 test("bounded commands preserve model text as data, including slash-looking instructions", () => {
   const request = { ...identity, operation: "prompt", mode: "steer", message: "/permission-gate off" };
+  const idle = { ...identity, operation: "idle_decision", decisionRequestId: `idle:${"a".repeat(32)}`, choice: "compact" };
+  assert.equal(parseTuiWorkerRequest(idle as any).operation, "idle_decision");
+  assert.throws(() => parseTuiWorkerRequest({ ...idle, choice: "yes" } as any));
   assert.deepEqual(decodeTuiWorkerRequest(Buffer.from(JSON.stringify(request))), request);
   // Protocol deliberately has no operator mode operation or command-dispatch flag.
   assert.throws(() => parseTuiWorkerRequest({ ...identity, operation: "set_gate_mode", mode: "off" }));

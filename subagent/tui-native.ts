@@ -19,7 +19,7 @@ type Child = { childId: string; taskId: string; attempt: number; directory: stri
   resumeSessionFile?: string; resumeMessage?: string; compactBeforePrompt?: boolean;
   state: "pending" | "launching" | "running" | "completed" | "failed" | "cancelled" | "lost" | "skipped";
   operatorCapability: string; started: boolean; reaped?: boolean; error?: string; report?: string;
-  notifiedSequence: number; runSequence?: number; pendingActivitySequence?: number; terminalNotification?: string; lastOutcome?: unknown; requiresCompaction?: boolean; };
+  notifiedSequence: number; idleDecisionNotified?: string; runSequence?: number; pendingActivitySequence?: number; terminalNotification?: string; lastOutcome?: unknown; requiresCompaction?: boolean; };
 type Group = { windowName?: string; version: 1; id: string; owner: string; createdAt: string; mode: "single" | "parallel" | "chain";
   background: boolean; cancelled: boolean; children: Child[]; caller: TuiWorkerPlacement;
   parentOwnerToken: string;
@@ -262,10 +262,20 @@ export class TuiNativeManager {
   private publicGroup(g: Group) {
     return { job_id: g.id, mode: g.mode, background: g.background, created_at: g.createdAt,
       status: g.children.some(active) ? "running" : g.cancelled || g.children.some(c => c.state === "cancelled") ? "cancelled" : g.children.some(c => ["failed", "lost"].includes(c.state)) ? "failed" : "completed",
-      children: g.children.map((c, i) => ({ child: i + 1, child_id: c.childId, task_id: c.taskId,
-        status: c.state, attempt: c.attempt ?? 1, reaped: !!c.reaped, task: c.spec.task.slice(0, 500), error: c.error,
-        report: c.report, task_outcome: c.lastOutcome,
-        ...(this.manifest(c) ? { runtime: publicTuiWorkerManifest(this.manifest(c)!) } : {}) })) };
+      children: g.children.map((c, i) => {
+        const manifest = this.manifest(c);
+        let idleDecision: unknown;
+        if (manifest) { try {
+          const events = new TuiWorkerStore(c.directory).readState().events.filter(e => e.workerEpoch === manifest.workerEpoch);
+          const pending = events.filter(e => e.kind === "idle_decision_pending").at(-1);
+          if (pending && !events.some(e => (e.kind === "idle_decision_cancelled" || e.kind === "idle_decision_resolved") && (e.data as any)?.requestId === (pending.data as any)?.requestId))
+            idleDecision = { ...(pending.data as object), workerEpoch: manifest.workerEpoch };
+        } catch {} }
+        return { child: i + 1, child_id: c.childId, task_id: c.taskId,
+          status: c.state, attempt: c.attempt ?? 1, reaped: !!c.reaped, task: c.spec.task.slice(0, 500), error: c.error,
+          report: c.report, task_outcome: c.lastOutcome, ...(idleDecision ? { idle_decision: idleDecision } : {}),
+          ...(manifest ? { runtime: publicTuiWorkerManifest(manifest) } : {}) };
+      }) };
   }
   private text(g: Group, output = false): string {
     const snapshot = this.publicGroup(g);
@@ -314,6 +324,13 @@ export class TuiNativeManager {
       if (!result.ok) { c.error = result.code; return; }
       c.error = undefined;
       const state = result.data as any;
+      if (!observationOnly && state.idleDecision?.requestId && state.idleDecision.workerEpoch === m.workerEpoch && state.idleDecision.model
+        && c.idleDecisionNotified !== state.idleDecision.requestId) {
+        const data = state.idleDecision;
+        const update: QuietUpdate = { kind: "notification", id: `${g.id}:${c.childId}:idle:${data.requestId}`,
+          child_id: c.childId, message: `Idle context warning for ${data.model}: idle ${data.idleMinutes}m, context ${data.contextPercent}%. Resolve with subagent operation=idle_decision child_id=${c.childId} request_id=${data.requestId} worker_epoch=${m.workerEpoch} choice=ignore|compact|cancel.`, requires_guidance: true, through_sequence: state.sequence };
+        if (this.notify?.(update)) c.idleDecisionNotified = data.requestId;
+      }
       if (state.active) { c.state = "running"; c.runSequence = state.sequence; }
       else if (state.lastReport) {
         const report = this.retainedArtifact(c, state.lastReport, "report");
@@ -338,6 +355,11 @@ export class TuiNativeManager {
       const events = await callTuiWorker(m, { operation: "events", afterSequence: c.notifiedSequence }, { timeoutMs: 1000 });
       if (events.ok) {
         for (const event of (events.data as any)?.events ?? []) {
+          if (event.kind === "idle_decision_cancelled") {
+            const update: QuietUpdate = { kind: "notification", id: `${g.id}:${c.childId}:idle-cancelled:${event.data?.requestId}`,
+              child_id: c.childId, message: `Idle context decision request ${event.data?.requestId} was cancelled or expired.`, requires_guidance: false, through_sequence: event.sequence };
+            this.notify?.(update);
+          }
           if (event.kind === "running" && event.sequence > state.sequence) {
             c.state = "running"; c.runSequence = event.sequence; c.lastOutcome = undefined; c.report = undefined; c.requiresCompaction = false;
             this.notifyActivity(g, c, event.sequence);
@@ -674,6 +696,7 @@ export class TuiNativeManager {
     let descendant = descendants.find(g => params.job_id ? g.id === params.job_id
       : g.children.some(c => c.childId === params.child_id || c.taskId === params.task_id));
     if (descendant) {
+      if (op === "idle_decision") throw new Error("Idle decisions cannot target descendant workers; ask the owning parent agent");
       if (params.child_id && !descendant.children.some(c => c.childId === params.child_id)
         || params.task_id && !descendant.children.some(c => c.taskId === params.task_id)) throw new Error("Descendant target identity mismatch");
       if (op === "reap") {
@@ -697,6 +720,7 @@ export class TuiNativeManager {
           }
         } finally { release(); }
       }
+      if (op === "idle_decision") throw new Error("Idle decisions cannot target descendant workers; ask the owning parent agent");
       const c = descendant.children.find(c => c.childId === params.child_id || c.taskId === params.task_id)
         ?? descendant.children[(params.child ?? 1) - 1];
       if (op === "result") {
@@ -771,6 +795,17 @@ export class TuiNativeManager {
       return response(waited.groups.map(g => `${g.job_id} ${g.status}`).join("\n") || "No running TUI groups", { operation: op, ...waited });
     }
     const g = selected!;
+    if (op === "idle_decision") {
+      const m = this.manifest(child!);
+      if (!m || child!.childId !== params.child_id || m.workerEpoch !== params.worker_epoch) throw new Error("Idle decision target is stale");
+      const status = await callTuiWorker(m, { operation: "status" }, { timeoutMs: 2000 });
+      if (!status.ok || status.data?.idleDecision?.requestId !== params.request_id || status.data?.idleDecision?.workerEpoch !== m.workerEpoch)
+        throw new Error("Idle decision request is stale or no longer pending");
+      const result = await callTuiWorker(m, { operation: "idle_decision", decisionRequestId: params.request_id, choice: params.choice },
+        { requestId: `idle:${createHash("sha256").update(String(params.request_id) + String(params.choice)).digest("hex").slice(0, 48)}` });
+      if (!result.ok) throw new Error(`Idle decision rejected: ${result.code}`);
+      return response(`Resolved idle decision ${params.request_id} for ${child!.childId}: ${params.choice}.`, { operation: op, child_id: child!.childId, request_id: params.request_id });
+    }
     if (op === "prompt" || op === "resume") {
       if (this.disposition() !== (g.launchMode === "guard-only" ? "guard-only" : "native") || !this.ready()) throw new Error("Current authority does not permit native child prompts");
       const c = child!; const m = this.manifest(c);

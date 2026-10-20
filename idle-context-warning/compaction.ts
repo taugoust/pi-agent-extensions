@@ -11,6 +11,7 @@ import { GUARD_ERROR, GUARD_PROOF, GUARD_PROVIDER, PROXY_PROVIDER, assertGuardPr
 type Thinking = NonNullable<Parameters<typeof compact>[6]>;
 const thinkingSuffix = /:(off|minimal|low|medium|high|xhigh|max)$/;
 const DETAILS_VERSION = "idleContextNativeCompaction";
+export const FORCE_CHEAP_COMPACTION_KEY = "__piIdleContextForceCheapV1";
 
 export function parseModelSelector(value: unknown): { provider: string; id: string; thinking: Thinking } {
   if (typeof value !== "string" || !value || /\s/.test(value)) {
@@ -62,7 +63,9 @@ export async function beforeCompact(
     const settings = readSettings();
     const proof = getGuardProof?.(ctx);
     const guarded = ctx.model?.provider === GUARD_PROVIDER;
-    if (!guarded && !proof && (settings.cheapCompactionModel == null || !isIdle(lastModelActivity(event.branchEntries), Date.now(), settings.idleMinutes))) return;
+    const forced = (globalThis as Record<string, unknown>)[FORCE_CHEAP_COMPACTION_KEY] as { sessionId?: string; token?: string } | undefined;
+    const forcedCheap = forced?.sessionId === ctx.sessionManager.getSessionId() && typeof forced.token === "string";
+    if (!guarded && !proof && !forcedCheap && (settings.cheapCompactionModel == null || !isIdle(lastModelActivity(event.branchEntries), Date.now(), settings.idleMinutes))) return;
     const warmPhysical = guarded && (proof ? proof.mode === "physical" : !isIdle(lastModelActivity(event.branchEntries), Date.now(), settings.idleMinutes));
     event.signal.throwIfAborted();
     const alias = ctx.model?.id;
@@ -110,7 +113,7 @@ export async function beforeCompact(
     };
     const result = await compact(event.preparation, model, undefined, undefined, event.customInstructions, event.signal, selected.thinking, stream);
     event.signal.throwIfAborted();
-    return { compaction: { ...result, details: { ...(result.details as object), [DETAILS_VERSION]: 1, ...(proof ? { [GUARD_PROOF]: proof } : {}) } } };
+    return { compaction: { ...result, details: { ...(result.details as object), [DETAILS_VERSION]: 1, ...(forcedCheap ? { idleContextExplicitAttempt: forced!.token } : {}), ...(proof ? { [GUARD_PROOF]: proof } : {}) } } };
   } catch (error) {
     reportFailure(ctx, error);
     return { cancel: true };

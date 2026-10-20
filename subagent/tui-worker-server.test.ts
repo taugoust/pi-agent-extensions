@@ -187,6 +187,27 @@ test("interrupt barrier retains partial receipts on timeout, abort error, shutdo
   } finally { await server.close(); await rm(directory, { recursive: true, force: true }); }
 });
 
+test("pending idle decision blocks reap and parent cancel rejects it before abort", async () => {
+  const root = await mkdtemp(join(tmpdir(), "idle-decision-lifecycle-"));
+  const manifest = manifestAt(root);
+  const store = new TuiWorkerStore(root); store.writeManifest(manifest);
+  let aborts = 0;
+  const server = new TuiWorkerServer(store, { isIdle: () => true, send() {}, abort() { aborts++; }, shutdown() {} });
+  try {
+    const pending = server.requestIdleDecision({ model: "provider/model", idleMinutes: 31, contextPercent: 145 });
+    void pending.catch(() => undefined);
+    const status = await server.handle(workerRequest(manifest, { operation: "status" }, "status-pending"));
+    assert.equal(status.data.active, true);
+    assert.equal(status.data.readyForPrompts, false);
+    const reap = await server.handle(workerRequest(manifest, { operation: "prepare_reap" }, "reap-pending"));
+    assert.equal(reap.code, "busy");
+    const cancel = await server.handle(workerRequest(manifest, { operation: "cancel" }, "cancel-pending"));
+    assert.equal(cancel.ok, true);
+    await assert.rejects(pending, /cancelled by parent/);
+    assert.ok(aborts > 0);
+  } finally { await server.close(); await rm(root, { recursive: true, force: true }); }
+});
+
 test("headless interactions persist, authenticate, validate, and resolve idempotently", async () => {
   const directory = await mkdtemp(join(tmpdir(), "pi-worker-interaction-"));
   const store = new TuiWorkerStore(directory);

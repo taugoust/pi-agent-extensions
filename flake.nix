@@ -131,6 +131,16 @@
           modal-editor = import ./nix/modal-editor-check.nix { inherit self pkgs; };
           idle-context-warning = import ./nix/idle-context-warning-check.nix { inherit self pkgs; };
           openai-accounts-module = import ./nix/openai-accounts-module-check.nix { inherit self pkgs; };
+          workflows-runtime = import ./nix/workflows-runtime-check.nix {
+            inherit pkgs;
+            piPackage = self.packages.${system}.pi;
+            extensionBundle = self.packages.${system}.default;
+          };
+          btw-runtime = import ./nix/btw-runtime-check.nix {
+            inherit pkgs;
+            piPackage = self.packages.${system}.pi;
+            extensionBundle = self.packages.${system}.default;
+          };
           openai-accounts-runtime = import ./nix/openai-accounts-runtime-check.nix {
             inherit pkgs;
             piPackage = self.packages.${system}.pi;

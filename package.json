@@ -28,6 +28,8 @@
     "extensions": [
       "auto",
       "background-job",
+      "btw",
+      "workflows",
       "stamp",
       "progress",
       "cache-hit-monitor",

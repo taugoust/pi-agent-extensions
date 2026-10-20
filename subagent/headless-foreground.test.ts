@@ -77,6 +77,32 @@ test("history pages default to newest, use stable entry cursors and report expir
   assert.equal(pageHeadlessHistory([{ ...history[0]!, truncated: true }], "epoch-1").truncated, true);
 });
 
+test("idle decision request is identity-bound, visible in status, one-shot, and abortable", async () => {
+  const root = await mkdtemp(join(tmpdir(), "idle-decision-worker-"));
+  const store = new TuiWorkerStore(root, true);
+  const manifest = { ...identity, controlSocket: store.path("control.sock"), controlToken: identity.token, sessionFile: store.path("session.jsonl"),
+    execution: "rpc-headless", presentation: "headless-foreground", processPid: process.pid, processToken: `${process.pid}:start`, fifoPath: store.path("stdin.fifo"), foregroundOwner: { pid: process.pid + 1, token: `${process.pid + 1}:start` } } as any;
+  store.writeManifest(manifest);
+  const { TuiWorkerServer } = await import("./tui-worker-server.ts");
+  const server = new TuiWorkerServer(store, { isIdle: () => true, send() {}, abort() {}, shutdown() {} });
+  const controller = new AbortController();
+  try {
+    const pending = server.requestIdleDecision({ model: "provider/model", idleMinutes: 31, contextPercent: 186 }, controller.signal);
+    const status = await server.handle(parseTuiWorkerRequest({ ...identity, operation: "status" }));
+    assert.deepEqual((status as any).data.idleDecision, { requestId: (server as any).idleDecisions.keys().next().value,
+      workerEpoch: identity.workerEpoch, model: "provider/model", idleMinutes: 31, contextPercent: 186 });
+    const requestId = (status as any).data.idleDecision.requestId;
+    const decision = await server.handle(parseTuiWorkerRequest({ ...identity, requestId: "parent-response", operation: "idle_decision", decisionRequestId: requestId, choice: "ignore" }));
+    assert.equal(decision.ok, true);
+    assert.equal(await pending, "ignore");
+    const stale = await server.handle(parseTuiWorkerRequest({ ...identity, requestId: "duplicate", operation: "idle_decision", decisionRequestId: requestId, choice: "cancel" }));
+    assert.equal((stale as any).code, "stale");
+    const aborted = server.requestIdleDecision({ model: "provider/model", idleMinutes: 31, contextPercent: 86 }, controller.signal);
+    controller.abort(new Error("test cancellation"));
+    await assert.rejects(aborted, /test cancellation/);
+  } finally { await server.close(); await rm(root, { recursive: true, force: true }); }
+});
+
 test("interaction socket DTOs are epoch-bound and reject malformed/oversized input", () => {
   const answer = { ...identity, operation: "respond_interaction", interactionId: "interaction:abc",
     answer: { kind: "questionnaire", cancelled: false, answers: [{ id: "q1", value: "yes", wasCustom: false }] } };

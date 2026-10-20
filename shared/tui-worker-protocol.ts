@@ -96,7 +96,8 @@ export type TuiWorkerOperation =
   // verified pane. It must reject a busy child; cancel is never implicit.
   | { operation: "prepare_reap" }
   | { operation: "promote"; placement: TuiWorkerPlacement }
-  | { operation: "respond_interaction"; interactionId: string; answer: import("./foreground-tasks.ts").TaskInteractionAnswer };
+  | { operation: "respond_interaction"; interactionId: string; answer: import("./foreground-tasks.ts").TaskInteractionAnswer }
+  | { operation: "idle_decision"; decisionRequestId: string; choice: "ignore" | "compact" | "cancel" };
 
 export type TuiWorkerRequest = TuiWorkerIdentity & TuiWorkerOperation & {
   protocol: typeof TUI_WORKER_PROTOCOL;
@@ -118,7 +119,7 @@ export type TuiWorkerEvent = {
   workerEpoch: string;
   sequence: number;
   timestamp: string;
-  kind: "ready" | "running" | "settled" | "notification" | "outcome" | "cancelled" | "closing" | "interaction_pending" | "interaction_resolved" | "interaction_cancelled";
+  kind: "ready" | "running" | "settled" | "notification" | "outcome" | "cancelled" | "closing" | "interaction_pending" | "interaction_resolved" | "interaction_cancelled" | "idle_decision_pending" | "idle_decision_resolved" | "idle_decision_cancelled";
   data?: unknown;
 };
 
@@ -161,7 +162,7 @@ export function parseTuiWorkerRequest(value: unknown): TuiWorkerRequest {
   const fields: Record<string, string[]> = {
     status: [], events: ["afterSequence"], prompt: ["mode", "message"], user_prompt: ["message"],
     cancel: [], compact: [], jobs: ["params"], prepare_reap: [], promote: ["placement"],
-    respond_interaction: ["interactionId", "answer"],
+    respond_interaction: ["interactionId", "answer"], idle_decision: ["decisionRequestId", "choice"],
   };
   const operation = text(data.operation, 32);
   if (!Object.hasOwn(fields, operation)) throw new Error("Unknown worker operation");
@@ -195,6 +196,12 @@ export function parseTuiWorkerRequest(value: unknown): TuiWorkerRequest {
       return { ...identity, operation, mode, message };
     }
     case "promote": return { ...identity, operation, placement: parseTuiWorkerPlacement(data.placement) };
+    case "idle_decision": {
+      const decisionRequestId = text(data.decisionRequestId, 128, /^idle:[a-f0-9]{32}$/);
+      const choice = data.choice;
+      if (choice !== "ignore" && choice !== "compact" && choice !== "cancel") throw new Error("Invalid idle decision");
+      return { ...identity, operation, decisionRequestId, choice };
+    }
     case "respond_interaction": {
       const interactionId = text(data.interactionId, 128, /^[a-zA-Z0-9._:-]+$/);
       const answer = data.answer as any;

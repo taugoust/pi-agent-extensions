@@ -39,6 +39,15 @@ in
 
     extensions = {
       background-job.enable = lib.mkEnableOption "background-job extension — durable native shell jobs in an isolated tmux server";
+      workflows.enable = lib.mkEnableOption "Git worktrees and bounded, opt-in Goal with native Paseo controls";
+      btw = {
+        enable = lib.mkEnableOption "BTW side conversations with native Paseo controls";
+        model = lib.mkOption {
+          type = lib.types.str;
+          default = "${cfg.extensions.subagent.defaultProvider}/${cfg.extensions.subagent.defaultModel}";
+          description = "Separate physical BTW model. Unavailable models fail without a fallback; thinking is low.";
+        };
+      };
       direnv.enable = lib.mkEnableOption "direnv extension — refreshes environment via direnv export";
       fence.enable = lib.mkEnableOption "fence extension — blocks write/edit outside cwd";
       fetch.enable = lib.mkEnableOption "adaptive fetch extension — native HTTP outside AgentSH and supervised curl when AgentSH is active";
@@ -207,6 +216,14 @@ in
 
       (lib.mkIf cfg.extensions.ssh.enable {
         "${extDir}/ssh/index.ts".source = "${self}/ssh/index.ts";
+      })
+
+      (lib.mkIf cfg.extensions.workflows.enable {
+        "${extDir}/workflows".source = "${self}/workflows";
+      })
+      (lib.mkIf cfg.extensions.btw.enable {
+        "${extDir}/btw".source = "${self}/btw";
+        ".pi/agent/btw.json".text = builtins.toJSON { model = cfg.extensions.btw.model; };
       })
 
       (lib.mkIf cfg.extensions.accounts.enable {

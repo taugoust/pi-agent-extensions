@@ -29,7 +29,7 @@ with tempfile.TemporaryDirectory(prefix="pi-completion-reload-") as tmp:
         # Expose the entrypoint's actual imported binding to the fixture, without
         # initializing the subagent launcher or changing production exports.
         entry = root / version / "subagent/index.ts"
-        entry.write_text(entry.read_text() + "\nexport { installQuietState as reloadProbe, requireAcceptance as acceptanceProbe, defaultSubagentModel as modelProbe };\n")
+        entry.write_text(entry.read_text() + "\nexport { installQuietState as reloadProbe, requireAcceptance as acceptanceProbe, defaultSubagentModel as modelProbe, dispatchIdleDecision as idleDecisionProbe };\n")
     old_config = root / "old/subagent/config.ts"
     old_config.write_text(old_config.read_text().replace('defaultModel: "gpt-6-luna"', 'defaultModel: "legacy-default"'))
     old_outcome = root / "old/subagent/outcome.ts"
@@ -48,7 +48,7 @@ export function notifyParent() { throw new Error("not used by this fixture"); }
     for folder in folders:
         (live / folder).symlink_to(root / "old" / folder)
     (extensions / "probe.ts").write_text(f'''
-import {{ reloadProbe, acceptanceProbe, modelProbe }} from {json.dumps(str(live / "subagent/index.ts"))};
+import {{ reloadProbe, acceptanceProbe, modelProbe, idleDecisionProbe }} from {json.dumps(str(live / "subagent/index.ts"))};
 export default function(pi) {{
   let current;
   let sequence = 0;
@@ -60,6 +60,13 @@ export default function(pi) {{
   pi.registerCommand("probe", {{handler: async (_, ctx) => {{
     current = ctx;
     quiet.enqueue(ctx, {{kind:"subagent", id:"reload-probe-" + (++sequence), completion:true, state:"completed"}});
+  }}}});
+  pi.registerCommand("idleprobe", {{handler: async (_, ctx) => {{
+    const params = {{child_id:"subagent-child-" + "a".repeat(24), request_id:"idle:" + "b".repeat(32), worker_epoch:"c".repeat(32), choice:"compact"}};
+    let received;
+    await idleDecisionProbe({{operation: async (actual, owner) => {{ received = {{actual, owner}}; return true; }} }}, params, "parent-session");
+    if (received.actual.worker_epoch !== params.worker_epoch || received.actual.request_id !== params.request_id || received.owner !== "parent-session") throw new Error("idle decision identity forwarding failed");
+    ctx.ui.notify("IDLE-FORWARD-OK");
   }}}});
   pi.registerCommand("modelprobe", {{handler: async (_, ctx) => {{ ctx.ui.notify(modelProbe); }}}});
   pi.registerCommand("acceptance", {{handler: async (_, ctx) => {{
@@ -113,6 +120,7 @@ export default function(pi) {{
     try:
         pid = process.pid
         command("probe", "SILENT")
+        command("idleprobe", "IDLE-FORWARD-OK")
         command("acceptance", "OLD-ACCEPTANCE")
         command("modelprobe", "openai/legacy-default:low")
         for folder in folders:
