@@ -23,6 +23,7 @@ export async function createAccountControlsSnapshot(
 	owner: SessionSelectionOwner,
 	store: AccountStore,
 	serviceEpoch: string,
+	pendingAccountNames: readonly string[] = [],
 ): Promise<AccountControlsSnapshot> {
 	const readTimeout = AbortSignal.timeout(5_000);
 	const data = await store.readAsync(
@@ -33,7 +34,11 @@ export async function createAccountControlsSnapshot(
 		state?.accounts ?? {},
 	).map(([name, credential]) => ({
 		id: name,
-		label: safeLabel(name),
+		label: safeLabel(
+			typeof (credential as { label?: unknown }).label === "string"
+				? (credential as { label: string }).label
+				: name,
+		),
 		authKind: credential.type === "api_key" ? "api-key" : "oauth",
 	}));
 	const currentAccountId = owner.selections.openai ?? null;
@@ -128,6 +133,9 @@ export async function createAccountControlsSnapshot(
 						: "inactive",
 		busy,
 		canSwitch: !busy && !pending,
+		...(pendingAccountNames.length
+			? { pendingAccountNames: pendingAccountNames.slice(0, 20) }
+			: {}),
 		usage: {
 			...usage,
 			nativeRegistrationVersion: 1,
@@ -215,7 +223,8 @@ function defaultNativeKey(ctx: ExtensionContext): string | undefined {
 	try {
 		const provider = ctx.modelRegistry.getProvider("openai");
 		const registered = ctx.modelRegistry.getRegisteredProviderConfig("openai");
-		if (ctx.modelRegistry.getRegisteredNativeProvider("openai")) return undefined;
+		if (ctx.modelRegistry.getRegisteredNativeProvider("openai"))
+			return undefined;
 		const model = ctx.model;
 		if (
 			!provider ||
@@ -230,7 +239,8 @@ function defaultNativeKey(ctx: ExtensionContext): string | undefined {
 			return undefined;
 		if (
 			registered &&
-			(registered.apiKey || registered.oauth ||
+			(registered.apiKey ||
+				registered.oauth ||
 				registered.authHeader === false ||
 				hasAuthHeaders(registered.headers) ||
 				(registered.baseUrl && !officialOrigin(registered.baseUrl)))
