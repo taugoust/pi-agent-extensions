@@ -4,12 +4,20 @@ Copied from the MIT-licensed `pi-worktree` and `pi-goal` packages in `narumiruna
 
 ## Paseo
 
-Open **Workflows** beside the composer. The agent-bound panel has two sections:
+Open **Work** beside the composer. Goals and worktrees have their own tabs alongside Jobs and Agents:
 
-- **Git worktrees:** inspect branches/paths/HEADs, create, remove and prune through the candidate's exact previews and confirmations. **Open new workspace** explicitly allocates a native workspace in the existing project; it never infers workspace identity from a directory. The current Pi conversation stays in its original cwd. Starting another Pi session there is an explicit native app action.
-- **Goal:** enter an objective and total token budget, review the model/workspace/limits, then confirm. Pause, resume/wake, edit and clear are explicit controls. Completion evidence remains visible after the candidate automatically clears its completed active goal.
+- **Work → Worktrees:** repository-grouped inventory of isolated branches, associated workers and changed-file counts. A workspace outside Git is treated as a container: discover child repositories up to two directory levels down, skipping hidden/dependency/build directories and directory symlinks. `.git` files and directories are recognized. Container views include clearly labeled, non-removable main checkouts; a single-repository view keeps the existing additional-worktree list. Session-owned repositories outside the workspace remain included. Discovery is cached for 30 seconds and bounded to 64 roots, 256 scanned directories and 4096 entries; inventory is capped at 100 rows with bounded Git work. Partial failures/limits produce warnings without discarding readable repositories. No repository is initialized and no first-repository mutation target is silently chosen. Open uses an existing native workspace ID when available, otherwise explicitly creates a workspace in the parent project. Per-tree removal retains the candidate's exact confirmation and safeguards; it requires a reaped worker and a clean tree. The current Pi conversation stays in its original cwd. Manual create/prune flows remain available through `/worktree`.
+- **Work → Goals:** see the current objective, required checklist and blocker/waiting reason. Describe the goal in chat and ask the model to keep working; no mandatory goal-entry form or separate Goal pill remains. Pause/resume and secondary Edit, Clear and Limits controls remain available. Add a task explicitly while paused and idle. Completion evidence remains visible after the active goal clears.
 
 Existing sessions need `/reload` after installation. No Goal is created merely by loading the extension or opening the panel. `/worktree` and the candidate's direct `/goal` commands remain available; terminal menus use public Pi dialogs instead of pi-tui-kit.
+
+## Model-managed goals and tasks
+
+`goal_manage` provides status, create, update, pause, resume and clear. Model guidelines require an actual relevant user instruction; `user_authorized:true` on create/resume enables the existing autonomous engine. Without authorization, creation stays paused. Automatic Goal turns cannot use management mutations to reset themselves or change scope. Existing goals require their exact current ID and are never silently replaced. Tool-driven activation binds the current run rather than recursively dispatching another user prompt.
+
+The existing `update_progress` checklist is the task source. It defaults to the current goal, accepts its exact `goal_id`, and supports `goal_id:null` for standalone work. Goal tasks receive stable IDs: keep an ID when refining wording or adding blocker details, omit it for a new task. Unfinished tasks cannot silently disappear from full-snapshot updates. An explicitly user-authorized scope update may remove exact task descriptions through `goal_manage.remove_tasks`.
+
+Scoped progress is persisted in the same session history, restored on branch/reload/compaction, and retains a stable scope key when Goal rotates its stale-call ID on edit or resume. The current goal and checklist are supplied to model requests, and `goal_complete` rejects pending, in-progress or blocked tasks. Completion still requires evidence for the actual outcome; changing a checkbox alone is not proof. UI task additions are paused/idle-only to avoid racing model checklist replacements.
 
 ## Goal boundaries
 
@@ -21,11 +29,19 @@ These are not dollar caps. The final request can exceed a token budget and may c
 
 Canonical Goal state is persisted in the session. Reload restores paused/limited state without silently resetting counters. A legacy unbudgeted canonical goal gains the conservative default budget. Legacy global state files are left untouched rather than rewritten. Accepted completion state and its matching tool-result evidence are projected separately for the panel.
 
+## Isolated subagent launches
+
+Native Linux subagents accept `worktree: { changes?: "include" | "exclude", base?: string }` on a single launch or each parallel/chain item. Set `cwd` to the source repository (or a directory inside it). Clean checkouts may use `worktree: {}`; the base defaults to the resolved HEAD commit. Any staged, unstaged or untracked changes require an explicit include/exclude choice. Ignored files neither trigger the choice nor get copied.
+
+Include copies staged/unstaged binary patches and untracked files without stashing, committing or modifying the source index/checkout. A dirty include requires HEAD as its base; unresolved merges, unsafe index flags, dirty submodules and oversized snapshots are refused. Exclude uses only the selected commit. Source changes during preparation fail closed. Each requested child gets its own branch and working copy; chain steps do not inherit the previous step's files.
+
+The worker starts in the new working copy, with an explicit instruction to keep edits there. This is Git checkout isolation, not a broader filesystem sandbox; normal permission policy still applies. Resume retains the same working copy. Completion and reap do not merge, remove the worktree or delete its branch. Partial creation failures retain artifacts for inspection. Ownership is persisted and removal refuses attached workers, including idle completed workers until they are reaped. AgentSH-supervised and non-Linux worktree launches are rejected rather than silently using a shared checkout.
+
 ## Worktree boundaries
 
 The copied checks protect main/current, dirty/untracked, locked, index-flagged, submodule and unsafe detached worktrees. Ignored files and administrative recovery pointers require their exact preview; inventory and identity are rechecked before Git mutates anything. Branches are never deleted and removal never uses force. Cancel does not roll back an already-applied Git change.
 
-The native backend also checks for open Paseo agents using the selected worktree, including subdirectories and symlink aliases, immediately before forwarding a removal confirmation. It fails closed if the agent inventory is incomplete. This is not an atomic lock against unrelated Git/process activity; keep other processes from modifying a worktree while removing it. Repository Git hooks still run with the host's normal permissions.
+The native backend also checks for open Paseo agents using the selected worktree, including subdirectories and symlink aliases, immediately before forwarding a removal confirmation. It fails closed if the agent inventory is incomplete. This is not an atomic lock against unrelated Git/process activity; keep other processes from modifying a worktree while removing it. Manual workflow Git hooks still run with the host's normal permissions; automated subagent worktree creation disables Git hooks.
 
 Native Git mutation is refused if Pi or Goal becomes active while a preview is open. Native open uses Paseo's workspace API, not session switching or a model prompt. The copied terminal Switch action still uses Pi's public session replacement APIs and its context-preserving flow.
 

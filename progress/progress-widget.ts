@@ -4,6 +4,7 @@ import type {
   ExtensionCommandContext,
   ExtensionContext,
 } from "@earendil-works/pi-coding-agent";
+import { writeProgress, GOAL_PROGRESS_EVENT } from "../shared/goal-progress.ts";
 import { renderCompletionSummary, renderProgressWidget, sanitizeProgressText } from "./progress-renderer.js";
 import { showProgressSettings } from "./progress-settings-ui.js";
 import {
@@ -64,6 +65,7 @@ export default function progressWidgetExtension(pi: ExtensionAPI, dependencies: 
   let completionTimer: ReturnType<typeof globalThis.setTimeout> | undefined;
   let completionToken = 0;
   let widgetHidden = false;
+  let unsubscribeGoalProgress: (() => void) | undefined;
 
   const ownsSession = (ctx: ExtensionContext): boolean => ctx.sessionManager === activeSession;
 
@@ -151,13 +153,14 @@ export default function progressWidgetExtension(pi: ExtensionAPI, dependencies: 
   pi.registerTool({
     name: TOOL_NAME,
     label: "Progress",
+    executionMode: "sequential",
     description:
-      "Replace the current session progress state with the complete supplied steps using update_progress. Keep at most one step in_progress; send an empty steps array only to intentionally clear the state.",
+      "Update the existing checklist with the full steps array. Tasks default to the current goal; use goal_id:null for standalone work. Keep at most one in_progress step. Never remove unfinished goal tasks silently; only an explicitly authorized goal scope change may remove them.",
     promptSnippet: "Show users what has been done, what is happening now, and what is planned next",
     promptGuidelines: [
       "Use update_progress for multi-step work when meaningful progress changes; skip simple tasks and avoid redundant updates.",
       "Report actual progress. Use blocked when work depends on an external action or condition, include what is needed to continue in the step text, and do not mark blocked work completed.",
-      "Progress reporting does not prescribe the workflow or require tool calls before work or replies.",
+      "For a goal, maintain its required tasks here and mark completed only with evidence. Keep existing task IDs when refining wording or adding blocker details; omit IDs for new tasks. Include unfinished tasks in every update; goal_complete rejects unfinished linked tasks. Standalone work remains valid with goal_id:null.",
     ],
     parameters: ProgressParameters,
     prepareArguments: prepareProgressArguments,
@@ -166,7 +169,9 @@ export default function progressWidgetExtension(pi: ExtensionAPI, dependencies: 
       if (!ownsSession(ctx)) {
         throw new Error("Cannot update progress because the session changed.");
       }
-      const nextSteps = validateProgressArguments(params).steps;
+      const validated = validateProgressArguments(params);
+      const scoped = writeProgress(pi, ctx, validated.steps, validated.goal_id, false, false);
+      const nextSteps = scoped.steps;
       const wasComplete = allProgressCompleted(steps);
       cancelCompletionSummary();
       widgetHidden = false;
@@ -177,7 +182,8 @@ export default function progressWidgetExtension(pi: ExtensionAPI, dependencies: 
 
       const details: ProgressDetails = {
         version: PROGRESS_DETAILS_VERSION,
-        steps: cloneProgressSteps(steps),
+        steps: steps.map(({ text, status }) => ({ text, status })),
+        ...(scoped.goalId ? { goalId: scoped.goalId } : {}),
       };
       if (steps.length === 0) {
         return {
@@ -320,6 +326,14 @@ export default function progressWidgetExtension(pi: ExtensionAPI, dependencies: 
     generation += 1;
     const ownerGeneration = generation;
     activeSession = ctx.sessionManager;
+    unsubscribeGoalProgress?.();
+    unsubscribeGoalProgress = pi.events.on(GOAL_PROGRESS_EVENT, (event: any) => {
+      if (!ownsSession(ctx) || (event?.sessionId && event.sessionId !== ctx.sessionManager.getSessionId())) return;
+      cancelCompletionSummary();
+      restoreBranchState(ctx);
+      widgetHidden = allProgressCompleted(steps);
+      publish(ctx);
+    });
     if (ctx.hasUI) {
       const ownerSession = ctx.sessionManager;
       activeWidgetOwner = {
@@ -360,6 +374,7 @@ export default function progressWidgetExtension(pi: ExtensionAPI, dependencies: 
 
   pi.on("context", (event: ContextEvent, ctx) => {
     if (!ownsSession(ctx)) return;
+    restoreBranchState(ctx);
     const summaryEpoch = leadingSummaryEpoch(event.messages);
     if (restoredBoundary?.summaryEpoch !== summaryEpoch) restoredBoundary = undefined;
     const messages = reconcileProgressContext(event.messages, steps, restoredBoundary?.content);
@@ -386,6 +401,8 @@ export default function progressWidgetExtension(pi: ExtensionAPI, dependencies: 
 
   pi.on("session_shutdown", async (_event, ctx) => {
     if (!ownsSession(ctx)) return;
+    unsubscribeGoalProgress?.();
+    unsubscribeGoalProgress = undefined;
     settingsController.abort();
     settingsReady = false;
     settingsScreenOpen = false;

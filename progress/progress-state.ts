@@ -3,6 +3,7 @@ import { buildSessionContext, type ContextEvent, type SessionEntry } from "@eare
 import { Type } from "typebox";
 
 export const TOOL_NAME = "update_progress";
+export const GOAL_PROGRESS_ENTRY_TYPE = "progress-scoped-state";
 export const PROGRESS_CONTEXT_MESSAGE_TYPE = "progress-status";
 export const PROGRESS_CONTEXT_VERSION = 5;
 export const PROGRESS_DETAILS_VERSION = 5;
@@ -31,6 +32,8 @@ type PreviousTodoStatus = (typeof NON_BLOCKED_STATUSES)[number];
 type SupportedStateVersion = 1 | 2 | 3 | 4 | 5;
 
 export interface ProgressStep {
+  /** Retain this identity when refining a goal task's text or blocker reason. */
+  id?: string;
   text: string;
   status: ProgressStatus;
 }
@@ -42,6 +45,7 @@ type ProgressV4 =
 export interface ProgressDetails {
   version: typeof PROGRESS_DETAILS_VERSION;
   steps: ProgressStep[];
+  goalId?: string;
 }
 
 type TodoV3 =
@@ -67,9 +71,11 @@ const progressTextSchema = Type.String({
 
 export const ProgressParameters = Type.Object(
   {
+    goal_id: Type.Optional(Type.Union([Type.String({ minLength: 1, maxLength: 128 }), Type.Null()], { description: "Defaults to the current goal when one exists. Supply its exact ID explicitly, or null for standalone work." })),
     steps: Type.Array(
       Type.Object(
         {
+          id: Type.Optional(Type.String({ minLength: 1, maxLength: 128, description: "Existing goal task ID from the current checklist. Keep it when changing task wording; omit for new tasks or standalone progress." })),
           text: progressTextSchema,
           status: StringEnum(PROGRESS_STATUSES, { description: "The step's current status" }),
         },
@@ -84,7 +90,7 @@ export const ProgressParameters = Type.Object(
   { additionalProperties: false },
 );
 
-export function prepareProgressArguments(value: unknown): { steps: ProgressStep[] } {
+export function prepareProgressArguments(value: unknown): { steps: ProgressStep[]; goal_id?: string | null } {
   if (typeof value !== "object" || value === null || Array.isArray(value)) {
     return validateProgressArguments(value);
   }
@@ -115,10 +121,11 @@ export function prepareProgressArguments(value: unknown): { steps: ProgressStep[
   return validateProgressArguments(normalized);
 }
 
-export function validateProgressArguments(value: unknown): { steps: ProgressStep[] } {
-  if (!isRecord(value) || !hasOnlyKeys(value, ["steps"])) {
-    rejectProgress("input must be an object containing only a steps array.");
+export function validateProgressArguments(value: unknown): { steps: ProgressStep[]; goal_id?: string | null } {
+  if (!isRecord(value) || !hasOnlyKeys(value, ["steps", "goal_id"])) {
+    rejectProgress("input must contain steps and optional goal_id.");
   }
+  if (value.goal_id !== undefined && value.goal_id !== null && (typeof value.goal_id !== "string" || !value.goal_id.trim() || value.goal_id.length > 128)) rejectProgress("goal_id must be the exact current goal ID or null.");
   if (!Array.isArray(value.steps)) rejectProgress("steps must be an array.");
   if (value.steps.length > MAX_PROGRESS_STEPS) {
     rejectProgress(`steps contains ${value.steps.length} items; the maximum is ${MAX_PROGRESS_STEPS}.`);
@@ -129,7 +136,7 @@ export function validateProgressArguments(value: unknown): { steps: ProgressStep
   for (const [index, entry] of value.steps.entries()) {
     const item = index + 1;
     if (!isRecord(entry)) rejectProgress(`item ${item} must be an object.`);
-    if (!hasOnlyKeys(entry, ["text", "status"])) {
+    if (!hasOnlyKeys(entry, ["text", "status", "id"])) {
       rejectProgress(`item ${item} contains an unsupported field.`);
     }
     if (typeof entry.text !== "string") rejectProgress(`item ${item} text must be a string.`);
@@ -145,17 +152,45 @@ export function validateProgressArguments(value: unknown): { steps: ProgressStep
     const status = entry.status as ProgressStatus;
     if (status === "in_progress") inProgressIndices.push(item);
 
-    steps.push({ text: entry.text, status });
+    if (entry.id !== undefined && (typeof entry.id !== "string" || !entry.id.trim() || entry.id.length > 128)) rejectProgress(`item ${item} has an invalid task id.`);
+    steps.push({ text: entry.text, status, ...(entry.id !== undefined ? { id: entry.id as string } : {}) });
   }
 
   if (inProgressIndices.length > 1) {
     rejectProgress(`items ${inProgressIndices.join(" and ")} are in_progress; keep at most one in_progress item.`);
   }
-  return { steps };
+  return { steps, ...(value.goal_id !== undefined ? { goal_id: value.goal_id as string | null } : {}) };
+}
+
+export function currentProgressGoal(entries: readonly SessionEntry[]): { id: string; key: string; status: string } | undefined {
+  for (let index = entries.length - 1; index >= 0; index--) {
+    const entry = entries[index];
+    if (entry.type !== "custom" || entry.customType !== "goal-state") continue;
+    const goal = (entry.data as any)?.goal;
+    if (!goal || goal.status === "complete" || typeof goal.id !== "string") return;
+    return { id: goal.id, key: typeof goal.progressId === "string" ? goal.progressId : goal.id, status: goal.status };
+  }
+}
+
+export function readScopedProgress(entries: readonly SessionEntry[], goalKey: string | null): ProgressStep[] {
+  let restored: ProgressStep[] = [];
+  for (const entry of entries) {
+    if (entry.type === "custom" && entry.customType === GOAL_PROGRESS_ENTRY_TYPE) {
+      const data = entry.data as any;
+      if (data?.version === 1 && data.goalKey === goalKey) restored = validateProgressArguments({ steps: data.steps }).steps;
+      continue;
+    }
+    if (goalKey !== null || entry.type !== "message") continue;
+    const message = entry.message;
+    if (message.role !== "toolResult" || message.isError || (message.details as any)?.goalId) continue;
+    const result = decodePersistedResult(message.toolName, message.details);
+    if (result !== undefined) restored = result.steps;
+  }
+  return cloneProgressSteps(restored);
 }
 
 export function cloneProgressSteps(steps: readonly ProgressStep[]): ProgressStep[] {
-  return steps.map((step) => ({ text: step.text, status: step.status }));
+  return steps.map((step) => ({ text: step.text, status: step.status, ...(step.id ? { id: step.id } : {}) }));
 }
 
 export function allProgressCompleted(steps: readonly ProgressStep[]): boolean {
@@ -163,15 +198,7 @@ export function allProgressCompleted(steps: readonly ProgressStep[]): boolean {
 }
 
 export function reconstructProgress(entries: readonly SessionEntry[]): ProgressStep[] {
-  let restored: ProgressStep[] = [];
-  for (const entry of entries) {
-    if (entry.type !== "message") continue;
-    const message = entry.message;
-    if (message.role !== "toolResult" || message.isError) continue;
-    const result = decodePersistedResult(message.toolName, message.details);
-    if (result !== undefined) restored = result.steps;
-  }
-  return restored;
+  return readScopedProgress(entries, currentProgressGoal(entries)?.key ?? null);
 }
 
 export function reconcileProgressContext(
@@ -374,7 +401,7 @@ function decodePersistedResult(
 ): { version: SupportedStateVersion; steps: ProgressStep[] } | undefined {
   if (!isRecord(value) || typeof value.version !== "number") return undefined;
   if (toolName === TOOL_NAME && value.version === PROGRESS_DETAILS_VERSION) {
-    if (!hasOnlyKeys(value, ["version", "steps"]) || !isProgressSteps(value.steps)) return undefined;
+    if (!hasOnlyKeys(value, ["version", "steps", "goalId"]) || !isProgressSteps(value.steps)) return undefined;
     return { version: 5, steps: cloneProgressSteps(value.steps) };
   }
   if (toolName === TOOL_NAME && value.version === 4) {

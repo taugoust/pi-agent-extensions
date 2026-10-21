@@ -1,6 +1,7 @@
 import { randomBytes, createHash } from "node:crypto";
+import { provisionWorktrees, releaseWorktree, worktreeOption, type WorktreeOption } from "../shared/subagent-worktrees.ts";
 import { waitForGroupSnapshot } from "./group-wait.ts";
-import { readdirSync, existsSync, readFileSync, writeFileSync, unlinkSync, openSync, closeSync, readSync, constants } from "node:fs";
+import { readdirSync, existsSync, readFileSync, writeFileSync, unlinkSync, openSync, closeSync, readSync, constants, lstatSync } from "node:fs";
 import { join, resolve, basename } from "node:path";
 import { validateAcceptance } from "./outcome.ts";
 import { subagentTmuxName, validateSubagentName } from "./tui-names.ts";
@@ -9,17 +10,18 @@ import { TuiWorkerStore, privateDirectory, atomicPrivateJson, readPrivateJson } 
 import { callTuiWorker, applyTuiWorkerOperatorMode } from "./tui-worker-client.ts";
 import { publicTuiWorkerManifest, parseTuiWorkerJobParams } from "../shared/tui-worker-protocol.ts";
 import { truncateUtf8 } from "../shared/harness-readonly.ts";
+import { readRetainedConversation } from "./retained-conversation.ts";
 import type { QuietUpdate } from "../shared/quiet-state.ts";
 import type { TuiWorkerManifest, TuiWorkerPlacement } from "../shared/tui-worker-protocol.ts";
 
 const id = (prefix: string) => `${prefix}-${randomBytes(12).toString("hex")}`;
 const pause = (ms: number) => new Promise(resolve => setTimeout(resolve, ms));
-type Spec = { name?: string; task: string; cwd: string; model?: string; tools?: string[]; systemPrompt?: string; acceptance?: string[] };
+type Spec = { name?: string; task: string; cwd: string; model?: string; tools?: string[]; systemPrompt?: string; acceptance?: string[]; worktree?: WorktreeOption; worktreeInfo?: { path: string; branch: string; baseCommit: string; includedChanges: boolean } };
 type Child = { childId: string; taskId: string; attempt: number; directory: string; spec: Spec;
   resumeSessionFile?: string; resumeMessage?: string; compactBeforePrompt?: boolean;
   state: "pending" | "launching" | "running" | "completed" | "failed" | "cancelled" | "lost" | "skipped";
   operatorCapability: string; started: boolean; reaped?: boolean; error?: string; report?: string;
-  notifiedSequence: number; idleDecisionNotified?: string; runSequence?: number; pendingActivitySequence?: number; terminalNotification?: string; lastOutcome?: unknown; requiresCompaction?: boolean; };
+  notifiedSequence: number; needsAttention?: boolean; idleDecisionNotified?: string; runSequence?: number; pendingActivitySequence?: number; terminalNotification?: string; lastOutcome?: unknown; requiresCompaction?: boolean; };
 type Group = { windowName?: string; version: 1; id: string; owner: string; createdAt: string; mode: "single" | "parallel" | "chain";
   background: boolean; cancelled: boolean; children: Child[]; caller: TuiWorkerPlacement;
   parentOwnerToken: string;
@@ -255,6 +257,7 @@ export class TuiNativeManager {
           if (c.report) this.retainedArtifact(c, c.report, "report");
           const m = this.manifest(c);
           if (m && !c.reaped) { await this.tmux.reap(m); c.reaped = true; this.save(nested); }
+          if (c.spec.worktree && (c.reaped || (!m && !c.started))) await releaseWorktree(nested.owner, c.taskId, c.childId);
         }
       } finally { release(); }
     }
@@ -273,6 +276,7 @@ export class TuiNativeManager {
         } catch {} }
         return { child: i + 1, child_id: c.childId, task_id: c.taskId,
           status: c.state, attempt: c.attempt ?? 1, reaped: !!c.reaped, task: c.spec.task.slice(0, 500), error: c.error,
+          cwd: c.spec.cwd, ...(c.spec.worktreeInfo ? { worktree: c.spec.worktreeInfo } : {}),
           report: c.report, task_outcome: c.lastOutcome, ...(idleDecision ? { idle_decision: idleDecision } : {}),
           ...(manifest ? { runtime: publicTuiWorkerManifest(manifest) } : {}) };
       }) };
@@ -324,6 +328,8 @@ export class TuiNativeManager {
       if (!result.ok) { c.error = result.code; return; }
       c.error = undefined;
       const state = result.data as any;
+      c.needsAttention = !!(state.idleDecision?.workerEpoch === m.workerEpoch
+        || state.interactions?.some((interaction: any) => interaction.workerEpoch === m.workerEpoch));
       if (!observationOnly && state.idleDecision?.requestId && state.idleDecision.workerEpoch === m.workerEpoch && state.idleDecision.model
         && c.idleDecisionNotified !== state.idleDecision.requestId) {
         const data = state.idleDecision;
@@ -499,7 +505,7 @@ export class TuiNativeManager {
       if (s.systemPrompt !== undefined && (typeof s.systemPrompt !== "string" || Buffer.byteLength(s.systemPrompt) > 64 * 1024)) throw new Error("Invalid system prompt");
       if (s.model !== undefined && (typeof s.model !== "string" || Buffer.byteLength(s.model) > 512)) throw new Error("Invalid model");
       if (s.tools !== undefined && (!Array.isArray(s.tools) || s.tools.length > 64 || s.tools.some((tool: any) => typeof tool !== "string" || !/^[a-zA-Z0-9_-]{1,128}$/.test(tool)))) throw new Error("Invalid tool selection");
-      return { name: validateSubagentName(s.name), task: s.task, cwd: resolve(s.cwd ?? cwd), model: s.model, tools: s.tools, systemPrompt: s.systemPrompt, acceptance: validateAcceptance(s.acceptance) };
+      return { name: validateSubagentName(s.name), task: s.task, cwd: resolve(s.cwd ?? cwd), model: s.model, tools: s.tools, systemPrompt: s.systemPrompt, acceptance: validateAcceptance(s.acceptance), worktree: worktreeOption(s.worktree) };
     });
     if (specs.length > 8) throw new Error("At most eight subagent children are allowed");
     if (signal?.aborted || this.closed || this.reapReserved) throw new Error("Subagent launch cancelled or cleanup reserved");
@@ -516,7 +522,15 @@ export class TuiNativeManager {
     await this.serial(async () => {
       if (signal?.aborted || this.closed || this.reapReserved) throw new Error("Launch cancelled before commit");
       if ([...this.groups.values()].filter(group => group.owner === owner && group.children.some(active)).length >= this.groupLimit) throw new Error(`Subagent concurrency limit reached (${this.groupLimit})`);
-      this.groups.set(g.id, g); this.save(g);
+      try {
+        await provisionWorktrees(g.children, owner, signal, () => this.owner === owner && !this.closed && !this.reapReserved && this.ready(), !!resume);
+        if (signal?.aborted || this.closed || this.reapReserved || this.owner !== owner) throw new Error("Worktree launch context changed");
+        this.groups.set(g.id, g); this.save(g);
+      } catch (error) {
+        this.groups.delete(g.id);
+        for (const child of g.children) if (child.spec.worktree) await releaseWorktree(owner, child.taskId, child.childId);
+        throw error;
+      }
     });
     void this.refresh(owner).catch(() => undefined);
     if (g.background) return response(this.text(g), { operation: "start", group: this.publicGroup(g), job_id: g.id });
@@ -594,9 +608,43 @@ export class TuiNativeManager {
       const manifest = this.manifest(c);
       return { taskId: c.taskId, childId: c.childId, groupId: g.id, runtimeId: manifest?.runtimeId ?? null,
         attempt: c.attempt ?? 1, status: c.state, title: c.spec.task.slice(0, 140),
+        kind: "subagent", needsAttention: active(c) && c.needsAttention === true,
         summary: typeof (c.lastOutcome as any)?.summary === "string" ? (c.lastOutcome as any).summary.slice(0, 2000) : undefined,
         lastUpdated: null, stale: true };
     })).slice(-50);
+  }
+  readonlyIndependentSource(owner: string, input: { taskId: string; childId: string; attempt: number; runtimeId: string | null }): any {
+    if (this.owner !== owner) throw new Error("Independent source belongs to another session");
+    const found = this.byChild(owner, input.childId);
+    if (!found || found.child.childId !== input.childId || found.child.taskId !== input.taskId
+      || (found.child.attempt ?? 1) !== input.attempt || active(found.child)) throw new Error("Source worker is not completed");
+    const c = found.child, manifest = this.manifest(c);
+    if ((manifest?.runtimeId ?? null) !== input.runtimeId || !c.report) throw new Error("Source identity changed");
+    const state = new TuiWorkerStore(c.directory).readState(false);
+    if (state.active || state.lastReport !== c.report || (state.interactions ?? []).some(item => !item.answer && !item.cancelledAt)) throw new Error("Source worker changed or needs attention");
+    const report = this.retainedArtifact(c, c.report, "report") as any;
+    const file = join(c.directory, "session.jsonl");
+    if (report.sessionFile !== file || (manifest && manifest.sessionFile !== file)) throw new Error("Source session identity changed");
+    const stat = lstatSync(file);
+    if (!stat.isFile() || stat.isSymbolicLink() || stat.nlink !== 1 || stat.uid !== process.getuid?.() || (stat.mode & 0o022) || stat.size > 32 * 1024 * 1024) throw new Error("Source file unavailable");
+    return { taskId: c.taskId, childId: c.childId, attempt: c.attempt ?? 1, runtimeId: manifest?.runtimeId ?? null,
+      file, title: c.spec.name?.replace(/-/g, " ") || c.spec.task.slice(0, 140), cwd: c.spec.cwd,
+      leafId: typeof report.leafId === "string" ? report.leafId : null,
+      assistantDigest: report.assistant ? createHash("sha256").update(JSON.stringify(report.assistant)).digest("hex") : null,
+      report: c.report, dev: stat.dev, ino: stat.ino, size: stat.size, mtimeMs: stat.mtimeMs };
+  }
+  readonlyTaskConversation(owner: string, input: { taskId: string; childId: string; attempt: number; runtimeId: string | null; cursor?: number }): any {
+    if (this.owner !== owner) throw new Error("Conversation belongs to another Pi session");
+    const found = this.byChild(owner, input.childId);
+    if (!found || found.child.childId !== input.childId || found.child.taskId !== input.taskId
+      || (found.child.attempt ?? 1) !== input.attempt) throw new Error("Conversation identity changed");
+    const { child: c, group: g } = found;
+    const manifest = this.manifest(c);
+    if ((manifest?.runtimeId ?? null) !== input.runtimeId) throw new Error("Conversation runtime changed");
+    const path = join(c.directory, "session.jsonl");
+    if (manifest && manifest.sessionFile !== path) throw new Error("Invalid conversation path");
+    return { taskId: c.taskId, childId: c.childId, groupId: g.id, attempt: c.attempt ?? 1,
+      runtimeId: manifest?.runtimeId ?? null, stale: true, ...readRetainedConversation(path, input.cursor) };
   }
   readonlyTaskReport(owner: string, taskId: string, maxBytes = 48 * 1024): any {
     if (this.owner !== owner) throw new Error("Native task snapshots belong to another Pi session");
@@ -674,6 +722,7 @@ export class TuiNativeManager {
           const m = this.manifest(c);
           if (m && !c.reaped) { await this.tmux.reap(m); c.reaped = true; this.save(g); }
           else if (!m && !c.reaped && c.started) throw new Error(`Descendant manifest unavailable: ${g.id}/${c.childId}`);
+          if (c.spec.worktree) await releaseWorktree(g.owner, c.taskId, c.childId);
         }
       });
       return () => { this.reapReserved = false; };
@@ -717,6 +766,7 @@ export class TuiNativeManager {
             if (c.report) readPrivateJson(c.report); // Require readable retained results before deletion.
             const manifest = this.manifest(c);
             if (manifest && !c.reaped) { await this.tmux.reap(manifest); c.reaped = true; this.save(descendant); }
+            if (c.spec.worktree && (c.reaped || (!manifest && !c.started))) await releaseWorktree(descendant.owner, c.taskId, c.childId);
           }
         } finally { release(); }
       }
@@ -853,7 +903,9 @@ export class TuiNativeManager {
       // only their proven descendants, deepest first; live parents perform
       // their own recursive cleanup through prepare_reap instead.
       await this.reapStoppedDescendants(descendants.filter(group => nestedIds.has(group.id)));
-      for (const c of g.children) { const m = this.manifest(c); if (m && !c.reaped) { await this.tmux.reap(m); c.reaped = true; this.save(g); } }
+      for (const c of g.children) { const m = this.manifest(c); if (m && !c.reaped) { await this.tmux.reap(m); c.reaped = true; this.save(g); }
+        if (c.spec.worktree && (c.reaped || (!m && !c.started))) await releaseWorktree(owner, c.taskId, c.childId);
+      }
     });
     if (op === "wait" || op === "wait_group") {
       const deadline = Date.now() + (params.wait_ms ?? 1000);

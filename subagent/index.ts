@@ -1458,7 +1458,7 @@ export function validateBackgroundOperation(params: any): void {
     return;
   }
   if (params.task_id !== undefined || params.compact !== undefined) throw new Error("task_id and compact are resume-only fields");
-  const launchFields = ["name", "acceptance", "task", "tasks", "chain", "systemPrompt", "model", "tools", "cwd", "action", "draft_id", "background", "mode", "timeout_ms"];
+  const launchFields = ["name", "acceptance", "task", "tasks", "chain", "systemPrompt", "model", "tools", "cwd", "worktree", "action", "draft_id", "background", "mode", "timeout_ms"];
   const integerField = (field: string, minimum: number, maximum: number, label: string) => {
     const value = params[field];
     if (value !== undefined && (!Number.isSafeInteger(value) || value < minimum || value > maximum)) {
@@ -1590,6 +1590,11 @@ function validateBackgroundLaunch(params: any): void {
 const SubagentName = Type.Optional(Type.String({ minLength: 1, maxLength: SUBAGENT_NAME_MAX_LENGTH, pattern: SUBAGENT_NAME_PATTERN,
   description: "Launch only: optional concise native tmux label (1–28 ASCII lowercase kebab-case characters, without agt- prefix). Root names the group; per-task names title panes. Ignored by other backends." }));
 
+const SubagentWorktree = Type.Optional(Type.Object({
+  changes: Type.Optional(Type.Union([Type.Literal("include"), Type.Literal("exclude")], { description: "Required if the source repository has any staged, unstaged, or untracked changes. Include copies them into the new worktree; exclude uses only the base commit. Ignored files are never copied." })),
+  base: Type.Optional(Type.String({ minLength: 1, maxLength: 512, description: "Base commit/ref, default HEAD. Including dirty changes requires HEAD." })),
+}, { additionalProperties: false, description: "Launch this native Linux worker in its own retained Git worktree. An empty object is allowed only with a clean source checkout. The parent's checkout/index/branch are untouched." }));
+
 const SubagentItem = Type.Object({
   name: SubagentName,
   acceptance: Type.Array(Type.String({minLength:1, maxLength:500}), {minItems:1, maxItems:16, description:"Required for each new task: explicit task-specific, verifiable completion criteria. Preserved verbatim; never inferred from the prompt."}),
@@ -1598,6 +1603,7 @@ const SubagentItem = Type.Object({
   model: Type.Optional(Type.String({ description: `Model override, optionally provider/id:thinking. Default: ${defaultSubagentModel}.` })),
   tools: Type.Optional(Type.Array(Type.String(), { description: "Optional tool allowlist, e.g. ['read','grep','find','ls']" })),
   cwd: Type.Optional(Type.String({ description: "Optional working directory for this subagent process" })),
+  worktree: SubagentWorktree,
 });
 
 function subagentParams() {
@@ -1632,6 +1638,7 @@ function subagentParams() {
   model: Type.Optional(Type.String({ description: `Launch only: model override (single mode), optionally provider/id:thinking. Default: ${defaultSubagentModel}. Not accepted by resume; it retains the saved model.` })),
   tools: Type.Optional(Type.Array(Type.String(), { description: "Launch only: optional tool allowlist (single mode). Not accepted by resume." })),
   cwd: Type.Optional(Type.String({ description: "Launch only: optional working directory (single mode). Not accepted by resume." })),
+  worktree: SubagentWorktree,
   tasks: Type.Optional(Type.Array(SubagentItem, { maxItems: MAX_PARALLEL_TASKS, description: "Launch only: parallel subagent tasks; each item requires acceptance criteria. Max 8, up to 4 run concurrently." })),
   chain: Type.Optional(Type.Array(SubagentItem, { maxItems: MAX_PARALLEL_TASKS, description: "Launch only: sequential subagent steps; each item requires acceptance criteria. Max 8; each task may use {previous}." })),
     ...(process.env.PI_AGENTSH_EXPOSE_SUBAGENT_TIMEOUT === "1" ? {
@@ -1894,6 +1901,33 @@ export default function (pi: ExtensionAPI) {
           const items = [...(foreground?.readonlyTaskList(sessionId, limit) ?? []), ...(native?.readonlyTaskList(sessionId) ?? [])].slice(0, limit);
           return { protocol: HARNESS_READONLY_PROTOCOL, state: "available", sessionId, items, lastUpdated: items[0]?.lastUpdated ?? null, stale: true };
         },
+        async independentSource(input) {
+          assertReadonlyOwner();
+          if (input.sessionId !== sessionId || !/^subagent-task-[0-9a-f]{24}$/.test(input.taskId)
+            || !/^subagent-child-[0-9a-f]{24}$/.test(input.childId) || !Number.isSafeInteger(input.attempt) || input.attempt < 1)
+            throw new Error("Invalid independent source identity");
+          if (!native || nativeDisposition() === "full" || nativeDisposition() === "unavailable") throw new Error("Native source unavailable");
+          const source = native.readonlyIndependentSource(sessionId, input);
+          assertReadonlyOwner();
+          return { protocol: HARNESS_READONLY_PROTOCOL, sessionId, source };
+        },
+        async conversation(input) {
+          if (input.sessionId !== sessionId) throw new Error("Conversation belongs to another Pi session");
+          assertReadonlyOwner();
+          if (!/^subagent-task-[0-9a-f]{24}$/.test(input.taskId) || !/^subagent-child-[0-9a-f]{24}$/.test(input.childId)
+            || !Number.isSafeInteger(input.attempt) || input.attempt < 1
+            || (input.runtimeId !== null && (typeof input.runtimeId !== "string" || input.runtimeId.length > 256))
+            || (input.cursor !== undefined && (!Number.isSafeInteger(input.cursor) || input.cursor < 0))) throw new Error("Invalid conversation identity");
+          if (!native || nativeDisposition() === "full" || nativeDisposition() === "unavailable")
+            return { protocol: HARNESS_READONLY_PROTOCOL, state: "unsupported", sessionId, lastUpdated: null, stale: true, message: "Retained native conversations are unavailable." };
+          try {
+            const item = native.readonlyTaskConversation(sessionId, input);
+            assertReadonlyOwner();
+            return { protocol: HARNESS_READONLY_PROTOCOL, state: "available", sessionId, item, lastUpdated: item.lastUpdated, stale: true };
+          } catch {
+            return { protocol: HARNESS_READONLY_PROTOCOL, state: "unavailable", sessionId, lastUpdated: null, stale: true, message: "This retained conversation is no longer available." };
+          }
+        },
         async report(input) {
           if (input.sessionId !== sessionId) throw new Error("Read-only subagents unavailable for this Pi session");
           assertReadonlyOwner();
@@ -2133,6 +2167,7 @@ export default function (pi: ExtensionAPI) {
       'Prompt shape: {operation:"prompt",child_id,message,job_id?,control_mode?,wait_for_response?}; optional job_id must match the child’s group.',
       "Inspect and control groups using job_id, message workers using child_id, and resume retained tasks using task_id.",
       "Native workers share their interactive session with the user and Paseo.",
+      "Set worktree:{} to isolate a native Linux worker. If its repository is dirty, worktree.changes must explicitly be include or exclude. Each parallel/chain item selects its own worktree. Resume retains that worktree; reap never removes it.",
       "mode defaults to shared; draft requires an active AgentSH supervisor.",
     ].join(" "),
     promptSnippet: "Delegate work to foreground or background subagents.",
@@ -2532,6 +2567,12 @@ export default function (pi: ExtensionAPI) {
       }
 
       validateBackgroundLaunch(params);
+      const requestedWorktrees = params.worktree !== undefined || [...(params.tasks ?? []), ...(params.chain ?? [])].some((item: any) => item.worktree !== undefined);
+      if (requestedWorktrees) {
+        if (params.worktree !== undefined && (params.tasks || params.chain)) throw new Error("Set worktree on each task/chain item, not on the group");
+        if (params.action || params.mode === "draft" || process.platform !== "linux" || selectSubagentBackend(agentSHBridge(), agentSHStartup).kind !== "native")
+          throw new Error("Worktree launch is supported by native Linux workers only; no backend fallback is allowed");
+      }
       // Set launch defaults before routing to either backend. Explicit model
       // selections (including Pi's :thinking suffix) remain authoritative.
       const withDefaultModel = (spec: any) => {

@@ -388,11 +388,14 @@ export async function removeFlow(
   currentPath: string,
   signal?: AbortSignal,
   onTarget?: (path: string) => void,
+  selectedPath?: string,
 ): Promise<void> {
   const candidates = records.filter(
     (record) => !record.isMain && !record.bare && !pathsEqual(record.path, currentPath),
   );
-  const selected = await selectWorktree(ctx, "Remove linked worktree", candidates, currentPath, signal);
+  const selected = selectedPath ? candidates.find(record => pathsEqual(record.path, selectedPath))
+    : await selectWorktree(ctx, "Remove linked worktree", candidates, currentPath, signal);
+  if (selectedPath && !selected) throw new Error("Selected worktree cannot be removed");
   if (!selected) return;
   onTarget?.(selected.path);
   if (selected.lockedReason !== undefined) {

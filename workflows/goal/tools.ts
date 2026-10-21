@@ -8,6 +8,8 @@ import {
 } from "@earendil-works/pi-coding-agent";
 import { Markdown } from "@earendil-works/pi-tui";
 import { Type } from "typebox";
+import { readGoalTasks } from "../../shared/goal-progress.ts";
+import { registerGoalManagement } from "./model-control.js";
 import { notifyTerminal, safeTerminalText } from "./errors.js";
 import {
   formatStatus,
@@ -59,9 +61,11 @@ const MAX_BLOCKER_REASON_LENGTH = 1_000;
 const MAX_BLOCKER_EVIDENCE_LENGTH = 4_000;
 
 export function registerGoalTools(pi: ExtensionAPI, runtime: GoalRuntime) {
+  registerGoalManagement(pi, runtime);
   const goalCompleteTool = defineTool({
     name: GOAL_COMPLETE_TOOL,
     label: "Goal Complete",
+    executionMode: "sequential",
     description:
       "Mark an active /goal complete only when the latest effective Goal contract explicitly says Goal mode is active, supplies the matching current goal_id, and every requirement is verified. Tool visibility alone does not activate Goal mode. Never call for ordinary work, partial progress, blockers, failures, or unverified work.",
     parameters: Type.Object({
@@ -162,6 +166,8 @@ export function registerGoalTools(pi: ExtensionAPI, runtime: GoalRuntime) {
         };
       }
 
+      const unfinished = readGoalTasks(ctx, completedGoal).filter(step => step.status !== "completed");
+      if (unfinished.length) throw new Error(`Goal completion rejected: ${unfinished.length} required tasks remain unfinished: ${unfinished.map(step => step.text).join("; ")}`);
       runtime.clearGoalWaitTimer();
       runtime.activeGoal = transitionGoal(completedGoal, "complete");
       runtime.setCompletionSummary(runtime.activeGoal.id, summary);

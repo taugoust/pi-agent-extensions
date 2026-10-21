@@ -63,6 +63,8 @@ export type ReadonlySubagentTask = {
   status: "pending" | "running" | "completed" | "failed" | "cancelled" | "skipped" | "lost" | "unknown";
   title: string;
   summary?: string;
+  kind?: "foreground" | "subagent";
+  needsAttention?: boolean;
   lastUpdated: string | null;
   stale: boolean;
 };
@@ -93,6 +95,12 @@ export type HarnessReadOnlySubagents = {
   sessionId: string;
   list(input: { sessionId: string; limit?: number; cursor?: string }): Promise<ReadonlyPage<ReadonlySubagentTask>>;
   report(input: { sessionId: string; taskId: string; maxBytes?: number }): Promise<ReadonlyDetail<ReadonlyTaskReport>>;
+  independentSource?(input: { sessionId: string; taskId: string; childId: string; attempt: number; runtimeId: string | null }): Promise<unknown>;
+  conversation?(input: { sessionId: string; taskId: string; childId: string; attempt: number; runtimeId: string | null; cursor?: number }): Promise<ReadonlyDetail<{
+    taskId: string; childId: string; groupId: string; attempt: number; runtimeId: string | null;
+    messages: Array<{ id: string; role: "user" | "assistant" | "tool" | "parent"; text: string; truncated?: boolean }>;
+    truncated: boolean; lastUpdated: string; nextCursor?: number;
+  }>>;
 };
 
 /** Lifetime-owned registry published by the supplying extensions. */

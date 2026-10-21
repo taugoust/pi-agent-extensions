@@ -9,6 +9,8 @@ export type SafetyPauseCause = "continuation_limit" | "no_progress";
 
 export interface ActiveGoal {
   id: string;
+  /** Stable checklist identity across goal-instance rotations. */
+  progressId?: string;
   text: string;
   status: GoalStatus;
   startedAt: number;
@@ -163,6 +165,7 @@ export function normalizeLoadedGoal(goal: ActiveGoal): ActiveGoal {
   const waiting = goal.status === "active" ? normalizeGoalWait(goal.waiting) : undefined;
   return {
     ...goal,
+    progressId: typeof goal.progressId === "string" && goal.progressId.length > 0 && goal.progressId.length <= 128 ? goal.progressId : goal.id,
     startedAt: isNonNegativeFiniteNumber(goal.startedAt) ? goal.startedAt : now,
     updatedAt: isNonNegativeFiniteNumber(goal.updatedAt) ? goal.updatedAt : now,
     iteration: Math.max(0, Math.floor(nonNegativeFiniteNumber(goal.iteration))),

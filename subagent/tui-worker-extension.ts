@@ -138,6 +138,10 @@ export default function tuiWorkerExtension(pi: ExtensionAPI): void {
       }
       const actualSession = ctx.sessionManager.getSessionFile();
       if (!actualSession || resolve(actualSession) !== resolve(manifest.sessionFile)) throw new Error("Worker Pi session does not match launch manifest");
+      const displayName = process.env.PI_SUBAGENT_NAME?.trim().slice(0, 80);
+      if (manifest.execution !== "rpc-headless" && displayName && !ctx.sessionManager.getSessionName()) {
+        pi.setSessionName(displayName.charAt(0).toUpperCase() + displayName.slice(1));
+      }
       worker = new TuiWorkerServer(store, {
         isIdle: () => context?.isIdle() === true && context?.hasPendingMessages() !== true,
         canRun: () => allowed(),
@@ -347,7 +351,7 @@ export default function tuiWorkerExtension(pi: ExtensionAPI): void {
   pi.on("agent_settled", (_event, ctx) => {
     modelInactivity.end();
     if (!worker || failed || worker.sealed) return;
-    try { worker.settled({ sessionFile: ctx.sessionManager.getSessionFile(), assistant: lastAssistant ?? null,
+    try { worker.settled({ sessionFile: ctx.sessionManager.getSessionFile(), leafId: ctx.sessionManager.getLeafId(), assistant: lastAssistant ?? null,
       ...(!allowed() ? { error: "Worker command authority unavailable at settlement" } : {}),
       contextTokens: ctx.getContextUsage()?.tokens, contextWindow: ctx.model?.contextWindow, timestamp: new Date().toISOString() }); }
     catch (error) { fail(ctx, error); }

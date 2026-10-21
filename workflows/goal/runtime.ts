@@ -1204,11 +1204,13 @@ export class GoalRuntime {
       this.clearTerminalDetails();
     }
     this.pi.appendEntry(GOAL_STATE_ENTRY_TYPE, serializeGoalState(goal));
+    this.pi.events.emit("pi:goal-progress", {});
     this.publishGoalState(buildGoalStateSnapshot(goal, this.terminalDetails?.summary, this.terminalDetails?.reason));
   }
 
   clearPersistedGoal(cwd: string, clearedGoal?: ActiveGoal, reason = "goal cleared") {
     this.pi.appendEntry(GOAL_STATE_ENTRY_TYPE, serializeGoalState(undefined));
+    this.pi.events.emit("pi:goal-progress", {});
     if (clearedGoal) {
       this.publishGoalState({
         goalId: clearedGoal.id,
@@ -1415,7 +1417,7 @@ export function transitionGoal(goal: ActiveGoal, requestedStatus: GoalStatus): A
 }
 
 export function nextGoalInstance(goal: ActiveGoal): ActiveGoal {
-  return { ...goal, id: randomUUID(), updatedAt: Date.now() };
+  return { ...goal, progressId: goal.progressId ?? goal.id, id: randomUUID(), updatedAt: Date.now() };
 }
 
 export function editedGoalStatus(status: GoalStatus): GoalStatus {

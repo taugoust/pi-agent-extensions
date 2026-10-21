@@ -73,6 +73,8 @@ function goalModeRules(goalLabel: string) {
     "Goal-mode rules:",
     "- Preserve the full objective across turns; do not redefine success around a narrower, safer, smaller, merely compatible, or easier-to-test result.",
     "- Derive concrete requirements from the objective and any referenced files, plans, specifications, issues, or user instructions.",
+    "- Maintain required tasks with update_progress, which defaults to this goal. Preserve unfinished tasks across updates; use goal_id:null only for genuinely standalone work. Complete the goal only after all required tasks and the outcome are verified.",
+    "- Do not use goal_manage to reset limits, replace the goal, or resume yourself. Goal controls require a relevant new user instruction; safety pauses require fresh user authorization.",
     "- Treat the current worktree, command output, tests, runtime behavior, PR state, rendered artifacts, and external state as authoritative. Previous conversation, plans, and summaries are context, not proof; inspect the current state before relying on them.",
     `- Keep working until ${goalLabel} is completely resolved end-to-end. Do not stop at analysis, a plan, TODO list, partial fixes, or suggested next steps.`,
     "- Autonomously implement and verify the work. If a tool fails, try reasonable alternatives instead of yielding early.",

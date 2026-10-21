@@ -1,4 +1,9 @@
 import { randomUUID } from "node:crypto";
+import { basename, isAbsolute, relative, sep } from "node:path";
+import { workspaceRepositories } from "./worktree/repositories.js";
+import { ownedWorktrees, worktreeGit } from "../shared/subagent-worktrees.ts";
+import { harnessReadOnlyRegistry } from "../shared/harness-readonly.ts";
+import { readGoalTasks, addGoalTask } from "../shared/goal-progress.ts";
 import type {
 	ExtensionAPI,
 	ExtensionContext,
@@ -9,10 +14,16 @@ import {
 	currentWorktreePath,
 	listWorktrees,
 	pathsEqual,
+	pathIdentity,
 	stripTerminalControls,
 } from "./worktree/git.js";
 import type { WorktreeSettingsRuntime } from "./worktree/settings.js";
-import type { GoalRuntime } from "./goal/runtime.js";
+import {
+	createGoal,
+	transitionGoal,
+	type GoalRuntime,
+} from "./goal/runtime.js";
+import { currentTokenTotal } from "./goal/accounting.js";
 import type { GoalCommandController } from "./goal/commands.js";
 
 type Dialog = {
@@ -31,6 +42,7 @@ type Operation = {
 	wasWaiting: boolean;
 	controller: AbortController;
 	policyCheck?: () => boolean;
+	worktreeCwd?: string;
 	dialog?: Dialog;
 	reply?: (value: unknown) => void;
 	reject?: (error: Error) => void;
@@ -41,10 +53,12 @@ const actions = [
 	"worktree.prune",
 	"worktree.open",
 	"goal.start",
+	"goal.create_paused",
 	"goal.edit",
 	"goal.pause",
 	"goal.resume",
 	"goal.clear",
+	"goal.add_task",
 ];
 const uuid =
 	/^[a-f0-9]{8}-[a-f0-9]{4}-4[a-f0-9]{3}-[89ab][a-f0-9]{3}-[a-f0-9]{12}$/i;
@@ -66,9 +80,36 @@ export function createWorkflowService(
 	const requests = new Map<string, string>();
 	const lifetime = new AbortController();
 	let worktreeCache:
-		| { rows: any[]; error: string | null; at: number }
+		| {
+				rows: any[];
+				error: string | null;
+				at: number;
+				repositoryCount?: number;
+				container?: boolean;
+		  }
 		| undefined;
 	let reading: Promise<void> | undefined;
+	let repositoryCache:
+		| {
+				cwd: string;
+				at: number;
+				value: Awaited<ReturnType<typeof workspaceRepositories>>;
+		  }
+		| undefined;
+	async function repositories() {
+		const cwd = ctx.cwd;
+		if (
+			repositoryCache?.cwd === cwd &&
+			Date.now() - repositoryCache.at < 30_000
+		)
+			return repositoryCache.value;
+		const value = await workspaceRepositories(pi, cwd, lifetime.signal);
+		current();
+		if (cwd !== ctx.cwd)
+			throw new Error("Workspace changed during repository discovery");
+		repositoryCache = { cwd, at: Date.now(), value };
+		return value;
+	}
 	let completionLeaf: string | null | undefined;
 	let lastCompletion: {
 		id: string;
@@ -142,28 +183,180 @@ export function createWorkflowService(
 			op.reject = undefined;
 		}
 	}
+	async function worktreeRepository(path: string, signal: AbortSignal) {
+		const mine = await ownedWorktrees(sessionId);
+		const owned = mine.find((record) => pathsEqual(record.path, path));
+		if (owned) return owned.commonDir;
+		const roots = new Set(mine.map((record) => record.commonDir));
+		const lookup = AbortSignal.any([signal, AbortSignal.timeout(15_000)]);
+		const discovered = await workspaceRepositories(pi, ctx.cwd, lookup);
+		current();
+		for (const root of discovered.roots) roots.add(root);
+		for (const root of roots) {
+			try {
+				if (
+					(await listWorktrees(pi, root, lookup)).some((record) =>
+						pathsEqual(record.path, path),
+					)
+				)
+					return root;
+			} catch {
+				lookup.throwIfAborted();
+			}
+		}
+		throw new Error(
+			"Worktree is no longer available in this session's repositories",
+		);
+	}
 	async function refreshWorktrees() {
 		if (reading) return reading;
-		if (worktreeCache && Date.now() - worktreeCache.at < 2000) return;
+		if (worktreeCache && Date.now() - worktreeCache.at < 5000) return;
 		reading = (async () => {
 			try {
-				const records = await listWorktrees(pi, ctx.cwd, lifetime.signal);
+				const ownership = await ownedWorktrees();
+				const mine = ownership.filter(
+					(record) => record.ownerSessionId === sessionId,
+				);
+				const roots = new Set(mine.map((record) => record.commonDir));
+				const discovered = await repositories();
+				const active = discovered.active;
+				for (const root of discovered.roots) roots.add(root);
+				const warnings = [...discovered.warnings];
+				if (discovered.limited || roots.size > 64)
+					warnings.push(
+						"Repository discovery is limited to two directory levels and 64 repository roots; open a repository directly to inspect more.",
+					);
+				const repositoryPaths = new Set<string>();
+				const service = harnessReadOnlyRegistry()?.subagents;
+				const workers =
+					service?.sessionId === sessionId
+						? await service
+								.list({ sessionId, limit: 50 })
+								.catch(() => undefined)
+						: undefined;
+				const rows: any[] = [];
+				const inventorySignal = AbortSignal.any([
+					lifetime.signal,
+					AbortSignal.timeout(15_000),
+				]);
+				for (const root of [...roots].slice(0, 64)) {
+					if (inventorySignal.aborted) {
+						lifetime.signal.throwIfAborted();
+						warnings.push(
+							"Worktree inventory timed out; open a repository directly for a narrower view.",
+						);
+						break;
+					}
+					current();
+					if (rows.length >= 100) break;
+					let records;
+					try {
+						records = await listWorktrees(pi, root, inventorySignal);
+					} catch {
+						lifetime.signal.throwIfAborted();
+						warnings.push(`Cannot list worktrees for ${root}`);
+						continue;
+					}
+					const repositoryPath =
+						records.find((record) => record.isMain)?.path ?? root;
+					repositoryPaths.add(repositoryPath);
+					const relativeName = relative(ctx.cwd, repositoryPath);
+					const repositoryLabel = stripTerminalControls(
+						!relativeName ||
+							relativeName === ".." ||
+							relativeName.startsWith(`..${sep}`)
+							? basename(repositoryPath)
+							: relativeName,
+					);
+					for (const record of records) {
+						if (rows.length >= 100 || inventorySignal.aborted) break;
+						if (rows.some((row) => pathsEqual(row.path, record.path))) continue;
+						const owned = ownership.find(
+							(row) =>
+								pathsEqual(row.path, record.path) &&
+								row.branch === record.branch,
+						);
+						if (record.bare || (active && record.isMain && !owned)) continue;
+						let changedFiles: number | null = null;
+						try {
+							const fields = (
+								await worktreeGit(
+									[
+										"status",
+										"--porcelain=v1",
+										"-z",
+										"--untracked-files=all",
+										"--ignore-submodules=none",
+									],
+									record.path,
+									inventorySignal,
+								)
+							).split("\0");
+							changedFiles = 0;
+							for (let i = 0; i < fields.length; i++)
+								if (fields[i]) {
+									changedFiles++;
+									if (/^[RC]|^.[RC]/.test(fields[i])) i++;
+								}
+						} catch {}
+						const worker =
+							owned?.ownerSessionId === sessionId &&
+							workers?.state === "available"
+								? workers.items.find((row) => row.childId === owned.childId)
+								: undefined;
+						rows.push({
+							repositoryPath,
+							repositoryLabel,
+							path: record.path,
+							branch: record.branch ?? null,
+							head: record.head ?? null,
+							main: record.isMain,
+							current: !!active && pathsEqual(record.path, active),
+							locked: record.lockedReason !== undefined,
+							stale: record.prunableReason !== undefined,
+							detached: record.detached,
+							changedFiles,
+							ownerTaskId: owned?.taskId,
+							ownerTitle: owned?.title,
+							workerStatus: worker?.status,
+							inUse: !!owned && !owned.released,
+							includedChanges:
+								owned?.state === "ready" && owned.includedChanges,
+							setupError:
+								owned?.state === "failed"
+									? (owned.error ?? "Worker launch failed")
+									: undefined,
+						});
+					}
+				}
 				current();
-				const active = await currentWorktreePath(pi, ctx.cwd, lifetime.signal);
-				current();
+				if (
+					inventorySignal.aborted &&
+					!warnings.some((warning) =>
+						warning.startsWith("Worktree inventory timed out"),
+					)
+				)
+					warnings.push(
+						"Worktree inventory timed out; open a repository directly for a narrower view.",
+					);
+				if (rows.length >= 100)
+					warnings.push(
+						"Showing the first 100 worktrees; open a repository directly to inspect more.",
+					);
+				rows.sort(
+					(a, b) =>
+						a.repositoryPath.localeCompare(b.repositoryPath) ||
+						Number(b.main) - Number(a.main) ||
+						a.path.localeCompare(b.path),
+				);
 				worktreeCache = {
 					at: Date.now(),
-					error: null,
-					rows: records.slice(0, 100).map((record) => ({
-						path: record.path,
-						branch: record.branch ?? null,
-						head: record.head ?? null,
-						main: record.isMain,
-						current: pathsEqual(record.path, active),
-						locked: record.lockedReason !== undefined,
-						stale: record.prunableReason !== undefined,
-						detached: record.detached,
-					})),
+					error: warnings.length
+						? stripTerminalControls(warnings.join("\n")).slice(0, 2000)
+						: null,
+					rows: rows.slice(0, 100),
+					repositoryCount: repositoryPaths.size,
+					container: !active,
 				};
 			} catch (error) {
 				if (!closed)
@@ -187,6 +380,7 @@ export function createWorkflowService(
 			terminal = runtime.snapshotSettingsApplicationState().terminalDetails;
 		return {
 			protocol: 1,
+			capabilities: { createPausedGoal: true },
 			sessionId,
 			serviceEpoch,
 			cwd: ctx.cwd,
@@ -201,11 +395,14 @@ export function createWorkflowService(
 			worktrees: worktreeCache?.rows ?? [],
 			worktreeError: worktreeCache?.error ?? null,
 			worktreeLoading: !worktreeCache || !!reading,
+			worktreeRepositoryCount: worktreeCache?.repositoryCount ?? 0,
+			worktreeContainer: worktreeCache?.container ?? false,
 			goal: goal
 				? {
 						id: goal.id,
 						text: goal.text,
 						status: goal.status,
+						tasks: readGoalTasks(ctx, goal),
 						waiting: goal.waiting?.reason ?? null,
 						iteration: goal.iteration,
 						tokensUsed: goal.tokensUsed,
@@ -215,7 +412,7 @@ export function createWorkflowService(
 						safetyPauseCause: goal.safetyPauseCause ?? null,
 						summary:
 							terminal?.goalId === goal.id
-								? (terminal.summary ?? null)
+								? (terminal.summary ?? terminal.reason ?? null)
 								: null,
 					}
 				: null,
@@ -285,6 +482,7 @@ export function createWorkflowService(
 		return new Proxy(ctx, {
 			get(target, key) {
 				if (key === "ui") return ui;
+				if (key === "cwd") return op.worktreeCwd ?? target.cwd;
 				if (key === "signal") return op.controller.signal;
 				if (key === "hasUI") return true;
 				if (key === "mode") return "rpc";
@@ -297,8 +495,35 @@ export function createWorkflowService(
 		const gitPi = new Proxy(pi, {
 			get(target, key) {
 				if (key === "exec")
-					return (command: string, args: string[], options: any) => {
+					return async (command: string, args: string[], options: any) => {
 						current(op);
+						if (
+							command === "git" &&
+							args[0] === "worktree" &&
+							args[1] === "remove"
+						) {
+							const path = args[2];
+							const inside = relative(
+								pathIdentity(path),
+								pathIdentity(ctx.cwd),
+							);
+							if (
+								!inside ||
+								(inside !== ".." &&
+									!inside.startsWith(`..${sep}`) &&
+									!isAbsolute(inside))
+							)
+								throw new Error("Cannot remove the current working directory");
+							if (
+								(await ownedWorktrees()).some(
+									(record) => pathsEqual(record.path, path) && !record.released,
+								)
+							)
+								throw new Error(
+									"Worktree still has an attached worker; reap the worker before removal",
+								);
+							current(op);
+						}
 						if (
 							command === "git" &&
 							args[0] === "worktree" &&
@@ -327,13 +552,39 @@ export function createWorkflowService(
 					throw new Error(
 						"Pause Goal and wait until Pi is idle before changing worktrees",
 					);
-				const records = await listWorktrees(pi, ctx.cwd, op.controller.signal);
-				current(op);
-				const path = await currentWorktreePath(
+				if (typeof r.path === "string")
+					op.worktreeCwd = await worktreeRepository(
+						r.path,
+						op.controller.signal,
+					);
+				if (
+					!op.worktreeCwd &&
+					!(await workspaceRepositories(pi, ctx.cwd, op.controller.signal))
+						.active
+				)
+					throw new Error(
+						"Select a repository checkout before changing its worktrees.",
+					);
+				const repository = op.worktreeCwd ?? ctx.cwd;
+				const records = await listWorktrees(
 					pi,
-					ctx.cwd,
+					repository,
 					op.controller.signal,
 				);
+				if (
+					r.path &&
+					!records.some((record) => pathsEqual(record.path, r.path))
+				)
+					throw new Error("Worktree is no longer registered");
+				current(op);
+				const path =
+					r.action === "worktree.remove"
+						? await currentWorktreePath(
+								pi,
+								ctx.cwd,
+								op.controller.signal,
+							).catch(() => ctx.cwd)
+						: await currentWorktreePath(pi, repository, op.controller.signal);
 				current(op);
 				if (r.action === "worktree.add")
 					await addFlow(
@@ -354,6 +605,7 @@ export function createWorkflowService(
 							current(op);
 							op.protectedPaths = [path];
 						},
+						r.path,
 					);
 				else if (r.action === "worktree.prune")
 					await pruneFlow(gitPi, commandCtx, records);
@@ -462,6 +714,7 @@ export function createWorkflowService(
 						"action",
 						"expectedGoalId",
 						"objective",
+						"text",
 						"tokenBudget",
 						"operationId",
 						"dialogId",
@@ -530,6 +783,44 @@ export function createWorkflowService(
 		if (r.action.startsWith("goal.")) {
 			if ((runtime.activeGoal?.id ?? null) !== r.expectedGoalId)
 				throw new Error("Goal changed");
+			if (r.action === "goal.create_paused") {
+				if (runtime.activeGoal)
+					throw new Error(
+						"A goal already exists; clear it before creating another",
+					);
+				if (!ctx.isIdle() || ctx.hasPendingMessages())
+					throw new Error("Wait until Pi is idle before saving a goal");
+				const budget = r.tokenBudget ?? 250_000;
+				if (
+					typeof r.objective !== "string" ||
+					!r.objective.trim() ||
+					r.objective.length > 4000 ||
+					!Number.isSafeInteger(budget) ||
+					budget < 1 ||
+					budget > 1_000_000
+				)
+					throw new Error(
+						"Provide an objective of 1–4000 characters and a budget between 1 and 1000000",
+					);
+			}
+			if (r.action === "goal.add_task") {
+				if (!runtime.activeGoal || runtime.activeGoal.status === "complete")
+					throw new Error("There is no current goal to add a task to");
+				if (
+					!ctx.isIdle() ||
+					ctx.hasPendingMessages() ||
+					runtime.activeGoal.status === "active"
+				)
+					throw new Error(
+						"Pause the goal and wait for the current turn before adding a task",
+					);
+				if (
+					typeof r.text !== "string" ||
+					!r.text.trim() ||
+					[...r.text.trim()].length > 503
+				)
+					throw new Error("Provide a task of at most 503 characters");
+			}
 			if (
 				["goal.start", "goal.edit"].includes(r.action) &&
 				(typeof r.objective !== "string" ||
@@ -544,10 +835,46 @@ export function createWorkflowService(
 				);
 		}
 		requests.set(r.requestId, fingerprint);
+		if (r.action === "goal.create_paused") {
+			current();
+			const goal = transitionGoal(
+				createGoal(
+					r.objective.trim(),
+					r.tokenBudget ?? 250_000,
+					currentTokenTotal(ctx),
+				),
+				"paused",
+			);
+			runtime.clearGoalWaitTimer();
+			runtime.cancelContinuationWork();
+			runtime.clearGoalRecovery();
+			runtime.clearBudgetWrapUp();
+			runtime.clearStaleGoalToolCallBlock();
+			runtime.activeGoal = goal;
+			try {
+				runtime.persistGoal(goal);
+			} catch (error) {
+				runtime.activeGoal = undefined;
+				try {
+					runtime.clearPersistedGoal(ctx.cwd);
+				} catch {}
+				throw error;
+			}
+			runtime.ensureInactiveGoalContextContract(ctx);
+			runtime.updateStatus(ctx, goal);
+			notice = null;
+			return snapshot();
+		}
+		if (r.action === "goal.add_task") {
+			addGoalTask(pi, ctx, runtime.activeGoal!, r.expectedGoalId, r.text);
+			notice = null;
+			return snapshot();
+		}
 		if (r.action === "worktree.open") {
 			if (typeof r.path !== "string" || r.path.length > 4096)
 				throw new Error("Invalid worktree path");
-			const records = await listWorktrees(pi, ctx.cwd, lifetime.signal);
+			const repository = await worktreeRepository(r.path, lifetime.signal);
+			const records = await listWorktrees(pi, repository, lifetime.signal);
 			current();
 			const match = records.find(
 				(record) =>

@@ -37,6 +37,12 @@ export interface AccountControlsSnapshot {
     /** Local binding only; never remote validity or quota status. */
     status: "local-binding-confirmed" | "unavailable" | "unknown";
     remoteEntitlement: "not-queried";
+    /** Hash of the verified OAuth account/user identity, not of a credential. Absent when unverified. */
+    accountKey?: string;
+    /** Noncredential key linking a verified native OpenAI OAuth registration; absent when unverified. */
+    nativeRegistrationKey?: string;
+    /** Distinguishes an unsupported older service from a rejected current binding. */
+    nativeRegistrationVersion?: 1;
     settingsUrl: "https://platform.openai.com/settings/organization/usage" | "https://chatgpt.com/settings/usage" | null;
   };
 }

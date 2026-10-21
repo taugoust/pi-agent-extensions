@@ -181,6 +181,7 @@ export class TuiWorkerTmux {
       PI_TUI_WORKER_LAUNCH_MODE: input.launchMode,
       PI_TUI_WORKER_LAUNCHER: launcher,
       PI_SUBAGENT_ID: input.childId,
+      PI_SUBAGENT_NAME: paneTitle.replace(/^agt-/, "").replace(/-/g, " ").split(/\s+/).slice(0, 3).join(" "),
     };
     const identity = { ...input, runtimeId, controlSocket };
     for (const [key, name] of Object.entries(TUI_WORKER_DISCOVERY_ENV)) identityEnv[name] = String(identity[key as keyof typeof identity]);

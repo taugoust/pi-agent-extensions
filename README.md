@@ -209,14 +209,14 @@ nix build .#checks.x86_64-linux.idle-context-warning
 <details>
 <summary><strong>workflows</strong> - Worktree and opt-in Goal</summary>
 
-The native Paseo **Workflows** panel adapts the candidate Worktree and Goal engines. Manage Git worktrees with exact previews and strict removal checks, or explicitly start a bounded goal using the current Pi model/tools. Defaults are three automatic responses, two repeated no-progress runs and a 250k token budget. Native opening creates a separate workspace rather than moving the current conversation. See [workflows/README.md](workflows/README.md) for safety boundaries, terminal commands and live-test instructions.
+**Work → Goals** and **Work → Worktrees** adapt the candidate engines. Describe an outcome in chat and ask the model to keep working: `goal_manage` controls the bounded Goal engine, while `update_progress` supplies its persistent checklist. Unfinished required tasks prevent completion; standalone progress remains supported. The Goals tab is an overview and intervention surface, not a mandatory creation form. Defaults remain three automatic responses, two repeated no-progress runs and a 250k token budget. Worktree operations retain their confirmation/removal safeguards. See [workflows/README.md](workflows/README.md) for model controls, task identity and safety boundaries.
 
 </details>
 
 <details>
-<summary><strong>btw</strong> - Paseo side conversations</summary>
+<summary><strong>btw</strong> - Terminal and Paseo side conversations</summary>
 
-Open the **BTW** composer panel in Paseo for streaming side questions and follow-ups, with a separate model, explicit context selection, cancellation, and temporary history. Copy an answer to paste it into the main draft. No main messages, model changes, or compaction are triggered. The default side model derives from the subagent configuration and never silently falls back. See [btw/README.md](btw/README.md) for limits and upstream attribution.
+In Pi's terminal, `/btw` opens the candidate manager and `/btw <question>` starts its native side chat, including follow-ups, search, pane layouts, settings, and explicit bring-to-main draft controls. Terminal settings default to the main model/thinking and are separate from Paseo. The **btw** composer chat in Paseo retains its compact interface and configured cheap model. Neither path automatically adds main messages, changes the main model, or compacts the main session. See [btw/README.md](btw/README.md) for lifecycle, build instructions and attribution.
 
 </details>
 

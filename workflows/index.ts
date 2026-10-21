@@ -23,6 +23,14 @@ export default function workflows(
 	let goalState: ReturnType<typeof goal>;
 	const api = new Proxy(pi, {
 		get(target, key) {
+			if (key === "registerTool")
+				return (definition: any) => target.registerTool(definition.name !== "goal_manage" ? definition : {
+					...definition,
+					execute: async (...args: any[]) => {
+						if (commandBusy || service?.hasOperation()) throw new Error("Finish the current workflow operation before changing the goal");
+						return definition.execute(...args);
+					},
+				});
 			if (key === "registerCommand")
 				return (name: string, definition: any) =>
 					target.registerCommand(name, {
