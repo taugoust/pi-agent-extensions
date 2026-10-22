@@ -11,354 +11,331 @@
 }:
 let
   cfg = config.programs.pi;
-  extDir = ".pi/agent/extensions";
   registry = import ./extension-registry.nix { inherit self pi-mcp-adapter pi-openai-fast-mode; };
+  json = pkgs.formats.json { };
+  jsonObject = lib.types.attrsOf json.type;
+  extensionNames = builtins.attrNames registry.extensions;
+  selectedExtensions = registry.resolveExtensions (
+    builtins.filter (
+      name: cfg.extensions.${registry.extensions.${name}.optionName}.enable
+    ) extensionNames
+  );
+  selectedSkills = builtins.filter (name: cfg.skills.${name}.enable) registry.localSkillNames;
+  bundle =
+    (import ./mk-extension-bundle.nix {
+      inherit
+        self
+        pi-mcp-adapter
+        pi-openai-fast-mode
+        lib
+        ;
+    })
+      {
+        inherit pkgs;
+        extensions = selectedExtensions;
+        skills = selectedSkills;
+      };
   needsSharedRuntime = lib.any (
+    name: builtins.elem name registry.sharedRuntimeExtensionNames
+  ) selectedExtensions;
+  modelDefaults = {
+    inherit (cfg.extensions.subagent) defaultProvider defaultModel defaultThinkingLevel;
+  };
+  namedSettings = {
+    btw = { inherit (cfg.extensions.btw) model; };
+    stamp = { inherit (cfg.extensions.stamp) visibleByDefault; };
+    cache-hit-monitor = { inherit (cfg.extensions.cache-hit-monitor) visibleByDefault; };
+    idle-context-warning = {
+      inherit (cfg.extensions.idle-context-warning)
+        idleMinutes
+        contextPercent
+        cheapCompactionModel
+        guardedModels
+        ;
+    };
+    slow-mode = { inherit (cfg.extensions.slow-mode) enabledByDefault; };
+    subagent = modelDefaults;
+  };
+  extensionSettings =
     name:
-    let
-      optionName =
-        if name == "openai-accounts" then
-          "accounts"
-        else if name == "openai-usage" then
-          "usage"
-        else
-          name;
-    in
-    cfg.extensions.${optionName}.enable
-  ) registry.sharedRuntimeExtensionNames;
+    lib.recursiveUpdate (namedSettings.${name} or { })
+      cfg.extensions.${registry.extensions.${name}.optionName}.settings;
+  normalizePackage =
+    value:
+    if lib.isDerivation value then
+      toString value
+    else if builtins.isAttrs value then
+      value // { source = toString value.source; }
+    else
+      value;
+  nativeSettings =
+    cfg.settings
+    // lib.optionalAttrs (cfg.packages != [ ] || cfg.settings ? packages) {
+      packages = lib.unique (map normalizePackage ((cfg.settings.packages or [ ]) ++ cfg.packages));
+    };
+  nativeDefaults = json.generate "pi-native-defaults.json" {
+    settings = nativeSettings;
+    models = cfg.models;
+  };
+  extensionFiles = lib.listToAttrs (
+    map (
+      name:
+      let
+        entry = registry.extensions.${name};
+      in
+      {
+        name = "${cfg.agentDir}/extensions/${entry.installName}";
+        value = {
+          source =
+            "${bundle}/${entry.manifestPath}"
+            + lib.optionalString (entry ? installSubdir) "/${entry.installSubdir}";
+          # Link source files, never the containing directory: upstream Fast Mode
+          # persists config.json alongside its sources.
+          recursive = true;
+        };
+      }
+    ) selectedExtensions
+  );
+  defaultsFiles = lib.listToAttrs (
+    map (name: {
+      name = "${cfg.agentDir}/defaults/${name}.json";
+      value.text = builtins.toJSON (extensionSettings name);
+    }) selectedExtensions
+  );
+  skillFiles = lib.listToAttrs (
+    map (name: {
+      name = "${cfg.agentDir}/skills/${name}";
+      value = {
+        source = "${bundle}/${registry.skills.${name}.manifestPath}";
+        recursive = true;
+      };
+    }) selectedSkills
+  );
+  subagentSettingsValid = lib.all (
+    key:
+    builtins.elem key [
+      "defaultProvider"
+      "defaultModel"
+      "defaultThinkingLevel"
+    ]
+  ) (builtins.attrNames cfg.extensions.subagent.settings);
+  thinkingType = lib.types.enum [
+    "off"
+    "minimal"
+    "low"
+    "medium"
+    "high"
+    "xhigh"
+    "max"
+  ];
+  stringOption =
+    default: description:
+    lib.mkOption {
+      type = lib.types.str;
+      inherit default description;
+    };
+  boolOption =
+    default: description:
+    lib.mkOption {
+      type = lib.types.bool;
+      inherit default description;
+    };
 in
 {
   options.programs.pi = {
     enable = lib.mkEnableOption "pi coding agent";
-
     package = lib.mkOption {
       type = lib.types.nullOr lib.types.package;
       default = null;
-      description = "The pi package to install. If null, pi is not added to home.packages.";
+      description = "Pi executable to install; null leaves home.packages unchanged.";
     };
-
-    extensions = {
-      background-job.enable = lib.mkEnableOption "background-job extension — durable native shell jobs in an isolated tmux server";
-      workflows.enable = lib.mkEnableOption "Git worktrees and bounded, opt-in Goal with native Paseo controls";
-      btw = {
-        enable = lib.mkEnableOption "BTW side conversations with native Paseo controls";
-        model = lib.mkOption {
-          type = lib.types.str;
-          default = "${cfg.extensions.subagent.defaultProvider}/${cfg.extensions.subagent.defaultModel}";
-          description = "Separate physical BTW model. Unavailable models fail without a fallback; thinking is low.";
-        };
-      };
-      direnv.enable = lib.mkEnableOption "direnv extension — refreshes environment via direnv export";
-      fence.enable = lib.mkEnableOption "fence extension — blocks write/edit outside cwd";
-      fetch.enable = lib.mkEnableOption "adaptive fetch extension — native HTTP outside AgentSH and supervised curl when AgentSH is active";
-      stamp = {
-        enable = lib.mkEnableOption "response stamps and Paseo metadata";
-        visibleByDefault = lib.mkOption {
-          type = lib.types.bool;
-          default = false;
-          description = "Show native transcript stamps at session start; /stamp show and /stamp hide override at runtime without changing collection.";
-        };
-      };
-      progress.enable = lib.mkEnableOption "branch-aware progress and Paseo snapshots";
-      cache-hit-monitor = {
-        enable = lib.mkEnableOption "observed cache diagnostics and Paseo snapshots";
-        visibleByDefault = lib.mkOption {
-          type = lib.types.bool;
-          default = false;
-          description = "Show the native cache widget at session start; /cache-hit-monitor toggles it without changing sampling or Paseo snapshots.";
-        };
-      };
-      idle-context-warning = {
-        enable = lib.mkEnableOption "idle-context-warning extension — warn before idle prompts and optionally use cheap idle compaction";
-        guardedModels = lib.mkOption {
-          type = lib.types.attrsOf lib.types.str;
-          default = { };
-          example = {
-            astra = "openai/gpt-6-astra";
+    agentDir = lib.mkOption {
+      type = lib.types.strMatching "[^/].*";
+      default = ".pi/agent";
+      description = "Agent directory relative to home. Sets PI_CODING_AGENT_DIR; must not contain parent traversal.";
+    };
+    nativeConfigMode = lib.mkOption {
+      type = lib.types.enum [
+        "managed"
+        "mutable"
+      ];
+      default = "managed";
+      description = "managed links native settings/models read-only (UI changes cannot persist); mutable merges defaults on activation beneath existing regular files. Existing symlinks are never migrated automatically.";
+    };
+    settings = lib.mkOption {
+      type = jsonObject;
+      default = { };
+      description = "Native Pi settings. In managed mode these are read-only; mutable mode merges beneath existing settings.json on activation. No secrets.";
+    };
+    models = lib.mkOption {
+      type = jsonObject;
+      default = { };
+      description = "Native models.json configuration, read-only in managed mode or merged beneath writable values on activation in mutable mode. Use environment references, never literal credentials.";
+    };
+    packages = lib.mkOption {
+      type = lib.types.listOf (
+        lib.types.oneOf [
+          lib.types.str
+          lib.types.package
+          (lib.types.submodule {
+            freeformType = jsonObject;
+            options.source = lib.mkOption { type = lib.types.either lib.types.str lib.types.package; };
+          })
+        ]
+      );
+      default = [ ];
+      description = "Additive native Pi package declarations: source strings, Nix package derivations, or source/filter objects. Store paths become strings, not serialized derivations.";
+    };
+    contextFiles = lib.mkOption {
+      type = lib.types.attrsOf (
+        lib.types.submodule {
+          options = {
+            source = lib.mkOption {
+              type = lib.types.nullOr lib.types.path;
+              default = null;
+              description = "Source file; mutually exclusive with text.";
+            };
+            text = lib.mkOption {
+              type = lib.types.nullOr lib.types.lines;
+              default = null;
+              description = "Literal context text; mutually exclusive with source.";
+            };
           };
-          description = "Selectable idle-guard/<name> models mapped to exact physical provider/model IDs. Selected thinking is forwarded unchanged. Idle recovery uses cheapCompactionModel; only selected guarded models are protected.";
-        };
-        cheapCompactionModel = lib.mkOption {
-          type = lib.types.nullOr lib.types.str;
-          default = null;
-          example = "openai/gpt-6-luna:low";
-          description = "Exact provider/model[:thinking] for compaction at or above the idle warning threshold, independently of context usage. Null keeps normal Pi compaction; failures cancel without default-model fallback. Omitted thinking defaults to low.";
-        };
-      };
-      questionnaire.enable = lib.mkEnableOption "questionnaire extension — LLM-driven multi-question UI tool";
-      modal-editor.enable = lib.mkEnableOption "modal-editor extension — vim-style modal input";
-      mac-system-theme.enable = lib.mkEnableOption "mac-system-theme extension — syncs pi theme to macOS system appearance";
-      pager.enable = lib.mkEnableOption "pager extension — open conversation in an external pager (bat/less)";
-      pdf.enable = lib.mkEnableOption "pdf extension — inspect PDFs locally or through an active AgentSH supervisor";
-      permission-gate.enable = lib.mkEnableOption "permission-gate extension — AgentSH rendezvous or legacy dangerous Bash authorization";
-      ssh.enable = lib.mkEnableOption "ssh extension — run read/write/edit/bash tools on a remote host via --ssh";
-      openai-fast-mode.enable = lib.mkEnableOption "pi-openai-fast-mode extension — toggle OpenAI priority inference with /fast";
-      accounts.enable = lib.mkEnableOption "native OpenAI account manager — named OAuth/API-key accounts scoped to Pi sessions";
-      usage.enable = lib.mkEnableOption "OpenAI effective-credential status and official settings link (no quota queries)";
-
-      slow-mode = {
-        enable = lib.mkEnableOption "slow-mode extension — review gate for write/edit tool calls";
-        enabledByDefault = lib.mkOption {
-          type = lib.types.bool;
-          default = false;
-          description = "Start every session with slow-mode already active.";
-        };
-      };
-
-      sandbox.enable = lib.mkEnableOption "sandbox extension — AgentSH supervisor backend; also installs the adaptive subagent and its child finalizer";
-      subagent = {
-        enable = lib.mkEnableOption "adaptive subagent extension — native child Pi or AgentSH backend; also installs its child finalizer";
-        defaultProvider = lib.mkOption {
-          type = lib.types.str;
-          default = "openai";
-          description = "Default provider for new subagents, independent of the main agent.";
-        };
-        defaultModel = lib.mkOption {
-          type = lib.types.str;
-          default = "gpt-6-luna";
-          description = "Default model ID for new subagents. Explicit task models take precedence.";
-        };
-        defaultThinkingLevel = lib.mkOption {
-          type = lib.types.enum [
-            "off"
-            "minimal"
-            "low"
-            "medium"
-            "high"
-            "xhigh"
-            "max"
-          ];
-          default = "low";
-          description = "Subagent thinking level unless the task model includes a thinking suffix.";
-        };
-      };
-      subagent-finalizer.enable = lib.mkEnableOption "standalone subagent-finalizer extension — automatically included with sandbox or subagent";
-      mcp-adapter.enable = lib.mkEnableOption "pi-mcp-adapter extension — MCP proxy/direct-tools integration";
+        }
+      );
+      default = { };
+      description = "Read-only Markdown context files keyed by filename relative to agentDir, e.g. AGENTS.md and APPEND_SYSTEM.md. No secrets. Reserved defaults/extensions/skills paths are not allowed.";
     };
-
-    skills = {
-      github-repo-search.enable = lib.mkEnableOption "github-repo-search skill — search GitHub repos via gh CLI without cloning";
-      remindctl.enable = lib.mkEnableOption "remindctl skill — manage Apple Reminders via the remindctl CLI";
-      drawio.enable = lib.mkEnableOption "drawio skill — generate native draw.io diagrams and optional exports";
-      tikz-figure-recreation.enable = lib.mkEnableOption "tikz-figure-recreation skill — recreate paper/PDF/image/draw.io figures as TikZ";
-    };
+    extensions =
+      lib.recursiveUpdate
+        (lib.listToAttrs (
+          map (name: {
+            name = registry.extensions.${name}.optionName;
+            value = {
+              enable = lib.mkEnableOption "${name} extension";
+              settings = lib.mkOption {
+                type = jsonObject;
+                default = { };
+                description = "Direct JSON configuration defaults for ${name}. Recursively overrides named options; user preferences and runtime overrides take precedence. Never put secrets, capabilities, or runtime identities here. Subagent accepts only its three model defaults.";
+              };
+            };
+          }) extensionNames
+        ))
+        {
+          btw.model = stringOption "${cfg.extensions.subagent.defaultProvider}/${cfg.extensions.subagent.defaultModel}" "Separate physical BTW model; unavailable models fail without fallback.";
+          stamp.visibleByDefault = boolOption false "Show native transcript stamps at session start.";
+          cache-hit-monitor.visibleByDefault = boolOption false "Show the native cache widget at session start.";
+          slow-mode.enabledByDefault = boolOption false "Start each session with slow-mode active.";
+          idle-context-warning = {
+            idleMinutes = lib.mkOption {
+              type = lib.types.ints.between 1 1440;
+              default = 30;
+              description = "Idle duration in minutes before the warning/recovery threshold.";
+            };
+            contextPercent = lib.mkOption {
+              type = lib.types.ints.between 1 100;
+              default = 20;
+              description = "Minimum used context percentage for an idle warning.";
+            };
+            guardedModels = lib.mkOption {
+              type = lib.types.attrsOf lib.types.str;
+              default = { };
+              description = "Selectable idle-guard names mapped to exact physical provider/model IDs.";
+            };
+            cheapCompactionModel = lib.mkOption {
+              type = lib.types.nullOr lib.types.str;
+              default = null;
+              description = "Exact provider/model[:thinking] for idle recovery; null uses normal Pi compaction. No fallback.";
+            };
+          };
+          subagent = {
+            defaultProvider = stringOption "openai" "Default provider for new subagents.";
+            defaultModel = stringOption "gpt-6-luna" "Default model ID for new subagents.";
+            defaultThinkingLevel = lib.mkOption {
+              type = thinkingType;
+              default = "low";
+              description = "Subagent thinking unless the explicit task model includes a thinking suffix.";
+            };
+          };
+        };
+    skills = lib.genAttrs registry.localSkillNames (name: {
+      enable = lib.mkEnableOption "${name} skill";
+    });
   };
 
   config = lib.mkIf cfg.enable {
+    assertions = [
+      {
+        assertion = !(builtins.elem ".." (lib.splitString "/" cfg.agentDir));
+        message = "programs.pi.agentDir must be relative to home without parent traversal.";
+      }
+      {
+        assertion = subagentSettingsValid;
+        message = "programs.pi.extensions.subagent.settings accepts only defaultProvider, defaultModel and defaultThinkingLevel; launcher policy cannot be overridden.";
+      }
+      {
+        assertion = lib.all (
+          name:
+          lib.hasSuffix ".md" name
+          && !(lib.hasPrefix "/" name)
+          && !(builtins.elem ".." (lib.splitString "/" name))
+          && !(builtins.elem (builtins.head (lib.splitString "/" name)) [
+            "defaults"
+            "extensions"
+            "skills"
+          ])
+          && (
+            let
+              file = cfg.contextFiles.${name};
+            in
+            (file.source == null) != (file.text == null)
+          )
+        ) (builtins.attrNames cfg.contextFiles);
+        message = "programs.pi.contextFiles requires safe relative names and exactly one of source or text.";
+      }
+    ];
     programs.pi.package = lib.mkDefault self.packages.${pkgs.stdenv.hostPlatform.system}.pi;
-
-    home.packages = lib.mkMerge [
-      (lib.mkIf (cfg.package != null) [ cfg.package ])
-      (lib.mkIf cfg.extensions.background-job.enable [
+    home.sessionVariables.PI_CODING_AGENT_DIR = "${config.home.homeDirectory}/${cfg.agentDir}";
+    home.packages =
+      lib.optional (cfg.package != null) cfg.package
+      ++ lib.optionals cfg.extensions.background-job.enable [
         pkgs.nodejs
         pkgs.tmux
-      ])
-      (lib.mkIf cfg.extensions.pdf.enable [
+      ]
+      ++ lib.optionals cfg.extensions.pdf.enable [
         pkgs.poppler-utils
         pkgs.imagemagick
-      ])
-    ];
-
-    home.file = lib.mkMerge [
-      (lib.mkIf cfg.skills.github-repo-search.enable {
-        ".pi/agent/skills/github-repo-search/SKILL.md".source =
-          "${self}/skills/github-repo-search/SKILL.md";
-      })
-      (lib.mkIf cfg.skills.remindctl.enable {
-        ".pi/agent/skills/remindctl/SKILL.md".source = "${self}/skills/remindctl/SKILL.md";
-      })
-      (lib.mkIf cfg.skills.drawio.enable {
-        ".pi/agent/skills/drawio".source = "${self}/skills/drawio";
-      })
-      (lib.mkIf cfg.skills.tikz-figure-recreation.enable {
-        ".pi/agent/skills/tikz-figure-recreation/SKILL.md".source =
-          "${self}/skills/tikz-figure-recreation/SKILL.md";
-      })
-      (lib.mkIf needsSharedRuntime {
-        "${extDir}/shared".source = "${self}/shared";
-      })
-      (lib.mkIf cfg.extensions.stamp.enable {
-        "${extDir}/stamp".source = "${self}/stamp";
-        ".pi/agent/stamp-display.json".text = builtins.toJSON {
-          inherit (cfg.extensions.stamp) visibleByDefault;
+      ];
+    home.file =
+      extensionFiles
+      // defaultsFiles
+      // skillFiles
+      // lib.optionalAttrs (cfg.nativeConfigMode == "managed") {
+        "${cfg.agentDir}/settings.json".text = builtins.toJSON nativeSettings;
+        "${cfg.agentDir}/models.json".text = builtins.toJSON cfg.models;
+      }
+      // lib.optionalAttrs needsSharedRuntime {
+        "${cfg.agentDir}/extensions/shared" = {
+          source = "${bundle}/shared";
+          recursive = true;
         };
-      })
-      (lib.mkIf cfg.extensions.progress.enable {
-        "${extDir}/progress".source = "${self}/progress";
-      })
-      (lib.mkIf cfg.extensions.cache-hit-monitor.enable {
-        "${extDir}/cache-hit-monitor".source = "${self}/cache-hit-monitor";
-        ".pi/agent/cache-hit-monitor-display.json".text = builtins.toJSON {
-          inherit (cfg.extensions.cache-hit-monitor) visibleByDefault;
-        };
-      })
-      (lib.mkIf cfg.extensions.background-job.enable {
-        "${extDir}/background-job".source = "${self}/background-job";
-      })
-
-      (lib.mkIf cfg.extensions.direnv.enable {
-        "${extDir}/direnv/index.ts".source = "${self}/direnv/index.ts";
-      })
-
-      (lib.mkIf cfg.extensions.fence.enable {
-        "${extDir}/fence/index.ts".source = "${self}/fence/index.ts";
-      })
-
-      (lib.mkIf cfg.extensions.fetch.enable {
-        "${extDir}/fetch".source = "${self}/fetch";
-      })
-
-      (lib.mkIf cfg.extensions.questionnaire.enable {
-        "${extDir}/questionnaire/index.ts".source = "${self}/questionnaire/index.ts";
-        "${extDir}/questionnaire/paseo.ts".source = "${self}/questionnaire/paseo.ts";
-      })
-
-      (lib.mkIf cfg.extensions.modal-editor.enable {
-        "${extDir}/modal-editor/index.ts".source = "${self}/modal-editor/index.ts";
-      })
-
-      (lib.mkIf cfg.extensions.mac-system-theme.enable {
-        "${extDir}/mac-system-theme/index.ts".source = "${self}/mac-system-theme/index.ts";
-      })
-
-      (lib.mkIf cfg.extensions.pager.enable {
-        "${extDir}/pager/index.ts".source = "${self}/pager/index.ts";
-      })
-
-      (lib.mkIf cfg.extensions.pdf.enable {
-        "${extDir}/pdf/index.ts".source = "${self}/pdf/index.ts";
-        "${extDir}/pdf/backend.ts".source = "${self}/pdf/backend.ts";
-      })
-
-      (lib.mkIf cfg.extensions.permission-gate.enable {
-        "${extDir}/permission-gate/index.ts".source = "${self}/permission-gate/index.ts";
-      })
-
-      (lib.mkIf cfg.extensions.ssh.enable {
-        "${extDir}/ssh/index.ts".source = "${self}/ssh/index.ts";
-      })
-
-      (lib.mkIf cfg.extensions.workflows.enable {
-        "${extDir}/workflows".source = "${self}/workflows";
-      })
-      (lib.mkIf cfg.extensions.btw.enable {
-        "${extDir}/btw".source = "${self}/btw";
-        ".pi/agent/btw.json".text = builtins.toJSON { model = cfg.extensions.btw.model; };
-      })
-
-      (lib.mkIf cfg.extensions.accounts.enable {
-        "${extDir}/openai-accounts".source = "${self}/openai-accounts";
-      })
-      (lib.mkIf cfg.extensions.usage.enable {
-        "${extDir}/openai-usage".source = "${self}/openai-usage";
-      })
-
-      (lib.mkIf cfg.extensions.openai-fast-mode.enable (
-        builtins.listToAttrs (
-          map
-            (file: {
-              name = "${extDir}/pi-openai-fast-mode/${file}";
-              value.source = "${pi-openai-fast-mode}/src/${file}";
-            })
-            [
-              "commands.ts"
-              "config.ts"
-              "index.ts"
-              "payload.ts"
-              "status.ts"
-              "types.ts"
-            ]
-        )
-      ))
-
-      (lib.mkIf cfg.extensions.idle-context-warning.enable {
-        "${extDir}/idle-context-warning/index.ts".source = "${self}/idle-context-warning/index.ts";
-        "${extDir}/idle-context-warning/policy.ts".source = "${self}/idle-context-warning/policy.ts";
-        "${extDir}/idle-context-warning/compaction.ts".source =
-          "${self}/idle-context-warning/compaction.ts";
-        "${extDir}/idle-context-warning/guard.ts".source = "${self}/idle-context-warning/guard.ts";
-        "${extDir}/idle-context-warning.json".text = builtins.toJSON {
-          inherit (cfg.extensions.idle-context-warning) cheapCompactionModel guardedModels;
-        };
-      })
-
-      (lib.mkIf cfg.extensions.slow-mode.enable {
-        "${extDir}/slow-mode/index.ts".text =
-          builtins.replaceStrings
-            [ "rmdirSync" "let enabled = false;" ]
-            [
-              "rmSync"
-              (
-                if cfg.extensions.slow-mode.enabledByDefault then
-                  ''
-                    let enabled = true;
-
-                      pi.on("session_start", async (_event, ctx) => {
-                        if (ctx.hasUI) ctx.ui.setStatus("slow-mode", ctx.ui.theme.fg("warning", "slow ■"));
-                      });''
-                else
-                  "let enabled = false;"
-              )
-            ]
-            (builtins.readFile "${self}/slow-mode/index.ts");
-      })
-
-      (lib.mkIf cfg.extensions.sandbox.enable {
-        "${extDir}/sandbox".source = "${self}/sandbox";
-      })
-
-      (lib.mkIf (cfg.extensions.sandbox.enable || cfg.extensions.subagent.enable) {
-        ".pi/agent/subagent.json".text = builtins.toJSON {
-          inherit (cfg.extensions.subagent) defaultProvider defaultModel defaultThinkingLevel;
-        };
-        "${extDir}/subagent/config.ts".source = "${self}/subagent/config.ts";
-        "${extDir}/subagent/state-root.ts".source = "${self}/subagent/state-root.ts";
-        "${extDir}/subagent/index.ts".source = "${self}/subagent/index.ts";
-        "${extDir}/subagent/backend.ts".source = "${self}/subagent/backend.ts";
-        "${extDir}/subagent/background.ts".source = "${self}/subagent/background.ts";
-        "${extDir}/subagent/control.ts".source = "${self}/subagent/control.ts";
-        "${extDir}/subagent/foreground-handoff.ts".source = "${self}/subagent/foreground-handoff.ts";
-        "${extDir}/subagent/native-rpc.ts".source = "${self}/subagent/native-rpc.ts";
-        "${extDir}/subagent/job-proxy.ts".source = "${self}/subagent/job-proxy.ts";
-        "${extDir}/subagent/notify-proxy.ts".source = "${self}/subagent/notify-proxy.ts";
-        "${extDir}/subagent/outcome.ts".source = "${self}/subagent/outcome.ts";
-        "${extDir}/subagent/outcome-proxy.ts".source = "${self}/subagent/outcome-proxy.ts";
-        "${extDir}/subagent/resume.ts".source = "${self}/subagent/resume.ts";
-        "${extDir}/subagent/dashboard.ts".source = "${self}/subagent/dashboard.ts";
-        "${extDir}/subagent/parallel-result.ts".source = "${self}/subagent/parallel-result.ts";
-        "${extDir}/subagent/permission-proxy.ts".source = "${self}/subagent/permission-proxy.ts";
-        "${extDir}/subagent/permission-relay.ts".source = "${self}/subagent/permission-relay.ts";
-        "${extDir}/subagent/result-artifact.ts".source = "${self}/subagent/result-artifact.ts";
-        "${extDir}/subagent/group-wait.ts".source = "${self}/subagent/group-wait.ts";
-        "${extDir}/subagent/tui-native.ts".source = "${self}/subagent/tui-native.ts";
-        "${extDir}/subagent/headless-foreground.ts".source = "${self}/subagent/headless-foreground.ts";
-        "${extDir}/subagent/tui-names.ts".source = "${self}/subagent/tui-names.ts";
-        "${extDir}/subagent/tui-worker-client.ts".source = "${self}/subagent/tui-worker-client.ts";
-        "${extDir}/subagent/tui-worker-extension.ts".source = "${self}/subagent/tui-worker-extension.ts";
-        "${extDir}/subagent/model-inactivity.ts".source = "${self}/subagent/model-inactivity.ts";
-        "${extDir}/subagent/tui-worker-server.ts".source = "${self}/subagent/tui-worker-server.ts";
-        "${extDir}/subagent/tui-worker-store.ts".source = "${self}/subagent/tui-worker-store.ts";
-        "${extDir}/subagent/tui-worker-tmux.ts".source = "${self}/subagent/tui-worker-tmux.ts";
-      })
-
-      (lib.mkIf
-        (
-          cfg.extensions.sandbox.enable
-          || cfg.extensions.subagent.enable
-          || cfg.extensions.subagent-finalizer.enable
-        )
-        {
-          "${extDir}/subagent-finalizer/index.ts".source = "${self}/subagent-finalizer/index.ts";
-        }
-      )
-
-      (lib.mkIf cfg.extensions.mcp-adapter.enable {
-        "${extDir}/pi-mcp-adapter".source =
-          if pi-mcp-adapter != null then
-            pi-mcp-adapter
-          else
-            throw "programs.pi.extensions.mcp-adapter.enable requires pi-mcp-adapter input";
-      })
-    ];
+      }
+      // lib.mapAttrs' (
+        name: file:
+        lib.nameValuePair "${cfg.agentDir}/${name}" (lib.filterAttrs (_: value: value != null) file)
+      ) cfg.contextFiles
+      // {
+        "${cfg.agentDir}/defaults/settings.json".text = builtins.toJSON nativeSettings;
+        "${cfg.agentDir}/defaults/models.json".text = builtins.toJSON cfg.models;
+      };
+    # Native Pi does not support an additional defaults file. Seed/merge native
+    # defaults only at activation, leaving regular files writable and existing
+    # values authoritative. Never move credentials, user state, or symlinks.
+    home.activation.piNativeDefaults = lib.mkIf (cfg.nativeConfigMode == "mutable") (
+      lib.hm.dag.entryAfter [ "writeBoundary" "linkGeneration" ] ''
+        run ${pkgs.python3}/bin/python3 ${./merge-native-defaults.py} \
+          ${lib.escapeShellArg "${config.home.homeDirectory}/${cfg.agentDir}"} ${nativeDefaults}
+      ''
+    );
   };
 }

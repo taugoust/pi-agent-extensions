@@ -38,36 +38,44 @@ let
       value = {
         source = "${self}/${name}";
         manifestPath = name;
+        installName = name;
+        optionName =
+          if name == "openai-accounts" then
+            "accounts"
+          else if name == "openai-usage" then
+            "usage"
+          else
+            name;
+        dependencies =
+          if name == "sandbox" then
+            [ "subagent" ]
+          else if name == "subagent" then
+            [ "subagent-finalizer" ]
+          else
+            [ ];
       };
     }) localExtensionNames
   );
 
   pinnedExtensionNames = [ "openai-fast-mode" ];
 
-  # These extensions import the canonical AgentSH startup/runtime classifier
-  # from the package-level shared directory.
-  sharedRuntimeExtensionNames = [
-    "stamp"
-    "progress"
-    "cache-hit-monitor"
-    "background-job"
-    "direnv"
-    "fetch"
-    "pdf"
-    "permission-gate"
-    "questionnaire"
-    "sandbox"
-    "ssh"
-    "subagent"
-    "openai-accounts"
-    "openai-usage"
-  ];
+  # Local extensions may import the classifier, defaults loader, or other
+  # package-level helpers. Include the small shared tree for every local
+  # selection so adding a helper import never creates a missing-file install.
+  sharedRuntimeExtensionNames = localExtensionNames;
 
   upstreamExtensions = {
     openai-fast-mode = {
       source = pi-openai-fast-mode;
       manifestPath = "node_modules/pi-openai-fast-mode";
+      # The package lives at manifestPath, but Pi's extension resource is its
+      # TypeScript entrypoint (not a nested package declaration).
+      entrypoint = "src/index.ts";
       requiresInput = "pi-openai-fast-mode";
+      installName = "pi-openai-fast-mode";
+      installSubdir = "src";
+      optionName = "openai-fast-mode";
+      dependencies = [ ];
     };
   };
 
@@ -76,6 +84,9 @@ let
       source = pi-mcp-adapter;
       manifestPath = "node_modules/pi-mcp-adapter";
       requiresInput = "pi-mcp-adapter";
+      installName = "pi-mcp-adapter";
+      optionName = "mcp-adapter";
+      dependencies = [ ];
     };
   };
 
@@ -95,9 +106,19 @@ let
       };
     }) localSkillNames
   );
+  extensions = localExtensions // upstreamExtensions // optionalExtensions;
+  # One dependency graph serves package composition and Home Manager installation.
+  resolveExtensions =
+    names:
+    map (entry: entry.key) (
+      builtins.genericClosure {
+        startSet = map (key: { inherit key; }) names;
+        operator = entry: map (key: { inherit key; }) (extensions.${entry.key}.dependencies or [ ]);
+      }
+    );
 in
 {
-  extensions = localExtensions // upstreamExtensions // optionalExtensions;
+  inherit extensions resolveExtensions;
   inherit
     skills
     localExtensionNames

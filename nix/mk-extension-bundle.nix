@@ -22,15 +22,10 @@ let
   extensionRegistry = registry.extensions;
   skillRegistry = registry.skills;
 
-  # sandbox publishes the AgentSH backend; subagent is the sole adaptive
-  # model-facing registration. Native children explicitly load the finalizer.
-  wantsSubagent = builtins.elem "sandbox" extensions || builtins.elem "subagent" extensions;
-  selectedExtensions = lib.unique (
-    extensions
-    ++ lib.optional (builtins.elem "sandbox" extensions) "subagent"
-    ++ lib.optional wantsSubagent "subagent-finalizer"
-  );
-  needsSharedRuntime = lib.any (name: builtins.elem name selectedExtensions) registry.sharedRuntimeExtensionNames;
+  selectedExtensions = registry.resolveExtensions extensions;
+  needsSharedRuntime = lib.any (
+    name: builtins.elem name selectedExtensions
+  ) registry.sharedRuntimeExtensionNames;
   unknownExtensions = lib.subtractLists (builtins.attrNames extensionRegistry) selectedExtensions;
   unknownSkills = lib.subtractLists (builtins.attrNames skillRegistry) skills;
 
@@ -65,7 +60,9 @@ let
     type = "module";
     keywords = [ "pi-package" ];
     pi = lib.filterAttrs (_: value: value != [ ]) {
-      extensions = map (entry: entry.manifestPath) extensionEntries;
+      extensions = map (
+        entry: entry.manifestPath + lib.optionalString (entry ? entrypoint) "/${entry.entrypoint}"
+      ) extensionEntries;
       skills = map (entry: entry.manifestPath) skillEntries;
       inherit prompts themes;
     };
