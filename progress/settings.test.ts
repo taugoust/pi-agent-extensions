@@ -11,6 +11,7 @@ import {
   loadProgressSettings,
   MAX_PROGRESS_SETTINGS_BYTES,
   normalizeProgressSettings,
+  saveProgressSettings,
 } from "./settings.js";
 
 async function temporaryDirectory(t: { onTestFinished(callback: () => Promise<void>): void }) {
@@ -209,6 +210,112 @@ test("ignores symlinked pi-todo.json without creating canonical settings", async
     settings: { ...DEFAULT_PROGRESS_SETTINGS },
   });
   await assert.rejects(access(canonical));
+});
+
+async function isolatedDefaults(t: { onTestFinished(callback: () => Promise<void>): void }) {
+  const directory = await temporaryDirectory(t);
+  const previous = process.env.PI_CODING_AGENT_DIR;
+  process.env.PI_CODING_AGENT_DIR = directory;
+  t.onTestFinished(async () => {
+    if (previous === undefined) delete process.env.PI_CODING_AGENT_DIR;
+    else process.env.PI_CODING_AGENT_DIR = previous;
+  });
+  await mkdir(join(directory, "defaults"));
+  return { directory, defaults: join(directory, "defaults", "progress.json"), canonical: join(directory, "pi-progress.json") };
+}
+
+test("normalization is pure and independent of even malformed declarative defaults", async (t) => {
+  const paths = await isolatedDefaults(t);
+  const input = Object.freeze({ widget: Object.freeze({ enabled: false, maxVisibleItems: 3 }), showCompleted: false });
+  const expected = { ...DEFAULT_PROGRESS_SETTINGS, enabled: false, maxVisibleItems: 3, showCompleted: false };
+  await writeFile(paths.defaults, "{malformed");
+  assert.deepEqual(normalizeProgressSettings(input), expected);
+  await writeFile(paths.defaults, '{"displayMode":"expanded","showProgress":false}');
+  assert.deepEqual(normalizeProgressSettings(input), expected);
+  assert.deepEqual(input, { widget: { enabled: false, maxVisibleItems: 3 }, showCompleted: false });
+  await assert.rejects(access(paths.canonical));
+});
+
+test("effective loading applies builtins then declarative defaults then explicit nested and flat preferences", async (t) => {
+  const paths = await isolatedDefaults(t);
+  const declarative = '{"enabled":false,"displayMode":"expanded","showCompleted":false,"maxVisibleItems":8}';
+  await writeFile(paths.defaults, declarative);
+  assert.deepEqual(await loadProgressSettings(), {
+    kind: "missing", path: paths.canonical,
+    settings: { enabled: false, displayMode: "expanded", showCompleted: false, maxVisibleItems: 8, showProgress: true },
+  });
+  await assert.rejects(access(paths.canonical));
+  const preferences = '{"widget":{"enabled":true,"displayMode":"collapsed","maxVisibleItems":2},"maxVisibleItems":5}';
+  await writeFile(paths.canonical, preferences);
+  const result = await loadProgressSettings();
+  assert.equal(result.kind, "loaded");
+  assert.deepEqual(result.settings, { enabled: true, displayMode: "collapsed", showCompleted: false, maxVisibleItems: 5, showProgress: true });
+  assert.equal(await readFile(paths.defaults, "utf8"), declarative);
+  assert.equal(await readFile(paths.canonical, "utf8"), preferences);
+});
+
+test("saving writes only explicit preferences, never resolved declarative or builtin fields", async (t) => {
+  const paths = await isolatedDefaults(t);
+  const declarative = '{"enabled":false,"displayMode":"expanded","maxVisibleItems":8}';
+  await writeFile(paths.defaults, declarative);
+  const effective = await saveProgressSettings({ showCompleted: false });
+  assert.deepEqual(effective, { enabled: false, displayMode: "expanded", maxVisibleItems: 8, showCompleted: false, showProgress: true });
+  assert.deepEqual(JSON.parse(await readFile(paths.canonical, "utf8")), { showCompleted: false });
+  assert.equal(await readFile(paths.defaults, "utf8"), declarative);
+  assert.deepEqual((await readdir(paths.directory)).sort(), ["defaults", "pi-progress.json"]);
+  // Existing explicit/unknown fields survive; inherited fields still do not leak.
+  await writeFile(paths.canonical, '{"widget":{"enabled":true},"future":{"preserve":1}}');
+  await saveProgressSettings({ showCompleted: false });
+  assert.deepEqual(JSON.parse(await readFile(paths.canonical, "utf8")), {
+    widget: { enabled: true }, future: { preserve: 1 }, showCompleted: false,
+  });
+});
+
+test("changed declarative defaults continue affecting only unoverridden fields after a save", async (t) => {
+  const paths = await isolatedDefaults(t);
+  await writeFile(paths.defaults, '{"displayMode":"expanded","enabled":false,"maxVisibleItems":8}');
+  await saveProgressSettings({ displayMode: "collapsed" });
+  const preferences = await readFile(paths.canonical, "utf8");
+  await writeFile(paths.defaults, '{"displayMode":"adaptive","enabled":true,"maxVisibleItems":2,"showProgress":false}');
+  assert.deepEqual((await loadProgressSettings()).settings, {
+    enabled: true, displayMode: "collapsed", maxVisibleItems: 2, showCompleted: true, showProgress: false,
+  });
+  assert.equal(await readFile(paths.canonical, "utf8"), preferences);
+});
+
+test("malformed declarative JSON or values fail closed without changing preferences or defaults", async (t) => {
+  const paths = await isolatedDefaults(t);
+  const preferences = '{"showCompleted":false}';
+  for (const declarative of ["{", "[]", '{"displayMode":"invalid"}', '{"enabled":"yes"}']) {
+    await writeFile(paths.defaults, declarative);
+    await writeFile(paths.canonical, preferences);
+    await assert.rejects(loadProgressSettings());
+    await assert.rejects(saveProgressSettings({ showProgress: false }));
+    assert.equal(await readFile(paths.canonical, "utf8"), preferences);
+    assert.equal(await readFile(paths.defaults, "utf8"), declarative);
+    assert.deepEqual((await readdir(paths.directory)).sort(), ["defaults", "pi-progress.json"]);
+  }
+  await rm(paths.canonical);
+  await writeFile(paths.defaults, "{");
+  await assert.rejects(loadProgressSettings());
+  await assert.rejects(saveProgressSettings({ enabled: false }));
+  await assert.rejects(access(paths.canonical));
+});
+
+test("malformed preferences report invalid and refuse saves without materializing effective defaults", async (t) => {
+  const paths = await isolatedDefaults(t);
+  const declarative = '{"enabled":false,"maxVisibleItems":4}';
+  await writeFile(paths.defaults, declarative);
+  for (const preferences of ["{", "null", '{"showCompleted":"yes"}']) {
+    await writeFile(paths.canonical, preferences);
+    const result = await loadProgressSettings();
+    assert.equal(result.kind, "invalid");
+    assert.deepEqual(result.settings, { ...DEFAULT_PROGRESS_SETTINGS, enabled: false, maxVisibleItems: 4 });
+    await assert.rejects(saveProgressSettings({ showCompleted: true }), /Cannot save invalid settings/);
+    assert.equal(await readFile(paths.canonical, "utf8"), preferences);
+    assert.equal(await readFile(paths.defaults, "utf8"), declarative);
+    assert.deepEqual((await readdir(paths.directory)).sort(), ["defaults", "pi-progress.json"]);
+  }
 });
 
 test("honors cancellation before canonical reads", async (t) => {
