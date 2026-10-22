@@ -154,6 +154,11 @@ in
       default = ".pi/agent";
       description = "Agent directory relative to home. Sets PI_CODING_AGENT_DIR; must not contain parent traversal.";
     };
+    quietState.enable = lib.mkOption {
+      type = lib.types.bool;
+      default = true;
+      description = "Enable quiet harness background-state delivery. PAE_QUIET_STATE_DISABLED remains a higher-priority runtime kill switch.";
+    };
     nativeConfigMode = lib.mkOption {
       type = lib.types.enum [
         "managed"
@@ -325,6 +330,9 @@ in
         lib.nameValuePair "${cfg.agentDir}/${name}" (lib.filterAttrs (_: value: value != null) file)
       ) cfg.contextFiles
       // {
+        "${cfg.agentDir}/defaults/quiet-state.json".text = builtins.toJSON {
+          enabled = cfg.quietState.enable;
+        };
         "${cfg.agentDir}/defaults/settings.json".text = builtins.toJSON nativeSettings;
         "${cfg.agentDir}/defaults/models.json".text = builtins.toJSON cfg.models;
       };

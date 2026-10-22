@@ -37,7 +37,12 @@ let
     if (entry ? requiresInput) && entry.source == null then
       throw "${packageName}: extension '${extName}' requires flake input '${entry.requiresInput}'"
     else
-      entry // { name = extName; }
+      entry
+      // {
+        name = extName;
+        source =
+          if entry ? package then pkgs.callPackage entry.package { src = entry.source; } else entry.source;
+      }
   ) selectedExtensions;
 
   skillEntries = map (skillName: skillRegistry.${skillName} // { name = skillName; }) skills;

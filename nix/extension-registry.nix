@@ -67,6 +67,7 @@ let
   upstreamExtensions = {
     openai-fast-mode = {
       source = pi-openai-fast-mode;
+      package = ./pi-openai-fast-mode;
       manifestPath = "node_modules/pi-openai-fast-mode";
       # The package lives at manifestPath, but Pi's extension resource is its
       # TypeScript entrypoint (not a nested package declaration).

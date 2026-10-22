@@ -1,0 +1,27 @@
+--- a/src/config.ts
++++ b/src/config.ts
+@@ -252,9 +252,23 @@
+   options: LoadConfigOptions,
+ ): Promise<LoadedConfig> {
+   const selected = selectConfigPath(options);
++  const managed = cloneConfig();
++  try {
++    const raw: unknown = JSON.parse(await fs.readFile(
++      join(options.agentDir ?? getAgentDir(), "defaults", "openai-fast-mode.json"),
++      "utf8",
++    ));
++    // Managed configuration is only a default for the persisted toggle. The
++    // package still owns its supported target list; never persist into defaults.
++    if (isRecord(raw) && typeof raw.enabled === "boolean") {
++      managed.enabled = raw.enabled;
++    }
++  } catch {
++    // Missing or malformed managed defaults must not break the user toggle.
++  }
+   const config = await loadConfigFromPath(
+     selected.path,
+-    options.fallback ?? DEFAULT_CONFIG,
++    options.fallback ?? managed,
+   );
+   return { ...selected, config };
+ }

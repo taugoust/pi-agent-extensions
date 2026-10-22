@@ -92,6 +92,7 @@
                 doCheck = false;
                 doInstallCheck = false;
               });
+          pi-openai-fast-mode = pkgs.callPackage ./nix/pi-openai-fast-mode { src = pi-openai-fast-mode; };
           pi-mcp-adapter-src = pkgs.runCommand "pi-mcp-adapter-src" { } ''
             cp -R ${pi-mcp-adapter} "$out"
             chmod -R u+rwX "$out"

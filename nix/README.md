@@ -48,9 +48,10 @@ programs.pi = {
 | Option | Default | Meaning |
 | --- | --- | --- |
 | `enable` | `false` | Enable installation and configuration. |
-| `package` | flake's Pi package when enabled | Executable added to `home.packages`; `null` disables this. |
+| `package` | declared `null`; flake's Pi package via `mkDefault` when enabled | Executable added to `home.packages`; explicit `null` disables this. |
 | `agentDir` | `.pi/agent` | Home-relative global agent directory; no `..`. The launcher must respect `PI_CODING_AGENT_DIR`. |
 | `nativeConfigMode` | `"managed"` | `managed` links native files read-only; `mutable` merges defaults on activation. |
+| `quietState.enable` | `true` | Emit `defaults/quiet-state.json` with `{ enabled = ...; }`; the runtime environment kill switch remains higher priority. |
 | `settings` | `{}` | Native `settings.json` object, including arbitrary supported native settings. |
 | `models` | `{}` | Native `models.json` object, including provider/model declarations. |
 | `packages` | `[]` | Additive native package declarations: source strings, derivations, or `{ source = ...; ...filters }`. |
@@ -87,7 +88,9 @@ itself. Switching `agentDir` does not move existing files or state.
 When adopting this API, remove equivalent consumer `home.file` declarations for
 `settings.json`, `models.json`, context files, extension sources and managed
 extension defaults. Keep unrelated bridge/package declarations. No launcher
-arguments, supervisor policy, or credential files are rewritten by this module.
+arguments, supervisor policy, or credential files are rewritten by this module. The selected consumer executable
+package supplies the trusted child-launcher integration; public extension
+preferences cannot replace that launcher or relax its policy.
 
 ## Extension settings
 
@@ -145,6 +148,21 @@ required. Home Manager consumes the generated bundle via recursive file links,
 keeping containing directories writable. Fast Mode's package-owned `src` tree is
 installed this way, so its runtime `config.json` is not a store symlink; consumers
 must not assemble six internal source files.
+
+The reusable `packages.<system>.pi-openai-fast-mode` output includes the existing
+session-scoped operator control and a package-level loader for
+`defaults/openai-fast-mode.json`. Its supported `enabled` boolean is a fallback
+below the selected writable user/project `config.json`; `/fast`, `--fast`, and
+the session-scoped operator keep their existing runtime precedence. Supported
+targets remain package-owned. Standalone bundles select this same patched package
+through registry metadata; the loader is self-contained and adds no missing
+shared-module import.
+
+Consumers needing a direct package call can use
+`pkgs.callPackage (inputs.pi-agent-extensions + "/nix/pi-openai-fast-mode") { }`.
+That call defaults to the fixed-hash npm release; optional `src` accepts a pinned
+source directory or tarball. Prefer the flake package output when consuming its
+pinned upstream input. No npm install, build, or test phase is involved.
 
 Skills retain `skills.<name>.enable`. Bundle resource paths are relative to the
 bundle root; external Fast Mode explicitly names `src/index.ts` as its extension
