@@ -1,47 +1,69 @@
 { self, pkgs }:
 let
   inherit (pkgs) lib;
-  evaluate =
+  inherit (import ./module-test-harness.nix { inherit self pkgs; }) evaluate valid;
+  make =
     accounts: usage:
-    (lib.evalModules {
-      specialArgs = { inherit pkgs; };
-      modules = [
-        (import ./module.nix { inherit self; })
-        ({ ... }: {
-          options.home.file = lib.mkOption {
-            type = lib.types.attrsOf lib.types.anything;
-            default = { };
-          };
-          options.home.packages = lib.mkOption {
-            type = lib.types.listOf lib.types.package;
-            default = [ ];
-          };
-          config.programs.pi = {
-            enable = true;
-            package = null;
-            extensions.accounts.enable = accounts;
-            extensions.usage.enable = usage;
-          };
-        })
-      ];
-    }).config.home.file;
-  both = evaluate true true;
-  accountsOnly = evaluate true false;
-  usageOnly = evaluate false true;
-  neither = evaluate false false;
+    evaluate {
+      agentDir = ".config/fixture-pi";
+      extensions.accounts.enable = accounts;
+      extensions.usage.enable = usage;
+    };
+  both = make true true;
+  accountsOnly = make true false;
+  usageOnly = make false true;
+  neither = make false false;
+  files = config: config.home.file;
+  root = ".config/fixture-pi";
+  accountPath = "${root}/extensions/openai-accounts";
+  usagePath = "${root}/extensions/openai-usage";
 in
-assert both ? ".pi/agent/extensions/shared";
-assert accountsOnly ? ".pi/agent/extensions/shared";
-assert usageOnly ? ".pi/agent/extensions/shared";
-assert both ? ".pi/agent/extensions/openai-accounts";
-assert both ? ".pi/agent/extensions/openai-usage";
-assert !(accountsOnly ? ".pi/agent/extensions/openai-usage");
-assert !(usageOnly ? ".pi/agent/extensions/openai-accounts");
-assert !(neither ? ".pi/agent/extensions/openai-accounts");
-assert !(neither ? ".pi/agent/extensions/openai-usage");
-pkgs.runCommand "openai-accounts-module-check" { } ''
-  test -f ${both.".pi/agent/extensions/openai-accounts".source}/index.ts
-  test -f ${both.".pi/agent/extensions/openai-usage".source}/index.ts
-  test -f ${self}/shared/account-controls.ts
-  touch "$out"
+assert lib.all valid [
+  both
+  accountsOnly
+  usageOnly
+  neither
+];
+assert lib.all (config: (files config) ? ${"${root}/extensions/shared"}) [
+  both
+  accountsOnly
+  usageOnly
+];
+assert (files both) ? ${accountPath} && (files both) ? ${usagePath};
+assert (files accountsOnly) ? ${accountPath} && !((files accountsOnly) ? ${usagePath});
+assert (files usageOnly) ? ${usagePath} && !((files usageOnly) ? ${accountPath});
+assert !((files neither) ? ${accountPath}) && !((files neither) ? ${usagePath});
+# Enabling account controls must never declare credentials or an account store,
+# nor silently take over the user's native settings/models files.
+assert lib.all
+  (
+    config:
+    lib.all (name: name == "${root}" || lib.hasPrefix "${root}/" name) (
+      builtins.attrNames (files config)
+    )
+    && lib.all (name: !((files config) ? ${"${root}/${name}"})) [
+      "auth.json"
+      "oauth.json"
+      "accounts.json"
+      "pi-accounts.json"
+      "pi-codex-accounts.json"
+      "codex-accounts.json"
+      "settings.json"
+      "models.json"
+    ]
+    && config.home.sessionVariables.PI_CODING_AGENT_DIR == "/fixture-home/${root}"
+  )
+  [
+    both
+    accountsOnly
+    usageOnly
+    neither
+  ];
+pkgs.runCommand "openai-accounts-module-contract" { } ''
+  test -f ${(files both).${accountPath}.source}/index.ts
+  test -f ${(files both).${usagePath}.source}/index.ts
+  test -f ${(files both).${"${root}/extensions/shared"}.source}/account-controls.ts
+  test -f ${(files both).${accountPath}.source}/node_modules/proper-lockfile/package.json
+  test -f ${(files both).${accountPath}.source}/node_modules/proper-lockfile/LICENSE
+  printf '%s\n' 'opt-in composition, canonical aliases, agentDir and credential non-ownership verified' > "$out"
 ''

@@ -29,8 +29,8 @@ Scope: `shared/extension-defaults.ts`,
   module imports `@earendil-works/pi-coding-agent`. Such stubs alone are not
   evidence that this new production dependency executes successfully.
 
-Existing wider checks were not rewritten; the reproduced stale-check failure is
-reported separately from the passing focused check.
+The initial focused change did not rewrite wider checks. The follow-up below
+repairs the three stale module checks rather than hiding their failures.
 
 ## New behavioral coverage
 
@@ -73,6 +73,26 @@ fixtures, and performs no account/provider/network/service/deployment activity.
   temporary-file cleanup. A deterministic scheduling seam inserts a native writer
   at the actual `os.link` publication syscall, proving that the race after the
   existence check does not overwrite its winner.
+
+## Follow-up: executable wiring and real dependency behavior
+
+- `module-test-harness.nix` is shared by extension settings, idle-warning,
+  observability and accounts module contracts. It forces actual module
+  assertions and exercises a non-default canonical agent directory, disabled
+  nonownership, named/raw precedence, immutable helper closure, and absence of
+  credential declarations. This is still an option scaffold; real-host parity
+  remains a separate consumer check.
+- Observability invokes `progress-settings-check.nix`. The Progress tests execute
+  production settings readers/writers with the release's actual SDK
+  `withFileMutationQueue`, not a replacement scheduler. Only the agent-root
+  locator is controlled. Concurrent saves preserve independent explicit edits;
+  saving cannot copy inherited defaults into mutable preferences. The latter
+  regression is deliberately mutated and must fail its named assertion.
+- Account and workflows immutable-load checks now query the actual standalone
+  Pi RPC process and require their extension commands to be registered. A normal
+  CLI exit or source-file presence is no longer sufficient. A missing-command
+  negative control must fail specifically at registration. These are offline
+  package-load tests, not account login/quota or full Goal UI tests.
 
 ## Mutation-sensitivity evidence
 

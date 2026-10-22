@@ -1,6 +1,15 @@
-{ pkgs, piPackage, extensionBundle }:
+{
+  pkgs,
+  piPackage,
+  extensionBundle,
+}:
 pkgs.runCommand "openai-accounts-immutable-runtime-check"
-  { nativeBuildInputs = [ pkgs.coreutils pkgs.gnugrep ]; }
+  {
+    nativeBuildInputs = [
+      pkgs.coreutils
+      pkgs.nodejs
+    ];
+  }
   ''
     set -euo pipefail
     test -f ${extensionBundle}/openai-accounts/index.ts
@@ -15,8 +24,7 @@ pkgs.runCommand "openai-accounts-immutable-runtime-check"
     export PI_OFFLINE=1
     export NODE_PATH=
     mkdir -p "$HOME" "$PI_CODING_AGENT_DIR"
-    ${piPackage}/bin/pi --no-extensions --no-skills \
-      --extension ${extensionBundle}/openai-accounts \
-      --extension ${extensionBundle}/openai-usage --list-models > "$TMPDIR/pi-load.log"
-    printf 'OpenAI account extension loaded in immutable Pi layout without repository node_modules.\n' > "$out"
+    timeout 30s node ${../tests/package-load.mjs} ${piPackage}/bin/pi \
+      ${extensionBundle}/openai-accounts ${extensionBundle}/openai-usage --expect accounts usage
+    printf 'Account and usage commands registered in the actual immutable Pi runtime.\n' > "$out"
   ''
