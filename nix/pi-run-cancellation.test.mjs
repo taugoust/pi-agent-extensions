@@ -15,6 +15,7 @@ if (globalThis.__piCancellationArtifact) {
   const chunks = `${root}/dist/bundle/chunks`;
   const { readFileSync } = await import('node:fs');
   const file = readdirSync(chunks).find(f => f.endsWith('.js') && readFileSync(`${chunks}/${f}`, 'utf8').includes('async function runLoop('));
+  console.log(`ARTIFACT builtin bundle executed: ${chunks}/${file}`);
   const bundled = await import(pathToFileURL(`${chunks}/${file}`));
   Agent = bundled.dist_exports.Agent;
   AgentSession = bundled.AgentSession;
@@ -31,13 +32,13 @@ const msg = (content, stopReason = 'toolUse') => ({ role: 'assistant', api: mode
 const stream = message => ({ async *[Symbol.asyncIterator]() { yield { type: 'done', message }; }, async result() { return message; } });
 const deferred = () => { let resolve; const promise = new Promise(r => { resolve = r; }); return { promise, resolve }; };
 async function scenario(mode) {
-  let dispatches = 0, executions = 0, canceled = false, stopListener;
+  let dispatches = 0, executions = 0, canceled = false, freshAdmission = false, stopListener;
   const signals = [], results = [], entered = deferred(), release = deferred(), freshEntered = deferred(), freshRelease = deferred();
   let agent;
   agent = new Agent({ initialState: { model, tools: [{ name: 'wait', label: 'wait', description: 'offline', parameters: { type: 'object', properties: {} }, async execute(_id, _args, signal) {
     executions++;
     if (!canceled) { entered.resolve(); await release.promise; if (signal.aborted) throw new Error('Wait cancelled'); }
-    else { freshEntered.resolve(); await freshRelease.promise; }
+    else if (freshAdmission) { freshEntered.resolve(); await freshRelease.promise; }
     return { content: [{ type: 'text', text: 'ok' }] };
   } }] }, streamFn(_m, _c, options) {
     signals.push(options.signal); dispatches++;
@@ -52,7 +53,12 @@ async function scenario(mode) {
   agent.followUp(user('queued followup'));
   if (mode === 'pending') { agent.abort(); canceled = true; release.resolve(); }
   else { canceled = true; release.resolve(); stopListener = agent.subscribe(e => { if (e.type === 'turn_end' && e.message.stopReason !== 'aborted') agent.abort(); }); }
-  await running;
+  let settlementDeadline;
+  try {
+    await Promise.race([running, new Promise((_, reject) => {
+      settlementDeadline = setTimeout(() => reject(new Error(`Original/patched ${target}/${mode} failed to settle within 5 seconds`)), 5000);
+    })]);
+  } finally { clearTimeout(settlementDeadline); }
   const initial = { dispatches, executions, queued: agent.hasQueuedMessages(), stopReason: agent.state.messages.at(-1).stopReason };
   if (expectation === 'original') {
     assert.ok(initial.dispatches > 1 || !initial.queued, `Expected original defect: ${JSON.stringify(initial)}`);
@@ -70,6 +76,7 @@ async function scenario(mode) {
   // Remove the test's turn_end cancellation listener before explicit fresh admission.
   stopListener?.();
   dispatches = 2;
+  freshAdmission = true;
   const freshRun = agent.prompt('explicit fresh user request');
   await freshEntered.promise;
   oldController.abort(); // A delayed cancellation belonging to the settled run.
@@ -127,7 +134,8 @@ if (expectation !== 'original') {
     assert.equal(agent.state.messages.filter(m => m.role === 'user').length, 1);
     console.log(`PASS queue poll cancellation restores ${kind} (${target})`);
   }
-  // Exercise the ACTUAL session scheduler method without auth/resources/provider setup.
+  // Unit-bind the ACTUAL session scheduler method to a controlled session facade.
+  // This verifies scheduler policy, not full AgentSession/auth/resource integration.
   let continued = 0, boundaries = 0;
   const session = {
     _agentRunAbortRequested: false, _pendingToolNames: new Set(), _retryAttempt: 1,
@@ -139,5 +147,5 @@ if (expectation !== 'original') {
   };
   await AgentSession.prototype._runAgentPrompt.call(session, [user('offline')]);
   assert.equal(continued, 0); assert.equal(boundaries, 0); assert.equal(session._retryAttempt, 0);
-  console.log(`PASS aborted session neither retries nor enters continuation boundary (${target})`);
+  console.log(`PASS scheduler unit binding (controlled session facade): aborted result neither retries nor enters continuation boundary (${target})`);
 }

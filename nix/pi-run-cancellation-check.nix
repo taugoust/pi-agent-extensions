@@ -21,6 +21,6 @@ piPackage.overrideAttrs (old: {
   postInstall = (old.postInstall or "") + ''
     # Bun's standalone build embeds this prebuilt chunk. Check the actual shipped
     # executable, including its controller/queue and session scheduler boundaries.
-    python3 ${./pi-run-cancellation-verify.py} "$out/libexec/pi/pi"
+    python3 ${./pi-run-cancellation-verify.py} "$out/libexec/pi/pi" "$PWD" ${./pi-run-cancellation.test.mjs}
   '';
 })
