@@ -26,7 +26,11 @@ export default function btw(pi: ExtensionAPI) {
 		dispose();
 		let model = "openai/gpt-6-luna";
 		try {
-			const settings = mergeExtensionSettings({ model, ...readExtensionDefaults("btw") },
+			const defaults = readExtensionDefaults("btw").paseo;
+			if (defaults !== undefined && (!defaults || typeof defaults !== "object" || Array.isArray(defaults))) {
+				throw new Error("defaults/btw.json: paseo must be an object");
+			}
+			const settings = mergeExtensionSettings({ model, ...(defaults as Record<string, unknown> | undefined) },
 				readPreferenceDocument(join(getAgentDir(), "btw.json")));
 			if (typeof settings.model === "string" && settings.model.length <= 512) model = settings.model;
 			else throw new Error("Invalid BTW model");
