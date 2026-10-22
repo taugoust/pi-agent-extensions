@@ -135,7 +135,7 @@ export function registerGoalManagement(pi: ExtensionAPI, runtime: GoalRuntime) {
 								text:
 									params.action === "pause"
 										? "Goal paused. Do not continue until the user resumes it."
-										: "Goal cleared.",
+										: "Goal moved to Completed.",
 							},
 						],
 						details: { goalId: previous!.id },

@@ -333,9 +333,8 @@ export class GoalCommandController {
       return;
     }
 
-    const stoppedGoal = this.runtime.activeGoal.text;
     this.runtime.clearActiveGoal(ctx);
-    notifyTerminal(ctx.ui, `Goal cleared: ${stoppedGoal}`, "warning");
+    notifyTerminal(ctx.ui, "Goal moved to Completed.", "info");
   }
 
   async editGoal(objective: string, tokenBudget: number | undefined, ctx: StatusContext) {

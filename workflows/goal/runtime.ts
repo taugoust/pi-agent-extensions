@@ -18,6 +18,7 @@ import {
   type SafetyPauseCause,
   serializeGoalState,
 } from "./persistence.js";
+import { archiveGoal } from "./history.js";
 import { buildContinuePrompt, type GoalStatus } from "./prompts.js";
 import { nextToolFreeRepeatState, resetGoalSafetyEpoch } from "./safety.js";
 
@@ -1233,6 +1234,20 @@ export class GoalRuntime {
 
   private clearActiveGoalState(ctx: StatusContext, reason: string, releaseWorkflow: boolean) {
     const clearedGoal = this.activeGoal;
+    if (clearedGoal && (clearedGoal.status === "complete" || reason === "goal cleared")) {
+      try {
+        archiveGoal(
+          this.pi,
+          clearedGoal,
+          clearedGoal.status === "complete" ? "completed" : "cleared",
+          this.terminalDetails?.goalId === clearedGoal.id
+            ? (this.terminalDetails.summary ?? null)
+            : null,
+        );
+      } catch {
+        // Archiving is best-effort; it must never prevent clearing the active goal.
+      }
+    }
     this.clearGoalWaitTimer();
     this.cancelContinuationWork();
     this.clearGoalRecovery();

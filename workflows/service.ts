@@ -4,6 +4,7 @@ import { workspaceRepositories } from "./worktree/repositories.js";
 import { ownedWorktrees, worktreeGit } from "../shared/subagent-worktrees.ts";
 import { harnessReadOnlyRegistry } from "../shared/harness-readonly.ts";
 import { readGoalTasks, addGoalTask } from "../shared/goal-progress.ts";
+import { readGoalHistory } from "./goal/history.js";
 import type {
 	ExtensionAPI,
 	ExtensionContext,
@@ -111,6 +112,8 @@ export function createWorkflowService(
 		return value;
 	}
 	let completionLeaf: string | null | undefined;
+	let completedGoalsKey: string | undefined;
+	let completedGoalsCache: ReturnType<typeof readGoalHistory> = [];
 	let lastCompletion: {
 		id: string;
 		text: string;
@@ -156,6 +159,13 @@ export function createWorkflowService(
 			break;
 		}
 		return lastCompletion;
+	}
+	function completedGoals(activeGoalId: string | null) {
+		const key = `${ctx.sessionManager.getLeafId() ?? ""}/${activeGoalId ?? ""}`;
+		if (key === completedGoalsKey) return completedGoalsCache;
+		completedGoalsKey = key;
+		completedGoalsCache = readGoalHistory(ctx);
+		return completedGoalsCache;
 	}
 	function current(op?: Operation) {
 		if (
@@ -417,6 +427,7 @@ export function createWorkflowService(
 					}
 				: null,
 			lastCompletion: completion(),
+			completedGoals: completedGoals(goal?.id ?? null),
 			limits: {
 				automaticTurns: runtime.settings.continuationLimits.automaticTurns,
 				noProgressTurns: runtime.settings.continuationLimits.noProgressTurns,
