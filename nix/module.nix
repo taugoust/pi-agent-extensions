@@ -118,15 +118,25 @@ let
       };
     }) selectedSkills
   );
-  subagentSettingsValid = lib.all (
-    key:
-    builtins.elem key [
-      "defaultProvider"
-      "defaultModel"
-      "defaultThinkingLevel"
-    ]
-  ) (builtins.attrNames cfg.extensions.subagent.settings);
-  thinkingType = lib.types.enum [
+  subagentSettings = extensionSettings "subagent";
+  subagentKeys = [
+    "defaultProvider"
+    "defaultModel"
+    "defaultThinkingLevel"
+  ];
+  subagentSettingsValid =
+    lib.all (key: builtins.elem key subagentKeys) (builtins.attrNames cfg.extensions.subagent.settings)
+    && lib.all (
+      key:
+      builtins.isString subagentSettings.${key}
+      && builtins.match "[^[:space:]]+" subagentSettings.${key} != null
+    ) subagentKeys
+    && builtins.elem subagentSettings.defaultThinkingLevel thinkingLevels;
+  fastModeSettings = cfg.extensions.openai-fast-mode.settings;
+  fastModeSettingsValid =
+    lib.all (key: key == "enabled") (builtins.attrNames fastModeSettings)
+    && (!(fastModeSettings ? enabled) || builtins.isBool fastModeSettings.enabled);
+  thinkingLevels = [
     "off"
     "minimal"
     "low"
@@ -135,6 +145,7 @@ let
     "xhigh"
     "max"
   ];
+  thinkingType = lib.types.enum thinkingLevels;
   stringOption =
     default: description:
     lib.mkOption {
@@ -298,7 +309,11 @@ in
       }
       {
         assertion = subagentSettingsValid;
-        message = "programs.pi.extensions.subagent.settings accepts only defaultProvider, defaultModel and defaultThinkingLevel; launcher policy cannot be overridden.";
+        message = "programs.pi.extensions.subagent.settings accepts only defaultProvider/defaultModel/defaultThinkingLevel; effective model defaults must be nonempty strings without whitespace and thinking must be off|minimal|low|medium|high|xhigh|max. Launcher policy cannot be overridden.";
+      }
+      {
+        assertion = fastModeSettingsValid;
+        message = "programs.pi.extensions.openai-fast-mode.settings supports only enabled, which must be a boolean; supported targets remain package-owned.";
       }
       {
         assertion = lib.all (
