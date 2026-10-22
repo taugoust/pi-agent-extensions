@@ -60,7 +60,6 @@ export function btwSettingsPath(): string {
 }
 
 export function normalizeBtwSettings(value: unknown): BtwSettings | undefined {
-  value = withExtensionDefaults("btw", value, "terminal");
   if (!isSettingsDocument(value)) return undefined;
 
   const settings: BtwSettings = {};
@@ -145,9 +144,9 @@ export function updateBtwSettings(
     options.signal?.throwIfAborted();
     const current = await readSettingsDocumentForUpdate(settingsPath);
     options.signal?.throwIfAborted();
-    options.validateCurrent?.(normalizeBtwSettings(current) ?? {});
+    options.validateCurrent?.(normalizeBtwSettings(withExtensionDefaults("btw", current, "terminal")) ?? {});
     const updated = applyBtwSettingsPatch(current, patch);
-    const settings = normalizeBtwSettings(updated);
+    const settings = normalizeBtwSettings(withExtensionDefaults("btw", updated, "terminal"));
     if (!settings) throw invalidSettingsError(settingsPath, "invalid settings shape");
     await publishSettings(settingsPath, updated, options.signal, options.beforeRename);
     return settings;
@@ -179,7 +178,7 @@ async function readBtwSettingsUncoordinated(settingsPath: string): Promise<BtwSe
   } catch (error: unknown) {
     if (isNodeError(error) && error.code === "ENOENT") {
       try {
-        const settings = normalizeBtwSettings({});
+        const settings = normalizeBtwSettings(withExtensionDefaults("btw", {}, "terminal"));
         if (!settings) return { kind: "invalid", reason: "Invalid defaults/btw.json settings" };
         return Object.keys(settings).length ? { kind: "loaded", settings } : { kind: "missing" };
       } catch (error) { return { kind: "invalid", reason: `defaults/btw.json: ${formatError(error)}` }; }
@@ -188,7 +187,7 @@ async function readBtwSettingsUncoordinated(settingsPath: string): Promise<BtwSe
   }
 
   try {
-    const settings = normalizeBtwSettings(JSON.parse(contents) as unknown);
+    const settings = normalizeBtwSettings(withExtensionDefaults("btw", JSON.parse(contents) as unknown, "terminal"));
     return settings
       ? { kind: "loaded", settings }
       : { kind: "invalid", reason: `${settingsPath}: invalid settings shape` };

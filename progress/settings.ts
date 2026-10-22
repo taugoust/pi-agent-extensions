@@ -39,9 +39,8 @@ export function normalizeProgressSettings(value: unknown): ProgressSettings | un
   if (!isRecord(value)) return undefined;
   const widgetValue = Object.hasOwn(value, "widget") ? value.widget : undefined;
   if (widgetValue !== undefined && !isRecord(widgetValue)) return undefined;
-  // Flatten legacy preferences before applying defaults: user widget fields
-  // must override declarative top-level fields too.
-  const settings = withExtensionDefaults("progress", { ...widgetValue, ...value }) as Record<string, unknown>;
+  // Retain nested legacy settings; explicit top-level fields take precedence.
+  const settings = { ...widgetValue, ...value };
 
   const enabled = booleanSetting(settings, "enabled", DEFAULT_PROGRESS_SETTINGS.enabled);
   const showCompleted = booleanSetting(settings, "showCompleted", DEFAULT_PROGRESS_SETTINGS.showCompleted);
@@ -75,6 +74,14 @@ export function normalizeProgressSettings(value: unknown): ProgressSettings | un
   };
 }
 
+function loadEffectiveProgressSettings(value: unknown): ProgressSettings | undefined {
+  if (!isRecord(value)) return undefined;
+  const widget = value.widget;
+  if (widget !== undefined && !isRecord(widget)) return undefined;
+  // Flatten user legacy fields before merging so they beat declarative fields.
+  return normalizeProgressSettings(withExtensionDefaults("progress", { ...widget, ...value }));
+}
+
 export async function loadProgressSettings(
   canonicalPath = progressSettingsPath(),
   signal?: AbortSignal,
@@ -101,7 +108,7 @@ export async function saveProgressSettings(
     throwIfAborted(signal);
     if (loaded.kind === "invalid") throw new Error(`Cannot save invalid settings: ${loaded.issue}`);
     const nextDocument = { ...document, ...patch };
-    const settings = normalizeProgressSettings(nextDocument);
+    const settings = loadEffectiveProgressSettings(nextDocument);
     if (!settings) throw new Error("Invalid settings update");
     const text = `${JSON.stringify(nextDocument, null, 2)}\n`;
     if (Buffer.byteLength(text) > MAX_PROGRESS_SETTINGS_BYTES) throw new Error("Settings update exceeds size limit");
@@ -178,7 +185,7 @@ async function loadSettingsFile(
     } catch {
       return invalidResult(path, "invalid JSON");
     }
-    const settings = normalizeProgressSettings(parsed);
+    const settings = loadEffectiveProgressSettings(parsed);
     if (!settings || !isRecord(parsed)) return invalidResult(path, "invalid settings shape or values");
     onDocument?.(parsed, stats.mode);
     return { kind: "loaded", path, settings };
@@ -196,7 +203,7 @@ function booleanSetting(record: Record<string, unknown>, key: string, fallback: 
 }
 
 function cloneDefaultSettings(): ProgressSettings {
-  const settings = normalizeProgressSettings({});
+  const settings = loadEffectiveProgressSettings({});
   if (!settings) throw new Error("Invalid defaults/progress.json settings");
   return settings;
 }

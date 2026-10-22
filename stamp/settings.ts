@@ -95,8 +95,6 @@ export function stampSettingsFilePath(): string {
 }
 
 export function normalizeStampSettingsDocument(value: unknown): NormalizedStampSettings | undefined {
-  const preferences = value;
-  value = withExtensionDefaults("stamp", value);
   if (!isRecord(value)) return undefined;
   const settings: StampSettings = { ...DEFAULT_STAMP_SETTINGS };
   const sources = builtInSources();
@@ -181,16 +179,24 @@ export function normalizeStampSettingsDocument(value: unknown): NormalizedStampS
     settings.toolStamps = value.toolStamps;
     sources.toolStamps = "user";
   }
-  for (const field of SETTING_FIELDS) {
-    if (sources[field] === "user" && isRecord(preferences) && !Object.hasOwn(preferences, field)) {
-      sources[field] = "declarative";
-    }
-  }
   return { settings, sources };
 }
 
+// Only load/update boundaries resolve filesystem defaults; normalization stays pure.
+function loadEffectiveStampSettings(preferences: unknown): NormalizedStampSettings | undefined {
+  const normalized = normalizeStampSettingsDocument(withExtensionDefaults("stamp", preferences));
+  if (normalized && isRecord(preferences)) {
+    for (const field of SETTING_FIELDS) {
+      if (normalized.sources[field] === "user" && !Object.hasOwn(preferences, field)) {
+        normalized.sources[field] = "declarative";
+      }
+    }
+  }
+  return normalized;
+}
+
 function declarativeStampSettings(): NormalizedStampSettings {
-  const settings = normalizeStampSettingsDocument({});
+  const settings = loadEffectiveStampSettings({});
   if (!settings) throw new Error("Invalid defaults/stamp.json settings");
   return settings;
 }
@@ -217,7 +223,7 @@ export async function loadStampSettings(
 
   try {
     const document = JSON.parse(text) as unknown;
-    const normalized = normalizeStampSettingsDocument(document);
+    const normalized = loadEffectiveStampSettings(document);
     if (!normalized || !isRecord(document)) {
       return invalidLoad(path, "the document is malformed or contains an invalid setting");
     }
@@ -276,7 +282,7 @@ export function createStampSettingsRuntime(options: StampSettingsRuntimeOptions 
           throw new Error(`Cannot update malformed or invalid settings: ${latest.issue.message}`);
         }
         const document = { ...latest.document, ...canonicalPatch };
-        const normalized = normalizeStampSettingsDocument(document);
+        const normalized = loadEffectiveStampSettings(document);
         if (!normalized) throw new Error("Refusing to publish invalid pi-stamp settings.");
         await publishSettingsDocument(document, getPath(), operations);
         state = { ...normalized, canSave: true };

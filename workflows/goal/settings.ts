@@ -38,7 +38,6 @@ interface GoalSettingsSaveFileSystem {
 }
 
 export function normalizeGoalSettings(value: unknown): GoalSettings | undefined {
-  value = withExtensionDefaults("workflows", value, "goal");
   if (typeof value !== "object" || value === null || Array.isArray(value)) return undefined;
 
   const rpcValue = Object.hasOwn(value, "rpc") ? Reflect.get(value, "rpc") : undefined;
@@ -148,7 +147,7 @@ export function readGoalSettings(settingsPath = join(getAgentDir(), GOAL_SETTING
     if (isNodeError(error) && error.code === "ENOENT") {
       try {
         if (readExtensionDefaults("workflows").goal !== undefined) {
-          const settings = normalizeGoalSettings({});
+          const settings = normalizeGoalSettings(withExtensionDefaults("workflows", {}, "goal"));
           return settings ? { kind: "loaded", settings, legacyExperimentalGoals: false }
             : { kind: "invalid", reason: "Invalid defaults/workflows.json goal settings" };
         }
@@ -162,7 +161,7 @@ export function readGoalSettings(settingsPath = join(getAgentDir(), GOAL_SETTING
 
   try {
     const parsed = JSON.parse(contents) as unknown;
-    const settings = normalizeGoalSettings(parsed);
+    const settings = normalizeGoalSettings(withExtensionDefaults("workflows", parsed, "goal"));
     return settings
       ? { kind: "loaded", settings, legacyExperimentalGoals: hasLegacyExperimentalGoals(parsed) }
       : { kind: "invalid", reason: `${settingsPath}: invalid settings shape` };

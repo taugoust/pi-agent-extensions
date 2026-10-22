@@ -66793,7 +66793,6 @@ function btwSettingsPath() {
   return join(getAgentDir(), BTW_SETTINGS_FILE);
 }
 function normalizeBtwSettings(value) {
-  value = withExtensionDefaults("btw", value, "terminal");
   if (!isSettingsDocument(value)) return void 0;
   const settings = {};
   if (Object.hasOwn(value, "keybindings")) {
@@ -66867,9 +66866,9 @@ function updateBtwSettings(patch, options = {}) {
     options.signal?.throwIfAborted();
     const current = await readSettingsDocumentForUpdate(settingsPath);
     options.signal?.throwIfAborted();
-    options.validateCurrent?.(normalizeBtwSettings(current) ?? {});
+    options.validateCurrent?.(normalizeBtwSettings(withExtensionDefaults("btw", current, "terminal")) ?? {});
     const updated = applyBtwSettingsPatch(current, patch);
-    const settings = normalizeBtwSettings(updated);
+    const settings = normalizeBtwSettings(withExtensionDefaults("btw", updated, "terminal"));
     if (!settings) throw invalidSettingsError(settingsPath, "invalid settings shape");
     await publishSettings(settingsPath, updated, options.signal, options.beforeRename);
     return settings;
@@ -66898,7 +66897,7 @@ async function readBtwSettingsUncoordinated(settingsPath) {
   } catch (error) {
     if (isNodeError(error) && error.code === "ENOENT") {
       try {
-        const settings = normalizeBtwSettings({});
+        const settings = normalizeBtwSettings(withExtensionDefaults("btw", {}, "terminal"));
         if (!settings) return { kind: "invalid", reason: "Invalid defaults/btw.json settings" };
         return Object.keys(settings).length ? { kind: "loaded", settings } : { kind: "missing" };
       } catch (error) { return { kind: "invalid", reason: `defaults/btw.json: ${formatError2(error)}` }; }
@@ -66906,7 +66905,7 @@ async function readBtwSettingsUncoordinated(settingsPath) {
     return { kind: "invalid", reason: `${settingsPath}: ${formatError2(error)}` };
   }
   try {
-    const settings = normalizeBtwSettings(JSON.parse(contents));
+    const settings = normalizeBtwSettings(withExtensionDefaults("btw", JSON.parse(contents), "terminal"));
     return settings ? { kind: "loaded", settings } : { kind: "invalid", reason: `${settingsPath}: invalid settings shape` };
   } catch {
     return { kind: "invalid", reason: `${settingsPath}: invalid JSON` };
