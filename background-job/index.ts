@@ -186,8 +186,8 @@ function outputText(snapshot: Awaited<ReturnType<BackgroundJobManager["output"]>
   return `${text}${snapshot.truncated ? "\n[output truncated to the last 50 KiB / 2000 lines]" : ""}`;
 }
 
-function toolResult(text: string, details: Record<string, unknown>) {
-  return { content: [{ type: "text" as const, text }], details };
+function toolResult(text: string, details: Record<string, unknown>, isError = false) {
+  return { content: [{ type: "text" as const, text }], details, ...(isError ? { isError: true } : {}) };
 }
 
 export default function backgroundJob(pi: ExtensionAPI) {
@@ -207,6 +207,7 @@ export default function backgroundJob(pi: ExtensionAPI) {
   const readonlyJobsByContext = new WeakMap<object, HarnessReadOnlyJobs>();
   const reapReservation = new ReapReservation();
   const watchNotified = new Map<string, number>();
+  const reapedJobNames = new Map<string, string>();
 
   const manager = () => {
     if (!managerPromise) managerPromise = (async () => {
@@ -378,6 +379,13 @@ export default function backgroundJob(pi: ExtensionAPI) {
     pollTimer = setInterval(() => void poll(), POLL_MS);
     pollTimer.unref();
     void poll();
+    void manager().then(async service => {
+      const records = await service.list(1000);
+      if (sessionContext !== ctx || sessionGeneration !== readonlyGeneration) return;
+      for (const record of records) if (record.metadata.sessionId === owner && !record.metadata.infrastructure) {
+        reapedJobNames.set(record.metadata.id, record.metadata.name ? preview(record.metadata.name, 80) : preview(record.metadata.command, 80));
+      }
+    }).catch(() => {});
   });
 
   pi.on("before_agent_start", () => {
@@ -461,6 +469,7 @@ export default function backgroundJob(pi: ExtensionAPI) {
       if (params.action === "start" && signal?.aborted) throw new Error("Background job start cancelled before launch");
       const owned = (record: JobRecord) => assertOwned(record, ownerSessionId, internal?.childId);
       let response;
+      let renderedJobName: string | undefined;
       switch (params.action) {
         case "watch": case "watches": case "events": case "ack": case "unwatch": {
           const watches = new WatchManager(service, ownerSessionId);
@@ -477,6 +486,7 @@ export default function backgroundJob(pi: ExtensionAPI) {
           if (internal && !internal.placement) throw new Error('Delegated background start requires trusted caller tmux placement; reload the child bridge');
           const record = await service.start({ command: params.command!, cwd: ctx.cwd, name: params.name, sessionId: ownerSessionId, childId: internal?.childId, placement: internal?.placement }, signal);
           runningReminderArmed = record.status === "running" || record.status === "starting";
+          reapedJobNames.set(record.metadata.id, record.metadata.name ? preview(record.metadata.name, 80) : preview(record.metadata.command, 80));
           response = toolResult(`${recordText(record)}\nStarted in a new tmux pane.`, { action: params.action, ...publicDetails(record) });
           break;
         }
@@ -484,6 +494,7 @@ export default function backgroundJob(pi: ExtensionAPI) {
           const record = params.pane_id
             ? await service.adoptPane({paneId:params.pane_id,socket:params.tmux_socket,logPath:params.log_path,cwd:ctx.cwd,sessionId:ownerSessionId,childId:internal?.childId,name:params.name})
             : await service.adopt({ pid: params.pid!, logPath: params.log_path!, cwd: ctx.cwd, sessionId: ownerSessionId, childId: internal?.childId, name: params.name });
+          reapedJobNames.set(record.metadata.id, record.metadata.name ? preview(record.metadata.name, 80) : preview(record.metadata.command, 80));
           const guidance = record.metadata.pane
             ? `Adopted the existing pane without restarting it. Tracks the pane’s root process, not individual commands inside an interactive shell.\nTo re-adopt after Pi restarts: pane_id=${record.metadata.pane.paneId}, tmux_socket=${record.metadata.pane.socket}.`
             : "Observation only: no process control or exit-status guarantee.";
@@ -492,29 +503,39 @@ export default function backgroundJob(pi: ExtensionAPI) {
         }
         case "list": {
           const records = (await service.list(1000)).filter((record) => !record.metadata.infrastructure && record.metadata.sessionId === ownerSessionId && (!internal || record.metadata.childId === internal.childId)).slice(0, params.limit ?? 20);
-          for (const record of records) if (record.result) await service.store.markNotified(record.metadata.id);
+          for (const record of records) {
+            reapedJobNames.set(record.metadata.id, record.metadata.name ? preview(record.metadata.name, 80) : preview(record.metadata.command, 80));
+            if (record.result) await service.store.markNotified(record.metadata.id);
+          }
           response = toolResult(records.length ? records.map(recordLine).join("\n") : "No background jobs for this Pi session.", { action: params.action, jobs: records.map(publicDetails) });
           break;
         }
         case "status": {
           const record = await service.get(requireJobId(params));
           owned(record);
+          reapedJobNames.set(record.metadata.id, record.metadata.name ? preview(record.metadata.name, 80) : preview(record.metadata.command, 80));
           if (record.result) await service.store.markNotified(record.metadata.id);
-          response = toolResult(recordText(record), { action: params.action, ...publicDetails(record) });
+          response = toolResult(recordText(record), { action: params.action, ...publicDetails(record) }, Boolean(record.result && record.status === 'failed'));
           break;
         }
         case "output": {
           const id = requireJobId(params);
-          owned(await service.get(id));
-          const snapshot = await service.output(id);
           const record = await service.get(id);
-          if (record.result) await service.store.markNotified(id);
-          response = toolResult(`${recordLine(record)}\n${outputText(snapshot, params.lines)}`, { action: params.action, ...publicDetails(record), source: snapshot.source, truncated: snapshot.truncated });
+          owned(record);
+          renderedJobName = record.metadata.name ? preview(record.metadata.name, 80) : preview(record.metadata.command, 80);
+          reapedJobNames.set(id, renderedJobName);
+          const snapshot = await service.output(id);
+          const finalRecord = await service.get(id);
+          if (finalRecord.result) await service.store.markNotified(id);
+          response = toolResult(`${recordLine(finalRecord)}\n${outputText(snapshot, params.lines)}`, { action: params.action, ...publicDetails(finalRecord), source: snapshot.source, truncated: snapshot.truncated }, Boolean(finalRecord.result && finalRecord.status === 'failed'));
           break;
         }
         case "wait": {
           const id = requireJobId(params);
-          owned(await service.get(id));
+          const initial = await service.get(id);
+          owned(initial);
+          renderedJobName = initial.metadata.name ? preview(initial.metadata.name, 80) : preview(initial.metadata.command, 80);
+          reapedJobNames.set(id, renderedJobName);
           const waited = await service.wait(id, params.timeout_ms ?? 1000, signal);
           const current = await service.get(id);
           const snapshot = params.lines === undefined ? undefined : await service.output(id);
@@ -522,28 +543,33 @@ export default function backgroundJob(pi: ExtensionAPI) {
           const deadlineText = waited.timedOut
             ? current.result ? "Job completed just after the wait deadline.\n" : "Wait timed out; job is still running.\n"
             : "";
-          response = toolResult(`${recordText(current)}\n${deadlineText}${snapshot ? outputText(snapshot, params.lines) : ''}`, { action: params.action, ...publicDetails(current), timed_out: waited.timedOut, output_source: snapshot?.source });
+          response = toolResult(`${recordText(current)}\n${deadlineText}${snapshot ? outputText(snapshot, params.lines) : ''}`, { action: params.action, ...publicDetails(current), timed_out: waited.timedOut, output_source: snapshot?.source }, Boolean(current.result && current.status === 'failed'));
           break;
         }
         case "signal": {
           const id = requireJobId(params);
           owned(await service.get(id));
           const record = await service.signal(id, params.signal!);
+          reapedJobNames.set(id, record.metadata.name ? preview(record.metadata.name, 80) : preview(record.metadata.command, 80));
           response = toolResult(`Sent ${params.signal} to ${record.metadata.id}.`, { action: params.action, ...publicDetails(record), signal: params.signal });
           break;
         }
         case "reap": {
           const id = requireJobId(params);
-          owned(await service.get(id));
+          const record = await service.get(id);
+          owned(record);
+          renderedJobName = record.metadata.name ? preview(record.metadata.name, 80) : preview(record.metadata.command, 80);
+          reapedJobNames.set(id, renderedJobName);
           await service.reap(id);
           quietState.consume(ctx, 'job', id);
-          response = toolResult(`Reaped ${id}; pane and retained output removed.`, {action: params.action, job_id: id, reaped: true});
+          response = toolResult('Job reaped', {action: params.action, job_id: id, name: renderedJobName, reaped: true});
           break;
         }
         case "cancel": {
           const id = requireJobId(params);
           owned(await service.get(id));
           const record = await service.cancel(id);
+          reapedJobNames.set(id, record.metadata.name ? preview(record.metadata.name, 80) : preview(record.metadata.command, 80));
           if (record.result) await service.store.markNotified(id);
           response = toolResult(recordText(record), { action: params.action, ...publicDetails(record) });
           break;
@@ -561,14 +587,34 @@ export default function backgroundJob(pi: ExtensionAPI) {
       return response!;
       } finally { releaseOperation(); }
     },
-    renderCall(args, theme) {
+    renderCall(args, theme, context) {
       const params = args as Params;
-      const subject = params.action === "start" ? params.name ?? preview(params.command ?? "") : params.job_id ?? "";
+      const state = context?.state as { jobName?: string } | undefined;
+      const subject = params.action === "start" ? params.name ?? preview(params.command ?? "") : state?.jobName ?? (params.job_id ? reapedJobNames.get(params.job_id) : undefined) ?? params.job_id ?? "";
       return new Text(`${theme.fg("toolTitle", theme.bold("background_job"))} ${theme.fg("muted", params.action)}${subject ? ` ${theme.fg("dim", subject)}` : ""}`, 0, 0);
     },
-    renderResult(result, { isPartial, expanded }, theme) {
+    renderResult(result, { isPartial, expanded }, theme, context) {
       if (isPartial) return new Text(theme.fg("warning", "Working…"), 0, 0);
+      const details = result.details as any;
+      if (details?.job_id && typeof details.name === 'string') {
+        reapedJobNames.set(details.job_id, details.name);
+        if (context?.state) {
+          const state = context.state as { jobName?: string };
+          if (state.jobName !== details.name) {
+            state.jobName = details.name;
+            context.invalidate();
+          }
+        }
+      }
+      for (const item of details?.jobs ?? []) if (item?.job_id && typeof item.name === 'string') reapedJobNames.set(item.job_id, item.name);
       let text = result.content.find((part: any) => part.type === "text")?.text ?? "";
+      if (details?.job_id && typeof details.name === 'string') {
+        const lines = text.split('\n');
+        // Replace only the tool-generated header, never IDs in command output.
+        const header = lines[0].match(/^job-[0-9a-f]{24}  (.*?)  (\d+[smh])  /);
+        if (header) lines[0] = `${details.name}  ${header[1]}  ${header[2]}`;
+        text = lines.join('\n');
+      }
       if (!expanded) {
         if (result.details?.jobs) text = result.details.jobs.map((j:any)=>`${jobStatusLabel(j.status,j.observation_only)} · ${uiText(j.name,90)}`).join("\n") || "No background jobs.";
         else if (result.details?.name && ["start","status","adopt"].includes(result.details.action)) text = `${jobStatusLabel(result.details.status,result.details.observation_only)} · ${uiText(result.details.name,100)}`;

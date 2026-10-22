@@ -1,3 +1,4 @@
+import { Text } from "@earendil-works/pi-tui";
 import type {
   ContextEvent,
   ExtensionAPI,
@@ -164,6 +165,34 @@ export default function progressWidgetExtension(pi: ExtensionAPI, dependencies: 
     ],
     parameters: ProgressParameters,
     prepareArguments: prepareProgressArguments,
+    renderCall(args, theme) {
+      const summary = Array.isArray(args.steps)
+        ? (args.steps as unknown[]).filter(
+            (step): step is ProgressStep =>
+              typeof step === "object" && step !== null && "status" in step &&
+              ["pending", "in_progress", "completed", "blocked"].includes(String(step.status)),
+          )
+        : [];
+      const completed = summary.filter((step) => step.status === "completed").length;
+      const blocked = summary.filter((step) => step.status === "blocked").length;
+      const total = Array.isArray(args.steps) ? args.steps.length : 0;
+      const remaining = Math.max(0, total - completed - blocked);
+      const counts = [Array.isArray(args.steps) && total === 0 ? "∅ cleared" : `✓ ${completed}/${total} completed`];
+      if (blocked > 0) counts.push(`⊘ ${blocked} blocked`);
+      if (remaining > 0) counts.push(`… ${remaining} remaining`);
+      return new Text(theme.fg("toolTitle", theme.bold("update_progress: ")) + counts.join("; "), 0, 0);
+    },
+    renderResult(result, { isPartial }, theme, context) {
+      if (context.isError) {
+        const message = result.content
+          .filter((item) => item.type === "text")
+          .map((item) => item.text)
+          .join("\n");
+        return new Text(theme.fg("error", message || "Progress update failed"), 0, 0);
+      }
+      if (isPartial) return new Text(theme.fg("warning", "Updating progress…"), 0, 0);
+      return new Text("", 0, 0);
+    },
     async execute(_toolCallId, params, signal, _onUpdate, ctx) {
       signal?.throwIfAborted();
       if (!ownsSession(ctx)) {
@@ -193,16 +222,13 @@ export default function progressWidgetExtension(pi: ExtensionAPI, dependencies: 
       }
 
       const completed = steps.filter((step) => step.status === "completed").length;
-      const inProgress = steps.some((step) => step.status === "in_progress");
       const blocked = steps.filter((step) => step.status === "blocked").length;
-      const suffixes = [...(inProgress ? ["1 in progress"] : []), ...(blocked > 0 ? [`${blocked} blocked`] : [])];
+      const pending = steps.length - completed - blocked;
+      const counts = [`✓ ${completed}/${steps.length} completed`];
+      if (blocked > 0) counts.push(`⊘ ${blocked} blocked`);
+      if (pending > 0) counts.push(`… ${pending} remaining`);
       return {
-        content: [
-          {
-            type: "text",
-            text: `Progress updated: ${completed} of ${steps.length} complete${suffixes.length > 0 ? `; ${suffixes.join("; ")}` : ""}.`,
-          },
-        ],
+        content: [{ type: "text", text: `update_progress: ${counts.join("; ")}` }],
         details,
       };
     },
