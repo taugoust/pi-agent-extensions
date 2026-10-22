@@ -1,0 +1,1889 @@
+# Extension reference
+
+Detailed material retained from the original README. Installation examples here include manual/source workflows; prefer the [Nix installation guide](installation.md). Historical validation recipes are documentation, not a claim of current validation. For the proposed settings API and current dependency boundaries, use that guide.
+
+## Overview
+
+**pi-agent-extensions** is a collection of
+[pi](https://github.com/mariozechner/pi) coding agent extensions that
+enhance the development experience. Each extension is a standalone
+TypeScript file that plugs into pi's extension system.Load extensions explicitly through a selected package or Pi's extension discovery directories.
+
+The package manifest determines package contents; Home Manager extension options are opt-in. See [installation](installation.md) for the supported composition paths.
+
+## Stamp, Progress, and Cache diagnostics
+
+The `stamp`, `progress`, and `cache-hit-monitor` extensions provide response metadata,
+branch-aware progress, and observed cache accounting in Pi and through the companion
+Paseo **Activity** panel. See [OBSERVABILITY.md](../OBSERVABILITY.md) for configuration,
+commands, lifecycle/privacy boundaries, and validation. Native iOS verification remains
+pending deployment. Adapted upstream source is credited in [THIRD_PARTY.md](../THIRD_PARTY.md).
+
+## Read-only harness API
+
+The background-job and native-subagent extensions publish the optional,
+versioned `globalThis.__paeHarnessReadOnlyV1` service described in
+[`shared/harness-readonly.ts`](../shared/harness-readonly.ts). Every request must
+supply its exact owning Pi `sessionId`. It exposes only bounded job snapshots
+and output, plus native task snapshots and answer-only reports. It does not
+provide control, reconciliation, migration, notification acknowledgement, or
+cleanup operations. AgentSH subagent tasks are reported as unsupported rather
+than as an empty native task list. Public native-worker identifiers are for
+navigation only; private control capabilities and persisted state are never
+part of this contract.
+
+## Installation
+
+Choose one of the following methods:
+
+<details>
+<summary><b>Method 1: Install via pi Package Manager</b></summary>
+<br>
+
+``` bash
+pi install git:github/taugoust/pi-agent-extensions
+```
+
+This command:
+
+1.  Clones the repository to `~/.pi/agent/git/`
+2.  Runs `npm install` to install dependencies
+3.  Adds the package path to `~/.pi/agent/settings.json`
+    (`"packages"` stanza)
+4.  Loads the resources selected by the package manifest and user configuration
+
+</details>
+<details>
+<summary><b>Method 2: Manual Installation via Git Clone</b></summary>
+<br>
+
+1.  Clone the repository to any directory:
+
+``` bash
+git clone https://github.com/taugoust/pi-agent-extensions.git ~/path/to/pi-agent-extensions
+```
+
+1.  Install dependencies:
+
+``` bash
+cd ~/path/to/pi-agent-extensions
+bun install
+# or: pnpm install
+```
+
+This uses workspaces to install extension-specific dependencies (e.g.,
+`@mozilla/readability` and `jsdom` for the
+`fetch` extension). Extensions gracefully degrade if their
+dependencies are not installed --- for example, fetch falls back to
+simple regex-based HTML stripping when Readability is unavailable.
+
+1.  Add the package to pi's configuration by editing
+    `~/.pi/agent/settings.json`:
+
+``` json
+{
+  "packages": [
+    "/absolute/path/to/pi-agent-extensions"
+  ]
+}
+```
+
+This setup loads the extensions selected by the package manifest.
+
+</details>
+<details>
+<summary><b>Method 3: Copy Individual Extensions</b></summary>
+<br>
+
+For selective installation, copy specific extension directories to
+`~/.pi/agent/extensions/`:
+
+``` bash
+# Copy only the extensions you want
+cp -r /path/to/pi-agent-extensions/slow-mode ~/.pi/agent/extensions/
+cp -r /path/to/pi-agent-extensions/questionnaire ~/.pi/agent/extensions/
+```
+
+Or clone directly to the extensions directory:
+
+``` bash
+git clone https://github.com/taugoust/pi-agent-extensions.git ~/.pi/agent/extensions/pi-agent-extensions
+```
+
+**Note:** If an extension has dependencies (e.g., `slow-mode`
+requires the `diff` package), you'll need to install them:
+
+``` bash
+cd ~/.pi/agent/extensions/slow-mode
+bun install
+```
+
+Extensions are auto-discovered from `~/.pi/agent/extensions/`
+--- pi loads all `*.ts` files and `index.ts` files
+in subdirectories. When manually copying `background-job`, `direnv`, `fetch`,
+`pdf`, `permission-gate`, `sandbox`, `ssh`, or `subagent`, also copy this repository's
+`shared/` directory beside the extension directories. Nix bundles and the Home
+Manager module add that shared runtime automatically.
+
+</details>
+
+## AgentSH mode selection
+
+AgentSH-aware extensions share one startup classification. Full AgentSH is
+selected by a REST/mock supervisor, `PI_AGENTSH_ENABLE=1`, or trusted wrapper
+signals such as `PI_SUPERVISED=1`, `PI_AUTO=1`,
+`PI_AGENTSH_REMOTE=ssh`, `PI_AGENTSH_READ_MODE=supervised`, and an AgentSH child
+capability. Once full mode is selected, adaptive tools fail closed until a full
+supervisor is active; they never fall back to native commands, files, network,
+direnv, SSH, PDF processing, or subagents.
+
+`AGENTSH_PERMISSION_GATE_SOCKET` remains a distinct **guard-only** startup mode:
+it authorizes Bash and native background-start intent but does not claim that
+execution is supervised.
+The compatibility `AGENTSH_APPROVAL_UI_SOCKET` protocol is likewise
+approval-only. Neither limited protocol selects the full backend by itself.
+Selecting guard-only and full authority together is a configuration conflict
+and Bash fails closed without opening duplicate authorization prompts.
+Published supervisor state includes its concrete `protocol`; `active=true`
+means a usable client has completed its initial attachment (or is reconnecting
+an already attached client), not merely that AgentSH was configured or attempted.
+
+## ✨ Extensions
+
+### idle-context-warning
+
+Warns before sending a prompt when the last model response on the active session branch was at least 30 minutes ago and current context usage is at least 20%. The warning displays the selected model, idle duration, token count, and context percentage, and offers **Cancel** (default), **Compact**, and **Ignore**. Ignore applies to that submission only. Compact uses the configured cheap model and continues the pending prompt only after a successful saved summary, preserving the conversation's selected model and thinking level. Cancel discards the submission without restoring it to the editor. Paseo-connected sessions mirror the same selector; intentional cancellation is reported as cancellation rather than a failed turn. Pi does not expose confirmation that cache warming actually occurred, so the warning describes possible cache expiry rather than claiming the cache is cold.
+
+Native TUI worker warnings are routed to the owning parent agent, never to a worker questionnaire. The parent receives a guidance notification and resolves the exact pending request using `subagent` with `operation: "idle_decision"`, `child_id`, `request_id`, `worker_epoch`, and `choice: "ignore" | "compact" | "cancel"`. Native status includes pending request details; stale or foreign decisions are rejected. RPC-headless, legacy RPC, and AgentSH workers without this parent channel fail closed instead of opening UI. Extension-originated automatic continuations retain their existing behavior; guarded aliases use the separate dispatch protection described below.
+
+Thresholds and optional cheap compaction are configurable in `~/.pi/agent/extensions/idle-context-warning.json`:
+
+```json
+{
+  "idleMinutes": 30,
+  "contextPercent": 20,
+  "cheapCompactionModel": "openai/gpt-6-luna:low",
+  "guardedModels": {
+    "astra": "openai/gpt-6-astra"
+  }
+}
+```
+
+`guardedModels` defaults to `{}`. Each key names a selectable `idle-guard/<key>` model; its value is the exact physical `provider/model` (without a thinking suffix). Select the guarded name, not the physical model, to enable the dispatch guard. The selection's thinking level is forwarded to the physical model. The cheap summary selector is independent and may include its own thinking suffix.
+
+The guarded selection uses a virtual alias plus a private `idle-guard-proxy` provider. The proxy checks idle state again immediately before delegating to the real model registry, including after Pi's automatic-compaction awaits. It also rechecks in the provider's `onPayload` callback after authentication and earlier payload callbacks, before the HTTP send. Custom physical providers must honor Pi's documented `onPayload`-before-send contract, as the built-in providers do. It does not replace the real provider: real credentials, headers, usage and physical response identity stay with that provider. Do not select the private proxy directly. For guarded selections, the idle threshold is independent of `contextPercent`, and the prompt-choice warning is bypassed—the guard, not a dialog choice, controls dispatch.
+
+Cold requests stop locally. Recovery uses native cheap compaction after the run settles; the gate reopens only after validating the persisted compaction and recording its authorization. Cancellation, failed summaries and intervening session/input changes leave the gate closed. Failed/cancelled compaction latches survive reload and do not repeatedly call the cheap model on subsequent input. Fix the cause and use `/idle-guard-retry` to retry compaction without bypassing the gate. Selecting the unguarded physical model explicitly bypasses this protection.
+
+Alias names are remembered in additive files under `~/.pi/agent/idle-guard-aliases.json.d/` so removing a mapping leaves a closed alias rather than silently restoring the last physical model. Keep this runtime state and the extension installed while restoring guarded sessions; disabling/removing the extension itself is outside the guard's protection.
+
+`cheapCompactionModel` defaults to `null` (normal Pi compaction). When configured, manual `/compact`, RPC/extension compaction, and automatic threshold/overflow compaction use this model **at or above `idleMinutes`**, regardless of context percentage or UI availability. Below that idle threshold, unguarded selections compact normally with their selected conversation model. Guarded selections preserve the same warm policy: native automatic/manual compaction uses their exact underlying physical conversation model and selected thinking level, without routing through the alias. Cold compaction and explicit guard recovery use `cheapCompactionModel`. A warm summary that crosses the idle deadline during authentication or payload preparation cancels locally rather than sending cold history; the gate stays closed until explicit recovery succeeds. The 20% `contextPercent` gate applies only to the prompt warning. For unguarded selections, this setting alone does not trigger compaction merely because a session is idle and does not automatically choose an action in the warning. Explicit **Compact** requires a configured cheap model and never falls back to the conversation model. Guarded selections start recovery when a cold request reaches their dispatch gate.
+
+The selector is an exact `provider/model[:thinking]`, compatible with subagent selectors. Thinking defaults to `low`; supported suffixes are `off`, `minimal`, `low`, `medium`, `high`, `xhigh`, and `max`. Nested model IDs and non-thinking colon suffixes are retained. Configure a direct physical model/provider already available to Pi with sufficient context capacity (virtual and guarded summary selectors are rejected to prevent recursive routing); the extension does not infer price, truncate the prepared conversation to fit a smaller model, or choose an alternative model. Nix can derive the selector from the configured subagent default without coupling runtime compaction to subagent settings.
+
+The conversation model and thinking level remain unchanged. Cheap compaction reuses Pi's native algorithm and the event's prepared token budgets, retained-message boundary, previous summary, custom instructions, split-turn handling, file tracking, and usage accounting. Credentials and provider headers are resolved through Pi's model registry. Cumulative native file lists survive subsequent cheap or normal compactions while the extension is enabled. Idle time always comes from the latest non-error, non-aborted model response on the active persisted branch, including restored sessions; failed routing/provider requests, user/tool activity, cache warming, and compaction itself do not reset it.
+
+Unknown models, authentication/provider errors, empty or incomplete summaries, and aborts **cancel compaction without falling back to the conversation model**. Diagnostics appear in UI notifications or stderr in headless mode. Invalid selector values cancel when the cheap route is selected; unreadable/malformed config files cancel compaction conservatively (a missing config file retains defaults). Fix the configuration/provider and retry; explicitly set the option to `null` to restore normal compaction.
+
+Home Manager installs the extension's helpers and generates the JSON selector:
+
+```nix
+programs.pi.extensions.idle-context-warning = {
+  enable = true;
+  cheapCompactionModel = "openai/gpt-6-luna:low"; # nullable string; default null
+  guardedModels.astra = "openai/gpt-6-astra"; # attrs of exact model IDs; default {}
+};
+```
+
+Validation (with the Pi 1.0.0 SDK, its matching `@earendil-works/pi-ai` dependency, and Node types available in `node_modules`):
+
+```sh
+nix shell nixpkgs#bun nixpkgs#typescript --command sh -c '
+  bun test idle-context-warning &&
+  tsc --noEmit --skipLibCheck --strict --module esnext --moduleResolution bundler \
+    --target es2023 --allowImportingTsExtensions idle-context-warning/index.ts
+'
+node --test idle-context-warning/runtime-integration.mjs
+nix build .#checks.x86_64-linux.idle-context-warning
+```
+
+
+<details>
+<summary><strong>workflows</strong> - Worktree and opt-in Goal</summary>
+
+**Work → Goals** and **Work → Worktrees** adapt the candidate engines. Describe an outcome in chat and ask the model to keep working: `goal_manage` controls the bounded Goal engine, while `update_progress` supplies its persistent checklist. Goal objectives are concise outcomes; implementation and verification steps belong in the linked checklist. Unfinished required tasks prevent completion; standalone progress remains supported. The Goals tab is an overview and intervention surface, not a mandatory creation form. Defaults remain three automatic responses and two repeated no-progress runs; token budgets are unlimited unless explicitly requested. Worktree operations retain their confirmation/removal safeguards. See [workflows/README.md](../workflows/README.md) for model controls, task identity and safety boundaries.
+
+</details>
+
+<details>
+<summary><strong>btw</strong> - Terminal and Paseo side conversations</summary>
+
+In Pi's terminal, `/btw` opens the candidate manager and `/btw <question>` starts its native side chat, including follow-ups, search, pane layouts, settings, and explicit bring-to-main draft controls. Terminal settings default to the main model/thinking and are separate from Paseo. The **btw** composer chat in Paseo retains its compact interface and configured cheap model. Neither path automatically adds main messages, changes the main model, or compacts the main session. See [btw/README.md](../btw/README.md) for lifecycle, build instructions and attribution.
+
+</details>
+
+<details>
+<summary><strong>openai-accounts</strong> - Native OpenAI account manager</summary>
+<br>
+
+- **Command**: `/accounts` (native Pi TUI only)
+- **Accounts**: named native OpenAI ChatGPT OAuth grants and API keys
+- **Selection**: per session, with an explicit restore-default-Pi-login action
+- **Home Manager**: `programs.pi.extensions.accounts.enable = true;`
+- **Storage**: private atomic `pi-accounts.json`; the runtime lock dependencies are included in the extension layout.
+
+Paseo sees safe account labels/status and may switch an existing account only while idle. It never receives credential values or login/add/remove operations. Switching sends no model call and preserves conversation context. A request-time OpenAI Responses gate covers ordinary OpenAI calls, guarded physical Astra dispatch, and direct Luna compaction; stale selection or failed activation blocks dispatch. The account store preserves other provider sections but this extension enables only Pi's built-in native `openai` (not Codex); if another extension registers a custom native provider under `openai`, the account extension refuses the gate without replacing that provider.
+
+</details>
+<details>
+<summary><strong>openai-usage</strong> - OpenAI credential status and official settings link</summary>
+<br>
+
+- **Command**: `/usage`
+- **Home Manager**: `programs.pi.extensions.usage.enable = true;`
+
+Shows the locally effective credential kind and official OpenAI/ChatGPT usage-settings link. It makes no quota calls and displays no fabricated numeric limits. `api-key-configured` means local configuration only; it does not assert remote validity or entitlement.
+
+</details>
+<details>
+<summary><strong>openai-fast-mode</strong> - OpenAI priority inference toggle</summary>
+<br>
+
+- **Source**: pinned unchanged from [`pi-openai-fast-mode` 0.3.0](https://github.com/johncmunson/pi-openai-fast-mode/releases/tag/v0.3.0)
+- **Command**: `/fast [on|off|toggle]`
+- **Default**: loaded but disabled
+- **Home Manager**: `programs.pi.extensions.openai-fast-mode.enable = true;`
+
+**Description**: Adds OpenAI Fast Mode priority-inference support. Loading the
+extension never enables Fast Mode automatically; use `/fast` or `/fast on` in a
+session. The Nix registry exposes it as `openai-fast-mode`, deduplicates bundle
+selection, and projects source files individually so its `config.json` remains
+writable outside the Nix store.
+
+</details>
+<details>
+<summary><strong>auto</strong> - Draft controls for <code>pi-auto</code></summary>
+<br>
+
+- **Source**: `auto/`
+- **Command**: `/auto`
+- **Status bar**: `auto · Draft ready` or degraded/action state
+- **Dependencies**: the trusted `pi-auto` wrapper and `sandbox` extension
+
+**Description**: Adds a user-only Draft action panel to interactive
+`pi-auto` sessions. It can request Review, Apply and exit, Discard and exit, or
+Pause and exit. The extension never exposes these actions as model-callable
+tools; it writes a private, exact-session handoff and asks Pi to shut down
+gracefully. The outer wrapper performs review/finalization only after Pi and its
+extensions have stopped.
+
+</details>
+<details>
+<summary><strong>background-job</strong> - Durable shell jobs in the calling agent's tmux window</summary>
+<br>
+
+- **Source**: `background-job/`
+- **Tool**: `background_job` with `start`, `list`, `status`, `output`, bounded
+  `wait`, `signal`, `cancel`, and explicit `reap`
+- **Wait limit**: `timeout_ms` accepts up to `43200000` (12 hours). Wait returns
+  early on completion; cancelling a wait does not cancel the job. Inspect output
+  before claiming dependent work complete.
+- **Reload safety**: source imports in this extension use explicit `.ts` paths so
+  Pi reload picks up changed Nix installation symlinks rather than stale `.js`
+  resolution. After activation, reload each affected live session separately.
+- **Command**: `/background-jobs`
+- **Dependencies**: tmux and Node.js (installed by the Home Manager module)
+
+**Description**: On Linux, runs long native commands as panes in the calling
+agent's tmux window, without overriding Pi's Bash tool. The caller must be in
+tmux; placement is resolved from its actual pane, not the user's current focus.
+Child Pi TUIs therefore place their jobs beside themselves. Infrastructure
+watchers retain a separate private backend. Jobs, private metadata, and a bounded 1 MiB
+output tail live under Pi's private agent state directory and survive turns,
+compaction, extension reload, session replacement, and Pi exit. Model-facing
+control operations are bound to the owning Pi session and use opaque job IDs.
+Only adoption accepts an exact existing tmux pane ID/server; no API accepts
+arbitrary tmux commands. Output returned to the model
+is further limited to 50 KiB/2000 lines. New-command concurrency is 64 jobs
+and per-working-directory concurrency is 32; adopted panes do not consume launch slots.
+User jobs are not automatically pruned merely because they completed. Completion and
+cancellation retain inspectable panes and records. Terminal native jobs are fully
+reaped (owned pane, output, and metadata) five minutes after their most recent
+output inspection. `output` and `wait` with `lines` start/reset this persistent timer;
+status, list, status-only waits, read-only UI previews, and notifications do not.
+Unread results, active jobs, and adopted panes/processes are excluded. Expiry is
+checked while Pi is running and on the next session start after Pi exits.
+`reap` explicitly removes a terminal job's verified owned pane and runtime state;
+it rejects running jobs and does not remove sibling panes. Infrastructure services
+have a separate 20-terminal-record retention limit; they
+never displace recent user jobs or unread outcomes. Watcher startup resolves
+symlinked entrypoints and backs off 30 seconds after an immediate startup exit.
+
+A cancelled `wait` leaves the underlying job running. `cancel` stops execution
+without reaping its pane; `reap` is a separate cleanup operation. User shell job
+termination (including failure, cancellation, or loss) wakes an idle parent.
+While the parent is busy, completions remain in the harness until it settles;
+reading the output first consumes the wake without interrupting active tools. The bounded
+internal completion message routes the parent to `background_job action=status`
+and `action=output` to verify dependent work, then explicit `action=reap` only
+when authorized and no longer needed. No full reports or toasts are posted
+automatically. Infrastructure jobs, watcher events, and routine progress remain
+outside model context and never schedule turns. Completion receipts deduplicate
+polling and reload; terminal tool reads suppress queued or late completion wakes.
+Historical terminal routine receipts are not replayed when upgrading.
+Waits are status-only unless output lines are explicitly requested. Starts pass
+through the same Permission Gate classification as ordinary Bash. Guard-only
+AgentSH can authorize native
+starts, while full AgentSH mode fails closed until it has a dedicated
+background-job backend. Arbitrary tmux commands and pane input are not exposed as
+job-tool operations. Reaping revalidates server, process and pane ownership; stale
+identities fail closed rather than risking an unrelated pane. Startup uses a
+runner/controller identity handshake and a bounded, cancellation-aware launch
+gate. If a caller-window split is explicitly rejected for lack of space, the
+backend may retile that same window and retry once; it never creates a hidden
+visible-job session or closes an unrelated pane.
+
+</details>
+<details>
+<summary><strong>direnv</strong> - Refresh environment from <code>.envrc</code></summary>
+<br>
+
+- **Source**:
+  [direnv/](https://github.com/taugoust/pi-agent-extensions/tree/main/direnv)
+- **License**: MIT
+- **Status bar**: `direnv …` / `direnv ✓` / `direnv ✗`
+- **Dependencies**: `direnv` binary in `PATH`
+
+**Description**: Refreshes direnv on session start and after each `bash` tool
+call. In ordinary/`pi-unsafe` sessions it preserves the shell-hook behaviour of
+running `direnv export json` locally and updating the Pi process environment. In
+sessions classified as full AgentSH (including `PI_SUPERVISED=1`) it requires
+the sandbox extension and uses AgentSH's exact-session `refresh_direnv` endpoint
+instead: `.envrc` code
+runs in the supervised execution workspace, values remain server-side for later
+commands, and the trusted parent Pi environment is never mutated. There is no
+local fallback when AgentSH is unavailable. Supervised use therefore requires
+an AgentSH release that implements `refresh_direnv`; older supervisors fail
+closed with an actionable diagnostic.
+
+</details>
+<details>
+<summary><strong>permission-gate</strong> - AgentSH or legacy dangerous-command authorization</summary>
+<br>
+
+- **Source**:
+  [permission-gate/](https://github.com/taugoust/pi-agent-extensions/tree/main/permission-gate)
+- **License**: MIT
+- **Command**: `/permission-gate off|on|status` controls guard-only approval
+  prompts for the parent and **all existing and future children**. Default: on.
+  With no argument, guard-only reports status; the unsupervised legacy gate toggles.
+  Off auto-resolves AgentSH prompts as allow; every command still goes through
+  authorize/resolve, exact receipt validation, and fail-closed transport handling.
+  Pending UI is dismissed when off is selected (including mirrored prompts).
+  On affects subsequent resolutions, not commands already authorized.
+  The operator command is not exposed as a model tool or child authority API.
+  Mode lives in the parent guard claim, bound to the Pi session ID, surviving
+  `/reload` only. New/fork/resume/restart sessions default on; copied or edited
+  custom session entries cannot disable it. Trusted in-process extensions remain
+  inside the trust boundary. Full AgentSH sandbox policy is **unchanged**:
+  this command does not disable sandbox enforcement or its approvals.
+- **Status bar**: `gate ■` in legacy mode, or `AgentSH gate ■` / `?` / `✗`
+  with an inherited AgentSH gate
+
+**Description**: Selects exactly one authority for Bash tool calls and
+`background_job` starts:
+
+1. When the trusted AgentSH launcher passes `AGENTSH_PERMISSION_GATE_SOCKET`,
+   the extension claims and deletes that environment marker, connects to the
+   private one-shot Unix rendezvous, performs the version 1 hello, and sends
+   every exact Bash command or background start, working directory, and Pi
+   tool-call ID to AgentSH.
+   AgentSH—not Pi's local regex list—classifies the command and durably audits
+   the terminal decision. Allowed background starts receive a one-use receipt
+   bound to the exact tool-call ID, command, and working directory, preventing
+   post-authorization argument mutation before launch. Trusted Bash routers
+   (currently SSH targeting) apply their idempotent rewrite before this exact
+   authorization regardless of extension handler order.
+2. Full AgentSH supervised, Auto, and sandbox modes suppress this legacy gate
+   once the supervisor is active, so they do not produce a duplicate prompt.
+   If full mode was selected but its supervisor is unavailable, the extension
+   blocks Bash rather than permitting native fallback.
+3. Only an ordinary session with neither integration uses the original local
+   dangerous-command regex prompts and `/permission-gate` toggle.
+
+The rendezvous protocol is bounded JSONL (64 KiB frames, with smaller command,
+cwd, ID, and prompt-preview limits). AgentSH prompt metadata is rendered through
+an attached Paseo permission card or Pi's selectable UI, with **Deny first** and
+the active cancellation signal. Pi sends `resolve` for explicit allow/deny or
+`cancel` for dismissal, timeout, headless use, or abort, then waits for
+AgentSH's audited `complete` acknowledgement before allowing anything. Invalid
+FDs, handshake/version errors, malformed or oversized frames, mismatched IDs,
+unexpected EOF, timeout, and abort all fail closed. The default per-step and
+prompt bound is five minutes; a trusted launcher may set
+`PI_AGENTSH_PERMISSION_GATE_TIMEOUT_MS` to another positive millisecond value.
+
+This AgentSH mode is a lightweight **guard only**. It authorizes command intent
+but does not create a sandbox or observe native Bash execution. Launch it via
+AgentSH rather than setting `AGENTSH_PERMISSION_GATE_SOCKET` manually. AgentSH
+creates the private mode-0700 rendezvous, binds its peer to the launched Pi PID
+on Linux, and removes its path immediately after the one allowed connection.
+
+``` sh
+agentsh permission-gate run -- pi
+```
+
+</details>
+<details>
+<summary><strong>slow-mode</strong> - Review gate for <code>write</code> and <code>edit</code> tool calls</summary>
+<br>
+
+- **Source**:
+  [slow-mode/](https://github.com/taugoust/pi-agent-extensions/tree/main/slow-mode)
+- **License**: MIT
+- **Toggle**: `/slow-mode`
+- **Status bar**: `slow ■` (when active)
+- **Dependencies**: `diff` package (auto-installed via
+  `bun install`)
+- **Optional**: `delta`, `nvim`, or
+  `vim` for external diff viewing
+
+**Description**: Intercepts `write` and `edit`
+tool calls, letting you review and approve/reject changes before they
+hit disk.
+
+**Features**:
+
+- External diff viewer by default for edits (delta/vim/diff)
+- Proper unified diff using Myers algorithm
+- Vim-style navigation in inline TUI (`j/k`,
+  `u/d`, `gg/G`)
+- `Ctrl+O` from inline view opens external diff viewer
+- Attached Paseo sessions show approval cards containing the proposed write or unified diff. Remote users can approve, reject, or hand the full review back to the terminal; oversized previews cannot be approved remotely.
+
+**Key bindings**:
+
+  Key                                  Action
+  ------------------------------------ ------------------------------
+  `Enter`                   Approve changes
+  `Esc`                     Reject changes
+  `Ctrl+O`                  Open in external diff viewer
+  `j/k` / `↑↓`   Scroll line by line
+  `u/d`                     Scroll half page
+  `gg` / `G`     Jump to top/bottom
+
+**What it looks like**:
+
+For edits, opens delta/vim diff viewer by default:
+
+``` example
+# Delta opens in your terminal showing side-by-side diff
+# After you close delta, you get a confirmation prompt:
+
+Apply changes to air/slow-mode.org?
+  > Yes
+    No
+```
+
+For writes (or if no external viewer), shows inline TUI diff:
+
+``` example
+────────────────────────────────────────────────────────────────
+ EDIT (diff)
+ slow-mode.ts
+
+ @@ -28,7 +28,9 @@
+  export default function slowMode(pi: ExtensionAPI) {
+ +  // State: whether slow mode is currently enabled
+    let enabled = false;
+ +
+ +  // Staging directory for review
+    const tmpDir = `/tmp/pi-slow-mode-${process.pid}`;
+
+ (lines 1–30 of 150 — j/k u/d gg/G scroll)
+
+ Enter approve • Esc reject • Ctrl+O external • j/k u/d gg/G scroll
+────────────────────────────────────────────────────────────────
+```
+
+</details>
+<details>
+<summary><strong>fence</strong> - Block <code>write</code> and <code>edit</code> outside the working directory</summary>
+<br>
+
+- **Source**:
+  [fence/](https://github.com/taugoust/pi-agent-extensions/tree/main/fence)
+- **License**: MIT
+- **Toggle**: `/fence`
+- **Status bar**: `fence ■` (when active)
+- **Dependencies**: none
+
+**Description**: Intercepts `write` and `edit`
+tool calls that target a path outside the current working directory and
+prompts the user to allow or block them. This is a local Pi guardrail;
+it is separate from the `sandbox` AgentSH supervisor-client mode,
+where AgentSH owns enforcement and approval state.
+
+**How it works**:
+
+- Resolves the target path (absolute or relative) against
+  `ctx.cwd`
+- Normalises both paths to prevent `..` traversal
+- Prompts for confirmation when a path is outside `cwd`
+- Hard-blocks in headless mode (no UI available)
+- No-op for all other tool calls (e.g., bash)
+
+**What it looks like** when a write outside cwd is intercepted:
+
+``` example
+⚠️  Write outside working directory:
+
+  /home/user/nix-config/home/programs/pi/default.nix
+
+  (cwd: /home/user/pi-agent-extensions)
+
+Allow?
+  > Yes
+    No
+```
+
+</details>
+<details>
+<summary><strong>modal-editor</strong> - Vim-style modal input editor</summary>
+<br>
+
+- **Source**:
+  [modal-editor/](https://github.com/taugoust/pi-agent-extensions/tree/main/modal-editor)
+- **License**: MIT
+- **Origin**: Based on
+  [badlogic/pi-mono](https://github.com/badlogic/pi-mono/tree/main/packages/coding-agent/examples/extensions/modal-editor.ts)
+
+**Description**: Replaces the default pi input editor with a vim-style
+modal editor. Adds an `INSERT` / `NORMAL` mode
+indicator to the bottom border of the editor. Normal-mode yanks use Pi's
+OSC 52-capable copy path; `p` / `P` and insert-mode
+`Ctrl+V` query the terminal clipboard with OSC 52 when no local
+desktop clipboard is available or Pi is running over SSH/mosh. This also works
+through nested tmux when every layer uses
+`set-clipboard on` and the outer terminal permits clipboard reads.
+
+**Modes and key bindings**:
+
+  Key                   From     Action
+  --------------------- -------- ------------------------------
+  `Escape`   insert   Switch to normal mode
+  `i`        normal   Switch to insert mode
+  `a`        normal   Append (insert + move right)
+  `h`        normal   Move left
+  `j`        normal   Move down
+  `k`        normal   Move up
+  `l`        normal   Move right
+  `0`        normal   Jump to line start
+  `$`        normal   Jump to line end
+  `x`        normal   Delete character
+  `Escape`   normal   Abort agent (default pi)
+
+**What it looks like**:
+
+``` example
+────────────────────────────────────────────────────────────────
+> hello world█
+
+                                                       NORMAL
+────────────────────────────────────────────────────────────────
+```
+
+</details>
+<details>
+<summary><strong>questionnaire</strong> - Interactive multi-question tool with tab navigation</summary>
+<br>
+
+- **Source**:
+  [questionnaire/](https://github.com/taugoust/pi-agent-extensions/tree/main/questionnaire)
+- **License**: MIT
+- **Type**: Tool (LLM-callable)
+- **Use cases**: Configuration wizards, disambiguation, confirmations,
+  multi-step workflows
+- **Paseo**: Attached sessions present each question as a sequential choice
+  card. Free-text answers can be handed back to the full terminal UI.
+
+**Description**: A tool the LLM can call to ask single or
+multiple-choice questions with tab-based navigation.
+
+**Features**:
+
+- Single question mode with option list
+- Multi-question mode with tab bar and completion indicators (■/□)
+- Free-text input option
+- Submit review screen showing all answers
+- Custom rendering in chat history
+
+**Key bindings**:
+
+  Key                                  Action
+  ------------------------------------ -----------------------
+  `Tab` / `←→`   Navigate between tabs
+  `↑↓`                      Navigate options
+  `Enter`                   Confirm selection
+  `Esc`                     Cancel
+
+**What it looks like**:
+
+Multi-question flow:
+
+``` example
+────────────────────────────────────────────────────────────────
+← □ Framework  □ TypeScript  □ Styling  ✓ Submit →
+
+Which framework would you like to use?
+
+> 1. React
+     Component-based library
+  2. Vue
+     Progressive framework
+  3. Svelte
+     Compiled framework
+  4. Type something.
+
+Tab/←→ navigate • ↑↓ select • Enter confirm • Esc cancel
+────────────────────────────────────────────────────────────────
+```
+
+After selecting \"React\" and pressing Enter:
+
+``` example
+────────────────────────────────────────────────────────────────
+← ■ Framework  □ TypeScript  □ Styling  ✓ Submit →
+
+Do you want to use TypeScript?
+
+> 1. Yes
+  2. No
+
+Tab/←→ navigate • ↑↓ select • Enter confirm • Esc cancel
+────────────────────────────────────────────────────────────────
+```
+
+Final submit screen shows all answers:
+
+``` example
+────────────────────────────────────────────────────────────────
+← ■ Framework  ■ TypeScript  ■ Styling  ✓ Submit →
+
+Ready to submit
+
+Framework: 1. React
+TypeScript: 1. Yes
+Styling: 1. Tailwind CSS
+
+Press Enter to submit
+
+Tab/←→ navigate • ↑↓ select • Enter confirm • Esc cancel
+────────────────────────────────────────────────────────────────
+```
+
+</details>
+<details>
+<summary><strong>fetch</strong> - Adaptive native and AgentSH-supervised HTTP</summary>
+<br>
+
+- **Source**:
+  [fetch/](https://github.com/taugoust/pi-agent-extensions/tree/main/fetch)
+
+- **License**: MIT
+
+- **Type**: Tool (LLM-callable)
+
+- **Use cases**: Fetching web pages, calling APIs, downloading files
+
+- **Optional dependencies**: `@mozilla/readability`,
+  `jsdom` (for Readability mode --- installed via
+  `bun install` at root)
+
+**Description**: Registers one adaptive `fetch` tool. Outside
+AgentSH it uses bounded Node.js `fetch`; with an active AgentSH
+supervisor it executes bounded `curl` through AgentSH so DNS, destination
+policy, approvals, cancellation, and audit remain authoritative. If AgentSH is
+expected but unavailable, native fallback is disabled. Supervised runtimes must
+provide `curl`. Optional Mozilla Readability support falls back to regex-based
+HTML stripping when its dependencies are absent.
+
+**Features**:
+
+- `GET`, `POST`, `PUT`,
+  `PATCH`, `DELETE`, `HEAD` methods
+- Custom request headers and body
+- Configurable timeout (default 30s) and response truncation (default
+  100KB)
+- Bounded, atomically published downloads via `outputPath`
+- Native `outputPath` is always restricted to the canonical system
+  temporary directory; supervised paths are translated and enforced by AgentSH
+- HTTP(S)-only initial and redirect protocols
+- Curl equivalent shown on expand (`Ctrl+O`)
+- Red error strip for HTTP 4xx/5xx, timeouts, and blocked writes
+
+**Rendering**:
+
+Tool call display:
+
+``` example
+fetch GET https://api.example.com/data
+fetch POST https://api.example.com/submit
+fetch GET https://example.com/logo.png → /tmp/logo.png
+```
+
+Collapsed result:
+
+``` example
+200 OK · 12.3KB
+200 OK · 47.1KB → /tmp/logo.png
+```
+
+Expanded result (`Ctrl+O`) shows curl equivalent:
+
+``` example
+$ curl -X POST \
+    -H 'Content-Type: application/json' \
+    -d '{"query":"test"}' \
+    'https://api.example.com/search'
+```
+
+Errors show with red background:
+
+``` example
+✗ 404 Not Found: https://example.com/missing
+✗ Timed out after 30000ms: https://slow.example.com
+Native fetch outputPath is restricted to /tmp/
+```
+
+</details>
+<details>
+<summary><strong>pdf</strong> - Local or AgentSH-supervised PDF inspection beyond text extraction</summary>
+<br>
+
+- **Source**:
+  [pdf/](https://github.com/taugoust/pi-agent-extensions/tree/main/pdf)
+- **License**: MIT
+- **Type**: Tools (LLM-callable)
+- **Dependencies**: Poppler (`pdfinfo`, `pdftoppm`, `pdftotext`,
+  `pdfimages`) and ImageMagick (`magick`)
+
+**Description**: Registers PDF inspection tools that complement plain
+`pdftotext` workflows. In ordinary unsupervised Pi sessions they use the local
+filesystem and process runtime. When the `sandbox` extension has an active
+AgentSH supervisor, every command, read, and sidecar write is routed through
+that supervisor, including forwarded `pi-auto --ssh` sessions; remote paths
+remain supervisor-visible `/workspace` paths. The tools can inspect metadata,
+render pages to PNG images, crop rendered regions, extract text in multiple
+modes, and extract embedded bitmap images. Outputs are written only to
+explicitly requested paths or directories and generated image/text artifacts
+get JSON metadata sidecars.
+
+**Nix usage**:
+
+``` bash
+nix shell nixpkgs#poppler_utils nixpkgs#imagemagick
+```
+
+The Home Manager module installs these packages automatically when
+`programs.pi.extensions.pdf.enable = true;` is set. Supervised sessions also
+require the packages on the AgentSH host; installing them only for a remote
+trusted Pi control plane is insufficient.
+
+**Tools**:
+
+- `pdf_info`: document metadata and page count
+- `pdf_render_pages`: render selected pages like `1,3-5` to PNG
+- `pdf_crop_image`: crop a pixel rectangle from a rendered page
+- `pdf_extract_text`: plain, layout, raw, bbox, or bbox-layout text
+- `pdf_extract_images`: extract embedded raster images
+
+</details>
+<details>
+<summary><strong>subagent</strong> - Adaptive native and AgentSH-backed delegation</summary>
+<br>
+
+- **Source**:
+  [subagent/](https://github.com/taugoust/pi-agent-extensions/tree/main/subagent)
+- **License**: MIT
+- **Type**: Tool (LLM-callable)
+- **Command**: `/background` moves every currently running foreground
+  `subagent` invocation to the background without restarting it
+- **Security model**: This is the sole model-facing `subagent` registration.
+  With an active AgentSH supervisor it delegates through AgentSH, including
+  isolated Git-backed Draft VMs. Without AgentSH configuration it starts raw
+  child Pi processes. If AgentSH is expected but unavailable, it fails closed
+  and never falls back to native execution.
+
+**Description**: Registers one adaptive `subagent` tool. The parent supplies a
+single task, parallel tasks, a chain, a background lifecycle/control operation,
+or an AgentSH Draft disposition. Native child Pi state is isolated under
+`$PI_CODING_AGENT_DIR/subagents/...`; AgentSH owns policy, streaming, approvals,
+artifacts, and Draft lifecycle whenever its backend is active. In guard-only
+`pi-unsafe` sessions, each native child loads only immutable Nix-store finalizer
+and permission-proxy extensions. The proxy exposes shell execution under the
+distinct `parent_bash` child-tool name, so a missing proxy cannot fall back to
+Pi's built-in Bash. Every command is relayed from that wrapper through a private
+one-connection Unix rendezvous to the launcher's parent-bound AgentSH Permission
+Gate, so dangerous commands appear in the parent terminal and Paseo for approval.
+Missing, disconnected, cancelled, stale, or conflicting authority blocks the
+child command; infrastructure loss terminates the child rather than becoming a
+model-visible ordinary denial. A successful child must close its authenticated
+relay with `goodbye`. This guarded-native relay currently requires Linux process
+identity support. Guarded native children accept only Pi's built-in `read`, `bash`,
+`edit`, and `write` tool names; project/package extensions are deliberately not
+loaded. This is still intent authorization, not containment: full AgentSH is
+required for filesystem, process, network, and descendant enforcement.
+
+**Modes**:
+
+``` json
+{ "task": "Review README.md", "tools": ["read"] }
+{ "tasks": [{ "task": "Find model code", "tools": ["read", "grep", "find"] }] }
+{ "chain": [{ "task": "Find files" }, { "task": "Plan from: {previous}" }] }
+{ "task": "Run the slower investigation", "background": true }
+{ "operation": "wait_any", "wait_ms": 30000 }
+{ "operation": "wait_group", "job_id": "subagent-job-...", "wait_ms": 30000 }
+{ "operation": "wait_all", "wait_ms": 30000 }
+{ "operation": "result", "job_id": "subagent-job-...", "child": 1, "offset": 0, "limit": 49152 }
+{ "operation": "prompt", "child_id": "subagent-child-...", "job_id": "subagent-job-...", "message": "Check the failing edge case", "control_mode": "steer" }
+{ "operation": "prompt", "child_id": "subagent-child-...", "message": "After that, summarize", "control_mode": "follow_up" }
+{ "operation": "prompt", "child_id": "subagent-child-...", "message": "Stop and investigate this instead", "control_mode": "interrupt" }
+{ "operation": "resume", "task_id": "subagent-task-...", "message": "Continue validation", "compact": false }
+{ "mode": "draft", "task": "Implement and commit the change in an isolated VM" }
+{ "mode": "draft", "action": "review", "draft_id": "session-..." }
+```
+
+The tool keeps a flat parameter schema for provider compatibility; its field
+and operation descriptions define the accepted combinations. Omit `operation`
+for a new launch or Draft disposition. Never combine an operation with launch
+options (`task`, `tasks`, `chain`, `model`, `background`, `tools`, `cwd`, etc.).
+
+| Operation | Fields besides `operation` (`?` means optional) |
+|---|---|
+| `resume` | `task_id`, `message?`, `compact?` |
+| `prompt` | `child_id`, `message`, `job_id?`, `control_mode?`, `wait_for_response?` |
+| `list`, `tasks` | `limit?` (1–50) |
+| `status`, `output`, `cancel`, `reap`, `promote` | `job_id` |
+| `wait`, `wait_group` | `job_id`, `wait_ms?` |
+| `wait_any`, `wait_all` | `wait_ms?` |
+| `result` | `job_id?`, `child_id?`, `child?`, `offset?`, `limit?`, `diagnostics?`; require `job_id` or `child_id`; never both `child` and `child_id` |
+
+For `prompt`, optional `job_id` is a checked assertion that the child belongs to
+that group, not a second target. Unknown, foreign, or mismatched identities fail
+before delivery; omitting it retains child-only control. A rejected control call
+never relaunches the task.
+
+Native workers can call `notify_parent({message, requires_guidance?})` without
+ending their task. Routine findings are retained outside model context;
+explicit guidance requests receive bounded, rate-limited parent wake-ups. The parent replies using `subagent`
+`operation=prompt` and the supplied `child_id`. Acceptance means queued, not a
+parent decision; the worker does not automatically pause or wait. Use background
+workers for this interaction: in-flight parent tools are not interrupted.
+Messages are limited to 1000 characters/2000 bytes and five per minute per child.
+Notifications are retained in private session entries and deduplicated on replay.
+Background child execution completion (including failure, cancellation, or a lost
+native worker) separately wakes an idle parent with `triggerTurn: true`. While
+the parent is busy, completions remain in the harness rather than accumulating
+stale Pi steering messages. Only the newest pending report per child wakes the
+parent after it settles; reading a result consumes that report and older wakes,
+not a newer unseen report. Accepted native prompts and observed newer running
+turns durably invalidate older pending terminal notices for that worker attempt,
+including active snapshots observed by a selected result read. If invalidation
+persistence fails, that worker's notices stay suppressed/held while the receipt is
+retried; the retry obligation survives manager restart and extension reload.
+Later completions still notify after recovery. Already-sent messages
+cannot be retracted. Foreground results are returned directly;
+`task_outcome` alone does not wake the parent before execution settles. Completion
+messages contain result-routing metadata, not report bodies or guidance requests.
+Read `subagent operation=result` before relying on the work, then explicitly reap
+when its retained panes are no longer needed. Completion batches are bounded and
+deduplicated durably; failed sends remain queued for retry. They do not share the
+guidance quota or 30-second throttle. Historical terminal records do not replay
+on upgrade/reload, and routine progress/findings remain silent.
+Native polling is single-flight: slow refreshes cannot accumulate timer work.
+Result reads check only the selected worker with a bounded, abortable status
+request, without waiting behind unrelated child polling.
+
+Guidance wake-ups have a 30-second minimum interval, a bounded UTF-8 payload,
+and a conservative 20-guidance-update quota between explicit operator resets.
+Guidance delivery receipts are reserved before scheduling the model: ambiguous failures
+may leave a request available only for explicit review, rather than replay it.
+
+Operator controls (do not cancel builds or workers):
+- `/harness-state status` — queue, deduplication, delivery and circuit-breaker counters, including guidance pause/reason.
+- `/harness-state dismiss-guidance all` or `/harness-state dismiss-guidance <exact child_id>` — durably consume only pending guidance requests in the explicit scope; completions and routine findings are never dismissed.
+- `/harness-state show` — explicitly display the last 25 retained child notifications.
+- `/harness-state disable` — persistently disable automatic delivery for this session.
+- `/harness-state enable` — explicitly re-enable guidance and reset its quota.
+- `PAE_QUIET_STATE_DISABLED=1` — startup environment kill switch.
+
+When Pi exposes numbered aliases because both job and subagent extensions register
+the shared command, use `/harness-state:1` in place of `/harness-state` (for
+example, `/harness-state:1 status`). Unqualified ambiguous names are not commands.
+
+Compaction temporarily pauses guidance delivery and resumes after successful or failed compaction. Older persisted compaction pauses remain disabled until `/harness-state enable` explicitly clears them.
+Routine job/watch state and full outputs remain available through their tools;
+receipt routing is not an acknowledgement for job-retention purposes.
+Existing workers acquire the tool only on a new launch/resume; AgentSH-backed
+workers do not yet expose this native notification channel.
+
+New subagents read `subagent.json` in Pi's agent directory (`~/.pi/agent`, or
+`PI_CODING_AGENT_DIR`), independently of the main agent's `settings.json`:
+
+```json
+{
+  "defaultProvider": "openai",
+  "defaultModel": "gpt-6-luna",
+  "defaultThinkingLevel": "low"
+}
+```
+
+Home Manager exposes the same three fields under
+`programs.pi.extensions.subagent`. They apply to single, parallel, and chain
+launches on both backends, including nested children. An explicit task `model`
+takes precedence; append `:medium`, `:high`, etc. to override thinking as well.
+Unconfigured fields default to OpenAI/Luna/low; there is no automatic Codex fallback. Invalid configuration
+is reported rather than silently ignored. Restart Pi or `/reload` after changes;
+existing/resumed children retain their recorded model.
+
+Background launches support single, parallel, and chain requests through both
+adaptive backends, with up to sixteen aggregate invocations active at once.
+Parallel and chain groups are capped at eight children; the native backend runs
+at most four siblings concurrently. They return immediately,
+retain a 50 KiB preview plus each child's complete terminal report up to 16 MiB
+in a private per-user store, with
+a fair 32 MiB aggregate cap per job. Completion updates are coalesced into
+private durable state deltas; they do not trigger model requests, add context,
+post worker reports in the conversation or interrupt an active supervisor. `result`
+returns the worker answer by default, without the generated task-outcome JSON or
+RPC diagnostics. Use `operation=result, diagnostics=true` to include that retained
+metadata. This also applies to older stored reports; the original artifacts remain
+unchanged. Pagination offsets and checksums refer to the selected view, so keep the
+same `diagnostics` setting across pages. Results are paged
+by byte `offset` and a limit of at most 48 KiB (leaving room inside the 50 KiB
+parent-response budget); parallel and chain jobs select either a one-based
+`child` or its opaque `child_id`.
+`list`, `status`, `output`, bounded waits of up to 24 hours, `result`, and
+`cancel` remain part of the same tool. `wait_any` waits for the next unfinished
+child in any group,
+`wait`/`wait_group` waits for one complete aggregate, and `wait_all` waits for
+all groups that are active when the call begins. Later launches never extend an
+existing wait. `wait_any` is edge-oriented rather than a completion queue:
+simultaneous sibling completions remain visible through `status` and `result`.
+Every newly launched child receives a stable opaque `subagent-child-...` ID.
+Background start, list, status, output, waits, and result metadata expose that
+ID without exposing a PID, transport, or child state directory. The ID remains
+the same through foreground-to-background handoff and hot extension reload.
+While a native child is active, `operation=prompt` returns when Pi accepts the
+message by default; it does not wait for the child to finish or claim the message
+has been processed. `steer` (the default) queues delivery at the next turn boundary;
+`follow_up` queues delivery after current work. `interrupt` first clears queued
+continuations and waits for the current run to abort, then submits the replacement.
+Native worker interrupts allow up to five seconds for confirmed idle and recheck
+local command authority before replacement. If cancellation was requested but the
+replacement was not dispatched, `interrupt_incomplete` retains that partial result:
+same-request-ID retries return the receipt without repeating cancellation or sending.
+Inspect worker state before explicitly retrying with a new request (the model tool
+creates a new request ID per prompt). Lost dispatch/persistence remains ambiguous,
+not a side-effect-free busy refusal.
+Use status/output/result or bounded waits to supervise subsequent work. Native
+headless group waits also honor the requested duration up to 24 hours, returning
+early on completion; cancelling a wait leaves workers running.
+
+Set `wait_for_response: true` only for a deliberately synchronous conversation:
+that waits through the child's next logical `agent_settled` boundary, potentially
+its entire long-running task, with a 24-hour hard deadline. It reports `handled`
+when a command/input extension handles the prompt without starting an agent run.
+Non-blocking prompts return `busy` without dispatching if another control request
+still owns the channel, rather than blocking behind it. Cancelling a dispatched
+wait does not retract the message. Children retained from an older implementation
+return an explicit capability error for non-blocking prompts; they are not silently
+treated as supporting the new behavior or automatically relaunched. Once a child
+completes, its ID remains terminal and cannot be used to restart it. AgentSH
+launches keep the same ID metadata, but control requests fail explicitly as
+unsupported because AgentSH
+owns those children and currently exposes no conversation-control capability.
+
+A job adopted directly from a pre-child-tracking extension build
+has aggregate-only progress until it terminates; exact per-child wakeups begin
+with jobs launched by this build. Artifact identity and SHA-256 are verified
+before each page is returned, and result artifacts are removed with their
+terminal job record.
+Cancelling any wait does not cancel execution.
+
+### Headless foreground helpers
+
+On Linux, new native calls without `background:true` run a real Pi RPC worker
+without creating any tmux pane, window, staging session, or separate Paseo agent.
+The parent waits for the single/parallel/chain request. Use the **Foreground**
+composer button in the companion Paseo plugin to inspect bounded conversation
+history, send direct user instructions, answer questionnaires or individual
+permission requests, and stop a helper. The button indicates pending attention.
+Closing the temporary popover/bottom sheet only hides it; reopening observes the
+same task. Direct user instructions are distinct from parent guidance and take
+precedence within the task's existing tool/authorization boundaries.
+
+The runtime retains an authenticated worker socket, session history and typed
+pending interactions. Missing, stale, cancelled or invalid responses never grant
+permission. AgentSH authorization and explicit prompt-mode settings remain in
+force. `Stop` aborts the helper's run; explicit `reap` is separate. Reaped task
+history remains readable, with control actions disabled. Foreground execution is
+owner-bound: parent shutdown/reload or cancellation of the owning foreground call
+can stop it. A client disconnect or closing the task view does not.
+
+Background TUI agents may launch foreground helpers. Foreground helpers cannot
+delegate further or use tmux-only background-job tools; use synchronous commands
+or return that work to the visible parent. Headless promotion is explicitly
+unsupported rather than restarting/replaying a task in a terminal. Existing
+workers are not migrated. Full AgentSH/Draft execution keeps its existing backend.
+
+### Linux native TUI workers
+
+Linux native **background** subagents run as **actual interactive Pi TUIs**, using the configured
+`PI_TUI_WORKER_LAUNCHER` and `PI_TUI_WORKER_LAUNCH_MODE`. The calling Pi must run in
+tmux. A guarded worker gets its own AgentSH guard process; losing the parent does
+not remove its authorization checks or close its terminal. Full AgentSH/Draft
+backends keep their existing execution model and never silently fall back to native.
+
+- A background single task gets a new window in the caller's tmux session.
+- Parallel/chain children share their group's window as panes.
+- New windows and pane titles use `agt-<label>` (at most 32 characters).
+  Optional launch `name` selects the group label; `tasks[].name` / `chain[].name`
+  select each pane label. Labels are 1–28 ASCII lowercase kebab-case characters,
+  without the `agt-` prefix. Without a name, up to four words from task text form
+  a short slug (non-ASCII/empty slugs fall back to `agt-worker`). The group's
+  default is its first task's label, fixed at creation, including for chains.
+  Names are presentation-only and may repeat; opaque IDs still control ownership.
+  Promotion preserves the window name; existing live windows/panes are not renamed.
+  Automatic window renaming and application pane-title changes are disabled only
+  on newly allocated worker windows/panes. Other backends ignore these labels.
+- Retained foreground TUI workers from before the headless runtime keep their
+  staging sessions. `/background` or `operation=promote` can still move those
+  legacy group windows while preserving Pi PIDs, conversations and sibling jobs.
+  New foreground helpers never create staging sessions.
+- Keyboard input, Paseo messages and parent control all reach the same Pi process.
+  Parent control is labelled supervising-agent input and never executes slash
+  commands; direct human instructions take precedence.
+- Launched background workers survive parent exit/crash. Returning to the same
+  parent session reattaches through private manifests. Pending group scheduling
+  resumes with the parent; it is not a separate autonomous supervisor.
+- Completion or cancellation retains the Pi TUI and reports. `operation=reap`
+  explicitly closes verified owned panes and rejects active human/model work.
+  Before closing a native child, its authenticated local job controller preserves
+  bounded terminal status/output in retained `job-cleanup-*.json` artifacts and
+  reaps its owned terminal background jobs. Active/starting jobs, adopted jobs,
+  active watches, or unverifiable cleanup refuse reap with blocking IDs; no work
+  is automatically cancelled. Cleanup also reserves delegation, preserves descendant
+  results and recursively reaps terminal native/headless subagents. Active descendants
+  block ancestor cleanup. Root `list` and `tasks` expose reachable nested groups, including
+  descendants of retained/reaped ancestors; their results remain readable and stopped
+  parents' stale group state is reconciled without replaying prompts or notifications.
+  An ancestor can reap an orphan only through verified retained session ancestry and
+  a stopped-owner lease; live parents retain their own lifecycle authority.
+  Failed cleanup leaves the child available for repair.
+  Legacy workers may have an immutable `--extension` entrypoint pinned to the old
+  controller: ordinary reload or resume does not necessarily upgrade that controller.
+  Do not repeatedly reload or kill such panes to bypass missing cleanup proof. A new
+  worker uses the current protocol, but does not clean up the old worker's resources.
+  An already-dead child without a verified cleanup receipt is not automatically recovered: inspect
+  and explicitly adopt retained jobs with user authorization, or recover its child
+  controller. Missing controllers never imply an empty inventory.
+  Reaping is never triggered by a final reply, reading a report, or hiding a UI tab.
+- Explicit resume can reuse a live idle worker; resuming a reaped task creates a
+  new owned attempt from retained context after confirming the old worker ended.
+- Ordinary state updates stay outside model context. Producer-confirmed background
+  completion uses the bounded quiet-state wakeup path described above; result
+  consumption and durable receipts suppress duplicate delivery.
+- After five minutes without assistant-stream progress while awaiting a model,
+  workers retain a parent guidance request and show a persistent TUI warning.
+  This distinguishes a stalled model response from an executing tool. Progress
+  or a lifecycle transition clears the warning. The monitor never cancels,
+  retries, or reports success for the work; control and abort remain explicit.
+
+The launcher/worker protocol is Linux-only. Update the shared Nix configuration
+and start fresh Pi parents to acquire the immutable launcher environment.
+
+### Legacy execution lifetime
+
+The older RPC/native execution path outside the Linux TUI implementation and
+non-TUI backends retain their prior lifecycle. Running legacy background subagents
+survive a hot `/reload` of the same Pi session: the replacement extension adopts
+the process-owned execution, while guarded child authorization pauses until the
+same parent session rebinds. If the replacement extension does not adopt within
+a bounded 65-second shutdown-and-startup window, the retained execution is
+cancelled rather than left orphaned. The first reload that installs this
+lifecycle support still runs the previously loaded shutdown handler, so work
+started under that older implementation is cancelled rather than adopted. They
+are also cancelled when Pi exits or replaces the session and are reported as
+`lost` after an unclean Pi restart; terminal records remain available for seven
+days. Draft cancellation never applies or discards a retained Draft result.
+
+For compatible legacy foreground calls, `/background` promotes running calls in
+place. New headless helpers reject promotion without changing execution. For
+retained Linux TUI workers this moves their
+existing window, not their process or conversation. In the legacy execution path,
+a single, parallel, or chain call remains
+one aggregate job; multiple sibling `subagent` calls receive separate job IDs.
+Foreground rendering stops, the original execution continues under the existing
+background manager, and each detached tool result explicitly tells the parent
+agent to continue useful work and consume the result before completing dependent
+work. The command does nothing to existing background jobs or unrelated tools.
+It refuses an all-at-once handoff when the sixteen-job aggregate background
+limit would be exceeded. Escape retains its normal cancellation behavior before
+a successful handoff; afterward, only `operation=cancel` cancels the detached work.
+
+Native children have a parent-owned `background_job` tool when the parent job
+extension is active (explicit child tool allowlists are honored). Starts are
+executed by the parent, use its durable job store, and pass through the parent
+Permission Gate in guarded mode. Children can inspect/control only their own
+jobs; the parent can supervise all jobs in its session. Launch messages disclose
+whether the broker is available. A broker outage fails explicitly rather than
+falling back to an untracked child process.
+
+### Existing tmux work and full Pi restarts
+
+An agent can attach any eligible existing pane as a managed background job:
+
+```json
+{"action":"adopt","pane_id":"%329","tmux_socket":"/run/user/2016/tmux-2016/default","name":"Helios route"}
+```
+
+Only `pane_id` is required when using the current/default tmux server. Registration
+never restarts the process or sends terminal input. The returned `job_id` supports
+normal status, output, wait, signal, and cancel operations. Output is captured for
+later inspection. `cancel` closes the selected adopted pane; SIGINT sends Ctrl-C
+to its foreground terminal work, and SIGTERM targets its original root process.
+Independently detached work is outside that pane's cancellation scope.
+
+For a handoff, save the **pane ID, tmux socket, meaningful name, and optional log
+path** in the project notes. After fully restarting Pi, the new agent calls the
+same `adopt` action. No descriptor from a previous harness version is required.
+The harness records/verifies identities internally, reuses a retained job record
+when available, and transfers management only after the previous Pi owner is gone
+(or within the same Pi process after a session change). It refuses another live
+controller's pane and the pane hosting Pi itself. Only same-user panes within the
+agent's workspace can be adopted; unrelated panes are not modified.
+
+A live interactive shell does not imply that a build inside it is still running.
+For reliable stage alerts, provide the build's append-only `log_path` at adoption
+or create a watch on that log explicitly; pane snapshots are not an append-only
+stream. The pane's own termination is tracked automatically.
+
+`background_job {action:"adopt", pid:123, log_path:"/workspace/build.log"}` registers
+an existing same-user Linux process and log within the caller's cwd. Adoption is
+read-only: it verifies process start identity and log inode, never acquires
+signal/cancel authority, and never treats disappearance as successful completion.
+Use adoption instead of relaunching an already-running build.
+
+Persistent monitoring uses `background_job` rather than an LLM polling loop:
+
+```json
+{"action":"watch","job_id":"job-...","patterns":[{"name":"stage","match":"Starting route"},{"name":"failure","match":"ERROR:"}],"from":"end","poll_ms":2000}
+```
+
+Alternatively specify an existing `log_path` within the delegated cwd. Rules are
+bounded literal substrings, not executable expressions or regexes. One durable
+monitor service handles all watches for the parent session. Cursors and a bounded
+128-event journal survive reload/restart; rotation, detectable truncation,
+read errors, and associated job termination are events. `events` reads up to 32
+events after `after_sequence`; `ack` with `through_sequence` acknowledges consumed
+events; `unwatch` stops observation, never the build. Event IDs are monotonic and
+old-journal overflow is explicit. New event availability is included in the same
+private durable state deltas, without log text, user notifications, or model
+wake-ups. Use explicit job waits and watch event reads for supervision.
+State deltas are deduplicated across reload; unread journal entries remain
+available until acknowledged. Watches default to
+starting at the current end of the file; `from:"start"` opts into existing output.
+
+Task delivery is separate from execution status. Native children receive a
+`task_outcome` reporting tool with `delivered`, `partial`, `blocked`, and
+`checkpointed` states. Every new tool delegation requires an explicit nonempty
+`acceptance` array (1–16 unique, nonblank criteria, at most 500 UTF-8 bytes each),
+on the single task or on **each** parallel/chain task. Supply task-specific,
+verifiable completion conditions; the harness never invents requirements from
+prose. Missing/empty criteria reject the launch with an actionable error before
+starting workers. Controls and retained legacy resumes remain compatible with
+stored empty criteria; they do not silently acquire new requirements. Criteria
+are preserved verbatim. Validation checks structure and reported coverage, not
+whether a criterion is substantively meaningful.
+`delivered` requires passing evidence for every supplied criterion and no remaining
+work; incomplete states require a next action. Reports remain explicitly
+**model-reported, not independently verified**. A clean exit without a report is
+`unreported`, not a delivery assertion. Full outcome/evidence data accompanies the
+retained result artifact; compact `task_outcomes` are persisted and exposed by
+status/result operations. Existing execution statuses and failure semantics remain
+unchanged.
+
+Linux native workers (TUI and headless foreground) may automatically continue
+**once per worker assignment** before publishing completion. An eligible
+`partial` outcome must explicitly set `continuation:"routine"`, include remaining
+work and a next action, and contain no failed acceptance checks. This attests
+that all remaining work is routine and already authorized—not a dependency,
+permission request, safety decision, or scope expansion. Ambiguous partials omit
+this field (or use `"needs_input"`) and return immediately; genuine external or
+authority blockers use `blocked`. This is model-reported eligibility, not semantic
+proof of authorization; existing tool/permission restrictions still apply.
+
+The continuation uses Pi's final actionable boundary in the same process/session,
+with unchanged tools, model and reasoning settings. No intermediate settled result
+or completion wake is published. Its budget is durably consumed **before** requesting
+the next model call, survives reload, and is never automatically replayed after an
+ambiguous crash. Repeated partial reports cannot loop. Errors, aborts, checkpointed
+or blocked outcomes, parent guidance requests, user dialogs/input, steering,
+queued messages, authority loss and reap prevent automatic continuation. Existing
+legacy RPC/AgentSH execution paths do not gain automatic continuation.
+
+Native launches also expose a stable `task_id`, distinct from each attempt's
+`child_id` and background group ID. The private task registry retains the original
+specification, acceptance criteria, session JSONL, attempt history, and checkpoint
+metadata. Use `subagent {operation:"tasks"}` to list this parent's retained tasks,
+then `subagent {operation:"resume",task_id:"subagent-task-...",message:"Continue validation"}`
+to continue the **same saved conversation**. Resume reuses a live worker where
+supported; only a verified closed worker needs a successor attempt. It preserves
+the saved launch configuration and execution kind (headless foreground remains
+headless; native TUI successors run in the background). Only `task_id`, optional
+`message`, and `compact` are accepted besides `operation`. Use `message`, not
+`task`, for continuation instructions. `model` and `background` are launch-only;
+resume rejects them explicitly rather than silently ignoring overrides or
+starting unrelated work. Resume never accepts an arbitrary session path or
+widens the task's tools/cwd. Parent-session
+ownership and process start identities prevent foreign or concurrent resumes.
+Task-owned background jobs remain accessible to successor attempts.
+
+Resume is explicit after a failure, exhausted/ineligible continuation or the existing 90% context
+finalizer. A successor attempt created by explicit resume starts a new automatic
+continuation budget; live-worker steering/resume does not replenish its budget. Native TUI resumes request compaction only when measured usage reaches
+80% of the context window, or when `compact:true` requests it explicitly. A
+`checkpointed` outcome alone does not trigger compaction. Compaction requests
+have a five-minute deadline rather than the ordinary short control timeout. Pi's exact “Nothing to compact (session
+too small)” error is an acknowledged no-op: the saved context is retained and the
+continuation proceeds. The exact “Already compacted” error is also an acknowledged
+no-op, preserving the existing compacted session without compacting it again.
+Other compaction errors return a durable `compact_failed`
+receipt with the cause and restore the worker's actual activity state. Repeating
+the same request ID does not repeat compaction; a new retry remains explicit.
+A new parent-controlled turn clears the previous turn's report and outcome.
+
+Legacy RPC resumes derive required compaction from measured high context (bounded
+to five minutes), not a low-context model checkpoint alone. Disabling required
+compaction is rejected; their too-small no-op is allowed only when high-context
+compaction is not required.
+Children created before retained-task support have no task ID and cannot be
+resumed this way. Runtime controls still target only active child IDs. A parent
+crash does not automatically relaunch work; recovery waits for previous-child
+exit and a cleanup grace before admitting a successor. Retained session files can
+contain sensitive project history and stay in the private parent agent directory.
+
+### Human task dashboard
+
+Use `/tasks` in Pi or Paseo to manage work by task title rather than copying IDs.
+Each task view groups its current attempt, delivery outcome, next step, report,
+registered builds, and watches. Actions include **Resume saved task**, **Open build
+output**, **View unread alerts**, **Acknowledge displayed alerts**, and **Stop
+watching — keep build running**. Resume requires an idle parent and confirmation;
+acknowledgement affects only the displayed sequence range. Menus are mirrored to
+Paseo using its existing choice UI. IDs and attempt history remain available under
+**Technical details**. `/watches` provides the same alert controls for all watches
+in the session, including ones not linked to a task. Watches created for a
+task-owned job appear under that task. `/background-jobs` manages this session's jobs and hides the
+internal watcher service so it cannot be mistaken for a user build.
+
+Outcome labels distinguish **Needs continuation**, **Blocked**, **Checkpoint
+saved**, **Outcome not reported**, and **Reported delivered**. Working tasks are
+never shown as delivered merely because a previous attempt reported success.
+Watch alerts already persisted in the session are not replayed by reload, while
+undelivered alerts remain recoverable and explicit acknowledgements remain durable.
+
+Native children run over Pi's strict UTF-8, LF-delimited RPC protocol. Parent
+prompts use RPC `prompt` with `streamingBehavior`, logical completion is
+`agent_settled`, and clean shutdown is stdin/stdout EOF. RPC extension dialogs
+are always answered as cancelled because a native child has no independent
+user-authority channel; guard-only shell approvals continue to use the existing
+authenticated parent Permission Gate relay. Progress reconstruction preserves
+content indices across thinking/text/tool blocks, and rendering errors cannot
+interrupt cancellation. Failure reports retain raw process exit code/signal and
+a bounded, metadata-only RPC lifecycle trace. Background reports remain available on demand; automatic state updates contain
+only IDs, execution/outcome states, and event cursors, and stay outside model context.
+
+POSIX process-group cleanup uses a private named FIFO and requires `mkfifo`
+(immutable Nix-store executables in guarded sessions). It deliberately avoids
+Bun's extra-stdio pipes: garbage collection of a completed child could close a
+reused descriptor belonging to a later child and trigger an unintended SIGKILL.
+
+Set `PI_SUBAGENT_BIN` to the raw Pi executable selected by your wrapper, e.g.
+`/nix/store/.../bin/pi`. If unset, the extension tries source/dev execution,
+then `pi-unsafe`, and only falls back to `pi` with a warning. Native children are
+marked with `PI_SUBAGENT_ID` so child-only extensions can identify them
+reliably. A guard-only parent directly re-executes its current raw Pi binary and
+requires both that executable and the child proxy to be immutable Nix-store
+files; it ignores wrapper/PATH fallbacks. The explicitly loaded child proxy returns each shell authorization to the
+already-bound parent Permission Gate instead of creating an unapprovable nested
+guard process.
+
+</details>
+<details>
+<summary><strong>subagent-finalizer</strong> - Finish child tasks before context compaction</summary>
+<br>
+
+- **Source**:
+  [subagent-finalizer/](https://github.com/taugoust/pi-agent-extensions/tree/main/subagent-finalizer)
+- **License**: MIT
+- **Activation**: Only child Pi processes marked by `AGENTSH_SUBAGENT_ID` or
+  `PI_SUBAGENT_ID`; top-level sessions remain inert.
+
+**Description**: After a continuing subagent turn (`toolUse` or `length`), this
+extension checks Pi's current context usage. Once usage exceeds 90%, it sends one
+urgent steering message telling the child to stop investigating and return its
+answer to the original task immediately. If `task_outcome` is available and the
+current outcome is not yet reported, it permits one truthful outcome call first,
+including partial, blocked, or checkpointed work; cutoff never requires claiming
+delivery. Steering is delivered before the next
+model call, giving the child a final response turn before threshold compaction can
+discard detailed task context. AgentSH children also receive one warning before
+their authoritative execution deadline. Long runs retain the five-minute lead;
+short explicit deadlines warn after three quarters of their available runtime
+instead of steering the child immediately at startup.
+
+The Home Manager module and extension bundles install this guard automatically
+with `sandbox` or `subagent`; it can also be enabled on its own. Native
+subagents explicitly load the packaged finalizer entrypoint because their
+isolated `PI_CODING_AGENT_DIR` does not inherit parent extension discovery.
+
+</details>
+<details>
+<summary><strong>ssh</strong> - Local/SSH target routing with optional AgentSH sandboxing</summary>
+<br>
+
+- **Source**: [ssh/](https://github.com/taugoust/pi-agent-extensions/tree/main/ssh)
+- **License**: MIT
+- **Flag**: `--ssh host[:path]`
+- **Command**: `/retarget [host[:path]]`
+
+**Description**: Owns execution-target selection for both legacy and supervised
+Pi sessions. In `pi-unsafe`, remote read/write/edit/Bash and `!` commands use
+raw SSH; `/retarget` changes targets in-process and no argument returns to the
+local launch directory. When an AgentSH sandbox is configured, the extension
+publishes the selected target to the sandbox API and never falls back to raw
+SSH. The trusted `pi-supervised` wrapper replaces the AgentSH lifecycle, then
+resumes the same saved conversation. Every supervised retarget gets a fresh
+sandbox and may therefore lose previous session-scoped grants.
+
+For `/retarget host` the destination login shell's `pwd` is used. Supply
+`host:/path` to select an explicit remote directory. `pi-auto` intentionally
+does not expose retargeting because its shadow workspace and review state are
+bound to one target.
+
+</details>
+<details>
+<summary><strong>sandbox</strong> - AgentSH supervisor client, approval UI, and AgentSH-backed tools</summary>
+<br>
+
+- **Source**:
+  [sandbox/](https://github.com/taugoust/pi-agent-extensions/tree/main/sandbox)
+- **License**: MIT
+- **Type**: AgentSH supervisor client (mock NDJSON test protocol and real Stage 1 REST)
+- **Commands**: `/sandbox` for status/debug;
+  `/sandbox-allow <target>` for retry guidance
+- **Tool overrides**: registered whenever the canonical startup classification
+  selects full AgentSH, including trusted wrapper signals without a usable
+  transport; the latter remain unavailable and fail closed. Mock NDJSON can
+  handle `bash`, `write`,
+  `edit`, and optional `read`; real AgentSH REST handles
+  those tools through `/api/v1/sessions/{id}/tools/*`. The separate adaptive
+  `subagent` extension is the sole registration and consumes the sandbox's
+  AgentSH backend when active.
+- **Status bar**: `agentsh inactive`, `agentsh start…`,
+  `agentsh …`, `agentsh ✓`, `agentsh net ✓`,
+  `agentsh net ?`, `agentsh ? N`, or `agentsh ✗`
+- **Mock helper/check**: `sandbox/mock-supervisor.mjs` and
+  `sandbox/mock-supervisor-check.mjs`
+- **Security model**: in real AgentSH REST mode, AgentSH owns session state,
+  approvals, and tool side effects over a local Unix socket. Commands use the
+  supervisor exec path; file tools are workspace-confined and policy checked.
+  The only outside-workspace read exception is an exact, session-owned output
+  artifact capability returned by AgentSH itself.
+
+**Description**: The old passive `AGENTSH_APPROVAL_UI_SOCKET` relay has
+been retired. `sandbox` now has two explicit protocol modes:
+
+1. **Mock NDJSON** when `PI_AGENTSH_MOCK_SUPERVISOR` is set. This is the
+   planned/Stage 2 protocol used by `sandbox/mock-supervisor.mjs`.
+2. **Real Stage 1 REST** when `AGENTSH_SESSION_SUPERVISOR` is set or
+   `PI_AGENTSH_ENABLE=1`. This uses HTTP JSON over the AgentSH Unix socket.
+
+With no full-mode signal, the extension stays inactive and does not register
+`bash`/`write`/`edit` overrides. The adaptive `subagent` extension uses its
+native backend in that case. A full-mode wrapper signal without a full
+supervisor transport still registers the overrides, publishes an unavailable
+state, and refuses native fallback. On `session_start`, the extension attaches
+to the canonically selected mock or real REST socket, or starts one with
+`agentsh session start --detach --policy <policy> --workspace <cwd> --workspace-mode <mode> --json`.
+
+**Environment**:
+
+``` sh
+PI_AGENTSH_MOCK_SUPERVISOR=/path/to/mock.sock         # mock NDJSON mode
+AGENTSH_SESSION_SUPERVISOR=unix:///path/to/supervisor.sock # real Stage 1 REST mode
+AGENTSH_SESSION_ID=session-...                         # recommended with real attach
+PI_AGENTSH_ENABLE=1                                    # start detached REST supervisor if no socket env
+PI_AGENTSH_POLICY=pi-autonomous|pi-supervised          # default: pi-autonomous
+PI_AGENTSH_WORKSPACE_MODE=shadow|direct                # Stage 1 only; default: shadow
+PI_AGENTSH_BIN=agentsh                                 # default: agentsh
+PI_AGENTSH_READ_MODE=supervised                        # optional read override (mock and real REST)
+PI_AGENTSH_APPROVAL_CLIENT=central                     # opt into central detached approval bridge
+PI_AGENTSH_APPROVAL_BELL=1                             # ring once when an AgentSH decision prompt opens
+PI_AGENTSH_REQUIRE_NETWORK_ENFORCEMENT=strict           # refuse tools without live strict runtime evidence
+PI_AGENTSH_RECOVERY_COMMAND=/nix/store/.../bin/recover  # optional immutable wrapper-owned recovery executable
+PI_AGENTSH_LIFECYCLE_STATE=/private/.../state.json      # optional private canonical wrapper-owned state
+PI_AGENTSH_RECOVERY_TIMEOUT_MS=300000                   # bounded explicit recovery request
+PI_AGENTSH_TOOL_REQUEST_TIMEOUT_MS=600000               # generic non-command REST tool request cap (default: 10m)
+PI_AGENTSH_APPROVAL_TIMEOUT_SLACK_MS=300000             # legacy command-slack default / direnv approval allowance
+PI_AGENTSH_CONNECT_TIMEOUT_MS=10000                     # connect timeout and modern terminal/cleanup margin
+PI_AGENTSH_COMMAND_EXECUTION_TIMEOUT_MS=14400000        # compatibility default/ceiling when metadata is absent (4h)
+PI_AGENTSH_COMMAND_TRANSPORT_SLACK_MS=310000             # command response slack baseline; modern server metadata may raise it
+
+PI_AGENTSH_EXPOSE_SUBAGENT_TIMEOUT=1                  # opt in to model-visible per-request timeout_ms; hidden by default
+PI_AGENTSH_SUBAGENT_EXECUTION_TIMEOUT_MS=7200000       # optional compatibility client ceiling; unset defers to AgentSH policy
+PI_AGENTSH_SUBAGENT_TRANSPORT_SLACK_MS=300000          # NDJSON deadline slack after an explicit child timeout (5m)
+PI_AGENTSH_SUBAGENT_TRANSPORT_TIMEOUT_MS=7500000       # optional transport floor; never shortens explicit execution + slack
+```
+
+**Mock NDJSON protocol**: newline-delimited JSON over a Unix socket. Requests
+have `id`, `op`, and `params`; final responses are
+`{"id":"...","ok":true,"result":...}` or `{"id":"...","ok":false,"error":"..."}`.
+Streaming ops may emit `stdout`, `stderr`, `tool_update`, `subagent_update`, or
+`message` events before the final response. The mock/planned operations are
+`hello`, `exec_bash`, `read_file`, `write_file`, `edit_file`,
+`spawn_subagent`, `watch_approvals`, `resolve_approval`, and optional `stop`.
+
+**Real AgentSH REST protocol**: HTTP JSON over the Unix socket
+(`unix:///absolute/path/to/supervisor.sock`). The extension currently uses:
+
+- `GET /api/v1/sessions` and `GET /api/v1/sessions/{id}` to discover metadata
+  when possible;
+- `GET /api/v1/sessions/{id}/network-enforcement` for live runtime evidence;
+- `GET /api/v1/approvals` on a polling interval to find pending approvals;
+- `POST /api/v1/approvals/{id}` to approve/deny with `scope` and `reason`;
+  central detached-session approval resolution is used only when explicitly
+  requested with `PI_AGENTSH_APPROVAL_CLIENT=central`;
+- `POST /api/v1/sessions/{id}/tools/exec_bash` for `bash`;
+- `POST /api/v1/sessions/{id}/tools/refresh_direnv` for a value-free,
+  server-owned supervised direnv environment refresh;
+- `POST /api/v1/sessions/{id}/tools/read_file` for optional supervised
+  `read`;
+- `POST /api/v1/sessions/{id}/tools/write_file` for `write`;
+- `POST /api/v1/sessions/{id}/tools/edit_file` for `edit`;
+- `POST /api/v1/sessions/{id}/tools/spawn_subagent` for `subagent`.
+
+The REST `exec_bash` response is buffered; it does not stream command output
+while the command runs. Ordinary Bash execution and HTTP transport use separate
+budgets. On REST hello and every verified reconnect, the extension reads live
+session metadata
+`command_timeout: { default_ms, maximum_ms?, approval_extension_ms?, source }`,
+where AgentSH reports metadata source `policy` or `fallback`.
+`approval_extension_ms`, when present, is a non-negative safe integer number of
+milliseconds within the AgentSH/Go `time.Duration` range. It is the
+server-enforced maximum cumulative approval-wait extension for one ordinary
+command—one bounded allowance for the
+command, not a new allowance per approval. Valid live metadata is
+authoritative. Execution-budget compatibility applies only when an older
+supervisor omits the entire `command_timeout` field: the client then uses the
+trusted-wrapper value `PI_AGENTSH_COMMAND_EXECUTION_TIMEOUT_MS`, or the built-in
+four-hour default, as both its default and client-side ceiling. A present but
+malformed `command_timeout` field—including an invalid
+`approval_extension_ms`—fails as a protocol/config error instead of silently
+falling back. The environment fallback is captured when the trusted extension
+loads; values from supervised direnv stay server-side and are never a
+command-timeout source. The selected AgentSH policy metadata—not an unrelated
+top-level server sample setting or project environment—is the operative source
+when available.
+
+When Bash omits `timeout`, the extension derives its client execution budget
+from that metadata/default but leaves `timeout_ms` out of the request so AgentSH
+can report command source `policy_default` or `fallback`. A positive explicit
+timeout is converted to exact integer milliseconds and sent unchanged, up to
+AgentSH/Go's `time.Duration` wire maximum of 9,223,372,036,854ms. If live
+metadata contains `maximum_ms`, or compatibility mode supplies its mirrored
+ceiling, only the client lifetime is based on `min(request, maximum)`;
+preserving an above-cap original request lets AgentSH report `policy_cap`.
+Transport stays open for the derived execution budget plus the selected actual
+command slack. If live metadata includes `approval_extension_ms`, actual slack
+is at least that one server allowance plus `PI_AGENTSH_CONNECT_TIMEOUT_MS` as a
+bounded terminal/cleanup response margin:
+`max(PI_AGENTSH_COMMAND_TRANSPORT_SLACK_MS, approval_extension_ms +
+PI_AGENTSH_CONNECT_TIMEOUT_MS)`. Thus a shorter configured command slack cannot
+expire while AgentSH is still within its advertised approval allowance or the
+fixed response margin. If the producer field is absent (including older live
+`command_timeout` metadata), the configured command slack is used unchanged.
+For supervisors that omit all command-timeout metadata, compatibility likewise
+uses that configured slack; its default already contains the legacy approval
+allowance plus the connect margin. The execution-plus-slack sum must fit
+JavaScript safe-integer arithmetic and the Node.js timer limit. A safe
+pre-dispatch socket failure uses the separate supervisor reconnect lifetime;
+after verified reconnect the client re-reads metadata, rebuilds the body, and
+starts a full command transport lifetime.
+Reconnect timeout diagnostics are not command transport timeouts.
+`PI_AGENTSH_TOOL_REQUEST_TIMEOUT_MS` remains the 600000ms generic budget for
+non-command REST tools and is never a Bash default or floor. Thus an explicit
+shorter timeout shortens both execution and transport.
+
+A structured AgentSH `E_COMMAND_TIMEOUT` or
+`termination_reason=command_timeout` becomes a distinct command execution
+timeout with code/exit code 124. Explicit effective fields, including new
+AgentSH `command_timeout: { effective_ms, source }`, are retained exactly;
+generic `timeout_ms` is not treated as server-effective reporting. If an older
+structured response lacks an explicit effective field, the error says the
+effective server timeout is unavailable and separately reports the
+client-derived execution budget/source. Partial buffered stdout/stderr,
+truncation warnings, and any remote output artifact path remain visible in Bash
+tool errors. A dispatched socket/response deadline is a distinct command
+transport timeout carrying the derived execution/transport budgets and selected
+actual slack, while caller abort remains `AbortError`. Exit code 124 alone is
+not interpreted as a timeout, because a normal child may return it.
+
+`spawn_subagent` separately uses an NDJSON streaming response for stdout/stderr
+and child result events. AgentSH owns the subagent execution deadline. The
+model-facing `subagent` tool hides `timeout_ms` by default so an agent cannot
+invent a speculative short deadline for work whose duration it cannot predict.
+Operators may set `PI_AGENTSH_EXPOSE_SUBAGENT_TIMEOUT=1` before Pi starts to
+restore that schema field. Trusted programmatic callers retain the underlying
+API option regardless of schema visibility. When the call omits `timeout_ms`,
+the extension also omits it from the request so the effective session policy can
+select the deadline. The transport then remains open under server authority,
+bounded only by Node's maximum timer as a final client safety limit. An enabled
+explicit `timeout_ms` selects a shorter requested window and gives the transport
+that duration plus five minutes for process-tree cleanup and the typed terminal
+result. AgentSH still applies the policy ceiling.
+`PI_AGENTSH_SUBAGENT_EXECUTION_TIMEOUT_MS` and its legacy
+`PI_AGENTSH_SUBAGENT_REQUEST_TIMEOUT_MS` alias remain optional compatibility
+client ceilings for older deployments; neither is a built-in execution default.
+Caller aborts remain distinct from execution/transport timeouts. Completed
+subagents remain successful Pi tool results; failed, cancelled, and timed-out
+terminal states are promoted through Pi's `tool_result` event path so the parent
+records `isError=true` rather than treating failure text as a successful tool.
+AgentSH-owned child Pi processes may receive an internal
+`AGENTSH_CHILD_CAPABILITY`. The
+extension validates that credential and sends it as
+`X-AgentSH-Child-Capability` only on Unix-socket `exec_bash` requests; it is not
+included in command environment payloads or unrelated supervisor operations.
+AgentSH binds it to the exact child process and uses it for authenticated
+per-child execution-lane admission. Multiple Pi `edit` replacements are applied as
+sequential single-replacement REST calls.
+When bounded model-facing `bash` output or a completed subagent final overflows,
+new AgentSH supervisors retain a capped artifact in the remote session runtime
+and return `full_output_path` or `full_result_path`. The extension shows that
+path without reading it automatically; supervised `read` can page it on demand.
+No supervised overflow file is created in the local parent-Pi temp directory.
+Approvals are polled rather than streamed. The default prompt is compact and
+kind-aware: it shows the requested operation and target, adds only a meaningful
+reason or actor attribution, and keeps opaque IDs, timestamps, internal rule
+keys, and raw `fields` payloads out of the decision UI. Network prompts promote
+useful context such as SSH, HTTPS, or private-address access into the title,
+show the destination once, and never display unrendered policy placeholders.
+Command prompts promote a concise policy reason into the question, shorten
+immutable Nix-store executables to their basename, and suppress a redundant
+leading argv entry only in the display. If `fields.scope_kind` and
+`fields.scope_key` are present, Pi offers concise once/session choices whose
+labels make broader file and command scope explicit. Every approval kind
+safe-defaults to `Deny once`, followed by the commonly used allow choices.
+Network prompts retain destination/session denial to suppress retries. When
+AgentSH advertises a command-lifetime scope, Pi also offers `Allow all requests
+for this command invocation`; it covers pending and future approval-required
+operations carrying the same top-level command ID, but is neither a session
+grant nor an override for hard policy denials. Command prompts retain
+exact-invocation/session denial but omit broader executable-wide or
+command-wide denial; exact grants precede executable-wide grants. File prompts retain all
+scoped allow choices without scoped denials. When a terminal Pi session is attached through
+a compatible Paseo bridge, the legacy and AgentSH-owned `permission-gate`
+selections and full AgentSH approval selections are rendered as Paseo permission
+cards while remaining actionable in the terminal. The first terminal or Paseo
+response wins and dismisses the other presentation. Paseo transports only the selected label;
+`sandbox` maps it back to the original AgentSH approval ID and exact scope metadata before
+asking AgentSH to resolve it. A bridge disconnect or response failure denies the request, while
+sessions without an attached bridge retain their normal terminal UI. In native Pi RPC mode,
+the extension uses Pi's standard selectable UI rather than the TUI-only custom overlay.
+When the supervisor reports `requested=strict`, the extension refuses all
+AgentSH-backed tools unless the live report proves the
+`helper-ebpf-proxy-required` tier is ready and `network_policy_enforced=true`.
+Additive `helper_lifecycle` evidence is shown separately from supervisor/SSH
+transport state, including only non-secret status, lease/unit identity,
+soft/hard expiry and remaining time, generations, path liveness, and terminal
+reason. Credential and token values are neither expected nor rendered.
+
+Typed AgentSH execution outcomes are normalized from promoted top-level fields,
+then nested `exec_response.result` fields, with legacy nested errors retained as
+a fallback. Pre-exec/helper failures are reported as “command was not executed”;
+queue timeout, cancellation, command timeout, denial, transport ambiguity, and a
+genuine child exit 127 remain distinct. Diagnostic messages are bounded and
+redacted, and ambiguous mutations are never replayed.
+
+Supervisor lifecycle is launcher-owned. The extension attaches or performs its
+configured initial local startup on `session_start`; it does not expose runtime
+start, stop, reconnect, or recovery commands. When a trusted launcher supplies
+a protected lifecycle state and immutable recovery executable, transport
+recovery remains automatic, exact-session-bound, bounded, and fail-closed. SSH,
+sudo, helper credentials, replacement, and rebind remain wrapper-owned, and an
+ambiguous failed command is never replayed.
+
+The extension exposes `globalThis.__AGENTSH_PI__` for owned extensions:
+
+- `exec(...)`, `refreshDirenv(...)`, `readFile(...)`, `writeFile(...)`,
+  `editFile(...)`, `spawnSubagent(...)`;
+- `resolveApproval(...)`;
+- `setExecutionTarget(...)` / `getExecutionTarget()` for the SSH target router;
+- `getSupervisorMetadata()` / `getSupervisorState()`; state reports
+  `configured`, readiness-correct `active`, and supervisor `protocol` (`rest`,
+  `mock-ndjson`, `legacy-approval-ui`, or empty).
+
+**Run with only the sandbox backend, adaptive subagent, and mock supervisor**:
+
+``` sh
+SOCK=${TMPDIR:-/tmp}/pi-agentsh-mock.sock
+nix shell nixpkgs#nodejs --command node sandbox/mock-supervisor.mjs --socket "$SOCK" --fake-approval &
+PI_AGENTSH_MOCK_SUPERVISOR="$SOCK" PI_AGENTSH_READ_MODE=supervised \
+  pi --no-extensions -e ./sandbox/index.ts -e ./subagent/index.ts
+```
+
+(`-e` is short for `--extension`; `--no-extensions` disables normal discovery.
+The sandbox publishes the backend and the adaptive extension registers the sole
+`subagent` tool.)
+
+**Manual real-AgentSH Stage 1 run**:
+
+``` sh
+PI_AGENTSH_ENABLE=1 \
+PI_AGENTSH_POLICY=pi-autonomous \
+PI_AGENTSH_WORKSPACE_MODE=shadow \
+  pi --no-extensions -e ./sandbox/index.ts -e ./subagent/index.ts
+```
+
+This starts/attaches a detached REST supervisor and enables AgentSH-backed
+`bash`, `write`, `edit`, `subagent`, and optional supervised `read` tool
+execution when the supervisor has a generic subagent runtime configured.
+
+Or attach to a supervisor started externally:
+
+``` sh
+AGENTSH_SESSION_ID=session-... \
+AGENTSH_SESSION_SUPERVISOR=unix:///path/to/sessions/<id>/supervisor.sock \
+  pi --no-extensions -e ./sandbox/index.ts -e ./subagent/index.ts
+```
+
+**Mock-driven protocol check**:
+
+``` sh
+nix shell nixpkgs#nodejs --command node sandbox/mock-supervisor-check.mjs
+```
+
+**Current real REST limitations**:
+
+- `subagent` requires `AGENTSH_SUBAGENT_COMMAND` runtime configuration and streams over REST NDJSON rather than the future full supervisor NDJSON protocol;
+- command output is buffered, not streamed live;
+- file tools are native supervisor filesystem operations, workspace-confined and
+  policy checked, but not child-process syscall-supervised writes;
+- approval watching is REST polling, not a long-lived socket stream;
+- detached supervisors support `shadow` and `direct` workspace modes here;
+  `overlay`/`auto` are intentionally not used by this extension for Stage 1.
+
+The guidance tools (`sandbox_allow_path`, `sandbox_allow_read_path`,
+`sandbox_allow_domain`, and `sandbox_allow_unix_socket`) remain as explanations
+only; they do not grant access or write local policy files.
+
+</details>
+<details>
+<summary><strong>@marckrenn/pi-sub-core</strong> - Historical upstream integration (not in the current Nix registry)</summary>
+<br>
+
+- **Source**: [pi-sub upstream](https://github.com/marckrenn/pi-sub)
+- **License**: MIT
+- **Author**: [marckrenn](https://github.com/marckrenn)
+- **Type**: Dependency (used by pi-sub-bar)
+
+**Description**: Core implementation for the status bar system,
+providing the foundational utilities and APIs for status bar management.
+
+</details>
+<details>
+<summary><strong>@marckrenn/pi-sub-bar</strong> - Historical upstream integration (not in the current Nix registry)</summary>
+<br>
+
+- **Source**: [pi-sub upstream](https://github.com/marckrenn/pi-sub)
+- **License**: MIT
+- **Author**: [marckrenn](https://github.com/marckrenn)
+- **Dependencies**: `@marckrenn/pi-sub-core`
+
+**Description**: Status bar extension that provides a persistent bottom
+bar for displaying extension status, notifications, and other real-time
+information in the pi terminal interface.
+
+</details>
+
+## Skills
+
+<details>
+<summary><strong>drawio</strong> - Generate native draw.io diagrams and optional exports</summary>
+<br>
+
+- **Source**: [skills/drawio/](.././skills/drawio/)
+- **License**: Apache-2.0 reference material from official draw.io MCP skill; repository license remains MIT unless otherwise noted
+- **Outputs**: `.drawio`, `.drawio.png`, `.drawio.svg`, `.drawio.pdf`, or browser URL
+- **Dependencies**: none for `.drawio` files or URL mode; draw.io Desktop CLI for PNG/SVG/PDF export
+
+**Description**: Guides agents to create editable draw.io XML files, open them in draw.io, or export them locally with embedded diagram XML. Intended for durable project figures and paper diagrams rather than broad MCP access.
+
+</details>
+
+<details>
+<summary><strong>tikz-figure-recreation</strong> - Recreate paper figures as TikZ</summary>
+<br>
+
+- **Source**: [skills/tikz-figure-recreation/](.././skills/tikz-figure-recreation/)
+- **Outputs**: bare `.tikz` source, standalone preview `.tex`, compiled PDF, optional PNG preview
+- **Dependencies**: project LaTeX environment; `tectonic` or equivalent for standalone previews; PDF rendering/cropping tools when inspecting source papers
+
+**Description**: Guides agents through visually recreating existing PDF/image/draw.io paper figures in TikZ. The workflow emphasizes rendering and cropping the reference, creating a standalone TikZ preview harness, compiling and rendering the generated figure, and iterating on visual details such as boundaries, typography, and hand-routed arrows.
+
+</details>
+
+## Configuration
+
+Package resources are selected by the package manifest and Pi's user configuration. Home Manager enables only explicitly selected extensions. See [current installation and configuration](installation.md).
+
+The following resource-selector walkthrough is retained as a **historical UI illustration**, not a supported invocation or current extension inventory. Its old command spelling is intentionally omitted; consult your installed Pi's resource configuration interface. The original selector offered these interactions:
+
+- View all available extensions from installed packages
+- Toggle individual extensions on/off with `Space`
+- Filter extensions by typing
+- Navigate with arrow keys
+
+Example:
+
+``` example
+────────────────────────────────────────────────────────────────
+Resource Configuration                     space toggle · esc close
+
+  ~/Coding/github.com/taugoust/pi-agent-extensions (user)
+    Extensions
+>     [x] pi-sub-bar/index.ts
+      [x] pi-sub-core/index.ts
+      [x] fetch/index.ts
+      [x] questionnaire/index.ts
+      [x] slow-mode/index.ts
+
+────────────────────────────────────────────────────────────────
+```
+
+Changes are saved to `~/.pi/agent/settings.json` and take
+effect on the next pi session. The actual content of `settings.json`
+would look like below.
+
+``` jsonc
+{
+  "packages": [
+    {
+      "source": "~/Coding/github.com/taugoust/pi-agent-extensions",
+      "extensions": [
+        "-questionnaire/index.ts" # Disabled
+      ]
+    }
+  ]
+}
+```
+
+## 🚀 Quick Start
+
+After installation, start using pi normally:
+
+``` bash
+pi
+```
+
+### Try the Extensions
+
+- **slow-mode:** Type `/slow-mode` to toggle the review gate
+- **fetch:** The LLM will use it for HTTP requests --- try asking it to
+  fetch a URL
+- **pdf:** Ask the LLM to inspect a local or AgentSH-workspace PDF,
+  render pages, or crop a page region for visual review
+- **drawio:** Ask the LLM to create a diagram or paper figure as a native
+  `.drawio` file, optionally exported to PNG/SVG/PDF
+- **questionnaire:** The LLM will call it automatically when needed
+- **Historical subscription integration:** `sub_get_usage` and
+  `sub_get_all_usage` belonged to the earlier subscription setup; they are not provided by the current OpenAI status extension. Use `/usage` for effective-credential status (no quota queries).
+
+## 📁 Structure
+
+``` example
+~/.pi/agent/extensions/
+├── fence/              # Block write/edit outside cwd
+│   └── index.ts
+├── fetch/              # HTTP request tool
+│   └── index.ts
+├── modal-editor/       # Vim-style modal input editor
+│   └── index.ts
+├── permission-gate/    # AgentSH/legacy Bash authorization gate
+│   └── index.ts
+├── pdf/                # Local or AgentSH-supervised PDF inspection tools
+│   ├── backend.ts
+│   └── index.ts
+├── questionnaire/      # Multi-question tool
+│   └── index.ts
+├── sandbox/            # AgentSH supervisor client and approval UI
+│   ├── index.ts
+│   ├── mock-supervisor.mjs
+│   └── mock-supervisor-check.mjs
+├── subagent/           # Dynamic same-session child Pi processes
+│   └── index.ts
+├── subagent-finalizer/ # Finish subagents before context compaction
+│   └── index.ts
+├── slow-mode/          # Review gate for write/edit
+│   ├── index.ts
+│   ├── package.json    # Dependencies (diff package)
+│   ├── package-lock.json
+│   ├── bun.lock
+│   └── node_modules/   # npm packages (gitignored)
+├── skills/             # Pi skills
+│   └── drawio/         # Native draw.io diagram generation guidance
+├── package.json        # Package metadata and extension list
+├── .gitignore          # Ignores node_modules, logs
+├── AGENTS.md           # Agent context for AI assistants
+└── README.md           # This file
+```
+
+## 🔧 Adding New Extensions
+
+To add a new extension, create a directory with an `index.ts`
+file. pi auto-discovers `*.ts` files and
+`index.ts` files in subdirectories.
+
+A minimal extension looks like:
+
+``` typescript
+import type { ExtensionAPI } from "@mariozechner/pi-coding-agent";
+
+export default function (pi: ExtensionAPI) {
+  pi.on("session_start", async (_event, ctx) => {
+    ctx.ui.notify("My extension loaded!", "info");
+  });
+}
+```
+
+**Recommended structure:**
+
+``` example
+my-extension/
+├── index.ts           # Extension entrypoint
+├── package.json       # Optional: if you need dependencies
+└── node_modules/      # Optional: npm packages (gitignored)
+```
+
+See the [pi documentation](https://github.com/mariozechner/pi) for the
+full extension API.
+
+## 🙏 Acknowledgements
+
+- [Mario Zechner](https://github.com/mariozechner): pi coding agent
+
+## 📄 License
+
+MIT
