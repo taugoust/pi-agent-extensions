@@ -4,6 +4,10 @@ Import `inputs.pi-agent-extensions.homeManagerModules.default`. The module owns
 extension source assembly; consumers should not enumerate internal TypeScript
 files. `programs.pi.enable` enables the module, not every extension.
 
+The following is a composition fragment: `bridgePackage`, `otherPackage` and
+`nixbotPackage` are derivations supplied by the consumer. Substitute your actual
+provider/model IDs and local context-file paths.
+
 ```nix
 programs.pi = {
   enable = true;
@@ -208,7 +212,8 @@ Bundle resource paths are relative to the
 bundle root; external Fast Mode explicitly names `src/index.ts` as its extension
 entrypoint. Optional upstream inputs must be supplied. The MCP adapter's upstream
 source requires non-host npm dependencies; this API does not install npm packages
-or turn that source checkout into a dependency-complete package.
+or turn that source checkout into a dependency-complete package. It is therefore
+an explicit source-only selection, excluded from the default catalogue bundle.
 
 `lib.mkExtensionBundle` remains usable independently with `pkgs`, `extensions`,
 `skills`, `prompts`, `themes`, `name`, `version`, and `packageName`. `prompts` and

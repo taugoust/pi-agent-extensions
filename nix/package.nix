@@ -16,9 +16,8 @@ mkExtensionBundle {
   inherit pkgs;
   name = "pi-agent-extensions";
   packageName = "pi-agent-extensions";
-  extensions =
-    registry.localExtensionNames
-    ++ registry.pinnedExtensionNames
-    ++ pkgs.lib.optional (pi-mcp-adapter != null) "mcp-adapter";
+  # Source-only optional integrations must be selected deliberately: a pinned
+  # repository is not an installed npm runtime dependency closure.
+  extensions = registry.localExtensionNames ++ registry.pinnedExtensionNames;
   skills = registry.localSkillNames;
 }

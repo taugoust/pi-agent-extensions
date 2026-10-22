@@ -53,7 +53,7 @@ in tools
 
 `lib.availableExtensions` and `lib.availableSkills` enumerate registry names. Unknown names are rejected. `sandbox` adds `subagent`; either adds `subagent-finalizer`. Shared runtime files are copied automatically. Optional upstream entries require their corresponding flake inputs. `prompts` and `themes` are manifest paths supplied by the caller, not an automatic external-resource installer.
 
-`packages.<system>.default` (also `.extensions`) selects the broad registered catalogue and skills. `packages.<system>.pi` is the Pi executable package; the two are not interchangeable.
+`packages.<system>.default` (also `.extensions`) selects local extensions, supported pinned extensions and registered skills. The source-only optional MCP adapter is not auto-loaded; select it explicitly only when supplying its runtime dependencies. `packages.<system>.pi` is the Pi executable package; the two are not interchangeable.
 
 ### Source packages are not dependency closures
 

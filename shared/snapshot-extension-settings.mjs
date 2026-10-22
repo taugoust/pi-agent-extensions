@@ -7,8 +7,8 @@
  * credentials, accounts, global settings, sessions, control files or identity
  * propagation. Runtime extensions retain responsibility for schema validation.
  * Source symlinks may point into the Nix store; only regular JSON objects up to
- * 64 KiB are accepted. Destination ancestors must be owned, non-writable by
- * other users, nonsymlink directories. Files publish atomically with mode 0600.
+ * 64 KiB are accepted. The resolved destination root and directories beneath it must be owned,
+ * non-writable by other users, nonsymlink directories. Files publish atomically with mode 0600.
  * Missing source removes only the corresponding approved destination file.
  * Existing empty objects are preserved; SOURCE == DEST is a safe no-op.
  * An empty SOURCE means no configured root, never the current directory.

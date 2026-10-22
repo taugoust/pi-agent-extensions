@@ -73,5 +73,22 @@ remain native Paseo/host configuration.
 Nix activation installs sources and defaults. Existing Pi processes keep the
 code and settings they loaded until a deliberate resource reload or new session;
 Pi executable changes require a new process. Extension display commands change
-session presentation only. Activation does not switch accounts, create a second
-credential store, resume goals or relaunch workers.
+session presentation only.
+
+Isolated host launchers can snapshot supported public configuration with:
+
+```sh
+node <bundle>/shared/snapshot-extension-settings.mjs SOURCE_AGENT_DIR DEST_AGENT_DIR
+```
+
+The [shared manifest](../shared/extension-config-manifest.json) is the allowlist
+for declarative defaults and public preference files. The Node-only helper
+validates bounded JSON objects and writes private atomic snapshots. Empty source
+means no configured root; identical canonical directories are left alone.
+Missing source files remove only their approved snapshot paths. It never walks
+or copies credential stores, accounts, sessions, sockets or control identities.
+Snapshots are per-runtime configuration; changes in an isolated snapshot are
+not merged back into the parent profile.
+
+Activation does not switch accounts, create a second credential store, resume
+goals or relaunch workers.
