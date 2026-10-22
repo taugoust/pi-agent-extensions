@@ -7,6 +7,7 @@ import {
   reconcileGoalContextContract,
   reconcileInactiveGoalContextContract,
 } from "./goal-contract.js";
+import { extractContinuationMarker, extractGoalPromptMarker } from "./markers.js";
 import { type ActiveGoal, loadGoalStateFromSession } from "./persistence.js";
 import type { GoalRunController } from "./run-protocol.js";
 import {
@@ -418,6 +419,21 @@ export function registerGoalLifecycle(
         );
     if (queuedNonGoalInput?.behavior === "followUp") {
       beginNonGoalFollowUp(ctx, queuedNonGoalInput.resetSafetyEpoch);
+    }
+    // Unlike a busy steer, this hook admits a fresh user-prompt run. Stopped
+    // Goal cleanup no longer owns an unmarked, non-automation prompt (including
+    // idle human prompts delivered through ExtensionAPI.sendUserMessage).
+    // Marker tombstones remain excluded after their pending ownership is gone.
+    if (
+      !ownedPromptGoalId &&
+      !ownedPromptBoundary &&
+      !extractGoalPromptMarker(event.prompt) &&
+      !extractContinuationMarker(event.prompt) &&
+      !activeGoalRecovery &&
+      !runtime.budgetWrapUp &&
+      queuedNonGoalInput?.behavior !== "steer"
+    ) {
+      runtime.clearStaleGoalToolCallBlock();
     }
     if (!ownedPromptGoalId && !ownedPromptBoundary) {
       runtime.supersedeOwnedInputCollision(event.prompt);

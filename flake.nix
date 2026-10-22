@@ -145,10 +145,6 @@
           };
           agentsh-mode = import ./nix/agentsh-mode-check.nix { inherit self pkgs; };
           extension-settings = import ./nix/extension-settings-check.nix { inherit self pkgs; };
-          pi-run-cancellation = import ./nix/pi-run-cancellation-check.nix {
-            inherit pkgs;
-            piPackage = self.packages.${system}.pi;
-          };
           auto = import ./nix/auto-check.nix { inherit self pkgs; };
           modal-editor = import ./nix/modal-editor-check.nix { inherit self pkgs; };
           idle-context-warning = import ./nix/idle-context-warning-check.nix { inherit self pkgs; };
@@ -174,6 +170,22 @@
             piPackage = if pkgs.stdenv.hostPlatform.isLinux then self.packages.${system}.pi else null;
           };
           subagent-finalizer = import ./nix/subagent-finalizer-check.nix { inherit self pkgs; };
+        }
+        # Upstream Pi's standalone nativeTargets omits x86_64-darwin. Do not
+        # advertise native-release checks there; pure configuration checks remain.
+        // pkgs.lib.optionalAttrs (builtins.elem system [
+          "x86_64-linux"
+          "aarch64-linux"
+          "aarch64-darwin"
+        ]) {
+          pi-run-cancellation = import ./nix/pi-run-cancellation-check.nix {
+            inherit pkgs;
+            piPackage = self.packages.${system}.pi;
+          };
+          goal-fresh-prompt = import ./nix/goal-fresh-prompt-check.nix {
+            inherit self pkgs;
+            piPackage = self.packages.${system}.pi;
+          };
         }
         // pkgs.lib.optionalAttrs pkgs.stdenv.hostPlatform.isLinux {
           background-job = import ./nix/background-job-check.nix { inherit self pkgs; };
