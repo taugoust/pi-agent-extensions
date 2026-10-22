@@ -1,0 +1,94 @@
+--- /dev/null
++++ b/scripts/patch-run-cancellation.mjs
+@@ -0,0 +1,91 @@
++// Pi 1.0.0 npm release: patch both the Node SDK and the prebuilt Bun execution chunk.
++// Fail closed on source drift; never silently ship an unpatched execution path.
++import { readFileSync, writeFileSync, existsSync, readdirSync } from 'node:fs';
++import { join } from 'node:path';
++const root = process.argv[2] ?? '.';
++const read = p => readFileSync(join(root, p), 'utf8');
++const write = (p, s) => writeFileSync(join(root, p), s);
++function replace(s, before, after) {
++  if (s.split(before).length !== 2) throw new Error(`Cancellation patch source drift: ${before.slice(0, 100)}`);
++  return s.replace(before, after);
++}
++function section(s, start, end) {
++  if (s.split(start).length !== 2) throw new Error(`Cancellation patch section drift: ${start}`);
++  const i = s.indexOf(start), j = s.indexOf(end, i + start.length);
++  if (j < 0) throw new Error(`Cancellation patch end missing: ${end}`);
++  return s.slice(i, j);
++}
++const candidates = ['node_modules/@earendil-works/pi-agent-core/dist', 'node_modules/@earendil-works/pi-coding-agent/node_modules/@earendil-works/pi-agent-core/dist'];
++const core = candidates.find(p => existsSync(join(root, p, 'agent-loop.js')));
++if (!core) throw new Error('Cancellation patch: pi-agent-core not installed');
++let loop = read(`${core}/agent-loop.js`);
++const oldLoop = section(loop, 'async function runLoop(', 'function declareToolChanges(');
++let nextLoop = oldLoop;
++nextLoop = replace(nextLoop, '    let pendingMessages = (await config.getSteeringMessages?.()) || [];', `    let pendingMessages = [];
++    let pendingKind = "steering";
++    try {
++    signal?.throwIfAborted();
++    pendingMessages = (await config.getSteeringMessages?.()) || [];`);
++nextLoop = replace(nextLoop, '        while (hasMoreToolCalls || pendingMessages.length > 0) {', '        while (hasMoreToolCalls || pendingMessages.length > 0) {\n            signal?.throwIfAborted();');
++nextLoop = replace(nextLoop, '                if (pendingMessages.length === 0) {', '                signal?.throwIfAborted();\n                if (pendingMessages.length === 0) {\n                    pendingKind = "steering";');
++nextLoop = replace(nextLoop, '            for (const message of declareToolChanges(currentContext, [...preparedMessages, ...pendingMessages])) {', `            signal?.throwIfAborted();
++            // Commit input admission synchronously. Until here a cancellation restores the queue.
++            const admittedMessages = declareToolChanges(currentContext, [...preparedMessages, ...pendingMessages]);
++            pendingMessages = [];
++            for (const message of admittedMessages) {`);
++nextLoop = replace(nextLoop, '            lastCompletedTurn = {\n                message,\n                toolResults,', '            signal?.throwIfAborted();\n            lastCompletedTurn = {\n                message,\n                toolResults,');
++nextLoop = replace(nextLoop, '            explicitContinuation = decision?.action === "continue";', '            signal?.throwIfAborted();\n            explicitContinuation = decision?.action === "continue";\n            pendingKind = "steering";');
++nextLoop = replace(nextLoop, '        const followUpMessages = (await config.getFollowUpMessages?.()) || [];', '        signal?.throwIfAborted();\n        pendingKind = "followUp";\n        const followUpMessages = (await config.getFollowUpMessages?.()) || [];\n        pendingMessages = followUpMessages;\n        signal?.throwIfAborted();');
++nextLoop = replace(nextLoop, '    await emit({ type: "agent_end", messages: newMessages });\n}', `    await emit({ type: "agent_end", messages: newMessages });
++    } finally {
++        if (signal?.aborted && pendingMessages.length > 0) {
++            config.restorePendingMessages?.(pendingMessages, pendingKind);
++        }
++    }
++}`);
++loop = replace(loop, oldLoop, nextLoop);
++const oldResponse = section(loop, 'async function streamAssistantResponse(', '/**\n * Fail all tool calls');
++let nextResponse = replace(oldResponse, '    // Apply context transform', '    signal?.throwIfAborted();\n    // Apply context transform');
++nextResponse = replace(nextResponse, '    const response = await streamFunction(', '    signal?.throwIfAborted();\n    const response = await streamFunction(');
++loop = replace(loop, oldResponse, nextResponse);
++let agent = read(`${core}/agent.js`);
++const oldConfig = section(agent, '    createLoopConfig(', '    async runWithLifecycle(');
++let nextConfig = replace(oldConfig, '            getSteeringMessages: async () => {', '            getSteeringMessages: async () => {\n                this.signal?.throwIfAborted();');
++nextConfig = replace(nextConfig, '            getFollowUpMessages: async () => this.followUpQueue.drain(),', `            getFollowUpMessages: async () => {
++                this.signal?.throwIfAborted();
++                return this.followUpQueue.drain();
++            },
++            restorePendingMessages: (messages, kind) => {
++                const queue = kind === "followUp" ? this.followUpQueue : this.steeringQueue;
++                queue.messages.unshift(...messages);
++            },`);
++agent = replace(agent, oldConfig, nextConfig);
++const oldLifecycle = section(agent, '    async runWithLifecycle(', '    async handleRunFailure(');
++const nextLifecycle = replace(oldLifecycle, '            await executor(abortController.signal);', `            await executor(abortController.signal);
++            // agent_end listeners are awaited while this run still owns the controller.
++            // A late cancellation must not turn queued input into automatic continuation.
++            if (abortController.signal.aborted && this._state.messages.at(-1)?.stopReason !== "aborted") {
++                abortController.signal.throwIfAborted();
++            }`);
++agent = replace(agent, oldLifecycle, nextLifecycle);
++let session = read('dist/core/agent-session.js');
++const oldPrompt = section(session, '    async _runAgentPrompt(', '    async _handlePostAgentRun(');
++let nextPrompt = replace(oldPrompt, '            while (!this._agentRunAbortRequested) {', '            // An aborted core run is terminal even if new user input is queued.\n            while (!this._agentRunAbortRequested && this._lastAssistantMessage?.stopReason !== "aborted") {');
++nextPrompt = replace(nextPrompt, '            if (this._agentRunAbortRequested)\n                this._finishCancelledRetry();', '            if (this._agentRunAbortRequested || this._lastAssistantMessage?.stopReason === "aborted")\n                this._finishCancelledRetry();');
++session = replace(session, oldPrompt, nextPrompt);
++const chunks = readdirSync(join(root, 'dist/bundle/chunks')).filter(p => p.endsWith('.js')).map(p => `dist/bundle/chunks/${p}`);
++const bundlePath = chunks.find(p => read(p).includes('async function runLoop('));
++if (!bundlePath) throw new Error('Cancellation patch: native core chunk missing');
++let bundle = read(bundlePath);
++// These functions use the same unmangled lexical bindings in both release artifacts.
++bundle = replace(bundle, section(bundle, 'async function runLoop(', 'function declareToolChanges('), nextLoop);
++bundle = replace(bundle, section(bundle, 'async function streamAssistantResponse(', 'async function failToolCallsFromTruncatedMessage('), nextResponse);
++bundle = replace(bundle, section(bundle, 'createLoopConfig(options={})', 'async runWithLifecycle('), nextConfig.trimStart());
++bundle = replace(bundle, section(bundle, 'async runWithLifecycle(', 'async handleRunFailure('), nextLifecycle.trimStart());
++bundle = replace(bundle, section(bundle, 'async _runAgentPrompt(', 'async _handlePostAgentRun('), nextPrompt.trimStart());
++// Only write after every Node/native release shape has been validated.
++write(`${core}/agent-loop.js`, loop);
++write(`${core}/agent.js`, agent);
++write('dist/core/agent-session.js', session);
++write(bundlePath, bundle);
++console.log(`Pi cancellation boundary patched: ${core}, dist/core/agent-session.js, ${bundlePath}`);

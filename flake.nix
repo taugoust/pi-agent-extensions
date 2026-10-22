@@ -87,7 +87,15 @@
             }).overrideAttrs
               (old: {
                 # Native shell-renderer preference, including a live /settings toggle.
-                patches = (old.patches or [ ]) ++ [ ./nix/pi-tool-timing.patch ];
+                patches = (old.patches or [ ]) ++ [
+                  ./nix/pi-tool-timing.patch
+                  ./nix/pi-run-cancellation.patch
+                ];
+                # npm dependencies exist only after configure; patch BOTH SDK Node
+                # core and the prebuilt chunk used by the native Bun release.
+                preBuild = (old.preBuild or "") + ''
+                  node scripts/patch-run-cancellation.mjs
+                '';
                 # Review deployments intentionally omit test/install-check phases.
                 doCheck = false;
                 doInstallCheck = false;
@@ -137,6 +145,10 @@
           };
           agentsh-mode = import ./nix/agentsh-mode-check.nix { inherit self pkgs; };
           extension-settings = import ./nix/extension-settings-check.nix { inherit self pkgs; };
+          pi-run-cancellation = import ./nix/pi-run-cancellation-check.nix {
+            inherit pkgs;
+            piPackage = self.packages.${system}.pi;
+          };
           auto = import ./nix/auto-check.nix { inherit self pkgs; };
           modal-editor = import ./nix/modal-editor-check.nix { inherit self pkgs; };
           idle-context-warning = import ./nix/idle-context-warning-check.nix { inherit self pkgs; };
