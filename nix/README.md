@@ -50,7 +50,7 @@ programs.pi = {
 | `enable` | `false` | Enable installation and configuration. |
 | `package` | declared `null`; flake's Pi package via `mkDefault` when enabled | Executable added to `home.packages`; explicit `null` disables this. |
 | `agentDir` | `.pi/agent` | Home-relative global agent directory; no `..`. The launcher must respect `PI_CODING_AGENT_DIR`. |
-| `nativeConfigMode` | `"managed"` | `managed` links native files read-only; `mutable` merges defaults on activation. |
+| `nativeConfigMode` | `"managed"` | `managed` links native files read-only; `mutable` seeds absent files once on activation. |
 | `quietState.enable` | `true` | Emit `defaults/quiet-state.json` with `{ enabled = ...; }`; the runtime environment kill switch remains higher priority. |
 | `settings` | `{}` | Native `settings.json` object, including arbitrary supported native settings. |
 | `models` | `{}` | Native `models.json` object, including provider/model declarations. |
@@ -70,15 +70,19 @@ operations may fail with `EROFS`. This mode preserves declarative native
 configuration, not writable native preferences. Do not promise persistence.
 
 Opt into `nativeConfigMode = "mutable"` for writable native settings/models.
-Activation recursively merges declared defaults beneath existing JSON objects;
-existing scalars/arrays win, except native package declarations are additive.
-Files are written atomically, only when changed, as ordinary user-owned files.
-Changed defaults do not override values already present. Removing a declaration
-does not remove previously seeded values/packages. This is default seeding, not
-continuous reconciliation or a runtime defaults loader.
+Activation **only seeds missing files once**. Every existing native file is left
+untouched, including invalid JSON and non-object JSON. No merge, update, package
+addition, or removal is applied to an existing file. Changed declarations take
+effect only when seeding a missing file, not through reconciliation or a runtime
+defaults loader. Manage subsequent changes through Pi or edit the writable file.
 
-Existing symlinks (including a previous managed-mode generation), invalid JSON,
-and non-object JSON are left untouched with a warning. No automatic migration,
+A completed temporary file is published with an atomic non-replacing hard link;
+a concurrent native save that creates the destination wins without being
+replaced. The helper never reads or overwrites existing preferences and therefore
+does not participate in Pi's native writer-lock protocol.
+
+Existing symlinks (including dangling links and a previous managed-mode
+generation) are left untouched with a warning. No automatic migration,
 move, or backup of user settings/state/credentials occurs. Review the existing
 configuration and remove the old declarative owner before a deliberate migration
 to mutable mode. Both modes expose `defaults/settings.json` and

@@ -165,17 +165,17 @@ in
         "mutable"
       ];
       default = "managed";
-      description = "managed links native settings/models read-only (UI changes cannot persist); mutable merges defaults on activation beneath existing regular files. Existing symlinks are never migrated automatically.";
+      description = "managed links native settings/models read-only (UI changes cannot persist); mutable only seeds missing files once on activation, with no reconciliation of existing files. Symlinks are never migrated automatically.";
     };
     settings = lib.mkOption {
       type = jsonObject;
       default = { };
-      description = "Native Pi settings. In managed mode these are read-only; mutable mode merges beneath existing settings.json on activation. No secrets.";
+      description = "Native Pi settings. In managed mode these are read-only; mutable mode only seeds a missing settings.json, never updating an existing file. No secrets.";
     };
     models = lib.mkOption {
       type = jsonObject;
       default = { };
-      description = "Native models.json configuration, read-only in managed mode or merged beneath writable values on activation in mutable mode. Use environment references, never literal credentials.";
+      description = "Native models.json configuration, read-only in managed mode or used to seed a missing writable file once in mutable mode. Use environment references, never literal credentials.";
     };
     packages = lib.mkOption {
       type = lib.types.listOf (
@@ -336,9 +336,9 @@ in
         "${cfg.agentDir}/defaults/settings.json".text = builtins.toJSON nativeSettings;
         "${cfg.agentDir}/defaults/models.json".text = builtins.toJSON cfg.models;
       };
-    # Native Pi does not support an additional defaults file. Seed/merge native
-    # defaults only at activation, leaving regular files writable and existing
-    # values authoritative. Never move credentials, user state, or symlinks.
+    # Native Pi does not support an additional defaults file. Seed absent native
+    # files only; never read/merge/overwrite preferences or race native saves.
+    # Existing files, credentials, user state, and symlinks are left untouched.
     home.activation.piNativeDefaults = lib.mkIf (cfg.nativeConfigMode == "mutable") (
       lib.hm.dag.entryAfter [ "writeBoundary" "linkGeneration" ] ''
         run ${pkgs.python3}/bin/python3 ${./merge-native-defaults.py} \
