@@ -8,13 +8,23 @@ Home Manager options:
 
 ```nix
 programs.pi.extensions = {
-  stamp.enable = true;
+  stamp = { enable = true; visibleByDefault = false; };
   progress.enable = true;
-  cache-hit-monitor.enable = true;
+  cache-hit-monitor = { enable = true; visibleByDefault = false; };
 };
 ```
 
 All three publish read-only, session-owned data for the companion Paseo bridge. They make no additional provider requests or automatic continuation prompts. Progress adds the model tool `update_progress`; enabling it changes the tool prefix once.
+
+## Native display defaults
+
+Stamp and cache decorations are hidden by default, independently per plugin. Home Manager writes `stamp-display.json` and `cache-hit-monitor-display.json` in Pi's agent directory; each contains `visibleByDefault` (default `false`). Missing or invalid defaults also hide decorations. Defaults apply at session start; runtime switches do not write these Nix-managed files.
+
+`/stamp show` and `/stamp hide` control all native stamp timestamps, model/thinking/usage/cost metadata, response timing and tool stamps together. `/stamp` still configures recorded fields and formatting in writable `pi-stamp.json`. Hiding never changes those collection settings or Paseo snapshots. `/cache-hit-monitor` toggles only its visual widget; sampling and Paseo observation continue.
+
+`openai-usage` has no automatic status decoration in this version: `/usage` explicitly shows credential status and the official usage link. No extra visibility option or quota collection is needed.
+
+The packaged Pi adds the native `showToolTiming` setting for shell-tool Elapsed/Took labels. The host's Nix-managed settings set it to `false`; `/settings` → Tool timing can show it at runtime. Timing collection stays unchanged. This is a small Pi-core setting patch because upstream has no equivalent switch; it does not replace shell renderers. These controls do not hide Pi's normal editor footer or active working spinner. `hideThinkingBlock` separately hides thinking content.
 
 ## Stamp
 

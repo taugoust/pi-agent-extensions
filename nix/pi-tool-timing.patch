@@ -1,0 +1,241 @@
+--- a/dist/core/extensions/types.d.ts
++++ b/dist/core/extensions/types.d.ts
+@@ -367,6 +367,7 @@
+     expanded: boolean;
+     /** Whether inline images are currently shown in the TUI. */
+     showImages: boolean;
++    showToolTiming?: boolean;
+     /** Whether the current result is an error. */
+     isError: boolean;
+ }
+--- a/dist/core/settings-manager.d.ts
++++ b/dist/core/settings-manager.d.ts
+@@ -104,6 +104,7 @@
+     compaction?: CompactionSettings;
+     branchSummary?: BranchSummarySettings;
+     retry?: RetrySettings;
++    showToolTiming?: boolean;
+     hideThinkingBlock?: boolean;
+     showCacheMissNotices?: boolean;
+     externalEditor?: string;
+@@ -284,6 +285,8 @@
+         maxRetryDelayMs: number;
+     };
+     getWebSocketConnectTimeoutMs(): number | undefined;
++    getShowToolTiming(): boolean;
++    setShowToolTiming(show: boolean): void;
+     getHideThinkingBlock(): boolean;
+     getShowCacheMissNotices(): boolean;
+     getExternalEditorCommand(): string;
+--- a/dist/core/settings-manager.js
++++ b/dist/core/settings-manager.js
+@@ -695,6 +695,14 @@
+     getWebSocketConnectTimeoutMs() {
+         return parseTimeoutSetting(this.settings.websocketConnectTimeoutMs, "websocketConnectTimeoutMs");
+     }
++    getShowToolTiming() {
++        return this.settings.showToolTiming ?? true;
++    }
++    setShowToolTiming(show) {
++        this.globalSettings.showToolTiming = show;
++        this.markModified("showToolTiming");
++        this.save();
++    }
+     getHideThinkingBlock() {
+         return this.settings.hideThinkingBlock ?? false;
+     }
+--- a/dist/core/tools/renderers/bash.js
++++ b/dist/core/tools/renderers/bash.js
+@@ -31,7 +31,7 @@
+     const commandDisplay = command === null ? invalidArgText(theme) : command ? command : theme.fg("toolOutput", "...");
+     return theme.fg("toolTitle", theme.bold(`${prompt} ${commandDisplay}`)) + timeoutSuffix;
+ }
+-function rebuildBashResultRenderComponent(component, result, options, showImages, startedAt, endedAt) {
++function rebuildBashResultRenderComponent(component, result, options, showImages, startedAt, endedAt, showToolTiming) {
+     component.clear();
+     let output = getTextOutput(result, showImages).trim();
+     const truncation = result.details?.truncation;
+@@ -76,7 +76,7 @@
+         }
+         component.addChild(new Text(`\n${theme.fg("warning", `[${warnings.join(". ")}]`)}`, 0, 0));
+     }
+-    if (startedAt !== undefined) {
++    if (showToolTiming && startedAt !== undefined) {
+         const label = options.isPartial ? "Elapsed" : "Took";
+         const endTime = endedAt ?? Date.now();
+         component.addChild(new Text(`\n${theme.fg("muted", `${label} ${formatDuration(endTime - startedAt)}`)}`, 0, 0));
+@@ -108,7 +108,7 @@
+                 }
+             }
+             const component = context.lastComponent ?? new Container();
+-            rebuildBashResultRenderComponent(component, result, options, context.showImages, state.startedAt, state.endedAt);
++            rebuildBashResultRenderComponent(component, result, options, context.showImages, state.startedAt, state.endedAt, context.showToolTiming ?? true);
+             component.invalidate();
+             return component;
+         },
+--- a/dist/modes/interactive/components/settings-selector.d.ts
++++ b/dist/modes/interactive/components/settings-selector.d.ts
+@@ -9,6 +9,7 @@
+     currentModel?: Model<any>;
+     availableDefaultModels: readonly Model<any>[];
+     showImages: boolean;
++    showToolTiming: boolean;
+     imageWidthCells: number;
+     autoResizeImages: boolean;
+     blockImages: boolean;
+@@ -49,6 +50,7 @@
+ export interface SettingsCallbacks {
+     onAutoCompactChange: (enabled: boolean) => void;
+     onShowImagesChange: (enabled: boolean) => void;
++    onShowToolTimingChange: (enabled: boolean) => void;
+     onImageWidthCellsChange: (width: number) => void;
+     onAutoResizeImagesChange: (enabled: boolean) => void;
+     onBlockImagesChange: (blocked: boolean) => void;
+--- a/dist/modes/interactive/components/settings-selector.js
++++ b/dist/modes/interactive/components/settings-selector.js
+@@ -308,6 +308,13 @@
+                 values: [...CACHE_WARMING_MODES],
+             },
+             {
++                id: "tool-timing",
++                label: "Tool timing",
++                description: "Show shell tool elapsed time without changing timing collection",
++                currentValue: config.showToolTiming ? "true" : "false",
++                values: ["true", "false"],
++            },
++            {
+                 id: "hide-thinking",
+                 label: "Hide thinking",
+                 description: "Hide thinking blocks in assistant responses",
+@@ -663,6 +670,9 @@
+                 case "cache-warming-mode":
+                     callbacks.onCacheWarmingModeChange(newValue);
+                     break;
++                case "tool-timing":
++                    callbacks.onShowToolTimingChange(newValue === "true");
++                    break;
+                 case "hide-thinking":
+                     callbacks.onHideThinkingBlockChange(newValue === "true");
+                     break;
+--- a/dist/modes/interactive/components/tool-execution.d.ts
++++ b/dist/modes/interactive/components/tool-execution.d.ts
+@@ -16,6 +16,7 @@
+ }
+ export interface ToolExecutionOptions {
+     showImages?: boolean;
++    showToolTiming?: boolean;
+     imageWidthCells?: number;
+ }
+ export declare class ToolExecutionComponent extends Container {
+@@ -34,6 +35,7 @@
+     private args;
+     private expanded;
+     private showImages;
++    private showToolTiming;
+     private imageWidthCells;
+     private isPartial;
+     private toolDefinition?;
+@@ -68,6 +70,7 @@
+     }, isPartial?: boolean): void;
+     private maybeConvertImagesForKitty;
+     setExpanded(expanded: boolean): void;
++    setShowToolTiming(show: boolean): void;
+     setShowImages(show: boolean): void;
+     setImageWidthCells(width: number): void;
+     invalidate(): void;
+--- a/dist/modes/interactive/components/tool-execution.js
++++ b/dist/modes/interactive/components/tool-execution.js
+@@ -20,6 +20,7 @@
+     args;
+     expanded = false;
+     showImages;
++    showToolTiming;
+     imageWidthCells;
+     isPartial = true;
+     toolDefinition;
+@@ -37,6 +38,7 @@
+         this.args = args;
+         this.toolDefinition = toolDefinition;
+         this.showImages = options.showImages ?? true;
++        this.showToolTiming = options.showToolTiming ?? true;
+         this.imageWidthCells = options.imageWidthCells ?? 60;
+         this.ui = ui;
+         this.cwd = cwd;
+@@ -84,6 +86,7 @@
+             isPartial: this.isPartial,
+             expanded: this.expanded,
+             showImages: this.showImages,
++            showToolTiming: this.showToolTiming,
+             isError: this.result?.isError ?? false,
+         };
+     }
+@@ -169,6 +172,10 @@
+         this.expanded = expanded;
+         this.updateDisplay();
+     }
++    setShowToolTiming(show) {
++        this.showToolTiming = show;
++        this.updateDisplay();
++    }
+     setShowImages(show) {
+         this.showImages = show;
+         this.updateDisplay();
+--- a/dist/modes/interactive/interactive-mode.js
++++ b/dist/modes/interactive/interactive-mode.js
+@@ -2797,6 +2797,7 @@
+                             if (!this.pendingTools.has(content.id)) {
+                                 const component = new ToolExecutionComponent(content.name, content.id, content.arguments, {
+                                     showImages: this.settingsManager.getShowImages(),
++                                    showToolTiming: this.settingsManager.getShowToolTiming(),
+                                     imageWidthCells: this.settingsManager.getImageWidthCells(),
+                                 }, this.getRegisteredToolDefinition(content.name), this.ui, this.sessionManager.getCwd());
+                                 component.setExpanded(this.toolOutputExpanded);
+@@ -2867,6 +2868,7 @@
+                 if (!component) {
+                     component = new ToolExecutionComponent(event.toolName, event.toolCallId, event.args, {
+                         showImages: this.settingsManager.getShowImages(),
++                        showToolTiming: this.settingsManager.getShowToolTiming(),
+                         imageWidthCells: this.settingsManager.getImageWidthCells(),
+                     }, this.getRegisteredToolDefinition(event.toolName), this.ui, this.sessionManager.getCwd());
+                     component.setExpanded(this.toolOutputExpanded);
+@@ -3199,6 +3201,7 @@
+                     if (content.type === "toolCall") {
+                         const component = new ToolExecutionComponent(content.name, content.id, content.arguments, {
+                             showImages: this.settingsManager.getShowImages(),
++                            showToolTiming: this.settingsManager.getShowToolTiming(),
+                             imageWidthCells: this.settingsManager.getImageWidthCells(),
+                         }, this.getRegisteredToolDefinition(content.name), this.ui, this.sessionManager.getCwd());
+                         component.setExpanded(this.toolOutputExpanded);
+@@ -3977,6 +3980,7 @@
+                 currentModel: this.session.model,
+                 availableDefaultModels: this.session.modelRuntime.getAvailableSnapshot(),
+                 showImages: this.settingsManager.getShowImages(),
++                showToolTiming: this.settingsManager.getShowToolTiming(),
+                 imageWidthCells: this.settingsManager.getImageWidthCells(),
+                 autoResizeImages: this.settingsManager.getImageAutoResize(),
+                 blockImages: this.settingsManager.getBlockImages(),
+@@ -4018,6 +4022,14 @@
+                     this.session.setAutoCompactionEnabled(enabled);
+                     this.footer.setAutoCompactEnabled(enabled);
+                 },
++                onShowToolTimingChange: (enabled) => {
++                    this.settingsManager.setShowToolTiming(enabled);
++                    for (const child of this.chatContainer.children) {
++                        if (child instanceof ToolExecutionComponent) {
++                            child.setShowToolTiming(enabled);
++                        }
++                    }
++                },
+                 onShowImagesChange: (enabled) => {
+                     this.settingsManager.setShowImages(enabled);
+                     for (const child of this.chatContainer.children) {
+--- a/docs/settings.md
++++ b/docs/settings.md
+@@ -14,6 +14,7 @@
+ | `modelThinkingLevels` | object | None | Per-model startup thinking levels keyed by exact `provider/modelId`. |
+ | `thinkingBudgets` | object | Built-in budgets | Token budgets for `minimal`, `low`, `medium`, and `high` thinking levels. |
+ | `enabledModels` | `string[]` | All available models | Model patterns used for startup selection and model cycling. Uses the same format as `--models`. |
++| `showToolTiming` | boolean | `true` | Show shell tool Elapsed/Took labels; toggle live in `/settings` under Tool timing. Timing collection is unchanged. |
+ | `hideThinkingBlock` | boolean | `false` | Hide thinking blocks in the transcript. |
+ | `showCacheMissNotices` | boolean | `false` | Show notices for significant cache misses, successful cache warming, compaction usage, and provider recovery. |
+ | `cacheWarming` | `"off" \| "streaming" \| "idle"` | `"streaming"` | Keep eligible provider prompt caches warm during active runs or, with `"idle"`, between runs. Global setting only. |

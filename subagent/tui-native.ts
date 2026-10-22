@@ -621,7 +621,7 @@ export class TuiNativeManager {
         kind: "subagent", needsAttention: active(c) && c.needsAttention === true,
         summary: typeof (c.lastOutcome as any)?.summary === "string" ? (c.lastOutcome as any).summary.slice(0, 2000) : undefined,
         lastUpdated: null, stale: true };
-    })).slice(-50);
+    }));
   }
   readonlyIndependentSource(owner: string, input: { taskId: string; childId: string; attempt: number; runtimeId: string | null }): any {
     if (this.owner !== owner) throw new Error("Independent source belongs to another session");

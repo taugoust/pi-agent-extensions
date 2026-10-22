@@ -1,0 +1,12 @@
+import { readFileSync } from "node:fs";
+import { join } from "node:path";
+import { getAgentDir } from "@earendil-works/pi-coding-agent";
+
+/** Presentation default only; sampling and observations are independent. */
+export function visibleByDefault(): boolean {
+  try {
+    return JSON.parse(readFileSync(join(getAgentDir(), "cache-hit-monitor-display.json"), "utf8")).visibleByDefault === true;
+  } catch {
+    return false;
+  }
+}

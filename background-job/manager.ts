@@ -45,7 +45,7 @@ function result(status: JobResult["status"], exitCode: number | null, reason?: s
 }
 
 function abortError(): Error {
-  const error = new Error("Background job wait was cancelled; the job is still running");
+  const error = new Error("Wait cancelled");
   error.name = "AbortError";
   return error;
 }

@@ -14,6 +14,8 @@ import {
   type MonitorLine,
 } from "./metrics.js";
 
+import { visibleByDefault } from "./visibility.js";
+
 export const COMMAND_NAME = "cache-hit-monitor";
 export const WIDGET_KEY = "cache-hit-monitor";
 
@@ -123,9 +125,10 @@ export default function cacheHitMonitor(pi: ExtensionAPI): void {
       ctx.ui.setWidget(WIDGET_KEY, undefined);
     }
     activeSession = ctx.sessionManager;
-    visible = false;
+    visible = visibleByDefault();
     publishedSignature = undefined;
     restore(ctx);
+    publish(ctx);
   });
 
   pi.on("message_start", (event, ctx) => {

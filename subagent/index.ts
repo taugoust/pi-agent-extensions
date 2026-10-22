@@ -1896,10 +1896,20 @@ export default function (pi: ExtensionAPI) {
           if (input.sessionId !== sessionId) throw new Error("Read-only subagents unavailable for this Pi session");
           assertReadonlyOwner();
           const limit = input.limit ?? 50;
-          if (!Number.isSafeInteger(limit) || limit < 1 || limit > 50 || input.cursor !== undefined) throw new Error("Invalid read-only subagent page");
+          const offset = input.cursor === undefined ? 0 : Number(input.cursor);
+          if (!Number.isSafeInteger(limit) || limit < 1 || limit > 50 ||
+            !Number.isSafeInteger(offset) || offset < 0 ||
+            (input.cursor !== undefined && !/^(0|[1-9]\d*)$/.test(input.cursor))) throw new Error("Invalid read-only subagent page");
           if ((!native && !foreground) || nativeDisposition() === "full" || nativeDisposition() === "unavailable") return { protocol: HARNESS_READONLY_PROTOCOL, state: "unsupported", sessionId, items: [], lastUpdated: null, stale: true, message: "Native subagent snapshots are unavailable in the selected backend." };
-          const items = [...(foreground?.readonlyTaskList(sessionId, limit) ?? []), ...(native?.readonlyTaskList(sessionId) ?? [])].slice(0, limit);
-          return { protocol: HARNESS_READONLY_PROTOCOL, state: "available", sessionId, items, lastUpdated: items[0]?.lastUpdated ?? null, stale: true };
+          // Native retention inventory comes first: foreground helpers must not
+          // consume the page and disappear again when the Agents UI filters them.
+          const nativeRows = native?.readonlyTaskList(sessionId) ?? [];
+          nativeRows.sort((a: any, b: any) => Number(a.reaped === true) - Number(b.reaped === true));
+          const rows = [...nativeRows, ...(foreground?.readonlyTaskList(sessionId, 50) ?? [])];
+          const items = rows.slice(offset, offset + limit);
+          return { protocol: HARNESS_READONLY_PROTOCOL, state: "available", sessionId, items,
+            ...(offset + items.length < rows.length ? { nextCursor: String(offset + items.length) } : {}),
+            lastUpdated: items[0]?.lastUpdated ?? null, stale: true };
         },
         async independentSource(input) {
           assertReadonlyOwner();

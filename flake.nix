@@ -69,21 +69,29 @@
           # Import Pi's upstream derivation directly: the llm-agents-nix flake
           # constructs all packages eagerly, and an unrelated package requires
           # unstable-only installAgentSkills from its separately pinned nixpkgs.
-          pi = pkgs.callPackage (llm-agents-nix + "/packages/pi/package.nix") {
-            formatelf = import (llm-agents-nix + "/packages/formatelf/package.nix") {
-              inherit (pkgs)
-                lib
-                stdenv
-                rustPlatform
-                fetchFromGitHub
-                makeSetupHook
-                ;
-            };
-            mkUpdater = import (llm-agents-nix + "/lib/mk-updater.nix") { inherit (pkgs) lib; };
-            versionCheckHomeHook = pkgs.callPackage (
-              llm-agents-nix + "/packages/versionCheckHomeHook/package.nix"
-            ) { };
-          };
+          pi =
+            (pkgs.callPackage (llm-agents-nix + "/packages/pi/package.nix") {
+              formatelf = import (llm-agents-nix + "/packages/formatelf/package.nix") {
+                inherit (pkgs)
+                  lib
+                  stdenv
+                  rustPlatform
+                  fetchFromGitHub
+                  makeSetupHook
+                  ;
+              };
+              mkUpdater = import (llm-agents-nix + "/lib/mk-updater.nix") { inherit (pkgs) lib; };
+              versionCheckHomeHook = pkgs.callPackage (
+                llm-agents-nix + "/packages/versionCheckHomeHook/package.nix"
+              ) { };
+            }).overrideAttrs
+              (old: {
+                # Native shell-renderer preference, including a live /settings toggle.
+                patches = (old.patches or [ ]) ++ [ ./nix/pi-tool-timing.patch ];
+                # Review deployments intentionally omit test/install-check phases.
+                doCheck = false;
+                doInstallCheck = false;
+              });
           pi-mcp-adapter-src = pkgs.runCommand "pi-mcp-adapter-src" { } ''
             cp -R ${pi-mcp-adapter} "$out"
             chmod -R u+rwX "$out"

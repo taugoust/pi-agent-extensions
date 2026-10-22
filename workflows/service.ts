@@ -659,7 +659,7 @@ export function createWorkflowService(
 								: r.action === "goal.edit"
 									? "Update Goal?"
 									: "Start Goal?",
-							`${r.objective ?? runtime.activeGoal?.text ?? ""}\n\nWorkspace: ${ctx.cwd}\nUses ${ctx.model ? `${ctx.model.provider}/${ctx.model.id}` : "the current Pi model"} with ${ctx.thinkingLevel ?? "current"} thinking and its active tools. It may edit this workspace and make paid model calls. Automatic limit: ${runtime.settings.continuationLimits.automaticTurns ?? "unlimited"} responses. Token budget: ${r.tokenBudget ?? runtime.activeGoal?.tokenBudget ?? 250000}; the final request can exceed it.`,
+							`${r.objective ?? runtime.activeGoal?.text ?? ""}\n\nWorkspace: ${ctx.cwd}\nUses ${ctx.model ? `${ctx.model.provider}/${ctx.model.id}` : "the current Pi model"} with ${ctx.thinkingLevel ?? "current"} thinking and its active tools. It may edit this workspace and make paid model calls. Automatic limit: ${runtime.settings.continuationLimits.automaticTurns ?? "unlimited"} responses. Token budget: ${r.tokenBudget ?? runtime.activeGoal?.tokenBudget ?? "unlimited"}; the final request can exceed it.`,
 						))
 					)
 						return;
@@ -801,17 +801,16 @@ export function createWorkflowService(
 					);
 				if (!ctx.isIdle() || ctx.hasPendingMessages())
 					throw new Error("Wait until Pi is idle before saving a goal");
-				const budget = r.tokenBudget ?? 250_000;
+				const budget = r.tokenBudget;
 				if (
 					typeof r.objective !== "string" ||
 					!r.objective.trim() ||
 					r.objective.length > 4000 ||
-					!Number.isSafeInteger(budget) ||
-					budget < 1 ||
-					budget > 1_000_000
+					(budget !== undefined &&
+						(!Number.isSafeInteger(budget) || budget < 1 || budget > 1_000_000))
 				)
 					throw new Error(
-						"Provide an objective of 1–4000 characters and a budget between 1 and 1000000",
+						"Provide an objective of 1–4000 characters and an optional budget between 1 and 1000000",
 					);
 			}
 			if (r.action === "goal.add_task") {
@@ -837,12 +836,11 @@ export function createWorkflowService(
 				(typeof r.objective !== "string" ||
 					!r.objective.trim() ||
 					r.objective.length > 4000 ||
-					!Number.isSafeInteger(r.tokenBudget) ||
-					r.tokenBudget < 1 ||
-					r.tokenBudget > 1_000_000)
+					(r.tokenBudget !== undefined &&
+						(!Number.isSafeInteger(r.tokenBudget) || r.tokenBudget < 1 || r.tokenBudget > 1_000_000)))
 			)
 				throw new Error(
-					"Provide an objective and a token budget between 1 and 1000000",
+					"Provide an objective and an optional token budget between 1 and 1000000",
 				);
 		}
 		requests.set(r.requestId, fingerprint);
@@ -851,7 +849,7 @@ export function createWorkflowService(
 			const goal = transitionGoal(
 				createGoal(
 					r.objective.trim(),
-					r.tokenBudget ?? 250_000,
+					r.tokenBudget,
 					currentTokenTotal(ctx),
 				),
 				"paused",

@@ -51,9 +51,23 @@ in
       direnv.enable = lib.mkEnableOption "direnv extension — refreshes environment via direnv export";
       fence.enable = lib.mkEnableOption "fence extension — blocks write/edit outside cwd";
       fetch.enable = lib.mkEnableOption "adaptive fetch extension — native HTTP outside AgentSH and supervised curl when AgentSH is active";
-      stamp.enable = lib.mkEnableOption "response stamps and Paseo metadata";
+      stamp = {
+        enable = lib.mkEnableOption "response stamps and Paseo metadata";
+        visibleByDefault = lib.mkOption {
+          type = lib.types.bool;
+          default = false;
+          description = "Show native transcript stamps at session start; /stamp show and /stamp hide override at runtime without changing collection.";
+        };
+      };
       progress.enable = lib.mkEnableOption "branch-aware progress and Paseo snapshots";
-      cache-hit-monitor.enable = lib.mkEnableOption "observed cache diagnostics and Paseo snapshots";
+      cache-hit-monitor = {
+        enable = lib.mkEnableOption "observed cache diagnostics and Paseo snapshots";
+        visibleByDefault = lib.mkOption {
+          type = lib.types.bool;
+          default = false;
+          description = "Show the native cache widget at session start; /cache-hit-monitor toggles it without changing sampling or Paseo snapshots.";
+        };
+      };
       idle-context-warning = {
         enable = lib.mkEnableOption "idle-context-warning extension — warn before idle prompts and optionally use cheap idle compaction";
         guardedModels = lib.mkOption {
@@ -165,12 +179,18 @@ in
       })
       (lib.mkIf cfg.extensions.stamp.enable {
         "${extDir}/stamp".source = "${self}/stamp";
+        ".pi/agent/stamp-display.json".text = builtins.toJSON {
+          inherit (cfg.extensions.stamp) visibleByDefault;
+        };
       })
       (lib.mkIf cfg.extensions.progress.enable {
         "${extDir}/progress".source = "${self}/progress";
       })
       (lib.mkIf cfg.extensions.cache-hit-monitor.enable {
         "${extDir}/cache-hit-monitor".source = "${self}/cache-hit-monitor";
+        ".pi/agent/cache-hit-monitor-display.json".text = builtins.toJSON {
+          inherit (cfg.extensions.cache-hit-monitor) visibleByDefault;
+        };
       })
       (lib.mkIf cfg.extensions.background-job.enable {
         "${extDir}/background-job".source = "${self}/background-job";

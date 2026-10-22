@@ -28,6 +28,7 @@ import {
   type ToolStampOutcome,
 } from "./metadata.js";
 import { createStampSettingsRuntime, type StampSettingsRuntime } from "./settings.js";
+import { visibleByDefault } from "./visibility.js";
 
 export const STAMP_ENTRY_TYPE = "pi-stamp";
 export const MAX_TOOL_STAMP_OBSERVATIONS = 256;
@@ -259,7 +260,10 @@ interface RightAlignedLine {
   exact: boolean;
 }
 
-export function createStampEntryRenderer(getSettings: () => Readonly<StampSettings>): EntryRenderer<StampEntryData> {
+export function createStampEntryRenderer(
+  getSettings: () => Readonly<StampSettings>,
+  isVisible: () => boolean = () => true,
+): EntryRenderer<StampEntryData> {
   return (entry, options, theme) => {
     if (isToolStampData(entry.data)) {
       if (!getSettings().toolStamps) return undefined;
@@ -280,6 +284,7 @@ export function createStampEntryRenderer(getSettings: () => Readonly<StampSettin
           ];
         }),
         (line) => theme.fg("dim", line),
+        isVisible,
       );
     }
     if (!isMessageStampData(entry.data)) return undefined;
@@ -342,6 +347,7 @@ export function createStampEntryRenderer(getSettings: () => Readonly<StampSettin
         return [regularLine(label), ...timelineLines, ...metadataLines.map(regularLine)];
       }),
       (line) => theme.fg("dim", line),
+      isVisible,
     );
   };
 }
@@ -416,13 +422,14 @@ function exactTimelineLines(observations: ReadonlyArray<readonly [StampTimelineB
 function dynamicRightAlignedText(
   getLines: () => readonly RightAlignedLine[],
   style: (text: string) => string,
+  isVisible: () => boolean = () => true,
 ): Component {
   let cachedWidth: number | undefined;
   let cachedLines: readonly RightAlignedLine[] | undefined;
   let cachedOutput: string[] | undefined;
   return {
     render(width) {
-      if (width < 1) return [];
+      if (width < 1 || !isVisible()) return [];
       const lines = getLines();
       if (cachedOutput && cachedWidth === width && cachedLines === lines) return cachedOutput;
       cachedWidth = width;
@@ -468,9 +475,10 @@ function hardWrapExactText(text: string, width: number): string[] {
 export default function stampExtension(pi: ExtensionAPI, options: StampExtensionOptions = {}): void {
   const settingsRuntime = options.settingsRuntime ?? createStampSettingsRuntime();
   const now = options.now ?? Date.now;
+  let visible = visibleByDefault();
   pi.registerEntryRenderer(
     STAMP_ENTRY_TYPE,
-    createStampEntryRenderer(() => settingsRuntime.get().settings),
+    createStampEntryRenderer(() => settingsRuntime.get().settings, () => visible),
   );
 
   let generation = 0;
@@ -488,7 +496,13 @@ export default function stampExtension(pi: ExtensionAPI, options: StampExtension
   pi.registerCommand("stamp", {
     description: "Configure transcript timestamp and metadata stamps",
     handler: async (args, ctx) => {
-      if (args.trim()) throw new Error("/stamp does not accept arguments.");
+      const action = args.trim();
+      if (action === "show" || action === "hide") {
+        visible = action === "show";
+        if (ctx.hasUI) ctx.ui.notify(`Stamp decorations ${visible ? "shown" : "hidden"}.`, "info");
+        return;
+      }
+      if (action) throw new Error("Usage: /stamp [show|hide]");
       if (ctx.mode === "print" || ctx.mode === "json") {
         throw new Error(`/stamp is unavailable in ${ctx.mode} mode; use TUI or RPC mode.`);
       }
@@ -643,6 +657,7 @@ export default function stampExtension(pi: ExtensionAPI, options: StampExtension
     sessionController = new AbortController();
     const controller = sessionController;
     const currentGeneration = ++generation;
+    visible = visibleByDefault();
     pendingUserStamps.length = 0;
     activeAssistantTiming = undefined;
     finalizedAssistantTiming = undefined;
