@@ -1,83 +1,88 @@
-# pi-agent-extensions
+# 🧩 Pi Agent Extensions
 
-Composable tools, terminal workflows, and supervised execution for the [Pi coding agent](https://github.com/earendil-works/pi).
+[![Pi](https://img.shields.io/badge/Pi-1.x-blue)](https://pi.dev) [![License: MIT](https://img.shields.io/badge/license-MIT-green.svg)](LICENSE)
 
-Choose the extensions you need with Nix; keep credentials and mutable session preferences outside the store. This repository also supports Pi package loading and manual source installation.
+Tools, side chats, parallel agents and terminal workflows for [Pi](https://pi.dev).
+**Choose what you need. Configure it with Nix.**
 
-## Start with Nix
+[Installation](docs/installation.md) · [Configuration](nix/README.md) · [Full reference](docs/reference.md)
 
-Add `github:taugoust/pi-agent-extensions` as a flake input, then import its Home Manager module:
+## 🚀 Quick start
+
+Add `github:taugoust/pi-agent-extensions` as a flake input, then select extensions in Home Manager:
 
 ```nix
-# In your Home Manager configuration, with pi-agent-extensions in scope:
-{
+{ pi-agent-extensions, ... }: {
   imports = [ pi-agent-extensions.homeManagerModules.default ];
   programs.pi = {
     enable = true;
     extensions = {
-      fetch.enable = true;
-      questionnaire.enable = true;
+      btw.enable = true;
       progress.enable = true;
+      fetch.enable = true;
     };
   };
 }
 ```
 
-`programs.pi.enable` installs this flake's Pi by default; extensions are **opt-in**. The default extension package is a different, broad catalogue bundle—not the module's default selection.
+Extensions are **opt-in**. [Build a selective bundle or install without Nix →](docs/installation.md)
 
-→ [Installation, selective bundles, dependencies, and configuration](docs/installation.md) · [Detailed extension reference](docs/reference.md)
+## 📦 Choose your extensions
 
-## Choose by purpose
+### Workflows and delegation
 
-Commands below are entry points, not a complete CLI reference. Most extensions support macOS and Linux; UI, external tools, and supervision impose additional requirements.
+| Extension | Use it for |
+| --- | --- |
+| [BTW](btw/README.md) | Ask a side question without cluttering the main conversation. |
+| [Workflows](workflows/README.md) | Manage Git worktrees and explicitly authorized Goals. |
+| [Subagent](subagent) | Delegate work to parallel agents. |
+| [Background jobs](background-job) | Run, monitor and clean up durable shell jobs. |
+| [Progress](OBSERVABILITY.md) | Keep multi-step work visible. |
+| [Auto](auto) | Opt into automatic continuation with `/auto`. |
 
-| Purpose | Extensions | Entry points / boundaries |
-| --- | --- | --- |
-| Parallel work | `subagent`, `subagent-finalizer`, `background-job` | `subagent`, `background_job` tools; `/background-jobs`; native TUI workers require Linux/tmux |
-| Goals and worktrees | [`workflows`](workflows/README.md), `auto` | Goal/progress tools; `/auto`; automatic continuation is explicitly authorized and bounded |
-| Side conversations | [`btw`](btw/README.md) | `/btw`; native terminal and Paseo have distinct settings |
-| Network and documents | `fetch`, `pdf`, `ssh` | `fetch`, PDF tools; SSH uses `--ssh` and `/retarget`; local binaries or active supervisor required |
-| Supervision and review | `sandbox`, `permission-gate`, `fence`, `slow-mode` | `/sandbox`, `/sandbox-allow`, `/permission-gate`, `/fence`, `/slow-mode` |
-| Interaction | `questionnaire`, `modal-editor`, `pager` | Questionnaire tool, modal input, `/pager`, `/pager-full`; interactive terminal where applicable |
-| Environment and appearance | `direnv`, `mac-system-theme` | Automatic environment refresh; system appearance sync is macOS-only |
-| Context and diagnostics | `idle-context-warning`, `stamp`, `progress`, `cache-hit-monitor` | `/idle-guard-retry`; [observability commands and privacy](OBSERVABILITY.md) |
-| OpenAI accounts and status | [`openai-accounts`](openai-accounts/README.md), [`openai-usage`](openai-usage/README.md) | `/accounts` (native TUI), `/usage`; safe labels/status, not quota queries |
-| Pinned integrations | `openai-fast-mode`, `mcp-adapter` | `/fast`; upstream MCP adapter configuration; separate upstream sources |
+### Tools and terminal
 
-Bundled skills: GitHub repository search, Apple Reminders (`remindctl`, macOS), draw.io diagrams, and TikZ figure recreation. See [reference](docs/reference.md#skills) and the [registry](nix/extension-registry.nix) for exact names.
+| Extension | Use it for |
+| --- | --- |
+| [Fetch](fetch) | Read web pages and call HTTP APIs. |
+| [PDF](pdf) | Work with PDF documents. |
+| [SSH](ssh) | Retarget work to a remote machine. |
+| [Questionnaire](questionnaire) | Ask structured questions instead of guessing. |
+| [Modal editor](modal-editor) | Edit longer input in a terminal dialog. |
+| [Pager](pager) | Browse long output without flooding the transcript. |
+| [direnv](direnv) | Refresh the project's environment. |
+| [System theme](mac-system-theme) | Follow macOS appearance. |
 
-## Compose, don't copy everything
+### Accounts, visibility and control
 
-Use `lib.mkExtensionBundle` for an explicit Pi package manifest:
+| Extension | Use it for |
+| --- | --- |
+| [OpenAI accounts](openai-accounts/README.md) | Manage named accounts with `/accounts`. |
+| [OpenAI usage](openai-usage/README.md) | Open credential status and the official usage link. |
+| [Stamp](OBSERVABILITY.md) | Record timestamps, response timing and usage metadata. |
+| [Cache monitor](OBSERVABILITY.md) | Inspect prompt-cache reuse. |
+| [Idle context guard](idle-context-warning) | Guard context usage and configure cheaper compaction. |
+| [Sandbox](sandbox) | Route tools through AgentSH supervision. |
+| [Permission Gate](permission-gate) | Require approvals for guarded operations. |
+| [Slow mode](slow-mode) | Review edits before applying them. |
+| [Fence](fence) | Add lightweight path restrictions—not an OS sandbox. |
 
-```nix
-pi-agent-extensions.lib.mkExtensionBundle {
-  inherit pkgs;
-  name = "pi-research-tools";
-  extensions = [ "fetch" "questionnaire" "progress" ];
-  skills = [ "github-repo-search" ];
-}
-```
+[Fast Mode and optional MCP integration →](nix/README.md#source-composition)
 
-The resulting derivation is a package directory to load through Pi's `packages` setting; it is not a Pi executable. Selecting `sandbox` also selects `subagent`; selecting either adds `subagent-finalizer`. Shared runtime files are included where needed. Bundles copy source rather than installing dependency closures—read the [composition guide](docs/installation.md) before selecting dependency-heavy extensions.
+## 🛠️ Skills and composition
 
-## Safety and runtime boundaries
+Bundled skills: [GitHub search](skills/github-repo-search), [Apple Reminders](skills/remindctl), [draw.io](skills/drawio) and [TikZ figures](skills/tikz-figure-recreation).
 
-Native execution uses the current user's authority. `fence` and review prompts are not an OS sandbox. Full AgentSH mode requires a working supervisor and fails closed instead of falling back to native execution; approval-only sockets are not full supervision. See [mode selection](docs/reference.md#agentsh-mode-selection).
+| Want to… | Guide |
+| --- | --- |
+| Configure Pi, models and extension defaults | [Nix API](nix/README.md) |
+| Package only selected extensions and skills | [Composition](docs/installation.md#build-a-package-manifest) |
+| Connect terminal sessions to Paseo | [paseo-bridge-pi](https://github.com/taugoust/paseo-bridge-pi) |
+| Understand dependencies and supported surfaces | [Installation guide](docs/installation.md) |
 
-Pi terminal UI, headless/RPC use, Linux native workers, AgentSH workers, and the companion Paseo UI are distinct surfaces. A terminal feature does not imply a native mobile control. [Observability](OBSERVABILITY.md), [workflow](workflows/README.md), and [side-chat](btw/README.md) documentation describe those boundaries; server installation does not update built-in desktop/mobile client features. The optional [read-only harness service](docs/reference.md#read-only-harness-api) exposes bounded session-owned snapshots, never control capabilities or credentials.
+> [!IMPORTANT]
+> Extensions run with your user permissions. Full AgentSH supervision requires a working supervisor; review prompts alone are not isolation. Keep credentials out of Nix values.
 
-Configure native Pi through `programs.pi.settings`, `models`, `packages` and `agentDir`; configure supported extension defaults through `extensions.<name>.settings`. Extension preference precedence is built-ins < declarative defaults < mutable preferences < session overrides. Native settings have explicit managed or seed-once ownership modes. See the [configuration guide](docs/installation.md#configuration) and [Nix option reference](nix/README.md).
+## 📄 License
 
-## Repository map
-
-- Extension directories: TypeScript entry points and extension-specific assets.
-- `shared/`: runtime classification and cross-extension contracts.
-- `nix/`: registry, bundle builder, Home Manager module, and Pi patches.
-- `skills/`: optional agent skills.
-- `docs/`: installation and preserved detailed reference.
-- `issues/`: tracked work; `tests/`: validation sources.
-
-## License and attribution
-
-[MIT](LICENSE). Adapted upstream material retains its notices; see [THIRD_PARTY.md](THIRD_PARTY.md) and extension READMEs. Pinned upstream integrations retain their own licenses. The [reference acknowledgements](docs/reference.md#-acknowledgements) preserve earlier credits.
+[MIT](LICENSE) · [Third-party notices](THIRD_PARTY.md) · [Acknowledgements](docs/reference.md#-acknowledgements)
