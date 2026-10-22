@@ -1,6 +1,6 @@
 # pi-agent-extensions
 
-Composable tools, terminal workflows, and supervised execution for the [Pi coding agent](https://github.com/mariozechner/pi).
+Composable tools, terminal workflows, and supervised execution for the [Pi coding agent](https://github.com/earendil-works/pi).
 
 Choose the extensions you need with Nix; keep credentials and mutable session preferences outside the store. This repository also supports Pi package loading and manual source installation.
 
@@ -33,7 +33,7 @@ Commands below are entry points, not a complete CLI reference. Most extensions s
 
 | Purpose | Extensions | Entry points / boundaries |
 | --- | --- | --- |
-| Parallel work | `subagent`, `subagent-finalizer`, `background-job` | `subagent`, `background_job` tools; `/background`, `/background-jobs`; native TUI workers require Linux/tmux |
+| Parallel work | `subagent`, `subagent-finalizer`, `background-job` | `subagent`, `background_job` tools; `/background-jobs`; native TUI workers require Linux/tmux |
 | Goals and worktrees | [`workflows`](workflows/README.md), `auto` | Goal/progress tools; `/auto`; automatic continuation is explicitly authorized and bounded |
 | Side conversations | [`btw`](btw/README.md) | `/btw`; native terminal and Paseo have distinct settings |
 | Network and documents | `fetch`, `pdf`, `ssh` | `fetch`, PDF tools; SSH uses `--ssh` and `/retarget`; local binaries or active supervisor required |
@@ -65,9 +65,9 @@ The resulting derivation is a package directory to load through Pi's `packages` 
 
 Native execution uses the current user's authority. `fence` and review prompts are not an OS sandbox. Full AgentSH mode requires a working supervisor and fails closed instead of falling back to native execution; approval-only sockets are not full supervision. See [mode selection](docs/reference.md#agentsh-mode-selection).
 
-Pi terminal UI, headless/RPC use, Linux native workers, AgentSH workers, and the companion Paseo UI are distinct surfaces. A terminal feature does not imply a native mobile control. [Observability](OBSERVABILITY.md), [workflow](workflows/README.md), and [side-chat](btw/README.md) documentation describe those boundaries; native iOS verification remains pending deployment where noted. The optional [read-only harness service](docs/reference.md#read-only-harness-api) exposes bounded session-owned snapshots, never control capabilities or credentials.
+Pi terminal UI, headless/RPC use, Linux native workers, AgentSH workers, and the companion Paseo UI are distinct surfaces. A terminal feature does not imply a native mobile control. [Observability](OBSERVABILITY.md), [workflow](workflows/README.md), and [side-chat](btw/README.md) documentation describe those boundaries; server installation does not update built-in desktop/mobile client features. The optional [read-only harness service](docs/reference.md#read-only-harness-api) exposes bounded session-owned snapshots, never control capabilities or credentials.
 
-Configuration evolves separately from deployment: the proposed `programs.pi.settings/models/packages/agentDir` and `extensions.*.settings` API is **not part of the module documented at this revision**. Its intended preference precedence is defaults < mutable preferences < session overrides. See [current versus proposed configuration](docs/installation.md#configuration-current-and-proposed).
+Configure native Pi through `programs.pi.settings`, `models`, `packages` and `agentDir`; configure supported extension defaults through `extensions.<name>.settings`. Extension preference precedence is built-ins < declarative defaults < mutable preferences < session overrides. Native settings have explicit managed or seed-once ownership modes. See the [configuration guide](docs/installation.md#configuration) and [Nix option reference](nix/README.md).
 
 ## Repository map
 

@@ -18,7 +18,7 @@ All three publish read-only, session-owned data for the companion Paseo bridge. 
 
 ## Native display defaults
 
-Stamp and cache decorations are hidden by default, independently per plugin. Home Manager writes `stamp-display.json` and `cache-hit-monitor-display.json` in Pi's agent directory; each contains `visibleByDefault` (default `false`). Missing or invalid defaults also hide decorations. Defaults apply at session start; runtime switches do not write these Nix-managed files.
+Stamp and cache decorations are hidden by default, independently per plugin. Home Manager writes `defaults/stamp.json` and `defaults/cache-hit-monitor.json` in Pi's agent directory with `visibleByDefault` (default `false`). Existing writable `stamp-display.json` and `cache-hit-monitor-display.json` preferences take precedence. Missing or invalid visibility settings hide decorations. Defaults apply at session start; runtime switches do not write these Nix-managed files.
 
 `/stamp show` and `/stamp hide` control all native stamp timestamps, model/thinking/usage/cost metadata, response timing and tool stamps together. `/stamp` still configures recorded fields and formatting in writable `pi-stamp.json`. Hiding never changes those collection settings or Paseo snapshots. `/cache-hit-monitor` toggles only its visual widget; sampling and Paseo observation continue.
 

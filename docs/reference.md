@@ -1,6 +1,6 @@
 # Extension reference
 
-Detailed material retained from the original README. Installation examples here include manual/source workflows; prefer the [Nix installation guide](installation.md). Historical validation recipes are documentation, not a claim of current validation. For the proposed settings API and current dependency boundaries, use that guide.
+Detailed material retained from the original README. Installation examples here include manual/source workflows; prefer the [Nix installation guide](installation.md). Historical validation recipes are documentation, not a claim of current validation. For the supported settings API and current dependency boundaries, use that guide.
 
 ## Overview
 

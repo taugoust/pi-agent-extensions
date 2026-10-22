@@ -18,7 +18,7 @@ programs.pi = {
   models.providers.openai.modelOverrides."gpt-6-astra".contextWindow = 1000000;
   keybindings = { }; # native keybindings.json object
   mcp = { }; # native mcp.json object
-  extraSkills.nixbot-cli = "${nixbotPackage}/share/pi/skills/nixbot-cli";
+  extraSkills.nixbot-cli = "${nixbotPackage}/share/skills/nixbot-cli";
   packages = [
     bridgePackage
     { source = otherPackage; extensions = [ "extensions/*.ts" ]; skills = [ ]; }
@@ -55,10 +55,10 @@ programs.pi = {
 | `agentDir` | `.pi/agent` | Home-relative global agent directory; no `..`. The launcher must respect `PI_CODING_AGENT_DIR`. |
 | `nativeConfigMode` | `"managed"` | `managed` links native files read-only; `mutable` seeds absent files once on activation. |
 | `quietState.enable` | `true` | Emit `defaults/quiet-state.json` with `{ enabled = ...; }`; the runtime environment kill switch remains higher priority. |
-| `settings` | `{}` | Native `settings.json` object, including arbitrary supported native settings. |
-| `models` | `{}` | Native `models.json` object, including provider/model declarations. |
-| `keybindings` | `{}` | Native `keybindings.json` object. |
-| `mcp` | `{}` | Native `mcp.json` object; never put literal credentials here. |
+| `settings` | `null` | Native `settings.json` object, including arbitrary supported native settings. |
+| `models` | `null` | Native `models.json` object, including provider/model declarations. |
+| `keybindings` | `null` | Native `keybindings.json` object. |
+| `mcp` | `null` | Native `mcp.json` object; never put literal credentials here. |
 | `extraSkills` | `{}` | Additional skill source directories keyed by safe skill names; recursive resource links under `agentDir/skills`. |
 | `packages` | `[]` | Additive native package declarations: source strings, derivations, or `{ source = ...; ...filters }`. |
 | `contextFiles` | `{}` | Markdown filenames relative to `agentDir`; exactly one of `source` or `text`. |
@@ -71,9 +71,11 @@ for reusable packages. Context files cannot occupy reserved extension, skill,
 or defaults directories.
 
 The four native JSON options (`settings`, `models`, `keybindings`, `mcp`) default
-to empty objects. Managed mode emits all four native files; mutable mode seeds
-all four missing files, including empty objects. Inspection copies always appear
-under `defaults/<native-name>.json`. Auth/account/credential files are excluded.
+to `null`, leaving their existing files unmanaged. An explicit object (including
+`{}`) opts that file into the selected ownership mode. Adding `packages` also
+opts in `settings.json`. Merely enabling extensions does not take ownership of
+existing native configuration. Inspection copies for selected files appear under
+`defaults/<native-name>.json`. Auth/account/credential files are excluded.
 
 **Managed mode is intentionally immutable.** Pi can apply an in-memory settings
 change but cannot persist it into a Nix-store-backed `settings.json`; UI save
@@ -96,10 +98,9 @@ Existing symlinks (including dangling links and a previous managed-mode
 generation) are left untouched with a warning. No automatic migration,
 move, or backup of user settings/state/credentials occurs. Review the existing
 configuration and remove the old declarative owner before a deliberate migration
-to mutable mode. Both modes expose `defaults/settings.json`,
-`defaults/models.json`, `defaults/keybindings.json`, and `defaults/mcp.json` for
-inspection; native Pi does **not** load these files by
-itself. Switching `agentDir` does not move existing files or state.
+to mutable mode. Both modes expose configured native documents under
+`defaults/<native-name>.json` for inspection; native Pi does **not** load these
+files by itself. Switching `agentDir` does not move existing files or state.
 
 When adopting this API, remove equivalent consumer `home.file` declarations for
 `settings.json`, `models.json`, `keybindings.json`, `mcp.json`, context files,
@@ -200,7 +201,7 @@ Skills retain `skills.<name>.enable`. `extraSkills.<name> = sourceDirectory`
 registers additional resources without modifying the fixed registry. Names must
 match `[A-Za-z0-9][A-Za-z0-9._-]*` and cannot collide with an enabled registry
 skill; traversal, absolute names, and nested paths are rejected. For example,
-`extraSkills.nixbot-cli = "${nixbotPackage}/share/pi/skills/nixbot-cli"` links the
+`extraSkills.nixbot-cli = "${nixbotPackage}/share/skills/nixbot-cli"` links the
 whole skill recursively while keeping its containing directory writable.
 
 Bundle resource paths are relative to the

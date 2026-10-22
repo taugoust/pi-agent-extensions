@@ -73,17 +73,22 @@ let
       value // { source = toString value.source; }
     else
       value;
+  nativeSettingsBase = if cfg.settings == null then { } else cfg.settings;
   nativeSettings =
-    cfg.settings
-    // lib.optionalAttrs (cfg.packages != [ ] || cfg.settings ? packages) {
-      packages = lib.unique (map normalizePackage ((cfg.settings.packages or [ ]) ++ cfg.packages));
-    };
-  nativeDefaults = json.generate "pi-native-defaults.json" {
+    if cfg.settings == null && cfg.packages == [ ] then
+      null
+    else
+      nativeSettingsBase
+      // lib.optionalAttrs (cfg.packages != [ ] || nativeSettingsBase ? packages) {
+        packages = lib.unique (map normalizePackage ((nativeSettingsBase.packages or [ ]) ++ cfg.packages));
+      };
+  nativeDocuments = lib.filterAttrs (_: value: value != null) {
     settings = nativeSettings;
     models = cfg.models;
     keybindings = cfg.keybindings;
     mcp = cfg.mcp;
   };
+  nativeDefaults = json.generate "pi-native-defaults.json" nativeDocuments;
   extensionFiles = lib.listToAttrs (
     map (
       name:
@@ -186,24 +191,24 @@ in
       description = "managed links native settings/models read-only (UI changes cannot persist); mutable only seeds missing files once on activation, with no reconciliation of existing files. Symlinks are never migrated automatically.";
     };
     settings = lib.mkOption {
-      type = jsonObject;
-      default = { };
-      description = "Native Pi settings. In managed mode these are read-only; mutable mode only seeds a missing settings.json, never updating an existing file. No secrets.";
+      type = lib.types.nullOr jsonObject;
+      default = null;
+      description = "Native Pi settings; null leaves existing configuration unmanaged unless packages are added. In managed mode these are read-only; mutable mode only seeds a missing settings.json, never updating an existing file. No secrets.";
     };
     models = lib.mkOption {
-      type = jsonObject;
-      default = { };
-      description = "Native models.json configuration, read-only in managed mode or used to seed a missing writable file once in mutable mode. Use environment references, never literal credentials.";
+      type = lib.types.nullOr jsonObject;
+      default = null;
+      description = "Native models.json configuration; null leaves it unmanaged. Otherwise read-only in managed mode or used to seed a missing writable file once in mutable mode. Use environment references, never literal credentials.";
     };
     keybindings = lib.mkOption {
-      type = jsonObject;
-      default = { };
-      description = "Native keybindings.json object, read-only in managed mode or used to seed a missing writable file once in mutable mode.";
+      type = lib.types.nullOr jsonObject;
+      default = null;
+      description = "Native keybindings.json object; null leaves it unmanaged. Otherwise read-only in managed mode or used to seed a missing writable file once in mutable mode.";
     };
     mcp = lib.mkOption {
-      type = jsonObject;
-      default = { };
-      description = "Native mcp.json object, read-only in managed mode or used to seed a missing writable file once in mutable mode. Never include literal credentials; use supported environment references.";
+      type = lib.types.nullOr jsonObject;
+      default = null;
+      description = "Native mcp.json object; null leaves it unmanaged. Otherwise read-only in managed mode or used to seed a missing writable file once in mutable mode. Never include literal credentials; use supported environment references.";
     };
     extraSkills = lib.mkOption {
       type = lib.types.attrsOf lib.types.path;
@@ -347,10 +352,12 @@ in
     home.sessionVariables.PI_CODING_AGENT_DIR = "${config.home.homeDirectory}/${cfg.agentDir}";
     home.packages =
       lib.optional (cfg.package != null) cfg.package
-      ++ lib.optionals cfg.extensions.background-job.enable [
-        pkgs.nodejs
-        pkgs.tmux
-      ]
+      ++
+        lib.optionals (cfg.extensions.background-job.enable || builtins.elem "subagent" selectedExtensions)
+          [
+            pkgs.nodejs
+            pkgs.tmux
+          ]
       ++ lib.optionals cfg.extensions.pdf.enable [
         pkgs.poppler-utils
         pkgs.imagemagick
@@ -359,12 +366,14 @@ in
       extensionFiles
       // defaultsFiles
       // skillFiles
-      // lib.optionalAttrs (cfg.nativeConfigMode == "managed") {
-        "${cfg.agentDir}/settings.json".text = builtins.toJSON nativeSettings;
-        "${cfg.agentDir}/models.json".text = builtins.toJSON cfg.models;
-        "${cfg.agentDir}/keybindings.json".text = builtins.toJSON cfg.keybindings;
-        "${cfg.agentDir}/mcp.json".text = builtins.toJSON cfg.mcp;
-      }
+      // lib.optionalAttrs (cfg.nativeConfigMode == "managed") (
+        lib.mapAttrs' (
+          name: value:
+          lib.nameValuePair "${cfg.agentDir}/${name}.json" {
+            text = builtins.toJSON value;
+          }
+        ) nativeDocuments
+      )
       // lib.optionalAttrs needsSharedRuntime {
         "${cfg.agentDir}/extensions/shared" = {
           source = "${bundle}/shared";
@@ -386,11 +395,13 @@ in
         "${cfg.agentDir}/defaults/quiet-state.json".text = builtins.toJSON {
           enabled = cfg.quietState.enable;
         };
-        "${cfg.agentDir}/defaults/settings.json".text = builtins.toJSON nativeSettings;
-        "${cfg.agentDir}/defaults/models.json".text = builtins.toJSON cfg.models;
-        "${cfg.agentDir}/defaults/keybindings.json".text = builtins.toJSON cfg.keybindings;
-        "${cfg.agentDir}/defaults/mcp.json".text = builtins.toJSON cfg.mcp;
-      };
+      }
+      // lib.mapAttrs' (
+        name: value:
+        lib.nameValuePair "${cfg.agentDir}/defaults/${name}.json" {
+          text = builtins.toJSON value;
+        }
+      ) nativeDocuments;
     # Native Pi does not support an additional defaults file. Seed absent native
     # files only; never read/merge/overwrite preferences or race native saves.
     # Existing files, credentials, user state, and symlinks are left untouched.
