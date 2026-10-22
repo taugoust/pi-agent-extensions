@@ -1,0 +1,33 @@
+{
+  "defaults": [
+    "stamp",
+    "progress",
+    "workflows",
+    "idle-context-warning",
+    "btw",
+    "subagent",
+    "slow-mode",
+    "cache-hit-monitor",
+    "sandbox",
+    "permission-gate",
+    "quiet-state",
+    "openai-fast-mode"
+  ],
+  "preferences": [
+    "pi-stamp.json",
+    "stamp-display.json",
+    "pi-progress.json",
+    "pi-goal.json",
+    "pi-worktree.json",
+    "idle-context-warning.json",
+    "extensions/idle-context-warning.json",
+    "btw.json",
+    "pi-btw.json",
+    "subagent.json",
+    "slow-mode.json",
+    "cache-hit-monitor-display.json",
+    "sandbox.json",
+    "permission-gate.json",
+    "extensions/pi-openai-fast-mode/config.json"
+  ]
+}

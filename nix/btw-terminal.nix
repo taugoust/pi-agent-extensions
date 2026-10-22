@@ -7,7 +7,7 @@
     name = "btw-terminal-source";
     filter = path: _type: builtins.baseNameOf path != "candidate-runtime.ts";
   },
-  sharedDefaults ? ../shared/extension-defaults.ts,
+  sharedSource ? ../shared,
 }:
 let
   kit = pkgs.fetchurl {
@@ -32,8 +32,7 @@ pkgs.runCommand "pi-btw-terminal-0.61.2" { nativeBuildInputs = [ pkgs.esbuild ];
   chmod -R u+w src
   # Match candidate/settings.ts's ../../shared import without copying any
   # agent configuration or bundling Pi's host-provided SDK.
-  mkdir -p shared
-  cp ${sharedDefaults} shared/extension-defaults.ts
+  cp -r ${sharedSource} shared
   mkdir -p node_modules/@narumitw/pi-tui-kit node_modules/diff node_modules/grok-mermaid node_modules/highlight.js "$out/licenses"
   tar -xzf ${kit} --strip-components=1 -C node_modules/@narumitw/pi-tui-kit
   tar -xzf ${diff} --strip-components=1 -C node_modules/diff

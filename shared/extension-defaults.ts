@@ -1,3 +1,4 @@
+import configManifest from "./extension-config-manifest.json";
 import { randomUUID } from "node:crypto";
 import { mkdir, rename, rm, writeFile } from "node:fs/promises";
 import { closeSync, constants, fstatSync, openSync, readSync } from "node:fs";
@@ -7,10 +8,8 @@ import { getAgentDir } from "@earendil-works/pi-coding-agent";
 type Document = Record<string, unknown>;
 
 // Public defaults only: never enumerate/copy an agent directory or credentials.
-export const SUPPORTED_EXTENSION_DEFAULTS = [
-  "stamp", "progress", "workflows", "idle-context-warning", "btw", "subagent",
-  "slow-mode", "cache-hit-monitor", "sandbox", "permission-gate", "quiet-state",
-] as const;
+export const SUPPORTED_EXTENSION_DEFAULTS: readonly string[] = Object.freeze(configManifest.defaults);
+export const SUPPORTED_EXTENSION_PREFERENCES: readonly string[] = Object.freeze(configManifest.preferences);
 const isDocument = (value: unknown): value is Document =>
   value !== null && typeof value === "object" && !Array.isArray(value);
 

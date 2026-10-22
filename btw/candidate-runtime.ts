@@ -66642,10 +66642,47 @@ import {
   visibleWidth as visibleWidth2
 } from "@earendil-works/pi-tui";
 
+// shared/extension-config-manifest.json
+var extension_config_manifest_default = {
+  defaults: [
+    "stamp",
+    "progress",
+    "workflows",
+    "idle-context-warning",
+    "btw",
+    "subagent",
+    "slow-mode",
+    "cache-hit-monitor",
+    "sandbox",
+    "permission-gate",
+    "quiet-state",
+    "openai-fast-mode"
+  ],
+  preferences: [
+    "pi-stamp.json",
+    "stamp-display.json",
+    "pi-progress.json",
+    "pi-goal.json",
+    "pi-worktree.json",
+    "idle-context-warning.json",
+    "extensions/idle-context-warning.json",
+    "btw.json",
+    "pi-btw.json",
+    "subagent.json",
+    "slow-mode.json",
+    "cache-hit-monitor-display.json",
+    "sandbox.json",
+    "permission-gate.json",
+    "extensions/pi-openai-fast-mode/config.json"
+  ]
+};
+
 // shared/extension-defaults.ts
 import { closeSync, constants, fstatSync, openSync, readSync } from "node:fs";
 import { join } from "node:path";
 import { getAgentDir } from "@earendil-works/pi-coding-agent";
+var SUPPORTED_EXTENSION_DEFAULTS = Object.freeze(extension_config_manifest_default.defaults);
+var SUPPORTED_EXTENSION_PREFERENCES = Object.freeze(extension_config_manifest_default.preferences);
 var isDocument = (value) => value !== null && typeof value === "object" && !Array.isArray(value);
 function mergeExtensionSettings(base, override) {
   const merged = { ...base };
