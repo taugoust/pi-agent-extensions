@@ -136,6 +136,7 @@
             inherit self pkgs pi-openai-fast-mode;
           };
           agentsh-mode = import ./nix/agentsh-mode-check.nix { inherit self pkgs; };
+          extension-settings = import ./nix/extension-settings-check.nix { inherit self pkgs; };
           auto = import ./nix/auto-check.nix { inherit self pkgs; };
           modal-editor = import ./nix/modal-editor-check.nix { inherit self pkgs; };
           idle-context-warning = import ./nix/idle-context-warning-check.nix { inherit self pkgs; };
