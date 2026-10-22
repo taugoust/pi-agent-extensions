@@ -3,17 +3,20 @@ import test from 'node:test';
 import assert from 'node:assert/strict';
 import { EventEmitter } from 'node:events';
 import { realpathSync } from 'node:fs';
-import { join } from 'node:path';
-import { createJiti } from '../node_modules/@earendil-works/pi-coding-agent/node_modules/jiti/lib/jiti.mjs';
-const sdkRoot = realpathSync(new URL('../node_modules/@earendil-works/pi-coding-agent', import.meta.url));
+import { join, resolve } from 'node:path';
+import { fileURLToPath, pathToFileURL } from 'node:url';
+const sourceRoot = resolve(process.argv[2] ?? fileURLToPath(new URL('../', import.meta.url)));
+const sdkRoot = realpathSync(process.argv[3] ?? join(sourceRoot, 'node_modules/@earendil-works/pi-coding-agent'));
+const { createJiti } = await import(pathToFileURL(join(sdkRoot, 'node_modules/jiti/lib/jiti.mjs')));
+globalThis.fetch = () => { throw new Error('Network forbidden in Goal presentation check'); };
 const jiti = createJiti(import.meta.url, { alias: {
   'typebox': join(sdkRoot, 'node_modules/typebox/build/index.mjs'),
   '@earendil-works/pi-tui': join(sdkRoot, 'node_modules/@earendil-works/pi-tui/dist/index.js'),
 } });
-const { registerGoalManagement } = await jiti.import('../workflows/goal/model-control.ts');
-const { GoalRuntime } = await jiti.import('../workflows/goal/runtime.ts');
-const { writeProgress } = await jiti.import('../shared/goal-progress.ts');
-const { normalizeGoalManageDisplay } = await jiti.import('../workflows/goal/presentation.ts');
+const { registerGoalManagement } = await jiti.import(join(sourceRoot, 'workflows/goal/model-control.ts'));
+const { GoalRuntime } = await jiti.import(join(sourceRoot, 'workflows/goal/runtime.ts'));
+const { writeProgress } = await jiti.import(join(sourceRoot, 'shared/goal-progress.ts'));
+const { normalizeGoalManageDisplay } = await jiti.import(join(sourceRoot, 'workflows/goal/presentation.ts'));
 const theme = { fg: (_color, text) => text, bold: text => text };
 function fixture() {
   let tool;
