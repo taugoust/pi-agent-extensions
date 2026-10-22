@@ -16,8 +16,6 @@ with open(sys.argv[2], encoding="utf-8") as source:
     defaults = json.load(source)
 agent_dir.mkdir(parents=True, exist_ok=True)
 for name, default in defaults.items():
-    if not default:
-        continue
     path = agent_dir / f"{name}.json"
     if path.is_symlink():
         print(f"pi: leaving symlinked {path} unchanged; mutable mode never migrates previous declarative owners", file=sys.stderr)

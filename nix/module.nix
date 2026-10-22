@@ -81,6 +81,8 @@ let
   nativeDefaults = json.generate "pi-native-defaults.json" {
     settings = nativeSettings;
     models = cfg.models;
+    keybindings = cfg.keybindings;
+    mcp = cfg.mcp;
   };
   extensionFiles = lib.listToAttrs (
     map (
@@ -181,6 +183,21 @@ in
       type = jsonObject;
       default = { };
       description = "Native models.json configuration, read-only in managed mode or used to seed a missing writable file once in mutable mode. Use environment references, never literal credentials.";
+    };
+    keybindings = lib.mkOption {
+      type = jsonObject;
+      default = { };
+      description = "Native keybindings.json object, read-only in managed mode or used to seed a missing writable file once in mutable mode.";
+    };
+    mcp = lib.mkOption {
+      type = jsonObject;
+      default = { };
+      description = "Native mcp.json object, read-only in managed mode or used to seed a missing writable file once in mutable mode. Never include literal credentials; use supported environment references.";
+    };
+    extraSkills = lib.mkOption {
+      type = lib.types.attrsOf lib.types.path;
+      default = { };
+      description = "Additional skill source directories keyed by safe skill name, recursively linked under agentDir/skills. Names must not collide with enabled registry skills.";
     };
     packages = lib.mkOption {
       type = lib.types.listOf (
@@ -286,6 +303,13 @@ in
       {
         assertion = lib.all (
           name:
+          builtins.match "[A-Za-z0-9][A-Za-z0-9._-]*" name != null && !(builtins.elem name selectedSkills)
+        ) (builtins.attrNames cfg.extraSkills);
+        message = "programs.pi.extraSkills requires safe skill names without collisions with enabled registry skills.";
+      }
+      {
+        assertion = lib.all (
+          name:
           lib.hasSuffix ".md" name
           && !(lib.hasPrefix "/" name)
           && !(builtins.elem ".." (lib.splitString "/" name))
@@ -323,6 +347,8 @@ in
       // lib.optionalAttrs (cfg.nativeConfigMode == "managed") {
         "${cfg.agentDir}/settings.json".text = builtins.toJSON nativeSettings;
         "${cfg.agentDir}/models.json".text = builtins.toJSON cfg.models;
+        "${cfg.agentDir}/keybindings.json".text = builtins.toJSON cfg.keybindings;
+        "${cfg.agentDir}/mcp.json".text = builtins.toJSON cfg.mcp;
       }
       // lib.optionalAttrs needsSharedRuntime {
         "${cfg.agentDir}/extensions/shared" = {
@@ -330,6 +356,13 @@ in
           recursive = true;
         };
       }
+      // lib.mapAttrs' (
+        name: source:
+        lib.nameValuePair "${cfg.agentDir}/skills/${name}" {
+          inherit source;
+          recursive = true;
+        }
+      ) cfg.extraSkills
       // lib.mapAttrs' (
         name: file:
         lib.nameValuePair "${cfg.agentDir}/${name}" (lib.filterAttrs (_: value: value != null) file)
@@ -340,6 +373,8 @@ in
         };
         "${cfg.agentDir}/defaults/settings.json".text = builtins.toJSON nativeSettings;
         "${cfg.agentDir}/defaults/models.json".text = builtins.toJSON cfg.models;
+        "${cfg.agentDir}/defaults/keybindings.json".text = builtins.toJSON cfg.keybindings;
+        "${cfg.agentDir}/defaults/mcp.json".text = builtins.toJSON cfg.mcp;
       };
     # Native Pi does not support an additional defaults file. Seed absent native
     # files only; never read/merge/overwrite preferences or race native saves.

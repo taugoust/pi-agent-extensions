@@ -16,6 +16,9 @@ programs.pi = {
     theme = "light/dark";
   };
   models.providers.openai.modelOverrides."gpt-6-astra".contextWindow = 1000000;
+  keybindings = { }; # native keybindings.json object
+  mcp = { }; # native mcp.json object
+  extraSkills.nixbot-cli = "${nixbotPackage}/share/pi/skills/nixbot-cli";
   packages = [
     bridgePackage
     { source = otherPackage; extensions = [ "extensions/*.ts" ]; skills = [ ]; }
@@ -54,6 +57,9 @@ programs.pi = {
 | `quietState.enable` | `true` | Emit `defaults/quiet-state.json` with `{ enabled = ...; }`; the runtime environment kill switch remains higher priority. |
 | `settings` | `{}` | Native `settings.json` object, including arbitrary supported native settings. |
 | `models` | `{}` | Native `models.json` object, including provider/model declarations. |
+| `keybindings` | `{}` | Native `keybindings.json` object. |
+| `mcp` | `{}` | Native `mcp.json` object; never put literal credentials here. |
+| `extraSkills` | `{}` | Additional skill source directories keyed by safe skill names; recursive resource links under `agentDir/skills`. |
 | `packages` | `[]` | Additive native package declarations: source strings, derivations, or `{ source = ...; ...filters }`. |
 | `contextFiles` | `{}` | Markdown filenames relative to `agentDir`; exactly one of `source` or `text`. |
 
@@ -64,12 +70,17 @@ settings file, **not** the Nix source file. Use a derivation or absolute source
 for reusable packages. Context files cannot occupy reserved extension, skill,
 or defaults directories.
 
+The four native JSON options (`settings`, `models`, `keybindings`, `mcp`) default
+to empty objects. Managed mode emits all four native files; mutable mode seeds
+all four missing files, including empty objects. Inspection copies always appear
+under `defaults/<native-name>.json`. Auth/account/credential files are excluded.
+
 **Managed mode is intentionally immutable.** Pi can apply an in-memory settings
 change but cannot persist it into a Nix-store-backed `settings.json`; UI save
 operations may fail with `EROFS`. This mode preserves declarative native
 configuration, not writable native preferences. Do not promise persistence.
 
-Opt into `nativeConfigMode = "mutable"` for writable native settings/models.
+Opt into `nativeConfigMode = "mutable"` for writable native JSON files.
 Activation **only seeds missing files once**. Every existing native file is left
 untouched, including invalid JSON and non-object JSON. No merge, update, package
 addition, or removal is applied to an existing file. Changed declarations take
@@ -85,12 +96,14 @@ Existing symlinks (including dangling links and a previous managed-mode
 generation) are left untouched with a warning. No automatic migration,
 move, or backup of user settings/state/credentials occurs. Review the existing
 configuration and remove the old declarative owner before a deliberate migration
-to mutable mode. Both modes expose `defaults/settings.json` and
-`defaults/models.json` for inspection; native Pi does **not** load these files by
+to mutable mode. Both modes expose `defaults/settings.json`,
+`defaults/models.json`, `defaults/keybindings.json`, and `defaults/mcp.json` for
+inspection; native Pi does **not** load these files by
 itself. Switching `agentDir` does not move existing files or state.
 
 When adopting this API, remove equivalent consumer `home.file` declarations for
-`settings.json`, `models.json`, context files, extension sources and managed
+`settings.json`, `models.json`, `keybindings.json`, `mcp.json`, context files,
+extension sources and managed
 extension defaults. Keep unrelated bridge/package declarations. No launcher
 arguments, supervisor policy, or credential files are rewritten by this module. The selected consumer executable
 package supplies the trusted child-launcher integration; public extension
@@ -176,7 +189,14 @@ That call defaults to the fixed-hash npm release; optional `src` accepts a pinne
 source directory or tarball. Prefer the flake package output when consuming its
 pinned upstream input. No npm install, build, or test phase is involved.
 
-Skills retain `skills.<name>.enable`. Bundle resource paths are relative to the
+Skills retain `skills.<name>.enable`. `extraSkills.<name> = sourceDirectory`
+registers additional resources without modifying the fixed registry. Names must
+match `[A-Za-z0-9][A-Za-z0-9._-]*` and cannot collide with an enabled registry
+skill; traversal, absolute names, and nested paths are rejected. For example,
+`extraSkills.nixbot-cli = "${nixbotPackage}/share/pi/skills/nixbot-cli"` links the
+whole skill recursively while keeping its containing directory writable.
+
+Bundle resource paths are relative to the
 bundle root; external Fast Mode explicitly names `src/index.ts` as its extension
 entrypoint. Optional upstream inputs must be supplied. The MCP adapter's upstream
 source requires non-host npm dependencies; this API does not install npm packages
