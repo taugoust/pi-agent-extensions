@@ -1,4 +1,4 @@
-import { readFileSync } from "node:fs";
+import { readExtensionDefaults, readPreferenceDocument, mergeExtensionSettings } from "../shared/extension-defaults.js";
 import { join } from "node:path";
 
 export interface SubagentModelSettings {
@@ -18,10 +18,10 @@ const thinkingSuffix = /:(off|minimal|low|medium|high|xhigh|max)$/;
 export function readSubagentModelSettings(agentDir: string): SubagentModelSettings {
   let value: unknown;
   try {
-    value = JSON.parse(readFileSync(join(agentDir, "subagent.json"), "utf8"));
+    value = mergeExtensionSettings(readExtensionDefaults("subagent", agentDir),
+      readPreferenceDocument(join(agentDir, "subagent.json")));
   } catch (error) {
-    if ((error as NodeJS.ErrnoException).code === "ENOENT") return { ...defaults };
-    throw new Error(`Cannot read subagent.json: ${String(error)}`);
+    throw new Error(`Cannot read subagent.json/defaults/subagent.json: ${String(error)}`);
   }
   if (!value || typeof value !== "object" || Array.isArray(value)) throw new Error("subagent.json must be an object");
   const settings = { ...defaults, ...value } as SubagentModelSettings;

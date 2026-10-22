@@ -1,3 +1,4 @@
+import { withExtensionDefaults } from "../shared/extension-defaults.js";
 import { constants } from "node:fs";
 import { chmod, type FileHandle, mkdir, mkdtemp, open, rename, rm, writeFile } from "node:fs/promises";
 import { dirname, join } from "node:path";
@@ -38,8 +39,9 @@ export function normalizeProgressSettings(value: unknown): ProgressSettings | un
   if (!isRecord(value)) return undefined;
   const widgetValue = Object.hasOwn(value, "widget") ? value.widget : undefined;
   if (widgetValue !== undefined && !isRecord(widgetValue)) return undefined;
-  // Retain nested pi-progress.json settings; top-level fields take precedence.
-  const settings = { ...widgetValue, ...value };
+  // Flatten legacy preferences before applying defaults: user widget fields
+  // must override declarative top-level fields too.
+  const settings = withExtensionDefaults("progress", { ...widgetValue, ...value }) as Record<string, unknown>;
 
   const enabled = booleanSetting(settings, "enabled", DEFAULT_PROGRESS_SETTINGS.enabled);
   const showCompleted = booleanSetting(settings, "showCompleted", DEFAULT_PROGRESS_SETTINGS.showCompleted);
@@ -194,7 +196,9 @@ function booleanSetting(record: Record<string, unknown>, key: string, fallback: 
 }
 
 function cloneDefaultSettings(): ProgressSettings {
-  return { ...DEFAULT_PROGRESS_SETTINGS };
+  const settings = normalizeProgressSettings({});
+  if (!settings) throw new Error("Invalid defaults/progress.json settings");
+  return settings;
 }
 
 function invalidResult(path: string, issue: string): ProgressSettingsLoadResult {

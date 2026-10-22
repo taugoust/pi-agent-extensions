@@ -1,8 +1,7 @@
-import { readFileSync } from "node:fs";
+import { readExtensionDefaults, readPreferenceDocument, mergeExtensionSettings } from "../shared/extension-defaults.js";
 import { randomUUID } from "node:crypto";
-import { homedir } from "node:os";
 import { join } from "node:path";
-import type { ExtensionAPI, ExtensionContext } from "@earendil-works/pi-coding-agent";
+import { getAgentDir, type ExtensionAPI, type ExtensionContext } from "@earendil-works/pi-coding-agent";
 import { createBtwService } from "./service";
 
 type CommandHandler = Parameters<ExtensionAPI["registerCommand"]>[1]["handler"];
@@ -27,7 +26,8 @@ export default function btw(pi: ExtensionAPI) {
 		dispose();
 		let model = "openai/gpt-6-luna";
 		try {
-			const settings = JSON.parse(readFileSync(join(process.env.PI_CODING_AGENT_DIR || join(homedir(), ".pi", "agent"), "btw.json"), "utf8"));
+			const settings = mergeExtensionSettings({ model, ...readExtensionDefaults("btw") },
+				readPreferenceDocument(join(getAgentDir(), "btw.json")));
 			if (typeof settings.model === "string" && settings.model.length <= 512) model = settings.model;
 			else throw new Error("Invalid BTW model");
 		} catch (error) {

@@ -23,6 +23,8 @@
  * In non-interactive mode (no UI), slow mode is a no-op.
  */
 
+import { readExtensionDefaults, readPreferenceDocument, mergeExtensionSettings } from "../shared/extension-defaults.js";
+import { getAgentDir } from "@earendil-works/pi-coding-agent";
 import { mkdirSync, mkdtempSync, writeFileSync, unlinkSync, rmSync, readFileSync } from "node:fs";
 import { execFileSync } from "node:child_process";
 import { homedir, tmpdir } from "node:os";
@@ -100,7 +102,12 @@ function buildRemoteReview(
 
 export default function slowMode(pi: ExtensionAPI) {
   // State: whether slow mode is currently enabled
-  let enabled = false;
+  const settings = mergeExtensionSettings(readExtensionDefaults("slow-mode"),
+    readPreferenceDocument(join(getAgentDir(), "slow-mode.json")));
+  if (settings.enabledByDefault !== undefined && typeof settings.enabledByDefault !== "boolean") {
+    throw new Error("Invalid slow-mode enabledByDefault preference");
+  }
+  let enabled = settings.enabledByDefault === true;
   let controlContext: ExtensionContext | undefined;
   const controlKey = "__piSlowModeControlV1";
   const control = {
@@ -116,7 +123,11 @@ export default function slowMode(pi: ExtensionAPI) {
       return this.status(sessionId);
     },
   };
-  pi.on("session_start", (_event, ctx) => { controlContext = ctx; (globalThis as any)[controlKey] = control; });
+  pi.on("session_start", (_event, ctx) => {
+    controlContext = ctx;
+    (globalThis as any)[controlKey] = control;
+    if (ctx.hasUI) ctx.ui.setStatus("slow-mode", enabled ? ctx.ui.theme.fg("warning", "slow ■") : undefined);
+  });
 
   // Track tool calls where content was edited
   // Maps toolCallId -> { originalContent, editedContent }

@@ -1,7 +1,7 @@
-import { readFileSync } from "node:fs";
-import { homedir } from "node:os";
+import { existsSync } from "node:fs";
+import { readExtensionDefaults, readPreferenceDocument, mergeExtensionSettings } from "../shared/extension-defaults.js";
 import { join } from "node:path";
-import type { ExtensionAPI, ExtensionContext } from "@earendil-works/pi-coding-agent";
+import { getAgentDir, type ExtensionAPI, type ExtensionContext } from "@earendil-works/pi-coding-agent";
 import { FORCE_CHEAP_COMPACTION_KEY, registerCompaction } from "./compaction.ts";
 import { GUARD_PROVIDER, registerGuard } from "./guard.ts";
 import { lastModelActivity, shouldWarn, type Config } from "./policy.ts";
@@ -10,7 +10,10 @@ export { lastModelActivity, shouldWarn } from "./policy.ts";
 const REMOTE_UI_KEY = "__piPaseoRemoteUiV1";
 const PARENT_DECISION_KEY = "__piIdleContextParentV1";
 export const REMOTE_PREFLIGHT_KEY = "__piIdleContextPreflightV1";
-const CONFIG_PATH = join(homedir(), ".pi/agent/extensions/idle-context-warning.json");
+function configPath(): string {
+  const canonical = join(getAgentDir(), "idle-context-warning.json");
+  return existsSync(canonical) ? canonical : join(getAgentDir(), "extensions", "idle-context-warning.json");
+}
 type RemoteUi = {
   isConnected(): boolean;
   selectMirrored?(title: string, options: string[], local: (signal: AbortSignal) => Promise<string | undefined>, settings?: { signal?: AbortSignal }): Promise<string | undefined>;
@@ -20,9 +23,9 @@ type PreflightCapability = { ready: boolean; check(signal?: AbortSignal): Promis
 type ParentDecision = { request(details: { model: string; idleMinutes: number; contextPercent: number }, signal?: AbortSignal): Promise<"ignore" | "compact" | "cancel"> };
 const DEFAULTS: Config = { idleMinutes: 30, contextPercent: 20 };
 
-export function readConfig(path = CONFIG_PATH, strict = false): Config {
+export function readConfig(path = configPath(), strict = false): Config {
   try {
-    const parsed = JSON.parse(readFileSync(path, "utf8"));
+    const parsed = mergeExtensionSettings(readExtensionDefaults("idle-context-warning"), readPreferenceDocument(path));
     if (!parsed || typeof parsed !== "object" || Array.isArray(parsed)) throw new Error("Configuration must be an object");
     return {
       idleMinutes: valid(parsed.idleMinutes, DEFAULTS.idleMinutes, 1, 1440),
@@ -33,7 +36,7 @@ export function readConfig(path = CONFIG_PATH, strict = false): Config {
       guardedModels: parsed.guardedModels,
     };
   } catch (error) {
-    if (strict && (error as NodeJS.ErrnoException).code !== "ENOENT") {
+    if (strict) {
       throw new Error(`Cannot read idle-context-warning.json: ${String(error)}`);
     }
     return DEFAULTS;
@@ -91,7 +94,7 @@ async function check(ctx: ExtensionContext, signal?: AbortSignal, readSettings: 
 }
 
 export default function (pi: ExtensionAPI, options: { readSettings?: () => Config; tombstonePath?: string } = {}) {
-  const settings = options.readSettings ?? (() => readConfig(CONFIG_PATH, true));
+  const settings = options.readSettings ?? (() => readConfig(configPath(), true));
   const guard = registerGuard(pi, settings, { tombstonePath: options.tombstonePath });
   registerCompaction(pi, settings, guard.compactionProof);
   const capability: PreflightCapability = { ready: false, check: async () => "continue" };

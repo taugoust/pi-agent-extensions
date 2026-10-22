@@ -10,6 +10,7 @@
  * (https://github.com/Mic92/dotfiles)
  */
 
+import { permissionGateTimeoutPreference } from "./settings.js";
 import { createConnection, Socket } from "node:net";
 import { isAbsolute } from "node:path";
 import {
@@ -209,7 +210,7 @@ function claimInheritedGate(startup: AgentSHStartupClassification): GateClaim | 
   const claim: GateClaim = {
     protocol: PROTOCOL_VERSION,
     rawSocket: rawSocket!,
-    timeoutRaw: process.env[GATE_TIMEOUT_ENV],
+    timeoutRaw: permissionGateTimeoutPreference(),
     startup,
   };
   root[GATE_CLAIM_KEY] = claim;

@@ -1,9 +1,8 @@
 import { readFileSync, writeFileSync, renameSync, mkdirSync, readdirSync } from "node:fs";
 import { join } from "node:path";
-import { homedir } from "node:os";
 import { randomUUID, createHash } from "node:crypto";
 import { lazyStream } from "@earendil-works/pi-ai";
-import type { ExtensionAPI, ExtensionContext, ProviderConfig } from "@earendil-works/pi-coding-agent";
+import { getAgentDir, type ExtensionAPI, type ExtensionContext, type ProviderConfig } from "@earendil-works/pi-coding-agent";
 import { isIdle, lastModelActivity, type Config } from "./policy.ts";
 
 export const GUARD_PROVIDER = "idle-guard";
@@ -72,7 +71,7 @@ function rememberAliases(path: string, configured: string[]): string[] {
 export function registerGuard(pi: ExtensionAPI, readSettings: () => Config, options: { tombstonePath?: string } = {}) {
   let initial: string[] = [];
   try { initial = guardedModelAliases(readSettings().guardedModels); } catch { /* Register persisted tombstones even with broken configuration. */ }
-  const aliases = rememberAliases(options.tombstonePath ?? join(homedir(), ".pi/agent/idle-guard-aliases.json"), initial);
+  const aliases = rememberAliases(options.tombstonePath ?? join(getAgentDir(), "idle-guard-aliases.json"), initial);
   if (aliases.length === 0) return { compactionProof: (_ctx: ExtensionContext): GuardProof | undefined => undefined };
   let context: ExtensionContext | undefined;
   let epoch = 0;

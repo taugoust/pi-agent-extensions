@@ -1,3 +1,4 @@
+import { readExtensionDefaults } from "../../shared/extension-defaults.js";
 import { lstat, mkdir, readFile, rename, unlink, writeFile } from "node:fs/promises";
 import { homedir } from "node:os";
 import { dirname, join, posix, win32 } from "node:path";
@@ -94,12 +95,24 @@ export function resolveWorktreeRoot(
   }
 }
 
+function declarativeWorktreeRoot(home: string, platform: NodeJS.Platform): string {
+  const defaults = readExtensionDefaults("workflows").worktree;
+  if (defaults === undefined) return defaultWorktreeRoot(home, platform);
+  if (!isRecord(defaults)) throw new Error("defaults/workflows.json: worktree must be an object");
+  if (!Object.hasOwn(defaults, "worktreeRoot")) return defaultWorktreeRoot(home, platform);
+  if (typeof defaults.worktreeRoot !== "string") throw new Error("defaults/workflows.json: worktreeRoot must be a string");
+  return resolveWorktreeRoot(defaults.worktreeRoot, home, platform);
+}
+
 export async function loadWorktreeSettings(
   path = settingsFilePath(),
   home = homedir(),
   platform: NodeJS.Platform = process.platform,
 ): Promise<LoadedWorktreeSettings> {
-  const fallback = defaultWorktreeRoot(home, platform);
+  let fallback = defaultWorktreeRoot(home, platform);
+  try {
+    fallback = declarativeWorktreeRoot(home, platform);
+  } catch (error) { return invalid(path, fallback, `defaults/workflows.json: ${formatError(error)}`); }
   let text: string;
   try {
     const stats = await lstat(path);
@@ -191,7 +204,7 @@ export function createWorktreeSettingsRuntime(options: RuntimeOptions = {}): Wor
     return result;
   };
   let state: WorktreeSettingsState = {
-    effectiveRoot: defaultWorktreeRoot(home, platform),
+    effectiveRoot: declarativeWorktreeRoot(home, platform),
     source: "default",
     canSave: true,
   };
@@ -220,7 +233,7 @@ export function createWorktreeSettingsRuntime(options: RuntimeOptions = {}): Wor
         }
         const effectiveRoot =
           configuredRoot === undefined
-            ? defaultWorktreeRoot(home, platform)
+            ? declarativeWorktreeRoot(home, platform)
             : resolveWorktreeRoot(configuredRoot, home, platform);
         const latest = await loadWorktreeSettings(getPath(), home, platform);
         if (latest.kind === "invalid") {

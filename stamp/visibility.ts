@@ -1,12 +1,13 @@
-import { readFileSync } from "node:fs";
 import { join } from "node:path";
 import { getAgentDir } from "@earendil-works/pi-coding-agent";
+import { mergeExtensionSettings, readExtensionDefaults, readPreferenceDocument } from "../shared/extension-defaults.js";
 
-/** Deployment default only; runtime visibility never changes collection settings. */
+/** Display default only; /stamp session visibility never changes collection. */
 export function visibleByDefault(): boolean {
-  try {
-    return JSON.parse(readFileSync(join(getAgentDir(), "stamp-display.json"), "utf8")).visibleByDefault === true;
-  } catch {
-    return false;
+  const settings = mergeExtensionSettings(readExtensionDefaults("stamp"),
+    readPreferenceDocument(join(getAgentDir(), "stamp-display.json")));
+  if (settings.visibleByDefault !== undefined && typeof settings.visibleByDefault !== "boolean") {
+    throw new Error("Invalid stamp visibleByDefault preference");
   }
+  return settings.visibleByDefault === true;
 }

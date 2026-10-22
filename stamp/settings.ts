@@ -1,3 +1,4 @@
+import { withExtensionDefaults } from "../shared/extension-defaults.js";
 import { randomUUID } from "node:crypto";
 import { constants } from "node:fs";
 import { lstat, mkdir, open, rename, rm, writeFile } from "node:fs/promises";
@@ -18,7 +19,7 @@ export const STAMP_SETTINGS_FILE = "pi-stamp.json";
 export const MAX_STAMP_SETTINGS_BYTES = 64 * 1024;
 
 export type StampSettingsField = keyof StampSettings;
-export type StampSettingsSource = "built-in" | "user";
+export type StampSettingsSource = "built-in" | "declarative" | "user";
 export type StampSettingsPatch = Partial<StampSettings>;
 
 export interface NormalizedStampSettings {
@@ -94,6 +95,8 @@ export function stampSettingsFilePath(): string {
 }
 
 export function normalizeStampSettingsDocument(value: unknown): NormalizedStampSettings | undefined {
+  const preferences = value;
+  value = withExtensionDefaults("stamp", value);
   if (!isRecord(value)) return undefined;
   const settings: StampSettings = { ...DEFAULT_STAMP_SETTINGS };
   const sources = builtInSources();
@@ -178,7 +181,18 @@ export function normalizeStampSettingsDocument(value: unknown): NormalizedStampS
     settings.toolStamps = value.toolStamps;
     sources.toolStamps = "user";
   }
+  for (const field of SETTING_FIELDS) {
+    if (sources[field] === "user" && isRecord(preferences) && !Object.hasOwn(preferences, field)) {
+      sources[field] = "declarative";
+    }
+  }
   return { settings, sources };
+}
+
+function declarativeStampSettings(): NormalizedStampSettings {
+  const settings = normalizeStampSettingsDocument({});
+  if (!settings) throw new Error("Invalid defaults/stamp.json settings");
+  return settings;
 }
 
 export async function loadStampSettings(
@@ -195,8 +209,7 @@ export async function loadStampSettings(
         kind: "missing",
         path,
         document: {},
-        settings: { ...DEFAULT_STAMP_SETTINGS },
-        sources: builtInSources(),
+        ...declarativeStampSettings(),
       };
     }
     return invalidLoad(path, formatError(error));
@@ -226,8 +239,7 @@ export function createStampSettingsRuntime(options: StampSettingsRuntimeOptions 
     ...options.operations,
   };
   let state: StampSettingsState = {
-    settings: { ...DEFAULT_STAMP_SETTINGS },
-    sources: builtInSources(),
+    ...declarativeStampSettings(),
     canSave: true,
   };
   let queue = Promise.resolve();

@@ -1,3 +1,4 @@
+import { sandboxSetting } from "./settings.js";
 import { stripSubagentTerminalControls } from "./subagent-text.js";
 import { cloneSubagentTerminal, normalizeSubagentTerminal, type SubagentTerminal } from "./subagent-terminal.js";
 
@@ -123,7 +124,7 @@ function configuredPositiveInteger(value: string | undefined, fallback: number):
   return Number.isSafeInteger(parsed) && parsed > 0 ? parsed : fallback;
 }
 
-export const MAX_SUBAGENT_RESULT_BYTES = configuredPositiveInteger(process.env.PI_AGENTSH_SUBAGENT_RESULT_MAX_BYTES, 50 * 1024);
+export const MAX_SUBAGENT_RESULT_BYTES = configuredPositiveInteger(sandboxSetting("PI_AGENTSH_SUBAGENT_RESULT_MAX_BYTES"), 50 * 1024);
 export const MAX_SUBAGENT_LINE_BYTES = 64 * 1024;
 export const MAX_SUBAGENT_RELEVANT_LINE_BYTES = 4 * 1024 * 1024;
 const MAX_RETAINED_MESSAGES = 16;

@@ -66777,6 +66777,8 @@ var SYSTEM_PROMPT = `You answer quick side questions for a coding-agent user.
 Use the provided conversation context only as background. Answer the user's side question directly and concisely. Do not claim to have changed files, run tools, or affected the main task. If the context is insufficient, say what is unknown and give the best next step.`;
 
 // src/candidate/settings.ts
+// Keep defaults integration in sync with candidate/settings.ts (no bundle rebuild needed).
+import { withExtensionDefaults } from "../shared/extension-defaults.js";
 var BTW_SETTINGS_FILE = "pi-btw.json";
 var BTW_LAYOUTS = ["fullscreen", "left-pane", "right-pane"];
 var DEFAULT_BTW_LAYOUT = "fullscreen";
@@ -66791,6 +66793,7 @@ function btwSettingsPath() {
   return join(getAgentDir(), BTW_SETTINGS_FILE);
 }
 function normalizeBtwSettings(value) {
+  value = withExtensionDefaults("btw", value);
   if (!isSettingsDocument(value)) return void 0;
   const settings = {};
   if (Object.hasOwn(value, "keybindings")) {
@@ -66893,7 +66896,13 @@ async function readBtwSettingsUncoordinated(settingsPath) {
   try {
     contents = await readSettingsContents(settingsPath);
   } catch (error) {
-    if (isNodeError(error) && error.code === "ENOENT") return { kind: "missing" };
+    if (isNodeError(error) && error.code === "ENOENT") {
+      try {
+        const settings = normalizeBtwSettings({});
+        if (!settings) return { kind: "invalid", reason: "Invalid defaults/btw.json settings" };
+        return Object.keys(settings).length ? { kind: "loaded", settings } : { kind: "missing" };
+      } catch (error) { return { kind: "invalid", reason: `defaults/btw.json: ${formatError2(error)}` }; }
+    }
     return { kind: "invalid", reason: `${settingsPath}: ${formatError2(error)}` };
   }
   try {

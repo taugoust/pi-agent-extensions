@@ -1,3 +1,4 @@
+import { withExtensionDefaults } from "../../shared/extension-defaults.js";
 import { randomUUID } from "node:crypto";
 import { constants } from "node:fs";
 import { mkdir, open, rename, rm, writeFile } from "node:fs/promises";
@@ -59,6 +60,7 @@ export function btwSettingsPath(): string {
 }
 
 export function normalizeBtwSettings(value: unknown): BtwSettings | undefined {
+  value = withExtensionDefaults("btw", value);
   if (!isSettingsDocument(value)) return undefined;
 
   const settings: BtwSettings = {};
@@ -175,7 +177,13 @@ async function readBtwSettingsUncoordinated(settingsPath: string): Promise<BtwSe
   try {
     contents = await readSettingsContents(settingsPath);
   } catch (error: unknown) {
-    if (isNodeError(error) && error.code === "ENOENT") return { kind: "missing" };
+    if (isNodeError(error) && error.code === "ENOENT") {
+      try {
+        const settings = normalizeBtwSettings({});
+        if (!settings) return { kind: "invalid", reason: "Invalid defaults/btw.json settings" };
+        return Object.keys(settings).length ? { kind: "loaded", settings } : { kind: "missing" };
+      } catch (error) { return { kind: "invalid", reason: `defaults/btw.json: ${formatError(error)}` }; }
+    }
     return { kind: "invalid", reason: `${settingsPath}: ${formatError(error)}` };
   }
 

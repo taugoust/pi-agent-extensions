@@ -7,6 +7,7 @@
  * approval events in Pi.
  */
 
+import { sandboxSetting } from "./settings.js";
 import { spawn } from "node:child_process";
 import { randomUUID } from "node:crypto";
 import { accessSync, closeSync, constants as fsConstants, fstatSync, lstatSync, openSync, readSync, realpathSync, statSync } from "node:fs";
@@ -243,18 +244,18 @@ type SupervisorState = {
 
 const PROTOCOL_VERSION = 1;
 const RELOAD_RETAINED_CLIENTS_KEY = "__paeAgentSHReloadRetainedClientsV1";
-const CONNECT_TIMEOUT_MS = Number(process.env.PI_AGENTSH_CONNECT_TIMEOUT_MS || "10000");
-const START_TIMEOUT_MS = Number(process.env.PI_AGENTSH_START_TIMEOUT_MS || "30000");
-const WATCH_RECONNECT_MS = Number(process.env.PI_AGENTSH_WATCH_RECONNECT_MS || "1500");
-const SUPERVISOR_RECONNECT_TIMEOUT_MS = Number(process.env.PI_AGENTSH_RECONNECT_TIMEOUT_MS || "30000");
-const SUPERVISOR_RECONNECT_INITIAL_MS = Number(process.env.PI_AGENTSH_RECONNECT_INITIAL_MS || "100");
-const SUPERVISOR_RECOVERY_TRIGGER_MS = Number(process.env.PI_AGENTSH_RECOVERY_TRIGGER_MS || String(Math.min(2000, Math.max(0, Math.floor(SUPERVISOR_RECONNECT_TIMEOUT_MS / 3)))));
-const APPROVAL_POLL_MS = Number(process.env.PI_AGENTSH_APPROVAL_POLL_MS || "1500");
-const TOOL_REQUEST_TIMEOUT_MS = Number(process.env.PI_AGENTSH_TOOL_REQUEST_TIMEOUT_MS || "600000");
-const APPROVAL_REQUEST_TIMEOUT_SLACK_MS = Number(process.env.PI_AGENTSH_APPROVAL_TIMEOUT_SLACK_MS || "300000");
-const COMMAND_EXECUTION_TIMEOUT_FALLBACK = configuredCommandExecutionTimeout(process.env.PI_AGENTSH_COMMAND_EXECUTION_TIMEOUT_MS);
+const CONNECT_TIMEOUT_MS = Number(sandboxSetting("PI_AGENTSH_CONNECT_TIMEOUT_MS") || "10000");
+const START_TIMEOUT_MS = Number(sandboxSetting("PI_AGENTSH_START_TIMEOUT_MS") || "30000");
+const WATCH_RECONNECT_MS = Number(sandboxSetting("PI_AGENTSH_WATCH_RECONNECT_MS") || "1500");
+const SUPERVISOR_RECONNECT_TIMEOUT_MS = Number(sandboxSetting("PI_AGENTSH_RECONNECT_TIMEOUT_MS") || "30000");
+const SUPERVISOR_RECONNECT_INITIAL_MS = Number(sandboxSetting("PI_AGENTSH_RECONNECT_INITIAL_MS") || "100");
+const SUPERVISOR_RECOVERY_TRIGGER_MS = Number(sandboxSetting("PI_AGENTSH_RECOVERY_TRIGGER_MS") || String(Math.min(2000, Math.max(0, Math.floor(SUPERVISOR_RECONNECT_TIMEOUT_MS / 3)))));
+const APPROVAL_POLL_MS = Number(sandboxSetting("PI_AGENTSH_APPROVAL_POLL_MS") || "1500");
+const TOOL_REQUEST_TIMEOUT_MS = Number(sandboxSetting("PI_AGENTSH_TOOL_REQUEST_TIMEOUT_MS") || "600000");
+const APPROVAL_REQUEST_TIMEOUT_SLACK_MS = Number(sandboxSetting("PI_AGENTSH_APPROVAL_TIMEOUT_SLACK_MS") || "300000");
+const COMMAND_EXECUTION_TIMEOUT_FALLBACK = configuredCommandExecutionTimeout(sandboxSetting("PI_AGENTSH_COMMAND_EXECUTION_TIMEOUT_MS"));
 const CONFIGURED_COMMAND_TRANSPORT_SLACK_MS = configuredCommandTransportSlack(
-  process.env.PI_AGENTSH_COMMAND_TRANSPORT_SLACK_MS,
+  sandboxSetting("PI_AGENTSH_COMMAND_TRANSPORT_SLACK_MS"),
   APPROVAL_REQUEST_TIMEOUT_SLACK_MS,
   CONNECT_TIMEOUT_MS,
 );
@@ -371,7 +372,7 @@ class RestHTTPError extends Error {
     this.resourcePath = payload?.path;
     this.errorId = payload?.error_id;
     this.diagnostic = `${method} ${path}: HTTP ${statusCode}${body.trim() ? `: ${truncate(body.trim(), 1000)}` : ""}`;
-    if (process.env.PI_AGENTSH_DEBUG_REST_ERRORS === "1") console.error(this.diagnostic);
+    if (sandboxSetting("PI_AGENTSH_DEBUG_REST_ERRORS") === "1") console.error(this.diagnostic);
   }
 }
 
@@ -496,7 +497,7 @@ function modelMayOverrideSubagentTimeout(processEnv: NodeJS.ProcessEnv = process
 }
 
 function optionalPositiveTimeoutEnv(name: string): number | undefined {
-  const raw = process.env[name]?.trim();
+  const raw = sandboxSetting(name)?.trim();
   if (!raw) return undefined;
   const value = Number(raw);
   if (!Number.isSafeInteger(value) || value <= 0) {
@@ -543,7 +544,7 @@ export function childExecutionCapabilityHeaders(path: string, processEnv: NodeJS
 }
 
 function env(name: string) {
-  const value = process.env[name];
+  const value = sandboxSetting(name);
   return value && value.trim() ? value.trim() : "";
 }
 
@@ -2320,7 +2321,7 @@ class RestApprovalWatcher {
       if (!this.#stopped) this.onError(asError(error));
     }
     finally {
-      const pollMs = Number(process.env.PI_AGENTSH_APPROVAL_POLL_MS || APPROVAL_POLL_MS);
+      const pollMs = Number(sandboxSetting("PI_AGENTSH_APPROVAL_POLL_MS") || APPROVAL_POLL_MS);
       if (!this.#stopped) this.#timer = setTimeout(() => void this.#poll(), Number.isFinite(pollMs) ? Math.max(1, pollMs) : APPROVAL_POLL_MS);
     }
   }

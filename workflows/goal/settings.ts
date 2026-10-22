@@ -1,3 +1,4 @@
+import { withExtensionDefaults, readExtensionDefaults } from "../../shared/extension-defaults.js";
 import { randomUUID } from "node:crypto";
 import { mkdirSync, readFileSync, renameSync, rmSync, writeFileSync } from "node:fs";
 import { basename, dirname, join } from "node:path";
@@ -37,6 +38,7 @@ interface GoalSettingsSaveFileSystem {
 }
 
 export function normalizeGoalSettings(value: unknown): GoalSettings | undefined {
+  value = withExtensionDefaults("workflows", value, "goal");
   if (typeof value !== "object" || value === null || Array.isArray(value)) return undefined;
 
   const rpcValue = Object.hasOwn(value, "rpc") ? Reflect.get(value, "rpc") : undefined;
@@ -144,7 +146,16 @@ export function readGoalSettings(settingsPath = join(getAgentDir(), GOAL_SETTING
     contents = readFileSync(settingsPath, "utf8");
   } catch (error: unknown) {
     if (isNodeError(error) && error.code === "ENOENT") {
-      return { kind: "missing", legacyExperimentalGoals: false };
+      try {
+        if (readExtensionDefaults("workflows").goal !== undefined) {
+          const settings = normalizeGoalSettings({});
+          return settings ? { kind: "loaded", settings, legacyExperimentalGoals: false }
+            : { kind: "invalid", reason: "Invalid defaults/workflows.json goal settings" };
+        }
+        return { kind: "missing", legacyExperimentalGoals: false };
+      } catch (error) {
+        return { kind: "invalid", reason: `defaults/workflows.json: ${formatError(error)}` };
+      }
     }
     return { kind: "invalid", reason: `${settingsPath}: ${formatError(error)}` };
   }
