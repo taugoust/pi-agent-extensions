@@ -42,7 +42,12 @@ let
     inherit (cfg.extensions.subagent) defaultProvider defaultModel defaultThinkingLevel;
   };
   namedSettings = {
-    btw = { inherit (cfg.extensions.btw) model; };
+    # The legacy typed model selects only the separate Paseo conversation.
+    # Terminal BTW retains its main-model default unless explicitly configured.
+    btw = {
+      paseo = { inherit (cfg.extensions.btw) model; };
+      terminal = { };
+    };
     stamp = { inherit (cfg.extensions.stamp) visibleByDefault; };
     cache-hit-monitor = { inherit (cfg.extensions.cache-hit-monitor) visibleByDefault; };
     idle-context-warning = {
@@ -227,7 +232,7 @@ in
           }) extensionNames
         ))
         {
-          btw.model = stringOption "${cfg.extensions.subagent.defaultProvider}/${cfg.extensions.subagent.defaultModel}" "Separate physical BTW model; unavailable models fail without fallback.";
+          btw.model = stringOption "${cfg.extensions.subagent.defaultProvider}/${cfg.extensions.subagent.defaultModel}" "Separate physical Paseo BTW model; terminal BTW keeps the main model unless settings.terminal explicitly overrides it. Unavailable models fail without fallback.";
           stamp.visibleByDefault = boolOption false "Show native transcript stamps at session start.";
           cache-hit-monitor.visibleByDefault = boolOption false "Show the native cache widget at session start.";
           slow-mode.enabledByDefault = boolOption false "Start each session with slow-mode active.";
