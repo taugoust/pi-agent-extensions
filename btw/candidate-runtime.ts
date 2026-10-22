@@ -66642,12 +66642,68 @@ import {
   visibleWidth as visibleWidth2
 } from "@earendil-works/pi-tui";
 
+// shared/extension-defaults.ts
+import { closeSync, constants, fstatSync, openSync, readSync } from "node:fs";
+import { join } from "node:path";
+import { getAgentDir } from "@earendil-works/pi-coding-agent";
+var isDocument = (value) => value !== null && typeof value === "object" && !Array.isArray(value);
+function mergeExtensionSettings(base, override) {
+  const merged = { ...base };
+  for (const [key, value] of Object.entries(override)) {
+    if (key === "__proto__" || key === "constructor" || key === "prototype") continue;
+    merged[key] = isDocument(value) && isDocument(base[key]) ? mergeExtensionSettings(base[key], value) : value;
+  }
+  return merged;
+}
+function readExtensionDefaults(name, agentDir = getAgentDir()) {
+  if (!/^[a-z][a-z0-9-]*$/.test(name)) throw new Error("Invalid canonical extension name");
+  return readPreferenceDocument(join(agentDir, "defaults", `${name}.json`));
+}
+function readPreferenceDocument(path) {
+  let descriptor;
+  try {
+    descriptor = openSync(path, constants.O_RDONLY | (constants.O_NONBLOCK ?? 0));
+  } catch (error) {
+    if (error.code === "ENOENT") return {};
+    throw error;
+  }
+  try {
+    const limit = 64 * 1024;
+    const stats = fstatSync(descriptor);
+    if (!stats.isFile() || stats.size > limit) throw new Error(`${path}: invalid preferences file`);
+    const buffer = Buffer.alloc(limit + 1);
+    let offset = 0;
+    while (offset < buffer.length) {
+      const count = readSync(descriptor, buffer, offset, buffer.length - offset, null);
+      if (!count) break;
+      offset += count;
+    }
+    if (offset > limit) throw new Error(`${path}: preferences file exceeds size limit`);
+    const value = JSON.parse(new TextDecoder("utf-8", { fatal: true }).decode(buffer.subarray(0, offset)));
+    if (!isDocument(value)) throw new Error(`${path}: preferences must be an object`);
+    return value;
+  } catch (error) {
+    throw new Error(`${path}: ${error instanceof Error ? error.message : String(error)}`);
+  } finally {
+    closeSync(descriptor);
+  }
+}
+function withExtensionDefaults(name, value, section) {
+  if (!isDocument(value)) return value;
+  const defaults = readExtensionDefaults(name);
+  const base = section === void 0 ? defaults : defaults[section];
+  if (base !== void 0 && !isDocument(base)) {
+    throw new Error(`defaults/${name}.json: ${section} must be an object`);
+  }
+  return mergeExtensionSettings(isDocument(base) ? base : {}, value);
+}
+
 // src/candidate/settings.ts
 import { randomUUID as randomUUID2 } from "node:crypto";
-import { constants } from "node:fs";
+import { constants as constants2 } from "node:fs";
 import { mkdir, open, rename, rm, writeFile } from "node:fs/promises";
-import { basename, dirname, join } from "node:path";
-import { getAgentDir } from "@earendil-works/pi-coding-agent";
+import { basename, dirname, join as join2 } from "node:path";
+import { getAgentDir as getAgentDir2 } from "@earendil-works/pi-coding-agent";
 
 // src/candidate/side-thread.ts
 import { randomUUID } from "node:crypto";
@@ -66777,8 +66833,6 @@ var SYSTEM_PROMPT = `You answer quick side questions for a coding-agent user.
 Use the provided conversation context only as background. Answer the user's side question directly and concisely. Do not claim to have changed files, run tools, or affected the main task. If the context is insufficient, say what is unknown and give the best next step.`;
 
 // src/candidate/settings.ts
-// Keep defaults integration in sync with candidate/settings.ts (no bundle rebuild needed).
-import { withExtensionDefaults } from "../shared/extension-defaults.js";
 var BTW_SETTINGS_FILE = "pi-btw.json";
 var BTW_LAYOUTS = ["fullscreen", "left-pane", "right-pane"];
 var DEFAULT_BTW_LAYOUT = "fullscreen";
@@ -66790,7 +66844,7 @@ var MAX_BTW_SIDE_PANE_RATIO = 0.8;
 var MAX_SETTINGS_BYTES = 64 * 1024;
 var mutationQueues = /* @__PURE__ */ new Map();
 function btwSettingsPath() {
-  return join(getAgentDir(), BTW_SETTINGS_FILE);
+  return join2(getAgentDir2(), BTW_SETTINGS_FILE);
 }
 function normalizeBtwSettings(value) {
   if (!isSettingsDocument(value)) return void 0;
@@ -66900,7 +66954,9 @@ async function readBtwSettingsUncoordinated(settingsPath) {
         const settings = normalizeBtwSettings(withExtensionDefaults("btw", {}, "terminal"));
         if (!settings) return { kind: "invalid", reason: "Invalid defaults/btw.json settings" };
         return Object.keys(settings).length ? { kind: "loaded", settings } : { kind: "missing" };
-      } catch (error) { return { kind: "invalid", reason: `defaults/btw.json: ${formatError2(error)}` }; }
+      } catch (error2) {
+        return { kind: "invalid", reason: `defaults/btw.json: ${formatError2(error2)}` };
+      }
     }
     return { kind: "invalid", reason: `${settingsPath}: ${formatError2(error)}` };
   }
@@ -66931,7 +66987,7 @@ async function readSettingsDocumentForUpdate(settingsPath) {
   return parsed;
 }
 async function readSettingsContents(settingsPath) {
-  const flags = constants.O_RDONLY | (constants.O_NONBLOCK ?? 0);
+  const flags = constants2.O_RDONLY | (constants2.O_NONBLOCK ?? 0);
   const handle = await open(settingsPath, flags);
   try {
     const descriptorStats = await handle.stat();
@@ -66968,7 +67024,7 @@ async function publishSettings(settingsPath, document2, signal, beforeRename) {
   const directory = dirname(settingsPath);
   await mkdir(directory, { recursive: true });
   signal?.throwIfAborted();
-  const temporaryPath = join(directory, `.${basename(settingsPath)}.${process.pid}.${randomUUID2()}.tmp`);
+  const temporaryPath = join2(directory, `.${basename(settingsPath)}.${process.pid}.${randomUUID2()}.tmp`);
   try {
     await writeFile(temporaryPath, contents, {
       encoding: "utf8",
