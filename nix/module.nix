@@ -402,6 +402,36 @@ in
           text = builtins.toJSON value;
         }
       ) nativeDocuments;
+    # HM's per-file collision check cannot recognize an old whole-directory
+    # ancestor link. Archive only links proven by the old generation/history;
+    # unknown/custom paths are left to the ordinary collision check (no force).
+    home.activation.piMigrateExtensionLinks = lib.hm.dag.entryBefore [ "checkLinkTargets" ] ''
+      piMigrationDryRun=()
+      if [[ -v DRY_RUN || -n "''${DRY_RUN_CMD:-}" ]]; then
+        piMigrationDryRun=(--dry-run)
+      fi
+      ${pkgs.python3}/bin/python3 ${./migrate-extension-links.py} \
+        --home ${lib.escapeShellArg config.home.homeDirectory} \
+        --old-generation "''${oldGenPath:-}" \
+        --profile "''${genProfilePath:-}" \
+        "''${piMigrationDryRun[@]}" \
+        ${
+          lib.escapeShellArgs (
+            lib.filter
+              (
+                path:
+                let
+                  file = config.home.file.${path};
+                in
+                (file.enable or true) && file.recursive && (file.target or path) == path
+              )
+              (
+                builtins.attrNames extensionFiles
+                ++ lib.optional needsSharedRuntime "${cfg.agentDir}/extensions/shared"
+              )
+          )
+        } || exit 1
+    '';
     # Native Pi does not support an additional defaults file. Seed absent native
     # files only; never read/merge/overwrite preferences or race native saves.
     # Existing files, credentials, user state, and symlinks are left untouched.

@@ -186,6 +186,24 @@ keeping containing directories writable. Fast Mode's package-owned `src` tree is
 installed this way, so its runtime `config.json` is not a store symlink; consumers
 must not assemble six internal source files.
 
+On activation, legacy whole-directory extension links are migrated **before**
+Home Manager's collision check, but only for currently declared recursive
+extension directories (including canonical aliases and the shared runtime).
+Ownership requires an exact link into a `home-manager-files` tree referenced by
+`oldGenPath` or a retained generation of Home Manager's own profile. This also
+supports shared homes whose active generation belongs to another host. No
+arbitrary store source, manual link, real directory, or symlinked ancestor is
+claimed; unresolved collisions still fail normally. If the owning generation
+has been deleted from profile history, migration deliberately fails closed.
+
+The original **links**, not their sources, are moved to private (0700)
+`~/.pi-extension-link-backup-*/link-*/original` slots outside autoload paths.
+Activation prints the backup directory; `readlink` on each archived link shows
+its original home-relative suffix. Backups are retained for manual recovery;
+to restore, first remove the new declarative owner and move the archived link
+back to its original, absent destination. Dry-run mode never creates backups or
+moves links. Native preferences, credentials and runtime state are not migrated.
+
 The reusable `packages.<system>.pi-openai-fast-mode` output includes the existing
 session-scoped operator control and a package-level loader for
 `defaults/openai-fast-mode.json`. Its supported `enabled` boolean is a fallback

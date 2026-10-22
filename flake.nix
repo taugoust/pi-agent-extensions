@@ -4,6 +4,12 @@
   inputs = {
     nixpkgs.url = "github:NixOS/nixpkgs/nixpkgs-26.05-darwin";
 
+    # Used only by the activation migration integration check.
+    home-manager = {
+      url = "github:nix-community/home-manager/release-26.05";
+      inputs.nixpkgs.follows = "nixpkgs";
+    };
+
     llm-agents-nix = {
       url = "github:numtide/llm-agents.nix";
       inputs.nixpkgs.follows = "nixpkgs";
@@ -24,6 +30,7 @@
     {
       self,
       nixpkgs,
+      home-manager,
       llm-agents-nix,
       pi-mcp-adapter,
       pi-openai-fast-mode,
@@ -142,6 +149,9 @@
         // {
           openai-fast-mode = import ./nix/openai-fast-mode-check.nix {
             inherit self pkgs pi-openai-fast-mode;
+          };
+          extension-link-migration = import ./nix/extension-link-migration-check.nix {
+            inherit self pkgs home-manager;
           };
           agentsh-mode = import ./nix/agentsh-mode-check.nix { inherit self pkgs; };
           extension-settings = import ./nix/extension-settings-check.nix { inherit self pkgs; };
