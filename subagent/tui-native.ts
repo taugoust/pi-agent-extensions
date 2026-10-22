@@ -243,6 +243,18 @@ export class TuiNativeManager {
     }
     return groups;
   }
+  private async reapChild(g: Group, c: Child): Promise<void> {
+    if (active(c)) throw new Error(`Active child blocks reap: ${g.id}/${c.childId}`);
+    if (!c.reaped) {
+      const manifest = this.manifest(c);
+      if (manifest) await this.tmux.reap(manifest);
+      else if (c.started) throw new Error(`Descendant manifest unavailable: ${g.id}/${c.childId}`);
+      // Terminal children cancelled/skipped before launch have no pane to reap.
+      c.reaped = true;
+      this.save(g);
+    }
+    if (c.spec.worktree) await releaseWorktree(g.owner, c.taskId, c.childId);
+  }
   private async reapStoppedDescendants(groups: Group[]): Promise<void> {
     for (let nested of [...groups].reverse()) {
       const release = this.observerLease(nested.owner);
@@ -255,9 +267,7 @@ export class TuiNativeManager {
           await this.observe(nested, c, true);
           if (active(c)) throw new Error(`Active descendant blocks reap: ${nested.id}/${c.childId}`);
           if (c.report) this.retainedArtifact(c, c.report, "report");
-          const m = this.manifest(c);
-          if (m && !c.reaped) { await this.tmux.reap(m); c.reaped = true; this.save(nested); }
-          if (c.spec.worktree && (c.reaped || (!m && !c.started))) await releaseWorktree(nested.owner, c.taskId, c.childId);
+          await this.reapChild(nested, c);
         }
       } finally { release(); }
     }
@@ -607,7 +617,7 @@ export class TuiNativeManager {
     return [...this.groups.values()].filter(g => g.owner === owner).flatMap(g => g.children.map(c => {
       const manifest = this.manifest(c);
       return { taskId: c.taskId, childId: c.childId, groupId: g.id, runtimeId: manifest?.runtimeId ?? null,
-        attempt: c.attempt ?? 1, status: c.state, title: c.spec.task.slice(0, 140),
+        attempt: c.attempt ?? 1, status: c.state, reaped: !!c.reaped, title: c.spec.task.slice(0, 140),
         kind: "subagent", needsAttention: active(c) && c.needsAttention === true,
         summary: typeof (c.lastOutcome as any)?.summary === "string" ? (c.lastOutcome as any).summary.slice(0, 2000) : undefined,
         lastUpdated: null, stale: true };
@@ -719,10 +729,7 @@ export class TuiNativeManager {
           job_id: g.id, child_id: c.childId, report: c.report ? readPrivateJson(c.report) : undefined,
         }))) });
         for (const g of groups) for (const c of g.children) {
-          const m = this.manifest(c);
-          if (m && !c.reaped) { await this.tmux.reap(m); c.reaped = true; this.save(g); }
-          else if (!m && !c.reaped && c.started) throw new Error(`Descendant manifest unavailable: ${g.id}/${c.childId}`);
-          if (c.spec.worktree) await releaseWorktree(g.owner, c.taskId, c.childId);
+          await this.reapChild(g, c);
         }
       });
       return () => { this.reapReserved = false; };
@@ -764,9 +771,7 @@ export class TuiNativeManager {
           await this.reapStoppedDescendants(nested);
           for (const c of descendant.children) {
             if (c.report) readPrivateJson(c.report); // Require readable retained results before deletion.
-            const manifest = this.manifest(c);
-            if (manifest && !c.reaped) { await this.tmux.reap(manifest); c.reaped = true; this.save(descendant); }
-            if (c.spec.worktree && (c.reaped || (!manifest && !c.started))) await releaseWorktree(descendant.owner, c.taskId, c.childId);
+            await this.reapChild(descendant, c);
           }
         } finally { release(); }
       }
@@ -903,9 +908,7 @@ export class TuiNativeManager {
       // only their proven descendants, deepest first; live parents perform
       // their own recursive cleanup through prepare_reap instead.
       await this.reapStoppedDescendants(descendants.filter(group => nestedIds.has(group.id)));
-      for (const c of g.children) { const m = this.manifest(c); if (m && !c.reaped) { await this.tmux.reap(m); c.reaped = true; this.save(g); }
-        if (c.spec.worktree && (c.reaped || (!m && !c.started))) await releaseWorktree(owner, c.taskId, c.childId);
-      }
+      for (const c of g.children) await this.reapChild(g, c);
     });
     if (op === "wait" || op === "wait_group") {
       const deadline = Date.now() + (params.wait_ms ?? 1000);
