@@ -171,7 +171,7 @@ async function configureRootFlow(ctx: ExtensionCommandContext, settings: Worktre
     throw new Error(current.warning ?? `Fix ${settings.getPath()} before changing pi-worktree settings.`);
   }
   const requested = await ctx.ui.input(
-    "Worktree root (blank restores ~/.worktrees)",
+    "Worktree root (blank restores declarative/default root)",
     stripTerminalControls(current.configuredRoot ?? current.effectiveRoot),
   );
   if (requested === undefined) return;

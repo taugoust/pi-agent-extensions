@@ -1,3 +1,4 @@
+import { readExtensionDefaults } from './extension-defaults.js';
 import type { ExtensionAPI, ExtensionContext } from '@mariozechner/pi-coding-agent';
 import { createHash } from 'node:crypto';
 
@@ -55,12 +56,18 @@ const GUIDANCE_PREFIX='Subagent requests guidance. Reply using subagent operatio
 function hubs():Map<string,Hub>{const root=globalThis as any;return root[KEY]??=(new Map<string,Hub>());}
 function session(ctx:any):string{return ctx.sessionManager.getSessionId();}
 function stats():Stats{return {accepted:0,duplicate:0,dropped:0,routineRecorded:0,guidanceDelivered:0,guidanceBytes:0,schedulingAttempts:0,disabled:0,receiptFailed:0,circuitBreaks:0};}
-function hub(ctx:any):Hub{const id=session(ctx);let h=hubs().get(id);if(!h){h={pending:new Map(),inFlight:new Map(),receipts:new Map(),ui:false,compacting:false,lastGuidanceAt:0,localDisabled:false,quotaResetAt:0,deliveryFailures:0,stats:stats()};hubs().set(id,h);}return h;}
+function hub(ctx:any):Hub{const id=session(ctx);let h=hubs().get(id);if(!h){h={pending:new Map(),inFlight:new Map(),receipts:new Map(),ui:false,compacting:false,lastGuidanceAt:0,localDisabled:defaultDisabled(),quotaResetAt:0,deliveryFailures:0,stats:stats()};hubs().set(id,h);}return h;}
 function revision(data:QuietUpdate):string{return createHash('sha256').update(JSON.stringify(data)).digest('hex');}
 function bytes(text:string):number{return Buffer.byteLength(text,'utf8');}
 function keyOf(data:Pick<QuietUpdate,'kind'|'id'>):string{return `${data.kind}:${data.id}`;}
 function clone<T>(value:T):T{return JSON.parse(JSON.stringify(value));}
-function envDisabled():boolean{return /^(1|true|yes|on)$/i.test(process.env.PAE_QUIET_STATE_DISABLED??process.env.PI_QUIET_STATE_DISABLED??'');}
+const quietStateDefaults=readExtensionDefaults('quiet-state');
+if(quietStateDefaults.enabled!==undefined&&typeof quietStateDefaults.enabled!=='boolean')throw new Error('Invalid defaults/quiet-state.json enabled preference');
+// Explicit environment values (including 0/false) override declarative defaults;
+// a true kill switch still cannot be bypassed by session enable commands.
+function quietStateEnvironment():string|undefined{return process.env.PAE_QUIET_STATE_DISABLED??process.env.PI_QUIET_STATE_DISABLED;}
+function envDisabled():boolean{return /^(1|true|yes|on)$/i.test(quietStateEnvironment()??'');}
+function defaultDisabled():boolean{return quietStateEnvironment()===undefined&&quietStateDefaults.enabled===false;}
 function disabled(h?:Hub):boolean{return envDisabled()||h?.localDisabled===true||(h?.deliveryFailures??0)>=3;}
 function validUpdate(data:any):data is QuietUpdate{return data&&['job','subagent','watch','notification'].includes(data.kind)&&typeof data.id==='string';}
 function toItem(data:QuietUpdate,queuedAt=Date.now()):Item{const updateText=JSON.stringify(data);return {key:keyOf(data),revision:revision(data),bytes:bytes(updateText),data:clone(data),queuedAt};}
@@ -101,7 +108,7 @@ function latestReceipt(h:Hub,key:string){return h.receipts.get(key);}
 function isDone(h:Hub,key:string,rev:string){const r=latestReceipt(h,key);return r?.revision===rev&&(r.state==='recorded'||r.state==='delivered'||r.state==='consumed');}
 function restore(h:Hub,ctx:any){
   const entries=ctx.sessionManager.getBranch?.()??ctx.sessionManager.getEntries?.()??[];
-  h.receipts.clear();h.pending.clear();h.inFlight.clear();h.localDisabled=false;h.guidanceDisabled=false;h.quotaResetAt=0;h.lastGuidanceAt=0;h.stats.guidanceDelivered=0;h.stats.guidanceBytes=0;
+  h.receipts.clear();h.pending.clear();h.inFlight.clear();h.localDisabled=defaultDisabled();h.guidanceDisabled=false;h.quotaResetAt=0;h.lastGuidanceAt=0;h.stats.guidanceDelivered=0;h.stats.guidanceBytes=0;
   for(const entry of entries){
     if(entry?.type==='custom'&&entry.customType===CONTROL_CUSTOM&&entry.data?.v===1){if(typeof entry.data.disabled==='boolean'){if(['guidance-quota','compaction-pause'].includes(entry.data.reason))h.guidanceDisabled=entry.data.disabled;else {h.localDisabled=entry.data.disabled;if(!entry.data.disabled)h.guidanceDisabled=false;}}if(typeof entry.data.quotaResetAt==='number')h.quotaResetAt=entry.data.quotaResetAt;}
     const r=receiptFrom(entry);if(r){h.receipts.set(r.key,r);continue;}
@@ -152,7 +159,7 @@ function installCommands(pi:any){
     }
     if(mode==='disable'||mode==='off'){current.localDisabled=true;current.pending.clear();clearTimer(current);pi.appendEntry(CONTROL_CUSTOM,{v:1,disabled:true,at:Date.now()});ctx.ui.notify('harness-state disabled for this session. Re-enable with /harness-state enable. Env kill switch: PAE_QUIET_STATE_DISABLED=1','warning');refreshStatus(current);return;}
     if(mode==='enable'||mode==='on'){current.localDisabled=false;current.guidanceDisabled=false;current.deliveryFailures=0;current.lastGuidanceAt=0;current.stats.guidanceDelivered=0;current.quotaResetAt=Date.now();pi.appendEntry(CONTROL_CUSTOM,{v:1,disabled:false,quotaResetAt:current.quotaResetAt,at:Date.now()});ctx.ui.notify('harness-state completion/guidance wakeups enabled for this session; guidance quota reset.','info');refreshStatus(current);schedule(current,0);return;}
-    ctx.ui.notify(`harness-state: status=${disabled(current)?'disabled':current.guidanceDisabled?'guidance-paused':'active'} reason=${envDisabled()?'environment kill switch':current.localDisabled?'operator disable':current.deliveryFailures>=3?'delivery circuit breaker':current.guidanceDisabled?'persisted guidance pause':current.compacting?'compaction':current.stats.guidanceDelivered>=MAX_GUIDANCE_PER_SESSION?'guidance quota':'none'} pendingCompletions=${[...current.pending.values()].filter(i=>isCompletion(i.data)).length} pendingGuidance=${[...current.pending.values()].filter(i=>i.data.requires_guidance).length} receipts=${current.receipts.size} deliveredUpdates=${current.stats.guidanceDelivered}/${MAX_GUIDANCE_PER_SESSION} guidanceBytes=${current.stats.guidanceBytes} schedulingAttempts=${current.stats.schedulingAttempts} routineRecorded=${current.stats.routineRecorded} duplicates=${current.stats.duplicate} dropped=${current.stats.dropped} receiptFailed=${current.stats.receiptFailed} circuitBreaks=${current.stats.circuitBreaks} disabled=${disabled(current)} envKillSwitch=PAE_QUIET_STATE_DISABLED=1`,'info');
+    ctx.ui.notify(`harness-state: status=${disabled(current)?'disabled':current.guidanceDisabled?'guidance-paused':'active'} reason=${envDisabled()?'environment kill switch':current.localDisabled?'quiet-state preference/operator disable':current.deliveryFailures>=3?'delivery circuit breaker':current.guidanceDisabled?'persisted guidance pause':current.compacting?'compaction':current.stats.guidanceDelivered>=MAX_GUIDANCE_PER_SESSION?'guidance quota':'none'} pendingCompletions=${[...current.pending.values()].filter(i=>isCompletion(i.data)).length} pendingGuidance=${[...current.pending.values()].filter(i=>i.data.requires_guidance).length} receipts=${current.receipts.size} deliveredUpdates=${current.stats.guidanceDelivered}/${MAX_GUIDANCE_PER_SESSION} guidanceBytes=${current.stats.guidanceBytes} schedulingAttempts=${current.stats.schedulingAttempts} routineRecorded=${current.stats.routineRecorded} duplicates=${current.stats.duplicate} dropped=${current.stats.dropped} receiptFailed=${current.stats.receiptFailed} circuitBreaks=${current.stats.circuitBreaks} disabled=${disabled(current)} envKillSwitch=PAE_QUIET_STATE_DISABLED=1`,'info');
   }});
 }
 function batchBytes(updates:QuietUpdate[]):number{return bytes(GUIDANCE_PREFIX+JSON.stringify(updates))+bytes(JSON.stringify({updates}));}

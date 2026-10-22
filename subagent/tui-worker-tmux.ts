@@ -1,3 +1,4 @@
+import { getAgentDir } from "@earendil-works/pi-coding-agent";
 import { execFile } from "node:child_process";
 import { promisify } from "node:util";
 import { access, readFile, realpath, writeFile, copyFile, chmod } from "node:fs/promises";
@@ -177,6 +178,8 @@ export class TuiWorkerTmux {
       "AGENTSH_SESSION_SUPERVISOR", "AGENTSH_CHILD_CAPABILITY", "AGENTSH_APPROVAL_UI_SOCKET",
       "PI_AGENTSH_ENABLE", "PI_AGENTSH_MOCK_SUPERVISOR", "PI_SUPERVISED", "PI_AUTO", "PI_AGENTSH_REMOTE", "PI_AGENTSH_READ_MODE"];
     const identityEnv: Record<string, string> = {
+      // Use the caller's config/defaults, not the tmux server's stale environment.
+      PI_CODING_AGENT_DIR: getAgentDir(),
       [TUI_WORKER_MANIFEST_ENV]: manifestPath,
       PI_TUI_WORKER_LAUNCH_MODE: input.launchMode,
       PI_TUI_WORKER_LAUNCHER: launcher,

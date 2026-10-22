@@ -60,7 +60,7 @@ export function btwSettingsPath(): string {
 }
 
 export function normalizeBtwSettings(value: unknown): BtwSettings | undefined {
-  value = withExtensionDefaults("btw", value);
+  value = withExtensionDefaults("btw", value, "terminal");
   if (!isSettingsDocument(value)) return undefined;
 
   const settings: BtwSettings = {};

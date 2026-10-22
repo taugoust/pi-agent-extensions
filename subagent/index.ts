@@ -18,6 +18,7 @@ import { TUI_WORKER_MANIFEST_ENV } from "../shared/tui-worker-protocol.ts";
 import { TuiWorkerStore } from "./tui-worker-store.ts";
 import type { Message } from "@mariozechner/pi-ai";
 import type { AgentToolResult, ExtensionAPI } from "@mariozechner/pi-coding-agent";
+import { copyExtensionDefaults } from "../shared/extension-defaults.js";
 import { getAgentDir, getMarkdownTheme } from "@mariozechner/pi-coding-agent";
 import { readSubagentModelSettings, resolveSubagentModel } from "./config.ts";
 
@@ -615,6 +616,7 @@ async function prepareChildAgentDir(subagentId: string): Promise<string> {
     }
   }
 
+  await copyExtensionDefaults(parentAgentDir, childAgentDir);
   return childAgentDir;
 }
 

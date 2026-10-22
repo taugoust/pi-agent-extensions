@@ -1,3 +1,4 @@
+import { getAgentDir } from "@earendil-works/pi-coding-agent";
 import { spawn, execFile } from "node:child_process";
 import { provisionWorktrees, releaseWorktree, worktreeOption, type WorktreeOption } from "../shared/subagent-worktrees.ts";
 import { promisify } from "node:util";
@@ -259,6 +260,8 @@ export class HeadlessForegroundManager {
     args.push("--append-system-prompt", promptPath);
     if (child.spec.tools) args.push("--tools", [...new Set([...child.spec.tools, "notify_parent", "task_outcome"])].join(","));
     const childEnv: Record<string, string> = {
+      // Headless workers share the caller's selected config/defaults root.
+      PI_CODING_AGENT_DIR: getAgentDir(),
       [TUI_WORKER_MANIFEST_ENV]: manifestPath, PI_TUI_WORKER_LAUNCH_MODE: contract.launchMode,
       PI_TUI_WORKER_LAUNCHER: launcher, PI_SUBAGENT_ID: child.childId,
       [TUI_WORKER_DISCOVERY_ENV.ownerSessionId]: group.owner, [TUI_WORKER_DISCOVERY_ENV.taskId]: child.taskId,

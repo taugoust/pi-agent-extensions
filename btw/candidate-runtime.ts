@@ -66793,7 +66793,7 @@ function btwSettingsPath() {
   return join(getAgentDir(), BTW_SETTINGS_FILE);
 }
 function normalizeBtwSettings(value) {
-  value = withExtensionDefaults("btw", value);
+  value = withExtensionDefaults("btw", value, "terminal");
   if (!isSettingsDocument(value)) return void 0;
   const settings = {};
   if (Object.hasOwn(value, "keybindings")) {

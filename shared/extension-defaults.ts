@@ -1,8 +1,16 @@
+import { randomUUID } from "node:crypto";
+import { mkdir, rename, rm, writeFile } from "node:fs/promises";
 import { closeSync, constants, fstatSync, openSync, readSync } from "node:fs";
 import { join } from "node:path";
 import { getAgentDir } from "@earendil-works/pi-coding-agent";
 
 type Document = Record<string, unknown>;
+
+// Public defaults only: never enumerate/copy an agent directory or credentials.
+export const SUPPORTED_EXTENSION_DEFAULTS = [
+  "stamp", "progress", "workflows", "idle-context-warning", "btw", "subagent",
+  "slow-mode", "cache-hit-monitor", "sandbox", "permission-gate", "quiet-state",
+] as const;
 const isDocument = (value: unknown): value is Document =>
   value !== null && typeof value === "object" && !Array.isArray(value);
 
@@ -27,6 +35,24 @@ export function mergeExtensionSettings(base: Document, override: Document): Docu
 export function readExtensionDefaults(name: string, agentDir = getAgentDir()): Document {
   if (!/^[a-z][a-z0-9-]*$/.test(name)) throw new Error("Invalid canonical extension name");
   return readPreferenceDocument(join(agentDir, "defaults", `${name}.json`));
+}
+
+/** Snapshot only supported public defaults into an isolated child's agent dir. */
+export async function copyExtensionDefaults(sourceAgentDir: string, childAgentDir: string): Promise<void> {
+  const destination = join(childAgentDir, "defaults");
+  for (const name of SUPPORTED_EXTENSION_DEFAULTS) {
+    const document = readExtensionDefaults(name, sourceAgentDir);
+    if (Object.keys(document).length === 0) {
+      await rm(join(destination, `${name}.json`), { force: true });
+      continue;
+    }
+    await mkdir(destination, { recursive: true, mode: 0o700 });
+    const temporary = join(destination, `.${name}.${randomUUID()}.tmp`);
+    try {
+      await writeFile(temporary, `${JSON.stringify(document)}\n`, { flag: "wx", mode: 0o600 });
+      await rename(temporary, join(destination, `${name}.json`));
+    } finally { await rm(temporary, { force: true }); }
+  }
 }
 
 /** Only explicitly named public preference paths may be passed here. */
