@@ -43,7 +43,6 @@ export class GoalCommandController {
     isRequestCurrent?: () => boolean,
   ) {
     if (isRequestCurrent && !isRequestCurrent()) return;
-    tokenBudget ??= 250_000;
     const validationError = validateObjective(objective);
     if (validationError) {
       notifyTerminal(ctx.ui, validationError, "warning");
@@ -352,6 +351,12 @@ export class GoalCommandController {
 
     const currentGoal = this.runtime.activeGoal;
     const effectiveTokenBudget = tokenBudget ?? currentGoal.tokenBudget;
+    const tokenBudgetExplicit =
+      tokenBudget !== undefined ||
+      currentGoal.tokenBudgetExplicit === true ||
+      (currentGoal.tokenBudgetExplicit === undefined &&
+        currentGoal.tokenBudget !== undefined &&
+        currentGoal.tokenBudget !== 250_000);
     if (
       currentGoal.status === "budget_limited" &&
       effectiveTokenBudget !== undefined &&
@@ -395,6 +400,7 @@ export class GoalCommandController {
         ...rotatedGoal,
         text: objective,
         tokenBudget: effectiveTokenBudget,
+        tokenBudgetExplicit,
         waiting: undefined,
       },
       editedGoalStatus(previousStatus),

@@ -6,6 +6,7 @@ const GOAL_STATE_ENTRY_TYPE = "goal-state";
 const LEGACY_GOALS_STATE_ENTRY_TYPE = "goals-state";
 
 export type SafetyPauseCause = "continuation_limit" | "no_progress";
+const LEGACY_IMPLICIT_TOKEN_BUDGET = 250_000;
 
 export interface ActiveGoal {
   id: string;
@@ -17,6 +18,8 @@ export interface ActiveGoal {
   updatedAt: number;
   iteration: number;
   tokenBudget?: number;
+  /** Distinguishes explicit caps from the old silent 250k default during migration. */
+  tokenBudgetExplicit?: boolean;
   tokensUsed: number;
   timeUsedSeconds: number;
   baselineTokens: number;
@@ -163,13 +166,30 @@ function validObjective(value: unknown): value is string {
 export function normalizeLoadedGoal(goal: ActiveGoal): ActiveGoal {
   const now = Date.now();
   const waiting = goal.status === "active" ? normalizeGoalWait(goal.waiting) : undefined;
+  const storedTokenBudget = normalizeTokenBudget(goal.tokenBudget);
+  // Older releases silently assigned 250k when no budget was requested. Treat that exact legacy
+  // value as implicit; old budget-limited goals become paused, never auto-resumed. New explicit
+  // budgets carry the marker and survive reloads.
+  const wasLegacyImplicitBudget =
+    goal.tokenBudgetExplicit === undefined &&
+    storedTokenBudget === LEGACY_IMPLICIT_TOKEN_BUDGET;
+  const tokenBudgetExplicit =
+    goal.tokenBudgetExplicit ??
+    (storedTokenBudget !== undefined &&
+      storedTokenBudget !== LEGACY_IMPLICIT_TOKEN_BUDGET);
+  const status =
+    wasLegacyImplicitBudget && goal.status === "budget_limited"
+      ? "paused"
+      : goal.status;
   return {
     ...goal,
+    status,
     progressId: typeof goal.progressId === "string" && goal.progressId.length > 0 && goal.progressId.length <= 128 ? goal.progressId : goal.id,
     startedAt: isNonNegativeFiniteNumber(goal.startedAt) ? goal.startedAt : now,
     updatedAt: isNonNegativeFiniteNumber(goal.updatedAt) ? goal.updatedAt : now,
     iteration: Math.max(0, Math.floor(nonNegativeFiniteNumber(goal.iteration))),
-    tokenBudget: normalizeTokenBudget(goal.tokenBudget),
+    tokenBudget: tokenBudgetExplicit ? storedTokenBudget : undefined,
+    tokenBudgetExplicit,
     tokensUsed: nonNegativeFiniteNumber(goal.tokensUsed),
     timeUsedSeconds: nonNegativeFiniteNumber(goal.timeUsedSeconds),
     baselineTokens: nonNegativeFiniteNumber(goal.baselineTokens),
@@ -217,6 +237,7 @@ function isStoredGoal(value: unknown): value is LegacyStoredGoal {
     typeof value.timeUsedSeconds === "number" &&
     typeof value.baselineTokens === "number" &&
     (value.activeStartedAt === undefined || typeof value.activeStartedAt === "number") &&
+    (value.tokenBudgetExplicit === undefined || typeof value.tokenBudgetExplicit === "boolean") &&
     (value.safetyResetPending === undefined || typeof value.safetyResetPending === "boolean")
   );
 }

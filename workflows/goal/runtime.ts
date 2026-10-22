@@ -1391,6 +1391,7 @@ export function createGoal(text: string, tokenBudget: number | undefined, baseli
     updatedAt: now,
     iteration: 0,
     tokenBudget,
+    tokenBudgetExplicit: tokenBudget !== undefined,
     tokensUsed: 0,
     timeUsedSeconds: 0,
     baselineTokens,

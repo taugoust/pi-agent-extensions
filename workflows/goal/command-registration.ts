@@ -23,7 +23,7 @@ export function registerGoalCommand(
   const loadGoalSettings = cachedModuleLoader(options.loadGoalSettings ?? (() => import("./settings-ui.js")));
 
   pi.registerCommand("goal", {
-    description: "Run a goal to completion: /goal [--tokens 100k] <goal_to_complete>",
+    description: "Create a concise outcome goal: /goal [--tokens 100k] <outcome>; token budgets are opt-in",
     getArgumentCompletions: (prefix) => completeGoalArguments(prefix),
     handler: async (args, ctx) => {
       try {

@@ -209,7 +209,7 @@ nix build .#checks.x86_64-linux.idle-context-warning
 <details>
 <summary><strong>workflows</strong> - Worktree and opt-in Goal</summary>
 
-**Work → Goals** and **Work → Worktrees** adapt the candidate engines. Describe an outcome in chat and ask the model to keep working: `goal_manage` controls the bounded Goal engine, while `update_progress` supplies its persistent checklist. Unfinished required tasks prevent completion; standalone progress remains supported. The Goals tab is an overview and intervention surface, not a mandatory creation form. Defaults remain three automatic responses, two repeated no-progress runs and a 250k token budget. Worktree operations retain their confirmation/removal safeguards. See [workflows/README.md](workflows/README.md) for model controls, task identity and safety boundaries.
+**Work → Goals** and **Work → Worktrees** adapt the candidate engines. Describe an outcome in chat and ask the model to keep working: `goal_manage` controls the bounded Goal engine, while `update_progress` supplies its persistent checklist. Goal objectives are concise outcomes; implementation and verification steps belong in the linked checklist. Unfinished required tasks prevent completion; standalone progress remains supported. The Goals tab is an overview and intervention surface, not a mandatory creation form. Defaults remain three automatic responses and two repeated no-progress runs; token budgets are unlimited unless explicitly requested. Worktree operations retain their confirmation/removal safeguards. See [workflows/README.md](workflows/README.md) for model controls, task identity and safety boundaries.
 
 </details>
 

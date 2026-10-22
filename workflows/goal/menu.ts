@@ -27,12 +27,12 @@ export async function showGoalManager(
 	if (action === "Start goal") {
 		const text = await ctx.ui.input(
 			"Goal objective",
-			"Describe the result and verification required",
+			"One sentence: what verifiable outcome should exist?",
 		);
 		if (text?.trim() && current())
 			await commands.startGoal(
 				text.trim(),
-				250_000,
+				undefined,
 				ctx,
 				undefined,
 				undefined,

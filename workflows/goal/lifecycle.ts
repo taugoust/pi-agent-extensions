@@ -68,8 +68,6 @@ export function registerGoalLifecycle(
     runtime.clearTerminalDetails();
     const settingsResult = readGoalSettings(options.settingsPath);
     const loaded = loadGoalStateFromSession(ctx);
-    // Legacy unbudgeted goals stay bounded when adopted by the Paseo integration.
-    if (loaded.goal && loaded.goal.tokenBudget === undefined) loaded.goal.tokenBudget = 250_000;
     runtime.settings = settingsResult.kind === "loaded" ? settingsResult.settings : DEFAULT_GOAL_SETTINGS;
     runtime.settingsLoadIssue = settingsResult.kind === "invalid" ? settingsResult : undefined;
     runtime.activeGoal = undefined;
