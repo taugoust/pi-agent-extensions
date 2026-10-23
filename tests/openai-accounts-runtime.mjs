@@ -9,12 +9,24 @@ import { ModelRegistry } from "../node_modules/@earendil-works/pi-coding-agent/d
 import { createAssistantMessageEventStream } from "../node_modules/@earendil-works/pi-ai/dist/index.js";
 
 const accountModule = await createJiti(import.meta.url).import("../openai-accounts/accounts.ts");
+const verificationModule = await createJiti(import.meta.url).import("../openai-accounts/model-auth-verification.ts");
 const oauthModule = await createJiti(import.meta.url).import("../openai-accounts/oauth.ts");
 const usageModule = await createJiti(import.meta.url).import("../openai-usage/index.ts");
 const compactionModule = await createJiti(import.meta.url).import("../idle-context-warning/compaction.ts");
 const guardModule = await createJiti(import.meta.url).import("../idle-context-warning/guard.ts");
 const { AccountStore, InMemoryAccountStorageBackend } = accountModule;
 const { createBtwService } = await createJiti(import.meta.url).import("../btw/service.ts");
+
+test("Codex binding verification rejects custom origins and conflicting model Authorization", async () => {
+  const model = { id: "fixture-codex", provider: "openai-codex", api: "openai-codex-responses", baseUrl: "https://chatgpt.com/backend-api/codex" };
+  const ctx = { modelRegistry: { getAll: () => [model], getApiKeyAndHeaders: async () => ({ ok: true, apiKey: "fixture-selected-codex", baseUrl: model.baseUrl, headers: { Authorization: "Bearer fixture-override" } }) } };
+  const adapter = { id: "openai-codex", displayName: "OpenAI Codex" };
+  await assert.rejects(verificationModule.verifyModelApiKeyAuth(ctx, adapter, "fixture-selected-codex", new AbortController().signal), /conflicting authentication header/);
+  ctx.modelRegistry.getApiKeyAndHeaders = async () => ({ ok: true, apiKey: "fixture-selected-codex", baseUrl: "https://attacker.invalid/codex", headers: {} });
+  await assert.rejects(verificationModule.verifyModelApiKeyAuth(ctx, adapter, "fixture-selected-codex", new AbortController().signal), /official ChatGPT origin/);
+  ctx.modelRegistry.getApiKeyAndHeaders = async () => ({ ok: true, apiKey: "fixture-selected-codex", baseUrl: model.baseUrl, headers: {} });
+  await verificationModule.verifyModelApiKeyAuth(ctx, adapter, "fixture-selected-codex", new AbortController().signal);
+});
 
 test("BTW inherits the parent named account and blocks switching during a real registry side stream", async () => {
   const { randomUUID } = await import("node:crypto");
@@ -214,9 +226,9 @@ async function fixture(options = {}) {
   };
 }
 
-async function switchRequest(f, accountId, requestId, revision = f.initial.selectionRevision) {
+async function switchRequest(f, accountId, requestId, revision = f.initial.selectionRevision, providerId) {
   return f.service.switchAccount({
-    protocol: 1, requestId, expectedSessionId: f.sessionId, expectedServiceEpoch: f.initial.serviceEpoch,
+    protocol: 1, ...(providerId ? { providerId } : {}), requestId, expectedSessionId: f.sessionId, expectedServiceEpoch: f.initial.serviceEpoch,
     expectedSelectionRevision: revision, accountId,
   });
 }
@@ -291,6 +303,28 @@ test("independent Pi ModelRuntime instances do not share selected account creden
     if (right) await dispose(right);
     await dispose(left);
   }
+});
+
+test("provider-scoped defaults and idempotency allow the same request ID across native providers", async () => {
+  const f = await fixture();
+  try {
+    const openai = await switchRequest(f, "alpha", "shared-request-id");
+    assert.equal(openai.ok, true);
+    assert.equal(openai.snapshot.providerId, "openai");
+    const codex = await switchRequest(f, null, "shared-request-id", 0, "openai-codex");
+    assert.equal(codex.ok, true);
+    assert.equal(codex.snapshot.providerId, "openai-codex");
+    assert.equal(codex.snapshot.currentAccountId, null);
+    assert.equal(codex.snapshot.selectionRevision, 1);
+    assert.equal((await f.service.getSnapshot({ sessionId: f.sessionId, providerId: "openai" })).currentAccountId, "alpha");
+    assert.equal((await f.service.getSnapshot({ sessionId: f.sessionId, providerId: "openai-codex" })).currentAccountId, null);
+    const replay = await switchRequest(f, null, "shared-request-id", 0, "openai-codex");
+    assert.deepEqual(replay, codex);
+    const staleCodex = await switchRequest(f, null, "stale-codex", 0, "openai-codex");
+    assert.equal(staleCodex.ok, false);
+    assert.equal(staleCodex.reason, "stale-selection");
+    assert.equal((await f.service.getSnapshot({ sessionId: f.sessionId, providerId: "openai" })).selectionRevision, 1);
+  } finally { await dispose(f); }
 });
 
 test("custom native OpenAI registration is rejected without replacement", async () => {

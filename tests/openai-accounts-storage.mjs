@@ -64,6 +64,24 @@ test("account updates preserve inert provider sections and publish private atomi
   } finally { await rm(root, { recursive: true, force: true }); }
 });
 
+test("native providers keep same-named synthetic credentials and defaults independent", async () => {
+  const root = await mkdtemp(join(tmpdir(), "pae-account-providers-"));
+  try {
+    const store = new AccountStore(new FileAccountStorageBackend(join(root, "pi-accounts.json")));
+    await store.updateProvider("openai", (state) => ({ ...state, active: "personal", accounts: { personal: { type: "api_key", key: "fixture-openai" } } }));
+    await store.updateProvider("openai-codex", (state) => ({ ...state, active: "personal", accounts: { personal: { type: "oauth", access: "fixture-codex-access", refresh: "fixture-codex-refresh", expires: 4_000_000_000_000 } } }));
+    const data = await store.readAsync();
+    assert.equal(data.providers.openai.active, "personal");
+    assert.equal(data.providers["openai-codex"].active, "personal");
+    assert.equal(data.providers.openai.accounts.personal.key, "fixture-openai");
+    assert.equal(data.providers["openai-codex"].accounts.personal.access, "fixture-codex-access");
+    await store.updateProvider("openai", (state) => ({ ...state, active: undefined }));
+    const restored = await store.readAsync();
+    assert.equal(restored.providers.openai.active, undefined);
+    assert.equal(restored.providers["openai-codex"].active, "personal");
+  } finally { await rm(root, { recursive: true, force: true }); }
+});
+
 test("vendored proper-lockfile serializes independent processes on the same credential file", async () => {
   const root = await mkdtemp(join(tmpdir(), "pae-account-cross-process-"));
   const file = join(root, "pi-accounts.json");

@@ -72,6 +72,10 @@ export const ACCOUNTS_STATUS_KEY = "accounts";
 export const FAIL_CLOSED_API_KEY = RUNTIME_FAIL_CLOSED_API_KEY;
 export const DEFAULT_PI_LOGIN_LABEL = "(default pi login)";
 
+function loginKey(providerId: AccountProviderId, accountName: string): string {
+	return `${providerId}:${accountName}`;
+}
+
 export type AccountsDependencies = {
 	store?: AccountStore;
 	providers?: readonly AccountProviderAdapter[];
@@ -167,7 +171,7 @@ export default function accountsExtension(
 		protocol: ACCOUNT_CONTROLS_PROTOCOL,
 		sessionId: "",
 		serviceEpoch,
-		getSnapshot: async ({ sessionId }) => {
+		getSnapshot: async ({ sessionId, providerId = "openai" }) => {
 			if (
 				(globalThis as Record<string, unknown>)[ACCOUNT_CONTROLS_KEY] !==
 				accountControlsService
@@ -176,7 +180,7 @@ export default function accountsExtension(
 			const owner = activeOwner;
 			if (!owner || owner.sessionId !== sessionId || !isOwnerCurrent(owner))
 				throw new Error("stale-session");
-			const snapshot = await snapshotFor(owner);
+			const snapshot = await snapshotFor(owner, providerId);
 			if (
 				!isOwnerCurrent(owner) ||
 				activeOwner !== owner ||
@@ -207,25 +211,21 @@ export default function accountsExtension(
 		await owner.ready;
 		if (!isOwnerCurrent(owner) || activeOwner !== owner)
 			throw new Error("stale-session");
+		const providerId = request.providerId ?? "openai";
 		if (request.operation === "cancel-login") {
-			if (paseoLoginInFlight.get(request.accountName))
-				paseoLoginInFlight
-					.get(request.accountName)!
-					.abort(
-						new DOMException("Pi account sign-in cancelled", "AbortError"),
-					);
+			paseoLoginInFlight.get(loginKey(providerId, request.accountName))?.abort(new DOMException("Pi account sign-in cancelled", "AbortError"));
 			return { ok: true as const, sessionId: owner.sessionId };
 		}
-		if (!canMutateAccountState(owner.context, owner, "openai"))
+		if (!canMutateAccountState(owner.context, owner, providerId))
 			throw new Error("Pi must be idle before managing accounts.");
-		const adapter = adapters.get("openai");
+		const adapter = adapters.get(providerId);
 		if (!adapter)
-			throw new Error("Native OpenAI account management is unavailable.");
+			throw new Error(`Native ${providerId} account management is unavailable.`);
 		const ensureManagementCurrent = () => {
 			if (
 				!isOwnerCurrent(owner) ||
 				activeOwner !== owner ||
-				!canMutateAccountState(owner.context, owner, "openai")
+				!canMutateAccountState(owner.context, owner, providerId)
 			)
 				throw new Error(
 					"Pi became busy or its account session changed; refresh and retry.",
@@ -237,16 +237,17 @@ export default function accountsExtension(
 				name =
 					(
 						await (owner.context as ExtensionCommandContext).ui.input(
-							"OpenAI account name",
+							`${adapter.displayName} account name`,
 							"e.g. personal",
 							{ signal: owner.signal },
 						)
 					)?.trim() ?? "";
 			if (!name) throw new Error("Account creation was cancelled.");
-			if (paseoLoginInFlight.has(name))
+			const key = loginKey(providerId, name);
+			if (paseoLoginInFlight.has(key))
 				throw new Error("Sign-in for this Pi account is already in progress.");
 			const loginController = new AbortController();
-			paseoLoginInFlight.set(name, loginController);
+			paseoLoginInFlight.set(key, loginController);
 			const loginSignal = AbortSignal.any([
 				owner.signal,
 				loginController.signal,
@@ -265,17 +266,17 @@ export default function accountsExtension(
 				false,
 			)
 				.catch(() => undefined)
-				.finally(() => paseoLoginInFlight.delete(name));
+				.finally(() => paseoLoginInFlight.delete(key));
 			return { ok: true as const, sessionId: owner.sessionId, accountId: name };
 		}
 		if (request.operation === "default") {
 			if (request.accountId !== null) {
-				const state = await store.readProviderAsync("openai", owner.signal);
+				const state = await store.readProviderAsync(providerId, owner.signal);
 				if (!Object.hasOwn(state.accounts, request.accountId))
 					throw new Error("That Pi account no longer exists.");
 			}
 			ensureManagementCurrent();
-			await store.updateProvider("openai", (state) => {
+			await store.updateProvider(providerId, (state) => {
 				ensureManagementCurrent();
 				return { ...state, active: request.accountId ?? undefined };
 			});
@@ -288,7 +289,7 @@ export default function accountsExtension(
 			)
 				throw new Error("Invalid Pi account name or label.");
 			ensureManagementCurrent();
-			await store.updateProvider("openai", (state) => {
+			await store.updateProvider(providerId, (state) => {
 				ensureManagementCurrent();
 				const credential = state.accounts[request.accountId];
 				if (!credential) throw new Error("That Pi account no longer exists.");
@@ -304,12 +305,12 @@ export default function accountsExtension(
 		} else {
 			if (!/^[A-Za-z0-9._-]{1,64}$/.test(request.accountId))
 				throw new Error("Invalid Pi account name.");
-			if (owner.selections.openai === request.accountId)
+			if (owner.selections[providerId] === request.accountId)
 				throw new Error(
 					"Switch this session away from the account before removing it.",
 				);
 			ensureManagementCurrent();
-			await store.updateProvider("openai", (state) => {
+			await store.updateProvider(providerId, (state) => {
 				ensureManagementCurrent();
 				if (!Object.hasOwn(state.accounts, request.accountId))
 					throw new Error("That Pi account no longer exists.");
@@ -324,8 +325,8 @@ export default function accountsExtension(
 			ensureManagementCurrent();
 		}
 		owner.selectionRevisions.set(
-			"openai",
-			(owner.selectionRevisions.get("openai") ?? 0) + 1,
+			providerId,
+			(owner.selectionRevisions.get(providerId) ?? 0) + 1,
 		);
 		return {
 			ok: true as const,
@@ -338,20 +339,27 @@ export default function accountsExtension(
 
 	const snapshotFor = async (
 		owner: SessionSelectionOwner,
+		providerId: AccountProviderId = "openai",
 	): Promise<AccountControlsSnapshot> => {
 		try {
-			return await createAccountControlsSnapshot(owner, store, serviceEpoch, [
-				...paseoLoginInFlight.keys(),
-			]);
+			const prefix = `${providerId}:`;
+			return await createAccountControlsSnapshot(owner, store, serviceEpoch,
+				[...paseoLoginInFlight.keys()]
+					.filter((key) => key.startsWith(prefix))
+					.map((key) => key.slice(prefix.length)),
+				providerId,
+			);
 		} catch {
 			return {
 				protocol: ACCOUNT_CONTROLS_PROTOCOL,
 				serviceEpoch,
-				selectionRevision: owner.selectionRevisions.get("openai") ?? 0,
+				providerId,
+				supportedProviders: SUPPORTED_PROVIDER_IDS,
+				selectionRevision: owner.selectionRevisions.get(providerId) ?? 0,
 				sessionId: owner.sessionId,
 				accounts: [],
-				currentAccountId: owner.selections.openai ?? null,
-				defaultSelected: (owner.selections.openai ?? null) === null,
+				currentAccountId: owner.selections[providerId] ?? null,
+				defaultSelected: (owner.selections[providerId] ?? null) === null,
 				activationStatus: "activation-failed",
 				busy: true,
 				canSwitch: false,
@@ -374,6 +382,8 @@ export default function accountsExtension(
 		)
 			throw new Error("stale-service");
 		const raw = (request ?? {}) as unknown as Record<string, unknown>;
+		const providerId = raw.providerId === undefined ? "openai" : raw.providerId;
+		if (providerId !== "openai" && providerId !== "openai-codex") throw new Error("unsupported-provider");
 		const requestId =
 			typeof raw?.requestId === "string" &&
 			raw.requestId.length <= 128 &&
@@ -387,11 +397,13 @@ export default function accountsExtension(
 				ok: false,
 				requestId: "",
 				reason: "invalid-request",
-				snapshot: await snapshotFor(owner),
+				snapshot: await snapshotFor(owner, providerId),
 			};
 		const bounded = (value: unknown, maximum: number): string | null =>
 			typeof value === "string" && value.length <= maximum ? value : null;
+		const scopedRequestId = `${providerId}:${requestId}`;
 		const fingerprint = JSON.stringify([
+			providerId,
 			raw.accountId === null ||
 			(typeof raw.accountId === "string" && raw.accountId.length <= 64)
 				? raw.accountId
@@ -421,9 +433,9 @@ export default function accountsExtension(
 				ok: false,
 				requestId,
 				reason: "invalid-request",
-				snapshot: await snapshotFor(owner),
+				snapshot: await snapshotFor(owner, providerId),
 			};
-			completedRequests.set(requestId, { fingerprint, result });
+			completedRequests.set(scopedRequestId, { fingerprint, result });
 			return result;
 		}
 		if (raw.expectedServiceEpoch !== serviceEpoch)
@@ -431,7 +443,7 @@ export default function accountsExtension(
 				ok: false,
 				requestId,
 				reason: "stale-service",
-				snapshot: await snapshotFor(owner),
+				snapshot: await snapshotFor(owner, providerId),
 			};
 		if (
 			raw.expectedSessionId !== accountControlsService.sessionId ||
@@ -441,27 +453,27 @@ export default function accountsExtension(
 				ok: false,
 				requestId,
 				reason: "stale-session",
-				snapshot: await snapshotFor(owner),
+				snapshot: await snapshotFor(owner, providerId),
 			};
 		}
-		const completed = completedRequests.get(requestId);
+		const completed = completedRequests.get(scopedRequestId);
 		if (completed) {
 			if (completed.fingerprint === fingerprint) return completed.result;
 			return {
 				ok: false,
 				requestId,
 				reason: "request-id-conflict",
-				snapshot: await snapshotFor(owner),
+				snapshot: await snapshotFor(owner, providerId),
 			};
 		}
-		const running = inFlightRequests.get(requestId);
+		const running = inFlightRequests.get(scopedRequestId);
 		if (running) {
 			if (running.fingerprint === fingerprint) return running.result;
 			return {
 				ok: false,
 				requestId,
 				reason: "request-id-conflict",
-				snapshot: await snapshotFor(owner),
+				snapshot: await snapshotFor(owner, providerId),
 			};
 		}
 		if (inFlightRequests.size + completedRequests.size >= 4096) {
@@ -469,7 +481,7 @@ export default function accountsExtension(
 				ok: false,
 				requestId,
 				reason: "busy",
-				snapshot: await snapshotFor(owner),
+				snapshot: await snapshotFor(owner, providerId),
 			};
 		}
 		const previous = switchTail;
@@ -485,37 +497,38 @@ export default function accountsExtension(
 			const owner = activeOwner;
 			if (owner) owner.switchReserved += 1;
 			try {
-				const rawResult = await performServiceSwitch(request);
-				const settledSnapshot = await snapshotFor(owner ?? activeOwner!);
+				const rawResult = await performServiceSwitch({ ...request, providerId });
+				const settledSnapshot = await snapshotFor(owner ?? activeOwner!, providerId);
 				const ownerNow = owner ?? activeOwner!;
 				const busy =
 					!ownerNow.context.isIdle() ||
 					ownerNow.openAIRequestCount > 0 ||
-					ownerNow.pendingSyncTasks.has("openai") ||
+					ownerNow.pendingSyncTasks.has(providerId) ||
 					ownerNow.switchReserved > 1;
 				const result = {
 					...rawResult,
 					snapshot: { ...settledSnapshot, busy, canSwitch: !busy },
 				} as AccountSwitchResult;
-				completedRequests.set(request.requestId, { fingerprint, result });
+				completedRequests.set(scopedRequestId, { fingerprint, result });
 				return result;
 			} finally {
 				if (owner) owner.switchReserved = Math.max(0, owner.switchReserved - 1);
 				release();
 			}
 		});
-		inFlightRequests.set(request.requestId, { fingerprint, result: operation });
+		inFlightRequests.set(scopedRequestId, { fingerprint, result: operation });
 		try {
 			return await operation;
 		} finally {
-			if (inFlightRequests.get(request.requestId)?.result === operation)
-				inFlightRequests.delete(request.requestId);
+			if (inFlightRequests.get(scopedRequestId)?.result === operation)
+				inFlightRequests.delete(scopedRequestId);
 		}
 	};
 
 	const performServiceSwitch = async (
 		request: AccountSwitchRequest,
 	): Promise<AccountSwitchResult> => {
+		const providerId = request.providerId ?? "openai";
 		const owner = activeOwner;
 		if (!owner || !isOwnerCurrent(owner)) throw new Error("stale-session");
 		const failure = async (
@@ -524,7 +537,7 @@ export default function accountsExtension(
 			ok: false,
 			requestId: request.requestId,
 			reason,
-			snapshot: await snapshotFor(owner),
+			snapshot: await snapshotFor(owner, providerId),
 		});
 		if (
 			request.protocol !== ACCOUNT_CONTROLS_PROTOCOL ||
@@ -535,10 +548,10 @@ export default function accountsExtension(
 			return failure("stale-service");
 		if (
 			request.expectedSelectionRevision !==
-			(owner.selectionRevisions.get("openai") ?? 0)
+			(owner.selectionRevisions.get(providerId) ?? 0)
 		)
 			return failure("stale-selection");
-		if (!owner.context.isIdle() || owner.pendingSyncTasks.has("openai"))
+		if (!owner.context.isIdle() || owner.pendingSyncTasks.has(providerId))
 			return failure("busy");
 		const deadline = AbortSignal.timeout(30_000);
 		const signal = AbortSignal.any([owner.signal, deadline]);
@@ -551,7 +564,7 @@ export default function accountsExtension(
 			if (accountId !== null) {
 				const parsed = parseAccountName(accountId);
 				if (!parsed.ok) return failure("unknown-account");
-				const stored = await store.readProviderAsync("openai", signal);
+				const stored = await store.readProviderAsync(providerId, signal);
 				signal.throwIfAborted();
 				if (!Object.hasOwn(stored.accounts, parsed.name))
 					return failure("unknown-account");
@@ -568,12 +581,12 @@ export default function accountsExtension(
 				return failure("stale-service");
 			if (
 				request.expectedSelectionRevision !==
-				(owner.selectionRevisions.get("openai") ?? 0)
+				(owner.selectionRevisions.get(providerId) ?? 0)
 			)
 				return failure("stale-selection");
 			if (
 				!owner.context.isIdle() ||
-				owner.pendingSyncTasks.has("openai") ||
+				owner.pendingSyncTasks.has(providerId) ||
 				owner.openAIRequestCount > 0 ||
 				owner.switchReserved !== 1
 			)
@@ -581,7 +594,7 @@ export default function accountsExtension(
 			if (
 				!persistSelection(
 					owner,
-					"openai",
+					providerId,
 					accountId,
 					() =>
 						isOwnerCurrent(owner) &&
@@ -591,7 +604,7 @@ export default function accountsExtension(
 			)
 				return failure("busy");
 			const activated = await syncProvider(
-				"openai",
+				providerId,
 				owner.context,
 				owner,
 				signal,
@@ -603,7 +616,7 @@ export default function accountsExtension(
 			return {
 				ok: true,
 				requestId: request.requestId,
-				snapshot: await snapshotFor(owner),
+				snapshot: await snapshotFor(owner, providerId),
 			};
 		};
 		const timedOut = new Promise<"timeout">((resolve) =>
@@ -1439,14 +1452,17 @@ function createAccountCommand(
 			const owner = await ensureSessionOwner(ctx);
 			const menuOwner = getMenuOwner(owner);
 			if (!menuOwner.isCurrent()) return;
-			const adapter = adapters.get("openai");
+			const providerChoice = await ctx.ui.select("Account provider", ["OpenAI", "OpenAI Codex"], { signal: menuOwner.signal });
+			if (!providerChoice || !menuOwner.isCurrent()) return;
+			const providerId: AccountProviderId = providerChoice === "OpenAI Codex" ? "openai-codex" : "openai";
+			const adapter = adapters.get(providerId);
 			if (!adapter)
-				return ctx.ui.notify("OpenAI accounts are unavailable.", "error");
+				return ctx.ui.notify(`${providerId} accounts are unavailable.`, "error");
 			while (menuOwner.isCurrent() && !menuOwner.signal.aborted) {
-				const state = await store.readProviderAsync("openai", menuOwner.signal);
+				const state = await store.readProviderAsync(providerId, menuOwner.signal);
 				if (!menuOwner.isCurrent()) return;
 				const names = Object.keys(state.accounts);
-				const current = owner.selections.openai ?? null;
+				const current = owner.selections[providerId] ?? null;
 				const options = [
 					...(current
 						? [`Current: ${current}`]
@@ -1456,7 +1472,7 @@ function createAccountCommand(
 					"Restore default Pi login",
 					"Close",
 				];
-				const action = await ctx.ui.select("OpenAI accounts", options, {
+				const action = await ctx.ui.select(`${adapter.displayName} accounts`, options, {
 					signal: menuOwner.signal,
 				});
 				if (!action || action === "Close" || !menuOwner.isCurrent()) return;
@@ -1466,7 +1482,7 @@ function createAccountCommand(
 					});
 					if (!name || !menuOwner.isCurrent()) continue;
 					const method = await ctx.ui.select(
-						"Add OpenAI account",
+						`Add ${adapter.displayName} account`,
 						["ChatGPT sign-in (OAuth)", "API key", "Cancel"],
 						{ signal: menuOwner.signal },
 					);

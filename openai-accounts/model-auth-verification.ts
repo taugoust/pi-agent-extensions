@@ -24,9 +24,18 @@ export async function verifyModelApiKeyAuth(
         `Pi could not verify the runtime ${provider.displayName} model authentication.`,
       );
     }
-    // Codex writes its generated Authorization last. The SDKs instead let configured headers
-    // override generated auth; pi-messages spreads headers after its lowercase authorization.
-    if (model.api === "openai-codex-responses") continue;
+    // Never treat Codex credentials as a verified account binding on a custom origin.
+    // Unlike the OpenAI SDK path, Codex's native request path emits generated auth after
+    // configuration, but we still verify resolved headers below so model overrides cannot
+    // be mistaken for the selected named/default grant.
+    if (model.api === "openai-codex-responses") {
+      let origin: string | undefined;
+      const baseUrl = resolved.baseUrl ?? model.baseUrl;
+      try { if (typeof baseUrl === "string") origin = new URL(baseUrl).origin; } catch { /* fail closed below */ }
+      if (origin !== "https://chatgpt.com") {
+        throw new EffectiveAuthConflictError("OpenAI Codex account authentication requires the official ChatGPT origin.");
+      }
+    }
     const openai = model.api === "openai-responses" || model.api === "openai-completions";
     const keyHeader = model.api === "anthropic-messages" ? "x-api-key" : openai ? "api-key" : undefined;
     const headers = new Map<string, { name: string; value: string | null }>();

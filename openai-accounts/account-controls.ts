@@ -61,22 +61,24 @@ export async function createAccountControlsSnapshot(
 	);
 	// A deleted/replaced named profile must never appear as the built-in login.
 	// This is a snapshot of the last verified binding, not an activation side effect.
-	const usage =
-		currentAccountId !== null && (!selected || !bindingMatchesStore)
+	const codexBindingEligible = providerId !== "openai-codex" || officialCodexBinding(owner.context);
+	const usage: AccountControlsSnapshot["usage"] =
+		currentAccountId !== null && (!selected || !bindingMatchesStore || !codexBindingEligible)
 			? {
 					effectiveCredential: "unavailable" as const,
 					status: "unavailable" as const,
 					remoteEntitlement: "not-queried" as const,
 					settingsUrl: null,
 				}
-			: effectiveOpenAIUsage(
-					owner.context,
-					selected,
-					result?.status === "active",
-				);
+			: providerId === "openai"
+				? effectiveOpenAIUsage(owner.context, selected, result?.status === "active")
+				: selected
+					? { effectiveCredential: selected.type === "api_key" ? "api-key-configured" : "chatgpt-grant-matched-refreshed", status: result?.status === "active" ? "local-binding-confirmed" : "unavailable", remoteEntitlement: "not-queried", settingsUrl: null }
+					: { effectiveCredential: "unknown", status: "unknown", remoteEntitlement: "not-queried", settingsUrl: null };
 	const snapshotRevision = owner.selectionRevisions.get(providerId) ?? 0;
 	let nativeRegistrationKey: string | undefined;
 	if (
+		providerId === "openai" &&
 		currentAccountId !== null &&
 		selected?.type === "oauth" &&
 		bindingMatchesStore &&
@@ -97,13 +99,14 @@ export async function createAccountControlsSnapshot(
 			nativeRegistrationKey = nativeKey(selected);
 		if (
 			!isOwnerCurrent(owner) ||
-			owner.selections.openai !== currentAccountId ||
-			(owner.selectionRevisions.get("openai") ?? 0) !== snapshotRevision ||
-			owner.appliedIdentities.get("openai") !==
+			owner.selections[providerId] !== currentAccountId ||
+			(owner.selectionRevisions.get(providerId) ?? 0) !== snapshotRevision ||
+			owner.appliedIdentities.get(providerId) !==
 				`${currentAccountId}:${selected.access}`
 		)
 			nativeRegistrationKey = undefined;
 	} else if (
+		providerId === "openai" &&
 		currentAccountId === null &&
 		usage.effectiveCredential === "chatgpt-grant-configured" &&
 		usage.status === "local-binding-confirmed"
@@ -111,8 +114,8 @@ export async function createAccountControlsSnapshot(
 		nativeRegistrationKey = defaultNativeKey(owner.context);
 		if (
 			!isOwnerCurrent(owner) ||
-			(owner.selections.openai ?? null) !== null ||
-			(owner.selectionRevisions.get("openai") ?? 0) !== snapshotRevision
+			(owner.selections[providerId] ?? null) !== null ||
+			(owner.selectionRevisions.get(providerId) ?? 0) !== snapshotRevision
 		)
 			nativeRegistrationKey = undefined;
 	}
@@ -121,7 +124,7 @@ export async function createAccountControlsSnapshot(
 		providerId,
 		supportedProviders: ["openai", "openai-codex"],
 		serviceEpoch,
-		selectionRevision: owner.selectionRevisions.get("openai") ?? 0,
+		selectionRevision: owner.selectionRevisions.get(providerId) ?? 0,
 		sessionId: owner.sessionId,
 		accounts,
 		currentAccountId,
@@ -143,6 +146,7 @@ export async function createAccountControlsSnapshot(
 			...usage,
 			nativeRegistrationVersion: 1,
 			...(bindingMatchesStore &&
+			codexBindingEligible &&
 			result?.status === "active" &&
 			!pending &&
 			selected?.type === "oauth"
@@ -211,6 +215,11 @@ function hasAuthHeaders(headers: unknown): boolean {
 			key,
 		),
 	);
+}
+function officialCodexBinding(ctx: ExtensionContext): boolean {
+	const model = ctx.model?.provider === "openai-codex" ? ctx.model : undefined;
+	const provider = ctx.modelRegistry.getProvider("openai-codex");
+	return Boolean(model && provider && model.api === "openai-codex-responses" && officialOrigin(model.baseUrl ?? provider.baseUrl) && officialOrigin(provider.baseUrl) && !hasAuthHeaders(model.headers) && !hasAuthHeaders(provider.headers));
 }
 function officialOrigin(url: unknown): boolean {
 	try {
