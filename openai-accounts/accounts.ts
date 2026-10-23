@@ -155,6 +155,10 @@ export default function accountsExtension(
 			>;
 		}
 	>();
+	const codexGates = new WeakMap<object, {
+		previous: ReturnType<ExtensionContext["modelRegistry"]["getRegisteredProviderConfig"]>;
+		applied: ReturnType<ExtensionContext["modelRegistry"]["getRegisteredProviderConfig"]>;
+	}>();
 	const serviceEpoch = randomUUID();
 	const completedRequests = new Map<
 		string,
@@ -704,7 +708,14 @@ export default function accountsExtension(
 	};
 
 	const startSessionOwner = (ctx: ExtensionContext): SessionSelectionOwner => {
-		installOpenAIGate(ctx);
+		try {
+			installOpenAIGate(ctx);
+			installCodexGate(ctx);
+		} catch (error) {
+			restoreCodexGate(ctx);
+			restoreOpenAIGate(ctx);
+			throw error;
+		}
 		const previous = sessionOwners.get(ctx.sessionManager);
 		if (previous) {
 			previous.controller.abort(
@@ -1147,6 +1158,104 @@ export default function accountsExtension(
 		openAIGates.delete(registry as object);
 	};
 
+	const installCodexGate = (ctx: ExtensionContext): void => {
+		const registry = ctx.modelRegistry;
+		if (codexGates.has(registry as object)) return;
+		const previous = registry.getRegisteredProviderConfig("openai-codex");
+		if (registry.getRegisteredNativeProvider("openai-codex"))
+			throw new Error("Named accounts do not support a separately registered native OpenAI Codex provider; its registration was left untouched.");
+		const effectiveProvider = registry.getProvider("openai-codex");
+		if (!effectiveProvider) throw new Error("Native OpenAI Codex provider is unavailable; request gate was not installed.");
+		const api = effectiveProvider.getModels().find((model) => model.api === "openai-codex-responses")?.api;
+		if (!api || (previous?.streamSimple && previous.api !== api))
+			throw new Error("OpenAI Codex provider has an incompatible stream override; request gate was not installed.");
+		const nativeProvider = registry.getRegisteredNativeProvider("openai-codex");
+		const delegateProvider = previous?.streamSimple ? effectiveProvider : (nativeProvider ?? effectiveProvider);
+		const delegate = delegateProvider.streamSimple.bind(delegateProvider);
+		const gateStreamSimple = (
+			model: Parameters<typeof effectiveProvider.streamSimple>[0],
+			context: Parameters<typeof effectiveProvider.streamSimple>[1],
+			options: Parameters<typeof effectiveProvider.streamSimple>[2],
+		) => lazyStream(model, async () => {
+				const owner = activeOwner;
+				if (!owner || owner.context.modelRegistry !== registry || !isOwnerCurrent(owner) || owner.sessionId !== owner.sessionManager.getSessionId())
+					throw new Error("OpenAI Codex account session is stale; request blocked.");
+				owner.openAIRequestCount += 1;
+				let released = false;
+				const release = () => { if (released) return; released = true; owner.openAIRequestCount = Math.max(0, owner.openAIRequestCount - 1); };
+				try {
+					const revision = owner.selectionRevisions.get("openai-codex") ?? 0;
+					const selection = owner.selections["openai-codex"] ?? null;
+					const activation = await syncProvider("openai-codex", owner.context, owner, options?.signal, model);
+					if (!isOwnerCurrent(owner) || activeOwner !== owner || owner.sessionId !== owner.sessionManager.getSessionId()) throw new Error("OpenAI Codex account session changed; request blocked.");
+					if (activation.status === "error" || (selection !== null && (activation.status !== "active" || activation.accountName !== selection))) {
+						owner.abortProviders.add("openai-codex");
+						throw new Error("OpenAI Codex account authentication failed; request blocked.");
+					}
+					if ((owner.selectionRevisions.get("openai-codex") ?? 0) !== revision || (owner.selections["openai-codex"] ?? null) !== selection) throw new Error("OpenAI Codex account selection changed; request blocked.");
+					if (!registry.getProvider("openai-codex")?.getModels().some((candidate) => candidate.id === model.id && candidate.api === "openai-codex-responses")) throw new Error("OpenAI Codex model is unavailable; request blocked.");
+					let resolved: Awaited<ReturnType<typeof registry.getApiKeyAndHeaders>>;
+					try { resolved = await registry.getApiKeyAndHeaders(model); } catch { throw new Error("OpenAI Codex account authentication could not be verified; request blocked."); }
+					if (!resolved.ok || typeof resolved.apiKey !== "string" || !resolved.apiKey) throw new Error("OpenAI Codex account authentication could not be verified; request blocked.");
+					const effectiveBaseUrl = resolved.baseUrl ?? model.baseUrl;
+					if (!isOfficialCodexUrl(effectiveBaseUrl) || !isOfficialCodexUrl(registry.getProvider("openai-codex")?.baseUrl)) throw new Error("OpenAI Codex account requires the official ChatGPT origin; request blocked.");
+					let dispatchApiKey = resolved.apiKey;
+					if (selection !== null) {
+						let saved;
+						try { saved = await store.readProviderAsync("openai-codex", AbortSignal.any([owner.signal, ...(options?.signal ? [options.signal] : []), AbortSignal.timeout(5_000)])); } catch { throw new Error("OpenAI Codex account store could not verify the selected credential; request blocked."); }
+						const credential = getOwnCredential(saved.accounts, selection);
+						if (!credential || credential.type !== "oauth" || owner.appliedIdentities.get("openai-codex") !== `${selection}:${credential.access}`) throw new Error("OpenAI Codex selected account changed; request blocked.");
+						const selectedAuthorization = Object.entries(resolved.headers ?? {}).filter(([name]) => name.toLowerCase() === "authorization");
+						if (selectedAuthorization.length !== 1 || selectedAuthorization[0]?.[1] !== `Bearer ${credential.access}`) throw new Error("OpenAI Codex selected account Authorization does not match; request blocked.");
+						dispatchApiKey = credential.access;
+					} else {
+						const defaultAuthorization = Object.entries(resolved.headers ?? {}).filter(([name]) => name.toLowerCase() === "authorization");
+						if (defaultAuthorization.some(([, value]) => value !== `Bearer ${dispatchApiKey}`)) throw new Error("OpenAI Codex default Authorization override conflicts with the configured account; request blocked.");
+					}
+					const originalOnPayload = options?.onPayload;
+					const finalOptions = {
+						...options,
+						apiKey: dispatchApiKey,
+						headers: resolved.headers,
+						...(resolved.env ? { env: resolved.env } : {}),
+						onPayload: async (payload: unknown, payloadModel: typeof model) => {
+							if (options?.signal?.aborted || owner.signal.aborted) throw new DOMException("OpenAI Codex request cancelled", "AbortError");
+							let latest: Awaited<ReturnType<typeof registry.getApiKeyAndHeaders>>;
+							try { latest = await registry.getApiKeyAndHeaders(model); } catch { throw new Error("OpenAI Codex authentication changed before dispatch; request blocked."); }
+							if (!latest.ok || latest.apiKey !== resolved.apiKey || (latest.baseUrl ?? model.baseUrl) !== effectiveBaseUrl || !headersEqual(latest.headers, resolved.headers) || !isOfficialCodexUrl(latest.baseUrl ?? model.baseUrl) || !isOfficialCodexUrl(registry.getProvider("openai-codex")?.baseUrl) || Object.entries(latest.headers ?? {}).some(([name, value]) => name.toLowerCase() === "authorization" && value !== `Bearer ${dispatchApiKey}`)) throw new Error("OpenAI Codex authentication changed before dispatch; request blocked.");
+							let transformed: unknown;
+							try { transformed = originalOnPayload ? await originalOnPayload(payload, payloadModel) : undefined; } catch { throw new Error("OpenAI Codex request payload validation failed; request blocked."); }
+							const providerNow = registry.getProvider("openai-codex");
+							const modelNow = registry.find("openai-codex", model.id);
+							const registeredNow = registry.getRegisteredProviderConfig("openai-codex");
+							const current = isOwnerCurrent(owner) && activeOwner === owner && owner.sessionId === owner.sessionManager.getSessionId() && !options?.signal?.aborted && (owner.selectionRevisions.get("openai-codex") ?? 0) === revision && (owner.selections["openai-codex"] ?? null) === selection && owner.switchReserved === 0 && owner.appliedIdentities.get("openai-codex") === (selection === null ? "default" : `${selection}:${dispatchApiKey}`) && isOfficialCodexUrl(providerNow?.baseUrl) && isOfficialCodexUrl(modelNow?.baseUrl ?? providerNow?.baseUrl) && codexAuthHeadersMatch(modelNow?.headers, dispatchApiKey) && codexAuthHeadersMatch(providerNow?.headers, dispatchApiKey) && codexAuthHeadersMatch(registeredNow?.headers, dispatchApiKey);
+							if (!current) throw new Error("OpenAI Codex account selection changed before dispatch; request blocked.");
+							return transformed;
+						},
+					};
+					const requestModel = resolved.baseUrl ? { ...model, baseUrl: resolved.baseUrl } : model;
+					return trackStreamLifecycle(delegate(requestModel, context, finalOptions), release, options?.signal);
+				} catch (error) { release(); throw error; }
+			});
+		const applied = { ...previous, api, streamSimple: gateStreamSimple };
+		registry.registerProvider("openai-codex", applied);
+		codexGates.set(registry as object, { previous, applied });
+	};
+
+	const restoreCodexGate = (ctx: ExtensionContext): void => {
+		const registry = ctx.modelRegistry;
+		const installed = codexGates.get(registry as object);
+		if (!installed) return;
+		const current = registry.getRegisteredProviderConfig("openai-codex");
+		if (current?.streamSimple !== installed.applied?.streamSimple) { codexGates.delete(registry as object); return; }
+		const restored = { ...current };
+		if (installed.previous?.api === undefined) delete restored.api; else restored.api = installed.previous.api;
+		if (installed.previous?.streamSimple === undefined) delete restored.streamSimple; else restored.streamSimple = installed.previous.streamSimple;
+		registry.unregisterProvider("openai-codex");
+		if (Object.keys(restored).length > 0) registry.registerProvider("openai-codex", restored);
+		codexGates.delete(registry as object);
+	};
+
 	const startupProvider = (
 		providerId: AccountProviderId,
 		ctx: ExtensionContext,
@@ -1418,6 +1527,7 @@ export default function accountsExtension(
 			}),
 		);
 		restoreOpenAIGate(ctx);
+		restoreCodexGate(ctx);
 		setStatus(ctx, undefined);
 		if (
 			(globalThis as Record<string, unknown>)[ACCOUNT_CONTROLS_KEY] ===
@@ -1586,7 +1696,7 @@ async function loginAccount(
 	}
 	const selectionRevision = session.selectionRevisions.get(adapter.id) ?? 0;
 	const parsed = parseAccountName(nameArg);
-	if (!parsed.ok) return ctx.ui.notify(parsed.error, "warning");
+	if (parsed.ok === false) return ctx.ui.notify(parsed.error, "warning");
 	if (isDefaultPiLoginArg(parsed.name)) {
 		ctx.ui.notify('"default" is reserved for Pi\'s built-in login.', "warning");
 		return;
@@ -1779,7 +1889,7 @@ async function switchAccount(
 		return;
 	}
 	const parsed = parseAccountName(name);
-	if (!parsed.ok) return ctx.ui.notify(parsed.error, "warning");
+	if (parsed.ok === false) return ctx.ui.notify(parsed.error, "warning");
 	const state = await store.readProviderAsync(adapter.id, session.signal);
 	if (!isCurrent()) return;
 	if (!getOwnCredential(state.accounts, parsed.name)) {
@@ -1840,7 +1950,7 @@ async function removeAccount(
 	}
 	const selectionRevision = session.selectionRevisions.get(adapter.id) ?? 0;
 	const parsed = parseAccountName(nameArg);
-	if (!parsed.ok) return ctx.ui.notify(parsed.error, "warning");
+	if (parsed.ok === false) return ctx.ui.notify(parsed.error, "warning");
 	let removed = false;
 	await store.updateProvider(adapter.id, (state) => {
 		if (
@@ -1908,6 +2018,15 @@ async function removeAccount(
 		`Removed ${adapter.displayName} account "${parsed.name}".`,
 		"info",
 	);
+}
+
+function isOfficialCodexUrl(value: unknown): boolean {
+	try { return typeof value === "string" && new URL(value).origin === "https://chatgpt.com"; } catch { return false; }
+}
+function codexAuthHeadersMatch(headers: unknown, apiKey: string): boolean {
+	if (headers === undefined) return true;
+	if (!headers || typeof headers !== "object" || Array.isArray(headers)) return false;
+	return Object.entries(headers).every(([name, value]) => name.toLowerCase() !== "authorization" || value === `Bearer ${apiKey}`);
 }
 
 function headersEqual(

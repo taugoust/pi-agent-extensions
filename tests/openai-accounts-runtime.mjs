@@ -1,6 +1,6 @@
 import assert from "node:assert/strict";
 import test from "node:test";
-import { mkdtemp, rm } from "node:fs/promises";
+import { chmod, mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { createJiti } from "../node_modules/@earendil-works/pi-coding-agent/node_modules/jiti/lib/jiti.mjs";
@@ -17,8 +17,13 @@ const guardModule = await createJiti(import.meta.url).import("../idle-context-wa
 const { AccountStore, InMemoryAccountStorageBackend } = accountModule;
 const { createBtwService } = await createJiti(import.meta.url).import("../btw/service.ts");
 
+function jwtToken(accountId, subject) {
+  const encode = (value) => Buffer.from(JSON.stringify(value)).toString("base64url");
+  return `${encode({ alg: "none", typ: "JWT" })}.${encode({ sub: subject, "https://api.openai.com/auth": { chatgpt_account_id: accountId } })}.fixture-signature`;
+}
+
 test("Codex binding verification rejects custom origins and conflicting model Authorization", async () => {
-  const model = { id: "fixture-codex", provider: "openai-codex", api: "openai-codex-responses", baseUrl: "https://chatgpt.com/backend-api/codex" };
+  const model = { id: "fixture-codex", provider: "openai-codex", api: "openai-codex-responses", baseUrl: "https://chatgpt.com/backend-api" };
   const ctx = { modelRegistry: { getAll: () => [model], getApiKeyAndHeaders: async () => ({ ok: true, apiKey: "fixture-selected-codex", baseUrl: model.baseUrl, headers: { Authorization: "Bearer fixture-override" } }) } };
   const adapter = { id: "openai-codex", displayName: "OpenAI Codex" };
   await assert.rejects(verificationModule.verifyModelApiKeyAuth(ctx, adapter, "fixture-selected-codex", new AbortController().signal), /conflicting authentication header/);
@@ -59,11 +64,19 @@ test("BTW inherits the parent named account and blocks switching during a real r
 
 async function fixture(options = {}) {
   const root = await mkdtemp(join(tmpdir(), "pae-openai-runtime-"));
+  const previousAgentDir = process.env.PI_CODING_AGENT_DIR;
+  process.env.PI_CODING_AGENT_DIR = root;
+  const codexPersonalToken = jwtToken("personal-account", "personal-subject");
+  const authPath = join(root, "auth.json");
+  const authData = options.codexPersonalAuth === false ? {} : { "openai-codex": { type: "oauth", access: codexPersonalToken, refresh: "fixture-personal-refresh", expires: Date.now() + 86_400_000, accountId: "personal-account" } };
+  await writeFile(authPath, JSON.stringify(authData), { mode: 0o600 });
+  await chmod(authPath, 0o600);
   const runtime = await ModelRuntime.create({
-    authPath: join(root, "auth.json"), modelsPath: null, allowModelNetwork: false, refreshOnCreate: false,
+    authPath, modelsPath: null, allowModelNetwork: false, refreshOnCreate: false,
   });
   const registry = new ModelRegistry(runtime);
   const delegated = [];
+  const codexDelegated = [];
   const providerErrors = [];
   let holdProvider = false;
   let providerStarted;
@@ -103,6 +116,24 @@ async function fixture(options = {}) {
     });
     return result;
   };
+  const codexStream = (model, _context, options = {}) => {
+    const result = createAssistantMessageEventStream();
+    void Promise.resolve().then(async () => {
+      try {
+        providerPayload = true;
+        try { await options.onPayload?.({ model: model.id }, model); }
+        finally { providerPayload = false; }
+        codexDelegated.push({ id: model.id, apiKey: options.apiKey, baseUrl: model.baseUrl });
+        result.end({ role: "assistant", api: "openai-codex-responses", provider: "openai-codex", model: model.id, timestamp: Date.now(), stopReason: "stop", content: [{ type: "text", text: "codex fixture" }], usage: { input: 1, output: 1, cacheRead: 0, cacheWrite: 0, totalTokens: 2, cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, total: 0 } } });
+      } catch (error) {
+        providerErrors.push(error);
+        result.end({ role: "assistant", api: "openai-codex-responses", provider: "openai-codex", model: model.id, timestamp: Date.now(), stopReason: "error", errorMessage: error instanceof Error ? error.message : "blocked", content: [], usage: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, totalTokens: 0, cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, total: 0 } } });
+      }
+    });
+    return result;
+  };
+  registry.registerProvider("openai-codex", { name: "Fixture Codex config", api: "openai-codex-responses", apiKey: options.codexApiKeyOverride, baseUrl: "https://chatgpt.com/backend-api", headers: { "X-Codex-Config": "preserved" }, streamSimple: codexStream });
+  const codexModel = registry.getProvider("openai-codex").getModels()[0];
   registry.registerProvider("openai", {
     name: "Fake native OpenAI adapter",
     api: "openai-responses",
@@ -138,6 +169,8 @@ async function fixture(options = {}) {
       beta: { type: "api_key", key: "fixture-secret-beta" },
     }),
   }));
+  await store.updateProvider("openai-codex", (state) => ({ ...state, accounts: { Work: { type: "oauth", access: jwtToken("work-account", "work-subject"), refresh: "fixture-work-refresh", expires: Date.now() + 86_400_000, accountId: "work-account" } } }));
+  await registry.refresh({ providers: ["openai-codex"], allowNetwork: false });
   await store.update((data) => ({
     ...data,
     providers: { ...data.providers, "other-provider": { active: "kept", accounts: { kept: { type: "api_key", key: "untouched" } } } },
@@ -186,10 +219,13 @@ async function fixture(options = {}) {
     getContextUsage: () => undefined,
     abort() {}, hasPendingMessages: () => false,
   };
-  const adapter = oauthModule.createBuiltinProviderAdapters()[0];
+  const builtinAdapters = oauthModule.createBuiltinProviderAdapters();
+  const adapter = builtinAdapters.find((item) => item.id === "openai");
   assert.ok(adapter);
   assert.equal(oauthModule.resolveProviderOAuth(adapter, ctx), registry.getProvider("openai").auth.oauth);
-  accountModule.default(pi, { store });
+  const codexOAuth = { async login() { throw new Error("unexpected Codex login"); }, async refresh(credential) { return credential; }, async toAuth(credential) { return { headers: { Authorization: `Bearer ${credential.access}` } }; } };
+  const codexAdapter = { ...builtinAdapters.find((item) => item.id === "openai-codex"), oauth: codexOAuth, resolveOAuth: () => codexOAuth };
+  accountModule.default(pi, { store, providers: [adapter, codexAdapter] });
   const fire = async (event, value = {}) => {
     for (const handler of handlers.get(event) ?? []) await handler({ type: event, ...value }, ctx);
   };
@@ -204,7 +240,7 @@ async function fixture(options = {}) {
   assert.equal(service?.protocol, 1);
   const initial = startupError || options.startSession === false ? undefined : await service.getSnapshot({ sessionId });
   return {
-    root, runtime, registry, models, store, handlers, events, commands, notices, statuses, pi, ctx,
+    root, runtime, registry, models, codexModel, codexDelegated, store, handlers, events, commands, notices, statuses, pi, ctx, previousAgentDir,
     get sessionId() { return sessionId; }, set sessionId(value) { sessionId = value; },
     get idle() { return idle; }, set idle(value) { idle = value; },
     get branch() { return branch; }, set branch(value) { branch = value; },
@@ -236,6 +272,8 @@ async function switchRequest(f, accountId, requestId, revision = f.initial.selec
 async function dispose(f) {
   await f.fire("session_shutdown");
   await rm(f.root, { recursive: true, force: true });
+  if (f.previousAgentDir === undefined) delete process.env.PI_CODING_AGENT_DIR;
+  else process.env.PI_CODING_AGENT_DIR = f.previousAgentDir;
 }
 
 test("installed Pi 1.0.0 gates normal OpenAI dispatch and cheap Luna compaction with the named key", async () => {
@@ -316,6 +354,9 @@ test("provider-scoped defaults and idempotency allow the same request ID across 
     assert.equal(codex.snapshot.providerId, "openai-codex");
     assert.equal(codex.snapshot.currentAccountId, null);
     assert.equal(codex.snapshot.selectionRevision, 1);
+    assert.equal(codex.snapshot.usage.status, "local-binding-confirmed", JSON.stringify({ auth: (await f.registry.getProviderAuth("openai-codex"))?.source, authStatus: f.registry.getProviderAuthStatus("openai-codex"), base: f.registry.getProvider("openai-codex")?.baseUrl, models: f.registry.getAll().filter(m => m.provider === "openai-codex").map(m => [m.api,m.baseUrl,!!m.headers]) }));
+    assert.match(codex.snapshot.usage.accountKey, /^[a-f0-9]{64}$/);
+    assert.equal(codex.snapshot.usage.nativeRegistrationVersion, undefined);
     assert.equal((await f.service.getSnapshot({ sessionId: f.sessionId, providerId: "openai" })).currentAccountId, "alpha");
     assert.equal((await f.service.getSnapshot({ sessionId: f.sessionId, providerId: "openai-codex" })).currentAccountId, null);
     const replay = await switchRequest(f, null, "shared-request-id", 0, "openai-codex");
@@ -324,6 +365,116 @@ test("provider-scoped defaults and idempotency allow the same request ID across 
     assert.equal(staleCodex.ok, false);
     assert.equal(staleCodex.reason, "stale-selection");
     assert.equal((await f.service.getSnapshot({ sessionId: f.sessionId, providerId: "openai" })).selectionRevision, 1);
+  } finally { await dispose(f); }
+});
+
+test("Codex default account proof is withheld under runtime, environment, and registered API-key overrides", async () => {
+  const registered = await fixture({ codexApiKeyOverride: "fixture-registered-override" });
+  let noStored;
+  try {
+    const snapshot = await registered.service.getSnapshot({ sessionId: registered.sessionId, providerId: "openai-codex" });
+    assert.equal(snapshot.usage.accountKey, undefined);
+    assert.equal(snapshot.usage.status, "unknown");
+  } finally { await dispose(registered); }
+  const priorKey = process.env.OPENAI_API_KEY;
+  process.env.OPENAI_API_KEY = "fixture-environment-key";
+  try {
+    noStored = await fixture({ codexPersonalAuth: false });
+    await writeFile(join(noStored.root, "models.json"), JSON.stringify({ providers: { "openai-codex": { apiKey: "${OPENAI_API_KEY}" } } }), { mode: 0o600 });
+    const environment = await noStored.service.getSnapshot({ sessionId: noStored.sessionId, providerId: "openai-codex" });
+    assert.equal(environment.usage.accountKey, undefined);
+    assert.equal(environment.usage.status, "unknown");
+    await noStored.runtime.setRuntimeApiKey("openai-codex", "fixture-runtime-override");
+    const runtime = await noStored.service.getSnapshot({ sessionId: noStored.sessionId, providerId: "openai-codex" });
+    assert.equal(runtime.usage.accountKey, undefined);
+    assert.equal(runtime.usage.status, "unknown");
+  } finally {
+    if (noStored) await dispose(noStored);
+    if (priorKey === undefined) delete process.env.OPENAI_API_KEY; else process.env.OPENAI_API_KEY = priorKey;
+  }
+});
+
+test("Codex native stream dispatch uses the selected Work OAuth grant, not the personal default", async () => {
+  const f = await fixture();
+  try {
+    const before = await f.service.getSnapshot({ sessionId: f.sessionId, providerId: "openai-codex" });
+    assert.equal(before.usage.status, "local-binding-confirmed", JSON.stringify({ auth: (await f.registry.getProviderAuth("openai-codex"))?.source, authStatus: f.registry.getProviderAuthStatus("openai-codex"), base: f.registry.getProvider("openai-codex")?.baseUrl, models: f.registry.getAll().filter(m => m.provider === "openai-codex").map(m => [m.api,m.baseUrl,!!m.headers]) }));
+    const personalKey = before.usage.accountKey;
+    const defaultConfig = f.registry.getRegisteredProviderConfig("openai-codex");
+    const authBefore = await readFile(join(f.root, "auth.json"), "utf8");
+    const changed = await switchRequest(f, "Work", "codex-work", 0, "openai-codex");
+    assert.equal(changed.ok, true, JSON.stringify(changed));
+    assert.notEqual(changed.snapshot.usage.accountKey, personalKey);
+    const model = f.registry.find("openai-codex", f.codexModel.id);
+    const result = await f.registry.streamSimple(model, [], {}).result();
+    assert.equal(result.stopReason, "stop", JSON.stringify(result));
+    assert.equal(f.codexDelegated.at(-1).apiKey, jwtToken("work-account", "work-subject"));
+    assert.equal(f.codexDelegated.at(-1).baseUrl, "https://chatgpt.com/backend-api");
+    assert.doesNotMatch(JSON.stringify(changed.snapshot), /fixture-work|fixture-personal/);
+    assert.equal(f.registry.getRegisteredProviderConfig("openai-codex").headers["X-Codex-Config"], "preserved");
+    const restored = await switchRequest(f, null, "codex-default", 1, "openai-codex");
+    assert.equal(restored.ok, true);
+    assert.equal(restored.snapshot.usage.accountKey, personalKey);
+    assert.equal(restored.snapshot.usage.nativeRegistrationVersion, undefined);
+    const defaultResult = await f.registry.streamSimple(model, [], {}).result();
+    assert.equal(defaultResult.stopReason, "stop", JSON.stringify(defaultResult));
+    assert.equal(f.codexDelegated.at(-1).apiKey, jwtToken("personal-account", "personal-subject"));
+    assert.equal(f.registry.getRegisteredProviderConfig("openai-codex").baseUrl, "https://chatgpt.com/backend-api");
+    assert.equal(f.registry.getRegisteredProviderConfig("openai-codex").headers["X-Codex-Config"], "preserved");
+    assert.deepEqual(f.registry.getRegisteredProviderConfig("openai-codex"), defaultConfig);
+    assert.equal(await readFile(join(f.root, "auth.json"), "utf8"), authBefore);
+  } finally { await dispose(f); }
+});
+
+test("deleted Codex Work account blocks dispatch instead of falling back to the personal OAuth grant", async () => {
+  const f = await fixture();
+  try {
+    await new Promise(resolve => setImmediate(resolve));
+    const selected = await switchRequest(f, "Work", "codex-select-work", 0, "openai-codex");
+    assert.equal(selected.ok, true, JSON.stringify(selected));
+    const calls = f.codexDelegated.length;
+    await f.store.updateProvider("openai-codex", (state) => ({ ...state, accounts: {} }));
+    const result = await f.registry.streamSimple(f.registry.find("openai-codex", f.codexModel.id), [], {}).result();
+    assert.equal(result.stopReason, "error");
+    assert.equal(f.codexDelegated.length, calls);
+    assert.notEqual(await f.registry.getApiKeyForProvider("openai-codex"), jwtToken("personal-account", "personal-subject"));
+  } finally { await dispose(f); }
+});
+
+test("Codex gate blocks an Authorization override changed during payload validation", async () => {
+  const f = await fixture();
+  try {
+    await new Promise(resolve => setImmediate(resolve));
+    assert.equal((await switchRequest(f, "Work", "codex-override-work", 0, "openai-codex")).ok, true);
+    const calls = f.codexDelegated.length;
+    const model = f.registry.find("openai-codex", f.codexModel.id);
+    const result = await f.registry.streamSimple(model, [], { onPayload: async (payload) => {
+      const config = f.registry.getRegisteredProviderConfig("openai-codex");
+      f.registry.registerProvider("openai-codex", { ...config, headers: { ...config.headers, Authorization: `Bearer ${jwtToken("personal-account", "personal-subject")}` } });
+      return payload;
+    } }).result();
+    assert.equal(result.stopReason, "error");
+    assert.equal(f.codexDelegated.length, calls);
+  } finally { await dispose(f); }
+});
+
+test("busy Codex dispatch blocks cross-provider switching without leaking the selected identity", async () => {
+  const f = await fixture();
+  try {
+    await new Promise(resolve => setImmediate(resolve));
+    const selected = await switchRequest(f, "Work", "codex-busy-work", 0, "openai-codex");
+    assert.equal(selected.ok, true, JSON.stringify(selected));
+    const pause = f.pauseFinalAuth();
+    const stream = f.registry.streamSimple(f.registry.find("openai-codex", f.codexModel.id), [], {}).result();
+    await pause.started;
+    const codexSwitch = await switchRequest(f, null, "codex-busy-switch", 1, "openai-codex");
+    const openaiSwitch = await switchRequest(f, "alpha", "openai-busy-switch", 0, "openai");
+    assert.equal(codexSwitch.reason, "busy");
+    assert.equal(openaiSwitch.reason, "busy");
+    assert.equal((await f.service.getSnapshot({ sessionId: f.sessionId, providerId: "openai-codex" })).currentAccountId, "Work");
+    pause.release();
+    assert.equal((await stream).stopReason, "stop");
+    assert.equal(f.codexDelegated.at(-1).apiKey, jwtToken("work-account", "work-subject"));
   } finally { await dispose(f); }
 });
 

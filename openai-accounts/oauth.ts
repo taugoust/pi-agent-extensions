@@ -65,7 +65,7 @@ export function createBuiltinProviderAdapters(
   }, {
     id: "openai-codex",
     displayName: "OpenAI Codex",
-    requiresApiKeyBridge: false,
+    requiresApiKeyBridge: true,
     runtimeAuthMode: "authorization-header",
     resolveOAuth: (ctx) => {
       const oauth = ctx.modelRegistry.getProvider("openai-codex")?.auth.oauth;
@@ -119,7 +119,7 @@ export async function loginWithOAuthUI(
     flow.start();
     return flow;
   });
-  if (result.ok) return result.credential;
+  if (result.ok === true) return result.credential;
   throw result.error;
 }
 

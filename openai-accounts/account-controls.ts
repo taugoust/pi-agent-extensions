@@ -37,7 +37,7 @@ export async function createAccountControlsSnapshot(
 		id: name,
 		label: safeLabel(
 			typeof (credential as { label?: unknown }).label === "string"
-				? (credential as { label: string }).label
+				? (credential as unknown as { label: string }).label
 				: name,
 		),
 		authKind: credential.type === "api_key" ? "api-key" : "oauth",
@@ -62,6 +62,9 @@ export async function createAccountControlsSnapshot(
 	// A deleted/replaced named profile must never appear as the built-in login.
 	// This is a snapshot of the last verified binding, not an activation side effect.
 	const codexBindingEligible = providerId !== "openai-codex" || officialCodexBinding(owner.context);
+	const defaultCodexKey = providerId === "openai-codex" && currentAccountId === null && codexBindingEligible
+		? defaultCodexAccountKey(owner.context)
+		: undefined;
 	const usage: AccountControlsSnapshot["usage"] =
 		currentAccountId !== null && (!selected || !bindingMatchesStore || !codexBindingEligible)
 			? {
@@ -73,8 +76,10 @@ export async function createAccountControlsSnapshot(
 			: providerId === "openai"
 				? effectiveOpenAIUsage(owner.context, selected, result?.status === "active")
 				: selected
-					? { effectiveCredential: selected.type === "api_key" ? "api-key-configured" : "chatgpt-grant-matched-refreshed", status: result?.status === "active" ? "local-binding-confirmed" : "unavailable", remoteEntitlement: "not-queried", settingsUrl: null }
-					: { effectiveCredential: "unknown", status: "unknown", remoteEntitlement: "not-queried", settingsUrl: null };
+					? { effectiveCredential: selected.type === "api_key" ? "api-key-configured" : "chatgpt-grant-matched-refreshed", status: result?.status === "active" && codexBindingEligible ? "local-binding-confirmed" : "unavailable", remoteEntitlement: "not-queried", settingsUrl: null }
+					: defaultCodexKey
+						? { effectiveCredential: "chatgpt-grant-configured", status: "local-binding-confirmed", remoteEntitlement: "not-queried", settingsUrl: null }
+						: { effectiveCredential: "unknown", status: "unknown", remoteEntitlement: "not-queried", settingsUrl: null };
 	const snapshotRevision = owner.selectionRevisions.get(providerId) ?? 0;
 	let nativeRegistrationKey: string | undefined;
 	if (
@@ -144,7 +149,8 @@ export async function createAccountControlsSnapshot(
 			: {}),
 		usage: {
 			...usage,
-			nativeRegistrationVersion: 1,
+			...(providerId === "openai" ? { nativeRegistrationVersion: 1 as const } : {}),
+			...(providerId === "openai-codex" && defaultCodexKey ? { accountKey: defaultCodexKey } : {}),
 			...(bindingMatchesStore &&
 			codexBindingEligible &&
 			result?.status === "active" &&
@@ -217,9 +223,44 @@ function hasAuthHeaders(headers: unknown): boolean {
 	);
 }
 function officialCodexBinding(ctx: ExtensionContext): boolean {
-	const model = ctx.model?.provider === "openai-codex" ? ctx.model : undefined;
 	const provider = ctx.modelRegistry.getProvider("openai-codex");
-	return Boolean(model && provider && model.api === "openai-codex-responses" && officialOrigin(model.baseUrl ?? provider.baseUrl) && officialOrigin(provider.baseUrl) && !hasAuthHeaders(model.headers) && !hasAuthHeaders(provider.headers));
+	if (!provider || !officialCodexOrigin(provider.baseUrl) || hasAuthHeaders(provider.headers)) return false;
+	const models = ctx.modelRegistry.getAll().filter((model) => model.provider === "openai-codex");
+	if (ctx.model?.provider === "openai-codex" && !models.some((model) => model.id === ctx.model!.id)) models.push(ctx.model);
+	return models.length > 0 && models.every((model) => model.api === "openai-codex-responses" && officialCodexOrigin(model.baseUrl ?? provider.baseUrl) && !hasAuthHeaders(model.headers));
+}
+function officialCodexOrigin(url: unknown): boolean {
+	try { return typeof url === "string" && new URL(url).origin === "https://chatgpt.com"; } catch { return false; }
+}
+function defaultCodexAccountKey(ctx: ExtensionContext): string | undefined {
+	try {
+		const provider = ctx.modelRegistry.getProvider("openai-codex");
+		const registered = ctx.modelRegistry.getRegisteredProviderConfig("openai-codex");
+		if (!provider || ctx.modelRegistry.getRegisteredNativeProvider("openai-codex") || !officialCodexBinding(ctx)) return undefined;
+		if (registered && (registered.apiKey || registered.oauth || registered.authHeader === false || hasAuthHeaders(registered.headers) || (registered.baseUrl && !officialCodexOrigin(registered.baseUrl)))) return undefined;
+		const auth = ctx.modelRegistry.getProviderAuthStatus("openai-codex");
+		const nativeModel = provider.getModels()[0];
+		if (!auth.configured || auth.source !== "stored" || !nativeModel || !ctx.modelRegistry.isUsingOAuth(nativeModel)) return undefined;
+		const config = JSON.parse(readFileSync(join(getAgentDir(), "models.json"), "utf8"))?.providers?.["openai-codex"];
+		const unsafeModels = Array.isArray(config?.models) && config.models.some((model: any) => hasAuthHeaders(model?.headers) || (model?.baseUrl && !officialCodexOrigin(model.baseUrl)));
+		const unsafeProvider = config && (config.apiKey || config.oauth || config.authHeader === false || hasAuthHeaders(config.headers) || (config.baseUrl && !officialCodexOrigin(config.baseUrl)));
+		if (unsafeProvider || unsafeModels) return undefined;
+	} catch (error) { if ((error as NodeJS.ErrnoException).code !== "ENOENT") return undefined; }
+	try {
+		const path = join(getAgentDir(), "auth.json");
+		const fd = openSync(path, constants.O_RDONLY | (constants.O_NOFOLLOW ?? 0));
+		try {
+			const stat = fstatSync(fd), max = 1024 * 1024;
+			if (!stat.isFile() || (stat.mode & 0o077) !== 0 || stat.size > max || (process.getuid && stat.uid !== process.getuid())) return undefined;
+			const buffer = Buffer.alloc(max + 1);
+			let size = 0;
+			while (size < buffer.length) { const n = readSync(fd, buffer, size, buffer.length - size, size); if (!n) break; size += n; }
+			if (size > max) return undefined;
+			const entry = JSON.parse(buffer.subarray(0, size).toString("utf8"))?.["openai-codex"];
+			if (!entry || entry.type !== "oauth" || typeof entry.access !== "string") return undefined;
+			return verifiedAccountKey(entry as StoredCredential, "openai-codex").accountKey;
+		} finally { closeSync(fd); }
+	} catch { return undefined; }
 }
 function officialOrigin(url: unknown): boolean {
 	try {
