@@ -8,7 +8,7 @@ Open. Requested as a backlog task; implementation is not started.
 
 Adapt runtime-verified acceptance directly from `candidates/pi-subagents`, so explicit verification commands—not worker claims—determine whether configured checks passed. Preserve our separate Pi RPC/TUI workers, tmux lifecycle, retained conversations, and Paseo integration.
 
-Related planned work: [scripted workflows and dynamic orchestration](subagent-scripted-orchestration.md).
+Related planned work: [scripted workflows and dynamic orchestration](subagent-scripted-orchestration.md) and [reusable profiles](subagent-agent-profiles.md). No Paseo changes in the current scope.
 
 ## Upstream reference
 
@@ -29,7 +29,9 @@ Related planned work: [scripted workflows and dynamic orchestration](subagent-sc
 - Preserve existing notification deduplication, parent wakeup behavior, explicit reap, and descendant/job cleanup. No duplicate terminal success before required verification settles; no invisible/orphaned verification work.
 - No delegation budgets, agent-profile system, scheduling, or execution-backend replacement in this task.
 
-## Proposed Paseo presentation
+## Deferred Paseo presentation
+
+Future reference only; Paseo implementation and UI validation are explicitly out of the current scope.
 
 Use the existing Work child row/detail surface, not a new dashboard. Keep execution state and check state separate:
 
@@ -45,5 +47,4 @@ An expandable Checks section lists each command, outcome, duration, checked work
 
 - Offline deterministic positive and negative controls demonstrate that fabricated worker success cannot bypass a failing command, while a passing configured command records real evidence.
 - Cover nonzero exit, timeout, cancellation, missing permission/backend, invalid typed output, workspace changes, reload/restart recovery, and cleanup without live providers or real credentials.
-- Native worker and composed Paseo tests verify the structured state, no premature accepted completion, and access to unmodified command output.
-- Verify narrow/mobile layouts; record native-device validation separately rather than claiming it from desktop tests.
+- Native worker/tool tests verify the structured state, no premature accepted completion, and access to unmodified command output. Paseo integration and device validation are deferred.

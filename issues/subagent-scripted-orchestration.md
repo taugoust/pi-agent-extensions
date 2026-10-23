@@ -13,7 +13,7 @@ Adapt scripted orchestration directly from `candidates/pi-subagents`: reusable p
 - Repository: https://github.com/nicobailon/pi-subagents, reviewed snapshot `3ce6185a`.
 - Start from `src/workflows/scripted-workflow.ts`, the workflow documentation, and associated workflow validation/execution tests. Copy/adapt applicable implementation and tests rather than recreating the feature from its description.
 - Preserve upstream license notices and attribution; document copied/adapted code provenance in `THIRD_PARTY.md`.
-- Related task: [runtime-verified acceptance](subagent-runtime-verified-acceptance.md).
+- Related tasks: [runtime-verified acceptance](subagent-runtime-verified-acceptance.md) and [reusable profiles](subagent-agent-profiles.md). No Paseo changes in the current scope.
 
 ## Requirements
 
@@ -24,9 +24,11 @@ Adapt scripted orchestration directly from `candidates/pi-subagents`: reusable p
 - Define honest cancellation, parent disconnect, reload/restart and retained-work recovery semantics. Do not imply that an arbitrary JavaScript continuation survives a process restart, replay completed mutations, or relaunch work after ambiguous dispatch.
 - Preserve existing concurrency controls and notification deduplication. Cost/token budgets remain owned by goals/accounts or another higher-level policy; do not import upstream delegation budgets.
 - Workflow scripts and resource provenance must have explicit authorization boundaries. Do not copy direct host-command execution or allow scripts/child outputs to expand permissions, bypass AgentSH, or authorize new scope. Do not represent ordinary JavaScript execution as a security sandbox.
-- Keep this task focused on orchestration; do not also import missions, schedules, watchdogs, agent catalogs, or a new project-management layer.
+- Keep this task focused on orchestration; integrate the separately scoped reusable profiles rather than importing a second catalog. Do not also import missions, schedules, watchdogs, or a new project-management layer.
 
-## Paseo outcome
+## Deferred Paseo outcome
+
+Future reference only; Paseo implementation and UI validation are explicitly out of the current scope.
 
 Present an orchestration as a structured group in the existing Work surface with named steps, dependencies, dynamically created children, current review/fix iteration, and explicit blocked/failed/checking states. Preserve direct access to each real worker conversation and terminal. Keep literal results/logs available on demand rather than flooding parent chat. Retain existing Work pill count/priority meanings; an orchestration group is not an additional running worker.
 
@@ -34,4 +36,4 @@ Present an orchestration as a structured group in the existing Work surface with
 
 - Offline deterministic tests cover dynamic fan-out/fan-in, conditional failures, review/fix stopping, result ordering, rejected/unobserved launches, cancellation, partial results, recovery and permission failures without live providers or real credentials.
 - Verify compatibility with single/parallel/chain calls, retained resume, worktree ownership and explicit recursive cleanup; do not silently change those existing contracts.
-- Composed native-worker and Paseo tests show actual structured progress, worker controls, verification/review outcomes and non-duplicated completion. Record native-device validation separately from desktop tests.
+- Native-worker/tool tests show actual structured progress, worker controls, verification/review outcomes and non-duplicated completion. Paseo integration and device validation are deferred.
