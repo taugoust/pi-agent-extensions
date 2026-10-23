@@ -102,6 +102,7 @@
                 # core and the prebuilt chunk used by the native Bun release.
                 preBuild = (old.preBuild or "") + ''
                   node scripts/patch-run-cancellation.mjs
+                  node ${./nix/patch-command-feedback.mjs} .
                 '';
                 # Review deployments intentionally omit test/install-check phases.
                 doCheck = false;
@@ -183,20 +184,27 @@
         }
         # Upstream Pi's standalone nativeTargets omits x86_64-darwin. Do not
         # advertise native-release checks there; pure configuration checks remain.
-        // pkgs.lib.optionalAttrs (builtins.elem system [
-          "x86_64-linux"
-          "aarch64-linux"
-          "aarch64-darwin"
-        ]) {
-          pi-run-cancellation = import ./nix/pi-run-cancellation-check.nix {
-            inherit pkgs;
-            piPackage = self.packages.${system}.pi;
-          };
-          goal-fresh-prompt = import ./nix/goal-fresh-prompt-check.nix {
-            inherit self pkgs;
-            piPackage = self.packages.${system}.pi;
-          };
-        }
+        //
+          pkgs.lib.optionalAttrs
+            (builtins.elem system [
+              "x86_64-linux"
+              "aarch64-linux"
+              "aarch64-darwin"
+            ])
+            {
+              pi-run-cancellation = import ./nix/pi-run-cancellation-check.nix {
+                inherit pkgs;
+                piPackage = self.packages.${system}.pi;
+              };
+              pi-command-feedback = import ./nix/pi-command-feedback-check.nix {
+                inherit pkgs;
+                piPackage = self.packages.${system}.pi;
+              };
+              goal-fresh-prompt = import ./nix/goal-fresh-prompt-check.nix {
+                inherit self pkgs;
+                piPackage = self.packages.${system}.pi;
+              };
+            }
         // pkgs.lib.optionalAttrs pkgs.stdenv.hostPlatform.isLinux {
           background-job = import ./nix/background-job-check.nix { inherit self pkgs; };
         }

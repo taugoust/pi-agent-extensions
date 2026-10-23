@@ -224,10 +224,10 @@ export default function questionnaire(pi: ExtensionAPI) {
             }
             seen.add(item.id);
             const optionIndex = question.options.findIndex((option) => option.value === item.value);
-            if (optionIndex >= 0) {
-              answers.push({ id: item.id, value: item.value, label: question.options[optionIndex].label, wasCustom: false, index: optionIndex + 1 });
-            } else if (item.wasCustom && question.allowOther && item.value.trim()) {
+            if (item.wasCustom && question.allowOther && item.value.trim()) {
               answers.push({ id: item.id, value: item.value, label: item.value, wasCustom: true });
+            } else if (!item.wasCustom && optionIndex >= 0) {
+              answers.push({ id: item.id, value: item.value, label: question.options[optionIndex].label, wasCustom: false, index: optionIndex + 1 });
             } else {
               return errorResult("Error: Headless questionnaire returned an unknown choice", questions);
             }
@@ -280,7 +280,7 @@ export default function questionnaire(pi: ExtensionAPI) {
         if (signal.aborted) remoteController.abort();
         else signal.addEventListener("abort", abortRemote, { once: true });
       }
-      const paseoResult = answerQuestionnaireInPaseo(questions, remoteController.signal);
+      const paseoResult = answerQuestionnaireInPaseo(questions, remoteController.signal, _toolCallId);
 
       const uiResult = ctx.ui.custom<QuestionnaireResult>(
         (tui, theme, _kb, done) => {

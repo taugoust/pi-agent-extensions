@@ -176,6 +176,15 @@ or transient state in any Nix option: all declared values enter the public Nix
 store. For native models use supported environment/command references instead
 of literal API credentials. Auth/account storage stays runtime-owned.
 
+## Awaitable runtime integration APIs
+
+The packaged Pi runtime adds two optional extension APIs without changing legacy `sendUserMessage` or slash-command behavior:
+
+- `dispatchExtensionCommand(name, args?, { onNotify?, allowDialogs? })` awaits the handler and returns `completed`, `failed` with an error message, or `not_found`. Notifications stream to the observer and retain local UI delivery; the observer is sealed at settlement. Remote callers can set `allowDialogs:false` to reject invisible terminal-only dialogs.
+- `submitUserMessage(content, options?)` resolves at Pi's real preflight boundary with `{ disposition: "handled" | "queued" | "started" }`, not after generation. Pre-admission errors reject instead of becoming false successful submissions. Content normalization and extension provenance match the legacy API.
+
+`checks.<system>.pi-command-feedback` exercises the standalone Bun and Node SDK paths with isolated credentials/settings, a deterministic offline model, input interception, dialog policy and no live provider/network calls. Runtime API upgrades need an explicit process restart; extension reload alone is insufficient. These APIs do not require any Paseo client changes.
+
 ## Source composition
 
 `extension-registry.nix` is the single source of installation names and extension

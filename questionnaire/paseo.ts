@@ -11,14 +11,15 @@ export interface PaseoQuestion {
   label: string;
   prompt: string;
   options: PaseoQuestionOption[];
+  allowOther?: boolean;
 }
 
 export interface PaseoAnswer {
   id: string;
   value: string;
   label: string;
-  wasCustom: false;
-  index: number;
+  wasCustom: boolean;
+  index?: number;
 }
 
 export type PaseoQuestionnaireOutcome =
@@ -26,16 +27,23 @@ export type PaseoQuestionnaireOutcome =
   | { kind: "cancelled" }
   | { kind: "terminal" };
 
+type RemoteQuestionnaireSettings = {
+  signal?: AbortSignal;
+  paseoQuestionnaire?: { v: 1; toolCallId: string; index: number; input: boolean };
+};
+
 type PaseoRemoteUi = {
   isConnected(): boolean;
   select(
     title: string,
     options: string[],
-    settings?: { signal?: AbortSignal },
+    settings?: RemoteQuestionnaireSettings,
   ): Promise<string | undefined>;
+  input?(title: string, placeholder?: string, settings?: RemoteQuestionnaireSettings): Promise<string | undefined>;
 };
 
 const TERMINAL_CHOICE = "Answer in terminal";
+const OTHER_CHOICE = "Other (write an answer)";
 const CANCEL_CHOICE = "Cancel questionnaire";
 
 function getRemoteUi(): PaseoRemoteUi | null | undefined {
@@ -50,6 +58,15 @@ function getRemoteUi(): PaseoRemoteUi | null | undefined {
   } catch {
     return undefined;
   }
+}
+
+function unavailableReply(bridge: PaseoRemoteUi, signal?: AbortSignal): PaseoQuestionnaireOutcome {
+  // Losing the daemon is not a user cancellation: the existing terminal UI
+  // remains usable and must not abort the model's tool execution.
+  if (!signal?.aborted) {
+    try { if (!bridge.isConnected()) return { kind: "terminal" }; } catch { /* Preserve explicit failure behavior. */ }
+  }
+  return { kind: "cancelled" };
 }
 
 function optionChoice(option: PaseoQuestionOption, index: number): string {
@@ -78,6 +95,7 @@ function questionTitle(question: PaseoQuestion, index: number, total: number): s
 export async function answerQuestionnaireInPaseo(
   questions: PaseoQuestion[],
   signal?: AbortSignal,
+  toolCallId?: string,
 ): Promise<PaseoQuestionnaireOutcome | null> {
   const bridge = getRemoteUi();
   if (bridge === null) return null;
@@ -86,20 +104,38 @@ export async function answerQuestionnaireInPaseo(
   const answers: PaseoAnswer[] = [];
   for (const [questionIndex, question] of questions.entries()) {
     const optionChoices = question.options.map(optionChoice);
-    const choices = [...optionChoices, TERMINAL_CHOICE, CANCEL_CHOICE];
+    const hasInput = typeof bridge.input === "function";
+    const canInput = question.allowOther !== false && hasInput;
+    const settings: RemoteQuestionnaireSettings = { signal, ...(toolCallId ? {
+      paseoQuestionnaire: { v: 1 as const, toolCallId, index: questionIndex, input: hasInput },
+    } : {}) };
+    const choices = [...optionChoices, ...(canInput ? [OTHER_CHOICE] : []), TERMINAL_CHOICE, CANCEL_CHOICE];
     let choice: string | undefined;
     try {
       choice = await bridge.select(
         questionTitle(question, questionIndex, questions.length),
         choices,
-        { signal },
+        settings,
       );
     } catch {
       return { kind: "cancelled" };
     }
 
     if (choice === TERMINAL_CHOICE) return { kind: "terminal" };
-    if (choice === CANCEL_CHOICE || choice === undefined) return { kind: "cancelled" };
+    if (choice === undefined) return unavailableReply(bridge, signal);
+    if (choice === CANCEL_CHOICE) return { kind: "cancelled" };
+    if (choice === OTHER_CHOICE && canInput) {
+      let value: string | undefined;
+      try {
+        value = await bridge.input!(questionTitle(question, questionIndex, questions.length), "Type your answer", settings);
+      } catch {
+        return { kind: "cancelled" };
+      }
+      if (value === undefined) return unavailableReply(bridge, signal);
+      if (!value.trim()) return { kind: "cancelled" };
+      answers.push({ id: question.id, value, label: value, wasCustom: true });
+      continue;
+    }
     const optionIndex = optionChoices.indexOf(choice);
     if (optionIndex < 0) return { kind: "cancelled" };
     const option = question.options[optionIndex];

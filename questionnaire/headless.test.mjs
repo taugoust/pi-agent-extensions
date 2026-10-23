@@ -31,9 +31,13 @@ try {
   assert.match(result.content[0].text, /\n/);
   assert.equal(requests[0].signal, controller.signal);
   assert.equal(requests[0].input.questions[1].allowOther, true);
+  service({ ...good, answers: [good.answers[0], { id: 'detail', value: 'default', wasCustom: true }] });
+  const customCollision = await execute();
+  assert.deepEqual(customCollision.details.answers[1], { id: 'detail', value: 'default', label: 'default', wasCustom: true });
   for (const answer of [
     { ...good, answers: [{ id: 'scope', value: 'unknown', wasCustom: false }, good.answers[1]] },
     { ...good, answers: [{ id: 'scope', value: 'custom forbidden', wasCustom: true }, good.answers[1]] },
+    { ...good, answers: [{ id: 'scope', value: 'small', wasCustom: true }, good.answers[1]] },
     { ...good, answers: [good.answers[0], good.answers[0]] },
     { ...good, answers: [good.answers[0]] },
     { kind: 'permission', cancelled: false, value: 'Allow' },

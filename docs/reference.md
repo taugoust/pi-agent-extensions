@@ -603,8 +603,12 @@ through nested tmux when every layer uses
 - **Type**: Tool (LLM-callable)
 - **Use cases**: Configuration wizards, disambiguation, confirmations,
   multi-step workflows
-- **Paseo**: Attached sessions present each question as a sequential choice
-  card. Free-text answers can be handed back to the full terminal UI.
+- **Paseo**: Compatible bridge/server pairs use a stock native multi-question
+  form with option descriptions. **Other (write an answer)** opens a separate
+  native text-input step, preserving custom-versus-selected provenance even for
+  identical text. Older peers keep sequential choices and **Answer in terminal**.
+  The first completed interface wins; losing the provider connection falls back
+  to the existing terminal UI rather than aborting it. No client changes are needed.
 
 **Description**: A tool the LLM can call to ask single or
 multiple-choice questions with tab-based navigation.

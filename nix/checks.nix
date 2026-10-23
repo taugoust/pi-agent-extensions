@@ -230,28 +230,11 @@ in
 
   questionnaire =
     let
-      moduleResult = pkgs.lib.evalModules {
-        modules = [
-          {
-            options.home.packages = pkgs.lib.mkOption {
-              type = pkgs.lib.types.listOf pkgs.lib.types.package;
-              default = [ ];
-            };
-            options.home.file = pkgs.lib.mkOption {
-              type = pkgs.lib.types.attrsOf pkgs.lib.types.anything;
-              default = { };
-            };
-          }
-          self.homeManagerModules.default
-          {
-            programs.pi.enable = true;
-            programs.pi.package = null;
-            programs.pi.extensions.questionnaire.enable = true;
-          }
-        ];
-        specialArgs = { inherit pkgs; };
+      moduleResult = (import ./module-test-harness.nix { inherit self pkgs; }).evaluate {
+        agentDir = ".pi/agent";
+        extensions.questionnaire.enable = true;
       };
-      moduleFiles = moduleResult.config.home.file;
+      moduleFiles = moduleResult.home.file;
       questionnaireBundle = self.packages.${pkgs.stdenv.hostPlatform.system}.example-auto-extensions;
     in
     pkgs.runCommand "questionnaire-check"
@@ -273,11 +256,11 @@ in
         mkdir -p "$srcdir/shared"
         cp ${self}/shared/foreground-tasks.ts "$srcdir/shared/foreground-tasks.ts"
 
-        test ${toString (builtins.length (builtins.attrNames moduleFiles))} = 3
+        test ${toString (builtins.length (builtins.attrNames moduleFiles))} = 4
         test -f ${moduleFiles.".pi/agent/extensions/shared".source}/foreground-tasks.ts
         test -f ${questionnaireBundle}/shared/foreground-tasks.ts
-        test -f ${moduleFiles.".pi/agent/extensions/questionnaire/index.ts".source}
-        test -f ${moduleFiles.".pi/agent/extensions/questionnaire/paseo.ts".source}
+        test -f ${moduleFiles.".pi/agent/extensions/questionnaire".source}/index.ts
+        test -f ${moduleFiles.".pi/agent/extensions/questionnaire".source}/paseo.ts
         test -f ${questionnaireBundle}/questionnaire/index.ts
         test -f ${questionnaireBundle}/questionnaire/paseo.ts
 
@@ -311,6 +294,7 @@ in
           Boolean: () => ({type:"boolean"}), Optional: value => value, Array: items => ({type:"array",items}) };
         EOF
         node ${self}/questionnaire/headless.test.mjs "$outdir"
+        node --experimental-strip-types --test ${self}/questionnaire/paseo.test.mjs
 
         cat > "$workdir/test.mjs" <<'EOF'
         import { pathToFileURL } from "node:url";
