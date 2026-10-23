@@ -1,0 +1,47 @@
+# Subagent runtime-verified acceptance
+
+## Status
+
+Open. Requested as a backlog task; implementation is not started.
+
+## Outcome
+
+Adapt runtime-verified acceptance directly from `candidates/pi-subagents`, so explicit verification commands—not worker claims—determine whether configured checks passed. Preserve our separate Pi RPC/TUI workers, tmux lifecycle, retained conversations, and Paseo integration.
+
+## Upstream reference
+
+- Repository: https://github.com/nicobailon/pi-subagents
+- Reviewed snapshot: `3ce6185a`.
+- Reuse/adapt relevant code in `src/runs/shared/acceptance.ts` and focused tests, including `test/unit/typed-gate-output.test.ts`, rather than independently recreating the feature from its description.
+- Reference contract: `docs/tool-reference.md`, acceptance gates section.
+- Preserve upstream license notices and attribution for copied/adapted code; document provenance in `THIRD_PARTY.md`.
+
+## Requirements
+
+- Distinguish worker execution settlement, worker-reported acceptance evidence, runtime verification, and independent review. A process finishing is not proof of delivery; passed checks are not proof that all task requirements are correct.
+- Support explicitly configured verification commands in the worker's actual cwd/worktree, with bounded output, timeouts, cancellation, and durable results. Explicit failed gates must prevent accepted delivery; unconfigured checks must never appear passed.
+- Adapt upstream typed JSON gates and relevant failure tests where applicable. Invalid/truncated/schema-invalid output cannot silently become successful verification. A business verdict in valid JSON is distinct from command execution success.
+- Execute commands through our existing supervised job/permission boundaries, not upstream's direct host-shell spawning. Verification must not expand a read-only task's authority or bypass AgentSH, approval, or worker ownership controls.
+- Retain literal stdout/stderr and real exit/timeout/cancellation outcomes with the command, cwd, time, and workspace identity. Do not substitute a model summary for evidence.
+- Bind evidence to the checked workspace state. Relevant changes invalidate current passed status; avoid claiming that command/workspace fingerprints prove full environmental reproducibility. Do not blindly copy caching assumptions.
+- Preserve existing notification deduplication, parent wakeup behavior, explicit reap, and descendant/job cleanup. No duplicate terminal success before required verification settles; no invisible/orphaned verification work.
+- No delegation budgets, agent-profile system, scheduling, or execution-backend replacement in this task.
+
+## Proposed Paseo presentation
+
+Use the existing Work child row/detail surface, not a new dashboard. Keep execution state and check state separate:
+
+- `Working` while the worker is active.
+- `Worker finished · Checking 1/3` while runtime verification is active.
+- `Checks passed 3/3` only after all required configured gates pass.
+- `Checks failed 1/3` with the failed command readily accessible.
+- Explicit `Not configured`, `Interrupted`, `Unavailable`, or `Stale` states where appropriate; never render these as green success.
+
+An expandable Checks section lists each command, outcome, duration, checked workspace/revision and timestamp, with literal stdout/stderr available on demand. Keep the compact row quiet; do not dump logs into chat or change existing Work pill count/priority semantics. Display independent review separately from command checks. These labels are a UI proposal, not an implemented contract.
+
+## Acceptance evidence required
+
+- Offline deterministic positive and negative controls demonstrate that fabricated worker success cannot bypass a failing command, while a passing configured command records real evidence.
+- Cover nonzero exit, timeout, cancellation, missing permission/backend, invalid typed output, workspace changes, reload/restart recovery, and cleanup without live providers or real credentials.
+- Native worker and composed Paseo tests verify the structured state, no premature accepted completion, and access to unmodified command output.
+- Verify narrow/mobile layouts; record native-device validation separately rather than claiming it from desktop tests.
