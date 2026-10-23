@@ -2,7 +2,7 @@
 
 ## Status
 
-In progress. User requested the newest Pi release; npm and the current upstream Nix derivation both identify 1.4.0. Existing Matebook installation is 1.0.0.
+Resolved. Pi 1.4.0 was published and activated on Matebook; both the normal launcher and system launcher report 1.4.0.
 
 ## Requirements
 
@@ -17,4 +17,8 @@ The shell-timing patch was ported to the 1.4 schema and shared timer renderer wi
 
 Combined checks passed against Pi 1.4.0: account runtime/storage/snapshots 21/3/3 tests, BTW/workflow SDK suites 11 tests, native Accounts/Usage/BTW/Workflow registration checks, and eight native Paseo bridge/RPC/reload tests. Cancellation negative controls reproduce the original extra dispatches and lost input; patched Node, bundle and actual native Bun RPC tests preserve both queued inputs, stop canceled dispatch, and use a clean controller for the next explicit run. All use offline synthetic fixtures. Native BTW validation now checks actual command registration rather than relying on `--list-models` exit status.
 
-Publication and Matebook activation remain pending consumer host-parity checks.
+## Resolution
+
+Implementation: `1b0eff8`. Consumer pin: nix-config `502e3d0`. Host-parity, parity-sensitivity, installed native bridge RPC and Matebook system builds passed. Activation completed successfully; Paseo and Home Manager are active. Verified active system: `/nix/store/f68zn3mjjyb5bz8gry2mxazkh1r10yng-nixos-system-matebook-26.05.20260916.4c78701`.
+
+Already running Pi processes must be restarted to execute the new binary; no live session was terminated for validation.
