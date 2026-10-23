@@ -24,6 +24,7 @@ export async function createAccountControlsSnapshot(
 	store: AccountStore,
 	serviceEpoch: string,
 	pendingAccountNames: readonly string[] = [],
+	providerId: "openai" | "openai-codex" = "openai",
 ): Promise<AccountControlsSnapshot> {
 	const readTimeout = AbortSignal.timeout(5_000);
 	const data = await store.readAsync(
@@ -117,6 +118,8 @@ export async function createAccountControlsSnapshot(
 	}
 	return {
 		protocol: 1,
+		providerId,
+		supportedProviders: ["openai", "openai-codex"],
 		serviceEpoch,
 		selectionRevision: owner.selectionRevisions.get("openai") ?? 0,
 		sessionId: owner.sessionId,

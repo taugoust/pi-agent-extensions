@@ -15,8 +15,7 @@ import {
   SettingsManager,
 } from "@earendil-works/pi-coding-agent";
 
-// Phase 2 intentionally supports the native OpenAI provider only. Codex is separate.
-export const SUPPORTED_PROVIDER_IDS = ["openai"] as const;
+export const SUPPORTED_PROVIDER_IDS = ["openai", "openai-codex"] as const;
 
 export type AccountProviderId = (typeof SUPPORTED_PROVIDER_IDS)[number];
 
@@ -63,6 +62,17 @@ export function createBuiltinProviderAdapters(
       return oauth;
     },
     oauth: createLazyProviderOwnedOAuth("openai", loader),
+  }, {
+    id: "openai-codex",
+    displayName: "OpenAI Codex",
+    requiresApiKeyBridge: false,
+    runtimeAuthMode: "authorization-header",
+    resolveOAuth: (ctx) => {
+      const oauth = ctx.modelRegistry.getProvider("openai-codex")?.auth.oauth;
+      if (!oauth) throw new Error("Pi's native OpenAI Codex OAuth provider is unavailable.");
+      return oauth;
+    },
+    oauth: createLazyProviderOwnedOAuth("openai-codex", loader),
   }];
 }
 

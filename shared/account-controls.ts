@@ -1,12 +1,14 @@
 /** Paseo-safe account controls protocol. Contains identifiers/status only; never secrets. */
 export const ACCOUNT_CONTROLS_PROTOCOL = 1 as const;
 export const ACCOUNT_CONTROLS_KEY = "__paeAccountControlsV1" as const;
+export const ACCOUNT_PROVIDER_IDS = ["openai", "openai-codex"] as const;
+export type AccountProviderId = (typeof ACCOUNT_PROVIDER_IDS)[number];
 /** Lifetime-owned service on globalThis[ACCOUNT_CONTROLS_KEY], like the existing foreground service. */
 export interface AccountControlsService {
 	protocol: typeof ACCOUNT_CONTROLS_PROTOCOL;
 	sessionId: string;
 	serviceEpoch: string;
-	getSnapshot(request: { sessionId: string }): Promise<AccountControlsSnapshot>;
+	getSnapshot(request: { sessionId: string; providerId?: AccountProviderId }): Promise<AccountControlsSnapshot>;
 	switchAccount(request: AccountSwitchRequest): Promise<AccountSwitchResult>;
 	manageAccount(
 		request: AccountManagementRequest,
@@ -28,6 +30,8 @@ export interface SafeAccountLabel {
 export interface AccountControlsSnapshot {
 	protocol: typeof ACCOUNT_CONTROLS_PROTOCOL;
 	serviceEpoch: string;
+	providerId?: AccountProviderId;
+	supportedProviders?: readonly AccountProviderId[];
 	/** Monotonic per-session selection revision; incremented on every accepted selection change. */
 	selectionRevision: number;
 	sessionId: string;
@@ -69,14 +73,16 @@ export type AccountManagementRequest =
 			accountName?: string;
 			method: "oauth" | "api_key";
 			sessionId: string;
+			providerId?: AccountProviderId;
 	  }
-	| { operation: "cancel-login"; accountName: string; sessionId: string }
-	| { operation: "rename"; accountId: string; label: string; sessionId: string }
-	| { operation: "remove"; accountId: string; sessionId: string }
-	| { operation: "default"; accountId: string | null; sessionId: string };
+	| { operation: "cancel-login"; accountName: string; sessionId: string; providerId?: AccountProviderId }
+	| { operation: "rename"; accountId: string; label: string; sessionId: string; providerId?: AccountProviderId }
+	| { operation: "remove"; accountId: string; sessionId: string; providerId?: AccountProviderId }
+	| { operation: "default"; accountId: string | null; sessionId: string; providerId?: AccountProviderId };
 
 export interface AccountSwitchRequest {
 	protocol: typeof ACCOUNT_CONTROLS_PROTOCOL;
+	providerId?: AccountProviderId;
 	requestId: string;
 	expectedSessionId: string;
 	expectedServiceEpoch: string;
