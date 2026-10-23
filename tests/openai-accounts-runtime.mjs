@@ -3,10 +3,10 @@ import test from "node:test";
 import { chmod, mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { createJiti } from "../node_modules/@earendil-works/pi-coding-agent/node_modules/jiti/lib/jiti.mjs";
-import { ModelRuntime } from "../node_modules/@earendil-works/pi-coding-agent/dist/core/model-runtime.js";
-import { ModelRegistry } from "../node_modules/@earendil-works/pi-coding-agent/dist/core/model-registry.js";
-import { createAssistantMessageEventStream } from "../node_modules/@earendil-works/pi-ai/dist/index.js";
+import { createRequire } from "node:module";
+import { ModelRuntime, ModelRegistry } from "@earendil-works/pi-coding-agent";
+import { createAssistantMessageEventStream } from "@earendil-works/pi-ai";
+const { createJiti } = createRequire(import.meta.resolve("@earendil-works/pi-coding-agent"))("jiti");
 
 const accountModule = await createJiti(import.meta.url).import("../openai-accounts/accounts.ts");
 const verificationModule = await createJiti(import.meta.url).import("../openai-accounts/model-auth-verification.ts");
@@ -276,7 +276,7 @@ async function dispose(f) {
   else process.env.PI_CODING_AGENT_DIR = f.previousAgentDir;
 }
 
-test("installed Pi 1.0.0 gates normal OpenAI dispatch and cheap Luna compaction with the named key", async () => {
+test("Pi SDK gates normal OpenAI dispatch and cheap Luna compaction with the named key", async () => {
   const f = await fixture();
   try {
     const modelCallsBeforeSwitch = f.delegated.length;

@@ -1,6 +1,7 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import {createJiti} from '../node_modules/@earendil-works/pi-coding-agent/node_modules/jiti/lib/jiti.mjs';
+import {createRequire} from 'node:module';
+const {createJiti}=createRequire(import.meta.resolve('@earendil-works/pi-coding-agent'))('jiti');
 const jiti=createJiti(import.meta.url);
 const {createAccountControlsSnapshot}=await jiti.import('../openai-accounts/account-controls.ts');
 const {default:usage}=await jiti.import('../openai-usage/index.ts');

@@ -12,6 +12,7 @@ import { execFileSync } from "node:child_process";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { randomUUID } from "node:crypto";
+import { createRequire } from "node:module";
 import { setTimeout as delay } from "node:timers/promises";
 const suite = await mkdtemp(join(tmpdir(), "workflows-sdk-")),
 	oldDir = process.env.PI_CODING_AGENT_DIR,
@@ -22,9 +23,9 @@ globalThis.fetch = async () => {
 	network++;
 	throw Error("HTTP forbidden in deterministic workflow tests");
 };
-const { createJiti } = await import(
-	"../node_modules/@earendil-works/pi-coding-agent/node_modules/jiti/lib/jiti.mjs"
-);
+const { createJiti } = createRequire(
+	import.meta.resolve("@earendil-works/pi-coding-agent"),
+)("jiti");
 const sdk = await import("@earendil-works/pi-coding-agent");
 const { createAssistantMessageEventStream } = await import(
 	"@earendil-works/pi-ai"

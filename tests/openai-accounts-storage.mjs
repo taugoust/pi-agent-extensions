@@ -5,7 +5,9 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { pathToFileURL } from "node:url";
 import test from "node:test";
-import { createJiti } from "../node_modules/@earendil-works/pi-coding-agent/node_modules/jiti/lib/jiti.mjs";
+import { createRequire } from "node:module";
+const sdkRequire = createRequire(import.meta.resolve("@earendil-works/pi-coding-agent"));
+const { createJiti } = sdkRequire("jiti");
 
 const jiti = createJiti(import.meta.url);
 const module = await jiti.import("../openai-accounts/accounts.ts");
@@ -27,7 +29,7 @@ function waitForLine(child, expected) {
 }
 
 function lockWorker(filePath, value, holdMs) {
-  const codingAgent = pathToFileURL(join(process.cwd(), "node_modules/@earendil-works/pi-coding-agent/node_modules/jiti/lib/jiti.mjs")).href;
+  const codingAgent = pathToFileURL(sdkRequire.resolve("jiti")).href;
   const storage = pathToFileURL(join(process.cwd(), "openai-accounts/storage.ts")).href;
   const code = `
     import { createJiti } from ${JSON.stringify(codingAgent)};

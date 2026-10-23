@@ -3,7 +3,6 @@
 # the shipped package, not an independently reimplemented cancellation loop.
 piPackage.overrideAttrs (old: {
   pname = "pi-run-cancellation-check";
-  nativeBuildInputs = (old.nativeBuildInputs or [ ]) ++ [ pkgs.python3 ];
   preBuild = ''
     # The patched expectations must reject the original SDK AND builtin bundle.
     for target in node bundle; do
@@ -19,9 +18,8 @@ piPackage.overrideAttrs (old: {
     done
   '';
   postInstall = (old.postInstall or "") + ''
-    # Bun's standalone build embeds this prebuilt chunk. Check the actual shipped
-    # executable, including its controller/queue and session scheduler boundaries.
-    python3 ${./pi-run-cancellation-verify.py} "$out/libexec/pi/pi" "$PWD" ${./pi-run-cancellation.test.mjs}
+    # Pi 1.4 compiles its Bun entry from unbundled modules. Verify behavior
+    # through RPC rather than extracting assumed byte layouts from the binary.
     # Exercise the actual standalone Bun process through public RPC and a
     # disposable offline extension, not merely extracted code under Node.
     timeout 45s node ${./pi-run-cancellation-native.test.mjs} "$out/bin/pi" ${./pi-run-cancellation-native-fixture.ts}

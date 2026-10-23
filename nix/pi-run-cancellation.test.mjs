@@ -140,12 +140,13 @@ if (expectation !== 'original') {
   const session = {
     _agentRunAbortRequested: false, _pendingToolNames: new Set(), _retryAttempt: 1,
     _finishCancelledRetry: AgentSession.prototype._finishCancelledRetry,
+    _prepareRun: async () => [user('offline')], _pendingNextTurnMessages: [],
     _emit(event) { assert.equal(event.type, 'auto_retry_end'); assert.equal(event.success, false); },
     _recordSelection() {}, _flushPendingBashMessages() {}, _flushPendingCustomMessages() {}, async _emitAgentSettled() {},
-    agent: { async prompt() { session._lastAssistantMessage = { stopReason: 'aborted' }; }, async continue() { continued++; } },
+    agent: { state: { messages: [] }, async prompt() { this.state.messages.push({ stopReason: 'aborted' }); }, async continue() { continued++; } },
     async _handlePostAgentRun() { continued++; return false; }, async _runBeforeSettleBoundary() { boundaries++; return false; },
   };
-  await AgentSession.prototype._runAgentPrompt.call(session, [user('offline')]);
+  await AgentSession.prototype._startRun.call(session, { type: 'prompt' });
   assert.equal(continued, 0); assert.equal(boundaries, 0); assert.equal(session._retryAttempt, 0);
   console.log(`PASS scheduler unit binding (controlled session facade): aborted result neither retries nor enters continuation boundary (${target})`);
 }

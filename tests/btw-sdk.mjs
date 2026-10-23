@@ -4,7 +4,11 @@ import { mkdtemp, rm } from "node:fs/promises";
 import { join } from "node:path";
 import { tmpdir } from "node:os";
 import { randomUUID } from "node:crypto";
-import { createJiti } from "../node_modules/@earendil-works/pi-coding-agent/node_modules/jiti/lib/jiti.mjs";
+import { createRequire } from "node:module";
+const { createJiti } = createRequire(
+	import.meta.resolve("@earendil-works/pi-coding-agent"),
+)("jiti");
+
 import {
 	createAgentSession,
 	AgentSessionRuntime,
