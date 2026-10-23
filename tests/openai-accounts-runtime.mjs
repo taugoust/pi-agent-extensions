@@ -223,7 +223,7 @@ async function fixture(options = {}) {
   const adapter = builtinAdapters.find((item) => item.id === "openai");
   assert.ok(adapter);
   assert.equal(oauthModule.resolveProviderOAuth(adapter, ctx), registry.getProvider("openai").auth.oauth);
-  const codexOAuth = { async login() { throw new Error("unexpected Codex login"); }, async refresh(credential) { return credential; }, async toAuth(credential) { return { headers: { Authorization: `Bearer ${credential.access}` } }; } };
+  const codexOAuth = { async login() { throw new Error("unexpected Codex login"); }, async refresh(credential) { return credential; }, async toAuth(credential) { return { apiKey: credential.access }; } };
   const codexAdapter = { ...builtinAdapters.find((item) => item.id === "openai-codex"), oauth: codexOAuth, resolveOAuth: () => codexOAuth };
   accountModule.default(pi, { store, providers: [adapter, codexAdapter] });
   const fire = async (event, value = {}) => {

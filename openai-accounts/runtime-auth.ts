@@ -238,8 +238,10 @@ export class RuntimeAuthCoordinator {
         auth = { apiKey: credential.key };
         runtimeApiKey = credential.key;
       } else {
-        auth = await resolveProviderOAuth(this.provider, ctx).toAuth(credential);
-        runtimeApiKey = validateModelAuth(auth, this.provider);
+        const nativeAuth = await resolveProviderOAuth(this.provider, ctx).toAuth(credential);
+        const validated = validateModelAuth(nativeAuth, this.provider);
+        auth = validated.auth;
+        runtimeApiKey = validated.runtimeApiKey;
       }
     } catch (error) {
       const selection = await this.selectedCredentialMatches(store, active, credential, refreshSignal);
@@ -871,7 +873,10 @@ function mergeConfigHeaders(
   return result;
 }
 
-function validateModelAuth(auth: unknown, provider: AccountProviderAdapter): string {
+function validateModelAuth(
+  auth: unknown,
+  provider: AccountProviderAdapter,
+): { auth: ModelAuth; runtimeApiKey: string } {
   const providerName = provider.displayName;
   if (!isRecord(auth)) throw new Error(`${providerName} OAuth returned invalid request auth.`);
   if (auth.baseUrl !== undefined) {
@@ -905,10 +910,17 @@ function validateModelAuth(auth: unknown, provider: AccountProviderAdapter): str
     if (typeof auth.apiKey !== "string" || !auth.apiKey) {
       throw new Error(`${providerName} OAuth returned no API key.`);
     }
-    return auth.apiKey;
+    return { auth: auth as ModelAuth, runtimeApiKey: auth.apiKey };
   }
+  const existingAuthorization = isRecord(auth.headers)
+    ? Object.entries(auth.headers).filter(([name]) => name.toLowerCase() === "authorization")
+    : [];
   if (auth.apiKey !== undefined) {
-    throw new Error(`${providerName} OAuth returned unexpected API-key authentication.`);
+    if (typeof auth.apiKey !== "string" || !auth.apiKey || existingAuthorization.length > 0) {
+      throw new Error(`${providerName} OAuth returned conflicting API-key and Authorization authentication.`);
+    }
+    const { apiKey, ...authWithoutApiKey } = auth;
+    auth = { ...authWithoutApiKey, headers: { ...(isRecord(auth.headers) ? auth.headers : {}), Authorization: `Bearer ${apiKey}` } };
   }
   const authorizationHeaders = isRecord(auth.headers)
     ? Object.entries(auth.headers).filter(([name]) => name.toLowerCase() === "authorization")
@@ -920,7 +932,7 @@ function validateModelAuth(auth: unknown, provider: AccountProviderAdapter): str
   ) {
     throw new Error(`${providerName} OAuth returned no valid Bearer authorization header.`);
   }
-  return RUNTIME_HEADER_AUTH_SELECTOR;
+  return { auth: auth as ModelAuth, runtimeApiKey: RUNTIME_HEADER_AUTH_SELECTOR };
 }
 
 function readAvailableModelIds(credential: StoredCredential): string[] | undefined {

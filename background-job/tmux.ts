@@ -30,7 +30,7 @@ export type PaneState = {
 };
 
 export interface JobProcessBackend {
-  launch(id: string, cwd: string, jobDir: string, shell: string, options?: { placement?: JobPlacement; infrastructure?: boolean }): Promise<JobLaunch>;
+  launch(id: string, cwd: string, jobDir: string, shell: string, options?: { placement?: JobPlacement; infrastructure?: boolean; name?: string }): Promise<JobLaunch>;
   paneState(id: string, launch: JobLaunch): Promise<PaneState>;
   capture(id: string, launch: JobLaunch): Promise<string>;
   signal(id: string, launch: JobLaunch, signal: NodeJS.Signals): Promise<void>;
@@ -127,7 +127,7 @@ export class TmuxBackend implements JobProcessBackend {
     }
   }
 
-  async launch(id: string, cwd: string, jobDir: string, shell: string, options?: { placement?: JobPlacement; infrastructure?: boolean }): Promise<JobLaunch> {
+  async launch(id: string, cwd: string, jobDir: string, shell: string, options?: { placement?: JobPlacement; infrastructure?: boolean; name?: string }): Promise<JobLaunch> {
     if (process.platform !== "linux") throw new Error("Background job launch is supported only on Linux");
     // Fail before creating a pane: otherwise a missing interpreter/script can
     // exit before finishLaunch reads /proc, obscuring the actionable error.
@@ -156,7 +156,7 @@ export class TmuxBackend implements JobProcessBackend {
         result = await this.run(['if-shell', '-F', '-t', placement.paneId, guard, split, 'display-message -p pi-job-placement-mismatch'], false, placement.socketPath);
       }
       if (result.stdout.includes('pi-job-placement-mismatch')) throw new Error('Caller tmux placement changed before launch');
-      try { return await this.finishLaunch(id, result.stdout, placement.socketPath, placement, ownershipToken); }
+      try { return await this.finishLaunch(id, result.stdout, placement.socketPath, placement, ownershipToken, options?.name); }
       catch (error) { await this.cleanupFailedLaunch(id, result.stdout, placement.socketPath, ownershipToken); throw error; }
     }
     let exists = await this.sessionExists();
@@ -176,7 +176,7 @@ export class TmuxBackend implements JobProcessBackend {
         result = await this.run(["new-window", "-d", "-P", "-F", format, "-t", `${SESSION}:`, "-n", id, "-c", cwd, command]);
       } else throw error;
     }
-    try { return await this.finishLaunch(id, result.stdout, this.store.socketPath, undefined, ownershipToken); }
+    try { return await this.finishLaunch(id, result.stdout, this.store.socketPath, undefined, ownershipToken, options?.name); }
     catch (error) { await this.cleanupFailedLaunch(id, result.stdout, this.store.socketPath, ownershipToken); throw error; }
   }
 
@@ -188,7 +188,7 @@ export class TmuxBackend implements JobProcessBackend {
     await this.run(["if-shell", "-F", "-t", paneId, guard, `kill-pane -t ${paneId}`, "display-message -p pi-job-launch-identity-mismatch"], true, socketPath).catch(() => undefined);
   }
 
-  private async finishLaunch(id: string, output: string, socketPath: string, placement: JobPlacement | undefined, ownershipToken: string): Promise<JobLaunch> {
+  private async finishLaunch(id: string, output: string, socketPath: string, placement: JobPlacement | undefined, ownershipToken: string, name?: string): Promise<JobLaunch> {
     const [windowId, paneId, pidRaw] = output.trim().split("|");
     const panePid = Number(pidRaw);
     if (!windowId || !paneId || !Number.isSafeInteger(panePid) || panePid < 1) {
@@ -199,6 +199,9 @@ export class TmuxBackend implements JobProcessBackend {
     await this.run([
       'set-option','-p','-t',paneId,'@pi_background_job_id',id,';','set-option','-p','-t',paneId,'@pi_background_job_token',ownershipToken,';','set-option','-p','-t',paneId,'remain-on-exit','on',';','set-option','-p','-t',paneId,'remain-on-exit-format','',
     ], false, socketPath);
+    // Human-readable title is pane-local and is applied only to this newly
+    // created pane, while the runner is still blocked behind launch-ready.
+    if (name !== undefined) await this.run(['set-option','-p','-t',paneId,'@pi_background_job_name',name], false, socketPath);
     const identity = await this.run(['display-message', '-p', '-t', paneId, '#{pid}|#{session_id}|#{window_id}'], false, socketPath);
     const [serverRaw, sessionId, actualWindow] = identity.stdout.trim().split('|');
     if (!/^\$[0-9]+$/.test(sessionId ?? '') || actualWindow !== windowId || placement && (windowId !== placement.windowId || sessionId !== placement.sessionId)) throw new Error('Tmux launch placement changed');

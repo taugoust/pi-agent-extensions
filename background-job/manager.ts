@@ -67,6 +67,10 @@ function sleep(milliseconds: number, signal?: AbortSignal): Promise<void> {
   });
 }
 
+function sanitizeJobName(name: string): string {
+  return name.replace(/[\x00-\x1f\x7f-\x9f]/g, " ").replace(/\s+/g, " ").trim();
+}
+
 export function sanitizeOutput(text: string): string {
   return text
     .replace(/\x1b\][\s\S]*?(?:\x07|\x1b\\)/g, "")
@@ -126,8 +130,12 @@ export class BackgroundJobManager {
     if (!request.command || Buffer.byteLength(request.command, "utf8") > MAX_COMMAND_BYTES) {
       throw new Error("Background job command must be between 1 and 32768 UTF-8 bytes");
     }
-    if (request.name !== undefined && (!request.name.trim() || Buffer.byteLength(request.name, "utf8") > 80)) {
+    if (request.name !== undefined && Buffer.byteLength(request.name, "utf8") > 80) {
       throw new Error("Background job name must be between 1 and 80 UTF-8 bytes");
+    }
+    const name = request.name === undefined ? undefined : sanitizeJobName(request.name);
+    if (request.name !== undefined && (!name || Buffer.byteLength(name, "utf8") > 80)) {
+      throw new Error("Background job name must be between 1 and 80 printable UTF-8 bytes");
     }
     const cwd = await realpath(request.cwd);
     const shell = await resolveExecutable("bash");
@@ -146,7 +154,7 @@ export class BackgroundJobManager {
       const metadata: JobMetadata = {
         schemaVersion: JOB_SCHEMA_VERSION,
         id,
-        ...(request.name === undefined ? {} : { name: request.name.trim() }),
+        ...(name === undefined ? {} : { name }),
         command: request.command,
         cwd,
         shell,
@@ -172,7 +180,7 @@ export class BackgroundJobManager {
           await this.store.publishResult(id, cancelled);
           throw abortError();
         }
-        const launch = await this.backend.launch(id, cwd, this.store.jobDir(id), shell, {placement: request.placement, infrastructure: request.infrastructure});
+        const launch = await this.backend.launch(id, cwd, this.store.jobDir(id), shell, {placement: request.placement, infrastructure: request.infrastructure, name: metadata.name});
         await this.store.writeLaunch(id, launch);
         const cancelled = await this.store.readResult(id);
         if (cancelled || signal?.aborted || await this.store.exists(join(this.store.jobDir(id), "cancel-requested"))) {

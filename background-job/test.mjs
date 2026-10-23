@@ -171,10 +171,13 @@ try {
   const first = await manager.start({
     command: "printf 'cwd=%s\\nenv=%s\\n' \"$PWD\" \"$BG_TEST_VALUE\"; sleep 1; printf 'done\\n'",
     cwd: root,
-    name: "survival",
+    name: "  survival\n ",
     sessionId: "test-session",
   });
   assert(first.status === "running" && first.launch?.paneStartToken, "job did not launch with process identity");
+  const paneTitle = (await execFileAsync(tmux, ["-S", first.launch.socketPath, "display-message", "-p", "-t", first.launch.paneId, "#{@pi_background_job_name}"])).stdout.trim();
+  assert(paneTitle === "survival", `pane-local title must use the human job name, got ${JSON.stringify(paneTitle)}`);
+  assert(paneTitle !== first.metadata.id, "pane-local title must not expose the opaque job ID");
   assert((fs.statSync(store.jobDir(first.metadata.id)).mode & 0o077) === 0, "job directory is not private");
   assert(!fs.existsSync(store.path(first.metadata.id, "environment")) || (fs.statSync(store.path(first.metadata.id, "environment")).mode & 0o077) === 0, "environment snapshot is not private");
 
@@ -184,8 +187,9 @@ try {
   controller.abort();
   let aborted = false;
   try { await manager.wait(first.metadata.id, 43_200_000, controller.signal); }
-  catch (error) { aborted = error?.name === "AbortError" && String(error.message).includes("still running"); }
-  assert(aborted, "aborted wait did not report that the job remains running");
+  catch (error) { aborted = error?.name === "AbortError" && String(error.message).includes("Wait cancelled"); }
+  assert(aborted, "aborted wait did not report cancellation");
+  assert((await manager.get(first.metadata.id)).status === "running", "aborting the wait cancelled the job itself");
 
   const reloadedStore = new JobStore(stateRoot, runtimeRoot);
   const reloaded = new BackgroundJobManager(reloadedStore, new TmuxBackend(reloadedStore, tmux, process.execPath, runner));

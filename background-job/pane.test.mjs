@@ -16,6 +16,7 @@ try {
  const pane=await call('-f','/dev/null','new-session','-d','-P','-F','#{pane_id}','-s','existing','-c',root,process.execPath,'-e',"console.log('existing-work');setInterval(()=>{},1000)");
  await call('set-option','-g','remain-on-exit','on');await call('set-option','-g','remain-on-exit-format','');
  const untouched=await call('new-window','-d','-P','-F','#{pane_id}','-t','existing:','-c',root,process.execPath,'-e','setInterval(()=>{},1000)');
+ await call('set-option','-p','-t',pane,'@pi_background_job_name','user-owned pane title');
  const pid=await call('display-message','-p','-t',pane,'#{pane_pid}');
  const untouchedPid=await call('display-message','-p','-t',untouched,'#{pane_pid}');
  const makeController=session=>`
@@ -29,12 +30,14 @@ try {
  const first=await exec(process.execPath,['--input-type=module','-e',makeController('old-parent')],{timeout:15000});
  const originalId=first.stdout.trim();assert.match(originalId,/^job-[a-f0-9]{24}$/);
  assert.equal(await call('display-message','-p','-t',pane,'#{pane_pid}'),pid,'initial adoption restarted the pane');
+ assert.equal(await call('display-message','-p','-t',pane,'#{@pi_background_job_name}'),'user-owned pane title','adoption changed pane-local metadata without launch ownership');
  const store=new JobStore(state,runtime);const manager=new BackgroundJobManager(store,new TmuxBackend(store,tmux,process.execPath,runner));
  // A new parent has only the existing pane ID/socket, not any descriptor.
  const recovered=await manager.adoptPane({paneId:pane,socket,cwd:root,sessionId:'new-parent'});
  assert.equal(recovered.metadata.id,originalId,'restart registration duplicated the job');
  assert.equal(recovered.metadata.sessionId,'new-parent');
  assert.equal(await call('display-message','-p','-t',pane,'#{pane_pid}'),pid,'re-registration restarted the pane');
+ assert.equal(await call('display-message','-p','-t',pane,'#{@pi_background_job_name}'),'user-owned pane title','re-registration changed adopted pane metadata');
  assert.equal((await manager.adoptPane({paneId:pane,socket,cwd:root,sessionId:'new-parent'})).metadata.id,originalId);
  assert.match((await manager.output(originalId)).text,/existing-work/);
  assert.equal((await manager.wait(originalId,10)).timedOut,true);

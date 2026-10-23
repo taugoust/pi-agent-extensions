@@ -1,29 +1,12 @@
 { self, pkgs }:
 
 let
-  moduleResult = pkgs.lib.evalModules {
-    modules = [
-      {
-        options.home.packages = pkgs.lib.mkOption {
-          type = pkgs.lib.types.listOf pkgs.lib.types.package;
-          default = [ ];
-        };
-        options.home.file = pkgs.lib.mkOption {
-          type = pkgs.lib.types.attrsOf pkgs.lib.types.anything;
-          default = { };
-        };
-      }
-      self.homeManagerModules.default
-      {
-        programs.pi.enable = true;
-        programs.pi.package = null;
-        programs.pi.extensions.background-job.enable = true;
-      }
-    ];
-    specialArgs = { inherit pkgs; };
-  };
-  moduleFiles = moduleResult.config.home.file;
-  modulePackages = moduleResult.config.home.packages;
+  inherit (import ./module-test-harness.nix { inherit self pkgs; }) evaluate valid;
+  moduleConfig = evaluate { extensions.background-job.enable = true; };
+  moduleFiles =
+    assert valid moduleConfig;
+    moduleConfig.home.file;
+  modulePackages = moduleConfig.home.packages;
   package = self.packages.${pkgs.stdenv.hostPlatform.system}.extensions;
 in
 pkgs.runCommand "background-job-extension-check"
@@ -51,6 +34,7 @@ pkgs.runCommand "background-job-extension-check"
     cp ${self}/shared/task-presentation.ts "$srcdir/shared/task-presentation.ts"
     cp ${self}/shared/watch-menu.ts "$srcdir/shared/watch-menu.ts"
     cp ${self}/shared/quiet-state.ts "$srcdir/shared/quiet-state.ts"
+    cp ${self}/shared/extension-defaults.ts ${self}/shared/extension-config-manifest.json "$srcdir/shared/"
     cp ${self}/shared/quiet-state.test.ts "$srcdir/shared/quiet-state.test.ts"
     printf '%s\n' '{"type":"module"}' > "$srcdir/package.json"
 
@@ -72,8 +56,12 @@ pkgs.runCommand "background-job-extension-check"
       "$srcdir/shared/agentsh-mode.ts" \
       "$srcdir/shared/quiet-state.test.ts"
     cp "$srcdir/background-job/"{test.mjs,retention.test.mjs,retention-races.test.mjs,runner.mjs,watch-runner.mjs,watch.test.mjs,pane.test.mjs,startup.test.mjs,completion.test.mjs} "$outdir/background-job/"
+    cp "$srcdir/shared/extension-config-manifest.json" "$outdir/shared/"
+    substituteInPlace "$outdir/shared/extension-defaults.js" \
+      --replace-fail 'from "./extension-config-manifest.json"' 'from "./extension-config-manifest.json" with { type: "json" }'
 
     export HOME="$workdir/home"
+    export PI_CODING_AGENT_DIR="$workdir/agent"
     export TMPDIR="$workdir/tmp"
     export TEST_TMUX=${pkgs.tmux}/bin/tmux
     export TEST_RUNNER=${package}/background-job/runner.mjs
@@ -82,6 +70,9 @@ pkgs.runCommand "background-job-extension-check"
     node "$outdir/background-job/watch.test.mjs"
     node "$outdir/background-job/pane.test.mjs"
 
+    mkdir -p "$outdir/node_modules/@earendil-works/pi-coding-agent"
+    printf '%s\n' '{"type":"module","main":"index.js"}' > "$outdir/node_modules/@earendil-works/pi-coding-agent/package.json"
+    printf '%s\n' 'export const getAgentDir = () => process.env.PI_CODING_AGENT_DIR;' > "$outdir/node_modules/@earendil-works/pi-coding-agent/index.js"
     mkdir -p "$outdir/node_modules/@sinclair/typebox" \
       "$outdir/node_modules/@mariozechner/pi-coding-agent" \
       "$outdir/node_modules/@mariozechner/pi-tui"
