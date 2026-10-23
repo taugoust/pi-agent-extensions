@@ -30,7 +30,7 @@ export async function createAccountControlsSnapshot(
 	const data = await store.readAsync(
 		AbortSignal.any([owner.signal, readTimeout]),
 	);
-	const state = data.providers.openai;
+	const state = data.providers[providerId];
 	const accounts: SafeAccountLabel[] = Object.entries(
 		state?.accounts ?? {},
 	).map(([name, credential]) => ({
@@ -42,12 +42,12 @@ export async function createAccountControlsSnapshot(
 		),
 		authKind: credential.type === "api_key" ? "api-key" : "oauth",
 	}));
-	const currentAccountId = owner.selections.openai ?? null;
+	const currentAccountId = owner.selections[providerId] ?? null;
 	const selected = currentAccountId
 		? state?.accounts[currentAccountId]
 		: undefined;
-	const result = owner.results.get("openai");
-	const pending = owner.pendingSyncTasks.has("openai");
+	const result = owner.results.get(providerId);
+	const pending = owner.pendingSyncTasks.has(providerId);
 	const busy =
 		!owner.context.isIdle() ||
 		owner.switchReserved > 0 ||
@@ -56,7 +56,7 @@ export async function createAccountControlsSnapshot(
 	const bindingMatchesStore = Boolean(
 		currentAccountId &&
 			selected &&
-			owner.appliedIdentities.get("openai") ===
+			owner.appliedIdentities.get(providerId) ===
 				`${currentAccountId}:${selected.type === "api_key" ? selected.key : selected.access}`,
 	);
 	// A deleted/replaced named profile must never appear as the built-in login.
@@ -74,7 +74,7 @@ export async function createAccountControlsSnapshot(
 					selected,
 					result?.status === "active",
 				);
-	const snapshotRevision = owner.selectionRevisions.get("openai") ?? 0;
+	const snapshotRevision = owner.selectionRevisions.get(providerId) ?? 0;
 	let nativeRegistrationKey: string | undefined;
 	if (
 		currentAccountId !== null &&
@@ -146,7 +146,7 @@ export async function createAccountControlsSnapshot(
 			result?.status === "active" &&
 			!pending &&
 			selected?.type === "oauth"
-				? verifiedAccountKey(selected)
+				? verifiedAccountKey(selected, providerId)
 				: {}),
 			...(nativeRegistrationKey ? { nativeRegistrationKey } : {}),
 		},
@@ -316,7 +316,7 @@ function defaultNativeKey(ctx: ExtensionContext): string | undefined {
 }
 
 /** Publish only a noncredential identity for the exact locally applied named grant. */
-function verifiedAccountKey(credential: StoredCredential): {
+function verifiedAccountKey(credential: StoredCredential, providerId: "openai" | "openai-codex" = "openai"): {
 	accountKey?: string;
 } {
 	try {
@@ -344,7 +344,7 @@ function verifiedAccountKey(credential: StoredCredential): {
 		return accountId && valid(subject)
 			? {
 					accountKey: createHash("sha256")
-						.update(JSON.stringify(["openai", accountId, subject]))
+						.update(JSON.stringify([providerId, accountId, subject]))
 						.digest("hex"),
 				}
 			: {};
