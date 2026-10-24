@@ -28,7 +28,7 @@ pkgs.runCommand "background-job-extension-check"
     srcdir="$workdir/src"
     outdir="$workdir/out"
     mkdir -p "$srcdir/background-job" "$srcdir/shared" "$outdir/background-job" "$workdir/home" "$workdir/tmp"
-    cp ${self}/background-job/{index.ts,manager.ts,retention.ts,retention.test.mjs,retention-races.test.mjs,store.ts,tmux.ts,types.ts,test.mjs,runner.mjs,watch.ts,watch-runner.mjs,watch.test.mjs,external-pane.ts,pane.test.mjs,runtime-path.ts,startup.test.mjs,completion.test.mjs} "$srcdir/background-job/"
+    cp ${self}/background-job/{index.ts,manager.ts,retention.ts,retention.test.mjs,retention-races.test.mjs,store.ts,tmux.ts,types.ts,test.mjs,streams.test.mjs,runner.mjs,watch.ts,watch-runner.mjs,watch.test.mjs,external-pane.ts,pane.test.mjs,runtime-path.ts,startup.test.mjs,completion.test.mjs} "$srcdir/background-job/"
     cp ${self}/shared/agentsh-mode.ts "$srcdir/shared/agentsh-mode.ts"
     cp ${self}/shared/background-job.ts ${self}/shared/harness-readonly.ts "$srcdir/shared/"
     cp ${self}/shared/task-presentation.ts "$srcdir/shared/task-presentation.ts"
@@ -55,7 +55,7 @@ pkgs.runCommand "background-job-extension-check"
       "$srcdir/background-job/types.ts" \
       "$srcdir/shared/agentsh-mode.ts" \
       "$srcdir/shared/quiet-state.test.ts"
-    cp "$srcdir/background-job/"{test.mjs,retention.test.mjs,retention-races.test.mjs,runner.mjs,watch-runner.mjs,watch.test.mjs,pane.test.mjs,startup.test.mjs,completion.test.mjs} "$outdir/background-job/"
+    cp "$srcdir/background-job/"{test.mjs,streams.test.mjs,retention.test.mjs,retention-races.test.mjs,runner.mjs,watch-runner.mjs,watch.test.mjs,pane.test.mjs,startup.test.mjs,completion.test.mjs} "$outdir/background-job/"
     cp "$srcdir/shared/extension-config-manifest.json" "$outdir/shared/"
     substituteInPlace "$outdir/shared/extension-defaults.js" \
       --replace-fail 'from "./extension-config-manifest.json"' 'from "./extension-config-manifest.json" with { type: "json" }'
@@ -65,6 +65,8 @@ pkgs.runCommand "background-job-extension-check"
     export TMPDIR="$workdir/tmp"
     export TEST_TMUX=${pkgs.tmux}/bin/tmux
     export TEST_RUNNER=${package}/background-job/runner.mjs
+    substituteInPlace "$outdir/background-job/streams.test.mjs" --replace-fail "./store.ts" "./store.js" --replace-fail "./manager.ts" "./manager.js"
+    node "$outdir/background-job/streams.test.mjs"
     node "$outdir/background-job/startup.test.mjs"
     node "$outdir/background-job/test.mjs"
     node "$outdir/background-job/watch.test.mjs"

@@ -57,6 +57,8 @@ export type TuiWorkerLaunch = {
   launcher: string;
   launchMode: "guard-only" | "none";
   model?: string;
+  /** Captured from the owning runtime, never accepted from model tool arguments. */
+  routingEnvironment?: Record<string, string>;
   systemPrompt?: string;
   acceptance?: string[];
   resumeSessionFile?: string;
@@ -176,10 +178,13 @@ export class TuiWorkerTmux {
     // parent's relay capability or accidentally inherit full supervisor markers.
     const remove = ["AGENTSH_PERMISSION_GATE_SOCKET", "PI_SUBAGENT_PERMISSION_SOCKET", "PI_SUBAGENT_PERMISSION_TOKEN", "PI_SUBAGENT_OUTCOME_PATH",
       "AGENTSH_SESSION_SUPERVISOR", "AGENTSH_CHILD_CAPABILITY", "AGENTSH_APPROVAL_UI_SOCKET",
-      "PI_AGENTSH_ENABLE", "PI_AGENTSH_MOCK_SUPERVISOR", "PI_SUPERVISED", "PI_AUTO", "PI_AGENTSH_REMOTE", "PI_AGENTSH_READ_MODE"];
+      "PI_AGENTSH_ENABLE", "PI_AGENTSH_MOCK_SUPERVISOR", "PI_SUPERVISED", "PI_AUTO", "PI_AGENTSH_REMOTE", "PI_AGENTSH_READ_MODE", "PI_SESSION_ROUTING_FILE", "PI_SESSION_ROUTING_OWNER_SESSION"];
+    const routing = input.routingEnvironment ?? {};
+    if (Object.keys(routing).some(key => !["PI_SESSION_ROUTING_FILE", "PI_SESSION_ROUTING_OWNER_SESSION"].includes(key))) throw new Error("Invalid private routing environment");
     const identityEnv: Record<string, string> = {
       // Use the caller's config/defaults, not the tmux server's stale environment.
       PI_CODING_AGENT_DIR: getAgentDir(),
+      ...routing,
       [TUI_WORKER_MANIFEST_ENV]: manifestPath,
       PI_TUI_WORKER_LAUNCH_MODE: input.launchMode,
       PI_TUI_WORKER_LAUNCHER: launcher,

@@ -1,4 +1,5 @@
 import { randomUUID } from "node:crypto";
+import { bindSessionModelRequest, type RoutingProfile } from "../../shared/session-routing.ts";
 import type {
   Api,
   AssistantMessage,
@@ -143,6 +144,7 @@ export interface CompleteSideQuestionOptions {
   signal?: AbortSignal;
   completeSimple: CompleteSimpleFunction;
   sessionId?: string;
+  routingProfile?: RoutingProfile;
 }
 
 export async function completeSideQuestion({
@@ -154,9 +156,10 @@ export async function completeSideQuestion({
   signal,
   completeSimple,
   sessionId,
+  routingProfile,
 }: CompleteSideQuestionOptions): Promise<AssistantMessage> {
   return completeSimple(
-    model,
+    routingProfile ? bindSessionModelRequest(model, routingProfile) : model,
     {
       systemPrompt: SYSTEM_PROMPT,
       messages: [createUserMessage(buildUserPrompt(question, conversationContext))],

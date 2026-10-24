@@ -466,6 +466,7 @@ async function agentSHIdentityCheck() {
   const sessionId = "background-child-identity-session";
   const pi = createPi();
   const ctx = {
+    model: { provider: "fixture-provider", id: "parent-main" },
     cwd: root,
     mode: "rpc",
     hasUI: false,
@@ -476,15 +477,17 @@ async function agentSHIdentityCheck() {
       getSessionFile: () => path.join(agentDir, "sessions", "session.jsonl"),
       getBranch: () => [],
     },
-    modelRegistry: { getAll: () => [] },
+    modelRegistry: { getAll: () => ["gpt-6-luna", "configured-default"].map(id => ({ provider: "fixture-provider", id, api: "fixture" })), find: (provider: string, id: string) => ({ provider, id, api: "fixture" }) },
   };
   let releaseAdapter!: () => void;
+  let adapterStarted!: () => void;
+  const adapterReady = new Promise<void>(resolve => { adapterStarted = resolve; });
   const previousBridge = (globalThis as any).__AGENTSH_PI__;
   (globalThis as any).__AGENTSH_PI__ = {
     getSupervisorState: () => ({ configured: true, active: true }),
     subagentAdapter: {
       async execute(_toolCallId: string, params: any) {
-        await new Promise<void>((resolve) => { releaseAdapter = resolve; });
+        await new Promise<void>((resolve) => { releaseAdapter = resolve; adapterStarted(); });
         return {
           content: [{ type: "text", text: "parallel preview" }],
           details: {
@@ -519,8 +522,10 @@ async function agentSHIdentityCheck() {
     assert.match(secondChildId, /^subagent-child-[0-9a-f]{24}$/);
     assert.notEqual(firstChildId, secondChildId);
 
-    const waitAll = tool.execute("identity-wait-all", { operation: "wait_all", wait_ms: 1000 }, undefined, undefined, ctx);
-    await new Promise((resolve) => setImmediate(resolve));
+    const waitAll = tool.execute("identity-wait-all", { operation: "wait_all", wait_ms: 5000 }, undefined, undefined, ctx);
+    let readyTimer: ReturnType<typeof setTimeout> | undefined;
+    try { await Promise.race([adapterReady, new Promise<void>((_, reject) => { readyTimer = setTimeout(() => reject(new Error("Background adapter never started")), 4000); })]); }
+    finally { if (readyTimer) clearTimeout(readyTimer); }
     releaseAdapter();
     const waited = await waitAll;
     assert.equal(waited.details.groups.length, 1);

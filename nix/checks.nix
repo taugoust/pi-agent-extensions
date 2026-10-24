@@ -19,6 +19,7 @@ in
 
   fetch = import ./fetch-check.nix { inherit self pkgs; };
   http-transport = import ./http-transport-check.nix { inherit self pkgs; };
+  session-routing = import ./session-routing-check.nix { inherit self pkgs; };
 
   ssh =
     pkgs.runCommand "ssh-extension-check"
@@ -2043,6 +2044,11 @@ in
         cp -r ${self}/sandbox "$srcdir/"
         cp -r ${self}/subagent "$srcdir/"
         cp -r ${self}/shared "$srcdir/"
+        cp -r ${self}/workflows "$srcdir/"
+        substituteInPlace "$srcdir/shared/extension-defaults.ts" \
+          --replace-fail 'from "./extension-config-manifest.json";' 'from "./extension-config-manifest.json" with { type: "json" };'
+        mkdir -p "$outdir/node_modules/@earendil-works"
+        ln -s ../@mariozechner/pi-coding-agent "$outdir/node_modules/@earendil-works/pi-coding-agent"
         printf '%s\n' '{"type":"module"}' > "$srcdir/package.json"
 
         mkdir -p "$outdir/node_modules/@sinclair/typebox"
@@ -2077,6 +2083,8 @@ in
           Optional(schema) {
             return { ...schema, optional: true };
           },
+          Literal(value) { return { const: value, type: typeof value }; },
+          Union(schemas, options = {}) { return { anyOf: schemas, ...options }; },
         };
         EOF
 
@@ -2214,6 +2222,8 @@ in
           --target es2022 \
           --rootDir "$srcdir" \
           --outDir "$outdir" \
+          --rewriteRelativeImportExtensions \
+          --resolveJsonModule \
           "$srcdir/sandbox/index.ts" \
           "$srcdir/subagent/index.ts" \
           "$srcdir/subagent/backend.ts" \
@@ -2318,7 +2328,7 @@ in
           };
         }
 
-        function createContext({ choices = [], hasUI = true, customActions, model, cwd = process.cwd() } = {}) {
+        function createContext({ choices = [], hasUI = true, customActions, model = { provider: "fixture-provider", id: "parent-main" }, cwd = process.cwd() } = {}) {
           const statuses = [];
           const notifications = [];
           const selectCalls = [];
@@ -2371,6 +2381,10 @@ in
             mode: "tui",
             hasUI,
             model,
+            modelRegistry: {
+              getAll: () => [model?.id, "configured-default", "gpt-6-luna", "gemini-pro", "claude-sonnet", "model"].filter(Boolean).map(id => ({ provider: model.provider, id, api: "fixture" })),
+              find: (provider, id) => provider === model.provider ? { provider, id, api: "fixture" } : undefined,
+            },
             statuses,
             notifications,
             selectCalls,
@@ -3735,15 +3749,23 @@ in
             await supervisor.close();
           }
 
-          // Configured subagent defaults apply consistently across backends; explicit child models win.
+          // Role models are independent; physical provider/account follow the owning session.
           {
             clearAgentSHEnv();
+            const routing = await import(pathToFileURL(path.join(compiledRoot, "shared", "session-routing.js")).href);
+            const boundSnapshots = [];
             const supervisor = await withRestSupervisor(async (request) => {
               if (request.method === "GET" && request.url === "/api/v1/sessions/sess-subagent-model") {
                 return { id: "sess-subagent-model", session_id: "sess-subagent-model", workspace: "/workspace", worktree: "/workspace" };
               }
               if (request.method === "GET" && request.url === "/api/v1/approvals") return [];
               if (request.method === "POST" && request.url === "/api/v1/sessions/sess-subagent-model/tools/spawn_subagent") {
+                if (request.body.request_id?.startsWith("pi-route-")) {
+                  const env = { AGENTSH_SUBAGENT_ID: "fixture-child", AGENTSH_SUBAGENT_REQUEST_ID: request.body.request_id, PI_CODING_AGENT_DIR: agentConfigDir };
+                  const child = { sessionManager: { getSessionId: () => "fixture-child-session" } };
+                  boundSnapshots.push(routing.getSessionRoutingProfile(child, env));
+                  assert(!JSON.stringify(request.body).includes("Work") && !JSON.stringify(request.body).includes("session-routing-v1"), "private routing/account metadata leaked into AgentSH tool parameters");
+                }
                 return {
                   event: "done",
                   ok: true,
@@ -3781,10 +3803,10 @@ in
 
             const spawnRequests = supervisor.requests.filter((request) => request.method === "POST" && request.url.endsWith("/tools/spawn_subagent"));
             assert(spawnRequests.length === 8, "unexpected subagent request count");
-            assert(spawnRequests[0].body.model === "fixture-provider/configured-default:medium", "single child ignored configured subagent defaults");
-            assert(spawnRequests[1].body.model === "google/gemini-pro:medium", "explicit child model was overwritten");
-            assert(spawnRequests[2].body.tasks[0].model === "fixture-provider/configured-default:medium", "parallel child ignored configured subagent defaults");
-            assert(spawnRequests[2].body.tasks[1].model === "anthropic/claude-sonnet:medium", "parallel explicit model was overwritten");
+            assert(spawnRequests[0].body.model === "openai-codex/configured-default:medium", "single child did not inherit active provider with configured role model");
+            assert(spawnRequests[1].body.model === "openai-codex/gemini-pro:medium", "explicit role model bypassed owning provider");
+            assert(spawnRequests[2].body.tasks[0].model === "openai-codex/configured-default:medium", "parallel child did not inherit provider");
+            assert(spawnRequests[2].body.tasks[1].model === "openai-codex/claude-sonnet:medium", "parallel explicit role model bypassed owning provider");
             assert(spawnRequests[3].body.cwd === "/workspace/project/rtl/package", "single relative cwd was not resolved from the parent Pi cwd");
             assert(spawnRequests[4].body.cwd === "/workspace/project", "parallel request omitted the parent Pi cwd");
             assert(spawnRequests[4].body.tasks[0].cwd === undefined, "parallel child without cwd was rewritten unnecessarily");
@@ -3795,6 +3817,15 @@ in
             assert(spawnRequests[7].body.timeout_ms === 1234, "operator-enabled subagent timeout was not forwarded");
             assert(spawnRequests[0].body.result_artifact_threshold_bytes === 4096, "single subagent artifact threshold did not match parent inline budget");
             assert(spawnRequests[2].body.result_artifact_threshold_bytes === 2048, "parallel subagent artifact threshold did not match per-child capsule budget");
+            const ownerSession = ctx.sessionManager.getSessionId();
+            const routingFile = routing.routingProfilePath(agentConfigDir, ownerSession);
+            const profile = { version: 1, ownerSessionId: ownerSession, providerId: "openai-codex", accountId: "Work", revision: 0 };
+            routing.writeSessionRoutingProfile(routingFile, profile);
+            const unbind = routing.registerSessionRouting(ctx, { file: routingFile, getProfile: () => profile });
+            try {
+              await subagentTool.execute("bound-routing", { task: "ok", acceptance: ["Private owning-session binding is available at helper startup"] }, undefined, undefined, ctx);
+              assert(boundSnapshots.length === 1 && boundSnapshots[0].providerId === "openai-codex" && boundSnapshots[0].accountId === "Work", "AgentSH helper did not inherit the owning provider/account");
+            } finally { unbind(); }
             await shutdownSession(timeoutOptInPi);
             await shutdownSession(pi);
             await supervisor.close();

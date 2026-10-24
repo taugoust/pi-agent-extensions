@@ -13,9 +13,11 @@ const verificationModule = await createJiti(import.meta.url).import("../openai-a
 const oauthModule = await createJiti(import.meta.url).import("../openai-accounts/oauth.ts");
 const usageModule = await createJiti(import.meta.url).import("../openai-usage/index.ts");
 const compactionModule = await createJiti(import.meta.url).import("../idle-context-warning/compaction.ts");
+const routingModule = await createJiti(import.meta.url).import("../shared/session-routing.ts");
 const guardModule = await createJiti(import.meta.url).import("../idle-context-warning/guard.ts");
 const { AccountStore, InMemoryAccountStorageBackend } = accountModule;
 const { createBtwService } = await createJiti(import.meta.url).import("../btw/service.ts");
+const { SESSION_ROUTING_FILE_ENV, SESSION_ROUTING_OWNER_ENV, prepareSessionRoutingRequest, resolveSessionProvider, registerSessionModelReference, bindSessionModelRequest } = routingModule;
 
 function jwtToken(accountId, subject) {
   const encode = (value) => Buffer.from(JSON.stringify(value)).toString("base64url");
@@ -143,6 +145,12 @@ async function fixture(options = {}) {
     streamSimple: stream,
   });
   const models = registry.getProvider("openai").getModels();
+  const codexRegistered = registry.getRegisteredProviderConfig("openai-codex");
+  const codexModels = registry.getProvider("openai-codex").getModels();
+  registry.registerProvider("openai-codex", {
+    ...codexRegistered,
+    models: options.noCodexRoleModel ? codexModels : [...codexModels, { ...models[0], provider: "openai-codex", api: "openai-codex-responses", baseUrl: "https://chatgpt.com/backend-api" }],
+  });
   const fakeNativeOAuth = {
     name: "Fixture native OAuth",
     async login() { throw new Error("login is not invoked by tests"); },
@@ -161,7 +169,7 @@ async function fixture(options = {}) {
   if (options.customNativeProvider) registry.registerProvider(fakeNativeProvider);
   const nativeBeforeExtension = registry.getRegisteredNativeProvider("openai");
   const configBeforeExtension = registry.getRegisteredProviderConfig("openai");
-  const store = new AccountStore(new InMemoryAccountStorageBackend());
+  const store = options.store ?? new AccountStore(new InMemoryAccountStorageBackend());
   await store.updateProvider("openai", (state) => ({
     ...state,
     accounts: Object.assign(Object.create(null), {
@@ -187,10 +195,11 @@ async function fixture(options = {}) {
     registerProvider(name, config) { registry.registerProvider(name, config); },
     registerVirtualModel(definition) { registry.registerVirtualModel(definition); },
     unregisterProvider(name) { registry.unregisterProvider(name); },
+    unregisterVirtualModel(provider, id) { registry.unregisterVirtualModel(provider, id); },
     appendEntry() {},
   };
   const entries = [];
-  let sessionId = "session-one";
+  let sessionId = options.sessionId ?? "session-one";
   let idle = true;
   let branch = [{ type: "message", id: "prior", parentId: null, timestamp: new Date().toISOString(), message: {
     role: "assistant", model: "gpt-6-astra", provider: "openai", timestamp: Date.now(), stopReason: "stop", content: [{ type: "text", text: "prior" }],
@@ -229,6 +238,11 @@ async function fixture(options = {}) {
   const fire = async (event, value = {}) => {
     for (const handler of handlers.get(event) ?? []) await handler({ type: event, ...value }, ctx);
   };
+  pi.setModel = async (model) => { ctx.model = model; await fire("model_select", { model }); return true; };
+  if (options.guardBootstrap) {
+    ctx.model = { provider: "idle-guard", id: "astra", api: "pi-virtual" };
+    registerSessionModelReference(ctx, () => ({ provider: "openai", id: "gpt-6-astra" }));
+  }
   let startupError;
   if (options.startSession !== false) {
     try {
@@ -240,7 +254,7 @@ async function fixture(options = {}) {
   assert.equal(service?.protocol, 1);
   const initial = startupError || options.startSession === false ? undefined : await service.getSnapshot({ sessionId });
   return {
-    root, runtime, registry, models, codexModel, codexDelegated, store, handlers, events, commands, notices, statuses, pi, ctx, previousAgentDir,
+    root, runtime, registry, models, codexModel, codexDelegated, store, handlers, events, commands, notices, statuses, pi, ctx, previousAgentDir, entries,
     get sessionId() { return sessionId; }, set sessionId(value) { sessionId = value; },
     get idle() { return idle; }, set idle(value) { idle = value; },
     get branch() { return branch; }, set branch(value) { branch = value; },
@@ -262,9 +276,9 @@ async function fixture(options = {}) {
   };
 }
 
-async function switchRequest(f, accountId, requestId, revision = f.initial.selectionRevision, providerId) {
+async function switchRequest(f, accountId, requestId, revision = f.initial.selectionRevision, providerId, expectedRoutingRevision) {
   return f.service.switchAccount({
-    protocol: 1, ...(providerId ? { providerId } : {}), requestId, expectedSessionId: f.sessionId, expectedServiceEpoch: f.initial.serviceEpoch,
+    protocol: 1, ...(providerId ? { providerId } : {}), ...(expectedRoutingRevision !== undefined ? { expectedRoutingRevision } : {}), requestId, expectedSessionId: f.sessionId, expectedServiceEpoch: f.initial.serviceEpoch,
     expectedSelectionRevision: revision, accountId,
   });
 }
@@ -327,6 +341,209 @@ test("Pi SDK gates normal OpenAI dispatch and cheap Luna compaction with the nam
   } finally { await dispose(f); }
 });
 
+test("stale Accounts routing callbacks fail closed before unregister on session replacement", async () => {
+  const f = await fixture();
+  try {
+    await f.fire("model_select", { model: f.models[0] });
+    f.sessionId = "replacement-session";
+    assert.throws(() => routingModule.getSessionRoutingProfile(f.ctx), /Accounts routing owner is stale/);
+    await f.fire("session_shutdown");
+    assert.equal(routingModule.getSessionRoutingProfile(f.ctx), undefined, "shutdown unregisters Accounts ownership and retains no stale profile");
+  } finally { await dispose(f); }
+});
+
+test("failed routing history publication revokes descriptor and blocks main/helper routing", async () => {
+  const f = await fixture();
+  try {
+    const append = f.ctx.sessionManager.appendCustomEntry;
+    f.ctx.sessionManager.appendCustomEntry = function (customType, data) {
+      if (customType === "pi-session-routing-profile") throw new Error("fixture history write failure");
+      return append.call(this, customType, data);
+    };
+    const switched = await switchRequest(f, "alpha", "routing-publication-fails");
+    assert.equal(switched.ok, false);
+    assert.equal(switched.reason, "activation-failed");
+    assert.throws(() => routingModule.readSessionRoutingProfile(routingModule.routingProfilePath(f.root, f.sessionId), f.sessionId));
+    assert.equal((await f.service.getSnapshot({ sessionId: f.sessionId })).sessionRouting, undefined);
+    assert.throws(() => resolveSessionProvider(f.ctx), /routing is unavailable/);
+    const failedStream = await f.registry.stream(f.registry.find("openai", "gpt-6-astra"), [], {}).result();
+    assert.equal(failedStream.stopReason, "error");
+  } finally { await dispose(f); }
+});
+
+test("initial guarded alias bootstraps routing from the guard-registered physical model reference", async () => {
+  const f = await fixture({ guardBootstrap: true });
+  try {
+    assert.equal(f.ctx.model.provider, "idle-guard", "bootstrap must not replace the guard alias");
+    const profile = routingModule.getSessionRoutingProfile(f.ctx);
+    assert.equal(profile.providerId, "openai");
+    assert.equal(profile.accountId, null);
+    assert.equal(profile.ownerSessionId, f.sessionId);
+  } finally { await dispose(f); }
+});
+
+test("physical model selection publishes credential-free session routing and account switches revise it", async () => {
+  const f = await fixture();
+  try {
+    await f.fire("model_select", { model: f.models[0] });
+    const profile = routingModule.getSessionRoutingProfile(f.ctx);
+    assert.equal(profile.providerId, "openai");
+    assert.equal(profile.accountId, null);
+    assert.equal(profile.ownerSessionId, f.sessionId);
+    const file = routingModule.routingProfilePath(f.root, f.sessionId);
+    const persisted = routingModule.readSessionRoutingProfile(file, f.sessionId);
+    assert.deepEqual(persisted, profile);
+    assert.doesNotMatch(JSON.stringify(persisted), /fixture-secret/);
+    const changed = await switchRequest(f, "alpha", "routing-account-alpha");
+    assert.equal(changed.ok, true);
+    const updated = routingModule.getSessionRoutingProfile(f.ctx);
+    assert.equal(updated.accountId, "alpha");
+    assert.ok(updated.revision > profile.revision);
+    const snapshot = await f.service.getSnapshot({ sessionId: f.sessionId, providerId: "openai" });
+    assert.deepEqual(snapshot.sessionRouting, { version: 1, providerId: "openai", revision: updated.revision });
+    assert.equal(JSON.stringify(snapshot.sessionRouting).includes("alpha"), false);
+    assert.equal(f.entries.some((entry) => entry.customType === "pi-session-routing-profile"), true);
+  } finally { await dispose(f); }
+});
+
+test("retained helper request preparation inherits the parent's current named account without credential IPC", async () => {
+  const parent = await fixture();
+  let child, pause;
+  const previousFile = process.env[SESSION_ROUTING_FILE_ENV];
+  const previousOwner = process.env[SESSION_ROUTING_OWNER_ENV];
+  try {
+    await parent.fire("model_select", { model: parent.models[0] });
+    assert.equal((await switchRequest(parent, "alpha", "parent-route-alpha")).ok, true);
+    process.env[SESSION_ROUTING_FILE_ENV] = routingModule.routingProfilePath(parent.root, parent.sessionId);
+    process.env[SESSION_ROUTING_OWNER_ENV] = parent.sessionId;
+    child = await fixture({ store: parent.store, sessionId: "retained-helper-session" });
+    assert.equal(child.ctx.model.provider, "session-follow");
+    assert.equal(child.ctx.model.id, parent.models[0].id);
+    const profile = await prepareSessionRoutingRequest(child.ctx);
+    assert.equal(profile.providerId, "openai");
+    assert.equal(profile.accountId, "alpha");
+    assert.equal(await child.registry.getApiKeyForProvider("openai"), "fixture-secret-alpha");
+    assert.doesNotMatch(JSON.stringify(profile), /fixture-secret/);
+    assert.equal(JSON.stringify(profile).includes("Authorization"), false);
+    const childSnapshot = await child.service.getSnapshot({ sessionId: child.sessionId });
+    assert.equal(childSnapshot.busy, true);
+    assert.equal(childSnapshot.canSwitch, false);
+    const rejected = await switchRequest(child, "beta", "helper-must-switch-at-owner", childSnapshot.selectionRevision);
+    assert.equal(rejected.ok, false);
+    assert.equal(rejected.reason, "busy");
+    assert.equal((await prepareSessionRoutingRequest(child.ctx)).accountId, "alpha");
+    const childService = globalThis.__paeAccountControlsV1;
+    globalThis.__paeAccountControlsV1 = parent.service;
+    const boundAlphaModel = bindSessionModelRequest(child.registry.find("openai", "gpt-6-astra"), profile);
+    assert.doesNotMatch(JSON.stringify(boundAlphaModel), /fixture-secret/);
+    assert.equal((await switchRequest(parent, "beta", "parent-route-beta", 1)).ok, true);
+    globalThis.__paeAccountControlsV1 = childService;
+    const refreshedSnapshot = await child.service.getSnapshot({ sessionId: child.sessionId, providerId: "openai" });
+    assert.equal(refreshedSnapshot.currentAccountId, "beta", "idle helper snapshots refresh inherited account state");
+    assert.ok(refreshedSnapshot.sessionRouting.revision > profile.revision);
+    const delegatedBeforeStale = child.delegated.length;
+    const stale = await child.registry.stream(boundAlphaModel, [], {}).result();
+    assert.equal(stale.stopReason, "error");
+    assert.equal(child.delegated.length, delegatedBeforeStale, "stale bound account is rejected before provider dispatch");
+    const nextProfile = await prepareSessionRoutingRequest(child.ctx);
+    assert.equal(nextProfile.accountId, "beta");
+    assert.ok(nextProfile.revision > profile.revision);
+    assert.equal(await child.registry.getApiKeyForProvider("openai"), "fixture-secret-beta");
+    const boundBetaModel = bindSessionModelRequest(child.registry.find("openai", "gpt-6-astra"), nextProfile);
+    const finalAuthPause = child.pauseFinalAuth();
+    const delegatedBeforeFinalCheck = child.delegated.length;
+    const staleAtPayload = child.registry.stream(boundBetaModel, [], {}).result();
+    await finalAuthPause.started;
+    const childServiceForFinalCheck = globalThis.__paeAccountControlsV1;
+    globalThis.__paeAccountControlsV1 = parent.service;
+    assert.equal((await switchRequest(parent, "alpha", "parent-route-alpha-at-payload", 2)).ok, true);
+    globalThis.__paeAccountControlsV1 = childServiceForFinalCheck;
+    finalAuthPause.release();
+    assert.equal((await staleAtPayload).stopReason, "error");
+    assert.equal(child.delegated.length, delegatedBeforeFinalCheck, "onPayload rejects changed route before provider dispatch");
+    const heldProfile = await prepareSessionRoutingRequest(child.ctx);
+    const heldModel = bindSessionModelRequest(child.registry.find("openai", "gpt-6-astra"), heldProfile);
+    pause = child.pauseProvider();
+    const heldStream = child.registry.stream(heldModel, [], {}).result();
+    await pause.started;
+    const childServiceForHeldStream = globalThis.__paeAccountControlsV1;
+    globalThis.__paeAccountControlsV1 = parent.service;
+    assert.equal((await switchRequest(parent, "beta", "parent-route-beta-again", 3)).ok, true);
+    globalThis.__paeAccountControlsV1 = childServiceForHeldStream;
+    pause.release();
+    const heldResult = await heldStream;
+    assert.equal(heldResult.stopReason, "stop");
+    assert.equal(child.delegated.at(-1).apiKey, "fixture-secret-alpha", "already-dispatched helper request retains captured credentials");
+    pause = undefined;
+    parent.ctx.model = parent.codexModel;
+    await parent.fire("model_select", { model: parent.codexModel });
+    const codexProfile = await prepareSessionRoutingRequest(child.ctx);
+    assert.equal(codexProfile.providerId, "openai-codex");
+    assert.equal(resolveSessionProvider(child.ctx), "openai-codex", "registered follower resolves from the consumed snapshot, not stale ctx.model");
+    const boundCodexDefault = bindSessionModelRequest(child.registry.find("openai-codex", parent.codexModel.id), codexProfile);
+    const parentServiceBeforeCodexSwitch = globalThis.__paeAccountControlsV1;
+    globalThis.__paeAccountControlsV1 = parent.service;
+    assert.equal((await switchRequest(parent, "Work", "parent-codex-work", 0, "openai-codex")).ok, true);
+    globalThis.__paeAccountControlsV1 = parentServiceBeforeCodexSwitch;
+    const codexCallsBeforeStale = child.codexDelegated.length;
+    const staleCodex = await child.registry.streamSimple(boundCodexDefault, [], {}).result();
+    assert.equal(staleCodex.stopReason, "error");
+    assert.equal(child.codexDelegated.length, codexCallsBeforeStale, "stale Codex account is rejected before provider dispatch");
+    const freshCodexProfile = await prepareSessionRoutingRequest(child.ctx);
+    assert.equal(freshCodexProfile.accountId, "Work");
+    const boundCodexWork = bindSessionModelRequest(child.registry.find("openai-codex", parent.codexModel.id), freshCodexProfile);
+    const freshCodex = await child.registry.streamSimple(boundCodexWork, [], {}).result();
+    assert.equal(freshCodex.stopReason, "stop");
+    assert.equal(child.codexDelegated.at(-1).apiKey, jwtToken("work-account", "work-subject"));
+  } finally {
+    if (previousFile === undefined) delete process.env[SESSION_ROUTING_FILE_ENV]; else process.env[SESSION_ROUTING_FILE_ENV] = previousFile;
+    if (previousOwner === undefined) delete process.env[SESSION_ROUTING_OWNER_ENV]; else process.env[SESSION_ROUTING_OWNER_ENV] = previousOwner;
+    if (child) await dispose(child);
+    await dispose(parent);
+  }
+});
+
+test("provider switch preflight leaves account and main model unchanged when same-role model is unavailable", async () => {
+  const f = await fixture({ noCodexRoleModel: true });
+  try {
+    await new Promise(resolve => setImmediate(resolve));
+    const rejected = await switchRequest(f, "Work", "no-matching-codex-role", 0, "openai-codex");
+    assert.equal(rejected.ok, false);
+    assert.equal(rejected.reason, "activation-failed");
+    assert.equal(rejected.snapshot.selectionRevision, 0);
+    assert.equal(f.ctx.model.provider, "openai");
+    assert.equal(routingModule.getSessionRoutingProfile(f.ctx).providerId, "openai");
+  } finally { await dispose(f); }
+});
+
+test("/accounts leaves selection unchanged when provider has no exact role model", async () => {
+  const f = await fixture({ noCodexRoleModel: true });
+  try {
+    const choices = ["OpenAI Codex", "Switch account", "Work", "Close"];
+    f.ctx.ui.select = async () => choices.shift();
+    await f.commands.get("accounts").handler("", f.ctx);
+    const snapshot = await f.service.getSnapshot({ sessionId: f.sessionId, providerId: "openai-codex" });
+    assert.equal(snapshot.selectionRevision, 0);
+    assert.equal(snapshot.currentAccountId, null);
+    assert.equal(f.ctx.model.provider, "openai");
+    assert.equal(routingModule.getSessionRoutingProfile(f.ctx).providerId, "openai");
+  } finally { await dispose(f); }
+});
+
+test("/accounts selection switches the main physical model provider while retaining its role model ID", async () => {
+  const f = await fixture();
+  try {
+    const roleModelId = f.ctx.model.id;
+    const choices = ["OpenAI Codex", "Switch account", "Work", "Close"];
+    f.ctx.ui.select = async () => choices.shift();
+    await f.commands.get("accounts").handler("", f.ctx);
+    assert.equal(f.ctx.model.provider, "openai-codex");
+    assert.equal(f.ctx.model.id, roleModelId);
+    assert.equal(routingModule.getSessionRoutingProfile(f.ctx).providerId, "openai-codex");
+    assert.equal(routingModule.getSessionRoutingProfile(f.ctx).accountId, "Work");
+  } finally { await dispose(f); }
+});
+
 test("independent Pi ModelRuntime instances do not share selected account credentials", async () => {
   const left = await fixture();
   let right;
@@ -343,6 +560,23 @@ test("independent Pi ModelRuntime instances do not share selected account creden
   }
 });
 
+test("optional route revision rejects stale routes and participates in switch idempotency", async () => {
+  const f = await fixture();
+  try {
+    const initialRouteRevision = routingModule.getSessionRoutingProfile(f.ctx).revision;
+    const selected = await switchRequest(f, "alpha", "route-epoch-request", 0, undefined, initialRouteRevision);
+    assert.equal(selected.ok, true);
+    assert.ok(selected.snapshot.sessionRouting.revision > initialRouteRevision);
+    const replayConflict = await switchRequest(f, "beta", "route-epoch-request", 0, undefined, initialRouteRevision + 1);
+    assert.equal(replayConflict.reason, "request-id-conflict");
+    const stale = await switchRequest(f, "beta", "stale-route-epoch", 1, undefined, initialRouteRevision);
+    assert.equal(stale.reason, "stale-selection");
+    assert.equal((await f.service.getSnapshot({ sessionId: f.sessionId })).currentAccountId, "alpha");
+    const legacy = await switchRequest(f, "beta", "legacy-no-route-epoch", 1);
+    assert.equal(legacy.ok, true, "omitting expectedRoutingRevision remains backward compatible");
+  } finally { await dispose(f); }
+});
+
 test("provider-scoped defaults and idempotency allow the same request ID across native providers", async () => {
   const f = await fixture();
   try {
@@ -354,6 +588,8 @@ test("provider-scoped defaults and idempotency allow the same request ID across 
     assert.equal(codex.snapshot.providerId, "openai-codex");
     assert.equal(codex.snapshot.currentAccountId, null);
     assert.equal(codex.snapshot.selectionRevision, 1);
+    assert.equal(f.ctx.model.provider, "openai-codex");
+    assert.equal(f.ctx.model.id, f.models[0].id);
     assert.equal(codex.snapshot.usage.status, "local-binding-confirmed", JSON.stringify({ auth: (await f.registry.getProviderAuth("openai-codex"))?.source, authStatus: f.registry.getProviderAuthStatus("openai-codex"), base: f.registry.getProvider("openai-codex")?.baseUrl, models: f.registry.getAll().filter(m => m.provider === "openai-codex").map(m => [m.api,m.baseUrl,!!m.headers]) }));
     assert.match(codex.snapshot.usage.accountKey, /^[a-f0-9]{64}$/);
     assert.equal(codex.snapshot.usage.nativeRegistrationVersion, undefined);

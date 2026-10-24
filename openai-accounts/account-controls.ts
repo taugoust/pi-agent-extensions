@@ -18,6 +18,7 @@ import type {
 } from "../shared/account-controls.js";
 import type { AccountStore, StoredCredential } from "./account-store.js";
 import type { SessionSelectionOwner } from "./accounts.js";
+import { isInheritedSessionRouting } from "../shared/session-routing.js";
 
 export async function createAccountControlsSnapshot(
 	owner: SessionSelectionOwner,
@@ -49,6 +50,7 @@ export async function createAccountControlsSnapshot(
 	const result = owner.results.get(providerId);
 	const pending = owner.pendingSyncTasks.has(providerId);
 	const busy =
+		isInheritedSessionRouting(owner.context) ||
 		!owner.context.isIdle() ||
 		owner.switchReserved > 0 ||
 		owner.openAIRequestCount > 0 ||

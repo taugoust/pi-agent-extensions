@@ -28,6 +28,21 @@ test("partial config and configured thinking are respected", t => {
   const settings = readSubagentModelSettings(fixture(t, { defaultThinkingLevel: "medium" }));
   assert.equal(resolveSubagentModel(undefined, settings), "openai/gpt-6-luna:medium");
 });
+test("owning session provider overrides legacy defaults and explicit provider prefixes", () => {
+  const settings = { defaultProvider: "openai", defaultModel: "gpt-6-luna", defaultThinkingLevel: "low" };
+  const ctx = { model: { provider: "openai-codex", id: "gpt-6-astra" }, sessionManager: { getSessionId: () => "provider-test" } };
+  assert.equal(resolveSubagentModel(undefined, settings, ctx), "openai-codex/gpt-6-luna:low");
+  assert.equal(resolveSubagentModel("openai/gpt-6-luna:high", settings, ctx), "openai-codex/gpt-6-luna:high");
+  ctx.model.provider = "openai";
+  assert.equal(resolveSubagentModel("openai-codex/gpt-6-luna:off", settings, ctx), "openai/gpt-6-luna:off");
+});
+
+test("missing role model under the active provider fails before CLI can choose a fallback", () => {
+  const settings = { defaultProvider: "openai", defaultModel: "only-openai", defaultThinkingLevel: "low" };
+  const ctx = { model: { provider: "openai-codex", id: "main" }, sessionManager: { getSessionId: () => "missing-role" }, modelRegistry: { find: () => undefined } };
+  assert.throws(() => resolveSubagentModel(undefined, settings, ctx), /Unavailable physical subagent model: openai-codex\/only-openai/);
+});
+
 test("invalid config fails visibly", t => {
   for (const value of [null, [], { defaultModel: "" }, { defaultModel: 1 }, { defaultThinkingLevel: "invalid" }]) {
     assert.throws(() => readSubagentModelSettings(fixture(t, value)), /subagent.json/);

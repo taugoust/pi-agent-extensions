@@ -154,8 +154,9 @@ function recordText(record: JobRecord): string {
   ].join("\n");
 }
 
-function publicDetails(record: JobRecord): Record<string, unknown> {
+function publicDetails(record: JobRecord, streams?: { stdout: string; stderr: string; available: boolean; stdout_truncated?: true; stderr_truncated?: true }): Record<string, unknown> {
   return {
+    ...(streams ? { streams: streams.available ? { available: true, stdout: streams.stdout, stderr: streams.stderr, ...(streams.stdout_truncated ? { stdout_truncated: true } : {}), ...(streams.stderr_truncated ? { stderr_truncated: true } : {}) } : { available: false, reason: "legacy-or-adopted-job" } } : {}),
     job_id: record.metadata.id,
     status: record.status,
     exit_code: record.result?.exitCode,
@@ -515,7 +516,8 @@ export default function backgroundJob(pi: ExtensionAPI) {
           owned(record);
           reapedJobNames.set(record.metadata.id, record.metadata.name ? preview(record.metadata.name, 80) : preview(record.metadata.command, 80));
           if (record.result) await service.store.markNotified(record.metadata.id);
-          response = toolResult(recordText(record), { action: params.action, ...publicDetails(record) }, Boolean(record.result && record.status === 'failed'));
+          const streams = await service.streamOutput(record.metadata.id);
+          response = toolResult(recordText(record), { action: params.action, ...publicDetails(record, streams) }, Boolean(record.result && record.status === 'failed'));
           break;
         }
         case "output": {
@@ -527,7 +529,8 @@ export default function backgroundJob(pi: ExtensionAPI) {
           const snapshot = await service.output(id);
           const finalRecord = await service.get(id);
           if (finalRecord.result) await service.store.markNotified(id);
-          response = toolResult(`${recordLine(finalRecord)}\n${outputText(snapshot, params.lines)}`, { action: params.action, ...publicDetails(finalRecord), source: snapshot.source, truncated: snapshot.truncated }, Boolean(finalRecord.result && finalRecord.status === 'failed'));
+          const streams = await service.streamOutput(finalRecord.metadata.id);
+          response = toolResult(`${recordLine(finalRecord)}\n${outputText(snapshot, params.lines)}`, { action: params.action, ...publicDetails(finalRecord, streams), source: snapshot.source, truncated: snapshot.truncated }, Boolean(finalRecord.result && finalRecord.status === 'failed'));
           break;
         }
         case "wait": {
@@ -543,7 +546,8 @@ export default function backgroundJob(pi: ExtensionAPI) {
           const deadlineText = waited.timedOut
             ? current.result ? "Job completed just after the wait deadline.\n" : "Wait timed out; job is still running.\n"
             : "";
-          response = toolResult(`${recordText(current)}\n${deadlineText}${snapshot ? outputText(snapshot, params.lines) : ''}`, { action: params.action, ...publicDetails(current), timed_out: waited.timedOut, output_source: snapshot?.source }, Boolean(current.result && current.status === 'failed'));
+          const streams = await service.streamOutput(current.metadata.id);
+          response = toolResult(`${recordText(current)}\n${deadlineText}${snapshot ? outputText(snapshot, params.lines) : ''}`, { action: params.action, ...publicDetails(current, streams), timed_out: waited.timedOut, output_source: snapshot?.source }, Boolean(current.result && current.status === 'failed'));
           break;
         }
         case "signal": {

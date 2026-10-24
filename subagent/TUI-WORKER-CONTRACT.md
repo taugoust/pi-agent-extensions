@@ -26,7 +26,7 @@ Headless helpers are flat: the worker blocks the `subagent` tool, and tmux-only 
 
 ## Placement, scheduling and lifetime
 
-A background single creates a new window in the calling parent's tmux session. Parallel/chain children share their group's window. Limits remain 16 background groups (`MAX_BACKGROUND_SUBAGENTS` supplied by the existing entry point), eight parallel specifications, four simultaneously launched children per group. The explicit default model remains `openai-codex/gpt-6-astra:low`, not inherited parent medium.
+A background single creates a new window in the calling parent's tmux session. Parallel/chain children share their group's window. Limits remain 16 background groups (`MAX_BACKGROUND_SUBAGENTS` supplied by the existing entry point), eight parallel specifications, four simultaneously launched children per group. Role model/thinking defaults remain independent (managed default `gpt-6-luna:low`), but physical provider and account follow the owning session. Trusted launch environments carry only the private routing descriptor path and owner identity; no credential or model-supplied routing authority is forwarded. Resumes retain the role model rather than pinning the old provider/account. Each subsequent request resolves a fresh committed routing snapshot; an already dispatched stream keeps its captured identity.
 
 Unpromoted foreground groups stage on the same server in a group-specific infrastructure session/window tagged `@pi_infrastructure=1`. They remain parent-bound: normal shutdown cancels foreground work; a child watchdog verifies the parent PID/start token and exits on parent death. Reload does not silently create a new foreground owner. Background children do not depend on a parent pipe/socket/PID lifetime.
 

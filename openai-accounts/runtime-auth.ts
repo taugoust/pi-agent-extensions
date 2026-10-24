@@ -73,6 +73,8 @@ export type EnsureActiveProviderAuthResult =
 export class RuntimeAuthCoordinator {
   private readonly controller: RuntimeApiKeyController;
   private readonly overlay: RuntimeProviderOverlay;
+  /** Capture Pi's native OAuth adapter before our runtime provider overlay is applied. */
+  private providerOAuth: ReturnType<typeof resolveProviderOAuth> | undefined;
   private availableModelIds: ReadonlySet<string> | undefined;
   private refreshController = new AbortController();
   private catalogAuthIdentity: string | undefined;
@@ -86,6 +88,10 @@ export class RuntimeAuthCoordinator {
   ) {
     this.controller = new RuntimeApiKeyController(provider.id);
     this.overlay = new RuntimeProviderOverlay(provider, failClosedApiKey);
+  }
+
+  private oauth(ctx: ExtensionContext): ReturnType<typeof resolveProviderOAuth> {
+    return this.providerOAuth ??= resolveProviderOAuth(this.provider, ctx);
   }
 
   async ensureActive(
@@ -167,7 +173,7 @@ export class RuntimeAuthCoordinator {
             if (latestCredential.type !== "oauth" || latestCredential.expires > now + REFRESH_SKEW_MS) return latest;
             try {
               refreshSignal.throwIfAborted();
-              const refreshed = await resolveProviderOAuth(this.provider, ctx).refresh(latestCredential, refreshSignal);
+              const refreshed = await this.oauth(ctx).refresh(latestCredential, refreshSignal);
               refreshSignal.throwIfAborted();
               credential = refreshed;
               return {
@@ -238,7 +244,7 @@ export class RuntimeAuthCoordinator {
         auth = { apiKey: credential.key };
         runtimeApiKey = credential.key;
       } else {
-        const nativeAuth = await resolveProviderOAuth(this.provider, ctx).toAuth(credential);
+        const nativeAuth = await this.oauth(ctx).toAuth(credential);
         const validated = validateModelAuth(nativeAuth, this.provider);
         auth = validated.auth;
         runtimeApiKey = validated.runtimeApiKey;

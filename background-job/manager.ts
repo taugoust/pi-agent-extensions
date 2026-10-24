@@ -398,6 +398,34 @@ export class BackgroundJobManager {
     return records.slice(0, limit);
   }
 
+  async streamOutput(id: string): Promise<{ available: boolean; stdout: string; stderr: string; stdout_truncated?: true; stderr_truncated?: true }> {
+    const record = await this.get(id, false);
+    if (record.metadata.observed || record.metadata.pane || !record.launch) return { available: false, stdout: "", stderr: "" };
+    const readStream = async (name: "stdout.log" | "stderr.log") => {
+      try {
+        const path = this.store.path(id, name);
+        const info = await lstat(path);
+        if (!info.isFile() || info.isSymbolicLink() || info.size > 1024 * 1024) return { available: false as const, text: "" };
+        const file = await open(path, constants.O_RDONLY | constants.O_NOFOLLOW);
+        try {
+          const current = await file.stat();
+          if (!current.isFile() || current.size > 1024 * 1024) return { available: false as const, text: "" };
+          const limit = 16 * 1024, offset = Math.max(0, current.size - limit);
+          const buffer = Buffer.alloc(Math.min(current.size, limit));
+          const { bytesRead } = await file.read(buffer, 0, buffer.length, offset);
+          let start = 0;
+          if (offset > 0) while (start < bytesRead && (buffer[start]! & 0xc0) === 0x80) start++;
+          return { available: true as const, text: buffer.subarray(start, bytesRead).toString("utf8"), truncated: offset > 0 };
+        } finally { await file.close(); }
+      } catch { return { available: false as const, text: "" }; }
+    };
+    const [stdout, stderr] = await Promise.all([readStream("stdout.log"), readStream("stderr.log")]);
+    return stdout.available && stderr.available
+      ? { available: true, stdout: stdout.text, stderr: stderr.text,
+          ...(stdout.truncated ? { stdout_truncated: true as const } : {}), ...(stderr.truncated ? { stderr_truncated: true as const } : {}) }
+      : { available: false, stdout: "", stderr: "" };
+  }
+
   async output(id: string): Promise<OutputSnapshot> {
     return await this.store.withRetentionLock(() => this.readOutput(id, true));
   }

@@ -18,7 +18,7 @@ with tempfile.TemporaryDirectory(prefix="pi-completion-reload-") as tmp:
     extensions.mkdir(parents=True)
     live = root / "live"
     live.mkdir()
-    folders = ("subagent", "shared", "background-job", "permission-gate")
+    folders = ("subagent", "shared", "background-job", "permission-gate", "workflows")
     for version in ("old", "new"):
         for folder in folders:
             destination = root / version / folder
@@ -122,7 +122,7 @@ export default function(pi) {{
         command("probe", "SILENT")
         command("idleprobe", "IDLE-FORWARD-OK")
         command("acceptance", "OLD-ACCEPTANCE")
-        command("modelprobe", "openai/legacy-default:low")
+        command("modelprobe", "legacy-default:low on the owning session's provider/account")
         for folder in folders:
             link = live / folder
             link.unlink()
@@ -130,7 +130,7 @@ export default function(pi) {{
         command("reloadtest")
         command("probe", "WAKE")
         command("acceptance", "NEW-ACCEPTANCE")
-        command("modelprobe", "openai/gpt-6-luna:low")
+        command("modelprobe", "gpt-6-luna:low on the owning session's provider/account")
         assert process.pid == pid and process.poll() is None
         print("PASS: same-process subagent reload refreshed completion wake behavior")
     finally:

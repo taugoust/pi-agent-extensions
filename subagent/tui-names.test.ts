@@ -45,6 +45,7 @@ test("native groups allocate root/first-task names once and retain per-task labe
   process.env.PI_TUI_WORKER_LAUNCHER = "/nix/store/test/bin/pi";
   process.env.PI_TUI_WORKER_LAUNCH_MODE = "none";
   manager.refresh = async () => {}; // Test allocation only; never launch real workers.
+  manager.activate("owner");
   manager.tmux.resolveCaller = async () => ({ socketPath: "/unused", serverEpoch: "1:2", sessionId: "$1", windowId: "@1", paneId: "%1" });
   try {
     for (const form of ["tasks", "chain"]) {

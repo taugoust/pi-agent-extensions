@@ -13,6 +13,7 @@ import {
   summarizeBringToMain,
 } from "./bring-to-main.js";
 import { buildConversationContext } from "./conversation-context.js";
+import { bindSessionModelRequest, prepareSessionRoutingRequest, resolveSessionModelSelector, resolveSessionPhysicalModelReference } from "../../shared/session-routing.ts";
 import { type RunBtwFullscreen, runBtwFullscreen } from "./fullscreen-ui.js";
 import { registerBtwMainThreadUpdates } from "./main-thread-updates.js";
 import { pickMainEntry } from "./main-tree-picker.js";
@@ -812,6 +813,21 @@ async function prepareCurrentTranscriptMarkdown(
   }
 }
 
+export function resolveBtwDispatchModel(
+  ctx: ExtensionCommandContext,
+  selected: ResolvedBtwModel,
+  routingProfile: Awaited<ReturnType<typeof prepareSessionRoutingRequest>>,
+): Model<Api> {
+  const roleModelId = selected.model === ctx.model && selected.model.api === "pi-virtual"
+    ? resolveSessionPhysicalModelReference(ctx, routingProfile).id
+    : selected.model.id;
+  const selector = resolveSessionModelSelector(ctx, roleModelId, routingProfile);
+  const separator = selector.indexOf("/");
+  const dispatchModel = ctx.modelRegistry.find(selector.slice(0, separator), selector.slice(separator + 1));
+  if (!dispatchModel || dispatchModel.api === "pi-virtual") throw new Error("Selected BTW model is unavailable for the current session provider; no fallback was made.");
+  return routingProfile ? bindSessionModelRequest(dispatchModel, routingProfile) : dispatchModel;
+}
+
 async function askThreadQuestion(
   thread: SideThread,
   question: string,
@@ -822,6 +838,13 @@ async function askThreadQuestion(
 ) {
   const createMarkdownTransformers = await prepareCurrentTranscriptMarkdown(thread, question, ctx);
   if (!createMarkdownTransformers) return { kind: "aborted" as const };
+  let dispatchModel: Model<Api>;
+  try {
+    const routingProfile = await prepareSessionRoutingRequest(ctx);
+    dispatchModel = resolveBtwDispatchModel(ctx, selected, routingProfile);
+  } catch (error) {
+    return { kind: "error" as const, message: formatError(error) };
+  }
   return ctx.ui.custom<Awaited<ReturnType<typeof completeSideThreadTurn>>>((tui, theme, keybindings, done) => {
     let settled = false;
     const view = new BtwAnsweringView(
@@ -847,7 +870,7 @@ async function askThreadQuestion(
     completeSideThreadTurn({
       thread,
       question,
-      model: selected.model,
+      model: dispatchModel,
       thinkingLevel,
       signal: view.signal,
       completeSimple: createModelRegistryCompleteSimple(ctx.modelRegistry),

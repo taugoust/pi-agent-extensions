@@ -265,7 +265,7 @@ in
           }) extensionNames
         ))
         {
-          btw.model = stringOption "${cfg.extensions.subagent.defaultProvider}/${cfg.extensions.subagent.defaultModel}" "Separate physical Paseo BTW model; terminal BTW keeps the main model unless settings.terminal explicitly overrides it. Unavailable models fail without fallback.";
+          btw.model = stringOption cfg.extensions.subagent.defaultModel "BTW role model ID; provider and account follow the owning session. Legacy qualified preferences cannot override the session provider. Unavailable models fail without fallback.";
           stamp.visibleByDefault = boolOption false "Show native transcript stamps at session start.";
           cache-hit-monitor.visibleByDefault = boolOption false "Show the native cache widget at session start.";
           slow-mode.enabledByDefault = boolOption false "Start each session with slow-mode active.";
@@ -288,11 +288,11 @@ in
             cheapCompactionModel = lib.mkOption {
               type = lib.types.nullOr lib.types.str;
               default = null;
-              description = "Exact provider/model[:thinking] for idle recovery; null uses normal Pi compaction. No fallback.";
+              description = "Role model[:thinking] for idle recovery; provider/account follow the owning session. Legacy qualified selectors remain readable. Null uses normal Pi compaction; no provider fallback.";
             };
           };
           subagent = {
-            defaultProvider = stringOption "openai" "Default provider for new subagents.";
+            defaultProvider = stringOption "openai" "Legacy standalone compatibility fallback; active subagents always use their owning session's provider/account.";
             defaultModel = stringOption "gpt-6-luna" "Default model ID for new subagents.";
             defaultThinkingLevel = lib.mkOption {
               type = thinkingType;

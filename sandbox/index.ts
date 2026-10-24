@@ -8,6 +8,7 @@
  */
 
 import { sandboxSetting } from "./settings.js";
+import { publishAgentSHRoutingBinding, releaseAgentSHRoutingBinding, sessionRoutingEnvironment } from "../shared/session-routing.ts";
 import { spawn } from "node:child_process";
 import { randomUUID } from "node:crypto";
 import { accessSync, closeSync, constants as fsConstants, fstatSync, lstatSync, openSync, readSync, realpathSync, statSync } from "node:fs";
@@ -16,7 +17,7 @@ import { createConnection, type Socket } from "node:net";
 import { homedir } from "node:os";
 import { posix as posixPath } from "node:path";
 import { Type } from "@sinclair/typebox";
-import { DEFAULT_MAX_BYTES, DEFAULT_MAX_LINES, type ExtensionAPI, type ExtensionContext } from "@mariozechner/pi-coding-agent";
+import { DEFAULT_MAX_BYTES, DEFAULT_MAX_LINES, getAgentDir, type ExtensionAPI, type ExtensionContext } from "@mariozechner/pi-coding-agent";
 import { Key, matchesKey, truncateToWidth, visibleWidth, wrapTextWithAnsi, type Component } from "@mariozechner/pi-tui";
 import {
   approvalChoices,
@@ -198,7 +199,10 @@ type ReadFileOptions = { offset?: number; limit?: number; maxBytes?: number; cwd
 type WriteFileOptions = { cwd?: string; actor?: Actor; signal?: AbortSignal };
 type Edit = { oldText: string; newText: string };
 type EditFileOptions = { cwd?: string; actor?: Actor; signal?: AbortSignal };
-type SpawnSubagentOptions = { actor?: Actor; signal?: AbortSignal; onUpdate?: (message: SupervisorMessage) => void };
+const SESSION_ROUTING_REQUEST = Symbol("trusted-session-routing-request");
+type SpawnSubagentOptions = { actor?: Actor; signal?: AbortSignal; onUpdate?: (message: SupervisorMessage) => void;
+  [SESSION_ROUTING_REQUEST]?: { agentDir: string; environment: Record<string, string> };
+};
 type ApprovalClient = {
   listApprovals(): Promise<ApprovalRequest[]>;
   resolveApproval(approvalId: string, resolution: ApprovalResolution): Promise<unknown>;
@@ -1010,13 +1014,21 @@ class MockSupervisorClient {
   async spawnSubagent(params: JsonObject, options: SpawnSubagentOptions = {}) {
     const executionTimeoutMs = effectiveSubagentExecutionTimeoutMs(params.timeout_ms);
     const body: JsonObject = { ...params, actor: options.actor || params.actor || parentActor(undefined, "Pi subagent tool") };
+    const routing = options[SESSION_ROUTING_REQUEST];
+    if (routing) {
+      const requestId = `pi-route-${randomUUID()}`;
+      publishAgentSHRoutingBinding(routing.agentDir, requestId, routing.environment);
+      body.request_id = requestId;
+    }
     if (executionTimeoutMs === undefined) delete body.timeout_ms;
     else body.timeout_ms = executionTimeoutMs;
-    return await this.request("spawn_subagent", body, {
+    const result = await this.request("spawn_subagent", body, {
       signal: options.signal,
       timeoutMs: subagentTransportTimeoutMs(executionTimeoutMs),
       onEvent: options.onUpdate,
     });
+    if (routing) releaseAgentSHRoutingBinding(routing.agentDir, String(body.request_id));
+    return result;
   }
 
   async resolveApproval(approvalId: string, resolution: ApprovalResolution) {
@@ -2076,7 +2088,9 @@ class RestSupervisorClient {
       body.stream = true;
       const executionTimeoutMs = effectiveSubagentExecutionTimeoutMs(body.timeout_ms);
       const transportTimeoutMs = subagentTransportTimeoutMs(executionTimeoutMs);
-      const requestId = `subagent-request-${randomUUID()}`;
+      const routing = options[SESSION_ROUTING_REQUEST];
+      const requestId = `${routing ? "pi-route" : "subagent-request"}-${randomUUID()}`;
+      if (routing) publishAgentSHRoutingBinding(routing.agentDir, requestId, routing.environment);
       if (executionTimeoutMs === undefined) delete body.timeout_ms;
       else body.timeout_ms = executionTimeoutMs;
       body.request_id = requestId;
@@ -2112,7 +2126,9 @@ class RestSupervisorClient {
       options.signal?.addEventListener("abort", onCallerAbort, { once: true });
       try {
         const raw = await this.requestNDJSON("POST", this.toolPath("spawn_subagent"), body, { signal: streamController.signal, timeoutMs: transportTimeoutMs, onEvent: options.onUpdate });
-        return unwrapRestSubagentResponse(raw);
+        const result = unwrapRestSubagentResponse(raw);
+        if (routing) releaseAgentSHRoutingBinding(routing.agentDir, requestId);
+        return result;
       } catch (error) {
         if (error instanceof SupervisorRequestTimeoutError && !options.signal?.aborted) {
           throw new SubagentTransportTimeoutError(executionTimeoutMs, transportTimeoutMs);
@@ -3294,9 +3310,12 @@ export default function sandbox(pi: ExtensionAPI) {
         onUpdate?.({ content: latest ? [{ type: "text", text: latest }] : [], details: streamDetails() });
       };
       const resultArtifactThresholdBytes = hasSingle ? 4 * 1024 : 2 * 1024;
+      const routingEnvironment = sessionRoutingEnvironment(ctx);
+      const requestRouting = Object.keys(routingEnvironment).length ? { agentDir: getAgentDir(), environment: routingEnvironment } : undefined;
       let result: unknown;
       try {
         result = await requireClient(state).spawnSubagent({ ...effectiveParams, cwd: effectiveParams.cwd || parentCwd, result_artifact_threshold_bytes: resultArtifactThresholdBytes, actor: parentActor(toolCallId, "Pi subagent tool") }, {
+          [SESSION_ROUTING_REQUEST]: requestRouting,
           signal,
           onUpdate: (message) => {
           if (message.event === "subagent_start") {

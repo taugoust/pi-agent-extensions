@@ -36,8 +36,15 @@ pkgs.runCommand "subagent-check"
 
     workdir="$TMPDIR/subagent-check"
     mkdir -p "$workdir/src/subagent" "$workdir/src/shared" "$workdir/out"
+    cp -R ${self}/workflows "$workdir/src/"
     cp ${self}/subagent/config.ts "$workdir/src/subagent/config.ts"
     cp ${self}/subagent/config.test.ts "$workdir/src/subagent/config.test.ts"
+    cp ${self}/shared/session-routing.ts "$workdir/src/shared/session-routing.ts"
+    cp ${self}/shared/session-routing.test.ts "$workdir/src/shared/session-routing.test.ts"
+    cp ${self}/shared/extension-defaults.ts "$workdir/src/shared/extension-defaults.ts"
+    cp ${self}/shared/extension-config-manifest.json "$workdir/src/shared/extension-config-manifest.json"
+    substituteInPlace "$workdir/src/shared/extension-defaults.ts" \
+      --replace-fail 'from "./extension-config-manifest.json";' 'from "./extension-config-manifest.json" with { type: "json" };'
     cp ${self}/subagent/backend.ts "$workdir/src/subagent/backend.ts"
     cp ${self}/subagent/background.ts "$workdir/src/subagent/background.ts"
     cp ${self}/subagent/legacy-reap.test.ts "$workdir/src/subagent/legacy-reap.test.ts"
@@ -69,6 +76,7 @@ pkgs.runCommand "subagent-check"
 
     tsc \
       --rewriteRelativeImportExtensions \
+      --resolveJsonModule \
       --noCheck \
       --skipLibCheck \
       --module nodenext \
@@ -82,6 +90,7 @@ pkgs.runCommand "subagent-check"
       "$workdir/src/subagent/control.ts" \
       "$workdir/src/subagent/outcome.ts" \
       "$workdir/src/subagent/config.test.ts" \
+      "$workdir/src/shared/session-routing.test.ts" \
       "$workdir/src/subagent/outcome.test.ts" \
       "$workdir/src/subagent/resume.ts" \
       "$workdir/src/subagent/resume.test.ts" \
@@ -117,9 +126,18 @@ pkgs.runCommand "subagent-check"
     }
     EOF
 
+    mkdir -p "$workdir/out/node_modules/@earendil-works/pi-coding-agent"
+    printf '%s\n' '{ "name": "@earendil-works/pi-coding-agent", "type": "module", "main": "./index.js" }' \
+      > "$workdir/out/node_modules/@earendil-works/pi-coding-agent/package.json"
+    export PI_SUBAGENT_TEST_AGENT_DIR="$workdir/isolated-agent"
+    mkdir -p "$PI_SUBAGENT_TEST_AGENT_DIR"
+    printf '%s\n' 'export function getAgentDir() { if (process.env.PI_CODING_AGENT_DIR) return process.env.PI_CODING_AGENT_DIR; if (!process.env.PI_SUBAGENT_TEST_AGENT_DIR) throw new Error("Tests must pass an isolated agent directory"); return process.env.PI_SUBAGENT_TEST_AGENT_DIR; }' \
+      > "$workdir/out/node_modules/@earendil-works/pi-coding-agent/index.js"
+
     node --test "$workdir/out/subagent/legacy-reap.test.js"
     node "$workdir/out/subagent/control.test.js"
     node --test "$workdir/out/subagent/config.test.js"
+    node --test "$workdir/out/shared/session-routing.test.js"
     node "$workdir/out/subagent/outcome.test.js"
     node "$workdir/out/subagent/resume.test.js"
     node "$workdir/out/subagent/dashboard.test.js"
@@ -129,8 +147,22 @@ pkgs.runCommand "subagent-check"
     # Native TUI tests use Node's TS stripping and the real Pi when supplied by
     # the parent check composition. No model/API requests: provider is local.
     mkdir -p "$workdir/tui-runtime"
-    cp -R ${self}/subagent ${self}/shared ${self}/permission-gate ${self}/background-job ${self}/questionnaire "$workdir/tui-runtime/"
+    cp -R ${self}/subagent ${self}/shared ${self}/workflows ${self}/permission-gate ${self}/background-job ${self}/questionnaire "$workdir/tui-runtime/"
     chmod -R u+rwX "$workdir/tui-runtime"
+    ln -s "$workdir/out/node_modules" "$workdir/tui-runtime/node_modules"
+    # Raw Node TS fixtures need source-relative TS imports, unlike compiled output.
+    ${pkgs.python3}/bin/python3 - "$workdir/tui-runtime" <<'PY'
+    import pathlib, re, sys
+    root = pathlib.Path(sys.argv[1])
+    for file in root.rglob('*.ts'):
+        text = file.read_text()
+        def resolve_import(match):
+            target = match.group(2)
+            return match.group(1) + target[:-3] + '.ts' + match.group(3) if (file.parent / (target[:-3] + '.ts')).exists() else match.group(0)
+        file.write_text(re.sub(r"(from\s+[\"'])(\.[^\"']+\.js)([\"'])", resolve_import, text))
+    PY
+    substituteInPlace "$workdir/tui-runtime/shared/extension-defaults.ts" \
+      --replace-fail 'from "./extension-config-manifest.json";' 'from "./extension-config-manifest.json" with { type: "json" };'
     ${pkgs.lib.optionalString (piPackage != null) ''
       PI_BIN=${pkgs.lib.getExe piPackage} ${pkgs.python3}/bin/python3 ${self}/background-job/reload.test.py
       PI_BIN=${pkgs.lib.getExe piPackage} ${pkgs.python3}/bin/python3 ${self}/subagent/quiet-state-reload.test.py
@@ -1086,18 +1118,13 @@ pkgs.runCommand "subagent-check"
       echo 'background lifecycle text leaked internal model guidance or running reminders' >&2
       exit 1
     fi
-    grep -F '(cfg.extensions.sandbox.enable || cfg.extensions.subagent.enable)' ${self}/nix/module.nix >/dev/null
-    grep -F 'builtins.elem "sandbox" extensions' ${self}/nix/mk-extension-bundle.nix >/dev/null
-    grep -F '"''${extDir}/subagent/backend.ts".source = "''${self}/subagent/backend.ts";' ${self}/nix/module.nix >/dev/null
-    grep -F '"''${extDir}/subagent/background.ts".source = "''${self}/subagent/background.ts";' ${self}/nix/module.nix >/dev/null
-    grep -F '"''${extDir}/subagent/control.ts".source = "''${self}/subagent/control.ts";' ${self}/nix/module.nix >/dev/null
-    grep -F '"''${extDir}/subagent/foreground-handoff.ts".source = "''${self}/subagent/foreground-handoff.ts";' ${self}/nix/module.nix >/dev/null
-    grep -F '"''${extDir}/subagent/native-rpc.ts".source = "''${self}/subagent/native-rpc.ts";' ${self}/nix/module.nix >/dev/null
-    grep -F '"''${extDir}/subagent/parallel-result.ts".source = "''${self}/subagent/parallel-result.ts";' ${self}/nix/module.nix >/dev/null
-    grep -F '"''${extDir}/subagent/permission-proxy.ts".source = "''${self}/subagent/permission-proxy.ts";' ${self}/nix/module.nix >/dev/null
-    grep -F '"''${extDir}/subagent/permission-relay.ts".source = "''${self}/subagent/permission-relay.ts";' ${self}/nix/module.nix >/dev/null
-    grep -F '"''${extDir}/subagent/result-artifact.ts".source = "''${self}/subagent/result-artifact.ts";' ${self}/nix/module.nix >/dev/null
-    grep -F '"''${extDir}/subagent/model-inactivity.ts".source = "''${self}/subagent/model-inactivity.ts";' ${self}/nix/module.nix >/dev/null
+    grep -F 'name: builtins.elem name registry.sharedRuntimeExtensionNames' ${self}/nix/module.nix >/dev/null
+    grep -F 'name: builtins.elem name selectedExtensions' ${self}/nix/mk-extension-bundle.nix >/dev/null
+    # Shared runtime sources are assembled by the extension registry/bundle now,
+    # not listed as individual Home Manager files in module.nix.
+    grep -F 'sharedRuntimeExtensionNames' ${self}/nix/extension-registry.nix >/dev/null
+    grep -F 'source = "''${bundle}/shared";' ${self}/nix/module.nix >/dev/null
+    grep -F 'source = "''${self}/''${name}";' ${self}/nix/extension-registry.nix >/dev/null
     if grep -F 'name: "subagent"' ${self}/sandbox/index.ts >/dev/null; then
       echo 'sandbox still registers a duplicate subagent tool' >&2
       exit 1

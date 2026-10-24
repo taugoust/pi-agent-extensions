@@ -162,7 +162,7 @@ Thresholds and optional cheap compaction are configurable in `~/.pi/agent/extens
 {
   "idleMinutes": 30,
   "contextPercent": 20,
-  "cheapCompactionModel": "openai/gpt-6-luna:low",
+  "cheapCompactionModel": "gpt-6-luna:low",
   "guardedModels": {
     "astra": "openai/gpt-6-astra"
   }
@@ -179,7 +179,7 @@ Alias names are remembered in additive files under `~/.pi/agent/idle-guard-alias
 
 `cheapCompactionModel` defaults to `null` (normal Pi compaction). When configured, manual `/compact`, RPC/extension compaction, and automatic threshold/overflow compaction use this model **at or above `idleMinutes`**, regardless of context percentage or UI availability. Below that idle threshold, unguarded selections compact normally with their selected conversation model. Guarded selections preserve the same warm policy: native automatic/manual compaction uses their exact underlying physical conversation model and selected thinking level, without routing through the alias. Cold compaction and explicit guard recovery use `cheapCompactionModel`. A warm summary that crosses the idle deadline during authentication or payload preparation cancels locally rather than sending cold history; the gate stays closed until explicit recovery succeeds. The 20% `contextPercent` gate applies only to the prompt warning. For unguarded selections, this setting alone does not trigger compaction merely because a session is idle and does not automatically choose an action in the warning. Explicit **Compact** requires a configured cheap model and never falls back to the conversation model. Guarded selections start recovery when a cold request reaches their dispatch gate.
 
-The selector is an exact `provider/model[:thinking]`, compatible with subagent selectors. Thinking defaults to `low`; supported suffixes are `off`, `minimal`, `low`, `medium`, `high`, `xhigh`, and `max`. Nested model IDs and non-thinking colon suffixes are retained. Configure a direct physical model/provider already available to Pi with sufficient context capacity (virtual and guarded summary selectors are rejected to prevent recursive routing); the extension does not infer price, truncate the prepared conversation to fit a smaller model, or choose an alternative model. Nix can derive the selector from the configured subagent default without coupling runtime compaction to subagent settings.
+The selector supplies the role `model[:thinking]`; provider and selected account follow the owning session's effective physical provider, including when the main selection is an idle-guard alias. Legacy qualified `provider/model[:thinking]` preferences remain readable but cannot pin another provider. Thinking defaults to `low`; supported suffixes are `off`, `minimal`, `low`, `medium`, `high`, `xhigh`, and `max`. The resolved model must be a direct physical model with sufficient context capacity. Missing models/authentication fail explicitly, without switching provider/account, inferring prices, or truncating the prepared conversation to fit. Nix derives the role model from the subagent default without coupling the runtimes.
 
 The conversation model and thinking level remain unchanged. Cheap compaction reuses Pi's native algorithm and the event's prepared token budgets, retained-message boundary, previous summary, custom instructions, split-turn handling, file tracking, and usage accounting. Credentials and provider headers are resolved through Pi's model registry. Cumulative native file lists survive subsequent cheap or normal compactions while the extension is enabled. Idle time always comes from the latest non-error, non-aborted model response on the active persisted branch, including restored sessions; failed routing/provider requests, user/tool activity, cache warming, and compaction itself do not reset it.
 
@@ -190,7 +190,7 @@ Home Manager installs the extension's helpers and generates the JSON selector:
 ```nix
 programs.pi.extensions.idle-context-warning = {
   enable = true;
-  cheapCompactionModel = "openai/gpt-6-luna:low"; # nullable string; default null
+  cheapCompactionModel = "gpt-6-luna:low"; # nullable role selector; default null
   guardedModels.astra = "openai/gpt-6-astra"; # attrs of exact model IDs; default {}
 };
 ```

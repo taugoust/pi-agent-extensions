@@ -84,7 +84,7 @@ test("TUI void abort waits for delayed settlement before sending replacement exa
   const abortStarted = new Promise<void>(resolve => { entered = resolve; });
   const ctx = { mode: "tui", hasUI: false, isIdle: () => idle, hasPendingMessages: () => false,
     abort() { aborts++; entered(); }, shutdown() {}, getContextUsage: () => undefined,
-    sessionManager: { getSessionFile: () => manifest.sessionFile, getSessionId: () => "child-session" } };
+    sessionManager: { getSessionFile: () => manifest.sessionFile, getSessionId: () => "child-session", getLeafId: () => null, getSessionName: () => undefined } };
   try {
     workerExtension({ registerTool() {}, on: (name: string, fn: Function) => handlers.set(name, fn),
       sendMessage() { assert.equal(idle, true); sends++; idle = false; } } as any);
@@ -235,12 +235,13 @@ test("worker extension with missing selected guard authority never dispatches pr
   store.writeManifest(manifest);
   const previous = process.env.PI_TUI_WORKER_MANIFEST;
   process.env.PI_TUI_WORKER_MANIFEST = store.path("manifest.json");
+  const manifestPath = store.path("manifest.json");
   const handlers = new Map<string, Function>();
   let sent = 0, aborted = 0, shutdown = 0;
   const ctx = { mode: "tui", hasUI: false, isIdle: () => true, hasPendingMessages: () => false,
     abort: () => { aborted++; }, shutdown: () => { shutdown++; },
     getContextUsage: () => undefined,
-    sessionManager: { getSessionFile: () => manifest.sessionFile, getSessionId: () => "child-session" } };
+    sessionManager: { getSessionFile: () => manifest.sessionFile, getSessionId: () => "child-session", getLeafId: () => null, getSessionName: () => undefined } };
   try {
     workerExtension({ registerTool() {}, on: (name: string, handler: Function) => handlers.set(name, handler), sendMessage: () => { sent++; } } as any);
     await handlers.get("session_start")!({}, ctx);
@@ -257,7 +258,9 @@ test("worker extension with missing selected guard authority never dispatches pr
     assert.equal(handlers.get("tool_call")!({}, ctx).block, true);
     handlers.get("message_end")!({ message: { role: "assistant", stopReason: "toolUse", content: [] } }, ctx);
     handlers.get("agent_settled")!({}, ctx);
-    const report = JSON.parse(await readFile(store.readState().lastReport!, "utf8"));
+    const reportPath = store.readState().lastReport;
+    assert.equal(typeof reportPath, "string", "authority-loss settlement should persist a report artifact");
+    const report = JSON.parse(await readFile(reportPath!, "utf8"));
     assert.match(report.error, /authority unavailable/i, "authority loss was retained as a successful settlement");
     assert.equal(handlers.get("input")!({}, ctx).action, "handled");
     handlers.get("before_agent_start")!({}, ctx);

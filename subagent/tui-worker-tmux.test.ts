@@ -15,6 +15,45 @@ const exec = promisify(execFile);
 const rawPi = process.env.PI_TUI_TEST_PI;
 const sleep = (ms: number) => new Promise(resolve => setTimeout(resolve, ms));
 
+test("routing launch input accepts only the trusted private routing keys", async () => {
+  const root = await mkdtemp(join(tmpdir(), "pi-routing-tmux-"));
+  const backend = new TuiWorkerTmux();
+  const calls: string[][] = [];
+  (backend as any).epoch = async () => "1:2";
+  (backend as any).locate = async (_socket: string, pane: string, nonce: string) => ({ socketPath: "/tmp/fake", serverEpoch: "1:2", sessionId: "$1", windowId: "@1", paneId: pane, ownershipNonce: nonce });
+  (backend as any).run = async (_socket: string, args: string[]) => {
+    calls.push(args);
+    if (args[0] === "new-window") return "%42";
+    if (args.at(-1) === "#{pane_pid}") return String(process.pid);
+    if (args.at(-1) === "#{pid}") return String(process.pid);
+    return "";
+  };
+  const base: any = { directory: root, ownerSessionId: "owner", taskId: "task", groupId: `subagent-job-${"1".repeat(24)}`,
+    childId: `subagent-child-${"2".repeat(24)}`, attempt: 1, cwd: root,
+    caller: { socketPath: "/tmp/fake", serverEpoch: "1:2", sessionId: "$1", windowId: "@1", paneId: "%1", ownershipNonce: "caller" },
+    foreground: false, parentDisposition: "native", launcher: rawPi ?? "/nix/store/vjns3phzh830d4qyajb637z4fnk56n4n-pi-1.4.0/bin/pi", launchMode: "none", model: "provider/old-role" };
+  const originalEnv = { ...process.env };
+  try {
+    process.env.PI_SESSION_ROUTING_FILE = "/stale/tmux/profile.json";
+    process.env.PI_SESSION_ROUTING_OWNER_SESSION = "stale-owner";
+    const manifest = await backend.launch({ ...base, routingEnvironment: { PI_SESSION_ROUTING_FILE: "/trusted/profile.json", PI_SESSION_ROUTING_OWNER_SESSION: "trusted-owner" } });
+    const command = calls.flat().join(" ");
+    assert.match(command, /'-u' 'PI_SESSION_ROUTING_FILE'/);
+    assert.match(command, /'-u' 'PI_SESSION_ROUTING_OWNER_SESSION'/);
+    assert.match(command, /PI_SESSION_ROUTING_FILE=\/trusted\/profile\.json/);
+    assert.match(command, /PI_SESSION_ROUTING_OWNER_SESSION=trusted-owner/);
+    assert.doesNotMatch(command, /stale\/tmux|stale-owner/);
+    assert.equal(manifest.ownerSessionId, "owner");
+    const before = calls.length;
+    await assert.rejects(backend.launch({ ...base, directory: join(root, "injected"), routingEnvironment: { PI_SESSION_ROUTING_FILE: "/trusted", PI_SESSION_ROUTING_OWNER_SESSION: "owner", PI_SUBAGENT_ID: "attacker" } }), /Invalid private routing environment/);
+    assert.equal(calls.length, before, "rejected model routing injection must not reach tmux");
+  } finally {
+    for (const key of ["PI_SESSION_ROUTING_FILE", "PI_SESSION_ROUTING_OWNER_SESSION"]) delete process.env[key];
+    Object.assign(process.env, originalEnv);
+    await rm(root, { recursive: true, force: true });
+  }
+});
+
 test("launcher authority contract fails closed on missing/mismatched/full mode", () => {
   assert.throws(() => tuiWorkerLaunchContract("native", {}));
   const env = { PI_TUI_WORKER_LAUNCHER: "/nix/store/example/bin/pi", PI_TUI_WORKER_LAUNCH_MODE: "none" };
@@ -116,11 +155,16 @@ test("inspection retries vanished /proc only with fresh owned tmux death evidenc
 test("real Pi TUI: local keyboard, observer crash, same-process promotion, retained completion and idle-only reap", { skip: !rawPi, timeout: 90_000 }, async () => {
   const root = await mkdtemp(join(tmpdir(), "pi-tui-"));
   const socket = join(root, "tmux.sock"), config = join(root, "agent");
+  const previousAgentDir = process.env.PI_CODING_AGENT_DIR;
+  process.env.PI_CODING_AGENT_DIR = config;
   const tmux = async (...args: string[]) => (await exec("tmux", ["-S", socket, ...args], { timeout: 5000 })).stdout.trim();
   await mkdir(config, { mode: 0o700 });
   await writeFile(join(config, "settings.json"), JSON.stringify({
     extensions: [fileURLToPath(new URL("./tui-worker-test-provider.ts", import.meta.url)),
-      fileURLToPath(new URL("./tui-worker-test-empty-jobs.ts", import.meta.url))],
+      fileURLToPath(new URL("./tui-worker-test-empty-jobs.ts", import.meta.url)),
+      fileURLToPath(new URL("../../questionnaire/index.ts", import.meta.url)),
+      fileURLToPath(new URL("../../background-job/index.ts", import.meta.url)),
+      fileURLToPath(new URL("./tui-worker-extension.ts", import.meta.url))],
     defaultProvider: "harness-test", defaultModel: "mock", quietStartup: true,
     enableSkillCommands: false, defaultProjectTrust: "no",
   }));
@@ -233,5 +277,10 @@ test("real Pi TUI: local keyboard, observer crash, same-process promotion, retai
     assert.notEqual(single.placement.windowId, caller.windowId);
     assert.notEqual(single.placement.windowId, manifest.placement.windowId);
     await backend.reap(single);
-  } finally { await tmux("kill-server").catch(() => undefined); await rm(root, { recursive: true, force: true }); }
+  } finally {
+    if (previousAgentDir === undefined) delete process.env.PI_CODING_AGENT_DIR;
+    else process.env.PI_CODING_AGENT_DIR = previousAgentDir;
+    await tmux("kill-server").catch(() => undefined);
+    await rm(root, { recursive: true, force: true });
+  }
 });

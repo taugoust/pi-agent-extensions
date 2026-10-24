@@ -113,7 +113,11 @@ export class HeadlessForegroundManager {
   private ready: () => boolean;
   private groupLimit: number;
   private notify?: (update: QuietUpdate) => boolean;
-  constructor(root: string, disposition: () => Disposition, ready: () => boolean, groupLimit = 16, notify?: (update: QuietUpdate) => boolean) {
+  private routingEnvironment: () => Record<string, string>;
+  private resolveRoleModel: (model: string | undefined) => string | undefined;
+  constructor(root: string, disposition: () => Disposition, ready: () => boolean, groupLimit = 16, notify?: (update: QuietUpdate) => boolean, routingEnvironment: () => Record<string, string> = () => ({}), resolveRoleModel: (model: string | undefined) => string | undefined = model => model) {
+    this.routingEnvironment = routingEnvironment;
+    this.resolveRoleModel = resolveRoleModel;
     this.disposition = disposition;
     this.ready = ready;
     this.groupLimit = groupLimit;
@@ -253,7 +257,8 @@ export class HeadlessForegroundManager {
     const manifestPath = store.path("manifest.json");
     const capability = child.operatorCapability;
     const args = ["--mode", "rpc", "--session", sessionFile, "--extension", this.extension];
-    if (child.spec.model) args.push("--model", child.spec.model);
+    const roleModel = this.resolveRoleModel(child.spec.model);
+    if (roleModel) args.push("--model", roleModel);
     const promptPath = store.path("system-prompt.txt");
     const runtimePrompt = [child.spec.systemPrompt, HEADLESS_WORKER_RUNTIME_POLICY].filter(Boolean).join("\n\n");
     writeFileSync(promptPath, runtimePrompt, { flag: "wx", mode: 0o600 });
@@ -262,6 +267,7 @@ export class HeadlessForegroundManager {
     const childEnv: Record<string, string> = {
       // Headless workers share the caller's selected config/defaults root.
       PI_CODING_AGENT_DIR: getAgentDir(),
+      ...this.routingEnvironment(),
       [TUI_WORKER_MANIFEST_ENV]: manifestPath, PI_TUI_WORKER_LAUNCH_MODE: contract.launchMode,
       PI_TUI_WORKER_LAUNCHER: launcher, PI_SUBAGENT_ID: child.childId,
       [TUI_WORKER_DISCOVERY_ENV.ownerSessionId]: group.owner, [TUI_WORKER_DISCOVERY_ENV.taskId]: child.taskId,
@@ -272,7 +278,7 @@ export class HeadlessForegroundManager {
     const env = { ...process.env };
     for (const key of ["AGENTSH_PERMISSION_GATE_SOCKET", "PI_SUBAGENT_PERMISSION_SOCKET", "PI_SUBAGENT_PERMISSION_TOKEN", "PI_SUBAGENT_OUTCOME_PATH",
       "AGENTSH_SESSION_SUPERVISOR", "AGENTSH_CHILD_CAPABILITY", "AGENTSH_APPROVAL_UI_SOCKET", "PI_AGENTSH_ENABLE", "PI_AGENTSH_MOCK_SUPERVISOR",
-      "PI_SUPERVISED", "PI_AUTO", "PI_AGENTSH_REMOTE", "PI_AGENTSH_READ_MODE", "TMUX", "TMUX_PANE"]) delete env[key];
+      "PI_SUPERVISED", "PI_AUTO", "PI_AGENTSH_REMOTE", "PI_AGENTSH_READ_MODE", "TMUX", "TMUX_PANE", "PI_SESSION_ROUTING_FILE", "PI_SESSION_ROUTING_OWNER_SESSION"]) delete env[key];
     for (const key of Object.keys(env)) if (key.startsWith("PI_PASEO_")) delete env[key];
     env.PI_PASEO_BRIDGE_NO_IMPORT = "1";
     Object.assign(env, childEnv);

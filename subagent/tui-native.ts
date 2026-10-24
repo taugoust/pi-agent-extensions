@@ -57,7 +57,11 @@ export class TuiNativeManager {
     catch { return undefined; }
   }
   private groupLimit: number;
-  constructor(root: string, privateDisposition: () => Disposition, ready: () => boolean, groupLimit: number) {
+  private routingEnvironment: () => Record<string, string>;
+  private resolveRoleModel: (model: string | undefined) => string | undefined;
+  constructor(root: string, privateDisposition: () => Disposition, ready: () => boolean, groupLimit: number, routingEnvironment: () => Record<string, string> = () => ({}), resolveRoleModel: (model: string | undefined) => string | undefined = model => model) {
+    this.routingEnvironment = routingEnvironment;
+    this.resolveRoleModel = resolveRoleModel;
     if (!Number.isSafeInteger(groupLimit) || groupLimit < 1) throw new Error("Invalid shared subagent group limit");
     this.groupLimit = groupLimit;
     this.root = privateDirectory(root, true);
@@ -476,7 +480,7 @@ export class TuiNativeManager {
                 windowName: g.windowName ?? subagentTmuxName(g.children[0].spec.task, g.children[0].spec.name),
                 paneTitle: subagentTmuxName(c.spec.task, c.spec.name),
                 parentDisposition: this.disposition(), launcher: g.launcher, launchMode: g.launchMode,
-                model: c.spec.model, tools: c.spec.tools, systemPrompt: c.spec.systemPrompt, acceptance: c.spec.acceptance, resumeSessionFile: c.resumeSessionFile,
+                model: this.resolveRoleModel(c.spec.model), routingEnvironment: this.routingEnvironment(), tools: c.spec.tools, systemPrompt: c.spec.systemPrompt, acceptance: c.spec.acceptance, resumeSessionFile: c.resumeSessionFile,
                 operatorCapabilityHash: createHash("sha256").update(c.operatorCapability).digest("hex") });
               await this.tmux.waitReady(manifest);
               await this.startPrompt(g, c, manifest);

@@ -1,6 +1,7 @@
 import { randomUUID } from "node:crypto";
 import type { ExtensionContext } from "@earendil-works/pi-coding-agent";
 import { buildConversationContext } from "./conversation-context";
+import { bindSessionModelRequest, prepareSessionRoutingRequest, resolveSessionModelSelector } from "../shared/session-routing";
 import {
 	completeSideThreadTurn,
 	createSideThread,
@@ -66,9 +67,11 @@ export function createBtwService(
 	}
 	function snapshot(selectedId?: string) {
 		current();
+		let provider: string | undefined;
+		try { provider = resolveSessionModelSelector(ctx, defaultModel).split("/", 1)[0]; } catch { /* unavailable until a physical provider is selected */ }
 		const available = ctx.modelRegistry
 			.getAvailable()
-			.filter((m) => m.provider !== "idle-guard" && m.api !== "pi-virtual")
+			.filter((m) => m.provider !== "idle-guard" && m.api !== "pi-virtual" && (!provider || m.provider === provider))
 			.map((m) => `${m.provider}/${m.id}`)
 			.filter((id) => id.length <= 512);
 		const models = [
@@ -85,7 +88,7 @@ export function createBtwService(
 			models,
 			threads: [...threads.values()].map((t) => ({
 				id: t.id,
-				model: t.model,
+				model: (() => { try { return resolveSessionModelSelector(ctx, t.model); } catch { return t.model; } })(),
 				context: t.context,
 				contextTruncated: t.thread.conversationContext.startsWith(
 					"[Earlier context omitted;",
@@ -105,11 +108,11 @@ export function createBtwService(
 		const timer = setTimeout(() => controller.abort(), 180_000);
 		try {
 			current();
-			const split = t.model.indexOf("/");
-			const model = ctx.modelRegistry.find(
-				t.model.slice(0, split),
-				t.model.slice(split + 1),
-			);
+			const routingProfile = await prepareSessionRoutingRequest(ctx);
+			const selector = resolveSessionModelSelector(ctx, t.model, routingProfile);
+			const split = selector.indexOf("/");
+			const foundModel = ctx.modelRegistry.find(selector.slice(0, split), selector.slice(split + 1));
+			const model = foundModel && routingProfile ? bindSessionModelRequest(foundModel, routingProfile) : foundModel;
 			if (
 				!model ||
 				model.provider === "idle-guard" ||

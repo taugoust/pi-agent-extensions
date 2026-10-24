@@ -14,6 +14,8 @@ if (!jobDir || !shell || !Number.isSafeInteger(maximum) || maximum < 65536 || ma
 const commandPath = join(jobDir, "command");
 const environmentPath = join(jobDir, "environment");
 const outputPath = join(jobDir, "output.log");
+const stdoutPath = join(jobDir, "stdout.log");
+const stderrPath = join(jobDir, "stderr.log");
 const processPath = join(jobDir, "process.json");
 const resultPath = join(jobDir, "result.json");
 const cancelPath = join(jobDir, "cancel-requested");
@@ -67,6 +69,7 @@ function parseEnvironment(bytes) {
 }
 
 let tail = Buffer.alloc(0);
+let stdoutTail = Buffer.alloc(0), stderrTail = Buffer.alloc(0);
 let dirty = false;
 let flushTimer;
 let sequence = 0;
@@ -75,9 +78,12 @@ let loggerFailed = false;
 function flush() {
   if (!dirty) return;
   dirty = false;
-  const temporary = `${outputPath}.tmp-${process.pid}-${++sequence}`;
-  writeFileSync(temporary, tail, { mode: 0o600 });
-  renameSync(temporary, outputPath);
+  const id = `${process.pid}-${++sequence}`;
+  for (const [path, data] of [[outputPath, tail], [stdoutPath, stdoutTail], [stderrPath, stderrTail]]) {
+    const temporary = `${path}.tmp-${id}`;
+    writeFileSync(temporary, data, { mode: 0o600 });
+    renameSync(temporary, path);
+  }
 }
 
 function scheduleFlush() {
@@ -97,6 +103,10 @@ function capture(chunk, descriptor) {
   try { writeSync(descriptor, data); } catch {}
   tail = tail.length === 0 ? data : Buffer.concat([tail, data]);
   if (tail.length > maximum) tail = tail.subarray(tail.length - maximum);
+  let stream = descriptor === 1 ? stdoutTail : stderrTail;
+  stream = stream.length === 0 ? data : Buffer.concat([stream, data]);
+  if (stream.length > maximum) stream = stream.subarray(stream.length - maximum);
+  if (descriptor === 1) stdoutTail = stream; else stderrTail = stream;
   dirty = true;
   scheduleFlush();
 }

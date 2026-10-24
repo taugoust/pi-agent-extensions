@@ -1,5 +1,6 @@
 import { readExtensionDefaults, readPreferenceDocument, mergeExtensionSettings } from "../shared/extension-defaults.js";
 import { join } from "node:path";
+import { resolveSessionModelSelector, type RoutingContext, type RoutingProfile } from "../shared/session-routing.ts";
 
 export interface SubagentModelSettings {
   defaultProvider: string;
@@ -7,7 +8,8 @@ export interface SubagentModelSettings {
   defaultThinkingLevel: string;
 }
 
-// Match the managed configuration; never silently fall back to deprecated Codex auth.
+// Legacy standalone defaults. Active launches rebind the provider to their
+// owning session; this field must never pin a helper to another provider.
 const defaults: SubagentModelSettings = {
   defaultProvider: "openai",
   defaultModel: "gpt-6-luna",
@@ -34,7 +36,17 @@ export function readSubagentModelSettings(agentDir: string): SubagentModelSettin
   return settings;
 }
 
-export function resolveSubagentModel(model: string | undefined, settings: SubagentModelSettings): string {
-  const selected = model ?? `${settings.defaultProvider}/${settings.defaultModel}`;
+export function resolveSubagentModel(model: string | undefined, settings: SubagentModelSettings, context?: RoutingContext, snapshot?: RoutingProfile): string {
+  // Keep legacy configuration readable, but provider policy belongs to the
+  // owning session, not to role defaults or model-generated launch arguments.
+  const selected = context
+    ? resolveSessionModelSelector(context, model ?? settings.defaultModel, snapshot)
+    : model ?? `${settings.defaultProvider}/${settings.defaultModel}`;
+  const reference = selected.replace(thinkingSuffix, "");
+  const slash = reference.indexOf("/");
+  if (context?.modelRegistry) {
+    const physical = context.modelRegistry.find(reference.slice(0, slash), reference.slice(slash + 1));
+    if (!physical || physical.api === "pi-virtual") throw new Error(`Unavailable physical subagent model: ${reference}; no provider/model fallback`);
+  }
   return thinkingSuffix.test(selected) ? selected : `${selected}:${settings.defaultThinkingLevel}`;
 }

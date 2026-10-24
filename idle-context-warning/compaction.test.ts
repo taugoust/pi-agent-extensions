@@ -4,6 +4,7 @@ import type { SessionBeforeCompactEvent } from "@earendil-works/pi-coding-agent"
 // preparation helper. Production code uses only the public extension event.
 const { prepareCompaction } = await import(new URL("./core/compaction/compaction.js", import.meta.resolve("@earendil-works/pi-coding-agent")).href);
 import { beforeCompact, parseModelSelector, registerCompaction } from "./compaction.ts";
+import { getSessionModelRequestProfile, registerSessionRouting } from "../shared/session-routing.ts";
 import { lastModelActivity, shouldWarn } from "./policy.ts";
 
 const now = Date.now();
@@ -16,7 +17,7 @@ function fixture(reason: SessionBeforeCompactEvent["reason"] = "manual") {
   const controller = new AbortController();
   const calls: any[] = [];
   const notices: string[] = [];
-  const selectedModel = Object.freeze({ provider: "expensive", id: "conversation" });
+  const selectedModel = Object.freeze({ provider: "cheap", id: "conversation" });
   const ctx: any = {
     hasUI: true, model: selectedModel,
     getContextUsage() { throw new Error("Compaction must not consult the warning usage gate"); },
@@ -116,6 +117,54 @@ describe("idle compaction routing", () => {
     f.event.branchEntries = [];
     expect(await beforeCompact(f.event, f.ctx, () => settings)).toBeUndefined();
   });
+  it("rebinds legacy cheap selectors and prepares the current provider account on every summary dispatch", async () => {
+    const f = fixture();
+    let profile: any = { version: 1, ownerSessionId: "unit-session", providerId: "cheap", accountId: "a", revision: 1 };
+    let preparations = 0;
+    registerSessionRouting(f.ctx, { file: "/tmp/unit-routing.json", getProfile: () => profile, prepareRequest: async () => { preparations++; return profile; } });
+    const routed: any[] = [];
+    f.ctx.modelRegistry.find = (provider: string, id: string) => {
+      routed.push([provider, id]);
+      return provider === profile.providerId && id === "family/model" ? { ...model, provider } : undefined;
+    };
+    const first = await beforeCompact(f.event, f.ctx, () => ({ ...settings, cheapCompactionModel: "openai/family/model:high" }));
+    expect(first?.compaction).toBeDefined();
+    expect(routed).toContainEqual(["cheap", "family/model"]);
+    expect(getSessionModelRequestProfile(f.calls[0].target)).toMatchObject({ providerId: "cheap", accountId: "a", revision: 1 });
+    expect(JSON.stringify(f.calls[0].target)).not.toContain("accountId");
+    expect(preparations).toBeGreaterThanOrEqual(2);
+    profile = { ...profile, providerId: "codex", accountId: "b", revision: 2 };
+    f.ctx.model = { provider: "codex", id: "conversation" };
+    routed.length = 0;
+    const second = await beforeCompact(f.event, f.ctx, () => ({ ...settings, cheapCompactionModel: "openai/family/model:high" }));
+    expect(second?.compaction).toBeDefined();
+    expect(routed).toContainEqual(["codex", "family/model"]);
+    expect(preparations).toBeGreaterThanOrEqual(4);
+  });
+  it("cancels remaining native chunks rather than retargeting after a profile switch", async () => {
+    const f = fixture();
+    f.event.preparation.isSplitTurn = true;
+    f.event.preparation.turnPrefixMessages = [{ role: "user", content: "Second chunk", timestamp: old }];
+    let profile: any = { version: 1, ownerSessionId: "unit-session", providerId: "cheap", accountId: "a", revision: 1 };
+    registerSessionRouting(f.ctx, { file: "/tmp/unit-routing-pinned.json", getProfile: () => profile, prepareRequest: async () => profile });
+    f.ctx.modelRegistry.find = (provider: string, id: string) => provider === profile.providerId && id === "family/model" ? { ...model, provider } : undefined;
+    f.ctx.modelRegistry.streamSimple = (target: any, context: any, options: any) => {
+      f.calls.push({ target, context, options });
+      profile = { ...profile, providerId: "codex", accountId: "b", revision: 2 };
+      return { result: async () => ({ role: "assistant", stopReason: "stop", content: [{ type: "text", text: "First chunk summary" }], usage }) };
+    };
+    expect(await beforeCompact(f.event, f.ctx, () => ({ ...settings, cheapCompactionModel: "openai/family/model" }))).toEqual({ cancel: true });
+    expect(f.calls).toHaveLength(1);
+    expect(f.calls[0].target.provider).toBe("cheap");
+  });
+  it("fails closed when the currently routed provider lacks the selected model", async () => {
+    const f = fixture();
+    const profile: any = { version: 1, ownerSessionId: "unit-session", providerId: "codex", accountId: "b", revision: 1 };
+    registerSessionRouting(f.ctx, { file: "/tmp/unit-routing-missing.json", getProfile: () => profile, prepareRequest: async () => profile });
+    f.ctx.modelRegistry.find = () => undefined;
+    expect(await beforeCompact(f.event, f.ctx, () => ({ ...settings, cheapCompactionModel: "openai/family/model" }))).toEqual({ cancel: true });
+    expect(f.calls).toHaveLength(0);
+  });
   it("registers the common native hook for all compaction entry points", async () => {
     const handlers: Record<string, any> = {};
     registerCompaction({ on: (name: string, handler: any) => { handlers[name] = handler; } } as any, () => settings);
@@ -137,14 +186,15 @@ describe("idle compaction routing", () => {
 });
 
 describe("exact model selectors", () => {
-  it("accepts subagent thinking levels, nested IDs and colon-bearing model IDs", () => {
+  it("accepts provider-relative model IDs plus thinking levels, nested IDs and colon-bearing model IDs", () => {
+    expect(parseModelSelector("family:high")).toEqual({ provider: "", id: "family", thinking: "high" });
     for (const thinking of ["off", "minimal", "low", "medium", "high", "xhigh", "max"]) {
       expect(parseModelSelector(`provider/family/model:${thinking}`)).toEqual({ provider: "provider", id: "family/model", thinking });
     }
     expect(parseModelSelector("ollama/qwen:7b")).toEqual({ provider: "ollama", id: "qwen:7b", thinking: "low" });
     expect(parseModelSelector("ollama/qwen:7b:high").id).toBe("qwen:7b");
   });
-  for (const selector of ["", "model", "/model", "provider/", "provider/model high", false, 42]) {
+  for (const selector of ["", "/model", "provider/", "provider/model high", false, 42]) {
     it(`rejects invalid selector ${JSON.stringify(selector)} without fallback`, async () => {
       const f = fixture();
       expect(await beforeCompact(f.event, f.ctx, () => ({ ...settings, cheapCompactionModel: selector }))).toEqual({ cancel: true });
@@ -166,7 +216,7 @@ describe("native summary semantics", () => {
     expect(prompt).toContain("Earlier checkpoint");
     expect(prompt).toContain("Preserve the deployment constraints");
     expect(prompt).toContain("Keep this goal");
-    expect(f.calls[0].options).toMatchObject({ signal: f.controller.signal, reasoning: "low", maxTokens: 4096, cacheRetention: "none" });
+    expect(f.calls[0].options).toMatchObject({ signal: f.controller.signal, reasoning: "low", cacheRetention: "none" });
     expect(result.details).toEqual({ readFiles: ["read.ts"], modifiedFiles: ["edit.ts"], idleContextNativeCompaction: 1 });
   });
   it("keeps split-turn summaries separate and combines their usage", async () => {

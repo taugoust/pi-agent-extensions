@@ -14,6 +14,17 @@ import { parseTuiWorkerRequest, publicTuiWorkerManifest } from "../shared/tui-wo
 const identity = { protocol: 1, requestId: "request-1", token: "a".repeat(64), ownerSessionId: "owner-session", taskId: "subagent-task-" + "1".repeat(24),
   runtimeId: "rpc-" + "2".repeat(24), groupId: "subagent-job-" + "3".repeat(24), childId: "subagent-child-" + "4".repeat(24), attempt: 1, workerEpoch: "5".repeat(32) };
 
+test("headless routing callbacks preserve trusted environment and rebind legacy role model", () => {
+  const root = "/tmp/headless-routing-fixture";
+  const manager: any = new HeadlessForegroundManager(root, () => "native", () => true, 16, undefined,
+    () => ({ PI_SESSION_ROUTING_FILE: "/trusted/profile.json", PI_SESSION_ROUTING_OWNER_SESSION: "trusted-owner" }),
+    model => model ? `routed-provider/${model.split("/").at(-1)}` : undefined);
+  assert.deepEqual(manager.routingEnvironment(), { PI_SESSION_ROUTING_FILE: "/trusted/profile.json", PI_SESSION_ROUTING_OWNER_SESSION: "trusted-owner" });
+  assert.equal(manager.resolveRoleModel("old-provider/role-model"), "routed-provider/role-model");
+  assert.equal(manager.resolveRoleModel(undefined), undefined);
+  assert.deepEqual(Object.keys(manager.routingEnvironment()), ["PI_SESSION_ROUTING_FILE", "PI_SESSION_ROUTING_OWNER_SESSION"]);
+});
+
 test("headless group waits honor validated durations above 60 seconds, early completion and observation cancellation", async (t) => {
   const root = await mkdtemp(join(tmpdir(), "headless-wait-"));
   const manager:any = new HeadlessForegroundManager(root, () => "native", () => true);

@@ -6,11 +6,21 @@ import {
   type SessionBeforeCompactResult,
 } from "@earendil-works/pi-coding-agent";
 import { isIdle, lastModelActivity, type Config } from "./policy.ts";
+import { bindSessionModelRequest, prepareSessionRoutingRequest, resolveSessionModelSelector, resolveSessionProvider, type RoutingProfile } from "../shared/session-routing.ts";
 import { GUARD_ERROR, GUARD_PROOF, GUARD_PROVIDER, PROXY_PROVIDER, assertGuardProofCurrent, parseGuardedModels, type GuardProof } from "./guard.ts";
 
 type Thinking = NonNullable<Parameters<typeof compact>[6]>;
 const thinkingSuffix = /:(off|minimal|low|medium|high|xhigh|max)$/;
 const DETAILS_VERSION = "idleContextNativeCompaction";
+function resolveCompactionSelector(ctx: ExtensionContext, selected: { provider: string; id: string }, profile?: RoutingProfile): string {
+  if (profile) return resolveSessionModelSelector(ctx, `${selected.provider || "_"}/${selected.id}`, profile);
+  return selected.provider
+    ? resolveSessionModelSelector(ctx, `${selected.provider}/${selected.id}`)
+    : `${resolveSessionProvider(ctx)}/${selected.id}`;
+}
+function sameRoutingProfile(a?: RoutingProfile, b?: RoutingProfile): boolean {
+  return a === undefined ? b === undefined : b !== undefined && a.ownerSessionId === b.ownerSessionId && a.providerId === b.providerId && a.accountId === b.accountId && a.revision === b.revision;
+}
 export const FORCE_CHEAP_COMPACTION_KEY = "__piIdleContextForceCheapV1";
 
 export function parseModelSelector(value: unknown): { provider: string; id: string; thinking: Thinking } {
@@ -20,12 +30,11 @@ export function parseModelSelector(value: unknown): { provider: string; id: stri
   const suffix = value.match(thinkingSuffix);
   const model = suffix ? value.slice(0, -suffix[0].length) : value;
   const slash = model.indexOf("/");
-  if (slash <= 0 || slash === model.length - 1) {
-    throw new Error("cheapCompactionModel must include a provider and model ID");
-  }
-  // Keep additional slashes and non-thinking colons in model IDs (OpenRouter,
-  // Ollama, etc.). No fuzzy matching or fallback to another provider/model.
-  return { provider: model.slice(0, slash), id: model.slice(slash + 1), thinking: (suffix?.[1] ?? "low") as Thinking };
+  if (slash === model.length - 1) throw new Error("cheapCompactionModel must include a model ID");
+  // A bare model ID is provider-relative. Qualified legacy preferences retain
+  // their model ID but bind to the active physical provider.
+  const id = slash > 0 ? model.slice(slash + 1) : model;
+  return { provider: slash > 0 ? model.slice(0, slash) : "", id, thinking: (suffix?.[1] ?? "low") as Thinking };
 }
 
 export function restoreFileTracking(event: SessionBeforeCompactEvent): void {
@@ -75,9 +84,14 @@ export async function beforeCompact(
     const selected = warmPhysical
       ? { ...parseModelSelector(physicalSelector), thinking: (ctx.thinkingLevel ?? "off") as Thinking }
       : parseModelSelector(settings.cheapCompactionModel);
-    const model = ctx.modelRegistry.find(selected.provider, selected.id);
-    if (!model) throw new Error(`Unknown compaction model: ${selected.provider}/${selected.id}`);
+    const requestProfile = await prepareSessionRoutingRequest(ctx);
+    const effectiveSelector = resolveCompactionSelector(ctx, selected, requestProfile);
+    const [effectiveProvider, ...modelParts] = effectiveSelector.split("/");
+    const effectiveId = modelParts.join("/");
+    const model = ctx.modelRegistry.find(effectiveProvider, effectiveId);
+    if (!model) throw new Error(`Unknown compaction model: ${effectiveProvider}/${effectiveId}`);
     if (model.api === "pi-virtual" || [GUARD_PROVIDER, PROXY_PROVIDER].includes(model.provider)) throw new Error("Compaction requires a direct physical model");
+    const requestModel = requestProfile ? bindSessionModelRequest(model, requestProfile) : model;
     const session = warmPhysical ? ctx.sessionManager.getSessionId() : undefined;
     const assertWarmDispatch = () => {
       event.signal.throwIfAborted();
@@ -96,7 +110,12 @@ export async function beforeCompact(
     const stream: NonNullable<Parameters<typeof compact>[7]> = async (target, context, options) => {
       assertWarmDispatch();
       const originalPayload = options?.onPayload;
-      const result = ctx.modelRegistry.streamSimple(target, context, warmPhysical ? {
+      const routeProfile = await prepareSessionRoutingRequest(ctx);
+      const routedSelector = resolveCompactionSelector(ctx, selected, routeProfile);
+      if (routedSelector !== effectiveSelector || !sameRoutingProfile(requestProfile, routeProfile)) {
+        throw new Error("Session routing changed during compaction; cancel and retry so native chunk planning uses matching model limits");
+      }
+      const result = ctx.modelRegistry.streamSimple(requestModel, context, warmPhysical ? {
         ...options,
         onPayload: async (payload, physicalModel) => {
           const replacement = await originalPayload?.(payload, physicalModel);
@@ -111,7 +130,7 @@ export async function beforeCompact(
       if (!response.content.some((block) => block.type === "text" && block.text.trim())) throw new Error("Summary was empty");
       return result;
     };
-    const result = await compact(event.preparation, model, undefined, undefined, event.customInstructions, event.signal, selected.thinking, stream);
+    const result = await compact(event.preparation, requestModel, undefined, undefined, event.customInstructions, event.signal, selected.thinking, stream);
     event.signal.throwIfAborted();
     return { compaction: { ...result, details: { ...(result.details as object), [DETAILS_VERSION]: 1, ...(forcedCheap ? { idleContextExplicitAttempt: forced!.token } : {}), ...(proof ? { [GUARD_PROOF]: proof } : {}) } } };
   } catch (error) {

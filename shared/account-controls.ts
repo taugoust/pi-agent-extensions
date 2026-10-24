@@ -32,6 +32,8 @@ export interface AccountControlsSnapshot {
 	serviceEpoch: string;
 	providerId?: AccountProviderId;
 	supportedProviders?: readonly AccountProviderId[];
+	/** Optional committed execution route; also declares coherent provider/account switching support. */
+	sessionRouting?: { version: 1; providerId: AccountProviderId; revision: number };
 	/** Monotonic per-session selection revision; incremented on every accepted selection change. */
 	selectionRevision: number;
 	sessionId: string;
@@ -88,6 +90,8 @@ export interface AccountSwitchRequest {
 	expectedServiceEpoch: string;
 	/** Rejects stale concurrent-client selections within the same service/session lifetime. */
 	expectedSelectionRevision: number;
+	/** Optional cross-provider route epoch for newer server integrations. */
+	expectedRoutingRevision?: number;
 	/** null explicitly restores Pi's built-in default authentication. */
 	accountId: string | null;
 }
