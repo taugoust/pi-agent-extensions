@@ -21,6 +21,7 @@ import type { AgentToolResult, ExtensionAPI } from "@mariozechner/pi-coding-agen
 import { copyExtensionDefaults } from "../shared/extension-defaults.js";
 import { getAgentDir, getMarkdownTheme } from "@mariozechner/pi-coding-agent";
 import { readSubagentModelSettings, resolveSubagentModel } from "./config.ts";
+import { discoverAgentProfiles, resolveAgentProfileLaunch, type AgentProfileScope } from "./profiles.ts";
 import { prepareSessionRoutingRequest, readInheritedSessionRoutingProfile, readSessionRoutingProfile, registerSessionRouting, sessionRoutingEnvironment } from "../shared/session-routing.ts";
 
 import { Container, Markdown, Spacer, Text } from "@mariozechner/pi-tui";
@@ -1066,6 +1067,38 @@ function normalizeStringArray(values: unknown): string[] | undefined {
   return values.map((value) => String(value).trim()).filter(Boolean);
 }
 
+/** Resolve profile configuration once, before backend selection or persistence. */
+export async function resolveSubagentProfiles(params: any, ctx: { cwd: string; isProjectTrusted?: () => boolean }, agentDir = getAgentDir()): Promise<any> {
+  const items = Array.isArray(params.tasks) ? params.tasks : Array.isArray(params.chain) ? params.chain : undefined;
+  if (items && params.agent !== undefined) throw new Error("Set agent on each task/chain item, not on the group");
+  const selected = items ?? [params];
+  if (params.action && (params.agent !== undefined || params.agentScope !== undefined || selected.some((item: any) => item.agent !== undefined || item.agentScope !== undefined)))
+    throw new Error("Draft disposition cannot select agent profiles");
+  const hasProfiles = selected.some((item: any) => item?.agent !== undefined);
+  if (!hasProfiles) {
+    if (params.agentScope !== undefined || selected.some((item: any) => item?.agentScope !== undefined)) throw new Error("agentScope requires an agent profile or operation=profiles");
+    return params;
+  }
+  const catalogues = new Map<string, Awaited<ReturnType<typeof discoverAgentProfiles>>>();
+  const resolve = async (item: any) => {
+    const scope = item.agentScope ?? params.agentScope;
+    if (item.agent === undefined) {
+      if (item.agentScope !== undefined) throw new Error("agentScope requires an agent profile");
+      return item;
+    }
+    const key = scope ?? "both";
+    if (!catalogues.has(key)) catalogues.set(key, await discoverAgentProfiles({ cwd: ctx.cwd, agentDir,
+      projectTrusted: ctx.isProjectTrusted?.() === true, scope, builtinDir: path.join(path.dirname(LOADED_SUBAGENT_MODULE_PATH), "agents") }));
+    return resolveAgentProfileLaunch({ ...item, ...(scope === undefined ? {} : { agentScope: scope }) }, catalogues.get(key)!, { defaultModel: subagentModelSettings.defaultModel });
+  };
+  if (!items) return await resolve(params);
+  // Keep profile-only fields off the existing backend wire contracts.
+  const { agentScope: _scope, ...group } = params;
+  const resolved = [];
+  for (const item of items) resolved.push(await resolve(item));
+  return { ...group, ...(Array.isArray(params.tasks) ? { tasks: resolved } : { chain: resolved }) };
+}
+
 function specFromParams(params: any): SubagentSpec {
   return {
     task: String(params.task ?? ""),
@@ -1464,8 +1497,13 @@ export function validateBackgroundOperation(params: any): void {
     throw new Error("Background subagent operation must be a non-empty string");
   }
   const operation = params.operation;
-  if (!["list", "status", "output", "wait", "wait_group", "wait_any", "wait_all", "result", "cancel", "reap", "promote", "prompt", "resume", "tasks", "idle_decision"].includes(operation)) {
+  if (!["list", "status", "output", "wait", "wait_group", "wait_any", "wait_all", "result", "cancel", "reap", "promote", "prompt", "resume", "tasks", "idle_decision", "profiles"].includes(operation)) {
     throw new Error(`Unknown background subagent operation: ${operation}`);
+  }
+  if (operation === "profiles") {
+    if (Object.keys(params).some(key => !["operation", "agentScope"].includes(key)) || (params.agentScope !== undefined && !["user", "project", "both"].includes(params.agentScope)))
+      throw new Error("profiles accepts only optional agentScope (user, project, both)");
+    return;
   }
   if (operation === "tasks") {
     if (Object.keys(params).some(k=>!["operation","limit"].includes(k)) || (params.limit!==undefined&&(!Number.isSafeInteger(params.limit)||params.limit<1||params.limit>50))) throw new Error("tasks accepts only optional limit (1–50)");
@@ -1480,7 +1518,7 @@ export function validateBackgroundOperation(params: any): void {
     return;
   }
   if (params.task_id !== undefined || params.compact !== undefined) throw new Error("task_id and compact are resume-only fields");
-  const launchFields = ["name", "acceptance", "task", "tasks", "chain", "systemPrompt", "model", "tools", "cwd", "worktree", "action", "draft_id", "background", "mode", "timeout_ms"];
+  const launchFields = ["name", "agent", "agentScope", "acceptance", "task", "tasks", "chain", "systemPrompt", "model", "tools", "cwd", "worktree", "action", "draft_id", "background", "mode", "timeout_ms"];
   const integerField = (field: string, minimum: number, maximum: number, label: string) => {
     const value = params[field];
     if (value !== undefined && (!Number.isSafeInteger(value) || value < minimum || value > maximum)) {
@@ -1617,13 +1655,18 @@ const SubagentWorktree = Type.Optional(Type.Object({
   base: Type.Optional(Type.String({ minLength: 1, maxLength: 512, description: "Base commit/ref, default HEAD. Including dirty changes requires HEAD." })),
 }, { additionalProperties: false, description: "Launch this native Linux worker in its own retained Git worktree. An empty object is allowed only with a clean source checkout. The parent's checkout/index/branch are untouched." }));
 
+const SubagentAgent = Type.Optional(Type.String({ minLength: 1, maxLength: 128, description: "Named agent profile (scout, worker, reviewer, oracle, or a custom profile). Separate from the tmux label name. Profile instructions and model/thinking/tool defaults resolve once; resume retains that configuration." }));
+const SubagentAgentScope = Type.Optional(Type.String({ pattern: "^(user|project|both)$", description: "Profile discovery scope. Default both: builtins, user, then trusted project overrides. Untrusted project definitions never load; explicit project scope requires project trust. Also accepted by operation=profiles." }));
+
 const SubagentItem = Type.Object({
   name: SubagentName,
+  agent: SubagentAgent,
+  agentScope: SubagentAgentScope,
   acceptance: Type.Array(Type.String({minLength:1, maxLength:500}), {minItems:1, maxItems:16, description:"Required for each new task: explicit task-specific, verifiable completion criteria. Preserved verbatim; never inferred from the prompt."}),
   task: Type.String({ description: "Task to delegate to this dynamic subagent" }),
   systemPrompt: Type.Optional(Type.String({ description: "Optional additional system prompt for this subagent" })),
-  model: Type.Optional(Type.String({ description: `Role model override, optionally model:thinking. Legacy provider/id prefixes cannot override the owning session's provider/account. Default: ${defaultSubagentModel}.` })),
-  tools: Type.Optional(Type.Array(Type.String(), { description: "Optional tool allowlist, e.g. ['read','grep','find','ls']" })),
+  model: Type.Optional(Type.String({ description: `Explicit override of the profile/default role model, optionally model:thinking. Legacy provider/id prefixes cannot override the owning session's provider/account. Default: ${defaultSubagentModel}.` })),
+  tools: Type.Optional(Type.Array(Type.String(), { description: "Optional tool allowlist. With agent, only read/bash/edit/write are supported and overrides may narrow, never widen the profile." })),
   cwd: Type.Optional(Type.String({ description: "Optional working directory for this subagent process" })),
   worktree: SubagentWorktree,
 });
@@ -1634,6 +1677,8 @@ function subagentParams() {
   // Launch overrides must never be silently dropped from a resume/control call.
   return Type.Object({
   name: SubagentName,
+  agent: SubagentAgent,
+  agentScope: SubagentAgentScope,
   acceptance: Type.Optional(Type.Array(Type.String({minLength:1, maxLength:500}), {minItems:1, maxItems:16, description:"Launch only: required for a new single task; explicit task-specific, verifiable completion criteria. Controls/resumes retain stored criteria, including legacy tasks."})),
   task_id: Type.Optional(Type.String({pattern:"^subagent-task-[0-9a-f]{24}$",description:"Resume only: required stable native task ID. Use operation=resume with only task_id, optional message and compact; never task/model/background."})),
   compact: Type.Optional(Type.Boolean({description:"Resume only: explicitly request compaction before continuing. High measured context usage selects it automatically; a checkpointed outcome alone does not require it."})),
@@ -1641,7 +1686,7 @@ function subagentParams() {
   action: Type.Optional(Type.String({ pattern: "^(review|apply|discard)$", description: "AgentSH Draft disposition; use with mode=draft and draft_id instead of task/tasks/chain." })),
   draft_id: Type.Optional(Type.String({ pattern: "^session-[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$", description: "Exact retained AgentSH Draft identity." })),
   background: Type.Optional(Type.Boolean({ description: "Launch only (omit operation): return immediately and continue a task/tasks/chain request in the background. Not accepted by resume; execution placement follows the retained backend, not a new launch option." })),
-  operation: Type.Optional(Type.String({ pattern: "^(list|status|output|wait|wait_group|wait_any|wait_all|result|cancel|reap|promote|prompt|resume|tasks|idle_decision)$", description: "Omit for new launches/Draft disposition. Accepted fields besides operation: resume {task_id, message?, compact?}; prompt {child_id, message, job_id?, control_mode?, wait_for_response?}; idle_decision {child_id, request_id, worker_epoch, choice, job_id?}; list/tasks {limit?}; status/output/cancel/reap/promote {job_id}; wait/wait_group {job_id, wait_ms?}; wait_any/wait_all {wait_ms?}; result {job_id?, child_id?, child?, offset?, limit?, diagnostics?} (job_id or child_id required; child and child_id exclusive). No launch fields with any operation." })),
+  operation: Type.Optional(Type.String({ pattern: "^(list|status|output|wait|wait_group|wait_any|wait_all|result|cancel|reap|promote|prompt|resume|tasks|idle_decision|profiles)$", description: "Omit for new launches/Draft disposition. Accepted fields besides operation: profiles {agentScope?}; resume {task_id, message?, compact?}; prompt {child_id, message, job_id?, control_mode?, wait_for_response?}; idle_decision {child_id, request_id, worker_epoch, choice, job_id?}; list/tasks {limit?}; status/output/cancel/reap/promote {job_id}; wait/wait_group {job_id, wait_ms?}; wait_any/wait_all {wait_ms?}; result {job_id?, child_id?, child?, offset?, limit?, diagnostics?} (job_id or child_id required; child and child_id exclusive). No launch fields with operations, except the profiles discovery scope." })),
   job_id: Type.Optional(Type.String({ pattern: "^subagent-job-[0-9a-f]{24}$", description: "Required for status/output/cancel/reap/promote/wait/wait_group; result needs job_id or child_id. Optional for prompt as an assertion that child_id belongs to this group (mismatch rejects before delivery). Omit for resume/list/tasks/wait_any/wait_all." })),
   child_id: Type.Optional(Type.String({ pattern: "^subagent-child-[0-9a-f]{24}$", description: "Opaque per-child ID; required by operation=prompt/idle_decision and accepted instead of child by operation=result." })),
   request_id: Type.Optional(Type.String({ pattern: "^idle:[a-f0-9]{32}$", description: "idle_decision only: exact pending idle-warning request reported by child status/notification." })),
@@ -1657,8 +1702,8 @@ function subagentParams() {
   child: Type.Optional(Type.Integer({ minimum: 1, maximum: 8, description: "Result only, with job_id: one-based child report number (default 1); do not combine with child_id." })),
   task: Type.Optional(Type.String({ description: "Launch only: task to delegate (single mode). For resume continuation instructions use message instead." })),
   systemPrompt: Type.Optional(Type.String({ description: "Launch only: optional additional system prompt (single mode). Resume preserves the saved configuration." })),
-  model: Type.Optional(Type.String({ description: `Launch only: role model override (single mode), optionally model:thinking. Provider/account follow the owning session even with a legacy provider/id prefix. Default: ${defaultSubagentModel}. Resume retains the role model, not a pinned provider/account.` })),
-  tools: Type.Optional(Type.Array(Type.String(), { description: "Launch only: optional tool allowlist (single mode). Not accepted by resume." })),
+  model: Type.Optional(Type.String({ description: `Launch only: explicit override of the profile/default role model (single mode), optionally model:thinking. Provider/account follow the owning session even with a legacy provider/id prefix. Default: ${defaultSubagentModel}. Resume retains the role model, not a pinned provider/account.` })),
+  tools: Type.Optional(Type.Array(Type.String(), { description: "Launch only: optional tool allowlist (single mode). With agent, only read/bash/edit/write are supported and overrides can only narrow the profile. Not accepted by resume." })),
   cwd: Type.Optional(Type.String({ description: "Launch only: optional working directory (single mode). Not accepted by resume." })),
   worktree: SubagentWorktree,
   tasks: Type.Optional(Type.Array(SubagentItem, { maxItems: MAX_PARALLEL_TASKS, description: "Launch only: parallel subagent tasks; each item requires acceptance criteria. Max 8, up to 4 run concurrently." })),
@@ -2195,6 +2240,7 @@ export default function (pi: ExtensionAPI) {
     label: "Subagent",
     description: [
       "Delegate a task, parallel tasks, or a chain through AgentSH or native Pi workers.",
+      "Select an optional named agent profile with agent on each launch/item; operation=profiles lists available profiles. Profiles never change provider/account authority or grant permission. Explicit tools can only narrow a profile's tool ceiling.",
       "Every new single task and each parallel/chain item requires nonempty explicit acceptance criteria; missing criteria reject before launch. Retained resumes preserve existing criteria.",
       "Linux native workers may continue once in the same session for explicitly routine authorized partial work; blockers/intervention return immediately. Other backends retain explicit parent control.",
       "For new launches omit operation; set background=true to continue while they run. Never mix launch options with operation.",
@@ -2207,6 +2253,7 @@ export default function (pi: ExtensionAPI) {
     ].join(" "),
     promptSnippet: "Delegate work to foreground or background subagents.",
     promptGuidelines: [
+      "Select a named profile with agent, not the tmux name label; operation=profiles lists the catalogue. Omit model/tools/systemPrompt to use its defaults, or use explicit narrowing/overrides as documented. Each concrete task still requires acceptance criteria.",
       "Use subagent background=true when you can do useful work concurrently.",
       "Read subagent results before relying on delegated work. wait_any waits for one child, wait/wait_group for one group, and wait_all for all current groups. Cancelling a wait leaves work running.",
       "Subagent result returns the worker’s answer. Use diagnostics=true for debugging and pagination for larger reports.",
@@ -2228,6 +2275,17 @@ export default function (pi: ExtensionAPI) {
         ? params[INTERNAL_OWNER_SESSION_ID] as string
         : undefined;
       validateBackgroundOperation(params);
+      if (params.operation === "profiles") {
+        const profiles = await discoverAgentProfiles({ cwd: ctx.cwd, agentDir: getAgentDir(),
+          projectTrusted: ctx.isProjectTrusted?.() === true, scope: params.agentScope as AgentProfileScope | undefined,
+          builtinDir: path.join(path.dirname(LOADED_SUBAGENT_MODULE_PATH), "agents") });
+        return { content: [{ type: "text", text: truncateByBytes(profiles.map(profile => `${profile.name} [${profile.source}] — ${profile.description.replace(/[\u0000-\u001f\u007f-\u009f]/g, " ")}`).join("\n") || "No agent profiles available") }],
+          details: { operation: "profiles", profiles: profiles.map(({ name, description, model, thinking, tools, source }) => ({ name, description, model, thinking, tools, source })) } };
+      }
+      if (!params.operation) {
+        params = await resolveSubagentProfiles(params, ctx);
+        if (signal?.aborted) throw signal.reason instanceof Error ? signal.reason : new Error("Subagent request cancelled");
+      }
       const routingSnapshot = ((!params.operation && !params.action) || ["resume", "prompt"].includes(params.operation))
         ? await prepareSessionRoutingRequest(ctx) : undefined;
       if (params.operation && process.platform === "linux") {
@@ -3063,6 +3121,7 @@ export default function (pi: ExtensionAPI) {
     },
 
     renderResult(result, options, theme) {
+      if (result.details?.operation === "profiles") return new Text(result.content.find((part: any) => part.type === "text")?.text ?? "No agent profiles available", 0, 0);
       if (result.details?.tui_subagent) return new Text(result.content.find((p: any) => p.type === "text")?.text ?? "(no output)", 0, 0);
       if (result.details?.operation === "tasks") return new Text(taskListText(result.details.tasks ?? [], options.expanded, result.details.descendants), 0, 0);
       if ((result.details as BackgroundSubagentDetails | undefined)?.background_subagent

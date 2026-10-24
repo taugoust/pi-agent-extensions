@@ -39,6 +39,8 @@ pkgs.runCommand "subagent-check"
     cp -R ${self}/workflows "$workdir/src/"
     cp ${self}/subagent/config.ts "$workdir/src/subagent/config.ts"
     cp ${self}/subagent/config.test.ts "$workdir/src/subagent/config.test.ts"
+    cp ${self}/subagent/profiles.ts "$workdir/src/subagent/profiles.ts"
+    cp ${self}/subagent/profiles.test.ts "$workdir/src/subagent/profiles.test.ts"
     cp ${self}/shared/session-routing.ts "$workdir/src/shared/session-routing.ts"
     cp ${self}/shared/session-routing.test.ts "$workdir/src/shared/session-routing.test.ts"
     cp ${self}/shared/extension-defaults.ts "$workdir/src/shared/extension-defaults.ts"
@@ -90,6 +92,7 @@ pkgs.runCommand "subagent-check"
       "$workdir/src/subagent/control.ts" \
       "$workdir/src/subagent/outcome.ts" \
       "$workdir/src/subagent/config.test.ts" \
+      "$workdir/src/subagent/profiles.test.ts" \
       "$workdir/src/shared/session-routing.test.ts" \
       "$workdir/src/subagent/outcome.test.ts" \
       "$workdir/src/subagent/resume.ts" \
@@ -137,6 +140,8 @@ pkgs.runCommand "subagent-check"
     node --test "$workdir/out/subagent/legacy-reap.test.js"
     node "$workdir/out/subagent/control.test.js"
     node --test "$workdir/out/subagent/config.test.js"
+    cp -R ${self}/subagent/agents "$workdir/out/subagent/agents"
+    node --test "$workdir/out/subagent/profiles.test.js"
     node --test "$workdir/out/shared/session-routing.test.js"
     node "$workdir/out/subagent/outcome.test.js"
     node "$workdir/out/subagent/resume.test.js"

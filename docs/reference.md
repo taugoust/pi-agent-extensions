@@ -864,6 +864,7 @@ options (`task`, `tasks`, `chain`, `model`, `background`, `tools`, `cwd`, etc.).
 
 | Operation | Fields besides `operation` (`?` means optional) |
 |---|---|
+| `profiles` | `agentScope?` (`user`, `project`, `both`) |
 | `resume` | `task_id`, `message?`, `compact?` |
 | `prompt` | `child_id`, `message`, `job_id?`, `control_mode?`, `wait_for_response?` |
 | `list`, `tasks` | `limit?` (1–50) |
@@ -871,6 +872,8 @@ options (`task`, `tasks`, `chain`, `model`, `background`, `tools`, `cwd`, etc.).
 | `wait`, `wait_group` | `job_id`, `wait_ms?` |
 | `wait_any`, `wait_all` | `wait_ms?` |
 | `result` | `job_id?`, `child_id?`, `child?`, `offset?`, `limit?`, `diagnostics?`; require `job_id` or `child_id`; never both `child` and `child_id` |
+
+Named profiles are selected with `agent` on a single launch or each parallel/chain item, independently of the tmux `name`. Builtins are `scout`, `worker`, `reviewer`, and `oracle`; `operation: "profiles"` lists the effective catalogue. User and trusted project Markdown definitions can override builtins. Profiles expand into the existing retained model/thinking, instructions and tool contract; they never supply acceptance criteria, grant permissions or pin another provider/account. See [Named subagent profiles](subagent-profiles.md) for supported fields, trust/precedence, narrowing-only tool overrides and examples.
 
 For `prompt`, optional `job_id` is a checked assertion that the child belongs to
 that group, not a second target. Unknown, foreign, or mismatched identities fail

@@ -182,6 +182,13 @@
           };
           subagent-finalizer = import ./nix/subagent-finalizer-check.nix { inherit self pkgs; };
         }
+        // pkgs.lib.optionalAttrs pkgs.stdenv.hostPlatform.isLinux {
+          subagent-profiles = import ./nix/subagent-profiles-check.nix {
+            inherit self pkgs;
+            piPackage = self.packages.${system}.pi;
+            extensionBundle = self.packages.${system}.default;
+          };
+        }
         # Upstream Pi's standalone nativeTargets omits x86_64-darwin. Do not
         # advertise native-release checks there; pure configuration checks remain.
         //

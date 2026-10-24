@@ -1,5 +1,5 @@
 import assert from "node:assert/strict";
-import { mkdtemp, readFile, rm, stat } from "node:fs/promises";
+import { mkdir, mkdtemp, readFile, rm, stat, writeFile } from "node:fs/promises";
 import os from "node:os";
 import path from "node:path";
 import backgroundSubagentExtension, {
@@ -9,6 +9,7 @@ import backgroundSubagentExtension, {
   getFinalOutput,
   applyNativeAssistantDelta,
   validateBackgroundOperation,
+  resolveSubagentProfiles,
 } from "./index.js";
 import {
   BackgroundSubagentManager,
@@ -31,6 +32,10 @@ assert.throws(() => validateBackgroundOperation({operation:"resume",task_id:task
 assert.throws(() => validateBackgroundOperation({operation:"resume",task_id:taskId,compact:"false"}), /boolean/);
 assert.throws(() => validateBackgroundOperation({operation:"resume",task_id:"../session"}), /valid task_id/);
 assert.doesNotThrow(() => validateBackgroundOperation({operation:"tasks",limit:20}));
+assert.doesNotThrow(() => validateBackgroundOperation({operation:"profiles",agentScope:"user"}));
+assert.throws(() => validateBackgroundOperation({operation:"profiles",task:"unexpected"}), /profiles accepts only/);
+assert.throws(() => validateBackgroundOperation({operation:"profiles",agentScope:"untrusted"}), /profiles accepts only/);
+assert.throws(() => validateBackgroundOperation({operation:"list",agent:"scout"}), /cannot include launch/);
 assert.throws(() => validateBackgroundOperation({ operation: "wait_everything" }), /Unknown background subagent operation/);
 assert.doesNotThrow(() => validateBackgroundOperation({ operation: "prompt", child_id: childId, message: "continue" }));
 assert.doesNotThrow(() => validateBackgroundOperation({ operation: "prompt", child_id: childId, message: "continue", control_mode: "interrupt" }));
@@ -42,7 +47,7 @@ assert.throws(() => validateBackgroundOperation({ operation: "prompt", child_id:
 // or interpreted as a fresh launch. The advertised correction is message.
 const resumeMisuse = { operation: "resume", task_id: taskId, model: "provider/model:high", background: true, task: "Continue validation" };
 assert.throws(() => validateBackgroundOperation(resumeMisuse), /unsupported fields: model, background, task.*Use message \(not task\).*No work was started/);
-for (const override of [{ model: "provider/model:high" }, { background: false }, { task: "continue" }, { job_id: jobId }, { wait_for_response: true }]) {
+for (const override of [{ agent: "scout" }, { agentScope: "user" }, { model: "provider/model:high" }, { background: false }, { task: "continue" }, { job_id: jobId }, { wait_for_response: true }]) {
   assert.throws(() => validateBackgroundOperation({ operation: "resume", task_id: taskId, ...override }), /accepts only/);
 }
 assert.doesNotThrow(() => validateBackgroundOperation({ operation: "resume", task_id: taskId }));
@@ -177,6 +182,33 @@ function createPi() {
 async function emit(pi: ReturnType<typeof createPi>, event: string, value: any, ctx: any) {
   for (const handler of pi.handlers.get(event) ?? []) await handler(value, ctx);
 }
+
+async function profileContractCheck() {
+  const root = await mkdtemp(path.join(os.tmpdir(), "subagent-profile-contract-"));
+  try {
+    const agents = path.join(root, "agents");
+    await mkdir(agents);
+    await writeFile(path.join(agents, "fixture.md"), "---\nname: fixture\ndescription: Contract fixture\nmodel: fixture-model\nthinking: high\ntools: read, bash\n---\nPROFILE_INSTRUCTIONS\n");
+    const ctx = { cwd: root, isProjectTrusted: () => false };
+    const task = { agent: "fixture", task: "Inspect", acceptance: ["Concrete acceptance"], systemPrompt: "EXPLICIT_EXTRA", tools: ["read"] };
+    for (const kind of ["tasks", "chain"]) {
+      const resolved = await resolveSubagentProfiles({ [kind]: [task], agentScope: "user", background: true }, ctx, root);
+      assert.equal("agentScope" in resolved, false, "profile scope must not leak to backend adapters");
+      const item = resolved[kind][0];
+      assert.equal("agent" in item, false);
+      assert.equal("agentScope" in item, false);
+      assert.equal(item.model, "fixture-model:high");
+      assert.match(item.systemPrompt, /PROFILE_INSTRUCTIONS[\s\S]*EXPLICIT_EXTRA/);
+      assert.deepEqual(item.tools, ["read"]);
+      assert.deepEqual(item.acceptance, task.acceptance, "profiles do not supply or replace acceptance");
+    }
+    await assert.rejects(resolveSubagentProfiles({ tasks: [task], agent: "fixture" }, ctx, root), /each task/);
+    await assert.rejects(resolveSubagentProfiles({ task: "Plain", agentScope: "user" }, ctx, root), /requires an agent/);
+    await assert.rejects(resolveSubagentProfiles({ ...task, agentScope: "project" }, ctx, root), /project trust/);
+    await assert.rejects(resolveSubagentProfiles({ action: "review", agent: "fixture" }, ctx, root), /Draft disposition/);
+  } finally { await rm(root, { recursive: true, force: true }); }
+}
+await profileContractCheck();
 
 async function operationCheck() {
   const root = await mkdtemp(path.join(os.tmpdir(), "subagent-wait-api-"));
