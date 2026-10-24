@@ -158,6 +158,7 @@ try {
 
   // Native dispatch supports named profiles for single, parallel, and chain items.
   for (const [label, params, count] of [
+    ["zero-tools", { task: "report without business tools", acceptance: ["report fixture completion"], agent: "fixture-scout", tools: [] }, 1],
     ["parallel", { tasks: [
       { task: "parallel scout A", acceptance: ["A acceptance"], agent: "fixture-scout" },
       { task: "parallel scout B", acceptance: ["B acceptance"], agent: "fixture-scout" },
@@ -174,6 +175,7 @@ try {
       assert.equal(actual.length, count, `${label} did not dispatch every named-profile child`);
       assert(actual.every((row) => row.model === "scout-v1" && row.reasoning === "high"), `${label} child model/thinking differs`);
       assert(actual.every((row) => /PROFILE_SCOUT_INSTRUCTION_V1/.test(JSON.stringify(row))), `${label} missed profile instruction`);
+      if (label === "zero-tools") assert.deepEqual(activeTools(actual[0]), ["notify_parent", "task_outcome"].sort(), "empty native profile allowlist must not inherit business tools");
     } finally { await cleanup(instance); }
   }
 
@@ -217,16 +219,19 @@ try {
     { name: "widen", params: { task: "must not launch", acceptance: ["required"], agent: "fixture-scout", tools: ["write"] }, reason: /cannot widen profile 'fixture-scout' allowlist/ },
     { name: "malformed", params: { task: "must not launch", acceptance: ["required"], agent: "fixture-scout" }, malformed: true, reason: /unsupported field 'unsupported'/ },
     { name: "missing-acceptance", params: { task: "must not launch", agent: "fixture-scout" }, reason: /New delegation requires acceptance: supply 1–16 explicit, task-specific, verifiable completion criteria\. No worker was launched\./ },
+    { name: "agentsh-empty-tools", agentSH: true, params: { task: "must not inherit defaults", acceptance: ["no dispatch"], agent: "fixture-scout", tools: [] }, reason: /AgentSH cannot enforce an empty profile tool allowlist; no work was started/ },
     { name: "trust", params: { task: "must not launch", acceptance: ["required"], agent: "fixture-project", agentScope: "project" }, projectTrust: true, reason: /agentScope: "project" requires project trust/ },
   ];
   for (const scenario of rejectedCases) {
-    const instance = await startParent(join(root, scenario.name), { params: scenario.params }, { projectTrust: scenario.projectTrust });
+    const instance = await startParent(join(root, scenario.name), { params: scenario.params }, { projectTrust: scenario.projectTrust, agentSH: scenario.agentSH });
     try {
       if (scenario.malformed) await writeFile(join(instance.agentDir, "agents", "fixture-scout.md"), "---\nname: fixture-scout\ndescription: broken\nunsupported: true\n---\nBROKEN\n");
       await instance.promptAndWait(`rejected ${scenario.name}`);
       const invocation = instance.events.find((event) => event.type === "tool_execution_start" && event.toolName === "subagent");
       assert.deepEqual(invocation?.args, scenario.params, `${scenario.name} did not reach the extension with the requested parameters`);
-      assert.equal((await assertOffline(instance.log)).filter((row) => row.role === "child").length, 0, `${scenario.name} launched a worker`);
+      const rejectedRows = await assertOffline(instance.log);
+      assert.equal(rejectedRows.filter((row) => row.role === "child").length, 0, `${scenario.name} launched a worker`);
+      assert.equal(rejectedRows.filter((row) => row.event === "adapter_call").length, 0, `${scenario.name} reached an adapter despite failed validation`);
       const toolResult = instance.events.findLast((event) => event.type === "message_end" && event.message?.role === "toolResult" && event.message?.toolName === "subagent");
       assert(toolResult?.message?.isError, `${scenario.name} did not produce a failed subagent tool result`);
       const callRow = (await dispatches(instance.log)).find((row) => row.event === "subagent_call");

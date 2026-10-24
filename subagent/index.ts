@@ -2283,7 +2283,15 @@ export default function (pi: ExtensionAPI) {
           details: { operation: "profiles", profiles: profiles.map(({ name, description, model, thinking, tools, source }) => ({ name, description, model, thinking, tools, source })) } };
       }
       if (!params.operation) {
+        const namedProfile = [params, ...(params.tasks ?? []), ...(params.chain ?? [])].some(item => item?.agent !== undefined);
         params = await resolveSubagentProfiles(params, ctx);
+        // AgentSH's legacy protocol omits --tools for an empty list, which
+        // would turn an explicit zero-tool profile into backend defaults.
+        if (namedProfile && selectSubagentBackend(agentSHBridge(), agentSHStartup).kind === "agentsh") {
+          const specs = params.tasks ?? params.chain ?? [params];
+          if (specs.some((spec: any) => Array.isArray(spec.tools) && spec.tools.length === 0))
+            throw new Error("AgentSH cannot enforce an empty profile tool allowlist; no work was started. Use a native worker or a nonempty supported allowlist.");
+        }
         if (signal?.aborted) throw signal.reason instanceof Error ? signal.reason : new Error("Subagent request cancelled");
       }
       const routingSnapshot = ((!params.operation && !params.action) || ["resume", "prompt"].includes(params.operation))

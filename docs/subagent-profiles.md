@@ -41,7 +41,7 @@ Review the assigned diff for concrete security defects. Do not edit files.
 Return findings with evidence and explain any uncertainty.
 ```
 
-The supported frontmatter fields are exactly `name`, `description`, `model`, `thinking`, and `tools`; the body is the profile instruction text. Name, description and a nonempty body are required. Comma-separated tools and simple YAML block lists are supported. An empty `tools:` means no business tools; omission preserves the backend's existing defaults. Unsupported YAML or fields such as skills, extensions, runners, memory, output files and acceptance defaults fail clearly instead of silently acquiring partial semantics.
+The supported frontmatter fields are exactly `name`, `description`, `model`, `thinking`, and `tools`; the body is the profile instruction text. Name, description and a nonempty body are required. Comma-separated tools and simple YAML block lists are supported. An empty `tools:` means no business tools on native workers; omission preserves the backend's existing defaults. AgentSH's current protocol cannot distinguish an empty list from inherited defaults, so zero-tool profile launches fail before AgentSH dispatch instead of widening access. Unsupported YAML or fields such as skills, extensions, runners, memory, output files and acceptance defaults fail clearly instead of silently acquiring partial semantics.
 
 Lowest to highest priority:
 
