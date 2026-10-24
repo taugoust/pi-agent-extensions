@@ -16,6 +16,7 @@ import {
   blocksStaleGoalToolCalls,
   findFinalAssistantMessage,
   type GoalRuntime,
+  GOAL_CONTINUATION_MESSAGE_TYPE,
   incrementGoal,
   isGoalContextOverflow,
   isRetryableGoalInterruption,
@@ -244,7 +245,6 @@ export function registerGoalLifecycle(
       // steer cannot consume a later follow-up's cleanup protection.
       if (runtime.acceptOwnedInputBoundary(event.text)) return;
       runtime.supersedeOwnedInputCollision(event.text);
-      if (runtime.activeGoal?.waiting) runtime.clearGoalWait(ctx, runtime.activeGoal.id);
       if (event.streamingBehavior === "steer" || event.streamingBehavior === "followUp") {
         runtime.noteQueuedNonGoalInput(event.text, event.streamingBehavior);
       }
@@ -252,7 +252,6 @@ export function registerGoalLifecycle(
       return;
     }
     if (/^\/goal(?:\s|$)/u.test(event.text.trimStart())) return;
-    if (runtime.activeGoal?.waiting) runtime.clearGoalWait(ctx, runtime.activeGoal.id);
     if (event.streamingBehavior === "followUp") {
       runtime.noteQueuedNonGoalInput(event.text, "followUp", true);
       return;
@@ -279,6 +278,20 @@ export function registerGoalLifecycle(
     }
     if (message.role === "custom") {
       if (Reflect.get(message, "customType") === GOAL_CONTRACT_MESSAGE_TYPE) return;
+      if (Reflect.get(message, "customType") === GOAL_CONTINUATION_MESSAGE_TYPE) {
+        const prompt = typeof message.content === "string" ? message.content : "";
+        if (runtime.consumeCancelledContinuationPrompt(prompt)) {
+          abortCurrentTurn(ctx);
+          return;
+        }
+        const goalId = runtime.markContinuationStarted(prompt);
+        if (!goalId || runtime.activeGoal?.id !== goalId || !runtime.ownsWorkflow(runtime.activeGoal)) {
+          abortCurrentTurn(ctx);
+          return;
+        }
+        runtime.beginAgentRun(goalId, "automatic");
+        return;
+      }
       if (runtime.isActiveBudgetWrapUpMessage(message)) return;
       if (runtime.activeGoal?.waiting) runtime.clearGoalWait(ctx, runtime.activeGoal.id);
       if (runtime.guardAbortGoalId === runtime.activeGoal?.id) {
@@ -398,23 +411,45 @@ export function registerGoalLifecycle(
   pi.on("before_agent_start", (event, ctx) => {
     // Custom runs use message_start to establish non-goal ownership.
     // Pi 1.0 emits this hook only for user prompts; older runtimes tagged custom runs.
-    if (!sessionActive || Reflect.get(event, "messageType") === "custom") return;
+    if (!sessionActive) return;
+    const startMessage = Reflect.get(event, "message");
+    const customContinuation =
+      Reflect.get(event, "messageType") === "custom" &&
+      startMessage !== null &&
+      typeof startMessage === "object" &&
+      Reflect.get(startMessage, "customType") === GOAL_CONTINUATION_MESSAGE_TYPE;
+    if (Reflect.get(event, "messageType") === "custom" && !customContinuation) return;
+    const customContent = customContinuation ? Reflect.get(startMessage, "content") : undefined;
+    const prompt = customContinuation
+      ? typeof customContent === "string"
+        ? customContent
+        : ""
+      : event.prompt;
     runtime.clearAgentRun();
     // Pi-owned retries emit agent_start directly. Reaching a normal prompt
     // boundary means cleanup no longer owns the next run, so the hard-cap guard
     // must not abort it.
     if (runtime.guardAbortGoalId) runtime.guardAbortGoalId = undefined;
-    const goalPrompt = runtime.consumeOwnedGoalPrompt(event.prompt);
+    const goalPrompt = runtime.consumeOwnedGoalPrompt(prompt);
     const goalPromptGoalId = goalPrompt?.goalId;
-    const continuationGoalId = goalPromptGoalId ? undefined : runtime.markContinuationStarted(event.prompt);
+    const continuationGoalId = goalPromptGoalId ? undefined : runtime.markContinuationStarted(prompt);
+    if (
+      customContinuation &&
+      (!continuationGoalId ||
+        runtime.activeGoal?.id !== continuationGoalId ||
+        !runtime.ownsWorkflow(runtime.activeGoal))
+    ) {
+      runtime.consumeCancelledContinuationPrompt(prompt);
+      return abortCurrentTurn(ctx);
+    }
     const ownedPromptGoalId = goalPromptGoalId ?? continuationGoalId;
-    const ownedPromptBoundary = runtime.hasOwnedPromptBoundary(event.prompt);
+    const ownedPromptBoundary = runtime.hasOwnedPromptBoundary(prompt);
     const activeBudgetWrapUp = runtime.hasActiveBudgetWrapUp();
     const activeGoalRecovery = runtime.hasActiveGoalRecovery();
     const queuedNonGoalInput = activeBudgetWrapUp
       ? undefined
       : runtime.consumeQueuedNonGoalInput(
-          event.prompt,
+          prompt,
           !activeGoalRecovery && ownedPromptGoalId === undefined && !ownedPromptBoundary,
         );
     if (queuedNonGoalInput?.behavior === "followUp") {
@@ -427,8 +462,8 @@ export function registerGoalLifecycle(
     if (
       !ownedPromptGoalId &&
       !ownedPromptBoundary &&
-      !extractGoalPromptMarker(event.prompt) &&
-      !extractContinuationMarker(event.prompt) &&
+      !extractGoalPromptMarker(prompt) &&
+      !extractContinuationMarker(prompt) &&
       !activeGoalRecovery &&
       !runtime.budgetWrapUp &&
       queuedNonGoalInput?.behavior !== "steer"
@@ -436,8 +471,7 @@ export function registerGoalLifecycle(
       runtime.clearStaleGoalToolCallBlock();
     }
     if (!ownedPromptGoalId && !ownedPromptBoundary) {
-      runtime.supersedeOwnedInputCollision(event.prompt);
-      if (runtime.activeGoal?.waiting) runtime.clearGoalWait(ctx, runtime.activeGoal.id);
+      runtime.supersedeOwnedInputCollision(prompt);
     }
     if (runtime.activeGoal?.status === "active" && !runtime.ownsWorkflow(runtime.activeGoal)) {
       runtime.cancelContinuationWork();

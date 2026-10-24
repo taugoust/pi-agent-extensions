@@ -191,6 +191,7 @@ const MAX_CANCELLED_CONTINUATION_PROMPTS = 20;
 const MAX_PENDING_GOAL_PROMPTS = 20;
 const MAX_PENDING_NON_GOAL_INPUTS = 20;
 const BUDGET_WRAP_UP_MESSAGE_TYPE = "goal-budget-wrap-up";
+export const GOAL_CONTINUATION_MESSAGE_TYPE = "goal-continuation";
 const BUDGET_WRAP_UP_PROMPT =
   "The active /goal token budget is exhausted. Stop substantive work and do not call substantive tools. Summarize progress, verified results, remaining work, and blockers concisely. Treat completion as unproven. Do not call goal_complete unless authoritative, requirement-by-requirement evidence already proves every requirement is complete. Weak, indirect, or missing evidence is not enough. Budget exhaustion is not completion.";
 const CONTRADICTORY_COMPLETION_PATTERNS = [
@@ -437,7 +438,15 @@ export class GoalRuntime {
     this.continuationIntent = undefined;
     this.continuationDelivery = intent;
     try {
-      this.pi.sendUserMessage(intent.prompt, { deliverAs: "followUp" });
+      this.pi.sendMessage(
+        {
+          customType: GOAL_CONTINUATION_MESSAGE_TYPE,
+          content: intent.prompt,
+          display: false,
+          details: { goalId: intent.goalId, marker: intent.marker },
+        },
+        { deliverAs: "followUp", triggerTurn: true },
+      );
       return true;
     } catch (error) {
       if (this.continuationDelivery?.marker === intent.marker) {

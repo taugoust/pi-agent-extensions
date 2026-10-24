@@ -101,8 +101,9 @@ async function fixture(mode = "text", existing) {
 	});
 	const calls = [],
 		errors = [];
-	let session, release;
+	let session, release, extensionApi;
 	const factory = (pi) => {
+		extensionApi = pi;
 		pi.registerProvider("openai", {
 			api: "openai-responses",
 			apiKey: "fake-workflow-key",
@@ -302,6 +303,7 @@ async function fixture(mode = "text", existing) {
 		errors,
 		release: () => release?.(),
 		setMode: value => { mode = value; },
+		sendCustom: (message, options) => extensionApi.sendMessage(message, options),
 		async dispose() {
 			await owner.dispose();
 			await rm(root, { recursive: true, force: true });
@@ -468,6 +470,16 @@ for (const [mode, cause, maxCalls] of [
 				"safety pause",
 			);
 			assert.equal(s.goal.safetyPauseCause, cause);
+			const branch = f.session.sessionManager.getBranch();
+			const continuations = branch.filter((entry) => entry.type === "custom_message" && entry.customType === "goal-continuation");
+			assert.ok(continuations.length > 0, "automatic continuation is stored as a custom message");
+			assert.ok(continuations.every((entry) => entry.display === false));
+			assert.ok(!branch.some((entry) => entry.type === "message" && entry.message?.role === "user" && String(entry.message.content).includes("pi-goal-continuation:")), "continuation markers must not be user-role messages");
+			const stale = continuations.at(-1);
+			const callsAtPause = f.calls.length;
+			f.sendCustom({ customType: "goal-continuation", content: stale.content, display: false, details: stale.details }, { triggerTurn: true });
+			await f.session.waitForIdle();
+			assert.equal(f.calls.length, callsAtPause, "a stale continuation must not start model work after Goal stops");
 			assert.ok(f.calls.length <= maxCalls, `${f.calls.length} calls`);
 			assert.deepEqual(f.errors, []);
 			const before = f.calls.length;
@@ -638,14 +650,35 @@ test("changing the selected model invalidates an outstanding Goal approval witho
 		await f.dispose();
 	}
 });
-test("Goal waits without polling the model and wakes only after an explicit confirmed resume", async () => {
+test("Goal waits without polling; incidental prompts stay quiet, explicit resume and custom external wakes work", async () => {
   const f = await fixture("wait");
   try {
     await f.start("goal.start", { objective: "Wait for explicit wake", tokenBudget: 1000 }); await f.answer(true);
     const waiting = await until(f.snapshot, s => !!s.goal?.waiting && !s.busy, "quiet wait");
     await f.session.waitForIdle(); for (let i = 0; i < 5; i++) await f.snapshot(); assert.equal(f.calls.length, 1);
-    f.setMode("complete"); await f.start("goal.resume"); await f.dialog(); assert.equal(f.calls.length, 1);
+    f.setMode("repeat");
+    await f.session.prompt("Can you answer an unrelated question?");
+    await f.session.waitForIdle();
+    const stillWaiting = await f.snapshot();
+    assert.ok(stillWaiting.goal?.waiting, "an incidental user prompt must not clear the wait");
+    assert.equal(f.calls.length, 2);
+    for (let i = 0; i < 5; i++) await f.snapshot();
+    assert.equal(f.calls.length, 2, "an incidental prompt must not authorize automatic continuation");
+    f.setMode("complete"); await f.start("goal.resume"); await f.dialog(); assert.equal(f.calls.length, 2);
     await f.answer(true); const done = await until(f.snapshot, s => !!s.lastCompletion?.summary, "resumed completion");
-    assert.equal(done.lastCompletion.id, waiting.goal.id); assert.equal(f.calls.length, 2);
+    assert.equal(done.lastCompletion.id, waiting.goal.id); assert.equal(f.calls.length, 3);
+  } finally { await f.dispose(); }
+});
+test("A custom external wake clears a Goal wait and runs the active goal", async () => {
+  const f = await fixture("wait");
+  try {
+    await f.start("goal.start", { objective: "Wait for a custom external wake", tokenBudget: 1000 });
+    await f.answer(true);
+    const waiting = await until(f.snapshot, s => !!s.goal?.waiting && !s.busy, "quiet wait before external wake");
+    f.setMode("complete");
+    f.sendCustom({ customType: "fixture-external-wake", content: "The external condition is ready.", display: false }, { triggerTurn: true });
+    const done = await until(f.snapshot, s => !!s.lastCompletion?.summary, "external wake completion");
+    assert.equal(done.lastCompletion.id, waiting.goal.id);
+    assert.equal(f.calls.length, 2);
   } finally { await f.dispose(); }
 });
