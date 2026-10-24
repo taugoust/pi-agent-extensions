@@ -2,7 +2,13 @@
 
 ## Status
 
-Open. Added to the planned subagent enhancements alongside [verified acceptance](subagent-runtime-verified-acceptance.md) and [scripted orchestration](subagent-scripted-orchestration.md). Implementation is not started; Goal mode remains inactive.
+Resolved. Related open tasks: [verified acceptance](../subagent-runtime-verified-acceptance.md) and [scripted orchestration](../subagent-scripted-orchestration.md).
+
+## Resolution
+
+Implemented in `6c00d4f`: named `agent` selection and scoped catalogue discovery, four adapted builtins, strict Markdown validation, trusted-project precedence, narrowing-only portable tool selections, and expanded retained launch contracts. Existing single/parallel/chain launches and AgentSH adapters share profile resolution; no new scripted runner or Paseo interface was imported. See [profile documentation](../../docs/subagent-profiles.md).
+
+Evidence: 19 deterministic parser/resolution tests, the full 90-test native subagent suite, sandbox/gateway tests, and the dedicated offline native profile check passed. Actual Pi parent/child requests verify model/thinking/tools/instructions, provider rebinding, retained resume after file edits, launch forms and exact rejection boundaries; an isolated mock verifies AgentSH adapter field stripping. Required acceptance remains mandatory. Unsupported skills/extensions/runners fail closed rather than acquiring partial semantics.
 
 ## Outcome
 

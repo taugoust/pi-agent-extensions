@@ -8,7 +8,7 @@ Open. Requested as a backlog task; implementation is not started.
 
 Adapt runtime-verified acceptance directly from `candidates/pi-subagents`, so explicit verification commands—not worker claims—determine whether configured checks passed. Preserve our separate Pi RPC/TUI workers, tmux lifecycle, retained conversations, and Paseo integration.
 
-Related planned work: [scripted workflows and dynamic orchestration](subagent-scripted-orchestration.md) and [reusable profiles](subagent-agent-profiles.md). No Paseo changes in the current scope.
+Related planned work: [scripted workflows and dynamic orchestration](subagent-scripted-orchestration.md) and [reusable profiles](resolved/subagent-agent-profiles.md). No Paseo changes in the current scope.
 
 ## Upstream reference
 
