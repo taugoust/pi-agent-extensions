@@ -9,7 +9,7 @@ import { loadWorktreeSettings } from "../workflows/worktree/settings.ts";
 export type WorktreeOption = { changes?: "include" | "exclude"; base?: string };
 export type OwnedWorktree = { version: 1; ownerSessionId: string; taskId: string; childId: string; title: string; repo: string; commonDir: string;
   path: string; cwd: string; branch: string; baseCommit: string; includedChanges: boolean; createdAt: string;
-  released: boolean; state: "preparing" | "ready" | "failed"; error?: string };
+  released: boolean; state: "preparing" | "ready" | "failed"; physicalIdentity?: { dev: string; ino: string; birthtimeMs: string }; error?: string };
 const registry = () => join(getAgentDir(), "state", "subagent-worktrees-v1");
 const recordFile = (owner: string, task: string) => join(registry(), `${createHash("sha256").update(`${owner}\0${task}`).digest("hex")}.json`);
 export function worktreeOption(value: unknown): WorktreeOption | undefined {
@@ -207,6 +207,9 @@ export async function provisionWorktrees(children: Child[], owner: string, signa
       await addWorktree(gitClient(), record.repo, { path: record.path, branch: record.branch, startOid: record.baseCommit }, signal);
       const target = await fs.lstat(record.path);
       if (!target.isDirectory() || target.isSymbolicLink() || !(await listWorktrees(gitClient(), record.repo, signal)).some(row => row.path === record.path && row.branch === record.branch)) throw new Error("Created worktree identity changed");
+      const adminStat = await fs.stat((await worktreeGit(["rev-parse", "--path-format=absolute", "--git-dir"], record.path, signal)).trim());
+      record.physicalIdentity = { dev: String(adminStat.dev), ino: String(adminStat.ino), birthtimeMs: String(adminStat.birthtimeMs) };
+      await save(record);
       await fs.chmod(record.path, 0o700);
       if (delta) {
         if (delta.staged) await worktreeGit(["apply", "--index", "--binary", "-"], record.path, signal, Buffer.from(delta.staged));

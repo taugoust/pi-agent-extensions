@@ -522,7 +522,7 @@ export function stripTerminalControls(value: string): string {
     .join("");
 }
 
-async function runGit(
+export async function runGit(
   pi: Pick<ExtensionAPI, "exec">,
   args: string[],
   cwd: string,

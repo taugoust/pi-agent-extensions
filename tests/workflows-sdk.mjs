@@ -35,6 +35,9 @@ const jiti = createJiti(import.meta.url),
 const { createWorktreeSettingsRuntime } = await jiti.import(
 	"../workflows/worktree/settings.ts",
 );
+const { provisionWorktrees, releaseWorktree, ownedWorktrees } = await jiti.import(
+	"../shared/subagent-worktrees.ts",
+);
 after(async () => {
 	globalThis.fetch = oldFetch;
 	if (oldDir === undefined) delete process.env.PI_CODING_AGENT_DIR;
@@ -228,9 +231,9 @@ async function fixture(mode = "text", existing) {
 		modelRuntime: runtime,
 		settingsManager: settings,
 		resourceLoader: loader,
-		sessionManager: existing?.sessionFile
+		sessionManager: existing?.sessionManager ?? (existing?.sessionFile
 			? sdk.SessionManager.open(existing.sessionFile)
-			: sdk.SessionManager.create(cwd, join(root, "sessions")),
+			: sdk.SessionManager.create(cwd, join(root, "sessions"))),
 		noTools: "builtin",
 	}));
 	const owner = new sdk.AgentSessionRuntime(
@@ -290,6 +293,7 @@ async function fixture(mode = "text", existing) {
 	return {
 		root,
 		cwd,
+		sessionFile: session.sessionManager.getSessionFile(),
 		runtime,
 		session,
 		owner,
@@ -330,6 +334,7 @@ test("copied Git flows create at approved OID, refuse dirty/removal races, prese
 			"created tree",
 		);
 		assert.equal(git(target, "rev-parse", "HEAD"), head);
+		assert.equal((await f.snapshot()).worktrees.find((t) => t.path === target).createdInSession, true);
 		assert.equal(f.session.sessionManager.getSessionId(), initial);
 		assert.equal(f.calls.length, 0);
 		await writeFile(join(target, "untracked.txt"), "must survive");
@@ -365,6 +370,94 @@ test("copied Git flows create at approved OID, refuse dirty/removal races, prese
 		assert.ok(git(f.cwd, "show-ref", "refs/heads/feature/native"));
 		assert.equal(network, 0);
 	} finally {
+		await f.dispose();
+	}
+});
+test("session-created worktree ownership survives reload, commits and branch renames but not path recreation", async () => {
+	const f = await fixture();
+	let reopened, forked;
+	try {
+		const target = join(f.root, "trees", "durable");
+		f.session.sessionManager.appendMessage({ role: "user", content: "Persist worktree ownership fixture", timestamp: Date.now() });
+		await f.start("worktree.add");
+		await f.answer("feature/durable");
+		await f.answer("");
+		await f.answer(target);
+		await f.answer(true);
+		await until(f.snapshot, s => !s.busy && s.worktrees.some(row => row.path === target && row.createdInSession), "owned worktree");
+		git(target, "config", "user.name", "Workflow test");
+		git(target, "config", "user.email", "test@example.invalid");
+		await writeFile(join(target, "later.txt"), "normal commit\n");
+		git(target, "add", "later.txt");
+		git(target, "-c", "commit.gpgsign=false", "commit", "-m", "Later commit");
+		git(target, "branch", "-m", "feature/renamed");
+		await f.owner.dispose();
+		reopened = await fixture("text", { root: f.root, sessionFile: f.sessionFile });
+		let inventory = await until(reopened.snapshot, s => s.worktrees.some(item => item.path === target), "reloaded inventory");
+		let row = inventory.worktrees.find(item => item.path === target);
+		assert.equal(row.createdInSession, true);
+		assert.equal(row.branch, "feature/renamed");
+		const createdEntry = reopened.session.sessionManager.getEntries().find(entry => entry.type === "custom" && entry.customType === "workflow-worktree-created");
+		const forkManager = sdk.SessionManager.create(f.cwd, join(f.root, "fork-sessions"));
+		forkManager.appendCustomEntry("workflow-worktree-created", createdEntry.data);
+		forked = await fixture("text", { root: f.root, sessionManager: forkManager });
+		assert.notEqual(forked.session.sessionManager.getSessionId(), reopened.session.sessionManager.getSessionId());
+		const forkSnapshot = await until(forked.snapshot, s => s.worktrees.some(item => item.path === target), "forked inventory");
+		assert.equal(forkSnapshot.worktrees.find(item => item.path === target).createdInSession, false);
+		await forked.owner.dispose();
+		forked = undefined;
+		await reopened.owner.dispose();
+		reopened = undefined;
+		git(f.cwd, "worktree", "remove", "--force", target);
+		git(f.cwd, "worktree", "add", "-b", "feature/recreated", target, "HEAD");
+		reopened = await fixture("text", { root: f.root, sessionFile: f.sessionFile });
+		inventory = await until(reopened.snapshot, s => s.worktrees.some(item => item.path === target), "recreated inventory");
+		row = inventory.worktrees.find(item => item.path === target);
+		assert.equal(row.createdInSession, false);
+	} finally {
+		if (forked) await forked.owner.dispose();
+		if (reopened) await reopened.dispose();
+		else await rm(f.root, { recursive: true, force: true });
+	}
+});
+test("released subagent worktrees remain session-created after their worker releases them", async () => {
+	const f = await fixture();
+	const previousAgentDir = process.env.PI_CODING_AGENT_DIR;
+	process.env.PI_CODING_AGENT_DIR = join(f.root, "agent");
+	try {
+		const taskId = `subagent-task-${randomUUID().replaceAll("-", "").slice(0, 24)}`;
+		const childId = `subagent-child-${randomUUID().replaceAll("-", "").slice(0, 24)}`;
+		const child = { taskId, childId, spec: { task: "Inspect the fixture", name: "retained", cwd: f.cwd, worktree: { changes: "exclude" } } };
+		await provisionWorktrees([child], f.session.sessionManager.getSessionId(), undefined, () => true);
+		assert.ok(child.spec.worktreeInfo?.path);
+		await releaseWorktree(f.session.sessionManager.getSessionId(), taskId, childId);
+		const snapshot = await until(f.snapshot, s => s.worktrees.some(row => row.path === child.spec.worktreeInfo.path), "released tree inventory");
+		const row = snapshot.worktrees.find(item => item.path === child.spec.worktreeInfo.path);
+		assert.equal(row.createdInSession, true);
+		assert.equal(row.inUse, false);
+	} finally {
+		if (previousAgentDir === undefined) delete process.env.PI_CODING_AGENT_DIR;
+		else process.env.PI_CODING_AGENT_DIR = previousAgentDir;
+		await f.dispose();
+	}
+});
+test("worktrees created before subagent setup fails still belong to the creating session", async () => {
+	const f = await fixture();
+	const previousAgentDir = process.env.PI_CODING_AGENT_DIR;
+	process.env.PI_CODING_AGENT_DIR = join(f.root, "agent");
+	try {
+		const taskId = `subagent-task-${randomUUID().replaceAll("-", "").slice(0, 24)}`;
+		const childId = `subagent-child-${randomUUID().replaceAll("-", "").slice(0, 24)}`;
+		const child = { taskId, childId, spec: { task: "Fail setup", name: "failed", cwd: f.cwd, worktree: { changes: "exclude" } } };
+		let checks = 0;
+		await assert.rejects(provisionWorktrees([child], f.session.sessionManager.getSessionId(), undefined, () => ++checks < 3), /Worktree launch context changed/);
+		const failed = (await ownedWorktrees(f.session.sessionManager.getSessionId())).find(record => record.taskId === taskId);
+		assert.equal(failed.state, "failed");
+		const snapshot = await until(f.snapshot, s => s.worktrees.some(row => row.path === failed.path), "failed tree inventory");
+		assert.equal(snapshot.worktrees.find(row => row.path === failed.path).createdInSession, true);
+	} finally {
+		if (previousAgentDir === undefined) delete process.env.PI_CODING_AGENT_DIR;
+		else process.env.PI_CODING_AGENT_DIR = previousAgentDir;
 		await f.dispose();
 	}
 });

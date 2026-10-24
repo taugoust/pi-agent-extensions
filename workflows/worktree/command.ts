@@ -1,4 +1,5 @@
 import { existsSync } from "node:fs";
+import { stat } from "node:fs/promises";
 import { resolve } from "node:path";
 import type { ExtensionAPI, ExtensionCommandContext } from "@earendil-works/pi-coding-agent";
 import {
@@ -28,6 +29,7 @@ import {
   worktreeAdministrativeDirectory,
   worktreeForBranch,
   worktreeInventory,
+  runGit,
 } from "./git.js";
 import { switchToWorktree } from "./session.js";
 import type { WorktreeSettingsRuntime } from "./settings.js";
@@ -295,6 +297,18 @@ export async function addFlow(
       `Git add completed, so the worktree was retained at ${targetPath}, but verification failed: ${formatError(error)}. Inspect git worktree list before retrying.`,
     );
   }
+  const commonDir = (await runGit(pi, ["rev-parse", "--path-format=absolute", "--git-common-dir"], targetPath, ctx.signal)).stdout.trim();
+  const gitDir = await worktreeAdministrativeDirectory(pi, targetPath, ctx.signal);
+  const gitStat = await stat(gitDir);
+  pi.appendEntry("workflow-worktree-created", {
+    version: 1,
+    ownerSessionId: ctx.sessionManager.getSessionId(),
+    path: created.path,
+    commonDir,
+    gitDir,
+    identity: { dev: String(gitStat.dev), ino: String(gitStat.ino), birthtimeMs: String(gitStat.birthtimeMs) },
+    createdAt: new Date().toISOString(),
+  });
   safeNotify(ctx, `Created worktree ${targetPath} on branch ${branch}.`, "info");
 
   if (

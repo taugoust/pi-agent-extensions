@@ -11,9 +11,11 @@ import type {
 	ExtensionCommandContext,
 } from "@earendil-works/pi-coding-agent";
 import { addFlow, removeFlow, pruneFlow } from "./worktree/command.js";
+import { stat } from "node:fs/promises";
 import {
 	currentWorktreePath,
 	listWorktrees,
+	runGit,
 	pathsEqual,
 	pathIdentity,
 	stripTerminalControls,
@@ -97,6 +99,10 @@ export function createWorkflowService(
 				value: Awaited<ReturnType<typeof workspaceRepositories>>;
 		  }
 		| undefined;
+	async function filesystemIdentity(path: string) {
+		const item = await stat(path);
+		return { dev: String(item.dev), ino: String(item.ino), birthtimeMs: String(item.birthtimeMs) };
+	}
 	async function repositories() {
 		const cwd = ctx.cwd;
 		if (
@@ -195,7 +201,12 @@ export function createWorkflowService(
 	}
 	async function worktreeRepository(path: string, signal: AbortSignal) {
 		const mine = await ownedWorktrees(sessionId);
+		const tracked = await allSessionCreatedRecords();
 		const owned = mine.find((record) => pathsEqual(record.path, path));
+		if (tracked.some((record) => record.ownerSessionId === sessionId && pathsEqual(record.path, path)) && !owned) {
+			const found = await locateTrackedWorktree(path, tracked, signal);
+			if (found) return found;
+		}
 		if (owned) return owned.commonDir;
 		const roots = new Set(mine.map((record) => record.commonDir));
 		const lookup = AbortSignal.any([signal, AbortSignal.timeout(15_000)]);
@@ -218,6 +229,34 @@ export function createWorkflowService(
 			"Worktree is no longer available in this session's repositories",
 		);
 	}
+	function sessionCreatedRecords() {
+		const entries = ctx.sessionManager.getEntries?.() ?? ctx.sessionManager.getBranch?.() ?? [];
+		return (entries as any[]).flatMap((entry) => {
+			const data = entry?.type === "custom" && entry.customType === "workflow-worktree-created" ? entry.data : undefined;
+			return data?.version === 1 && data.ownerSessionId === sessionId && [data.path, data.commonDir, data.gitDir].every((value: unknown) => typeof value === "string") && validPhysicalIdentity(data.identity) ? [data] : [];
+		});
+	}
+	function validPhysicalIdentity(value: any) {
+		return value && typeof value.dev === "string" && typeof value.ino === "string" && typeof value.birthtimeMs === "string";
+	}
+	function samePhysicalIdentity(actual: any, expected: any) {
+		return validPhysicalIdentity(expected) && actual.dev === expected.dev && actual.ino === expected.ino && actual.birthtimeMs === expected.birthtimeMs;
+	}
+	async function allSessionCreatedRecords() {
+		const manual = sessionCreatedRecords();
+		const owned = (await ownedWorktrees(sessionId)).filter(record => record.ownerSessionId === sessionId && validPhysicalIdentity(record.physicalIdentity));
+		return [...manual, ...owned.map(record => ({ ownerSessionId: record.ownerSessionId, path: record.path, commonDir: record.commonDir, identity: record.physicalIdentity }))];
+	}
+	async function locateTrackedWorktree(path: string, tracked: any[], signal: AbortSignal) {
+		for (const item of tracked) {
+			try {
+				const records = await listWorktrees(pi, item.commonDir, signal);
+				const record = records.find((row) => pathsEqual(row.path, path));
+				if (record) return item.commonDir;
+			} catch {}
+		}
+		return undefined;
+	}
 	async function refreshWorktrees() {
 		if (reading) return reading;
 		if (worktreeCache && Date.now() - worktreeCache.at < 5000) return;
@@ -227,7 +266,9 @@ export function createWorkflowService(
 				const mine = ownership.filter(
 					(record) => record.ownerSessionId === sessionId,
 				);
+				const createdRecords = await allSessionCreatedRecords();
 				const roots = new Set(mine.map((record) => record.commonDir));
+				for (const item of createdRecords) roots.add(item.commonDir);
 				const discovered = await repositories();
 				const active = discovered.active;
 				for (const root of discovered.roots) roots.add(root);
@@ -244,6 +285,11 @@ export function createWorkflowService(
 								.list({ sessionId, limit: 50 })
 								.catch(() => undefined)
 						: undefined;
+				const sessionCreated = new Map<string, any[]>();
+				for (const record of createdRecords) {
+					const key = pathIdentity(record.path);
+					sessionCreated.set(key, [...(sessionCreated.get(key) ?? []), record]);
+				}
 				const rows: any[] = [];
 				const inventorySignal = AbortSignal.any([
 					lifetime.signal,
@@ -282,9 +328,7 @@ export function createWorkflowService(
 						if (rows.length >= 100 || inventorySignal.aborted) break;
 						if (rows.some((row) => pathsEqual(row.path, record.path))) continue;
 						const owned = ownership.find(
-							(row) =>
-								pathsEqual(row.path, record.path) &&
-								row.branch === record.branch,
+							(row) => pathsEqual(row.path, record.path) && row.branch === record.branch,
 						);
 						if (record.bare || (active && record.isMain && !owned)) continue;
 						let changedFiles: number | null = null;
@@ -309,6 +353,18 @@ export function createWorkflowService(
 									if (/^[RC]|^.[RC]/.test(fields[i])) i++;
 								}
 						} catch {}
+						let createdInSession = false;
+						const candidates = sessionCreated.get(pathIdentity(record.path));
+						if (candidates?.length) {
+							try {
+								const [commonDir, gitDir] = await Promise.all([
+									runGit(pi, ["rev-parse", "--path-format=absolute", "--git-common-dir"], record.path, inventorySignal),
+									runGit(pi, ["rev-parse", "--path-format=absolute", "--git-dir"], record.path, inventorySignal),
+								]);
+								const identity = await filesystemIdentity(gitDir.stdout.trim());
+								createdInSession = candidates.some(created => created.ownerSessionId === sessionId && pathIdentity(commonDir.stdout.trim()) === pathIdentity(created.commonDir) && (!created.gitDir || pathIdentity(gitDir.stdout.trim()) === pathIdentity(created.gitDir)) && samePhysicalIdentity(identity, created.identity));
+							} catch {}
+						}
 						const worker =
 							owned?.ownerSessionId === sessionId &&
 							workers?.state === "available"
@@ -318,6 +374,7 @@ export function createWorkflowService(
 							repositoryPath,
 							repositoryLabel,
 							path: record.path,
+							createdInSession,
 							branch: record.branch ?? null,
 							head: record.head ?? null,
 							main: record.isMain,
