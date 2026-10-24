@@ -18,6 +18,8 @@ The terminal runtime is loaded only on first TUI use. It uses Pi's public UI and
 
 The **btw** composer chat remains a separate, compact UI with its existing private service. It uses recent main context and the configured default side model, supports follow-ups and copying, and can stop an active answer. Dismissing the chat discards its local state and requests cancellation/removal of its owned server thread. Terminal and Paseo threads are not synchronized.
 
+The configured selector supplies the side model's role/ID, not its authentication provider. Snapshots advertise the default under the owning session's current physical provider, matching the available model inventory. New-chat requests, including cached legacy provider-qualified selectors, resolve against that same owner. An unavailable role remains unavailable without fallback; existing threads can still be inspected, cancelled or removed.
+
 The Nix `programs.pi.extensions.btw.model` default derives from the subagent provider/model; standalone default is `openai/gpt-6-luna`. Paseo thinking is low, output is limited to 4096 tokens, and requests have a three-minute cancellation deadline. Unavailable models fail without fallback. The guarded main-model alias is excluded from this service. Pi's request-time model registry handles authentication, including the selected session's OpenAI account; credentials are not exposed in snapshots.
 
 ## Boundaries

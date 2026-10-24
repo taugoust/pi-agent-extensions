@@ -1,7 +1,8 @@
 import test from "node:test";
 import assert from "node:assert/strict";
 import { randomUUID } from "node:crypto";
-import { createJiti } from "../node_modules/@earendil-works/pi-coding-agent/node_modules/jiti/lib/jiti.mjs";
+import { createRequire } from "node:module";
+const { createJiti } = createRequire(import.meta.resolve("@earendil-works/pi-coding-agent"))("jiti");
 const jiti = createJiti(import.meta.url);
 const { createBtwService } = await jiti.import("../btw/service.ts");
 const { buildConversationContext } = await jiti.import(
@@ -130,6 +131,7 @@ test("copied engine routes only to selected side model, separate routing, no mai
 	f.service.handle(
 		f.request("send", { threadId: r.threadId, question: "Follow up" }),
 	);
+	await turn();
 	assert.equal(f.calls[1].options.sessionId, f.calls[0].options.sessionId);
 	assert.match(JSON.stringify(f.calls[1].context), /Side answer/);
 	assert.doesNotMatch(JSON.stringify(f.calls[1].context), /Later main change/);
@@ -141,6 +143,7 @@ test("mutation replay is idempotent, conflicting replay and concurrent send reje
 	const f = fixture(),
 		r = f.request();
 	f.service.handle(r);
+	await turn();
 	f.service.handle(r);
 	assert.equal(f.calls.length, 1);
 	assert.throws(
@@ -199,6 +202,7 @@ test("errors are sanitized, no context mode imports no main text, independent ow
 		b = fixture(),
 		r = a.request("start", { context: "none" });
 	a.service.handle(r);
+	await turn();
 	assert.doesNotMatch(JSON.stringify(a.calls[0].context), /Main task context/);
 	a.calls[0].fail();
 	await turn();

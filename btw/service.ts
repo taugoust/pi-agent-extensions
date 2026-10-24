@@ -67,16 +67,18 @@ export function createBtwService(
 	}
 	function snapshot(selectedId?: string) {
 		current();
-		let provider: string | undefined;
-		try { provider = resolveSessionModelSelector(ctx, defaultModel).split("/", 1)[0]; } catch { /* unavailable until a physical provider is selected */ }
+		// The selector's legacy provider is only a hint. Resolve it through the
+		// owning session so the public default agrees with its routed inventory.
+		const effectiveDefault = resolveSessionModelSelector(ctx, defaultModel);
+		const provider = effectiveDefault.split("/", 1)[0];
 		const available = ctx.modelRegistry
 			.getAvailable()
-			.filter((m) => m.provider !== "idle-guard" && m.api !== "pi-virtual" && (!provider || m.provider === provider))
+			.filter((m) => m.provider !== "idle-guard" && m.api !== "pi-virtual" && m.provider === provider)
 			.map((m) => `${m.provider}/${m.id}`)
 			.filter((id) => id.length <= 512);
 		const models = [
 			...new Set([
-				...(available.includes(defaultModel) ? [defaultModel] : []),
+				...(available.includes(effectiveDefault) ? [effectiveDefault] : []),
 				...available,
 			]),
 		].slice(0, 256);
@@ -84,7 +86,7 @@ export function createBtwService(
 			protocol: 1,
 			sessionId,
 			serviceEpoch,
-			defaultModel,
+			defaultModel: effectiveDefault,
 			models,
 			threads: [...threads.values()].map((t) => ({
 				id: t.id,
@@ -252,7 +254,12 @@ export function createBtwService(
 					throw new Error("Thread exists or BTW thread limit reached");
 				if (r.context !== "recent" && r.context !== "none")
 					throw new Error("Choose a context source");
-				const model = r.model ?? defaultModel;
+				const requestedModel = r.model ?? defaultModel;
+				if (typeof requestedModel !== "string" || requestedModel.length > 512)
+					throw new Error("Selected side model is unavailable; no fallback was made");
+				let model = requestedModel;
+				try { model = resolveSessionModelSelector(ctx, requestedModel); }
+				catch { throw new Error("Selected side model is unavailable; no fallback was made"); }
 				if (
 					typeof model !== "string" ||
 					model.length > 512 ||
