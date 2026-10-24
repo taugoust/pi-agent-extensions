@@ -883,7 +883,7 @@ export class GoalRuntime {
       if (!waitingGoal) return false;
       notifyTerminal(
         ctx.ui,
-        `Goal waiting after provider retries were exhausted${details}. Send a follow-up or run /goal resume to retry.`,
+        `Goal waiting after provider retries were exhausted${details}. Run /goal resume to retry; ordinary follow-ups leave the goal waiting.`,
         "warning",
       );
       return true;
