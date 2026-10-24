@@ -373,6 +373,23 @@ test("copied Git flows create at approved OID, refuse dirty/removal races, prese
 		await f.dispose();
 	}
 });
+test("cached worktree inventories refresh silently, including empty inventories", async () => {
+	const f = await fixture();
+	const now = Date.now;
+	try {
+		const initial = await f.snapshot();
+		assert.equal(initial.worktreeLoading, true, "first inventory may show loading");
+		const ready = await until(f.snapshot, s => !s.worktreeLoading, "first inventory");
+		assert.deepEqual(ready.worktrees, [], "fixture has no additional worktrees");
+		Date.now = () => now() + 6000;
+		const refreshing = await f.snapshot();
+		assert.equal(refreshing.worktreeLoading, false, "background refresh must not hide the toggle");
+		assert.deepEqual(refreshing.worktrees, ready.worktrees, "cached results remain available");
+	} finally {
+		Date.now = now;
+		await f.dispose();
+	}
+});
 test("session-created worktree ownership survives reload, commits and branch renames but not path recreation", async () => {
 	const f = await fixture();
 	let reopened, forked;

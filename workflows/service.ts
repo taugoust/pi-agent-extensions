@@ -461,7 +461,8 @@ export function createWorkflowService(
 			dialog: operation?.dialog ?? null,
 			worktrees: worktreeCache?.rows ?? [],
 			worktreeError: worktreeCache?.error ?? null,
-			worktreeLoading: !worktreeCache || !!reading,
+			// Cached inventories remain usable during silent background refreshes.
+			worktreeLoading: !worktreeCache,
 			worktreeRepositoryCount: worktreeCache?.repositoryCount ?? 0,
 			worktreeContainer: worktreeCache?.container ?? false,
 			goal: goal
