@@ -185,7 +185,8 @@ export default function tuiWorkerExtension(pi: ExtensionAPI): void {
           if (worker?.state.sealed && !announcedReap) {
             announcedReap = true;
             pi.events?.emit?.("harness-runtime-reaping", { runtimeId: worker.manifest.runtimeId,
-              childId: worker.manifest.childId, workerEpoch: worker.manifest.workerEpoch });
+              taskId: worker.manifest.taskId, childId: worker.manifest.childId, attempt: worker.manifest.attempt,
+              workerEpoch: worker.manifest.workerEpoch });
           }
           if (context) requestShutdown(context, worker?.state.sealed === true);
         },

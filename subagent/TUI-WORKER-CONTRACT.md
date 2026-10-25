@@ -71,7 +71,7 @@ Cancel aborts work but never closes a pane. Idle-only `prepare_reap` synchronous
 Before deleting owned terminal jobs, the worker retains their status and bounded UTF-8-safe output tails in private immutable `job-cleanup-*.json` artifacts (16 KiB per job, 256 KiB aggregate output). The controller rechecks ownership, invokes ordinary terminal pane/process safety checks and verifies no jobs remain. Its 20-second deadline is checked between awaited operations; individual operations retain their existing timeouts. Preservation failure prevents deletion; partial cleanup failure retains already-written snapshots and allows retry of remaining jobs. Only verified cleanup followed by another idle/activity check durably seals input, records the epoch-bound cleanup artifact and requests graceful Pi shutdown. On this sealed path only, the worker emits:
 
 ```ts
-pi.events.emit('harness-runtime-reaping', { runtimeId, childId, workerEpoch });
+pi.events.emit('harness-runtime-reaping', { runtimeId, taskId, childId, attempt, workerEpoch });
 ```
 
 Ordinary exit/failure/cancellation is not reap. Bridge/server owners handle the public tombstone and managed-agent archival. The launcher waits for real process exit; it will not kill a live Pi to satisfy reap. It verifies server epoch, pane identity/nonce, process identity and dead state at the destructive tmux boundary. Retried deletion uses a retained intent/tombstone. Before deleting a dead worker pane, the launcher also verifies its durable seal and epoch-bound cleanup artifact. Parent and unrelated sibling worker/job panes and retained reports remain intact; the child's owned terminal job panes were explicitly cleaned before its exit.

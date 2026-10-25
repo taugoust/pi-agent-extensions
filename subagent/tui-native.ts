@@ -669,7 +669,7 @@ export class TuiNativeManager {
       : child.state === "cancelled" ? "cancelled" : child.state === "lost" ? "lost"
       : child.state === "completed" ? "completed" : group.cancelled ? "cancelled" : "lost";
     return { taskId: child.taskId, childId: child.childId, groupId: group.id, attempt: child.attempt ?? 1,
-      runtimeId: manifest.runtimeId, ...(retainedSessionFile ? { sessionFile: retainedSessionFile } : {}), status, title: child.spec.name?.replace(/-/g, " ") || child.spec.task.slice(0, 140), cwd: child.spec.cwd };
+      runtimeId: manifest.runtimeId, reaped: child.reaped === true, ...(retainedSessionFile ? { sessionFile: retainedSessionFile } : {}), status, title: child.spec.name?.replace(/-/g, " ") || child.spec.task.slice(0, 140), cwd: child.spec.cwd };
   }
   readonlyTaskConversation(owner: string, input: { taskId: string; childId: string; attempt: number; runtimeId: string | null; cursor?: number }): any {
     if (this.owner !== owner) throw new Error("Conversation belongs to another Pi session");

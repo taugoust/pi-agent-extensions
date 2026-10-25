@@ -70,7 +70,8 @@ test("initial tools/source attribution and explicit reap event are distinct from
     assert.ok((await callTuiWorker(manifest, { operation: "prepare_reap" })).ok);
     await new Promise(resolve => setTimeout(resolve, 50));
     assert.equal(events.length, 1);
-    assert.deepEqual(events[0], { name: "harness-runtime-reaping", data: { runtimeId: manifest.runtimeId, childId: manifest.childId, workerEpoch: manifest.workerEpoch } });
+    assert.deepEqual(events[0], { name: "harness-runtime-reaping", data: { runtimeId: manifest.runtimeId, taskId: manifest.taskId,
+      childId: manifest.childId, attempt: manifest.attempt, workerEpoch: manifest.workerEpoch } });
     assert.equal(shutdown, 1);
     assert.equal(handlers.get("input")!({}, ctx).action, "handled");
     assert.equal(handlers.get("tool_call")!({}, ctx).block, true);
