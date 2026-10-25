@@ -1981,6 +1981,19 @@ export default function (pi: ExtensionAPI) {
             ...(offset + items.length < rows.length ? { nextCursor: String(offset + items.length) } : {}),
             lastUpdated: items[0]?.lastUpdated ?? null, stale: true };
         },
+        async sessionSource(input) {
+          assertReadonlyOwner();
+          if (input.sessionId !== sessionId || !/^subagent-task-[0-9a-f]{24}$/.test(input.taskId)
+            || !/^subagent-child-[0-9a-f]{24}$/.test(input.childId) || !Number.isSafeInteger(input.attempt) || input.attempt < 1
+            || (input.runtimeId !== undefined && input.runtimeId !== null && (typeof input.runtimeId !== "string" || input.runtimeId.length > 256)))
+            throw new Error("Invalid session source identity");
+          if (nativeDisposition() === "full" || nativeDisposition() === "unavailable") throw new Error("Native session source unavailable");
+          const nativeMatch = native?.readonlyHasTask(sessionId, input) ?? false;
+          const foregroundMatch = foreground?.readonlyHasTask(sessionId, input) ?? false;
+          if (nativeMatch) return native!.readonlyTaskSessionSource(sessionId, input);
+          if (foregroundMatch) return foreground!.readonlyTaskSessionSource(sessionId, input);
+          throw new Error("Session source identity is unavailable");
+        },
         async independentSource(input) {
           assertReadonlyOwner();
           if (input.sessionId !== sessionId || !/^subagent-task-[0-9a-f]{24}$/.test(input.taskId)
@@ -1998,10 +2011,14 @@ export default function (pi: ExtensionAPI) {
             || !Number.isSafeInteger(input.attempt) || input.attempt < 1
             || (input.runtimeId !== null && (typeof input.runtimeId !== "string" || input.runtimeId.length > 256))
             || (input.cursor !== undefined && (!Number.isSafeInteger(input.cursor) || input.cursor < 0))) throw new Error("Invalid conversation identity");
-          if (!native || nativeDisposition() === "full" || nativeDisposition() === "unavailable")
+          if ((!native && !foreground) || nativeDisposition() === "full" || nativeDisposition() === "unavailable")
             return { protocol: HARNESS_READONLY_PROTOCOL, state: "unsupported", sessionId, lastUpdated: null, stale: true, message: "Retained native conversations are unavailable." };
           try {
-            const item = native.readonlyTaskConversation(sessionId, input);
+            const nativeMatch = native?.readonlyHasTask(sessionId, input) ?? false;
+            const foregroundMatch = foreground?.readonlyHasTask(sessionId, input) ?? false;
+            if (!nativeMatch && !foregroundMatch) throw new Error("Conversation identity is unavailable");
+            const item = nativeMatch ? native!.readonlyTaskConversation(sessionId, input)
+              : foreground!.readonlyTaskConversation(sessionId, input);
             assertReadonlyOwner();
             return { protocol: HARNESS_READONLY_PROTOCOL, state: "available", sessionId, item, lastUpdated: item.lastUpdated, stale: true };
           } catch {

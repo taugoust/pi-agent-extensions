@@ -193,6 +193,7 @@ pkgs.runCommand "subagent-check"
       "$workdir/tui-runtime/subagent/tui-worker-extension.test.ts" \
       "$workdir/tui-runtime/subagent/model-inactivity.test.ts" \
       "$workdir/tui-runtime/subagent/headless-foreground.test.ts" \
+      "$workdir/tui-runtime/subagent/session-source.test.ts" \
       "$workdir/tui-runtime/subagent/tui-worker-seal.test.ts" \
       "$workdir/tui-runtime/subagent/tui-worker-tmux.test.ts" \
       "$workdir/tui-runtime/subagent/tui-root.test.ts"

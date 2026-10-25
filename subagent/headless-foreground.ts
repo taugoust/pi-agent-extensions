@@ -12,6 +12,7 @@ import { processIdentity, processIsAlive, tuiWorkerLaunchContract } from "./tui-
 import { TuiWorkerStore, atomicPrivateJson, privateDirectory, readPrivateJson } from "./tui-worker-store.ts";
 import { callTuiWorker, applyTuiWorkerOperatorMode } from "./tui-worker-client.ts";
 import { validateAcceptance } from "./outcome.ts";
+import { readRetainedConversation, validateRetainedConversationFile } from "./retained-conversation.ts";
 import { validateSubagentName } from "./tui-names.ts";
 import type { QuietUpdate } from "../shared/quiet-state.ts";
 
@@ -907,6 +908,21 @@ export class HeadlessForegroundManager {
     const report = readPrivateJson(artifact!) as any;
     if (report?.workerEpoch !== manifest.workerEpoch || typeof report.retainedAt !== "string" || report.report === undefined) throw new Error("Headless cleanup receipt identity is invalid; refusing reap");
   }
+  /** Normalize execution outcome from durable manager/state/report data, never reap lifecycle alone. */
+  private readonlyExecutionStatus(child: Child, state: ReturnType<TuiWorkerStore["readState"]>): "running" | "completed" | "failed" | "cancelled" | "lost" {
+    if (["pending", "running", "waiting-input", "waiting-permission"].includes(child.status)) return "running";
+    if (child.status === "failed" || child.error) return "failed";
+    if (child.status === "cancelled") return "cancelled";
+    if (child.status === "lost") return "lost";
+    const reportPath = this.artifactPath(child, state.lastReport ?? child.report, "report");
+    let report: any;
+    try { if (reportPath) report = readPrivateJson(reportPath); } catch {}
+    if (report?.assistant?.stopReason === "error") return "failed";
+    if (report?.assistant?.stopReason === "aborted") return "cancelled";
+    if (report?.assistant) return "completed";
+    if (child.status === "reaped") return "lost";
+    return child.status === "completed" ? "completed" : "lost";
+  }
   /** Pure retained snapshots for the read-only Paseo dashboard; never contacts workers or writes state. */
   readonlyTaskList(owner: string, limit = 50): any[] {
     if (this.owner !== owner) throw new Error("Headless task snapshots belong to another Pi session");
@@ -916,14 +932,44 @@ export class HeadlessForegroundManager {
       const state = new TuiWorkerStore(child.directory).readState(false);
       const outcomePath = this.artifactPath(child, state.lastOutcome, "outcome");
       const outcome = outcomePath ? readPrivateJson(outcomePath) as any : child.outcome as any;
-      const status = child.status === "waiting-input" || child.status === "waiting-permission" ? "running"
-        : child.status === "reaped" ? "completed" : child.status;
+      const status = this.readonlyExecutionStatus(child, state);
       return { taskId: child.taskId, childId: child.childId, groupId: group.id, runtimeId: manifest?.runtimeId ?? null,
         attempt: child.attempt, status, title: child.spec.task.slice(0, 140),
         kind: "foreground", needsAttention: child.status === "waiting-input" || child.status === "waiting-permission",
         ...(typeof outcome?.summary === "string" ? { summary: outcome.summary.slice(0, 2000) } : {}),
         lastUpdated: child.updatedAt, stale: true };
     })).slice(-limit);
+  }
+  readonlyHasTask(owner: string, input: { taskId: string; childId: string; attempt: number }): boolean {
+    return this.owner === owner && [...this.groups.values()].some(group => group.owner === owner && group.children.some(child =>
+      child.taskId === input.taskId && child.childId === input.childId && child.attempt === input.attempt));
+  }
+  readonlyTaskConversation(owner: string, input: { taskId: string; childId: string; attempt: number; runtimeId: string | null; cursor?: number }): any {
+    const source = this.readonlyTaskSessionSource(owner, input);
+    if (source.runtimeId !== input.runtimeId) throw new Error("Conversation runtime changed");
+    return { taskId: source.taskId, childId: source.childId, groupId: source.groupId, attempt: source.attempt,
+      runtimeId: source.runtimeId, stale: true, ...readRetainedConversation(source.sessionFile, input.cursor) };
+  }
+  readonlyTaskSessionSource(owner: string, input: { taskId: string; childId: string; attempt: number; runtimeId?: string | null }): any {
+    if (this.owner !== owner) throw new Error("Session source belongs to another Pi session");
+    const found = [...this.groups.values()].filter(group => group.owner === owner)
+      .flatMap(group => group.children.map(child => ({ group, child })))
+      .find(entry => entry.child.childId === input.childId);
+    if (!found || found.child.taskId !== input.taskId || found.child.attempt !== input.attempt) throw new Error("Session source identity changed");
+    const { group, child } = found, manifest = this.manifest(child);
+    if (!manifest || manifest.ownerSessionId !== owner || manifest.groupId !== group.id || manifest.taskId !== child.taskId
+      || manifest.childId !== child.childId || manifest.attempt !== child.attempt
+      || (input.runtimeId !== undefined && manifest.runtimeId !== input.runtimeId)) throw new Error("Session source manifest identity changed");
+    const path = join(child.directory, "session.jsonl");
+    if (manifest.sessionFile !== path) throw new Error("Invalid session source path");
+    // Reuse the retained reader's no-follow, owner/mode/link and bounded-file checks without parsing history on polls.
+    validateRetainedConversationFile(path);
+    const state = new TuiWorkerStore(child.directory).readState(false);
+    const childActive = ["running", "waiting-input", "waiting-permission", "pending"].includes(child.status);
+    if (state.active !== childActive && child.status !== "pending") throw new Error("Active session state identity is inconsistent");
+    const status = this.readonlyExecutionStatus(child, state);
+    return { taskId: child.taskId, childId: child.childId, groupId: group.id, attempt: child.attempt,
+      runtimeId: manifest.runtimeId, sessionFile: path, status, title: child.spec.task.slice(0, 140), cwd: child.spec.cwd };
   }
   readonlyTaskReport(owner: string, taskId: string, maxBytes = 48 * 1024): any | undefined {
     if (this.owner !== owner) throw new Error("Headless task reports belong to another Pi session");

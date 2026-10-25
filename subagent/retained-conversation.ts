@@ -6,9 +6,8 @@ export type ConversationMessage = { id: string; role: "user" | "assistant" | "to
 const clean = (text: string) => text.replace(/\x1b\][\s\S]*?(?:\x07|\x1b\\)/g, "")
   .replace(/(?:\x1b\[|\x9b)[0-?]*[ -/]*[@-~]/g, "").replace(/[\x00-\x08\x0b-\x1f\x7f-\x9f]/g, "");
 
-/** Read a bounded page of an already owner-validated worker session. Never starts or resumes it. */
-export function readRetainedConversation(path: string, cursor = 0) {
-  if (!Number.isSafeInteger(cursor) || cursor < 0) throw new Error("Invalid conversation cursor");
+/** Open only a private, bounded, single-link regular session file beneath a private directory. */
+function openValidatedConversation(path: string) {
   const directory = lstatSync(dirname(path));
   if (!directory.isDirectory() || directory.isSymbolicLink() || (directory.mode & 0o777) !== 0o700
     || (typeof process.getuid === "function" && directory.uid !== process.getuid())) throw new Error("Conversation directory unavailable");
@@ -16,7 +15,23 @@ export function readRetainedConversation(path: string, cursor = 0) {
   try {
     const stat = fstatSync(fd);
     if (!stat.isFile() || (typeof process.getuid === "function" && stat.uid !== process.getuid())
-      || (stat.mode & 0o022) !== 0 || stat.nlink !== 1 || cursor > stat.size) throw new Error("Conversation file unavailable");
+      || (stat.mode & 0o077) !== 0 || stat.nlink !== 1 || stat.size > 32 * 1024 * 1024) throw new Error("Conversation file unavailable");
+    return { fd, stat };
+  } catch (error) { closeSync(fd); throw error; }
+}
+
+/** Lightweight validation for bridge session references; does not parse/read session contents. */
+export function validateRetainedConversationFile(path: string): void {
+  const { fd } = openValidatedConversation(path);
+  closeSync(fd);
+}
+
+/** Read a bounded page of an already owner-validated worker session. Never starts or resumes it. */
+export function readRetainedConversation(path: string, cursor = 0) {
+  if (!Number.isSafeInteger(cursor) || cursor < 0) throw new Error("Invalid conversation cursor");
+  const { fd, stat } = openValidatedConversation(path);
+  try {
+    if (cursor > stat.size) throw new Error("Conversation file unavailable");
     const bytes = Buffer.alloc(Math.min(256 * 1024, stat.size - cursor));
     const length = readSync(fd, bytes, 0, bytes.length, cursor);
     if (!length && cursor < stat.size) throw new Error("Conversation changed while reading");

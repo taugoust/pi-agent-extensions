@@ -97,6 +97,11 @@ export type HarnessReadOnlySubagents = {
   sessionId: string;
   list(input: { sessionId: string; limit?: number; cursor?: string }): Promise<ReadonlyPage<ReadonlySubagentTask>>;
   report(input: { sessionId: string; taskId: string; maxBytes?: number }): Promise<ReadonlyDetail<ReadonlyTaskReport>>;
+  /** Internal bridge linkage only; the returned file reference is owner-validated and is not a public RPC route. */
+  sessionSource?(input: { sessionId: string; taskId: string; childId: string; attempt: number; runtimeId?: string | null }): Promise<{
+    taskId: string; childId: string; groupId: string; attempt: number; runtimeId: string | null;
+    sessionFile: string; status: "running" | "completed" | "failed" | "cancelled" | "lost"; title?: string; cwd?: string;
+  }>;
   independentSource?(input: { sessionId: string; taskId: string; childId: string; attempt: number; runtimeId: string | null }): Promise<unknown>;
   conversation?(input: { sessionId: string; taskId: string; childId: string; attempt: number; runtimeId: string | null; cursor?: number }): Promise<ReadonlyDetail<{
     taskId: string; childId: string; groupId: string; attempt: number; runtimeId: string | null;

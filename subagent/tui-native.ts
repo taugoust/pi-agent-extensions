@@ -10,7 +10,7 @@ import { TuiWorkerStore, privateDirectory, atomicPrivateJson, readPrivateJson } 
 import { callTuiWorker, applyTuiWorkerOperatorMode } from "./tui-worker-client.ts";
 import { publicTuiWorkerManifest, parseTuiWorkerJobParams } from "../shared/tui-worker-protocol.ts";
 import { truncateUtf8 } from "../shared/harness-readonly.ts";
-import { readRetainedConversation } from "./retained-conversation.ts";
+import { readRetainedConversation, validateRetainedConversationFile } from "./retained-conversation.ts";
 import type { QuietUpdate } from "../shared/quiet-state.ts";
 import type { TuiWorkerManifest, TuiWorkerPlacement } from "../shared/tui-worker-protocol.ts";
 
@@ -646,6 +646,29 @@ export class TuiNativeManager {
       leafId: typeof report.leafId === "string" ? report.leafId : null,
       assistantDigest: report.assistant ? createHash("sha256").update(JSON.stringify(report.assistant)).digest("hex") : null,
       report: c.report, dev: stat.dev, ino: stat.ino, size: stat.size, mtimeMs: stat.mtimeMs };
+  }
+  readonlyHasTask(owner: string, input: { taskId: string; childId: string; attempt: number }): boolean {
+    return this.owner === owner && [...this.groups.values()].some(group => group.owner === owner && group.children.some(child =>
+      child.taskId === input.taskId && child.childId === input.childId && (child.attempt ?? 1) === input.attempt));
+  }
+  readonlyTaskSessionSource(owner: string, input: { taskId: string; childId: string; attempt: number; runtimeId?: string | null }): any {
+    if (this.owner !== owner) throw new Error("Session source belongs to another Pi session");
+    const found = this.byChild(owner, input.childId);
+    if (!found || found.child.taskId !== input.taskId || (found.child.attempt ?? 1) !== input.attempt) throw new Error("Session source identity changed");
+    const { group, child } = found, manifest = this.manifest(child);
+    if (!manifest || manifest.ownerSessionId !== owner || manifest.groupId !== group.id || manifest.taskId !== child.taskId
+      || manifest.childId !== child.childId || manifest.attempt !== (child.attempt ?? 1)
+      || (input.runtimeId !== undefined && manifest.runtimeId !== input.runtimeId)) throw new Error("Session source manifest identity changed");
+    const path = join(child.directory, "session.jsonl");
+    if (manifest.sessionFile !== path) throw new Error("Invalid session source path");
+    validateRetainedConversationFile(path);
+    const state = new TuiWorkerStore(child.directory).readState(false);
+    if (state.active !== active(child) && !["pending", "launching"].includes(child.state)) throw new Error("Active session state identity is inconsistent");
+    const status = active(child) ? "running" : child.state === "failed" ? "failed"
+      : child.state === "cancelled" ? "cancelled" : child.state === "lost" ? "lost"
+      : child.state === "completed" ? "completed" : group.cancelled ? "cancelled" : "lost";
+    return { taskId: child.taskId, childId: child.childId, groupId: group.id, attempt: child.attempt ?? 1,
+      runtimeId: manifest.runtimeId, sessionFile: path, status, title: child.spec.name?.replace(/-/g, " ") || child.spec.task.slice(0, 140), cwd: child.spec.cwd };
   }
   readonlyTaskConversation(owner: string, input: { taskId: string; childId: string; attempt: number; runtimeId: string | null; cursor?: number }): any {
     if (this.owner !== owner) throw new Error("Conversation belongs to another Pi session");
