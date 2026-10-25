@@ -7,6 +7,29 @@ const clean = (text: string) => text.replace(/\x1b\][\s\S]*?(?:\x07|\x1b\\)/g, "
   .replace(/(?:\x1b\[|\x9b)[0-?]*[ -/]*[@-~]/g, "").replace(/[\x00-\x08\x0b-\x1f\x7f-\x9f]/g, "");
 
 /** Open only a private, bounded, single-link regular session file beneath a private directory. */
+function collectFollowingToolResults(fd: number, start: number, size: number, pending: Set<string>, statuses: Map<string, "completed" | "failed">): void {
+  if (!pending.size || start >= size) return;
+  const length = Math.min(256 * 1024, size - start);
+  const bytes = Buffer.alloc(length);
+  const read = readSync(fd, bytes, 0, length, start);
+  let offset = 0;
+  while (offset < read && pending.size) {
+    const newline = bytes.indexOf(10, offset);
+    if (newline < 0) break; // Never interpret a concurrently appended partial JSONL record.
+    const lineEnd = newline;
+    if (lineEnd - offset <= 64 * 1024) {
+      try {
+        const entry = JSON.parse(bytes.subarray(offset, lineEnd).toString("utf8"));
+        const message = entry?.type === "message" ? entry.message : undefined;
+        if (message?.role === "toolResult" && typeof message.toolCallId === "string" && pending.delete(message.toolCallId))
+          statuses.set(message.toolCallId, message.isError === true ? "failed" : "completed");
+      } catch { /* Malformed or oversized unrelated rows cannot authorize a tool status. */ }
+    }
+    offset = newline + 1;
+  }
+}
+
+/** Open only a private, bounded, single-link regular session file beneath a private directory. */
 function openValidatedConversation(path: string) {
   const directory = lstatSync(dirname(path));
   if (!directory.isDirectory() || directory.isSymbolicLink() || (directory.mode & 0o777) !== 0o700
@@ -82,6 +105,8 @@ export function readRetainedConversation(path: string, cursor = 0) {
       offset = next;
       if (budget < 1024) break;
     }
+    const pendingToolCalls = new Set(messages.flatMap(message => (message.parts ?? []).flatMap(part => part.type === "toolCall" && !toolStatuses.has(part.id) ? [part.id] : [])));
+    collectFollowingToolResults(fd, cursor + offset, stat.size, pendingToolCalls, toolStatuses);
     for (const message of messages) for (const part of message.parts ?? []) if (part.type === "toolCall") part.status = toolStatuses.get(part.id) ?? "unknown";
     return { messages, truncated, lastUpdated: stat.mtime.toISOString(),
       ...(cursor + offset < stat.size ? { nextCursor: cursor + offset } : {}) };

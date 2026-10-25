@@ -11,6 +11,7 @@ import { callTuiWorker, applyTuiWorkerOperatorMode } from "./tui-worker-client.t
 import { publicTuiWorkerManifest, parseTuiWorkerJobParams } from "../shared/tui-worker-protocol.ts";
 import { truncateUtf8 } from "../shared/harness-readonly.ts";
 import { readRetainedConversation, validateRetainedConversationFile } from "./retained-conversation.ts";
+import { validateLiveEvents, validateLiveStatus } from "./live-conversation.ts";
 import type { QuietUpdate } from "../shared/quiet-state.ts";
 import type { TuiWorkerManifest, TuiWorkerPlacement } from "../shared/tui-worker-protocol.ts";
 
@@ -685,21 +686,29 @@ export class TuiNativeManager {
     const retained = readRetainedConversation(path, input.cursor);
     let live: any = {};
     if (manifest && !c.reaped) {
-      const status = await callTuiWorker(manifest, { operation: "status" }, { timeoutMs: 1500 });
-      if (status.ok && status.data && typeof status.data === "object") {
-        const state = status.data as any;
-        if (state.sessionFile === path && state.active === true && state.phase === "running" && !state.idleDecision) {
-          const eventReply = await callTuiWorker(manifest, { operation: "events", afterSequence: Math.max(0, Number(state.sequence) - 24) }, { timeoutMs: 1500 });
-          const events = eventReply.ok ? ((eventReply.data as any)?.events ?? []) : [];
-          live = { stale: false, execution: "running", liveText: typeof state.liveText === "string" ? state.liveText.slice(-16384) : "",
-            liveSequence: Number.isSafeInteger(state.sequence) ? state.sequence : 0,
+      const pinned = structuredClone(manifest);
+      try {
+        const statusReply = await callTuiWorker(pinned, { operation: "status" }, { timeoutMs: 1500 });
+        const state = validateLiveStatus(statusReply, pinned);
+        if (state) {
+          const afterSequence = Math.max(0, state.sequence - 24);
+          const eventReply = await callTuiWorker(pinned, { operation: "events", afterSequence }, { timeoutMs: 1500 });
+          const events = validateLiveEvents(eventReply, pinned, afterSequence);
+          const current = this.manifest(c);
+          if (!current || current.ownerSessionId !== pinned.ownerSessionId || current.taskId !== pinned.taskId
+            || current.runtimeId !== pinned.runtimeId || current.groupId !== pinned.groupId || current.childId !== pinned.childId
+            || current.attempt !== pinned.attempt || current.workerEpoch !== pinned.workerEpoch
+            || current.sessionFile !== pinned.sessionFile || current.controlSocket !== pinned.controlSocket) throw new Error("Live worker manifest changed");
+          const running = state.active === true && state.phase === "running" && !state.idleDecision;
+          live = { stale: false, liveSequence: state.sequence,
+            ...(running ? { execution: "running", liveText: state.liveText } : {}),
             liveEvents: events.filter((event: any) => ["conversation_tool_start", "conversation_tool_end"].includes(event.kind)).map((event: any) => ({
               sequence: event.sequence, kind: event.kind === "conversation_tool_start" ? "tool_start" : "tool_end",
-              toolCallId: event.data?.toolCallId, name: event.data?.name,
-              ...(event.kind === "conversation_tool_start" ? { status: "running", arguments: event.data?.arguments } : { status: event.data?.status, result: event.data?.result }),
+              toolCallId: event.data.toolCallId, name: event.data.name,
+              ...(event.kind === "conversation_tool_start" ? { status: "running", arguments: event.data.arguments } : { status: event.data.status, result: event.data.result }),
             })).slice(-12) };
         }
-      }
+      } catch { live = {}; } // Invalid, stale or old worker replies never become live UI state.
     }
     const execution = live.execution === "running" ? "running" : c.state === "completed" ? "completed" : c.state === "failed" ? "failed" : c.state === "cancelled" ? "cancelled" : c.state === "lost" ? "lost" : undefined;
     return { taskId: c.taskId, childId: c.childId, groupId: g.id, attempt: c.attempt ?? 1,

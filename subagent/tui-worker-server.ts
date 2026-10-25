@@ -181,7 +181,9 @@ export class TuiWorkerServer {
     return "One automatic continuation of the same assignment. Continue only the routine remaining work already authorized by the original task and acceptance criteria. No additional authority is granted. Stop and report blocked if external input, permissions, safety decisions or scope changes are needed. This budget is now exhausted; report an updated task_outcome before returning. Recorded next action (model-reported): " + outcome.next_action;
   }
   private snapshot() {
-    return { active: this.state.active || !this.adapter.isIdle() || this.idleDecisions.size > 0, sealed: this.sealed, phase: this.state.phase,
+    return { ownerSessionId: this.manifest.ownerSessionId, taskId: this.manifest.taskId, runtimeId: this.manifest.runtimeId,
+      groupId: this.manifest.groupId, childId: this.manifest.childId, attempt: this.manifest.attempt,
+      workerEpoch: this.manifest.workerEpoch, active: this.state.active || !this.adapter.isIdle() || this.idleDecisions.size > 0, sealed: this.sealed, phase: this.state.phase,
       lastReport: this.state.lastReport, lastOutcome: this.state.lastOutcome, sequence: this.state.sequence, pid: process.pid,
       sessionFile: this.manifest.sessionFile, presentation: this.manifest.presentation,
       interactions: (this.state.interactions ?? []).filter(item => !item.answer && !item.cancelledAt).slice(-2)

@@ -7,6 +7,7 @@ import { createHash } from "node:crypto";
 import { TuiWorkerStore } from "./tui-worker-store.ts";
 import { TuiWorkerServer } from "./tui-worker-server.ts";
 import { callTuiWorker, applyTuiWorkerOperatorMode, workerRequest } from "./tui-worker-client.ts";
+import { validateLiveEvents, validateLiveStatus } from "./live-conversation.ts";
 import type { TuiWorkerManifest } from "../shared/tui-worker-protocol.ts";
 
 export function manifestAt(directory: string): TuiWorkerManifest {
@@ -17,6 +18,27 @@ export function manifestAt(directory: string): TuiWorkerManifest {
     placement: { socketPath: "/tmp/tmux-test", serverEpoch: "123:456", sessionId: "$1", windowId: "@1", paneId: "%1", ownershipNonce: "e".repeat(64) },
     presentation: "background", launchMode: "none" };
 }
+
+test("authenticated live conversation stream reports tool start then authoritative completion", async () => {
+  const directory = await mkdtemp(join(tmpdir(), "pi-live-conversation-"));
+  const manifest = manifestAt(directory), store = new TuiWorkerStore(directory);
+  store.writeManifest(manifest);
+  const server = new TuiWorkerServer(store, { isIdle: () => false, send() {}, abort() {}, shutdown() {} });
+  try {
+    await server.start();
+    server.running(true);
+    server.conversationTool("start", { toolCallId: "call-1", name: "read", arguments: { path: "README.md" } });
+    const startReply = await callTuiWorker(manifest, { operation: "events", afterSequence: 0 });
+    const startEvents = validateLiveEvents(startReply, manifest, 0);
+    assert.ok(startEvents.some(event => event.kind === "conversation_tool_start" && (event.data as any).toolCallId === "call-1"));
+    server.conversationTool("end", { toolCallId: "call-1", name: "read", result: { text: "done" } });
+    const statusReply = await callTuiWorker(manifest, { operation: "status" });
+    assert.equal(validateLiveStatus(statusReply, manifest)?.active, true);
+    const endReply = await callTuiWorker(manifest, { operation: "events", afterSequence: startReply.sequence });
+    const endEvents = validateLiveEvents(endReply, manifest, startReply.sequence);
+    assert.deepEqual(endEvents.map(event => [(event.data as any)?.toolCallId, (event.data as any)?.status]), [["call-1", "completed"]]);
+  } finally { await server.close(); await rm(directory, { recursive: true, force: true }); }
+});
 
 test("routine continuation is durably single-use and interventions win before dispatch", async () => {
   const directory = await mkdtemp(join(tmpdir(), "pi-continuation-"));
