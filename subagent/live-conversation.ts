@@ -44,6 +44,7 @@ export function validateLiveEvents(response: TuiWorkerResponse, manifest: Pinned
     || data.events.length > 256 || Buffer.byteLength(JSON.stringify(data)) > MAX_EVENT_BYTES
     || data.nextSequence < afterSequence || data.nextSequence > response.sequence
     || data.oldestSequence > response.sequence) throw new Error("Malformed live event page");
+  if (data.oldestSequence > afterSequence + 1) throw new Error("Live event history gap; partial tool state is not authoritative");
   let previous = afterSequence;
   for (const event of data.events) {
     if (!object(event) || event.protocol !== 1 || event.workerEpoch !== manifest.workerEpoch

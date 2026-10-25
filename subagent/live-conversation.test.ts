@@ -43,6 +43,8 @@ test("live event page validates epoch, monotonic sequence, cursor and byte bound
   assert.throws(() => validateLiveEvents(eventReply([start, { ...end, sequence: 3 }]), manifest, 2), /ordering/);
   assert.throws(() => validateLiveEvents(eventReply([start, { ...end, workerEpoch: "f".repeat(32) }]), manifest, 2), /identity/);
   assert.throws(() => validateLiveEvents(eventReply([start], { nextSequence: 2 }), manifest, 2), /cursor/);
+  assert.deepEqual(validateLiveEvents(eventReply([start], { oldestSequence: 3 }), manifest, 2), [start], "oldest=cursor+1 is a complete page boundary");
+  assert.throws(() => validateLiveEvents(eventReply([end], { oldestSequence: 4 }), manifest, 2), /history gap/, "missing ring events cannot claim complete tool state");
   assert.throws(() => validateLiveEvents(eventReply([start], {}, { workerEpoch: "f".repeat(32) }), manifest, 2), /envelope/);
   assert.throws(() => validateLiveEvents(eventReply([start], { events: [{ ...start, data: { toolCallId: "call-1", name: "x", arguments: "x".repeat(5000) } }] }), manifest, 2), /arguments/);
   const huge = { ...start, kind: "other", data: "x".repeat(100 * 1024) };
