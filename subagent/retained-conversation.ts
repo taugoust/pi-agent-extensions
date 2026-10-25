@@ -2,7 +2,7 @@ import { closeSync, constants, fstatSync, lstatSync, openSync, readSync } from "
 import { dirname } from "node:path";
 import { truncateUtf8 } from "../shared/harness-readonly.ts";
 
-export type ConversationMessage = { id: string; role: "user" | "assistant" | "tool" | "parent"; text: string; truncated?: boolean };
+export type ConversationMessage = { id: string; role: "user" | "assistant" | "tool" | "parent"; text: string; truncated?: boolean; parts?: Array<{ type: "text"; text: string } | { type: "toolCall"; id: string; name: string; arguments: unknown; status?: "completed" | "failed" | "unknown" }>; status?: "completed" | "failed" };
 const clean = (text: string) => text.replace(/\x1b\][\s\S]*?(?:\x07|\x1b\\)/g, "")
   .replace(/(?:\x1b\[|\x9b)[0-?]*[ -/]*[@-~]/g, "").replace(/[\x00-\x08\x0b-\x1f\x7f-\x9f]/g, "");
 
@@ -38,6 +38,7 @@ export function readRetainedConversation(path: string, cursor = 0) {
     const lastNewline = bytes.subarray(0, length).lastIndexOf(10);
     const end = cursor + length < stat.size && lastNewline >= 0 ? lastNewline + 1 : length;
     const messages: ConversationMessage[] = [];
+    const toolStatuses = new Map<string, "completed" | "failed">();
     let offset = 0, budget = 24 * 1024, truncated = false;
     while (offset < end && messages.length < 50) {
       const newline = bytes.indexOf(10, offset);
@@ -51,16 +52,23 @@ export function readRetainedConversation(path: string, cursor = 0) {
       const role = custom ? entry.customType === "harness-user-control" ? "user" : "parent"
         : message?.role === "toolResult" ? "tool" : message?.role;
       if (!message || !["user", "assistant", "tool", "parent"].includes(role)) { offset = next; continue; }
+      if (role === "tool" && typeof message.toolCallId === "string") toolStatuses.set(message.toolCallId, message.isError === true ? "failed" : "completed");
       const content = message.content;
+      const parts: NonNullable<ConversationMessage["parts"]> = [];
       let text = typeof content === "string" ? content : Array.isArray(content) ? content.flatMap((part: any) => {
-        if (part?.type === "text" && typeof part.text === "string") return [part.text];
-        if (part?.type === "toolCall") return [`Tool call: ${String(part.name ?? "tool")}\n${JSON.stringify(part.arguments ?? {})}`];
-        if (part?.type === "image") return ["[Image]"];
+        if (part?.type === "text" && typeof part.text === "string") return [clean(part.text).slice(0, 8192)];
+        if (part?.type === "toolCall" && typeof part.id === "string" && typeof part.name === "string") {
+          if (parts.filter(item => item.type === "toolCall").length >= 4) return [];
+          let args: unknown = part.arguments ?? {};
+          try { if (Buffer.byteLength(JSON.stringify(args)) > 1024) args = { truncated: true, preview: Buffer.from(JSON.stringify(args)).subarray(0, 900).toString("utf8") }; } catch { args = "[unavailable]"; }
+          parts.push({ type: "toolCall", id: part.id.slice(0, 128), name: part.name.slice(0, 128), arguments: args }); return [];
+        }
+        if (part?.type === "image") { parts.push({ type: "text", text: "[Image]" }); return ["[Image]"]; }
         return []; // Do not expose thinking blocks or private non-message records.
       }).join("\n\n") : "";
       text = clean(text);
-      if (!text) { offset = next; continue; }
-      const record: ConversationMessage = { id: `${cursor + offset}:${String(entry.id ?? "").slice(0, 64)}`, role, text };
+      if (!text && !parts.some(part => part.type === "toolCall")) { offset = next; continue; }
+      const record: ConversationMessage = { id: `${cursor + offset}:${String(entry.id ?? "").slice(0, 64)}`, role, text, ...(parts.length ? { parts } : {}), ...(role === "tool" ? { status: "completed" as const } : {}) };
       let size = Buffer.byteLength(JSON.stringify(record));
       if (size > budget && messages.length) break;
       if (size > budget) {
@@ -74,6 +82,7 @@ export function readRetainedConversation(path: string, cursor = 0) {
       offset = next;
       if (budget < 1024) break;
     }
+    for (const message of messages) for (const part of message.parts ?? []) if (part.type === "toolCall") part.status = toolStatuses.get(part.id) ?? "unknown";
     return { messages, truncated, lastUpdated: stat.mtime.toISOString(),
       ...(cursor + offset < stat.size ? { nextCursor: cursor + offset } : {}) };
   } finally { closeSync(fd); }

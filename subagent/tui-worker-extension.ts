@@ -305,7 +305,7 @@ export default function tuiWorkerExtension(pi: ExtensionAPI): void {
   });
   pi.on("message_update", (event: any) => {
     if (event.message?.role === "assistant") modelInactivity.progress();
-    if (!worker || worker.manifest.execution !== "rpc-headless") return;
+    if (!worker) return;
     if (event.message?.role === "assistant") {
       const text = typeof event.message.content === "string" ? event.message.content : Array.isArray(event.message.content)
         ? event.message.content.filter((part: any) => part?.type === "text").map((part: any) => part.text ?? "").join("") : "";
@@ -325,6 +325,14 @@ export default function tuiWorkerExtension(pi: ExtensionAPI): void {
       liveAssistantText = boundedSuffix(text);
       worker?.liveText(liveAssistantText);
     }
+  });
+  pi.on("tool_execution_start", (event: any) => {
+    try { worker?.conversationTool("start", { toolCallId: String(event.toolCallId ?? ""), name: String(event.toolName ?? "tool"), arguments: event.args }); }
+    catch { /* Conversation observation must not interrupt tool execution. */ }
+  });
+  pi.on("tool_execution_end", (event: any) => {
+    try { worker?.conversationTool("end", { toolCallId: String(event.toolCallId ?? ""), name: String(event.toolName ?? "tool"), result: event.result, failed: event.isError === true }); }
+    catch { /* Conversation observation must not interrupt tool execution. */ }
   });
   pi.on("tool_result", (event, ctx) => {
     if (event.isError) {

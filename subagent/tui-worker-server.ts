@@ -130,6 +130,20 @@ export class TuiWorkerServer {
       } catch { finish("Abort request failed; cancellation may have occurred"); }
     });
   }
+  conversationTool(kind: "start" | "end", value: { toolCallId: string; name: string; arguments?: unknown; result?: unknown; failed?: boolean }): void {
+    if (!/^[a-zA-Z0-9._:-]{1,128}$/.test(value.toolCallId) || typeof value.name !== "string" || !value.name || value.name.length > 128) return;
+    const bounded = (input: unknown, max: number) => {
+      let text: string;
+      try { text = typeof input === "string" ? input : JSON.stringify(input ?? {}); } catch { text = "[unavailable]"; }
+      const bytes = Buffer.from(text);
+      if (bytes.length <= max) { try { return JSON.parse(text); } catch { return text; } }
+      return { truncated: true, preview: bytes.subarray(0, max - 64).toString("utf8") };
+    };
+    this.event(kind === "start" ? "conversation_tool_start" : "conversation_tool_end", {
+      toolCallId: value.toolCallId, name: value.name,
+      ...(kind === "start" ? { arguments: bounded(value.arguments, 2048) } : { result: bounded(value.result, 2048), status: value.failed ? "failed" : "completed" }),
+    });
+  }
   liveText(value: string): void {
     if (typeof value !== "string") return;
     const bytes = Buffer.from(value);

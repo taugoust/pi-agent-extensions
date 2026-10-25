@@ -119,7 +119,7 @@ export type TuiWorkerEvent = {
   workerEpoch: string;
   sequence: number;
   timestamp: string;
-  kind: "ready" | "running" | "settled" | "notification" | "outcome" | "cancelled" | "closing" | "interaction_pending" | "interaction_resolved" | "interaction_cancelled" | "idle_decision_pending" | "idle_decision_resolved" | "idle_decision_cancelled";
+  kind: "ready" | "running" | "settled" | "notification" | "outcome" | "cancelled" | "closing" | "interaction_pending" | "interaction_resolved" | "interaction_cancelled" | "idle_decision_pending" | "idle_decision_resolved" | "idle_decision_cancelled" | "conversation_tool_start" | "conversation_tool_end";
   data?: unknown;
 };
 

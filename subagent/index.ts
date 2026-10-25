@@ -2017,7 +2017,7 @@ export default function (pi: ExtensionAPI) {
             const nativeMatch = native?.readonlyHasTask(sessionId, input) ?? false;
             const foregroundMatch = foreground?.readonlyHasTask(sessionId, input) ?? false;
             if (!nativeMatch && !foregroundMatch) throw new Error("Conversation identity is unavailable");
-            const item = nativeMatch ? native!.readonlyTaskConversation(sessionId, input)
+            const item = nativeMatch ? await native!.readonlyTaskConversation(sessionId, input)
               : foreground!.readonlyTaskConversation(sessionId, input);
             assertReadonlyOwner();
             return { protocol: HARNESS_READONLY_PROTOCOL, state: "available", sessionId, item, lastUpdated: item.lastUpdated, stale: true };

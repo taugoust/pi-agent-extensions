@@ -48,7 +48,7 @@ for (const kind of ["foreground", "tui"] as const) test(`${kind} sessionSource v
       child.reaped = false;
       assert.equal(manager.readonlyTaskSessionSource(owner, { taskId, childId, attempt: 2 }).reaped, false);
       child.reaped = true;
-      assert.equal(manager.readonlyTaskConversation(owner, { taskId, childId, attempt: 2, runtimeId }).messages[0].text, "hello");
+      assert.equal((await manager.readonlyTaskConversation(owner, { taskId, childId, attempt: 2, runtimeId })).messages[0].text, "hello");
       group.cancelled = true;
       assert.equal(manager.readonlyTaskSessionSource(owner, { taskId, childId, attempt: 2 }).status, "completed", "cancelling siblings cannot cancel a completed child");
       group.cancelled = false;

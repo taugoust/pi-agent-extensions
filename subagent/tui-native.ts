@@ -671,7 +671,7 @@ export class TuiNativeManager {
     return { taskId: child.taskId, childId: child.childId, groupId: group.id, attempt: child.attempt ?? 1,
       runtimeId: manifest.runtimeId, reaped: child.reaped === true, ...(retainedSessionFile ? { sessionFile: retainedSessionFile } : {}), status, title: child.spec.name?.replace(/-/g, " ") || child.spec.task.slice(0, 140), cwd: child.spec.cwd };
   }
-  readonlyTaskConversation(owner: string, input: { taskId: string; childId: string; attempt: number; runtimeId: string | null; cursor?: number }): any {
+  async readonlyTaskConversation(owner: string, input: { taskId: string; childId: string; attempt: number; runtimeId: string | null; cursor?: number }): Promise<any> {
     if (this.owner !== owner) throw new Error("Conversation belongs to another Pi session");
     const found = this.byChild(owner, input.childId);
     if (!found || found.child.childId !== input.childId || found.child.taskId !== input.taskId
@@ -682,8 +682,28 @@ export class TuiNativeManager {
     const path = join(c.directory, "session.jsonl");
     if (manifest && manifest.sessionFile !== path) throw new Error("Invalid conversation path");
     validateRetainedConversationFile(path);
+    const retained = readRetainedConversation(path, input.cursor);
+    let live: any = {};
+    if (manifest && !c.reaped) {
+      const status = await callTuiWorker(manifest, { operation: "status" }, { timeoutMs: 1500 });
+      if (status.ok && status.data && typeof status.data === "object") {
+        const state = status.data as any;
+        if (state.sessionFile === path && state.active === true && state.phase === "running" && !state.idleDecision) {
+          const eventReply = await callTuiWorker(manifest, { operation: "events", afterSequence: Math.max(0, Number(state.sequence) - 24) }, { timeoutMs: 1500 });
+          const events = eventReply.ok ? ((eventReply.data as any)?.events ?? []) : [];
+          live = { stale: false, execution: "running", liveText: typeof state.liveText === "string" ? state.liveText.slice(-16384) : "",
+            liveSequence: Number.isSafeInteger(state.sequence) ? state.sequence : 0,
+            liveEvents: events.filter((event: any) => ["conversation_tool_start", "conversation_tool_end"].includes(event.kind)).map((event: any) => ({
+              sequence: event.sequence, kind: event.kind === "conversation_tool_start" ? "tool_start" : "tool_end",
+              toolCallId: event.data?.toolCallId, name: event.data?.name,
+              ...(event.kind === "conversation_tool_start" ? { status: "running", arguments: event.data?.arguments } : { status: event.data?.status, result: event.data?.result }),
+            })).slice(-12) };
+        }
+      }
+    }
+    const execution = live.execution === "running" ? "running" : c.state === "completed" ? "completed" : c.state === "failed" ? "failed" : c.state === "cancelled" ? "cancelled" : c.state === "lost" ? "lost" : undefined;
     return { taskId: c.taskId, childId: c.childId, groupId: g.id, attempt: c.attempt ?? 1,
-      runtimeId: manifest?.runtimeId ?? null, stale: true, ...readRetainedConversation(path, input.cursor) };
+      runtimeId: manifest?.runtimeId ?? null, ...retained, ...live, ...(execution ? { execution } : {}) };
   }
   readonlyTaskReport(owner: string, taskId: string, maxBytes = 48 * 1024): any {
     if (this.owner !== owner) throw new Error("Native task snapshots belong to another Pi session");
