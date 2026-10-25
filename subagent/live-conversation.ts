@@ -54,7 +54,7 @@ export function validateLiveEvents(response: TuiWorkerResponse, manifest: Pinned
     previous = event.sequence;
     if (event.kind === "conversation_tool_start" || event.kind === "conversation_tool_end") {
       const value = event.data;
-      if (!object(value) || typeof value.toolCallId !== "string" || !/^[a-zA-Z0-9._:-]{1,128}$/.test(value.toolCallId)
+      if (!object(value) || typeof value.toolCallId !== "string" || !/^[a-zA-Z0-9._:|\-]{1,128}$/.test(value.toolCallId)
         || typeof value.name !== "string" || !value.name || Buffer.byteLength(value.name) > 128) throw new Error("Invalid conversation tool event");
       if (event.kind === "conversation_tool_start" && (!Object.hasOwn(value, "arguments") || Buffer.byteLength(JSON.stringify(value.arguments)) > 4096))
         throw new Error("Invalid conversation tool arguments");

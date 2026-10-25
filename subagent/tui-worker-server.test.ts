@@ -27,16 +27,18 @@ test("authenticated live conversation stream reports tool start then authoritati
   try {
     await server.start();
     server.running(true);
-    server.conversationTool("start", { toolCallId: "call-1", name: "read", arguments: { path: "README.md" } });
+    // Actual Codex IDs include both call and function-call IDs separated by '|'.
+    const toolCallId = "call_0a704f3dde69491bb6bd655fd9c8c8fd|fc_02f41ccd1e450f68016addf8f6e84c819194af859e3b489076";
+    server.conversationTool("start", { toolCallId, name: "read", arguments: { path: "README.md" } });
     const startReply = await callTuiWorker(manifest, { operation: "events", afterSequence: 0 });
     const startEvents = validateLiveEvents(startReply, manifest, 0);
-    assert.ok(startEvents.some(event => event.kind === "conversation_tool_start" && (event.data as any).toolCallId === "call-1"));
-    server.conversationTool("end", { toolCallId: "call-1", name: "read", result: { text: "done" } });
+    assert.ok(startEvents.some(event => event.kind === "conversation_tool_start" && (event.data as any).toolCallId === toolCallId));
+    server.conversationTool("end", { toolCallId, name: "read", result: { text: "done" } });
     const statusReply = await callTuiWorker(manifest, { operation: "status" });
     assert.equal(validateLiveStatus(statusReply, manifest)?.active, true);
     const endReply = await callTuiWorker(manifest, { operation: "events", afterSequence: startReply.sequence });
     const endEvents = validateLiveEvents(endReply, manifest, startReply.sequence);
-    assert.deepEqual(endEvents.map(event => [(event.data as any)?.toolCallId, (event.data as any)?.status]), [["call-1", "completed"]]);
+    assert.deepEqual(endEvents.map(event => [(event.data as any)?.toolCallId, (event.data as any)?.status]), [[toolCallId, "completed"]]);
   } finally { await server.close(); await rm(directory, { recursive: true, force: true }); }
 });
 

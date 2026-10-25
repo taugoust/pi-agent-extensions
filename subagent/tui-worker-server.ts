@@ -131,7 +131,7 @@ export class TuiWorkerServer {
     });
   }
   conversationTool(kind: "start" | "end", value: { toolCallId: string; name: string; arguments?: unknown; result?: unknown; failed?: boolean }): void {
-    if (!/^[a-zA-Z0-9._:-]{1,128}$/.test(value.toolCallId) || typeof value.name !== "string" || !value.name || value.name.length > 128) return;
+    if (!/^[a-zA-Z0-9._:|\-]{1,128}$/.test(value.toolCallId) || typeof value.name !== "string" || !value.name || value.name.length > 128) return;
     const bounded = (input: unknown, max: number) => {
       let text: string;
       try { text = typeof input === "string" ? input : JSON.stringify(input ?? {}); } catch { text = "[unavailable]"; }

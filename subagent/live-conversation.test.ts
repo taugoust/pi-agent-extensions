@@ -47,6 +47,12 @@ test("live event page validates epoch, monotonic sequence, cursor and byte bound
   assert.throws(() => validateLiveEvents(eventReply([end], { oldestSequence: 4 }), manifest, 2), /history gap/, "missing ring events cannot claim complete tool state");
   assert.throws(() => validateLiveEvents(eventReply([start], {}, { workerEpoch: "f".repeat(32) }), manifest, 2), /envelope/);
   assert.throws(() => validateLiveEvents(eventReply([start], { events: [{ ...start, data: { toolCallId: "call-1", name: "x", arguments: "x".repeat(5000) } }] }), manifest, 2), /arguments/);
+  for (const toolCallId of ["bad/id", "bad\nname", "x".repeat(129)]) {
+    const invalid = { ...start, data: { ...start.data, toolCallId } };
+    assert.throws(() => validateLiveEvents(eventReply([invalid]), manifest, 2), /tool event/);
+  }
+  const codex = { ...start, data: { ...start.data, toolCallId: "call_123|fc_456" } };
+  assert.equal(validateLiveEvents(eventReply([codex]), manifest, 2)[0].data.toolCallId, "call_123|fc_456");
   const huge = { ...start, kind: "other", data: "x".repeat(100 * 1024) };
   assert.throws(() => validateLiveEvents(eventReply([huge]), manifest, 2), /byte bound|Malformed/);
 });
