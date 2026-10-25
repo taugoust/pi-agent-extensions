@@ -59,8 +59,20 @@ for (const kind of ["foreground", "tui"] as const) test(`${kind} sessionSource v
     }
     const extraLink = join(directory, "extra-link");
     await link(manifest.sessionFile, extraLink);
-    assert.throws(() => manager.readonlyTaskSessionSource(owner, { taskId, childId, attempt: 2 }));
+    const linkedStatus = manager.readonlyTaskSessionSource(owner, { taskId, childId, attempt: 2 });
+    assert.equal(linkedStatus.status, source.status);
+    assert.equal("sessionFile" in linkedStatus, false, "a multiply-linked transcript is never published");
     await unlink(extraLink);
+    assert.equal(manager.readonlyTaskSessionSource(owner, { taskId, childId, attempt: 2 }).sessionFile, manifest.sessionFile);
+    await unlink(manifest.sessionFile);
+    const statusOnly = manager.readonlyTaskSessionSource(owner, { taskId, childId, attempt: 2 });
+    assert.equal(statusOnly.status, source.status);
+    assert.equal(statusOnly.runtimeId, runtimeId);
+    assert.equal("sessionFile" in statusOnly, false);
+    if (kind === "foreground") {
+      assert.throws(() => manager.readonlyTaskConversation(owner, { taskId, childId, attempt: 2, runtimeId }));
+    }
+    await writeFile(manifest.sessionFile, `${JSON.stringify({ type: "message", id: "m1", message: { role: "user", content: "hello" } })}\n`, { mode: 0o600 });
     if (kind === "foreground") {
       child.status = "reaped";
       const lost = manager.readonlyTaskSessionSource(owner, { taskId, childId, attempt: 2 });

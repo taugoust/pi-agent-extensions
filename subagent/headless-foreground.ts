@@ -962,14 +962,16 @@ export class HeadlessForegroundManager {
       || (input.runtimeId !== undefined && manifest.runtimeId !== input.runtimeId)) throw new Error("Session source manifest identity changed");
     const path = join(child.directory, "session.jsonl");
     if (manifest.sessionFile !== path) throw new Error("Invalid session source path");
-    // Reuse the retained reader's no-follow, owner/mode/link and bounded-file checks without parsing history on polls.
-    validateRetainedConversationFile(path);
+    // A missing/unsafe transcript must not suppress the authoritative task status.
+    // Only publish the reference after the retained reader's strict file checks.
+    let retainedSessionFile: string | undefined;
+    try { validateRetainedConversationFile(path); retainedSessionFile = path; } catch { /* Status-only source. */ }
     const state = new TuiWorkerStore(child.directory).readState(false);
     const childActive = ["running", "waiting-input", "waiting-permission", "pending"].includes(child.status);
     if (state.active !== childActive && child.status !== "pending") throw new Error("Active session state identity is inconsistent");
     const status = this.readonlyExecutionStatus(child, state);
     return { taskId: child.taskId, childId: child.childId, groupId: group.id, attempt: child.attempt,
-      runtimeId: manifest.runtimeId, sessionFile: path, status, title: child.spec.task.slice(0, 140), cwd: child.spec.cwd };
+      runtimeId: manifest.runtimeId, ...(retainedSessionFile ? { sessionFile: retainedSessionFile } : {}), status, title: child.spec.task.slice(0, 140), cwd: child.spec.cwd };
   }
   readonlyTaskReport(owner: string, taskId: string, maxBytes = 48 * 1024): any | undefined {
     if (this.owner !== owner) throw new Error("Headless task reports belong to another Pi session");

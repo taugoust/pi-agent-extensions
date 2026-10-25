@@ -252,7 +252,8 @@ test("real Pi TUI: local keyboard, observer crash, same-process promotion, retai
     assert.match(await readFile(sessionFile, "utf8"), /keyboard-worker/);
     assert.equal((await stat(sessionFile)).mode & 0o777, 0o600);
     validateRetainedConversationFile(sessionFile);
-    assert.ok(readRetainedConversation(sessionFile).messages.some(message => message.text.includes("keyboard-worker")));
+    await writeFile(sessionFile, `${JSON.stringify({ type: "message", id: "retained-reader-regression", message: { role: "user", content: "transcript permission regression" } })}\n`, { flag: "a" });
+    assert.ok(readRetainedConversation(sessionFile).messages.some(message => message.text === "transcript permission regression"));
     assert.doesNotMatch(await readFile(sessionFile, "utf8"), /"type":"session_info"[^\n]*MODEL-MUST-NOT-RENAME/);
     // A direct human conversation starts after terminal result: stale terminal
     // observations must not let reap cancel that new live turn.

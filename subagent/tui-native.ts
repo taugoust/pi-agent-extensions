@@ -661,14 +661,15 @@ export class TuiNativeManager {
       || (input.runtimeId !== undefined && manifest.runtimeId !== input.runtimeId)) throw new Error("Session source manifest identity changed");
     const path = join(child.directory, "session.jsonl");
     if (manifest.sessionFile !== path) throw new Error("Invalid session source path");
-    validateRetainedConversationFile(path);
+    let retainedSessionFile: string | undefined;
+    try { validateRetainedConversationFile(path); retainedSessionFile = path; } catch { /* Status identity remains useful without a trusted transcript. */ }
     const state = new TuiWorkerStore(child.directory).readState(false);
     if (state.active !== active(child) && !["pending", "launching"].includes(child.state)) throw new Error("Active session state identity is inconsistent");
     const status = active(child) ? "running" : child.state === "failed" ? "failed"
       : child.state === "cancelled" ? "cancelled" : child.state === "lost" ? "lost"
       : child.state === "completed" ? "completed" : group.cancelled ? "cancelled" : "lost";
     return { taskId: child.taskId, childId: child.childId, groupId: group.id, attempt: child.attempt ?? 1,
-      runtimeId: manifest.runtimeId, sessionFile: path, status, title: child.spec.name?.replace(/-/g, " ") || child.spec.task.slice(0, 140), cwd: child.spec.cwd };
+      runtimeId: manifest.runtimeId, ...(retainedSessionFile ? { sessionFile: retainedSessionFile } : {}), status, title: child.spec.name?.replace(/-/g, " ") || child.spec.task.slice(0, 140), cwd: child.spec.cwd };
   }
   readonlyTaskConversation(owner: string, input: { taskId: string; childId: string; attempt: number; runtimeId: string | null; cursor?: number }): any {
     if (this.owner !== owner) throw new Error("Conversation belongs to another Pi session");
@@ -680,6 +681,7 @@ export class TuiNativeManager {
     if ((manifest?.runtimeId ?? null) !== input.runtimeId) throw new Error("Conversation runtime changed");
     const path = join(c.directory, "session.jsonl");
     if (manifest && manifest.sessionFile !== path) throw new Error("Invalid conversation path");
+    validateRetainedConversationFile(path);
     return { taskId: c.taskId, childId: c.childId, groupId: g.id, attempt: c.attempt ?? 1,
       runtimeId: manifest?.runtimeId ?? null, stale: true, ...readRetainedConversation(path, input.cursor) };
   }
