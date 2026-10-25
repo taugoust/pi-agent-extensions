@@ -712,7 +712,7 @@ export class TuiNativeManager {
     }
     const execution = live.execution === "running" ? "running" : c.state === "completed" ? "completed" : c.state === "failed" ? "failed" : c.state === "cancelled" ? "cancelled" : c.state === "lost" ? "lost" : undefined;
     return { taskId: c.taskId, childId: c.childId, groupId: g.id, attempt: c.attempt ?? 1,
-      runtimeId: manifest?.runtimeId ?? null, ...retained, ...live, ...(execution ? { execution } : {}) };
+      runtimeId: manifest?.runtimeId ?? null, ...retained, ...live, stale: live.stale !== false, ...(execution ? { execution } : {}) };
   }
   readonlyTaskReport(owner: string, taskId: string, maxBytes = 48 * 1024): any {
     if (this.owner !== owner) throw new Error("Native task snapshots belong to another Pi session");
