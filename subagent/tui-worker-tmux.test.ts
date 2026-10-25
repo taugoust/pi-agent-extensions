@@ -2,7 +2,7 @@ import assert from "node:assert/strict";
 import { test } from "node:test";
 import { execFile, spawn } from "node:child_process";
 import { promisify } from "node:util";
-import { mkdtemp, mkdir, writeFile, rm, readFile } from "node:fs/promises";
+import { mkdtemp, mkdir, writeFile, rm, readFile, stat } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
@@ -10,6 +10,7 @@ import { TuiWorkerTmux, tuiWorkerLaunchContract, processIdentity } from "./tui-w
 import type { TuiWorkerManifest } from "../shared/tui-worker-protocol.ts";
 import { callTuiWorker } from "./tui-worker-client.ts";
 import { TuiWorkerStore } from "./tui-worker-store.ts";
+import { readRetainedConversation, validateRetainedConversationFile } from "./retained-conversation.ts";
 
 const exec = promisify(execFile);
 const rawPi = process.env.PI_TUI_TEST_PI;
@@ -249,6 +250,9 @@ test("real Pi TUI: local keyboard, observer crash, same-process promotion, retai
     assert.match(await readFile(report, "utf8"), /Deterministic completed task/);
     assert.equal((await backend.inspect(manifest)).dead, false);
     assert.match(await readFile(sessionFile, "utf8"), /keyboard-worker/);
+    assert.equal((await stat(sessionFile)).mode & 0o777, 0o600);
+    validateRetainedConversationFile(sessionFile);
+    assert.ok(readRetainedConversation(sessionFile).messages.some(message => message.text.includes("keyboard-worker")));
     assert.doesNotMatch(await readFile(sessionFile, "utf8"), /"type":"session_info"[^\n]*MODEL-MUST-NOT-RENAME/);
     // A direct human conversation starts after terminal result: stale terminal
     // observations must not let reap cancel that new live turn.

@@ -161,6 +161,10 @@ export class TuiWorkerTmux {
     if (input.resumeSessionFile) {
       await copyFile(input.resumeSessionFile, sessionFile, constants.COPYFILE_EXCL);
       await chmod(sessionFile, 0o600);
+    } else {
+      // Pi preserves permissions when opening an existing --session path; if
+      // left absent, its default create mode may be group/world-readable.
+      await writeFile(sessionFile, "", { flag: "wx", mode: 0o600 });
     }
     const manifestPath = store.path("manifest.json");
     const extension = input.workerExtension ?? fileURLToPath(new URL("./tui-worker-extension.ts", import.meta.url));
