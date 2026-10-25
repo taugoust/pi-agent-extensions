@@ -6,6 +6,7 @@ import { join } from "node:path";
 import { HeadlessForegroundManager } from "./headless-foreground.ts";
 import { TuiNativeManager } from "./tui-native.ts";
 import { TuiWorkerStore } from "./tui-worker-store.ts";
+import { TuiWorkerServer } from "./tui-worker-server.ts";
 
 const taskId = `subagent-task-${"a".repeat(24)}`;
 const childId = `subagent-child-${"b".repeat(24)}`;
@@ -49,6 +50,24 @@ for (const kind of ["foreground", "tui"] as const) test(`${kind} sessionSource v
       assert.equal(manager.readonlyTaskSessionSource(owner, { taskId, childId, attempt: 2 }).reaped, false);
       child.reaped = true;
       assert.equal((await manager.readonlyTaskConversation(owner, { taskId, childId, attempt: 2, runtimeId })).messages[0].text, "hello");
+      let fixtureIdle = false;
+      const server = new TuiWorkerServer(store, { isIdle: () => fixtureIdle, send() {}, abort() {}, shutdown() {} });
+      try {
+        await server.start();
+        server.running(true);
+        child.state = "running";
+        child.reaped = false;
+        const toolCallId = "call_123|fc_456";
+        server.conversationTool("end", { toolCallId, name: "read", result: { content: [{ type: "text", text: "actual structured result" }] } });
+        const live = await manager.readonlyTaskConversation(owner, { taskId, childId, attempt: 2, runtimeId });
+        assert.equal(live.stale, false);
+        assert.equal(live.liveEvents.at(-1).toolCallId, toolCallId);
+        assert.equal(typeof live.liveEvents.at(-1).result, "string", "authenticated worker result objects must satisfy the public string DTO");
+        assert.equal(JSON.parse(live.liveEvents.at(-1).result).content[0].text, "actual structured result");
+        server.conversationTool("end", { toolCallId, name: "read", result: { content: "é".repeat(4000) } });
+        const bounded = await manager.readonlyTaskConversation(owner, { taskId, childId, attempt: 2, runtimeId });
+        assert.ok(Buffer.byteLength(bounded.liveEvents.at(-1).result) <= 2048, "serialized live result remains within the wire byte bound");
+      } finally { child.state = "completed"; child.reaped = true; fixtureIdle = true; server.settled({}); await server.close(); }
       group.cancelled = true;
       assert.equal(manager.readonlyTaskSessionSource(owner, { taskId, childId, attempt: 2 }).status, "completed", "cancelling siblings cannot cancel a completed child");
       group.cancelled = false;
