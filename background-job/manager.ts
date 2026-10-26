@@ -1,5 +1,5 @@
 import { randomBytes } from "node:crypto";
-import { privateEvidenceDirectory as privateDirectory, type JobOwner } from "../shared/readonly-job-ancestry.ts";
+import { MAX_READONLY_SNAPSHOT_BYTES, privateEvidenceDirectory as privateDirectory, type JobOwner } from "../shared/readonly-job-ancestry.ts";
 import type { JobPlacement } from '../shared/background-job.ts';
 import { constants, writeFileSync } from "node:fs";
 import { access, lstat, open, readFile, realpath, writeFile } from "node:fs/promises";
@@ -400,7 +400,8 @@ export class BackgroundJobManager {
     return records.slice(0, limit);
   }
 
-  async listReadOnlyOwners(owners: JobOwner[]): Promise<JobRecord[]> {
+  async listReadOnlyOwners(owners: JobOwner[], maxBytes = MAX_READONLY_SNAPSHOT_BYTES): Promise<JobRecord[]> {
+    if (!Number.isSafeInteger(maxBytes) || maxBytes < 1 || maxBytes > MAX_READONLY_SNAPSHOT_BYTES) throw new Error("Invalid read-only jobs byte bound");
     let ids: string[];
     try {
       privateDirectory(this.store.jobsRoot);
@@ -410,23 +411,31 @@ export class BackgroundJobManager {
     const records: JobRecord[] = [];
     const scope = new Set(owners.map(owner => JSON.stringify([owner.sessionId, owner.childId ?? null])));
     const owned = (metadata: JobMetadata) => !metadata.infrastructure && scope.has(JSON.stringify([metadata.sessionId, metadata.childId ?? null]));
-    let next = 0;
+    let next = 0, bytes = 0, capacityExceeded = false;
     await Promise.all(Array.from({ length: Math.min(8, ids.length) }, async () => {
-      while (next < ids.length) {
+      while (next < ids.length && !capacityExceeded) {
         const id = ids[next++]!;
         try {
           privateDirectory(this.store.jobDir(id));
           const metadata = await this.store.readMetadata(id);
           if (metadata.id !== id || !owned(metadata)) continue;
+          bytes += Buffer.byteLength(JSON.stringify(metadata));
+          if (bytes > maxBytes) { capacityExceeded = true; continue; }
           const record = await this.get(id, false, current => {
             if (current.id !== id || !owned(current) || JSON.stringify(current) !== JSON.stringify(metadata)) throw new Error("Read-only job ownership changed before observation");
           });
           const current = await this.store.readMetadata(id);
           if (owned(record.metadata) && owned(current) && JSON.stringify(current) === JSON.stringify(metadata)
-            && JSON.stringify(record.metadata) === JSON.stringify(metadata)) records.push(record);
+            && JSON.stringify(record.metadata) === JSON.stringify(metadata)) {
+            bytes += Buffer.byteLength(JSON.stringify(record.result ?? null));
+            if (bytes > maxBytes) { capacityExceeded = true; continue; }
+            // Lists do not retain launch/control identities or backend diagnostics.
+            records.push({ metadata: record.metadata, status: record.status, ...(record.result ? { result: record.result } : {}) });
+          }
         } catch { /* Missing or invalid job metadata grants no observation authority. */ }
       }
     }));
+    if (capacityExceeded) throw new Error("Read-only jobs snapshot byte capacity exceeded");
     return records.sort((a, b) => b.metadata.createdAt.localeCompare(a.metadata.createdAt) || a.metadata.id.localeCompare(b.metadata.id));
   }
 

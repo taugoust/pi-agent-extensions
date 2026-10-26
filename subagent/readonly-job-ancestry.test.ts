@@ -82,6 +82,13 @@ test("headless foreground retained nonce evidence authorizes its session, not un
     assert.equal(stale.unavailable, true); assert.equal(ownsJob(stale.owners, { sessionId: "session-1" }), false);
   } finally { f.close(); }
 });
+test("ancestry byte capacity fails explicitly rather than returning a partial scope", () => {
+  const f = fixture(); try {
+    assert.throws(() => readJobAncestry(f.root, "session-0", 1), /byte capacity exceeded/);
+    assert.throws(() => readJobAncestry(f.root, "session-0", 0), /Invalid/);
+    assert.throws(() => readJobAncestry(f.root, "session-0", Number.MAX_SAFE_INTEGER), /Invalid/);
+  } finally { f.close(); }
+});
 test("non-regular evidence cannot block read-only discovery", () => {
   const f = fixture(); try {
     const path = f.manifests[0].sessionFile;

@@ -4,6 +4,7 @@ import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { createHash } from 'node:crypto';
 import { JobStore } from './store.js';
+import { BackgroundJobManager } from './manager.js';
 import { TuiWorkerStore, atomicPrivateJson } from '../subagent/tui-worker-store.js';
 import extension from './index.js';
 const root = await mkdtemp(join(tmpdir(), 'rj-'));
@@ -47,6 +48,8 @@ try {
   const aliasMetadata = await store.readMetadata(aliased);
   await writeFile(store.path(aliased, 'metadata.json'), JSON.stringify({ ...aliasMetadata, id: direct }), { mode: 0o600 });
   for (let n = 10; n < 66; n++) await job(n, 'owner-3');
+  const boundedManager = new BackgroundJobManager(store, {});
+  await assert.rejects(boundedManager.listReadOnlyOwners([{ sessionId: 'owner-0' }], 1), /byte capacity exceeded/);
   extension({ registerTool() {}, registerCommand() {}, sendMessage() {}, on(name, handler) { const previous = handlers.get(name); handlers.set(name, previous ? async (...args) => { await previous(...args); await handler(...args); } : handler); } });
   ctx = { cwd: root, hasUI: false, isIdle: () => true, sessionManager: { getSessionId: () => 'owner-0', getBranch: () => [] } };
   await handlers.get('session_start')({}, ctx);

@@ -25,19 +25,30 @@ function validateWorkerManifest(m: any): any {
 export type JobOwner = { sessionId: string; childId?: string };
 export type JobAncestry = { owners: JobOwner[]; fingerprint: string; unavailable?: boolean };
 const MAX_GROUPS = 10000, MAX_WORKERS = 20000;
-function readEvidence(path: string): any {
+export const MAX_READONLY_SNAPSHOT_BYTES = 64 * 1024 * 1024;
+class AncestryCapacityError extends Error {}
+type ByteBudget = { remaining: number };
+function consume(budget: ByteBudget, bytes: number): void {
+  if (bytes > budget.remaining) throw new AncestryCapacityError("Read-only job ancestry byte capacity exceeded");
+  budget.remaining -= bytes;
+}
+function readEvidence(path: string, budget: ByteBudget): any {
   privateEvidenceDirectory(dirname(path));
   const fd = openSync(path, constants.O_RDONLY | constants.O_NOFOLLOW | constants.O_NONBLOCK);
   try {
     const stat = fstatSync(fd), maximum = 256 * 1024;
     if (!stat.isFile() || stat.nlink !== 1 || stat.size > maximum || (stat.mode & 0o077) || (process.getuid && stat.uid !== process.getuid())) throw new Error("Unsafe job ancestry evidence");
-    const bytes = Buffer.alloc(maximum + 1), count = readSync(fd, bytes, 0, bytes.length, 0);
+    if (stat.size > budget.remaining) throw new AncestryCapacityError("Read-only job ancestry byte capacity exceeded");
+    const bytes = Buffer.alloc(Math.min(maximum + 1, budget.remaining + 1)), count = readSync(fd, bytes, 0, bytes.length, 0);
     if (count > maximum) throw new Error("Job ancestry evidence capacity exceeded");
+    consume(budget, count);
     return JSON.parse(bytes.subarray(0, count).toString("utf8"));
   } finally { closeSync(fd); }
 }
 /** Observation only. No scheduler, socket calls, reconciliation or ownership adoption. */
-export function readJobAncestry(root: string, owner: string): JobAncestry {
+export function readJobAncestry(root: string, owner: string, maxBytes = MAX_READONLY_SNAPSHOT_BYTES): JobAncestry {
+  if (!Number.isSafeInteger(maxBytes) || maxBytes < 1 || maxBytes > MAX_READONLY_SNAPSHOT_BYTES) throw new Error("Invalid read-only ancestry byte bound");
+  const budget = { remaining: maxBytes };
   const hash = createHash("sha256").update(owner);
   const owners: JobOwner[] = [{ sessionId: owner }];
   try { lstatSync(root); } catch (error) {
@@ -56,10 +67,11 @@ export function readJobAncestry(root: string, owner: string): JobAncestry {
     if (groupCount > MAX_GROUPS) throw new Error("Read-only job ancestry group capacity exceeded");
     for (const file of files) {
       try {
-        const group = readEvidence(join(groupsDir, file));
+        const group = readEvidence(join(groupsDir, file), budget);
         if (group.version !== 1 || `${group.id}.json` !== file || typeof group.owner !== "string" || !Array.isArray(group.children) || group.children.length > 8) throw new Error("Invalid retained job ancestry group");
         const groups = byOwner.get(group.owner) ?? []; groups.push(group); byOwner.set(group.owner, groups);
-      } catch {
+      } catch (error) {
+        if (error instanceof AncestryCapacityError) throw error;
         unavailable = true; hash.update(JSON.stringify(["unavailable-group", directory, file]));
       }
     }
@@ -78,7 +90,7 @@ export function readJobAncestry(root: string, owner: string): JobAncestry {
           || typeof child.directory !== "string" || !/^[a-f0-9]{24}$/.test(child.directory.split("/").pop() ?? "")
           || child.directory !== join(root, "workers", child.directory.split("/").pop())) throw new Error("Invalid retained job ancestry child");
         let manifest;
-        try { manifest = validateWorkerManifest(readEvidence(join(child.directory, "manifest.json"))); }
+        try { manifest = validateWorkerManifest(readEvidence(join(child.directory, "manifest.json"), budget)); }
         catch (error) { if ((error as NodeJS.ErrnoException).code === "ENOENT" && !child.started) continue; throw error; }
         if (manifest.sessionFile !== join(child.directory, "session.jsonl") || manifest.controlSocket !== join(child.directory, "control.sock")
           || manifest.ownerSessionId !== session || manifest.groupId !== group.id || manifest.childId !== child.childId
@@ -100,7 +112,8 @@ export function readJobAncestry(root: string, owner: string): JobAncestry {
         try {
           const stat = fstatSync(fd);
           if (!stat.isFile() || stat.nlink !== 1 || (stat.mode & 0o077) || (process.getuid && stat.uid !== process.getuid())) throw new Error("Unsafe descendant session header");
-          const bytes = Buffer.alloc(8192), n = readSync(fd, bytes, 0, bytes.length, 0), newline = bytes.indexOf(10, 0);
+          const bytes = Buffer.alloc(Math.min(8192, budget.remaining + 1)), n = readSync(fd, bytes, 0, bytes.length, 0), newline = bytes.indexOf(10, 0);
+          consume(budget, n);
           if (newline < 0 || newline >= n) throw new Error("Missing bounded descendant session header");
           const header = JSON.parse(bytes.subarray(0, newline).toString("utf8"));
           if (header.type !== "session" || typeof header.id !== "string" || !header.id || Buffer.byteLength(header.id) > 512) throw new Error("Invalid descendant session header");
@@ -112,6 +125,7 @@ export function readJobAncestry(root: string, owner: string): JobAncestry {
         if (seen.has(descendant)) continue;
         seen.add(descendant); queue.push(descendant); owners.push({ sessionId: descendant });
         } catch (error) {
+          if (error instanceof AncestryCapacityError) throw error;
           // A stale/unverifiable worker never authorizes its branch. Keep other
           // proven branches and direct jobs available, with an explicit notice.
           unavailable = true;
