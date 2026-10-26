@@ -1,5 +1,5 @@
 import assert from 'node:assert/strict';
-import { mkdtemp, mkdir, writeFile, rm, access, symlink, stat } from 'node:fs/promises';
+import { mkdtemp, mkdir, writeFile, rm, access, symlink, stat, rename } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { createHash } from 'node:crypto';
@@ -77,6 +77,12 @@ try {
   await assert.rejects(api.output({ sessionId: 'owner-0', jobId: grandchild }), /ELOOP/);
   await rm(store.path(grandchild, 'output.log'));
   await writeFile(store.path(grandchild, 'output.log'), 'restored-owned-output', { mode: 0o600 });
+  await rename(store.jobsRoot, store.jobsRoot + '-retained');
+  await symlink(store.jobsRoot + '-retained', store.jobsRoot);
+  await assert.rejects(api.list({ sessionId: 'owner-0' }), /symlinks/);
+  await assert.rejects(api.output({ sessionId: 'owner-0', jobId: grandchild }), /symlinks/);
+  await rm(store.jobsRoot);
+  await rename(store.jobsRoot + '-retained', store.jobsRoot);
   await assert.rejects(api.output({ sessionId: 'foreign', jobId: direct }));
   const originalReadMetadata = JobStore.prototype.readMetadata;
   let mutate = true;

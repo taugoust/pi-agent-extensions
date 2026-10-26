@@ -401,8 +401,10 @@ export class BackgroundJobManager {
 
   async listReadOnlyOwners(owners: JobOwner[]): Promise<JobRecord[]> {
     let ids: string[];
-    try { ids = await this.store.listIdsReadOnly(); }
-    catch (error) { if ((error as NodeJS.ErrnoException).code === "ENOENT") return []; throw error; }
+    try {
+      privateDirectory(this.store.jobsRoot);
+      ids = await this.store.listIdsReadOnly();
+    } catch (error) { if ((error as NodeJS.ErrnoException).code === "ENOENT") return []; throw error; }
     if (ids.length > 20000) throw new Error("Read-only jobs capacity exceeded");
     const records: JobRecord[] = [];
     const scope = new Set(owners.map(owner => JSON.stringify([owner.sessionId, owner.childId ?? null])));
