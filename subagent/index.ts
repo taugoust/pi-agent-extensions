@@ -81,7 +81,7 @@ import { waitForGroupSnapshot } from "./group-wait.ts";
 import { parentJobBroker, validateJobParams } from "../shared/background-job.js";
 import { validateAcceptance, requireAcceptance, readTaskOutcome, outcomeSummary, type TaskOutcome, type TaskOutcomeSummary } from "./outcome.ts";
 import { NativeTaskStore, createTaskId, TASK_ID_PATTERN, type NativeTaskRecord } from "./resume.js";
-import { SUBAGENT_NAME_MAX_LENGTH, SUBAGENT_NAME_PATTERN, validateSubagentName, validateSubagentDisplayName, canonicalSubagentName, subagentResultPresentation, withoutSubagentNames } from "./tui-names.js";
+import { SUBAGENT_NAME_MAX_LENGTH, SUBAGENT_NAME_PATTERN, validateSubagentName, validateSubagentDisplayName, canonicalSubagentName, subagentResultPresentation, withoutSubagentNames } from "./tui-names.ts";
 import { registerTaskDashboard } from "./dashboard.js";
 import { taskListText, outcomeLabel } from "../shared/task-presentation.js";
 import { HARNESS_READONLY_KEY, HARNESS_READONLY_PROTOCOL, type HarnessReadOnlyRegistry, type HarnessReadOnlySubagents } from "../shared/harness-readonly.ts";

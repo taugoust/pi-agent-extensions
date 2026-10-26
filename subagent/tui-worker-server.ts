@@ -1,4 +1,5 @@
 import net from "node:net";
+import { boundedToolResult } from "../shared/tool-result-text.ts";
 import { chmodSync, lstatSync, openSync, closeSync, unlinkSync, writeFileSync } from "node:fs";
 import { createHash, randomBytes, timingSafeEqual } from "node:crypto";
 import { decodeTuiWorkerRequest, TUI_WORKER_MAX_FRAME_BYTES } from "../shared/tui-worker-protocol.ts";
@@ -200,7 +201,7 @@ export class TuiWorkerServer {
     };
     this.event(kind === "start" ? "conversation_tool_start" : "conversation_tool_end", {
       toolCallId: value.toolCallId, name: value.name,
-      ...(kind === "start" ? { arguments: bounded(value.arguments, 2048) } : { result: bounded(value.result, 2048), status: value.failed ? "failed" : "completed" }),
+      ...(kind === "start" ? { arguments: bounded(value.arguments, 2048) } : { result: boundedToolResult(value.result, 2048), resultFormat: "text", status: value.failed ? "failed" : "completed" }),
     });
   }
   liveText(value: string): void {

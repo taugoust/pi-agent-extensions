@@ -1,11 +1,13 @@
 import { closeSync, constants, fstatSync, lstatSync, openSync, readSync } from "node:fs";
 import { dirname } from "node:path";
 import { truncateUtf8 } from "../shared/harness-readonly.ts";
+import { boundedToolResultText } from "../shared/tool-result-text.ts";
 
-export type ConversationToolCall = { type: "toolCall"; id: string; name: string; arguments: unknown; status?: "completed" | "failed" | "unknown"; result?: string };
+export type ConversationToolCall = { type: "toolCall"; id: string; name: string; arguments: unknown; status?: "completed" | "failed" | "unknown"; result?: string; resultFormat?: "text" };
 export type ConversationMessage = {
   id: string; role: "user" | "assistant" | "tool" | "parent"; text: string; truncated?: boolean;
   parts?: Array<{ type: "text"; text: string } | ConversationToolCall>;
+  resultFormat?: "text";
   toolCallId?: string; toolName?: string; status?: "completed" | "failed" | "unknown";
 };
 const PAGE_BYTES = 8 * 1024 * 1024;
@@ -15,9 +17,9 @@ const MAX_RESULT_BYTES = 2048;
 const clean = (text: string) => text.replace(/\x1b\][\s\S]*?(?:\x07|\x1b\\)/g, "")
   .replace(/(?:\x1b\[|\x9b)[0-?]*[ -/]*[@-~]/g, "").replace(/[\x00-\x08\x0b-\x1f\x7f-\x9f]/g, "");
 function contentText(content: unknown, maximum = MAX_RESULT_BYTES): string {
-  const text = typeof content === "string" ? content : Array.isArray(content)
-    ? content.flatMap((part: any) => part?.type === "text" && typeof part.text === "string" ? [part.text] : []).join("\n") : "";
-  return truncateUtf8(clean(text), maximum).text;
+  // Decode complete source transport before byte clipping: never slice serialized
+  // MCP JSON into an irrecoverable partial envelope.
+  return boundedToolResultText(Array.isArray(content) ? { content } : content, maximum);
 }
 function resultStatus(message: any): "completed" | "failed" { return message?.isError === true ? "failed" : "completed"; }
 
@@ -125,6 +127,7 @@ export function readRetainedConversation(path: string, cursor?: number) {
           if (text || parts.length || role === "tool") messages.push({
             id: `${windowStart + offset}:${String(entry.id ?? "").slice(0, 64)}`, role, text: role === "tool" ? contentText(content) : safeText,
             ...(parts.length ? { parts } : {}),
+            ...(role === "tool" ? { resultFormat: "text" as const } : {}),
             ...(resultId ? { toolCallId: resultId, toolName: typeof message.toolName === "string" ? message.toolName.slice(0, 128) : "tool",
               status: resultStatus(message) } : {}),
             ...(role === "tool" && !resultId ? { status: "unknown" as const } : {}),
@@ -143,7 +146,7 @@ export function readRetainedConversation(path: string, cursor?: number) {
     for (const message of pageMessages) for (const part of message.parts ?? []) if (part.type === "toolCall") {
       part.status = toolStatuses.get(part.id) ?? "unknown";
       const result = toolResults.get(part.id);
-      if (result) part.result = result;
+      if (result !== undefined) { part.result = result; part.resultFormat = "text"; }
     }
 
     const selected: ConversationMessage[] = [];

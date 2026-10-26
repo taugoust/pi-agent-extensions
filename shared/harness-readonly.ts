@@ -106,8 +106,8 @@ export type HarnessReadOnlySubagents = {
   independentSource?(input: { sessionId: string; taskId: string; childId: string; attempt: number; runtimeId: string | null }): Promise<unknown>;
   conversation?(input: { sessionId: string; taskId: string; childId: string; attempt: number; runtimeId: string | null; cursor?: number }): Promise<ReadonlyDetail<{
     taskId: string; childId: string; groupId: string; attempt: number; runtimeId: string | null;
-    messages: Array<{ id: string; role: "user" | "assistant" | "tool" | "parent"; text: string; truncated?: boolean; parts?: Array<{ type: "text"; text: string } | { type: "toolCall"; id: string; name: string; arguments: unknown; status?: "completed" | "failed" | "unknown"; result?: string }>; toolCallId?: string; toolName?: string; status?: "completed" | "failed" | "unknown" }>;
-    truncated: boolean; lastUpdated: string; nextCursor?: number; execution?: "running" | "completed" | "failed" | "cancelled" | "lost"; liveText?: string; liveSequence?: number; liveEvents?: Array<{ sequence: number; kind: "tool_start" | "tool_end"; toolCallId: string; name: string; status?: "running" | "completed" | "failed"; arguments?: unknown; result?: string }>;
+    messages: Array<{ id: string; role: "user" | "assistant" | "tool" | "parent"; text: string; truncated?: boolean; parts?: Array<{ type: "text"; text: string } | { type: "toolCall"; id: string; name: string; arguments: unknown; status?: "completed" | "failed" | "unknown"; result?: string; resultFormat?: "text" }>; resultFormat?: "text"; toolCallId?: string; toolName?: string; status?: "completed" | "failed" | "unknown" }>;
+    truncated: boolean; lastUpdated: string; nextCursor?: number; execution?: "running" | "completed" | "failed" | "cancelled" | "lost"; liveText?: string; liveSequence?: number; liveEvents?: Array<{ sequence: number; kind: "tool_start" | "tool_end"; toolCallId: string; name: string; status?: "running" | "completed" | "failed"; arguments?: unknown; result?: string; resultFormat?: "text" }>;
   }>>;
 };
 

@@ -87,6 +87,15 @@ else
       cp -R ${self}/shared "$out/shared"
       chmod -R u+rwX "$out/shared"
     ''}
+    # Subagent worktree helpers import these implementation modules without
+    # requiring the workflows extension to be enabled in a narrow bundle.
+    ${lib.optionalString
+      (builtins.elem "subagent" selectedExtensions && !(builtins.elem "workflows" selectedExtensions))
+      ''
+        mkdir -p "$out/workflows/worktree"
+        cp ${self}/workflows/worktree/git.ts ${self}/workflows/worktree/settings.ts "$out/workflows/worktree/"
+      ''
+    }
     ${copySkillCommands}
 
     cat > "$out/package.json" <<'EOF'

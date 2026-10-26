@@ -39,6 +39,14 @@ test("authenticated live conversation stream reports tool start then authoritati
     const endReply = await callTuiWorker(manifest, { operation: "events", afterSequence: startReply.sequence });
     const endEvents = validateLiveEvents(endReply, manifest, startReply.sequence);
     assert.deepEqual(endEvents.map(event => [(event.data as any)?.toolCallId, (event.data as any)?.status]), [[toolCallId, "completed"]]);
+    const code = 'const logLevel = "λ🚀";\nconst literal = \'{"content":[1,2]}\';\n'.repeat(100);
+    server.conversationTool("end", { toolCallId: "long-read", name: "read", result: { content: [{ type: "text", text: code }] } });
+    const clippedReply = await callTuiWorker(manifest, { operation: "events", afterSequence: endReply.sequence });
+    const clipped = (validateLiveEvents(clippedReply, manifest, endReply.sequence)[0]?.data as any).result;
+    assert.equal(clipped.truncated, true); assert.equal(clipped.normalized, true);
+    assert.ok(code.startsWith(clipped.preview)); assert.ok(clipped.preview.includes("\n"));
+    assert.ok(!clipped.preview.includes('"type":"text"')); assert.ok(!clipped.preview.includes("\ufffd"));
+    assert.ok(Buffer.byteLength(JSON.stringify(clipped)) <= 2048);
   } finally { await server.close(); await rm(directory, { recursive: true, force: true }); }
 });
 

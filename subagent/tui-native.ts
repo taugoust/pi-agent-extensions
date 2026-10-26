@@ -838,7 +838,7 @@ export class TuiNativeManager {
             liveEvents: events.filter((event: any) => ["conversation_tool_start", "conversation_tool_end"].includes(event.kind)).map((event: any) => ({
               sequence: event.sequence, kind: event.kind === "conversation_tool_start" ? "tool_start" : "tool_end",
               toolCallId: event.data.toolCallId, name: event.data.name,
-              ...(event.kind === "conversation_tool_start" ? { status: "running", arguments: event.data.arguments } : { status: event.data.status, result: truncateUtf8(typeof event.data.result === "string" ? event.data.result : JSON.stringify(event.data.result), 2048).text }),
+              ...(event.kind === "conversation_tool_start" ? { status: "running", arguments: event.data.arguments } : { status: event.data.status, result: truncateUtf8(typeof event.data.result === "string" ? event.data.result : event.data.resultFormat === "text" && event.data.result?.normalized === true && typeof event.data.result.preview === "string" ? event.data.result.preview + "\n[truncated]" : JSON.stringify(event.data.result), 2048).text, ...(event.data.resultFormat === "text" ? { resultFormat: "text" } : {}) }),
             })).slice(-12) };
         }
       } catch { live = {}; } // Invalid, stale or old worker replies never become live UI state.

@@ -29,7 +29,10 @@ with tempfile.TemporaryDirectory(prefix="pi-completion-reload-") as tmp:
         # Expose the entrypoint's actual imported binding to the fixture, without
         # initializing the subagent launcher or changing production exports.
         entry = root / version / "subagent/index.ts"
-        entry.write_text(entry.read_text() + "\nexport { installQuietState as reloadProbe, requireAcceptance as acceptanceProbe, defaultSubagentModel as modelProbe, dispatchIdleDecision as idleDecisionProbe };\n")
+        entry.write_text(entry.read_text() + "\nexport { installQuietState as reloadProbe, requireAcceptance as acceptanceProbe, defaultSubagentModel as modelProbe, dispatchIdleDecision as idleDecisionProbe, validateSubagentDisplayName as displayNameProbe };\n")
+    old_names = root / "old/subagent/tui-names.ts"
+    old_names.write_text(old_names.read_text().replace(
+        "export function validateSubagentDisplayName(", "function validateSubagentDisplayName("))
     old_config = root / "old/subagent/config.ts"
     old_config.write_text(old_config.read_text().replace('defaultModel: "gpt-6-luna"', 'defaultModel: "legacy-default"'))
     old_outcome = root / "old/subagent/outcome.ts"
@@ -48,7 +51,7 @@ export function notifyParent() { throw new Error("not used by this fixture"); }
     for folder in folders:
         (live / folder).symlink_to(root / "old" / folder)
     (extensions / "probe.ts").write_text(f'''
-import {{ reloadProbe, acceptanceProbe, modelProbe, idleDecisionProbe }} from {json.dumps(str(live / "subagent/index.ts"))};
+import {{ reloadProbe, acceptanceProbe, modelProbe, idleDecisionProbe, displayNameProbe }} from {json.dumps(str(live / "subagent/index.ts"))};
 export default function(pi) {{
   let current;
   let sequence = 0;
@@ -77,6 +80,14 @@ export default function(pi) {{
     try {{ acceptanceProbe(undefined); }} catch {{ rejected = true; }}
     if (!rejected) throw new Error("missing acceptance was allowed");
     ctx.ui.notify("NEW-ACCEPTANCE");
+  }}}});
+  pi.registerCommand("nameprobe", {{handler: async (_, ctx) => {{
+    if (typeof displayNameProbe !== "function") {{ ctx.ui.notify("OLD-NAMES"); return; }}
+    if (displayNameProbe("Chat controls repair") !== "Chat controls repair") throw new Error("canonical name lost");
+    let rejected = false;
+    try {{ displayNameProbe("one two three four five"); }} catch {{ rejected = true; }}
+    if (!rejected) throw new Error("invalid display name accepted");
+    ctx.ui.notify("NEW-NAMES");
   }}}});
   pi.registerCommand("reloadtest", {{handler: async (_, ctx) => {{ await ctx.reload(); }} }});
 }}
@@ -122,6 +133,7 @@ export default function(pi) {{
         command("probe", "SILENT")
         command("idleprobe", "IDLE-FORWARD-OK")
         command("acceptance", "OLD-ACCEPTANCE")
+        command("nameprobe", "OLD-NAMES")
         command("modelprobe", "legacy-default:low on the owning session's provider/account")
         for folder in folders:
             link = live / folder
@@ -130,6 +142,7 @@ export default function(pi) {{
         command("reloadtest")
         command("probe", "WAKE")
         command("acceptance", "NEW-ACCEPTANCE")
+        command("nameprobe", "NEW-NAMES")
         command("modelprobe", "gpt-6-luna:low on the owning session's provider/account")
         assert process.pid == pid and process.poll() is None
         print("PASS: same-process subagent reload refreshed completion wake behavior")

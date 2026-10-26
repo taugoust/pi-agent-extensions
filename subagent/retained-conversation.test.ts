@@ -17,6 +17,20 @@ const toolCall = { type: "message", id: "call-entry", message: { role: "assistan
 const toolResult = (isError = false) => ({ type: "message", id: "result-entry", message: { role: "toolResult", toolCallId: "call-1", toolName: "read", isError, content: [{ type: "text", text: "done" }] } });
 const textRow = (id: number) => ({ type: "message", id: `text-${id}`, message: { role: "user", content: `message ${id}` } });
 
+test("long Read normalizes complete source before retained clipping, including serialized MCP and literal JSON", async () => {
+  const code = 'const logLevel = "λ🚀";\nconst literal = \'{"content":[1,2]}\';\n'.repeat(100);
+  for (const content of [[{ type: "text", text: code }], code]) {
+    const row = { ...toolResult(), message: { ...toolResult().message, content } };
+    await withSession([toolCall, row], async path => {
+      const page = readRetainedConversation(path), text = page.messages[1]!.text;
+      assert.ok(text.startsWith('const logLevel = "λ🚀";\n')); assert.ok(text.endsWith("\n[truncated]"));
+      assert.ok(code.startsWith(text.slice(0, -"\n[truncated]".length))); assert.ok(Buffer.byteLength(text) <= 2048);
+      assert.ok(!text.includes("\ufffd")); assert.equal(page.messages[1]!.resultFormat, "text"); const part = page.messages[0]!.parts![0];
+      assert.equal(part.type === "toolCall" ? part.result : undefined, text);
+    });
+  }
+});
+
 test("default transcript page is the newest tail and explicit cursor pages older without overlap", async () => {
   await withSession([toolCall, ...Array.from({ length: 1060 }, (_, index) => textRow(index)), toolResult()], async path => {
     const latest = readRetainedConversation(path);

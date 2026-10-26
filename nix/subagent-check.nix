@@ -179,6 +179,7 @@ pkgs.runCommand "subagent-check"
       export PI_TUI_ROOT_MODE=${if tuiWorkerLauncher != null then "guard-only" else "none"}
     ''}
     node --experimental-strip-types --test \
+      "$workdir/tui-runtime/shared/tool-result-text.test.ts" \
       "$workdir/tui-runtime/subagent/acceptance.test.ts" \
       "$workdir/tui-runtime/subagent/acceptance-adversarial.test.ts" \
       "$workdir/tui-runtime/subagent/acceptance-manager.test.ts" \
@@ -1162,6 +1163,11 @@ pkgs.runCommand "subagent-check"
       test -f "$bundle/subagent/result-artifact.ts"
       test -f "$bundle/subagent-finalizer/index.ts"
       test -f "$bundle/shared/agentsh-mode.ts"
+      # Narrow subagent bundles must include implementation-only worktree
+      # dependencies without enabling the workflows extension.
+      test -f "$bundle/workflows/worktree/git.ts"
+      test -f "$bundle/workflows/worktree/settings.ts"
+      test "$(jq '[.pi.extensions[] | select(. == "workflows")] | length' "$bundle/package.json")" -eq 0
     done
     test "$(jq '[.pi.extensions[] | select(. == "sandbox")] | length' ${sandboxOnlyBundle}/package.json)" -eq 1
     test "$(jq '[.pi.extensions[] | select(. == "sandbox")] | length' ${subagentOnlyBundle}/package.json)" -eq 0

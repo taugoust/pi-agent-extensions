@@ -69,7 +69,7 @@ for (const kind of ["foreground", "tui"] as const) test(`${kind} sessionSource v
         assert.equal(live.stale, false);
         assert.equal(live.liveEvents.at(-1).toolCallId, toolCallId);
         assert.equal(typeof live.liveEvents.at(-1).result, "string", "authenticated worker result objects must satisfy the public string DTO");
-        assert.equal(JSON.parse(live.liveEvents.at(-1).result).content[0].text, "actual structured result");
+        assert.equal(live.liveEvents.at(-1).result, "actual structured result", "presentation event exposes normalized text, not a serialized transport envelope");
         server.conversationTool("end", { toolCallId, name: "read", result: { content: "é".repeat(4000) } });
         const bounded = await manager.readonlyTaskConversation(owner, { taskId, childId, attempt: 2, runtimeId });
         assert.ok(Buffer.byteLength(bounded.liveEvents.at(-1).result) <= 2048, "serialized live result remains within the wire byte bound");
