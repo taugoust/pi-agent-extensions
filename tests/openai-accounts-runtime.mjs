@@ -59,7 +59,7 @@ test("BTW inherits the parent named account and blocks switching during a real r
     assert.equal(snapshot.threads[0].state, "idle");
     assert.equal(f.delegated.at(-1).id, "gpt-6-luna");
     assert.equal(f.delegated.at(-1).apiKey, "fixture-secret-alpha");
-    assert.equal(f.ctx.model, mainModel); assert.deepEqual(f.branch, branch);
+    assert.equal(f.ctx.model, mainModel); assert.deepEqual(structuredClone(f.branch), branch);
     assert.equal(JSON.stringify(snapshot).includes("fixture-secret"), false);
   } finally { pause?.release(); btw?.dispose(); await dispose(f); }
 });
@@ -212,6 +212,7 @@ async function fixture(options = {}) {
     appendCustomEntry(customType, data) {
       const entry = { type: "custom", id: `entry-${entries.length + 1}`, customType, data, timestamp: new Date().toISOString() };
       entries.push(entry);
+      branch.push(entry);
       return entry.id;
     },
   };
@@ -289,6 +290,31 @@ async function dispose(f) {
   if (f.previousAgentDir === undefined) delete process.env.PI_CODING_AGENT_DIR;
   else process.env.PI_CODING_AGENT_DIR = f.previousAgentDir;
 }
+
+test("session reload restores only current branch account and routing entries", async () => {
+  const f = await fixture();
+  try {
+    const selected = await switchRequest(f, "alpha", "branch-alpha");
+    assert.equal(selected.ok, true);
+    const currentBranch = [...f.branch];
+    const globalAccounts = await f.store.readAsync();
+    const abandoned = await switchRequest(f, "beta", "branch-beta", selected.snapshot.selectionRevision);
+    assert.equal(abandoned.ok, true);
+    assert.ok(f.entries.length > currentBranch.length - 1);
+    f.branch = currentBranch;
+    await f.fire("session_tree");
+    const snapshot = await f.service.getSnapshot({ sessionId: f.sessionId });
+    assert.equal(snapshot.currentAccountId, "alpha");
+    const staleReplay = await switchRequest(f, "alpha", "branch-alpha");
+    assert.equal(staleReplay.ok, false, "branch navigation must not replay an abandoned selection admission");
+    assert.equal(staleReplay.reason, "stale-selection");
+    const profile = await prepareSessionRoutingRequest(f.ctx);
+    assert.equal(profile.accountId, "alpha");
+    assert.ok(profile.revision > abandoned.snapshot.sessionRouting.revision, "restored branch must publish a fresh revision rather than replay abandoned state");
+    assert.deepEqual(await f.store.readAsync(), globalAccounts, "branch selection and restoration must not mutate global account defaults");
+    assert.equal(f.delegated.length, 0, "branch restoration must not dispatch a model request");
+  } finally { await dispose(f); }
+});
 
 test("Pi SDK gates normal OpenAI dispatch and cheap Luna compaction with the named key", async () => {
   const f = await fixture();
@@ -417,7 +443,7 @@ test("retained helper request preparation inherits the parent's current named ac
     process.env[SESSION_ROUTING_FILE_ENV] = routingModule.routingProfilePath(parent.root, parent.sessionId);
     process.env[SESSION_ROUTING_OWNER_ENV] = parent.sessionId;
     child = await fixture({ store: parent.store, sessionId: "retained-helper-session" });
-    assert.equal(child.ctx.model.provider, "session-follow");
+    assert.equal(child.ctx.model.provider, "openai");
     assert.equal(child.ctx.model.id, parent.models[0].id);
     const profile = await prepareSessionRoutingRequest(child.ctx);
     assert.equal(profile.providerId, "openai");
@@ -426,11 +452,8 @@ test("retained helper request preparation inherits the parent's current named ac
     assert.doesNotMatch(JSON.stringify(profile), /fixture-secret/);
     assert.equal(JSON.stringify(profile).includes("Authorization"), false);
     const childSnapshot = await child.service.getSnapshot({ sessionId: child.sessionId });
-    assert.equal(childSnapshot.busy, true);
-    assert.equal(childSnapshot.canSwitch, false);
-    const rejected = await switchRequest(child, "beta", "helper-must-switch-at-owner", childSnapshot.selectionRevision);
-    assert.equal(rejected.ok, false);
-    assert.equal(rejected.reason, "busy");
+    assert.equal(childSnapshot.busy, false);
+    assert.equal(childSnapshot.canSwitch, true);
     assert.equal((await prepareSessionRoutingRequest(child.ctx)).accountId, "alpha");
     const childService = globalThis.__paeAccountControlsV1;
     globalThis.__paeAccountControlsV1 = parent.service;
@@ -466,6 +489,12 @@ test("retained helper request preparation inherits the parent's current named ac
     pause = child.pauseProvider();
     const heldStream = child.registry.stream(heldModel, [], {}).result();
     await pause.started;
+    const busyChild = await child.service.getSnapshot({ sessionId: child.sessionId });
+    assert.equal(busyChild.busy, true);
+    const deniedChildSwitch = await switchRequest(child, "beta", "child-inflight-cannot-reroute", busyChild.selectionRevision);
+    assert.equal(deniedChildSwitch.ok, false); assert.equal(deniedChildSwitch.reason, "busy");
+    const deniedChildClear = await child.service.switchAccount({ protocol: 1, requestId: "child-inflight-cannot-clear", expectedSessionId: child.sessionId, expectedServiceEpoch: busyChild.serviceEpoch, expectedSelectionRevision: busyChild.selectionRevision, accountId: null, inherit: true });
+    assert.equal(deniedChildClear.ok, false); assert.equal(deniedChildClear.reason, "busy");
     const childServiceForHeldStream = globalThis.__paeAccountControlsV1;
     globalThis.__paeAccountControlsV1 = parent.service;
     assert.equal((await switchRequest(parent, "beta", "parent-route-beta-again", 3)).ok, true);
@@ -500,6 +529,107 @@ test("retained helper request preparation inherits the parent's current named ac
     if (previousOwner === undefined) delete process.env[SESSION_ROUTING_OWNER_ENV]; else process.env[SESSION_ROUTING_OWNER_ENV] = previousOwner;
     if (child) await dispose(child);
     await dispose(parent);
+  }
+});
+
+test("child overrides govern only its current/future subtree, survive reload and clear separately from explicit default", async () => {
+  const saved = { file: process.env[SESSION_ROUTING_FILE_ENV], owner: process.env[SESSION_ROUTING_OWNER_ENV], service: globalThis.__paeAccountControlsV1 };
+  const all = [];
+  const scope = async (f, parent, action) => {
+    if (parent) { process.env[SESSION_ROUTING_FILE_ENV] = routingModule.routingProfilePath(parent.root, parent.sessionId); process.env[SESSION_ROUTING_OWNER_ENV] = parent.sessionId; }
+    else { delete process.env[SESSION_ROUTING_FILE_ENV]; delete process.env[SESSION_ROUTING_OWNER_ENV]; }
+    if (f) { globalThis.__paeAccountControlsV1 = f.service; process.env.PI_CODING_AGENT_DIR = f.root; }
+    return action();
+  };
+  const create = async (id, parent) => scope(undefined, parent, async () => { const f = await fixture({ sessionId: id, ...(parent ? { store: parent.store } : {}) }); all.push(f); assert.equal(f.startupError, undefined); return f; });
+  const route = (f, parent) => scope(f, parent, () => prepareSessionRoutingRequest(f.ctx));
+  const choose = (f, parent, accountId, providerId = "openai", inherit = false) => scope(f, parent, async () => {
+    const snapshot = await f.service.getSnapshot({ sessionId: f.sessionId, providerId });
+    const result = await f.service.switchAccount({ protocol: 1, providerId, requestId: `subtree-${Math.random()}`, expectedSessionId: f.sessionId, expectedServiceEpoch: snapshot.serviceEpoch, expectedSelectionRevision: snapshot.selectionRevision, expectedRoutingRevision: snapshot.sessionRouting.revision, accountId, ...(inherit ? { inherit: true } : {}) });
+    assert.equal(result.ok, true, JSON.stringify(result));
+    return result;
+  });
+  try {
+    const root = await create("subtree-root");
+    await choose(root, undefined, "alpha");
+    const child = await create("subtree-child", root);
+    const inheritedBranch = [...child.branch];
+    const sibling = await create("subtree-sibling", root);
+    const grandchild = await create("subtree-grandchild", child);
+    assert.equal((await route(grandchild, child)).accountId, "alpha");
+    await choose(child, root, "Work", "openai-codex");
+    assert.equal(child.ctx.model.provider, "openai-codex");
+    assert.equal((await route(root)).accountId, "alpha");
+    assert.equal((await route(sibling, root)).accountId, "alpha");
+    assert.equal((await route(grandchild, child)).accountId, "Work");
+    const nativeRole = grandchild.ctx.model;
+    const response = await scope(grandchild, child, () => grandchild.registry.stream(nativeRole, [], {}).result());
+    assert.equal(response.stopReason, "stop", JSON.stringify(response));
+    assert.equal(grandchild.ctx.model, nativeRole, "inherited provider routing never replaces native role identity");
+    assert.equal(grandchild.codexDelegated.at(-1).apiKey, jwtToken("work-account", "work-subject"));
+    const future = await create("subtree-future", child);
+    assert.equal((await route(future, child)).accountId, "Work");
+    await choose(root, undefined, "beta");
+    assert.equal((await route(child, root)).accountId, "Work");
+    assert.equal((await route(sibling, root)).accountId, "beta");
+    await scope(child, undefined, () => child.fire("session_start"));
+    assert.equal((await route(child, root)).accountId, "Work", "local override survives extension reload");
+    const nativeSelect = grandchild.ctx.ui.select;
+    let choices = ["OpenAI Codex", "Restore default Pi login", "Close"];
+    grandchild.ctx.ui.select = async (_title, options) => { const answer = choices.shift(); assert.ok(options.includes(answer), answer); return answer; };
+    await scope(grandchild, child, () => grandchild.commands.get("accounts").handler("", grandchild.ctx));
+    assert.equal((await route(grandchild, child)).accountId, null, "native TUI default is an explicit built-in login choice");
+    await choose(child, root, null, "openai-codex", true);
+    assert.equal((await route(child, root)).accountId, "beta");
+    const firstClearProfile = await route(future, child);
+    assert.equal(firstClearProfile.accountId, "beta");
+    const earlierClearBranch = [...child.branch];
+    await choose(child, root, "Work", "openai-codex");
+    const overrideProfile = await route(future, child);
+    assert.equal(overrideProfile.accountId, "Work");
+    assert.ok(overrideProfile.revision > firstClearProfile.revision);
+    await choose(child, root, null, "openai-codex", true);
+    const laterClearProfile = await route(future, child);
+    assert.ok(laterClearProfile.revision > overrideProfile.revision);
+    child.branch = inheritedBranch;
+    await scope(child, undefined, () => child.fire("session_tree"));
+    const restoredInherited = await route(future, child);
+    assert.equal(restoredInherited.accountId, "beta");
+    assert.ok(restoredInherited.revision > laterClearProfile.revision, "restoring an earlier inherited branch publishes a fresh epoch for existing descendants");
+    child.branch = earlierClearBranch;
+    await scope(child, undefined, () => child.fire("session_tree"));
+    const restoredClear = await route(future, child);
+    assert.equal(restoredClear.accountId, "beta");
+    assert.ok(restoredClear.revision > restoredInherited.revision, "historical clear offset is intent, never a replayable publication epoch");
+    await scope(child, undefined, () => child.fire("session_start"));
+    const resumedInherited = await route(future, child);
+    assert.equal(resumedInherited.ownerSessionId, restoredClear.ownerSessionId);
+    assert.equal(resumedInherited.providerId, restoredClear.providerId);
+    assert.equal(resumedInherited.accountId, "beta");
+    assert.ok(resumedInherited.revision > restoredClear.revision, "resume preserves auth scope but advances the restored inheritance epoch");
+    assert.equal((await route(grandchild, child)).accountId, null, "grandchild explicit default survives parent clear and history restore");
+    choices = ["OpenAI Codex", "Follow parent account", "Close"];
+    await scope(grandchild, child, () => grandchild.commands.get("accounts").handler("", grandchild.ctx));
+    grandchild.ctx.ui.select = nativeSelect;
+    assert.equal((await route(grandchild, child)).accountId, "beta");
+    await scope(grandchild, undefined, () => grandchild.fire("session_start"));
+    assert.equal((await route(grandchild, child)).accountId, "beta", "clear persists through reload");
+    await choose(root, undefined, "alpha");
+    assert.equal((await route(grandchild, child)).accountId, "alpha", "cleared chain follows later ancestor changes");
+    await route(child, root);
+    const stableRoot = await route(root);
+    const rootFile = routingModule.routingProfilePath(root.root, root.sessionId);
+    routingModule.writeSessionRoutingProfile(rootFile, { ...stableRoot, revision: stableRoot.revision - 1 });
+    try {
+      await assert.rejects(scope(child, undefined, () => child.fire("session_start")), /regressed/, "fresh branch epochs must not mask an actually regressed ancestor descriptor");
+    } finally { routingModule.writeSessionRoutingProfile(rootFile, stableRoot); }
+    await scope(child, undefined, () => child.fire("session_start"));
+    assert.equal((await route(future, child)).accountId, "alpha");
+  } finally {
+    for (const f of all.reverse()) await dispose(f);
+    if (saved.file === undefined) delete process.env[SESSION_ROUTING_FILE_ENV]; else process.env[SESSION_ROUTING_FILE_ENV] = saved.file;
+    if (saved.owner === undefined) delete process.env[SESSION_ROUTING_OWNER_ENV]; else process.env[SESSION_ROUTING_OWNER_ENV] = saved.owner;
+    globalThis.__paeAccountControlsV1 = saved.service;
   }
 });
 
@@ -597,6 +727,8 @@ test("provider-scoped defaults and idempotency allow the same request ID across 
     assert.equal((await f.service.getSnapshot({ sessionId: f.sessionId, providerId: "openai-codex" })).currentAccountId, null);
     const replay = await switchRequest(f, null, "shared-request-id", 0, "openai-codex");
     assert.deepEqual(replay, codex);
+    const clearConflict = await f.service.switchAccount({ protocol: 1, providerId: "openai-codex", requestId: "shared-request-id", expectedSessionId: f.sessionId, expectedServiceEpoch: f.initial.serviceEpoch, expectedSelectionRevision: 0, accountId: null, inherit: true });
+    assert.equal(clearConflict.ok, false); assert.equal(clearConflict.reason, "request-id-conflict", "clear inheritance is not an exact retry of explicit default");
     const staleCodex = await switchRequest(f, null, "stale-codex", 0, "openai-codex");
     assert.equal(staleCodex.ok, false);
     assert.equal(staleCodex.reason, "stale-selection");

@@ -112,10 +112,10 @@ test("actual Pi SDK accounts-before-guard bootstraps the guard alias and retaine
     process.env[SESSION_ROUTING_FILE_ENV] = routingProfilePath(root, rootSessionId);
     process.env[SESSION_ROUTING_OWNER_ENV] = rootSessionId;
     childBundle = await makeSession(join(root, "child"));
-    assert.equal(childBundle.session.model.provider, "session-follow");
+    assert.equal(childBundle.session.model.provider, "openai");
     assert.equal(childBundle.session.model.id, "gpt-6-astra");
     const childResult = await childBundle.session.prompt("Answer using the inherited account.");
-    assert.equal(childBundle.session.model.provider, "session-follow");
+    assert.equal(childBundle.session.model.provider, "openai");
     assert.equal(rootBundle.session.model, parentModel, "helper routing must not change the parent's selected model");
     assert.ok(calls.some((call) => call.provider === "openai" && call.model === "gpt-6-astra" && call.apiKey === "fixture-default"), JSON.stringify(calls));
     assert.doesNotMatch(JSON.stringify(childResult ?? {}), /fixture-sdk-alpha/);

@@ -17,6 +17,7 @@ export interface RoutingContext {
 }
 interface Registration {
   file: string;
+  parent?: { file: string; owner: string };
   getProfile(): RoutingProfile | undefined;
   prepareRequest?(): Promise<RoutingProfile | undefined>;
 }
@@ -25,11 +26,41 @@ interface Registry {
   listeners: WeakMap<object, Set<() => void>>;
   seen: WeakMap<object, RoutingProfile>;
   modelReferences: WeakMap<object, () => { provider: string; id: string } | undefined>;
+  overrides?: WeakSet<object>;
 }
 const key = Symbol.for("pi-agent-extensions.session-routing.v1");
 const globals = globalThis as unknown as Record<symbol, Registry | undefined>;
 const registry = globals[key] ??= { owners: new WeakMap(), listeners: new WeakMap(), seen: new WeakMap(), modelReferences: new WeakMap() };
 registry.modelReferences ??= new WeakMap();
+registry.overrides ??= new WeakSet();
+
+/** Explicit local choice is distinct from inherited routing, including accountId=null. */
+export function setSessionRoutingOverride(ctx: RoutingContext, explicit: boolean): void {
+  if (explicit) registry.overrides!.add(ctx.sessionManager);
+  else registry.overrides!.delete(ctx.sessionManager);
+}
+
+export function writeInheritedSessionRoutingProfile(file: string, ownerSessionId: string, environment: Record<string, string>, revision = 0): void {
+  const parentFile = environment[SESSION_ROUTING_FILE_ENV], parentOwner = environment[SESSION_ROUTING_OWNER_ENV];
+  if (!ownerSessionId || !parentFile || !parentOwner || parentOwner === ownerSessionId || !Number.isSafeInteger(revision) || revision < 0) throw new Error("Invalid parent session routing binding");
+  const parent = readSessionRoutingProfile(parentFile, parentOwner);
+  // A branch restores its inheritance intent, never its old publication epoch.
+  // Existing descendants may already have observed a later local override/clear.
+  let exists = false;
+  try { readPrivateRoutingDocument(file); exists = true; }
+  catch (error) { if ((error as NodeJS.ErrnoException).code !== "ENOENT") throw error; }
+  // Only an absent local descriptor is an initial publication. A broken existing
+  // parent chain must not be mistaken for an absent local file and repaired.
+  const previous = exists ? readSessionRoutingProfile(file, ownerSessionId) : undefined;
+  const offset = Math.max(revision, previous ? previous.revision - parent.revision + 1 : 0);
+  validateRoutingProfile({ ...parent, ownerSessionId, revision: parent.revision + offset });
+  writePrivateRoutingDocument(file, { version: 1, kind: "inherit", ownerSessionId, parentFile, parentOwner, revision: offset });
+}
+
+export function inheritedSessionRoutingEnvironment(env: Environment = process.env): Record<string, string> | undefined {
+  const identity = inheritedIdentity(env);
+  return identity ? { [SESSION_ROUTING_FILE_ENV]: identity.file, [SESSION_ROUTING_OWNER_ENV]: identity.owner } : undefined;
+}
 export const SESSION_ROUTING_FILE_ENV = "PI_SESSION_ROUTING_FILE";
 export const SESSION_ROUTING_OWNER_ENV = "PI_SESSION_ROUTING_OWNER_SESSION";
 export const SESSION_MODEL_REFERENCE_EVENT = "session-routing:configured-model-reference";
@@ -93,8 +124,17 @@ function readPrivateRoutingDocument(file: string): unknown {
 }
 
 export function readSessionRoutingProfile(file: string, expectedOwner: string): RoutingProfile {
-  if (!expectedOwner) throw new Error("Invalid inherited session routing owner");
-  return validateRoutingProfile(readPrivateRoutingDocument(file), expectedOwner);
+  const seen = new Set<string>();
+  const read = (path: string, owner: string): RoutingProfile => {
+    if (!owner || seen.has(path) || seen.size >= 32) throw new Error("Invalid or cyclic inherited session routing chain");
+    seen.add(path);
+    const document = readPrivateRoutingDocument(path) as any;
+    if (document?.kind !== "inherit") return validateRoutingProfile(document, owner);
+    if (document.version !== 1 || document.ownerSessionId !== owner || typeof document.parentFile !== "string" || !isAbsolute(document.parentFile) || typeof document.parentOwner !== "string" || !document.parentOwner || !Number.isSafeInteger(document.revision) || document.revision < 0) throw new Error("Invalid inherited session routing descriptor");
+    const parent = read(document.parentFile, document.parentOwner);
+    return validateRoutingProfile({ ...parent, ownerSessionId: owner, revision: parent.revision + document.revision });
+  };
+  return read(file, expectedOwner);
 }
 
 function agentSHBindingPath(agentDir: string, requestId: string): string {
@@ -135,15 +175,18 @@ function inheritedIdentity(env: Environment): { file: string; owner: string } | 
 }
 
 export function isInheritedSessionRouting(ctx: RoutingContext, env: Environment = process.env): boolean {
-  const identity = inheritedIdentity(env);
+  const identity = registry.owners.get(ctx.sessionManager)?.parent ?? inheritedIdentity(env);
   return identity !== undefined && identity.owner !== ctx.sessionManager.getSessionId();
 }
 
 /** Bypasses the local registry so an inherited owner's callback cannot recurse. */
 export function readInheritedSessionRoutingProfile(ctx: RoutingContext, env: Environment = process.env): RoutingProfile | undefined {
-  const identity = inheritedIdentity(env);
-  if (!identity || identity.owner === ctx.sessionManager.getSessionId()) return undefined;
-  const profile = readSessionRoutingProfile(identity.file, identity.owner);
+  const identity = registry.owners.get(ctx.sessionManager)?.parent ?? inheritedIdentity(env);
+  if (!identity || identity.owner === ctx.sessionManager.getSessionId() || registry.overrides!.has(ctx.sessionManager)) return undefined;
+  const local = registry.owners.get(ctx.sessionManager);
+  const profile = local
+    ? readSessionRoutingProfile(local.file, ctx.sessionManager.getSessionId())
+    : readSessionRoutingProfile(identity.file, identity.owner);
   const previous = registry.seen.get(ctx.sessionManager);
   if (previous?.ownerSessionId === profile.ownerSessionId && (profile.revision < previous.revision ||
     (profile.revision === previous.revision && (profile.providerId !== previous.providerId || profile.accountId !== previous.accountId)))) {
@@ -176,7 +219,14 @@ export async function prepareSessionRoutingRequest(ctx: RoutingContext): Promise
 }
 
 export function sessionRoutingEnvironment(ctx: RoutingContext, env: Environment = process.env): Record<string, string> {
-  // Descendants keep their original owning session, not an intermediate worker.
+  // Bind the immediate session, so future local overrides affect its subtree only.
+  const local = registry.owners.get(ctx.sessionManager);
+  if (local) {
+    const profile = getSessionRoutingProfile(ctx, env);
+    if (!profile) throw new Error("Session routing is not ready; refusing an unbound helper launch");
+    readSessionRoutingProfile(local.file, ctx.sessionManager.getSessionId());
+    return { [SESSION_ROUTING_FILE_ENV]: local.file, [SESSION_ROUTING_OWNER_ENV]: ctx.sessionManager.getSessionId() };
+  }
   const inherited = inheritedIdentity(env);
   if (inherited && inherited.owner !== ctx.sessionManager.getSessionId()) {
     readSessionRoutingProfile(inherited.file, inherited.owner);

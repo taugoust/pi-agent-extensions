@@ -4,67 +4,44 @@ import { mkdtempSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { installSessionFollower } from "./session-follower.ts";
-import { getSessionModelRequestProfile, readInheritedSessionRoutingProfile, registerSessionRouting, resolveSessionPhysicalModelReference, routingProfilePath, writeSessionRoutingProfile, type RoutingProfile } from "../shared/session-routing.ts";
+import { readInheritedSessionRoutingProfile, registerSessionRouting, routingProfilePath, writeInheritedSessionRoutingProfile, writeSessionRoutingProfile } from "../shared/session-routing.ts";
 
 function fixture(t: any) {
-  const dir = mkdtempSync(join(tmpdir(), "session-follower-"));
+  const dir = mkdtempSync(join(tmpdir(), "session-native-routing-"));
   t.after(() => rmSync(dir, { recursive: true, force: true }));
   const env = { ...process.env };
   t.after(() => { for (const key of ["PI_SESSION_ROUTING_FILE", "PI_SESSION_ROUTING_OWNER_SESSION"]) { if (env[key] === undefined) delete process.env[key]; else process.env[key] = env[key]; } });
-  const file = routingProfilePath(dir, "parent");
+  const file = routingProfilePath(dir, "parent"), local = routingProfilePath(dir, "child");
   process.env.PI_SESSION_ROUTING_FILE = file;
   process.env.PI_SESSION_ROUTING_OWNER_SESSION = "parent";
-  const publish = (providerId: string, accountId: string, revision: number) => writeSessionRoutingProfile(file, { version: 1, ownerSessionId: "parent", providerId, accountId, revision });
-  publish("openai", "Personal", 0);
-  const models = new Map<string, any>(["openai", "openai-codex"].map(provider => [`${provider}/small`, { provider, id: "small", api: "fixture", input: ["text"], contextWindow: 1024, maxTokens: 128 }]));
-  const definitions = new Map<string, any>();
+  const publish = (providerId: string, revision: number) => writeSessionRoutingProfile(file, { version: 1, ownerSessionId: "parent", providerId, accountId: "fixture", revision });
+  publish("openai", 0);
+  writeInheritedSessionRoutingProfile(local, "child", { PI_SESSION_ROUTING_FILE: file, PI_SESSION_ROUTING_OWNER_SESSION: "parent" });
+  const models = new Map<string, any>(["openai", "openai-codex"].map(provider => [`${provider}/small`, { provider, id: "small", api: "fixture" }]));
   const ctx: any = { model: models.get("openai/small"), sessionManager: { getSessionId: () => "child" }, modelRegistry: { find: (provider: string, id: string) => models.get(`${provider}/${id}`) } };
-  let prepared: RoutingProfile | undefined;
-  t.after(registerSessionRouting(ctx, { file, getProfile: () => prepared, prepareRequest: async () => (prepared = readInheritedSessionRoutingProfile(ctx)) }));
+  t.after(registerSessionRouting(ctx, { file: local, getProfile: () => readInheritedSessionRoutingProfile(ctx), prepareRequest: async () => readInheritedSessionRoutingProfile(ctx) }));
   const pi: any = {
-    registerVirtualModel(def: any) { definitions.set(`${def.provider}/${def.id}`, def); models.set(`${def.provider}/${def.id}`, { ...def, api: "pi-virtual" }); },
-    unregisterVirtualModel(provider: string, id: string) { definitions.delete(`${provider}/${id}`); models.delete(`${provider}/${id}`); },
-    async setModel(model: any) { ctx.model = model; return true; },
+    registerVirtualModel() { assert.fail("native inheritance must not register virtual models"); },
+    async setModel() { assert.fail("inheritance must not replace the session's native identity"); },
   };
-  return { ctx, pi, publish, models, definitions };
+  return { ctx, pi, publish, models };
 }
 
-test("existing helper requests follow both provider directions and named accounts, preserving admitted snapshots", async t => {
-  const f = fixture(t), dispose = await installSessionFollower(f.pi, f.ctx);
-  t.after(dispose);
-  assert.equal(f.ctx.model.provider, "session-follow");
-  const router = f.definitions.get("session-follow/small");
-  const first = await router.route({ thinkingLevel: "low", reason: "user" }, f.ctx);
-  f.publish("openai-codex", "Work", 1);
-  const second = await router.route({ thinkingLevel: "low", reason: "continuation" }, f.ctx);
-  f.publish("openai-codex", "Personal", 2);
-  const third = await router.route({ thinkingLevel: "high", reason: "direct" }, f.ctx);
-  f.publish("openai", "Work", 3);
-  const fourth = await router.route({ thinkingLevel: "low", reason: "retry" }, f.ctx);
-  assert.deepEqual([first, second, third, fourth].map(r => r.model.provider), ["openai", "openai-codex", "openai-codex", "openai"]);
-  assert.deepEqual([first, second, third, fourth].map(r => getSessionModelRequestProfile(r.model)!.accountId), ["Personal", "Work", "Personal", "Work"]);
-  assert.equal(first.model.id, "small"); assert.equal(third.thinkingLevel, "high");
-  assert.equal(getSessionModelRequestProfile(first.model)!.revision, 0);
-  assert.equal(JSON.stringify(first.model).includes("Personal"), false);
-  assert.equal(JSON.stringify(second.model).includes("Work"), false);
-  assert.equal(resolveSessionPhysicalModelReference(f.ctx, getSessionModelRequestProfile(fourth.model)).id, "small");
+test("inheritance and reload retain native role/provider identity without a virtual model", async t => {
+  const f = fixture(t), original = f.ctx.model;
+  (await installSessionFollower(f.pi, f.ctx))();
+  f.publish("openai-codex", 1);
+  (await installSessionFollower(f.pi, f.ctx))();
+  assert.equal(f.ctx.model, original);
+  assert.equal(f.ctx.model.provider, "openai");
+  assert.equal(f.ctx.model.id, "small");
 });
 
-test("missing role model on new provider fails without choosing a different role or provider", async t => {
-  const f = fixture(t), dispose = await installSessionFollower(f.pi, f.ctx);
-  t.after(dispose);
+test("missing inherited physical role and virtual roles fail closed", async t => {
+  const f = fixture(t);
+  f.publish("openai-codex", 1);
   f.models.delete("openai-codex/small");
-  f.publish("openai-codex", "Work", 1);
-  await assert.rejects(f.definitions.get("session-follow/small").route({ thinkingLevel: "low" }, f.ctx), /Unavailable inherited role model: openai-codex\/small/);
-});
-
-test("reload preserves the original role ID rather than wrapping an alias as a new role", async t => {
-  const f = fixture(t), firstDispose = await installSessionFollower(f.pi, f.ctx);
-  firstDispose();
-  f.publish("openai-codex", "Work", 1);
-  const dispose = await installSessionFollower(f.pi, f.ctx);
-  t.after(dispose);
-  const routed = await f.definitions.get("session-follow/small").route({ thinkingLevel: "low" }, f.ctx);
-  assert.equal(routed.model.provider, "openai-codex");
-  assert.equal(routed.model.id, "small");
+  await assert.rejects(installSessionFollower(f.pi, f.ctx), /unavailable/);
+  f.ctx.model = { provider: "virtual", id: "small", api: "pi-virtual" };
+  await assert.rejects(installSessionFollower(f.pi, f.ctx), /native physical role/);
 });

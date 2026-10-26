@@ -1,9 +1,9 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
-import { mkdtempSync, readFileSync, rmSync, statSync, writeFileSync } from "node:fs";
+import { chmodSync, mkdtempSync, readFileSync, rmSync, statSync, symlinkSync, unlinkSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { getSessionRoutingProfile, isInheritedSessionRouting, notifySessionRoutingChanged, onSessionRoutingChanged, prepareSessionRoutingRequest, publishAgentSHRoutingBinding, releaseAgentSHRoutingBinding, readInheritedSessionRoutingProfile, registerSessionModelReference, registerSessionRouting, resolveSessionPhysicalModelReference, resolveSessionModelSelector, routingProfilePath, sessionRoutingEnvironment, validateRoutingProfile, writeSessionRoutingProfile, type RoutingProfile } from "./session-routing.ts";
+import { writeInheritedSessionRoutingProfile, readSessionRoutingProfile, getSessionRoutingProfile, isInheritedSessionRouting, notifySessionRoutingChanged, onSessionRoutingChanged, prepareSessionRoutingRequest, publishAgentSHRoutingBinding, releaseAgentSHRoutingBinding, readInheritedSessionRoutingProfile, registerSessionModelReference, registerSessionRouting, resolveSessionPhysicalModelReference, resolveSessionModelSelector, routingProfilePath, sessionRoutingEnvironment, validateRoutingProfile, writeSessionRoutingProfile, type RoutingProfile } from "./session-routing.ts";
 const context = (id: string, provider = "openai") => ({ model: { provider, id: "gpt-6-astra" }, sessionManager: { getSessionId: () => id } });
 function fixture(t: any) {
   const dir = mkdtempSync(join(tmpdir(), "session-routing-"));
@@ -103,6 +103,7 @@ test("inherited revision rollback and same-revision identity changes fail closed
 
 test("preparation and notifications remain session scoped and disposed callbacks stay disposed", async t => {
   const dir = fixture(t), a = context("a"), b = context("b");
+  writeSessionRoutingProfile(routingProfilePath(dir, "a"), profile("a"));
   let count = 0, other = 0, prepared = 0;
   const off = registerSessionRouting(a, { file: routingProfilePath(dir, "a"), getProfile: () => profile("a"), prepareRequest: async () => { prepared++; return profile("a", "openai-codex", "Work", 2); } });
   t.after(off);
@@ -113,4 +114,79 @@ test("preparation and notifications remain session scoped and disposed callbacks
   assert.equal((await prepareSessionRoutingRequest(a))!.providerId, "openai-codex");
   assert.equal(prepared, 1);
   assert.deepEqual(sessionRoutingEnvironment(a, {}), { PI_SESSION_ROUTING_FILE: routingProfilePath(dir, "a"), PI_SESSION_ROUTING_OWNER_SESSION: "a" });
+});
+
+test("private immediate-parent chain follows nearest override and isolates siblings", t => {
+  const dir = fixture(t), root = routingProfilePath(dir, "root"), child = routingProfilePath(dir, "child"), sibling = routingProfilePath(dir, "sibling"), grandchild = routingProfilePath(dir, "grandchild");
+  const env = (file: string, owner: string) => ({ PI_SESSION_ROUTING_FILE: file, PI_SESSION_ROUTING_OWNER_SESSION: owner });
+  writeSessionRoutingProfile(root, profile("root", "openai", "Personal", 1));
+  writeInheritedSessionRoutingProfile(child, "child", env(root, "root"));
+  writeInheritedSessionRoutingProfile(sibling, "sibling", env(root, "root"));
+  writeInheritedSessionRoutingProfile(grandchild, "grandchild", env(child, "child"));
+  assert.equal(readSessionRoutingProfile(grandchild, "grandchild").accountId, "Personal");
+  writeSessionRoutingProfile(child, profile("child", "openai-codex", "Work", 2));
+  assert.equal(readSessionRoutingProfile(grandchild, "grandchild").accountId, "Work");
+  assert.equal(readSessionRoutingProfile(root, "root").accountId, "Personal");
+  assert.equal(readSessionRoutingProfile(sibling, "sibling").accountId, "Personal");
+  writeSessionRoutingProfile(grandchild, profile("grandchild", "openai", null, 3));
+  writeSessionRoutingProfile(root, profile("root", "openai", "Other", 4));
+  assert.equal(readSessionRoutingProfile(child, "child").accountId, "Work");
+  assert.equal(readSessionRoutingProfile(grandchild, "grandchild").accountId, null, "explicit default is not inherit");
+  writeInheritedSessionRoutingProfile(child, "child", env(root, "root"), 5);
+  assert.equal(readSessionRoutingProfile(child, "child").accountId, "Other");
+  assert.equal(readSessionRoutingProfile(grandchild, "grandchild").accountId, null);
+  writeInheritedSessionRoutingProfile(grandchild, "grandchild", env(child, "child"), 10);
+  assert.equal(readSessionRoutingProfile(grandchild, "grandchild").accountId, "Other");
+  writeFileSync(root, "{}", { mode: 0o600 });
+  assert.throws(() => readSessionRoutingProfile(grandchild, "grandchild"), /Invalid/);
+});
+
+test("restoring historical inheritance republishes above epochs already observed by descendants", t => {
+  const dir = fixture(t), root = routingProfilePath(dir, "root"), child = routingProfilePath(dir, "child");
+  const parent = { PI_SESSION_ROUTING_FILE: root, PI_SESSION_ROUTING_OWNER_SESSION: "root" };
+  const inherited = { PI_SESSION_ROUTING_FILE: child, PI_SESSION_ROUTING_OWNER_SESSION: "child" };
+  const descendant = context("existing-descendant");
+  writeSessionRoutingProfile(root, profile("root", "openai", "Personal", 2));
+  writeSessionRoutingProfile(child, profile("child", "openai-codex", "Work", 12));
+  const admitted = readInheritedSessionRoutingProfile(descendant, inherited)!;
+  assert.equal(admitted.revision, 12);
+  writeInheritedSessionRoutingProfile(child, "child", parent, 0);
+  const restored = readInheritedSessionRoutingProfile(descendant, inherited)!;
+  assert.deepEqual(restored, profile("child", "openai", "Personal", 13));
+  writeInheritedSessionRoutingProfile(child, "child", parent, 0);
+  const resumed = readInheritedSessionRoutingProfile(descendant, inherited)!;
+  assert.deepEqual(resumed, profile("child", "openai", "Personal", 14));
+  assert.deepEqual(admitted, profile("child", "openai-codex", "Work", 12), "admitted snapshots are not rerouted");
+  assert.deepEqual(readSessionRoutingProfile(root, "root"), profile("root", "openai", "Personal", 2), "ancestor selection and epoch are untouched");
+  chmodSync(child, 0o644);
+  assert.throws(() => writeInheritedSessionRoutingProfile(child, "child", parent, 0), /private/, "fresh epochs cannot repair or bypass an unsafe prior descriptor");
+  chmodSync(child, 0o600);
+  writeFileSync(child, JSON.stringify({ version: 1, kind: "inherit", ownerSessionId: "child", parentFile: join(dir, "missing-parent.json"), parentOwner: "missing", revision: 0 }));
+  assert.throws(() => writeInheritedSessionRoutingProfile(child, "child", parent, 0), /ENOENT/, "broken existing parent chains are not treated as an absent local descriptor");
+});
+
+test("every inherited descriptor stays private; deletion and symlink substitution never fall back", t => {
+  const dir = fixture(t), root = routingProfilePath(dir, "root"), child = routingProfilePath(dir, "child");
+  writeSessionRoutingProfile(root, profile("root"));
+  writeInheritedSessionRoutingProfile(child, "child", { PI_SESSION_ROUTING_FILE: root, PI_SESSION_ROUTING_OWNER_SESSION: "root" });
+  chmodSync(root, 0o644);
+  assert.throws(() => readSessionRoutingProfile(child, "child"), /private/);
+  chmodSync(root, 0o600); unlinkSync(root);
+  assert.throws(() => readSessionRoutingProfile(child, "child"), /ENOENT/);
+  const other = routingProfilePath(dir, "other"); writeSessionRoutingProfile(other, profile("root"));
+  symlinkSync(other, root);
+  assert.throws(() => readSessionRoutingProfile(child, "child"));
+  writeSessionRoutingProfile(child, profile("child", "openai", null, 2));
+  assert.equal(readSessionRoutingProfile(child, "child").accountId, null, "nearest explicit override does not inspect unrelated ancestors");
+});
+
+test("parent descriptors reject cycles, owner substitution and unsafe revision overflow", t => {
+  const dir = fixture(t), a = routingProfilePath(dir, "a"), b = routingProfilePath(dir, "b");
+  writeSessionRoutingProfile(a, profile("a", "openai", null, Number.MAX_SAFE_INTEGER));
+  assert.throws(() => writeInheritedSessionRoutingProfile(b, "b", { PI_SESSION_ROUTING_FILE: a, PI_SESSION_ROUTING_OWNER_SESSION: "a" }, 1), /Invalid/);
+  writeSessionRoutingProfile(a, profile("a"));
+  writeInheritedSessionRoutingProfile(b, "b", { PI_SESSION_ROUTING_FILE: a, PI_SESSION_ROUTING_OWNER_SESSION: "a" });
+  writeFileSync(a, JSON.stringify({ version: 1, kind: "inherit", ownerSessionId: "a", parentFile: b, parentOwner: "b", revision: 0 }), { mode: 0o600 });
+  assert.throws(() => readSessionRoutingProfile(a, "a"), /cyclic/);
+  assert.throws(() => readSessionRoutingProfile(a, "wrong"), /Invalid/);
 });

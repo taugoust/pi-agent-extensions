@@ -44,6 +44,8 @@ export interface AccountControlsSnapshot {
 	/** Advisory UI state only; switchAccount must independently enforce idleness. */
 	busy: boolean;
 	canSwitch: boolean;
+	/** Child-only inheritance control; null account remains explicit default login. */
+	inheritance?: "inherited" | "explicit";
 	/** Account names with an interactive Paseo-triggered login running in this Pi process. */
 	pendingAccountNames?: string[];
 	/** Local credential binding only; never implies remote quota/entitlement verification. */
@@ -94,6 +96,8 @@ export interface AccountSwitchRequest {
 	expectedRoutingRevision?: number;
 	/** null explicitly restores Pi's built-in default authentication. */
 	accountId: string | null;
+	/** Clear this session's override and follow its nearest ancestor; requires accountId=null. */
+	inherit?: boolean;
 }
 export type AccountSwitchResult =
 	| { ok: true; requestId: string; snapshot: AccountControlsSnapshot }

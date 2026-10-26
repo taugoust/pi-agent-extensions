@@ -1,5 +1,6 @@
 import { randomUUID } from "node:crypto";
 import { unlinkSync } from "node:fs";
+import { isAbsolute } from "node:path";
 import { lazyStream } from "@earendil-works/pi-ai";
 import type {
 	ExtensionAPI,
@@ -10,6 +11,10 @@ import { createAccountControlsSnapshot } from "./account-controls.js";
 import { installSessionFollower } from "./session-follower.js";
 import { getAgentDir } from "@earendil-works/pi-coding-agent";
 import {
+  bindSessionModelRequest,
+  inheritedSessionRoutingEnvironment,
+  setSessionRoutingOverride,
+  writeInheritedSessionRoutingProfile,
   notifySessionRoutingChanged,
   SESSION_MODEL_REFERENCE_EVENT,
   getSessionModelRequestProfile,
@@ -93,14 +98,14 @@ export const FAIL_CLOSED_API_KEY = RUNTIME_FAIL_CLOSED_API_KEY;
 export const DEFAULT_PI_LOGIN_LABEL = "(default pi login)";
 
 function latestBranchRoutingProfile(owner: SessionSelectionOwner, ctx: ExtensionContext): RoutingProfile | undefined {
-	const entry = [...ctx.sessionManager.getEntries()].reverse().find((candidate: any) => candidate?.type === "custom" && candidate.customType === "pi-session-routing-profile" && candidate.data?.ownerSessionId === owner.sessionId) as any;
+	const entry = [...ctx.sessionManager.getBranch()].reverse().find((candidate: any) => candidate?.type === "custom" && candidate.customType === "pi-session-routing-profile" && candidate.data?.ownerSessionId === owner.sessionId) as any;
 	const data = entry?.data;
 	if (!data) return undefined;
 	try { return validateRoutingProfile(data, owner.sessionId); } catch { return undefined; }
 }
 
 function nextRoutingRevision(owner: SessionSelectionOwner, ctx: ExtensionContext): number {
-	let revision = owner.routingProfile?.revision ?? -1;
+	let revision = Math.max(owner.routingProfile?.revision ?? -1, owner.routingRevisionFloor ?? -1);
 	const inherited = readInheritedSessionRoutingProfile(ctx);
 	if (inherited) revision = Math.max(revision, inherited.revision);
 	const branchProfile = latestBranchRoutingProfile(owner, ctx);
@@ -144,6 +149,7 @@ function notifyRoutingObservers(owner: SessionSelectionOwner): void {
 }
 
 function invalidateRoutingProfile(owner: SessionSelectionOwner): boolean {
+	owner.routingRevisionFloor = Math.max(owner.routingRevisionFloor ?? -1, owner.routingProfile?.revision ?? -1);
 	try { unlinkSync(owner.routingFile); } catch (error) { if ((error as NodeJS.ErrnoException).code !== "ENOENT") return false; }
 	owner.routingProfile = undefined;
 	notifyRoutingObservers(owner);
@@ -224,6 +230,8 @@ export type SessionSelectionOwner = {
 	startupTasks: Map<AccountProviderId, Promise<EnsureActiveProviderAuthResult>>;
 	startupCompletedProviders: Set<AccountProviderId>;
 	routingProfile?: RoutingProfile;
+	routingRevisionFloor?: number;
+	parentRouting?: Record<string, string>;
 	routingProviderId?: string;
 	routingPublicationFailed?: boolean;
 	disposeFollower?: () => void;
@@ -481,7 +489,7 @@ export default function accountsExtension(
 					.map((key) => key.slice(prefix.length)),
 				providerId,
 			);
-			return { ...snapshot, ...committedRoutingSnapshot(owner) };
+			return { ...snapshot, ...committedRoutingSnapshot(owner), ...(isInheritedSessionRouting(owner.context) ? { inheritance: readInheritedSessionRoutingProfile(owner.context) ? "inherited" as const : "explicit" as const } : {}) };
 		} catch {
 			return {
 				protocol: ACCOUNT_CONTROLS_PROTOCOL,
@@ -538,6 +546,7 @@ export default function accountsExtension(
 		const scopedRequestId = `${providerId}:${requestId}`;
 		const fingerprint = JSON.stringify([
 			providerId,
+			raw.inherit ?? false,
 			raw.accountId === null ||
 			(typeof raw.accountId === "string" && raw.accountId.length <= 64)
 				? raw.accountId
@@ -558,6 +567,7 @@ export default function accountsExtension(
 				: "<invalid-protocol>",
 		]);
 		const requestValid =
+			(raw.inherit === undefined || raw.inherit === false || (raw.inherit === true && raw.accountId === null)) &&
 			raw.protocol === ACCOUNT_CONTROLS_PROTOCOL &&
 			typeof raw.expectedSessionId === "string" &&
 			raw.expectedSessionId.length <= 256 &&
@@ -706,6 +716,26 @@ export default function accountsExtension(
 			if (!isOwnerCurrent(owner) || activeOwner !== owner)
 				return failure("stale-session");
 			const accountId = request.accountId;
+			if (request.inherit) {
+				const parent = owner.parentRouting;
+				if (!parent || parent.PI_SESSION_ROUTING_OWNER_SESSION === owner.sessionId) return failure("invalid-request");
+				await Promise.all(owner.pendingSyncTasks.values());
+				if (!isOwnerCurrent(owner) || activeOwner !== owner || (owner.selectionRevisions.get(providerId) ?? 0) !== request.expectedSelectionRevision || (request.expectedRoutingRevision !== undefined && owner.routingProfile?.revision !== request.expectedRoutingRevision)) return failure("stale-selection");
+				const inheritedProfile = readSessionRoutingProfile(parent.PI_SESSION_ROUTING_FILE, parent.PI_SESSION_ROUTING_OWNER_SESSION);
+				const role = getConfiguredSessionModelReference(owner.context);
+				const physical = role && owner.context.modelRegistry.find(inheritedProfile.providerId, role.id);
+				if (!physical || physical.api === "pi-virtual") return failure("activation-failed");
+				const revision = nextRoutingRevision(owner, owner.context);
+				if (!owner.context.isIdle() || owner.openAIRequestCount > 0 || owner.pendingSyncTasks.size > 0 || owner.switchReserved !== 1) return failure("busy");
+				// Revoke first: a failed append/publication must never retain the old account.
+				if (!invalidateRoutingProfile(owner)) return failure("activation-failed");
+				owner.sessionManager.appendCustomEntry("pi-session-routing-mode", { sessionId: owner.sessionId, mode: "inherit", revision });
+				writeInheritedSessionRoutingProfile(owner.routingFile, owner.sessionId, parent, revision);
+				setSessionRoutingOverride(owner.context, false);
+				owner.selectionRevisions.set(providerId, (owner.selectionRevisions.get(providerId) ?? 0) + 1);
+				await prepareSessionRoutingRequest(owner.context);
+				return { ok: true, requestId: request.requestId, snapshot: await snapshotFor(owner, providerId) };
+			}
 			if (accountId !== null) {
 				const parsed = parseAccountName(accountId);
 				if (!parsed.ok) return failure("unknown-account");
@@ -731,7 +761,6 @@ export default function accountsExtension(
 				return failure("stale-selection");
 			if (request.expectedRoutingRevision !== undefined && owner.routingProfile?.revision !== request.expectedRoutingRevision)
 				return failure("stale-selection");
-			if (isInheritedSessionRouting(owner.context)) return failure("busy");
 			if (!(await selectSessionPhysicalModel(owner, providerId, false)))
 				return failure("activation-failed");
 			if (
@@ -844,8 +873,23 @@ export default function accountsExtension(
 		owner: SessionSelectionOwner,
 		ctx: ExtensionContext,
 	): Promise<void> => {
+		const parent = owner.parentRouting;
+		if (parent && !ctx.sessionManager.getEntries().some((entry: any) => entry?.type === "custom" && entry.customType === "pi-session-routing-parent" && entry.data?.sessionId === owner.sessionId)) {
+			owner.sessionManager.appendCustomEntry("pi-session-routing-parent", { sessionId: owner.sessionId, file: parent.PI_SESSION_ROUTING_FILE, owner: parent.PI_SESSION_ROUTING_OWNER_SESSION });
+		}
+		const mode = [...ctx.sessionManager.getBranch()].reverse().find((entry: any) => entry?.type === "custom" && entry.customType === "pi-session-routing-mode" && entry.data?.sessionId === owner.sessionId) as any;
+		if (mode && (mode.data?.mode !== "explicit" && mode.data?.mode !== "inherit" || mode.data?.mode === "inherit" && (!Number.isSafeInteger(mode.data.revision) || mode.data.revision < 0))) throw new Error("Invalid branch inheritance mode; refusing fallback.");
+		const explicit = mode?.data?.mode === "explicit" || (!mode && !!latestBranchRoutingProfile(owner, ctx));
+		setSessionRoutingOverride(ctx, explicit);
+		if (parent && parent.PI_SESSION_ROUTING_OWNER_SESSION !== owner.sessionId && !explicit) {
+			// Verify the prior publication against this runtime's observed high-water mark
+			// before issuing a fresh epoch for the restored branch inheritance intent.
+			try { readInheritedSessionRoutingProfile(ctx); }
+			catch (error) { if ((error as NodeJS.ErrnoException).code !== "ENOENT") throw error; }
+			writeInheritedSessionRoutingProfile(owner.routingFile, owner.sessionId, parent, mode?.data?.revision ?? 0);
+		}
 		const restored = restoreAccountSelections(
-			ctx.sessionManager.getEntries(),
+			ctx.sessionManager.getBranch(),
 			owner.sessionId,
 		);
 		if (restored.status === "invalid") {
@@ -916,7 +960,9 @@ export default function accountsExtension(
 			throw error;
 		}
 		const previous = sessionOwners.get(ctx.sessionManager);
+		const previousSelectionRevisions = new Map(previous?.selectionRevisions);
 		if (previous) {
+			completedRequests.clear();
 			previous.disposeFollower?.();
 			previous.unregisterRouting?.();
 			previous.controller.abort(
@@ -935,8 +981,16 @@ export default function accountsExtension(
 				coordinator.invalidate(ctx);
 		}
 		const controller = new AbortController();
+		// Parent identity is immutable session metadata, not branch selection state.
+		const parents = ctx.sessionManager.getEntries().filter((entry: any) => entry?.type === "custom" && entry.customType === "pi-session-routing-parent" && entry.data?.sessionId === ctx.sessionManager.getSessionId()) as any[];
+		const savedParent = parents[0];
+		if (parents.some(entry => entry.data?.file !== savedParent.data?.file || entry.data?.owner !== savedParent.data?.owner)) throw new Error("Conflicting persisted parent session identities; refusing fallback.");
+		let parentRouting = savedParent ? { PI_SESSION_ROUTING_FILE: savedParent.data?.file, PI_SESSION_ROUTING_OWNER_SESSION: savedParent.data?.owner } : inheritedSessionRoutingEnvironment();
+		if (parentRouting?.PI_SESSION_ROUTING_OWNER_SESSION === ctx.sessionManager.getSessionId()) parentRouting = undefined;
+		if (parentRouting && (typeof parentRouting.PI_SESSION_ROUTING_FILE !== "string" || !isAbsolute(parentRouting.PI_SESSION_ROUTING_FILE) || typeof parentRouting.PI_SESSION_ROUTING_OWNER_SESSION !== "string" || !parentRouting.PI_SESSION_ROUTING_OWNER_SESSION)) throw new Error("Invalid persisted parent session routing identity; refusing fallback.");
 		const owner: SessionSelectionOwner = {
 			context: ctx,
+			parentRouting,
 			// Pi exposes this as read-only to extensions, but the runtime context contains the concrete
 			// session manager. Factory-bound pi.appendEntry() cannot target concurrent session owners.
 			sessionManager: ctx.sessionManager as ExtensionContext["sessionManager"] &
@@ -947,7 +1001,7 @@ export default function accountsExtension(
 			selections: cloneAccountSelections(
 				Object.create(null) as ProviderAccountSelections,
 			),
-			selectionRevisions: new Map(),
+			selectionRevisions: new Map(providers.map(provider => [provider.id, (previousSelectionRevisions.get(provider.id) ?? -1) + 1])),
 			activationRequests: new Map(),
 			controller,
 			signal: controller.signal,
@@ -971,9 +1025,11 @@ export default function accountsExtension(
 		sessionOwners.set(ctx.sessionManager, owner);
 		owner.unregisterRouting = registerSessionRouting(ctx, {
 			file: owner.routingFile,
+			...(owner.parentRouting ? { parent: { file: owner.parentRouting.PI_SESSION_ROUTING_FILE, owner: owner.parentRouting.PI_SESSION_ROUTING_OWNER_SESSION } } : {}),
 			getProfile: () => {
 				if (!isOwnerCurrent(owner) || owner.sessionId !== owner.sessionManager.getSessionId())
 					throw new Error("Accounts routing owner is stale; request blocked.");
+				if (owner.routingProfile && !sameRoutingProfile(owner.routingProfile, readSessionRoutingProfile(owner.routingFile, owner.sessionId))) throw new Error("Session routing descriptor changed or disappeared; request blocked.");
 				return owner.routingProfile;
 			},
 			prepareRequest: async () => {
@@ -982,6 +1038,9 @@ export default function accountsExtension(
 					throw new Error("Accounts routing owner is stale; request blocked.");
 				const inherited = readInheritedSessionRoutingProfile(ctx);
 				if (inherited) {
+					const role = getConfiguredSessionModelReference(ctx);
+					const physical = role && ctx.modelRegistry.find(inherited.providerId, role.id);
+					if (!physical || physical.api === "pi-virtual") throw new Error("Inherited physical role model is unavailable; request blocked.");
 					const providerId = toProviderId(inherited.providerId);
 					if (providerId) {
 						const previousAccount = owner.selections[providerId] ?? null;
@@ -989,7 +1048,7 @@ export default function accountsExtension(
 							owner.selections = setAccountSelection(owner.selections, providerId, inherited.accountId);
 							owner.selectionRevisions.set(providerId, (owner.selectionRevisions.get(providerId) ?? 0) + 1);
 						}
-						await syncProvider(providerId, ctx, owner);
+						await syncProvider(providerId, ctx, owner, undefined, physical);
 						if (!isOwnerCurrent(owner)) throw new Error("Helper account session changed; request blocked.");
 						const result = owner.results.get(providerId);
 						if (result?.status === "error" || (inherited.accountId !== null && (result?.status !== "active" || result.accountName !== inherited.accountId)))
@@ -1028,7 +1087,7 @@ export default function accountsExtension(
 		accountName,
 		isCurrent,
 	) => {
-		if (!isOwnerCurrent(owner) || !isCurrent() || isInheritedSessionRouting(owner.context)) {
+		if (!isOwnerCurrent(owner) || !isCurrent()) {
 			return false;
 		}
 		let selections = owner.error
@@ -1047,6 +1106,8 @@ export default function accountsExtension(
 			createAccountSelectionEntryData(owner.sessionId, selections),
 		);
 		if (!isOwnerCurrent(owner) || !isCurrent()) return false;
+		owner.sessionManager.appendCustomEntry("pi-session-routing-mode", { sessionId: owner.sessionId, mode: "explicit" });
+		setSessionRoutingOverride(owner.context, true);
 		owner.selections = selections;
 		owner.selectionRevisions.set(
 			providerId,
@@ -1169,7 +1230,7 @@ export default function accountsExtension(
 		const current = owner.context.model;
 		if (!current) return false;
 		const keepVirtualSelection = current.api === "pi-virtual";
-		if (keepVirtualSelection && current.provider !== "idle-guard" && current.provider !== "session-follow") return false;
+		if (keepVirtualSelection && current.provider !== "idle-guard") return false;
 		const snapshot: RoutingProfile = {
 			version: 1,
 			ownerSessionId: owner.sessionId,
@@ -1186,6 +1247,15 @@ export default function accountsExtension(
 		if (current.provider === target.provider && current.id === target.id) return true;
 		if (!apply) return true;
 		try { return await pi.setModel(target); } catch { return false; }
+	};
+
+	const routeNativeRequest = async (owner: SessionSelectionOwner, model: any): Promise<any> => {
+		if (getSessionModelRequestProfile(model)) return model;
+		const profile = await prepareSessionRoutingRequest(owner.context);
+		if (!profile) throw new Error("Session routing unavailable; request blocked.");
+		const physical = owner.context.modelRegistry.find(profile.providerId, model.id);
+		if (!physical || physical.api === "pi-virtual" || !toProviderId(physical.provider)) throw new Error(`Unavailable physical role model ${profile.providerId}/${model.id}; request blocked.`);
+		return bindSessionModelRequest(model.provider === profile.providerId ? model : physical, profile);
 	};
 
 	const installOpenAIGate = (ctx: ExtensionContext): void => {
@@ -1238,6 +1308,9 @@ export default function accountsExtension(
 					owner.openAIRequestCount = Math.max(0, owner.openAIRequestCount - 1);
 				};
 				try {
+					const routed = await routeNativeRequest(owner, model);
+					if (routed.provider !== model.provider) return trackStreamLifecycle(registry.stream(routed, context, options), release, options?.signal);
+					model = routed;
 					await assertBoundRoutingProfile(owner.context, model, "openai");
 					const revision = owner.selectionRevisions.get("openai") ?? 0;
 					const selection = owner.selections.openai ?? null;
@@ -1452,6 +1525,9 @@ export default function accountsExtension(
 				let released = false;
 				const release = () => { if (released) return; released = true; owner.openAIRequestCount = Math.max(0, owner.openAIRequestCount - 1); };
 				try {
+					const routed = await routeNativeRequest(owner, model);
+					if (routed.provider !== model.provider) return trackStreamLifecycle(registry.stream(routed, context, options), release, options?.signal);
+					model = routed;
 					await assertBoundRoutingProfile(owner.context, model, "openai-codex");
 					const revision = owner.selectionRevisions.get("openai-codex") ?? 0;
 					const selection = owner.selections["openai-codex"] ?? null;
@@ -1690,6 +1766,11 @@ export default function accountsExtension(
 				isCurrent: () => isOwnerCurrent(owner),
 			}),
 			selectSessionPhysicalModel,
+			async (owner, providerId, accountId, inherit = false) => {
+				const snapshot = await snapshotFor(owner, providerId);
+				const result = await switchViaService({ protocol: 1, providerId, requestId: randomUUID(), expectedSessionId: owner.sessionId, expectedServiceEpoch: serviceEpoch, expectedSelectionRevision: snapshot.selectionRevision, ...(snapshot.sessionRouting ? { expectedRoutingRevision: snapshot.sessionRouting.revision } : {}), accountId, ...(inherit ? { inherit: true } : {}) });
+				owner.context.ui.notify(result.ok ? (inherit ? "Following parent session account." : "Session account selection updated.") : "Session account could not be changed; refresh and retry while idle.", result.ok ? "info" : "warning");
+			},
 		),
 	);
 
@@ -1709,6 +1790,14 @@ export default function accountsExtension(
 			}
 		}
 		startBackgroundSync(ctx, owner);
+	});
+
+	pi.on("session_tree", async (_event, ctx) => {
+		const owner = startSessionOwner(ctx);
+		activeOwner = owner;
+		accountControlsService.sessionId = owner.sessionId;
+		await owner.ready;
+		if (isOwnerCurrent(owner)) startBackgroundSync(ctx, owner);
 	});
 
 	pi.on("model_select", async (event, ctx) => {
@@ -1842,6 +1931,7 @@ function createAccountCommand(
 		isCurrent(): boolean;
 	},
 	selectPhysicalModel: (owner: SessionSelectionOwner, providerId: AccountProviderId, apply?: boolean) => Promise<boolean>,
+	selectBranchAccount: (owner: SessionSelectionOwner, providerId: AccountProviderId, accountId: string | null, inherit?: boolean) => Promise<void>,
 ) {
 	return {
 		description: "Open the interactive OAuth and API key account manager",
@@ -1854,10 +1944,7 @@ function createAccountCommand(
 				return;
 			}
 			const owner = await ensureSessionOwner(ctx);
-			if (isInheritedSessionRouting(ctx)) {
-				ctx.ui.notify("Account switching must be performed in the owning session.", "warning");
-				return;
-			}
+			const inherited = isInheritedSessionRouting(ctx);
 			const menuOwner = getMenuOwner(owner);
 			if (!menuOwner.isCurrent()) return;
 			const providerChoice = await ctx.ui.select("Account provider", ["OpenAI", "OpenAI Codex"], { signal: menuOwner.signal });
@@ -1875,9 +1962,10 @@ function createAccountCommand(
 					...(current
 						? [`Current: ${current}`]
 						: ["Current: default Pi login"]),
-					"Add account",
-					...(names.length ? ["Switch account", "Remove account"] : []),
+					...(!inherited ? ["Add account"] : []),
+					...(names.length ? ["Switch account", ...(!inherited ? ["Remove account"] : [])] : []),
 					"Restore default Pi login",
+					...(inherited ? ["Follow parent account"] : []),
 					"Close",
 				];
 				const action = await ctx.ui.select(`${adapter.displayName} accounts`, options, {
@@ -1910,7 +1998,12 @@ function createAccountCommand(
 					);
 					continue;
 				}
+				if (action === "Follow parent account" && inherited) {
+					await selectBranchAccount(owner, providerId, null, true);
+					continue;
+				}
 				if (action === "Restore default Pi login") {
+					if (inherited) { await selectBranchAccount(owner, providerId, null); continue; }
 					await switchAccount(
 						ctx,
 						store,
@@ -1930,6 +2023,7 @@ function createAccountCommand(
 						signal: menuOwner.signal,
 					});
 					if (!name || !menuOwner.isCurrent()) continue;
+					if (action === "Switch account" && inherited) { await selectBranchAccount(owner, providerId, name); continue; }
 					if (action === "Switch account")
 						await switchAccount(
 							ctx,

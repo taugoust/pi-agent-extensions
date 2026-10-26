@@ -87,7 +87,7 @@ test("actual AgentSession startup order and retained follower use coherent provi
     process.env.PI_SESSION_ROUTING_FILE = routing.routingProfilePath(root, rootId);
     process.env.PI_SESSION_ROUTING_OWNER_SESSION = rootId;
     const child = await session(true);
-    assert.equal(child.session.model.provider, "session-follow");
+    assert.equal(child.session.model.provider, "openai");
     const pending = child.session.prompt("hold");
     await dispatched;
     async function select(providerId, accountId) {
