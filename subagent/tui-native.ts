@@ -632,21 +632,22 @@ export class TuiNativeManager {
     if (this.owner !== owner) throw new Error("Independent source belongs to another session");
     const found = this.byChild(owner, input.childId);
     if (!found || found.child.childId !== input.childId || found.child.taskId !== input.taskId
-      || (found.child.attempt ?? 1) !== input.attempt || active(found.child)) throw new Error("Source worker is not completed");
+      || (found.child.attempt ?? 1) !== input.attempt) throw new Error("Source worker identity changed");
     const c = found.child, manifest = this.manifest(c);
-    if ((manifest?.runtimeId ?? null) !== input.runtimeId || !c.report) throw new Error("Source identity changed");
-    const state = new TuiWorkerStore(c.directory).readState(false);
-    if (state.active || state.lastReport !== c.report || (state.interactions ?? []).some(item => !item.answer && !item.cancelledAt)) throw new Error("Source worker changed or needs attention");
-    const report = this.retainedArtifact(c, c.report, "report") as any;
+    if ((manifest?.runtimeId ?? null) !== input.runtimeId) throw new Error("Source identity changed");
+    // Opening copies a stable checkpoint; it neither controls nor resumes this worker.
+    // Validate the same owner/attempt/runtime manifest used by live session reads.
+    if (active(c) || !c.report) this.readonlyTaskSessionSource(owner, input);
+    const report = c.report && !active(c) ? this.retainedArtifact(c, c.report, "report") as any : undefined;
     const file = join(c.directory, "session.jsonl");
-    if (report.sessionFile !== file || (manifest && manifest.sessionFile !== file)) throw new Error("Source session identity changed");
+    if ((report && report.sessionFile !== file) || (manifest && manifest.sessionFile !== file)) throw new Error("Source session identity changed");
     const stat = lstatSync(file);
     if (!stat.isFile() || stat.isSymbolicLink() || stat.nlink !== 1 || stat.uid !== process.getuid?.() || (stat.mode & 0o022) || stat.size > 32 * 1024 * 1024) throw new Error("Source file unavailable");
     return { taskId: c.taskId, childId: c.childId, attempt: c.attempt ?? 1, runtimeId: manifest?.runtimeId ?? null,
       file, title: c.spec.name?.replace(/-/g, " ") || c.spec.task.slice(0, 140), cwd: c.spec.cwd,
-      leafId: typeof report.leafId === "string" ? report.leafId : null,
-      assistantDigest: report.assistant ? createHash("sha256").update(JSON.stringify(report.assistant)).digest("hex") : null,
-      report: c.report, dev: stat.dev, ino: stat.ino, size: stat.size, mtimeMs: stat.mtimeMs };
+      leafId: typeof report?.leafId === "string" ? report.leafId : null,
+      assistantDigest: report?.assistant ? createHash("sha256").update(JSON.stringify(report.assistant)).digest("hex") : null,
+      report: report ? c.report : null, dev: stat.dev, ino: stat.ino, size: stat.size, mtimeMs: stat.mtimeMs };
   }
   readonlyHasTask(owner: string, input: { taskId: string; childId: string; attempt: number }): boolean {
     return this.owner === owner && [...this.groups.values()].some(group => group.owner === owner && group.children.some(child =>

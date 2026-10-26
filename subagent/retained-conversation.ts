@@ -8,9 +8,9 @@ export type ConversationMessage = {
   parts?: Array<{ type: "text"; text: string } | ConversationToolCall>;
   toolCallId?: string; toolName?: string; status?: "completed" | "failed" | "unknown";
 };
-const PAGE_BYTES = 256 * 1024;
-const MAX_MESSAGES = 50;
-const MAX_RESPONSE_BYTES = 24 * 1024;
+const PAGE_BYTES = 8 * 1024 * 1024;
+const MAX_MESSAGES = 500;
+const MAX_RESPONSE_BYTES = 512 * 1024;
 const MAX_RESULT_BYTES = 2048;
 const clean = (text: string) => text.replace(/\x1b\][\s\S]*?(?:\x07|\x1b\\)/g, "")
   .replace(/(?:\x1b\[|\x9b)[0-?]*[ -/]*[@-~]/g, "").replace(/[\x00-\x08\x0b-\x1f\x7f-\x9f]/g, "");

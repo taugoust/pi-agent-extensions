@@ -57,6 +57,12 @@ for (const kind of ["foreground", "tui"] as const) test(`${kind} sessionSource v
         server.running(true);
         child.state = "running";
         child.reaped = false;
+        const independent = manager.readonlyIndependentSource(owner, { taskId, childId, attempt: 2, runtimeId });
+        assert.equal(independent.file, manifest.sessionFile, "active workers expose a pinned copy source, not mutable control");
+        assert.equal(independent.report, null);
+        assert.throws(() => manager.readonlyIndependentSource(owner, { taskId, childId, attempt: 1, runtimeId }));
+        assert.throws(() => manager.readonlyIndependentSource(owner, { taskId, childId, attempt: 2, runtimeId: "wrong" }));
+        assert.throws(() => manager.readonlyIndependentSource("wrong-owner", { taskId, childId, attempt: 2, runtimeId }));
         const toolCallId = "call_123|fc_456";
         server.conversationTool("end", { toolCallId, name: "read", result: { content: [{ type: "text", text: "actual structured result" }] } });
         const live = await manager.readonlyTaskConversation(owner, { taskId, childId, attempt: 2, runtimeId });
