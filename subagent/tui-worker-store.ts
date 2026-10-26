@@ -1,6 +1,7 @@
 import { constants, openSync, closeSync, readFileSync, readSync, writeSync, ftruncateSync, writeFileSync, fsyncSync, fstatSync, renameSync, unlinkSync, lstatSync, mkdirSync, readdirSync } from "node:fs";
 import { dirname, resolve, join, isAbsolute } from "node:path";
 import { randomBytes } from "node:crypto";
+import { validateVerification, type VerificationRecord } from "./acceptance.ts";
 import { parseTuiWorkerPlacement, parseTuiWorkerRequest } from "../shared/tui-worker-protocol.ts";
 import type { TuiWorkerManifest, TuiWorkerEvent, TuiWorkerResponse } from "../shared/tui-worker-protocol.ts";
 
@@ -10,6 +11,9 @@ export type WorkerState = {
   phase: "ready" | "running" | "settled" | "closing";
   receipts: Record<string, WorkerReceipt>; events: TuiWorkerEvent[];
   lastReport?: string; lastOutcome?: string; reapReservation?: string;
+  verification?: VerificationRecord;
+  verificationReport?: string;
+  verificationQuarantine?: string;
   /** Durable fail-closed budget: never replenished by reload, steering or repeated outcomes. */
   autoContinuation?: { used: boolean; inhibited: boolean };
   jobCleanup?: { workerEpoch: string; artifact: string };
@@ -56,8 +60,19 @@ export function readPrivateJson(path: string, maximum = MAX_WORKER_STATE_BYTES):
   if (!stat.isFile() || stat.isSymbolicLink() || stat.size > maximum || (stat.mode & 0o077) !== 0
     || (process.getuid && stat.uid !== process.getuid())) throw new Error("Unsafe worker state file");
   const fd = openSync(path, constants.O_RDONLY | constants.O_NOFOLLOW);
-  try { return JSON.parse(readFileSync(fd, "utf8")); }
-  finally { closeSync(fd); }
+  try {
+    const opened = fstatSync(fd);
+    // Atomic publishers may legitimately replace the pathname between lstat/open;
+    // validate the opened fd itself rather than rejecting a new, safe inode.
+    if (!opened.isFile() || opened.size > maximum || (opened.mode & 0o077) !== 0
+      || (process.getuid && opened.uid !== process.getuid())) throw new Error("Unsafe opened worker state file");
+    const bytes = Buffer.alloc(opened.size + 1);
+    let length = 0, count = 0;
+    while (length < bytes.length && (count = readSync(fd, bytes, length, bytes.length - length, null)) > 0) length += count;
+    const after = fstatSync(fd);
+    if (length !== opened.size || after.size !== opened.size || after.mtimeMs !== opened.mtimeMs) throw new Error("Worker state changed during bounded read");
+    return JSON.parse(bytes.subarray(0, length).toString("utf8"));
+  } finally { closeSync(fd); }
 }
 
 export function atomicPrivateJson(path: string, value: unknown): void {
@@ -77,6 +92,7 @@ export function atomicPrivateJson(path: string, value: unknown): void {
 export function validateWorkerManifest(value: unknown): TuiWorkerManifest {
   if (!value || typeof value !== "object" || Array.isArray(value)) throw new Error("Invalid worker manifest");
   const m = value as TuiWorkerManifest;
+  validateVerification(m.verification);
   parseTuiWorkerRequest({ protocol: m.protocol, requestId: "validate", token: m.controlToken,
     ownerSessionId: m.ownerSessionId, taskId: m.taskId, runtimeId: m.runtimeId,
     groupId: m.groupId, childId: m.childId, attempt: m.attempt, workerEpoch: m.workerEpoch, operation: "status" });

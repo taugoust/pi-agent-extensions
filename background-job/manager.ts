@@ -31,6 +31,7 @@ export type StartRequest = {
   sessionId?: string;
   childId?: string;
   infrastructure?: boolean;
+  verification?: true;
   placement?: JobPlacement;
 };
 
@@ -165,6 +166,7 @@ export class BackgroundJobManager {
         ...(request.sessionId ? { sessionId: request.sessionId } : {}),
         ...(request.childId ? { childId: request.childId } : {}),
         ...(request.infrastructure ? { infrastructure: true } : {}),
+        ...(request.verification ? { verification: true as const } : {}),
       };
       await this.store.create(metadata, request.command, environment);
       const cancelPath = join(this.store.jobDir(id), "cancel-requested");
@@ -519,7 +521,7 @@ export class BackgroundJobManager {
       await this.store.markNotified(id);
       // The snapshot must have started in terminal state. Completion during a
       // running read does not authorize disposal of output we may not have seen.
-      if (record.launch && !record.metadata.pane && !record.metadata.infrastructure) {
+      if (record.launch && !record.metadata.pane && !record.metadata.infrastructure && !record.metadata.verification) {
         await this.store.markRetrieved(id);
       }
     }
@@ -677,7 +679,7 @@ export class BackgroundJobManager {
     if (candidate === undefined || now - candidate < retentionMs) return;
     await this.store.withRetentionLock(async () => {
       const record = await this.get(id);
-      if (!record.result || !record.launch || record.metadata.infrastructure || record.metadata.observed || record.metadata.pane) return;
+      if (!record.result || !record.launch || record.metadata.infrastructure || record.metadata.verification || record.metadata.observed || record.metadata.pane) return;
       const retrieved = await this.store.readRetrieved(id);
       if (retrieved === undefined || now - retrieved < retentionMs) return;
       await this.reapLocked(id);

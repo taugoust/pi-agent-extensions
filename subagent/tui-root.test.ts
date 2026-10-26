@@ -28,6 +28,7 @@ test("actual root subagent tool: guarded/native launch, crash hydration, group c
     PI_PASEO_EXISTING_AGENT_ID: "malicious-parent-agent", PI_PASEO_BRIDGE_FORCE: "1",
     PI_PASEO_TMUX_TARGET: "malicious-session:9", PI_PASEO_CONTROL_SOCKET: "/tmp/malicious-paseo.sock" };
   const command = ["env", "-u", "AGENTSH_PERMISSION_GATE_SOCKET", "-u", "PI_SUBAGENT_ID", "-u", "PI_SUBAGENT_PERMISSION_SOCKET", "-u", "PI_SUBAGENT_PERMISSION_TOKEN",
+    "-u", "PI_SESSION_ROUTING_FILE", "-u", "PI_SESSION_ROUTING_OWNER_SESSION",
     ...Object.entries(environment).map(([key, value]) => `${key}=${value}`), launcher!, "--session", join(root, "parent-session.jsonl")].map(quote).join(" ");
   let parentPane: string;
   const send = async (text: string) => { await tmux("send-keys", "-t", parentPane, "-l", text); await tmux("send-keys", "-t", parentPane, "Enter"); };
@@ -57,6 +58,13 @@ test("actual root subagent tool: guarded/native launch, crash hydration, group c
     await waitForReady();
     await send("Root persistence fixture");
     await waitForPaneText("Deterministic completed task.", 30_000);
+    await send("/tui-root-verification");
+    const verification = await waitFile(result, 150_000);
+    assert.equal(verification.ok, true, JSON.stringify(verification));
+    assert.equal(verification.result.nativeManager, true);
+    assert.equal(verification.result.realPermissionGate, mode === "guard-only");
+    if (process.env.PI_TUI_VERIFY_ONLY === "1") return;
+    await rm(result);
     await send("/tui-root-background");
     const first = await waitFile(result, 60_000);
     assert.equal(first.ok, true, JSON.stringify(first));

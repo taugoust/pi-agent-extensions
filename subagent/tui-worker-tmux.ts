@@ -61,6 +61,7 @@ export type TuiWorkerLaunch = {
   routingEnvironment?: Record<string, string>;
   systemPrompt?: string;
   acceptance?: string[];
+  verification?: import("./acceptance.ts").VerificationGate[];
   resumeSessionFile?: string;
   tools?: string[];
   operatorCapabilityHash?: string;
@@ -243,7 +244,7 @@ export class TuiWorkerTmux {
       groupId: input.groupId, childId: input.childId, attempt: input.attempt, runtimeId, workerEpoch,
       controlSocket, controlToken: randomBytes(32).toString("hex"), sessionFile, placement, panePid, paneProcessToken,
       presentation: input.foreground ? "foreground-staged" : "background", execution: "tmux", launchMode: input.launchMode,
-      acceptance: input.acceptance ?? [], tools: input.tools,
+      acceptance: input.acceptance ?? [], verification: input.verification, tools: input.tools,
       ...(input.foreground ? { foregroundOwner: { pid: process.pid, token: await processIdentity(process.pid) } } : {}),
       ...(input.operatorCapabilityHash ? { operatorCapabilityHash: input.operatorCapabilityHash } : {}) };
     store.writeManifest(m);

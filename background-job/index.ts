@@ -2,7 +2,9 @@ import { createHash } from "node:crypto";
 import { homedir } from "node:os";
 import { ancestryStateRoot as nativeTuiStateRoot, readJobAncestry, ownsJob, privateEvidenceDirectory as privateDirectory } from "../shared/readonly-job-ancestry.ts";
 import { pinRuntimePath } from "./runtime-path.ts";
-import { isAbsolute, join } from "node:path";
+import { isAbsolute, join, dirname, resolve } from "node:path";
+import { realpathSync } from "node:fs";
+import { readNativeVerificationManifest } from "../shared/verification-worker.ts";
 import { Type } from "@sinclair/typebox";
 import type { ExtensionAPI, ExtensionContext } from "@mariozechner/pi-coding-agent";
 import { getAgentDir } from "@mariozechner/pi-coding-agent";
@@ -20,6 +22,7 @@ import type { JobRecord } from "./types.ts";
 import { JOB_BROKER_KEY, LOCAL_JOB_CONTROLLER_KEY, JobParameters, validateJobParams, type JobParams, type JobPlacement, type ParentJobBroker, type LocalJobController } from "../shared/background-job.ts";
 import { HARNESS_READONLY_KEY, HARNESS_READONLY_PROTOCOL, truncateUtf8, type HarnessReadOnlyJobs, type HarnessReadOnlyRegistry } from "../shared/harness-readonly.ts";
 const INTERNAL_JOB_CALL = Symbol("parent-job-call");
+const INTERNAL_VERIFICATION_START = Symbol("supervised-verification-start");
 const runnerPath = pinRuntimePath(new URL("./runner.mjs", import.meta.url), "background-job runner");
 
 const ACTION_PATTERN = "^(start|list|status|output|wait|signal|cancel|reap)$";
@@ -162,10 +165,11 @@ function publicDetails(record: JobRecord, streams?: { stdout: string; stderr: st
     job_id: record.metadata.id,
     status: record.status,
     exit_code: record.result?.exitCode,
+    ...(record.metadata.verification ? { verification: true } : {}),
     signal: record.result?.signal,
     child_id: record.metadata.childId,
     observation_only: Boolean(record.metadata.observed && !record.metadata.pane),
-    retention: record.launch && !record.metadata.observed && !record.metadata.pane && !record.metadata.infrastructure
+    retention: record.launch && !record.metadata.observed && !record.metadata.pane && !record.metadata.infrastructure && !record.metadata.verification
       ? 'five-minutes-after-output-retrieval' : 'until-explicit-reap',
     ...(record.launch ? {pane_id:record.launch.paneId, tmux_socket:record.launch.socketPath, tmux_session:record.launch.sessionId, tmux_window:record.launch.windowId} : {}),
     ...(record.metadata.pane ? {pane_id:record.metadata.pane.paneId,tmux_socket:record.metadata.pane.socket,tracking_kind:'tmux-pane',adopted:true} : {}),
@@ -374,7 +378,67 @@ export default function backgroundJob(pi: ExtensionAPI) {
         { cwd: identity.cwd, hasUI: false, sessionManager: { getSessionId: () => owner } } as any);
     } };
     (globalThis as any)[JOB_BROKER_KEY] = broker;
+    const verificationDispatches = new Map<string, { command: string; cwd: string; launching: boolean }>();
+    const verificationManifest = (callId: string) => {
+      if (sessionContext !== ctx || ctx.sessionManager.getSessionId() !== owner) throw new Error("Verification supervisor session changed");
+      const path = process.env.PI_TUI_WORKER_MANIFEST;
+      if (!path) throw new Error("Verification requires an authenticated native worker manifest");
+      const m = readNativeVerificationManifest(path);
+      if (resolve(path) !== join(dirname(m.sessionFile), "manifest.json") || ctx.sessionManager.getSessionFile() !== m.sessionFile
+        || m.execution === "rpc-headless" || !new RegExp(`^verify:${m.workerEpoch}:[a-f0-9]{24}$`).test(callId)) throw new Error("Verification worker/dispatch identity mismatch");
+      return m;
+    };
+    const verificationRecord = async (callId: string, command: string, jobId?: string) => {
+      verificationManifest(callId);
+      const service = await manager();
+      const matches = (record: JobRecord) => record.metadata.sessionId === owner && record.metadata.name === callId
+        && record.metadata.command === command && realpathSync(record.metadata.cwd) === realpathSync(ctx.cwd)
+        && record.metadata.verification === true && !record.metadata.observed && !record.metadata.pane && !record.metadata.infrastructure && !!record.launch;
+      if (jobId) {
+        const record = await service.get(jobId);
+        if (!matches(record)) throw new Error("Verification job metadata/owner mismatch");
+        return record;
+      }
+      const candidates = (await service.list(1000)).filter(matches);
+      if (candidates.length > 1) throw new Error("Ambiguous verification dispatch ownership");
+      return candidates[0];
+    };
     localController = { protocol: 1, sessionId: owner,
+      async resolveVerification(callId, command, jobId) {
+        verificationManifest(callId);
+        const dispatch = verificationDispatches.get(callId);
+        if (!jobId && dispatch && !dispatch.launching && dispatch.command === command && dispatch.cwd === ctx.cwd) return null;
+        return (await verificationRecord(callId, command, jobId))?.metadata.id;
+      },
+      async attestVerification(run, identity) {
+        if (!run.dispatchId || !run.jobId) return false;
+        const m = verificationManifest(run.dispatchId);
+        if (!["ownerSessionId", "taskId", "childId", "attempt", "workerEpoch", "runtimeId"].every(key => (m as any)[key] === (identity as any)[key])
+          || realpathSync(identity.cwd) !== realpathSync(ctx.cwd)) return false;
+        const record = await verificationRecord(run.dispatchId, run.gate.command, run.jobId);
+        if (!record?.result) return false;
+        const streams = await (await manager()).streamOutput(run.jobId);
+        return streams.available && record.result.exitCode === run.exitCode && record.result.signal === run.signal
+          && streams.stdout === run.stdout && streams.stderr === run.stderr
+          && !!(streams.stdout_truncated || streams.stderr_truncated) === run.truncated;
+      },
+      async startVerification(callId, command, signal) {
+        if (sessionContext !== ctx || ctx.sessionManager.getSessionId() !== owner) throw new Error("Verification job session unavailable");
+        const dispatch = { command, cwd: ctx.cwd, launching: false };
+        verificationDispatches.set(callId, dispatch);
+        if (verificationDispatches.size > 256) verificationDispatches.delete(verificationDispatches.keys().next().value!);
+        const tools = pi.getActiveTools();
+        if (!tools.includes("bash")) throw new Error("Verification cannot expand the worker's command tool authority");
+        const authority = (globalThis as any)[COMMAND_AUTHORITY_KEY] as CommandAuthority | undefined;
+        if (authority?.protocol !== 1 || !authority.active || !authority.authorize) throw new Error("Live verification command permission authority unavailable");
+        verificationManifest(callId);
+        const id = `verification-job-${createHash("sha256").update(callId).digest("hex")}`;
+        await authority.authorize(id, command, ctx.cwd, owner, signal);
+        if (sessionContext !== ctx || !pi.getActiveTools().includes("bash")) throw new Error("Verification authority changed during approval");
+        // Ordinary tool path consumes exactly that command/cwd receipt and enforces AgentSH disposition.
+        dispatch.launching = true;
+        return await jobTool.execute(id, { action: "start", command, name: callId.slice(0, 80), [INTERNAL_VERIFICATION_START]: true } as any, signal, undefined, ctx);
+      },
       async prepareReap(preserve) {
         const deadline = performance.now() + 20_000;
         const assertSession = () => {
@@ -517,7 +581,7 @@ export default function backgroundJob(pi: ExtensionAPI) {
         }
         case "start": {
           if (internal && !internal.placement) throw new Error('Delegated background start requires trusted caller tmux placement; reload the child bridge');
-          const record = await service.start({ command: params.command!, cwd: ctx.cwd, name: params.name, sessionId: ownerSessionId, childId: internal?.childId, placement: internal?.placement }, signal);
+          const record = await service.start({ command: params.command!, cwd: ctx.cwd, name: params.name, sessionId: ownerSessionId, childId: internal?.childId, placement: internal?.placement, ...((rawParams as any)[INTERNAL_VERIFICATION_START] === true ? { verification: true as const } : {}) }, signal);
           runningReminderArmed = record.status === "running" || record.status === "starting";
           reapedJobNames.set(record.metadata.id, record.metadata.name ? preview(record.metadata.name, 80) : preview(record.metadata.command, 80));
           response = toolResult(`${recordText(record)}\nStarted in a new tmux pane.`, { action: params.action, ...publicDetails(record) });

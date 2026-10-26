@@ -149,6 +149,17 @@ export default function tuiWorkerExtension(pi: ExtensionAPI): void {
           try { return (globalThis as any).__PAE_PERMISSION_GATE_OPERATOR_V1__?.status(ctx.sessionManager.getSessionId()).enabled; }
           catch { return undefined; }
         },
+        verificationCwd: () => context?.cwd ?? ctx.cwd,
+        verificationJobs: () => {
+          const controller = (globalThis as any).__paeLocalJobControllerV1 as LocalJobController | undefined;
+          if (!context || manifest.execution === "rpc-headless" || controller?.protocol !== 1
+            || controller.sessionId !== context.sessionManager.getSessionId() || !controller.startVerification
+            || manifest.tools && !manifest.tools.includes("bash")) return undefined;
+          return { start: (id, command, signal) => controller.startVerification!(id, command, signal),
+            execute: (id, params, signal) => controller.execute(id, params as any, signal),
+            resolve: (id, command, jobId) => controller.resolveVerification ? controller.resolveVerification(id, command, jobId) : Promise.reject(new Error("Supervisor dispatch resolution unavailable")),
+            attest: (run, identity) => controller.attestVerification ? controller.attestVerification(run, identity) : Promise.resolve(false) };
+        },
         jobs: async (params, requestId) => {
           const controller = (globalThis as any).__paeLocalJobControllerV1;
           if (!context || controller?.protocol !== 1 || controller.sessionId !== context.sessionManager.getSessionId()

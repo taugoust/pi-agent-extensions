@@ -1,6 +1,6 @@
 import type { ExtensionAPI } from "@mariozechner/pi-coding-agent";
 import assert from "node:assert/strict";
-import { writeFile, readFile, lstat, readlink, rm } from "node:fs/promises";
+import { writeFile, readFile, lstat, readlink, rm, mkdir } from "node:fs/promises";
 import { dirname, join } from "node:path";
 import { getAgentDir } from "@mariozechner/pi-coding-agent";
 import { sharedBackgroundSubagentManager } from "./background.ts";
@@ -86,6 +86,51 @@ export default function rootTest(pi: ExtensionAPI) {
     assert.equal(result.details.group.status, "completed", JSON.stringify(result));
     return result;
   };
+  register("tui-root-verification", async ctx => {
+    const permission = (globalThis as any).__PAE_PERMISSION_GATE_OPERATOR_V1__;
+    permission?.applyMode(ctx.sessionManager.getSessionId(), false);
+    const cwd = join(dirname(output), "verification-cwd");
+    await mkdir(cwd, { mode: 0o700 });
+    for (const code of [0, 7]) {
+      const launched = await execute(ctx, { task: "REPORT_OUTCOME", acceptance: ["fixture"], model: "harness-test/mock:off", background: true,
+        cwd, tools: ["read", "bash"], verification: [{ command: `printf 'verified literal stdout\\n'; printf 'verified literal stderr\\n' >&2; exit ${code}`, timeoutMs: 20000 }] });
+      const result = await execute(ctx, { operation: "wait", job_id: launched.details.job_id, wait_ms: 60000 });
+      const child = result.details.group.children[0];
+      assert.equal(child.verification.status, permission ? code === 0 ? "passed" : "failed" : "unavailable", JSON.stringify(result));
+      assert.equal(child.accepted_delivery, !!permission && code === 0, JSON.stringify(result));
+      const evidence = await execute(ctx, { operation: "result", child_id: child.child_id, diagnostics: true });
+      assert.equal(evidence.details.failed, !permission || code !== 0);
+      const raw = JSON.parse(evidence.content[0].text);
+      if (permission) {
+        assert.equal(raw.runtimeVerification.runs[0].exitCode, code);
+        assert.equal(raw.runtimeVerification.runs[0].stdout, "verified literal stdout\n");
+        assert.equal(raw.runtimeVerification.runs[0].stderr, "verified literal stderr\n");
+        const jobs = await (await import("./tui-worker-client.ts")).callTuiWorker(manifestFor(result.details.group), { operation: "jobs", params: { action: "list" } });
+        assert.equal((jobs.data as any)?.details?.jobs?.length, 0, "verification left a child-local supervised job behind");
+        if (code === 0) {
+          const manifest = manifestFor(result.details.group), store = new TuiWorkerStore(dirname(manifest.sessionFile));
+          const beforeReload = store.readState().sequence, placement = manifest.placement!;
+          await promisify(execFile)("tmux", ["-S", placement.socketPath, "send-keys", "-t", placement.paneId, "-l", "/reload"]);
+          await promisify(execFile)("tmux", ["-S", placement.socketPath, "send-keys", "-t", placement.paneId, "Enter"]);
+          const deadline = Date.now() + 20000;
+          while (Date.now() < deadline && !store.readState().events.some(event => event.kind === "ready" && event.sequence > beforeReload)) await sleep(100);
+          const restored = await execute(ctx, { operation: "status", job_id: launched.details.job_id });
+          assert.equal(restored.details.group.children[0].verification.status, "interrupted", JSON.stringify(restored));
+          assert.equal(restored.details.group.children[0].accepted_delivery, false);
+          assert.equal(store.readState().verification?.runs[0].jobId, raw.runtimeVerification.runs[0].jobId, "reload replayed a verification dispatch");
+          assert.equal(store.readState().verification?.runs[0].stdout, "verified literal stdout\n");
+        }
+      }
+      await execute(ctx, { operation: "reap", job_id: launched.details.job_id });
+    }
+    const readonly = await execute(ctx, { task: "REPORT_OUTCOME", acceptance: ["fixture"], model: "harness-test/mock:off", background: true,
+      cwd, tools: ["read"], verification: [{ command: "printf MUST_NOT_RUN", timeoutMs: 20000 }] });
+    const denied = await execute(ctx, { operation: "wait", job_id: readonly.details.job_id, wait_ms: 60000 });
+    assert.equal(denied.details.group.children[0].verification.status, "unavailable");
+    assert.equal(denied.details.group.children[0].accepted_delivery, false);
+    await execute(ctx, { operation: "reap", job_id: readonly.details.job_id });
+    return { nativeManager: true, realPermissionGate: !!permission };
+  });
   register("tui-root-background", async ctx => {
     pi.setSessionName("tui-root-test");
     const gate = (globalThis as any).__PAE_PERMISSION_GATE_OPERATOR_V1__;

@@ -28,8 +28,8 @@ pkgs.runCommand "background-job-extension-check"
     srcdir="$workdir/src"
     outdir="$workdir/out"
     mkdir -p "$srcdir/background-job" "$srcdir/shared" "$srcdir/subagent" "$outdir/background-job" "$workdir/home" "$workdir/tmp"
-    cp ${self}/subagent/{readonly-job-ancestry.test.ts,tui-worker-store.ts} "$srcdir/subagent/"
-    cp ${self}/shared/{tui-worker-protocol.ts,readonly-job-ancestry.ts} "$srcdir/shared/"
+    cp ${self}/subagent/{readonly-job-ancestry.test.ts,tui-worker-store.ts,acceptance.ts} "$srcdir/subagent/"
+    cp ${self}/shared/{tui-worker-protocol.ts,readonly-job-ancestry.ts,verification-worker.ts,verification-worker.test.ts} "$srcdir/shared/"
     cp ${self}/background-job/{index.ts,manager.ts,retention.ts,retention.test.mjs,retention-races.test.mjs,store.ts,tmux.ts,types.ts,test.mjs,streams.test.mjs,runner.mjs,watch.ts,watch-runner.mjs,watch.test.mjs,external-pane.ts,pane.test.mjs,runtime-path.ts,startup.test.mjs,completion.test.mjs,readonly-descendants.test.mjs} "$srcdir/background-job/"
     cp ${self}/shared/agentsh-mode.ts "$srcdir/shared/agentsh-mode.ts"
     cp ${self}/shared/background-job.ts ${self}/shared/harness-readonly.ts "$srcdir/shared/"
@@ -57,8 +57,10 @@ pkgs.runCommand "background-job-extension-check"
       "$srcdir/background-job/types.ts" \
       "$srcdir/shared/agentsh-mode.ts" \
       "$srcdir/shared/quiet-state.test.ts" \
+      "$srcdir/shared/verification-worker.test.ts" \
       "$srcdir/subagent/readonly-job-ancestry.test.ts"
     node --test "$outdir/subagent/readonly-job-ancestry.test.js"
+    node --test "$outdir/shared/verification-worker.test.js"
     cp "$srcdir/background-job/"{test.mjs,streams.test.mjs,retention.test.mjs,retention-races.test.mjs,runner.mjs,watch-runner.mjs,watch.test.mjs,pane.test.mjs,startup.test.mjs,completion.test.mjs,readonly-descendants.test.mjs} "$outdir/background-job/"
     cp "$srcdir/shared/extension-config-manifest.json" "$outdir/shared/"
     substituteInPlace "$outdir/shared/extension-defaults.js" \
@@ -154,11 +156,13 @@ pkgs.runCommand "background-job-extension-check"
       isIdle: () => true,
       sessionManager: { getSessionId: () => "reload-session" },
     };
+    let verificationTools = ["read"];
     const loadHarness = async (suffix) => {
       const tools = new Map();
       const handlers = new Map();
       const loaded = (await import(`./out/background-job/index.js?''${suffix}`)).default;
       loaded({
+        getActiveTools() { return verificationTools; },
         registerTool(tool) { tools.set(tool.name, tool); },
         registerCommand() {},
         on(name, handler) { const previous=handlers.get(name); handlers.set(name, previous ? async (...args)=>{await previous(...args);await handler(...args);} : handler); },
@@ -169,6 +173,82 @@ pkgs.runCommand "background-job-extension-check"
     };
 
     const beforeReload = await loadHarness("before-reload");
+    const assert = (await import('node:assert/strict')).default;
+    const { initialVerification, runVerification, recoverVerification } = await import('./out/subagent/acceptance.js');
+    const controller = globalThis.__paeLocalJobControllerV1;
+    await assert.rejects(controller.startVerification('readonly', 'printf forbidden'), /cannot expand/);
+    verificationTools = ['bash'];
+    await assert.rejects(controller.startVerification('no-permission', 'printf forbidden'), /permission authority unavailable/);
+    const receipts = new Map();
+    globalThis.__paeCommandAuthorityV1 = { protocol: 1, active: true,
+      async authorize(id, command, cwd, owner) { assert.equal(owner, 'reload-session'); assert.equal(cwd, reloadContext.cwd); receipts.set(id, {command, cwd}); },
+      consume(id, command, cwd) { const receipt = receipts.get(id); receipts.delete(id); return receipt?.command === command && receipt.cwd === cwd; } };
+    const { mkdtemp, rm } = await import('node:fs/promises');
+    const { tmpdir } = await import('node:os');
+    const { join } = await import('node:path');
+    // Use a small stable cwd for workspace binding, while the runtime itself is
+    // authoritatively bound to reloadContext.cwd; the test context has that cwd.
+    const verifyCwd = await mkdtemp(join(tmpdir(), 'runtime-gate-'));
+    const originalCwd = reloadContext.cwd; reloadContext.cwd = verifyCwd;
+    const manifestDir = await mkdtemp(join(tmpdir(), 'gate-worker-'));
+    const { TuiWorkerStore } = await import('./out/subagent/tui-worker-store.js');
+    const workerStore = new TuiWorkerStore(manifestDir);
+    const verifyIdentity = {ownerSessionId:'parent',taskId:'task-test',childId:'subagent-child-'+'b'.repeat(24),attempt:1,workerEpoch:'c'.repeat(32),runtimeId:'runtime-test',cwd:verifyCwd};
+    workerStore.writeManifest({protocol:1,...verifyIdentity,groupId:'subagent-job-'+'a'.repeat(24),controlToken:'d'.repeat(64),
+      controlSocket:join(manifestDir,'control.sock'),sessionFile:join(manifestDir,'session.jsonl'),presentation:'background',
+      placement:{socketPath:'/tmp/fixture-tmux',serverEpoch:'1:2',sessionId:'$1',windowId:'@1',paneId:'%1',ownershipNonce:'e'.repeat(64)}});
+    const previousManifest = process.env.PI_TUI_WORKER_MANIFEST;
+    process.env.PI_TUI_WORKER_MANIFEST = workerStore.path('manifest.json');
+    reloadContext.sessionManager.getSessionFile = () => join(manifestDir,'session.jsonl');
+    try {
+      const supervised = {start:(id,command,signal)=>controller.startVerification(id,command,signal),execute:(...args)=>controller.execute(...args),
+        resolve:(...args)=>controller.resolveVerification(...args),attest:(...args)=>controller.attestVerification(...args)};
+      for (const code of [0, 7]) {
+        const gates = [{command: `printf ' literal stdout\\n'; printf ' literal stderr\\n' >&2; exit ''${code}`}];
+        const record = initialVerification(verifyIdentity, gates);
+        await runVerification(record, gates, {start:(id,command,signal)=>controller.startVerification(id,command,signal),execute:(...args)=>controller.execute(...args),
+          resolve:(...args)=>controller.resolveVerification(...args),
+          attest:async(run,identity)=>{
+            assert.equal(await controller.attestVerification({...run,stdout:'fabricated'},identity),false);
+            assert.equal(await controller.attestVerification(run,{...identity,attempt:2}),false);
+            return await controller.attestVerification(run,identity);
+          }},()=>{});
+        assert.equal(record.status, code === 0 ? 'passed' : 'failed', JSON.stringify(record));
+        assert.equal(record.runs[0].exitCode, code);
+        assert.equal(record.runs[0].stdout, ' literal stdout\n');
+        assert.equal(record.runs[0].stderr, ' literal stderr\n');
+      }
+      const authorize = globalThis.__paeCommandAuthorityV1.authorize;
+      globalThis.__paeCommandAuthorityV1.authorize = async()=>{throw new Error('explicit permission denial');};
+      const deniedGates = [{command:'printf MUST_NOT_RUN'}], denied = initialVerification(verifyIdentity,deniedGates);
+      await runVerification(denied,deniedGates,supervised,()=>{});
+      assert.equal(denied.status,'unavailable'); assert.equal(denied.runs[0].dispatchState,'not-dispatched');
+      globalThis.__paeCommandAuthorityV1.authorize = authorize;
+      // A real supervised process exists even when the launch receipt is lost.
+      const lostGates = [{command:"printf 'before lost receipt'; sleep 30",timeoutMs:10000}];
+      const lost = initialVerification(verifyIdentity,lostGates);
+      await runVerification(lost,lostGates,{...supervised,start:async(...args)=>{await supervised.start(...args);throw new Error('receipt lost after dispatch');}},()=>{});
+      assert.notEqual(lost.status,'passed');
+      assert.equal(lost.runs[0].dispatchState,'cleaned',JSON.stringify(lost));
+      // Failed output retrieval must retain the real terminal job and its logs.
+      const heldGates = [{command:"printf 'retained literal evidence'"}];
+      const held = initialVerification(verifyIdentity,heldGates);
+      await runVerification(held,heldGates,{...supervised,execute:async(id,params,signal)=>params.action==='output'
+        ? {isError:true,details:{streams:{available:false}}}:supervised.execute(id,params,signal)},()=>{});
+      assert.equal(held.status,'unavailable');
+      assert.equal(held.runs[0].dispatchState,'cleanup-pending');
+      const heldStatus = await controller.execute('retained-evidence',{action:'status',job_id:held.runs[0].jobId});
+      assert.equal(heldStatus.details.status,'completed');
+      await recoverVerification(held,supervised,()=>{});
+      assert.equal(held.runs[0].stdout,'retained literal evidence');
+      assert.equal(held.runs[0].dispatchState,'cleaned');
+      assert.equal((await controller.execute('no-orphans',{action:'list',limit:50})).details.jobs.length,0);
+    } finally {
+      reloadContext.cwd = originalCwd; delete globalThis.__paeCommandAuthorityV1;
+      if(previousManifest === undefined) delete process.env.PI_TUI_WORKER_MANIFEST; else process.env.PI_TUI_WORKER_MANIFEST = previousManifest;
+      delete reloadContext.sessionManager.getSessionFile;
+      await rm(verifyCwd,{recursive:true,force:true}); await rm(manifestDir,{recursive:true,force:true});
+    }
     const started = await beforeReload.tool.execute(
       "reload-start",
       { action: "start", command: "printf 'before-reload\\n'; sleep 1; printf 'after-reload\\n'" },

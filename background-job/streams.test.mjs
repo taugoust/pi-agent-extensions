@@ -61,5 +61,18 @@ try {
   assert(Buffer.byteLength(bounded.stdout)<=16384); assert(Buffer.byteLength(bounded.stderr)<=16384);
   assert(bounded.stdout.endsWith('stdout tail')); assert(bounded.stderr.endsWith('stderr tail'));
   assert(!bounded.stderr.includes('\ufffd'),'UTF-8 tail must not split code points');
-  console.log('stream capture, combined order, stdout-only failure, stderr-only success, per-stream bounds, legacy-unavailable passed');
+  let reaped = 0;
+  const retentionManager = new BackgroundJobManager(store,{async reap(){reaped++;},async paneState(){return {exists:false,dead:true};}});
+  for (const verification of [true,false]) {
+    const retained = verification ? 'job-222222222222222222222222' : 'job-333333333333333333333333';
+    await store.create({schemaVersion:1,id:retained,command:'retention control',cwd:root,shell:'/bin/sh',createdAt:new Date().toISOString(),ownerPid:process.pid,...(verification?{verification:true}:{})},'control',Buffer.alloc(0));
+    await store.writeLaunch(retained,{schemaVersion:1,windowId:'@2',paneId:'%2',panePid:process.pid,paneStartToken:'x',launchedAt:new Date().toISOString()});
+    await store.publishResult(retained,{schemaVersion:1,status:'completed',exitCode:0,finishedAt:new Date().toISOString()});
+    await store.markRetrieved(retained,1);
+    await retentionManager.reapExpired(retained,1_000_000,300_000);
+    if(verification) assert.equal((await store.readMetadata(retained)).verification,true,'verification evidence auto-expired before durable acceptance');
+    else await assert.rejects(()=>store.readMetadata(retained),{code:'ENOENT'});
+  }
+  assert.equal(reaped,1,'verification pin changed ordinary job retention or reaped pinned evidence');
+  console.log('stream capture, combined order, stdout-only failure, stderr-only success, per-stream bounds, legacy-unavailable and verification retention pin passed');
 } finally { await rm(root,{recursive:true,force:true}); }

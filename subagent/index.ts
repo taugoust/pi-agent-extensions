@@ -106,11 +106,14 @@ const INTERNAL_MANAGED_EXECUTION = Symbol("subagent-internal-managed-execution")
 const INTERNAL_CHILD_IDENTITIES = Symbol("subagent-internal-child-identities");
 const INTERNAL_OWNER_SESSION_ID = Symbol("subagent-internal-owner-session-id");
 
+import { validateVerification, type VerificationGate } from "./acceptance.ts";
+
 type Mode = "single" | "parallel" | "chain";
 
 type SubagentSpec = {
   task: string;
   acceptance?: string[];
+  verification?: VerificationGate[];
   resumeTask?: NativeTaskRecord;
   resumeMessage?: string;
   compactBeforePrompt?: boolean;
@@ -1103,6 +1106,7 @@ function specFromParams(params: any): SubagentSpec {
   return {
     task: String(params.task ?? ""),
     acceptance: validateAcceptance(params.acceptance),
+    ...(params.verification !== undefined ? { verification: validateVerification(params.verification) } : {}),
     resumeTask: params[INTERNAL_TASK_RESUME],
     resumeMessage: params[INTERNAL_RESUME_MESSAGE],
     compactBeforePrompt: params[INTERNAL_RESUME_COMPACT],
@@ -1518,7 +1522,7 @@ export function validateBackgroundOperation(params: any): void {
     return;
   }
   if (params.task_id !== undefined || params.compact !== undefined) throw new Error("task_id and compact are resume-only fields");
-  const launchFields = ["name", "agent", "agentScope", "acceptance", "task", "tasks", "chain", "systemPrompt", "model", "tools", "cwd", "worktree", "action", "draft_id", "background", "mode", "timeout_ms"];
+  const launchFields = ["name", "agent", "agentScope", "acceptance", "verification", "task", "tasks", "chain", "systemPrompt", "model", "tools", "cwd", "worktree", "action", "draft_id", "background", "mode", "timeout_ms"];
   const integerField = (field: string, minimum: number, maximum: number, label: string) => {
     const value = params[field];
     if (value !== undefined && (!Number.isSafeInteger(value) || value < minimum || value > maximum)) {
@@ -1658,10 +1662,19 @@ const SubagentWorktree = Type.Optional(Type.Object({
 const SubagentAgent = Type.Optional(Type.String({ minLength: 1, maxLength: 128, description: "Named agent profile (scout, worker, reviewer, oracle, or a custom profile). Separate from the tmux label name. Profile instructions and model/thinking/tool defaults resolve once; resume retains that configuration." }));
 const SubagentAgentScope = Type.Optional(Type.String({ pattern: "^(user|project|both)$", description: "Profile discovery scope. Default both: builtins, user, then trusted project overrides. Untrusted project definitions never load; explicit project scope requires project trust. Also accepted by operation=profiles." }));
 
+const SubagentVerification = Type.Optional(Type.Array(Type.Object({
+  command: Type.String({ minLength: 1, maxLength: 8192 }),
+  timeoutMs: Type.Optional(Type.Integer({ minimum: 1, maximum: 600000 })),
+  output: Type.Optional(Type.Literal("json")),
+  schema: Type.Optional(Type.Record(Type.String(), Type.Unknown())),
+  verdict: Type.Optional(Type.Object({ path: Type.Array(Type.String({ maxLength: 256 }), { maxItems: 16 }), equals: Type.Union([Type.String(), Type.Number(), Type.Boolean(), Type.Null()]) }, { additionalProperties: false })),
+}, { additionalProperties: false }), { minItems: 1, maxItems: 8, description: "Launch only: explicit runtime command gates, separate from worker-reported acceptance. Run in actual worker cwd through supervised jobs and live permissions; configured unavailable/failed/stale gates block accepted delivery. No authority expansion; unsupported backends fail closed. Retained on resume." }));
+
 const SubagentItem = Type.Object({
   name: SubagentName,
   agent: SubagentAgent,
   agentScope: SubagentAgentScope,
+  verification: SubagentVerification,
   acceptance: Type.Array(Type.String({minLength:1, maxLength:500}), {minItems:1, maxItems:16, description:"Required for each new task: explicit task-specific, verifiable completion criteria. Preserved verbatim; never inferred from the prompt."}),
   task: Type.String({ description: "Task to delegate to this dynamic subagent" }),
   systemPrompt: Type.Optional(Type.String({ description: "Optional additional system prompt for this subagent" })),
@@ -1680,6 +1693,7 @@ function subagentParams() {
   agent: SubagentAgent,
   agentScope: SubagentAgentScope,
   acceptance: Type.Optional(Type.Array(Type.String({minLength:1, maxLength:500}), {minItems:1, maxItems:16, description:"Launch only: required for a new single task; explicit task-specific, verifiable completion criteria. Controls/resumes retain stored criteria, including legacy tasks."})),
+  verification: SubagentVerification,
   task_id: Type.Optional(Type.String({pattern:"^subagent-task-[0-9a-f]{24}$",description:"Resume only: required stable native task ID. Use operation=resume with only task_id, optional message and compact; never task/model/background."})),
   compact: Type.Optional(Type.Boolean({description:"Resume only: explicitly request compaction before continuing. High measured context usage selects it automatically; a checkpointed outcome alone does not require it."})),
   mode: Type.Optional(Type.String({ pattern: "^(shared|draft)$", description: "Launch/Draft disposition only, never with operation: execution isolation. Omitted/shared uses AgentSH when configured, otherwise a native child; draft requires AgentSH." })),
@@ -2696,6 +2710,7 @@ export default function (pi: ExtensionAPI) {
       // Set launch defaults before routing to either backend. Explicit model
       // selections (including Pi's :thinking suffix) remain authoritative.
       const withDefaultModel = (spec: any) => {
+        validateVerification(spec.verification);
         return { ...spec, ...(!params.operation ? { acceptance: requireAcceptance(spec.acceptance) } : {}), model: resolveSubagentModel(spec.model, subagentModelSettings, ctx, routingSnapshot) };
       };
       if (!params.action) {
@@ -2703,6 +2718,12 @@ export default function (pi: ExtensionAPI) {
         else if (Array.isArray(params.chain)) params = { ...params, chain: params.chain.map(withDefaultModel) };
         else params = withDefaultModel(params);
       }
+      const configuredVerification = [params, ...(params.tasks ?? []), ...(params.chain ?? [])].some((spec: any) => spec.verification?.length);
+      if (configuredVerification && (process.platform !== "linux" || selectSubagentBackend(agentSHBridge(), agentSHStartup).kind !== "native" || params.action || params.mode === "draft")) {
+        return { content: [{ type: "text", text: "Runtime verification unavailable on this execution backend; configured gates prevent accepted delivery. No command was launched." }], isError: true,
+          details: { verification: { status: "unavailable" }, accepted_delivery: false } };
+      }
+      if (params.verification !== undefined && (params.tasks || params.chain)) throw new Error("Configure verification on each task/chain item, not on the group");
       if (process.platform === "linux") {
         const selected = selectSubagentBackend(agentSHBridge(), agentSHStartup);
         if (selected.kind === "unavailable") throw new Error(selected.message);

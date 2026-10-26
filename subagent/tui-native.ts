@@ -1,9 +1,10 @@
 import { randomBytes, createHash } from "node:crypto";
 import { provisionWorktrees, releaseWorktree, worktreeOption, type WorktreeOption } from "../shared/subagent-worktrees.ts";
 import { waitForGroupSnapshot } from "./group-wait.ts";
-import { readdirSync, existsSync, readFileSync, writeFileSync, unlinkSync, openSync, closeSync, readSync, constants, lstatSync } from "node:fs";
+import { readdirSync, existsSync, readFileSync, writeFileSync, unlinkSync, openSync, closeSync, readSync, constants, lstatSync, realpathSync } from "node:fs";
 import { join, resolve, basename } from "node:path";
 import { validateAcceptance } from "./outcome.ts";
+import { validateVerification, currentVerification, verificationSummary, verificationContract, workspaceIdentity, type VerificationGate } from "./acceptance.ts";
 import { subagentTmuxName, validateSubagentName } from "./tui-names.ts";
 import { TuiWorkerTmux, tuiWorkerLaunchContract, processIdentity } from "./tui-worker-tmux.ts";
 import { TuiWorkerStore, privateDirectory, atomicPrivateJson, readPrivateJson } from "./tui-worker-store.ts";
@@ -17,11 +18,12 @@ import type { TuiWorkerManifest, TuiWorkerPlacement } from "../shared/tui-worker
 
 const id = (prefix: string) => `${prefix}-${randomBytes(12).toString("hex")}`;
 const pause = (ms: number) => new Promise(resolve => setTimeout(resolve, ms));
-type Spec = { name?: string; task: string; cwd: string; model?: string; tools?: string[]; systemPrompt?: string; acceptance?: string[]; worktree?: WorktreeOption; worktreeInfo?: { path: string; branch: string; baseCommit: string; includedChanges: boolean } };
+type Spec = { name?: string; task: string; cwd: string; model?: string; tools?: string[]; systemPrompt?: string; acceptance?: string[]; verification?: VerificationGate[]; worktree?: WorktreeOption; worktreeInfo?: { path: string; branch: string; baseCommit: string; includedChanges: boolean } };
 type Child = { childId: string; taskId: string; attempt: number; directory: string; spec: Spec;
   resumeSessionFile?: string; resumeMessage?: string; compactBeforePrompt?: boolean;
   state: "pending" | "launching" | "running" | "completed" | "failed" | "cancelled" | "lost" | "skipped";
   operatorCapability: string; started: boolean; reaped?: boolean; error?: string; report?: string;
+  verification?: unknown; historicalVerification?: unknown; acceptedDelivery?: boolean;
   notifiedSequence: number; needsAttention?: boolean; idleDecisionNotified?: string; runSequence?: number; pendingActivitySequence?: number; terminalNotification?: string; lastOutcome?: unknown; requiresCompaction?: boolean; };
 type Group = { windowName?: string; version: 1; id: string; owner: string; createdAt: string; mode: "single" | "parallel" | "chain";
   background: boolean; cancelled: boolean; children: Child[]; caller: TuiWorkerPlacement;
@@ -29,7 +31,7 @@ type Group = { windowName?: string; version: 1; id: string; owner: string; creat
   operatorEnabled: boolean; launcher: string; launchMode: "none" | "guard-only"; promotionPending?: boolean; };
 type Disposition = "native" | "guard-only" | "full" | "unavailable";
 const active = (child: Child) => ["pending", "launching", "running"].includes(child.state);
-const terminalToken = (child: Child) => child.report ?? `terminal:${child.attempt ?? 1}:${child.runSequence ?? 0}`;
+const terminalToken = (child: Child) => `${child.report ?? `terminal:${child.attempt ?? 1}:${child.runSequence ?? 0}`}${child.spec?.verification?.length ? `:verification:${(child.verification as any)?.status ?? "unavailable"}` : ""}`;
 const messageText = (message: any) => typeof message?.content === "string" ? message.content : (message?.content ?? []).filter((p: any) => p.type === "text").map((p: any) => p.text).join("\n");
 const response = (text: string, data: Record<string, unknown> = {}) => ({ content: [{ type: "text" as const, text: Buffer.from(text).subarray(0, 48 * 1024).toString("utf8") }], details: { tui_subagent: true, backend: "native", ...data } });
 
@@ -43,6 +45,8 @@ export class TuiNativeManager {
   private persistenceWriter = atomicPrivateJson;
   private queue: Promise<unknown> = Promise.resolve();
   private refreshFlight?: Promise<void>;
+  private verificationObservations = new WeakMap<Child, { digest: string; manifest: string; contract: string; accepted: boolean }>();
+  private verificationObservationTurns = new WeakMap<Child, number>();
   private modeQueue: Promise<unknown> = Promise.resolve();
   private timer?: ReturnType<typeof setInterval>;
   private closed = false;
@@ -81,7 +85,13 @@ export class TuiNativeManager {
           || !/^[a-f0-9]{24}$/.test(basename(c.directory)) || c.directory !== join(this.root, "workers", basename(c.directory)))) throw new Error("Invalid retained child");
         // Old already-terminal records were previously observed without wakes.
         // Baseline them instead of replaying historical completions on upgrade.
-        for (const c of g.children) if (c.terminalNotification === undefined) c.terminalNotification = active(c) ? '' : terminalToken(c);
+        for (const c of g.children) {
+          if (c.terminalNotification === undefined) c.terminalNotification = active(c) ? '' : terminalToken(c);
+          if (c.spec.verification?.length) {
+            if (c.historicalVerification) c.historicalVerification = { ...(c.historicalVerification as object), provenance: "retained-unverified", last_observed_status: undefined };
+            this.invalidateVerification(c, "interrupted", "Manager restored from disk; fresh worker observation required");
+          }
+        }
         this.groups.set(g.id, g);
         // Seed the persistence baseline from disk so constructor normalization is
         // durable only when it actually changed the record.
@@ -277,11 +287,80 @@ export class TuiNativeManager {
       } finally { release(); }
     }
   }
+  private invalidateVerification(c: Child, status: "unavailable" | "interrupted" | "stale", reason: string) {
+    if (!c.spec.verification?.length) return;
+    const previous = c.verification as any;
+    if (previous?.status === "passed") {
+      const observed = this.verificationObservations.get(c);
+      const fromLiveObservation = observed?.digest === createHash("sha256").update(JSON.stringify(previous)).digest("hex");
+      c.historicalVerification = { historical: true, provenance: fromLiveObservation ? "live-worker-observation" : "retained-unverified",
+        recorded_status: "passed", ...(fromLiveObservation ? { last_observed_status: "passed" } : {}), evidence: structuredClone(previous) };
+    }
+    this.verificationObservations.delete(c);
+    this.verificationObservationTurns.set(c, (this.verificationObservationTurns.get(c) ?? 0) + 1);
+    c.verification = { ...(previous ?? {}), status, reason,
+      ...(Array.isArray(previous?.runs) ? { runs: previous.runs.map((run: any) => ({ ...run, historical_status: run.historical_status ?? run.status, status })) } : {}) };
+    c.acceptedDelivery = false;
+  }
+  private verificationManifestIdentity(m: TuiWorkerManifest) {
+    return JSON.stringify([m.ownerSessionId, m.groupId, m.taskId, m.childId, m.attempt, m.runtimeId, m.workerEpoch, m.sessionFile, m.controlSocket, m.controlToken]);
+  }
+  private observeVerification(g: Group, c: Child, m: TuiWorkerManifest, state: any, observationTurn?: number) {
+    if (c.spec.verification?.length && observationTurn !== undefined && this.verificationObservationTurns.get(c) !== observationTurn) return;
+    c.verification = state.verification ?? { status: c.spec.verification?.length ? "unavailable" : "not-configured" };
+    c.acceptedDelivery = state.accepted_delivery === true;
+    if (!c.spec.verification?.length) return;
+    const v = c.verification as any;
+    if (v.status !== "passed") {
+      c.acceptedDelivery = false;
+      if (["unavailable", "interrupted", "stale"].includes(v.status)) this.invalidateVerification(c, v.status, v.reason ?? "Current verification is not live; command evidence is historical");
+      return;
+    }
+    try {
+      if (m.ownerSessionId !== g.owner || m.groupId !== g.id || m.taskId !== c.taskId || m.childId !== c.childId || m.attempt !== (c.attempt ?? 1)
+        || v.contract !== verificationContract(c.spec.verification) || !v.identity
+        || !["ownerSessionId", "taskId", "childId", "attempt", "runtimeId", "workerEpoch"].every(key => v.identity[key] === (m as any)[key])
+        || realpathSync(v.identity.cwd) !== realpathSync(c.spec.cwd)) throw new Error("Verification observation identity/contract mismatch");
+      this.verificationObservations.set(c, { digest: createHash("sha256").update(JSON.stringify(v)).digest("hex"),
+        manifest: this.verificationManifestIdentity(m), contract: JSON.stringify(c.spec.verification), accepted: state.accepted_delivery === true && state.active === false && state.phase === "settled" });
+    } catch { this.invalidateVerification(c, "unavailable", "Fresh verification observation identity/contract unavailable"); }
+  }
+  private currentVerification(c: Child, manifest?: TuiWorkerManifest) {
+    if (!c.spec.verification?.length) return;
+    const v = c.verification as any;
+    if (v?.status !== "passed") { c.acceptedDelivery = false; return; }
+    const observed = this.verificationObservations.get(c);
+    if (!manifest || !observed || observed.manifest !== this.verificationManifestIdentity(manifest)
+      || observed.contract !== JSON.stringify(c.spec.verification) || observed.digest !== createHash("sha256").update(JSON.stringify(v)).digest("hex")) {
+      this.invalidateVerification(c, "interrupted", "No fresh process-local worker observation for current verification"); return;
+    }
+    try {
+      const current = workspaceIdentity(c.spec.cwd);
+      if (!Array.isArray(v.runs) || v.runs.length !== c.spec.verification.length || v.runs.some((run: any) => run.status !== "passed" || run.workspaceAfter !== current)) {
+        this.invalidateVerification(c, "stale", "Workspace changed since the live verification observation"); return;
+      }
+      c.acceptedDelivery = observed.accepted && c.state === "completed";
+    } catch { this.invalidateVerification(c, "unavailable", "Current checked workspace identity unavailable"); }
+  }
+  private retainedVerification(g: Group, c: Child) {
+    if (!c.spec.verification?.length) return { status: "not-configured" };
+    try {
+      const m = this.manifest(c);
+      if (!m) return { status: "unavailable" };
+      const record = new TuiWorkerStore(c.directory).readState().verification;
+      return verificationSummary(currentVerification(record, { ownerSessionId: g.owner, taskId: c.taskId, childId: c.childId,
+        attempt: c.attempt, workerEpoch: m.workerEpoch, runtimeId: m.runtimeId, cwd: realpathSync(c.spec.cwd) }, c.spec.verification));
+    } catch { return { status: "unavailable" }; }
+  }
   private publicGroup(g: Group) {
     return { job_id: g.id, mode: g.mode, background: g.background, created_at: g.createdAt,
       status: g.children.some(active) ? "running" : g.cancelled || g.children.some(c => c.state === "cancelled") ? "cancelled" : g.children.some(c => ["failed", "lost"].includes(c.state)) ? "failed" : "completed",
       children: g.children.map((c, i) => {
-        const manifest = this.manifest(c);
+        let manifest: TuiWorkerManifest | undefined;
+        try { manifest = this.manifest(c); }
+        catch { this.invalidateVerification(c, "unavailable", "Worker manifest unavailable"); }
+        if (c.reaped) this.invalidateVerification(c, "interrupted", "Worker reaped; retained evidence is historical only");
+        this.currentVerification(c, manifest);
         let idleDecision: unknown;
         if (manifest) { try {
           const events = new TuiWorkerStore(c.directory).readState().events.filter(e => e.workerEpoch === manifest.workerEpoch);
@@ -292,7 +371,7 @@ export class TuiNativeManager {
         return { child: i + 1, child_id: c.childId, task_id: c.taskId,
           status: c.state, attempt: c.attempt ?? 1, reaped: !!c.reaped, task: c.spec.task.slice(0, 500), error: c.error,
           cwd: c.spec.cwd, ...(c.spec.worktreeInfo ? { worktree: c.spec.worktreeInfo } : {}),
-          report: c.report, task_outcome: c.lastOutcome, ...(idleDecision ? { idle_decision: idleDecision } : {}),
+          report: c.report, task_outcome: c.lastOutcome, historical_verification: c.historicalVerification, verification: c.verification ?? { status: c.spec.verification?.length ? "interrupted" : "not-configured" }, accepted_delivery: c.acceptedDelivery === true, review: "not-configured", ...(idleDecision ? { idle_decision: idleDecision } : {}),
           ...(manifest ? { runtime: publicTuiWorkerManifest(manifest) } : {}) };
       }) };
   }
@@ -301,6 +380,7 @@ export class TuiNativeManager {
     let text = `${g.id} ${snapshot.status} (${g.mode}${g.background ? ", background" : ", foreground staged"})`;
     for (const [i, c] of g.children.entries()) {
       text += `\n${i + 1}. ${c.childId} task_id=${c.taskId} ${c.state}${c.reaped ? " [reaped]" : ""}${c.error ? `: ${c.error}` : ""}`;
+      if (c.spec.verification?.length) text += ` checks=${(c.verification as any)?.status ?? "unavailable"} accepted_delivery=${c.acceptedDelivery === true}`;
       if (output && c.report) { try { text += `\n${messageText((readPrivateJson(c.report) as any).assistant)}`; } catch {} }
     }
     return text;
@@ -311,10 +391,16 @@ export class TuiNativeManager {
     return readPrivateJson(path);
   }
   private async observe(g: Group, c: Child, observationOnly = false): Promise<void> {
+    // Revoke cached acceptance BEFORE awaiting any observation. A disconnect,
+    // non-ok response or missing manifest must never leave a prior pass current.
+    this.invalidateVerification(c, c.reaped ? "interrupted" : "unavailable", c.reaped ? "Worker reaped; evidence is historical" : "Fresh worker verification observation pending/unavailable");
+    const observationTurn = this.verificationObservationTurns.get(c);
     // Retry even if the worker settled, died, or was reaped since observation.
     if (!observationOnly && c.pendingActivitySequence !== undefined) this.notifyActivity(g, c, c.pendingActivitySequence);
     if (c.reaped || c.state === "pending") return;
-    const m = this.manifest(c);
+    let m: TuiWorkerManifest | undefined;
+    try { m = this.manifest(c); }
+    catch { this.invalidateVerification(c, "unavailable", "Worker manifest unavailable"); return; }
     if (!m) {
       if (c.state === "launching") { c.state = "failed"; c.error = "Interrupted uncommitted launch; no automatic replay"; }
       return;
@@ -331,6 +417,10 @@ export class TuiNativeManager {
             const report = this.retainedArtifact(c, state.lastReport, "report");
             c.report = state.lastReport;
             c.error = typeof report.error === "string" ? report.error.slice(0, 2000) : undefined;
+            if (c.spec.verification?.length) {
+              c.verification = this.retainedVerification(g, c);
+              if ((c.verification as any)?.status !== "passed") c.error = `Runtime verification ${(c.verification as any)?.status}; accepted delivery blocked`;
+            }
             c.state = c.error || report.assistant?.stopReason === "error" ? "failed"
               : report.assistant?.stopReason === "aborted" || g.cancelled ? "cancelled" : "completed";
             c.lastOutcome = state.lastOutcome ? this.retainedArtifact(c, state.lastOutcome, "outcome") : undefined;
@@ -363,6 +453,7 @@ export class TuiNativeManager {
         c.error = typeof report.error === "string" ? report.error.slice(0, 2000)
           : report.assistant?.stopReason === "toolUse" && state.readyForPrompts === false
             ? "Worker command authority unavailable" : undefined;
+        if (c.spec.verification?.length && state.verification?.status !== "passed") c.error = `Runtime verification ${state.verification?.status ?? "unavailable"}; worker completion is not accepted delivery`;
         c.state = c.error || report.assistant?.stopReason === "error" ? "failed"
           : report.assistant?.stopReason === "aborted" || g.cancelled ? "cancelled" : "completed";
         // Settlement is reported through the replay cursor below, never a text injection.
@@ -371,6 +462,7 @@ export class TuiNativeManager {
       // newer events may supersede this snapshot (a human can act mid-poll).
       c.lastOutcome = state.lastOutcome ? this.retainedArtifact(c, state.lastOutcome, "outcome") : undefined;
       if (!state.lastReport) { c.report = undefined; c.requiresCompaction = false; }
+      this.observeVerification(g, c, m, state, observationTurn);
       if (observationOnly) return; // Ancestor observation never consumes/reroutes notifications or dispatches work.
       if (state.active) this.notifyActivity(g, c, state.sequence);
       const events = await callTuiWorker(m, { operation: "events", afterSequence: c.notifiedSequence }, { timeoutMs: 1000 });
@@ -383,13 +475,18 @@ export class TuiNativeManager {
           }
           if (event.kind === "running" && event.sequence > state.sequence) {
             c.state = "running"; c.runSequence = event.sequence; c.lastOutcome = undefined; c.report = undefined; c.requiresCompaction = false;
+            this.invalidateVerification(c, "interrupted", "New worker activity superseded verification observation");
             this.notifyActivity(g, c, event.sequence);
           }
           if (event.kind === "notification" || event.kind === "outcome") {
             const artifact = event.data?.artifact;
             if (typeof artifact === "string" && artifact.startsWith(`${c.directory}/`)) {
               const data = readPrivateJson(artifact) as any;
-              if (event.kind === "outcome" && event.sequence > state.sequence) c.lastOutcome = data;
+              if (event.kind === "outcome" && event.sequence > state.sequence) {
+                c.lastOutcome = data;
+                this.invalidateVerification(c, "interrupted", "New worker report superseded verification observation");
+              }
+              if (event.kind === "outcome" && c.spec.verification?.length) { c.notifiedSequence = Math.max(c.notifiedSequence, event.sequence); continue; }
               const update: QuietUpdate = event.kind === "outcome"
                 ? { kind: "subagent", id: `${g.id}:${c.childId}:${event.sequence}`, child_id: c.childId, state: data.state,
                     outcomes: [{ child: g.children.indexOf(c) + 1, task_id: c.taskId, attempt: c.attempt ?? 1, state: data.state }], through_sequence: event.sequence }
@@ -406,6 +503,7 @@ export class TuiNativeManager {
       // Recover committed launch after parent death before the initial receipt.
       if (!c.started && state.readyForPrompts && !g.cancelled) await this.startPrompt(g, c, m);
     } catch (error) {
+      this.invalidateVerification(c, "unavailable", "Fresh worker verification observation failed; retained evidence is historical");
       try {
         if ((await this.tmux.inspect(m)).dead && active(c)) { c.state = "lost"; c.error = "Pi exited before reporting settlement"; }
       } catch { c.error = `Worker unavailable: ${String(error).slice(0, 300)}`; }
@@ -467,7 +565,12 @@ export class TuiNativeManager {
             if (g.mode === "chain" && index > 0) {
               const prior = g.children[index - 1];
               if (active(prior)) break;
-              if (prior.state !== "completed") { c.state = "skipped"; continue; }
+              if (prior.spec.verification?.length) {
+                let priorManifest: TuiWorkerManifest | undefined;
+                try { priorManifest = this.manifest(prior); } catch { this.invalidateVerification(prior, "unavailable", "Prior worker manifest unavailable"); }
+                this.currentVerification(prior, priorManifest);
+              }
+              if (prior.state !== "completed" || prior.spec.verification?.length && (prior.verification as any)?.status !== "passed") { c.state = "skipped"; continue; }
             }
             c.state = "launching"; this.save(g);
             try {
@@ -481,7 +584,7 @@ export class TuiNativeManager {
                 windowName: g.windowName ?? subagentTmuxName(g.children[0].spec.task, g.children[0].spec.name),
                 paneTitle: subagentTmuxName(c.spec.task, c.spec.name),
                 parentDisposition: this.disposition(), launcher: g.launcher, launchMode: g.launchMode,
-                model: this.resolveRoleModel(c.spec.model), routingEnvironment: this.routingEnvironment(), tools: c.spec.tools, systemPrompt: c.spec.systemPrompt, acceptance: c.spec.acceptance, resumeSessionFile: c.resumeSessionFile,
+                model: this.resolveRoleModel(c.spec.model), routingEnvironment: this.routingEnvironment(), tools: c.spec.tools, systemPrompt: c.spec.systemPrompt, acceptance: c.spec.acceptance, verification: c.spec.verification, resumeSessionFile: c.resumeSessionFile,
                 operatorCapabilityHash: createHash("sha256").update(c.operatorCapability).digest("hex") });
               await this.tmux.waitReady(manifest);
               await this.startPrompt(g, c, manifest);
@@ -501,6 +604,12 @@ export class TuiNativeManager {
   }
   private notifyTerminal(g: Group, c: Child): void {
     if (active(c) || c.reaped) return;
+    if (c.spec?.verification?.length) {
+      let manifest: TuiWorkerManifest | undefined;
+      try { manifest = this.manifest(c); } catch { this.invalidateVerification(c, "unavailable", "Worker manifest unavailable at terminal notification"); }
+      this.currentVerification(c, manifest);
+    }
+    const notificationState = c.state === "completed" && c.spec?.verification?.length && (c.verification as any)?.status !== "passed" ? "failed" : c.state;
     const token = terminalToken(c);
     if (c.terminalNotification === token) return;
     // Foreground callers receive their result directly. Persist the baseline
@@ -508,7 +617,7 @@ export class TuiNativeManager {
     if (!g.background) { c.terminalNotification = token; return; }
     const identity = createHash("sha256").update(token).digest("hex").slice(0, 24);
     if (this.notify?.({ kind: "subagent", id: `${g.id}:${c.childId}:terminal:${identity}`,
-      job_id: g.id, child_id: c.childId, state: c.state, completion: true,
+      job_id: g.id, child_id: c.childId, state: notificationState, completion: true,
       through_sequence: Number(c.report?.match(/report-(\d+)-[a-f0-9]{16}\.json$/)?.[1]) || c.runSequence || 0 })) c.terminalNotification = token;
   }
   async launch(params: any, owner: string, cwd: string, signal?: AbortSignal, update?: (value: any) => void,
@@ -520,7 +629,7 @@ export class TuiNativeManager {
       if (s.systemPrompt !== undefined && (typeof s.systemPrompt !== "string" || Buffer.byteLength(s.systemPrompt) > 64 * 1024)) throw new Error("Invalid system prompt");
       if (s.model !== undefined && (typeof s.model !== "string" || Buffer.byteLength(s.model) > 512)) throw new Error("Invalid model");
       if (s.tools !== undefined && (!Array.isArray(s.tools) || s.tools.length > 64 || s.tools.some((tool: any) => typeof tool !== "string" || !/^[a-zA-Z0-9_-]{1,128}$/.test(tool)))) throw new Error("Invalid tool selection");
-      return { name: validateSubagentName(s.name), task: s.task, cwd: resolve(s.cwd ?? cwd), model: s.model, tools: s.tools, systemPrompt: s.systemPrompt, acceptance: validateAcceptance(s.acceptance), worktree: worktreeOption(s.worktree) };
+      return { name: validateSubagentName(s.name), task: s.task, cwd: resolve(s.cwd ?? cwd), model: s.model, tools: s.tools, systemPrompt: s.systemPrompt, acceptance: validateAcceptance(s.acceptance), ...(s.verification !== undefined ? { verification: validateVerification(s.verification) } : {}), worktree: worktreeOption(s.worktree) };
     });
     if (specs.length > 8) throw new Error("At most eight subagent children are allowed");
     if (signal?.aborted || this.closed || this.reapReserved) throw new Error("Subagent launch cancelled or cleanup reserved");
@@ -561,7 +670,7 @@ export class TuiNativeManager {
         await pause(200);
       }
       return response(this.text(g, !g.background), { operation: g.background ? "start" : "result", job_id: g.id, group: this.publicGroup(g),
-        failed: !g.background && g.children.some(child => ["failed", "lost"].includes(child.state)) });
+        failed: !g.background && g.children.some(child => ["failed", "lost"].includes(child.state) || child.spec.verification?.length && (child.verification as any)?.status !== "passed") });
     } finally { signal?.removeEventListener("abort", abortForeground); this.foregroundWaits.delete(g.id); }
   }
   private async cancelGroup(g: Group) {
@@ -841,7 +950,12 @@ export class TuiNativeManager {
         if (!c || active(c) || !c.report) return response("Descendant result not ready.", { operation: op, job_id: descendant.id });
         const bytes = Buffer.from(messageText((readPrivateJson(c.report) as any).assistant));
         const offset = params.offset ?? 0, limit = params.limit ?? 48 * 1024;
+        let manifest: TuiWorkerManifest | undefined;
+        try { manifest = this.manifest(c); } catch { this.invalidateVerification(c, "unavailable", "Descendant worker manifest unavailable"); }
+        this.currentVerification(c, manifest);
         return response(bytes.subarray(offset, offset + limit).toString("utf8"), { operation: op, job_id: descendant.id, child_id: c.childId,
+          verification: c.verification ?? { status: c.spec.verification?.length ? "unavailable" : "not-configured" }, historical_verification: c.historicalVerification,
+          accepted_delivery: c.acceptedDelivery === true, failed: !!c.spec.verification?.length && (c.verification as any)?.status !== "passed",
           descendant: true, artifact: c.report, offset, next_offset: Math.min(bytes.length, offset + limit), complete: offset + limit >= bytes.length });
       }
       return response(this.text(descendant, op === "output"), { operation: op, job_id: descendant.id, descendant: true, group: this.publicGroup(descendant) });
@@ -860,12 +974,14 @@ export class TuiNativeManager {
     if (op === "result" && selected) {
       child ??= selected.children[(params.child ?? 1) - 1];
       if (!child) return response("Unknown child result.", { operation: op, job_id: selected.id });
+      this.invalidateVerification(child, child.reaped ? "interrupted" : "unavailable", "Fresh result verification observation required; cached evidence is historical");
       if (signal?.aborted) throw new Error("Result observation cancelled");
       // Observe a bounded selected-child status without mutating shared state
       // or waiting for the manager refresh queue. Never return an old report
       // while the worker reports an active turn.
       if (!child.reaped) {
-        const manifest = this.manifest(child);
+        let manifest: TuiWorkerManifest | undefined;
+        try { manifest = this.manifest(child); } catch { this.invalidateVerification(child, "unavailable", "Result worker manifest unavailable"); }
         let status;
         if (manifest) {
           try { status = await callTuiWorker(manifest, { operation: "status" }, { timeoutMs: 1000, signal }); }
@@ -893,6 +1009,8 @@ export class TuiNativeManager {
             : artifact.assistant?.stopReason === "toolUse" && snapshot.readyForPrompts === false ? "Worker command authority unavailable"
             : artifact.assistant?.stopReason === "error" ? "Worker reported an error" : undefined;
           child.state = child.error ? "failed" : artifact.assistant?.stopReason === "aborted" ? "cancelled" : "completed";
+          this.observeVerification(selected, child, manifest!, snapshot);
+          this.currentVerification(child, manifest);
         }
       }
     } else await this.refresh(owner);
@@ -977,13 +1095,18 @@ export class TuiNativeManager {
       const c = child ?? g.children[(params.child ?? 1) - 1];
       if (!c?.report) return response("Result not ready. Use wait.", { operation: op, job_id: g.id });
       const raw = readPrivateJson(c.report) as any;
-      const text = params.diagnostics ? JSON.stringify(raw, null, 2)
-        : [retainedResult ? "Worker status unavailable; retained result may be stale." : "", c.error ? `Worker failed: ${c.error}` : "", messageText(raw.assistant)].filter(Boolean).join("\n\n");
+      if (retainedResult || c.reaped) this.invalidateVerification(c, c.reaped ? "interrupted" : "unavailable", "Fresh result observation unavailable; retained evidence is historical only");
+      let manifest: TuiWorkerManifest | undefined;
+      try { manifest = this.manifest(c); } catch { this.invalidateVerification(c, "unavailable", "Result worker manifest unavailable"); }
+      this.currentVerification(c, manifest);
+      const text = params.diagnostics ? JSON.stringify({ ...raw, current_verification: c.verification ?? { status: c.spec.verification?.length ? "unavailable" : "not-configured" },
+          accepted_delivery: c.acceptedDelivery === true, runtime_verification_is_historical: true }, null, 2)
+        : [retainedResult ? "Worker status unavailable; retained result may be stale." : "", c.error ? `Worker failed: ${c.error}` : "", c.spec.verification?.length && (c.verification as any)?.status !== "passed" ? `Current runtime verification ${(c.verification as any)?.status ?? "unavailable"}; retained command evidence is historical, accepted_delivery=false.` : "", messageText(raw.assistant)].filter(Boolean).join("\n\n");
       const bytes = Buffer.from(text), offset = params.offset ?? 0, limit = params.limit ?? 48 * 1024;
       return response(bytes.subarray(offset, offset + limit).toString("utf8"), { operation: op, job_id: g.id, child_id: c.childId,
-        artifact: c.report, retained: retainedResult, terminal_id: createHash("sha256").update(terminalToken(c)).digest("hex").slice(0, 24),
+        artifact: c.report, retained: retainedResult, failed: !!c.spec.verification?.length && (c.verification as any)?.status !== "passed", terminal_id: createHash("sha256").update(terminalToken(c)).digest("hex").slice(0, 24),
         report_sequence: Number(c.report.match(/report-(\d+)-[a-f0-9]{16}\.json$/)?.[1]) || c.runSequence || 0,
-        offset, next_offset: Math.min(bytes.length, offset + limit), complete: offset + limit >= bytes.length, task_outcome: c.lastOutcome });
+        offset, next_offset: Math.min(bytes.length, offset + limit), complete: offset + limit >= bytes.length, task_outcome: c.lastOutcome, historical_verification: c.historicalVerification, verification: c.verification ?? { status: c.spec.verification?.length ? "unavailable" : "not-configured" }, accepted_delivery: c.acceptedDelivery === true, review: "not-configured" });
     }
     return response(this.text(g, op === "output"), { operation: op, job_id: g.id, group: this.publicGroup(g) });
   }

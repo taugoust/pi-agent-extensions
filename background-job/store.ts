@@ -74,8 +74,9 @@ function iso(value: unknown, label: string): string {
 
 export function parseMetadata(value: unknown): JobMetadata {
   const data = object(value, "job metadata");
-  exactKeys(data, ["schemaVersion", "id", "command", "cwd", "shell", "createdAt", "ownerPid"], ["name", "sessionId", "childId", "observed", "infrastructure", "pane", "ownerToken"]);
+  exactKeys(data, ["schemaVersion", "id", "command", "cwd", "shell", "createdAt", "ownerPid"], ["name", "sessionId", "childId", "observed", "infrastructure", "verification", "pane", "ownerToken"]);
   if (data.schemaVersion !== JOB_SCHEMA_VERSION) throw new Error("unsupported job metadata schema");
+  if (data.verification !== undefined && data.verification !== true) throw new Error("invalid verification job marker");
   const id = string(data.id, "job id", 64);
   if (!JOB_ID_PATTERN.test(id)) throw new Error("invalid job id");
   return {
@@ -93,6 +94,7 @@ export function parseMetadata(value: unknown): JobMetadata {
     ...(data.childId === undefined ? {} : { childId: string(data.childId, "child id", 128) }),
     ...(data.observed === undefined ? {} : { observed: parseObserved(data.observed) }),
     ...(data.infrastructure === true ? { infrastructure: true } : {}),
+    ...(data.verification === true ? { verification: true as const } : {}),
   };
 }
 

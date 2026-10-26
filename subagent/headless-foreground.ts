@@ -12,6 +12,7 @@ import { processIdentity, processIsAlive, tuiWorkerLaunchContract } from "./tui-
 import { TuiWorkerStore, atomicPrivateJson, privateDirectory, readPrivateJson } from "./tui-worker-store.ts";
 import { callTuiWorker, applyTuiWorkerOperatorMode } from "./tui-worker-client.ts";
 import { validateAcceptance } from "./outcome.ts";
+import { validateVerification } from "./acceptance.ts";
 import { readRetainedConversation, validateRetainedConversationFile } from "./retained-conversation.ts";
 import { validateSubagentName } from "./tui-names.ts";
 import type { QuietUpdate } from "../shared/quiet-state.ts";
@@ -30,7 +31,7 @@ const MAX_HISTORY_MESSAGES = 100;
 const MAX_MESSAGE_TEXT = 4 * 1024;
 const stripControls = (text: string) => text.replace(/\x1b\][\s\S]*?(?:\x07|\x1b\\)/g, "").replace(/(?:\x1b\[|\x9b)[0-?]*[ -/]*[@-~]/g, "").replace(/[\x00-\x08\x0b-\x1f\x7f-\x9f]/g, "");
 
-type Spec = { name?: string; task: string; cwd: string; model?: string; tools?: string[]; systemPrompt?: string; acceptance?: string[]; worktree?: WorktreeOption; worktreeInfo?: { path: string; branch: string; baseCommit: string; includedChanges: boolean } };
+type Spec = { name?: string; task: string; cwd: string; model?: string; tools?: string[]; systemPrompt?: string; acceptance?: string[]; verification?: import("./acceptance.ts").VerificationGate[]; worktree?: WorktreeOption; worktreeInfo?: { path: string; branch: string; baseCommit: string; includedChanges: boolean } };
 type Child = { taskId: string; childId: string; attempt: number; directory: string; spec: Spec; status: ForegroundTask["status"]; createdAt: string; updatedAt: string; started: boolean; launching?: boolean; reaped?: boolean; report?: string; outcome?: unknown; error?: string; workerAlive?: boolean; requiresCompaction?: boolean; notifiedSequence?: number; launcherPid?: number; launcherToken?: string; ownerToken: string; operatorCapability: string; resumeMessage?: string; compactBeforePrompt?: boolean; stopRequested?: boolean; initialPromptDispatching?: boolean; };
 type Group = { version: 1; id: string; owner: string; ownerToken: string; createdAt: string; mode: "single" | "parallel" | "chain"; cancelled: boolean; launchMode: "none" | "guard-only"; launcher: string; children: Child[] };
 type Disposition = "native" | "guard-only" | "full" | "unavailable";
@@ -306,7 +307,7 @@ export class HeadlessForegroundManager {
       childId: child.childId, attempt: child.attempt, workerEpoch, controlSocket, controlToken: randomBytes(32).toString("hex"),
       operatorCapabilityHash: contract.launchMode === "guard-only" ? createHash("sha256").update(capability).digest("hex") : undefined,
       launchMode: contract.launchMode, foregroundOwner: { pid: process.pid, token: this.ownerToken! }, acceptance: child.spec.acceptance ?? [],
-      tools: child.spec.tools, sessionFile, presentation: "headless-foreground", execution: "rpc-headless", processPid: childProc.pid,
+      tools: child.spec.tools, verification: child.spec.verification, sessionFile, presentation: "headless-foreground", execution: "rpc-headless", processPid: childProc.pid,
       processToken, fifoPath };
     store.writeManifest(manifest);
     child.launching = false;
@@ -445,6 +446,9 @@ export class HeadlessForegroundManager {
         else if (report.assistant?.stopReason === "error") { nextError = "Worker reported an error"; nextStatus = "failed"; }
         else if (report.assistant?.stopReason === "aborted" || group.cancelled) nextStatus = "cancelled";
       }
+      if (!state.active && state.lastReport && child.spec.verification?.length && state.verification?.status !== "passed") {
+        nextStatus = "failed"; nextError = `Runtime verification ${state.verification?.status ?? "unavailable"}; accepted delivery blocked`;
+      }
       const outcomePath = this.artifactPath(child, state.lastOutcome, "outcome");
       const outcome = outcomePath ? readPrivateJson(outcomePath) : undefined;
       const report = reportPath ? readPrivateJson(reportPath) as any : undefined;
@@ -482,6 +486,7 @@ export class HeadlessForegroundManager {
             const report = reportPath ? readPrivateJson(reportPath) as any : undefined;
             child.error = typeof report?.error === "string" ? report.error
               : report?.assistant?.stopReason === "error" ? "Worker reported an error" : undefined;
+            if (child.spec.verification?.length) child.error = "Runtime verification unavailable in headless execution; accepted delivery blocked";
             child.status = report?.assistant?.stopReason === "aborted" || group.cancelled ? "cancelled"
               : child.error ? "failed" : reportPath ? "completed" : "lost";
             child.requiresCompaction = Number.isFinite(report?.contextTokens) && Number.isFinite(report?.contextWindow)
@@ -513,7 +518,7 @@ export class HeadlessForegroundManager {
       const unavailable = (spec.tools ?? []).filter((tool: string) => ["subagent", "background_job"].includes(tool));
       if (unavailable.length) throw new Error(`Headless foreground tasks cannot enable tmux/delegation tools: ${unavailable.join(", ")}`);
       return { name: validateSubagentName(spec.name), task: spec.task, cwd: resolve(spec.cwd ?? cwd), model: spec.model, tools: spec.tools,
-        systemPrompt: spec.systemPrompt, acceptance: validateAcceptance(spec.acceptance), worktree: worktreeOption(spec.worktree) };
+        systemPrompt: spec.systemPrompt, acceptance: validateAcceptance(spec.acceptance), ...(spec.verification !== undefined ? { verification: validateVerification(spec.verification) } : {}), worktree: worktreeOption(spec.worktree) };
     });
     if (specs.length > 8) throw new Error("At most eight subagent children are allowed");
     if (!this.ready()) throw new Error("Parent AgentSH authority is not active; refusing headless worker launch");
@@ -598,7 +603,7 @@ export class HeadlessForegroundManager {
     } catch { return ""; }
   }
   private result(group: Group, selected?: Child, options: { operation?: string; offset?: number; limit?: number; diagnostics?: boolean; retained?: boolean } = {}): any {
-    const children = group.children.map((child, index) => ({ child: index + 1, child_id: child.childId, task_id: child.taskId, status: child.status, attempt: child.attempt, task: child.spec.task.slice(0, 500), cwd: child.spec.cwd, worktree: child.spec.worktreeInfo, error: child.error, task_outcome: child.outcome }));
+    const children = group.children.map((child, index) => ({ child: index + 1, child_id: child.childId, task_id: child.taskId, status: child.status, attempt: child.attempt, task: child.spec.task.slice(0, 500), cwd: child.spec.cwd, worktree: child.spec.worktreeInfo, error: child.error, task_outcome: child.outcome, verification: { status: child.spec.verification?.length ? "unavailable" : "not-configured" }, accepted_delivery: !child.spec.verification?.length && child.status === "completed" && (child.outcome as any)?.state === "delivered", review: "not-configured" }));
     const failed = group.children.some(child => ["failed", "lost"].includes(child.status));
     const operation = options.operation ?? "result";
     const cancelled = group.cancelled || group.children.some(child => child.status === "cancelled");

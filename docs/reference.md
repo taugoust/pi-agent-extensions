@@ -1228,8 +1228,22 @@ work; incomplete states require a next action. Reports remain explicitly
 **model-reported, not independently verified**. A clean exit without a report is
 `unreported`, not a delivery assertion. Full outcome/evidence data accompanies the
 retained result artifact; compact `task_outcomes` are persisted and exposed by
-status/result operations. Existing execution statuses and failure semantics remain
-unchanged.
+status/result operations. Without configured runtime verification, existing
+execution statuses and failure semantics remain unchanged.
+
+Optional `verification` command gates are separate from the mandatory criteria
+and worker reports. Native TUI workers run them through their own supervised jobs
+and live command permissions in the actual worker cwd/worktree; read-only tools
+never gain command authority. All configured gates must pass before
+`accepted_delivery` can be true. Nonzero exit, timeout, cancellation, unavailable
+backend/permission, invalid or truncated typed JSON, a rejected configured
+business verdict, stale workspace identity, or cleanup failure blocks acceptance.
+Unconfigured checks remain `not-configured`, never passed. Runtime success does
+not imply independent review. Full AgentSH/legacy execution rejects configured
+gates; headless helpers currently record Unavailable because they have no job
+placement. No direct host-shell fallback occurs. See [Runtime verification](subagent-verification.md)
+for the gate API, schema subset, literal evidence retrieval, identity limits,
+restart/cleanup contract and offline controls.
 
 Linux native workers (TUI and headless foreground) may automatically continue
 **once per worker assignment** before publishing completion. An eligible

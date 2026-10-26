@@ -3,12 +3,15 @@ import { chmodSync, lstatSync, openSync, closeSync, unlinkSync, writeFileSync } 
 import { createHash, randomBytes, timingSafeEqual } from "node:crypto";
 import { decodeTuiWorkerRequest, TUI_WORKER_MAX_FRAME_BYTES } from "../shared/tui-worker-protocol.ts";
 import type { TuiWorkerEvent, TuiWorkerManifest, TuiWorkerRequest, TuiWorkerResponse } from "../shared/tui-worker-protocol.ts";
-import { TuiWorkerStore } from "./tui-worker-store.ts";
+import { TuiWorkerStore, readPrivateJson } from "./tui-worker-store.ts";
 import { readTaskOutcome } from "./outcome.ts";
+import { validateVerification, initialVerification, currentVerification, runVerification, recoverVerification, verificationSummary, type VerificationIdentity, type VerificationJobs } from "./acceptance.ts";
 import type { WorkerState } from "./tui-worker-store.ts";
 
 export type TuiWorkerAdapter = {
   isIdle(): boolean;
+  verificationCwd?(): string;
+  verificationJobs?(): VerificationJobs | undefined;
   canRun?(): boolean;
   permissionMode?(): boolean | undefined;
   send(message: string, mode: "steer" | "follow_up", source?: "parent" | "user"): void;
@@ -50,12 +53,39 @@ export class TuiWorkerServer {
   private idleDecisionHistory = new Map<string, { model: string; idleMinutes: number; contextPercent: number }>();
   private currentLiveText = "";
   private interruptTimeoutMs: number;
+  private verificationAbort?: AbortController;
+  private verificationFlight?: Promise<void>;
+  private verificationGeneration = 0;
   constructor(store: TuiWorkerStore, adapter: TuiWorkerAdapter, interruptTimeoutMs = 5000) {
     this.interruptTimeoutMs = interruptTimeoutMs;
     this.store = store;
     this.adapter = adapter;
     this.manifest = store.readManifest();
     this.state = store.readState(true);
+    if (this.manifest.verification?.length) {
+      const prior = this.state.verification;
+      this.state.verification = currentVerification(prior, this.verificationIdentity(), this.manifest.verification);
+      if (prior && (!this.state.verification.runs.length && prior.runs.length)) {
+        this.state.verificationQuarantine = this.store.report(this.state.sequence + 1, { untrustedRuntimeVerification: prior,
+          error: "Verification identity/contract changed; retained for inspection only, never authorizes command replay or job cleanup" });
+      }
+      // Restart never replays a command. Existing owned jobs remain visible to ordinary cleanup.
+      if (this.state.verification.status !== "checking") {
+        this.state.active = false;
+        if (this.state.verificationReport && !this.state.lastReport) { this.state.lastReport = this.state.verificationReport; this.state.phase = "settled"; }
+      }
+      this.persist();
+    }
+  }
+  private verificationIdentity(): VerificationIdentity {
+    const m = this.manifest;
+    return { ownerSessionId: m.ownerSessionId, taskId: m.taskId, childId: m.childId, attempt: m.attempt,
+      workerEpoch: m.workerEpoch, runtimeId: m.runtimeId, cwd: this.adapter.verificationCwd?.() ?? process.cwd() };
+  }
+  private verificationSnapshot() {
+    const gates = validateVerification(this.manifest.verification);
+    const record = this.verificationFlight && this.state.verification ? this.state.verification : currentVerification(this.state.verification, this.verificationIdentity(), gates);
+    return verificationSummary(record);
   }
   get sealed(): boolean { return this.state.sealed || this.closing || this.failed; }
   private persist(): void {
@@ -77,12 +107,16 @@ export class TuiWorkerServer {
   running(newTurn = false): boolean {
     if (this.preparingReap) { this.reapInterrupted = true; void this.adapter.abort(); return false; }
     if (this.sealed) { void this.adapter.abort(); return false; }
+    this.verificationAbort?.abort();
+    this.verificationGeneration++;
+    if (this.manifest.verification?.length && !this.verificationFlight) this.state.verification = initialVerification(this.verificationIdentity(), this.manifest.verification);
     this.activityGeneration++;
     this.runningGeneration++;
     for (const check of this.idleWaiters) check();
     if (newTurn || this.state.phase !== "running") {
       this.state.lastOutcome = undefined;
       this.state.lastReport = undefined;
+      this.state.verificationReport = undefined;
     }
     this.state.active = true;
     this.state.phase = "running";
@@ -92,6 +126,31 @@ export class TuiWorkerServer {
   settled(report: unknown): void {
     if (this.closing || this.failed || this.preparingReap || !this.adapter.isIdle()
       || this.state.phase === "settled" && !this.state.active) return;
+    if (this.manifest.verification?.length && !this.verificationFlight) {
+      this.state.active = true;
+      this.state.verification = initialVerification(this.verificationIdentity(), this.manifest.verification);
+      this.state.verificationReport = this.store.report(this.state.sequence + 1, report);
+      const record = this.state.verification, generation = ++this.verificationGeneration;
+      this.verificationAbort = new AbortController();
+      this.persist();
+      const flight = runVerification(record, this.manifest.verification, this.adapter.verificationJobs?.(), () => this.persist(), this.verificationAbort.signal)
+        .catch(error => { record.status = "unavailable"; if (record.runs.at(-1)) record.runs.at(-1)!.error = String(error); this.persist(); })
+        .then(() => {
+          if (generation !== this.verificationGeneration || this.closing || this.failed) return;
+          this.state.active = false;
+          this.state.lastReport = this.store.report(this.state.sequence + 1, { ...(report as object), runtimeVerification: record });
+          this.state.phase = "settled";
+          this.event("settled", { report: this.state.lastReport, verification: record.status });
+          for (const check of this.idleWaiters) check();
+        }).finally(() => { if (this.verificationFlight === flight) this.verificationFlight = undefined; });
+      this.verificationFlight = flight;
+      return;
+    }
+    if (this.verificationFlight) {
+      const generation = this.verificationGeneration;
+      void this.verificationFlight.then(() => { if (generation === this.verificationGeneration) this.settled(report); });
+      return;
+    }
     this.activityGeneration++;
     this.state.lastReport = this.store.report(this.state.sequence + 1, report);
     this.state.active = false;
@@ -159,7 +218,10 @@ export class TuiWorkerServer {
   outcome(data: unknown): void {
     const artifact = this.store.artifact("outcome", this.state.sequence + 1, data);
     this.state.lastOutcome = artifact;
-    this.event("outcome", { artifact });
+    // This is model-reported evidence, not runtime acceptance. Do not wake a terminal
+    // delivery receipt before configured verification has settled.
+    if (this.manifest.verification?.length) this.persist();
+    else this.event("outcome", { artifact });
   }
   /** An external intervention closes this assignment's automatic-continuation window. */
   inhibitAutoContinuation(): void {
@@ -180,7 +242,19 @@ export class TuiWorkerServer {
     this.persist();
     return "One automatic continuation of the same assignment. Continue only the routine remaining work already authorized by the original task and acceptance criteria. No additional authority is granted. Stop and report blocked if external input, permissions, safety decisions or scope changes are needed. This budget is now exhausted; report an updated task_outcome before returning. Recorded next action (model-reported): " + outcome.next_action;
   }
+  private successfulSettlement(): boolean {
+    try {
+      if (!this.state.lastReport) return false;
+      const report = readPrivateJson(this.state.lastReport) as any;
+      return !!report && !report.error && !["error", "aborted"].includes(report.assistant?.stopReason);
+    } catch { return false; }
+  }
+  private deliveredClaim(): boolean {
+    try { return !!this.state.lastOutcome && readTaskOutcome(this.state.lastOutcome, this.manifest.acceptance ?? [])?.state === "delivered"; }
+    catch { return false; }
+  }
   private snapshot() {
+    const verification = this.verificationSnapshot();
     return { ownerSessionId: this.manifest.ownerSessionId, taskId: this.manifest.taskId, runtimeId: this.manifest.runtimeId,
       groupId: this.manifest.groupId, childId: this.manifest.childId, attempt: this.manifest.attempt,
       workerEpoch: this.manifest.workerEpoch, active: this.state.active || !this.adapter.isIdle() || this.idleDecisions.size > 0, sealed: this.sealed, phase: this.state.phase,
@@ -192,8 +266,13 @@ export class TuiWorkerServer {
         const pending = this.state.events.findLast(event => event.kind === "idle_decision_pending" && (event.data as any)?.requestId === requestId);
         return { ...this.idleDecisionHistory.get(requestId), ...pending?.data as object, requestId, workerEpoch: this.manifest.workerEpoch };
       }).at(-1), liveText: this.currentLiveText,
+      worker_finished: this.adapter.isIdle(), worker_reported_acceptance: this.state.lastOutcome,
+      verification, verification_quarantine: this.state.verificationQuarantine,
+      accepted_delivery: this.state.phase === "settled" && !this.state.active && (!this.manifest.verification?.length || verification?.status === "passed")
+        && this.successfulSettlement() && this.deliveredClaim(),
+      review: "not-configured",
       recursiveCleanup: this.adapter.recursiveCleanup === true,
-      readyForPrompts: !this.sealed && !this.preparingReap && this.idleDecisions.size === 0 && (this.adapter.canRun?.() ?? true), permissionPromptsEnabled: this.adapter.permissionMode?.() };
+      readyForPrompts: !this.verificationFlight && !this.sealed && !this.preparingReap && this.idleDecisions.size === 0 && (this.adapter.canRun?.() ?? true), permissionPromptsEnabled: this.adapter.permissionMode?.() };
   }
   private authenticated(r: TuiWorkerRequest): boolean {
     const expected = Buffer.from(this.manifest.controlToken);
@@ -256,6 +335,8 @@ export class TuiWorkerServer {
         || old.ownershipNonce !== next.ownershipNonce) return fail("invalid", "Promotion must preserve server and owned pane");
     }
     if (mutation && Object.keys(this.state.receipts).length >= 4096) return fail("unavailable", "Worker receipt capacity exhausted");
+    if (r.operation === "prepare_reap" && this.state.verification?.runs.some(run => !["cleaned", "not-dispatched"].includes(run.dispatchState ?? "") && (run.jobId || run.dispatchId)))
+      return fail("verification_cleanup_incomplete", "Unresolved verification dispatch/evidence blocks recursive reap; recover the supervised job output before removing its worker");
     if (r.operation === "prepare_reap") return await this.prepareReap(r, receiptKey, digest);
     // Persist intent before side effects. A lost post-dispatch write is explicitly ambiguous.
     this.state.receipts[receiptKey] = { digest };
@@ -332,6 +413,8 @@ export class TuiWorkerServer {
       }
       case "cancel":
         this.inhibitAutoContinuation();
+        this.verificationAbort?.abort();
+        if (this.verificationFlight) await this.verificationFlight;
         this.cancelPendingIdleDecisions(new Error("Worker cancelled by parent"));
         await this.adapter.clearQueue?.();
         await this.adapter.abort();
@@ -573,6 +656,24 @@ export class TuiWorkerServer {
     try { writeFileSync(fd, JSON.stringify({ pid: process.pid, epoch: this.manifest.workerEpoch })); }
     finally { closeSync(fd); }
     this.lockHeld = true;
+    if (this.state.verification) {
+      try {
+        await recoverVerification(this.state.verification, this.adapter.verificationJobs?.(), () => this.persist());
+        const pending = this.state.verificationReport;
+        if (pending) {
+          const prefix = `${this.store.directory}/`;
+          if (!pending.startsWith(prefix) || !/^report-[0-9]+-[a-f0-9]{16}\.json$/.test(pending.slice(prefix.length))) throw new Error("Invalid retained verification report path");
+          const original = readPrivateJson(pending) as object;
+          if (this.state.lastReport && (!this.state.lastReport.startsWith(prefix) || !/^report-[0-9]+-[a-f0-9]{16}\.json$/.test(this.state.lastReport.slice(prefix.length)))) throw new Error("Invalid prior verification report path");
+          const prior = this.state.lastReport ? readPrivateJson(this.state.lastReport) as any : undefined;
+          if (JSON.stringify(prior?.runtimeVerification) !== JSON.stringify(this.state.verification)) {
+            this.state.lastReport = this.store.report(this.state.sequence + 1, { ...original, runtimeVerification: this.state.verification });
+            this.persist();
+          }
+        }
+      }
+      catch { this.state.verification.status = "unavailable"; this.persist(); }
+    }
     this.server = net.createServer(socket => {
       if (this.sockets.size >= 32 || this.closing) { socket.destroy(); return; }
       this.sockets.add(socket);
@@ -624,6 +725,8 @@ export class TuiWorkerServer {
   async close(): Promise<void> {
     if (this.closing) return;
     this.closing = true;
+    this.verificationAbort?.abort();
+    if (this.verificationFlight) await this.verificationFlight.catch(() => undefined);
     for (const check of this.idleWaiters) check();
     for (const [id, waiter] of this.idleDecisions) {
       this.idleDecisionHistory.delete(id);

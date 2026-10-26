@@ -179,6 +179,9 @@ pkgs.runCommand "subagent-check"
       export PI_TUI_ROOT_MODE=${if tuiWorkerLauncher != null then "guard-only" else "none"}
     ''}
     node --experimental-strip-types --test \
+      "$workdir/tui-runtime/subagent/acceptance.test.ts" \
+      "$workdir/tui-runtime/subagent/acceptance-adversarial.test.ts" \
+      "$workdir/tui-runtime/subagent/acceptance-manager.test.ts" \
       "$workdir/tui-runtime/subagent/state-root.test.ts" \
       "$workdir/tui-runtime/subagent/tui-names.test.ts" \
       "$workdir/tui-runtime/subagent/group-wait.test.ts" \

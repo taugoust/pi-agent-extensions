@@ -26,6 +26,8 @@ export type JobMetadata = {
   sessionId?: string;
   childId?: string;
   infrastructure?: boolean;
+  /** Supervisor-only verification evidence: never expire on ordinary output retrieval. */
+  verification?: true;
   observed?: { pid: number; startToken: string; logPath: string; logDevice: number; logInode: number };
 };
 

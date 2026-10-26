@@ -46,6 +46,7 @@ type TuiWorkerManifestBase = {
   launchMode?: "guard-only" | "none";
   foregroundOwner?: { pid: number; token: string };
   acceptance?: string[];
+  verification?: import("../subagent/acceptance.ts").VerificationGate[];
   tools?: string[];
   sessionFile: string;
 };
