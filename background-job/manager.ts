@@ -416,7 +416,7 @@ export class BackgroundJobManager {
         try {
           privateDirectory(this.store.jobDir(id));
           const metadata = await this.store.readMetadata(id);
-          if (!owned(metadata)) continue;
+          if (metadata.id !== id || !owned(metadata)) continue;
           const record = await this.get(id, false);
           const current = await this.store.readMetadata(id);
           if (owned(record.metadata) && owned(current) && JSON.stringify(current) === JSON.stringify(metadata)

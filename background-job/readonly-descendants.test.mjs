@@ -43,6 +43,9 @@ try {
   const delegated = await job(4, 'owner-0', { childId: manifests[0].childId });
   const foreign = await job(5, 'foreign'), infra = await job(6, 'owner-3', { infrastructure: true });
   const forged = await job(7, 'owner-0', { childId: 'subagent-child-' + 'f'.repeat(24) });
+  const aliased = await job(8, 'owner-0');
+  const aliasMetadata = await store.readMetadata(aliased);
+  await writeFile(store.path(aliased, 'metadata.json'), JSON.stringify({ ...aliasMetadata, id: direct }), { mode: 0o600 });
   for (let n = 10; n < 66; n++) await job(n, 'owner-3');
   extension({ registerTool() {}, registerCommand() {}, sendMessage() {}, on(name, handler) { const previous = handlers.get(name); handlers.set(name, previous ? async (...args) => { await previous(...args); await handler(...args); } : handler); } });
   ctx = { cwd: root, hasUI: false, isIdle: () => true, sessionManager: { getSessionId: () => 'owner-0', getBranch: () => [] } };
@@ -60,7 +63,7 @@ try {
     assert.equal(all.find(item => item.jobId === id).fromSubagent, true);
     assert.match((await api.output({ sessionId: 'owner-0', jobId: id })).item.text, /owned-output/);
   }
-  for (const id of [foreign, infra, forged]) {
+  for (const id of [foreign, infra, forged, aliased]) {
     assert.ok(!all.some(item => item.jobId === id));
     await assert.rejects(api.output({ sessionId: 'owner-0', jobId: id }), /another owner/);
   }
