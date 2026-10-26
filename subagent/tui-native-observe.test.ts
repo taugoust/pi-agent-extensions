@@ -5,6 +5,7 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { TuiWorkerStore, atomicPrivateJson } from "./tui-worker-store.ts";
 import { TuiWorkerServer } from "./tui-worker-server.ts";
+import { TaskNameStore } from "./task-name-store.ts";
 import { TuiNativeManager } from "./tui-native.ts";
 
 test("read-only native task snapshot/report avoids refresh and excludes private artifact fields", async () => {
@@ -31,6 +32,17 @@ test("read-only native task snapshot/report avoids refresh and excludes private 
     assert.equal(tasks[0].runtimeId, "runtime-public");
     assert.equal(tasks[0].attempt, 2);
     assert.equal(tasks[0].lastUpdated, null);
+    const names = new TaskNameStore(directory, manifest);
+    names.claim("Parser Review");
+    assert.equal(manager.readonlyTaskList("parent")[0].title, "Parser Review");
+    names.rename("User Parser Name", 1, "paseo");
+    const renamedTasks = manager.readonlyTaskList("parent");
+    assert.equal(renamedTasks[0].title, "User Parser Name");
+    assert.equal(renamedTasks[0].taskId, tasks[0].taskId);
+    assert.equal(renamedTasks[0].runtimeId, tasks[0].runtimeId);
+    assert.equal(renamedTasks[0].attempt, 2);
+    new TaskNameStore(join(root, "workers", "new-attempt"), { ...manifest, attempt: 3, runtimeId: "new-runtime", workerEpoch: "new-epoch" }).claim("Do Not Replace");
+    assert.equal(manager.readonlyTaskList("parent")[0].title, "User Parser Name", "retained attempt shares stable canonical name");
     assert.equal(JSON.stringify(tasks).includes("controlToken"), false);
     const answer = manager.readonlyTaskReport("parent", manifest.taskId, 48 * 1024);
     assert.equal(answer.text, "Final answer 🌍");
@@ -133,6 +145,9 @@ test("native idle request notifies parent, appears in status, and resolves only 
   manager.owner = "parent"; manager.notify = (update: any) => (notifications.push(update), true); manager.groups.set(group.id, group);
   try {
     await worker.start();
+    const names = new TaskNameStore(directory, manifest);
+    names.claim("Original Review");
+    names.rename("Renamed Review", 1, "pi");
     const pending = worker.requestIdleDecision({ model: "provider/model", idleMinutes: 31, contextPercent: 86 });
     void pending.catch(() => undefined);
     await manager.observe(group, child, true);
@@ -141,6 +156,8 @@ test("native idle request notifies parent, appears in status, and resolves only 
     await manager.observe(group, child);
     const guidance = notifications.filter(item => item.requires_guidance === true);
     assert.equal(guidance.length, 1);
+    assert.equal(guidance[0].displayName, "Renamed Review");
+    assert.equal(manager.publicGroup(group).children[0].displayName, "Renamed Review");
     assert.match(guidance[0].message, /provider\/model.*31m.*86%/);
     assert.ok(guidance[0].message.includes(`worker_epoch=${manifest.workerEpoch}`));
     assert.equal(manager.publicGroup(group).children[0].idle_decision.model, "provider/model");

@@ -5,7 +5,8 @@ import { readdirSync, existsSync, readFileSync, writeFileSync, unlinkSync, openS
 import { join, resolve, basename } from "node:path";
 import { validateAcceptance } from "./outcome.ts";
 import { validateVerification, currentVerification, verificationSummary, verificationContract, workspaceIdentity, type VerificationGate } from "./acceptance.ts";
-import { subagentTmuxName, validateSubagentName } from "./tui-names.ts";
+import { TaskNameStore } from "./task-name-store.ts";
+import { subagentTmuxName, validateSubagentName, canonicalSubagentName, subagentTmuxAlias } from "./tui-names.ts";
 import { TuiWorkerTmux, tuiWorkerLaunchContract, processIdentity } from "./tui-worker-tmux.ts";
 import { TuiWorkerStore, privateDirectory, atomicPrivateJson, readPrivateJson } from "./tui-worker-store.ts";
 import { callTuiWorker, applyTuiWorkerOperatorMode } from "./tui-worker-client.ts";
@@ -18,14 +19,14 @@ import type { TuiWorkerManifest, TuiWorkerPlacement } from "../shared/tui-worker
 
 const id = (prefix: string) => `${prefix}-${randomBytes(12).toString("hex")}`;
 const pause = (ms: number) => new Promise(resolve => setTimeout(resolve, ms));
-type Spec = { name?: string; task: string; cwd: string; model?: string; tools?: string[]; systemPrompt?: string; acceptance?: string[]; verification?: VerificationGate[]; worktree?: WorktreeOption; worktreeInfo?: { path: string; branch: string; baseCommit: string; includedChanges: boolean } };
+type Spec = { name?: string; displayName?: string; tmuxAlias?: string; task: string; cwd: string; model?: string; tools?: string[]; systemPrompt?: string; acceptance?: string[]; verification?: VerificationGate[]; worktree?: WorktreeOption; worktreeInfo?: { path: string; branch: string; baseCommit: string; includedChanges: boolean } };
 type Child = { childId: string; taskId: string; attempt: number; directory: string; spec: Spec;
   resumeSessionFile?: string; resumeMessage?: string; compactBeforePrompt?: boolean;
   state: "pending" | "launching" | "running" | "completed" | "failed" | "cancelled" | "lost" | "skipped";
   operatorCapability: string; started: boolean; reaped?: boolean; error?: string; report?: string;
   verification?: unknown; historicalVerification?: unknown; acceptedDelivery?: boolean;
   notifiedSequence: number; needsAttention?: boolean; idleDecisionNotified?: string; runSequence?: number; pendingActivitySequence?: number; terminalNotification?: string; lastOutcome?: unknown; requiresCompaction?: boolean; };
-type Group = { windowName?: string; version: 1; id: string; owner: string; createdAt: string; mode: "single" | "parallel" | "chain";
+type Group = { windowName?: string; renameWindowWithFirstChild?: boolean; version: 1; id: string; owner: string; createdAt: string; mode: "single" | "parallel" | "chain";
   background: boolean; cancelled: boolean; children: Child[]; caller: TuiWorkerPlacement;
   parentOwnerToken: string;
   operatorEnabled: boolean; launcher: string; launchMode: "none" | "guard-only"; promotionPending?: boolean; };
@@ -167,6 +168,16 @@ export class TuiNativeManager {
       try { const lock = readPrivateJson(this.ownerLock) as any; if (lock.pid === process.pid && lock.token === this.processToken(process.pid)) unlinkSync(this.ownerLock); } catch {}
       this.ownerLock = undefined;
     }
+  }
+  private canonicalTitle(c: Child): string {
+    try {
+      const manifest = this.manifest(c);
+      if (manifest && manifest.ownerSessionId === this.owner) {
+        const record = new TaskNameStore(c.directory, manifest).read(false);
+        if (record) return record.displayName;
+      }
+    } catch { /* Invalid metadata cannot authorize a title or navigation. */ }
+    return c.spec?.displayName ?? canonicalSubagentName(c.spec?.task ?? "Worker", undefined, c.spec?.name);
   }
   private manifest(c: Child): TuiWorkerManifest | undefined {
     try {
@@ -369,7 +380,7 @@ export class TuiNativeManager {
             idleDecision = { ...(pending.data as object), workerEpoch: manifest.workerEpoch };
         } catch {} }
         return { child: i + 1, child_id: c.childId, task_id: c.taskId,
-          status: c.state, attempt: c.attempt ?? 1, reaped: !!c.reaped, task: c.spec.task.slice(0, 500), error: c.error,
+          status: c.state, attempt: c.attempt ?? 1, reaped: !!c.reaped, displayName: this.canonicalTitle(c), task: c.spec.task.slice(0, 500), error: c.error,
           cwd: c.spec.cwd, ...(c.spec.worktreeInfo ? { worktree: c.spec.worktreeInfo } : {}),
           report: c.report, task_outcome: c.lastOutcome, historical_verification: c.historicalVerification, verification: c.verification ?? { status: c.spec.verification?.length ? "interrupted" : "not-configured" }, accepted_delivery: c.acceptedDelivery === true, review: "not-configured", ...(idleDecision ? { idle_decision: idleDecision } : {}),
           ...(manifest ? { runtime: publicTuiWorkerManifest(manifest) } : {}) };
@@ -377,9 +388,9 @@ export class TuiNativeManager {
   }
   private text(g: Group, output = false): string {
     const snapshot = this.publicGroup(g);
-    let text = `${g.id} ${snapshot.status} (${g.mode}${g.background ? ", background" : ", foreground staged"})`;
+    let text = `${g.mode} ${snapshot.status} (${g.background ? "background" : "foreground staged"})`;
     for (const [i, c] of g.children.entries()) {
-      text += `\n${i + 1}. ${c.childId} task_id=${c.taskId} ${c.state}${c.reaped ? " [reaped]" : ""}${c.error ? `: ${c.error}` : ""}`;
+      text += `\n${i + 1}. ${this.canonicalTitle(c)} ${c.state}${c.reaped ? " [reaped]" : ""}${c.error ? `: ${c.error}` : ""}`;
       if (c.spec.verification?.length) text += ` checks=${(c.verification as any)?.status ?? "unavailable"} accepted_delivery=${c.acceptedDelivery === true}`;
       if (output && c.report) { try { text += `\n${messageText((readPrivateJson(c.report) as any).assistant)}`; } catch {} }
     }
@@ -439,7 +450,7 @@ export class TuiNativeManager {
         && c.idleDecisionNotified !== state.idleDecision.requestId) {
         const data = state.idleDecision;
         const update: QuietUpdate = { kind: "notification", id: `${g.id}:${c.childId}:idle:${data.requestId}`,
-          child_id: c.childId, message: `Idle context warning for ${data.model}: idle ${data.idleMinutes}m, context ${data.contextPercent}%. Resolve with subagent operation=idle_decision child_id=${c.childId} request_id=${data.requestId} worker_epoch=${m.workerEpoch} choice=ignore|compact|cancel.`, requires_guidance: true, through_sequence: state.sequence };
+          child_id: c.childId, displayName: this.canonicalTitle(c), message: `Idle context warning for ${data.model}: idle ${data.idleMinutes}m, context ${data.contextPercent}%. Resolve with subagent operation=idle_decision child_id=${c.childId} request_id=${data.requestId} worker_epoch=${m.workerEpoch} choice=ignore|compact|cancel.`, requires_guidance: true, through_sequence: state.sequence };
         if (this.notify?.(update)) c.idleDecisionNotified = data.requestId;
       }
       if (state.active) { c.state = "running"; c.runSequence = state.sequence; }
@@ -470,7 +481,7 @@ export class TuiNativeManager {
         for (const event of (events.data as any)?.events ?? []) {
           if (event.kind === "idle_decision_cancelled") {
             const update: QuietUpdate = { kind: "notification", id: `${g.id}:${c.childId}:idle-cancelled:${event.data?.requestId}`,
-              child_id: c.childId, message: `Idle context decision request ${event.data?.requestId} was cancelled or expired.`, requires_guidance: false, through_sequence: event.sequence };
+              child_id: c.childId, displayName: this.canonicalTitle(c), message: `Idle context decision request ${event.data?.requestId} was cancelled or expired.`, requires_guidance: false, through_sequence: event.sequence };
             this.notify?.(update);
           }
           if (event.kind === "running" && event.sequence > state.sequence) {
@@ -488,10 +499,10 @@ export class TuiNativeManager {
               }
               if (event.kind === "outcome" && c.spec.verification?.length) { c.notifiedSequence = Math.max(c.notifiedSequence, event.sequence); continue; }
               const update: QuietUpdate = event.kind === "outcome"
-                ? { kind: "subagent", id: `${g.id}:${c.childId}:${event.sequence}`, child_id: c.childId, state: data.state,
+                ? { kind: "subagent", id: `${g.id}:${c.childId}:${event.sequence}`, child_id: c.childId, displayName: this.canonicalTitle(c), state: data.state,
                     outcomes: [{ child: g.children.indexOf(c) + 1, task_id: c.taskId, attempt: c.attempt ?? 1, state: data.state }], through_sequence: event.sequence }
                 : { kind: "notification", id: `${g.id}:${c.childId}:${event.sequence}`, child_id: c.childId,
-                    message: String(data.message ?? "").slice(0, 1000), requires_guidance: data.requires_guidance === true, through_sequence: event.sequence };
+                    displayName: this.canonicalTitle(c), message: String(data.message ?? "").slice(0, 1000), requires_guidance: data.requires_guidance === true, through_sequence: event.sequence };
               if (this.notify && !this.notify(update)) break;
             }
           }
@@ -582,7 +593,9 @@ export class TuiNativeManager {
                 groupId: g.id, childId: c.childId, attempt: c.attempt ?? 1, caller: g.caller, cwd: c.spec.cwd,
                 foreground: !g.background, groupWindowId: existing?.placement?.windowId,
                 windowName: g.windowName ?? subagentTmuxName(g.children[0].spec.task, g.children[0].spec.name),
-                paneTitle: subagentTmuxName(c.spec.task, c.spec.name),
+                paneTitle: c.spec.tmuxAlias ?? subagentTmuxName(c.spec.task, c.spec.name),
+                displayName: c.spec.displayName ?? canonicalSubagentName(c.spec.task, undefined, c.spec.name),
+                nameWindow: g.renameWindowWithFirstChild === true && c === g.children[0],
                 parentDisposition: this.disposition(), launcher: g.launcher, launchMode: g.launchMode,
                 model: this.resolveRoleModel(c.spec.model), routingEnvironment: this.routingEnvironment(), tools: c.spec.tools, systemPrompt: c.spec.systemPrompt, acceptance: c.spec.acceptance, verification: c.spec.verification, resumeSessionFile: c.resumeSessionFile,
                 operatorCapabilityHash: createHash("sha256").update(c.operatorCapability).digest("hex") });
@@ -617,7 +630,7 @@ export class TuiNativeManager {
     if (!g.background) { c.terminalNotification = token; return; }
     const identity = createHash("sha256").update(token).digest("hex").slice(0, 24);
     if (this.notify?.({ kind: "subagent", id: `${g.id}:${c.childId}:terminal:${identity}`,
-      job_id: g.id, child_id: c.childId, state: notificationState, completion: true,
+      job_id: g.id, child_id: c.childId, displayName: this.canonicalTitle(c), state: notificationState, completion: true,
       through_sequence: Number(c.report?.match(/report-(\d+)-[a-f0-9]{16}\.json$/)?.[1]) || c.runSequence || 0 })) c.terminalNotification = token;
   }
   async launch(params: any, owner: string, cwd: string, signal?: AbortSignal, update?: (value: any) => void,
@@ -629,7 +642,7 @@ export class TuiNativeManager {
       if (s.systemPrompt !== undefined && (typeof s.systemPrompt !== "string" || Buffer.byteLength(s.systemPrompt) > 64 * 1024)) throw new Error("Invalid system prompt");
       if (s.model !== undefined && (typeof s.model !== "string" || Buffer.byteLength(s.model) > 512)) throw new Error("Invalid model");
       if (s.tools !== undefined && (!Array.isArray(s.tools) || s.tools.length > 64 || s.tools.some((tool: any) => typeof tool !== "string" || !/^[a-zA-Z0-9_-]{1,128}$/.test(tool)))) throw new Error("Invalid tool selection");
-      return { name: validateSubagentName(s.name), task: s.task, cwd: resolve(s.cwd ?? cwd), model: s.model, tools: s.tools, systemPrompt: s.systemPrompt, acceptance: validateAcceptance(s.acceptance), ...(s.verification !== undefined ? { verification: validateVerification(s.verification) } : {}), worktree: worktreeOption(s.worktree) };
+      return { name: validateSubagentName(s.name), displayName: canonicalSubagentName(s.task, s.displayName, s.name), task: s.task, cwd: resolve(s.cwd ?? cwd), model: s.model, tools: s.tools, systemPrompt: s.systemPrompt, acceptance: validateAcceptance(s.acceptance), ...(s.verification !== undefined ? { verification: validateVerification(s.verification) } : {}), worktree: worktreeOption(s.worktree) };
     });
     if (specs.length > 8) throw new Error("At most eight subagent children are allowed");
     if (signal?.aborted || this.closed || this.reapReserved) throw new Error("Subagent launch cancelled or cleanup reserved");
@@ -638,7 +651,8 @@ export class TuiNativeManager {
     const enabled = contract.launchMode === "guard-only" ? this.liveOperatorMode(owner) : true;
     if (typeof enabled !== "boolean") throw new Error("Parent operator authority unavailable");
     const groupId = id("subagent-job");
-    const g: Group = { windowName: subagentTmuxName(specs[0].task, validateSubagentName(params.name) ?? specs[0].name), version: 1, id: groupId, owner, createdAt: new Date().toISOString(), mode: params.chain ? "chain" : params.tasks ? "parallel" : "single",
+    const g: Group = { renameWindowWithFirstChild: specs.length === 1 || params.name === undefined && params.displayName === undefined,
+      windowName: subagentTmuxName(specs[0].task, validateSubagentName(params.name) ?? specs[0].name), version: 1, id: groupId, owner, createdAt: new Date().toISOString(), mode: params.chain ? "chain" : params.tasks ? "parallel" : "single",
       background: params.background === true, cancelled: false, parentOwnerToken: this.processToken(process.pid)!, operatorEnabled: enabled, ...contract,
       caller: await this.tmux.resolveCaller(), children: specs.map(spec => ({ childId: id("subagent-child"), taskId: resume?.child.taskId ?? id("subagent-task"), attempt: resume ? (resume.child.attempt ?? 1) + 1 : 1,
         ...(resume ? { resumeSessionFile: resume.sessionFile, compactBeforePrompt: resume.compact, resumeMessage: resume.message } : {}),
@@ -646,6 +660,15 @@ export class TuiNativeManager {
     await this.serial(async () => {
       if (signal?.aborted || this.closed || this.reapReserved) throw new Error("Launch cancelled before commit");
       if ([...this.groups.values()].filter(group => group.owner === owner && group.children.some(active)).length >= this.groupLimit) throw new Error(`Subagent concurrency limit reached (${this.groupLimit})`);
+      const occupiedAliases = [...this.groups.values()].flatMap(group => group.children.map(child => child.spec.tmuxAlias).filter((alias): alias is string => !!alias));
+      for (const child of g.children) {
+        child.spec.tmuxAlias = subagentTmuxAlias(child.spec.displayName!, occupiedAliases);
+        occupiedAliases.push(child.spec.tmuxAlias);
+      }
+      const groupName = params.displayName !== undefined || params.name !== undefined
+        ? canonicalSubagentName(specs[0].task, params.displayName, params.name) : specs[0].displayName!;
+      g.windowName = groupName === specs[0].displayName ? specs[0].tmuxAlias
+        : subagentTmuxAlias(groupName, [...this.groups.values()].map(group => group.windowName).filter((name): name is string => !!name));
       try {
         await provisionWorktrees(g.children, owner, signal, () => this.owner === owner && !this.closed && !this.reapReserved && this.ready(), !!resume);
         if (signal?.aborted || this.closed || this.reapReserved || this.owner !== owner) throw new Error("Worktree launch context changed");
@@ -731,7 +754,7 @@ export class TuiNativeManager {
     return [...this.groups.values()].filter(g => g.owner === owner).flatMap(g => g.children.map(c => {
       const manifest = this.manifest(c);
       return { taskId: c.taskId, childId: c.childId, groupId: g.id, runtimeId: manifest?.runtimeId ?? null,
-        attempt: c.attempt ?? 1, status: c.state, reaped: !!c.reaped, title: c.spec.task.slice(0, 140),
+        attempt: c.attempt ?? 1, status: c.state, reaped: !!c.reaped, title: this.canonicalTitle(c),
         kind: "subagent", needsAttention: active(c) && c.needsAttention === true,
         summary: typeof (c.lastOutcome as any)?.summary === "string" ? (c.lastOutcome as any).summary.slice(0, 2000) : undefined,
         lastUpdated: null, stale: true };
@@ -753,7 +776,7 @@ export class TuiNativeManager {
     const stat = lstatSync(file);
     if (!stat.isFile() || stat.isSymbolicLink() || stat.nlink !== 1 || stat.uid !== process.getuid?.() || (stat.mode & 0o022) || stat.size > 32 * 1024 * 1024) throw new Error("Source file unavailable");
     return { taskId: c.taskId, childId: c.childId, attempt: c.attempt ?? 1, runtimeId: manifest?.runtimeId ?? null,
-      file, title: c.spec.name?.replace(/-/g, " ") || c.spec.task.slice(0, 140), cwd: c.spec.cwd,
+      file, title: this.canonicalTitle(c), cwd: c.spec.cwd,
       leafId: typeof report?.leafId === "string" ? report.leafId : null,
       assistantDigest: report?.assistant ? createHash("sha256").update(JSON.stringify(report.assistant)).digest("hex") : null,
       report: report ? c.report : null, dev: stat.dev, ino: stat.ino, size: stat.size, mtimeMs: stat.mtimeMs };
@@ -780,7 +803,7 @@ export class TuiNativeManager {
       : child.state === "cancelled" ? "cancelled" : child.state === "lost" ? "lost"
       : child.state === "completed" ? "completed" : group.cancelled ? "cancelled" : "lost";
     return { taskId: child.taskId, childId: child.childId, groupId: group.id, attempt: child.attempt ?? 1,
-      runtimeId: manifest.runtimeId, reaped: child.reaped === true, ...(retainedSessionFile ? { sessionFile: retainedSessionFile } : {}), status, title: child.spec.name?.replace(/-/g, " ") || child.spec.task.slice(0, 140), cwd: child.spec.cwd };
+      runtimeId: manifest.runtimeId, reaped: child.reaped === true, ...(retainedSessionFile ? { sessionFile: retainedSessionFile } : {}), status, title: this.canonicalTitle(child), cwd: child.spec.cwd };
   }
   async readonlyTaskConversation(owner: string, input: { taskId: string; childId: string; attempt: number; runtimeId: string | null; cursor?: number }): Promise<any> {
     if (this.owner !== owner) throw new Error("Conversation belongs to another Pi session");
@@ -856,7 +879,7 @@ export class TuiNativeManager {
   taskList(owner: string): any[] {
     const tasks = new Map<string, any>();
     for (const g of this.groups.values()) if (g.owner === owner) for (const c of g.children) tasks.set(c.taskId,
-      { task_id: c.taskId, child_id: c.childId, attempt: c.attempt ?? 1, state: active(c) ? "running" : "idle", title: c.spec.task.slice(0, 140),
+      { task_id: c.taskId, child_id: c.childId, attempt: c.attempt ?? 1, state: active(c) ? "running" : "idle", title: this.canonicalTitle(c),
         outcome: (c.lastOutcome as any)?.state, execution: c.state, can_resume: !active(c), checkpointed: (c.lastOutcome as any)?.state === "checkpointed",
         requires_compaction: c.requiresCompaction, summary: (c.lastOutcome as any)?.summary, next_action: (c.lastOutcome as any)?.next_action, updated_at: g.createdAt });
     return [...tasks.values()].reverse().slice(0, 50);
@@ -1056,7 +1079,7 @@ export class TuiNativeManager {
         if (this.resuming.has(c.taskId) || this.byChild(owner, c.taskId)?.child !== c) throw new Error("Task already has a successor attempt");
         this.resuming.add(c.taskId);
         try {
-          return await this.launch({ ...c.spec, background: true }, owner, c.spec.cwd, signal, undefined,
+          return await this.launch({ ...c.spec, displayName: this.canonicalTitle(c), background: true }, owner, c.spec.cwd, signal, undefined,
             { child: c, sessionFile: m.sessionFile, compact: params.compact ?? requiresCompaction, message: params.message });
         } finally { this.resuming.delete(c.taskId); }
       }

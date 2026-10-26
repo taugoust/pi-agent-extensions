@@ -4,7 +4,7 @@ import { createHash } from 'node:crypto';
 
 export type QuietUpdate = {
   kind:'job'|'subagent'|'watch'|'notification'; id:string; state?:string;
-  child_id?:string; job_id?:string; message?:string; requires_guidance?:boolean;
+  child_id?:string; job_id?:string; displayName?:string; message?:string; requires_guidance?:boolean;
   /** Producer-confirmed background execution terminal state, not task delivery. */
   completion?:boolean;
   /** New running generation, scoped by job_id + child_id (worker attempt). */
@@ -146,7 +146,7 @@ function installCommands(pi:any){
   pi.registerCommand('harness-state',{description:'Show quiet harness-state status/notifications or disable/enable quiet model wakeups',handler:async(args:string,ctx:any)=>{
     const current=hub(ctx);restore(current,ctx);const parts=(args||'status').trim().split(/\s+/);const mode=parts[0];
     if(mode==='show'){
-      const notes=notificationEntries(ctx).slice(-25).map((u,i)=>`${i+1}. ${u.requires_guidance?'[guidance]':'[finding]'} ${u.child_id??u.id}: ${u.message??''}`);
+      const notes=notificationEntries(ctx).slice(-25).map((u,i)=>`${i+1}. ${u.requires_guidance?'[guidance]':'[finding]'} ${u.displayName??'Subagent'}: ${u.message??''}`);
       const content=notes.length?notes.join('\n'):'No retained child notifications.';
       pi.sendMessage({customType:'harness-state-view',display:true,content,details:{count:notes.length}},{deliverAs:'nextTurn',triggerTurn:false});
       return;

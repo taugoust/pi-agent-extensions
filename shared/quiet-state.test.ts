@@ -76,11 +76,13 @@ assert.equal(rateReload.messages.length,0,'guidance rate limit did not persist a
 entries=[];sessionName=`quiet-notes-${process.pid}`;const notesFixture=fixture();const quietNotes=installQuietState(notesFixture.pi,5);await notesFixture.emit('session_start');
 const child='subagent-child-'+'a'.repeat(24);const owner=ctx.sessionManager.getSessionId();
 notifyParent(owner,child,'finding',{message:'A concise discovery'});
+entries.find(e=>e.customType==='harness-child-notification').data.update.displayName='Canonical Review';
 assert.equal(notesFixture.messages.length,0,'routine child finding woke the model');
 await notesFixture.commands.get('harness-state').handler('show',ctx);
 assert.equal(notesFixture.messages.length,1);
 assert.equal(notesFixture.messages[0].options.triggerTurn,false);
-assert.match(notesFixture.messages[0].message.content,/A concise discovery/);
+assert.match(notesFixture.messages[0].message.content,/Canonical Review: A concise discovery/);
+assert.doesNotMatch(notesFixture.messages[0].message.content,/subagent-child-/);
 
 // Dismissal requires an explicit scope and consumes only pending guidance, durably.
 const childA='subagent-child-'+'b'.repeat(24),childB='subagent-child-'+'c'.repeat(24);

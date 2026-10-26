@@ -103,7 +103,12 @@ test("root discovers multilevel orphan, blocks active ancestor reap, reconciles 
   try {
     const listing = await f.manager.operation({ operation: "list" }, "session-0");
     assert.equal(listing.details.descendants.length, 2);
-    assert.match(listing.content[0].text, new RegExp(f.groups[2].id));
+    const leaf = listing.details.descendants.find((group: any) => group.job_id === f.groups[2].id);
+    assert.ok(leaf, "descendant job identity remains structured, not a human-facing alias");
+    assert.equal(leaf.children[0].child_id, f.manifests[2].childId);
+    assert.equal(leaf.children[0].task_id, f.manifests[2].taskId);
+    assert.match(listing.content[0].text, /Descendant: single running \(background\)\n1\. fixture running/);
+    assert.doesNotMatch(listing.content[0].text, /subagent-job-[0-9a-f]{24}/, "readable status uses names, while exact IDs stay in details");
     await assert.rejects(f.manager.operation({ operation: "reap", job_id: f.groups[0].id }, "session-0"), /Active descendants/);
     assert.deepEqual(f.reaped, []);
     f.server.outcome({ state: "delivered" });

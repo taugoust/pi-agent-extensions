@@ -81,7 +81,7 @@ import { waitForGroupSnapshot } from "./group-wait.ts";
 import { parentJobBroker, validateJobParams } from "../shared/background-job.js";
 import { validateAcceptance, requireAcceptance, readTaskOutcome, outcomeSummary, type TaskOutcome, type TaskOutcomeSummary } from "./outcome.ts";
 import { NativeTaskStore, createTaskId, TASK_ID_PATTERN, type NativeTaskRecord } from "./resume.js";
-import { SUBAGENT_NAME_MAX_LENGTH, SUBAGENT_NAME_PATTERN, validateSubagentName, withoutSubagentNames } from "./tui-names.js";
+import { SUBAGENT_NAME_MAX_LENGTH, SUBAGENT_NAME_PATTERN, validateSubagentName, validateSubagentDisplayName, canonicalSubagentName, subagentResultPresentation, withoutSubagentNames } from "./tui-names.js";
 import { registerTaskDashboard } from "./dashboard.js";
 import { taskListText, outcomeLabel } from "../shared/task-presentation.js";
 import { HARNESS_READONLY_KEY, HARNESS_READONLY_PROTOCOL, type HarnessReadOnlyRegistry, type HarnessReadOnlySubagents } from "../shared/harness-readonly.ts";
@@ -1522,7 +1522,7 @@ export function validateBackgroundOperation(params: any): void {
     return;
   }
   if (params.task_id !== undefined || params.compact !== undefined) throw new Error("task_id and compact are resume-only fields");
-  const launchFields = ["name", "agent", "agentScope", "acceptance", "verification", "task", "tasks", "chain", "systemPrompt", "model", "tools", "cwd", "worktree", "action", "draft_id", "background", "mode", "timeout_ms"];
+  const launchFields = ["name", "displayName", "agent", "agentScope", "acceptance", "verification", "task", "tasks", "chain", "systemPrompt", "model", "tools", "cwd", "worktree", "action", "draft_id", "background", "mode", "timeout_ms"];
   const integerField = (field: string, minimum: number, maximum: number, label: string) => {
     const value = params[field];
     if (value !== undefined && (!Number.isSafeInteger(value) || value < minimum || value > maximum)) {
@@ -1634,8 +1634,9 @@ export function validateBackgroundOperation(params: any): void {
 
 function validateBackgroundLaunch(params: any): void {
   validateSubagentName(params.name);
+  validateSubagentDisplayName(params.displayName);
   for (const items of [params.tasks, params.chain]) {
-    if (Array.isArray(items)) for (const item of items) validateSubagentName(item?.name);
+    if (Array.isArray(items)) for (const item of items) { validateSubagentName(item?.name); validateSubagentDisplayName(item?.displayName); }
   }
   const lifecycleFields = ["job_id", "wait_ms", "limit", "offset", "child", "child_id", "message", "control_mode", "wait_for_response", "task_id", "compact"];
   if (params.background !== true) {
@@ -1651,15 +1652,17 @@ function validateBackgroundLaunch(params: any): void {
   if (items.some((item: any) => typeof item?.task !== "string" || item.task.trim().length === 0)) throw new Error("Every background subagent task must be a non-empty string");
 }
 
+const SubagentDisplayName = Type.Optional(Type.String({ minLength: 1, maxLength: 80, description: "Canonical human name, at most four words; shared by Pi, Work and Paseo. For tasks/chain set it per item; a root label names only the shared tmux group. Prefer this over legacy name. Presentation only, never task identity." }));
+
 const SubagentName = Type.Optional(Type.String({ minLength: 1, maxLength: SUBAGENT_NAME_MAX_LENGTH, pattern: SUBAGENT_NAME_PATTERN,
-  description: "Launch only: optional concise native tmux label (1–28 ASCII lowercase kebab-case characters, without agt- prefix). Root names the group; per-task names title panes. Ignored by other backends." }));
+  description: "Launch only: legacy lowercase kebab-case name (1–28 characters). Converted to a canonical human name when displayName is absent; tmux aliases are derived independently. Prefer displayName." }));
 
 const SubagentWorktree = Type.Optional(Type.Object({
   changes: Type.Optional(Type.Union([Type.Literal("include"), Type.Literal("exclude")], { description: "Required if the source repository has any staged, unstaged, or untracked changes. Include copies them into the new worktree; exclude uses only the base commit. Ignored files are never copied." })),
   base: Type.Optional(Type.String({ minLength: 1, maxLength: 512, description: "Base commit/ref, default HEAD. Including dirty changes requires HEAD." })),
 }, { additionalProperties: false, description: "Launch this native Linux worker in its own retained Git worktree. An empty object is allowed only with a clean source checkout. The parent's checkout/index/branch are untouched." }));
 
-const SubagentAgent = Type.Optional(Type.String({ minLength: 1, maxLength: 128, description: "Named agent profile (scout, worker, reviewer, oracle, or a custom profile). Separate from the tmux label name. Profile instructions and model/thinking/tool defaults resolve once; resume retains that configuration." }));
+const SubagentAgent = Type.Optional(Type.String({ minLength: 1, maxLength: 128, description: "Named agent profile (scout, worker, reviewer, oracle, or a custom profile). Separate from the canonical displayName/legacy name. Profile instructions and model/thinking/tool defaults resolve once; resume retains that configuration." }));
 const SubagentAgentScope = Type.Optional(Type.String({ pattern: "^(user|project|both)$", description: "Profile discovery scope. Default both: builtins, user, then trusted project overrides. Untrusted project definitions never load; explicit project scope requires project trust. Also accepted by operation=profiles." }));
 
 const SubagentVerification = Type.Optional(Type.Array(Type.Object({
@@ -1671,6 +1674,7 @@ const SubagentVerification = Type.Optional(Type.Array(Type.Object({
 }, { additionalProperties: false }), { minItems: 1, maxItems: 8, description: "Launch only: explicit runtime command gates, separate from worker-reported acceptance. Run in actual worker cwd through supervised jobs and live permissions; configured unavailable/failed/stale gates block accepted delivery. No authority expansion; unsupported backends fail closed. Retained on resume." }));
 
 const SubagentItem = Type.Object({
+  displayName: SubagentDisplayName,
   name: SubagentName,
   agent: SubagentAgent,
   agentScope: SubagentAgentScope,
@@ -1689,6 +1693,7 @@ function subagentParams() {
   // operation-specific shapes in descriptions; validate before any dispatch.
   // Launch overrides must never be silently dropped from a resume/control call.
   return Type.Object({
+  displayName: SubagentDisplayName,
   name: SubagentName,
   agent: SubagentAgent,
   agentScope: SubagentAgentScope,
@@ -2284,7 +2289,7 @@ export default function (pi: ExtensionAPI) {
     ].join(" "),
     promptSnippet: "Delegate work to foreground or background subagents.",
     promptGuidelines: [
-      "Select a named profile with agent, not the tmux name label; operation=profiles lists the catalogue. Omit model/tools/systemPrompt to use its defaults, or use explicit narrowing/overrides as documented. Each concrete task still requires acceptance criteria.",
+      "Select a named profile with agent, not the human displayName/name; operation=profiles lists the catalogue. Omit model/tools/systemPrompt to use its defaults, or use explicit narrowing/overrides as documented. Each concrete task still requires acceptance criteria.",
       "Use subagent background=true when you can do useful work concurrently.",
       "Read subagent results before relying on delegated work. wait_any waits for one child, wait/wait_group for one group, and wait_all for all current groups. Cancelling a wait leaves work running.",
       "Subagent result returns the worker’s answer. Use diagnostics=true for debugging and pagination for larger reports.",
@@ -3127,13 +3132,16 @@ export default function (pi: ExtensionAPI) {
     },
 
     renderCall(args: any, theme) {
+      const title = (spec: any) => {
+        try { return canonicalSubagentName(String(spec.task ?? "Worker"), spec.displayName, spec.name); }
+        catch { return "Worker"; } // Streaming/incomplete arguments must not break rendering.
+      };
       if (args.operation) {
-        const targetId = args.job_id ?? args.child_id;
-        return new Text(`${theme.fg("toolTitle", theme.bold("subagent"))} ${theme.fg("muted", args.operation)}${targetId ? ` ${theme.fg("dim", targetId)}` : ""}`, 0, 0);
+        return new Text(`${theme.fg("toolTitle", theme.bold("subagent"))} ${theme.fg("muted", args.operation)}`, 0, 0);
       }
       if (args.background) {
         const mode = requestMode(args);
-        return new Text(`${theme.fg("toolTitle", theme.bold("subagent"))} ${theme.fg("accent", `background ${mode}`)}\n  ${theme.fg("dim", requestSummary(args))}`, 0, 0);
+        return new Text(`${theme.fg("toolTitle", theme.bold("subagent"))} ${theme.fg("accent", `background ${mode}`)}\n  ${theme.fg("dim", typeof args.task === "string" ? title(args) : (args.tasks ?? args.chain ?? []).slice(0, 3).map(title).join(" · "))}`, 0, 0);
       }
       const bridge = agentSHBridge();
       const disposition = bridgeDisposition(bridge);
@@ -3144,8 +3152,7 @@ export default function (pi: ExtensionAPI) {
         let text = theme.fg("toolTitle", theme.bold("subagent ")) + theme.fg("accent", `chain (${args.chain.length} steps)`);
         for (let i = 0; i < Math.min(args.chain.length, 3); i++) {
           const step = args.chain[i];
-          const cleanTask = String(step.task ?? "").replace(/\{previous\}/g, "").trim();
-          const preview = cleanTask.length > 50 ? `${cleanTask.slice(0, 50)}...` : cleanTask;
+          const preview = title(step);
           text += `\n  ${theme.fg("muted", `${i + 1}.`)} ${theme.fg("dim", preview)}`;
         }
         if (args.chain.length > 3) text += `\n  ${theme.fg("muted", `... +${args.chain.length - 3} more`)}`;
@@ -3154,21 +3161,30 @@ export default function (pi: ExtensionAPI) {
       if (args.tasks && args.tasks.length > 0) {
         let text = theme.fg("toolTitle", theme.bold("subagent ")) + theme.fg("accent", `parallel (${args.tasks.length} tasks)`);
         for (const t of args.tasks.slice(0, 3)) {
-          const task = String(t.task ?? "");
-          const preview = task.length > 50 ? `${task.slice(0, 50)}...` : task;
+          const preview = title(t);
           text += `\n  ${theme.fg("dim", preview)}`;
         }
         if (args.tasks.length > 3) text += `\n  ${theme.fg("muted", `... +${args.tasks.length - 3} more`)}`;
         return new Text(text, 0, 0);
       }
-      const task = String(args.task ?? "...");
-      const preview = task.length > 70 ? `${task.slice(0, 70)}...` : task;
+      const preview = title(args);
       return new Text(`${theme.fg("toolTitle", theme.bold("subagent single"))}\n  ${theme.fg("dim", preview)}`, 0, 0);
     },
 
     renderResult(result, options, theme) {
       if (result.details?.operation === "profiles") return new Text(result.content.find((part: any) => part.type === "text")?.text ?? "No agent profiles available", 0, 0);
-      if (result.details?.tui_subagent) return new Text(result.content.find((p: any) => p.type === "text")?.text ?? "(no output)", 0, 0);
+      if (result.details?.tui_subagent) {
+        let tasks: any[] = [];
+        if (sessionContext) {
+          const owner = stableSessionId(sessionContext);
+          try { tasks.push(...(tuiNative?.readonlyTaskList(owner) ?? [])); } catch { /* Retained presentation only; never refresh/control a worker. */ }
+          try { tasks.push(...(headlessForeground?.readonlyTaskList(owner) ?? [])); } catch { /* Stale owner supplies no title. */ }
+        }
+        const text = subagentResultPresentation(result.content.find((p: any) => p.type === "text")?.text ?? "(no output)", result.details.group,
+          child => tasks.find(task => task.taskId === child.task_id && task.childId === child.child_id && task.attempt === child.attempt && task.groupId === result.details.group.job_id
+            && (!child.runtime?.runtimeId || task.runtimeId === child.runtime.runtimeId))?.title);
+        return new Text(text, 0, 0);
+      }
       if (result.details?.operation === "tasks") return new Text(taskListText(result.details.tasks ?? [], options.expanded, result.details.descendants), 0, 0);
       if ((result.details as BackgroundSubagentDetails | undefined)?.background_subagent
         || (result.details as SubagentControlDetails | undefined)?.subagent_control) {

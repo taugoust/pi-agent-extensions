@@ -10,13 +10,61 @@ import { TUI_WORKER_DISCOVERY_ENV, TUI_WORKER_MANIFEST_ENV } from "../shared/tui
 import type { TuiPlacedWorkerManifest, TuiWorkerManifest, TuiWorkerPlacement } from "../shared/tui-worker-protocol.ts";
 import { TuiWorkerStore, atomicPrivateJson, readPrivateJson } from "./tui-worker-store.ts";
 import { callTuiWorker } from "./tui-worker-client.ts";
-import { subagentTmuxName } from "./tui-names.ts";
+import { TaskNameStore } from "./task-name-store.ts";
+import { subagentTmuxName, subagentTmuxAlias } from "./tui-names.ts";
 
 const exec = promisify(execFile);
 const quote = (s: string) => `'${s.replaceAll("'", `'\\''`)}'`;
 const pause = (ms: number) => new Promise(resolve => setTimeout(resolve, ms));
 const NONCE = "@pi_tui_worker_nonce";
 const GROUP = "@pi_subagent_group_id";
+// Reloaded extension factories and separate backend instances must share ordering.
+const aliasQueueKey = Symbol.for("pi-agent-extensions.worker-tmux-alias-queue.v1");
+const aliasGlobals = globalThis as unknown as Record<symbol, Map<string, Promise<void>> | undefined>;
+const aliasQueues = aliasGlobals[aliasQueueKey] ??= new Map<string, Promise<void>>();
+
+/** Best-effort presentation: coalesce edits, retry unchanged desired aliases, stop on reload. */
+export class WorkerAliasProjection {
+  private desired?: string;
+  private applied?: string;
+  private pending?: Promise<void>;
+  private stopped = false;
+  private warned?: string;
+  private readonly apply: (alias: string) => Promise<void>;
+  private readonly onError: (error: unknown) => void;
+  constructor(apply: (alias: string) => Promise<void>, onError: (error: unknown) => void = () => {}) { this.apply = apply; this.onError = onError; }
+  request(alias: string): Promise<void> { if (!this.stopped) this.desired = alias; return this.retry(); }
+  retry(): Promise<void> {
+    if (this.stopped || this.pending || !this.desired || this.desired === this.applied) return this.pending ?? Promise.resolve();
+    let failedAlias: string | undefined;
+    const operation = (async () => {
+      while (!this.stopped && this.desired && this.desired !== this.applied) {
+        const alias = this.desired;
+        try { await this.apply(alias); }
+        catch (error) {
+          if (this.stopped) return;
+          if (alias !== this.desired) continue;
+          failedAlias = alias;
+          if (this.warned !== alias) { this.warned = alias; try { this.onError(error); } catch {} }
+          return; // The next metadata observation retries, even without a name revision.
+        }
+        this.applied = alias;
+        this.warned = undefined;
+      }
+    })();
+    this.pending = operation;
+    const clear = () => {
+      if (this.pending !== operation) return;
+      this.pending = undefined;
+      // A newer request can arrive between the drain finishing and this callback.
+      // Resume it, but never spin on a failed unchanged alias without observation.
+      if (!this.stopped && this.desired !== this.applied && this.desired !== failedAlias) void this.retry();
+    };
+    void operation.then(clear, clear);
+    return operation;
+  }
+  stop(): void { this.stopped = true; this.desired = undefined; }
+}
 function requiredPlacement(manifest: TuiWorkerManifest): TuiWorkerPlacement {
   if (manifest.execution === "rpc-headless" || !manifest.placement) throw new Error("Headless worker has no tmux placement");
   return manifest.placement;
@@ -52,6 +100,8 @@ export type TuiWorkerLaunch = {
   /** Presentation only; supplied at creation, never used to locate workers. */
   windowName?: string;
   paneTitle?: string;
+  displayName?: string;
+  nameWindow?: boolean;
   /** Trusted actual parent runtime disposition, NOT a tool parameter. */
   parentDisposition: "native" | "guard-only" | "full" | "unavailable";
   launcher: string;
@@ -138,7 +188,7 @@ export class TuiWorkerTmux {
   async launch(input: TuiWorkerLaunch): Promise<TuiWorkerManifest> {
     const windowName = input.windowName ?? subagentTmuxName("");
     const paneTitle = input.paneTitle ?? windowName;
-    if (![windowName, paneTitle].every(name => /^agt-[a-z0-9]+(?:-[a-z0-9]+)*$/.test(name) && name.trim() === name && name.length <= 32)) throw new Error("Invalid native TUI display name");
+    if (![windowName, paneTitle].every(name => /^[a-z0-9]+(?:-[a-z0-9]+)*$/.test(name) && name.trim() === name && name.length <= 32)) throw new Error("Invalid native TUI display name");
     if (input.parentDisposition === "full" || input.parentDisposition === "unavailable"
       || input.launchMode !== (input.parentDisposition === "guard-only" ? "guard-only" : "none")) throw new Error("Worker launcher mode does not match parent authority; native fallback disabled");
     if (!isAbsolute(input.launcher)) throw new Error("Worker launcher must be an absolute trusted executable");
@@ -194,7 +244,9 @@ export class TuiWorkerTmux {
       PI_TUI_WORKER_LAUNCH_MODE: input.launchMode,
       PI_TUI_WORKER_LAUNCHER: launcher,
       PI_SUBAGENT_ID: input.childId,
-      PI_SUBAGENT_NAME: paneTitle.replace(/^agt-/, "").replace(/-/g, " ").split(/\s+/).slice(0, 3).join(" "),
+      PI_SUBAGENT_CANONICAL_NAMES: input.displayName ? "1" : "",
+      PI_SUBAGENT_NAME_WINDOW: input.nameWindow === false ? "0" : "1",
+      PI_SUBAGENT_NAME: input.displayName ?? paneTitle.replace(/^agt-/, "").replace(/-/g, " ").split(/\s+/).slice(0, 4).join(" "),
     };
     const identity = { ...input, runtimeId, controlSocket };
     for (const [key, name] of Object.entries(TUI_WORKER_DISCOVERY_ENV)) identityEnv[name] = String(identity[key as keyof typeof identity]);
@@ -212,10 +264,20 @@ export class TuiWorkerTmux {
       if (group !== input.groupId) throw new Error("Refusing foreign group window");
       paneId = await this.run(caller.socketPath, ["split-window", "-d", "-P", "-F", format, "-t", input.groupWindowId, "-c", cwd, shell]);
     } else if (input.foreground) {
-      // One staging session per group avoids cross-parent naming/creation races.
-      const sessionName = `pi-stage-${input.groupId}`;
-      paneId = await this.run(caller.socketPath, ["new-session", "-d", "-P", "-F", format, "-s", sessionName,
-        "-n", windowName, "-c", cwd, "-x", "120", "-y", "35", shell]);
+      const occupied = new Set((await this.run(caller.socketPath, ["list-sessions", "-F", "#{session_name}"])).split("\n"));
+      paneId = "";
+      for (let tries = 0; tries < 1000; tries++) {
+        const sessionName = subagentTmuxAlias(input.displayName ?? paneTitle.replace(/^agt-/, "").replace(/-/g, " "), occupied);
+        try {
+          paneId = await this.run(caller.socketPath, ["new-session", "-d", "-P", "-F", format, "-s", sessionName,
+            "-n", windowName, "-c", cwd, "-x", "120", "-y", "35", shell]);
+          break;
+        } catch (error) {
+          if (!/duplicate session/i.test(String(error))) throw error;
+          occupied.add(sessionName); // Atomic tmux creation resolves cross-parent races.
+        }
+      }
+      if (!paneId) throw new Error("Tmux readable session alias collisions exhausted");
     } else {
       paneId = await this.run(caller.socketPath, ["new-window", "-d", "-P", "-F", format, "-t", `${caller.sessionId}:`, "-n", windowName, "-c", cwd, shell]);
     }
@@ -248,8 +310,36 @@ export class TuiWorkerTmux {
       ...(input.foreground ? { foregroundOwner: { pid: process.pid, token: await processIdentity(process.pid) } } : {}),
       ...(input.operatorCapabilityHash ? { operatorCapabilityHash: input.operatorCapabilityHash } : {}) };
     store.writeManifest(m);
+    if (input.displayName) new TaskNameStore(input.directory, m).claim(input.displayName);
     await writeFile(gate, "ready\n", { flag: "wx", mode: 0o600 });
     return m;
+  }
+  async rename(manifest: TuiWorkerManifest, alias: string, nameWindow = true): Promise<void> {
+    if (!/^[a-z0-9]+(?:-[a-z0-9]+)*$/.test(alias) || alias.length > 40) throw new Error("Invalid canonical tmux alias");
+    if (manifest.execution === "rpc-headless" || !manifest.placement) return;
+    const target = structuredClone(manifest);
+    const key = JSON.stringify([target.ownerSessionId, target.taskId, target.groupId, target.childId, target.attempt, target.runtimeId, target.workerEpoch]);
+    const previous = aliasQueues.get(key) ?? Promise.resolve();
+    const operation = previous.catch(() => {}).then(() => this.applyAlias(target, alias, nameWindow));
+    aliasQueues.set(key, operation);
+    const clear = () => { if (aliasQueues.get(key) === operation) aliasQueues.delete(key); };
+    void operation.then(clear, clear);
+    return operation;
+  }
+  private async applyAlias(manifest: TuiWorkerManifest, alias: string, nameWindow: boolean): Promise<void> {
+    // Inspect after prior work settles: never reuse an earlier placement/authority snapshot.
+    const inspected = await this.inspect(manifest);
+    if (inspected.dead) throw new Error("Cannot rename stale worker placement");
+    const p = inspected.placement;
+    await this.run(p.socketPath, ["select-pane", "-t", p.paneId, "-T", alias]);
+    const ownedWindow = nameWindow && await this.run(p.socketPath, ["show-option", "-wqv", "-t", p.windowId, GROUP]) === manifest.groupId;
+    if (ownedWindow) await this.run(p.socketPath, ["rename-window", "-t", p.windowId, alias]);
+    if (ownedWindow && manifest.presentation === "foreground-staged" && p.sessionId === manifest.placement.sessionId
+      && await this.run(p.socketPath, ["show-option", "-qv", "-t", p.sessionId, "@pi_infrastructure"]) === "1") {
+      const names = (await this.run(p.socketPath, ["list-sessions", "-F", "#{session_id}|#{session_name}"])).split("\n")
+        .filter(line => !line.startsWith(`${p.sessionId}|`)).map(line => line.slice(line.indexOf("|") + 1));
+      await this.run(p.socketPath, ["rename-session", "-t", p.sessionId, subagentTmuxAlias(alias, names)]);
+    }
   }
   async waitReady(manifest: TuiWorkerManifest, timeoutMs = 30_000): Promise<void> {
     const deadline = Date.now() + timeoutMs;

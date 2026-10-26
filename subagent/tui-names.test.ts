@@ -4,7 +4,7 @@ import { mkdtemp, rm } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { TuiNativeManager } from "./tui-native.ts";
-import { subagentTmuxName, validateSubagentName, withoutSubagentNames } from "./tui-names.ts";
+import { subagentTmuxName, validateSubagentName, withoutSubagentNames, canonicalSubagentName, validateSubagentDisplayName, subagentTmuxAlias } from "./tui-names.ts";
 
 test("native labels are bounded ASCII kebab-case, deterministic and presentation-only", () => {
   assert.equal(subagentTmuxName("Review HTTP parser tests"), "agt-review-http-parser-tests");
@@ -54,14 +54,28 @@ test("native groups allocate root/first-task names once and retain per-task labe
           { name: "first-label", task: "First task" }, { name: "second-label", task: "Second {previous}" },
         ] }, "owner", root);
         const group = manager.groups.get(result.details.job_id);
-        assert.equal(group.windowName, `agt-${name ?? "first-label"}`);
+        assert.match(group.windowName, new RegExp(`^${name ?? "first-label"}(?:-[0-9]+)?$`));
         assert.deepEqual(group.children.map((c: any) => c.spec.name), ["first-label", "second-label"]);
+        assert.equal(group.renameWindowWithFirstChild, name === undefined);
+        const allocated = group.windowName;
         group.children[0].state = "completed";
-        assert.equal(group.windowName, `agt-${name ?? "first-label"}`);
+        assert.equal(group.windowName, allocated);
       }
     }
     const result = await manager.launch({ background: true, task: "Review parser tests" }, "owner", root);
-    assert.equal(manager.groups.get(result.details.job_id).windowName, "agt-review-parser-tests");
+    assert.equal(manager.groups.get(result.details.job_id).windowName, "review-parser");
+    const parallel = await Promise.all([0, 1].map(() => manager.launch({ background: true, tasks: [
+      { displayName: "Shared Parser Review", task: "URGENT completely different instructions" },
+      { displayName: "Shared Parser Review", task: "other instructions" },
+    ] }, "owner", root)));
+    const children = parallel.flatMap(result => manager.groups.get(result.details.job_id).children);
+    assert.equal(new Set(children.map((child: any) => child.spec.tmuxAlias)).size, 4);
+    assert.deepEqual(children.map((child: any) => child.spec.displayName), Array(4).fill("Shared Parser Review"));
+    assert.equal(new Set(children.map((child: any) => child.taskId)).size, 4);
+    assert.equal(new Set(children.map((child: any) => child.childId)).size, 4);
+    assert.ok(children.every((child: any) => child.attempt === 1));
+    assert.ok(parallel.every(result => manager.groups.get(result.details.job_id).background === true));
+    await assert.rejects(manager.launch({ background: true, displayName: "one two three four five", task: "Work" }, "owner", root), /displayName/);
     await assert.rejects(manager.launch({ background: true, name: "Bad name", task: "Work" }, "owner", root), /Subagent name/);
     await assert.rejects(manager.launch({ background: true, tasks: [{ name: "bad\n", task: "Work" }] }, "owner", root), /Subagent name/);
   } finally {

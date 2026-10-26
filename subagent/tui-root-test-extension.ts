@@ -13,6 +13,7 @@ import { HARNESS_READONLY_KEY } from "../shared/harness-readonly.ts";
 import type { TuiWorkerManifest } from "../shared/tui-worker-protocol.ts";
 import { processIdentity } from "./tui-worker-tmux.ts";
 import { callTuiWorker } from "./tui-worker-client.ts";
+import { canonicalSubagentName } from "./tui-names.ts";
 
 /** Explicit real-root integration fixture. Never enabled outside tests. */
 export default function rootTest(pi: ExtensionAPI) {
@@ -46,14 +47,14 @@ export default function rootTest(pi: ExtensionAPI) {
     return value.details.group;
   };
   const answerHeadlessInteraction = async (ctx: any, marker: string, answer: any, kind: string) => {
-    const pendingRun = tool.execute(`root-test-interaction-${marker}-${Date.now()}`, { task: marker, model: "harness-test/mock:off", acceptance: ["The requested typed interaction is answered and the worker completes"] }, undefined, undefined, ctx);
+    const pendingRun = tool.execute(`root-test-interaction-${marker}-${Date.now()}`, { displayName: canonicalSubagentName(marker), task: marker, model: "harness-test/mock:off", acceptance: ["The requested typed interaction is answered and the worker completes"] }, undefined, undefined, ctx);
     void pendingRun.catch(() => undefined);
     const service = (globalThis as any)[FOREGROUND_TASKS_KEY];
     const deadline = Date.now() + 30_000;
     let target: any, interaction: any;
     while (Date.now() < deadline) {
       const listed = await service.execute({ sessionId: service.sessionId, epoch: service.epoch, operation: "list" });
-      const task = listed.tasks?.find((item: any) => item.title.includes(marker));
+      const task = listed.tasks?.find((item: any) => item.title === canonicalSubagentName(marker));
       if (task) {
         target = { taskId: task.taskId, childId: task.childId, workerEpoch: task.workerEpoch };
         const view = await service.execute({ sessionId: service.sessionId, epoch: service.epoch, operation: "view", target });
@@ -327,13 +328,13 @@ export default function rootTest(pi: ExtensionAPI) {
     assert.equal(headlessAttempt3.details.group.children[0].attempt, 3);
     await execute(ctx, { operation: "reap", job_id: headlessAttempt3.details.job_id });
     process.env.PI_TUI_TEST_HEADLESS_START_DELAY_MS = "2000";
-    const startupStop = tool.execute(`root-test-startup-stop-${Date.now()}`, { task: "STARTUP_STOP_SENTINEL", model: "harness-test/mock:off", acceptance: ["Stop before startup prevents the initial task from running"] }, undefined, undefined, ctx);
+    const startupStop = tool.execute(`root-test-startup-stop-${Date.now()}`, { displayName: "Startup Stop", task: "STARTUP_STOP_SENTINEL", model: "harness-test/mock:off", acceptance: ["Stop before startup prevents the initial task from running"] }, undefined, undefined, ctx);
     void startupStop.catch(() => undefined);
     let delayedTask: any;
     const delayedDeadline = Date.now() + 10_000;
     while (Date.now() < delayedDeadline) {
       const page = await service.execute({ sessionId: service.sessionId, epoch: service.epoch, operation: "list" });
-      delayedTask = page.tasks?.find((task: any) => task.title.includes("STARTUP_STOP_SENTINEL"));
+      delayedTask = page.tasks?.find((task: any) => task.title === "Startup Stop");
       if (delayedTask?.canStop) break;
       await sleep(50);
     }
@@ -354,14 +355,14 @@ export default function rootTest(pi: ExtensionAPI) {
     assert.equal(startupState.sealed, true);
     assert.ok(startupState.jobCleanup);
     let orphanFailure: string | undefined;
-    const orphanTask = tool.execute(`root-test-owner-loss-${Date.now()}`, { task: "WAIT_FOR_PARENT OWNER_LOSS_HEADLESS", model: "harness-test/mock:off", acceptance: ["Owner loss safely terminates the headless worker"] }, undefined, undefined, ctx);
+    const orphanTask = tool.execute(`root-test-owner-loss-${Date.now()}`, { displayName: "Owner Loss", task: "WAIT_FOR_PARENT OWNER_LOSS_HEADLESS", model: "harness-test/mock:off", acceptance: ["Owner loss safely terminates the headless worker"] }, undefined, undefined, ctx);
     void orphanTask.catch(error => { orphanFailure = String(error); });
     let orphanManifest: TuiWorkerManifest | undefined;
     let orphanStatusError: string | undefined;
     const orphanDeadline = Date.now() + 30_000;
     while (Date.now() < orphanDeadline) {
       const tasks = await service.execute({ sessionId: service.sessionId, epoch: service.epoch, operation: "list" });
-      const child = tasks.tasks?.find((task: any) => task.title.includes("OWNER_LOSS_HEADLESS"));
+      const child = tasks.tasks?.find((task: any) => task.title === "Owner Loss");
       if (child) orphanManifest = discoverTuiWorkers(join(process.env.PI_TUI_WORKER_STATE_ROOT!, "workers"), ctx.sessionManager.getSessionId()).find(worker => worker.childId === child.childId);
       if (orphanManifest) {
         try {

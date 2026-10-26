@@ -14,7 +14,8 @@ import { callTuiWorker, applyTuiWorkerOperatorMode } from "./tui-worker-client.t
 import { validateAcceptance } from "./outcome.ts";
 import { validateVerification } from "./acceptance.ts";
 import { readRetainedConversation, validateRetainedConversationFile } from "./retained-conversation.ts";
-import { validateSubagentName } from "./tui-names.ts";
+import { TaskNameStore } from "./task-name-store.ts";
+import { validateSubagentName, canonicalSubagentName } from "./tui-names.ts";
 import type { QuietUpdate } from "../shared/quiet-state.ts";
 
 const exec = promisify(execFile);
@@ -31,7 +32,7 @@ const MAX_HISTORY_MESSAGES = 100;
 const MAX_MESSAGE_TEXT = 4 * 1024;
 const stripControls = (text: string) => text.replace(/\x1b\][\s\S]*?(?:\x07|\x1b\\)/g, "").replace(/(?:\x1b\[|\x9b)[0-?]*[ -/]*[@-~]/g, "").replace(/[\x00-\x08\x0b-\x1f\x7f-\x9f]/g, "");
 
-type Spec = { name?: string; task: string; cwd: string; model?: string; tools?: string[]; systemPrompt?: string; acceptance?: string[]; verification?: import("./acceptance.ts").VerificationGate[]; worktree?: WorktreeOption; worktreeInfo?: { path: string; branch: string; baseCommit: string; includedChanges: boolean } };
+type Spec = { name?: string; displayName?: string; task: string; cwd: string; model?: string; tools?: string[]; systemPrompt?: string; acceptance?: string[]; verification?: import("./acceptance.ts").VerificationGate[]; worktree?: WorktreeOption; worktreeInfo?: { path: string; branch: string; baseCommit: string; includedChanges: boolean } };
 type Child = { taskId: string; childId: string; attempt: number; directory: string; spec: Spec; status: ForegroundTask["status"]; createdAt: string; updatedAt: string; started: boolean; launching?: boolean; reaped?: boolean; report?: string; outcome?: unknown; error?: string; workerAlive?: boolean; requiresCompaction?: boolean; notifiedSequence?: number; launcherPid?: number; launcherToken?: string; ownerToken: string; operatorCapability: string; resumeMessage?: string; compactBeforePrompt?: boolean; stopRequested?: boolean; initialPromptDispatching?: boolean; };
 type Group = { version: 1; id: string; owner: string; ownerToken: string; createdAt: string; mode: "single" | "parallel" | "chain"; cancelled: boolean; launchMode: "none" | "guard-only"; launcher: string; children: Child[] };
 type Disposition = "native" | "guard-only" | "full" | "unavailable";
@@ -210,6 +211,16 @@ export class HeadlessForegroundManager {
     }
     throw new Error("Actual Pi runtime identity was never authenticated; launcher death is not proof of worker death, refusing reap/recovery");
   }
+  private canonicalTitle(child: Child): string {
+    try {
+      const manifest = this.manifest(child);
+      if (manifest && manifest.ownerSessionId === this.owner) {
+        const record = new TaskNameStore(child.directory, manifest).read(false);
+        if (record) return record.displayName;
+      }
+    } catch { /* Invalid metadata never supplies a cross-session title. */ }
+    return child.spec.displayName ?? canonicalSubagentName(child.spec.task, undefined, child.spec.name);
+  }
   private manifest(child: Child): HeadlessWorkerManifest | undefined {
     try {
       const group = [...this.groups.values()].find(candidate => candidate.children.includes(child));
@@ -272,6 +283,8 @@ export class HeadlessForegroundManager {
       ...this.routingEnvironment(),
       [TUI_WORKER_MANIFEST_ENV]: manifestPath, PI_TUI_WORKER_LAUNCH_MODE: contract.launchMode,
       PI_TUI_WORKER_LAUNCHER: launcher, PI_SUBAGENT_ID: child.childId,
+      PI_SUBAGENT_CANONICAL_NAMES: "1",
+      PI_SUBAGENT_NAME: child.spec.displayName ?? canonicalSubagentName(child.spec.task, undefined, child.spec.name),
       [TUI_WORKER_DISCOVERY_ENV.ownerSessionId]: group.owner, [TUI_WORKER_DISCOVERY_ENV.taskId]: child.taskId,
       [TUI_WORKER_DISCOVERY_ENV.groupId]: group.id, [TUI_WORKER_DISCOVERY_ENV.childId]: child.childId,
       [TUI_WORKER_DISCOVERY_ENV.attempt]: String(child.attempt), [TUI_WORKER_DISCOVERY_ENV.runtimeId]: runtimeId,
@@ -310,6 +323,7 @@ export class HeadlessForegroundManager {
       tools: child.spec.tools, verification: child.spec.verification, sessionFile, presentation: "headless-foreground", execution: "rpc-headless", processPid: childProc.pid,
       processToken, fifoPath };
     store.writeManifest(manifest);
+    new TaskNameStore(child.directory, manifest).claim(child.spec.displayName ?? canonicalSubagentName(child.spec.task, undefined, child.spec.name));
     child.launching = false;
     atomicPrivateJson(store.path("launch-intent.json"), { groupId: group.id, childId: child.childId, runtimeId, workerEpoch, fifoPath });
     await import("node:fs/promises").then(fs => fs.writeFile(gate, "ready\n", { flag: "wx", mode: 0o600 }));
@@ -400,7 +414,7 @@ export class HeadlessForegroundManager {
           const value = readPrivateJson(path) as any;
           if (typeof value.message === "string" && Buffer.byteLength(value.message) <= 1000) {
             const update: QuietUpdate = { kind: "notification", id: `${group.id}:${child.childId}:${event.sequence}`,
-              child_id: child.childId, message: value.message, requires_guidance: value.requires_guidance === true, through_sequence: event.sequence };
+              child_id: child.childId, displayName: this.canonicalTitle(child), message: value.message, requires_guidance: value.requires_guidance === true, through_sequence: event.sequence };
             if (!this.notify(update)) break;
           }
         }
@@ -517,7 +531,7 @@ export class HeadlessForegroundManager {
       if (spec.tools !== undefined && (!Array.isArray(spec.tools) || spec.tools.length > 64 || spec.tools.some((tool: any) => typeof tool !== "string" || !/^[a-zA-Z0-9_-]{1,128}$/.test(tool)))) throw new Error("Invalid tool selection");
       const unavailable = (spec.tools ?? []).filter((tool: string) => ["subagent", "background_job"].includes(tool));
       if (unavailable.length) throw new Error(`Headless foreground tasks cannot enable tmux/delegation tools: ${unavailable.join(", ")}`);
-      return { name: validateSubagentName(spec.name), task: spec.task, cwd: resolve(spec.cwd ?? cwd), model: spec.model, tools: spec.tools,
+      return { name: validateSubagentName(spec.name), displayName: canonicalSubagentName(spec.task, spec.displayName, spec.name), task: spec.task, cwd: resolve(spec.cwd ?? cwd), model: spec.model, tools: spec.tools,
         systemPrompt: spec.systemPrompt, acceptance: validateAcceptance(spec.acceptance), ...(spec.verification !== undefined ? { verification: validateVerification(spec.verification) } : {}), worktree: worktreeOption(spec.worktree) };
     });
     if (specs.length > 8) throw new Error("At most eight subagent children are allowed");
@@ -603,7 +617,7 @@ export class HeadlessForegroundManager {
     } catch { return ""; }
   }
   private result(group: Group, selected?: Child, options: { operation?: string; offset?: number; limit?: number; diagnostics?: boolean; retained?: boolean } = {}): any {
-    const children = group.children.map((child, index) => ({ child: index + 1, child_id: child.childId, task_id: child.taskId, status: child.status, attempt: child.attempt, task: child.spec.task.slice(0, 500), cwd: child.spec.cwd, worktree: child.spec.worktreeInfo, error: child.error, task_outcome: child.outcome, verification: { status: child.spec.verification?.length ? "unavailable" : "not-configured" }, accepted_delivery: !child.spec.verification?.length && child.status === "completed" && (child.outcome as any)?.state === "delivered", review: "not-configured" }));
+    const children = group.children.map((child, index) => ({ child: index + 1, child_id: child.childId, task_id: child.taskId, status: child.status, attempt: child.attempt, displayName: this.canonicalTitle(child), task: child.spec.task.slice(0, 500), cwd: child.spec.cwd, worktree: child.spec.worktreeInfo, error: child.error, task_outcome: child.outcome, verification: { status: child.spec.verification?.length ? "unavailable" : "not-configured" }, accepted_delivery: !child.spec.verification?.length && child.status === "completed" && (child.outcome as any)?.state === "delivered", review: "not-configured" }));
     const failed = group.children.some(child => ["failed", "lost"].includes(child.status));
     const operation = options.operation ?? "result";
     const cancelled = group.cancelled || group.children.some(child => child.status === "cancelled");
@@ -630,7 +644,7 @@ export class HeadlessForegroundManager {
     }
     const rows = (selected ? [selected] : group.children).map(child => {
       const index = group.children.indexOf(child);
-      return `${index + 1}. ${child.childId} ${statusText(child)}${child.error ? `: ${child.error}` : ""}${child.report ? `\n${this.readMessages(child, false).filter(message => message.role === "assistant").at(-1)?.text ?? ""}` : ""}`;
+      return `${index + 1}. ${this.canonicalTitle(child)} ${statusText(child)}${child.error ? `: ${child.error}` : ""}${child.report ? `\n${this.readMessages(child, false).filter(message => message.role === "assistant").at(-1)?.text ?? ""}` : ""}`;
     });
     return { content: [{ type: "text", text: boundedUtf8(rows.join("\n\n"), 48 * 1024) }],
       details: { tui_subagent: true, backend: "native", operation, job_id: group.id, failed: selected ? ["failed", "lost"].includes(selected.status) : failed,
@@ -714,7 +728,7 @@ export class HeadlessForegroundManager {
     const manifest = this.manifest(child);
     const pending = manifest ? (() => { try { const state = new TuiWorkerStore(child.directory).readState(); return (state.interactions ?? []).filter(item => !item.answer && !item.cancelledAt).length; } catch { return 0; } })() : 0;
     return { taskId: child.taskId, childId: child.childId, workerEpoch: manifest?.workerEpoch ?? "", groupId: group.id, attempt: child.attempt,
-      title: child.spec.task.slice(0, 140), status: child.status, createdAt: child.createdAt, updatedAt: child.updatedAt,
+      title: this.canonicalTitle(child), status: child.status, createdAt: child.createdAt, updatedAt: child.updatedAt,
       pendingInteractions: pending, canPrompt: !!manifest && manifest.foregroundOwner?.token === this.ownerToken && child.started && child.workerAlive === true && ["running", "waiting-input", "waiting-permission", "completed", "cancelled"].includes(child.status),
       canStop: child.workerAlive === true && (child.started && active(child) || !child.started && !child.initialPromptDispatching) };
   }
@@ -939,7 +953,7 @@ export class HeadlessForegroundManager {
       const outcome = outcomePath ? readPrivateJson(outcomePath) as any : child.outcome as any;
       const status = this.readonlyExecutionStatus(child, state);
       return { taskId: child.taskId, childId: child.childId, groupId: group.id, runtimeId: manifest?.runtimeId ?? null,
-        attempt: child.attempt, status, title: child.spec.task.slice(0, 140),
+        attempt: child.attempt, status, title: this.canonicalTitle(child),
         kind: "foreground", needsAttention: child.status === "waiting-input" || child.status === "waiting-permission",
         ...(typeof outcome?.summary === "string" ? { summary: outcome.summary.slice(0, 2000) } : {}),
         lastUpdated: child.updatedAt, stale: true };
@@ -976,7 +990,7 @@ export class HeadlessForegroundManager {
     if (state.active !== childActive && child.status !== "pending") throw new Error("Active session state identity is inconsistent");
     const status = this.readonlyExecutionStatus(child, state);
     return { taskId: child.taskId, childId: child.childId, groupId: group.id, attempt: child.attempt,
-      runtimeId: manifest.runtimeId, ...(retainedSessionFile ? { sessionFile: retainedSessionFile } : {}), status, title: child.spec.task.slice(0, 140), cwd: child.spec.cwd };
+      runtimeId: manifest.runtimeId, ...(retainedSessionFile ? { sessionFile: retainedSessionFile } : {}), status, title: this.canonicalTitle(child), cwd: child.spec.cwd };
   }
   readonlyTaskReport(owner: string, taskId: string, maxBytes = 48 * 1024): any | undefined {
     if (this.owner !== owner) throw new Error("Headless task reports belong to another Pi session");

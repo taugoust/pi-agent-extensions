@@ -8,7 +8,8 @@ import { currentSubagentPermissionAuthority } from "../shared/subagent-permissio
 import { TuiWorkerStore } from "./tui-worker-store.ts";
 import { TuiWorkerServer } from "./tui-worker-server.ts";
 import { callTuiWorker } from "./tui-worker-client.ts";
-import { processIsAlive } from "./tui-worker-tmux.ts";
+import { TaskNameStore } from "./task-name-store.ts";
+import { processIsAlive, TuiWorkerTmux, WorkerAliasProjection } from "./tui-worker-tmux.ts";
 import { validateTaskOutcome } from "./outcome.ts";
 import { ModelInactivityWatch } from "./model-inactivity.ts";
 import type { LocalJobController } from "../shared/background-job.ts";
@@ -20,6 +21,32 @@ export default function tuiWorkerExtension(pi: ExtensionAPI): void {
   let worker: TuiWorkerServer | undefined;
   let context: ExtensionContext | undefined;
   let failed = false;
+  let nameStore: TaskNameStore | undefined;
+  let nameOperator: any;
+  let nameRevision = 0;
+  let nameWatch: ReturnType<typeof setInterval> | undefined;
+  let appliedName: string | undefined;
+  let aliasProjection: WorkerAliasProjection | undefined;
+  const projectAlias = (alias: string) => {
+    if (!worker || failed) return;
+    aliasProjection ??= new WorkerAliasProjection(async desired => {
+      if (!worker || failed || worker.sealed) throw new Error("Worker alias authority unavailable");
+      await new TuiWorkerTmux().rename(worker.manifest, desired, process.env.PI_SUBAGENT_NAME_WINDOW !== "0");
+    }, () => {
+      if (context?.hasUI) context.ui.notify("Name saved; tmux alias update unavailable. Retrying while this worker remains active.", "warning");
+    });
+    void aliasProjection.request(alias);
+  };
+  const applyName = (name: string, source: "pi" | "paseo", expectedRevision = nameRevision) => {
+    if (!nameStore || !context) throw new Error("Canonical naming unavailable");
+    const record = nameStore.rename(name, expectedRevision, source);
+    nameRevision = record.revision;
+    appliedName = record.displayName;
+    if (context.sessionManager.getSessionName() !== record.displayName) pi.setSessionName(record.displayName);
+    projectAlias(record.alias);
+    pi.events.emit("subagent-name-changed", { taskId: record.taskId, childId: record.childId, attempt: record.attempt, runtimeId: record.runtimeId, workerEpoch: record.workerEpoch, revision: record.revision, displayName: record.displayName });
+    return record;
+  };
   let lastAssistant: unknown;
   let liveAssistantText = "";
   let ownerWatch: ReturnType<typeof setInterval> | undefined;
@@ -120,6 +147,10 @@ export default function tuiWorkerExtension(pi: ExtensionAPI): void {
     stop(ctx);
   };
   pi.on("session_start", async (_event, ctx) => {
+    aliasProjection?.stop();
+    aliasProjection = undefined;
+    if (nameWatch) clearInterval(nameWatch);
+    nameWatch = undefined;
     context = ctx;
     try {
       const store = new TuiWorkerStore(dirname(resolve(manifestPath)));
@@ -139,8 +170,19 @@ export default function tuiWorkerExtension(pi: ExtensionAPI): void {
       const actualSession = ctx.sessionManager.getSessionFile();
       if (!actualSession || resolve(actualSession) !== resolve(manifest.sessionFile)) throw new Error("Worker Pi session does not match launch manifest");
       const displayName = process.env.PI_SUBAGENT_NAME?.trim().slice(0, 80);
-      if (manifest.execution !== "rpc-headless" && displayName && !ctx.sessionManager.getSessionName()) {
-        pi.setSessionName(displayName.charAt(0).toUpperCase() + displayName.slice(1));
+      if (process.env.PI_SUBAGENT_CANONICAL_NAMES === "1") {
+        nameStore = new TaskNameStore(store.directory, manifest);
+        const record = nameStore.read();
+        if (!record) throw new Error("Canonical naming claim missing");
+        nameRevision = record.revision;
+        appliedName = record.displayName;
+        nameOperator = { protocol: 1, sessionId: ctx.sessionManager.getSessionId(),
+          get: () => nameStore!.read(false),
+          rename: (name: string, revision: number, source: "pi" | "paseo") => applyName(name, source, revision) };
+        (globalThis as any).__paeCanonicalTaskNameV1 = nameOperator;
+        if (ctx.sessionManager.getSessionName() !== record.displayName) pi.setSessionName(record.displayName);
+      } else if (manifest.execution !== "rpc-headless" && displayName && !ctx.sessionManager.getSessionName()) {
+        pi.setSessionName(displayName);
       }
       worker = new TuiWorkerServer(store, {
         isIdle: () => context?.isIdle() === true && context?.hasPendingMessages() !== true,
@@ -235,6 +277,22 @@ export default function tuiWorkerExtension(pi: ExtensionAPI): void {
         },
       });
       await worker.start();
+      if (nameStore && appliedName) applyName(appliedName, "pi");
+      if (nameStore) {
+        nameWatch = setInterval(() => {
+          try {
+            const record = nameStore?.read(false);
+            if (!record) return;
+            nameRevision = record.revision;
+            if (record.displayName !== appliedName) {
+              appliedName = record.displayName;
+              pi.setSessionName(record.displayName);
+            }
+            projectAlias(record.alias); // Retry failed projections even when metadata is unchanged.
+          } catch { /* Metadata unavailable: preserve the last accepted presentation. */ }
+        }, 1000);
+        nameWatch.unref?.();
+      }
       if (manifest.execution !== "rpc-headless" && process.env.PI_SUBAGENT_ID) {
         const globals = globalThis as Record<string, any>;
         parentIdleCapability = { request: (details: { model: string; idleMinutes: number; contextPercent: number }, decisionSignal?: AbortSignal) =>
@@ -398,7 +456,23 @@ export default function tuiWorkerExtension(pi: ExtensionAPI): void {
       worker.outcome(outcome);
       return { content: [{ type: "text", text: `Recorded ${outcome.state}; execution completion and explicit reap remain separate.` }], details: { task_outcome: outcome } };
     } });
+  pi.on("session_info_changed", (event: any, ctx) => {
+    if (!nameStore || event.name === appliedName || ctx.sessionManager.getSessionName() !== event.name) return;
+    try { applyName(event.name, "pi"); }
+    catch (error) {
+      // Reject invalid/stale writes visibly; never silently truncate a user's rename.
+      if (appliedName && ctx.sessionManager.getSessionName() !== appliedName) pi.setSessionName(appliedName);
+      if (ctx.hasUI) ctx.ui.notify(`Name not changed: ${String(error)}`, "warning");
+    }
+  });
   pi.on("session_shutdown", async () => {
+    if ((globalThis as any).__paeCanonicalTaskNameV1 === nameOperator) delete (globalThis as any).__paeCanonicalTaskNameV1;
+    if (nameWatch) clearInterval(nameWatch);
+    nameWatch = undefined;
+    aliasProjection?.stop();
+    aliasProjection = undefined;
+    nameStore = undefined;
+    nameOperator = undefined;
     modelInactivity.shutdown();
     if (ownerWatch) clearInterval(ownerWatch);
     if (rpcLogTrimTimer) clearInterval(rpcLogTrimTimer);

@@ -184,6 +184,10 @@ pkgs.runCommand "subagent-check"
       "$workdir/tui-runtime/subagent/acceptance-manager.test.ts" \
       "$workdir/tui-runtime/subagent/state-root.test.ts" \
       "$workdir/tui-runtime/subagent/tui-names.test.ts" \
+      "$workdir/tui-runtime/subagent/canonical-names.test.ts" \
+      "$workdir/tui-runtime/subagent/task-name-store.test.ts" \
+      "$workdir/tui-runtime/subagent/canonical-runtime.test.ts" \
+      "$workdir/tui-runtime/subagent/worker-alias-projection.test.ts" \
       "$workdir/tui-runtime/subagent/group-wait.test.ts" \
       "$workdir/tui-runtime/subagent/tui-native-observe.test.ts" \
       "$workdir/tui-runtime/subagent/tui-descendants.test.ts" \
