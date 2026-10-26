@@ -161,11 +161,16 @@ export function parseResult(value: unknown): JobResult {
 }
 
 async function readJson(path: string): Promise<unknown> {
-  const info = await lstat(path);
-  if (!info.isFile() || info.isSymbolicLink()) throw new Error(`${path} is not a regular file`);
-  if (info.size > MAX_JSON_BYTES) throw new Error(`${path} is oversized`);
-  const raw = await readFile(path, "utf8");
-  return JSON.parse(raw) as unknown;
+  const file = await open(path, constants.O_RDONLY | constants.O_NOFOLLOW | constants.O_NONBLOCK);
+  try {
+    const info = await file.stat();
+    if (!info.isFile() || (info.mode & 0o077) || (process.getuid && info.uid !== process.getuid())) throw new Error(`${path} is not a private regular file`);
+    if (info.size > MAX_JSON_BYTES) throw new Error(`${path} is oversized`);
+    const bytes = Buffer.alloc(MAX_JSON_BYTES + 1);
+    const { bytesRead } = await file.read(bytes, 0, bytes.length, 0);
+    if (bytesRead > MAX_JSON_BYTES) throw new Error(`${path} is oversized`);
+    return JSON.parse(bytes.subarray(0, bytesRead).toString("utf8")) as unknown;
+  } finally { await file.close(); }
 }
 
 async function writeAtomic(path: string, value: unknown): Promise<void> {
@@ -349,7 +354,7 @@ export class JobStore {
   /** Enumerate already-initialized retained jobs without creating/changing state. */
   async listIdsReadOnly(): Promise<string[]> {
     const entries = await readdir(this.jobsRoot, { withFileTypes: true });
-    return entries.filter((entry) => entry.isDirectory() && JOB_ID_PATTERN.test(entry.name)).map((entry) => entry.name);
+    return entries.filter((entry) => entry.isDirectory() && !entry.isSymbolicLink() && JOB_ID_PATTERN.test(entry.name)).map((entry) => entry.name);
   }
 
   async remove(id: string): Promise<void> {

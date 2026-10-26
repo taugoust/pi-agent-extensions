@@ -40,7 +40,8 @@ export type ReadonlyJob = {
   updatedAt: string | null;
   /** Observation-only adopted PID/log jobs remain explicitly labeled. */
   observationOnly: boolean;
-  /** Child job ownership is not exposed through this first-version root API. */
+  /** Verified retained native-worker ancestry; observation only. */
+  fromSubagent?: boolean;
 };
 
 export type ReadonlyJobOutput = {

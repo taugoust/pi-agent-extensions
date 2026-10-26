@@ -113,7 +113,7 @@ try {
   // Global expiry from a different session/store must wait for worker-session
   // preservation. No data can disappear between inventory and durable copy.
   const sessionId = await fixture();
-  await writeFile(store.path(sessionId, 'output.log'), 'preserve me');
+  await writeFile(store.path(sessionId, 'output.log'), 'preserve me', { mode: 0o600 });
   await store.markRetrieved(sessionId, Date.now() - OUTPUT_RETENTION_MS - 1000);
   const preserveEntered = gate(), releasePreserve = gate();
   let preserved = false, deleted = false;

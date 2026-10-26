@@ -32,6 +32,16 @@ than as an empty native task list. Public native-worker identifiers are for
 navigation only; private control capabilities and persisted state are never
 part of this contract.
 
+Job pages include direct jobs and `fromSubagent: true` jobs from verified native
+worker descendants, recursively. Ownership is derived from private retained
+group/manifest nonce evidence and actual worker session headers, never ambient
+job visibility. Infrastructure and unrelated sessions are excluded. Opaque
+cursors are snapshot-bound; consumers must exhaust pages or display an error,
+not silently truncate. Unverifiable retained branches are excluded with an
+explicit notice; retained idle/reaped history alone grants no fabricated owner.
+Output revalidates the same ancestry and metadata after reading and remains
+observation-only, including adopted jobs.
+
 ## Installation
 
 Choose one of the following methods:

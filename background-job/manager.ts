@@ -1,4 +1,5 @@
 import { randomBytes } from "node:crypto";
+import { privateEvidenceDirectory as privateDirectory, type JobOwner } from "../shared/readonly-job-ancestry.ts";
 import type { JobPlacement } from '../shared/background-job.ts';
 import { constants, writeFileSync } from "node:fs";
 import { access, lstat, open, readFile, realpath, writeFile } from "node:fs/promises";
@@ -398,6 +399,32 @@ export class BackgroundJobManager {
     return records.slice(0, limit);
   }
 
+  async listReadOnlyOwners(owners: JobOwner[]): Promise<JobRecord[]> {
+    let ids: string[];
+    try { ids = await this.store.listIdsReadOnly(); }
+    catch (error) { if ((error as NodeJS.ErrnoException).code === "ENOENT") return []; throw error; }
+    if (ids.length > 20000) throw new Error("Read-only jobs capacity exceeded");
+    const records: JobRecord[] = [];
+    const scope = new Set(owners.map(owner => JSON.stringify([owner.sessionId, owner.childId ?? null])));
+    const owned = (metadata: JobMetadata) => !metadata.infrastructure && scope.has(JSON.stringify([metadata.sessionId, metadata.childId ?? null]));
+    let next = 0;
+    await Promise.all(Array.from({ length: Math.min(8, ids.length) }, async () => {
+      while (next < ids.length) {
+        const id = ids[next++]!;
+        try {
+          privateDirectory(this.store.jobDir(id));
+          const metadata = await this.store.readMetadata(id);
+          if (!owned(metadata)) continue;
+          const record = await this.get(id, false);
+          const current = await this.store.readMetadata(id);
+          if (owned(record.metadata) && owned(current) && JSON.stringify(current) === JSON.stringify(metadata)
+            && JSON.stringify(record.metadata) === JSON.stringify(metadata)) records.push(record);
+        } catch { /* Missing or invalid job metadata grants no observation authority. */ }
+      }
+    }));
+    return records.sort((a, b) => b.metadata.createdAt.localeCompare(a.metadata.createdAt) || a.metadata.id.localeCompare(b.metadata.id));
+  }
+
   async streamOutput(id: string): Promise<{ available: boolean; stdout: string; stderr: string; stdout_truncated?: true; stderr_truncated?: true }> {
     const record = await this.get(id, false);
     if (record.metadata.observed || record.metadata.pane || !record.launch) return { available: false, stdout: "", stderr: "" };
@@ -432,6 +459,7 @@ export class BackgroundJobManager {
 
   /** Read existing output without result reconciliation or notification writes. */
   async outputReadOnly(id: string): Promise<OutputSnapshot> {
+    privateDirectory(this.store.jobDir(id));
     return await this.readOutput(id, false);
   }
 
@@ -454,11 +482,17 @@ export class BackgroundJobManager {
     const snapshotWasTerminal = Boolean(record.result);
     try {
       const outputPath = this.store.path(id, "output.log");
-      const info = await lstat(outputPath);
-      if (!info.isFile() || info.isSymbolicLink()) throw new Error("Background job output is not a regular file");
-      if (info.size > 1024 * 1024) throw new Error("Background job output exceeds its persistent 1 MiB bound");
-      raw = await readFile(outputPath, "utf8");
-      source = "log";
+      const fd = await open(outputPath, constants.O_RDONLY | constants.O_NOFOLLOW | constants.O_NONBLOCK);
+      try {
+        const info = await fd.stat();
+        if (!info.isFile() || (info.mode & 0o077) || (process.getuid && info.uid !== process.getuid())) throw new Error("Background job output is not a private regular file");
+        if (info.size > 1024 * 1024) throw new Error("Background job output exceeds its persistent 1 MiB bound");
+        const bytes = Buffer.alloc(1024 * 1024 + 1);
+        const { bytesRead } = await fd.read(bytes, 0, bytes.length, 0);
+        if (bytesRead > 1024 * 1024) throw new Error("Background job output exceeds its persistent 1 MiB bound");
+        raw = bytes.subarray(0, bytesRead).toString("utf8");
+        source = "log";
+      } finally { await fd.close(); }
     } catch (error) {
       if ((error as NodeJS.ErrnoException).code !== "ENOENT") throw error;
     }

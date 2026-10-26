@@ -1,4 +1,6 @@
 import { createHash } from "node:crypto";
+import { homedir } from "node:os";
+import { ancestryStateRoot as nativeTuiStateRoot, readJobAncestry, ownsJob, privateEvidenceDirectory as privateDirectory } from "../shared/readonly-job-ancestry.ts";
 import { pinRuntimePath } from "./runtime-path.ts";
 import { isAbsolute, join } from "node:path";
 import { Type } from "@sinclair/typebox";
@@ -222,6 +224,16 @@ export default function backgroundJob(pi: ExtensionAPI) {
     return managerPromise;
   };
 
+  const readonlyManager = async () => {
+    if (managerPromise) return managerPromise;
+    // A headless root may never have started a direct job. Discover descendant
+    // records without initializing writable store/config state on a read RPC.
+    const stateRoot = join(getAgentDir(), "state", "background-jobs-v1");
+    const store = new JobStore(stateRoot, runtimeRoot(stateRoot));
+    const [tmux, node] = await Promise.all([resolveExecutable("tmux"), resolveExecutable("node")]);
+    return new BackgroundJobManager(store, new TmuxBackend(store, tmux, node, runnerPath()));
+  };
+
   const updateStatus = async (ctx: ExtensionContext) => {
     if (!ctx.hasUI) return;
     try {
@@ -301,32 +313,49 @@ export default function backgroundJob(pi: ExtensionAPI) {
         if (input.sessionId !== owner) throw new Error("Read-only jobs unavailable for this Pi session");
         assertReadonlyOwner();
         const limit = input.limit ?? 50;
-        if (!Number.isSafeInteger(limit) || limit < 1 || limit > 50 || input.cursor !== undefined) throw new Error("Invalid read-only jobs page");
-        if (!managerPromise) return { protocol: HARNESS_READONLY_PROTOCOL, state: "unavailable" as const, sessionId: owner, items: [], lastUpdated: null, stale: true, message: "Background-job service has not initialized." };
-        const service = await managerPromise;
+        if (!Number.isSafeInteger(limit) || limit < 1 || limit > 50) throw new Error("Invalid read-only jobs page");
+        const service = await readonlyManager();
         assertReadonlyOwner();
-        const records = await service.listReadOnly(owner, limit);
+        const ancestry = readJobAncestry(nativeTuiStateRoot(process.env, homedir()), owner);
+        const all = await service.listReadOnlyOwners(ancestry.owners);
         assertReadonlyOwner();
+        if (readJobAncestry(nativeTuiStateRoot(process.env, homedir()), owner).fingerprint !== ancestry.fingerprint) throw new Error("Read-only job ancestry changed; retry");
+        const fingerprint = createHash("sha256").update(ancestry.fingerprint).update(JSON.stringify(all.map(record => [record.metadata.id, record.metadata.sessionId, record.metadata.childId, record.metadata.createdAt]))).digest("hex");
+        let offset = 0;
+        if (input.cursor !== undefined) {
+          if (input.cursor.length > 256) throw new Error("Invalid read-only jobs cursor");
+          const page = JSON.parse(Buffer.from(input.cursor, "base64url").toString("utf8"));
+          if (page.fingerprint !== fingerprint || !Number.isSafeInteger(page.offset) || page.offset < 1 || page.offset >= all.length) throw new Error("Read-only jobs snapshot changed; retry");
+          offset = page.offset;
+        }
+        const records = all.slice(offset, offset + limit);
+        const nextCursor = offset + limit < all.length ? Buffer.from(JSON.stringify({ fingerprint, offset: offset + limit })).toString("base64url") : undefined;
         const observedLiveState = records.some(record => record.status === "running" || record.status === "starting");
         const lastUpdated = observedLiveState ? new Date().toISOString() : null;
         return { protocol: HARNESS_READONLY_PROTOCOL, state: "available" as const, sessionId: owner,
-          items: records.map(record => ({ jobId: record.metadata.id, status: record.status, name: record.metadata.name, createdAt: record.metadata.createdAt, updatedAt: record.result?.finishedAt ?? null, observationOnly: Boolean(record.metadata.observed && !record.metadata.pane) })),
-          lastUpdated, stale: !observedLiveState || records.some(record => record.status === "unavailable") };
+          items: records.map(record => ({ jobId: record.metadata.id, status: record.status, name: record.metadata.name, createdAt: record.metadata.createdAt, updatedAt: record.result?.finishedAt ?? null, observationOnly: Boolean(record.metadata.observed && !record.metadata.pane), ...(record.metadata.sessionId !== owner || record.metadata.childId ? { fromSubagent: true as const } : {}) })),
+          nextCursor, ...(ancestry.unavailable ? { message: "Some subagent job history is unavailable because its retained ownership evidence could not be verified." } : {}), lastUpdated, stale: !observedLiveState || records.some(record => record.status === "unavailable") };
       },
       async output(input) {
         if (input.sessionId !== owner) throw new Error("Read-only jobs unavailable for this Pi session");
         assertReadonlyOwner();
         if (!/^job-[0-9a-f]{24}$/.test(input.jobId) || (input.maxBytes !== undefined && (!Number.isSafeInteger(input.maxBytes) || input.maxBytes < 1 || input.maxBytes > 48 * 1024))) throw new Error("Invalid read-only job output request");
-        if (!managerPromise) return { protocol: HARNESS_READONLY_PROTOCOL, state: "unavailable" as const, sessionId: owner, lastUpdated: null, stale: true, message: "Background-job service has not initialized." };
-        const service = await managerPromise;
+        const service = await readonlyManager();
         assertReadonlyOwner();
+        const ancestry = readJobAncestry(nativeTuiStateRoot(process.env, homedir()), owner);
+        privateDirectory(service.store.jobDir(input.jobId));
         const metadata = await service.store.readMetadata(input.jobId);
-        if (metadata.sessionId !== owner || metadata.childId || metadata.infrastructure) throw new Error("Background job belongs to another owner");
+        if (!ownsJob(ancestry.owners, metadata)) throw new Error("Background job belongs to another owner");
         const record = await service.get(input.jobId, false);
         const snapshot = await service.outputReadOnly(input.jobId);
         assertReadonlyOwner();
+        const currentAncestry = readJobAncestry(nativeTuiStateRoot(process.env, homedir()), owner);
+        privateDirectory(service.store.jobDir(input.jobId));
+        const currentMetadata = await service.store.readMetadata(input.jobId);
+        if (currentAncestry.fingerprint !== ancestry.fingerprint || !ownsJob(currentAncestry.owners, currentMetadata)
+          || JSON.stringify(currentMetadata) !== JSON.stringify(metadata) || JSON.stringify(record.metadata) !== JSON.stringify(metadata)) throw new Error("Background job ownership changed; retry");
         let text = snapshot.text, truncated = snapshot.truncated;
-        if (input.maxBytes !== undefined) { const bounded = truncateUtf8(text, input.maxBytes, true); text = bounded.text; truncated ||= bounded.truncated; }
+        { const bounded = truncateUtf8(text, input.maxBytes ?? 48 * 1024, true); text = bounded.text; truncated ||= bounded.truncated; }
         return { protocol: HARNESS_READONLY_PROTOCOL, state: "available" as const, sessionId: owner,
           item: { jobId: input.jobId, text, truncated, source: snapshot.source, lastUpdated: record.result?.finishedAt ?? null, stale: !record.result },
           lastUpdated: record.result?.finishedAt ?? null, stale: !record.result };

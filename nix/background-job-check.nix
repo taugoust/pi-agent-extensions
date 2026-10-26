@@ -27,8 +27,10 @@ pkgs.runCommand "background-job-extension-check"
     workdir="$TMPDIR/background-job-check"
     srcdir="$workdir/src"
     outdir="$workdir/out"
-    mkdir -p "$srcdir/background-job" "$srcdir/shared" "$outdir/background-job" "$workdir/home" "$workdir/tmp"
-    cp ${self}/background-job/{index.ts,manager.ts,retention.ts,retention.test.mjs,retention-races.test.mjs,store.ts,tmux.ts,types.ts,test.mjs,streams.test.mjs,runner.mjs,watch.ts,watch-runner.mjs,watch.test.mjs,external-pane.ts,pane.test.mjs,runtime-path.ts,startup.test.mjs,completion.test.mjs} "$srcdir/background-job/"
+    mkdir -p "$srcdir/background-job" "$srcdir/shared" "$srcdir/subagent" "$outdir/background-job" "$workdir/home" "$workdir/tmp"
+    cp ${self}/subagent/{readonly-job-ancestry.test.ts,tui-worker-store.ts} "$srcdir/subagent/"
+    cp ${self}/shared/{tui-worker-protocol.ts,readonly-job-ancestry.ts} "$srcdir/shared/"
+    cp ${self}/background-job/{index.ts,manager.ts,retention.ts,retention.test.mjs,retention-races.test.mjs,store.ts,tmux.ts,types.ts,test.mjs,streams.test.mjs,runner.mjs,watch.ts,watch-runner.mjs,watch.test.mjs,external-pane.ts,pane.test.mjs,runtime-path.ts,startup.test.mjs,completion.test.mjs,readonly-descendants.test.mjs} "$srcdir/background-job/"
     cp ${self}/shared/agentsh-mode.ts "$srcdir/shared/agentsh-mode.ts"
     cp ${self}/shared/background-job.ts ${self}/shared/harness-readonly.ts "$srcdir/shared/"
     cp ${self}/shared/task-presentation.ts "$srcdir/shared/task-presentation.ts"
@@ -54,8 +56,10 @@ pkgs.runCommand "background-job-extension-check"
       "$srcdir/background-job/tmux.ts" \
       "$srcdir/background-job/types.ts" \
       "$srcdir/shared/agentsh-mode.ts" \
-      "$srcdir/shared/quiet-state.test.ts"
-    cp "$srcdir/background-job/"{test.mjs,streams.test.mjs,retention.test.mjs,retention-races.test.mjs,runner.mjs,watch-runner.mjs,watch.test.mjs,pane.test.mjs,startup.test.mjs,completion.test.mjs} "$outdir/background-job/"
+      "$srcdir/shared/quiet-state.test.ts" \
+      "$srcdir/subagent/readonly-job-ancestry.test.ts"
+    node --test "$outdir/subagent/readonly-job-ancestry.test.js"
+    cp "$srcdir/background-job/"{test.mjs,streams.test.mjs,retention.test.mjs,retention-races.test.mjs,runner.mjs,watch-runner.mjs,watch.test.mjs,pane.test.mjs,startup.test.mjs,completion.test.mjs,readonly-descendants.test.mjs} "$outdir/background-job/"
     cp "$srcdir/shared/extension-config-manifest.json" "$outdir/shared/"
     substituteInPlace "$outdir/shared/extension-defaults.js" \
       --replace-fail 'from "./extension-config-manifest.json"' 'from "./extension-config-manifest.json" with { type: "json" }'
@@ -93,6 +97,7 @@ pkgs.runCommand "background-job-extension-check"
     cat > "$outdir/node_modules/@mariozechner/pi-tui/index.js" <<'EOF'
     export class Text { constructor(text) { this.text = text; } }
     EOF
+    node "$outdir/background-job/readonly-descendants.test.mjs"
     node "$outdir/shared/quiet-state.test.js"
     PI_CODING_AGENT_DIR="$workdir/completion-agent" node "$outdir/background-job/completion.test.mjs"
     PI_CODING_AGENT_DIR="$workdir/retention-agent" node "$outdir/background-job/retention.test.mjs"

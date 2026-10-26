@@ -205,7 +205,7 @@ try {
   const inferred = await reloaded.get(first.metadata.id, false);
   assert(inferred.status === "lost" && !fs.existsSync(store.path(first.metadata.id, "result.json")), "non-reconciling observation persisted inferred terminal state");
   assert(fs.statSync(store.path(first.metadata.id, "metadata.json")).mtimeMs === metadataMtimeBefore, "non-reconciling observation changed metadata mtime");
-  fs.writeFileSync(store.path(first.metadata.id, "result.json"), resultBefore);
+  fs.writeFileSync(store.path(first.metadata.id, "result.json"), resultBefore, { mode: 0o600 });
   const readonlyOutput = await reloaded.outputReadOnly(first.metadata.id);
   assert(readonlyOutput.text.includes("done") && !fs.existsSync(notifiedPath), "read-only output wrote notification state");
   assert(fs.readFileSync(store.path(first.metadata.id, "metadata.json"), "utf8") === metadataBefore, "read-only output changed metadata");
