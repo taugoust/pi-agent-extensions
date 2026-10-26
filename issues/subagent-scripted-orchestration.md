@@ -13,7 +13,7 @@ Adapt scripted orchestration directly from `candidates/pi-subagents`: reusable p
 - Repository: https://github.com/nicobailon/pi-subagents, reviewed snapshot `3ce6185a`.
 - Start from `src/workflows/scripted-workflow.ts`, the workflow documentation, and associated workflow validation/execution tests. Copy/adapt applicable implementation and tests rather than recreating the feature from its description.
 - Preserve upstream license notices and attribution; document copied/adapted code provenance in `THIRD_PARTY.md`.
-- Related tasks: [runtime-verified acceptance](subagent-runtime-verified-acceptance.md) and [reusable profiles](resolved/subagent-agent-profiles.md). No Paseo changes in the current scope.
+- Related tasks: [runtime-verified acceptance](resolved/subagent-runtime-verified-acceptance.md) and [reusable profiles](resolved/subagent-agent-profiles.md). No Paseo changes in the current scope.
 
 ## Requirements
 

@@ -2,7 +2,7 @@
 
 ## Status
 
-Resolved. Related open tasks: [verified acceptance](../subagent-runtime-verified-acceptance.md) and [scripted orchestration](../subagent-scripted-orchestration.md).
+Resolved. Related tasks: [verified acceptance](subagent-runtime-verified-acceptance.md) and [scripted orchestration](../subagent-scripted-orchestration.md).
 
 ## Resolution
 

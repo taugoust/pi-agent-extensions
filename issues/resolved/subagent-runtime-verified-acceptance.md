@@ -2,13 +2,25 @@
 
 ## Status
 
-Open. Requested as a backlog task; implementation is not started.
+Resolved.
+
+## Resolution
+
+Implemented in `b0dfe9e2938963698b21a8919ce4f31f8d494542`. Explicit optional verification gates now use worker-owned supervised jobs and live command permissions, retain literal bounded evidence, distinguish typed/business verdicts from real exits, invalidate stale/current acceptance, recover ambiguous dispatches without replay, and preserve unresolved evidence through cleanup. Runtime verification, worker reports, execution settlement and independent review remain separate. Upstream snapshot `3ce6185a` and MIT provenance are recorded in [THIRD_PARTY.md](../../THIRD_PARTY.md); the implemented contract and limits are documented in [Runtime verification](../../docs/subagent-verification.md).
+
+Validation passed sequentially with `nice -n 19`, `--max-jobs 1` and `--cores 1`:
+
+- `nix build .#checks.x86_64-linux.background-job --no-link -L`: 10 named Node tests plus real supervised command/permission/evidence/ambiguous-dispatch controls and stream/retention/watch/ownership fixtures.
+- `nix build .#checks.x86_64-linux.subagent --no-link -L`: 177 named Node tests (123 native runtime/tool tests plus 54 legacy/config/profile/routing tests), no failures or skips, plus background-only schema reload and actual Pi reload/control/outcome/RPC fixtures.
+- Additional offline real guard-only Pi controls verified exit-zero acceptance, exit-seven rejection, read-only denial, literal output, reload invalidation and cleanup without provider credentials. Independent review cleared the implementation and adversarial regressions.
+
+Unsupported headless/full-AgentSH verification remains explicitly unavailable, not bypassed. Disk-only/reloaded/reaped evidence never restores current acceptance; native same-UID execution is not an OS isolation boundary. Conservative byte-tree identity and the supported JSON Schema subset are explicit limits. No Paseo UI changes, deployment or protected-runtime restart are included.
 
 ## Outcome
 
 Adapt runtime-verified acceptance directly from `candidates/pi-subagents`, so explicit verification commands—not worker claims—determine whether configured checks passed. Preserve our separate Pi RPC/TUI workers, tmux lifecycle, retained conversations, and Paseo integration.
 
-Related planned work: [scripted workflows and dynamic orchestration](subagent-scripted-orchestration.md) and [reusable profiles](resolved/subagent-agent-profiles.md). No Paseo changes in the current scope.
+Related planned work: [scripted workflows and dynamic orchestration](../subagent-scripted-orchestration.md) and [reusable profiles](subagent-agent-profiles.md). No Paseo changes in the current scope.
 
 ## Upstream reference
 
