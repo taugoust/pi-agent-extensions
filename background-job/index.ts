@@ -346,8 +346,11 @@ export default function backgroundJob(pi: ExtensionAPI) {
         privateDirectory(service.store.jobDir(input.jobId));
         const metadata = await service.store.readMetadata(input.jobId);
         if (metadata.id !== input.jobId || !ownsJob(ancestry.owners, metadata)) throw new Error("Background job belongs to another owner");
-        const record = await service.get(input.jobId, false);
-        const snapshot = await service.outputReadOnly(input.jobId);
+        const authorize = (current: typeof metadata) => {
+          if (current.id !== input.jobId || !ownsJob(ancestry.owners, current) || JSON.stringify(current) !== JSON.stringify(metadata)) throw new Error("Background job ownership changed before observation");
+        };
+        const record = await service.get(input.jobId, false, authorize);
+        const snapshot = await service.outputReadOnly(input.jobId, authorize);
         assertReadonlyOwner();
         const currentAncestry = readJobAncestry(nativeTuiStateRoot(process.env, homedir()), owner);
         privateDirectory(service.store.jobDir(input.jobId));

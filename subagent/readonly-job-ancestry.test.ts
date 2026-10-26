@@ -4,6 +4,7 @@ import { mkdtempSync, mkdirSync, writeFileSync, rmSync, symlinkSync, chmodSync, 
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { createHash } from "node:crypto";
+import { spawnSync } from "node:child_process";
 import { atomicPrivateJson, TuiWorkerStore } from "./tui-worker-store.ts";
 import { readJobAncestry, ownsJob } from "../shared/readonly-job-ancestry.ts";
 function fixture(depth = 3) {
@@ -79,6 +80,16 @@ test("headless foreground retained nonce evidence authorizes its session, not un
     atomicPrivateJson(join(group.children[0].directory, "manifest.json"), manifest);
     const stale = readJobAncestry(f.root, "session-0");
     assert.equal(stale.unavailable, true); assert.equal(ownsJob(stale.owners, { sessionId: "session-1" }), false);
+  } finally { f.close(); }
+});
+test("non-regular evidence cannot block read-only discovery", () => {
+  const f = fixture(); try {
+    const path = f.manifests[0].sessionFile;
+    rmSync(path); assert.equal(spawnSync("mkfifo", ["-m", "600", path]).status, 0);
+    assert.equal(readJobAncestry(f.root, "session-0").unavailable, true);
+    const manifest = join(f.groups[0].children[0].directory, "manifest.json");
+    rmSync(manifest); assert.equal(spawnSync("mkfifo", ["-m", "600", manifest]).status, 0);
+    assert.equal(readJobAncestry(f.root, "session-0").unavailable, true);
   } finally { f.close(); }
 });
 test("symlinked worker/session paths and public files grant no ownership", () => {

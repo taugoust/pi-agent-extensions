@@ -27,7 +27,7 @@ export type JobAncestry = { owners: JobOwner[]; fingerprint: string; unavailable
 const MAX_GROUPS = 10000, MAX_WORKERS = 20000;
 function readEvidence(path: string): any {
   privateEvidenceDirectory(dirname(path));
-  const fd = openSync(path, constants.O_RDONLY | constants.O_NOFOLLOW);
+  const fd = openSync(path, constants.O_RDONLY | constants.O_NOFOLLOW | constants.O_NONBLOCK);
   try {
     const stat = fstatSync(fd), maximum = 256 * 1024;
     if (!stat.isFile() || stat.nlink !== 1 || stat.size > maximum || (stat.mode & 0o077) || (process.getuid && stat.uid !== process.getuid())) throw new Error("Unsafe job ancestry evidence");
@@ -94,7 +94,7 @@ export function readJobAncestry(root: string, owner: string): JobAncestry {
         identities.add(identity); hash.update(identity);
         owners.push({ sessionId: session, childId: child.childId });
         let fd: number;
-        try { fd = openSync(manifest.sessionFile, constants.O_RDONLY | constants.O_NOFOLLOW); }
+        try { fd = openSync(manifest.sessionFile, constants.O_RDONLY | constants.O_NOFOLLOW | constants.O_NONBLOCK); }
         catch (error) { if ((error as NodeJS.ErrnoException).code === "ENOENT" && !child.started) continue; throw error; }
         let descendant: string;
         try {

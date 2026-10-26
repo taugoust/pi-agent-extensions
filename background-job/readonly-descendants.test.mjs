@@ -88,6 +88,23 @@ try {
   await rename(store.jobsRoot + '-retained', store.jobsRoot);
   await assert.rejects(api.output({ sessionId: 'foreign', jobId: direct }));
   const originalReadMetadata = JobStore.prototype.readMetadata;
+  const originalReadResult = JobStore.prototype.readResult;
+  let metadataReads = 0, foreignProbes = 0;
+  JobStore.prototype.readMetadata = async function(id) {
+    const metadata = await originalReadMetadata.call(this, id);
+    return id === grandchild && ++metadataReads === 2 ? { ...metadata, sessionId: 'raced-foreign-owner' } : metadata;
+  };
+  JobStore.prototype.readResult = async function(id) {
+    if (id === grandchild) foreignProbes++;
+    return originalReadResult.call(this, id);
+  };
+  await assert.rejects(api.output({ sessionId: 'owner-0', jobId: grandchild }), /ownership changed/);
+  assert.equal(foreignProbes, 0, 'ownership must be checked before result/pane/process observation');
+  metadataReads = 0;
+  await api.list({ sessionId: 'owner-0' });
+  assert.equal(foreignProbes, 0, 'list must reject raced metadata before observing foreign state');
+  JobStore.prototype.readMetadata = originalReadMetadata;
+  JobStore.prototype.readResult = originalReadResult;
   let mutate = true;
   JobStore.prototype.readMetadata = async function(id) {
     const metadata = await originalReadMetadata.call(this, id);

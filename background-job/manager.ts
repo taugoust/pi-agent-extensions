@@ -305,8 +305,9 @@ export class BackgroundJobManager {
     });
   }
 
-  async get(id: string, reconcile = true): Promise<JobRecord> {
+  async get(id: string, reconcile = true, authorize?: (metadata: JobMetadata) => void): Promise<JobRecord> {
     const metadata = await this.store.readMetadata(id);
+    authorize?.(metadata);
     const terminal = await this.store.readResult(id);
     const launch = await this.store.readLaunch(id);
     if (terminal) return { metadata, launch, result: terminal, status: terminal.status };
@@ -417,7 +418,9 @@ export class BackgroundJobManager {
           privateDirectory(this.store.jobDir(id));
           const metadata = await this.store.readMetadata(id);
           if (metadata.id !== id || !owned(metadata)) continue;
-          const record = await this.get(id, false);
+          const record = await this.get(id, false, current => {
+            if (current.id !== id || !owned(current) || JSON.stringify(current) !== JSON.stringify(metadata)) throw new Error("Read-only job ownership changed before observation");
+          });
           const current = await this.store.readMetadata(id);
           if (owned(record.metadata) && owned(current) && JSON.stringify(current) === JSON.stringify(metadata)
             && JSON.stringify(record.metadata) === JSON.stringify(metadata)) records.push(record);
@@ -460,13 +463,13 @@ export class BackgroundJobManager {
   }
 
   /** Read existing output without result reconciliation or notification writes. */
-  async outputReadOnly(id: string): Promise<OutputSnapshot> {
+  async outputReadOnly(id: string, authorize?: (metadata: JobMetadata) => void): Promise<OutputSnapshot> {
     privateDirectory(this.store.jobDir(id));
-    return await this.readOutput(id, false);
+    return await this.readOutput(id, false, authorize);
   }
 
-  private async readOutput(id: string, notify: boolean): Promise<OutputSnapshot> {
-    const record = await this.get(id, notify);
+  private async readOutput(id: string, notify: boolean, authorize?: (metadata: JobMetadata) => void): Promise<OutputSnapshot> {
+    const record = await this.get(id, notify, authorize);
     if (record.metadata.observed) {
       const observed = record.metadata.observed;
       const fd = await open(observed.logPath, constants.O_RDONLY | constants.O_NOFOLLOW | constants.O_NONBLOCK);
