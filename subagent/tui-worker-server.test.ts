@@ -1,3 +1,4 @@
+import { extractToolPresentation, validateToolPresentationArguments } from "../shared/tool-presentation.ts";
 import assert from "node:assert/strict";
 import { test } from "node:test";
 import { mkdtemp, rm } from "node:fs/promises";
@@ -47,6 +48,21 @@ test("authenticated live conversation stream reports tool start then authoritati
     assert.ok(code.startsWith(clipped.preview)); assert.ok(clipped.preview.includes("\n"));
     assert.ok(!clipped.preview.includes('"type":"text"')); assert.ok(!clipped.preview.includes("\ufffd"));
     assert.ok(Buffer.byteLength(JSON.stringify(clipped)) <= 2048);
+    const result = { content: [{ type: "text", text: "original running prose" }], details: { job_id: "job-2083c71f9e35e537555f2506", status: "running", name: "Ready repaired Accounts repeat proof", action: "start", capability: "private" } };
+    server.conversationTool("end", { toolCallId: "job", name: "background_job", result });
+    const jobsReply = await callTuiWorker(manifest, { operation: "events", afterSequence: clippedReply.sequence });
+    const job = validateLiveEvents(jobsReply, manifest, clippedReply.sequence)[0].data;
+    assert.deepEqual(job.toolPresentation, extractToolPresentation("background_job", result));
+    assert.equal(job.result, "original running prose");
+    assert.throws(() => validateLiveEvents(jobsReply, { ...manifest, workerEpoch: "wrong" }, clippedReply.sequence));
+    const largeArguments = { command: "echo " + "safe ".repeat(900) };
+    server.conversationTool("start", { toolCallId: "long-shell", name: "bash", arguments: largeArguments });
+    const shellReply = await callTuiWorker(manifest, { operation: "events", afterSequence: jobsReply.sequence });
+    const shell = validateLiveEvents(shellReply, manifest, jobsReply.sequence)[0].data;
+    assert.deepEqual(shell.toolArguments, largeArguments);
+    assert.notDeepEqual(shell.arguments, largeArguments);assert.equal(shell.arguments.truncated, true);
+    assert.deepEqual(validateToolPresentationArguments(shell.name, shell.toolArguments), largeArguments);
+    assert.equal(validateToolPresentationArguments("read", shell.toolArguments), undefined);
   } finally { await server.close(); await rm(directory, { recursive: true, force: true }); }
 });
 

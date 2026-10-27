@@ -7,6 +7,7 @@ import { basename, dirname, join, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 import { createHash, randomBytes } from "node:crypto";
 import { TUI_WORKER_DISCOVERY_ENV, TUI_WORKER_MANIFEST_ENV, type HeadlessWorkerManifest, type TuiWorkerEvent } from "../shared/tui-worker-protocol.ts";
+import { extractRetainedToolPresentation, extractToolPresentationArguments } from "../shared/tool-presentation.ts";
 import { FOREGROUND_TASKS_PROTOCOL, type ForegroundTask, type ForegroundTaskRequest, type ForegroundTaskResponse, type ForegroundTasksService, type TaskMessage, type TaskTarget, type TaskView } from "../shared/foreground-tasks.ts";
 import { processIdentity, processIsAlive, tuiWorkerLaunchContract } from "./tui-worker-tmux.ts";
 import { TuiWorkerStore, atomicPrivateJson, privateDirectory, readPrivateJson } from "./tui-worker-store.ts";
@@ -734,6 +735,9 @@ export class HeadlessForegroundManager {
   }
   private readHistory(child: Child): { messages: TaskMessage[]; truncated: boolean } {
     const messages: TaskMessage[] = [];
+    // Local to this exact child history read: never correlate across tasks/epochs.
+    const callsById = new Map<string, TaskMessage>();
+    const duplicateCalls = new Set<string>();
     let truncated = false;
     try {
       const tail = readBoundedTail(join(child.directory, "session.jsonl"), 1024 * 1024);
@@ -766,8 +770,16 @@ export class HeadlessForegroundManager {
             const args = toolArgsText(call.arguments);
             const toolName = typeof call.name === "string" ? call.name.slice(0, 128) : "unknown";
             const text = `Tool call: ${toolName}\n${args.text}`;
-            messages.push({ id: `${id}:tool:${String(call.id ?? index)}`, role: "tool", toolName, text,
-              ...(args.truncated ? { truncated: true } : {}), timestamp });
+            const toolCallId = typeof call.id === "string" && /^[a-zA-Z0-9._:|\-]{1,128}$/.test(call.id) ? call.id : undefined;
+            const safeArguments = toolCallId ? extractToolPresentationArguments(toolName, call.arguments) : undefined;
+            const toolMessage: TaskMessage = { id: `${id}:tool:${String(call.id ?? index)}`, role: "tool", toolName, text,
+              ...(toolCallId ? { toolCallId, toolPhase: "call", status: "unknown", ...(safeArguments ? { arguments: safeArguments } : {}) } : {}),
+              ...(args.truncated ? { truncated: true } : {}), timestamp };
+            messages.push(toolMessage);
+            if (toolCallId) {
+              if (callsById.has(toolCallId)) { duplicateCalls.add(toolCallId); callsById.delete(toolCallId); }
+              else if (!duplicateCalls.has(toolCallId)) callsById.set(toolCallId, toolMessage);
+            }
             if (args.truncated) truncated = true;
           }
           if (!text && calls.length === 0 && Array.isArray(message.content) && message.content.some((part: any) => !["text", "toolCall"].includes(part?.type))) {
@@ -782,8 +794,20 @@ export class HeadlessForegroundManager {
           ? hasNonText ? "[Tool result contains image or non-text content]" : "[Tool returned no text content]"
           : "[User message contains image or non-text content]");
         if (wasTruncated) truncated = true;
+        let toolMetadata: Partial<TaskMessage> = {};
+        if (message.role === "toolResult") {
+          const toolName = String(message.toolName ?? "tool").slice(0, 128);
+          const toolCallId = typeof message.toolCallId === "string" && /^[a-zA-Z0-9._:|\-]{1,128}$/.test(message.toolCallId) ? message.toolCallId : undefined;
+          const call = toolCallId ? callsById.get(toolCallId) : undefined;
+          const paired = call?.toolName === toolName ? call : undefined;
+          const status = message.isError === true ? "failed" as const : "completed" as const;
+          const toolPresentation = extractRetainedToolPresentation(toolName, message);
+          if (paired) paired.status = status;
+          toolMetadata = { toolName, ...(toolCallId ? { toolCallId, toolPhase: "result", status, resultFormat: "text",
+            ...(paired?.arguments ? { arguments: paired.arguments } : {}), ...(toolPresentation ? { toolPresentation } : {}) } : {}) };
+        }
         messages.push({ id, role: message.role === "toolResult" ? "tool" : "user",
-          ...(message.role === "toolResult" ? { toolName: String(message.toolName ?? "tool").slice(0, 128) } : {}),
+          ...toolMetadata,
           text, ...(wasTruncated ? { truncated: true } : {}), timestamp });
       }
     } catch { truncated = true; }

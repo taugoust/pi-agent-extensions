@@ -1,3 +1,4 @@
+import { extractToolPresentation, extractToolPresentationArguments } from "../shared/tool-presentation.ts";
 import assert from "node:assert/strict";
 import { test } from "node:test";
 import { mkdtemp, mkdir, writeFile, readFile, chmod, rm, lstat } from "node:fs/promises";
@@ -13,6 +14,45 @@ import { parseTuiWorkerRequest, publicTuiWorkerManifest } from "../shared/tui-wo
 
 const identity = { protocol: 1, requestId: "request-1", token: "a".repeat(64), ownerSessionId: "owner-session", taskId: "subagent-task-" + "1".repeat(24),
   runtimeId: "rpc-" + "2".repeat(24), groupId: "subagent-job-" + "3".repeat(24), childId: "subagent-child-" + "4".repeat(24), attempt: 1, workerEpoch: "5".repeat(32) };
+
+test("foreground retained tool pairing preserves canonical typed metadata and raw text", async () => {
+  const root = await mkdtemp(join(tmpdir(), "foreground-presentation-"));
+  const manager: any = new HeadlessForegroundManager(root, () => "native", () => true);
+  const command = "cd /home/theo/.worktrees/paseo/web-plugin-surface-focus && node .dev/verify-accounts.cjs > .dev/repaired-browser.log 2>&1";
+  const args = { action: "start", command, name: "Ready repaired Accounts repeat proof", token: "PRIVATE" };
+  const result = { content: [{ type: "text", text: "job-2083c71f9e35e537555f2506  Running  0s  Ready repaired Accounts repeat proof" }], details: { job_id: "job-2083c71f9e35e537555f2506", status: "running", action: "start", command, name: args.name, sessionFile: "/private/session" } };
+  const child = { directory: root, updatedAt: "2026-01-01T00:00:00.000Z" };
+  const rows = [
+    { id: "call", message: { role: "assistant", content: [{ type: "toolCall", id: "call-safe", name: "background_job", arguments: args }] } },
+    { id: "result", message: { role: "toolResult", toolCallId: "call-safe", toolName: "background_job", ...result } },
+    { id: "unpaired", message: { role: "toolResult", toolCallId: "different-id", toolName: "background_job", ...result, isError: true } },
+    { id: "unknown", message: { role: "toolResult", toolCallId: "unknown-id", toolName: "unknown", content: JSON.stringify(result) } },
+  ];
+  try {
+    await chmod(root, 0o700);
+    await writeFile(join(root, "session.jsonl"), rows.map(row => JSON.stringify({ type: "message", ...row })).join("\n") + "\n", { mode: 0o600 });
+    const history = manager.readHistory(child).messages;
+    assert.deepEqual(manager.readMessages(child, true), manager.readMessages(child, false), "foreground live/history projection differs");
+    const call = history.find((m: any) => m.toolPhase === "call");
+    const completed = history.find((m: any) => m.id === "result");
+    assert.equal(call.status, "completed"); assert.equal(call.toolCallId, "call-safe");
+    assert.deepEqual(call.arguments, extractToolPresentationArguments("background_job", args));
+    assert.deepEqual(completed.arguments, call.arguments); assert.equal(completed.toolPhase, "result");
+    assert.deepEqual(completed.toolPresentation, extractToolPresentation("background_job", result));
+    assert.equal(completed.resultFormat, "text");assert.equal(completed.text, result.content[0].text);
+    assert.equal(history.find((m: any) => m.id === "unpaired").arguments, undefined);
+    assert.equal(history.find((m: any) => m.id === "unpaired").status, "failed");
+    assert.equal(history.find((m: any) => m.id === "unknown").toolPresentation, undefined);
+    assert.equal(history.find((m: any) => m.id === "unknown").text, JSON.stringify(result));
+    // The exact same call id in another child cannot inherit this child's arguments.
+    const other = join(root, "other");await mkdir(other, { mode: 0o700 });
+    await writeFile(join(other, "session.jsonl"), JSON.stringify({ type: "message", ...rows[1] }) + "\n", { mode: 0o600 });
+    assert.equal(manager.readHistory({ ...child, directory: other }).messages[0].arguments, undefined);
+    // Old snapshots lack authoritative call IDs; no phase/status is guessed from prose.
+    await writeFile(join(root, "session.jsonl"), JSON.stringify({ type: "message", message: { role: "toolResult", toolName: "background_job", content: "running" } }) + "\n");
+    const old = manager.readHistory(child).messages[0];assert.equal(old.text, "running");assert.equal(old.toolPhase, undefined);assert.equal(old.status, undefined);assert.equal(old.resultFormat, undefined);assert.equal(old.toolPresentation, undefined);
+  } finally { await manager.shutdown(false); await rm(root, { recursive: true, force: true }); }
+});
 
 test("headless routing callbacks preserve trusted environment and rebind legacy role model", () => {
   const root = "/tmp/headless-routing-fixture";

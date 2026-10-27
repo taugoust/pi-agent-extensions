@@ -1,13 +1,14 @@
+import { extractRetainedToolPresentation, extractToolPresentationArguments, type ToolPresentation, type ToolPresentationArguments } from "../shared/tool-presentation.ts";
 import { closeSync, constants, fstatSync, lstatSync, openSync, readSync } from "node:fs";
 import { dirname } from "node:path";
 import { truncateUtf8 } from "../shared/harness-readonly.ts";
 import { boundedToolResultText } from "../shared/tool-result-text.ts";
 
-export type ConversationToolCall = { type: "toolCall"; id: string; name: string; arguments: unknown; status?: "completed" | "failed" | "unknown"; result?: string; resultFormat?: "text" };
+export type ConversationToolCall = { type: "toolCall"; id: string; name: string; arguments: unknown; toolArguments?: ToolPresentationArguments; status?: "completed" | "failed" | "unknown"; result?: string; toolPresentation?: ToolPresentation; resultFormat?: "text" };
 export type ConversationMessage = {
   id: string; role: "user" | "assistant" | "tool" | "parent"; text: string; truncated?: boolean;
   parts?: Array<{ type: "text"; text: string } | ConversationToolCall>;
-  resultFormat?: "text";
+  toolPresentation?: ToolPresentation; resultFormat?: "text";
   toolCallId?: string; toolName?: string; status?: "completed" | "failed" | "unknown";
 };
 const PAGE_BYTES = 8 * 1024 * 1024;
@@ -24,22 +25,27 @@ function contentText(content: unknown, maximum = MAX_RESULT_BYTES): string {
 function resultStatus(message: any): "completed" | "failed" { return message?.isError === true ? "failed" : "completed"; }
 
 /** Correlate structured results beyond a page boundary; never infer a status from missing text. */
-function collectFollowingToolResults(fd: number, start: number, size: number, pending: Set<string>, statuses: Map<string, "completed" | "failed">, results: Map<string, string>): void {
+function collectFollowingToolResults(fd: number, start: number, size: number, pending: Set<string>, statuses: Map<string, "completed" | "failed">, results: Map<string, string>, presentations: Map<string, ToolPresentation>): void {
   if (!pending.size || start >= size) return;
   const length = Math.min(PAGE_BYTES, size - start);
   const bytes = Buffer.alloc(length);
   const read = readSync(fd, bytes, 0, length, start);
+  const sought = new Set(pending);
   let offset = 0;
-  while (offset < read && pending.size) {
+  while (offset < read) {
     const newline = bytes.indexOf(10, offset);
     if (newline < 0) break;
     if (newline - offset <= 64 * 1024) {
       try {
         const entry = JSON.parse(bytes.subarray(offset, newline).toString("utf8"));
         const message = entry?.type === "message" ? entry.message : undefined;
-        if (message?.role === "toolResult" && typeof message.toolCallId === "string" && pending.delete(message.toolCallId)) {
+        if (message?.role === "toolResult" && typeof message.toolCallId === "string" && sought.has(message.toolCallId)) {
+          pending.delete(message.toolCallId);
           statuses.set(message.toolCallId, resultStatus(message));
           results.set(message.toolCallId, contentText(message.content));
+          const presentation = extractRetainedToolPresentation(message.toolName, message);
+          if (presentation) presentations.set(message.toolCallId, presentation);
+          else presentations.delete(message.toolCallId);
         }
       } catch { /* Malformed or oversized rows cannot authorize a tool status. */ }
     }
@@ -89,6 +95,7 @@ export function readRetainedConversation(path: string, cursor?: number) {
     const messages: ConversationMessage[] = [];
     const toolStatuses = new Map<string, "completed" | "failed">();
     const toolResults = new Map<string, string>();
+    const presentations = new Map<string, ToolPresentation>();
     let offset = firstComplete, truncated = windowStart > 0 || completeEnd < length;
     while (offset < completeEnd) {
       const newline = bytes.indexOf(10, offset);
@@ -110,9 +117,10 @@ export function readRetainedConversation(path: string, cursor?: number) {
             if (part?.type === "text" && typeof part.text === "string") return [clean(part.text).slice(0, 8192)];
             if (part?.type === "toolCall" && typeof part.id === "string" && part.id.length > 0 && part.id.length <= 128 && typeof part.name === "string" && part.name.length > 0 && part.name.length <= 128) {
               if (parts.filter(item => item.type === "toolCall").length >= 4) return [];
+              const toolArguments = extractToolPresentationArguments(part.name, part.arguments);
               let args: unknown = part.arguments ?? {};
               try { if (Buffer.byteLength(JSON.stringify(args)) > 1024) args = { truncated: true, preview: Buffer.from(JSON.stringify(args)).subarray(0, 900).toString("utf8") }; } catch { args = "[unavailable]"; }
-              parts.push({ type: "toolCall", id: part.id, name: part.name, arguments: args, status: "unknown" }); return [];
+              parts.push({ type: "toolCall", id: part.id, name: part.name, arguments: args, ...(toolArguments ? { toolArguments } : {}), status: "unknown" }); return [];
             }
             if (part?.type === "image") return ["[Image]"];
             return [];
@@ -123,10 +131,14 @@ export function readRetainedConversation(path: string, cursor?: number) {
             const status = resultStatus(message);
             toolStatuses.set(resultId, status);
             toolResults.set(resultId, contentText(content));
+            const presentation = extractRetainedToolPresentation(message.toolName, message);
+            if (presentation) presentations.set(resultId, presentation);
+            else presentations.delete(resultId);
           }
           if (text || parts.length || role === "tool") messages.push({
             id: `${windowStart + offset}:${String(entry.id ?? "").slice(0, 64)}`, role, text: role === "tool" ? contentText(content) : safeText,
             ...(parts.length ? { parts } : {}),
+            ...(resultId && presentations.has(resultId) ? { toolPresentation: presentations.get(resultId) } : {}),
             ...(role === "tool" ? { resultFormat: "text" as const } : {}),
             ...(resultId ? { toolCallId: resultId, toolName: typeof message.toolName === "string" ? message.toolName.slice(0, 128) : "tool",
               status: resultStatus(message) } : {}),
@@ -140,13 +152,18 @@ export function readRetainedConversation(path: string, cursor?: number) {
     const pageMessages = messages.slice(-MAX_MESSAGES);
     let olderBoundary = olderCursor;
     if (messages.length > MAX_MESSAGES && pageMessages.length) olderBoundary = Number(pageMessages[0]!.id.slice(0, pageMessages[0]!.id.indexOf(":")));
-    const pendingToolCalls = new Set(pageMessages.flatMap(message => (message.parts ?? []).flatMap(part => part.type === "toolCall" && !toolStatuses.has(part.id) ? [part.id] : [])));
+    const pendingToolCalls = new Set(pageMessages.flatMap(message => (message.parts ?? []).flatMap(part => part.type === "toolCall" ? [part.id] : [])));
     const readEnd = windowStart + completeEnd;
-    collectFollowingToolResults(fd, readEnd, stat.size, pendingToolCalls, toolStatuses, toolResults);
+    collectFollowingToolResults(fd, readEnd, stat.size, pendingToolCalls, toolStatuses, toolResults, presentations);
+    const callCounts = new Map<string, number>();
+    for (const message of pageMessages) for (const part of message.parts ?? []) if (part.type === "toolCall") callCounts.set(part.id, (callCounts.get(part.id) ?? 0) + 1);
     for (const message of pageMessages) for (const part of message.parts ?? []) if (part.type === "toolCall") {
       part.status = toolStatuses.get(part.id) ?? "unknown";
       const result = toolResults.get(part.id);
       if (result !== undefined) { part.result = result; part.resultFormat = "text"; }
+      const presentation = presentations.get(part.id);
+      if (callCounts.get(part.id) !== 1) { delete part.toolArguments; continue; }
+      if (presentation?.toolName === part.name) part.toolPresentation = presentation;
     }
 
     const selected: ConversationMessage[] = [];

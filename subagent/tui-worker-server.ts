@@ -1,3 +1,4 @@
+import { extractToolPresentation, extractToolPresentationArguments } from "../shared/tool-presentation.ts";
 import net from "node:net";
 import { boundedToolResult } from "../shared/tool-result-text.ts";
 import { chmodSync, lstatSync, openSync, closeSync, unlinkSync, writeFileSync } from "node:fs";
@@ -201,7 +202,7 @@ export class TuiWorkerServer {
     };
     this.event(kind === "start" ? "conversation_tool_start" : "conversation_tool_end", {
       toolCallId: value.toolCallId, name: value.name,
-      ...(kind === "start" ? { arguments: bounded(value.arguments, 2048) } : { result: boundedToolResult(value.result, 2048), resultFormat: "text", status: value.failed ? "failed" : "completed" }),
+      ...(kind === "start" ? { arguments: bounded(value.arguments, 2048), toolArguments: extractToolPresentationArguments(value.name, value.arguments) } : { toolPresentation: extractToolPresentation(value.name, value.result), result: boundedToolResult(value.result, 2048), resultFormat: "text", status: value.failed ? "failed" : "completed" }),
     });
   }
   liveText(value: string): void {
@@ -310,12 +311,15 @@ export class TuiWorkerServer {
       const events = this.state.events.filter(event => event.sequence > r.afterSequence);
       // Bound response bytes even if event producers attach large data.
       const selected: TuiWorkerEvent[] = [];
+      const oldestSequence = this.state.events[0]?.sequence ?? this.state.sequence;
       for (const event of events) {
-        if (Buffer.byteLength(JSON.stringify([...selected, event])) > 96 * 1024) break;
+        // The readonly validator bounds the whole page, not just its array.
+        const page = { events: [...selected, event], oldestSequence, nextSequence: event.sequence };
+        if (Buffer.byteLength(JSON.stringify(page)) > 96 * 1024) break;
         selected.push(event);
       }
       return this.response(r, { ok: true, receipt: "applied", sequence: this.state.sequence,
-        data: { events: selected, oldestSequence: this.state.events[0]?.sequence ?? this.state.sequence,
+        data: { events: selected, oldestSequence,
           nextSequence: selected.at(-1)?.sequence ?? r.afterSequence } });
     }
     if (r.operation === "jobs" && !this.adapter.jobs) return fail("unavailable", "Child-local job controller unavailable");

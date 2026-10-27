@@ -19,6 +19,8 @@
  * - DTO history, interaction payloads, liveText and cursors are bounded. Cursors
  *   are opaque history positions and never filesystem paths or capabilities.
  */
+import type { ToolPresentation, ToolPresentationArguments } from "./tool-presentation.ts";
+
 export const FOREGROUND_TASKS_KEY = "__paeForegroundTasksV1";
 export const WORKER_INTERACTIONS_KEY = "__paeWorkerInteractionsV1";
 export const FOREGROUND_TASKS_PROTOCOL = 1 as const;
@@ -61,6 +63,13 @@ export type TaskMessage = {
   text: string;
   timestamp: string;
   toolName?: string;
+  /** Display only; routing remains bound to the owning task/session/worker identity. */
+  toolCallId?: string;
+  arguments?: ToolPresentationArguments;
+  status?: "running" | "completed" | "failed" | "unknown" | "canceled" | "cancelled";
+  toolPhase?: "call" | "result";
+  resultFormat?: "text";
+  toolPresentation?: ToolPresentation;
   truncated?: boolean;
 };
 export type TaskView = {
