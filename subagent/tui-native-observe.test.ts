@@ -331,3 +331,28 @@ test("authority loss is a failed native result, including old tool-only reports"
     assert.equal(child.error, undefined);
   } finally { await server.close(); await manager.shutdown(false); await rm(root, { recursive: true, force: true }); }
 });
+
+test("worker observation failure preserves the original launch failure and exposes its own diagnostic", async () => {
+  const root = await mkdtemp(join(tmpdir(), "pi-observe-launch-failure-"));
+  const manager: any = new TuiNativeManager(root, () => "native", () => true, 16);
+  const directory = join(root, "workers", "a".repeat(24));
+  const store = new TuiWorkerStore(directory, true);
+  const manifest: any = { protocol: 1, ownerSessionId: "parent", taskId: "task", runtimeId: "runtime", groupId: `subagent-job-${"a".repeat(24)}`,
+    childId: `subagent-child-${"b".repeat(24)}`, attempt: 1, workerEpoch: "c".repeat(32), controlToken: "d".repeat(64),
+    controlSocket: join(directory, "control.sock"), sessionFile: join(directory, "session.jsonl"), launchMode: "none", presentation: "background",
+    placement: { socketPath: "/tmp/tmux", serverEpoch: "1:2", sessionId: "$1", windowId: "@1", paneId: "%1", ownershipNonce: "e".repeat(64) } };
+  store.writeManifest(manifest);
+  const launchFailure = "Worker startup timeout: pane did not become ready";
+  const child: any = { childId: manifest.childId, taskId: manifest.taskId, directory, spec: { task: "work" }, state: "failed", error: launchFailure, started: false, notifiedSequence: 0 };
+  const group: any = { id: manifest.groupId, owner: "parent", background: true, mode: "single", launchMode: "none", caller: manifest.placement, children: [child] };
+  manager.groups.set(group.id, group);
+  try {
+    await manager.observe(group, child);
+    const status = manager.publicGroup(group).children[0];
+    assert.equal(child.state, "failed", "observer failure must not change the worker lifecycle state");
+    assert.equal(child.error, launchFailure, "observer failure must not replace the causal startup failure");
+    assert.match(status.error, /startup timeout/);
+    assert.match(status.observation_error, /unavailable|connect|socket/i);
+    assert.match(manager.text(group), /startup timeout.*observation unavailable/i);
+  } finally { await manager.shutdown(false); await rm(root, { recursive: true, force: true }); }
+});

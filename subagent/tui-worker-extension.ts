@@ -1,4 +1,5 @@
 import type { ExtensionAPI, ExtensionContext } from "@mariozechner/pi-coding-agent";
+import { getAgentDir, ProjectTrustStore, SettingsManager } from "@earendil-works/pi-coding-agent";
 import { dirname, resolve } from "node:path";
 import { closeSync, constants, fstatSync, openSync, writeSync } from "node:fs";
 import { randomBytes } from "node:crypto";
@@ -18,6 +19,22 @@ import type { LocalJobController } from "../shared/background-job.ts";
 export default function tuiWorkerExtension(pi: ExtensionAPI): void {
   const manifestPath = process.env[TUI_WORKER_MANIFEST_ENV];
   if (!manifestPath) return;
+  // Unattended TUI workers must not wait at a trust dialog before their control
+  // socket exists. Keep saved/global policy; decline only the unresolved ask,
+  // for this process alone. Never read untrusted project settings to decide.
+  pi.on("project_trust", (event) => {
+    try {
+      const agentDir = getAgentDir();
+      const decision = new ProjectTrustStore(agentDir).get(event.cwd);
+      if (decision !== null) return { trusted: "undecided" };
+      const settings = SettingsManager.create(event.cwd, agentDir, { projectTrusted: false });
+      if (settings.getDefaultProjectTrust() !== "ask") return { trusted: "undecided" };
+    } catch {
+      // Unreadable policy must never grant access or strand an unattended TUI.
+      return { trusted: "no", remember: false };
+    }
+    return { trusted: "no", remember: false };
+  });
   let worker: TuiWorkerServer | undefined;
   let context: ExtensionContext | undefined;
   let failed = false;

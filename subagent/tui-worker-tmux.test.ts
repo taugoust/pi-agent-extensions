@@ -55,6 +55,22 @@ test("routing launch input accepts only the trusted private routing keys", async
   }
 });
 
+test("startup timeout retains a safe trust diagnosis rather than terminal secrets", async () => {
+  const root = await mkdtemp(join(tmpdir(), "worker-startup-diagnostic-"));
+  const backend = new TuiWorkerTmux();
+  const placement = { socketPath: "/fixture/tmux", paneId: "%42" };
+  (backend as any).inspect = async () => ({ dead: false, placement });
+  (backend as any).run = async () => "Trust project folder?\nprivate-credential-must-not-be-retained";
+  try {
+    const manifest = { sessionFile: join(root, "session.jsonl"), workerEpoch: "epoch" } as TuiWorkerManifest;
+    await assert.rejects(backend.waitReady(manifest, 0), /startup timed out \(project-trust-prompt\)/);
+    const text = await readFile(join(root, "startup-failure.json"), "utf8");
+    assert.equal(JSON.parse(text).reason, "project-trust-prompt");
+    assert.doesNotMatch(text, /private-credential/);
+    assert.equal((await stat(join(root, "startup-failure.json"))).mode & 0o777, 0o600);
+  } finally { await rm(root, { recursive: true, force: true }); }
+});
+
 test("launcher authority contract fails closed on missing/mismatched/full mode", () => {
   assert.throws(() => tuiWorkerLaunchContract("native", {}));
   const env = { PI_TUI_WORKER_LAUNCHER: "/nix/store/example/bin/pi", PI_TUI_WORKER_LAUNCH_MODE: "none" };
@@ -167,8 +183,14 @@ test("real Pi TUI: local keyboard, observer crash, same-process promotion, retai
       fileURLToPath(new URL("../../background-job/index.ts", import.meta.url)),
       fileURLToPath(new URL("./tui-worker-extension.ts", import.meta.url))],
     defaultProvider: "harness-test", defaultModel: "mock", quietStartup: true,
-    enableSkillCommands: false, defaultProjectTrust: "no",
+    enableSkillCommands: false, defaultProjectTrust: "ask",
   }));
+  // Match the failed fresh-checkout launch: gated project resources, no saved
+  // trust, and interactive Pi. The project must not run its own extension.
+  await mkdir(join(root, ".pi", "extensions"), { recursive: true });
+  await mkdir(join(root, ".agents", "skills"), { recursive: true });
+  const projectMarker = join(root, "untrusted-extension-loaded");
+  await writeFile(join(root, ".pi", "extensions", "probe.ts"), `import {writeFileSync} from 'node:fs'; export default function(){writeFileSync(${JSON.stringify(projectMarker)}, 'unsafe');}`);
   try {
     await tmux("new-session", "-d", "-s", "parent", "-x", "120", "-y", "35", "sleep 120");
     await tmux("set-environment", "-g", "PI_CODING_AGENT_DIR", config);
@@ -198,6 +220,8 @@ test("real Pi TUI: local keyboard, observer crash, same-process promotion, retai
       for (const pane of panes.split("\n").filter(Boolean)) captures += await tmux("capture-pane", "-p", "-S", "-100", "-t", pane).catch(() => "");
       throw new Error(`Launcher did not become ready: ${error}\n${captures}`);
     }
+    await assert.rejects(readFile(projectMarker), { code: "ENOENT" });
+    await assert.rejects(readFile(join(config, "trust.json")), { code: "ENOENT" });
     const store = new TuiWorkerStore(workerDir);
     let manifest = store.readManifest();
     const display = (pane: string, format: string) => tmux("display-message", "-p", "-t", pane, format);

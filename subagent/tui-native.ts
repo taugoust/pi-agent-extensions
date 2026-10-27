@@ -23,7 +23,7 @@ type Spec = { name?: string; displayName?: string; tmuxAlias?: string; task: str
 type Child = { childId: string; taskId: string; attempt: number; directory: string; spec: Spec;
   resumeSessionFile?: string; resumeMessage?: string; compactBeforePrompt?: boolean;
   state: "pending" | "launching" | "running" | "completed" | "failed" | "cancelled" | "lost" | "skipped";
-  operatorCapability: string; started: boolean; reaped?: boolean; error?: string; report?: string;
+  operatorCapability: string; started: boolean; reaped?: boolean; error?: string; observationError?: string; report?: string;
   verification?: unknown; historicalVerification?: unknown; acceptedDelivery?: boolean;
   notifiedSequence: number; needsAttention?: boolean; idleDecisionNotified?: string; runSequence?: number; pendingActivitySequence?: number; terminalNotification?: string; lastOutcome?: unknown; requiresCompaction?: boolean; };
 type Group = { windowName?: string; renameWindowWithFirstChild?: boolean; version: 1; id: string; owner: string; createdAt: string; mode: "single" | "parallel" | "chain";
@@ -380,7 +380,7 @@ export class TuiNativeManager {
             idleDecision = { ...(pending.data as object), workerEpoch: manifest.workerEpoch };
         } catch {} }
         return { child: i + 1, child_id: c.childId, task_id: c.taskId,
-          status: c.state, attempt: c.attempt ?? 1, reaped: !!c.reaped, displayName: this.canonicalTitle(c), task: c.spec.task.slice(0, 500), error: c.error,
+          status: c.state, attempt: c.attempt ?? 1, reaped: !!c.reaped, displayName: this.canonicalTitle(c), task: c.spec.task.slice(0, 500), error: c.error, observation_error: c.observationError,
           cwd: c.spec.cwd, ...(c.spec.worktreeInfo ? { worktree: c.spec.worktreeInfo } : {}),
           report: c.report, task_outcome: c.lastOutcome, historical_verification: c.historicalVerification, verification: c.verification ?? { status: c.spec.verification?.length ? "interrupted" : "not-configured" }, accepted_delivery: c.acceptedDelivery === true, review: "not-configured", ...(idleDecision ? { idle_decision: idleDecision } : {}),
           ...(manifest ? { runtime: publicTuiWorkerManifest(manifest) } : {}) };
@@ -390,7 +390,7 @@ export class TuiNativeManager {
     const snapshot = this.publicGroup(g);
     let text = `${g.mode} ${snapshot.status} (${g.background ? "background" : "foreground staged"})`;
     for (const [i, c] of g.children.entries()) {
-      text += `\n${i + 1}. ${this.canonicalTitle(c)} ${c.state}${c.reaped ? " [reaped]" : ""}${c.error ? `: ${c.error}` : ""}`;
+      text += `\n${i + 1}. ${this.canonicalTitle(c)} ${c.state}${c.reaped ? " [reaped]" : ""}${c.error ? `: ${c.error}` : ""}${c.observationError ? ` (observation unavailable: ${c.observationError})` : ""}`;
       if (c.spec.verification?.length) text += ` checks=${(c.verification as any)?.status ?? "unavailable"} accepted_delivery=${c.acceptedDelivery === true}`;
       if (output && c.report) { try { text += `\n${messageText((readPrivateJson(c.report) as any).assistant)}`; } catch {} }
     }
@@ -441,7 +441,8 @@ export class TuiNativeManager {
         return;
       } catch (error) { if ((error as NodeJS.ErrnoException).code !== "ENOENT") throw error; }
       const result = await callTuiWorker(m, { operation: "status" }, { timeoutMs: 1000 });
-      if (!result.ok) { c.error = result.code; return; }
+      if (!result.ok) { c.observationError = result.code; return; }
+      c.observationError = undefined;
       c.error = undefined;
       const state = result.data as any;
       c.needsAttention = !!(state.idleDecision?.workerEpoch === m.workerEpoch
@@ -515,9 +516,10 @@ export class TuiNativeManager {
       if (!c.started && state.readyForPrompts && !g.cancelled) await this.startPrompt(g, c, m);
     } catch (error) {
       this.invalidateVerification(c, "unavailable", "Fresh worker verification observation failed; retained evidence is historical");
+      c.observationError = `Worker unavailable: ${String(error).slice(0, 300)}`;
       try {
         if ((await this.tmux.inspect(m)).dead && active(c)) { c.state = "lost"; c.error = "Pi exited before reporting settlement"; }
-      } catch { c.error = `Worker unavailable: ${String(error).slice(0, 300)}`; }
+      } catch { /* Retain the causal error and the separate observation failure. */ }
       // Parent/observer failure alone never marks a live TUI lost.
     }
   }

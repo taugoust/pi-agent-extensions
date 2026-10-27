@@ -54,6 +54,12 @@ Operator mode has a separate capability/hash and request namespace. The generic 
 
 Parent/model instructions use custom `harness-control` messages prefixed **“Parent instructions:”**. They do not enter slash-command dispatch. Child guidance gives direct human TUI/Paseo instructions precedence and requests parent notification on material scope changes. Human keyboard/Paseo remains actual user input. Owned session switching/forking is blocked to preserve session identity.
 
+## Unattended startup and project trust
+
+Workers participate in Pi's pre-session `project_trust` event. Existing saved decisions (including parent-directory decisions), explicit CLI overrides and global `always`/`never` policy retain their ordinary meaning. Only an unresolved `ask` is declined for that process, without saving a decision; untrusted project settings cannot grant their own trust. This prevents an unseen interactive trust dialog from blocking `session_start` and control-socket creation. No credentials, permissions or global defaults change.
+
+Startup timeouts retain a private, epoch-bound `startup-failure.json` with a bounded reason classification, never raw terminal text. Observer/RPC failures are separate from the original task/launch error. Missing sockets or panes remain insufficient proof of child-local cleanup; the existing reap safeguards still apply.
+
 ## Control, results and waits
 
 The child owns the control socket and durable request receipts. Observer disconnection, bounded-wait cancellation and parent SIGKILL do not control background worker lifetime. Retry an uncertain mutation only with the same request ID; persisted intent without confirmed dispatch returns `ambiguous`, never automatic replay. Receipt capacity fails closed.

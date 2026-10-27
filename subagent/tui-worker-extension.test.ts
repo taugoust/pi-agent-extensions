@@ -1,6 +1,7 @@
 import assert from "node:assert/strict";
 import { test } from "node:test";
-import { mkdtemp, readFile, rm } from "node:fs/promises";
+import { mkdtemp, readFile, rm, mkdir, writeFile } from "node:fs/promises";
+import { ProjectTrustStore } from "@earendil-works/pi-coding-agent";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import workerExtension from "./tui-worker-extension.ts";
@@ -8,6 +9,38 @@ import { TuiWorkerStore } from "./tui-worker-store.ts";
 import { processIdentity } from "./tui-worker-tmux.ts";
 import { callTuiWorker } from "./tui-worker-client.ts";
 import type { TuiWorkerManifest } from "../shared/tui-worker-protocol.ts";
+
+test("worker trust skips only unresolved asks without persisting trust or loading project policy", async () => {
+  const root = await mkdtemp(join(tmpdir(), "worker-trust-policy-"));
+  const config = join(root, "config"), cwd = join(root, "project");
+  const previous = { manifest: process.env.PI_TUI_WORKER_MANIFEST, config: process.env.PI_CODING_AGENT_DIR };
+  try {
+    await mkdir(config); await mkdir(join(cwd, ".pi"), { recursive: true });
+    await writeFile(join(cwd, ".pi", "settings.json"), JSON.stringify({ defaultProjectTrust: "always" }));
+    process.env.PI_TUI_WORKER_MANIFEST = join(root, "manifest.json");
+    process.env.PI_CODING_AGENT_DIR = config;
+    const handlers = new Map<string, Function>();
+    workerExtension({ registerTool() {}, on: (name: string, fn: Function) => handlers.set(name, fn) } as any);
+    const decide = () => handlers.get("project_trust")!({ cwd });
+    assert.deepEqual(decide(), { trusted: "no", remember: false });
+    await assert.rejects(readFile(join(config, "trust.json")), { code: "ENOENT" });
+    for (const policy of ["always", "never"]) {
+      await writeFile(join(config, "settings.json"), JSON.stringify({ defaultProjectTrust: policy }));
+      assert.deepEqual(decide(), { trusted: "undecided" });
+    }
+    await writeFile(join(config, "settings.json"), JSON.stringify({ defaultProjectTrust: "ask" }));
+    for (const saved of [true, false]) {
+      new ProjectTrustStore(config).set(root, saved);
+      const before = await readFile(join(config, "trust.json"), "utf8");
+      assert.deepEqual(decide(), { trusted: "undecided" });
+      assert.equal(await readFile(join(config, "trust.json"), "utf8"), before);
+    }
+  } finally {
+    if (previous.manifest === undefined) delete process.env.PI_TUI_WORKER_MANIFEST; else process.env.PI_TUI_WORKER_MANIFEST = previous.manifest;
+    if (previous.config === undefined) delete process.env.PI_CODING_AGENT_DIR; else process.env.PI_CODING_AGENT_DIR = previous.config;
+    await rm(root, { recursive: true, force: true });
+  }
+});
 
 test("final boundary continues routine partial once, never blockers, errors or intervention", async () => {
   for (const scenario of ["routine", "legacy-partial", "needs-input", "blocked", "checkpointed", "error", "aborted", "pending", "guidance", "ui", "user-input", "tool-error", "cancel", "sealed"] ) {

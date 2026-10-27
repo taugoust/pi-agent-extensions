@@ -351,7 +351,20 @@ export class TuiWorkerTmux {
       } catch {}
       await pause(50);
     }
-    throw new Error("Worker startup timed out; owned pane and launch artifacts retained");
+    // Preserve a bounded diagnosis, never terminal contents (which may contain
+    // credentials). Revalidate ownership on both sides of the read-only capture.
+    let reason = "control-not-ready";
+    try {
+      const before = await this.inspect(manifest);
+      const p = before.placement;
+      const pane = await this.run(p.socketPath, ["capture-pane", "-p", "-S", "-80", "-t", p.paneId]);
+      const after = await this.inspect(manifest);
+      if (after.placement.paneId === p.paneId && /Trust project folder\?/.test(pane)) reason = "project-trust-prompt";
+    } catch { /* Missing or changed placement is not authority to capture elsewhere. */ }
+    atomicPrivateJson(new TuiWorkerStore(dirname(manifest.sessionFile)).path("startup-failure.json"), {
+      workerEpoch: manifest.workerEpoch, reason, at: new Date().toISOString(),
+    });
+    throw new Error(`Worker startup timed out (${reason}); owned pane and launch artifacts retained`);
   }
   /** Move the entire staged group window, including its local background jobs. */
   async promote(manifests: TuiWorkerManifest[], target: TuiWorkerPlacement): Promise<TuiWorkerManifest[]> {
