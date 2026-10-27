@@ -163,7 +163,12 @@ export default function rootTest(pi: ExtensionAPI) {
     const childEnvironment = (await readFile(`/proc/${headless.runtimePid}/environ`)).toString("utf8").split("\0");
     assert.ok(!childEnvironment.some(entry => entry.startsWith("TMUX=") || entry.startsWith("TMUX_PANE=")), "headless worker inherited tmux targeting");
     assert.equal(childEnvironment.find(entry => entry.startsWith("PI_PASEO_BRIDGE_NO_IMPORT=")), "PI_PASEO_BRIDGE_NO_IMPORT=1");
-    assert.ok(!childEnvironment.some(entry => /^PI_PASEO_(?!BRIDGE_NO_IMPORT=)/.test(entry)), "parent Paseo identity/force/control variables leaked into worker");
+    // The immutable guarded launcher may add its own bridge defaults after
+    // inherited variables have been removed. Those are not parent identity.
+    const launcherBridgeDefaults = process.env.PI_TUI_WORKER_LAUNCH_MODE === "guard-only"
+      ? new Set(["PI_PASEO_BRIDGE_DEBUG=0", "PI_PASEO_BRIDGE_DEFAULT_AUTO_CONNECT=1", "PI_PASEO_BRIDGE_GENERATE_TITLES=1", "PI_PASEO_BRIDGE_IMPORT_SESSIONS=1"])
+      : new Set<string>();
+    assert.ok(!childEnvironment.some(entry => /^PI_PASEO_(?!BRIDGE_NO_IMPORT=)/.test(entry) && !launcherBridgeDefaults.has(entry)), "parent Paseo identity/force/control variables leaked into worker");
     assert.equal(process.env.PI_PASEO_EXISTING_AGENT_ID, "malicious-parent-agent", "headless launch mutated parent Paseo binding");
     // Public launch API must reject missing/empty requirements without a worker.
     const workersBeforeInvalid = discoverTuiWorkers(join(process.env.PI_TUI_WORKER_STATE_ROOT!, "workers"), ctx.sessionManager.getSessionId()).length;

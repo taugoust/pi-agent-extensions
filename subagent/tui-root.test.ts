@@ -23,7 +23,12 @@ test("actual root subagent tool: guarded/native launch, crash hydration, group c
   const extensions = [fileURLToPath(new URL("../background-job/index.ts", import.meta.url)), fileURLToPath(new URL("../questionnaire/index.ts", import.meta.url)), fileURLToPath(new URL("./tui-worker-test-provider.ts", import.meta.url)), fileURLToPath(new URL("./tui-root-test-extension.ts", import.meta.url))];
   if (mode === "guard-only") extensions.unshift(fileURLToPath(new URL("../permission-gate/index.ts", import.meta.url)));
   await writeFile(join(config, "settings.json"), JSON.stringify({ extensions, defaultProvider: "harness-test", defaultModel: "mock", defaultProjectTrust: "no", quietStartup: true }));
-  const environment = { PI_CODING_AGENT_DIR: config, PI_TUI_WORKER_STATE_ROOT: join(root, "state"), PI_TUI_ROOT_RESULT: result,
+  // The guarded launcher writes state before Pi starts. Nix supplies an
+  // unwritable HOME; isolate both launcher and descendant state in this fixture.
+  const home = join(root, "home"), stateHome = join(root, "xdg-state");
+  await mkdir(home, { mode: 0o700 });
+  await mkdir(stateHome, { mode: 0o700 });
+  const environment = { HOME: home, XDG_STATE_HOME: stateHome, PI_CODING_AGENT_DIR: config, PI_TUI_WORKER_STATE_ROOT: join(root, "state"), PI_TUI_ROOT_RESULT: result,
     PI_TUI_WORKER_LAUNCHER: launcher!, PI_TUI_WORKER_LAUNCH_MODE: mode, PI_TUI_ROOT_PERMISSION_FILE: permissionFile,
     PI_PASEO_EXISTING_AGENT_ID: "malicious-parent-agent", PI_PASEO_BRIDGE_FORCE: "1",
     PI_PASEO_TMUX_TARGET: "malicious-session:9", PI_PASEO_CONTROL_SOCKET: "/tmp/malicious-paseo.sock" };
