@@ -39,6 +39,10 @@ job visibility. Infrastructure and unrelated sessions are excluded. Opaque
 cursors are snapshot-bound; consumers must exhaust pages or display an error,
 not silently truncate. Unverifiable retained branches are excluded with an
 explicit notice; retained idle/reaped history alone grants no fabricated owner.
+Readable malformed group records with a known owner affect only that owner's
+reachable ancestry, not unrelated sessions or their cursors. Records that cannot
+be attributed to an owner retain a conservative notice. Missing legacy nonce
+evidence is not migrated or treated as proof of ownership.
 Output revalidates the same ancestry and metadata after reading and remains
 observation-only, including adopted jobs.
 

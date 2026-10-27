@@ -40,6 +40,40 @@ test("verified direct, nested and grandchild sessions and broker child identitie
     assert.equal(readJobAncestry(f.root, "session-0").fingerprint, proof.fingerprint);
   } finally { f.close(); }
 });
+test("malformed attributable groups warn only reachable owners and do not perturb unrelated cursors", () => {
+  const f = fixture(); try {
+    const before = readJobAncestry(f.root, "session-0");
+    // A readable legacy record belongs to another session, but cannot prove
+    // any children. It must neither authorize them nor taint this cursor.
+    const unrelated = f.groups[3];
+    unrelated.version = 0;
+    atomicPrivateJson(join(f.root, "groups", `${unrelated.id}.json`), unrelated);
+    assert.deepEqual(readJobAncestry(f.root, "session-0"), before);
+    const own = readJobAncestry(f.root, "unrelated");
+    assert.equal(own.unavailable, true);
+    assert.equal(ownsJob(own.owners, { sessionId: "session-4" }), false);
+    // Reachability, rather than just the root owner, controls notices.
+    f.groups[1].children = null;
+    atomicPrivateJson(join(f.root, "groups", `${f.groups[1].id}.json`), f.groups[1]);
+    const nested = readJobAncestry(f.root, "session-0");
+    assert.equal(nested.unavailable, true);
+    assert.equal(ownsJob(nested.owners, { sessionId: "session-2" }), false);
+    assert.notEqual(nested.fingerprint, before.fingerprint);
+  } finally { f.close(); }
+});
+test("unattributable malformed records retain a conservative notice without granting authority", () => {
+  const f = fixture(); try {
+    const path = join(f.root, "groups", `${f.groups[3].id}.json`);
+    for (const value of [null, { version: 1, children: [] }]) {
+      atomicPrivateJson(path, value);
+      const proof = readJobAncestry(f.root, "session-0");
+      assert.equal(proof.unavailable, true);
+      assert.equal(ownsJob(proof.owners, { sessionId: "session-4" }), false);
+    }
+    writeFileSync(path, "{broken", { mode: 0o600 });
+    assert.equal(readJobAncestry(f.root, "session-0").unavailable, true);
+  } finally { f.close(); }
+});
 test("iterative ancestry crosses old depth32 limit, retaining idle/reaped evidence", () => {
   const f = fixture(45); try { assert.ok(ownsJob(readJobAncestry(f.root, "session-0").owners, { sessionId: "session-45" })); } finally { f.close(); }
 });
@@ -81,6 +115,23 @@ test("headless foreground retained nonce evidence authorizes its session, not un
     const stale = readJobAncestry(f.root, "session-0");
     assert.equal(stale.unavailable, true); assert.equal(ownsJob(stale.owners, { sessionId: "session-1" }), false);
   } finally { f.close(); }
+});
+test("legacy capability and stale missing manifests are unavailable, but unstarted workers need no manifest", () => {
+  for (const scenario of ["legacy-capability", "missing-started", "missing-unstarted"]) {
+    const f = fixture(); try {
+      const child = f.groups[0].children[0];
+      if (scenario === "legacy-capability") delete child.operatorCapability;
+      else {
+        rmSync(join(child.directory, "manifest.json"));
+        child.started = scenario === "missing-started";
+      }
+      atomicPrivateJson(join(f.root, "groups", `${f.groups[0].id}.json`), f.groups[0]);
+      const proof = readJobAncestry(f.root, "session-0");
+      assert.equal(proof.unavailable, scenario === "missing-unstarted" ? undefined : true, scenario);
+      assert.equal(ownsJob(proof.owners, { sessionId: "session-1" }), false, scenario);
+      assert.equal(ownsJob(proof.owners, { sessionId: "session-0" }), true, scenario);
+    } finally { f.close(); }
+  }
 });
 test("ancestry byte capacity fails explicitly rather than returning a partial scope", () => {
   const f = fixture(); try {

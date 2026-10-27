@@ -68,8 +68,13 @@ export function readJobAncestry(root: string, owner: string, maxBytes = MAX_READ
     for (const file of files) {
       try {
         const group = readEvidence(join(groupsDir, file), budget);
-        if (group.version !== 1 || `${group.id}.json` !== file || typeof group.owner !== "string" || !Array.isArray(group.children) || group.children.length > 8) throw new Error("Invalid retained job ancestry group");
-        const groups = byOwner.get(group.owner) ?? []; groups.push(group); byOwner.set(group.owner, groups);
+        // Attribute readable records before validating their schema: legacy or
+        // malformed records from unrelated sessions must not taint this scope.
+        // The owner field alone never grants authority; validation still happens
+        // before any children can be traversed.
+        if (!group || typeof group.owner !== "string") throw new Error("Unattributable retained job ancestry group");
+        const valid = group.version === 1 && `${group.id}.json` === file && Array.isArray(group.children) && group.children.length <= 8;
+        const groups = byOwner.get(group.owner) ?? []; groups.push({ group, valid, directory, file }); byOwner.set(group.owner, groups);
       } catch (error) {
         if (error instanceof AncestryCapacityError) throw error;
         unavailable = true; hash.update(JSON.stringify(["unavailable-group", directory, file]));
@@ -80,7 +85,12 @@ export function readJobAncestry(root: string, owner: string, maxBytes = MAX_READ
   let workers = 0;
   for (let i = 0; i < queue.length; i++) {
     const session = queue[i]!;
-    for (const group of byOwner.get(session) ?? []) {
+    for (const record of byOwner.get(session) ?? []) {
+      if (!record.valid) {
+        unavailable = true; hash.update(JSON.stringify(["unavailable-group", record.directory, record.file]));
+        continue;
+      }
+      const group = record.group;
       // Hash only identity evidence, not unrelated task status or notification writes.
       for (const child of group.children) {
         if (++workers > MAX_WORKERS) throw new Error("Read-only job ancestry worker capacity exceeded");
