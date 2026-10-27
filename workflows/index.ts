@@ -7,18 +7,23 @@ import {
 	type WorktreeSettingsRuntime,
 } from "./worktree/settings.js";
 import { createWorkflowService } from "./service.js";
+import { createDelegatedChildGoalService } from "./delegated-child.ts";
 
 export default function workflows(
 	pi: ExtensionAPI,
 	options: {
 		goalSettingsPath?: string;
+		/** Trusted native worker bootstrap only: installs the existing child engine. */
+		delegatedChild?: boolean;
 		worktreeSettings?: WorktreeSettingsRuntime;
 	} = {},
 ) {
 	let service: ReturnType<typeof createWorkflowService> | undefined,
+		childService: ReturnType<typeof createDelegatedChildGoalService> | undefined,
 		commandBusy = false;
 	const global = globalThis as typeof globalThis & {
 		__paeWorkflowsV1?: ReturnType<typeof createWorkflowService>;
+		__paeDelegatedChildGoalV1?: ReturnType<typeof createDelegatedChildGoalService>;
 	};
 	let goalState: ReturnType<typeof goal>;
 	const api = new Proxy(pi, {
@@ -26,7 +31,10 @@ export default function workflows(
 			if (key === "registerTool")
 				return (definition: any) => target.registerTool(definition.name !== "goal_manage" ? definition : {
 					...definition,
+					...(options.delegatedChild ? { description: "Inspect this dedicated child's parent-owned goal with action=status. Creating, updating, pausing, resuming or clearing it is restricted to the authenticated parent control path." } : {}),
 					execute: async (...args: any[]) => {
+						if (options.delegatedChild && args[1]?.action !== "status")
+							throw new Error("Dedicated child goal management is owned by its authenticated parent; only goal_manage status is available");
 						if (commandBusy || service?.hasOperation()) throw new Error("Finish the current workflow operation before changing the goal");
 						return definition.execute(...args);
 					},
@@ -36,6 +44,10 @@ export default function workflows(
 					target.registerCommand(name, {
 						...definition,
 						handler: async (args: string, ctx: any) => {
+							if (options.delegatedChild && name === "goal" && args.trim() !== "status") {
+								if (ctx.hasUI) ctx.ui.notify("Dedicated child goal management is owned by its authenticated parent. Use /goal status for inspection.", "warning");
+								return;
+							}
 							if (
 								commandBusy ||
 								service?.hasOperation() ||
@@ -60,18 +72,26 @@ export default function workflows(
 			return Reflect.get(target, key, target);
 		},
 	});
-	goalState = goal(api, { settingsPath: options.goalSettingsPath });
+	goalState = goal(api, { settingsPath: options.goalSettingsPath, restorePaused: options.delegatedChild === true });
 	const settings =
 		options.worktreeSettings ??
 		createWorktreeSettingsRuntime({ path: settingsFilePath });
-	worktree(api, { settings });
+	if (!options.delegatedChild) worktree(api, { settings });
 	function dispose() {
+		childService?.dispose();
+		if (global.__paeDelegatedChildGoalV1 === childService) delete global.__paeDelegatedChildGoalV1;
+		childService = undefined;
 		service?.dispose();
 		if (global.__paeWorkflowsV1 === service) delete global.__paeWorkflowsV1;
 		service = undefined;
 	}
 	pi.on("session_start", async (_event, ctx) => {
 		dispose();
+		if (options.delegatedChild) {
+			childService = createDelegatedChildGoalService(pi, ctx, goalState.runtime, goalState.commands);
+			global.__paeDelegatedChildGoalV1 = childService;
+			return;
+		}
 		service = createWorkflowService(
 			pi,
 			ctx,
@@ -82,6 +102,9 @@ export default function workflows(
 		);
 		global.__paeWorkflowsV1 = service;
 	});
-	pi.on("model_select", async (_event, ctx) => service?.refreshContext(ctx));
+	pi.on("model_select", async (_event, ctx) => {
+		service?.refreshContext(ctx);
+		childService?.refreshContext(ctx);
+	});
 	pi.on("session_shutdown", async () => dispose());
 }

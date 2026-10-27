@@ -1,4 +1,6 @@
 import { randomUUID } from "node:crypto";
+import { DEDICATED_GOAL_LIMITS, DelegatedGoalRegistry, type DelegatedGoalExecutor } from "./delegated-goals.ts";
+import { delegatedGoalStore } from "./delegated-goal-store.ts";
 import { basename, isAbsolute, relative, sep } from "node:path";
 import { workspaceRepositories } from "./worktree/repositories.js";
 import { ownedWorktrees, worktreeGit } from "../shared/subagent-worktrees.ts";
@@ -51,6 +53,7 @@ type Operation = {
 	reject?: (error: Error) => void;
 };
 const actions = [
+	"goals.create", "goals.start", "goals.pause", "goals.resume", "goals.edit", "goals.clear", "goals.add_task",
 	"worktree.add",
 	"worktree.remove",
 	"worktree.prune",
@@ -81,6 +84,42 @@ export function createWorkflowService(
 	const sessionId = ctx.sessionManager.getSessionId(),
 		serviceEpoch = randomUUID();
 	const requests = new Map<string, string>();
+	function childExecutor(): DelegatedGoalExecutor {
+		current();
+		const executor = (globalThis as any).__paeDelegatedGoalExecutorV1;
+		if (executor?.protocol !== 1 || executor.sessionId !== sessionId ||
+			!["start", "resume", "pause"].every(method => typeof executor[method] === "function"))
+			throw new Error("Dedicated goal child execution is unavailable for this session");
+		return executor;
+	}
+	function executionUnavailableReason(): string | null {
+		try {
+			const executor = childExecutor();
+			if (executor.executionAvailable?.() !== true)
+				return executor.executionUnavailableReason?.()?.slice(0, 1000) || "Dedicated goal execution is unavailable: required child goal/progress tools or execution policy are not enabled. Paused metadata remains available.";
+			return delegated.blockedReason();
+		} catch { return "Dedicated goal child execution is unavailable for this session; paused goal metadata remains available."; }
+	}
+	const delegatedStore = delegatedGoalStore(sessionId);
+	const delegated = new DelegatedGoalRegistry(sessionId, {
+		executionAvailable: () => executionUnavailableReason() === null,
+		executionUnavailableReason,
+		start: entry => childExecutor().start(entry),
+		resume: entry => childExecutor().resume(entry),
+		pause: entry => childExecutor().pause(entry),
+		verifyStopped: entry => {
+			const executor = childExecutor();
+			if (!executor.verifyStopped) throw new Error("Owned child stop verification is unavailable");
+			return executor.verifyStopped(entry);
+		},
+		observe: entry => {
+			try { const executor = childExecutor(); return executor.observe?.(entry) ?? Promise.resolve(null); }
+			catch { return Promise.resolve(null); }
+		},
+	}, state => { current(); delegatedStore.save(state); }, delegatedStore.load(), {
+		initial: delegatedStore.loadIntent(),
+		save: intent => { current(); delegatedStore.saveIntent(intent); },
+	});
 	const lifetime = new AbortController();
 	let worktreeCache:
 		| {
@@ -442,19 +481,22 @@ export function createWorkflowService(
 	}
 	async function snapshot() {
 		current();
+		try { await delegated.refresh(); } catch { /* Child unavailability must not hide durable metadata. */ }
+		current();
 		void refreshWorktrees();
 		const goal = runtime.activeGoal,
 			terminal = runtime.snapshotSettingsApplicationState().terminalDetails;
 		return {
 			protocol: 1,
-			capabilities: { createPausedGoal: true },
+			capabilities: { createPausedGoal: false, delegatedGoals: true, delegatedGoalExecution: executionUnavailableReason() === null },
+			delegatedGoals: delegated.snapshot(),
 			sessionId,
 			serviceEpoch,
 			cwd: ctx.cwd,
 			model: ctx.model ? `${ctx.model.provider}/${ctx.model.id}` : null,
 			busy: !!operation || externalBusy(),
 			idle: ctx.isIdle() && !ctx.hasPendingMessages(),
-			notice,
+			notice: notice ?? delegated.blockedReason() ?? executionUnavailableReason(),
 			operationId: operation?.id ?? null,
 			operationAction: operation?.action ?? null,
 			protectedPaths: operation?.protectedPaths ?? [],
@@ -487,8 +529,8 @@ export function createWorkflowService(
 			lastCompletion: completion(),
 			completedGoals: completedGoals(goal?.id ?? null),
 			limits: {
-				automaticTurns: runtime.settings.continuationLimits.automaticTurns,
-				noProgressTurns: runtime.settings.continuationLimits.noProgressTurns,
+				automaticTurns: DEDICATED_GOAL_LIMITS.automaticTurns,
+				noProgressTurns: DEDICATED_GOAL_LIMITS.noProgressTurns,
 			},
 		};
 	}
@@ -612,7 +654,24 @@ export function createWorkflowService(
 		});
 		try {
 			current(op);
-			if (r.action.startsWith("worktree.")) {
+			if (r.action.startsWith("goals.")) {
+				const entry = delegated.snapshot().entries.find(e => e.id === r.expectedGoalId);
+				if (r.action === "goals.pause") childExecutor();
+				if (["goals.start", "goals.resume"].includes(r.action)) {
+					const unavailable = executionUnavailableReason();
+					if (unavailable) throw new Error(unavailable);
+					if (!entry || entry.revision !== r.expectedEntryRevision) throw new Error("Goal changed");
+					const workspace = ctx.cwd;
+					const approvedLimits = JSON.stringify(DEDICATED_GOAL_LIMITS);
+					op.policyCheck = () => ctx.cwd === workspace && JSON.stringify(DEDICATED_GOAL_LIMITS) === approvedLimits;
+					if (!(await commandCtx.ui.confirm(r.action === "goals.start" ? "Start dedicated Goal child?" : "Resume dedicated Goal child?",
+						`${entry.text}\n\nWorkspace: ${workspace}\nModel: gpt-6.1-sol\nExecution: independent dedicated child; the parent never executes this goal.\nIt may edit this workspace and make paid model calls.\nDedicated automatic limit: ${DEDICATED_GOAL_LIMITS.automaticTurns} responses.\nDedicated no-progress limit: ${DEDICATED_GOAL_LIMITS.noProgressTurns} repeated runs.\nThese dedicated limits do not inherit parent/child settings.\nToken budget: ${entry.tokenBudget ?? "unlimited"}; the final request can exceed it.`))) return;
+					current(op);
+					const changedAvailability = executionUnavailableReason();
+					if (changedAvailability) throw new Error(changedAvailability);
+				}
+				await delegated.mutate(sessionId, r);
+			} else if (r.action.startsWith("worktree.")) {
 				if (
 					!ctx.isIdle() ||
 					ctx.hasPendingMessages() ||
@@ -782,6 +841,8 @@ export function createWorkflowService(
 						"requestId",
 						"action",
 						"expectedGoalId",
+						"expectedEntryRevision",
+						"expectedRegistryRevision",
 						"objective",
 						"text",
 						"tokenBudget",
@@ -847,8 +908,10 @@ export function createWorkflowService(
 			reply(r.value);
 			return snapshot();
 		}
-		if (operation || externalBusy() || !actions.includes(r.action))
+		if (operation || (!r.action?.startsWith("goals.") && externalBusy()) || !actions.includes(r.action))
 			throw new Error("Workflow busy or invalid action");
+		if (["goal.start", "goal.create_paused", "goal.resume", "goal.edit"].includes(r.action))
+			throw new Error("Use dedicated delegated goals; legacy parent goal execution is read-only");
 		if (r.action.startsWith("goal.")) {
 			if ((runtime.activeGoal?.id ?? null) !== r.expectedGoalId)
 				throw new Error("Goal changed");
@@ -900,6 +963,25 @@ export function createWorkflowService(
 				throw new Error(
 					"Provide an objective and an optional token budget between 1 and 1000000",
 				);
+		}
+		if (r.action.startsWith("goals.")) {
+			if (r.action === "goals.create") {
+				await delegated.mutate(sessionId, r);
+				requests.set(r.requestId, fingerprint);
+				notice = null;
+				return snapshot();
+			}
+			if (typeof r.expectedGoalId !== "string" || !uuid.test(r.expectedGoalId) || !Number.isSafeInteger(r.expectedEntryRevision) || r.expectedEntryRevision < 1)
+				throw new Error("Expected delegated goal identity and revision");
+			if (["goals.edit", "goals.add_task", "goals.clear"].includes(r.action)) {
+				// Definitive metadata result: rejected edits retain the caller's draft.
+				// Cache at service level only AFTER success; failed retries must reach
+				// the registry's retained rejection instead of looking applied.
+				await delegated.mutate(sessionId, r);
+				requests.set(r.requestId, fingerprint);
+				notice = null;
+				return snapshot();
+			}
 		}
 		requests.set(r.requestId, fingerprint);
 		if (r.action === "goal.create_paused") {

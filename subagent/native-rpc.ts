@@ -491,17 +491,53 @@ export class NativeSubagentRpcSession implements NativeSubagentControlHandle {
     this.proc.on("close", (code, signal) => this.handleClose(code, signal));
   }
 
+  private workflowMode = false;
+
   get protocolError(): Error | undefined {
     return this.fatal;
   }
 
   isActive(): boolean {
-    return !this.closed
+    return !this.workflowMode
+      && !this.closed
       && !this.closingInput
       && !this.fatal
       && !this.terminationRequested
       && !this.initialPromptHandled
       && (this.settledVersion === 0 || this.streaming || this.controlReservations > 0);
+  }
+
+  /** Dedicated goal workers are bootstrapped through a separate structured
+   * workflow channel. Keep RPC input open across automatic goal turns; never
+   * dispatch an assignment prompt or infer goal completion from agent_end.
+   * The owner must pause the goal and terminate the process group explicitly.
+   */
+  async startWorkflow(bootstrap: () => Promise<void>): Promise<NativeSubagentRpcExit> {
+    if (this.initialPromptSent) throw new Error("native subagent RPC execution was already started");
+    this.initialPromptSent = true;
+    this.workflowMode = true;
+    this.notifyChange();
+    try {
+      // A successful response establishes that Pi completed extension startup.
+      await this.sendCommand("get_state", {});
+      await bootstrap();
+    } catch (error) {
+      this.fail(asError(error));
+    }
+    return await this.exitPromise;
+  }
+
+  /** Stop an owned goal turn without sending any replacement prompt. */
+  async pauseWorkflowExecution(): Promise<void> {
+    await this.abortCurrentRun();
+    const state = (await this.sendCommand("get_state", {})).response.data;
+    if (state?.isStreaming !== false || state?.pendingMessageCount !== 0)
+      throw new Error("Dedicated goal worker did not stop execution");
+  }
+
+  /** Await the process close boundary, including its process-group anchor. */
+  async waitForExit(): Promise<NativeSubagentRpcExit> {
+    return await this.exitPromise;
   }
 
   async start(initialMessage: string, compactBeforePrompt = false, requireCompaction = false): Promise<NativeSubagentRpcExit> {
@@ -631,6 +667,7 @@ export class NativeSubagentRpcSession implements NativeSubagentControlHandle {
   }
 
   private requireOpenControlChannel(): void {
+    if (this.workflowMode) throw new SubagentControlError("capability", "Dedicated goal workers accept only structured workflow control", "native");
     if (this.fatal) throw this.fatal;
     if (this.closed || this.closingInput || this.terminationRequested) {
       throw new SubagentControlError("inactive", "The native subagent child is no longer active", "native");

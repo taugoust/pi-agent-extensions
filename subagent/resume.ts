@@ -61,6 +61,21 @@ export class NativeTaskStore {
    }catch{return [];}
   }).sort((a,b)=>b.updated_at.localeCompare(a.updated_at)).slice(0,limit);
  }
+ /** Verify the exact retained execution is halted without a truncated inventory scan. */
+ async verifyStopped(owner:string,id:string,childId:string,attempt:number):Promise<void> {
+  await this.lock(id,()=>{
+   const r=this.get(owner,id);
+   if(r.childId!==childId||r.attempt!==attempt)throw new Error('Native task attempt ownership changed');
+   if(r.state==='running') {
+    if(token(r.ownerPid)===r.ownerToken)throw new Error('Native task owner is still running');
+    // The owner may have died between spawn and bindChild. Retain the same
+    // cleanup grace as beginResume before claiming its process group stopped.
+    if(!r.recoveryAfter){r.recoveryAfter=Date.now()+10000;this.save(r);throw new Error('Prior owner cleanup grace has not elapsed');}
+    if(Date.now()<r.recoveryAfter)throw new Error('Prior owner cleanup grace has not elapsed');
+   }
+   if(r.childPid&&(!r.childToken||token(r.childPid)===r.childToken))throw new Error('Native task child stop cannot be verified');
+  });
+ }
  async create(owner:string,id:string,spec:NativeTaskSpec,childId:string):Promise<NativeTaskRecord>{
   if(!owner||Buffer.byteLength(owner)>512||!/^subagent-child-[0-9a-f]{24}$/.test(childId)||!spec.task.trim()||Buffer.byteLength(JSON.stringify(spec))>96*1024)throw new Error('Invalid retained task specification');
   validateSpec(spec);

@@ -37,6 +37,7 @@ const REMOVED_PERSISTED_QUEUE_WARNING =
 
 interface GoalLifecycleOptions {
   settingsPath?: string;
+  restorePaused?: boolean;
 }
 
 export function registerGoalLifecycle(
@@ -83,6 +84,29 @@ export function registerGoalLifecycle(
     }
     if (runtime.legacyExperimentalGoalsSetting && !runtime.legacyQueueState) {
       notifyTerminal(ctx.ui, REMOVED_QUEUE_SETTING_WARNING, "warning");
+    }
+
+    if (options.restorePaused && loaded.goal) {
+      // Dedicated child startup is metadata-only. In particular, never install
+      // an active contract or wait timer before the authenticated parent Resume.
+      runtime.cancelContinuationWork();
+      runtime.clearGoalWaitTimer();
+      runtime.clearPendingGoalPrompts();
+      const restoredGoal = { ...loaded.goal };
+      if (restoredGoal.status === "active") {
+        // A crash can persist assistant usage after the last goal-state entry.
+        // Reconcile that history before pausing without acquiring ownership or
+        // installing an active contract/timer. Never reduce an existing total.
+        runtime.recordGoalUsage(restoredGoal, ctx, false);
+        restoredGoal.tokensUsed = Math.max(loaded.goal.tokensUsed, restoredGoal.tokensUsed);
+      }
+      runtime.activeGoal = restoredGoal.status === "active"
+        ? transitionGoal(restoredGoal, "paused")
+        : { ...restoredGoal, waiting: undefined };
+      runtime.persistGoal(runtime.activeGoal);
+      runtime.ensureInactiveGoalContextContract(ctx);
+      runtime.updateStatus(ctx, runtime.activeGoal);
+      return;
     }
 
     if (loaded.goal?.status === "active") {

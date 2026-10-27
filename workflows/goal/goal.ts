@@ -8,6 +8,8 @@ import { registerGoalTools } from "./tools.js";
 
 interface GoalOptions {
   settingsPath?: string;
+  /** Dedicated workers restore metadata only; activation requires structured Resume. */
+  restorePaused?: boolean;
 }
 
 function registerGoalRuntime(pi: ExtensionAPI, options: GoalOptions = {}) {

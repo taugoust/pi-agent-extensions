@@ -1,0 +1,114 @@
+import { registerHooks } from "node:module";
+import { test } from "node:test";
+import assert from "node:assert/strict";
+import { mkdtempSync, readdirSync, rmSync } from "node:fs";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
+import { randomUUID } from "node:crypto";
+
+// Real service and registry; narrow dependency seams isolate filesystem inventories,
+// legacy goal commands and SDK types. No Pi process, provider or child is launched.
+const seams = {
+  "./worktree/repositories.js": "export async function workspaceRepositories(){return {roots:[],active:null,container:true}}",
+  "../shared/subagent-worktrees.ts": "export async function ownedWorktrees(){return []}; export async function worktreeGit(){return {stdout:''}}",
+  "../shared/harness-readonly.ts": "export function harnessReadOnlyRegistry(){return {}}",
+  "../shared/goal-progress.ts": "export function readGoalTasks(){return []};export function addGoalTask(){throw Error('legacy mutation forbidden')}",
+  "./goal/history.js": "export function readGoalHistory(){return []}",
+  "./worktree/command.js": "export function addFlow(){};export function removeFlow(){};export function pruneFlow(){}",
+  "./worktree/git.js": "export function currentWorktreePath(){};export async function listWorktrees(){return []};export function runGit(){};export const pathsEqual=(a,b)=>a===b;export const pathIdentity=x=>x;export const stripTerminalControls=x=>x",
+  "./goal/runtime.js": "export function createGoal(){throw Error('parent execution forbidden')};export function transitionGoal(){throw Error('parent execution forbidden')}",
+  "./goal/accounting.js": "export function currentTokenTotal(){return 0}",
+};
+registerHooks({ resolve(specifier, context, nextResolve) {
+  if (context.parentURL?.endsWith("/workflows/delegated-child.ts") && specifier === "../shared/goal-progress.ts") return { url: `data:text/javascript,${encodeURIComponent("export function readGoalTasks(ctx,goal){return goal.testTasks??[]};export function writeProgress(pi,ctx,tasks,id){pi.appendEntry('progress-fixture',{tasks,id})}")}`, shortCircuit: true };
+  if (context.parentURL?.endsWith("/workflows/service.ts") && seams[specifier]) return { url: `data:text/javascript,${encodeURIComponent(seams[specifier])}`, shortCircuit: true };
+  return nextResolve(specifier, context);
+} });
+const { createWorkflowService } = await import("./service.ts");
+
+test("actual service permits busy parent metadata create and fences independent confirmed child actions", async () => {
+  const root = mkdtempSync(join(tmpdir(), "delegated-service-"));
+  const previous = process.env.PI_DELEGATED_GOALS_STATE_ROOT;
+  process.env.PI_DELEGATED_GOALS_STATE_ROOT = root;
+  let service;
+  try {
+    const calls = [], sessionId = randomUUID();
+    const runtime = { activeGoal: { id: "legacy", text: "legacy untouched", status: "active", tokensUsed: 0 },
+      snapshotSettingsApplicationState: () => ({}), settings: { continuationLimits: { automaticTurns: null, noProgressTurns: null } } };
+    const originalGoal = structuredClone(runtime.activeGoal);
+    const ctx = { cwd: root, isIdle: () => false, hasPendingMessages: () => true,
+      sessionManager: { getSessionId: () => sessionId, getLeafId: () => "leaf", getBranch: () => [], getEntries: () => [] },
+      ui: { setStatus() {} }, model: null };
+    const pi = { appendEntry() { throw Error("Parent session mutation forbidden"); }, exec: async () => ({ code: 0, stdout: "", stderr: "" }) };
+    globalThis.__paeDelegatedGoalExecutorV1 = { protocol: 1, sessionId,
+      executionAvailable: () => true,
+      executionUnavailableReason: () => "Required child lifecycle tools denied by effective allowlist",
+      async start(entry) { calls.push(`start:${entry.id}`); return { taskId: `task:${entry.id}`, childId: `child:${entry.id}:1`, jobId: `job:${entry.id}:1`, attempt: 1 }; },
+      async pause(entry) { calls.push(`pause:${entry.id}`); },
+      async resume(entry) { calls.push(`resume:${entry.id}`); return { ...entry.child, childId: `child:${entry.id}:2`, jobId: `job:${entry.id}:2`, attempt: 2 }; },
+    };
+    service = createWorkflowService(pi, ctx, runtime, {}, { get: () => ({}) }, () => true);
+    const identity = { sessionId, serviceEpoch: service.serviceEpoch };
+    const request = data => service.handle({ ...identity, requestId: randomUUID(), operation: "start", ...data });
+    const snap = () => service.handle({ ...identity, operation: "snapshot" });
+    let snapshot = await request({ action: "goals.create", expectedGoalId: null, expectedRegistryRevision: 0, objective: "first" });
+    snapshot = await request({ action: "goals.create", expectedGoalId: null, expectedRegistryRevision: 1, objective: "second" });
+    assert.equal(snapshot.delegatedGoals.entries.length, 2); assert.deepEqual(calls, []);
+    assert.deepEqual(runtime.activeGoal, originalGoal); assert.equal(snapshot.idle, false);
+    assert.deepEqual(snapshot.limits, { automaticTurns: 3, noProgressTurns: 2 });
+    let first = snapshot.delegatedGoals.entries[0];
+    const second = snapshot.delegatedGoals.entries[1];
+    snapshot = await request({ action: "goals.add_task", expectedGoalId: second.id, expectedEntryRevision: second.revision, text: "  keep exact task  " });
+    const afterAdd = structuredClone(snapshot.delegatedGoals);
+    const duplicate = { ...identity, requestId: randomUUID(), operation: "start", action: "goals.add_task", expectedGoalId: second.id, expectedEntryRevision: snapshot.delegatedGoals.entries[1].revision, text: "keep exact task" };
+    await assert.rejects(service.handle(duplicate), /distinct descriptions/);
+    await assert.rejects(service.handle(duplicate), /distinct descriptions/); // replay must retain rejection, never snapshot-as-success
+    const staleEdit = { ...identity, requestId: randomUUID(), operation: "start", action: "goals.edit", expectedGoalId: first.id, expectedEntryRevision: first.revision + 99, objective: "must not apply" };
+    await assert.rejects(service.handle(staleEdit), /revision/);
+    await assert.rejects(service.handle(staleEdit), /revision/);
+    snapshot = await snap(); assert.deepEqual(snapshot.delegatedGoals, afterAdd);
+    assert.equal(snapshot.operationId, null); assert.equal(snapshot.notice, null); assert.deepEqual(calls, []);
+    assert.ok(!readdirSync(root).some(name => name.endsWith(".intent")));
+    globalThis.__paeDelegatedGoalExecutorV1.executionAvailable = () => false;
+    snapshot = await snap();
+    assert.equal(snapshot.capabilities.delegatedGoalExecution, false);
+    assert.match(snapshot.notice, /tools denied/);
+    snapshot = await request({ action: "goals.start", expectedGoalId: first.id, expectedEntryRevision: first.revision });
+    assert.equal(snapshot.dialog, null); assert.deepEqual(calls, []);
+    globalThis.__paeDelegatedGoalExecutorV1.executionAvailable = () => true;
+    snapshot = await request({ action: "goals.start", expectedGoalId: first.id, expectedEntryRevision: first.revision });
+    assert.equal(snapshot.dialog.kind, "confirm");
+    assert.match(snapshot.dialog.message, /gpt-6\.1-sol/); assert.match(snapshot.dialog.message, /Workspace:/);
+    assert.match(snapshot.dialog.message, /Dedicated automatic limit: 3/); assert.match(snapshot.dialog.message, /Dedicated no-progress limit: 2/);
+    assert.deepEqual(calls, []);
+    await service.handle({ ...identity, requestId: randomUUID(), operation: "send", operationId: snapshot.operationId, dialogId: snapshot.dialog.id, value: true });
+    // Microtask-only deterministic drain: no polling timers or model calls.
+    for (let i = 0; i < 20 && (await snap()).operationId; i++) await Promise.resolve();
+    snapshot = await snap(); first = snapshot.delegatedGoals.entries[0];
+    assert.equal(first.status, "active"); assert.equal(calls.length, 1);
+    assert.equal(snapshot.delegatedGoals.entries[1].status, "paused");
+    await assert.rejects(service.handle({ ...identity, serviceEpoch: randomUUID(), operation: "snapshot" }), /Stale/);
+    await assert.rejects(request({ action: "goals.pause", expectedGoalId: first.id, expectedEntryRevision: 0 }), /revision/);
+    await assert.rejects(request({ action: "goal.start", expectedGoalId: "legacy", objective: "forbidden" }), /busy|read-only/);
+    assert.deepEqual(runtime.activeGoal, originalGoal);
+    await request({ action: "goals.pause", expectedGoalId: first.id, expectedEntryRevision: first.revision });
+    for (let i = 0; i < 20 && (await snap()).operationId; i++) await Promise.resolve();
+    snapshot = await snap(); const paused = snapshot.delegatedGoals.entries[0];
+    assert.equal(paused.status, "paused");
+    const unverifiableClear = { ...identity, requestId: randomUUID(), operation: "start", action: "goals.clear", expectedGoalId: paused.id, expectedEntryRevision: paused.revision };
+    await assert.rejects(service.handle(unverifiableClear), /stop verification is unavailable/);
+    await assert.rejects(service.handle(unverifiableClear), /stop verification is unavailable/);
+    assert.equal((await snap()).delegatedGoals.entries[0].status, "paused");
+    const clearSecond = snapshot.delegatedGoals.entries[1];
+    snapshot = await request({ action: "goals.clear", expectedGoalId: clearSecond.id, expectedEntryRevision: clearSecond.revision });
+    assert.equal(snapshot.delegatedGoals.entries[1].status, "cleared"); assert.equal(snapshot.operationId, null);
+    assert.ok(!readdirSync(root).some(name => name.endsWith(".intent")));
+    service.dispose(); service = createWorkflowService(pi, ctx, runtime, {}, { get: () => ({}) }, () => true);
+    const restored = await service.handle({ operation: "snapshot", sessionId, serviceEpoch: service.serviceEpoch });
+    assert.equal(restored.delegatedGoals.entries.length, 2); assert.equal(restored.delegatedGoals.entries[0].child.taskId, first.child.taskId);
+  } finally {
+    service?.dispose(); delete globalThis.__paeDelegatedGoalExecutorV1;
+    if (previous === undefined) delete process.env.PI_DELEGATED_GOALS_STATE_ROOT; else process.env.PI_DELEGATED_GOALS_STATE_ROOT = previous;
+    rmSync(root, { recursive: true, force: true });
+  }
+});

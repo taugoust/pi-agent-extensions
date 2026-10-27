@@ -668,6 +668,16 @@ async function exerciseProcessGroupEscalation() {
 }
 
 try {
+  const workflow = createSession("handled-initial");
+  let structuredBootstrap = false;
+  await workflow.rpc.startWorkflow(async () => {
+    structuredBootstrap = true;
+    await workflow.rpc.pauseWorkflowExecution();
+    workflow.rpc.terminate(new Error("deterministic structured goal shutdown"));
+  });
+  assert(structuredBootstrap);
+  assert(!workflow.events.some(event => event.type === "agent_start"));
+  await workflow.rpc.waitForExit();
   let jobRequestSeen = false;
   const jobSession = createSession("parent-job", undefined, async (request: any, signal: AbortSignal) => {
     assert.equal(request.params.command, "printf fixture");

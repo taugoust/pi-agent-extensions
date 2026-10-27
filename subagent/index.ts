@@ -19,7 +19,7 @@ import { TuiWorkerStore } from "./tui-worker-store.ts";
 import type { Message } from "@mariozechner/pi-ai";
 import type { AgentToolResult, ExtensionAPI } from "@mariozechner/pi-coding-agent";
 import { copyExtensionDefaults } from "../shared/extension-defaults.js";
-import { getAgentDir, getMarkdownTheme } from "@mariozechner/pi-coding-agent";
+import { getAgentDir, getMarkdownTheme, SessionManager } from "@mariozechner/pi-coding-agent";
 import { readSubagentModelSettings, resolveSubagentModel } from "./config.ts";
 import { discoverAgentProfiles, resolveAgentProfileLaunch, type AgentProfileScope } from "./profiles.ts";
 import { prepareSessionRoutingRequest, readInheritedSessionRoutingProfile, readSessionRoutingProfile, registerSessionRouting, sessionRoutingEnvironment } from "../shared/session-routing.ts";
@@ -107,10 +107,18 @@ const INTERNAL_CHILD_IDENTITIES = Symbol("subagent-internal-child-identities");
 const INTERNAL_OWNER_SESSION_ID = Symbol("subagent-internal-owner-session-id");
 
 import { validateVerification, type VerificationGate } from "./acceptance.ts";
+import { randomBytes, randomUUID } from "node:crypto";
+import { createDelegatedGoalExecutor, resumeRestoredGoal, type GoalChildHandle, type ChildGoalSnapshot } from "./goal-executor.ts";
+import { requestGoalWorker, type GoalWorkerIdentity } from "./goal-rpc.ts";
+import { dedicatedGoalTools } from "./goal-tools.ts";
+import { setDedicatedGoalEnvironment } from "./goal-environment.ts";
+import { dedicatedGoalPolicy, type DedicatedGoalPolicy } from "./goal-policy.ts";
+import { DEDICATED_GOAL_LIMITS } from "../shared/delegated-goal-policy.ts";
 
 type Mode = "single" | "parallel" | "chain";
 
 type SubagentSpec = {
+  goalExecution?: { completion?: ChildGoalSnapshot; goalTools: string[]; binding: { path: string; token: string; entryId: string; policy: DedicatedGoalPolicy; identity: GoalWorkerIdentity }; ready(rpc: NativeSubagentRpcSession): Promise<void> };
   task: string;
   acceptance?: string[];
   verification?: VerificationGate[];
@@ -682,6 +690,7 @@ async function runSingleSubagent(
 ): Promise<SingleResult> {
   const { childId: subagentId, label } = identity;
   const args: string[] = ["--mode", "rpc"];
+  if (spec.goalExecution) args.push("--no-extensions", "--extension", nativeHelperEntrypoint("goal-worker", Boolean(permissionAuthority)));
   const jobAvailable = Boolean(parentJobBroker(ownerSessionId));
   const jobEnabled = jobAvailable && (!spec.tools || spec.tools.includes("background_job"));
   const effectiveTools = spec.tools ?? [...SUBAGENT_PERMISSION_NATIVE_TOOLS, ...(jobEnabled ? ["background_job"] : [])];
@@ -707,9 +716,9 @@ async function runSingleSubagent(
   if (permissionTools) {
     // A distinct name prevents a missing/broken proxy from falling back to the
     // built-in Bash implementation under Pi's hard CLI tool allowlist.
-    args.push("--tools", [...permissionTools.map((tool) => tool === "bash" ? SUBAGENT_PERMISSION_BASH_TOOL : tool), ...(jobEnabled ? ["background_job"] : []), "task_outcome", "notify_parent"].join(","));
+    args.push("--tools", [...permissionTools.map((tool) => tool === "bash" ? SUBAGENT_PERMISSION_BASH_TOOL : tool), ...(jobEnabled ? ["background_job"] : []), "task_outcome", "notify_parent", ...(spec.goalExecution?.goalTools ?? [])].join(","));
   } else {
-    args.push("--tools", [...effectiveTools, "task_outcome", "notify_parent"].join(","));
+    args.push("--tools", [...effectiveTools, "task_outcome", "notify_parent", ...(spec.goalExecution?.goalTools ?? [])].join(","));
   }
 
   let tmpPromptDir: string | null = null;
@@ -828,10 +837,15 @@ async function runSingleSubagent(
       PI_SUBAGENT_OUTCOME_PATH: outcomePath,
     };
     Object.assign(env, runtime.routingEnvironment);
-    if (runtime.routingEnvironment.PI_SESSION_ROUTING_FILE && permissionAuthority) {
-      // --no-extensions prevents normal discovery; explicitly load the trusted
-      // sibling extension from the same immutable bundle as this subagent module.
-      const accountsEntrypoint = nativeHelperEntrypoint("../openai-accounts/accounts", true);
+    if (spec.goalExecution) {
+      if (spec.goalExecution.binding.identity.taskId !== taskRecord.taskId || spec.goalExecution.binding.identity.attempt !== taskRecord.attempt)
+        throw new Error("Dedicated goal task attempt changed before spawn");
+    }
+    setDedicatedGoalEnvironment(env, spec.goalExecution?.binding);
+    if (runtime.routingEnvironment.PI_SESSION_ROUTING_FILE && (permissionAuthority || spec.goalExecution)) {
+      // Restricted/dedicated launches skip normal discovery. Explicitly load
+      // owning-account enforcement; guarded launches still require immutable code.
+      const accountsEntrypoint = nativeHelperEntrypoint("../openai-accounts/accounts", Boolean(permissionAuthority));
       args.push("--extension", accountsEntrypoint);
     }
     delete env[SUBAGENT_PERMISSION_SOCKET_ENV];
@@ -992,7 +1006,9 @@ async function runSingleSubagent(
         rpcSession.terminate(permissionRelayFailure);
       }
     }
-    const exited = await rpcSession.start(initialPrompt, spec.compactBeforePrompt === true, spec.resumeTask?.requiresCompaction === true);
+    const exited = spec.goalExecution
+      ? await rpcSession.startWorkflow(() => spec.goalExecution!.ready(rpcSession!))
+      : await rpcSession.start(initialPrompt, spec.compactBeforePrompt === true, spec.resumeTask?.requiresCompaction === true);
     currentResult.rpcDiagnostics = rpcSession.diagnostics;
     executionSettled = true;
     signal?.removeEventListener("abort", abortHandler);
@@ -1041,6 +1057,7 @@ async function runSingleSubagent(
     return currentResult;
   } catch (error) {
     rpcSession?.terminate(error);
+    if (rpcSession) await rpcSession.waitForExit();
     if (rpcSession) currentResult.rpcDiagnostics = rpcSession.diagnostics;
     const message = error instanceof Error ? error.message : String(error);
     currentResult.exitCode = signal?.aborted ? 130 : 1;
@@ -1049,8 +1066,17 @@ async function runSingleSubagent(
     currentResult.stderr += `${message}\n`;
     return currentResult;
   } finally {
-    try { currentResult.taskOutcome = outcomePath ? readTaskOutcome(outcomePath, acceptance) : undefined; }
+    try { currentResult.taskOutcome = !spec.goalExecution && outcomePath ? readTaskOutcome(outcomePath, acceptance) : undefined; }
     catch (error) { currentResult.task_outcome = outcomeSummary(identity.child, subagentId, undefined, `Invalid outcome report: ${String(error).slice(0,512)}`); }
+    const completed = spec.goalExecution?.completion;
+    if (completed?.status === "complete" && completed.goalId && completed.summary?.trim()) {
+      currentResult.exitCode = 0;
+      currentResult.stopReason = "completed";
+      currentResult.errorMessage = undefined;
+      currentResult.taskOutcome = { version: 1, state: "delivered", summary: completed.summary.slice(0, 2000),
+        acceptance: acceptance.map(criterion => ({ criterion, status: "passed", evidence: `Owned child goal ${completed.goalId} completed in task ${taskRecord?.taskId}, child ${subagentId}, attempt ${taskRecord?.attempt}.` })),
+        artifacts: [], remaining: [] };
+    }
     currentResult.task_outcome ??= outcomeSummary(identity.child, subagentId, currentResult.taskOutcome);
     currentResult.task_outcome = {...currentResult.task_outcome,task_id:currentResult.task_id,attempt:currentResult.attempt};
     if (taskStore && taskRecord) {
@@ -1735,6 +1761,8 @@ function subagentParams() {
 
 export default function (pi: ExtensionAPI) {
   const quietState = installQuietState(pi);
+  const dedicatedGoalRuns = new Set<{ stop(): Promise<void> }>();
+  const delegatedGoalGlobal = globalThis as typeof globalThis & { __paeDelegatedGoalExecutorV1?: ReturnType<typeof createDelegatedGoalExecutor> };
   const agentSHStartup = classifyAgentSHStartup(process.env);
   const bridgeDisposition = (bridge: AgentSHBridge | undefined) =>
     agentSHRuntimeDisposition(agentSHStartup, bridgeSupervisorState(bridge));
@@ -1947,6 +1975,9 @@ export default function (pi: ExtensionAPI) {
   };
 
   pi.on("session_start", async (_event, ctx) => {
+    lifecycleClosing = true;
+    delete delegatedGoalGlobal.__paeDelegatedGoalExecutorV1;
+    await Promise.all([...dedicatedGoalRuns].map(run => run.stop()));
     sessionGeneration += 1;
     const generation = sessionGeneration;
     lifecycleClosing = false;
@@ -1956,6 +1987,145 @@ export default function (pi: ExtensionAPI) {
     try {
       const sessionId = stableSessionId(ctx);
       activeSessionId = sessionId;
+      if (process.env.PI_DEDICATED_GOAL_CHILD !== "1") {
+        const runtimeId = randomUUID();
+        delegatedGoalGlobal.__paeDelegatedGoalExecutorV1 = createDelegatedGoalExecutor({ sessionId, runtimeId,
+          executionUnavailableReason() {
+            try {
+              if (generation !== sessionGeneration || lifecycleClosing || activeSessionId !== sessionId) throw new Error("Dedicated goal parent runtime changed");
+              dedicatedGoalTools(pi.getActiveTools());
+              resolveSubagentModel("gpt-6.1-sol", subagentModelSettings, ctx, readInheritedSessionRoutingProfile(ctx));
+              const disposition = nativeDisposition();
+              const authority = currentSubagentPermissionAuthority();
+              if (!["native", "guard-only"].includes(disposition) || (disposition === "guard-only" && !authority))
+                throw new Error("Dedicated native goal execution is unavailable under current permission policy");
+              nativeHelperEntrypoint("goal-worker", Boolean(authority));
+              nativeHelperEntrypoint("../workflows/index", Boolean(authority));
+              nativeHelperEntrypoint("../workflows/delegated-child", Boolean(authority));
+              nativeHelperEntrypoint("../workflows/goal/goal", Boolean(authority));
+              nativeHelperEntrypoint("../progress/index", Boolean(authority));
+              if (sessionRoutingEnvironment(ctx).PI_SESSION_ROUTING_FILE)
+                nativeHelperEntrypoint("../openai-accounts/accounts", Boolean(authority));
+              if (authority && !installedPermissionProxyEntrypoint()) throw new Error("Dedicated goal permission proxy is unavailable");
+              return null;
+            } catch (error) { return error instanceof Error ? error.message : "Dedicated goal execution is unavailable"; }
+          },
+          async verifyStopped(entry) {
+            if (generation !== sessionGeneration || lifecycleClosing || activeSessionId !== sessionId) throw new Error("Dedicated goal parent runtime changed");
+            const child = entry.child;
+            if (!child) return;
+            const store = new NativeTaskStore(path.join(getAgentDir(), "state", "native-tasks-v1"));
+            await store.verifyStopped(sessionId, child.taskId, child.childId, child.attempt);
+          },
+          async retainedCompletion(entry) {
+            if (!entry.child) return null;
+            const store = new NativeTaskStore(path.join(getAgentDir(), "state", "native-tasks-v1"));
+            await store.verifyStopped(sessionId, entry.child.taskId, entry.child.childId, entry.child.attempt);
+            const record = store.get(sessionId, entry.child.taskId);
+            const manager = SessionManager.open(store.sessionPath(entry.child.taskId));
+            if (manager.getSessionId() !== record.sessionId) throw new Error("Retained child session identity changed");
+            const branch = manager.getBranch() as any[];
+            const binding = branch.findLast(e => e.type === "custom" && e.customType === "delegated-goal-child-binding-v1");
+            if (binding?.data?.goalId !== entry.id) return null;
+            // Keep workflow/progress optional for ordinary narrow installations.
+            const { retainedGoalCompletion } = await import("../workflows/delegated-child.ts");
+            const { readGoalTasks } = await import("../shared/goal-progress.ts");
+            const completed = retainedGoalCompletion(branch, entry.id, binding.data.progressId);
+            if (!completed) return null;
+            const goal = completed.state;
+            const last = record.history.at(-1);
+            if (last?.attempt !== record.attempt || last?.outcome !== "delivered")
+              await store.finish(sessionId, record.taskId, record.childId, { outcome: "delivered", execution: "completed", summary: completed.summary });
+            return { goalId: goal.id, status: "complete", executionStopped: true, waiting: null,
+              tasks: readGoalTasks({ sessionManager: manager }, goal), tokensUsed: goal.tokensUsed, automaticTurns: goal.automaticModelTurns,
+              noProgressTurns: goal.toolFreeRepeatCount, summary: completed.summary };
+          },
+          async launch(entry, previous) {
+            const policy = dedicatedGoalPolicy({ continuationLimits: DEDICATED_GOAL_LIMITS });
+            if (generation !== sessionGeneration || lifecycleClosing || activeSessionId !== sessionId) throw new Error("Dedicated goal parent runtime changed");
+            const disposition = nativeDisposition();
+            const authority = currentSubagentPermissionAuthority();
+            if (!["native", "guard-only"].includes(disposition) || (disposition === "guard-only" && !authority))
+              throw new Error("Dedicated native goal execution is unavailable under current permission policy");
+            const allowed = pi.getActiveTools();
+            const goalTools = dedicatedGoalTools(allowed);
+            const selectedModel = resolveSubagentModel("gpt-6.1-sol", subagentModelSettings, ctx, readInheritedSessionRoutingProfile(ctx));
+            let tools = SUBAGENT_PERMISSION_NATIVE_TOOLS.filter(tool => allowed.includes(tool)
+              || (tool === "bash" && allowed.includes(SUBAGENT_PERMISSION_BASH_TOOL)));
+            const taskStore = new NativeTaskStore(path.join(getAgentDir(), "state", "native-tasks-v1"));
+            const childId = createSubagentChildId();
+            const taskId = previous?.taskId ?? createTaskId();
+            let resumeTask: NativeTaskRecord | undefined;
+            if (previous) {
+              const retained = taskStore.get(sessionId, taskId);
+              if (retained.attempt !== previous.attempt || retained.childId !== previous.childId || retained.spec.model !== selectedModel) throw new Error("Dedicated goal retained attempt or owning model authority changed");
+              tools = tools.filter(tool => retained.spec.tools?.includes(tool));
+              resumeTask = await taskStore.beginResume(sessionId, taskId, childId);
+            }
+            const identity: GoalWorkerIdentity = { sessionId, runtimeId, taskId, childId,
+              jobId: `subagent-job-${randomBytes(12).toString("hex")}`, attempt: resumeTask?.attempt ?? 1, workerEpoch: randomBytes(16).toString("hex") };
+            const directory = await fs.promises.mkdtemp(path.join(os.tmpdir(), "pi-goal-"));
+            if (generation !== sessionGeneration || lifecycleClosing || activeSessionId !== sessionId) {
+              if (resumeTask) await taskStore.finish(sessionId, taskId, childId, { execution: "cancelled" });
+              await fs.promises.rm(directory, { recursive: true, force: true });
+              throw new Error("Dedicated goal parent runtime changed before spawn");
+            }
+            await fs.promises.writeFile(path.join(directory, "goal-settings.json"), JSON.stringify({ rpc: { enabled: false }, ...policy }), { mode: 0o600 });
+            const binding = { path: path.join(directory, "worker.sock"), token: randomBytes(32).toString("hex"), entryId: entry.id, policy, identity };
+            const abort = new AbortController();
+            let rpc: NativeSubagentRpcSession | undefined;
+            let resolveReady!: () => void, rejectReady!: (error: Error) => void;
+            const ready = new Promise<void>((resolve, reject) => { resolveReady = resolve; rejectReady = reject; });
+            try {
+              if (generation !== sessionGeneration || lifecycleClosing || activeSessionId !== sessionId) throw new Error("Dedicated goal parent runtime changed before spawn");
+              dedicatedGoalTools(pi.getActiveTools());
+              if (tools.some(tool => !pi.getActiveTools().includes(tool) && !(tool === "bash" && pi.getActiveTools().includes(SUBAGENT_PERMISSION_BASH_TOOL))))
+                throw new Error("Dedicated goal parent tool policy changed before spawn");
+            } catch (error) {
+              if (resumeTask) await taskStore.finish(sessionId, taskId, childId, { execution: "cancelled" });
+              await fs.promises.rm(directory, { recursive: true, force: true });
+              throw error;
+            }
+            const launchIdentity: SubagentChildIdentity = { child: 1, childId, taskId, label: "dedicated goal", task: entry.text };
+            reserveSubagentChildren(sessionId, "native", [launchIdentity]);
+            const goalExecution: NonNullable<SubagentSpec["goalExecution"]> = { goalTools, binding, async ready(session) { rpc = session; resolveReady(); } };
+            let lastObservation: ChildGoalSnapshot | undefined;
+            const run = runSingleSubagent(ctx.cwd, { task: entry.text, acceptance: ["Execute the dedicated goal through the existing goal engine."],
+              model: selectedModel, tools, resumeTask, goalExecution },
+              launchIdentity, undefined, abort.signal, undefined,
+              results => ({ mode: "single", results } as SubagentDetails), authority, sessionId,
+              { agentDir: getAgentDir(), routingEnvironment: sessionRoutingEnvironment(ctx) });
+            void run.then(result => rejectReady(new Error(result.errorMessage ?? "Dedicated child exited before readiness")), rejectReady);
+            const stop = async (completion?: ChildGoalSnapshot) => {
+              if (completion?.status === "complete" && lastObservation?.status === "complete" && completion.goalId === lastObservation.goalId)
+                goalExecution.completion = structuredClone(lastObservation);
+              rpc?.terminate(new Error("Dedicated goal execution stopped"));
+              if (!rpc) abort.abort();
+              await run;
+              if (rpc) await rpc.waitForExit();
+              await fs.promises.rm(directory, { recursive: true, force: true });
+              dedicatedGoalRuns.delete(control);
+            };
+            const control = { stop }; dedicatedGoalRuns.add(control);
+            try { await ready; }
+            catch (error) { await stop(); throw error; }
+            const request = async (operation: string, value?: unknown) => {
+              if (generation !== sessionGeneration || lifecycleClosing || activeSessionId !== sessionId) throw new Error("Dedicated goal parent runtime changed");
+              const observed = await requestGoalWorker(binding.path, { token: binding.token, identity,
+                request: { operation, ...(value === undefined ? {} : { entry: value }) } }) as ChildGoalSnapshot;
+              lastObservation = structuredClone(observed);
+              return observed;
+            };
+            const handle: GoalChildHandle = { identity, model: "gpt-6.1-sol", start: value => request("start", value),
+              resume: () => resumeRestoredGoal(() => request("observe"), () => request("resume", entry)), pause: async () => {
+                await request("pause");
+                await rpc!.pauseWorkflowExecution();
+                return await request("observe");
+              }, observe: () => request("observe"), stop };
+            return handle;
+          },
+        });
+      }
       const headlessWorker = isHeadlessWorkerRuntime(ctx);
       const native = headlessWorker ? undefined : nativeTui(ctx);
       const foreground = !headlessWorker && process.platform === "linux" ? headlessNative(ctx) : undefined;
@@ -2115,6 +2285,9 @@ export default function (pi: ExtensionAPI) {
   });
 
   pi.on("session_shutdown", async (event, ctx) => {
+    lifecycleClosing = true;
+    delete delegatedGoalGlobal.__paeDelegatedGoalExecutorV1;
+    await Promise.all([...dedicatedGoalRuns].map(run => run.stop()));
     const readonlyRegistry = (globalThis as any)[HARNESS_READONLY_KEY] as HarnessReadOnlyRegistry | undefined;
     const readonlySubagents = readonlySubagentsByContext.get(ctx as object);
     if (readonlySubagents && readonlyRegistry?.subagents === readonlySubagents) { delete readonlyRegistry.subagents; if (!readonlyRegistry.jobs) delete (globalThis as any)[HARNESS_READONLY_KEY]; }
