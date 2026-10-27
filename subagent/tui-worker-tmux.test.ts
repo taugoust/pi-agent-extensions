@@ -16,7 +16,8 @@ const exec = promisify(execFile);
 const rawPi = process.env.PI_TUI_TEST_PI;
 const sleep = (ms: number) => new Promise(resolve => setTimeout(resolve, ms));
 
-test("routing launch input accepts only the trusted private routing keys", async () => {
+for (const foreground of [false, true]) {
+test(`routing launch input publishes identity before tmux creation (foreground=${foreground})`, async () => {
   const root = await mkdtemp(join(tmpdir(), "pi-routing-tmux-"));
   const backend = new TuiWorkerTmux();
   const calls: string[][] = [];
@@ -24,7 +25,20 @@ test("routing launch input accepts only the trusted private routing keys", async
   (backend as any).locate = async (_socket: string, pane: string, nonce: string) => ({ socketPath: "/tmp/fake", serverEpoch: "1:2", sessionId: "$1", windowId: "@1", paneId: pane, ownershipNonce: nonce });
   (backend as any).run = async (_socket: string, args: string[]) => {
     calls.push(args);
-    if (args[0] === "new-window") return "%42";
+    if (args[0] === "new-window" || args[0] === "new-session") {
+      const intentPath = join(root, "launch-intent.json");
+      const intent = JSON.parse(await readFile(intentPath, "utf8"));
+      assert.equal(intent.schemaVersion, 1);
+      assert.equal(intent.presentation, foreground ? "foreground-staged" : "background");
+      assert.equal(intent.ownerToken, await processIdentity(process.pid));
+      assert.equal(intent.serverEpoch, "1:2");
+      assert.equal(intent.socketPath, "/tmp/fake");
+      assert.equal(intent.command, args.at(-1), "intent binds the entire shell command, not only its marker");
+      assert.ok(args.at(-1)?.startsWith(`PASEO_MANAGED_LAUNCH=${Buffer.from(intentPath).toString("base64url")}.${intent.nonce}; `),
+        "initial tmux command carries the already-published launch identity");
+      await assert.rejects(readFile(join(root, "manifest.json")), { code: "ENOENT" });
+      return "%42";
+    }
     if (args.at(-1) === "#{pane_pid}") return String(process.pid);
     if (args.at(-1) === "#{pid}") return String(process.pid);
     return "";
@@ -32,7 +46,7 @@ test("routing launch input accepts only the trusted private routing keys", async
   const base: any = { directory: root, ownerSessionId: "owner", taskId: "task", groupId: `subagent-job-${"1".repeat(24)}`,
     childId: `subagent-child-${"2".repeat(24)}`, attempt: 1, cwd: root,
     caller: { socketPath: "/tmp/fake", serverEpoch: "1:2", sessionId: "$1", windowId: "@1", paneId: "%1", ownershipNonce: "caller" },
-    foreground: false, parentDisposition: "native", launcher: rawPi ?? "/nix/store/vjns3phzh830d4qyajb637z4fnk56n4n-pi-1.4.0/bin/pi", launchMode: "none", model: "provider/old-role" };
+    foreground, parentDisposition: "native", launcher: rawPi ?? "/nix/store/vjns3phzh830d4qyajb637z4fnk56n4n-pi-1.4.0/bin/pi", launchMode: "none", model: "provider/old-role" };
   const originalEnv = { ...process.env };
   try {
     process.env.PI_SESSION_ROUTING_FILE = "/stale/tmux/profile.json";
@@ -54,6 +68,8 @@ test("routing launch input accepts only the trusted private routing keys", async
     await rm(root, { recursive: true, force: true });
   }
 });
+
+}
 
 test("startup timeout retains a safe trust diagnosis rather than terminal secrets", async () => {
   const root = await mkdtemp(join(tmpdir(), "worker-startup-diagnostic-"));

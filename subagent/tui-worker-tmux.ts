@@ -254,8 +254,15 @@ export class TuiWorkerTmux {
     const gate = store.path("launch-ready");
     // No Pi executes until its manifest and pane ownership are committed. Parent
     // death before commit leaves a bounded, non-executing launch shell.
-    const shell = `i=0; while [ ! -f ${quote(gate)} ]; do i=$((i+1)); [ "$i" -lt 400 ] || exit 125; sleep 0.05; done; exec ${command}`;
-    atomicPrivateJson(store.path("launch-intent.json"), { groupId: input.groupId, childId: input.childId, nonce, runtimeId });
+    // The marker is part of tmux's initial pane_start_command, unlike options
+    // written after new-window. Paseo can classify the gate shell before Pi imports.
+    const intentPath = store.path("launch-intent.json");
+    const marker = `${Buffer.from(intentPath).toString("base64url")}.${nonce}`;
+    const shell = `PASEO_MANAGED_LAUNCH=${marker}; i=0; while [ ! -f ${quote(gate)} ]; do i=$((i+1)); [ "$i" -lt 400 ] || exit 125; sleep 0.05; done; exec ${command}`;
+    atomicPrivateJson(intentPath, { schemaVersion: 1, command: shell, groupId: input.groupId, childId: input.childId, nonce, runtimeId,
+      socketPath: caller.socketPath, serverEpoch: caller.serverEpoch,
+      ownerPid: process.pid, ownerToken: await processIdentity(process.pid),
+      presentation: input.foreground ? "foreground-staged" : "background" });
     let paneId: string;
     const format = "#{pane_id}";
     if (input.groupWindowId) {
