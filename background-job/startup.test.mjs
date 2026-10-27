@@ -47,9 +47,36 @@ try {
   const sibling = (await exec(tmux, ["-S", socket, "split-window", "-d", "-P", "-F", "#{pane_id}", "-t", "caller", "-h", "sleep", "90"])).stdout.trim();
   await exec(tmux, ["-S", socket, "resize-pane", "-t", "caller", "-y", "1"]);
   const geometryBackend = new TmuxBackend(store, tmux, process.execPath, pinned[0]());
+  const geometryRun = geometryBackend.run.bind(geometryBackend);
+  let initialIntent;
+  geometryBackend.run = async (args, ...rest) => {
+    const output = await geometryRun(args, ...rest);
+    if (args[0] === 'if-shell' && args.some(arg => arg.includes('split-window')) && output.stdout.includes('|')) {
+      const paneId = output.stdout.trim().split('|')[1];
+      const startCommand = (await exec(tmux, ['-S', socket, 'display-message', '-p', '-t', paneId, '#{pane_start_command}'])).stdout.trim();
+      const match = /^"?PASEO_BACKGROUND_JOB_LAUNCH=([A-Za-z0-9_-]+)\.([a-f0-9]{64}) /.exec(startCommand);
+      assert(match, 'first observable pane has no immutable launch intent');
+      const file = Buffer.from(match[1], 'base64url').toString('utf8');
+      initialIntent = JSON.parse(fs.readFileSync(file, 'utf8'));
+      assert.equal(initialIntent.nonce, match[2]);
+      assert.equal(initialIntent.paneId, undefined, 'fixture did not pause before pane identity commit');
+      assert.equal(initialIntent.ownerPid, process.pid);
+      assert.equal(initialIntent.socketPath, socket);
+      assert.equal(fs.statSync(file).mode & 0o777, 0o600);
+      const flag = (await exec(tmux, ['-S', socket, 'display-message', '-p', '-t', paneId, '#{@pi_background_job_id}'])).stdout.trim();
+      assert.equal(flag, '', 'fixture did not observe the pre-flag publication interval');
+    }
+    return output;
+  };
   const geometryManager = new BackgroundJobManager(store, geometryBackend);
   const geometryMarker = path.join(root, "geometry-ran");
   const geometryJob = await geometryManager.start({ command: `printf x >> '${geometryMarker}'`, cwd: root });
+  assert(initialIntent, 'launch intent was not observed');
+  const committedIntent = JSON.parse(fs.readFileSync(store.path(geometryJob.metadata.id, 'launch-intent.json'), 'utf8'));
+  assert.equal(committedIntent.paneId, geometryJob.launch.paneId);
+  assert.equal(committedIntent.panePid, geometryJob.launch.panePid);
+  assert.equal(committedIntent.paneStartToken, geometryJob.launch.paneStartToken);
+  assert.equal(committedIntent.command, initialIntent.command);
   const geometryDone = await geometryManager.wait(geometryJob.metadata.id, 5000);
   assert.equal(geometryDone.record.status, "completed", `geometry job did not complete: ${JSON.stringify(geometryDone.record.result)} ${(await geometryManager.output(geometryJob.metadata.id)).text}`);
   assert.equal(fs.readFileSync(geometryMarker, "utf8"), "x", "geometry recovery duplicated or skipped command");

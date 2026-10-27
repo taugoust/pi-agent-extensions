@@ -1,5 +1,5 @@
 import { execFile } from "node:child_process";
-import { lstat, realpath, rm, readFile } from "node:fs/promises";
+import { lstat, realpath, rm, readFile, writeFile, rename } from "node:fs/promises";
 import { randomBytes } from "node:crypto";
 import { constants } from "node:fs";
 import { validateRuntimePath } from "./runtime-path.ts";
@@ -136,7 +136,22 @@ export class TmuxBackend implements JobProcessBackend {
     if (!options?.infrastructure) {
       const placement = options?.placement ?? await resolveLocalPlacement(this.tmuxPath);
       await validatePlacement(this.tmuxPath, placement);
-      const command = `${quote(this.nodePath)} ${quote(this.runnerPath)} ${quote(jobDir)} ${quote(shell)} 1048576`;
+      const runnerCommand = `${quote(this.nodePath)} ${quote(this.runnerPath)} ${quote(jobDir)} ${quote(shell)} 1048576`;
+      const intentPath = `${jobDir}/launch-intent.json`;
+      const nonce = randomBytes(32).toString('hex');
+      const ownerStart = (await processStartToken(process.pid)).replace('linux-proc:', '');
+      const serverIdentity = await this.run(['display-message', '-p', '-t', placement.paneId, '#{pid}'], false, placement.socketPath);
+      const serverPid = Number(serverIdentity.stdout.trim());
+      const serverStart = (await processStartToken(serverPid)).replace('linux-proc:', '');
+      const command = `PASEO_BACKGROUND_JOB_LAUNCH=${Buffer.from(intentPath).toString('base64url')}.${nonce} ${runnerCommand}`;
+      // Publish presentation evidence before tmux can expose the new pane.
+      // This never grants control authority; that still uses the launch token.
+      const intent = {
+        schemaVersion: 1, nonce, command, jobId: id,
+        socketPath: placement.socketPath, serverEpoch: `${serverPid}:${serverStart}`,
+        ownerPid: process.pid, ownerToken: `${process.pid}:${ownerStart}`,
+      };
+      await writeFile(intentPath, JSON.stringify(intent), {mode:0o600, flag:'wx'});
       const ownershipToken = randomBytes(16).toString('hex');
       const split = ['split-window', '-d', '-P', '-F', '#{window_id}|#{pane_id}|#{pane_pid}', '-t', placement.paneId, '-c', cwd, command].map(quote).join(' ');
       const guard = [
@@ -156,7 +171,7 @@ export class TmuxBackend implements JobProcessBackend {
         result = await this.run(['if-shell', '-F', '-t', placement.paneId, guard, split, 'display-message -p pi-job-placement-mismatch'], false, placement.socketPath);
       }
       if (result.stdout.includes('pi-job-placement-mismatch')) throw new Error('Caller tmux placement changed before launch');
-      try { return await this.finishLaunch(id, result.stdout, placement.socketPath, placement, ownershipToken, options?.name); }
+      try { return await this.finishLaunch(id, result.stdout, placement.socketPath, placement, ownershipToken, options?.name, intentPath, intent); }
       catch (error) { await this.cleanupFailedLaunch(id, result.stdout, placement.socketPath, ownershipToken); throw error; }
     }
     let exists = await this.sessionExists();
@@ -188,7 +203,7 @@ export class TmuxBackend implements JobProcessBackend {
     await this.run(["if-shell", "-F", "-t", paneId, guard, `kill-pane -t ${paneId}`, "display-message -p pi-job-launch-identity-mismatch"], true, socketPath).catch(() => undefined);
   }
 
-  private async finishLaunch(id: string, output: string, socketPath: string, placement: JobPlacement | undefined, ownershipToken: string, name?: string): Promise<JobLaunch> {
+  private async finishLaunch(id: string, output: string, socketPath: string, placement: JobPlacement | undefined, ownershipToken: string, name?: string, intentPath?: string, intent?: Record<string, unknown>): Promise<JobLaunch> {
     const [windowId, paneId, pidRaw] = output.trim().split("|");
     const panePid = Number(pidRaw);
     if (!windowId || !paneId || !Number.isSafeInteger(panePid) || panePid < 1) {
@@ -223,6 +238,13 @@ export class TmuxBackend implements JobProcessBackend {
     const paneStartToken = await processStartToken(panePid);
     if (paneStartToken !== ready.startToken) throw new Error('background-job runner process identity changed during startup');
     await this.run(['set-option', '-p', '-t', paneId, '@pi_background_job_start_token', paneStartToken], false, socketPath);
+    // Readers must see either the live-launcher record or the committed pane,
+    // never a truncated JSON record during the startup handoff.
+    if (intentPath && intent) {
+      const temporary = `${intentPath}.${ownershipToken}.tmp`;
+      await writeFile(temporary, JSON.stringify({...intent, paneId, panePid, paneStartToken}), {mode:0o600, flag:'wx'});
+      await rename(temporary, intentPath);
+    }
     // Repeated splits must not shrink the caller to an unsplittable sliver.
     // Layout failure does not invalidate an otherwise successfully owned job.
     if (placement) await this.run(['select-layout', '-t', windowId, 'tiled'], true, socketPath).catch(() => undefined);
