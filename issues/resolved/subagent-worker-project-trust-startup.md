@@ -18,7 +18,7 @@ For worker processes only, saved project decisions and global settings/CLI polic
 
 ## Resolution
 
-Worker startup now declines only unresolved project-trust asks without persisting policy. Original lifecycle errors survive observation failures, and startup timeouts retain a private reason classification. Cleanup authority remains unchanged.
+Fixed in `070f2e0`. Worker startup now declines only unresolved project-trust asks without persisting policy. Original lifecycle errors survive observation failures, and startup timeouts retain a private reason classification. Cleanup authority remains unchanged.
 
 ## Validation
 
