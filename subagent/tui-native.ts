@@ -193,10 +193,19 @@ export class TuiNativeManager {
     const g = this.groups.get(job); if (g && g.owner !== owner) throw new Error("Subagent belongs to a different Pi session"); return g;
   }
   private byChild(owner: string, childId: string): { group: Group; child: Child } | undefined {
-    for (const g of [...this.groups.values()].reverse()) {
-      const child = g.children.find(c => c.childId === childId || c.taskId === childId);
-      if (child) { if (g.owner !== owner) throw new Error("Subagent belongs to a different Pi session"); return { group: g, child }; }
+    let latest: { group: Group; child: Child } | undefined;
+    // Disk reload order is group-ID order, not chronology. A stable task ID
+    // must resolve to its highest attempt, or resume can reuse an old number
+    // and fail the canonical-name claim before the launch gate is released.
+    for (const g of this.groups.values()) {
+      for (const child of g.children) {
+        if (child.childId !== childId && child.taskId !== childId) continue;
+        if (g.owner !== owner) throw new Error("Subagent belongs to a different Pi session");
+        if (child.childId === childId) return { group: g, child };
+        if (!latest || (child.attempt ?? 1) > (latest.child.attempt ?? 1)) latest = { group: g, child };
+      }
     }
+    return latest;
   }
   /** Derive reachability only from validated worker identity and its exact retained
    * session header. Pane names, cwd and model-supplied owner IDs confer no authority. */

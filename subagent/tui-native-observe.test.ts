@@ -8,6 +8,40 @@ import { TuiWorkerServer } from "./tui-worker-server.ts";
 import { TaskNameStore } from "./task-name-store.ts";
 import { TuiNativeManager } from "./tui-native.ts";
 
+test("task lookup after disk reload selects highest attempt, not random group ID order", async () => {
+  const root = await mkdtemp(join(tmpdir(), "pi-resume-order-"));
+  const manager: any = new TuiNativeManager(root, () => "native", () => false, 16);
+  const taskId = `subagent-task-${"a".repeat(24)}`;
+  const children: any[] = [];
+  try {
+    // Lexical disk order places the original attempt last, as in the incident.
+    for (const [digit, attempt] of [["1", 3], ["5", 2], ["9", 1]] as const) {
+      const groupId = `subagent-job-${digit.repeat(24)}`;
+      const directory = join(root, "workers", digit.repeat(24));
+      const child = { childId: `subagent-child-${digit.repeat(24)}`, taskId, attempt, directory,
+        operatorCapability: "a".repeat(64), state: "completed", spec: { task: "Worktree UI" } };
+      children.push(child);
+      atomicPrivateJson(join(root, "groups", `${groupId}.json`), {
+        version: 1, id: groupId, owner: "parent", children: [child],
+      });
+    }
+    const restored: any = new TuiNativeManager(root, () => "native", () => false, 16);
+    assert.equal(restored.byChild("parent", taskId).child.attempt, 3);
+    assert.equal(restored.byChild("parent", children[2].childId).child.attempt, 1, "explicit child lookup remains exact");
+    assert.throws(() => restored.byChild("foreign", taskId), /different Pi session/);
+    // The existing claim guard remains strict; the selected successor clears it.
+    const identity = { ownerSessionId: "parent", taskId, groupId: "old-group", childId: children[0].childId,
+      attempt: 3, runtimeId: "old-runtime", workerEpoch: "old-epoch" };
+    const names = new TaskNameStore(children[0].directory, identity);
+    names.claim("Worktree UI");
+    const selected = restored.byChild("parent", taskId).child;
+    const successor = { ...identity, attempt: selected.attempt + 1, childId: "new-child", runtimeId: "new-runtime", workerEpoch: "new-epoch" };
+    assert.throws(() => new TaskNameStore(children[0].directory, { ...successor, attempt: 3 }).claim("Worktree UI"), /competing attempt/);
+    assert.equal(new TaskNameStore(children[0].directory, successor).claim("Worktree UI").attempt, 4);
+    await restored.shutdown(false);
+  } finally { await manager.shutdown(false); await rm(root, { recursive: true, force: true }); }
+});
+
 test("read-only native task snapshot/report avoids refresh and excludes private artifact fields", async () => {
   const root = await mkdtemp(join(tmpdir(), "pi-readonly-task-"));
   const manager: any = new TuiNativeManager(root, () => "native", () => true, 16);
