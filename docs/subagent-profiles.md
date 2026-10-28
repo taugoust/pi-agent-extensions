@@ -16,12 +16,13 @@ Profiles select reusable instructions, a role model/thinking level, and an optio
 
 | Builtin | Purpose | Business tools | Thinking |
 |---|---|---|---|
+| `coordinator` | Coordinates a goal and reviews delegated work (model `gpt-6.1-sol`) | runtime defaults | high |
 | `scout` | Focused codebase reconnaissance, no edits | read, bash | low |
 | `worker` | Narrow implementation and validation | read, bash, edit, write | high |
 | `reviewer` | Independent review, no edits | read, bash | high |
 | `oracle` | Advisory challenge of decisions and assumptions, no edits | read, bash | high |
 
-Builtins keep the existing subagent role model ID rather than pinning a new model or provider. Their instructions are adapted from `nicobailon/pi-subagents` at `3ce6185a`; see `THIRD_PARTY.md` and `subagent/agents/LICENSE`.
+Implementers keep the existing subagent role default (`gpt-6-luna`, plain launches use low thinking and `worker` uses high). The named `coordinator` defaults to `gpt-6.1-sol:high`, including dedicated Work → Goals launches through the existing single-child executor. Dedicated Resume retains the recorded model, instructions and tool ceiling instead of rediscovering the profile. Custom coordinator definitions can override the role default; they grant no extra authority. The top-level startup model belongs to Pi settings, not this extension: Astra's physical ID is `gpt-6-astra`. The current idle-guard setup exposes it as `astra`; that is snapshot compatibility, not a requirement to retain that provider or alias during an authorized migration. Configure Astra on the intended owning provider rather than introducing role-specific provider/account routing. Explicit model selections and resumed sessions take precedence over startup defaults. Their instructions are adapted from `nicobailon/pi-subagents` at `3ce6185a`; see `THIRD_PARTY.md` and `subagent/agents/LICENSE`.
 
 ## Custom definitions and precedence
 

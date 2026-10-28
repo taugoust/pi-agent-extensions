@@ -1018,7 +1018,7 @@ export class HeadlessForegroundManager {
     if (state.active !== childActive && child.status !== "pending") throw new Error("Active session state identity is inconsistent");
     const status = this.readonlyExecutionStatus(child, state);
     return { taskId: child.taskId, childId: child.childId, groupId: group.id, attempt: child.attempt,
-      runtimeId: manifest.runtimeId, ...(retainedSessionFile ? { sessionFile: retainedSessionFile } : {}), status, title: this.canonicalTitle(child), cwd: child.spec.cwd };
+      runtimeId: manifest.runtimeId, reaped: child.reaped === true, ...(retainedSessionFile ? { sessionFile: retainedSessionFile } : {}), status, title: this.canonicalTitle(child), cwd: child.spec.cwd };
   }
   readonlyTaskReport(owner: string, taskId: string, maxBytes = 48 * 1024): any | undefined {
     if (this.owner !== owner) throw new Error("Headless task reports belong to another Pi session");

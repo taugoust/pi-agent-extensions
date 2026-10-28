@@ -43,7 +43,10 @@ for (const kind of ["foreground", "tui"] as const) test(`${kind} sessionSource v
     assert.equal(source.runtimeId, runtimeId);
     assert.equal(source.groupId, groupId);
     assert.equal(source.status, kind === "tui" ? "completed" : "running", "a pending manifest must not become a terminal lost source");
-    if (kind === "foreground") assert.equal(manager.readonlyTaskList(owner).find((row: any) => row.childId === childId).status, source.status);
+    if (kind === "foreground") {
+      assert.equal(source.reaped, false);
+      assert.equal(manager.readonlyTaskList(owner).find((row: any) => row.childId === childId).status, source.status);
+    }
     if (kind === "tui") {
       assert.equal(source.reaped, true);
       child.reaped = false;
@@ -78,7 +81,7 @@ for (const kind of ["foreground", "tui"] as const) test(`${kind} sessionSource v
       assert.equal(manager.readonlyTaskSessionSource(owner, { taskId, childId, attempt: 2 }).status, "completed", "cancelling siblings cannot cancel a completed child");
       group.cancelled = false;
     }
-    assert.deepEqual(Object.keys(source).sort(), ["attempt", "childId", "cwd", "groupId", "runtimeId", "sessionFile", "status", "taskId", "title", ...(kind === "tui" ? ["reaped"] : [])].sort());
+    assert.deepEqual(Object.keys(source).sort(), ["attempt", "childId", "cwd", "groupId", "runtimeId", "sessionFile", "status", "taskId", "title", "reaped"].sort());
     assert.throws(() => manager.readonlyTaskSessionSource(owner, { taskId, childId, attempt: 1 }));
     assert.throws(() => manager.readonlyTaskSessionSource(owner, { taskId, childId: `subagent-child-${"9".repeat(24)}`, attempt: 2 }));
     assert.throws(() => manager.readonlyTaskSessionSource("other-owner", { taskId, childId, attempt: 2 }));

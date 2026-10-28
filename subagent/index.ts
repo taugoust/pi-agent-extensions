@@ -22,6 +22,7 @@ import { copyExtensionDefaults } from "../shared/extension-defaults.js";
 import { getAgentDir, getMarkdownTheme, SessionManager } from "@mariozechner/pi-coding-agent";
 import { readSubagentModelSettings, resolveSubagentModel } from "./config.ts";
 import { discoverAgentProfiles, resolveAgentProfileLaunch, type AgentProfileScope } from "./profiles.ts";
+import { resolveCoordinatorRole } from "./coordinator-role.ts";
 import { prepareSessionRoutingRequest, readInheritedSessionRoutingProfile, readSessionRoutingProfile, registerSessionRouting, sessionRoutingEnvironment } from "../shared/session-routing.ts";
 
 import { Container, Markdown, Spacer, Text } from "@mariozechner/pi-tui";
@@ -1977,7 +1978,6 @@ export default function (pi: ExtensionAPI) {
             try {
               if (generation !== sessionGeneration || lifecycleClosing || activeSessionId !== sessionId) throw new Error("Dedicated goal parent runtime changed");
               dedicatedGoalTools(pi.getActiveTools());
-              resolveSubagentModel("gpt-6.1-sol", subagentModelSettings, ctx, readInheritedSessionRoutingProfile(ctx));
               const disposition = nativeDisposition();
               const authority = currentSubagentPermissionAuthority();
               if (!["native", "guard-only"].includes(disposition) || (disposition === "guard-only" && !authority))
@@ -2032,19 +2032,20 @@ export default function (pi: ExtensionAPI) {
               throw new Error("Dedicated native goal execution is unavailable under current permission policy");
             const allowed = pi.getActiveTools();
             const goalTools = dedicatedGoalTools(allowed);
-            const selectedModel = resolveSubagentModel("gpt-6.1-sol", subagentModelSettings, ctx, readInheritedSessionRoutingProfile(ctx));
             let tools = SUBAGENT_PERMISSION_NATIVE_TOOLS.filter(tool => allowed.includes(tool)
               || (tool === "bash" && allowed.includes(SUBAGENT_PERMISSION_BASH_TOOL)));
             const taskStore = new NativeTaskStore(path.join(getAgentDir(), "state", "native-tasks-v1"));
             const childId = createSubagentChildId();
             const taskId = previous?.taskId ?? createTaskId();
-            let resumeTask: NativeTaskRecord | undefined;
-            if (previous) {
-              const retained = taskStore.get(sessionId, taskId);
-              if (retained.attempt !== previous.attempt || retained.childId !== previous.childId || retained.spec.model !== selectedModel) throw new Error("Dedicated goal retained attempt or owning model authority changed");
-              tools = tools.filter(tool => retained.spec.tools?.includes(tool));
-              resumeTask = await taskStore.beginResume(sessionId, taskId, childId);
-            }
+            const retained = previous ? taskStore.get(sessionId, taskId) : undefined;
+            if (previous && (retained!.attempt !== previous.attempt || retained!.childId !== previous.childId)) throw new Error("Dedicated goal retained attempt changed");
+            const role = await resolveCoordinatorRole(retained?.spec, input => resolveSubagentProfiles(input, ctx));
+            if (retained) tools = tools.filter(tool => retained.spec.tools?.includes(tool));
+            else if (role?.tools) tools = tools.filter(tool => role.tools.includes(tool));
+            // Fail model resolution before changing the retained attempt.
+            const selectedModel = resolveSubagentModel(role?.model, subagentModelSettings, ctx, readInheritedSessionRoutingProfile(ctx));
+            const coordinatorPrompt = role?.systemPrompt;
+            const resumeTask = previous ? await taskStore.beginResume(sessionId, taskId, childId) : undefined;
             const identity: GoalWorkerIdentity = { sessionId, runtimeId, taskId, childId,
               jobId: `subagent-job-${randomBytes(12).toString("hex")}`, attempt: resumeTask?.attempt ?? 1, workerEpoch: randomBytes(16).toString("hex") };
             const directory = await fs.promises.mkdtemp(path.join(os.tmpdir(), "pi-goal-"));
@@ -2074,7 +2075,7 @@ export default function (pi: ExtensionAPI) {
             const goalExecution: NonNullable<SubagentSpec["goalExecution"]> = { goalTools, binding, async ready(session) { rpc = session; resolveReady(); } };
             let lastObservation: ChildGoalSnapshot | undefined;
             const run = runSingleSubagent(ctx.cwd, { task: entry.text, acceptance: ["Execute the dedicated goal through the existing goal engine."],
-              model: selectedModel, tools, resumeTask, goalExecution },
+              model: selectedModel, systemPrompt: coordinatorPrompt, tools, resumeTask, goalExecution },
               launchIdentity, undefined, abort.signal, undefined,
               results => ({ mode: "single", results } as SubagentDetails), authority, sessionId,
               { agentDir: getAgentDir(), routingEnvironment: sessionRoutingEnvironment(ctx) });
@@ -2099,7 +2100,7 @@ export default function (pi: ExtensionAPI) {
               lastObservation = structuredClone(observed);
               return observed;
             };
-            const handle: GoalChildHandle = { identity, model: "gpt-6.1-sol", start: value => request("start", value),
+            const handle: GoalChildHandle = { identity, model: selectedModel, start: value => request("start", value),
               resume: () => resumeRestoredGoal(() => request("observe"), () => request("resume", entry)), pause: async () => {
                 await request("pause");
                 await rpc!.pauseWorkflowExecution();

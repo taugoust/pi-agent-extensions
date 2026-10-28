@@ -58,6 +58,8 @@ const actions = [
 	"worktree.remove",
 	"worktree.prune",
 	"worktree.open",
+	"worktree.complete",
+	"worktree.cleanup",
 	"goal.start",
 	"goal.create_paused",
 	"goal.edit",
@@ -497,11 +499,17 @@ export function createWorkflowService(
 		try { await delegated.refresh(); } catch { /* Child unavailability must not hide durable metadata. */ }
 		current();
 		void refreshWorktrees();
+		let worktreeCompletionError: string | null = null;
+		const completionRecords = await ownedWorktrees(sessionId).catch(error => {
+			worktreeCompletionError = stripTerminalControls(error instanceof Error ? error.message : String(error)).slice(0, 2000);
+			return [];
+		});
+		current();
 		const goal = runtime.activeGoal,
 			terminal = runtime.snapshotSettingsApplicationState().terminalDetails;
 		return {
 			protocol: 1,
-			capabilities: { createPausedGoal: false, delegatedGoals: true, delegatedGoalExecution: executionUnavailableReason() === null },
+			capabilities: { ownedWorktreeCompletion: true, createPausedGoal: false, delegatedGoals: true, delegatedGoalExecution: executionUnavailableReason() === null },
 			delegatedGoals: delegated.snapshot(),
 			sessionId,
 			serviceEpoch,
@@ -514,6 +522,8 @@ export function createWorkflowService(
 			operationAction: operation?.action ?? null,
 			protectedPaths: operation?.protectedPaths ?? [],
 			dialog: operation?.dialog ?? null,
+			worktreeCompletions: completionRecords.flatMap(record => record.completion ? [{ ...record.completion, path: record.path, branch: record.branch, retained: record.retain === true || record.state === "failed" || !!record.error }] : []),
+			worktreeCompletionError,
 			worktrees: worktreeCache?.rows ?? [],
 			worktreeError: worktreeCache?.error ?? null,
 			// Cached inventories remain usable during silent background refreshes.
@@ -678,12 +688,21 @@ export function createWorkflowService(
 					const approvedLimits = JSON.stringify(DEDICATED_GOAL_LIMITS);
 					op.policyCheck = () => ctx.cwd === workspace && JSON.stringify(DEDICATED_GOAL_LIMITS) === approvedLimits;
 					if (!(await commandCtx.ui.confirm(r.action === "goals.start" ? "Start dedicated Goal child?" : "Resume dedicated Goal child?",
-						`${entry.text}\n\nWorkspace: ${workspace}\nModel: gpt-6.1-sol\nExecution: independent dedicated child; the parent never executes this goal.\nIt may edit this workspace and make paid model calls.\nDedicated automatic limit: ${DEDICATED_GOAL_LIMITS.automaticTurns} responses.\nDedicated no-progress limit: ${DEDICATED_GOAL_LIMITS.noProgressTurns} repeated runs.\nThese dedicated limits do not inherit parent/child settings.\nToken budget: ${entry.tokenBudget ?? "unlimited"}; the final request can exceed it.`))) return;
+						`${entry.text}\n\nWorkspace: ${workspace}\nRole: coordinator (default gpt-6.1-sol; Resume retains the recorded model)\nExecution: independent dedicated child; the parent never executes this goal.\nIt may edit this workspace and make paid model calls.\nDedicated automatic limit: ${DEDICATED_GOAL_LIMITS.automaticTurns} responses.\nDedicated no-progress limit: ${DEDICATED_GOAL_LIMITS.noProgressTurns} repeated runs.\nThese dedicated limits do not inherit parent/child settings.\nToken budget: ${entry.tokenBudget ?? "unlimited"}; the final request can exceed it.`))) return;
 					current(op);
 					const changedAvailability = executionUnavailableReason();
 					if (changedAvailability) throw new Error(changedAvailability);
 				}
 				await delegated.mutate(sessionId, r);
+			} else if (["worktree.complete", "worktree.cleanup"].includes(r.action)) {
+				current(op);
+				if (!ctx.isIdle() || ctx.hasPendingMessages() || runtime.activeGoal?.status === "active") throw new Error("Wait until Pi is idle before worktree completion/cleanup");
+				op.policyCheck = () => ctx.sessionManager.getSessionId() === sessionId && ctx.isIdle() && !ctx.hasPendingMessages() && runtime.activeGoal?.status !== "active";
+				const { completionFlow } = await import("./worktree/completion.ts");
+				await completionFlow(commandCtx, r.action === "worktree.complete" ? "complete" : "cleanup", r.taskId, r.reason, () => {
+					current(op);
+					if (!op.policyCheck?.()) throw new Error("Worktree completion/cleanup context became active or changed");
+				});
 			} else if (r.action.startsWith("worktree.")) {
 				if (
 					!ctx.isIdle() ||
@@ -863,6 +882,8 @@ export function createWorkflowService(
 						"dialogId",
 						"value",
 						"path",
+						"taskId",
+						"reason",
 					];
 		if (Object.keys(r).some((key) => !allowed.includes(key)))
 			throw new Error("Unknown workflow fields");
@@ -925,6 +946,11 @@ export function createWorkflowService(
 			throw new Error("Workflow busy or invalid action");
 		if (["goal.start", "goal.create_paused", "goal.resume", "goal.edit"].includes(r.action))
 			throw new Error("Use dedicated delegated goals; legacy parent goal execution is read-only");
+		if (["worktree.complete", "worktree.cleanup"].includes(r.action)) {
+			if (typeof r.taskId !== "string" || !/^subagent-task-[a-f0-9]{24}$/.test(r.taskId) || r.path !== undefined) throw new Error("Completion/cleanup requires an owned task ID, not a path");
+			if (r.action === "worktree.complete" && (typeof r.reason !== "string" || !r.reason.trim() || r.reason.length > 2000)) throw new Error("Completion rationale required (1–2000 characters)");
+			if (r.action === "worktree.cleanup" && r.reason !== undefined) throw new Error("Cleanup cannot replace completion rationale");
+		}
 		if (r.action.startsWith("goal.")) {
 			if ((runtime.activeGoal?.id ?? null) !== r.expectedGoalId)
 				throw new Error("Goal changed");

@@ -8,6 +8,11 @@ let
   # A test-owned immutable launcher, deliberately without host AgentSH/Paseo
   # environment or real credentials. Each fixture gets its own HOME/state root.
   launcher = pkgs.writeShellScriptBin "pi-profiles-test-worker" ''
+    if [ "''${PI_DEDICATED_GOAL_CHILD:-}" = 1 ]; then
+      # Dedicated workers intentionally disable auto-discovery. Explicitly add
+      # ONLY this synthetic provider fixture, never host extensions or auth.
+      exec ${pkgs.lib.getExe piPackage} "$@" --extension ${self}/tests/subagent-profiles-native-fixture.ts 2>> "''${PROFILE_FIXTURE_LOG:?}.stderr"
+    fi
     exec ${pkgs.lib.getExe piPackage} "$@"
   '';
 in
@@ -26,7 +31,7 @@ pkgs.runCommand "pi-subagent-profiles-native-check"
     export PI_OFFLINE=1
     export PI_TUI_WORKER_LAUNCHER=${pkgs.lib.getExe launcher}
     export PI_TUI_WORKER_LAUNCH_MODE=none
-    for role in scout worker reviewer oracle; do
+    for role in scout worker reviewer oracle coordinator; do
       test -f ${extensionBundle}/subagent/agents/$role.md
     done
     test -f ${extensionBundle}/subagent/agents/LICENSE

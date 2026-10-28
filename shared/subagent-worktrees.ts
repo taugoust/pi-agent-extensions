@@ -8,7 +8,8 @@ import { canonicalSubagentName, validateSubagentDisplayName } from "../subagent/
 import { loadWorktreeSettings } from "../workflows/worktree/settings.ts";
 
 export type WorktreeOption = { changes?: "include" | "exclude"; base?: string };
-export type OwnedWorktree = { version: 1; ownerSessionId: string; taskId: string; childId: string; title: string; canonicalDisplayName?: string; repo: string; commonDir: string;
+import { validateWorktreeCompletion, type WorktreeCompletion } from "./worktree-completion.ts";
+export type OwnedWorktree = { completion?: WorktreeCompletion; retain?: boolean; version: 1; ownerSessionId: string; taskId: string; childId: string; title: string; canonicalDisplayName?: string; repo: string; commonDir: string;
   path: string; cwd: string; branch: string; baseCommit: string; includedChanges: boolean; createdAt: string;
   released: boolean; state: "preparing" | "ready" | "failed"; physicalIdentity?: { dev: string; ino: string; birthtimeMs: string }; error?: string };
 const registry = () => join(getAgentDir(), "state", "subagent-worktrees-v1");
@@ -57,13 +58,19 @@ function gitClient(input?: Buffer) {
     });
   } };
 }
-async function save(record: OwnedWorktree) {
+export async function saveOwnedWorktree(record: OwnedWorktree) {
+  if (record.completion) validateWorktreeCompletion(record.completion, record.ownerSessionId, record.taskId);
+  const document = JSON.stringify(record);
+  if (Buffer.byteLength(document) > 16384) throw new Error("Worktree ownership record exceeds the safe inventory limit");
   await fs.mkdir(registry(), { recursive: true, mode: 0o700 });
   const stat = await fs.lstat(registry());
   if (!stat.isDirectory() || stat.isSymbolicLink() || (stat.mode & 0o777) !== 0o700 || stat.uid !== process.getuid?.()) throw new Error("Worktree ownership registry unavailable");
   const file = recordFile(record.ownerSessionId, record.taskId), temporary = `${file}.${randomUUID()}.tmp`;
-  await fs.writeFile(temporary, JSON.stringify(record), { mode: 0o600, flag: "wx" });
+  const handle = await fs.open(temporary, "wx", 0o600);
+  try { await handle.writeFile(document); await handle.sync(); } finally { await handle.close(); }
   await fs.rename(temporary, file);
+  const directory = await fs.open(registry(), "r");
+  try { await directory.sync(); } finally { await directory.close(); }
 }
 export async function ownedWorktrees(owner?: string): Promise<OwnedWorktree[]> {
   let files: string[];
@@ -79,6 +86,8 @@ export async function ownedWorktrees(owner?: string): Promise<OwnedWorktree[]> {
       || !/^subagent-child-[a-f0-9]{24}$/.test(record.childId) || typeof record.released !== "boolean"
       || ![record.path, record.repo, record.cwd, record.commonDir].every(p => typeof p === "string" && isAbsolute(p))
       || recordFile(record.ownerSessionId, record.taskId) !== path) throw new Error("Invalid worktree ownership identity");
+    if (record.completion) validateWorktreeCompletion(record.completion, record.ownerSessionId, record.taskId);
+    if (record.retain !== undefined && typeof record.retain !== "boolean") throw new Error("Invalid worktree retention marker");
     if (!owner || record.ownerSessionId === owner) records.push(record);
   }
   return records;
@@ -96,10 +105,20 @@ export function recordedWorktreeOwner(record: OwnedWorktree) {
   return { ownerSessionId: record.ownerSessionId, taskId: record.taskId, childId: record.childId,
     ...(canonicalDisplayName ? { canonicalDisplayName } : {}) };
 }
+const save = saveOwnedWorktree;
 const queues: Map<string, Promise<unknown>> = (globalThis as any).__piWorktreeRegistryWritesV1 ??= new Map();
-async function serialized<T>(owner: string, taskId: string, action: () => Promise<T>): Promise<T> {
+export async function serialized<T>(owner: string, taskId: string, action: () => Promise<T>): Promise<T> {
   const key = recordFile(owner, taskId), previous = queues.get(key) ?? Promise.resolve();
-  const next = previous.catch(() => undefined).then(action); queues.set(key, next);
+  const next = previous.catch(() => undefined).then(async () => {
+    await fs.mkdir(registry(), { recursive: true, mode: 0o700 });
+    const stat = await fs.lstat(registry());
+    if (!stat.isDirectory() || stat.isSymbolicLink() || (stat.mode & 0o777) !== 0o700 || stat.uid !== process.getuid?.()) throw new Error("Worktree ownership registry unavailable");
+    // Never steal a stale lock: interruption requires explicit operator review.
+    const lock = `${key}.lock`;
+    try { await fs.mkdir(lock, { mode: 0o700 }); }
+    catch (error: any) { if (error.code === "EEXIST") throw new Error("Worktree ownership mutation is locked; wait or review interrupted operation"); throw error; }
+    try { return await action(); } finally { await fs.rmdir(lock); }
+  }); queues.set(key, next);
   try { return await next; } finally { if (queues.get(key) === next) queues.delete(key); }
 }
 export async function releaseWorktree(owner: string, taskId: string, childId: string) {
@@ -159,6 +178,7 @@ export async function provisionWorktrees(children: Child[], owner: string, signa
   if (resume) {
     for (const child of requested) await serialized(owner, child.taskId, async () => {
       const record = (await ownedWorktrees(owner)).find(row => row.taskId === child.taskId);
+      if (record?.completion) throw new Error("Completed worktree cannot be resumed; retained completion must be reviewed by its owner");
       if (!record || record.state !== "ready" || record.cwd !== child.spec.cwd) throw new Error("Retained worktree identity is unavailable");
       if (!within(record.path, await fs.realpath(record.cwd)) || (await worktreeGit(["rev-parse", "--path-format=absolute", "--git-common-dir"], record.path, signal)).trim() !== record.commonDir) throw new Error("Retained worktree directory identity changed");
       const list = await listWorktrees(gitClient(), record.commonDir, signal);
@@ -211,7 +231,7 @@ export async function provisionWorktrees(children: Child[], owner: string, signa
   }
   const created: OwnedWorktree[] = [];
   try {
-    for (const plan of plans) {
+    for (const plan of plans) await serialized(owner, plan.record.taskId, async () => {
       if (signal?.aborted || !current()) throw new Error("Worktree launch context changed");
       const { record, delta, choice } = plan;
       const now = await worktreeGit(["status", "--porcelain=v1", "-z", "--untracked-files=all", "--ignore-submodules=none"], record.repo, signal);
@@ -251,9 +271,12 @@ export async function provisionWorktrees(children: Child[], owner: string, signa
       record.state = "ready"; await save(record); plan.child.spec.cwd = record.cwd;
       plan.child.spec.worktreeInfo = { path: record.path, branch: record.branch, baseCommit: record.baseCommit, includedChanges: record.includedChanges };
       attachContext(plan.child, record);
-    }
+    });
   } catch (error) {
-    for (const record of created) await save({ ...record, released: true, state: "failed", error: String(error).slice(0, 2000) });
+    for (const record of created) await serialized(owner, record.taskId, async () => {
+      const latest = (await ownedWorktrees(owner)).find(row => row.taskId === record.taskId);
+      await save({ ...record, ...latest, released: true, state: "failed", error: String(error).slice(0, 2000) });
+    });
     throw new Error(`${error instanceof Error ? error.message : error}${created.length ? `; retained worktrees for inspection: ${created.map(row => row.path).join(", ")}` : ""}`);
   }
 }

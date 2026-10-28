@@ -3,7 +3,7 @@ import { readFileSync } from 'node:fs';
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 registerHooks({ resolve(specifier, context, next) {
-  if (context.parentURL?.endsWith('/shared/subagent-worktrees.ts') && specifier !== '../subagent/tui-names.ts' && !specifier.startsWith('node:')) {
+  if (context.parentURL?.endsWith('/shared/subagent-worktrees.ts') && specifier !== '../subagent/tui-names.ts' && specifier !== './worktree-completion.ts' && !specifier.startsWith('node:')) {
     const code = specifier.includes('settings') ? 'export function loadWorktreeSettings(){}' : specifier.includes('/git.ts') ? 'export const addWorktree=0,currentWorktreePath=0,defaultWorktreePath=0,listWorktrees=0,pathEntryExists=0,resolveCommit=0,unresolvableSymlinkAncestor=0,validateBranch=0' : 'export function getAgentDir(){throw Error("live registry forbidden")}';
     return {url:`data:text/javascript,${encodeURIComponent(code)}`,shortCircuit:true};
   }

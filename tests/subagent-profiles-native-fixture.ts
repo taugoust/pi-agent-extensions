@@ -4,7 +4,7 @@ import { createAssistantMessageEventStream } from "@earendil-works/pi-ai";
 import { appendFile } from "node:fs/promises";
 
 const providerId = "offline-profile-fixture";
-const models = ["parent", "scout-v1", "worker-v1", "reviewer-v1", "oracle-v1", "changed-v2"].map((id) => ({
+const models = ["parent", "gpt-6-astra", "gpt-6.1-sol", "gpt-6-luna", "scout-v1", "worker-v1", "reviewer-v1", "oracle-v1", "changed-v2"].map((id) => ({
   id, name: id, reasoning: true, input: ["text"], contextWindow: 128_000, maxTokens: 4096,
   cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 },
 }));
@@ -20,7 +20,7 @@ function offlineMessage(model: any, content: any[], stopReason: string) {
       cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, total: 0 } } };
 }
 
-export default function profileFixture(pi: any) {
+export default async function profileFixture(pi: any) {
   globalThis.fetch = (async () => { throw new Error("HTTP_FORBIDDEN_PROFILE_FIXTURE"); }) as any;
   let handledUserCount = 0;
   let toolCallId = 0;
@@ -29,6 +29,12 @@ export default function profileFixture(pi: any) {
     if (!log) throw new Error("PROFILE_FIXTURE_LOG is required");
     await appendFile(log, `${JSON.stringify(row)}\n`, { mode: 0o600 });
   };
+
+  const scenario = JSON.parse(process.env.PROFILE_SCENARIO ?? "{}");
+  if (scenario.dedicated && !process.env.PI_SUBAGENT_ID) {
+    const { registerDedicatedCoordinatorProbe } = await import("./dedicated-coordinator-native-probe.ts");
+    registerDedicatedCoordinatorProbe(pi, append);
+  }
 
   pi.on("tool_call", async (event: any, ctx: any) => {
     if (event.toolName === "subagent") await append({ event: "subagent_call", args: event.input,
@@ -90,7 +96,7 @@ export default function profileFixture(pi: any) {
           const scenario = JSON.parse(process.env.PROFILE_SCENARIO ?? "{}") as Record<string, unknown>;
           args = (scenario.params && typeof scenario.params === "object" ? scenario.params : scenario) as Record<string, unknown>;
         }
-        content = [{ type: "toolCall", id: `profile-test-${++toolCallId}`, name: "subagent", arguments: args }];
+        content = [{ type: "toolCall", id: `profile-test-${++toolCallId}`, name: scenario.dedicated ? "fixture_dedicated_probe" : "subagent", arguments: scenario.dedicated ? {} : args }];
         stopReason = "toolUse";
       }
       const stream = createAssistantMessageEventStream();

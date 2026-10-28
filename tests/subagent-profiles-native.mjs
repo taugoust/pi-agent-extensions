@@ -18,12 +18,12 @@ const fixture = resolve(fixtureArg ?? join(here, "subagent-profiles-native-fixtu
 const profile = (model = "legacy-profile-provider/scout-v1", thinking = "high", body = "PROFILE_SCOUT_INSTRUCTION_V1") =>
   `---\nname: fixture-scout\ndescription: Offline named profile acceptance fixture\nmodel: ${model}\nthinking: ${thinking}\ntools: read, bash\n---\n${body}\n`;
 
-async function startParent(root, scenario, { projectTrust = false, agentSH = false } = {}) {
+async function startParent(root, scenario, { projectTrust = false, agentSH = false, startupDefault = false } = {}) {
   const home = join(root, "home"), agentDir = join(home, "agent"), cwd = join(root, "workspace");
   await mkdir(join(agentDir, "agents"), { recursive: true });
   await mkdir(join(agentDir, "extensions"), { recursive: true });
   await mkdir(cwd, { recursive: true });
-  await writeFile(join(agentDir, "settings.json"), JSON.stringify({ retry: { enabled: false }, compaction: { enabled: false }, defaultProjectTrust: "never", extensions: [fixture] }));
+  await writeFile(join(agentDir, "settings.json"), JSON.stringify({ defaultModel: "gpt-6-astra", defaultProvider: "offline-profile-fixture", retry: { enabled: false }, compaction: { enabled: false }, defaultProjectTrust: "never", extensions: [fixture] }));
   await writeFile(join(agentDir, "agents", "fixture-scout.md"), profile());
   const log = join(root, "dispatch.jsonl"), stateRoot = join(root, "worker-state");
   const launcher = process.env.PI_TUI_WORKER_LAUNCHER;
@@ -33,6 +33,7 @@ async function startParent(root, scenario, { projectTrust = false, agentSH = fal
     XDG_CONFIG_HOME: join(home, "config"), XDG_CACHE_HOME: join(home, "cache"),
     PI_CODING_AGENT_DIR: agentDir, PI_OFFLINE: "1", PI_SKIP_VERSION_CHECK: "1", PI_TELEMETRY: "0",
     PROFILE_FIXTURE_LOG: log, PROFILE_SCENARIO: JSON.stringify(scenario), PI_TUI_WORKER_LAUNCHER: launcher,
+    PI_SUBAGENT_BIN: launcher, // dedicated foreground executor uses the existing raw invocation seam
     PI_TUI_WORKER_LAUNCH_MODE: process.env.PI_TUI_WORKER_LAUNCH_MODE ?? "none", PI_TUI_WORKER_STATE_ROOT: stateRoot,
     ...(projectTrust ? { PROFILE_FIXTURE_UNTRUSTED_PROJECT: "1" } : {}),
     ...(agentSH ? { PI_AGENTSH_MOCK_SUPERVISOR: "fixture", PROFILE_FIXTURE_AGENTSH: "1" } : {}),
@@ -44,7 +45,7 @@ async function startParent(root, scenario, { projectTrust = false, agentSH = fal
   }
   const args = ["--mode", "rpc", "--offline", "--no-session", "--no-skills",
     "--extension", fixture, "--extension", extension,
-    "--provider", "offline-profile-fixture", "--model", "parent"];
+    ...(startupDefault ? [] : ["--provider", "offline-profile-fixture", "--model", "parent"])];
   const child = spawn(binary, args, { cwd, env, stdio: ["pipe", "pipe", "pipe"] });
   const events = [], errors = [], bus = new EventEmitter();
   let exited;
@@ -68,9 +69,9 @@ async function startParent(root, scenario, { projectTrust = false, agentSH = fal
   };
   await rpc("get_state");
   let settledCount = events.filter((event) => event.type === "agent_settled").length;
-  const promptAndWait = async (message) => {
+  const promptAndWait = async (message, timeoutMs = 20_000) => {
     await rpc("prompt", { message });
-    await wait(() => events.filter((event) => event.type === "agent_settled").length > settledCount, "agent_settled");
+    await wait(() => events.filter((event) => event.type === "agent_settled").length > settledCount, "agent_settled", timeoutMs);
     settledCount = events.filter((event) => event.type === "agent_settled").length;
   };
   const close = async () => {
@@ -115,6 +116,44 @@ async function assertOffline(log) {
 const root = await mkdtemp(join(tmpdir(), "pf-"));
 let parent;
 try {
+  // Pi owns the top-level default. Changing a startup preference does not
+  // require an extension to forcibly rewrite selected or resumed sessions.
+  for (const startupDefault of [true, false]) {
+    const instance = await startParent(join(root, `top-level-${startupDefault}`), { params: { operation: "profiles" } }, { startupDefault });
+    try {
+      await instance.promptAndWait("inspect top-level selection");
+      const requests = (await assertOffline(instance.log)).filter(row => row.role === "parent");
+      assert(requests.length > 0);
+      assert(requests.every(row => row.model === (startupDefault ? "gpt-6-astra" : "parent")));
+    } finally { await cleanup(instance); }
+  }
+  // Exercise the actual dedicated-goal launch/resume path, not just profile
+  // overlays and executor unit seams. Its child Goal engines and state are
+  // disposable, with this fixture's deterministic in-process provider only.
+  {
+    const instance = await startParent(join(root, "dedicated-coordinator"), { dedicated: true });
+    try {
+      await instance.promptAndWait("run dedicated coordinator probe", 60_000);
+      const rows = await assertOffline(instance.log);
+      const proof = rows.find(row => row.event === "dedicated_probe");
+      const result = instance.events.findLast(event => event.type === "message_end" && event.message?.role === "toolResult" && event.message.toolName === "fixture_dedicated_probe");
+      assert(proof, `dedicated proof absent: ${JSON.stringify(result)}; errors=${instance.errors.join("\\n")}; child=${await readFile(`${instance.log}.stderr`, "utf8").catch(() => "no stderr")}`);
+      assert.notEqual(result?.message?.isError, true);
+      assert.equal(proof.exactChildFencing, true);
+      assert.equal(proof.verifiedStopped, true);
+      for (const child of [proof.first.child, proof.resumed.child]) {
+        const request = rows.find(row => row.role === "child" && row.childId === child.childId);
+        assert(request, `missing actual dedicated request for ${child.childId}`);
+        assert.equal(request.provider, "offline-profile-fixture");
+        assert.equal(request.model, "gpt-6.1-sol");
+        assert.equal(request.reasoning, "high");
+        assert.match(JSON.stringify(request), /single-coordinator execution controls/);
+        assert.doesNotMatch(JSON.stringify(request), /CHANGED_COORDINATOR_MUST_NOT_REPLACE_RETAINED/);
+      }
+      console.log("PASS actual dedicated coordinator: Sol:high launch + retained Resume after profile edit; exact task/child/attempt fencing; both attempts verified stopped");
+    } finally { await cleanup(instance); }
+  }
+
   // A narrowed launch stays inside the profile ceiling. This is a real child Pi
   // model request, not a mock of profile resolution or backend dispatch.
   parent = await startParent(join(root, "single"), { params: { task: "inspect offline fixture", acceptance: ["inspect fixture acceptance"], agent: "fixture-scout", tools: ["read"] } });
@@ -179,6 +218,25 @@ try {
     } finally { await cleanup(instance); }
   }
 
+  // Actual bundled role defaults travel through native dispatch, without
+  // changing the owning synthetic provider/account. Explicit models win.
+  for (const [label, params, model, thinking] of [
+    ["default-implementer", {}, "gpt-6-luna", "low"],
+    ["named-implementer", { agent: "worker" }, "gpt-6-luna", "high"],
+    ["named-coordinator", { agent: "coordinator" }, "gpt-6.1-sol", "high"],
+    ["explicit-role-override", { agent: "coordinator", model: "legacy-provider/gpt-6-astra:low" }, "gpt-6-astra", "low"],
+  ]) {
+    const instance = await startParent(join(root, label), { params: { task: "offline role dispatch", acceptance: ["record selected role"], ...params } });
+    try {
+      await instance.promptAndWait(`launch ${label}`);
+      const actual = (await assertOffline(instance.log)).filter(row => row.role === "child");
+      assert.equal(actual.length, 1, `${label} must dispatch exactly one worker`);
+      assert.equal(actual[0].provider, "offline-profile-fixture");
+      assert.equal(actual[0].model, model);
+      assert.equal(actual[0].reasoning, thinking);
+    } finally { await cleanup(instance); }
+  }
+
   // Profile-only arguments are removed before the AgentSH adapter boundary,
   // after profiles are resolved and expanded. The stub adapter logs received
   // params; a child provider request would indicate an unsafe native fallback.
@@ -215,6 +273,7 @@ try {
   // Invalid profile selection, malformed catalogue input, trust failures, and
   // attempts to widen the declared profile tool ceiling all fail before launch.
   const rejectedCases = [
+    { name: "unavailable-model", params: { task: "must not launch", acceptance: ["no fallback"], agent: "coordinator", model: "nonexistent-role-model" }, reason: /not found|unavailable|Unknown model/i },
     { name: "unknown", params: { task: "must not launch", acceptance: ["required"], agent: "missing-profile" }, reason: /Unknown agent profile 'missing-profile'/ },
     { name: "widen", params: { task: "must not launch", acceptance: ["required"], agent: "fixture-scout", tools: ["write"] }, reason: /cannot widen profile 'fixture-scout' allowlist/ },
     { name: "malformed", params: { task: "must not launch", acceptance: ["required"], agent: "fixture-scout" }, malformed: true, reason: /unsupported field 'unsupported'/ },

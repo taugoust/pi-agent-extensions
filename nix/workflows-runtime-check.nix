@@ -13,7 +13,8 @@ pkgs.runCommand "workflows-immutable-runtime-check"
   {
     nativeBuildInputs = [
       pkgs.coreutils
-      pkgs.nodejs
+      pkgs.nodejs_24
+      pkgs.git
     ];
   }
   ''
@@ -26,6 +27,19 @@ pkgs.runCommand "workflows-immutable-runtime-check"
     export PI_OFFLINE=1
     export NODE_PATH=
     mkdir -p "$PI_CODING_AGENT_DIR"
+    # All Git mutations and removals in these tests are confined to disposable
+    # repositories; fixture hooks prohibit use of the live ownership registry.
+    node --experimental-transform-types --test \
+      ${self}/shared/worktree-completion.test.ts \
+      ${self}/shared/worktree-completion.integration.test.mjs \
+      ${self}/shared/subagent-worktrees-metadata.test.mjs \
+      ${self}/workflows/worktree-completion-service.test.mjs \
+      ${self}/workflows/delegated-service.test.mjs \
+      ${self}/subagent/coordinator-role.test.ts \
+      ${self}/subagent/goal-executor.test.ts \
+      ${self}/subagent/goal-reload.test.ts \
+      ${self}/subagent/goal-pause-race.test.ts \
+      ${self}/subagent/goal-completion.test.ts
     timeout 30s node ${../tests/package-load.mjs} ${piPackage}/bin/pi \
       ${extensionBundle}/workflows ${extensionBundle}/subagent --expect goal worktree background
     test -f ${workflowsOnly}/subagent/tui-names.ts

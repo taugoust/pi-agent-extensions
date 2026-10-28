@@ -10,7 +10,9 @@ test("two child bindings retain tasks across attempts; pause awaits halt and rej
   const executor = createDelegatedGoalExecutor({ sessionId: "s", runtimeId: "r", async launch(e, previous) {
     const attempt = (previous?.attempt ?? 0) + 1;
     const handle: GoalChildHandle = {
-      model: "gpt-6.1-sol",
+      // The executor fences child identity, not a hardcoded default model.
+      // Explicit/retained role choices must survive the same exact-child lane.
+      model: e.id === "a" ? "owning-provider/gpt-6-astra:low" : "owning-provider/gpt-6.1-sol:high",
       identity: { sessionId: "s", runtimeId: "r", taskId: previous?.taskId ?? `task-${e.id}`, childId: `child-${e.id}-${attempt}`, jobId: `job-${e.id}-${attempt}`, attempt, workerEpoch: `epoch-${e.id}-${attempt}` },
       async start() { contractIds.set(e.id, e.id); return { goalId: e.id, status: "active", waiting: null, executionStopped: false }; },
       async resume() { const goalId = `${e.id}-contract-${attempt}`; contractIds.set(e.id, goalId); return { goalId, status: "active", waiting: null, executionStopped: false }; },

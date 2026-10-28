@@ -31,6 +31,7 @@ import {
   worktreeInventory,
   runGit,
 } from "./git.js";
+import { completionFlow } from "./completion.ts";
 import { switchToWorktree } from "./session.js";
 import type { WorktreeSettingsRuntime } from "./settings.js";
 import { loadWorktreeStatusCards, type WorktreeStatusCard } from "./status.js";
@@ -79,7 +80,18 @@ export function registerWorktreeCommand(
     description: "Interactively manage Git worktrees and their default root",
     handler: async (args, ctx) => {
       if (args.trim()) {
-        safeNotify(ctx, "/worktree does not accept arguments; run it without arguments to open the menu.", "warning");
+        const request = /^(complete|cleanup)\s+(subagent-task-[a-f0-9]{24})(?:\s+([\s\S]+))?$/.exec(args.trim());
+        if (!request || (request[1] === "cleanup" && request[3])) {
+          safeNotify(ctx, "Usage: /worktree, /worktree complete <task-id> <rationale>, or /worktree cleanup <task-id>", "warning");
+          return;
+        }
+        try {
+          const owner = getMenuOwner();
+          await ctx.waitForIdle();
+          await completionFlow(ctx, request[1] as "complete" | "cleanup", request[2], request[3], () => {
+            if (owner.signal.aborted || !owner.isCurrent()) throw new Error("Worktree command session changed");
+          });
+        } catch (error) { safeNotify(ctx, formatError(error), "error"); }
         return;
       }
       if (!ctx.hasUI) {

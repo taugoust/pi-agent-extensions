@@ -18,7 +18,7 @@ export async function resumeRestoredGoal(
 
 export type GoalChildHandle = {
   identity: GoalWorkerIdentity;
-  model: "gpt-6.1-sol";
+  model: string;
   start(entry: Readonly<DelegatedGoalEntry>): Promise<ChildGoalSnapshot>;
   resume(): Promise<ChildGoalSnapshot>;
   pause(): Promise<ChildGoalSnapshot>;
@@ -28,7 +28,7 @@ export type GoalChildHandle = {
 };
 export function createDelegatedGoalExecutor(options: {
   sessionId: string; runtimeId: string;
-  /** Must launch gpt-6.1-sol, without dispatching any prompt before structured start/resume. */
+  /** Launch the resolved coordinator role without prompting before structured start/resume. */
   launch(entry: Readonly<DelegatedGoalEntry>, previous?: DelegatedGoalChild): Promise<GoalChildHandle>;
   verifyStopped?(entry: Readonly<DelegatedGoalEntry>): Promise<void>;
   retainedCompletion?(entry: Readonly<DelegatedGoalEntry>): Promise<ChildGoalSnapshot | null>;
@@ -66,7 +66,7 @@ export function createDelegatedGoalExecutor(options: {
     const handle = await options.launch(structuredClone(entry), resume ? structuredClone(entry.child!) : undefined);
     const id = structuredClone(handle.identity);
     try {
-      if (handle.model !== "gpt-6.1-sol" || id.sessionId !== options.sessionId || id.runtimeId !== options.runtimeId
+      if (typeof handle.model !== "string" || !handle.model.trim() || id.sessionId !== options.sessionId || id.runtimeId !== options.runtimeId
         || !Number.isSafeInteger(id.attempt) || id.attempt < 1
         || !id.taskId || !id.childId || !id.jobId || !id.workerEpoch
         || (resume && (id.taskId !== entry.child!.taskId || id.attempt !== entry.child!.attempt + 1

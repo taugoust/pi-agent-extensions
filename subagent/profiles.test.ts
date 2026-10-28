@@ -134,10 +134,10 @@ describe("agent profile discovery", () => {
     await assert.rejects(discover(root, { scope: "user" }), /ELOOP/);
   });
 
-  it("ships four adapted builtins with guarded native tool names", async () => {
+  it("ships coordinator and four adapted builtins with guarded native tool names", async () => {
     const root = await temp();
     const profiles = await discoverAgentProfiles({ cwd: root, agentDir: path.join(root, "home"), projectTrusted: false });
-    assert.deepEqual(profiles.map(({ name }) => name), ["oracle", "reviewer", "scout", "worker"]);
+    assert.deepEqual(profiles.map(({ name }) => name), ["coordinator", "oracle", "reviewer", "scout", "worker"]);
     assert.deepEqual(profiles.find(({ name }) => name === "scout")?.tools, ["read", "bash"]);
     assert.deepEqual(profiles.find(({ name }) => name === "reviewer")?.tools, ["read", "bash"]);
     assert.deepEqual(profiles.find(({ name }) => name === "oracle")?.tools, ["read", "bash"]);
