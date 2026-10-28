@@ -10,6 +10,7 @@ import {
   MAX_SUBAGENT_RESULT_PAGE_BYTES,
   type RetainedSubagentReport,
   answerOnlyReport,
+  diagnosticReport,
 } from "./result-artifact.js";
 
 export const BACKGROUND_SUBAGENT_ID_PATTERN = /^subagent-job-[0-9a-f]{24}$/;
@@ -801,7 +802,7 @@ export class BackgroundSubagentManager {
       if (!opened.isFile() || opened.size !== artifact.bytes || opened.dev !== info.dev || opened.ino !== info.ino) throw new Error("Retained background subagent result identity changed");
       const completeArtifact = await handle.readFile();
       if (createHash("sha256").update(completeArtifact).digest("hex") !== artifact.sha256) throw new Error("Retained background subagent result checksum mismatch");
-      const view = diagnostics ? completeArtifact : Buffer.from(answerOnlyReport(completeArtifact.toString("utf8")), "utf8");
+      const view = Buffer.from((diagnostics ? diagnosticReport : answerOnlyReport)(completeArtifact.toString("utf8")) || "(no visible terminal report)", "utf8");
       if (offset > view.byteLength) throw new Error(`Result offset ${offset} exceeds retained size ${view.byteLength}`);
       if (offset < view.byteLength && (view[offset] & 0xc0) === 0x80) throw new Error(`Result offset ${offset} is not a UTF-8 character boundary`);
       const bytesRead = Math.min(limit, view.byteLength - offset);
@@ -828,7 +829,7 @@ export class BackgroundSubagentManager {
         totalBytes: view.byteLength,
         sourceTotalBytes: Math.max(view.byteLength, artifact.totalBytes - (artifact.bytes - view.byteLength)),
         complete: artifact.complete,
-        sha256: diagnostics ? artifact.sha256 : createHash("sha256").update(view).digest("hex"),
+        sha256: createHash("sha256").update(view).digest("hex"),
         text,
       };
     } finally {

@@ -26,7 +26,7 @@ async function fixture() {
   const server = new TuiWorkerServer(store, { isIdle: () => true, verificationCwd: () => cwd, verificationJobs: () => jobs, send() {}, abort() {}, shutdown() {} });
   await server.start(); server.running(true);
   server.outcome({ version: 1, state: "delivered", summary: "Worker reported delivery", acceptance: [{ criterion: "fixture", status: "passed", evidence: "worker evidence" }], artifacts: [], remaining: [] });
-  server.settled({ assistant: { content: "Historical worker answer", stopReason: "stop" }, timestamp: new Date().toISOString() });
+  server.settled({ assistant: { content: "Historical worker answer café 🐈", stopReason: "stop" }, timestamp: new Date().toISOString() });
   await (server as any).verificationFlight;
   const group: any = { version: 1, id: manifest.groupId, owner: "parent", createdAt: new Date().toISOString(), mode: "single", background: true,
     cancelled: false, caller: manifest.placement, parentOwnerToken: "test", operatorEnabled: true, launcher: "unused", launchMode: "none", children: [{
@@ -66,17 +66,27 @@ test("manager status/list/result revoke a disconnected completed worker's cached
     assert.equal(status.historical_verification.provenance, "live-worker-observation");
     assert.equal(status.task_outcome.state, "delivered", "worker claims must remain distinct, not rewritten");
     unaccepted(child(await f.operation(f.manager, "list")));
-    for (const op of ["output", "tasks", "wait"]) unaccepted(child(await f.operation(f.manager, op)));
-    for (const op of ["wait_any", "wait_all"]) assert.equal(JSON.stringify((await f.operation(f.manager, op)).details).includes('"accepted_delivery":true'), false);
+    for (const op of ["output", "tasks"]) unaccepted(child(await f.operation(f.manager, op)));
     for (const diagnostics of [false, true]) {
       const result = await f.operation(f.manager, "result", { diagnostics });
       assert.equal(result.details.accepted_delivery, false); assert.equal(result.details.failed, true);
       assert.notEqual(result.details.verification.status, "passed");
       if (diagnostics) {
-        const data = JSON.parse(result.content[0].text);
-        assert.equal(data.accepted_delivery, false); assert.equal(data.runtime_verification_is_historical, true);
-        assert.equal(data.runtimeVerification.runs[0].stdout, "literal historical stdout\n");
-        assert.notEqual(data.current_verification.status, "passed");
+        assert.ok(result.content[0].text.startsWith("Historical worker answer"));
+        assert.match(result.content[0].text, /Accepted delivery: false/);
+        assert.match(result.content[0].text, /Retained command evidence: historical only/);
+        assert.match(result.content[0].text, /Current verification: unavailable/);
+        assert.doesNotMatch(result.content[0].text, /sessionFile|textSignature|runtimeVerification/);
+        const pages: string[] = []; let offset = 0;
+        for (;;) {
+          const page = await f.operation(f.manager, "result", { diagnostics: true, offset, limit: 40 });
+          assert.ok(Buffer.byteLength(page.content[0].text) <= 40);
+          assert.doesNotMatch(page.content[0].text, /\uFFFD/);
+          pages.push(page.content[0].text);
+          if (page.details.complete) break;
+          assert.ok(page.details.next_offset > offset); offset = page.details.next_offset;
+        }
+        assert.equal(pages.join(""), result.content[0].text);
       } else assert.match(result.content[0].text, /historical.*accepted_delivery=false/);
     }
     await f.operation(f.manager, "status"); await f.operation(f.manager, "list");
@@ -130,7 +140,9 @@ test("parent reload needs a fresh authenticated worker observation, then permits
     const result = await f.operation(restored, "result", { diagnostics: true });
     assert.equal(result.details.accepted_delivery, true);
     assert.equal(result.details.verification.status, "passed");
-    assert.equal(JSON.parse(result.content[0].text).accepted_delivery, true);
+    assert.ok(result.content[0].text.startsWith("Historical worker answer"));
+    assert.match(result.content[0].text, /Accepted delivery: true/);
+    assert.match(result.content[0].text, new RegExp(`Task: ${f.manifest.taskId}`));
     assert.equal(f.notifications.filter(n => n.completion && n.state === "completed").length, 1, "parent reload duplicated successful terminal receipt");
   } finally { await f.close(f.manager, ...(restored ? [restored] : [])); }
 });

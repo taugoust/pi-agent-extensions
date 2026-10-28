@@ -41,8 +41,18 @@ export default function rootTest(pi: ExtensionAPI) {
   let sequence = 0;
   const execute = (ctx: any, params: any) => tool.execute(`root-test-${++sequence}`, params, undefined, undefined, ctx);
   const manifestFor = (group: any, index = 0) => new TuiWorkerStore(dirname(group.children[index].runtime.sessionFile)).readManifest();
+  // Test-only polling: public yield never blocks for a lifecycle transition.
+  const terminalSnapshot = async (ctx: any, job: string) => {
+    const deadline = Date.now() + 60_000;
+    while (true) {
+      const value = await execute(ctx, { operation: "status", job_id: job });
+      if (["completed", "failed", "cancelled"].includes(value.details.group?.status ?? value.details.status)) return value;
+      assert.ok(Date.now() < deadline, `Timed out observing ${job}`);
+      await sleep(100);
+    }
+  };
   const wait = async (ctx: any, job: string) => {
-    const value = await execute(ctx, { operation: "wait", job_id: job, wait_ms: 60_000 });
+    const value = await terminalSnapshot(ctx, job);
     assert.equal(value.details.group.status, "completed", JSON.stringify(value));
     return value.details.group;
   };
@@ -95,13 +105,15 @@ export default function rootTest(pi: ExtensionAPI) {
     for (const code of [0, 7]) {
       const launched = await execute(ctx, { task: "REPORT_OUTCOME", acceptance: ["fixture"], model: "harness-test/mock:off", background: true,
         cwd, tools: ["read", "bash"], verification: [{ command: `printf 'verified literal stdout\\n'; printf 'verified literal stderr\\n' >&2; exit ${code}`, timeoutMs: 20000 }] });
-      const result = await execute(ctx, { operation: "wait", job_id: launched.details.job_id, wait_ms: 60000 });
+      const result = await terminalSnapshot(ctx, launched.details.job_id);
       const child = result.details.group.children[0];
       assert.equal(child.verification.status, permission ? code === 0 ? "passed" : "failed" : "unavailable", JSON.stringify(result));
       assert.equal(child.accepted_delivery, !!permission && code === 0, JSON.stringify(result));
       const evidence = await execute(ctx, { operation: "result", child_id: child.child_id, diagnostics: true });
       assert.equal(evidence.details.failed, !permission || code !== 0);
-      const raw = JSON.parse(evidence.content[0].text);
+      assert.equal(typeof evidence.content[0].text, "string");
+      assert.ok(!evidence.content[0].text.trimStart().startsWith("{"), "diagnostics must remain human-readable");
+      const raw = { runtimeVerification: evidence.details.verification };
       if (permission) {
         assert.equal(raw.runtimeVerification.runs[0].exitCode, code);
         assert.equal(raw.runtimeVerification.runs[0].stdout, "verified literal stdout\n");
@@ -126,7 +138,7 @@ export default function rootTest(pi: ExtensionAPI) {
     }
     const readonly = await execute(ctx, { task: "REPORT_OUTCOME", acceptance: ["fixture"], model: "harness-test/mock:off", background: true,
       cwd, tools: ["read"], verification: [{ command: "printf MUST_NOT_RUN", timeoutMs: 20000 }] });
-    const denied = await execute(ctx, { operation: "wait", job_id: readonly.details.job_id, wait_ms: 60000 });
+    const denied = await terminalSnapshot(ctx, readonly.details.job_id);
     assert.equal(denied.details.group.children[0].verification.status, "unavailable");
     assert.equal(denied.details.group.children[0].accepted_delivery, false);
     await execute(ctx, { operation: "reap", job_id: readonly.details.job_id });
@@ -492,27 +504,28 @@ export default function rootTest(pi: ExtensionAPI) {
     assert.match(retainedTranscript, /Continue after the small checkpoint/);
     assert.equal(retainedTranscript.split("\n").filter(Boolean).map(line => JSON.parse(line)).some(entry => entry.type === "compaction"), false, "small-session no-op unexpectedly compacted context");
     await execute(ctx, { operation: "reap", job_id: small.details.job_id });
-    // Real root API inventory/waits must cover the legacy manager as well.
+    // Real root yield inventory covers native and legacy groups without waiting.
     const nativeWait = await execute(ctx, { task: "WAIT_FOR_PARENT mixed waits", model: "harness-test/mock:off", background: true, acceptance: ["Mixed backend waits retain the same live worker"] });
     const legacyManager = sharedBackgroundSubagentManager(join(getAgentDir(), "state", "background-subagents-v1"));
     let finishLegacy!: (value: any) => void;
     const legacy = await legacyManager.start({ sessionId: ctx.sessionManager.getSessionId(), backend: "agentsh", mode: "single", summary: "Deterministic legacy wait fixture", children: [{ label: "legacy fixture" }] }, () => new Promise(resolve => { finishLegacy = resolve; }));
     const inventory = await execute(ctx, { operation: "list", limit: 50 });
     assert.ok(inventory.details.legacy_groups?.some((g: any) => g.job_id === legacy.id), JSON.stringify({ inventory, agentDir: getAgentDir(), roots: [...((globalThis as any).__paeBackgroundSubagentManagersV4?.keys() ?? [])] }));
-    const anyWait = execute(ctx, { operation: "wait_any", wait_ms: 60_000 });
-    await sleep(300); finishLegacy({ text: "legacy completed", failed: false });
-    const anyResult = await anyWait;
-    assert.equal(anyResult.details.job_id, legacy.id, JSON.stringify({ anyResult, legacy: await legacyManager.get(legacy.id) }));
-    assert.equal(anyResult.details.timed_out, false);
+    const yielded = await execute(ctx, { operation: "yield" });
+    assert.equal(yielded.terminate, true);
+    assert.ok(yielded.details.groups.some((g: any) => g.job_id === legacy.id && g.status === "running"));
+    assert.ok(yielded.details.groups.some((g: any) => g.job_id === nativeWait.details.job_id));
+    finishLegacy({ text: "legacy completed", failed: false });
     let finishSecond!: (value: any) => void;
     const second = await legacyManager.start({ sessionId: ctx.sessionManager.getSessionId(), backend: "agentsh", mode: "single", summary: "Second legacy fixture", children: [{ label: "second" }] }, () => new Promise(resolve => { finishSecond = resolve; }));
-    const allWait = execute(ctx, { operation: "wait_all", wait_ms: 1000 });
-    await sleep(300); finishSecond({ text: "second completed", failed: false });
-    const mixed = await allWait;
-    assert.equal(mixed.details.timed_out, true);
-    assert.deepEqual(mixed.details.groups.map((g: any) => g.job_id).sort(), [nativeWait.details.job_id, second.id].sort());
-    const complete = await execute(ctx, { operation: "wait_all", wait_ms: 60_000 });
-    assert.equal(complete.details.timed_out, false);
+    const mixed = await execute(ctx, { operation: "yield", job_id: second.id });
+    assert.equal(mixed.terminate, true);
+    assert.deepEqual(mixed.details.groups.map((g: any) => g.job_id), [second.id]);
+    for (const operation of ["wait", "wait_group", "wait_any", "wait_all"]) {
+      await assert.rejects(execute(ctx, { operation }), /Unknown background subagent operation/);
+    }
+    finishSecond({ text: "second completed", failed: false });
+    await wait(ctx, nativeWait.details.job_id);
     await execute(ctx, { operation: "reap", job_id: nativeWait.details.job_id });
     const gate = (globalThis as any).__PAE_PERMISSION_GATE_OPERATOR_V1__;
     gate?.applyMode(ctx.sessionManager.getSessionId(), false);
@@ -540,8 +553,8 @@ export default function rootTest(pi: ExtensionAPI) {
     assert.equal((await callTuiWorker(jobsWorker, { operation: "status" }) as any).data.pid, localPid,
       "active-job refusal must retain the authenticated child controller");
     assert.ok((await callTuiWorker(jobsWorker, { operation: "jobs", params: { action: "cancel", job_id: job } })).ok);
-    const jobDone = await callTuiWorker(jobsWorker, { operation: "jobs", params: { action: "wait", job_id: job, timeout_ms: 5000 } }, { timeoutMs: 10_000 });
-    assert.equal((jobDone as any).data.details.status, "cancelled");
+    const jobDone = await callTuiWorker(jobsWorker, { operation: "jobs", params: { action: "yield", job_id: job } }, { timeoutMs: 10_000 });
+    assert.equal((jobDone as any).data.details.jobs[0].status, "cancelled");
     const afterJobs = (await callTuiWorker(jobsWorker, { operation: "status" }) as any).data;
     assert.equal(afterJobs.pid, localPid);
     assert.equal(afterJobs.sequence, beforeJobs.sequence, "Job controls must not start a model turn");
@@ -579,7 +592,7 @@ export default function rootTest(pi: ExtensionAPI) {
     assert.equal(direct.children[1].status, "running");
     assert.equal(direct.children[1].task_outcome, undefined);
     await keys(human, "Escape");
-    const stopped = (await execute(ctx, { operation: "wait", job_id: parallel.details.job_id, wait_ms: 60_000 })).details.group;
+    const stopped = (await terminalSnapshot(ctx, parallel.details.job_id)).details.group;
     assert.equal(stopped.children[1].status, "cancelled");
     await execute(ctx, { operation: "reap", job_id: parallel.details.job_id });
     // Esc on the first chain step must not advance to the next assignment.
@@ -589,7 +602,7 @@ export default function rootTest(pi: ExtensionAPI) {
     ], background: true });
     const waiting = (await execute(ctx, { operation: "status", job_id: cancelledChain.details.job_id })).details.group;
     await sleep(400); await keys(manifestFor(waiting), "Escape");
-    const cancelled = (await execute(ctx, { operation: "wait", job_id: cancelledChain.details.job_id, wait_ms: 60_000 })).details.group;
+    const cancelled = (await terminalSnapshot(ctx, cancelledChain.details.job_id)).details.group;
     assert.equal(cancelled.children[0].status, "cancelled");
     assert.equal(cancelled.children[1].status, "skipped");
     assert.equal(cancelled.children[1].runtime, undefined);

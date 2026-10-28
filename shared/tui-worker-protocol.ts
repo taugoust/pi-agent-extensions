@@ -61,13 +61,13 @@ export type HeadlessWorkerManifest = Extract<TuiWorkerManifest, { execution: "rp
 export type TuiWorkerIdentity = Pick<TuiWorkerManifest,
   "ownerSessionId" | "taskId" | "runtimeId" | "groupId" | "childId" | "attempt" | "workerEpoch">;
 
-export type TuiWorkerJobParams = { action: "list" | "status" | "output" | "wait" | "cancel" | "reap" | "watches" | "events" | "ack" | "unwatch";
-  job_id?: string; watch_id?: string; limit?: number; lines?: number; timeout_ms?: number; after_sequence?: number; through_sequence?: number };
+export type TuiWorkerJobParams = { action: "list" | "status" | "output" | "yield" | "cancel" | "reap" | "watches" | "events" | "ack" | "unwatch";
+  job_id?: string; watch_id?: string; limit?: number; lines?: number; after_sequence?: number; through_sequence?: number };
 /** Existing-job control only. No shell, start/adopt, foreign session, or scope override. */
 export function parseTuiWorkerJobParams(value: unknown): TuiWorkerJobParams {
   const data = object(value);
   const fields: Record<string, [string[], string[]]> = {
-    list: [[], ["limit"]], status: [["job_id"], []], output: [["job_id"], ["lines"]], wait: [["job_id"], ["lines", "timeout_ms"]],
+    list: [[], ["limit"]], status: [["job_id"], []], output: [["job_id"], ["lines"]], yield: [[], ["job_id"]],
     cancel: [["job_id"], []], reap: [["job_id"], []], watches: [[], []], events: [["watch_id"], ["after_sequence"]],
     ack: [["watch_id", "through_sequence"], []], unwatch: [["watch_id"], []],
   };
@@ -77,7 +77,7 @@ export function parseTuiWorkerJobParams(value: unknown): TuiWorkerJobParams {
   exactKeys(data, ["action", ...required, ...optional.filter(key => Object.hasOwn(data, key))]);
   if (data.job_id !== undefined) text(data.job_id, 64, /^job-[a-f0-9]{24}$/);
   if (data.watch_id !== undefined) text(data.watch_id, 64, /^watch-[a-f0-9]{24}$/);
-  for (const [key, min, max] of [["limit", 1, 50], ["lines", 1, 2000], ["timeout_ms", 0, 43_200_000], ["after_sequence", 0, Number.MAX_SAFE_INTEGER], ["through_sequence", 0, Number.MAX_SAFE_INTEGER]] as const) {
+  for (const [key, min, max] of [["limit", 1, 50], ["lines", 1, 2000], ["after_sequence", 0, Number.MAX_SAFE_INTEGER], ["through_sequence", 0, Number.MAX_SAFE_INTEGER]] as const) {
     if (data[key] !== undefined && integer(data[key], min) > max) throw new Error(`Invalid ${key}`);
   }
   return { ...data } as TuiWorkerJobParams;

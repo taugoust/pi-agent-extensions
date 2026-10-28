@@ -1,8 +1,14 @@
 {
   pkgs,
+  self,
   piPackage,
   extensionBundle,
 }:
+let
+  bundle = import ./mk-extension-bundle.nix { inherit self; inherit (pkgs) lib; };
+  workflowsOnly = bundle { inherit pkgs; name = "pi-workflows-only-runtime"; extensions = [ "workflows" ]; };
+  subagentOnly = bundle { inherit pkgs; name = "pi-subagent-only-runtime"; extensions = [ "subagent" ]; };
+in
 pkgs.runCommand "workflows-immutable-runtime-check"
   {
     nativeBuildInputs = [
@@ -21,7 +27,15 @@ pkgs.runCommand "workflows-immutable-runtime-check"
     export NODE_PATH=
     mkdir -p "$PI_CODING_AGENT_DIR"
     timeout 30s node ${../tests/package-load.mjs} ${piPackage}/bin/pi \
-      ${extensionBundle}/workflows --expect goal worktree
+      ${extensionBundle}/workflows ${extensionBundle}/subagent --expect goal worktree background
+    test -f ${workflowsOnly}/subagent/tui-names.ts
+    test ! -f ${workflowsOnly}/subagent/index.ts
+    test -f ${workflowsOnly}/progress/progress-state.ts
+    test ! -f ${workflowsOnly}/progress/index.ts
+    timeout 30s node ${../tests/package-load.mjs} ${piPackage}/bin/pi \
+      ${workflowsOnly}/workflows --expect goal worktree
+    timeout 30s node ${../tests/package-load.mjs} ${piPackage}/bin/pi \
+      ${subagentOnly}/subagent --expect background
     # A normal CLI exit is not sufficient: demonstrate that missing expected
     # registration fails this probe for the intended reason, not import/setup.
     node --input-type=module - ${../tests/package-load.mjs} ${piPackage}/bin/pi ${extensionBundle}/workflows <<'JS'

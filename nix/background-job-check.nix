@@ -30,7 +30,8 @@ pkgs.runCommand "background-job-extension-check"
     mkdir -p "$srcdir/background-job" "$srcdir/shared" "$srcdir/subagent" "$outdir/background-job" "$workdir/home" "$workdir/tmp"
     cp ${self}/subagent/{readonly-job-ancestry.test.ts,tui-worker-store.ts,acceptance.ts} "$srcdir/subagent/"
     cp ${self}/shared/{tui-worker-protocol.ts,readonly-job-ancestry.ts,verification-worker.ts,verification-worker.test.ts} "$srcdir/shared/"
-    cp ${self}/background-job/{index.ts,manager.ts,retention.ts,retention.test.mjs,retention-races.test.mjs,store.ts,tmux.ts,types.ts,test.mjs,streams.test.mjs,runner.mjs,watch.ts,watch-runner.mjs,watch.test.mjs,external-pane.ts,pane.test.mjs,runtime-path.ts,startup.test.mjs,completion.test.mjs,readonly-descendants.test.mjs} "$srcdir/background-job/"
+    cp ${self}/background-job/{index.ts,manager.ts,retention.ts,retention.test.mjs,retention-races.test.mjs,store.ts,tmux.ts,types.ts,test.mjs,streams.test.mjs,runner.mjs,watch.ts,watch-runner.mjs,watch.test.mjs,external-pane.ts,pane.test.mjs,runtime-path.ts,startup.test.mjs,completion.test.mjs,readonly-descendants.test.mjs,yield.test.mjs} "$srcdir/background-job/"
+    cp ${self}/background-job/identity-race.test.mjs "$srcdir/background-job/"
     cp ${self}/shared/agentsh-mode.ts "$srcdir/shared/agentsh-mode.ts"
     cp ${self}/shared/background-job.ts ${self}/shared/harness-readonly.ts "$srcdir/shared/"
     cp ${self}/shared/task-presentation.ts "$srcdir/shared/task-presentation.ts"
@@ -61,7 +62,9 @@ pkgs.runCommand "background-job-extension-check"
       "$srcdir/subagent/readonly-job-ancestry.test.ts"
     node --test "$outdir/subagent/readonly-job-ancestry.test.js"
     node --test "$outdir/shared/verification-worker.test.js"
-    cp "$srcdir/background-job/"{test.mjs,streams.test.mjs,retention.test.mjs,retention-races.test.mjs,runner.mjs,watch-runner.mjs,watch.test.mjs,pane.test.mjs,startup.test.mjs,completion.test.mjs,readonly-descendants.test.mjs} "$outdir/background-job/"
+    cp "$srcdir/background-job/"{test.mjs,streams.test.mjs,retention.test.mjs,retention-races.test.mjs,runner.mjs,watch-runner.mjs,watch.test.mjs,pane.test.mjs,startup.test.mjs,completion.test.mjs,readonly-descendants.test.mjs,yield.test.mjs} "$outdir/background-job/"
+    cp "$srcdir/background-job/identity-race.test.mjs" "$outdir/background-job/"
+    node "$outdir/background-job/identity-race.test.mjs"
     cp "$srcdir/shared/extension-config-manifest.json" "$outdir/shared/"
     substituteInPlace "$outdir/shared/extension-defaults.js" \
       --replace-fail 'from "./extension-config-manifest.json"' 'from "./extension-config-manifest.json" with { type: "json" }'
@@ -100,6 +103,8 @@ pkgs.runCommand "background-job-extension-check"
     export class Text { constructor(text) { this.text = text; } }
     EOF
     node "$outdir/background-job/readonly-descendants.test.mjs"
+    substituteInPlace "$outdir/background-job/yield.test.mjs" --replace-fail '../shared/background-job.ts' '../shared/background-job.js'
+    node "$outdir/background-job/yield.test.mjs"
     node "$outdir/shared/quiet-state.test.js"
     PI_CODING_AGENT_DIR="$workdir/completion-agent" node "$outdir/background-job/completion.test.mjs"
     PI_CODING_AGENT_DIR="$workdir/retention-agent" node "$outdir/background-job/retention.test.mjs"
@@ -172,6 +177,16 @@ pkgs.runCommand "background-job-extension-check"
       return { tool: tools.get("background_job"), handlers };
     };
 
+    const terminalOutput = async (execute, job_id) => {
+      const deadline = Date.now() + 5000;
+      for (;;) {
+        const snapshot = await execute({action:'yield',job_id});
+        if (snapshot.terminate !== true) throw new Error('yield lost the termination signal');
+        if (['completed','failed','cancelled','lost'].includes(snapshot.details?.jobs?.[0]?.status)) return await execute({action:'output',job_id,lines:100});
+        if (Date.now() >= deadline) throw new Error('Test job did not finish');
+        await new Promise(resolve => setTimeout(resolve, 50));
+      }
+    };
     const beforeReload = await loadHarness("before-reload");
     const assert = (await import('node:assert/strict')).default;
     const { initialVerification, runVerification, recoverVerification } = await import('./out/subagent/acceptance.js');
@@ -273,13 +288,7 @@ pkgs.runCommand "background-job-extension-check"
     let staleServiceRejected = false;
     try { await oldReadonly.jobs.list({sessionId:"reload-session",limit:10}); } catch { staleServiceRejected = true; }
     if (!staleServiceRejected) throw new Error("stale read-only service survived reload");
-    const recovered = await afterReload.tool.execute(
-      "reload-wait",
-      { action: "wait", job_id: started.details.job_id, timeout_ms: 5000, lines: 100 },
-      undefined,
-      undefined,
-      reloadContext,
-    );
+    const recovered = await terminalOutput(params => afterReload.tool.execute("reload-output", params, undefined, undefined, reloadContext), started.details.job_id);
     const broker = globalThis.__paeParentJobBrokerV1;
     const {resolveLocalPlacement} = await import('./out/background-job/tmux.js');
     const identity = { sessionId: "reload-session", childId: "subagent-child-111111111111111111111111", cwd: process.cwd(), placement: await resolveLocalPlacement(process.env.TEST_TMUX) };
@@ -288,7 +297,11 @@ pkgs.runCommand "background-job-extension-check"
     catch(error) { placementBlocked = /trusted caller tmux placement/.test(String(error)); }
     if (!placementBlocked) throw new Error('delegated start guessed the parent pane');
     const childJob = await broker.execute(identity, "child-start", { action: "start", command: "printf child-owned" });
-    const childDone = await broker.execute(identity, "child-wait", { action: "wait", job_id: childJob.details.job_id, timeout_ms: 5000 });
+    const childInventory = await broker.execute(identity, "child-yield-all", {action:'yield'});
+    if (childInventory.details.jobs.length !== 1 || childInventory.details.jobs[0].job_id !== childJob.details.job_id) throw new Error('broker yield crossed child ownership boundary');
+    const childYield = await broker.execute(identity, "child-yield", {action:'yield',job_id:childJob.details.job_id});
+    if (childYield.terminate !== true) throw new Error('broker yield lost termination signal');
+    const childDone = await terminalOutput(params => broker.execute(identity, "child-output", params), childJob.details.job_id);
     if (childDone.details.status !== "completed") throw new Error("broker job did not complete");
     let foreignBlocked = false;
     try { await broker.execute({ ...identity, childId: "subagent-child-222222222222222222222222" }, "foreign", { action: "output", job_id: childJob.details.job_id }); }

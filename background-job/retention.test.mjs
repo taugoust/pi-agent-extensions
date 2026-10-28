@@ -78,15 +78,16 @@ try {
   assert.equal(await store.readRetrieved(first.metadata.id), undefined, 'status must not retrieve output');
   await call({ action: 'list' });
   assert.equal(await store.readRetrieved(first.metadata.id), undefined, 'list must not retrieve output');
-  await call({ action: 'wait', job_id: first.metadata.id, timeout_ms: 0 });
-  assert.equal(await store.readRetrieved(first.metadata.id), undefined, 'wait without lines must not retrieve output');
+  const yielded = await call({ action: 'yield', job_id: first.metadata.id });
+  assert.equal(yielded.terminate, true);
+  assert.equal(await store.readRetrieved(first.metadata.id), undefined, 'yield must not retrieve output');
 
   await call({ action: 'output', job_id: first.metadata.id });
   const initialRetrievedAt = await store.readRetrieved(first.metadata.id);
   assert.ok(Number.isSafeInteger(initialRetrievedAt), 'output must persist retrieval timestamp');
-  await call({ action: 'wait', job_id: second.metadata.id, timeout_ms: 0, lines: 10 });
+  await call({ action: 'output', job_id: second.metadata.id, lines: 10 });
   const secondRetrievedAt = await store.readRetrieved(second.metadata.id);
-  assert.ok(Number.isSafeInteger(secondRetrievedAt), 'wait(lines) must persist retrieval timestamp');
+  assert.ok(Number.isSafeInteger(secondRetrievedAt), 'output(lines) must persist retrieval timestamp');
 
   await new Promise(resolve => setTimeout(resolve, 5));
   await call({ action: 'output', job_id: first.metadata.id });

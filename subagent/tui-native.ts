@@ -1,3 +1,5 @@
+import { resultPage } from "./result-page.ts";
+import { nativeResultReport } from "./result-report.ts";
 import { validateToolPresentation, validateToolPresentationArguments } from "../shared/tool-presentation.ts";
 import { randomBytes, createHash } from "node:crypto";
 import { provisionWorktrees, releaseWorktree, worktreeOption, type WorktreeOption } from "../shared/subagent-worktrees.ts";
@@ -763,6 +765,37 @@ export class TuiNativeManager {
         lastUpdated: null, stale: true };
     }));
   }
+  /** Verify only the requested inventory page. Retention snapshots remain stale;
+   * authenticated live status is the sole freshness authority. Never refresh,
+   * observe, persist or control a worker from a read-only inventory request. */
+  async readonlyTaskInventory(owner: string, rows: any[]): Promise<any[]> {
+    if (this.owner !== owner || this.closed) throw new Error("Native inventory owner unavailable");
+    if (rows.length > 50) throw new Error("Native inventory page exceeds read budget");
+    const generation = this.generation;
+    return await Promise.all(rows.map(async row => {
+      row = { ...row, stale: true, lastUpdated: null }; // Never inherit caller/cached freshness.
+      const found = this.byChild(owner, row.childId);
+      if (!found || found.child.reaped) return row;
+      const { child, group } = found;
+      try {
+        const pinned = this.manifest(child);
+        if (!pinned || pinned.ownerSessionId !== owner || pinned.groupId !== group.id
+          || pinned.taskId !== row.taskId || pinned.childId !== row.childId || pinned.attempt !== row.attempt
+          || pinned.runtimeId !== row.runtimeId || pinned.sessionFile !== join(child.directory, "session.jsonl")) return row;
+        const status = validateLiveStatus(await callTuiWorker(pinned, { operation: "status" }, { timeoutMs: 200 }), pinned);
+        if (!status || status.phase === "closing") return row;
+        const current = this.byChild(owner, row.childId), after = this.manifest(child);
+        if (this.owner !== owner || this.closed || this.generation !== generation || current?.child !== child
+          || current?.group !== group || child.reaped || !after || JSON.stringify(after) !== JSON.stringify(pinned)) return row;
+        // Do not bless a retained execution snapshot that disagrees with live state.
+        if (status.active !== active(child) || row.status !== child.state) return row;
+        if (status.active ? child.state !== "running" || status.phase !== "running"
+          : !["completed", "failed", "cancelled"].includes(child.state) || status.phase !== "settled"
+            || !child.report || status.lastReport !== child.report) return row;
+        return { ...row, stale: false, lastUpdated: new Date().toISOString() };
+      } catch { return row; } // Missing, legacy, timed-out and rotated sources stay stale.
+    }));
+  }
   readonlyIndependentSource(owner: string, input: { taskId: string; childId: string; attempt: number; runtimeId: string | null }): any {
     if (this.owner !== owner) throw new Error("Independent source belongs to another session");
     const found = this.byChild(owner, input.childId);
@@ -896,7 +929,7 @@ export class TuiNativeManager {
     if (!manifest) throw new Error("Child TUI has not launched; no local job controller is available.");
     const request = parseTuiWorkerJobParams(params);
     let result;
-    try { result = await callTuiWorker(manifest, { operation: "jobs", params: request }, { timeoutMs: (request.timeout_ms ?? 0) + 5000 }); }
+    try { result = await callTuiWorker(manifest, { operation: "jobs", params: request }, { timeoutMs: 5000 }); }
     catch { throw new Error("Child-local job control is unavailable. Jobs remain independent; reconnect the worker or re-adopt their panes in a live Pi."); }
     if (!result.ok) throw new Error(`Child-local job control ${result.code}: ${result.message}`);
     return result.data;
@@ -1119,20 +1152,22 @@ export class TuiNativeManager {
     }
     if (op === "result") {
       const c = child ?? g.children[(params.child ?? 1) - 1];
-      if (!c?.report) return response("Result not ready. Use wait.", { operation: op, job_id: g.id });
+      if (!c?.report) return response(c?.error ? `Worker failed: ${c.error}` : "Result not ready. Use wait.", { operation: op, job_id: g.id });
       const raw = readPrivateJson(c.report) as any;
       if (retainedResult || c.reaped) this.invalidateVerification(c, c.reaped ? "interrupted" : "unavailable", "Fresh result observation unavailable; retained evidence is historical only");
       let manifest: TuiWorkerManifest | undefined;
       try { manifest = this.manifest(c); } catch { this.invalidateVerification(c, "unavailable", "Result worker manifest unavailable"); }
       this.currentVerification(c, manifest);
-      const text = params.diagnostics ? JSON.stringify({ ...raw, current_verification: c.verification ?? { status: c.spec.verification?.length ? "unavailable" : "not-configured" },
-          accepted_delivery: c.acceptedDelivery === true, runtime_verification_is_historical: true }, null, 2)
-        : [retainedResult ? "Worker status unavailable; retained result may be stale." : "", c.error ? `Worker failed: ${c.error}` : "", c.spec.verification?.length && (c.verification as any)?.status !== "passed" ? `Current runtime verification ${(c.verification as any)?.status ?? "unavailable"}; retained command evidence is historical, accepted_delivery=false.` : "", messageText(raw.assistant)].filter(Boolean).join("\n\n");
-      const bytes = Buffer.from(text), offset = params.offset ?? 0, limit = params.limit ?? 48 * 1024;
-      return response(bytes.subarray(offset, offset + limit).toString("utf8"), { operation: op, job_id: g.id, child_id: c.childId,
+      const text = nativeResultReport(raw, { reportText: messageText(raw.assistant), diagnostics: params.diagnostics === true,
+        jobId: g.id, childId: c.childId, taskId: c.taskId, attempt: c.attempt, state: c.state,
+        retained: retainedResult, error: c.error, verification: c.verification, acceptedDelivery: c.acceptedDelivery,
+        verificationWarning: c.spec.verification?.length && (c.verification as any)?.status !== "passed"
+          ? `Current runtime verification ${(c.verification as any)?.status ?? "unavailable"}; retained command evidence is historical, accepted_delivery=false.` : undefined });
+      const page = resultPage(text, params.offset, params.limit);
+      return response(page.text, { operation: op, job_id: g.id, child_id: c.childId, task_id: c.taskId, attempt: c.attempt,
         artifact: c.report, retained: retainedResult, failed: !!c.spec.verification?.length && (c.verification as any)?.status !== "passed", terminal_id: createHash("sha256").update(terminalToken(c)).digest("hex").slice(0, 24),
         report_sequence: Number(c.report.match(/report-(\d+)-[a-f0-9]{16}\.json$/)?.[1]) || c.runSequence || 0,
-        offset, next_offset: Math.min(bytes.length, offset + limit), complete: offset + limit >= bytes.length, task_outcome: c.lastOutcome, historical_verification: c.historicalVerification, verification: c.verification ?? { status: c.spec.verification?.length ? "unavailable" : "not-configured" }, accepted_delivery: c.acceptedDelivery === true, review: "not-configured" });
+        offset: page.offset, next_offset: page.nextOffset, complete: page.complete, task_outcome: c.lastOutcome, historical_verification: c.historicalVerification, verification: c.verification ?? { status: c.spec.verification?.length ? "unavailable" : "not-configured" }, accepted_delivery: c.acceptedDelivery === true, review: "not-configured" });
     }
     return response(this.text(g, op === "output"), { operation: op, job_id: g.id, group: this.publicGroup(g) });
   }

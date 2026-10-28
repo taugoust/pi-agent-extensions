@@ -96,6 +96,24 @@ else
         cp ${self}/workflows/worktree/git.ts ${self}/workflows/worktree/settings.ts "$out/workflows/worktree/"
       ''
     }
+    # Shared goal/progress projections need the state helper, not the progress
+    # extension entrypoint or its autoload registration.
+    ${lib.optionalString
+      ((builtins.elem "workflows" selectedExtensions || builtins.elem "subagent" selectedExtensions) && !(builtins.elem "progress" selectedExtensions))
+      ''
+        mkdir -p "$out/progress"
+        cp ${self}/progress/progress-state.ts "$out/progress/progress-state.ts"
+      ''
+    }
+    # Workflows imports the pure canonical-name policy via shared ownership
+    # helpers. Copy only that module; do not enable/autoload subagent.
+    ${lib.optionalString
+      (builtins.elem "workflows" selectedExtensions && !(builtins.elem "subagent" selectedExtensions))
+      ''
+        mkdir -p "$out/subagent"
+        cp ${self}/subagent/tui-names.ts "$out/subagent/tui-names.ts"
+      ''
+    }
     ${copySkillCommands}
 
     cat > "$out/package.json" <<'EOF'

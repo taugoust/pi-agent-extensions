@@ -259,11 +259,18 @@ export class TmuxBackend implements JobProcessBackend {
     };
   }
 
-  private async inspect(id: string, launch: JobLaunch): Promise<PaneState> {
+  private async identityToken(pid: number): Promise<string> {
+    return processStartToken(pid);
+  }
+
+  private async inspect(id: string, launch: JobLaunch, exitRecheck = false): Promise<PaneState> {
     const socket = launch.socketPath ?? this.store.socketPath;
-    if (launch.serverPid && await processStartToken(launch.serverPid).catch(() => '') !== launch.serverStartToken) throw new Error('Saved tmux server identity changed; refusing replacement work');
+    if (launch.serverPid && await this.identityToken(launch.serverPid).catch(() => '') !== launch.serverStartToken) throw new Error('Saved tmux server identity changed; refusing replacement work');
     const result = await this.run(["display-message", "-p", "-t", launch.paneId, "#{@pi_background_job_id}|#{pane_dead}|#{pane_pid}|#{@pi_background_job_token}|#{session_id}|#{window_id}|#{pid}|#{@pi_background_job_start_token}"], true, socket);
-    if (result.code !== 0) return { exists: false };
+    if (result.code !== 0) {
+      if (exitRecheck && !/can't find pane:/.test(result.stderr)) throw new Error('Cannot verify missing tmux pane after exit recheck');
+      return { exists: false };
+    }
     const [tag, deadRaw, pidRaw, token, session, window, server, startToken] = result.stdout.trim().split("|");
     // A foreground group is promoted with move-window. Its server-global window
     // and pane identities remain unchanged; sessionId is launch history only.
@@ -274,18 +281,25 @@ export class TmuxBackend implements JobProcessBackend {
     if ((deadRaw !== "0" && deadRaw !== "1") || !Number.isSafeInteger(panePid)) {
       throw new Error("tmux returned malformed pane state");
     }
-    if (panePid !== launch.panePid || deadRaw === '0' && await processStartToken(panePid).catch(() => '') !== launch.paneStartToken) throw new Error('Saved tmux pane start identity changed; refusing replacement work');
+    if (panePid !== launch.panePid) throw new Error('Saved tmux pane start identity changed; refusing replacement work');
+    if (deadRaw === '0') {
+      if (exitRecheck) throw new Error('Saved tmux pane start identity unavailable after exit recheck; refusing replacement work');
+      let current: string;
+      try { current = await this.identityToken(panePid); }
+      catch (error) {
+        // A live tmux snapshot can precede runner exit and /proc removal.
+        // Reobserve once, authenticating the server and every pane option again.
+        // Only a dead/missing pane proves this race; never trust stale live data.
+        if (process.platform !== 'linux' || (error as NodeJS.ErrnoException).code !== 'ENOENT') throw error;
+        return this.inspect(id, launch, true);
+      }
+      if (current !== launch.paneStartToken) throw new Error('Saved tmux pane start identity changed; refusing replacement work');
+    }
     return { exists: true, dead: deadRaw === "1", panePid };
   }
 
   async paneState(id: string, launch: JobLaunch): Promise<PaneState> {
-    const state = await this.inspect(id, launch);
-    if (!state.exists || state.dead) return state;
-    if (state.panePid !== launch.panePid) return { exists: false };
-    try {
-      if (await processStartToken(launch.panePid) !== launch.paneStartToken) return { exists: false };
-    } catch { return { exists: false }; }
-    return state;
+    return this.inspect(id, launch);
   }
 
   async capture(id: string, launch: JobLaunch): Promise<string> {

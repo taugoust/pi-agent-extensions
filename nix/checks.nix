@@ -2085,6 +2085,9 @@ in
           },
           Literal(value) { return { const: value, type: typeof value }; },
           Union(schemas, options = {}) { return { anyOf: schemas, ...options }; },
+          Unknown() { return {}; },
+          Null() { return { type: "null" }; },
+          Record(key, value) { return { type: "object", additionalProperties: value }; },
         };
         EOF
 
@@ -2106,6 +2109,8 @@ in
         }
         export function getMarkdownTheme() { return {}; }
         export function getAgentDir() { return process.env.PI_TEST_AGENT_DIR || "/tmp/pi-test-agent"; }
+        // Background API fixtures must not open a real session.
+        export class SessionManager { static open() { throw new Error("SessionManager.open is unavailable in the offline fixture"); } }
         export function truncateHead(value, options = {}) {
           const text = String(value);
           const maxLines = options.maxLines ?? DEFAULT_MAX_LINES;
@@ -4063,8 +4068,9 @@ in
             assert(/^subagent-job-[0-9a-f]{24}$/.test(backgroundID), "background AgentSH launch omitted its opaque job ID");
             let backgroundWait;
             for (let attempt = 0; attempt < 20; attempt++) {
-              backgroundWait = await subagentTool.execute("background-wait", { operation: "wait", job_id: backgroundID, wait_ms: 100 }, undefined, undefined, ctx);
+              backgroundWait = await subagentTool.execute("background-status", { operation: "status", job_id: backgroundID }, undefined, undefined, ctx);
               if (backgroundWait.details.status !== "running" && backgroundWait.details.status !== "cancelling") break;
+              await new Promise(resolve => setTimeout(resolve, 100));
             }
             assert(backgroundWait.details.status === "completed", "background AgentSH result did not complete: " + JSON.stringify(backgroundWait.details));
             assert(!backgroundWait.content[0].text.includes(artifactPath), "background result leaked a backend-specific remote artifact path");

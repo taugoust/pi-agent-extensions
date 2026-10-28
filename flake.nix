@@ -161,7 +161,7 @@
           idle-context-warning = import ./nix/idle-context-warning-check.nix { inherit self pkgs; };
           openai-accounts-module = import ./nix/openai-accounts-module-check.nix { inherit self pkgs; };
           workflows-runtime = import ./nix/workflows-runtime-check.nix {
-            inherit pkgs;
+            inherit pkgs self;
             piPackage = self.packages.${system}.pi;
             extensionBundle = self.packages.${system}.default;
           };

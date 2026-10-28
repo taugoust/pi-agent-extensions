@@ -26,14 +26,14 @@ with tempfile.TemporaryDirectory(prefix="pi-job-reload-") as tmp:
                     directory.chmod(0o700)
     schema = root / "old/shared/background-job.ts"
     schema.chmod(0o600)
-    schema.write_text(schema.read_text().replace("43_200_000", "30000"))
+    schema.write_text(schema.read_text().replace("maximum: 2000", "maximum: 1234"))
     for folder in ("background-job", "shared"):
         (extensions / folder).symlink_to(root / "old" / folder)
     (extensions / "probe.ts").write_text('''
 export default function(pi) {
   pi.registerCommand("schema", {handler: async (_, ctx) => {
     const tool = pi.getAllTools().find(t => t.name === "background_job");
-    ctx.ui.notify("MAX=" + tool?.parameters?.properties?.timeout_ms?.maximum);
+    ctx.ui.notify("MAX=" + tool?.parameters?.properties?.lines?.maximum);
   }});
   pi.registerCommand("reloadtest", {handler: async (_, ctx) => { await ctx.reload(); }});
 }
@@ -73,15 +73,15 @@ export default function(pi) {
 
     try:
         pid = process.pid
-        command("schema", "MAX=30000")
+        command("schema", "MAX=1234")
         for folder in ("background-job", "shared"):
             link = extensions / folder
             link.unlink()
             link.symlink_to(root / "new" / folder)
         command("reloadtest")
-        command("schema", "MAX=43200000")
+        command("schema", "MAX=2000")
         assert process.pid == pid and process.poll() is None
-        print("PASS: same-process reload refreshed the background-job schema to 12 hours")
+        print("PASS: same-process reload refreshed the background-job output-lines schema")
     finally:
         process.terminate()
         process.communicate(timeout=5)

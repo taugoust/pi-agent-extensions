@@ -10,7 +10,7 @@ import { randomUUID } from "node:crypto";
 // legacy goal commands and SDK types. No Pi process, provider or child is launched.
 const seams = {
   "./worktree/repositories.js": "export async function workspaceRepositories(){return {roots:[],active:null,container:true}}",
-  "../shared/subagent-worktrees.ts": "export async function ownedWorktrees(){return []}; export async function worktreeGit(){return {stdout:''}}",
+  "../shared/subagent-worktrees.ts": "export function recordedWorktreeOwner(){}; export async function ownedWorktrees(){return []}; export async function worktreeGit(){return {stdout:''}}",
   "../shared/harness-readonly.ts": "export function harnessReadOnlyRegistry(){return {}}",
   "../shared/goal-progress.ts": "export function readGoalTasks(){return []};export function addGoalTask(){throw Error('legacy mutation forbidden')}",
   "./goal/history.js": "export function readGoalHistory(){return []}",

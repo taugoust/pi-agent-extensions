@@ -4,10 +4,11 @@ import { constants, promises as fs } from "node:fs";
 import { basename, dirname, isAbsolute, join, relative, resolve, sep } from "node:path";
 import { getAgentDir } from "@earendil-works/pi-coding-agent";
 import { addWorktree, currentWorktreePath, defaultWorktreePath, listWorktrees, pathEntryExists, resolveCommit, unresolvableSymlinkAncestor, validateBranch } from "../workflows/worktree/git.ts";
+import { canonicalSubagentName, validateSubagentDisplayName } from "../subagent/tui-names.ts";
 import { loadWorktreeSettings } from "../workflows/worktree/settings.ts";
 
 export type WorktreeOption = { changes?: "include" | "exclude"; base?: string };
-export type OwnedWorktree = { version: 1; ownerSessionId: string; taskId: string; childId: string; title: string; repo: string; commonDir: string;
+export type OwnedWorktree = { version: 1; ownerSessionId: string; taskId: string; childId: string; title: string; canonicalDisplayName?: string; repo: string; commonDir: string;
   path: string; cwd: string; branch: string; baseCommit: string; includedChanges: boolean; createdAt: string;
   released: boolean; state: "preparing" | "ready" | "failed"; physicalIdentity?: { dev: string; ino: string; birthtimeMs: string }; error?: string };
 const registry = () => join(getAgentDir(), "state", "subagent-worktrees-v1");
@@ -82,6 +83,19 @@ export async function ownedWorktrees(owner?: string): Promise<OwnedWorktree[]> {
   }
   return records;
 }
+/** Never recover a canonical name from historical title/task instruction text. */
+export function recordedWorktreeName(spec: { displayName?: string; name?: string }): string | undefined {
+  return spec.displayName !== undefined || spec.name !== undefined
+    ? canonicalSubagentName("", spec.displayName, spec.name) : undefined;
+}
+
+/** Presentation of one recorded owner only; callers must first verify physical identity. */
+export function recordedWorktreeOwner(record: OwnedWorktree) {
+  let canonicalDisplayName: string | undefined;
+  try { canonicalDisplayName = validateSubagentDisplayName(record.canonicalDisplayName); } catch {}
+  return { ownerSessionId: record.ownerSessionId, taskId: record.taskId, childId: record.childId,
+    ...(canonicalDisplayName ? { canonicalDisplayName } : {}) };
+}
 const queues: Map<string, Promise<unknown>> = (globalThis as any).__piWorktreeRegistryWritesV1 ??= new Map();
 async function serialized<T>(owner: string, taskId: string, action: () => Promise<T>): Promise<T> {
   const key = recordFile(owner, taskId), previous = queues.get(key) ?? Promise.resolve();
@@ -129,7 +143,7 @@ async function capture(repo: string, signal?: AbortSignal) {
   for (const file of files) digest.update(file.path).update(String(file.mode)).update(file.link ?? file.bytes!);
   return { status, staged, unstaged, files, digest: digest.digest("hex") };
 }
-type Child = { taskId: string; childId: string; spec: { task: string; name?: string; cwd?: string; systemPrompt?: string; worktree?: WorktreeOption; worktreeInfo?: { path: string; branch: string; baseCommit: string; includedChanges: boolean } } };
+type Child = { taskId: string; childId: string; spec: { task: string; name?: string; displayName?: string; cwd?: string; systemPrompt?: string; worktree?: WorktreeOption; worktreeInfo?: { path: string; branch: string; baseCommit: string; includedChanges: boolean } } };
 function within(root: string, path: string) {
   const part = relative(root, path);
   return !part || (!isAbsolute(part) && part !== ".." && !part.startsWith(`..${sep}`));
@@ -188,6 +202,7 @@ export async function provisionWorktrees(children: Child[], owner: string, signa
     if (pathEntryExists(path) || unresolvableSymlinkAncestor(path) || records.some(row => row.branch === branch)) throw new Error(`Worktree target is occupied: ${path}`);
     const commonDir = (await worktreeGit(["rev-parse", "--path-format=absolute", "--git-common-dir"], repo, signal)).trim();
     const record: OwnedWorktree = { version: 1, ownerSessionId: owner, taskId: child.taskId, childId: child.childId, title: child.spec.name ?? child.spec.task.slice(0, 140),
+      canonicalDisplayName: recordedWorktreeName(child.spec),
       repo, commonDir, path, cwd: join(path, relative(repo, sourceCwd)), branch, baseCommit: base,
       includedChanges: !!delta, createdAt: new Date().toISOString(), released: false, state: "preparing" };
     attachContext(child, record);

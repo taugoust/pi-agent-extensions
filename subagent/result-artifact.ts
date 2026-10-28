@@ -91,7 +91,37 @@ export function answerOnlyReport(text: string): string {
     rest = end < 0 ? "" : rest.slice(end + 1);
     removed = true;
   }
-  return removed && /^\r?\n/.test(rest) ? rest.replace(/^\r?\n/, "") : text;
+  return removed ? rest.replace(/^\r?\n/, "") : text;
+}
+
+/** Diagnostic display is a separate byte-paged view, never the private metadata serialization. */
+export function diagnosticReport(text: string): string {
+  const answer = answerOnlyReport(text);
+  if (answer === text) return text;
+  const fields: string[] = [];
+  const scalar = (value: unknown) => typeof value === "string" || typeof value === "number" || typeof value === "boolean"
+    ? cleanText(String(value)).replace(/[\r\n\t]/g, " ").slice(0, 500) : undefined;
+  const field = (label: string, value: unknown) => { const display = scalar(value); if (display) fields.push(`${label}: ${display}`); };
+  for (const line of text.slice(0, text.length - answer.length).split("\n")) {
+    const outcomePrefix = "Task outcome (model-reported, not independently verified): ";
+    const rpcPrefix = "RPC diagnostics: ";
+    const prefix = line.startsWith(outcomePrefix) ? outcomePrefix : line.startsWith(rpcPrefix) ? rpcPrefix : undefined;
+    if (!prefix) continue;
+    try {
+      const value = JSON.parse(line.slice(prefix.length));
+      if (prefix === outcomePrefix) {
+        field("Model-reported outcome (not independently verified)", value.state);
+        field("Outcome summary", value.summary);
+        if (Array.isArray(value.remaining)) for (const item of value.remaining.slice(0, 8)) field("Remaining", item);
+        field("Next action", value.next_action);
+      } else {
+        field("Process exit code", value.rawExit?.code);
+        field("Process exit signal", value.rawExit?.signal);
+        if (Array.isArray(value.trace)) field("Retained RPC trace events", value.trace.length);
+      }
+    } catch { /* Malformed metadata is not expanded into diagnostic prose. */ }
+  }
+  return [answer || "(no visible terminal report)", "Diagnostics:\n" + [...fields, "Full diagnostic metadata retained in the private result artifact."].join("\n")].join("\n\n");
 }
 
 export function extractRetainedSubagentReports(source: unknown): RetainedSubagentReport[] {

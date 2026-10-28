@@ -1,3 +1,5 @@
+import { resultPage } from "./result-page.ts";
+import { nativeResultReport } from "./result-report.ts";
 import { getAgentDir } from "@earendil-works/pi-coding-agent";
 import { spawn, execFile } from "node:child_process";
 import { provisionWorktrees, releaseWorktree, worktreeOption, type WorktreeOption } from "../shared/subagent-worktrees.ts";
@@ -632,16 +634,18 @@ export class HeadlessForegroundManager {
       if (!reportPath) return { content: [{ type: "text", text: "Worker returned an invalid report artifact." }],
         details: { tui_subagent: true, backend: "native", operation, job_id: group.id, child_id: selected.childId, unavailable: true } };
       const raw = readPrivateJson(reportPath) as any;
-      const body = options.diagnostics ? JSON.stringify(raw, null, 2)
-        : [options.retained ? "Worker status unavailable; retained result may be stale." : "", selected.error ? `Worker failed: ${selected.error}` : "", contentText(raw.assistant) || raw.error || "(no output)"].filter(Boolean).join("\n\n");
-      const bytes = Buffer.from(body), offset = options.offset ?? 0, limit = options.limit ?? 48 * 1024;
-      if (!Number.isSafeInteger(offset) || offset < 0 || !Number.isSafeInteger(limit) || limit < 1 || limit > 48 * 1024) throw new Error("Invalid result page");
-      const page = bytes.subarray(offset, offset + limit).toString("utf8");
+      const body = nativeResultReport(raw, { reportText: contentText(raw.assistant), diagnostics: options.diagnostics,
+        jobId: group.id, childId: selected.childId, taskId: selected.taskId, attempt: selected.attempt,
+        state: selected.status, retained: options.retained, error: selected.error,
+        verification: children[group.children.indexOf(selected)].verification,
+        acceptedDelivery: children[group.children.indexOf(selected)].accepted_delivery });
+      const page = resultPage(body, options.offset, options.limit);
       const reportSequence = Number(reportPath.match(/report-(\d+)-[a-f0-9]{16}\.json$/)?.[1]) || 0;
-      return { content: [{ type: "text", text: page }], details: { tui_subagent: true, backend: "native", operation, job_id: group.id,
-        child_id: selected.childId, group: groupView, artifact: reportPath, retained: options.retained === true,
+      return { content: [{ type: "text", text: page.text }], details: { tui_subagent: true, backend: "native", operation, job_id: group.id,
+        child_id: selected.childId, task_id: selected.taskId, attempt: selected.attempt, group: groupView, artifact: reportPath, retained: options.retained === true,
+        verification: children[group.children.indexOf(selected)].verification, accepted_delivery: children[group.children.indexOf(selected)].accepted_delivery,
         terminal_id: createHash("sha256").update(`${selected.attempt}:${reportPath}`).digest("hex").slice(0, 24),
-        report_sequence: reportSequence, offset, next_offset: Math.min(bytes.length, offset + limit), complete: offset + limit >= bytes.length, task_outcome: selected.outcome } };
+        report_sequence: reportSequence, offset: page.offset, next_offset: page.nextOffset, complete: page.complete, task_outcome: selected.outcome } };
     }
     const rows = (selected ? [selected] : group.children).map(child => {
       const index = group.children.indexOf(child);

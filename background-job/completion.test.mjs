@@ -54,6 +54,10 @@ try {
   let h = harness(); await h.emit('session_start'); await pause();
   records = ['completed','failed','cancelled','lost'].map(status=>record(status));
   records.push(record('failed',{infrastructure:true}),record('completed',{sessionId:'foreign'}),record('running'));
+  const allYield = await h.call({action:'yield'});
+  assert.equal(allYield.terminate,true);
+  assert.equal(allYield.details.jobs.length,5,'yield inventory must exclude foreign and infrastructure jobs');
+  assert.equal(notified.size,0,'yield must not acknowledge terminal records');
   poll(); await pause(1150);
   assert.equal(h.messages.length,1);
   assert.deepEqual(h.messages[0].options,{deliverAs:'followUp',triggerTurn:true});
@@ -67,7 +71,7 @@ try {
   idle=true; await pause(1150);
   assert.deepEqual(h.messages[1].options,{deliverAs:'followUp',triggerTurn:true});
   // Each existing consuming tool must remove a queued completion before it wakes.
-  for(const action of ['status','output','wait','cancel','list','reap']) {
+  for(const action of ['status','output','cancel','list','reap']) {
     const r=record(); records.push(r); poll(); await pause();
     await h.call(action==='list'?{action,limit:50}:{action,job_id:r.metadata.id});
     await pause(1100); assert.equal(h.messages.length,2,`${action} left a delayed wake`);
@@ -98,6 +102,19 @@ try {
   await h.emit('session_shutdown',{reason:'reload'});
   h=harness(); await h.emit('session_start'); await pause(1150);
   assert.equal(h.messages.length,0,'delivered completion replayed on reload');
+  // Yield is observation only: never consume completion, retrieve output, or
+  // install a second completion producer. Repeated yields still yield one wake.
+  const yielding=record(); records=[yielding];
+  for (let index=0; index<2; index++) {
+    const result=await h.call({action:'yield',job_id:yielding.metadata.id});
+    assert.equal(result.terminate,true);
+    assert.equal(notified.has(yielding.metadata.id),false);
+    assert.equal(JSON.stringify(result.details).includes('accepted_delivery'),false);
+  }
+  poll(); await pause(1150);
+  assert.equal(h.messages.length,1,'yield suppressed the existing completion producer');
+  poll(); await pause(1150);
+  assert.equal(h.messages.length,1,'yield introduced duplicate completion wakes');
   await h.emit('session_shutdown',{reason:'quit'});
   console.log('background-job completion producer tests passed');
 } finally {

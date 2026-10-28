@@ -297,11 +297,12 @@ extensions have stopped.
 <br>
 
 - **Source**: `background-job/`
-- **Tool**: `background_job` with `start`, `list`, `status`, `output`, bounded
-  `wait`, `signal`, `cancel`, and explicit `reap`
-- **Wait limit**: `timeout_ms` accepts up to `43200000` (12 hours). Wait returns
-  early on completion; cancelling a wait does not cancel the job. Inspect output
-  before claiming dependent work complete.
+- **Tool**: `background_job` with `start`, `list`, `status`, `output`, `yield`,
+  `signal`, `cancel`, and explicit `reap`
+- **Yield**: returns an immediate status-only snapshot, optionally selecting an
+  owned `job_id`. As the sole tool it ends the current run, not the conversation.
+  It never waits for completion or retrieves output. Inspect output after the
+  completion notification before claiming dependent work complete.
 - **Reload safety**: source imports in this extension use explicit `.ts` paths so
   Pi reload picks up changed Nix installation symlinks rather than stale `.js`
   resolution. After activation, reload each affected live session separately.
@@ -323,8 +324,8 @@ and per-working-directory concurrency is 32; adopted panes do not consume launch
 User jobs are not automatically pruned merely because they completed. Completion and
 cancellation retain inspectable panes and records. Terminal native jobs are fully
 reaped (owned pane, output, and metadata) five minutes after their most recent
-output inspection. `output` and `wait` with `lines` start/reset this persistent timer;
-status, list, status-only waits, read-only UI previews, and notifications do not.
+output inspection. `output` starts/resets this persistent timer;
+status, list, yield, read-only UI previews, and notifications do not.
 Unread results, active jobs, and adopted panes/processes are excluded. Expiry is
 checked while Pi is running and on the next session start after Pi exits.
 `reap` explicitly removes a terminal job's verified owned pane and runtime state;
@@ -333,7 +334,10 @@ have a separate 20-terminal-record retention limit; they
 never displace recent user jobs or unread outcomes. Watcher startup resolves
 symlinked entrypoints and backs off 30 seconds after an immediate startup exit.
 
-A cancelled `wait` leaves the underlying job running. `cancel` stops execution
+A `yield` returns an immediate snapshot and asks Pi to end the current run when
+it is the sole tool. Mixed tool batches or queued messages may continue. It does
+not lock the agent or suspend the conversation: users can chat immediately, and
+completion/guidance notifications arrive independently. `cancel` stops execution
 without reaping its pane; `reap` is a separate cleanup operation. User shell job
 termination (including failure, cancellation, or loss) wakes an idle parent.
 While the parent is busy, completions remain in the harness until it settles;
@@ -859,9 +863,8 @@ required for filesystem, process, network, and descendant enforcement.
 { "tasks": [{ "task": "Find model code", "tools": ["read", "grep", "find"] }] }
 { "chain": [{ "task": "Find files" }, { "task": "Plan from: {previous}" }] }
 { "task": "Run the slower investigation", "background": true }
-{ "operation": "wait_any", "wait_ms": 30000 }
-{ "operation": "wait_group", "job_id": "subagent-job-...", "wait_ms": 30000 }
-{ "operation": "wait_all", "wait_ms": 30000 }
+{ "operation": "yield" }
+{ "operation": "yield", "job_id": "subagent-job-..." }
 { "operation": "result", "job_id": "subagent-job-...", "child": 1, "offset": 0, "limit": 49152 }
 { "operation": "prompt", "child_id": "subagent-child-...", "job_id": "subagent-job-...", "message": "Check the failing edge case", "control_mode": "steer" }
 { "operation": "prompt", "child_id": "subagent-child-...", "message": "After that, summarize", "control_mode": "follow_up" }
@@ -883,8 +886,7 @@ options (`task`, `tasks`, `chain`, `model`, `background`, `tools`, `cwd`, etc.).
 | `prompt` | `child_id`, `message`, `job_id?`, `control_mode?`, `wait_for_response?` |
 | `list`, `tasks` | `limit?` (1–50) |
 | `status`, `output`, `cancel`, `reap`, `promote` | `job_id` |
-| `wait`, `wait_group` | `job_id`, `wait_ms?` |
-| `wait_any`, `wait_all` | `wait_ms?` |
+| `yield` | `job_id?` (immediate snapshot; sole tool ends the current run) |
 | `result` | `job_id?`, `child_id?`, `child?`, `offset?`, `limit?`, `diagnostics?`; require `job_id` or `child_id`; never both `child` and `child_id` |
 
 Named profiles are selected with `agent` on a single launch or each parallel/chain item, independently of the tmux `name`. Builtins are `scout`, `worker`, `reviewer`, and `oracle`; `operation: "profiles"` lists the effective catalogue. User and trusted project Markdown definitions can override builtins. Profiles expand into the existing retained model/thinking, instructions and tool contract; they never supply acceptance criteria, grant permissions or pin another provider/account. See [Named subagent profiles](subagent-profiles.md) for supported fields, trust/precedence, narrowing-only tool overrides and examples.
@@ -974,8 +976,9 @@ at most four siblings concurrently. They return immediately,
 retain a 50 KiB preview plus each child's complete terminal report up to 16 MiB
 in a private per-user store, with
 a fair 32 MiB aggregate cap per job. Completion updates are coalesced into
-private durable state deltas; they do not trigger model requests, add context,
-post worker reports in the conversation or interrupt an active supervisor. `result`
+private durable state deltas. Terminal execution notifications can wake an idle
+supervisor; routine progress does not trigger model requests or post worker reports.
+Completion does not interrupt an active supervisor. `result`
 returns the worker answer by default, without the generated task-outcome JSON or
 RPC diagnostics. Use `operation=result, diagnostics=true` to include that retained
 metadata. This also applies to older stored reports; the original artifacts remain
@@ -984,15 +987,14 @@ same `diagnostics` setting across pages. Results are paged
 by byte `offset` and a limit of at most 48 KiB (leaving room inside the 50 KiB
 parent-response budget); parallel and chain jobs select either a one-based
 `child` or its opaque `child_id`.
-`list`, `status`, `output`, bounded waits of up to 24 hours, `result`, and
-`cancel` remain part of the same tool. `wait_any` waits for the next unfinished
-child in any group,
-`wait`/`wait_group` waits for one complete aggregate, and `wait_all` waits for
-all groups that are active when the call begins. Later launches never extend an
-existing wait. `wait_any` is edge-oriented rather than a completion queue:
-simultaneous sibling completions remain visible through `status` and `result`.
+`list`, `status`, `output`, `yield`, `result`, and `cancel` remain part of the same tool.
+`yield` returns an immediate snapshot for the optional owned `job_id` and asks Pi
+to end the current run when it is the sole tool. Mixed tool batches or queued
+messages may continue. The conversation remains usable immediately; no worker is
+suspended and no delivery is accepted by yielding. Existing completion and guidance
+notifications wake the parent independently. Check `status` and `result` as needed.
 Every newly launched child receives a stable opaque `subagent-child-...` ID.
-Background start, list, status, output, waits, and result metadata expose that
+Background start, list, status, output, yield, and result metadata expose that
 ID without exposing a PID, transport, or child state directory. The ID remains
 the same through foreground-to-background handoff and hot extension reload.
 While a native child is active, `operation=prompt` returns when Pi accepts the
@@ -1007,9 +1009,8 @@ same-request-ID retries return the receipt without repeating cancellation or sen
 Inspect worker state before explicitly retrying with a new request (the model tool
 creates a new request ID per prompt). Lost dispatch/persistence remains ambiguous,
 not a side-effect-free busy refusal.
-Use status/output/result or bounded waits to supervise subsequent work. Native
-headless group waits also honor the requested duration up to 24 hours, returning
-early on completion; cancelling a wait leaves workers running.
+Use status/output/result or `yield` snapshots to supervise subsequent work. Foreground
+wait behavior is unchanged; background snapshots return immediately and leave workers running.
 
 Set `wait_for_response: true` only for a deliberately synchronous conversation:
 that waits through the child's next logical `agent_settled` boundary, potentially
@@ -1030,7 +1031,8 @@ has aggregate-only progress until it terminates; exact per-child wakeups begin
 with jobs launched by this build. Artifact identity and SHA-256 are verified
 before each page is returned, and result artifacts are removed with their
 terminal job record.
-Cancelling any wait does not cancel execution.
+Yielding does not cancel execution or acknowledge a result; use `cancel` to stop
+background work and read its retained result before cleanup.
 
 ### Headless foreground helpers
 
@@ -1171,7 +1173,7 @@ An agent can attach any eligible existing pane as a managed background job:
 
 Only `pane_id` is required when using the current/default tmux server. Registration
 never restarts the process or sends terminal input. The returned `job_id` supports
-normal status, output, wait, signal, and cancel operations. Output is captured for
+normal status, output, yield, signal, and cancel operations. Output is captured for
 later inspection. `cancel` closes the selected adopted pane; SIGINT sends Ctrl-C
 to its foreground terminal work, and SIGTERM targets its original root process.
 Independently detached work is outside that pane's cancellation scope.
@@ -1211,7 +1213,7 @@ events after `after_sequence`; `ack` with `through_sequence` acknowledges consum
 events; `unwatch` stops observation, never the build. Event IDs are monotonic and
 old-journal overflow is explicit. New event availability is included in the same
 private durable state deltas, without log text, user notifications, or model
-wake-ups. Use explicit job waits and watch event reads for supervision.
+wake-ups. Use job snapshots and watch event reads for supervision.
 State deltas are deduplicated across reload; unread journal entries remain
 available until acknowledged. Watches default to
 starting at the current end of the file; `from:"start"` opts into existing output.

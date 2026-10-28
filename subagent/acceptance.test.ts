@@ -25,7 +25,7 @@ function supervisor(options: { code?: number; stdout?: string; stderr?: string; 
     async attest() { calls.push("attest"); return true; },
     async execute(_id, params) {
       calls.push(params.action);
-      if (params.action === "wait") options.onWait?.();
+      if (params.action === "status") options.onWait?.();
       if (params.action === "cancel") cancelled = true;
       if (params.action === "reap") { if (options.cleanupFail) return { isError: true }; reaped = true; }
       return { details: data(), isError: options.code !== undefined && options.code !== 0 };

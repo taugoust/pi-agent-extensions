@@ -75,22 +75,13 @@ for (const limit of [3, 48 * 1024 + 1, 4.5, "4"]) {
   assert.throws(() => validateBackgroundOperation({ operation: "result", job_id: jobId, limit }), /result limit/);
 }
 
-for (const operation of ["wait", "wait_group"]) {
-  assert.doesNotThrow(() => validateBackgroundOperation({ operation, job_id: jobId, wait_ms: 10 }));
-  assert.throws(() => validateBackgroundOperation({ operation, wait_ms: 10 }), /requires a valid job_id/);
-}
-for (const operation of ["wait_any", "wait_all"]) {
-  assert.doesNotThrow(() => validateBackgroundOperation({ operation, wait_ms: 10 }));
-  assert.throws(() => validateBackgroundOperation({ operation, job_id: jobId }), /accepts only optional wait_ms/);
-  assert.throws(() => validateBackgroundOperation({ operation, task: "not a lifecycle request" }), /cannot include launch/);
-}
-const sixHoursMs = 6 * 60 * 60 * 1000;
+assert.doesNotThrow(() => validateBackgroundOperation({ operation: "yield" }));
+assert.doesNotThrow(() => validateBackgroundOperation({ operation: "yield", job_id: jobId }));
+assert.throws(() => validateBackgroundOperation({ operation: "yield", job_id: "../group" }), /valid optional job_id/);
 for (const operation of ["wait", "wait_group", "wait_any", "wait_all"]) {
-  const params = operation === "wait" || operation === "wait_group" ? { operation, job_id: jobId } : { operation };
-  assert.doesNotThrow(() => validateBackgroundOperation({ ...params, wait_ms: sixHoursMs }));
-  assert.throws(() => validateBackgroundOperation({ ...params, wait_ms: Number.MAX_SAFE_INTEGER }), /wait_ms/);
-  assert.throws(() => validateBackgroundOperation({ ...params, wait_ms: 1.5 }), /wait_ms/);
+  assert.throws(() => validateBackgroundOperation({ operation }), /Unknown background subagent operation/);
 }
+assert.throws(() => validateBackgroundOperation({ operation: "yield", wait_ms: 10 }), /yield accepts only/);
 
 assert.equal(getFinalOutput([
   { role: "assistant", content: [{ type: "text", text: "first " }, { type: "thinking", thinking: "hidden" }, { type: "text", text: "second" }] } as any,
@@ -232,13 +223,14 @@ async function operationCheck() {
   await emit(pi, "session_start", { reason: "startup" }, ctx);
   const tool = pi.tools.get("subagent");
   assert(tool, "subagent tool was not registered");
-  assert.match(tool.parameters.properties.operation.pattern, /wait_group/);
-  assert.match(tool.parameters.properties.operation.pattern, /wait_any/);
-  assert.match(tool.parameters.properties.operation.pattern, /wait_all/);
+  assert.match(tool.parameters.properties.operation.pattern, /yield/);
+  for (const removedOperation of ["wait", "wait_group", "wait_any", "wait_all"]) {
+    assert.doesNotMatch(tool.parameters.properties.operation.pattern, new RegExp(removedOperation));
+  }
   assert.match(tool.parameters.properties.operation.pattern, /prompt/);
   assert.match(tool.parameters.properties.child_id.pattern, /subagent-child/);
   assert.match(tool.parameters.properties.control_mode.pattern, /follow_up/);
-  assert(tool.parameters.properties.wait_ms.maximum >= sixHoursMs, "tool schema does not expose hour-scale waits");
+  assert.equal(Object.hasOwn(tool.parameters.properties, "wait_ms"), false, "tool schema still exposes wait_ms");
   assert.match(tool.description, /Resume shape:.*task_id,message\?,compact\?/);
   assert.match(tool.parameters.properties.operation.description, /resume \{task_id, message\?, compact\?\}/);
   assert.match(tool.parameters.properties.operation.description, /prompt \{child_id, message, job_id\?/);
@@ -246,7 +238,7 @@ async function operationCheck() {
     assert.match(tool.parameters.properties[field].description, /Launch only/i, `${field} must not advertise a resume override`);
   }
   assert.match(tool.parameters.properties.message.description, /resume/);
-  assert.match(tool.parameters.properties.job_id.description, /Optional for prompt.*mismatch rejects before delivery/);
+  assert.match(tool.parameters.properties.job_id.description, /Optional for yield.*mismatch rejects before delivery/);
   // Validation must run before looking up or launching the retained task.
   await assert.rejects(tool.execute("resume-misuse", resumeMisuse, undefined, undefined, ctx), /unsupported fields: model, background, task/);
 
@@ -409,57 +401,22 @@ async function operationCheck() {
   await escapedReload.initialize();
   assert.equal((await escapedReload.get(escapedGroup.id)).status, "completed", "bounded escaped state disappeared on reload");
 
-  let releaseAny!: () => void;
-  const anyGroup = await manager.start({ sessionId, backend: "native", mode: "parallel", summary: "parallel 2: any" }, async () => {
-    await new Promise<void>((resolve) => { releaseAny = resolve; });
-    return { text: "any complete", failed: false };
+  let releaseYield!: () => void;
+  const yieldGroup = await manager.start({ sessionId, backend: "native", mode: "parallel", summary: "yield snapshot" }, async () => {
+    await new Promise<void>((resolve) => { releaseYield = resolve; });
+    return { text: "yield complete", failed: false };
   });
-  tracker.register(anyGroup, [{ label: "task 1" }, { label: "task 2" }]);
-  tracker.update(anyGroup.id, [
-    { child: 1, label: "task 1", status: "running" },
-    { child: 2, label: "task 2", status: "running" },
-  ]);
-  setTimeout(() => tracker.update(anyGroup.id, [{ child: 2, label: "task 2", status: "completed" }]), 20);
-  const anyResult = await tool.execute("wait-any", { operation: "wait_any", wait_ms: 500 }, undefined, undefined, ctx);
-  assert.equal(anyResult.details.operation, "wait_any");
-  assert.equal(anyResult.details.job_id, anyGroup.id);
-  assert.equal(anyResult.details.child, 2);
-  assert.equal(anyResult.details.child_status, "completed");
-  assert.equal((await manager.get(anyGroup.id)).status, "running", "wait_any cancelled its group");
-  setTimeout(releaseAny, 20);
-  const groupResult = await tool.execute("wait-group", { operation: "wait_group", job_id: anyGroup.id, wait_ms: 500 }, undefined, undefined, ctx);
-  assert.equal(groupResult.details.status, "completed");
-  const aliasResult = await tool.execute("wait-alias", { operation: "wait", job_id: anyGroup.id, wait_ms: 0 }, undefined, undefined, ctx);
-  assert.equal(aliasResult.details.status, "completed");
-
-  let releaseOne!: () => void;
-  let releaseTwo!: () => void;
-  const one = await manager.start({ sessionId, backend: "native", mode: "single", summary: "all one" }, async () => {
-    await new Promise<void>((resolve) => { releaseOne = resolve; });
-    return { text: "one", failed: false };
-  });
-  const two = await manager.start({ sessionId, backend: "agentsh", mode: "single", summary: "all two" }, async () => {
-    await new Promise<void>((resolve) => { releaseTwo = resolve; });
-    return { text: "two", failed: false };
-  });
-  const allPromise = tool.execute("wait-all", { operation: "wait_all", wait_ms: 500 }, undefined, undefined, ctx);
-  const later = await manager.start({ sessionId, backend: "native", mode: "single", summary: "later" }, async (signal) => {
-    await new Promise<void>((_resolve, reject) => signal.addEventListener("abort", () => reject(signal.reason), { once: true }));
-    return { text: "unexpected", failed: false };
-  });
-  setTimeout(releaseOne, 20);
-  setTimeout(releaseTwo, 40);
-  const allResult = await allPromise;
-  assert.equal(allResult.details.operation, "wait_all");
-  assert.deepEqual(new Set(allResult.details.groups.map((group: any) => group.job_id)), new Set([one.id, two.id]));
-  for (const group of allResult.details.groups) {
-    assert.equal(group.children.length, 1, "wait_all omitted structured child metadata");
-    assert.equal(group.children[0].child, 1);
-    assert.equal(Object.hasOwn(group.children[0], "child_id"), false, "pre-identity wait_all metadata exposed a controllable ID");
-  }
-  assert.doesNotMatch(allResult.content[0].text, /subagent-child-|undefined/, "pre-identity wait_all text exposed a fabricated ID");
-  assert.equal((await manager.get(later.id)).status, "running", "wait_all included or cancelled a later group");
-  await manager.cancel(later.id);
+  tracker.register(yieldGroup, [{ label: "task 1" }]);
+  tracker.update(yieldGroup.id, [{ child: 1, label: "task 1", status: "running" }]);
+  const snapshot = await tool.execute("yield", { operation: "yield", job_id: yieldGroup.id }, undefined, undefined, ctx);
+  assert.equal(snapshot.details.operation, "yield");
+  assert.equal(snapshot.details.groups[0].job_id, yieldGroup.id);
+  assert.equal(snapshot.terminate, true);
+  assert.equal(JSON.stringify(snapshot.details).includes('"accepted_delivery":true'), false);
+  assert.equal((await manager.get(yieldGroup.id)).status, "running", "yield cancelled the running group");
+  releaseYield();
+  assert.equal((await manager.wait(yieldGroup.id, 1000)).record.status, "completed");
+  await assert.rejects(tool.execute("yield-unknown", { operation: "yield", job_id: jobId }, undefined, undefined, ctx), /not found|unknown/i);
 
   const foreign = await manager.start({ sessionId: "another-session", backend: "native", mode: "single", summary: "foreign" }, async (signal) => {
     await new Promise<void>((_resolve, reject) => signal.addEventListener("abort", () => reject(signal.reason), { once: true }));
@@ -469,6 +426,7 @@ async function operationCheck() {
     tool.execute("foreign-status", { operation: "status", job_id: foreign.id }, undefined, undefined, ctx),
     /belongs to a different Pi session/,
   );
+  await assert.rejects(tool.execute("yield-foreign", { operation: "yield", job_id: foreign.id }, undefined, undefined, ctx), /Unknown or unowned/);
   await manager.cancel(foreign.id);
 
   const notificationJob = await manager.start({ sessionId, backend: "native", mode: "single", summary: "visible report" }, async () => ({ text: "completed report body", failed: false }));
@@ -554,18 +512,16 @@ async function agentSHIdentityCheck() {
     assert.match(secondChildId, /^subagent-child-[0-9a-f]{24}$/);
     assert.notEqual(firstChildId, secondChildId);
 
-    const waitAll = tool.execute("identity-wait-all", { operation: "wait_all", wait_ms: 5000 }, undefined, undefined, ctx);
+    const yieldSnapshot = await tool.execute("identity-yield", { operation: "yield", job_id: started.details.job_id }, undefined, undefined, ctx);
+    assert.equal(yieldSnapshot.details.operation, "yield");
+    assert.equal(yieldSnapshot.terminate, true);
+    const terminalBeforeYieldResult = await tool.execute("identity-status", { operation: "status", job_id: started.details.job_id }, undefined, undefined, ctx);
+    assert.notEqual(terminalBeforeYieldResult.details.status, "failed", "yield incorrectly treated the child as accepted/rejected");
     let readyTimer: ReturnType<typeof setTimeout> | undefined;
     try { await Promise.race([adapterReady, new Promise<void>((_, reject) => { readyTimer = setTimeout(() => reject(new Error("Background adapter never started")), 4000); })]); }
     finally { if (readyTimer) clearTimeout(readyTimer); }
     releaseAdapter();
-    const waited = await waitAll;
-    assert.equal(waited.details.groups.length, 1);
-    assert.deepEqual(
-      waited.details.groups[0].children.map((child: any) => [child.child, child.child_id, child.status]),
-      [[1, firstChildId, "completed"], [2, secondChildId, "completed"]],
-      "wait_all did not preserve stable child metadata",
-    );
+    await sharedBackgroundSubagentManager(path.join(agentDir, "state", "background-subagents-v1")).wait(started.details.job_id, 5000);
 
     const firstByNumber = await tool.execute("identity-result-number", {
       operation: "result", job_id: started.details.job_id, child: 1,
@@ -599,4 +555,4 @@ async function agentSHIdentityCheck() {
 
 await operationCheck();
 await agentSHIdentityCheck();
-console.log("background subagent wait API checks passed");
+console.log("background subagent yield API checks passed");

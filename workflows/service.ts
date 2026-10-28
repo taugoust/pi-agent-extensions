@@ -3,7 +3,7 @@ import { DEDICATED_GOAL_LIMITS, DelegatedGoalRegistry, type DelegatedGoalExecuto
 import { delegatedGoalStore } from "./delegated-goal-store.ts";
 import { basename, isAbsolute, relative, sep } from "node:path";
 import { workspaceRepositories } from "./worktree/repositories.js";
-import { ownedWorktrees, worktreeGit } from "../shared/subagent-worktrees.ts";
+import { ownedWorktrees, recordedWorktreeOwner, worktreeGit } from "../shared/subagent-worktrees.ts";
 import { harnessReadOnlyRegistry } from "../shared/harness-readonly.ts";
 import { readGoalTasks, addGoalTask } from "../shared/goal-progress.ts";
 import { readGoalHistory } from "./goal/history.js";
@@ -404,6 +404,18 @@ export function createWorkflowService(
 								createdInSession = candidates.some(created => created.ownerSessionId === sessionId && pathIdentity(commonDir.stdout.trim()) === pathIdentity(created.commonDir) && (!created.gitDir || pathIdentity(gitDir.stdout.trim()) === pathIdentity(created.gitDir)) && samePhysicalIdentity(identity, created.identity));
 							} catch {}
 						}
+						// Path/branch matches preserve legacy fields, but are not proof of ownership.
+						let recordedOwner;
+						if (owned && validPhysicalIdentity(owned.physicalIdentity)) {
+							try {
+								const [commonDir, gitDir] = await Promise.all([
+									runGit(pi, ["rev-parse", "--path-format=absolute", "--git-common-dir"], record.path, inventorySignal),
+									runGit(pi, ["rev-parse", "--path-format=absolute", "--git-dir"], record.path, inventorySignal),
+								]);
+								if (pathIdentity(commonDir.stdout.trim()) === pathIdentity(owned.commonDir) && samePhysicalIdentity(await filesystemIdentity(gitDir.stdout.trim()), owned.physicalIdentity))
+									recordedOwner = recordedWorktreeOwner(owned);
+							} catch {}
+						}
 						const worker =
 							owned?.ownerSessionId === sessionId &&
 							workers?.state === "available"
@@ -422,6 +434,7 @@ export function createWorkflowService(
 							stale: record.prunableReason !== undefined,
 							detached: record.detached,
 							changedFiles,
+							...(recordedOwner ? { recordedOwner } : {}),
 							ownerTaskId: owned?.taskId,
 							ownerTitle: owned?.title,
 							workerStatus: worker?.status,

@@ -929,7 +929,8 @@ pkgs.runCommand "subagent-check"
     const diagnosticJob = await manager.start({ sessionId: "metadata-probe", backend: "native", mode: "single", summary: "answer-only view" }, async () => ({ text: "OK α", failed: false, reports: [{label:"worker",text:diagnosticReport}] }));
     await manager.wait(diagnosticJob.id, 2000);
     assert.equal((await manager.readResult(diagnosticJob.id)).text, "OK α");
-    assert.equal((await manager.readResult(diagnosticJob.id, undefined, 0, 4096, true)).text, diagnosticReport);
+    const readableDiagnostics = (await manager.readResult(diagnosticJob.id, undefined, 0, 4096, true)).text;
+    assert.equal(readableDiagnostics, 'OK α\n\nDiagnostics:\nModel-reported outcome (not independently verified): delivered\nRetained RPC trace events: 0\nFull diagnostic metadata retained in the private result artifact.');
     const answerFirst = await manager.readResult(diagnosticJob.id, undefined, 0, 4);
     assert.equal(answerFirst.text, "OK ");
     assert.equal((await manager.readResult(diagnosticJob.id, undefined, answerFirst.nextOffset, 4)).text, "α");
@@ -1122,9 +1123,13 @@ pkgs.runCommand "subagent-check"
 
     node "$workdir/test.mjs" "$workdir/out/subagent/parallel-result.js" "$workdir/out/subagent/backend.js" "$workdir/out/shared/agentsh-mode.js" "$workdir/out/subagent/background.js" "$workdir/out/subagent/foreground-handoff.js" "$workdir/out/subagent/result-artifact.js" "$workdir/out/subagent/permission-relay.js" "$workdir/out/shared/subagent-permission.js" "$workdir/out/subagent/permission-proxy.js"
     grep -F 'formatParallelResultContent(sections, successCount, MAX_TEXT_PREVIEW_BYTES)' ${self}/subagent/index.ts >/dev/null
-    grep -F 'waitForAnyBackgroundSubagentChild(backgroundManager, childTracker, snapshot' ${self}/subagent/index.ts >/dev/null
-    grep -F 'waitForAllBackgroundSubagentGroups(backgroundManager, snapshot' ${self}/subagent/index.ts >/dev/null
-    grep -F 'operation === "wait" || operation === "wait_group"' ${self}/subagent/index.ts >/dev/null
+    grep -F 'params.operation === "yield"' ${self}/subagent/index.ts >/dev/null
+    grep -F 'terminate: true' ${self}/subagent/index.ts >/dev/null
+    if grep -F 'waitForAnyBackgroundSubagentChild(backgroundManager' ${self}/subagent/index.ts >/dev/null \
+      || grep -F 'waitForAllBackgroundSubagentGroups(backgroundManager' ${self}/subagent/index.ts >/dev/null; then
+      echo 'public subagent entrypoint still exposes blocking background waits' >&2
+      exit 1
+    fi
     grep -F 'childProgress.capture(partial)' ${self}/subagent/index.ts >/dev/null
     grep -F 'backgroundState: "pending"' ${self}/subagent/index.ts >/dev/null
     grep -F 'releaseForegroundOwnership();' ${self}/subagent/index.ts >/dev/null

@@ -1,0 +1,10 @@
+import assert from "node:assert/strict";
+import { validateJobParams } from "../shared/background-job.ts";
+const job_id = `job-${"a".repeat(24)}`;
+assert.doesNotThrow(() => validateJobParams({ action: "yield", job_id }));
+assert.doesNotThrow(() => validateJobParams({ action: "yield" }));
+assert.throws(() => validateJobParams({ action: "wait", job_id }), /Unknown background job action/);
+assert.throws(() => validateJobParams({ action: "yield", job_id, terminate: true }), /does not accept terminate/);
+assert.throws(() => validateJobParams({ action: "yield", job_id, lines: 1 }), /does not accept lines/);
+assert.throws(() => validateJobParams({ action: "yield", job_id: "../bad" }), /Invalid job_id/);
+console.log("background-job yield schema tests passed");

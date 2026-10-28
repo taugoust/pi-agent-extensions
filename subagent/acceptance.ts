@@ -220,10 +220,13 @@ export async function runVerification(record: VerificationRecord, gates: Verific
           await jobs.execute(callId, { action: "cancel", job_id: run.jobId });
           terminal = await jobs.execute(callId, { action: "output", job_id: run.jobId }); break;
         }
-        terminal = await jobs.execute(callId, { action: "wait", job_id: run.jobId, timeout_ms: Math.min(1000, Math.max(0, deadline - Date.now())), lines: 2000 });
+        terminal = await jobs.execute(callId, { action: "status", job_id: run.jobId });
         if (terminal?.isError && !["completed", "failed", "cancelled", "lost"].includes(terminal?.details?.status)) throw new Error("Verification job observation failed");
         if (["completed", "failed", "cancelled", "lost"].includes(terminal?.details?.status)) break;
         if (terminal?.details?.job_id !== run.jobId || !["running", "starting"].includes(terminal?.details?.status)) throw new Error("Verification supervisor state unavailable");
+        // Verification remains an internal synchronous workflow. The public
+        // background-job API now yields instead of providing a blocking wait.
+        await new Promise(resolve => setTimeout(resolve, Math.min(1000, Math.max(0, deadline - Date.now()))));
       }
       const d = terminal?.details;
       captureEvidence(run, terminal);
