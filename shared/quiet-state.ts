@@ -1,12 +1,15 @@
 import { readExtensionDefaults } from './extension-defaults.js';
-import type { ExtensionAPI, ExtensionContext } from '@mariozechner/pi-coding-agent';
+import type { ExtensionAPI, ExtensionContext } from '@earendil-works/pi-coding-agent';
 import { createHash } from 'node:crypto';
+import { admitHarnessWake } from './idle-admission.js';
 
 export type QuietUpdate = {
   kind:'job'|'subagent'|'watch'|'notification'; id:string; state?:string;
   child_id?:string; job_id?:string; displayName?:string; message?:string; requires_guidance?:boolean;
   /** Producer-confirmed background execution terminal state, not task delivery. */
   completion?:boolean;
+  /** Owning-controller generated idle-decision request only, never model input. */
+  admission_control?:{kind:'idle-decision'|'idle-decision-resolved';request_id:string;worker_epoch:string};
   /** New running generation, scoped by job_id + child_id (worker attempt). */
   activity?:boolean;
   outcomes?:Array<{child:number;task_id?:string;attempt?:number;state:string}>;
@@ -17,7 +20,7 @@ type Item={key:string;revision:string;bytes:number;data:QuietUpdate;queuedAt:num
 export type QuietStateReceiptState='recorded'|'queued'|'delivered'|'consumed';
 export type QuietStateReceipt={v:1;key:string;revision:string;state:QuietStateReceiptState;at:number;update:QuietUpdate};
 type Stats={accepted:number;duplicate:number;dropped:number;routineRecorded:number;guidanceDelivered:number;guidanceBytes:number;schedulingAttempts:number;disabled:number;receiptFailed:number;circuitBreaks:number};
-type Hub={pending:Map<string,Item>;inFlight:Map<string,Item>;receipts:Map<string,QuietStateReceipt>;activityRetries?:Map<string,Item>;activityTimer?:ReturnType<typeof setTimeout>;writer?:symbol;pi?:ExtensionAPI;ctx?:ExtensionContext;timer?:ReturnType<typeof setTimeout>;completionTimer?:ReturnType<typeof setTimeout>;guidanceDisabled?:boolean;ui:boolean;compacting:boolean;lastGuidanceAt:number;localDisabled:boolean;quotaResetAt:number;deliveryFailures:number;stats:Stats};
+type Hub={wakeAdmission?:AbortController;wakeItems?:Map<string,string>;pending:Map<string,Item>;inFlight:Map<string,Item>;receipts:Map<string,QuietStateReceipt>;activityRetries?:Map<string,Item>;activityTimer?:ReturnType<typeof setTimeout>;writer?:symbol;pi?:ExtensionAPI;ctx?:ExtensionContext;timer?:ReturnType<typeof setTimeout>;completionTimer?:ReturnType<typeof setTimeout>;guidanceDisabled?:boolean;ui:boolean;compacting:boolean;lastGuidanceAt:number;localDisabled:boolean;quotaResetAt:number;deliveryFailures:number;stats:Stats};
 
 const KEY='__paeQuietHarnessStateV2';
 const MESSAGE_CUSTOM='harness-state';
@@ -71,6 +74,27 @@ function defaultDisabled():boolean{return quietStateEnvironment()===undefined&&q
 function disabled(h?:Hub):boolean{return envDisabled()||h?.localDisabled===true||(h?.deliveryFailures??0)>=3;}
 function validUpdate(data:any):data is QuietUpdate{return data&&['job','subagent','watch','notification'].includes(data.kind)&&typeof data.id==='string';}
 function toItem(data:QuietUpdate,queuedAt=Date.now()):Item{const updateText=JSON.stringify(data);return {key:keyOf(data),revision:revision(data),bytes:bytes(updateText),data:clone(data),queuedAt};}
+function controlUpdate(data:QuietUpdate):boolean{return data.kind==='notification'&&data.requires_guidance===true&&!!data.child_id&&/^subagent-child-[0-9a-f]{24}$/.test(data.child_id)&&data.admission_control?.kind==='idle-decision'&&/^idle:[0-9a-f]{32}$/.test(data.admission_control.request_id)&&/^[0-9a-f]{32}$/.test(data.admission_control.worker_epoch);}
+function controlPending(h:Hub):boolean{return [...h.pending.values()].some(i=>controlUpdate(i.data));}
+function controlResolved(h:Hub,data:QuietUpdate):boolean{return controlUpdate(data)&&[...h.receipts.values()].some(r=>r.update.kind==='notification'&&r.update.child_id===data.child_id&&r.update.admission_control?.kind==='idle-decision-resolved'&&r.update.admission_control.request_id===data.admission_control?.request_id&&r.update.admission_control.worker_epoch===data.admission_control?.worker_epoch);}
+function revokeConsumedWake(h:Hub):void{if(h.wakeAdmission&&h.wakeItems&&![...h.wakeItems].some(([key,rev])=>h.pending.get(key)?.revision===rev))h.wakeAdmission.abort();}
+/** Gate the existing durable notification queue, not a duplicate wake message.
+ * Approval-control requests alone can bypass admission to avoid parent/child
+ * recursion; mixed ordinary updates never inherit that exemption. */
+async function admitBatch(h:Hub,items:Item[]):Promise<boolean>{
+  if(items.every(item=>controlUpdate(item.data)))return true;
+  if(h.wakeAdmission||!h.ctx)return false;
+  const controller=new AbortController(),writer=h.writer,ctx=h.ctx;
+  h.wakeAdmission=controller;h.wakeItems=new Map(items.map(item=>[item.key,item.revision]));
+  try{
+    const decision=await admitHarnessWake(ctx,controller.signal);
+    if(controller.signal.aborted||h.writer!==writer||!h.ctx||session(h.ctx)!==session(ctx))return false;
+    if(decision==='continue')return true;
+    // Explicit Cancel suppresses this exact wake revision, not retained history.
+    for(const item of items)if(h.pending.get(item.key)?.revision===item.revision&&appendReceipt(h,item,'consumed'))h.pending.delete(item.key);
+    return false;
+  }catch{return false;}finally{if(h.wakeAdmission===controller){h.wakeAdmission=undefined;h.wakeItems=undefined;}}
+}
 function clearTimer(h:Hub){if(h.timer)clearTimeout(h.timer);if(h.completionTimer)clearTimeout(h.completionTimer);if(h.activityTimer)clearTimeout(h.activityTimer);h.timer=undefined;h.completionTimer=undefined;h.activityTimer=undefined;}
 function receiptFrom(entry:any):QuietStateReceipt|undefined{
   if(entry?.type!=='custom'||entry.customType!==QUIET_STATE_RECEIPT_CUSTOM_TYPE)return undefined;
@@ -127,7 +151,7 @@ function restore(h:Hub,ctx:any){
   for(const r of h.receipts.values()){if(r.state==='delivered'&&r.update.requires_guidance===true&&r.at>=h.quotaResetAt){h.stats.guidanceDelivered++;h.stats.guidanceBytes+=bytes(JSON.stringify(r.update));h.lastGuidanceAt=Math.max(h.lastGuidanceAt,r.at);}if(r.state==='queued'&&(r.update.requires_guidance===true||isCompletion(r.update)))h.pending.set(r.key,toItem(r.update,r.at));}
   // Report sequence, not receipt time, orders child turns. Consuming an older
   // result later must not suppress a newer unseen completion after reload.
-  for(const [key,item]of h.pending)if(completionSuperseded(h,item.data))h.pending.delete(key);
+  for(const [key,item]of h.pending)if(completionSuperseded(h,item.data)||controlResolved(h,item.data))h.pending.delete(key);
   // Retained child notifications are operator-visible records. Routine notifications stay retained only; explicit guidance is re-queued until delivered/consumed.
   for(const entry of entries){
     const data=entry?.type==='custom'&&entry.customType===NOTIFICATION_CUSTOM?entry.data?.update:undefined;
@@ -163,11 +187,11 @@ function installCommands(pi:any){
   }});
 }
 function batchBytes(updates:QuietUpdate[]):number{return bytes(GUIDANCE_PREFIX+JSON.stringify(updates))+bytes(JSON.stringify({updates}));}
-function selectBatch(h:Hub){const out:Item[]=[];for(const item of [...h.pending.values()].filter(i=>i.data.requires_guidance).sort((a,b)=>a.queuedAt-b.queuedAt)){if(out.length>=MAX_BATCH_ITEMS)break;const next=[...out,item];if(batchBytes(next.map(i=>i.data))>MAX_BATCH_BYTES){if(out.length===0){h.pending.delete(item.key);h.stats.circuitBreaks++;appendReceipt(h,item,'consumed');}break;}out.push(item);}return out;}
+function selectBatch(h:Hub){const out:Item[]=[];const controls=controlPending(h);for(const item of [...h.pending.values()].filter(i=>i.data.requires_guidance&&(controls?controlUpdate(i.data):!h.wakeAdmission)).sort((a,b)=>a.queuedAt-b.queuedAt)){if(out.length>=MAX_BATCH_ITEMS)break;const next=[...out,item];if(batchBytes(next.map(i=>i.data))>MAX_BATCH_BYTES){if(out.length===0){h.pending.delete(item.key);h.stats.circuitBreaks++;appendReceipt(h,item,'consumed');}break;}out.push(item);}return out;}
 function scheduleCompletions(h:Hub,delayMs:number){
-  if(h.completionTimer||h.ui||h.compacting||!h.pi||!h.ctx||disabled(h))return;
+  if(h.completionTimer||h.wakeAdmission||h.ui||h.compacting||!h.pi||!h.ctx||disabled(h))return;
   if(![...h.pending.values()].some(i=>isCompletion(i.data)))return;
-  h.completionTimer=setTimeout(()=>{
+  h.completionTimer=setTimeout(async()=>{
     h.completionTimer=undefined;
     if(h.ui||h.compacting||!h.pi||!h.ctx||disabled(h))return;
     // Let existing queued messages drain; never abort or interrupt active tools.
@@ -202,13 +226,18 @@ function scheduleCompletions(h:Hub,delayMs:number){
     }
     const deliver=items.filter(item=>h.pending.get(item.key)?.revision===item.revision);
     if(!deliver.length){scheduleCompletions(h,Math.max(delayMs,1000));return;}
-    const updates=deliver.map(i=>i.data);
+    if(!await admitBatch(h,deliver)){schedule(h,Math.max(delayMs,1000));return;}
+    if(!h.pi||!h.ctx||h.ui||h.compacting||disabled(h)||h.ctx.hasPendingMessages?.()||!h.ctx.isIdle()){schedule(h,Math.max(delayMs,1000));return;}
+    // Result reads, new worker generations and reload may race the decision.
+    const admitted=deliver.filter(item=>h.pending.get(item.key)?.revision===item.revision&&!completionSuperseded(h,item.data));
+    if(!admitted.length){schedule(h,Math.max(delayMs,1000));return;}
+    const updates=admitted.map(i=>i.data);
     try{
       h.pi.sendMessage({customType:MESSAGE_CUSTOM,display:false,content:completionPrefix(updates)+JSON.stringify(updates),details:{updates}},
         {deliverAs:'followUp',triggerTurn:true});
     }catch{h.deliveryFailures++;scheduleCompletions(h,Math.max(delayMs,1000));return;}
     h.deliveryFailures=0;
-    for(const item of deliver){
+    for(const item of admitted){
       // Only acknowledge accepted sends. The persisted message also deduplicates
       // recovery if appending the receipt fails after sendMessage succeeds.
       if(!appendReceipt(h,item,'delivered'))h.receipts.set(item.key,{v:1,key:item.key,revision:item.revision,state:'delivered',at:Date.now(),update:item.data});
@@ -220,27 +249,53 @@ function scheduleCompletions(h:Hub,delayMs:number){
 function schedule(h:Hub,delayMs:number){
   scheduleActivity(h,delayMs);
   scheduleCompletions(h,delayMs);
-  refreshStatus(h);if(h.timer||h.ui||h.compacting||!h.pi||!h.ctx||disabled(h)||h.guidanceDisabled||!guidancePending(h)||h.ctx.hasPendingMessages?.())return;
-  if(h.stats.guidanceDelivered>=MAX_GUIDANCE_PER_SESSION)return;
-  const wait=Math.max(delayMs,MIN_GUIDANCE_INTERVAL_MS-(Date.now()-h.lastGuidanceAt),0);
-  h.timer=setTimeout(()=>{h.timer=undefined;if(!h.pi||!h.ctx||h.ui||h.compacting||disabled(h)||!guidancePending(h)||h.ctx.hasPendingMessages?.())return;h.stats.schedulingAttempts++;const items=selectBatch(h);if(!items.length)return;const updates=items.map(i=>i.data);const content=GUIDANCE_PREFIX+JSON.stringify(updates);const reserved:Item[]=[];for(const item of items){if(!appendReceipt(h,item,'delivered'))break;reserved.push(item);if(h.pending.get(item.key)?.revision===item.revision)h.pending.delete(item.key);}if(reserved.length!==items.length){schedule(h,delayMs);return;}h.lastGuidanceAt=Date.now();h.stats.guidanceDelivered+=items.length;h.stats.guidanceBytes+=batchBytes(updates);try{h.pi.sendMessage({customType:MESSAGE_CUSTOM,display:false,content,details:{updates}},{deliverAs:h.ctx.isIdle()?'followUp':'steer',triggerTurn:true});h.deliveryFailures=0;}catch{h.deliveryFailures++;}schedule(h,delayMs);},wait);h.timer.unref?.();
+  refreshStatus(h);if(h.timer||h.ui&&!controlPending(h)||h.compacting||!h.pi||!h.ctx||disabled(h)||h.guidanceDisabled&&!controlPending(h)||!guidancePending(h)||h.ctx.hasPendingMessages?.()||h.wakeAdmission&&!controlPending(h))return;
+  if(h.stats.guidanceDelivered>=MAX_GUIDANCE_PER_SESSION&&!controlPending(h))return;
+  const wait=controlPending(h)?delayMs:Math.max(delayMs,MIN_GUIDANCE_INTERVAL_MS-(Date.now()-h.lastGuidanceAt),0);
+  h.timer=setTimeout(async()=>{
+    h.timer=undefined;
+    if(!h.pi||!h.ctx||h.ui&&!controlPending(h)||h.compacting||disabled(h)||!guidancePending(h)||h.ctx.hasPendingMessages?.())return;
+    if(!h.ctx.isIdle()&&!controlPending(h)){schedule(h,Math.max(delayMs,1000));return;}
+    h.stats.schedulingAttempts++;
+    const items=selectBatch(h);if(!items.length)return;
+    if(!await admitBatch(h,items)){schedule(h,Math.max(delayMs,1000));return;}
+    if(!h.pi||!h.ctx||h.compacting||disabled(h)||!items.every(i=>controlUpdate(i.data))&&(!h.ctx.isIdle()||h.ctx.hasPendingMessages?.()||h.ui)){schedule(h,delayMs);return;}
+    const current=items.filter(item=>h.pending.get(item.key)?.revision===item.revision);
+    if(!current.length){schedule(h,delayMs);return;}
+    const updates=current.map(i=>i.data),content=GUIDANCE_PREFIX+JSON.stringify(updates);
+    try{
+      h.pi.sendMessage({customType:MESSAGE_CUSTOM,display:false,content,details:{updates}},{deliverAs:h.ctx.isIdle()?'followUp':'steer',triggerTurn:true});h.deliveryFailures=0;
+    }catch{h.deliveryFailures++;schedule(h,Math.max(delayMs,1000));return;}
+    h.lastGuidanceAt=Date.now();h.stats.guidanceDelivered+=current.length;h.stats.guidanceBytes+=batchBytes(updates);
+    for(const item of current){if(!appendReceipt(h,item,'delivered'))h.receipts.set(item.key,{v:1,key:item.key,revision:item.revision,state:'delivered',at:Date.now(),update:item.data});if(h.pending.get(item.key)?.revision===item.revision)h.pending.delete(item.key);}
+    schedule(h,delayMs);
+  },wait);h.timer.unref?.();
 }
 
 /** Routine updates are receipts only; explicit guidance and background terminal completion may wake the model. */
 export function installQuietState(pi:ExtensionAPI,delayMs=1000){
   const writer=Symbol('quiet-harness-writer');
   installCommands(pi);
-  pi.on('session_start',async(_event,ctx)=>{const h=hub(ctx);clearTimer(h);h.writer=writer;h.pi=pi;h.ctx=ctx;h.ui=false;h.compacting=false;restore(h,ctx);schedule(h,delayMs);});
+  pi.on('session_start',async(_event,ctx)=>{const h=hub(ctx);h.wakeAdmission?.abort();h.wakeAdmission=undefined;clearTimer(h);h.writer=writer;h.pi=pi;h.ctx=ctx;h.ui=false;h.compacting=false;restore(h,ctx);schedule(h,delayMs);});
   pi.on('agent_settled',async(_event,ctx)=>{const h=hub(ctx);if(h.writer===writer){h.ctx=ctx;restore(h,ctx);schedule(h,delayMs);}});
   pi.on('session_before_compact',async(_event,ctx)=>{const h=hub(ctx);if(h.writer===writer){h.compacting=true;clearTimer(h);refreshStatus(h);}});
   pi.on('session_compact',async(_event,ctx)=>{const h=hub(ctx);if(h.writer===writer){h.compacting=false;restore(h,ctx);schedule(h,delayMs);}});
   pi.on('session_compact_failed',async(_event,ctx)=>{const h=hub(ctx);if(h.writer===writer){h.compacting=false;restore(h,ctx);schedule(h,delayMs);}});
   pi.on('ui_prompt_start',async(_event,ctx)=>{const h=hub(ctx);if(h.writer===writer){h.ui=true;clearTimer(h);refreshStatus(h);}});
   pi.on('ui_prompt_end',async(_event,ctx)=>{const h=hub(ctx);if(h.writer===writer){h.ui=false;schedule(h,delayMs);}});
-  pi.on('session_shutdown',async(event,ctx)=>{const h=hub(ctx);if(h.writer!==writer)return;clearTimer(h);restore(h,ctx);h.writer=undefined;h.pi=undefined;h.ctx=undefined;if(event.reason!=='reload')hubs().delete(session(ctx));});
+  pi.on('session_shutdown',async(event,ctx)=>{const h=hub(ctx);if(h.writer!==writer)return;h.wakeAdmission?.abort();h.wakeAdmission=undefined;clearTimer(h);restore(h,ctx);h.writer=undefined;h.pi=undefined;h.ctx=undefined;if(event.reason!=='reload')hubs().delete(session(ctx));});
   return {
     enqueue(ctx:ExtensionContext,data:QuietUpdate):boolean{
       const h=hub(ctx);h.pi=pi;h.ctx=ctx;
+      // Parent control resolution consumes only the exact authenticated child /
+      // epoch / request. It is a retained record, never another model wake.
+      if(data.kind==='notification'&&data.child_id&&data.admission_control?.kind==='idle-decision-resolved'){
+        const resolved=data.admission_control;
+        for(const [key,item]of h.pending)if(controlUpdate(item.data)&&item.data.child_id===data.child_id&&item.data.admission_control?.request_id===resolved.request_id&&item.data.admission_control.worker_epoch===resolved.worker_epoch){if(appendReceipt(h,item,'consumed'))h.pending.delete(key);}
+        revokeConsumedWake(h);
+        const persisted=appendReceipt(h,toItem({...data,requires_guidance:false,completion:false}),'recorded');
+        if(persisted)h.stats.routineRecorded++;schedule(h,delayMs);return persisted;
+      }
       // Activity invalidation must persist even while delivery is disabled, and
       // never move backwards when an older async observation arrives late.
       if(data.activity===true){
@@ -256,9 +311,10 @@ export function installQuietState(pi:ExtensionAPI,delayMs=1000){
         const persisted=appendReceipt(h,item,'recorded');
         if(persisted)retries.delete(item.key);
         for(const [key,pending]of h.pending)if(completionSuperseded(h,pending.data))h.pending.delete(key);
-        schedule(h,delayMs);
+        revokeConsumedWake(h);schedule(h,delayMs);
         return persisted;
       }
+      if(controlResolved(h,data)){h.stats.duplicate++;return true;}
       if(disabled(h)){h.stats.disabled++;return false;}
       const item=toItem(data);if(item.bytes>MAX_UPDATE_BYTES||(isCompletion(data)&&bytes(completionPrefix([data])+JSON.stringify([data]))+bytes(JSON.stringify({updates:[data]}))>MAX_BATCH_BYTES))throw new Error('Quiet state update exceeds its metadata budget');
       const superseded=completionSuperseded(h,data);
@@ -277,7 +333,7 @@ export function installQuietState(pi:ExtensionAPI,delayMs=1000){
       // Unknown/legacy sequence numbers authorize consuming only this exact ID.
       if(!appendReceipt(h,target,'consumed'))return;
       for(const [pendingKey,item]of h.pending)if(pendingKey===key||completionSuperseded(h,item.data))h.pending.delete(pendingKey);
-      refreshStatus(h);
+      revokeConsumedWake(h);refreshStatus(h);
     },
     consume(ctx:ExtensionContext,kind:QuietUpdate['kind'],id:string,through?:number){
       const h=hub(ctx);const key=`${kind}:${id}`;
@@ -286,7 +342,7 @@ export function installQuietState(pi:ExtensionAPI,delayMs=1000){
       // this race, and must not cause a delayed wake after the tool returned.
       const item=h.pending.get(key)??(kind==='job'&&!h.receipts.has(key)?toItem({kind,id,completion:true}):undefined);
       if(item&&(through===undefined||(item.data.through_sequence??0)<=through)&&appendReceipt(h,item,'consumed'))h.pending.delete(key);
-      refreshStatus(h);
+      revokeConsumedWake(h);refreshStatus(h);
     },
   };
 }

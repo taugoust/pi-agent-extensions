@@ -1,8 +1,15 @@
 import { describe, expect, it } from "bun:test";
-import { lastModelActivity, shouldWarn } from "./index.ts";
+import { lastModelActivity, shouldWarn, warningTitle } from "./policy.ts";
 
 const settings = { idleMinutes: 30, contextPercent: 20 };
 describe("idle context warning thresholds", () => {
+  it("preserves warning presentation without deciding admission or registering a provider", () => {
+    const usage = { tokens: 1234.6, contextWindow: 10000, percent: 20.5 };
+    const title = warningTitle("physical/model", 1000, 1000 + 30 * 60_000 + 59999, usage);
+    expect(title).toBe(`Model: physical/model\nLast model response: 30 minutes ago\nContext: ${(1235).toLocaleString()} / ${(10000).toLocaleString()} tokens (21%). The model cache may have expired.`);
+    expect(warningTitle("unknown model", 0, 0, { ...usage, tokens: null })).toContain("Context: unknown /");
+    expect(usage).toEqual({ tokens: 1234.6, contextWindow: 10000, percent: 20.5 });
+  });
   it("uses the latest model response on the active branch, ignoring user/tool activity", () => {
     const branch = [
       { type: "message", timestamp: new Date(0).toISOString(), message: { role: "assistant", model: "m", timestamp: 1000 } },

@@ -1,478 +1,243 @@
-// Explicit Node integration suite (kept outside Bun's *.test.* discovery).
-// Run: node --test idle-context-warning/runtime-integration.mjs
+// Deterministic, network-forbidden stock Pi/Node integration. No live sessions.
 import assert from 'node:assert/strict';
 import { test as nodeTest } from 'node:test';
-const test = (name, fn) => nodeTest(name, { timeout: 10000 }, fn);
-import { mkdtempSync, readFileSync, rmSync } from 'node:fs';
+import { existsSync, mkdtempSync, readFileSync, rmSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { dirname, join } from 'node:path';
 import { fileURLToPath, pathToFileURL } from 'node:url';
-import { createAgentSession, AgentSessionRuntime, DefaultResourceLoader, ModelRuntime, SessionManager, SettingsManager } from '@earendil-works/pi-coding-agent';
 import { registerHooks } from 'node:module';
+import { createAgentSession, DefaultResourceLoader, ModelRuntime, SessionManager, SettingsManager } from '@earendil-works/pi-coding-agent';
+assert.equal(process.version, 'v24.21.0');
 const sdkDist = dirname(fileURLToPath(import.meta.resolve('@earendil-works/pi-coding-agent')));
-assert.equal(JSON.parse(readFileSync(join(sdkDist, '../package.json'), 'utf8')).version, '1.0.0', 'integration contract is pinned to Pi 1.0.0');
+assert.equal(JSON.parse(readFileSync(join(sdkDist, '../package.json'), 'utf8')).version, '1.4.0');
+const root = pathToFileURL(join(import.meta.dirname, '..') + '/').href;
 const aiUrl = pathToFileURL(join(sdkDist, '../node_modules/@earendil-works/pi-ai/dist/index.js')).href;
-// This checkout links only the SDK package; resolve its exact installed AI
-// dependency, avoiding package installation or a second incompatible runtime.
-registerHooks({ resolve(specifier, context, next) { return specifier === '@earendil-works/pi-ai' ? { url: aiUrl, shortCircuit: true } : next(specifier, context); } });
+registerHooks({ resolve(specifier, context, next) {
+  if (specifier === '@earendil-works/pi-ai') return { url: aiUrl, shortCircuit: true };
+  if (specifier.startsWith('.') && specifier.endsWith('.js') && context.parentURL?.startsWith(root)) {
+    const source = new URL(specifier.slice(0, -3) + '.ts', context.parentURL);
+    if (!existsSync(new URL(specifier, context.parentURL)) && existsSync(source)) return { url: source.href, shortCircuit: true };
+  }
+  return next(specifier, context);
+}, load(url, context, next) {
+  return next(url, url.endsWith('.json') && url.startsWith(root) ? { ...context, importAttributes: { ...context.importAttributes, type: 'json' } } : context);
+} });
 const { AssistantMessageEventStream } = await import(aiUrl);
-const { registerCompaction } = await import('./compaction.ts');
-const { registerGuard } = await import('./guard.ts');
+const { default: idle, REMOTE_PREFLIGHT_KEY } = await import('./index.ts');
 const { installQuietState } = await import('../shared/quiet-state.ts');
-const cost = { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 };
-const deferred = () => { let resolve; const promise = new Promise(r => { resolve = r; }); return { promise, resolve }; };
-function message(provider, now, tokens = 3000, content = [{ type: 'text', text: 'fake response' }], stopReason = 'stop') {
-  return { role: 'assistant', provider, model: 'model', api: 'openai-completions', content, stopReason, timestamp: now,
-    usage: { input: tokens, output: 1, cacheRead: 0, cacheWrite: 0, totalTokens: tokens + 1, cost: { ...cost, total: 0 } } };
+const { admitHarnessWake } = await import('../shared/idle-admission.ts');
+const test = (name, fn) => nodeTest(name, { timeout: 10000 }, fn);
+const tick = () => new Promise(resolve => setTimeout(resolve, 5));
+async function until(predicate) { for (let i = 0; i < 300; i++) { if (predicate()) return; await tick(); } throw Error('condition not reached'); }
+const cost = { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, total: 0 };
+function response(provider = 'probe', tokens = 3000) {
+  return { role: 'assistant', provider, model: 'model', api: 'openai-completions', content: [{ type: 'text', text: 'Synthetic result' }], stopReason: 'stop', timestamp: Date.now(), usage: { input: tokens, output: 1, cacheRead: 0, cacheWrite: 0, totalTokens: tokens + 1, cost } };
 }
 async function fixture(options = {}) {
-  const dir = mkdtempSync(join(tmpdir(), 'idle-proxy-integration-'));
-  const OriginalDate = globalThis.Date, originalFetch = globalThis.fetch;
-  let now = OriginalDate.now();
-  const initial = now;
-  // Entry counters are distinct from simulated HTTP sends; onPayload may
-  // reject after a provider is entered but before it sends anything.
-  const stats = { physical: 0, cheap: 0, physicalSends: 0, cheapSends: 0, network: 0, tools: [], errors: [], trace: [] };
-  let config = options.initialConfig ?? { idleMinutes: 1, contextPercent: 20, cheapCompactionModel: 'cheap-probe/model:off', guardedModels: { alias: 'physical-probe/model' } };
-  let session, owner;
-  globalThis.Date = class extends OriginalDate {
-    constructor(...args) { super(...(args.length ? args : [now])); }
-    static now() { return now; }
-  };
-  globalThis.fetch = async () => { stats.network++; throw Error('NETWORK FORBIDDEN'); };
+  const dir = mkdtempSync(join(tmpdir(), 'idle-stock-'));
+  const originalFetch = globalThis.fetch, previousWorker = process.env.PI_SUBAGENT_ID, previousAgent = process.env.AGENTSH_SUBAGENT_ID;
+  delete process.env.PI_SUBAGENT_ID; delete process.env.AGENTSH_SUBAGENT_ID;
+  if (options.worker) process.env.PI_SUBAGENT_ID = 'test-child';
+  let network = 0;
+  globalThis.fetch = async () => { network++; throw Error('NETWORK FORBIDDEN'); };
+  const stats = { physical: 0, summary: 0, messages: [], hooks: [], modelSelections: [], errors: [] };
+  const settings = SettingsManager.inMemory({ compaction: { enabled: false, keepRecentTokens: 128 }, retry: { enabled: false }, cacheWarming: 'off' });
   const modelRuntime = await ModelRuntime.create({ authPath: join(dir, 'auth.json'), modelsPath: null, modelsStorePath: join(dir, 'models'), allowModelNetwork: false, refreshOnCreate: false });
-  const settings = SettingsManager.inMemory({ compaction: { enabled: !!options.compact, reserveTokens: 1000, keepRecentTokens: 128 }, retry: { enabled: false } });
+  let ctx, quiet;
+  const aliases = options.alias ? { role: 'probe/model' } : undefined;
   const extension = pi => {
-    for (const provider of ['physical-probe', 'cheap-probe']) pi.registerProvider(provider, {
-      baseUrl: 'https://invalid.invalid', apiKey: `fake-${provider}`, headers: { 'X-Physical-Probe': provider }, api: 'openai-completions',
-      models: [{ id: 'model', name: 'fake', reasoning: true, input: ['text'], cost, contextWindow: 10000, maxTokens: 1000 }],
-      streamSimple(model, context, streamOptions) {
-        const cheap = provider === 'cheap-probe';
-        stats[cheap ? 'cheap' : 'physical']++;
-        stats.trace.push({ event: cheap ? 'cheap' : 'physical', now });
+    for (const provider of ['probe', 'small']) pi.registerProvider(provider, {
+      api: 'openai-completions', apiKey: 'fake', baseUrl: 'https://invalid.invalid',
+      models: ['model', 'small-model'].map(id => ({ id, name: `${provider}/${id}`, reasoning: true, input: ['text'], cost, contextWindow: 10000, maxTokens: 1000 })),
+      streamSimple(model, transcript, streamOptions) {
+        stats[model.id === 'small-model' ? 'summary' : 'physical']++;
         const stream = new AssistantMessageEventStream();
-        queueMicrotask(async () => {
-          try {
-            // Custom-provider contract: await onPayload before any HTTP dispatch.
-            // This fixture records a fake send only after that hook permits it.
-            await streamOptions?.onPayload?.({ provider, messages: context.messages }, model);
-            stats[cheap ? 'cheapSends' : 'physicalSends']++;
-            const result = await (cheap ? options.cheap?.({ session, streamOptions }) : options.physical?.({ session, count: stats.physical, context, streamOptions }));
-            const output = result ?? message(provider, now);
-            stream.push(output.stopReason === 'error' ? { type: 'error', reason: 'error', error: output } : { type: 'done', reason: output.stopReason, message: output });
-          } catch (error) {
-            stream.push({ type: 'error', reason: 'error', error: { ...message(provider, now, 10, [], 'error'), errorMessage: String(error) } });
-          } finally { stream.end(); }
-        });
+        queueMicrotask(async () => { try {
+          await streamOptions?.onPayload?.({ messages: transcript.messages }, model);
+          const output = model.id === 'model' && options.physical ? await options.physical(stats.physical) : response(provider);
+          stream.push({ type: 'done', reason: 'stop', message: output });
+        } catch (error) { stream.push({ type: 'error', reason: 'error', error: { ...response(provider), stopReason: 'error', errorMessage: String(error) } }); } finally { stream.end(); } });
         return stream;
       },
     });
-    options.register?.(pi, { stats, cold: () => { now += 60001; }, now: () => now });
-    const guard = registerGuard(pi, () => config, { tombstonePath: join(dir, 'aliases.json') });
-    registerCompaction(pi, () => config, guard.compactionProof);
+    idle(pi, { readSettings: () => ({ idleMinutes: 1, contextPercent: 20, cheapCompactionModel: 'probe/small-model:off', guardedModels: aliases }), tombstonePath: join(dir, 'legacy-aliases.json') });
+    quiet = installQuietState(pi, 1);
+    pi.on('session_start', (_event, context) => { ctx = context; });
+    pi.on('message_end', event => stats.messages.push(event.message));
+    pi.on('model_select', event => stats.modelSelections.push(event));
+    options.register?.(pi);
   };
-  async function create({ sessionManager, sessionStartEvent }) {
-    const loader = new DefaultResourceLoader({ cwd: dir, agentDir: dir, settingsManager: settings, noExtensions: true, noSkills: true, noPromptTemplates: true, noThemes: true, noContextFiles: true, extensionFactories: [extension], additionalExtensionPaths: process.env.PI_TEST_OBSERVABILITY === '1' ? ['stamp', 'progress', 'cache-hit-monitor'].map(name => join(dirname(fileURLToPath(import.meta.url)), '..', name, 'index.ts')) : [] });
-    await loader.reload();
-    const result = await createAgentSession({ cwd: dir, agentDir: dir, modelRuntime, sessionManager, settingsManager: settings, resourceLoader: loader, noTools: 'builtin', sessionStartEvent });
-    return { ...result, services: { cwd: dir, agentDir: dir, modelRuntime, settingsManager: settings, resourceLoader: loader, diagnostics: [] }, diagnostics: [] };
-  }
-  const manager = options.persisted ? SessionManager.create(dir, join(dir, 'sessions')) : SessionManager.inMemory(dir);
-  manager.appendMessage({ role: 'user', content: 'Previous question '.repeat(200), timestamp: initial - 1 });
-  manager.appendMessage(message('physical-probe', initial, options.compact ? 9500 : 3000));
-  const created = await create({ sessionManager: manager });
-  session = created.session;
-  owner = new AgentSessionRuntime(session, created.services, create);
-  const bind = async next => { session = next; await session.bindExtensions({ onError: e => stats.errors.push(e) }); };
-  owner.setRebindSession(bind);
-  await bind(session);
-  const alias = modelRuntime.getModel('idle-guard', 'alias');
-  assert.ok(alias, 'guard registered real provider alias');
-  await session.setModel(alias);
-  return { get session() { return session; }, owner, stats, initial, modelRuntime,
-    cold() { now += 60001; }, setConfig(value) { config = value; },
-    async close() { await session.abort(); await owner.dispose(); globalThis.Date = OriginalDate; globalThis.fetch = originalFetch; rmSync(dir, { recursive: true, force: true }); assert.equal(stats.network, 0); },
+  const manager = SessionManager.create(dir, join(dir, 'sessions'));
+  manager.appendMessage({ role: 'user', content: 'Earlier request '.repeat(1000), timestamp: Date.now() - 120001 });
+  manager.appendMessage({ ...response(), timestamp: Date.now() - 120000 });
+  manager.appendMessage({ role: 'user', content: 'Recent request '.repeat(40), timestamp: Date.now() - 119999 });
+  manager.appendMessage({ ...response(), timestamp: Date.now() - 119998 });
+  manager.appendModelChange(options.alias ? 'idle-guard' : 'probe', options.alias ? 'role' : 'model');
+  const loader = new DefaultResourceLoader({ cwd: dir, agentDir: dir, settingsManager: settings, noExtensions: true, noSkills: true, noPromptTemplates: true, noThemes: true, noContextFiles: true, extensionFactories: [extension] });
+  await loader.reload();
+  const model = modelRuntime.getModel(options.alias ? 'idle-guard' : 'probe', options.alias ? 'role' : 'model');
+  const { session } = await createAgentSession({ cwd: dir, agentDir: dir, modelRuntime, model, sessionManager: manager, settingsManager: settings, resourceLoader: loader, noTools: 'builtin' });
+  await session.bindExtensions({ mode: 'rpc', onError: error => stats.errors.push(error) });
+  // Extension registrations become available through the bound runtime. Select
+  // only synthetic catalog models; no provider defaults or host credentials.
+  await session.setModel(modelRuntime.getModel(options.alias ? 'idle-guard' : 'probe', options.alias ? 'role' : 'model'));
+  if (options.alias) await session.prompt('/idle-context-migrate');
+  return { dir, session, get ctx() { return ctx; }, manager, stats, get quiet() { return quiet; }, get capability() { return globalThis[REMOTE_PREFLIGHT_KEY]; },
+    async close() {
+      await session.abort(); session.dispose(); await modelRuntime.dispose?.();
+      globalThis.fetch = originalFetch;
+      if (previousWorker === undefined) delete process.env.PI_SUBAGENT_ID; else process.env.PI_SUBAGENT_ID = previousWorker;
+      if (previousAgent === undefined) delete process.env.AGENTSH_SUBAGENT_ID; else process.env.AGENTSH_SUBAGENT_ID = previousAgent;
+      delete globalThis.__piIdleContextParentV1;
+      rmSync(dir, { recursive: true, force: true }); assert.equal(network, 0);
+    },
   };
 }
 
-test('SDK input hook returns before deferred compact and success is persisted', async () => {
-  let compactPromiseResolve, compactPromiseReject;
-  const compacted = new Promise((resolve, reject) => { compactPromiseResolve = resolve; compactPromiseReject = reject; });
-  const f = await fixture({ persisted: true, register(pi) {
-    pi.on('session_compact', event => compactPromiseResolve(event.compactionEntry));
-    pi.on('session_compact_failed', event => compactPromiseReject(new Error(event.errorMessage ?? 'failed')));
-    pi.on('input', (event, ctx) => {
-      if (event.text !== 'deferred compact request') return;
-      const sessionId = ctx.sessionManager.getSessionId();
-      const forced = { sessionId, token: crypto.randomUUID() };
-      globalThis.__piIdleContextForceCheapV1 = forced;
-      setTimeout(() => ctx.compact({
-        onComplete: () => { if (globalThis.__piIdleContextForceCheapV1 === forced) delete globalThis.__piIdleContextForceCheapV1; },
-        onError: () => { if (globalThis.__piIdleContextForceCheapV1 === forced) delete globalThis.__piIdleContextForceCheapV1; },
-      }), 0);
-      return { action: 'handled' };
-    });
-  } });
-  try {
-    await f.session.setModel(f.modelRuntime.getModel('physical-probe', 'model'));
-    await f.session.prompt('create a completed turn');
-    await f.session.waitForIdle();
-    f.cold();
-    await Promise.race([f.session.prompt('deferred compact request'), new Promise((_, reject) => setTimeout(() => reject(new Error('input event deadlocked')), 5000))]);
-    const entry = await Promise.race([compacted, new Promise((_, reject) => setTimeout(() => reject(new Error('deferred compact timed out')), 5000))]);
-    assert.ok(entry?.fromHook);
-    assert.ok(f.session.sessionManager.getBranch().some(saved => saved.type === 'compaction' && saved.id === entry.id));
-  } finally { await f.close(); }
-});
-
-for (const outcome of ['failure', 'abort']) test(`post-route auto-compaction crosses idle, cheap ${outcome}, zero physical dispatch`, async () => {
-  const f = await fixture({ compact: true,
-    register(pi, clock) { pi.on('session_before_compact', async () => { await Promise.resolve(); clock.cold(); }); },
-    cheap({ session }) { if (outcome === 'abort') { session.abortCompaction(); return; } throw Error('fake cheap failure'); },
-  });
-  try {
-    await f.session.prompt('new input');
-    await f.session.waitForIdle();
-    assert.equal(f.stats.cheap, 1, 'one cheap attempt, no core auto-compaction retry storm');
-    assert.equal(f.stats.physical, 0, 'final provider gate blocks cold physical dispatch');
-    for (let n = 0; n < 3; n++) await f.session.prompt(`new cold input ${n}`);
-    await f.session.waitForIdle();
-    assert.equal(f.stats.physical, 0);
-    assert.equal(f.stats.cheap, 1, 'ordinary new input cannot retry failed cheap compaction');
-    await f.session.prompt('/idle-guard-retry');
-    await f.session.waitForIdle();
-    assert.equal(f.stats.cheap, 2, 'explicit retry permits exactly one additional cheap attempt');
-    assert.equal(f.stats.physical, 0);
-  } finally { await f.close(); }
-});
-
-test('cold guard ignores warning contextPercent threshold', async () => {
-  const f = await fixture({ cheap() { throw Error('keep cold gate closed'); } });
-  try {
-    f.setConfig({ idleMinutes: 1, contextPercent: 100, cheapCompactionModel: 'cheap-probe/model:off', guardedModels: { alias: 'physical-probe/model' } });
-    f.cold();
-    await f.session.prompt('cold context is only 30 percent, warning threshold is 100');
-    await f.session.waitForIdle();
-    assert.equal(f.stats.physical, 0);
-    assert.match(f.session.messages.findLast(item => item.role === 'assistant')?.errorMessage ?? '', /IDLE_GUARD_CLOSED/);
-  } finally { await f.close(); }
-});
-
-test('fresh cold user input and queued custom notification never dispatch physical', async () => {
+test('root RPC submission is consumed and remains pending without UI; Ignore releases exactly once', async () => {
   const f = await fixture();
   try {
-    f.cold();
-    await f.session.sendCustomMessage({ customType: 'notification', content: 'notification', display: true }, { triggerTurn: false });
-    await f.session.prompt('cold user input');
-    await assert.rejects(f.session.sendUserMessage('input during guarded compaction'), /compaction is in progress/);
-    f.session.abortCompaction();
-    await f.session.waitForIdle();
+    await f.session.prompt('request', { source: 'rpc' });
+    await until(() => f.capability.pending);
+    assert.equal(f.stats.physical, 0); assert.equal(f.capability.pending.state, 'pending');
+    const id = f.capability.pending.id;
+    await f.session.prompt(`/idle-context ignore ${id}`, { source: 'rpc' });
+    await until(() => f.stats.physical === 1); await f.session.waitForIdle();
+    assert.equal(f.capability.decide(id, 'ignore'), false); assert.equal(f.stats.physical, 1);
+  } finally { await f.close(); }
+});
+test('Cancel drops submitted input without a model request', async () => {
+  const f = await fixture(); try {
+    await f.session.prompt('cancelled', { source: 'rpc' }); await until(() => f.capability.pending);
+    f.capability.decide(f.capability.pending.id, 'cancel'); await until(() => !f.capability.pending);
     assert.equal(f.stats.physical, 0);
   } finally { await f.close(); }
 });
-
-test('sibling tools drain, queued steering/follow-up/notifications cannot bypass final gate', async () => {
-  const entered = deferred(), release = deferred();
-  const f = await fixture({
-    physical({ count }) { if (count === 1) return message('physical-probe', Date.now(), 3000, [1, 2].map(n => ({ type: 'toolCall', id: `call-${n}`, name: 'pause_probe', arguments: { n } })), 'toolUse'); },
-    register(pi, clock) {
-      pi.registerTool({ name: 'pause_probe', label: 'pause', description: 'In-process barrier', executionMode: 'parallel', parameters: { type: 'object', properties: { n: { type: 'number' } }, required: ['n'] },
-        async execute(_id, args) { clock.stats.tools.push(args.n); if (clock.stats.tools.length === 2) entered.resolve(); if (args.n === 1) { await release.promise; clock.cold(); } return { content: [{ type: 'text', text: 'done' }] }; },
-      });
-    },
-  });
-  try {
-    const running = f.session.prompt('call sibling tools');
-    await entered.promise;
-    await f.session.steer('queued steering input');
-    await f.session.followUp('queued follow-up input');
-    await f.session.sendCustomMessage({ customType: 'notice', content: 'queued notice', display: true }, { deliverAs: 'followUp', triggerTurn: true });
-    release.resolve();
-    await running;
-    await f.session.waitForIdle();
-    assert.deepEqual(f.stats.tools, [1, 2]);
-    assert.equal(f.stats.physical, 1, 'only initial warm tool-call dispatch; none after tools cross idle');
-  } finally { release.resolve(); await f.close(); }
-});
-
-for (const transition of ['reload', 'newSession']) test(`${transition} during guarded compaction invalidates late success`, async () => {
-  const entered = deferred(), release = deferred();
-  const f = await fixture({ async cheap() { entered.resolve(); await release.promise; } });
-  try {
-    f.cold();
-    await f.session.prompt('cold request with suspended cheap compaction');
-    await entered.promise;
-    const replacing = transition === 'reload' ? f.session.reload() : f.owner.newSession();
-    release.resolve();
-    await replacing;
-    await f.session.waitForIdle();
-    assert.equal(f.stats.physical, 0, 'late cheap completion cannot resume invalidated session');
-  } finally { release.resolve(); await f.close(); }
-});
-
-test('successful persisted native cheap compaction permits one resumed physical request', async () => {
-  const dispatched = deferred();
-  const f = await fixture({ persisted: true, physical() { dispatched.resolve(); } });
-  try {
-    f.cold();
-    await f.session.prompt('cold request requiring native compaction');
-    await dispatched.promise;
-    await f.session.waitForIdle();
-    assert.equal(f.stats.cheap, 1);
-    assert.equal(f.stats.physical, 1);
-    const compaction = f.session.sessionManager.getBranch().findLast(entry => entry.type === 'compaction');
-    assert.equal(compaction.details.idleContextNativeCompaction, 1);
-    assert.equal(compaction.details.idleContextGuard.alias, 'alias');
-    const reopened = SessionManager.open(f.session.sessionFile);
-    const durable = reopened.getBranch().findLast(entry => entry.type === 'compaction');
-    assert.deepEqual(durable.details.idleContextGuard, compaction.details.idleContextGuard);
-    const savedFile = f.session.sessionFile;
-    await f.owner.newSession();
-    await f.owner.switchSession(savedFile);
-    assert.equal(f.session.model.provider, 'idle-guard');
-    assert.equal(f.session.model.id, 'alias');
-    await f.session.prompt('warm input after durable restore');
-    assert.equal(f.stats.physical, 2);
+test('explicit Compact persists native cheap summary before one ordinary-model request', async () => {
+  const f = await fixture(); try {
+    await f.session.prompt('after summary', { source: 'rpc' }); await until(() => f.capability.pending);
+    f.capability.decide(f.capability.pending.id, 'compact');
+    await until(() => f.stats.physical === 1).catch(error => { throw new Error(`${error.message}: ${JSON.stringify({ stats: f.stats, pending: f.capability.pending, branch: f.manager.getBranch().map(e => ({ type: e.type, id: e.id, parentId: e.parentId, customType: e.customType, data: e.data, details: e.details })) })}`); }); await f.session.waitForIdle();
+    const compaction = f.manager.getBranch().findLast(e => e.type === 'compaction');
+    assert.equal(compaction.details.idleContextNativeCompaction, 1); assert.ok(compaction.details.idleContextExplicitAttempt);
+    assert.equal(f.stats.summary, 1); assert.equal(f.session.model.provider, 'probe');
   } finally { await f.close(); }
 });
-
-test('initially cold high-context request compacts once and dispatches only with durable proof', async () => {
-  const f = await fixture({ persisted: true, compact: true });
-  try {
-    f.cold();
-    await f.session.prompt('already cold and above native compaction threshold');
-    await f.session.waitForIdle();
-    assert.equal(f.stats.cheap, 1);
-    assert.equal(f.stats.physical, 1);
-    assert.equal(f.stats.physicalSends, 1);
-    const branch = SessionManager.open(f.session.sessionFile).getBranch();
-    const compactions = branch.filter(entry => entry.type === 'compaction');
-    assert.equal(compactions.length, 1);
-    assert.equal(compactions[0].details.idleContextGuard.alias, 'alias');
-    const physicalEntry = branch.findLast(entry => entry.type === 'message' && entry.message.role === 'assistant' && entry.message.provider === 'physical-probe');
-    assert.ok(branch.indexOf(compactions[0]) < branch.indexOf(physicalEntry), 'durable compaction precedes physical response');
+test('existing quiet completion queue asks root user, deduplicates while pending, and sends once', async () => {
+  const f = await fixture(); try {
+    const update = { kind: 'job', id: 'done', completion: true };
+    assert.equal(f.quiet.enqueue(f.ctx, update), true); assert.equal(f.quiet.enqueue(f.ctx, update), true);
+    await until(() => f.capability.pending); assert.equal(f.capability.pending.origin, 'notification'); assert.equal(f.stats.physical, 0);
+    assert.equal(f.quiet.enqueue(f.ctx, update), true); f.capability.decide(f.capability.pending.id, 'ignore');
+    await until(() => f.stats.physical === 1); await f.session.waitForIdle();
+    const messages = f.manager.getBranch().filter(e => e.type === 'custom_message' && e.customType === 'harness-state');
+    assert.equal(messages.length, 1); assert.equal(messages[0].details.updates.length, 1);
   } finally { await f.close(); }
 });
-
-test('slow post-route auto-compaction success authorizes physical dispatch without redundant compaction', async () => {
-  const dispatched = deferred();
-  let crossed = false;
-  const f = await fixture({ persisted: true, compact: true,
-    register(pi, clock) { pi.on('session_before_compact', async () => { if (!crossed) { crossed = true; await Promise.resolve(); clock.cold(); } }); },
-    physical() { dispatched.resolve(); },
-  });
-  try {
-    await f.session.prompt('warm route, slow successful auto-compaction');
-    let timer;
-    try {
-      await Promise.race([dispatched.promise, new Promise((_, reject) => {
-        timer = setTimeout(() => reject(Error(`No physical resume after successful auto-compaction: ${JSON.stringify(f.stats)}`)), 2000);
-      })]);
-    } finally { clearTimeout(timer); }
-    await f.session.waitForIdle();
-    assert.equal(f.stats.cheap, 1, 'one successful native summary, no redundant compaction');
-    assert.equal(f.stats.physical, 1);
-    const reopened = SessionManager.open(f.session.sessionFile);
-    const compactions = reopened.getBranch().filter(entry => entry.type === 'compaction');
-    assert.equal(compactions.length, 1);
-    assert.equal(compactions[0].details.idleContextGuard.alias, 'alias');
+test('ordinary guidance requires root admission; Cancel is durable across reload', async () => {
+  const f = await fixture(); try {
+    f.quiet.enqueue(f.ctx, { kind: 'notification', id: 'guidance-cancel', requires_guidance: true, message: 'ordinary guidance' });
+    await until(() => f.capability.pending); assert.equal(f.stats.physical, 0);
+    f.capability.decide(f.capability.pending.id, 'cancel'); await until(() => !f.capability.pending);
+    await f.session.reload(); await tick(); assert.equal(f.capability.pending, undefined); assert.equal(f.stats.physical, 0);
   } finally { await f.close(); }
 });
-
-for (const producer of ['job', 'subagent', 'guidance']) test(`shared quiet-state ${producer} delivery cannot dispatch cold physical model`, async () => {
-  let quiet, context;
-  const delivered = deferred();
-  const updates = [];
-  const f = await fixture({
-    cheap() { throw Error('intentional cheap failure preserves cold gate'); },
-    register(pi) {
-      quiet = installQuietState(pi, 0);
-      pi.on('session_start', (_event, ctx) => { context = ctx; });
-    },
-  });
-  let unsubscribe;
-  let timer;
-  try {
-    f.cold();
-    unsubscribe = f.session.subscribe(event => {
-      if (event.type === 'message_end' && event.message.customType === 'harness-state') {
-        updates.push(...event.message.details.updates);
-        delivered.resolve();
-      }
-    });
-    const update = producer === 'guidance'
-      ? { kind: 'subagent', id: 'guidance-test', child_id: 'subagent-child-000000000000000000000001', requires_guidance: true, message: 'Need parent guidance' }
-      : { kind: producer, id: `${producer}-completion-test`, job_id: `${producer}-job-test`, child_id: producer === 'subagent' ? 'subagent-child-000000000000000000000002' : undefined, state: 'completed', completion: true };
-    assert.equal(quiet.enqueue(context, update), true);
-    await Promise.race([delivered.promise, new Promise((_, reject) => { timer = setTimeout(() => reject(Error(`No real harness-state delivery for ${producer}`)), 3000); })]);
-    await f.session.waitForIdle();
-    assert.ok(updates.some(item => item.id === update.id), 'actual shared producer message reached real session');
-    const response = f.session.messages.findLast(item => item.role === 'assistant');
-    assert.match(response?.errorMessage ?? '', /IDLE_GUARD_CLOSED/, 'producer wakeup reached and was rejected by final dispatch gate');
-    assert.equal(f.stats.physical, 0);
-    assert.ok(f.session.sessionManager.getBranch().some(entry => entry.type === 'custom' && entry.customType === 'harness-state-receipt'));
-  } finally { clearTimeout(timer); unsubscribe?.(); await f.close(); }
-});
-
-test('delegated onPayload await crossing idle blocks send after physical provider entry', async () => {
-  let payloadCalls = 0;
-  const f = await fixture({
-    cheap() { throw Error('intentional failure keeps guard closed'); },
-    register(pi, clock) {
-      pi.on('before_provider_request', async event => {
-        if (event.payload.provider !== 'physical-probe') return;
-        payloadCalls++;
-        await Promise.resolve();
-        clock.cold();
-      });
-    },
-  });
-  try {
-    await f.session.prompt('warm dispatch, slow payload hook');
-    await f.session.waitForIdle();
-    assert.equal(payloadCalls, 1, 'original awaited provider hook executed');
-    assert.equal(f.stats.physical, 1, 'physical stream implementation entered while warm');
-    assert.equal(f.stats.physicalSends, 0, 'final post-onPayload check prevented simulated HTTP send');
-    const response = f.session.messages.findLast(item => item.role === 'assistant');
-    assert.match(response?.errorMessage ?? '', /IDLE_GUARD_CLOSED/);
+test('routing-relevant selection change revokes approval but retains queued completion', async () => {
+  const f = await fixture(); try {
+    f.quiet.enqueue(f.ctx, { kind: 'job', id: 'rethink', completion: true }); await until(() => f.capability.pending);
+    const id = f.capability.pending.id; f.session.setThinkingLevel('low');
+    await until(() => f.capability.pending && f.capability.pending.id !== id);
+    assert.equal(f.capability.decide(id, 'ignore'), false); assert.equal(f.stats.physical, 0);
+    f.capability.decide(f.capability.pending.id, 'cancel'); await until(() => !f.capability.pending);
   } finally { await f.close(); }
 });
-
-test('destination authentication await crossing idle blocks simulated HTTP dispatch', async () => {
-  const f = await fixture({ cheap() { throw Error('intentional failure keeps guard closed'); } });
-  const originalAuth = f.modelRuntime.getAuth.bind(f.modelRuntime);
-  let authCalls = 0;
-  f.modelRuntime.getAuth = async (model, options) => {
-    if (typeof model !== 'string' && model.provider === 'physical-probe') {
-      authCalls++;
-      await Promise.resolve();
-      f.cold();
-    }
-    return originalAuth(model, options);
-  };
-  try {
-    await f.session.prompt('warm request, delayed destination credential resolution');
-    await f.session.waitForIdle();
-    assert.equal(authCalls, 1);
-    assert.equal(f.stats.physicalSends, 0);
-    assert.match(f.session.messages.findLast(item => item.role === 'assistant')?.errorMessage ?? '', /IDLE_GUARD_CLOSED/);
-  } finally { f.modelRuntime.getAuth = originalAuth; await f.close(); }
-});
-
-test('warm summary crossing idle during destination auth stays closed before send', async () => {
-  const f = await fixture();
-  await f.session.prompt('establish a warm turn before manual compaction');
-  const baselineSends = f.stats.physicalSends;
-  let authCalls = 0;
-  const originalAuth = f.modelRuntime.getAuth.bind(f.modelRuntime);
-  f.modelRuntime.getAuth = async (model, options) => {
-    if (typeof model !== 'string' && model.provider === 'physical-probe') { authCalls++; await Promise.resolve(); f.cold(); }
-    return originalAuth(model, options);
-  };
-  try {
-    await assert.rejects(f.session.compact());
-    assert.equal(authCalls, 1, 'native summary reached destination credential resolution');
-    assert.equal(f.stats.physicalSends, baselineSends);
-    assert.equal(f.stats.cheap, 0, 'warm attempt cancels rather than silently changing summary policy');
-    await f.session.prompt('input after cancelled warm summary');
-    assert.equal(f.stats.physicalSends, baselineSends);
-  } finally { f.modelRuntime.getAuth = originalAuth; await f.close(); }
-});
-
-test('warm automatic threshold compaction uses physical summary and physical continuation', async () => {
-  const thinking = [];
-  const f = await fixture({ compact: true, persisted: true, physical({ streamOptions }) { thinking.push(streamOptions.reasoning); } });
-  try {
-    f.session.setThinkingLevel('high');
-    await f.session.prompt('warm automatic compaction policy');
-    await f.session.waitForIdle();
-    assert.equal(f.stats.physicalSends, 2, 'one physical summary and one conversation response');
-    assert.equal(f.stats.cheap, 0);
-    assert.deepEqual(thinking, ['high', 'high']);
-    const entry = SessionManager.open(f.session.sessionFile).getBranch().findLast(item => item.type === 'compaction');
-    assert.equal(entry.details.idleContextGuard.mode, 'physical');
+test('owning-parent worker decisions never open worker UI; missing parent stays pending', async () => {
+  const f = await fixture({ worker: true }); try {
+    const pending = f.capability.check(); await until(() => f.capability.pending);
+    assert.equal(f.capability.pending.state, 'pending'); f.capability.decide(f.capability.pending.id, 'cancel'); assert.equal(await pending, 'cancel');
+    let requested;
+    globalThis.__piIdleContextParentV1 = { request: async details => { requested = details; return 'ignore'; } };
+    assert.equal(await f.capability.check(), 'continue'); assert.equal(requested.model, 'probe/model'); assert.equal(f.stats.physical, 0);
   } finally { await f.close(); }
 });
-
-test('warm guarded native compaction keeps physical model and selected thinking', async () => {
-  let observed;
-  const f = await fixture({ persisted: true, physical({ streamOptions }) { observed = streamOptions; } });
-  try {
-    f.setConfig({ idleMinutes: 1, contextPercent: 20, cheapCompactionModel: null, guardedModels: { alias: 'physical-probe/model' } });
-    f.session.setThinkingLevel('high');
-    await f.session.prompt('establish a warm turn before manual compaction');
-    const baseline = f.stats.physical;
-    await f.session.compact();
-    assert.equal(f.stats.physical, baseline + 1, 'warm summary uses physical conversation model');
-    assert.equal(f.stats.physicalSends, baseline + 1);
-    assert.equal(f.stats.cheap, 0);
-    assert.equal(observed.reasoning, 'high');
-    assert.equal(f.session.thinkingLevel, 'high');
-    assert.equal(f.session.model.provider, 'idle-guard');
-    const entry = SessionManager.open(f.session.sessionFile).getBranch().findLast(item => item.type === 'compaction');
-    assert.equal(entry.details.idleContextNativeCompaction, 1);
-    assert.equal(entry.details.idleContextGuard.target, 'physical-probe/model');
+test('idle-decision control wake alone bypasses parent admission; ordinary guidance stays queued for root', async () => {
+  const f = await fixture(); try {
+    // Keep a normal root approval pending so a child cannot depend on that same
+    // approval to deliver its parent-decision request.
+    const root = f.capability.check(); await until(() => f.capability.pending);
+    f.quiet.enqueue(f.ctx, { kind: 'notification', id: 'normal-help', requires_guidance: true, message: 'ordinary guidance' });
+    f.quiet.enqueue(f.ctx, { kind: 'notification', id: 'idle-help', child_id: 'subagent-child-' + '1'.repeat(24), requires_guidance: true,
+      admission_control: { kind: 'idle-decision', request_id: 'idle:' + '2'.repeat(32), worker_epoch: '3'.repeat(32) }, message: 'resolve child idle decision' });
+    await until(() => f.stats.physical === 1); await f.session.waitForIdle();
+    const sent = f.manager.getBranch().find(e => e.type === 'custom_message' && e.customType === 'harness-state');
+    assert.deepEqual(sent.details.updates.map(u => u.id), ['idle-help']);
+    f.capability.decide(f.capability.pending.id, 'cancel'); assert.equal(await root, 'cancel');
   } finally { await f.close(); }
 });
-
-test('warm dispatch preserves non-off thinking and physical credentials/headers', async () => {
-  let observed;
-  const f = await fixture({ physical({ streamOptions }) { observed = streamOptions; } });
-  try {
-    f.session.setThinkingLevel('high');
-    await f.session.prompt('warm reasoning request');
-    assert.equal(f.stats.physical, 1);
-    assert.equal(f.session.thinkingLevel, 'high');
-    assert.equal(observed.reasoning, 'high');
-    assert.equal(observed.apiKey, 'fake-physical-probe');
-    assert.equal(observed.headers['X-Physical-Probe'], 'physical-probe');
-    assert.notEqual(observed.apiKey, 'idle-guard-local-only');
-  } finally { await f.close(); }
-});
-
-test('first-time malformed target retains a closed selectable alias', async () => {
-  const f = await fixture({ initialConfig: { idleMinutes: 1, contextPercent: 20, cheapCompactionModel: 'cheap-probe/model:off', guardedModels: { alias: 'malformed-target' } } });
-  try {
-    await f.session.prompt('invalid target must not fall back');
-    assert.equal(f.session.model.provider, 'idle-guard');
-    assert.equal(f.stats.physical, 0);
-    assert.equal(f.stats.cheap, 0);
-  } finally { await f.close(); }
-});
-
-test('removed alias tombstone survives reload after a physical response', async () => {
-  const f = await fixture();
-  try {
-    await f.session.prompt('warm initial request');
-    assert.equal(f.stats.physical, 1);
-    f.setConfig({ idleMinutes: 1, contextPercent: 20, guardedModels: {} });
+test('resolved child idle-control requests stay suppressed even when old polling arrives after resolution or reload', async () => {
+  const f = await fixture(); try {
+    const child_id = 'subagent-child-' + '4'.repeat(24), request_id = 'idle:' + '5'.repeat(32), worker_epoch = '6'.repeat(32);
+    f.quiet.enqueue(f.ctx, { kind: 'notification', id: 'resolved-first', child_id, admission_control: { kind: 'idle-decision-resolved', request_id, worker_epoch } });
+    f.quiet.enqueue(f.ctx, { kind: 'notification', id: 'late-control', child_id, requires_guidance: true, admission_control: { kind: 'idle-decision', request_id, worker_epoch } });
+    await tick(); assert.equal(f.stats.physical, 0); assert.equal(f.capability.pending, undefined);
     await f.session.reload();
-    assert.equal(f.session.model.provider, 'idle-guard');
-    assert.equal(f.session.model.id, 'alias');
-    await f.session.prompt('removed alias must not fall back to physical history');
-    assert.equal(f.stats.physical, 1);
+    f.quiet.enqueue(f.ctx, { kind: 'notification', id: 'late-control', child_id, requires_guidance: true, admission_control: { kind: 'idle-decision', request_id, worker_epoch } });
+    await tick(); assert.equal(f.stats.physical, 0);
   } finally { await f.close(); }
 });
-
-test('reload, newSession and switchSession preserve cold isolation', async () => {
-  const f = await fixture({ persisted: true });
+test('result read while notification admission waits suppresses the stale wake', async () => {
+  const f = await fixture(); try {
+    f.quiet.enqueue(f.ctx, { kind: 'job', id: 'read-first', completion: true }); await until(() => f.capability.pending);
+    const id = f.capability.pending.id;
+    f.quiet.consume(f.ctx, 'job', 'read-first');
+    await until(() => !f.capability.pending); assert.equal(f.capability.decide(id, 'ignore'), false); await tick(); assert.equal(f.stats.physical, 0);
+  } finally { await f.close(); }
+});
+test('legacy selected alias resolves through public model selection, no proxy/provider request', async () => {
+  const f = await fixture({ alias: true }); try {
+    assert.equal(f.session.model.provider, 'probe'); assert.equal(f.session.model.id, 'model');
+    assert.equal(f.stats.physical, 0); assert.equal(f.stats.summary, 0);
+    assert.equal(f.manager.getBranch().findLast(e => e.type === 'model_change').provider, 'probe');
+  } finally { await f.close(); }
+});
+test('reload restores durable pending submission but never reuses approval', async () => {
+  const f = await fixture(); try {
+    await f.session.prompt('survive reload', { source: 'rpc' }); await until(() => f.capability.pending);
+    const previous = f.capability, oldId = previous.pending.id;
+    await f.session.reload(); await until(() => f.capability.pending).catch(error => { throw new Error(`${error.message}: ${JSON.stringify({ ready: f.capability?.ready, pending: f.capability?.pending, model: f.session.model, usage: f.ctx.getContextUsage(), records: f.manager.getBranch().filter(e => e.type === 'custom') })}`); });
+    assert.notEqual(f.capability, previous); assert.notEqual(f.capability.pending.id, oldId);
+    assert.equal(previous.decide(oldId, 'ignore'), false); assert.equal(f.stats.physical, 0);
+    f.capability.decide(f.capability.pending.id, 'ignore'); await until(() => f.stats.physical === 1); await f.session.waitForIdle();
+    const records = f.manager.getBranch().filter(e => e.type === 'custom' && e.customType === 'idle-context-submission');
+    assert.equal(records.at(-1).data.state, 'released');
+  } finally { await f.close(); }
+});
+test('reload preserves queued notification, no duplicate wake or approval across runtimes', async () => {
+  const f = await fixture(); try {
+    f.quiet.enqueue(f.ctx, { kind: 'job', id: 'reload-job', completion: true }); await until(() => f.capability.pending);
+    const previous = f.capability, oldId = previous.pending.id;
+    await f.session.reload(); await until(() => f.capability.pending);
+    assert.equal(previous.decide(oldId, 'ignore'), false); assert.equal(f.stats.physical, 0);
+    f.capability.decide(f.capability.pending.id, 'ignore'); await until(() => f.stats.physical === 1); await f.session.waitForIdle();
+    await f.session.reload(); await tick(); assert.equal(f.stats.physical, 1);
+  } finally { await f.close(); }
+});
+test('busy completion stays in existing queue and asks admission only after settlement', async () => {
+  let release; const held = new Promise(resolve => release = resolve);
+  const f = await fixture({ physical: async count => { if (count === 1) await held; return { ...response(), timestamp: Date.now() - 120000 }; } });
   try {
-    const originalFile = f.session.sessionFile;
-    assert.ok(originalFile);
-    f.cold();
-    await f.session.reload();
-    await f.session.prompt('cold after reload');
-    assert.equal(f.stats.physical, 0);
-    await f.owner.newSession({ setup: async manager => {
-      manager.appendMessage({ role: 'user', content: 'restored question', timestamp: f.initial - 1 });
-      manager.appendMessage(message('physical-probe', f.initial));
-    } });
-    await f.session.setModel(f.modelRuntime.getModel('idle-guard', 'alias'));
-    await f.session.prompt('cold after real runtime replacement');
-    assert.equal(f.stats.physical, 0);
-    await f.owner.switchSession(originalFile);
-    await f.session.setModel(f.modelRuntime.getModel('idle-guard', 'alias'));
-    await f.session.prompt('cold after switchSession restore');
-    assert.equal(f.stats.physical, 0);
+    const active = f.session.prompt('synthetic in-flight turn', { source: 'extension' }); await until(() => f.stats.physical === 1);
+    f.quiet.enqueue(f.ctx, { kind: 'job', id: 'busy-job', completion: true }); await tick();
+    assert.equal(f.capability.pending, undefined); assert.equal(f.stats.physical, 1);
+    release(); await active; await until(() => f.capability.pending);
+    assert.equal(f.stats.physical, 1); f.capability.decide(f.capability.pending.id, 'ignore');
+    await until(() => f.stats.physical === 2); await f.session.waitForIdle();
+  } finally { release(); await f.close(); }
+});
+test('shutdown revokes a pending decision; no stale approval or fake dispatch survives', async () => {
+  const f = await fixture(); try {
+    const controller = new AbortController(); const pending = admitHarnessWake(f.ctx, controller.signal);
+    await until(() => f.capability.pending); const id = f.capability.pending.id;
+    controller.abort(); assert.equal(await pending, 'cancel'); assert.equal(f.capability.decide(id, 'ignore'), false); assert.equal(f.stats.physical, 0);
   } finally { await f.close(); }
 });

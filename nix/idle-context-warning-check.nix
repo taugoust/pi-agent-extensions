@@ -40,7 +40,7 @@ assert !(configured.home.file ? ".config/fixture-pi/idle-context-warning.json");
 assert !(configured.home.file ? ".config/fixture-pi/extensions/idle-context-warning.json");
 assert configured.home.sessionVariables.PI_CODING_AGENT_DIR == "/fixture-home/.config/fixture-pi";
 pkgs.runCommand "idle-context-warning-module-contract" { } ''
-  for file in index.ts policy.ts compaction.ts guard.ts; do
+  for file in index.ts policy.ts admission.ts compaction.ts migration.ts; do
     test -f ${configured.home.file.${sourceDir}.source}/"$file"
   done
   printf '%s\n' ${lib.escapeShellArg (builtins.toJSON expected)} > "$out"

@@ -463,7 +463,7 @@ export class TuiNativeManager {
         && c.idleDecisionNotified !== state.idleDecision.requestId) {
         const data = state.idleDecision;
         const update: QuietUpdate = { kind: "notification", id: `${g.id}:${c.childId}:idle:${data.requestId}`,
-          child_id: c.childId, displayName: this.canonicalTitle(c), message: `Idle context warning for ${data.model}: idle ${data.idleMinutes}m, context ${data.contextPercent}%. Resolve with subagent operation=idle_decision child_id=${c.childId} request_id=${data.requestId} worker_epoch=${m.workerEpoch} choice=ignore|compact|cancel.`, requires_guidance: true, through_sequence: state.sequence };
+          child_id: c.childId, displayName: this.canonicalTitle(c), admission_control: { kind: "idle-decision", request_id: data.requestId, worker_epoch: m.workerEpoch }, message: `Idle context warning for ${data.model}: idle ${data.idleMinutes}m, context ${data.contextPercent}%. Resolve with subagent operation=idle_decision child_id=${c.childId} request_id=${data.requestId} worker_epoch=${m.workerEpoch} choice=ignore|compact|cancel.`, requires_guidance: true, through_sequence: state.sequence };
         if (this.notify?.(update)) c.idleDecisionNotified = data.requestId;
       }
       if (state.active) { c.state = "running"; c.runSequence = state.sequence; }
@@ -492,9 +492,9 @@ export class TuiNativeManager {
       const events = await callTuiWorker(m, { operation: "events", afterSequence: c.notifiedSequence }, { timeoutMs: 1000 });
       if (events.ok) {
         for (const event of (events.data as any)?.events ?? []) {
-          if (event.kind === "idle_decision_cancelled") {
-            const update: QuietUpdate = { kind: "notification", id: `${g.id}:${c.childId}:idle-cancelled:${event.data?.requestId}`,
-              child_id: c.childId, displayName: this.canonicalTitle(c), message: `Idle context decision request ${event.data?.requestId} was cancelled or expired.`, requires_guidance: false, through_sequence: event.sequence };
+          if (event.kind === "idle_decision_cancelled" || event.kind === "idle_decision_resolved") {
+            const update: QuietUpdate = { kind: "notification", id: `${g.id}:${c.childId}:idle-resolved:${event.data?.requestId}`,
+              child_id: c.childId, displayName: this.canonicalTitle(c), admission_control: { kind: "idle-decision-resolved", request_id: event.data?.requestId, worker_epoch: m.workerEpoch }, message: `Idle context decision request ${event.data?.requestId} ${event.kind === "idle_decision_resolved" ? "was resolved" : "was cancelled or expired"}.`, requires_guidance: false, through_sequence: event.sequence };
             this.notify?.(update);
           }
           if (event.kind === "running" && event.sequence > state.sequence) {

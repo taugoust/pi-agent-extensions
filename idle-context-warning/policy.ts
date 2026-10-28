@@ -19,6 +19,15 @@ export function isIdle(idleAt: number | undefined, now: number, idleMinutes: num
   return idleAt !== undefined && now - idleAt >= idleMinutes * 60_000;
 }
 
+// Presentation only: admission and compaction remain owned by their callers.
+export function warningTitle(model: string, idleAt: number, now: number, usage: { tokens: number | null; contextWindow: number; percent: number }): string {
+  const minutes = Math.floor((now - idleAt) / 60_000);
+  const percentage = Math.round(usage.percent);
+  const tokens = usage.tokens == null ? "unknown" : Math.round(usage.tokens).toLocaleString();
+  const window = usage.contextWindow.toLocaleString();
+  return `Model: ${model}\nLast model response: ${minutes} minutes ago\nContext: ${tokens} / ${window} tokens (${percentage}%). The model cache may have expired.`;
+}
+
 export function shouldWarn(idleAt: number | undefined, now: number, percent: number | null | undefined, settings: Config): boolean {
   return isIdle(idleAt, now, settings.idleMinutes) && percent != null && Number.isFinite(percent) && percent >= settings.contextPercent;
 }

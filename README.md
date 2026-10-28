@@ -61,7 +61,7 @@ Extensions are **opt-in**. [Build a selective bundle or install without Nix →]
 | [OpenAI usage](openai-usage/README.md) | Open credential status and the official usage link. |
 | [Stamp](OBSERVABILITY.md) | Record timestamps, response timing and usage metadata. |
 | [Cache monitor](OBSERVABILITY.md) | Inspect prompt-cache reuse. |
-| [Idle context guard](idle-context-warning) | Guard context usage and configure cheaper compaction. |
+| [Idle context admission](idle-context-warning) | User/parent-owned cold-context decisions, notification admission, and native cheap compaction; independent of provider routing. |
 | [Sandbox](sandbox) | Route tools through AgentSH supervision. |
 | [Permission Gate](permission-gate) | Require approvals for guarded operations. |
 | [Slow mode](slow-mode) | Review edits before applying them. |

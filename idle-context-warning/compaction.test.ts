@@ -3,7 +3,7 @@ import type { SessionBeforeCompactEvent } from "@earendil-works/pi-coding-agent"
 // Test the real native preparation too; Pi exports compact(), but not its
 // preparation helper. Production code uses only the public extension event.
 const { prepareCompaction } = await import(new URL("./core/compaction/compaction.js", import.meta.resolve("@earendil-works/pi-coding-agent")).href);
-import { beforeCompact, parseModelSelector, registerCompaction } from "./compaction.ts";
+import { beforeCompact, parseModelSelector, registerCompaction, FORCE_CHEAP_COMPACTION_KEY } from "./compaction.ts";
 import { getSessionModelRequestProfile, registerSessionRouting } from "../shared/session-routing.ts";
 import { lastModelActivity, shouldWarn } from "./policy.ts";
 
@@ -48,29 +48,26 @@ function fixture(reason: SessionBeforeCompactEvent["reason"] = "manual") {
 describe("idle compaction routing", () => {
   it("preserves warm physical-model compaction and selected thinking without requiring a cheap selector", async () => {
     const f = fixture();
-    const physical = { ...model, provider: "expensive", id: "conversation" };
-    f.ctx.model = { provider: "idle-guard", id: "alias" };
     f.ctx.thinkingLevel = "high";
-    f.ctx.modelRegistry.find = (provider: string, id: string) => provider === physical.provider && id === physical.id ? physical : undefined;
     f.event.branchEntries = [message(Date.now())];
-    expect((await beforeCompact(f.event, f.ctx, () => ({ ...settings, cheapCompactionModel: null, guardedModels: { alias: "expensive/conversation" } })))?.compaction).toBeDefined();
-    expect(f.calls).toHaveLength(1);
-    expect(f.calls[0].target).toBe(physical);
-    expect(f.calls[0].options.reasoning).toBe("high");
+    expect(await beforeCompact(f.event, f.ctx, () => ({ ...settings, cheapCompactionModel: null }))).toBeUndefined();
+    expect(f.calls).toHaveLength(0);
+    expect(f.ctx.thinkingLevel).toBe("high");
   });
-  it("explicit guard recovery uses cheap thinking even if physical activity is warm", async () => {
+  it("explicit admission Compact uses cheap thinking even if physical activity is warm", async () => {
     const f = fixture();
-    f.ctx.model = { provider: "idle-guard", id: "alias" };
     f.ctx.thinkingLevel = "high";
     f.event.branchEntries = [message(Date.now())];
-    const proof = { version: 1 as const, mode: "cheap" as const, attempt: "recovery", session: "unit-session", alias: "alias", target: "expensive/conversation", idleAt: Date.now(), sourceLeaf: null };
-    expect((await beforeCompact(f.event, f.ctx, () => settings, () => proof))?.compaction).toBeDefined();
-    expect(f.calls).toHaveLength(1);
-    expect(f.calls[0].target).toBe(model);
-    expect(f.calls[0].options.reasoning).toBe("low");
+    (globalThis as any)[FORCE_CHEAP_COMPACTION_KEY] = { sessionId: "unit-session", token: "explicit" };
+    try {
+      expect((await beforeCompact(f.event, f.ctx, () => settings))?.compaction).toBeDefined();
+      expect(f.calls[0].target).toBe(model);
+      expect(f.calls[0].options.reasoning).toBe("low");
+      expect(f.ctx.thinkingLevel).toBe("high");
+    } finally { delete (globalThis as any)[FORCE_CHEAP_COMPACTION_KEY]; }
   });
   it("rejects virtual or guarded summary models without recursive dispatch", async () => {
-    for (const target of [{ ...model, api: "pi-virtual" }, { ...model, provider: "idle-guard" }, { ...model, provider: "idle-guard-proxy" }]) {
+    for (const target of [{ ...model, api: "pi-virtual" }]) {
       const f = fixture();
       f.ctx.modelRegistry.find = () => target;
       expect(await beforeCompact(f.event, f.ctx, () => settings)).toEqual({ cancel: true });

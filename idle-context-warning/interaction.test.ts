@@ -1,198 +1,94 @@
-import { describe, expect, it } from "bun:test";
-import { randomUUID } from "node:crypto";
-import { tmpdir } from "node:os";
-import { join } from "node:path";
+import { afterEach, describe, expect, it } from "bun:test";
 import register, { REMOTE_PREFLIGHT_KEY } from "./index.ts";
+import { admitHarnessWake } from "../shared/idle-admission.ts";
 
-delete process.env.PI_SUBAGENT_ID;
-delete process.env.AGENTSH_SUBAGENT_ID;
-
-function setup(choice: string) {
-  const handlers: Record<string, (event: any, ctx: any) => Promise<any> | void> = {};
-  const uiCalls: any[] = [];
-  const pi: any = { on(name: string, fn: any) { handlers[name] = fn; } };
-  register(pi, { readSettings: () => ({ idleMinutes: 30, contextPercent: 20 }), tombstonePath: join(tmpdir(), `idle-guard-test-${randomUUID()}.json`) });
-  const old = Date.now() - 60 * 60_000;
-  const text = "  preserve this draft exactly  ";
-  const globals = globalThis as Record<string, any>;
-  const initialCapability = globals[REMOTE_PREFLIGHT_KEY];
-  const initiallyReady = initialCapability.ready;
-  let branch = [{ type: "message", timestamp: new Date(old).toISOString(), message: { role: "assistant", model: "model-1", timestamp: old } }];
-  const ctx = {
-    hasUI: true,
-    mode: "tui",
-    model: { provider: "example", id: "model-1" },
-    sessionManager: { getBranch: () => branch, getSessionId: () => "interaction-session" },
+const cleanups: (() => void)[] = [];
+afterEach(() => { for (const fn of cleanups.splice(0)) fn(); });
+const tick = () => new Promise(resolve => setTimeout(resolve, 10));
+function fixture(choice = "Ignore") {
+  const oldWorker = process.env.PI_SUBAGENT_ID, oldAgent = process.env.AGENTSH_SUBAGENT_ID;
+  delete process.env.PI_SUBAGENT_ID; delete process.env.AGENTSH_SUBAGENT_ID;
+  const handlers: Record<string, Function[]> = {}, commands: Record<string, any> = {}, sent: any[] = [], notices: any[] = [], dialogs: any[] = [];
+  const pi: any = { on: (name: string, fn: Function) => (handlers[name] ??= []).push(fn), registerCommand: (name: string, command: any) => commands[name] = command,
+    appendEntry: (customType: string, data: any) => branch.push({ type: "custom", id: `custom-${branch.length}`, customType, data }),
+    events: { on: () => () => {}, emit() {} }, sendUserMessage: (...args: any[]) => sent.push(args), registerVirtualModel() {} };
+  register(pi, { readSettings: () => ({ idleMinutes: 30, contextPercent: 20, cheapCompactionModel: "p/small" }), tombstonePath: "/nonexistent/idle-test" });
+  const old = Date.now() - 3_600_000;
+  let branch: any[] = [{ type: "message", id: "old", parentId: null, message: { role: "assistant", model: "model", timestamp: old } }];
+  const compacts: any[] = [];
+  const ctx: any = { hasUI: true, mode: "tui", model: { provider: "p", id: "model" }, thinkingLevel: "low", isIdle: () => true, hasPendingMessages: () => false,
+    sessionManager: { getBranch: () => branch, getSessionId: () => "test", getLeafId: () => branch.at(-1)?.id },
     getContextUsage: () => ({ tokens: 30, contextWindow: 100, percent: 30 }),
-    ui: {
-      select: async (title: string, options: string[], settings?: { signal?: AbortSignal }) => {
-        uiCalls.push({ title, options, signal: settings?.signal });
-        return choice;
-      },
-      setEditorText: (value: string) => uiCalls.push({ draft: value }),
-      compact: undefined,
-    },
+    ui: { select: async (...args: any[]) => { dialogs.push(args); return choice; }, setStatus() {}, notify: (...args: any[]) => notices.push(args) },
+    compact: (options: any) => compacts.push({ options, token: (globalThis as any).__piIdleContextForceCheapV1.token, parentId: branch.at(-1)?.id }),
   };
-  handlers.session_start({ type: "session_start", reason: "startup" }, ctx);
-  return { handlers, ctx, text, uiCalls, globals, initialCapability, initiallyReady, capability: globals[REMOTE_PREFLIGHT_KEY], setBranch: (value: any[]) => { branch = value; } };
+  const emit = async (name: string, event: any = {}) => { for (const fn of handlers[name] ?? []) await fn(event, ctx); };
+  for (const fn of handlers.session_start ?? []) void fn({}, ctx);
+  const capability = (globalThis as any)[REMOTE_PREFLIGHT_KEY];
+  cleanups.push(() => { void emit("session_shutdown"); if (oldWorker === undefined) delete process.env.PI_SUBAGENT_ID; else process.env.PI_SUBAGENT_ID = oldWorker; if (oldAgent === undefined) delete process.env.AGENTSH_SUBAGENT_ID; else process.env.AGENTSH_SUBAGENT_ID = oldAgent; delete (globalThis as any).__piIdleContextParentV1; });
+  const complete = (attempt = compacts.at(-1), tag = true) => { branch.push({ type: "compaction", id: `summary-${branch.length}`, parentId: attempt.parentId, fromHook: true, details: tag ? { idleContextNativeCompaction: 1, idleContextExplicitAttempt: attempt.token } : {} }); attempt.options.onComplete(); };
+  return { emit, commands, ctx, sent, dialogs, notices, capability, compacts, complete };
 }
-
-describe("idle warning input handling", () => {
-  it("leaves guarded aliases to the authoritative dispatch gate rather than Cancel/Ignore", async () => {
-    const { handlers, ctx, text, uiCalls, capability, globals } = setup("Cancel");
-    ctx.model = { provider: "idle-guard", id: "alias" };
-    expect(await handlers.input({ source: "interactive", text }, ctx)).toBeUndefined();
-    expect(await capability.check()).toBe("continue");
-    expect(uiCalls).toHaveLength(0);
-    delete globals[REMOTE_PREFLIGHT_KEY];
+describe("provider-independent admission", () => {
+  it("consumes first, asks user, and replays exact text/images once on Ignore", async () => {
+    const f = fixture(); const images = [{ type: "image", data: "image", mimeType: "image/png" }];
+    expect(await f.emit("input", { source: "interactive", text: "  draft  ", images })).toBeUndefined();
+    expect(f.sent).toHaveLength(0); await tick();
+    expect(f.sent).toEqual([[[{ type: "text", text: "  draft  " }, ...images], { expandPromptTemplates: false, deliverAs: undefined }]]);
+    expect(f.dialogs[0][0]).toContain("30 / 100 tokens (30%)");
   });
-  it("Cancel consumes interactive input without restoring the submitted text", async () => {
-    const { handlers, ctx, text, uiCalls, globals } = setup("Cancel");
-    expect(await handlers.input({ source: "interactive", text }, ctx)).toEqual({ action: "handled" });
-    expect(uiCalls[0].options).toEqual(["Cancel", "Ignore", "Compact"]);
-    expect(uiCalls[0].signal).toBeInstanceOf(AbortSignal);
-    expect(uiCalls.some((call) => "draft" in call)).toBe(false);
-    handlers.session_shutdown?.({ type: "session_shutdown" }, ctx);
-    expect(globals[REMOTE_PREFLIGHT_KEY]).toBeUndefined();
+  it("Cancel never replays or restores the draft", async () => { const f = fixture("Cancel"); await f.emit("input", { source: "interactive", text: "discard" }); await tick(); expect(f.sent).toHaveLength(0); });
+  it("missing root channel stays pending until explicit user control, never autoapproves", async () => {
+    const f = fixture(); f.ctx.hasUI = false;
+    const check = f.capability.check(); await tick(); expect(f.capability.pending.state).toBe("pending");
+    let done = false; void check.then(() => done = true); await tick(); expect(done).toBe(false);
+    expect(f.capability.decide(f.capability.pending.id, "ignore")).toBe(true); expect(await check).toBe("continue");
   });
-  it("Ignore continues without changing the input", async () => {
-    const { handlers, ctx, text, uiCalls, globals } = setup("Ignore");
-    expect(await handlers.input({ source: "interactive", text }, ctx)).toBeUndefined();
-    expect(uiCalls[0].options).toEqual(["Cancel", "Ignore", "Compact"]);
-    delete globals[REMOTE_PREFLIGHT_KEY];
+  it("missing parent stays pending and child UI cannot approve", async () => {
+    const f = fixture(); process.env.PI_SUBAGENT_ID = "child";
+    const check = f.capability.check(); await tick();
+    expect(f.capability.pending.state).toBe("pending"); await f.commands["idle-context"].handler("ignore", f.ctx);
+    expect(f.capability.pending).toBeDefined(); expect(f.dialogs).toHaveLength(0);
+    f.capability.decide(f.capability.pending.id, "cancel"); expect(await check).toBe("cancel");
   });
-  it("registers an explicit preflight capability before session readiness", () => {
-    const { initialCapability, initiallyReady, capability, globals } = setup("Cancel");
-    expect(initialCapability).toBe(capability);
-    expect(initiallyReady).toBe(false);
-    delete globals[REMOTE_PREFLIGHT_KEY];
+  it("parent owns worker decisions; transport disconnect remains pending", async () => {
+    const f = fixture(); process.env.PI_SUBAGENT_ID = "child";
+    let request: any;
+    (globalThis as any).__piIdleContextParentV1 = { request: async (details: any) => { request = details; return "ignore"; } };
+    expect(await f.capability.check()).toBe("continue"); expect(request.model).toBe("p/model"); expect(f.dialogs).toHaveLength(0);
+    (globalThis as any).__piIdleContextParentV1.request = async () => { throw new Error("disconnected"); };
+    const check = f.capability.check(); await tick(); expect(f.capability.pending.state).toBe("pending");
+    await f.emit("session_shutdown"); expect(await check).toBe("cancel");
   });
-  it("registered bridge capability includes model, token count, percent, and honors abort signals", async () => {
-    const { capability, uiCalls, globals } = setup("Cancel");
-    const controller = new AbortController();
-    expect(capability.ready).toBe(true);
-    expect(await capability.check(controller.signal)).toBe("cancel");
-    expect(uiCalls[0].title).toContain("example/model-1");
-    expect(uiCalls[0].title).toContain("30 / 100 tokens (30%). The model cache may have expired.");
-    expect(uiCalls[0].signal).toBeInstanceOf(AbortSignal);
-    delete globals[REMOTE_PREFLIGHT_KEY];
+  it("one lane never overwrites pending submission; late and mismatched choices cannot approve", async () => {
+    const f = fixture(); f.ctx.hasUI = false;
+    const first = f.capability.check(); await tick(); const id = f.capability.pending.id;
+    expect(await f.capability.check()).toBe("cancel"); expect(f.capability.pending.id).toBe(id);
+    expect(f.capability.decide("wrong", "ignore")).toBe(false);
+    f.capability.decide(id, "cancel"); expect(await first).toBe("cancel"); expect(f.capability.decide(id, "ignore")).toBe(false);
   });
-  it("does not authorize an already-aborted preflight", async () => {
-    const { capability, uiCalls, globals } = setup("Ignore");
-    expect(await capability.check(AbortSignal.abort())).toBe("cancel");
-    expect(uiCalls).toHaveLength(0);
-    delete globals[REMOTE_PREFLIGHT_KEY];
+  it("notification admission uses the same user lane without replaying a submission", async () => {
+    const f = fixture(); f.ctx.hasUI = false;
+    const pending = admitHarnessWake(f.ctx, new AbortController().signal); await tick();
+    expect(f.capability.pending.origin).toBe("notification"); f.capability.decide(f.capability.pending.id, "ignore");
+    expect(await pending).toBe("continue"); expect(f.sent).toHaveLength(0);
   });
-  it("passes cancellation signals through the mirrored Paseo selector", async () => {
-    const { capability, globals } = setup("Cancel");
-    let received: AbortSignal | undefined;
-    const previous = globals.__piPaseoRemoteUiV1;
-    globals.__piPaseoRemoteUiV1 = {
-      isConnected: () => true,
-      selectMirrored: async (_title: string, _options: string[], _local: any, settings: { signal?: AbortSignal }) => {
-        received = settings.signal;
-        return "Cancel";
-      },
-    };
-    const controller = new AbortController();
-    try {
-      expect(await capability.check(controller.signal)).toBe("cancel");
-      expect(received).toBeInstanceOf(AbortSignal);
-    } finally {
-      if (previous === undefined) delete globals.__piPaseoRemoteUiV1;
-      else globals.__piPaseoRemoteUiV1 = previous;
-      delete globals[REMOTE_PREFLIGHT_KEY];
-    }
+  it("explicit Compact waits for a matching persisted receipt, no selection change", async () => {
+    const f = fixture("Compact"); const model = f.ctx.model;
+    const check = f.capability.check(); await tick(); expect(f.compacts).toHaveLength(1);
+    f.complete(); expect(await check).toBe("continue"); expect(f.ctx.model).toBe(model); expect(f.ctx.thinkingLevel).toBe("low");
   });
-  it("routes native and AgentSH workers through parent decision contract, failing closed if absent", async () => {
-    const { capability, uiCalls, globals } = setup("Ignore");
-    const oldPi = process.env.PI_SUBAGENT_ID;
-    const oldAgent = process.env.AGENTSH_SUBAGENT_ID;
-    const oldParent = globals.__piIdleContextParentV1;
-    try {
-      process.env.PI_SUBAGENT_ID = "child-native";
-      process.env.AGENTSH_SUBAGENT_ID = "child-agentsh";
-      let details: unknown;
-      globals.__piIdleContextParentV1 = { request: async (value: unknown) => { details = value; return "ignore"; } };
-      expect(await capability.check()).toBe("continue");
-      expect(details).toMatchObject({ model: "example/model-1", idleMinutes: 60, contextPercent: 30 });
-      delete globals.__piIdleContextParentV1;
-      expect(await capability.check()).toBe("cancel");
-      expect(uiCalls).toHaveLength(0);
-    } finally {
-      if (oldPi === undefined) delete process.env.PI_SUBAGENT_ID; else process.env.PI_SUBAGENT_ID = oldPi;
-      if (oldAgent === undefined) delete process.env.AGENTSH_SUBAGENT_ID; else process.env.AGENTSH_SUBAGENT_ID = oldAgent;
-      if (oldParent === undefined) delete globals.__piIdleContextParentV1; else globals.__piIdleContextParentV1 = oldParent;
-      delete globals[REMOTE_PREFLIGHT_KEY];
-    }
+  it("Cancel during compaction revokes replay even if the native callback arrives late", async () => {
+    const f = fixture("Compact"); const check = f.capability.check(); await tick();
+    const id = f.capability.pending.id; expect(f.capability.decide(id, "cancel")).toBe(true);
+    expect(await check).toBe("cancel"); f.complete(); expect(f.sent).toHaveLength(0); expect(f.capability.decide(id, "ignore")).toBe(false);
   });
-  it("aborts the local mirrored selector when the remote choice wins", async () => {
-    const { capability, globals, ctx } = setup("Ignore");
-    const previous = globals.__piPaseoRemoteUiV1;
-    let localSignal: AbortSignal | undefined;
-    globals.__piPaseoRemoteUiV1 = {
-      isConnected: () => true,
-      selectMirrored: async (_title: string, _options: string[], local: any) => {
-        const remoteLocal = new AbortController();
-        const result = await local(remoteLocal.signal);
-        localSignal = (globalThis as any).__lastIdleSelectSignal;
-        remoteLocal.abort();
-        return result;
-      },
-    };
-    ctx.ui.select = async (_title: string, _options: string[], config: any) => {
-      (globalThis as any).__lastIdleSelectSignal = config.signal;
-      return "Ignore";
-    };
-    try {
-      expect(await capability.check()).toBe("continue");
-      expect(localSignal?.aborted).toBe(true);
-    } finally {
-      if (previous === undefined) delete globals.__piPaseoRemoteUiV1; else globals.__piPaseoRemoteUiV1 = previous;
-      delete (globalThis as any).__lastIdleSelectSignal;
-      delete globals[REMOTE_PREFLIGHT_KEY];
-    }
+  it("callback alone or wrong receipt cannot release admission", async () => {
+    const f = fixture("Compact"); const check = f.capability.check(); await tick(); f.complete(undefined, false); expect(await check).toBe("cancel");
   });
-  for (const lifecycle of ["model_select", "thinking_level_select", "session_before_tree", "session_before_fork", "session_before_switch", "session_start", "session_shutdown"]) it(`does not start deferred compact after ${lifecycle}`, async () => {
-    const fx = setup("Compact");
-    const calls: any[] = [];
-    fx.ctx.isIdle = () => true;
-    fx.ctx.compact = (options: any) => calls.push(options);
-    await fx.handlers.input({ source: "interactive", text: fx.text }, fx.ctx);
-    fx.handlers[lifecycle]?.({ type: lifecycle }, fx.ctx);
-    await new Promise((resolve) => setTimeout(resolve, 5));
-    expect(calls).toHaveLength(0);
-    delete fx.globals[REMOTE_PREFLIGHT_KEY];
+  for (const event of ["model_select", "thinking_level_select", "session_before_tree", "session_before_fork", "session_before_switch", "session_start", "session_shutdown"]) it(`${event} revokes pending approval and late compaction`, async () => {
+    const f = fixture("Compact"); const pending = f.capability.check(); await tick(); const old = f.compacts[0];
+    await f.emit(event); old.options.onComplete(); expect(await pending).toBe("cancel"); expect(f.sent).toHaveLength(0);
   });
-  it("ignores old completion callbacks when a newer same-session compaction is pending", async () => {
-    const fx = setup("Compact");
-    const callbacks: { options: any; token: string }[] = [];
-    fx.ctx.isIdle = () => true;
-    fx.ctx.compact = (options: any) => callbacks.push({ options, token: (globalThis as any).__piIdleContextForceCheapV1.token });
-    await fx.handlers.input({ source: "interactive", text: fx.text }, fx.ctx);
-    await new Promise((resolve) => setTimeout(resolve, 5));
-    expect(callbacks).toHaveLength(1);
-    fx.handlers.model_select?.({ type: "model_select" }, fx.ctx);
-    const newer = fx.capability.check();
-    await new Promise((resolve) => setTimeout(resolve, 0));
-    expect(callbacks).toHaveLength(2);
-    const appendSummary = (callback: any, token: string, id: string) => {
-      fx.setBranch([...fx.ctx.sessionManager.getBranch(), { type: "compaction", id, fromHook: true, details: { idleContextNativeCompaction: 1, idleContextExplicitAttempt: token } }]);
-      callback.options.onComplete();
-    };
-    appendSummary(callbacks[0], callbacks[0].token, "old-entry");
-    let settled = false;
-    void newer.then(() => { settled = true; });
-    await new Promise((resolve) => setTimeout(resolve, 0));
-    expect(settled).toBe(false);
-    appendSummary(callbacks[1], callbacks[1].token, "new-entry");
-    expect(await newer).toBe("continue");
-    delete fx.globals[REMOTE_PREFLIGHT_KEY];
-  });
-  it("does not gate automatic extension-originated prompts", async () => {
-    const { handlers, ctx, text, uiCalls, globals } = setup("Cancel");
-    expect(await handlers.input({ source: "extension", text }, ctx)).toBeUndefined();
-    expect(uiCalls).toEqual([]);
-    delete globals[REMOTE_PREFLIGHT_KEY];
-  });
+  it("already-aborted preflight never opens a dialog", async () => { const f = fixture(); expect(await f.capability.check(AbortSignal.abort())).toBe("cancel"); expect(f.dialogs).toHaveLength(0); });
 });

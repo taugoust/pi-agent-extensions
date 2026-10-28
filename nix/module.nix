@@ -283,7 +283,7 @@ in
             guardedModels = lib.mkOption {
               type = lib.types.attrsOf lib.types.str;
               default = { };
-              description = "Selectable idle-guard names mapped to exact physical provider/model IDs.";
+              description = "Legacy idle-guard alias mappings used only to migrate saved selections to physical models. Idle admission does not route provider requests.";
             };
             cheapCompactionModel = lib.mkOption {
               type = lib.types.nullOr lib.types.str;

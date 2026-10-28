@@ -3,7 +3,7 @@ import { mkdtempSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { readConfig } from "./index.ts";
-import { parseGuardedModels } from "./guard.ts";
+import { parseLegacyAliases as parseGuardedModels } from "./migration.ts";
 
 const directories: string[] = [];
 function file(text?: string): string {

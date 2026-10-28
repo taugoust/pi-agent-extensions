@@ -310,11 +310,12 @@ export default function tuiWorkerExtension(pi: ExtensionAPI): void {
         }, 1000);
         nameWatch.unref?.();
       }
-      if (manifest.execution !== "rpc-headless" && process.env.PI_SUBAGENT_ID) {
+      if (process.env.PI_SUBAGENT_ID) {
         const globals = globalThis as Record<string, any>;
         parentIdleCapability = { request: (details: { model: string; idleMinutes: number; contextPercent: number }, decisionSignal?: AbortSignal) =>
           !worker?.sealed ? worker.requestIdleDecision(details, decisionSignal) : Promise.reject(new Error("Parent idle-decision channel unavailable")) };
         globals["__piIdleContextParentV1"] = parentIdleCapability;
+        pi.events.emit("idle-context:decision-channel-ready", {});
       }
       if (manifest.execution === "rpc-headless") {
         (globalThis as any)[WORKER_INTERACTIONS_KEY] = { protocol: 1, mode: "headless", workerEpoch: manifest.workerEpoch,

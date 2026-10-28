@@ -386,10 +386,12 @@ try {
 
   const raceStore = new JobStore(path.join(root, "race-state"), path.join(root, "race-runtime"));
   let releaseLaunch;
+  let enteredLaunch;
+  const launchEntered = new Promise(resolve => { enteredLaunch = resolve; });
   let killed = false;
   const raceBackend = {
     async launch() {
-      await new Promise((resolve) => { releaseLaunch = resolve; });
+      await new Promise((resolve) => { releaseLaunch = resolve; enteredLaunch(); });
       return { schemaVersion: 1, windowId: "@99", paneId: "%99", panePid: process.pid, paneStartToken: "test", launchedAt: new Date().toISOString() };
     },
     async paneState() { return { exists: true, dead: false, panePid: process.pid }; },
@@ -400,11 +402,10 @@ try {
   };
   const raceManager = new BackgroundJobManager(raceStore, raceBackend);
   const starting = raceManager.start({ command: "printf must-not-run", cwd: root, sessionId: "race" });
-  let raceIds = [];
-  for (let attempt = 0; attempt < 100 && raceIds.length === 0; attempt += 1) {
-    await new Promise((resolve) => setTimeout(resolve, 10));
-    raceIds = await raceStore.listIds();
-  }
+  // Directory allocation precedes metadata publication. Synchronize on backend
+  // entry so cancellation exercises an actual in-flight launch, not setup.
+  await launchEntered;
+  const raceIds = await raceStore.listIds();
   assert(raceIds.length === 1, "starting job was not durably discoverable");
   await raceManager.cancel(raceIds[0]);
   releaseLaunch();
