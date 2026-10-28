@@ -57,7 +57,22 @@ let
     { enabled = "yes"; }
     { targets = [ "fixture" ]; }
   ];
+  registry = import ./extension-registry.nix { inherit self; };
+  removedPager = evaluate { extensions.pager.enable = true; };
+  allLocal = evaluate {
+    extensions = lib.genAttrs
+      (map (name: registry.extensions.${name}.optionName) registry.localExtensionNames)
+      (_: { enable = true; });
+  };
 in
+# Removed feature selections fail explicitly rather than installing missing sources.
+assert !(registry.extensions ? pager);
+assert !(builtins.tryEval (builtins.deepSeq (registry.resolveExtensions [ "pager" ]) true)).success;
+assert !(valid removedPager);
+assert lib.any (entry: !entry.assertion && lib.hasInfix "pager extension was removed" entry.message) removedPager.assertions;
+assert valid allLocal;
+assert !(allLocal.home.file ? ".pi/agent/extensions/pager");
+assert lib.all (name: builtins.pathExists registry.extensions.${name}.source) registry.localExtensionNames;
 assert valid absent && valid optedIn && valid precedence && valid sandbox && valid withPackages;
 # Null is unmanaged, including absence of defaults artifacts; {} opts in.
 assert lib.all (

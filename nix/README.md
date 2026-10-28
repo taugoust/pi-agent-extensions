@@ -123,7 +123,7 @@ option names remain available. The only aliases are:
 | Existing option name | Canonical extension / defaults file |
 | --- | --- |
 | `accounts` | `openai-accounts` / `defaults/openai-accounts.json` |
-| `usage` | `openai-usage` / `defaults/openai-usage.json` |
+| `usage` (legacy) | `openai-usage` / `defaults/openai-usage.json`; installs `accounts` dependency, no `/usage` command. Prefer `accounts.enable`. |
 
 All others use their option name as the canonical name, including
 `openai-fast-mode` (installed source directory `pi-openai-fast-mode`). The full

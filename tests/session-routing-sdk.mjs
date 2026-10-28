@@ -12,8 +12,7 @@ const load = createJiti(import.meta.url, { fsCache: false });
 const { default: accounts } = await load.import("../openai-accounts/accounts.ts");
 const oauth = await load.import("../openai-accounts/oauth.ts");
 const { AccountStore, InMemoryAccountStorageBackend } = await load.import("../openai-accounts/account-store.ts");
-const { registerGuard } = await load.import("../idle-context-warning/guard.ts");
-const { registerCompaction } = await load.import("../idle-context-warning/compaction.ts");
+const { installLegacyMigration } = await load.import("../idle-context-warning/migration.ts");
 const routing = await load.import("../shared/session-routing.ts");
 const token = (id) => `${Buffer.from('{"alg":"none"}').toString("base64url")}.${Buffer.from(JSON.stringify({ sub: id, "https://api.openai.com/auth": { chatgpt_account_id: id } })).toString("base64url")}.fixture`;
 
@@ -62,11 +61,11 @@ test("actual AgentSession startup order and retained follower use coherent provi
       // Like the CLI, select an explicit model before binding session events.
       // SDK sessions with caller-supplied runtimes do not infer a late factory's model.
       factory({})({ registerProvider: (provider, definition) => runtime.registerProvider(provider, definition), on() {} });
-      if (!child) runtime.registerVirtualModel({ provider: "idle-guard", id: "astra", name: "Bootstrap guard", thinkingLevels: ["low"], route() { throw new Error("Guard registration must replace bootstrap before dispatch"); } });
+      if (!child) runtime.registerVirtualModel({ provider: "idle-guard", id: "astra", name: "Legacy idle alias", thinkingLevels: ["low"], route() { throw new Error("Legacy alias is closed until migration resolves it"); } });
       const config = SettingsManager.inMemory({ defaultProvider: child ? "openai" : "idle-guard", defaultModel: child ? "small-fixture" : "astra", defaultThinkingLevel: "low", compaction: { enabled: false }, retry: { enabled: false } });
       const factories = [factory(refs), pi => accounts(pi, { store, providers: oauth.createBuiltinProviderAdapters() })];
-      // Deliberately load Accounts BEFORE Guard: bootstrap cannot rely on session_start order.
-      if (!child) factories.push(pi => { const guard = registerGuard(pi, () => settings, { tombstonePath: join(root, "aliases.json") }); registerCompaction(pi, () => settings, guard.compactionProof); });
+      // Legacy aliases are compatibility selections only; current admission is provider-independent.
+      if (!child) factories.push(pi => installLegacyMigration(pi, () => settings, join(root, "aliases.json")));
       const loader = new DefaultResourceLoader({ cwd: root, agentDir: root, settingsManager: config, noExtensions: true, noSkills: true, noPromptTemplates: true, noThemes: true, noContextFiles: true, extensionFactories: factories });
       await loader.reload();
       const { session } = await createAgentSession({ cwd: root, agentDir: root, modelRuntime: runtime, settingsManager: config, resourceLoader: loader, sessionManager: SessionManager.inMemory(root), noTools: "builtin" });
@@ -79,7 +78,7 @@ test("actual AgentSession startup order and retained follower use coherent provi
       return { session, owner, ctx: refs.ctx, controls: globalThis.__paeAccountControlsV1 };
     }
     const parent = await session();
-    assert.equal(parent.session.model.provider, "idle-guard");
+    assert.equal(parent.session.model.provider, "openai");
     assert.equal(routing.getSessionRoutingProfile(parent.ctx).providerId, "openai");
     await parent.session.prompt("warm");
     assert.equal(calls.at(-1).key, "fixture-alpha");

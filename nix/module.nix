@@ -165,6 +165,11 @@ let
     };
 in
 {
+  imports = [
+    (lib.mkRemovedOptionModule [ "programs" "pi" "extensions" "pager" ]
+      "The pager extension was removed. Remove this configuration; use native Pi scrolling, fullscreen, Ctrl+O or the external editor instead.")
+  ];
+
   options.programs.pi = {
     enable = lib.mkEnableOption "pi coding agent";
     package = lib.mkOption {

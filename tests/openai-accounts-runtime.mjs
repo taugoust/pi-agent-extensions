@@ -14,10 +14,14 @@ const oauthModule = await createJiti(import.meta.url).import("../openai-accounts
 const usageModule = await createJiti(import.meta.url).import("../openai-usage/index.ts");
 const compactionModule = await createJiti(import.meta.url).import("../idle-context-warning/compaction.ts");
 const routingModule = await createJiti(import.meta.url).import("../shared/session-routing.ts");
-const guardModule = await createJiti(import.meta.url).import("../idle-context-warning/guard.ts");
 const { AccountStore, InMemoryAccountStorageBackend } = accountModule;
 const { createBtwService } = await createJiti(import.meta.url).import("../btw/service.ts");
 const { SESSION_ROUTING_FILE_ENV, SESSION_ROUTING_OWNER_ENV, prepareSessionRoutingRequest, resolveSessionProvider, registerSessionModelReference, bindSessionModelRequest } = routingModule;
+// A harness worker may inherit live routing descriptors. Fixtures own their routing
+// explicitly; never read or mutate the invoking worker's account/session state.
+const outerRoutingEnv = [SESSION_ROUTING_FILE_ENV, SESSION_ROUTING_OWNER_ENV].map(key => [key, process.env[key]]);
+for (const [key] of outerRoutingEnv) delete process.env[key];
+test.after(() => { for (const [key, value] of outerRoutingEnv) { if (value === undefined) delete process.env[key]; else process.env[key] = value; } });
 
 function jwtToken(accountId, subject) {
   const encode = (value) => Buffer.from(JSON.stringify(value)).toString("base64url");
@@ -240,7 +244,7 @@ async function fixture(options = {}) {
     for (const handler of handlers.get(event) ?? []) await handler({ type: event, ...value }, ctx);
   };
   pi.setModel = async (model) => { ctx.model = model; await fire("model_select", { model }); return true; };
-  if (options.guardBootstrap) {
+  if (options.legacyBootstrap) {
     ctx.model = { provider: "idle-guard", id: "astra", api: "pi-virtual" };
     registerSessionModelReference(ctx, () => ({ provider: "openai", id: "gpt-6-astra" }));
   }
@@ -397,10 +401,10 @@ test("failed routing history publication revokes descriptor and blocks main/help
   } finally { await dispose(f); }
 });
 
-test("initial guarded alias bootstraps routing from the guard-registered physical model reference", async () => {
-  const f = await fixture({ guardBootstrap: true });
+test("legacy alias bootstraps account routing from an explicit physical model reference", async () => {
+  const f = await fixture({ legacyBootstrap: true });
   try {
-    assert.equal(f.ctx.model.provider, "idle-guard", "bootstrap must not replace the guard alias");
+    assert.equal(f.ctx.model.provider, "idle-guard", "account bootstrap alone must not bypass explicit legacy migration");
     const profile = routingModule.getSessionRoutingProfile(f.ctx);
     assert.equal(profile.providerId, "openai");
     assert.equal(profile.accountId, null);
@@ -667,7 +671,7 @@ test("/accounts selection switches the main physical model provider while retain
     const choices = ["OpenAI Codex", "Switch account", "Work", "Close"];
     f.ctx.ui.select = async () => choices.shift();
     await f.commands.get("accounts").handler("", f.ctx);
-    assert.equal(f.ctx.model.provider, "openai-codex");
+    assert.equal(f.ctx.model.provider, "openai-codex", JSON.stringify(f.notices));
     assert.equal(f.ctx.model.id, roleModelId);
     assert.equal(routingModule.getSessionRoutingProfile(f.ctx).providerId, "openai-codex");
     assert.equal(routingModule.getSessionRoutingProfile(f.ctx).accountId, "Work");
@@ -871,49 +875,39 @@ test("same-session startup/resume restores its saved selection while a new sessi
   } finally { await dispose(f); }
 });
 
-test("idle-guard physical Astra route reaches the same request-time OpenAI auth gate", async () => {
+test("legacy idle alias migration retains the named account and uses ordinary physical dispatch", async () => {
+  const { installLegacyMigration } = await createJiti(import.meta.url).import("../idle-context-warning/migration.ts");
   const f = await fixture();
   try {
-    const switched = await switchRequest(f, "alpha", "guard-alpha");
-    assert.equal(switched.ok, true);
-    const settings = { idleMinutes: 30, contextPercent: 20, guardedModels: { astra: "openai/gpt-6-astra" } };
-    const guard = guardModule.registerGuard(f.pi, () => settings, { tombstonePath: join(f.root, "guard-aliases.json") });
+    assert.equal((await switchRequest(f, "alpha", "migration-alpha")).ok, true);
+    installLegacyMigration(f.pi, () => ({ idleMinutes: 30, contextPercent: 20, guardedModels: { astra: "openai/gpt-6-astra" } }), join(f.root, "aliases.json"));
+    f.ctx.model = { provider: "idle-guard", id: "astra", api: "pi-virtual" };
     await f.fire("session_start");
-    f.ctx.model = { provider: "idle-guard", id: "astra" };
-    const proxy = f.registry.find("idle-guard-proxy", "astra");
-    assert.ok(proxy);
-    const result = await f.registry.streamSimple(proxy, [], {}).result();
+    assert.equal(f.ctx.model.provider, "openai");
+    assert.equal(f.ctx.model.id, "gpt-6-astra");
+    const snapshot = await f.service.getSnapshot({ sessionId: f.sessionId });
+    assert.equal(snapshot.currentAccountId, "alpha");
+    assert.equal(snapshot.sessionRouting.providerId, "openai");
+    const result = await f.registry.streamSimple(f.ctx.model, [], {}).result();
     assert.equal(result.stopReason, "stop", JSON.stringify(result));
-    assert.equal(f.delegated.at(-1).id, "gpt-6-astra");
     assert.equal(f.delegated.at(-1).apiKey, "fixture-secret-alpha");
-    assert.equal(guard.compactionProof(f.ctx)?.mode, "physical");
-    assert.equal(guard.compactionProof(f.ctx)?.target, "openai/gpt-6-astra");
+    assert.equal(f.registry.find("idle-guard-proxy", "astra").api, "pi-virtual", "legacy proxy is only a closed migration sentinel");
   } finally { await dispose(f); }
 });
 
-test("idle-guard rechecks after a delayed final auth resolution and sends no cold history", async () => {
+test("ordinary physical dispatch rechecks selected account after delayed final auth resolution", async () => {
   const f = await fixture();
   try {
-    assert.equal((await switchRequest(f, "alpha", "guard-pause-alpha")).ok, true);
-    const settings = { idleMinutes: 30, contextPercent: 20, guardedModels: { astra: "openai/gpt-6-astra" } };
-    guardModule.registerGuard(f.pi, () => settings, { tombstonePath: join(f.root, "paused-guard-aliases.json") });
-    await f.fire("session_start");
-    f.ctx.model = { provider: "idle-guard", id: "astra" };
-    f.branch = [{ type: "message", id: "warm", parentId: null, timestamp: new Date().toISOString(), message: {
-      role: "assistant", model: "gpt-6-astra", provider: "openai", timestamp: Date.now(), stopReason: "stop", content: [{ type: "text", text: "warm" }],
-    } }];
-    const proxy = f.registry.find("idle-guard-proxy", "astra");
+    assert.equal((await switchRequest(f, "alpha", "physical-pause-alpha")).ok, true);
     const pause = f.pauseFinalAuth();
     const before = f.delegated.length;
-    const resultPromise = f.registry.streamSimple(proxy, [], {}).result();
+    const resultPromise = f.registry.streamSimple(f.ctx.model, [], {}).result();
     await pause.started;
-    f.branch = [{ type: "message", id: "cold", parentId: null, timestamp: new Date(Date.now() - 60 * 60_000).toISOString(), message: {
-      role: "assistant", model: "gpt-6-astra", provider: "openai", timestamp: Date.now() - 60 * 60_000, stopReason: "stop", content: [{ type: "text", text: "cold" }],
-    } }];
+    await f.store.updateProvider("openai", state => ({ ...state, accounts: { ...state.accounts, alpha: { type: "api_key", key: "fixture-replaced-alpha" } } }));
     pause.release();
     const result = await resultPromise;
     assert.equal(result.stopReason, "error");
-    assert.equal(f.delegated.length, before, "cold transcript must never reach the expensive provider");
+    assert.equal(f.delegated.length, before, "stale account authority must never reach the physical provider");
   } finally { await dispose(f); }
 });
 
@@ -1064,18 +1058,20 @@ test("credential management refuses RPC/Paseo UI mode without forwarding secret 
   } finally { await dispose(f); }
 });
 
-test("/usage does not reuse a platform link when the owner snapshot is unavailable", async () => {
+test("/accounts does not reuse a platform link when the owner snapshot is unavailable", async () => {
   const f = await fixture();
   try {
     usageModule.default(f.pi);
     f.service.getSnapshot = async () => { throw new Error("stale owner"); };
-    await f.commands.get("usage").handler("", f.ctx);
+    const choices = ["OpenAI", "Credential status and usage link", "Close"];
+    f.ctx.ui.select = async (_title, options) => { const choice = choices.shift(); assert.ok(options.includes(choice)); return choice; };
+    await f.commands.get("accounts").handler("", f.ctx);
     assert.equal(f.notices.at(-1).message, "OpenAI credential status unavailable.");
-    assert.doesNotMatch(f.notices.at(-1).message, /platform\\.openai\\.com|chatgpt\\.com/);
+    assert.doesNotMatch(f.notices.at(-1).message, /platform\.openai\.com|chatgpt\.com/);
   } finally { await dispose(f); }
 });
 
-test("/usage is local-only and reports a link without issuing any companion request", async () => {
+test("/accounts is local-only and reports a link without issuing any companion request", async () => {
   const f = await fixture();
   const beforeFetch = globalThis.fetch;
   let fetchCalls = 0;
@@ -1083,12 +1079,55 @@ test("/usage is local-only and reports a link without issuing any companion requ
   try {
     assert.equal((await switchRequest(f, "alpha", "usage-alpha")).ok, true);
     usageModule.default(f.pi);
-    await f.commands.get("usage").handler("", f.ctx);
+    const choices = ["OpenAI", "Credential status and usage link", "Close"];
+    f.ctx.ui.select = async (_title, options) => { const choice = choices.shift(); assert.ok(options.includes(choice)); return choice; };
+    await f.commands.get("accounts").handler("", f.ctx);
+    assert.equal(f.commands.has("usage"), false);
     assert.equal(fetchCalls, 0);
     assert.match(f.notices.at(-1).message, /platform\.openai\.com\/settings\/organization\/usage/);
-    assert.doesNotMatch(f.notices.at(-1).message, /quota|tokens?\s*[:=]\s*0/i);
+    assert.doesNotMatch(f.notices.at(-1).message, /tokens?\s*[:=]\s*0/i);
   } finally {
     globalThis.fetch = beforeFetch;
     await dispose(f);
   }
+});
+
+for (const [provider, credential, url, label] of [
+  ["OpenAI", "chatgpt-grant-configured", "https://chatgpt.com/settings/usage", "ChatGPT grant configured"],
+  ["OpenAI Codex", "chatgpt-grant-matched-refreshed", "https://chatgpt.com/settings/usage", "ChatGPT grant active"],
+  ["OpenAI", "unknown", null, "Credential status unknown"],
+  ["OpenAI", "unavailable", null, "No effective credential"],
+]) test(`/accounts credential status: ${provider} ${credential}`, async () => {
+  const f = await fixture();
+  try {
+    const choices = [provider, "Credential status and usage link", "Close"];
+    f.ctx.ui.select = async (_title, options) => { const choice = choices.shift(); assert.ok(options.includes(choice)); return choice; };
+    f.service.getSnapshot = async request => {
+      assert.equal(request.sessionId, f.sessionId);
+      assert.equal(request.providerId, provider === "OpenAI" ? "openai" : "openai-codex");
+      return {sessionId: f.sessionId, usage: {effectiveCredential: credential, settingsUrl: url}};
+    };
+    await f.commands.get("accounts").handler("", f.ctx);
+    const message = f.notices.at(-1).message;
+    assert.ok(message.includes(label));
+    assert.ok(message.includes("quota, billing and remote entitlement are not queried"));
+    if (url) assert.ok(message.includes(url)); else assert.doesNotMatch(message, /https?:/);
+    assert.doesNotMatch(message, /fixture-secret/);
+  } finally { await dispose(f); }
+});
+
+test("/accounts suppresses credential status after session replacement", async () => {
+  const f = await fixture();
+  try {
+    const choices = ["OpenAI", "Credential status and usage link"];
+    f.ctx.ui.select = async () => choices.shift();
+    f.service.getSnapshot = async () => {
+      f.sessionId = "replacement";
+      await f.fire("session_start");
+      return {sessionId: "session-one", usage: {effectiveCredential: "api-key-configured", settingsUrl: "https://platform.openai.com/settings/organization/usage"}};
+    };
+    const before = f.notices.length;
+    await f.commands.get("accounts").handler("", f.ctx);
+    assert.equal(f.notices.length, before);
+  } finally { await dispose(f); }
 });

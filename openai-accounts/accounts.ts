@@ -1766,6 +1766,7 @@ export default function accountsExtension(
 				isCurrent: () => isOwnerCurrent(owner),
 			}),
 			selectSessionPhysicalModel,
+			(owner, providerId) => accountControlsService.getSnapshot({ sessionId: owner.sessionId, providerId }),
 			async (owner, providerId, accountId, inherit = false) => {
 				const snapshot = await snapshotFor(owner, providerId);
 				const result = await switchViaService({ protocol: 1, providerId, requestId: randomUUID(), expectedSessionId: owner.sessionId, expectedServiceEpoch: serviceEpoch, expectedSelectionRevision: snapshot.selectionRevision, ...(snapshot.sessionRouting ? { expectedRoutingRevision: snapshot.sessionRouting.revision } : {}), accountId, ...(inherit ? { inherit: true } : {}) });
@@ -1931,11 +1932,13 @@ function createAccountCommand(
 		isCurrent(): boolean;
 	},
 	selectPhysicalModel: (owner: SessionSelectionOwner, providerId: AccountProviderId, apply?: boolean) => Promise<boolean>,
+	getSnapshot: (owner: SessionSelectionOwner, providerId: AccountProviderId) => Promise<AccountControlsSnapshot>,
 	selectBranchAccount: (owner: SessionSelectionOwner, providerId: AccountProviderId, accountId: string | null, inherit?: boolean) => Promise<void>,
 ) {
 	return {
-		description: "Open the interactive OAuth and API key account manager",
+		description: "Manage accounts, inspect credential status and find official usage settings",
 		handler: async (_args: string, ctx: ExtensionCommandContext) => {
+			if (!ctx.hasUI) return;
 			if (ctx.mode !== "tui") {
 				ctx.ui.notify(
 					"/accounts credential management is available only in the native Pi TUI.",
@@ -1964,6 +1967,7 @@ function createAccountCommand(
 						: ["Current: default Pi login"]),
 					...(!inherited ? ["Add account"] : []),
 					...(names.length ? ["Switch account", ...(!inherited ? ["Remove account"] : [])] : []),
+					"Credential status and usage link",
 					"Restore default Pi login",
 					...(inherited ? ["Follow parent account"] : []),
 					"Close",
@@ -1972,6 +1976,21 @@ function createAccountCommand(
 					signal: menuOwner.signal,
 				});
 				if (!action || action === "Close" || !menuOwner.isCurrent()) return;
+				if (action === "Credential status and usage link") {
+					try {
+						const snapshot = await getSnapshot(owner, providerId);
+						if (!menuOwner.isCurrent() || snapshot.sessionId !== owner.sessionId) return;
+						const { effectiveCredential, settingsUrl } = snapshot.usage;
+						const status = effectiveCredential === "api-key-configured" ? "API key configured"
+							: effectiveCredential === "chatgpt-grant-matched-refreshed" ? "ChatGPT grant active"
+							: effectiveCredential === "chatgpt-grant-configured" ? "ChatGPT grant configured"
+							: effectiveCredential === "unavailable" ? "No effective credential" : "Credential status unknown";
+						ctx.ui.notify(`${adapter.displayName}: ${status}\n${settingsUrl ? `Official usage settings: ${settingsUrl}\n` : ""}Local credential status only; quota, billing and remote entitlement are not queried.`, effectiveCredential === "unavailable" ? "warning" : "info");
+					} catch {
+						if (menuOwner.isCurrent()) ctx.ui.notify(`${adapter.displayName} credential status unavailable.`, "warning");
+					}
+					continue;
+				}
 				if (action === "Add account") {
 					const name = await ctx.ui.input("Account name", "e.g. personal", {
 						signal: menuOwner.signal,

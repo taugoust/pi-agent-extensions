@@ -63,6 +63,10 @@ try {
   const commands = await request('registrations', 'get_commands');
   assert.equal(commands.success, true, JSON.stringify(commands));
   for (const name of expected) {
+    if (name.startsWith('!')) {
+      assert.ok(!commands.data.commands.some(command => command.name === name.slice(1)), `Retired command ${name.slice(1)} is still registered`);
+      continue;
+    }
     assert.ok(commands.data.commands.some(command => command.name === name && command.source === 'extension'),
       `Missing registered command ${name}; native extension load did not succeed. ${stderr}`);
   }

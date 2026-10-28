@@ -663,7 +663,9 @@ export default function backgroundJob(pi: ExtensionAPI) {
           const state = context.state as { jobName?: string };
           if (state.jobName !== details.name) {
             state.jobName = details.name;
-            context.invalidate();
+            // Pi rebuilds the tool container during renderResult. Invalidating here
+            // re-enters that rebuild and appends the result twice (including on reload).
+            // The next normal renderCall reads this state; do not repaint recursively.
           }
         }
       }
@@ -677,7 +679,11 @@ export default function backgroundJob(pi: ExtensionAPI) {
         text = lines.join('\n');
       }
       if (!expanded) {
-        if (result.details?.jobs) text = result.details.jobs.map((j:any)=>`${jobStatusLabel(j.status,j.observation_only)} · ${uiText(j.name,90)}`).join("\n") || "No background jobs.";
+        if (result.details?.jobs) {
+          const jobs = result.details.jobs;
+          text = jobs.map((j:any)=>`${jobStatusLabel(j.status,j.observation_only)} · ${uiText(j.name,90)}`).join("\n") || "No background jobs.";
+          if (details.action === "yield") text = `Run yielded · ${jobs.length} ${jobs.length === 1 ? "job" : "jobs"}${jobs.length ? `\n${text}` : ""}`;
+        }
         else if (result.details?.name && ["start","status","adopt"].includes(result.details.action)) text = `${jobStatusLabel(result.details.status,result.details.observation_only)} · ${uiText(result.details.name,100)}`;
         const lines=text.split("\n");
         if(lines.length>10)text=lines.slice(0,10).join("\n")+"\nExpand output for more.";

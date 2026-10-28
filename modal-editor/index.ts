@@ -11,7 +11,6 @@
  *   Reflow:     gq(q|j|k|G|gg)   Q (reflow entire buffer)
  *               In visual/V-line: gq reflows selected lines.
  *   Clipboard:  y/p/P use the system clipboard.  Cmd+V (bracketed paste) still works.
- *   Pager:      K emits pager:open event (opens pager if pager extension is loaded).
  *   Visual:      v → select with motions → d/c/x/y/o/</> (o swaps endpoint)
  *   Visual-line: V → select lines with j/k → d/c/x/y/o/</> (o swaps endpoint)
  *   Escape:      insert → normal, normal → abort agent
@@ -354,8 +353,6 @@ class ModalEditor extends CustomEditor {
 	private lastYankText: string | null = null;
 	private lastYankLinewise: boolean = false;
 
-	// Normal-mode K handler (wired to pager:open event by the extension entry point)
-	onNormalK?: () => void;
 
 	// OSC 52 clipboard reader supplied by the extension entry point.
 	onReadTerminalClipboard?: () => Promise<string | null>;
@@ -1669,13 +1666,6 @@ class ModalEditor extends CustomEditor {
 			return;
 		}
 
-		// Open conversation pager (K — vim uses K for "look up")
-		// Emits an event so the pager extension handles it if loaded.
-		if (data === "K") {
-			this.onNormalK?.();
-			return;
-		}
-
 		// Replace single character (r{c})
 		if (data === "r") {
 			this.pendingReplace = true;
@@ -1908,7 +1898,6 @@ export default function (pi: ExtensionAPI) {
 
 		ctx.ui.setEditorComponent((tui, theme, kb) => {
 			const editor = new ModalEditor(tui, theme, kb);
-			editor.onNormalK = () => pi.events.emit("pager:open");
 			editor.onReadTerminalClipboard = () => readClipboardViaOsc52((handler) => ctx.ui.onTerminalInput(handler));
 			return editor;
 		});

@@ -17,7 +17,11 @@ let
   root = ".config/fixture-pi";
   accountPath = "${root}/extensions/openai-accounts";
   usagePath = "${root}/extensions/openai-usage";
+  registry = import ./extension-registry.nix { inherit self; };
 in
+# Package and module selections share the same compatibility dependency closure.
+assert lib.elem "openai-accounts" (registry.resolveExtensions [ "openai-usage" ]);
+assert !(lib.elem "openai-usage" (registry.resolveExtensions [ "openai-accounts" ]));
 assert lib.all valid [
   both
   accountsOnly
@@ -31,7 +35,8 @@ assert lib.all (config: (files config) ? ${"${root}/extensions/shared"}) [
 ];
 assert (files both) ? ${accountPath} && (files both) ? ${usagePath};
 assert (files accountsOnly) ? ${accountPath} && !((files accountsOnly) ? ${usagePath});
-assert (files usageOnly) ? ${usagePath} && !((files usageOnly) ? ${accountPath});
+# The legacy usage option now installs the account UI, without a /usage command.
+assert (files usageOnly) ? ${usagePath} && (files usageOnly) ? ${accountPath};
 assert !((files neither) ? ${accountPath}) && !((files neither) ? ${usagePath});
 # Enabling account controls must never declare credentials or an account store,
 # nor silently take over the user's native settings/models files.

@@ -21,7 +21,6 @@ let
     "cache-hit-monitor"
     "mac-system-theme"
     "modal-editor"
-    "pager"
     "pdf"
     "permission-gate"
     "questionnaire"
@@ -47,7 +46,9 @@ let
           else
             name;
         dependencies =
-          if name == "sandbox" then
+          if name == "openai-usage" then
+            [ "openai-accounts" ]
+          else if name == "sandbox" then
             [ "subagent" ]
           else if name == "subagent" then
             [ "subagent-finalizer" ]
@@ -108,9 +109,15 @@ let
     }) localSkillNames
   );
   extensions = localExtensions // upstreamExtensions // optionalExtensions;
+  assertPagerRemoved = names:
+    if builtins.elem "pager" names then
+      throw "The pager extension was removed. Remove pager from extension selections; use native Pi scrolling, fullscreen, Ctrl+O or the external editor instead."
+    else
+      true;
   # One dependency graph serves package composition and Home Manager installation.
   resolveExtensions =
     names:
+    assert assertPagerRemoved names;
     map (entry: entry.key) (
       builtins.genericClosure {
         startSet = map (key: { inherit key; }) names;

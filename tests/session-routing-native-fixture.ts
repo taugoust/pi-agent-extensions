@@ -1,6 +1,6 @@
 // Offline fixture extension for native multi-process routing regression.
 import accounts from "../openai-accounts/accounts.js";
-import { registerGuard } from "../idle-context-warning/guard.js";
+import idleAdmission from "../idle-context-warning/index.js";
 import { AccountStore, InMemoryAccountStorageBackend } from "../openai-accounts/account-store.js";
 import * as oauth from "../openai-accounts/oauth.js";
 import { createAssistantMessageEventStream } from "@earendil-works/pi-ai";
@@ -19,7 +19,7 @@ export default async function fixture(pi: any) {
   pi.registerProvider("openai", provider("openai", log));
   pi.registerProvider("openai-codex", provider("openai-codex", log));
   accounts(pi,{store,providers:oauth.createBuiltinProviderAdapters()});
-  if (role === "parent") registerGuard(pi,()=>({idleMinutes:30,contextPercent:20,guardedModels:{astra:"openai/main-fixture"}}),{tombstonePath:process.env.PI_CODING_AGENT_DIR+"/aliases.json"});
+  if (role === "parent") idleAdmission(pi,{readSettings:()=>({idleMinutes:30,contextPercent:20,guardedModels:{astra:"openai/main-fixture"}}),tombstonePath:process.env.PI_CODING_AGENT_DIR+"/aliases.json"});
   pi.registerCommand("routing-switch",{handler:async(args:string,ctx:any)=>{const [providerId,accountId]=args.split(/\s+/,2);const service=(globalThis as any)[ACCOUNT_CONTROLS_KEY];try{await appendFile(log,JSON.stringify({role:"control-start",providerId,accountId})+"\n");const snapshot=await service.getSnapshot({sessionId:ctx.sessionManager.getSessionId(),providerId});await appendFile(log,JSON.stringify({role:"snapshot",providerId,snapshot:{sessionId:snapshot.sessionId,serviceEpoch:snapshot.serviceEpoch,selectionRevision:snapshot.selectionRevision,sessionRouting:snapshot.sessionRouting,currentAccountId:snapshot.currentAccountId,activationStatus:snapshot.activationStatus}})+"\n");const result=await service.switchAccount({protocol:1,providerId,requestId:crypto.randomUUID(),expectedSessionId:snapshot.sessionId,expectedServiceEpoch:snapshot.serviceEpoch,expectedSelectionRevision:snapshot.selectionRevision,expectedRoutingRevision:snapshot.sessionRouting?.revision,accountId:accountId==="default"||accountId==="inherit"?null:accountId,...(accountId==="inherit"?{inherit:true}:{})});await appendFile(log,JSON.stringify({role:"control",providerId,accountId,result})+"\n");ctx.ui.notify(`switch:${result.ok}:${result.reason??"ok"}`);}catch(error){await appendFile(log,JSON.stringify({role:"control-error",error:String(error)})+"\n");throw error;}}});
   pi.registerCommand("routing-restore", { handler: async (args: string, ctx: any) => { const result = await ctx.navigateTree(args.trim(), { summarize: false }); await appendFile(log, JSON.stringify({ role: "history", source: role, cancelled: result.cancelled }) + "\n"); ctx.ui.notify(`history:${result.cancelled ? "cancelled" : "restored"}`); } });
   pi.registerCommand("routing-dispatch",{handler:async(_args:string,ctx:any)=>{await pi.sendUserMessage("offline fixture dispatch");}});

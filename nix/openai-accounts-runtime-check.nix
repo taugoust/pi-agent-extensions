@@ -25,7 +25,7 @@ pkgs.runCommand "openai-accounts-immutable-runtime-check"
     export NODE_PATH=
     mkdir -p "$HOME" "$PI_CODING_AGENT_DIR"
     timeout 30s node ${../tests/package-load.mjs} ${piPackage}/bin/pi \
-      ${extensionBundle}/openai-accounts ${extensionBundle}/openai-usage --expect accounts usage
+      ${extensionBundle}/openai-accounts ${extensionBundle}/openai-usage --expect accounts '!usage'
     # Exercise native identity, isolated subtree overrides, history restoration and
     # cold resume against the immutable bundle, never a checkout or user accounts.
     mkdir -p fixture/tests

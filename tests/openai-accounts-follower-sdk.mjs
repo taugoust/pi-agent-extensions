@@ -12,7 +12,7 @@ import {
 const { createJiti } = createRequire(import.meta.resolve("@earendil-works/pi-coding-agent"))("jiti");
 const accounts = await createJiti(import.meta.url).import("../openai-accounts/accounts.ts");
 const oauth = await createJiti(import.meta.url).import("../openai-accounts/oauth.ts");
-const { registerGuard } = await createJiti(import.meta.url).import("../idle-context-warning/guard.ts");
+const { installLegacyMigration } = await createJiti(import.meta.url).import("../idle-context-warning/migration.ts");
 const { AccountStore, InMemoryAccountStorageBackend } = accounts;
 const { routingProfilePath, SESSION_ROUTING_FILE_ENV, SESSION_ROUTING_OWNER_ENV } = await createJiti(import.meta.url).import("../shared/session-routing.ts");
 const cost = { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 };
@@ -22,7 +22,7 @@ function codexToken() {
   return `${encode({ alg: "none" })}.${encode({ sub: "sdk-user", "https://api.openai.com/auth": { chatgpt_account_id: "sdk-codex" } })}.fixture`;
 }
 
-test("actual Pi SDK accounts-before-guard bootstraps the guard alias and retained follower dispatches inherited routing", { timeout: 20_000 }, async () => {
+test("actual Pi SDK accounts startup preserves retained follower routing and legacy alias migration", { timeout: 20_000 }, async () => {
   const root = await mkdtemp(join(tmpdir(), "pae-account-follower-sdk-"));
   const oldDir = process.env.PI_CODING_AGENT_DIR;
   const oldFile = process.env[SESSION_ROUTING_FILE_ENV];
@@ -31,6 +31,8 @@ test("actual Pi SDK accounts-before-guard bootstraps the guard alias and retaine
   const calls = [];
   let rootBundle, childBundle;
   process.env.PI_CODING_AGENT_DIR = root;
+  delete process.env[SESSION_ROUTING_FILE_ENV];
+  delete process.env[SESSION_ROUTING_OWNER_ENV];
   globalThis.fetch = async () => { throw new Error("Live HTTP is forbidden in follower SDK test"); };
   const store = new AccountStore(new InMemoryAccountStorageBackend());
   await store.updateProvider("openai", (state) => ({ ...state, accounts: { alpha: { type: "api_key", key: "fixture-sdk-alpha" } } }));
@@ -41,13 +43,9 @@ test("actual Pi SDK accounts-before-guard bootstraps the guard alias and retaine
     await mkdir(sessionDir, { recursive: true });
     const runtime = await ModelRuntime.create({ authPath, modelsPath: null, allowModelNetwork: false, refreshOnCreate: false });
     if (guardedRoot) runtime.registerVirtualModel({
-      provider: "idle-guard", id: "astra", name: "Idle guarded Astra", thinkingLevels: ["low", "medium", "high"],
+      provider: "idle-guard", id: "astra", name: "Legacy idle alias", thinkingLevels: ["low", "medium", "high"],
       input: ["text"], contextWindow: 32_000, maxTokens: 4096,
-      route(request, ctx) {
-        const model = ctx.modelRegistry.find("openai", "gpt-6-astra");
-        if (!model) throw new Error("SDK guard fixture physical target missing");
-        return { model, thinkingLevel: request.thinkingLevel };
-      },
+      route() { throw new Error("Legacy aliases are closed until current migration resolves them"); },
     });
     const settings = SettingsManager.inMemory({ defaultProvider: "openai", defaultModel: "gpt-6-astra", compaction: { enabled: false }, retry: { enabled: false } });
     const providerFactory = (pi) => {
@@ -74,7 +72,7 @@ test("actual Pi SDK accounts-before-guard bootstraps the guard alias and retaine
         streamSimple() { throw new Error("Codex stream was not expected in this test"); },
       });
       accounts.default(pi, { store, providers: oauth.createBuiltinProviderAdapters() });
-      registerGuard(pi, () => ({ idleMinutes: 30, contextPercent: 20, guardedModels: { astra: "openai/gpt-6-astra" } }), { tombstonePath: join(sessionDir, "guard-aliases.json") });
+      installLegacyMigration(pi, () => ({ idleMinutes: 30, contextPercent: 20, guardedModels: { astra: "openai/gpt-6-astra" } }), join(sessionDir, "legacy-aliases.json"));
     };
     const loader = new DefaultResourceLoader({
       cwd: sessionDir, agentDir: root, settingsManager: settings, noExtensions: true, noSkills: true,
@@ -87,7 +85,7 @@ test("actual Pi SDK accounts-before-guard bootstraps the guard alias and retaine
     });
     if (guardedRoot) {
       const alias = runtime.getModel("idle-guard", "astra");
-      assert.ok(alias, "guard virtual alias exists in the actual SDK ModelRuntime");
+      assert.ok(alias, "closed migration sentinel exists before session binding");
       await session.setModel(alias);
     } else {
       const roleModel = runtime.getModel("openai", "gpt-6-astra");
@@ -106,9 +104,9 @@ test("actual Pi SDK accounts-before-guard bootstraps the guard alias and retaine
     rootBundle = await makeSession(root, { guardedRoot: true });
     const rootSessionId = rootBundle.session.sessionManager.getSessionId();
     const parentModel = rootBundle.session.model;
-    assert.equal(parentModel.provider, "idle-guard");
+    assert.equal(parentModel.provider, "openai");
     const routeSnapshot = await globalThis.__paeAccountControlsV1.getSnapshot({ sessionId: rootSessionId, providerId: "openai" });
-    assert.equal(routeSnapshot.sessionRouting.providerId, "openai", "Accounts-before-guard startup discovers the guard's configured physical alias target");
+    assert.equal(routeSnapshot.sessionRouting.providerId, "openai", "account startup retains the physical role provider");
     process.env[SESSION_ROUTING_FILE_ENV] = routingProfilePath(root, rootSessionId);
     process.env[SESSION_ROUTING_OWNER_ENV] = rootSessionId;
     childBundle = await makeSession(join(root, "child"));

@@ -49,7 +49,6 @@ Extensions are **opt-in**. [Build a selective bundle or install without Nix →]
 | [SSH](ssh) | Retarget work to a remote machine. |
 | [Questionnaire](questionnaire) | Ask structured questions instead of guessing. |
 | [Modal editor](modal-editor) | Edit longer input in a terminal dialog. |
-| [Pager](pager) | Browse long output without flooding the transcript. |
 | [direnv](direnv) | Refresh the project's environment. |
 | [System theme](mac-system-theme) | Follow macOS appearance. |
 
@@ -58,7 +57,7 @@ Extensions are **opt-in**. [Build a selective bundle or install without Nix →]
 | Extension | Use it for |
 | --- | --- |
 | [OpenAI accounts](openai-accounts/README.md) | Manage named accounts with `/accounts`. |
-| [OpenAI usage](openai-usage/README.md) | Open credential status and the official usage link. |
+| [OpenAI usage (legacy)](openai-usage/README.md) | Compatibility selection; credential status and official usage links now live in `/accounts`. |
 | [Stamp](OBSERVABILITY.md) | Record timestamps, response timing and usage metadata. |
 | [Cache monitor](OBSERVABILITY.md) | Inspect prompt-cache reuse. |
 | [Idle context admission](idle-context-warning) | User/parent-owned cold-context decisions, notification admission, and native cheap compaction; independent of provider routing. |

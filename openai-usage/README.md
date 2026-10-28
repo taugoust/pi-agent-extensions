@@ -1,5 +1,5 @@
-# OpenAI usage status
+# Legacy OpenAI usage selection
 
-`/usage` reports only the locally effective OpenAI credential binding and provides the official settings page. It does not query usage endpoints or claim that an API key or ChatGPT grant has remote quota/entitlement. API keys are labeled configured, not validated. No numerical quota placeholders are shown.
+`/usage` is retired. Use `/accounts` → choose provider → **Credential status and usage link**. This reports only local session-bound credential status and the official usage settings URL, never quota/billing metrics or remote entitlement.
 
-Enable `programs.pi.extensions.usage.enable` in the pi-agent-extensions Home Manager module. `pi-accounts` publishes the safe session status service; without it, `/usage` still links to OpenAI's platform usage settings.
+The `openai-usage` entrypoint is retained as an inert compatibility resource. Nix `programs.pi.extensions.usage.enable` and package selections pull in `openai-accounts` through the shared dependency closure. Prefer `programs.pi.extensions.accounts.enable = true;` and remove `usage.enable`. Non-Nix package filters must select `openai-accounts` explicitly. The account-controls service and its bridge `usage` data remain supported.

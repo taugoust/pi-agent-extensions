@@ -3266,6 +3266,13 @@ export default function (pi: ExtensionAPI) {
     },
 
     renderResult(result, options, theme) {
+      if (result.details?.operation === "yield" && !options.expanded) {
+        const groups = result.details.groups ?? [];
+        const children = groups.flatMap((group: any) => group.children ?? []);
+        const summary = children.slice(0, 3).map((child: any) => `${child.status ?? "Unknown"} · ${child.displayName ?? child.title ?? child.label ?? "Subagent"}`).join("\n")
+          + (children.length > 3 ? `\n… ${children.length - 3} more subagents` : "");
+        return new Text(`Run yielded · ${groups.length} ${groups.length === 1 ? "group" : "groups"}${summary ? `\n${summary}` : ""}`, 0, 0);
+      }
       if (result.details?.operation === "profiles") return new Text(result.content.find((part: any) => part.type === "text")?.text ?? "No agent profiles available", 0, 0);
       if (result.details?.tui_subagent) {
         let tasks: any[] = [];
@@ -3323,6 +3330,12 @@ export default function (pi: ExtensionAPI) {
         const failed = isFailure(r);
         const icon = resultIcon(r);
         container.addChild(new Text(`${icon} ${theme.fg("toolTitle", theme.bold(title))} · ${outcomeText(r)}${r.attempt ? ` · attempt ${r.attempt}` : ""}`, 0, 0));
+        const finalOutput = getFinalOutput(r.messages);
+        container.addChild(new Spacer(1));
+        if (finalOutput) container.addChild(new Markdown(truncateByBytes(finalOutput.trim()), 0, 0, mdTheme));
+        else container.addChild(new Text(theme.fg("muted", r.exitCode === -1 ? "(running...)" : "(no output)"), 0, 0));
+        container.addChild(new Spacer(1));
+        container.addChild(new Text(theme.fg("muted", "─── Diagnostics ───"), 0, 0));
         container.addChild(new Text(theme.fg("muted", "Status: ") + theme.fg(failed ? "error" : "dim", `${resultStatus(r)} (exit ${r.exitCode})`), 0, 0));
         container.addChild(new Text(theme.fg("muted", "Task: ") + theme.fg("dim", r.task), 0, 0));
         if (r.model) container.addChild(new Text(theme.fg("muted", "Model: ") + theme.fg("dim", r.model), 0, 0));
@@ -3341,12 +3354,6 @@ export default function (pi: ExtensionAPI) {
         for (const item of displayItems) {
           if (item.type === "toolCall") container.addChild(new Text(theme.fg("muted", "→ ") + formatToolCall(item.name, item.args, theme.fg.bind(theme)), 0, 0));
         }
-
-        const finalOutput = getFinalOutput(r.messages);
-        container.addChild(new Spacer(1));
-        container.addChild(new Text(theme.fg("muted", "─── Output ───"), 0, 0));
-        if (finalOutput) container.addChild(new Markdown(truncateByBytes(finalOutput.trim()), 0, 0, mdTheme));
-        else container.addChild(new Text(theme.fg("muted", r.exitCode === -1 ? "(running...)" : "(no output)"), 0, 0));
 
         const usageStr = formatUsageStats(r.usage, r.model);
         if (usageStr) container.addChild(new Text(theme.fg("dim", usageStr), 0, 0));

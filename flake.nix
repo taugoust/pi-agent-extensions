@@ -120,7 +120,6 @@
             packageName = "pi-auto-extensions";
             extensions = [
               "questionnaire"
-              "pager"
               "fetch"
               "modal-editor"
               "pdf"
