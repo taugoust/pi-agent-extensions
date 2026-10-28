@@ -297,7 +297,7 @@ test("real Pi TUI: local keyboard, observer crash, same-process promotion, retai
     await writeFile(sessionFile, `${JSON.stringify({ type: "message", id: "tool-call-regression", message: { role: "assistant", content: [{ type: "toolCall", id: "call-1", name: "read", arguments: { path: "README.md" } }] } })}\n`, { flag: "a" });
     const structured = readRetainedConversation(sessionFile).messages.find(message => message.id.includes("tool-call-regression"));
     assert.equal(structured?.text, "");
-    assert.deepEqual(structured?.parts?.[0], { type: "toolCall", id: "call-1", name: "read", arguments: { path: "README.md" }, status: "unknown" });
+    assert.deepEqual(structured?.parts?.[0], { type: "toolCall", id: "call-1", name: "read", arguments: { path: "README.md" }, toolArguments: { path: "README.md" }, status: "unknown" });
     await writeFile(sessionFile, `${JSON.stringify({ type: "message", id: "tool-result-regression", message: { role: "toolResult", toolCallId: "call-1", content: [{ type: "text", text: "done" }] } })}\n`, { flag: "a" });
     const completedTool = readRetainedConversation(sessionFile).messages.find(message => message.id.includes("tool-call-regression"));
     assert.equal(completedTool?.parts?.[0]?.status, "completed", "tool status derives from structured result identity, never transcript text");
