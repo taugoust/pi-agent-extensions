@@ -16,6 +16,9 @@ test("story records explicit state changes and updates, persists and deduplicate
  recorder.observe({status:"active",tasks:[{id:"t",text:"Check UI",status:"in_progress"}]},200);
  recorder.activity("tool-1","Phone checks passed",300);recorder.activity("tool-1","Phone checks passed",400);
  assert.equal(recorder.snapshot().timeline.length,1);assert.equal(recorder.snapshot().timeline[0].at,100);
+ assert.equal(recorder.snapshot().timeline[0].taskStatus,"in_progress");
+ recorder.observe({status:"active",tasks:[{id:"t",text:"Check UI",status:"completed"}]},250);
+ assert.equal(recorder.snapshot().timeline.at(-1)?.taskStatus,"completed");
  assert.equal(recorder.snapshot().activity.length,1);
  const restored=createGoalStoryRecorder("goal",branch,persist);assert.deepEqual(restored.snapshot(),recorder.snapshot());
  assert.deepEqual(mergeGoalStory(recorder.snapshot(),restored.snapshot()),recorder.snapshot());

@@ -142,7 +142,7 @@ async function settle(snapshotValue) {
 }
 try {
   await mkdir(agent,{recursive:true}); await mkdir(cwd,{recursive:true});
-  await cp(source,copied,{recursive:true,filter:path=>!path.split("/").some(part=>[".git",".direnv","node_modules","plans"].includes(part))});
+  await cp(source,copied,{recursive:true,filter:path=>!path.split("/").some(part=>[".git",".direnv",".dev","node_modules","plans"].includes(part))});
   await writeFile(join(copied,"fake-provider.ts"),provider);
   await writeFile(join(copied,"runtime-parent.ts"),parent);
   await rename(join(copied,"subagent","goal-worker.ts"),join(copied,"subagent","goal-worker-real.ts"));
@@ -354,6 +354,7 @@ export default async function(pi) {
   let questioning=state.goals.entries.at(-1);
   state=await settle(await mutate("goals.start",{expectedGoalId:questioning.id,expectedEntryRevision:questioning.revision}));
   state=await until(async()=>{const s=await snapshot();return s.goals.entries.at(-1).story?.questions?.some(q=>q.status==="pending")?s:null;},"actual child questionnaire reaches goal story");
+  const questionEvidence=structuredClone(state);
   questioning=state.goals.entries.at(-1);const question=questioning.story.questions.find(q=>q.status==="pending");
   await assert.rejects(mutate("goals.answer",{expectedGoalId:questioning.id,expectedEntryRevision:questioning.revision,questionId:question.id,questionRevision:question.revision,workerEpoch:"foreign",answer:{kind:"questionnaire",cancelled:false,answers:[{id:"direction",value:"yes",wasCustom:false}]}}));
   state=await settle(await mutate("goals.answer",{expectedGoalId:questioning.id,expectedEntryRevision:questioning.revision,questionId:question.id,questionRevision:question.revision,workerEpoch:question.workerEpoch,answer:{kind:"questionnaire",cancelled:false,answers:[{id:"direction",value:"yes",wasCustom:false}]}}));
@@ -362,6 +363,10 @@ export default async function(pi) {
   assert.equal(story.questions.find(q=>q.id===question.id).status,"answered");
   assert(story.activity.some(event=>event.text==="Explicit fixture activity after the user's answer"));
   assert(story.timeline.some(event=>event.kind==="completed"));
+  if(process.env.PI_GOAL_STORY_EVIDENCE){
+    const plain=value=>Object.fromEntries(Object.entries(value).filter(([key])=>key!=="goals"));
+    await writeFile(process.env.PI_GOAL_STORY_EVIDENCE,JSON.stringify({pending:plain(questionEvidence),completed:plain(state)}),{mode:0o600});
+  }
   calls=(await readFile(join(root,"calls.jsonl"),"utf8")).trim().split("\n").map(JSON.parse);
   assert.equal(calls.filter(c=>!c.isChild).length,1,"registry never dispatches parent goal prompts");
   assert(calls.filter(c=>c.isChild).every(c=>c.model==="gpt-6.1-sol"&&c.provider==="harness-test"&&c.goalId&&c.activated));

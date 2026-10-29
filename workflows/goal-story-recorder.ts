@@ -1,5 +1,5 @@
 import { createHash } from "node:crypto";
-import { emptyGoalStory, recordGoalEvent, validateGoalStory, boundStoryEvents, GOAL_STORY_LIMIT, type GoalStory, type GoalTimelineKind } from "./goal-story.ts";
+import { emptyGoalStory, recordGoalEvent, validateGoalStory, boundStoryEvents, GOAL_STORY_LIMIT, type GoalStory, type GoalTimelineKind, type GoalTaskStatus } from "./goal-story.ts";
 
 type Task = { id: string; text: string; status: string };
 type State = { status: string; tasks: Task[] };
@@ -32,7 +32,7 @@ export function createGoalStoryRecorder(entryId: string, branch: unknown[], pers
         const tasks = new Map(previous.tasks.map(task => [task.id, task]));
         for (const task of state.tasks) {
           const prior = tasks.get(task.id);
-          if (!prior || prior.status !== task.status || prior.text !== task.text) recordGoalEvent(story, "task", `${task.text}: ${task.status.replaceAll("_", " ")}`, task.id, at);
+          if (!prior || prior.status !== task.status || prior.text !== task.text) recordGoalEvent(story, "task", `${task.text}: ${task.status.replaceAll("_", " ")}`, task.id, at, ["pending", "in_progress", "completed", "blocked"].includes(task.status) ? task.status as GoalTaskStatus : undefined);
         }
         const current = new Set(state.tasks.map(task => task.id));
         for (const task of previous.tasks) if (!current.has(task.id)) recordGoalEvent(story, "task", `Task removed: ${task.text}`, task.id, at);

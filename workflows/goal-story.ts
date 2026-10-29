@@ -5,7 +5,8 @@ export type GoalQuestion = { id: string; revision: number; at: number; workerEpo
 export type GoalQuestionReply = { questionId: string; questionRevision: number; workerEpoch: string; answer: Extract<TaskInteractionAnswer, { kind: "questionnaire" }> };
 
 export type GoalTimelineKind = "created" | "started" | "paused" | "resumed" | "blocked" | "completed" | "cleared" | "edited" | "task";
-export type GoalTimelineEvent = { id: string; at: number; kind: GoalTimelineKind; text: string; taskId?: string };
+export type GoalTaskStatus = "pending" | "in_progress" | "completed" | "blocked";
+export type GoalTimelineEvent = { id: string; at: number; kind: GoalTimelineKind; text: string; taskId?: string; taskStatus?: GoalTaskStatus };
 export type GoalActivityEvent = { id: string; at: number; text: string };
 export type GoalStory = { version: 1; timeline: GoalTimelineEvent[]; activity: GoalActivityEvent[]; questions?: GoalQuestion[] };
 export const GOAL_STORY_LIMIT = 200;
@@ -62,8 +63,8 @@ export function mergeGoalStory(target: GoalStory | undefined, observed: GoalStor
   return merged;
 }
 export function emptyGoalStory(): GoalStory { return { version: 1, timeline: [], activity: [], questions: [] }; }
-export function recordGoalEvent(story: GoalStory, kind: GoalTimelineKind, text: string, taskId?: string, at = Date.now()): void {
-  story.timeline.push({ id: randomUUID(), at, kind, text: text.slice(0, 4000), ...(taskId ? { taskId } : {}) });
+export function recordGoalEvent(story: GoalStory, kind: GoalTimelineKind, text: string, taskId?: string, at = Date.now(), taskStatus?: GoalTaskStatus): void {
+  story.timeline.push({ id: randomUUID(), at, kind, text: text.slice(0, 4000), ...(taskId ? { taskId } : {}), ...(taskStatus ? { taskStatus } : {}) });
   story.timeline = story.timeline.slice(-GOAL_STORY_LIMIT);
   boundStoryEvents(story);
 }
@@ -99,7 +100,8 @@ export function validateGoalStory(value: unknown): asserts value is GoalStory | 
     }
   }
   for (const event of story.timeline) {
-    if (!["created", "started", "paused", "resumed", "blocked", "completed", "cleared", "edited", "task"].includes(event.kind)
+    if ((event.taskStatus !== undefined && (event.kind !== "task" || !["pending", "in_progress", "completed", "blocked"].includes(event.taskStatus)))
+      || !["created", "started", "paused", "resumed", "blocked", "completed", "cleared", "edited", "task"].includes(event.kind)
       || (event.taskId !== undefined && (typeof event.taskId !== "string" || !event.taskId || event.taskId.length > 128))) throw new Error("Invalid goal timeline event");
   }
 }
