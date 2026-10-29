@@ -25,6 +25,8 @@ export interface ActiveGoal {
   status: GoalStatus;
   startedAt: number;
   updatedAt: number;
+  /** Recorded checklist change, not a heartbeat or inferred work progress. */
+  lastTaskUpdateAt?: number;
   iteration: number;
   tokenBudget?: number;
   /** Per-goal user policy, retained across reload/Resume without resetting counters. */
@@ -232,6 +234,7 @@ export function normalizeLoadedGoal(goal: ActiveGoal): ActiveGoal {
     safetyPauseCause: normalizeSafetyPauseCause(goal.safetyPauseCause),
     safetyResetPending: goal.safetyResetPending === true ? true : undefined,
     waiting,
+    lastTaskUpdateAt: isNonNegativeFiniteNumber(goal.lastTaskUpdateAt) ? goal.lastTaskUpdateAt : undefined,
     lastWake: normalizeGoalWake(goal.lastWake),
     lastBlocker: normalizeGoalBlocker(goal.lastBlocker),
   };

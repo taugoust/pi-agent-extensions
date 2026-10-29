@@ -51,6 +51,17 @@ function fixture(options = {}) {
   const update = (extra = {}) => mutate({ action: "update", request_id: "update", goal_id: runtime.activeGoal.id, expected_revision: runtime.activeGoal.revision, steps: [], ...extra });
   return { pi, ctx, runtime, entries, tools, messages, handlers, dispose, mutate, create, update, idle: value => idle = value, busy: value => busy = value };
 }
+test("checklist change timestamp is recorded without treating accounting as progress", () => {
+  const f = fixture(), created = f.create({ start: false });
+  const at = f.runtime.activeGoal.lastTaskUpdateAt;
+  assert.ok(Number.isSafeInteger(at));
+  f.runtime.activeGoal.tokensUsed++; f.runtime.persistGoal(f.runtime.activeGoal);
+  assert.equal(f.runtime.activeGoal.lastTaskUpdateAt, at);
+  f.runtime.activeGoal.lastTaskUpdateAt = 1;
+  f.update({ steps: [{ ...created.steps[0], status: 'completed' }] });
+  assert.ok(f.runtime.activeGoal.lastTaskUpdateAt > 1);
+  f.dispose();
+});
 test("create atomically allocates goal and tasks and authorizes default continuation with configured limits", () => {
   const f = fixture(), result = f.create();
   assert.equal(result.status, "active"); assert.ok(result.goalId); assert.ok(result.activationId); assert.ok(result.steps[0].id);

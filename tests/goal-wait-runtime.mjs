@@ -5,7 +5,7 @@ import test from "node:test";
 import { mkdtemp, rm } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join, resolve } from "node:path";
-import { pathToFileURL } from "node:url";
+import { pathToFileURL, fileURLToPath } from "node:url";
 import { setTimeout as delay } from "node:timers/promises";
 const sdk = resolve(process.argv[2]);
 const { createAgentSession, AgentSessionRuntime, DefaultResourceLoader, ModelRuntime, SessionManager, SettingsManager, initTheme } = await import(pathToFileURL(join(sdk, "dist/index.js")));
@@ -17,12 +17,14 @@ const jiti = createJiti(import.meta.url, { alias: {
   "@earendil-works/pi-tui": join(sdk, "node_modules/@earendil-works/pi-tui/dist/index.js"),
   typebox: join(sdk, "node_modules/typebox/build/index.mjs"),
 } });
-const { default: goal } = await jiti.import("../workflows/goal/goal.ts");
-const { default: progress } = await jiti.import("../progress/progress-widget.ts");
-const { DEFAULT_PROGRESS_SETTINGS } = await jiti.import("../progress/settings.ts");
-const { bindGoalMutations } = await jiti.import("../workflows/goal/mutations.ts");
-const { installQuietState } = await jiti.import("../shared/quiet-state.ts");
-const { GoalWaitTimer } = await jiti.import("../workflows/goal/wait.ts");
+// Optional immutable installed bundle for post-deployment verification.
+const source = process.env.PI_GOAL_TEST_SOURCE ?? fileURLToPath(new URL("../", import.meta.url));
+const { default: goal } = await jiti.import(join(source, "workflows/goal/goal.ts"));
+const { default: progress } = await jiti.import(join(source, "progress/progress-widget.ts"));
+const { DEFAULT_PROGRESS_SETTINGS } = await jiti.import(join(source, "progress/settings.ts"));
+const { bindGoalMutations } = await jiti.import(join(source, "workflows/goal/mutations.ts"));
+const { installQuietState } = await jiti.import(join(source, "shared/quiet-state.ts"));
+const { GoalWaitTimer } = await jiti.import(join(source, "workflows/goal/wait.ts"));
 const call = (name, args) => ({ type: "toolCall", id: `${name}-${crypto.randomUUID()}`, name, arguments: args });
 const text = m => typeof m.content === "string" ? m.content : m.content.filter(p => p.type === "text").map(p => p.text).join("\n");
 
