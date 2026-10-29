@@ -60,7 +60,7 @@ for (const objective of ['Validate this outcome.', 'Quotes: "yes"; path \\tmp; e
         const result = await f.execute(args);
         const goal = f.runtime.activeGoal;
         if (action === 'pause' || action === 'clear') {
-          assert.equal(plain(result), action === 'pause' ? 'Goal paused. Wait for explicit resume.' : 'Goal moved to Completed.');
+          assert.equal(plain(result), action === 'pause' ? 'Goal paused. Wait for explicit resume.' : 'Goal cleared and retained in history; not marked complete.');
           assert.equal(result.details.goalId, previous.id);
           assert.equal(result.terminate, action === 'pause');
         } else {

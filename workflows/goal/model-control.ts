@@ -69,7 +69,7 @@ export function registerGoalManagement(pi: ExtensionAPI, runtime: GoalRuntime) {
         if (params.action === "pause" || params.action === "clear") {
           const commands = new GoalCommandController(runtime);
           if (params.action === "pause") commands.pauseGoal(ctx); else commands.clearGoal(ctx);
-          return { content: [{ type: "text", text: params.action === "pause" ? "Goal paused. Wait for explicit resume." : "Goal moved to Completed." }], details: { goalId: previous.id, presentation: goalManagePresentation(params.action, previous.text) }, terminate: params.action === "pause" };
+          return { content: [{ type: "text", text: params.action === "pause" ? "Goal paused. Wait for explicit resume." : "Goal cleared and retained in history; not marked complete." }], details: { goalId: previous.id, presentation: goalManagePresentation(params.action, previous.text) }, terminate: params.action === "pause" };
         }
         let next = nextGoalInstance(previous);
         if (params.action === "update") {

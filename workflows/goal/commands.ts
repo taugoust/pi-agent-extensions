@@ -335,7 +335,7 @@ export class GoalCommandController {
     }
 
     this.runtime.clearActiveGoal(ctx);
-    notifyTerminal(ctx.ui, "Goal moved to Completed.", "info");
+    notifyTerminal(ctx.ui, "Goal cleared and retained in history; not marked complete.", "info");
   }
 
   async editGoal(objective: string, tokenBudget: number | undefined, ctx: StatusContext) {
