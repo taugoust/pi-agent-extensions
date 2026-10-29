@@ -29,7 +29,7 @@ export default function fakeProvider(pi) {
       const isChild = process.env.PI_DEDICATED_GOAL_CHILD === "1";
       const goal = ctx?.sessionManager.getBranch().findLast(e => e.type === "custom" && e.customType === "goal-state")?.data?.goal;
       appendFileSync(process.env.TEST_CALLS, JSON.stringify({ pid: process.pid, isChild, model: model.id, provider: model.provider,
-        goalId: goal?.id ?? null, calls, activated:globalThis.__fixtureActivation===true, limits:globalThis.__paeDelegatedChildGoalV1?.snapshot().limits, sessionId: ctx?.sessionManager.getSessionId() }) + "\n");
+        goalId: goal?.id ?? null, goalText: goal?.text ?? null, calls, activated:globalThis.__fixtureActivation===true, limits:globalThis.__paeDelegatedChildGoalV1?.snapshot().limits, sessionId: ctx?.sessionManager.getSessionId() }) + "\n");
       if(isChild && globalThis.__fixtureActivation!==true) throw new Error("Automatic child model call before explicit structured activation");
       const stream = createAssistantMessageEventStream();
       const response = { role:"assistant", api:"openai-responses", provider:"harness-test", model:model.id,
@@ -202,11 +202,11 @@ export default function(pi) {
   let state=stateView(await until(runtimeSnapshot,"parent fixture startup"));
   assert.equal(state.capabilities.delegatedGoalExecution,true,JSON.stringify(state));
   assert.deepEqual(JSON.parse(await readFile(join(agent,"pi-goal.json"),"utf8")).continuationLimits,{automaticTurns:7,noProgressTurns:5},"fixture parent config uses non-default legacy limits");
-  assert.deepEqual(state.limits,{automaticTurns:3,noProgressTurns:2},"registry advertises explicit dedicated fixed limits");
+  assert.deepEqual(state.limits,{automaticTurns:7,noProgressTurns:5},"registry advertises configured inherited limits");
   child.stdin.write(JSON.stringify({id:"hold-parent",type:"prompt",message:"Hold this isolated parent fake-provider turn; do not start any goal."})+"\n");
   await until(async()=>{try{return(await readFile(join(root,"calls.jsonl"),"utf8")).includes('"isChild":false');}catch{return false;}},"parent fake call");
   for(const text of ["Isolated first goal","Isolated independent second goal"]) {
-    state=await settle(await mutate("goals.create",{expectedGoalId:null,expectedRegistryRevision:state.goals.revision,objective:text}));
+    state=await settle(await mutate("goals.create",{expectedGoalId:null,expectedRegistryRevision:state.goals.revision,objective:text,...(text.includes("independent second")?{continuationLimits:{automaticTurns:11,noProgressTurns:6}}:{})}));
   }
   assert.equal(state.goals.entries.length,2);
   assert(state.goals.entries.every(e=>e.status==="paused"&&e.child===null));
@@ -347,12 +347,12 @@ export default function(pi) {
   calls=(await readFile(join(root,"calls.jsonl"),"utf8")).trim().split("\n").map(JSON.parse);
   assert.equal(calls.filter(c=>!c.isChild).length,1,"registry never dispatches parent goal prompts");
   assert(calls.filter(c=>c.isChild).every(c=>c.model==="gpt-6.1-sol"&&c.provider==="harness-test"&&c.goalId&&c.activated));
-  for(const call of calls.filter(c=>c.isChild)) assert.deepEqual(call.limits,{automaticTurns:3,noProgressTurns:2},"effective child limits must match explicit fixed-policy confirmation, not parent 7/5");
+  for(const call of calls.filter(c=>c.isChild)) assert.deepEqual(call.limits,call.goalText?.includes("independent second")?{automaticTurns:11,noProgressTurns:6}:{automaticTurns:7,noProgressTurns:5},"effective child limits must match confirmed per-goal override or parent defaults");
   assert(confirmations.length>=3);
   for(const message of confirmations) {
-    assert.match(message,/Dedicated automatic limit: 3 responses/);
-    assert.match(message,/Dedicated no-progress limit: 2 repeated runs/);
-    assert.match(message,/do not inherit parent\/child settings/);
+    assert.match(message,message.includes("independent second")?/Dedicated automatic limit: 11 responses/:/Dedicated automatic limit: 7 responses/);
+    assert.match(message,message.includes("independent second")?/Dedicated no-progress limit: 6 repeated runs/:/Dedicated no-progress limit: 5 repeated runs/);
+    assert.match(message,/Unset limits inherit the configured defaults/);
   }
   console.log("isolated actual-Pi dedicated-goal runtime integration passed",{calls:calls.length,childCalls:calls.filter(c=>c.isChild).length,concurrentGoalOwnership:true});
 } catch(error) { keep=true; console.error(`Fixture retained: ${root}\n${output}`); throw error; }

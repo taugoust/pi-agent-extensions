@@ -16,12 +16,12 @@ test("structured child seam uses injected existing engine, binds ownership and s
   const pi = { appendEntry(type, data) { entries.push({ type: "custom", customType: type, data }); events.push(type); } };
   const commands = {
     async startGoal(text, budget, context, onActivated) {
-      assert.deepEqual(runtime.settings.continuationLimits, { automaticTurns: 3, noProgressTurns: 2 });
+      assert.deepEqual(runtime.settings.continuationLimits, { automaticTurns: 99, noProgressTurns: 88 });
       runtime.activeGoal = { id: "child-goal-id", status: "active", text, tokenBudget: budget, tokensUsed: 0, automaticModelTurns: 0, toolFreeRepeatCount: 0 };
       onActivated(runtime.activeGoal); events.push("owned-child-prompt");
     },
     pauseGoal() { runtime.activeGoal.status = "paused"; },
-    async resumeGoal() { assert.deepEqual(runtime.settings.continuationLimits, { automaticTurns: 3, noProgressTurns: 2 }); runtime.activeGoal.status = "active"; runtime.activeGoal.progressId ??= runtime.activeGoal.id; runtime.activeGoal.id = "child-goal-id-rotated"; events.push("owned-child-resume"); },
+    async resumeGoal() { assert.deepEqual(runtime.settings.continuationLimits, { automaticTurns: 99, noProgressTurns: 88 }); runtime.activeGoal.status = "active"; runtime.activeGoal.progressId ??= runtime.activeGoal.id; runtime.activeGoal.id = "child-goal-id-rotated"; events.push("owned-child-resume"); },
   };
   const service = createDelegatedChildGoalService(pi, ctx, runtime, commands);
   const entry = { id: "11111111-1111-4111-8111-111111111111", revision: 1, status: "paused", child: null, text: "objective", tokenBudget: 100, tokensUsed: 0, automaticTurns: 0, noProgressTurns: 0, summary: null, waiting: null, tasks: [{ id: "task", text: "check", status: "pending" }] };
@@ -31,7 +31,7 @@ test("structured child seam uses injected existing engine, binds ownership and s
   const persistedBinding = entries.find(e => e.customType === "delegated-goal-child-binding-v1" && e.data.progressId);
   assert.equal(persistedBinding.data.progressId, "child-goal-id");
   assert.ok(entries.indexOf(persistedBinding) >= 0);
-  assert.deepEqual(result.limits, { automaticTurns: 3, noProgressTurns: 2 });
+  assert.deepEqual(result.limits, { automaticTurns: 99, noProgressTurns: 88 });
   await assert.rejects(service.bootstrap({ ...entry, id: "foreign" }), /another goal/);
   await assert.rejects(service.pause("foreign", "child-goal-id"), /ownership/);
   await assert.rejects(service.pause(entry.id, "stale-child"), /identity/);

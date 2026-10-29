@@ -5,6 +5,7 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { DelegatedGoalRegistry, type DelegatedGoalEntry, type DelegatedGoalExecutor } from "./delegated-goals.ts";
 import { delegatedGoalStore } from "./delegated-goal-store.ts";
+import { resolveGoalLimits, DEDICATED_GOAL_LIMITS } from "../shared/delegated-goal-policy.ts";
 
 function fixture() {
   const calls: string[] = [];
@@ -22,6 +23,22 @@ function fixture() {
   const act = (entry: DelegatedGoalEntry, action: any, extra = {}) => registry.mutate("parent", { action, requestId: String(++id), expectedGoalId: entry.id, expectedEntryRevision: entry.revision, ...extra });
   return { registry, executor, calls, saves, create, act, launches: () => launches };
 }
+
+test("per-goal limits persist independently, validate, and clear back to inherited defaults", async () => {
+  const f = fixture();
+  let state = await f.registry.mutate("parent", { action: "goals.create", requestId: "limits", expectedGoalId: null, objective: "bounded", continuationLimits: { automaticTurns: 9, noProgressTurns: null } });
+  const defaults = { automaticTurns: 12, noProgressTurns: 4 };
+  assert.deepEqual(resolveGoalLimits(state.entries[0].continuationLimits, defaults), { automaticTurns: 9, noProgressTurns: 4 });
+  assert.deepEqual(resolveGoalLimits(undefined, DEDICATED_GOAL_LIMITS), { automaticTurns: null, noProgressTurns: null });
+  const restored = new DelegatedGoalRegistry("parent", f.executor, () => {}, state);
+  assert.deepEqual(restored.snapshot(), state);
+  for (const invalid of [0, -1, 1.5, Infinity, Number.MAX_SAFE_INTEGER + 1, "3"]) {
+    await assert.rejects(f.act(state.entries[0], "goals.edit", { objective: "bounded", continuationLimits: { automaticTurns: invalid } }), /Invalid goal continuation/);
+  }
+  state = await f.act(state.entries[0], "goals.edit", { objective: "bounded", continuationLimits: { automaticTurns: null, noProgressTurns: null } });
+  assert.deepEqual(resolveGoalLimits(state.entries[0].continuationLimits, defaults), defaults);
+  assert.equal(f.launches(), 0);
+});
 
 test("exhausted explicit budget Resume refusal has no child side effect or pending intent", async () => {
   const f = fixture();
@@ -60,7 +77,11 @@ test("pause racing exact owned completion preserves terminal evidence without un
   await f.act(f.registry.snapshot().entries[0], "goals.start");
   const active = f.registry.snapshot().entries[0];
   f.executor.pause = async () => ({ status: "complete", summary: "exact completion evidence", tokensUsed: 51, tasks: active.tasks.map(task => ({ ...task, status: "completed" })) });
-  f.executor.observe = async () => { throw Error("terminal process already stopped; direct terminal receipt must suffice"); };
+  let observations = 0;
+  f.executor.observe = async () => {
+    if (observations++ === 0) return { status: "active" }; // lifecycle preflight
+    throw Error("terminal process already stopped; direct terminal receipt must suffice");
+  };
   await f.act(active, "goals.pause");
   const completed = f.registry.snapshot().entries[0];
   assert.equal(completed.status, "complete"); assert.equal(completed.summary, "exact completion evidence");
@@ -151,7 +172,10 @@ test("child observation synchronizes only owned goal fields and retains complete
   const state = f.registry.snapshot();
   assert.equal(state.entries[0].status, "complete"); assert.equal(state.entries[0].summary, "verified done");
   assert.deepEqual(state.entries[1], other);
-  await assert.rejects(f.act(state.entries[0], "goals.resume"), /terminal/);
+  const launches = f.launches();
+  const reconciled = await f.act(state.entries[0], "goals.resume");
+  assert.equal(reconciled.entries[0].status, "complete");
+  assert.equal(f.launches(), launches, "terminal reconciliation must never launch again");
   assert.equal(state.entries.length, 2);
 });
 

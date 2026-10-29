@@ -5,9 +5,20 @@
   extensionBundle,
 }:
 let
-  bundle = import ./mk-extension-bundle.nix { inherit self; inherit (pkgs) lib; };
-  workflowsOnly = bundle { inherit pkgs; name = "pi-workflows-only-runtime"; extensions = [ "workflows" ]; };
-  subagentOnly = bundle { inherit pkgs; name = "pi-subagent-only-runtime"; extensions = [ "subagent" ]; };
+  bundle = import ./mk-extension-bundle.nix {
+    inherit self;
+    inherit (pkgs) lib;
+  };
+  workflowsOnly = bundle {
+    inherit pkgs;
+    name = "pi-workflows-only-runtime";
+    extensions = [ "workflows" ];
+  };
+  subagentOnly = bundle {
+    inherit pkgs;
+    name = "pi-subagent-only-runtime";
+    extensions = [ "subagent" ];
+  };
 in
 pkgs.runCommand "workflows-immutable-runtime-check"
   {
@@ -35,6 +46,9 @@ pkgs.runCommand "workflows-immutable-runtime-check"
       ${self}/shared/subagent-worktrees-metadata.test.mjs \
       ${self}/workflows/worktree-completion-service.test.mjs \
       ${self}/workflows/delegated-service.test.mjs \
+      ${self}/workflows/delegated-goals.test.ts \
+      ${self}/workflows/delegated-child.test.mjs \
+      ${self}/subagent/goal-policy.test.ts \
       ${self}/subagent/coordinator-role.test.ts \
       ${self}/subagent/goal-executor.test.ts \
       ${self}/subagent/goal-reload.test.ts \

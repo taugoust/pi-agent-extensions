@@ -1,5 +1,6 @@
 import { randomUUID } from "node:crypto";
-import { DEDICATED_GOAL_LIMITS, DelegatedGoalRegistry, type DelegatedGoalExecutor } from "./delegated-goals.ts";
+import { DelegatedGoalRegistry, type DelegatedGoalExecutor } from "./delegated-goals.ts";
+import { resolveGoalLimits } from "../shared/delegated-goal-policy.ts";
 import { delegatedGoalStore } from "./delegated-goal-store.ts";
 import { basename, isAbsolute, relative, sep } from "node:path";
 import { workspaceRepositories } from "./worktree/repositories.js";
@@ -106,8 +107,8 @@ export function createWorkflowService(
 	const delegated = new DelegatedGoalRegistry(sessionId, {
 		executionAvailable: () => executionUnavailableReason() === null,
 		executionUnavailableReason,
-		start: entry => childExecutor().start(entry),
-		resume: entry => childExecutor().resume(entry),
+		start: entry => childExecutor().start({ ...entry, continuationLimits: resolveGoalLimits(entry.continuationLimits, runtime.settings.continuationLimits) }),
+		resume: entry => childExecutor().resume({ ...entry, continuationLimits: resolveGoalLimits(entry.continuationLimits, runtime.settings.continuationLimits) }),
 		pause: entry => childExecutor().pause(entry),
 		verifyStopped: entry => {
 			const executor = childExecutor();
@@ -552,8 +553,8 @@ export function createWorkflowService(
 			lastCompletion: completion(),
 			completedGoals: completedGoals(goal?.id ?? null),
 			limits: {
-				automaticTurns: DEDICATED_GOAL_LIMITS.automaticTurns,
-				noProgressTurns: DEDICATED_GOAL_LIMITS.noProgressTurns,
+				automaticTurns: runtime.settings.continuationLimits.automaticTurns,
+				noProgressTurns: runtime.settings.continuationLimits.noProgressTurns,
 			},
 		};
 	}
@@ -685,10 +686,11 @@ export function createWorkflowService(
 					if (unavailable) throw new Error(unavailable);
 					if (!entry || entry.revision !== r.expectedEntryRevision) throw new Error("Goal changed");
 					const workspace = ctx.cwd;
-					const approvedLimits = JSON.stringify(DEDICATED_GOAL_LIMITS);
-					op.policyCheck = () => ctx.cwd === workspace && JSON.stringify(DEDICATED_GOAL_LIMITS) === approvedLimits;
+					const limits = resolveGoalLimits(entry.continuationLimits, runtime.settings.continuationLimits);
+					const approvedLimits = JSON.stringify(limits);
+					op.policyCheck = () => ctx.cwd === workspace && JSON.stringify(resolveGoalLimits(entry.continuationLimits, runtime.settings.continuationLimits)) === approvedLimits;
 					if (!(await commandCtx.ui.confirm(r.action === "goals.start" ? "Start dedicated Goal child?" : "Resume dedicated Goal child?",
-						`${entry.text}\n\nWorkspace: ${workspace}\nRole: coordinator (default gpt-6.1-sol; Resume retains the recorded model)\nExecution: independent dedicated child; the parent never executes this goal.\nIt may edit this workspace and make paid model calls.\nDedicated automatic limit: ${DEDICATED_GOAL_LIMITS.automaticTurns} responses.\nDedicated no-progress limit: ${DEDICATED_GOAL_LIMITS.noProgressTurns} repeated runs.\nThese dedicated limits do not inherit parent/child settings.\nToken budget: ${entry.tokenBudget ?? "unlimited"}; the final request can exceed it.`))) return;
+						`${entry.text}\n\nWorkspace: ${workspace}\nRole: coordinator (default gpt-6.1-sol; Resume retains the recorded model)\nExecution: independent dedicated child; the parent never executes this goal.\nIt may edit this workspace and make paid model calls.\nDedicated automatic limit: ${limits.automaticTurns ?? "unlimited"} responses.\nDedicated no-progress limit: ${limits.noProgressTurns ?? "unlimited"} repeated runs.\nUnset limits inherit the configured defaults; this execution uses the values shown above.\nToken budget: ${entry.tokenBudget ?? "unlimited"}; the final request can exceed it.`))) return;
 					current(op);
 					const changedAvailability = executionUnavailableReason();
 					if (changedAvailability) throw new Error(changedAvailability);
@@ -878,6 +880,7 @@ export function createWorkflowService(
 						"objective",
 						"text",
 						"tokenBudget",
+						"continuationLimits",
 						"operationId",
 						"dialogId",
 						"value",

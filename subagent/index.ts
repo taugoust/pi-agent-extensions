@@ -110,7 +110,6 @@ import { requestGoalWorker, type GoalWorkerIdentity } from "./goal-rpc.ts";
 import { dedicatedGoalTools } from "./goal-tools.ts";
 import { setDedicatedGoalEnvironment } from "./goal-environment.ts";
 import { dedicatedGoalPolicy, type DedicatedGoalPolicy } from "./goal-policy.ts";
-import { DEDICATED_GOAL_LIMITS } from "../shared/delegated-goal-policy.ts";
 
 type Mode = "single" | "parallel" | "chain";
 
@@ -2024,7 +2023,7 @@ export default function (pi: ExtensionAPI) {
               noProgressTurns: goal.toolFreeRepeatCount, summary: completed.summary };
           },
           async launch(entry, previous) {
-            const policy = dedicatedGoalPolicy({ continuationLimits: DEDICATED_GOAL_LIMITS });
+            const policy = dedicatedGoalPolicy({ continuationLimits: entry.continuationLimits });
             if (generation !== sessionGeneration || lifecycleClosing || activeSessionId !== sessionId) throw new Error("Dedicated goal parent runtime changed");
             const disposition = nativeDisposition();
             const authority = currentSubagentPermissionAuthority();

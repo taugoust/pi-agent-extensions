@@ -57,22 +57,53 @@ let
     { enabled = "yes"; }
     { targets = [ "fixture" ]; }
   ];
+  goalDefaults = evaluate { extensions.workflows.enable = true; };
+  goalLimits = evaluate {
+    extensions.workflows = {
+      enable = true;
+      goal.continuationLimits = {
+        automaticTurns = 12;
+        noProgressTurns = 4;
+      };
+      settings.goal.continuationLimits.noProgressTurns = 6;
+    };
+  };
+  goalJSON =
+    config:
+    (builtins.fromJSON config.home.file.".pi/agent/defaults/workflows.json".text)
+    .goal.continuationLimits;
   registry = import ./extension-registry.nix { inherit self; };
   removedPager = evaluate { extensions.pager.enable = true; };
   allLocal = evaluate {
-    extensions = lib.genAttrs
-      (map (name: registry.extensions.${name}.optionName) registry.localExtensionNames)
-      (_: { enable = true; });
+    extensions =
+      lib.genAttrs (map (name: registry.extensions.${name}.optionName) registry.localExtensionNames)
+        (_: {
+          enable = true;
+        });
   };
 in
+assert
+  goalJSON goalDefaults == {
+    automaticTurns = null;
+    noProgressTurns = null;
+  };
+assert
+  goalJSON goalLimits == {
+    automaticTurns = 12;
+    noProgressTurns = 6;
+  };
 # Removed feature selections fail explicitly rather than installing missing sources.
 assert !(registry.extensions ? pager);
 assert !(builtins.tryEval (builtins.deepSeq (registry.resolveExtensions [ "pager" ]) true)).success;
 assert !(valid removedPager);
-assert lib.any (entry: !entry.assertion && lib.hasInfix "pager extension was removed" entry.message) removedPager.assertions;
+assert lib.any (
+  entry: !entry.assertion && lib.hasInfix "pager extension was removed" entry.message
+) removedPager.assertions;
 assert valid allLocal;
 assert !(allLocal.home.file ? ".pi/agent/extensions/pager");
-assert lib.all (name: builtins.pathExists registry.extensions.${name}.source) registry.localExtensionNames;
+assert lib.all (
+  name: builtins.pathExists registry.extensions.${name}.source
+) registry.localExtensionNames;
 assert valid absent && valid optedIn && valid precedence && valid sandbox && valid withPackages;
 # Null is unmanaged, including absence of defaults artifacts; {} opts in.
 assert lib.all (

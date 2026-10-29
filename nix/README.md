@@ -33,6 +33,13 @@ programs.pi = {
   };
   extensions = {
     auto.enable = true;
+    workflows = {
+      enable = true;
+      goal.continuationLimits = {
+        automaticTurns = null; # unlimited (default), or a positive integer
+        noProgressTurns = null; # unlimited (default), or a positive integer
+      };
+    };
     sandbox.enable = true; # includes subagent and its finalizer
     subagent.defaultModel = "gpt-6-luna";
     idle-context-warning = {

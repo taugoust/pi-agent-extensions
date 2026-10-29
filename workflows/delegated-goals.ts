@@ -1,4 +1,5 @@
 import { randomUUID } from "node:crypto";
+import { validateGoalLimitOverrides, type GoalContinuationLimits } from "../shared/delegated-goal-policy.ts";
 
 export { DEDICATED_GOAL_LIMITS } from "../shared/delegated-goal-policy.ts";
 
@@ -8,6 +9,7 @@ export type DelegatedGoalEntry = {
   id: string; revision: number; text: string; status: DelegatedGoalStatus;
   tasks: Array<{ id: string; text: string; status: "pending" | "in_progress" | "completed" | "blocked" }>;
   child: DelegatedGoalChild | null; tokenBudget: number | null; tokensUsed: number;
+  continuationLimits?: Partial<GoalContinuationLimits>;
   automaticTurns: number; noProgressTurns: number; summary: string | null; waiting: string | null;
 };
 export type DelegatedGoals = { version: 1; revision: number; entries: DelegatedGoalEntry[] };
@@ -16,6 +18,7 @@ export type DelegatedGoalRequest = {
   action: DelegatedGoalAction; requestId: string; expectedGoalId: string | null;
   expectedEntryRevision?: number; expectedRegistryRevision?: number;
   objective?: string; text?: string; tokenBudget?: number | null;
+  continuationLimits?: Partial<GoalContinuationLimits>;
 };
 /** Child execution is deliberately injected: this registry never runs a parent goal. */
 export type DelegatedGoalObservation = Partial<Pick<DelegatedGoalEntry, "status" | "tasks" | "tokensUsed" | "automaticTurns" | "noProgressTurns" | "summary" | "waiting">>;
@@ -44,6 +47,7 @@ export function validateDelegatedGoals(state: DelegatedGoals): void {
     ids.add(e.id); objective(e.text, 4000);
     if (!["paused", "active", "blocked", "usage_limited", "budget_limited", "complete", "cleared"].includes(e.status)) throw new Error("Invalid delegated status");
     budget(e.tokenBudget === null ? undefined : e.tokenBudget);
+    validateGoalLimitOverrides(e.continuationLimits);
     if (![e.tokensUsed, e.automaticTurns, e.noProgressTurns].every(n => typeof n === "number" && Number.isFinite(n) && n >= 0)) throw new Error("Invalid delegated accounting");
     if (!Array.isArray(e.tasks) || e.tasks.length > 50 || new Set(e.tasks.map(t => t.id)).size !== e.tasks.length) throw new Error("Invalid delegated tasks");
     if (new Set(e.tasks.map(t => objective(t.text, 503))).size !== e.tasks.length) throw new Error("Goal tasks need distinct descriptions after trimming");
@@ -126,13 +130,14 @@ export class DelegatedGoalRegistry {
     if (this.pending && (r.expectedGoalId === this.pending.entryId ||
       ["goals.start", "goals.resume", "goals.pause"].includes(r.action))) throw new Error(this.blockedReason()!);
     let performedEffect = false;
-    const fields = ["operation", "sessionId", "serviceEpoch", "requestId", "action", "expectedGoalId", ...(r.action === "goals.create" ? ["expectedRegistryRevision", "objective", "tokenBudget"] : ["expectedEntryRevision", ...(r.action === "goals.edit" ? ["objective", "tokenBudget"] : r.action === "goals.add_task" ? ["text"] : [])])];
+    const fields = ["operation", "sessionId", "serviceEpoch", "requestId", "action", "expectedGoalId", ...(r.action === "goals.create" ? ["expectedRegistryRevision", "objective", "tokenBudget", "continuationLimits"] : ["expectedEntryRevision", ...(r.action === "goals.edit" ? ["objective", "tokenBudget", "continuationLimits"] : r.action === "goals.add_task" ? ["text"] : [])])];
     if (Object.keys(r).some(key => !fields.includes(key))) throw new Error("Unknown delegated goal request fields");
     if (r.action === "goals.create") {
       if (r.expectedGoalId !== null || r.expectedEntryRevision !== undefined) throw new Error("Create requires null goal identity");
       if (r.expectedRegistryRevision !== undefined && r.expectedRegistryRevision !== next.revision) throw new Error("Registry changed");
       if (next.entries.length >= 1000) throw new Error("Delegated goal history limit reached");
       next.entries.push({ id: randomUUID(), revision: 1, text: objective(r.objective, 4000), status: "paused", tasks: [], child: null,
+        ...(r.continuationLimits === undefined ? {} : { continuationLimits: copy(r.continuationLimits) }),
         tokenBudget: budget(r.tokenBudget) ?? null, tokensUsed: 0, automaticTurns: 0, noProgressTurns: 0, summary: null, waiting: null });
     } else {
       const entry = next.entries.find(e => e.id === r.expectedGoalId);
@@ -197,6 +202,7 @@ export class DelegatedGoalRegistry {
           if (entry.status === "active") throw new Error("Pause goal before editing metadata");
           entry.text = objective(r.objective, 4000);
           if (r.tokenBudget !== undefined) entry.tokenBudget = r.tokenBudget === null ? null : budget(r.tokenBudget)!;
+          if (r.continuationLimits !== undefined) entry.continuationLimits = copy(r.continuationLimits);
           break;
         case "goals.add_task":
           if (entry.status === "active") throw new Error("Pause goal before editing tasks");

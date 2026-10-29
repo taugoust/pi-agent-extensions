@@ -60,6 +60,7 @@ let
     };
     slow-mode = { inherit (cfg.extensions.slow-mode) enabledByDefault; };
     subagent = modelDefaults;
+    workflows.goal.continuationLimits = cfg.extensions.workflows.goal.continuationLimits;
   };
   extensionSettings =
     name:
@@ -167,7 +168,8 @@ in
 {
   imports = [
     (lib.mkRemovedOptionModule [ "programs" "pi" "extensions" "pager" ]
-      "The pager extension was removed. Remove this configuration; use native Pi scrolling, fullscreen, Ctrl+O or the external editor instead.")
+      "The pager extension was removed. Remove this configuration; use native Pi scrolling, fullscreen, Ctrl+O or the external editor instead."
+    )
   ];
 
   options.programs.pi = {
@@ -270,6 +272,14 @@ in
           }) extensionNames
         ))
         {
+          workflows.goal.continuationLimits = lib.genAttrs [ "automaticTurns" "noProgressTurns" ] (
+            name:
+            lib.mkOption {
+              type = lib.types.nullOr lib.types.ints.positive;
+              default = null;
+              description = "Default ${name} limit for Goals; null is unlimited. Per-goal overrides and mutable user settings take precedence.";
+            }
+          );
           btw.model = stringOption cfg.extensions.subagent.defaultModel "BTW role model ID; provider and account follow the owning session. Legacy qualified preferences cannot override the session provider. Unavailable models fail without fallback.";
           stamp.visibleByDefault = boolOption false "Show native transcript stamps at session start.";
           cache-hit-monitor.visibleByDefault = boolOption false "Show the native cache widget at session start.";

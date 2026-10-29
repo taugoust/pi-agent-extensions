@@ -3,7 +3,6 @@ import workflows from "../workflows/index.ts";
 import progress from "../progress/index.ts";
 import { serveGoalWorker, type GoalWorkerIdentity } from "./goal-rpc.ts";
 import type { DelegatedGoalEntry } from "../workflows/delegated-goals.ts";
-import { DEDICATED_GOAL_LIMITS } from "../shared/delegated-goal-policy.ts";
 import { dirname, join } from "node:path";
 import { dedicatedGoalPolicy, sameGoalLimits, type DedicatedGoalPolicy } from "./goal-policy.ts";
 import type { createDelegatedChildGoalService } from "../workflows/delegated-child.ts";
@@ -18,7 +17,6 @@ export default function goalWorker(pi: ExtensionAPI) {
   if (!binding.path || !binding.entryId || !binding.identity || binding.identity.childId !== process.env.PI_SUBAGENT_ID)
     throw new Error("Dedicated goal worker launch identity mismatch");
   const policy = dedicatedGoalPolicy(binding.policy);
-  if (!sameGoalLimits(policy.continuationLimits, DEDICATED_GOAL_LIMITS)) throw new Error("Dedicated child fixed policy differs from parent confirmation");
   progress(pi);
   workflows(pi, { delegatedChild: true, goalSettingsPath: join(dirname(binding.path), "goal-settings.json") });
   let current = false;
@@ -35,6 +33,7 @@ export default function goalWorker(pi: ExtensionAPI) {
       let snapshot = service.snapshot();
       if (!sameGoalLimits(policy.continuationLimits, snapshot.limits)) throw new Error("Dedicated child effective limits differ from parent confirmation");
       if (r.operation !== "start" && snapshot.entryId !== binding.entryId) throw new Error("Dedicated parent goal identity changed");
+      if (r.entry && !sameGoalLimits(policy.continuationLimits, r.entry.continuationLimits)) throw new Error("Goal metadata differs from confirmed continuation limits");
       if (r.operation === "start" && r.entry) {
         if (r.entry.id !== binding.entryId) throw new Error("Dedicated parent goal identity changed");
         snapshot = await service.bootstrap(r.entry);

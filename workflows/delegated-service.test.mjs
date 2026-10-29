@@ -55,7 +55,7 @@ test("actual service permits busy parent metadata create and fences independent 
     snapshot = await request({ action: "goals.create", expectedGoalId: null, expectedRegistryRevision: 1, objective: "second" });
     assert.equal(snapshot.delegatedGoals.entries.length, 2); assert.deepEqual(calls, []);
     assert.deepEqual(runtime.activeGoal, originalGoal); assert.equal(snapshot.idle, false);
-    assert.deepEqual(snapshot.limits, { automaticTurns: 3, noProgressTurns: 2 });
+    assert.deepEqual(snapshot.limits, { automaticTurns: null, noProgressTurns: null });
     let first = snapshot.delegatedGoals.entries[0];
     const second = snapshot.delegatedGoals.entries[1];
     snapshot = await request({ action: "goals.add_task", expectedGoalId: second.id, expectedEntryRevision: second.revision, text: "  keep exact task  " });
@@ -79,7 +79,7 @@ test("actual service permits busy parent metadata create and fences independent 
     snapshot = await request({ action: "goals.start", expectedGoalId: first.id, expectedEntryRevision: first.revision });
     assert.equal(snapshot.dialog.kind, "confirm");
     assert.match(snapshot.dialog.message, /gpt-6\.1-sol/); assert.match(snapshot.dialog.message, /Workspace:/);
-    assert.match(snapshot.dialog.message, /Dedicated automatic limit: 3/); assert.match(snapshot.dialog.message, /Dedicated no-progress limit: 2/);
+    assert.match(snapshot.dialog.message, /Dedicated automatic limit: unlimited/); assert.match(snapshot.dialog.message, /Dedicated no-progress limit: unlimited/);
     assert.deepEqual(calls, []);
     await service.handle({ ...identity, requestId: randomUUID(), operation: "send", operationId: snapshot.operationId, dialogId: snapshot.dialog.id, value: true });
     // Microtask-only deterministic drain: no polling timers or model calls.

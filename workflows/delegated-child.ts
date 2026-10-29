@@ -1,7 +1,7 @@
 import type { ExtensionAPI, ExtensionContext } from "@earendil-works/pi-coding-agent";
 import type { GoalRuntime } from "./goal/runtime.js";
 import type { GoalCommandController } from "./goal/commands.js";
-import { DEDICATED_GOAL_LIMITS, validateDelegatedGoals, type DelegatedGoalEntry } from "./delegated-goals.ts";
+import { validateDelegatedGoals, type DelegatedGoalEntry } from "./delegated-goals.ts";
 import { readGoalTasks, writeProgress } from "../shared/goal-progress.ts";
 
 const BINDING = "delegated-goal-child-binding-v1";
@@ -10,9 +10,9 @@ export function createDelegatedChildGoalService(pi: ExtensionAPI, initial: Exten
   let ctx = initial, closed = false, lane: Promise<unknown> = Promise.resolve();
   const sessionId = ctx.sessionManager.getSessionId();
   const active = () => runtime.activeGoal;
-  const applyDedicatedLimits = () => {
-    runtime.settings = { ...runtime.settings, continuationLimits: { ...DEDICATED_GOAL_LIMITS } };
-  };
+  // The authenticated launcher seeds these from the parent's confirmed policy.
+  const confirmedLimits = { ...runtime.settings.continuationLimits };
+  const applyConfirmedLimits = () => { runtime.settings = { ...runtime.settings, continuationLimits: { ...confirmedLimits } }; };
   let binding: string | undefined, boundProgressId: string | undefined;
   for (const entry of ctx.sessionManager.getBranch() as any[]) {
     if (entry.type === "custom" && entry.customType === BINDING && typeof entry.data?.goalId === "string") {
@@ -71,7 +71,7 @@ export function createDelegatedChildGoalService(pi: ExtensionAPI, initial: Exten
       if (runtime.activeGoal) throw new Error("Dedicated child already has a goal; inspect or resume it");
       if (!ctx.isIdle() || ctx.hasPendingMessages()) throw new Error("Dedicated child is not idle");
       if (!binding) { pi.appendEntry(BINDING, { goalId: entry.id }); binding = entry.id; }
-      applyDedicatedLimits();
+      applyConfirmedLimits();
       let activatedGoalId: string | undefined;
       await commands.startGoal(entry.text, entry.tokenBudget ?? undefined, commandContext(), goal => {
         // Bind the stable lineage BEFORE dispatch; resumed contract IDs rotate.
@@ -110,7 +110,7 @@ export function createDelegatedChildGoalService(pi: ExtensionAPI, initial: Exten
         writeProgress(pi, ctx, entry.tasks, goal.id, true);
       }
       const resumedLineage = boundProgressId;
-      applyDedicatedLimits();
+      applyConfirmedLimits();
       await commands.resumeGoal(commandContext());
       const observed = snapshot();
       if (!resumedLineage || boundProgressId !== resumedLineage || observed.childGoalId === childGoalId

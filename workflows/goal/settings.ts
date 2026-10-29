@@ -20,7 +20,7 @@ export interface GoalSettings {
 
 export const DEFAULT_GOAL_SETTINGS: GoalSettings = {
   rpc: { enabled: false },
-  continuationLimits: { automaticTurns: 3, noProgressTurns: 2 },
+  continuationLimits: { automaticTurns: null, noProgressTurns: null },
 };
 
 export type GoalSettingsLoadResult =
