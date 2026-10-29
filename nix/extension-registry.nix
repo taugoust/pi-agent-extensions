@@ -48,6 +48,8 @@ let
         dependencies =
           if name == "openai-usage" then
             [ "openai-accounts" ]
+          else if name == "progress" then
+            [ "workflows" ]
           else if name == "sandbox" then
             [ "subagent" ]
           else if name == "subagent" then
@@ -109,7 +111,8 @@ let
     }) localSkillNames
   );
   extensions = localExtensions // upstreamExtensions // optionalExtensions;
-  assertPagerRemoved = names:
+  assertPagerRemoved =
+    names:
     if builtins.elem "pager" names then
       throw "The pager extension was removed. Remove pager from extension selections; use native Pi scrolling, fullscreen, Ctrl+O or the external editor instead."
     else

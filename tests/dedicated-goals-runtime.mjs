@@ -29,7 +29,7 @@ export default function fakeProvider(pi) {
       const isChild = process.env.PI_DEDICATED_GOAL_CHILD === "1";
       const goal = ctx?.sessionManager.getBranch().findLast(e => e.type === "custom" && e.customType === "goal-state")?.data?.goal;
       appendFileSync(process.env.TEST_CALLS, JSON.stringify({ pid: process.pid, isChild, model: model.id, provider: model.provider,
-        goalId: goal?.id ?? null, goalText: goal?.text ?? null, calls, activated:globalThis.__fixtureActivation===true, limits:globalThis.__paeDelegatedChildGoalV1?.snapshot().limits, sessionId: ctx?.sessionManager.getSessionId() }) + "\n");
+        goalId: goal?.id ?? null, activationId: goal?.activationId ?? null, goalText: goal?.text ?? null, calls, activated:globalThis.__fixtureActivation===true, limits:globalThis.__paeDelegatedChildGoalV1?.snapshot().limits, sessionId: ctx?.sessionManager.getSessionId() }) + "\n");
       if(isChild && globalThis.__fixtureActivation!==true) throw new Error("Automatic child model call before explicit structured activation");
       const stream = createAssistantMessageEventStream();
       const response = { role:"assistant", api:"openai-responses", provider:"harness-test", model:model.id,
@@ -257,7 +257,7 @@ export default async function(pi) {
   assert.deepEqual(state.goals.entries[0].child,original);
   assert.notEqual(state.goals.entries[1].child.taskId,original.taskId);
   // Preserve the executor's in-memory binding across Pause/Resume. The engine
-  // rotates its contract ID while task/session lineage must remain unchanged.
+  // rotates its activation token while goal/task/session identity stays stable.
   first=state.goals.entries[0];
   state=await settle(await mutate("goals.pause",{expectedGoalId:first.id,expectedEntryRevision:first.revision}));
   first=state.goals.entries[0];
@@ -267,7 +267,8 @@ export default async function(pi) {
   assert.equal(first.child.taskId,original.taskId);assert.equal(first.child.attempt,original.attempt+1);assert.notEqual(first.child.childId,original.childId);
   const sameParentTask=JSON.parse(await readFile(join(agent,"state","native-tasks-v1",original.taskId,"state.json"),"utf8"));
   const sameParentCalls=(await readFile(join(root,"calls.jsonl"),"utf8")).trim().split("\n").map(JSON.parse).filter(call=>call.sessionId===sameParentTask.sessionId);
-  assert.equal(sameParentCalls.length,3);assert.notEqual(sameParentCalls[0].goalId,sameParentCalls[1].goalId);
+  assert.equal(sameParentCalls.length,3);assert.equal(sameParentCalls[0].goalId,sameParentCalls[1].goalId);
+  assert.ok(sameParentCalls[0].activationId);assert.notEqual(sameParentCalls[0].activationId,sameParentCalls[1].activationId);
   original=structuredClone(first.child);
   await stopParent();
   launchParent();
@@ -302,13 +303,13 @@ export default async function(pi) {
     const stopped=stoppedLines.findLast(e=>e.type==="custom"&&e.customType==="goal-state").data.goal;
     stopped.status=stoppedStatus;delete stopped.waiting;
     if(stoppedStatus==="budget_limited") { stopped.tokenBudget=stopped.tokensUsed;stopped.tokenBudgetExplicit=true; }
-    const previousId=stopped.id,previousAttempt=first.child.attempt,previousUsed=stopped.tokensUsed;
+    const previousId=stopped.id,previousActivation=stopped.activationId,previousAttempt=first.child.attempt,previousUsed=stopped.tokensUsed;
     await writeFile(retainedPath,stoppedLines.map(JSON.stringify).join("\n")+"\n");
     state=await settle(await mutate("goals.resume",{expectedGoalId:first.id,expectedEntryRevision:first.revision}));
     state=await until(async()=>{const s=await snapshot();return s.goals.entries[0].status==="active"&&s.goals.entries[0].waiting?s:null;},`explicit Resume of ${stoppedStatus}`);
     first=state.goals.entries[0];assert.equal(first.child.taskId,original.taskId);assert.equal(first.child.attempt,previousAttempt+1);
     const activated=(await readFile(retainedPath,"utf8")).trim().split("\n").map(JSON.parse).findLast(e=>e.type==="custom"&&e.customType==="goal-state").data.goal;
-    assert.notEqual(activated.id,previousId);assert(activated.tokensUsed>=previousUsed);
+    assert.equal(activated.id,previousId);assert.notEqual(activated.activationId,previousActivation);assert(activated.tokensUsed>=previousUsed);
     assert.equal(activated.tokenBudget,2000,"budget-limited resume uses explicitly authorized increased metadata budget, never resets usage");
     state=await settle(await mutate("goals.pause",{expectedGoalId:first.id,expectedEntryRevision:first.revision}));first=state.goals.entries[0];
   }

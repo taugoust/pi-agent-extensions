@@ -151,6 +151,12 @@ test("existing paused goals, native child ownership, workflow ownership and pend
   const other = fixture(), owner = new GoalRuntime(other.pi); owner.bindWorkflowSession(other.ctx.sessionManager); assert.ok(owner.acquireWorkflow());
   assert.throws(() => other.create(), /workflow/); assert.equal(other.entries.length, 0);
 });
+test("standalone history is readable but never becomes a current checklist", () => {
+  const history = [{ type: 'custom', customType: 'progress-scoped-state', data: { version: 1, goalKey: null, steps: [{ text: 'Historical task', status: 'pending' }] } }];
+  assert.equal(readScopedProgress(history, null).length, 1);
+  assert.deepEqual(reconstructProgress(history), []);
+  assert.deepEqual(reconstructProgress([...history, { type: 'custom', customType: 'goal-state', data: { goal: null } }]), []);
+});
 test("legacy migration preserves exact linked tasks and IDs without associating standalone history", () => {
   const f = fixture(); const legacy = createGoal("old", undefined, 0); delete legacy.tasks; delete legacy.revision; delete legacy.activationId;
   legacy.progressId = "original-scope"; legacy.status = "paused";

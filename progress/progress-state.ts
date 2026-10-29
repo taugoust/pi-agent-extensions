@@ -238,7 +238,10 @@ export function allProgressCompleted(steps: readonly ProgressStep[]): boolean {
 }
 
 export function reconstructProgress(entries: readonly SessionEntry[]): ProgressStep[] {
-  return readScopedProgress(entries, currentProgressGoal(entries)?.key ?? null);
+  const goal = currentProgressGoal(entries);
+  // Standalone legacy checklists remain readable in transcript/history, never
+  // as the current progress widget or model context without an owning goal.
+  return goal ? readScopedProgress(entries, goal.key) : [];
 }
 
 export function reconcileProgressContext(
