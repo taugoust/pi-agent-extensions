@@ -103,6 +103,7 @@ let
         # immutable bundle path so /reload gets the entire new module graph.
         autoloadSource = pkgs.runCommand "pi-${name}-autoload" { } ''
           cp -rs ${lib.escapeShellArg source} "$out"
+          chmod u+w "$out"
           rm "$out/index.ts"
           printf '%s\n' ${lib.escapeShellArg "export { default } from \"${source}/index.ts\"; export * from \"${source}/index.ts\";"} > "$out/index.ts"
         '';
