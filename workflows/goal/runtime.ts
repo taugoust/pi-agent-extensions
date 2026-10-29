@@ -1293,7 +1293,15 @@ export class GoalRuntime {
     if (!isTerminalGoalStatus(goal.status) || this.terminalDetails?.goalId !== goal.id) {
       this.clearTerminalDetails();
     }
-    goal.revision = Math.max(goal.revision ?? 0, this.activeGoal?.id === goal.id ? (this.activeGoal.revision ?? 0) : 0) + 1;
+    // Compare against the immutable persisted record, not activeGoal: accounting
+    // and some lifecycle paths mutate that object in place. SDK message_end usage
+    // and earlier sibling tool checkpoints must not stale a model's task revision.
+    const session = this.workflowSession as { getBranch?: () => Array<{ type?: string; customType?: string; data?: { goal?: ActiveGoal | null } }> } | undefined;
+    const previous = session?.getBranch?.().findLast(entry => entry.type === "custom" && entry.customType === GOAL_STATE_ENTRY_TYPE)?.data?.goal;
+    const changed = !previous || goalMutationSignature(previous) !== goalMutationSignature(goal);
+    const revision = Math.max(goal.revision ?? 0, previous?.id === goal.id ? (previous.revision ?? 0) : 0,
+      this.activeGoal?.id === goal.id ? (this.activeGoal.revision ?? 0) : 0);
+    goal.revision = Math.max(1, revision + (changed ? 1 : 0));
     this.pi.appendEntry(GOAL_STATE_ENTRY_TYPE, serializeGoalState(goal));
     this.activeGoal = goal;
     const signature = JSON.stringify([goal.id, goal.activationId, goal.tokenBudget, goal.continuationLimits, this.settings.continuationLimits]);
@@ -1528,6 +1536,22 @@ export function transitionGoal(goal: ActiveGoal, requestedStatus: GoalStatus): A
   };
   checkpointGoalActiveTime(next, now, status === "active" && !next.waiting);
   return next;
+}
+
+/** Optimistic-control revision excludes usage, clocks, iteration and safety counters.
+ * A new durable receipt is a mutation even when its task patch is a no-op.
+ */
+function goalMutationSignature(goal: ActiveGoal): string {
+  return JSON.stringify([
+    goal.id, goal.activationId ?? goal.id, goal.progressId ?? goal.id,
+    goal.text, goal.status,
+    goal.tasks?.map(task => [task.id, task.text, task.status]),
+    goal.tokenBudget, goal.tokenBudgetExplicit,
+    goal.continuationLimits?.automaticTurns, goal.continuationLimits?.noProgressTurns,
+    goal.waiting ? [goal.waiting.reason, goal.waiting.resumeAt] : undefined,
+    goal.safetyPauseCause, goal.safetyResetPending,
+    Object.entries(goal.requests ?? {}).map(([id, receipt]) => [id, receipt.fingerprint]),
+  ]);
 }
 
 export function sameGoalActivation(left: ActiveGoal | undefined, right: ActiveGoal | undefined): boolean {

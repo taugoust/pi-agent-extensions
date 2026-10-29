@@ -15,6 +15,7 @@ piPackage.overrideAttrs (old: {
     timeout 30s node ${../tests/goal-fresh-prompt.mjs} "$PWD/goal-test-source" "$PWD"
     timeout 30s node ${../tests/goal-presentation.mjs} "$PWD/goal-test-source" "$PWD"
     timeout 30s node ${../tests/goal-progress-unification.mjs} "$PWD"
+    timeout 30s node ${../tests/goal-progress-runtime.mjs} "$PWD"
     # Restore the original stale-guard behavior in the disposable fixture.
     # The identical real-runtime test must fail at its fresh-input assertion.
     node --input-type=module - ${../tests/goal-fresh-prompt.mjs} "$PWD" <<'JS'

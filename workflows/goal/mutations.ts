@@ -88,7 +88,8 @@ export function bindGoalMutations(pi: ExtensionAPI, ctx: ExtensionContext, runti
       if (options.child && mutation.remove_task_ids?.length) throw new Error("Dedicated child scope removal is owned by its authenticated parent");
       next = { ...previous, tasks: mergeGoalTasks(readGoalTasks(ctx, previous), mutation.steps, mutation.remove_task_ids) };
     }
-    // persistGoal increments exactly once; receipt contains that committed revision.
+    // A new receipt always changes the mutation projection, even for a no-op
+    // task patch. Reserve its one increment; accounting checkpoints add none.
     next.revision = Math.max(next.revision ?? 0, previous?.revision ?? 0);
     const result = { ...snapshot(next), revision: next.revision + 1 };
     // The immutable branch history is the durable request journal. Retain only

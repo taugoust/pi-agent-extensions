@@ -217,14 +217,57 @@ test("branch navigation pauses selected goal, preserves branch tasks/counters, a
   for (const handler of f.handlers.get("agent_settled")) await handler({}, f.ctx);
   assert.equal(f.runtime.activeGoal.status, "paused"); assert.equal(f.messages.filter(([m]) => m.customType === "goal-continuation").length, 0);
 });
-test("policy revisions ignore accounting while shared revisions and configured live limits survive updates", () => {
+test("control and policy revisions ignore accounting while live limits survive task updates", () => {
   const f = fixture(); f.create({ start: false });
   f.runtime.activeGoal.automaticModelTurns = 5;
   f.runtime.updateGoalLimits(f.ctx, f.runtime.activeGoal.id, f.runtime.policyRevision, null, { automaticTurns: 12, noProgressTurns: 6 });
   const policy = f.runtime.policyRevision, revision = f.runtime.activeGoal.revision;
-  f.runtime.activeGoal.tokensUsed++; f.runtime.persistGoal(f.runtime.activeGoal);
-  assert.equal(f.runtime.policyRevision, policy); assert.ok(f.runtime.activeGoal.revision > revision);
-  f.update({ steps: [{ text: "extra", status: "pending" }] });
+  Object.assign(f.runtime.activeGoal, { tokensUsed: 19, timeUsedSeconds: 12, baselineTokens: 1,
+    activeStartedAt: Date.now(), updatedAt: Date.now(), iteration: 2, toolFreeRepeatCount: 1,
+    lastToolFreeOutputFingerprint: "a".repeat(64) });
+  f.runtime.persistGoal(f.runtime.activeGoal);
+  assert.equal(f.runtime.policyRevision, policy); assert.equal(f.runtime.activeGoal.revision, revision);
+  const patched = f.update({ expected_revision: revision, steps: [{ text: "extra", status: "pending" }] });
+  assert.equal(patched.revision, revision + 1);
   assert.deepEqual(f.runtime.continuationLimits, { automaticTurns: 12, noProgressTurns: 6 });
   assert.equal(f.runtime.activeGoal.automaticModelTurns, 5);
+});
+test("task, scope, lifecycle, activation and policy changes still invalidate control revisions", () => {
+  const f = fixture(); f.create();
+  for (const change of [
+    goal => { goal.tasks[0].text = "Refined scope"; },
+    goal => { goal.text = "Changed objective"; },
+    goal => { goal.status = "paused"; },
+    goal => { goal.activationId = "new-activation"; },
+    goal => { goal.tokenBudget = 100; goal.tokenBudgetExplicit = true; },
+    goal => { goal.continuationLimits = { automaticTurns: 12, noProgressTurns: 6 }; },
+  ]) {
+    const revision = f.runtime.activeGoal.revision;
+    change(f.runtime.activeGoal);
+    f.runtime.persistGoal(f.runtime.activeGoal);
+    assert.equal(f.runtime.activeGoal.revision, revision + 1);
+    assert.throws(() => f.update({ expected_revision: revision, request_id: `stale-${revision}` }), /revision changed/);
+    f.runtime.activeGoal.automaticModelTurns++; f.runtime.persistGoal(f.runtime.activeGoal);
+    assert.equal(f.runtime.activeGoal.revision, revision + 1, "counter checkpoint preserves mutation fence");
+  }
+  const waiting = fixture(), created = waiting.create();
+  waiting.runtime.enterGoalWait(waiting.ctx, created.goalId, { reason: "External wake" });
+  assert.equal(waiting.runtime.activeGoal.revision, created.revision + 1);
+  waiting.runtime.recordGoalUsage(waiting.runtime.activeGoal, waiting.ctx);
+  waiting.runtime.persistGoal(waiting.runtime.activeGoal);
+  assert.equal(waiting.runtime.activeGoal.revision, created.revision + 1);
+  waiting.runtime.clearGoalWait(waiting.ctx, created.goalId);
+  assert.equal(waiting.runtime.activeGoal.revision, created.revision + 2);
+});
+test("no-op task mutations commit their receipt revision once and retry durably", () => {
+  const f = fixture(), created = f.create({ start: false });
+  const request = { action: "update", goal_id: created.goalId, expected_revision: created.revision, request_id: "no-op", steps: [] };
+  const result = f.mutate(request);
+  assert.equal(result.revision, created.revision + 1);
+  assert.equal(result.revision, f.runtime.activeGoal.revision);
+  assert.equal(result.revision, f.entries.at(-1).data.goal.requests[request.request_id].result.revision);
+  f.runtime.activeGoal.tokensUsed++; f.runtime.persistGoal(f.runtime.activeGoal);
+  assert.deepEqual(f.mutate(request), result);
+  const next = f.update({ request_id: "another-no-op", expected_revision: result.revision });
+  assert.equal(next.revision, result.revision + 1);
 });

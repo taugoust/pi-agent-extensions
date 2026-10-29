@@ -15,6 +15,7 @@ export interface ActiveGoal {
   id: string;
   /** Rotates on activation; never use the stable id as a stale-turn guard. */
   activationId?: string;
+  /** Task/control mutation fence; usage-only checkpoints preserve this revision. */
   revision?: number;
   tasks?: ProgressStep[];
   requests?: Record<string, { fingerprint: string; result: { goalId: string; activationId: string; revision: number; status: string; steps: ProgressStep[] } }>;

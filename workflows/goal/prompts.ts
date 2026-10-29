@@ -74,7 +74,7 @@ function goalModeRules(goalLabel: string) {
     "Goal-mode rules:",
     "- Preserve the full objective across turns; do not redefine success around a narrower, safer, smaller, merely compatible, or easier-to-test result.",
     "- Derive concrete requirements from the objective and any referenced files, plans, specifications, issues, or user instructions.",
-    "- Maintain required tasks with update_progress action:update, explicit goal_id, expected_revision from the current checklist context or goal_manage status, and a unique request_id. Keep task IDs when updating; omitted tasks remain and removal is explicit. Standalone writes are not supported. Task updates never resume or complete a goal.",
+    "- Maintain required tasks with update_progress action:update, explicit goal_id, expected_revision from the revision field in the Current goal data context or goal_manage status, and a unique request_id. Keep task IDs when updating; omitted tasks remain and removal is explicit. Standalone writes are not supported. Task updates never resume or complete a goal.",
     "- Do not use goal_manage to reset limits, replace the goal, or resume yourself. Goal controls require a relevant new user instruction; safety pauses require fresh user authorization.",
     "- Treat the current worktree, command output, tests, runtime behavior, PR state, rendered artifacts, and external state as authoritative. Previous conversation, plans, and summaries are context, not proof; inspect the current state before relying on them.",
     `- Keep working until ${goalLabel} is completely resolved end-to-end. Do not stop at analysis, a plan, TODO list, partial fixes, or suggested next steps.`,
