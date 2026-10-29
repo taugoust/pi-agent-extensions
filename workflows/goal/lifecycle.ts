@@ -362,7 +362,9 @@ export function registerGoalLifecycle(
         return;
       }
       if (runtime.isActiveBudgetWrapUpMessage(message)) return;
-      if (runtime.activeGoal?.waiting) runtime.clearGoalWait(ctx, runtime.activeGoal.id);
+      if (runtime.activeGoal?.waiting) runtime.clearGoalWait(ctx, runtime.activeGoal.id, {
+        reason: "custom_message", customType: String(Reflect.get(message, "customType") ?? "").slice(0, 128),
+      });
       if (runtime.guardAbortGoalId === runtime.activeGoal?.id) {
         runtime.guardAbortGoalId = undefined;
       }
@@ -383,6 +385,9 @@ export function registerGoalLifecycle(
     const ownedPromptBoundary = runtime.hasOwnedPromptBoundary(prompt);
     const queuedNonGoalInput = runtime.consumeQueuedNonGoalInput(prompt, !ownedPromptBoundary);
     if (!ownedPrompt) {
+      if (!ownedPromptBoundary && !extractGoalPromptMarker(prompt) && !extractContinuationMarker(prompt) && runtime.activeGoal?.waiting) {
+        runtime.clearGoalWait(ctx, runtime.activeGoal.id, { reason: "user_input" });
+      }
       if (queuedNonGoalInput?.behavior === "followUp") {
         beginNonGoalFollowUp(ctx, queuedNonGoalInput.resetSafetyEpoch);
       }
@@ -542,6 +547,7 @@ export function registerGoalLifecycle(
       queuedNonGoalInput?.behavior !== "steer"
     ) {
       runtime.clearStaleGoalToolCallBlock();
+      if (runtime.activeGoal?.waiting) runtime.clearGoalWait(ctx, runtime.activeGoal.id, { reason: "user_input" });
     }
     if (!ownedPromptGoalId && !ownedPromptBoundary) {
       runtime.supersedeOwnedInputCollision(prompt);

@@ -9,6 +9,8 @@ import { mutateProgress, readGoalTasks } from "../../shared/goal-progress.ts";
 import { ProgressParameters } from "../../progress/progress-state.js";
 import { mergeGoalTasks } from "./mutations.ts";
 import { completeVerifiedGoal, MAX_COMPLETION_SUMMARY_LENGTH } from "./completion.js";
+import { GOAL_WAIT_WAKE_SEMANTICS } from "./wait.js";
+import { readGoalSessionActivity } from "./activity.js";
 
 /** Chat controls and progress share the runtime's single persisted goal record. */
 export function registerGoalManagement(pi: ExtensionAPI, runtime: GoalRuntime) {
@@ -22,7 +24,7 @@ export function registerGoalManagement(pi: ExtensionAPI, runtime: GoalRuntime) {
       "Use a concise outcome-only objective (at most 320 characters); put implementation and verification steps in update_progress.",
       "update_progress create (or goal_manage create) authorizes autonomous continuation with configured limits unless start:false. Creation is not permission to bypass an existing goal, pending approvals, or another workflow.",
       "After pause, blocker or safety limit, wait for fresh user authorization to resume. Task updates do not resume. Complete only after verifying every required task and the outcome.",
-      "Read status for the current stable goal_id, activation_id and revision. Never reuse an old activation token after resume or objective changes.",
+      "Read status for the current stable goal_id, activation_id and revision, waiting/wake evidence and bounded session-owned execution activity. Session activity is not proof of goal assignment. Never reuse an old activation token after resume or objective changes.",
       "When the user explicitly asks to complete a verified paused goal, use goal_manage action:complete with summary and fresh user_authorized:true. Do not resume it or create an active Goal contract merely to complete it. All required tasks must already be completed.",
     ],
     parameters: Type.Object({
@@ -80,7 +82,9 @@ export function registerGoalManagement(pi: ExtensionAPI, runtime: GoalRuntime) {
         } else if (params.action === "resume") {
           if (previous.status === "active" && !previous.waiting) throw new Error("Goal is already active");
           if (next.tokenBudget !== undefined && next.tokensUsed >= next.tokenBudget) throw new Error("Goal budget is exhausted; explicitly update it before resuming");
-          next = resetGoalSafetyEpoch(transitionGoal({ ...next, waiting: undefined, baselineTokens: currentTokenTotal(ctx) }, "active"));
+          next = resetGoalSafetyEpoch(transitionGoal({ ...next, waiting: undefined,
+            ...(previous.waiting ? { lastWake: { at: Date.now(), reason: "explicit_resume" as const } } : {}),
+            baselineTokens: currentTokenTotal(ctx) }, "active"));
         }
         const retainedWorkflow = runtime.ownsWorkflow(previous);
         if (next.status === "active") {
@@ -89,6 +93,7 @@ export function registerGoalManagement(pi: ExtensionAPI, runtime: GoalRuntime) {
           if (!runtime.acquireWorkflow(ctx.sessionManager)) throw new Error("Another workflow currently owns this session");
         }
         try { runtime.persistGoal(next); } catch (error) { if (!retainedWorkflow) runtime.releaseWorkflow(); throw error; }
+        if (!next.waiting) runtime.clearGoalWaitTimer();
         if (next.status === "active") {
           runtime.beginAgentRun(next.id, "manual");
           runtime.markAgentToolAttempted();
@@ -97,15 +102,16 @@ export function registerGoalManagement(pi: ExtensionAPI, runtime: GoalRuntime) {
         runtime.updateStatus(ctx, next);
         if (next.waiting) runtime.restoreGoalWaitTimer(ctx);
       }
+      const sessionActivity = params.action === "status" ? await readGoalSessionActivity(ctx) : undefined;
       const goal = runtime.activeGoal;
-      const state = goal ? { id: goal.id, activationId: goal.activationId ?? goal.id, revision: goal.revision, policyRevision: runtime.policyRevision, objective: goal.text, status: goal.status, tokenBudget: goal.tokenBudget, continuationLimits: goal.continuationLimits, effectiveLimits: runtime.continuationLimits, tasks: readGoalTasks(ctx, goal) } : null;
+      const state = goal ? { id: goal.id, activationId: goal.activationId ?? goal.id, revision: goal.revision, policyRevision: runtime.policyRevision, objective: goal.text, status: goal.status, waiting: goal.waiting ?? null, lastWake: goal.lastWake ?? null, lastBlocker: goal.lastBlocker ?? null, wakeSemantics: GOAL_WAIT_WAKE_SEMANTICS, ...(sessionActivity ? { sessionActivity } : {}), tokenBudget: goal.tokenBudget, continuationLimits: goal.continuationLimits, effectiveLimits: runtime.continuationLimits, tasks: readGoalTasks(ctx, goal) } : null;
       return { content: [{ type: "text", text: state ? JSON.stringify(state) : "No current goal." }], details: { presentation: goalManagePresentation(params.action, goal?.text), goal: state } };
     },
   }));
   pi.on("context", (event, ctx) => {
     const messages = event.messages.filter(message => !(message.role === "custom" && message.customType === "goal-task-context"));
     const goal = runtime.activeGoal;
-    if (goal) messages.push({ role: "custom", customType: "goal-task-context", content: `Current goal data: ${JSON.stringify({ goal_id: goal.id, activation_id: goal.activationId ?? goal.id, revision: goal.revision, status: goal.status, objective: goal.text, tasks: readGoalTasks(ctx, goal) })}\nUse update_progress action:update with this exact goal_id and expected_revision, a new request_id, and only changed/new steps. Omitted tasks remain. Task updates never resume or complete the goal. ${goal.status === "active" ? "Continue toward the outcome; do not call goal_complete while any required task is unfinished." : "Autonomous continuation is disabled; resume requires fresh user authorization. If the user explicitly requests completion of a verified paused goal, use goal_manage action:complete with summary, exact goal_id/activation_id/expected_revision and user_authorized:true; do not resume merely to complete it."}`, display: false, timestamp: 0 });
+    if (goal) messages.push({ role: "custom", customType: "goal-task-context", content: `Current goal data: ${JSON.stringify({ goal_id: goal.id, activation_id: goal.activationId ?? goal.id, revision: goal.revision, status: goal.status, waiting: goal.waiting ?? null, lastWake: goal.lastWake ?? null, lastBlocker: goal.lastBlocker ?? null, objective: goal.text, tasks: readGoalTasks(ctx, goal) })}\nUse update_progress action:update with this exact goal_id and expected_revision, a new request_id, and only changed/new steps. Omitted tasks remain. Task updates never resume or complete the goal. ${goal.status === "active" ? "Continue independent work toward the outcome; do not call goal_complete while any required task is unfinished. If only delegated results or external work remain, arrange completion/guidance delivery and call goal_wait alone instead of ending with a progress-only response (which causes automatic continuation). The presence of a child alone is not a reason to wait. Wait reasons are status data, not event subscriptions; routine progress receipts do not wake you." : "Autonomous continuation is disabled; resume requires fresh user authorization. If the user explicitly requests completion of a verified paused goal, use goal_manage action:complete with summary, exact goal_id/activation_id/expected_revision and user_authorized:true; do not resume merely to complete it."}`, display: false, timestamp: 0 });
     return { messages };
   });
 }

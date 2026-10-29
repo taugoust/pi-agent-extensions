@@ -761,20 +761,21 @@ test("changing the selected model invalidates an outstanding Goal approval witho
 		await f.dispose();
 	}
 });
-test("Goal waits without polling; incidental prompts stay quiet, explicit resume and custom external wakes work", async () => {
+test("Goal waits without polling; user prompts interrupt waiting and may explicitly wait again",  async () => {
   const f = await fixture("wait");
   try {
     await f.start("goal.start", { objective: "Wait for explicit wake", tokenBudget: 1000 }); await f.answer(true);
     const waiting = await until(f.snapshot, s => !!s.goal?.waiting && !s.busy, "quiet wait");
     await f.session.waitForIdle(); for (let i = 0; i < 5; i++) await f.snapshot(); assert.equal(f.calls.length, 1);
-    f.setMode("repeat");
-    await f.session.prompt("Can you answer an unrelated question?");
+    await f.session.prompt("Recheck the waiting condition, then explicitly wait again.");
     await f.session.waitForIdle();
     const stillWaiting = await f.snapshot();
-    assert.ok(stillWaiting.goal?.waiting, "an incidental user prompt must not clear the wait");
+    assert.ok(stillWaiting.goal?.waiting, "the new model response explicitly re-entered waiting");
+    const recorded = f.session.sessionManager.getBranch().findLast(e => e.type === "custom" && e.customType === "goal-state").data.goal;
+    assert.equal(recorded.lastWake.reason, "user_input", "user input cleared the prior wait before model work");
     assert.equal(f.calls.length, 2);
     for (let i = 0; i < 5; i++) await f.snapshot();
-    assert.equal(f.calls.length, 2, "an incidental prompt must not authorize automatic continuation");
+    assert.equal(f.calls.length, 2, "a newly accepted wait must not authorize automatic continuation");
     f.setMode("complete"); await f.start("goal.resume"); await f.dialog(); assert.equal(f.calls.length, 2);
     await f.answer(true); const done = await until(f.snapshot, s => !!s.lastCompletion?.summary, "resumed completion");
     assert.equal(done.lastCompletion.id, waiting.goal.id); assert.equal(f.calls.length, 3);

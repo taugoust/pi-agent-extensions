@@ -3,7 +3,7 @@ import { validateGoalLimitOverrides, type GoalContinuationLimits } from "../../s
 import type { GoalStatus } from "./prompts.js";
 import { createHash } from "node:crypto";
 import { readScopedProgress, validateProgressArguments, type ProgressStep } from "../../progress/progress-state.js";
-import { type GoalWait, normalizeGoalWait } from "./wait.js";
+import { type GoalWait, type GoalWake, normalizeGoalWait, normalizeGoalWake } from "./wait.js";
 
 const GOAL_STATE_ENTRY_TYPE = "goal-state";
 const LEGACY_GOALS_STATE_ENTRY_TYPE = "goals-state";
@@ -41,6 +41,10 @@ export interface ActiveGoal {
   safetyPauseCause?: SafetyPauseCause;
   safetyResetPending?: boolean;
   waiting?: GoalWait;
+  /** Last transition out of waiting; bounded diagnostic data, not authority. */
+  lastWake?: GoalWake;
+  /** Most recent accepted, evidenced blocker report; retained across resume. */
+  lastBlocker?: { at: number; reason: string; evidence: string; repeatedTurns: number };
 }
 
 interface LegacyStoredGoal extends Omit<ActiveGoal, "status"> {
@@ -228,7 +232,16 @@ export function normalizeLoadedGoal(goal: ActiveGoal): ActiveGoal {
     safetyPauseCause: normalizeSafetyPauseCause(goal.safetyPauseCause),
     safetyResetPending: goal.safetyResetPending === true ? true : undefined,
     waiting,
+    lastWake: normalizeGoalWake(goal.lastWake),
+    lastBlocker: normalizeGoalBlocker(goal.lastBlocker),
   };
+}
+
+function normalizeGoalBlocker(value: unknown): ActiveGoal["lastBlocker"] {
+  if (!isRecord(value) || !Number.isSafeInteger(value.at) || (value.at as number) < 0 ||
+      typeof value.reason !== "string" || typeof value.evidence !== "string" ||
+      !Number.isSafeInteger(value.repeatedTurns) || (value.repeatedTurns as number) < 3) return undefined;
+  return { at: value.at as number, reason: value.reason.slice(0, 1_000), evidence: value.evidence.slice(0, 4_000), repeatedTurns: value.repeatedTurns as number };
 }
 
 function normalizeSafetyCounter(value: unknown) {

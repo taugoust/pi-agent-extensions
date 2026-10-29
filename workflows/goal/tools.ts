@@ -22,6 +22,7 @@ import {
 } from "./runtime.js";
 import {
   createGoalWait,
+  GOAL_WAIT_WAKE_SEMANTICS,
   MAX_GOAL_WAIT_DELAY_MS,
   MAX_GOAL_WAIT_REASON_LENGTH,
   MIN_GOAL_WAIT_DELAY_MS,
@@ -224,6 +225,8 @@ export function registerGoalTools(pi: ExtensionAPI, runtime: GoalRuntime) {
         kind: "blocker_report",
         expectedGoalId: blockedGoal.id,
         reason,
+        evidence,
+        repeatedTurns,
       });
       if (!stoppedGoal) return reject("active goal changed before blocker transition");
       notifyTerminal(ctx.ui, `Goal blocked: ${truncateNotification(reason)}`, "warning");
@@ -239,7 +242,8 @@ export function registerGoalTools(pi: ExtensionAPI, runtime: GoalRuntime) {
   const goalWaitTool = defineTool({
     name: GOAL_WAIT_TOOL,
     label: "Goal Wait",
-    description: `Keep an active /goal quiet only when the latest effective Goal contract explicitly says Goal mode is active, supplies the matching current goal_id, and progress depends on an arranged external wake event or one safety deadline. Tool visibility alone does not activate Goal mode. Call goal_wait alone. Requests below ${MIN_GOAL_WAIT_DELAY_MS}ms are clamped to ${MIN_GOAL_WAIT_DELAY_MS}ms. Never call for ordinary unfinished work.`,
+    executionMode: "sequential",
+    description: `Keep an active /goal quiet only when the latest effective Goal contract explicitly says Goal mode is active, supplies the matching current goal_id, and progress depends on an arranged external wake event or one safety deadline. Tool visibility alone does not activate Goal mode. Call goal_wait alone. Repeated calls succeed; omitting resume_after_ms preserves an existing absolute deadline, while supplying it replaces the deadline from now. Reason text does not create a subscription. Delivered non-Goal custom messages, user input, explicit resume or the optional deadline clear the wait; routine progress does not wake the model. Requests below ${MIN_GOAL_WAIT_DELAY_MS}ms are clamped to ${MIN_GOAL_WAIT_DELAY_MS}ms. Never call for ordinary unfinished work.`,
     parameters: Type.Object({
       goal_id: Type.String({
         minLength: 1,
@@ -285,7 +289,6 @@ export function registerGoalTools(pi: ExtensionAPI, runtime: GoalRuntime) {
         return reject(`goal is ${activeGoal.status}, not active`);
       }
       if (!runtime.ownsWorkflow(activeGoal)) return reject("active Goal no longer owns its workflow");
-      if (activeGoal.waiting) return reject("goal is already waiting");
       if (!reason) return reject("reason is empty");
       if (reason.length > MAX_GOAL_WAIT_REASON_LENGTH) return reject("reason is too long");
       if (
@@ -296,25 +299,28 @@ export function registerGoalTools(pi: ExtensionAPI, runtime: GoalRuntime) {
       }
 
       const { requestedMs, effectiveMs } = resolveGoalWaitDelay(resumeAfterMs);
-      const waiting = createGoalWait(reason, resumeAfterMs);
+      const previous = activeGoal.waiting;
+      const waiting = previous && resumeAfterMs === undefined
+        ? { ...previous, reason }
+        : createGoalWait(reason, resumeAfterMs);
+      const changed = !previous || previous.reason !== waiting.reason || previous.resumeAt !== waiting.resumeAt;
       const waitingGoal = runtime.enterGoalWait(ctx, activeGoal.id, waiting);
       if (!waitingGoal) return reject("active goal changed before waiting transition");
       const clamped = requestedMs !== undefined && effectiveMs !== requestedMs;
-      notifyTerminal(ctx.ui, `Goal waiting: ${truncateNotification(reason)}`, "info");
+      if (changed) notifyTerminal(ctx.ui, `Goal waiting: ${truncateNotification(reason)}`, "info");
+      const details = {
+        ...waitDetails(goal, requestedGoalId, reason, effectiveMs, waiting.resumeAt, clamped ? requestedMs : undefined),
+        activation_id: waitingGoal.activationId ?? waitingGoal.id,
+        status: "waiting" as const,
+        waiting: { reason: waiting.reason, resume_at: waiting.resumeAt ?? null },
+        changed,
+        deadline: previous && resumeAfterMs === undefined ? "preserved" : resumeAfterMs === undefined ? "none" : "replaced",
+        wake_semantics: GOAL_WAIT_WAKE_SEMANTICS,
+        last_wake: waitingGoal.lastWake ?? null,
+      };
       return {
-        content: toolContent(
-          clamped
-            ? `Goal waiting: ${reason}\nRequested resume_after_ms ${requestedMs} was clamped to ${effectiveMs}.`
-            : `Goal waiting: ${reason}`,
-        ),
-        details: waitDetails(
-          goal,
-          requestedGoalId,
-          reason,
-          effectiveMs,
-          waiting.resumeAt,
-          clamped ? requestedMs : undefined,
-        ),
+        content: toolContent(`Goal waiting: ${reason}\n${JSON.stringify(details)}`),
+        details,
         terminate: true,
       };
     },

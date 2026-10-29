@@ -27,7 +27,7 @@ export { queueGoalSafetyReset, resetGoalSafetyEpoch } from "./safety.js";
 
 import { DEFAULT_GOAL_SETTINGS, type GoalSettings, type GoalSettingsLoadIssue } from "./settings.js";
 import { assertGoalToolsAvailable, goalToolsAvailable } from "./tool-policy.js";
-import { type GoalWait, GoalWaitTimer } from "./wait.js";
+import { type GoalWait, type GoalWake, GoalWaitTimer } from "./wait.js";
 import { WorkflowMutex, type WorkflowMutexOwner } from "./workflow-mutex.js";
 
 export {
@@ -89,7 +89,7 @@ export type GoalStopRequest =
       abortTurn: boolean;
       recordUsage: boolean;
     }
-  | { kind: "blocker_report"; expectedGoalId: string; reason: string }
+  | { kind: "blocker_report"; expectedGoalId: string; reason: string; evidence?: string; repeatedTurns?: number }
   | {
       kind: "agent_interruption";
       expectedGoalId: string;
@@ -503,7 +503,12 @@ export class GoalRuntime {
 
   enterGoalWait(ctx: StatusContext, goalId: string, waiting: GoalWait) {
     const goal = this.activeGoal;
-    if (!goal || goal.id !== goalId || !this.ownsWorkflow(goal)) return undefined;
+    if (!goal || goal.id !== goalId || goal.status !== "active" || !this.ownsWorkflow(goal)) return undefined;
+    if (goal.waiting?.reason === waiting.reason && goal.waiting?.resumeAt === waiting.resumeAt) {
+      // A repeat must neither postpone the deadline nor re-arm an exhausted retry.
+      this.cancelContinuationWork();
+      return goal;
+    }
     this.recordGoalUsage(goal, ctx, false);
     this.cancelContinuationWork();
     this.clearGoalRecoveryForGoal(goal.id);
@@ -520,14 +525,15 @@ export class GoalRuntime {
     return this.activeGoal;
   }
 
-  clearGoalWait(ctx: StatusContext, goalId: string) {
+  clearGoalWait(ctx: StatusContext, goalId: string, wake: Omit<GoalWake, "at"> = { reason: "explicit_resume" }) {
     const goal = this.activeGoal;
-    if (!goal || goal.id !== goalId || !this.ownsWorkflow(goal) || !goal.waiting) return false;
+    if (!goal || goal.id !== goalId || goal.status !== "active" || !this.ownsWorkflow(goal) || !goal.waiting) return false;
     this.clearGoalWaitTimer();
     const { waiting: _waiting, ...nextGoal } = goal;
     const now = Date.now();
     checkpointGoalActiveTime(nextGoal, now, true);
     nextGoal.updatedAt = now;
+    nextGoal.lastWake = { at: now, reason: wake.reason, ...(wake.customType ? { customType: wake.customType.slice(0, 128) } : {}) };
     this.activeGoal = nextGoal;
     this.persistGoal(this.activeGoal);
     this.updateStatus(ctx, this.activeGoal);
@@ -558,7 +564,7 @@ export class GoalRuntime {
     const retryAttempt = matchingRetry?.retryAt !== undefined;
     if (ctx.isIdle?.() !== true || hasPendingMessages(ctx)) return false;
     if (retryAttempt) this.goalWaitDeadlineRetry = undefined;
-    if (!this.clearGoalWait(ctx, goal.id)) return false;
+    if (!this.clearGoalWait(ctx, goal.id, { reason: "deadline" })) return false;
     const resumedGoal = this.activeGoal;
     if (!resumedGoal || !sameGoalActivation(resumedGoal, goal) || resumedGoal.status !== "active") return false;
     this.requestContinuation(resumedGoal);
@@ -569,7 +575,7 @@ export class GoalRuntime {
       this.activeGoal?.status === "active" &&
       this.continuationIntent?.goalId === goal.id
     ) {
-      this.restoreGoalWaitAfterDeadlineFailure(ctx, goal.id, waiting, !retryAttempt);
+      this.restoreGoalWaitAfterDeadlineFailure(ctx, goal.id, waiting, !retryAttempt, goal.lastWake);
     }
     return false;
   }
@@ -598,6 +604,7 @@ export class GoalRuntime {
     goalId: string,
     waiting: GoalWait,
     allowRetry: boolean,
+    previousWake: GoalWake | undefined,
   ) {
     const goal = this.activeGoal;
     if (!goal || goal.id !== goalId || goal.status !== "active" || waiting.resumeAt === undefined) {
@@ -612,6 +619,8 @@ export class GoalRuntime {
       activeStartedAt: undefined,
       updatedAt: Date.now(),
     };
+    // A failed send did not wake model work; retain the last accepted wake.
+    this.activeGoal.lastWake = previousWake;
     const retryAt = allowRetry ? Date.now() + 1_000 : undefined;
     this.goalWaitDeadlineRetry = {
       goalId,
@@ -698,6 +707,9 @@ export class GoalRuntime {
         this.blockStaleGoalToolCalls();
         status = "blocked";
         terminalReason = request.reason;
+        if (request.evidence !== undefined && request.repeatedTurns !== undefined) {
+          goal = { ...goal, lastBlocker: { at: Date.now(), reason: request.reason.slice(0, 1_000), evidence: request.evidence.slice(0, 4_000), repeatedTurns: request.repeatedTurns } };
+        }
         break;
       case "agent_interruption":
         this.cancelContinuationWork();
@@ -924,7 +936,7 @@ export class GoalRuntime {
       if (!waitingGoal) return false;
       notifyTerminal(
         ctx.ui,
-        `Goal waiting after provider retries were exhausted${details}. Run /goal resume to retry; ordinary follow-ups leave the goal waiting.`,
+        `Goal waiting after provider retries were exhausted${details}. Run /goal resume to retry; user input interrupts the wait.`,
         "warning",
       );
       return true;
