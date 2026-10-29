@@ -1,6 +1,7 @@
 import { createHash, randomUUID } from "node:crypto";
-import type { ExtensionAPI } from "@earendil-works/pi-coding-agent";
+import type { ExtensionAPI, ExtensionContext } from "@earendil-works/pi-coding-agent";
 import { checkpointGoalActiveTime, formatDuration, formatTokenCount, updateGoalUsage } from "./accounting.js";
+import { resolveGoalLimits, validateGoalLimitOverrides, type GoalContinuationLimits } from "../../shared/delegated-goal-policy.ts";
 import { formatError, isStaleContextError, notifyTerminal, safeGoalMenuText, truncateNotification } from "./errors.js";
 import {
   createGoalContextContract,
@@ -590,7 +591,7 @@ export class GoalRuntime {
 
   updateStatus(ctx: StatusContext, goal: ActiveGoal) {
     this.clearCompletionStatusTimer();
-    ctx.ui.setStatus(STATUS_KEY, formatFooterStatus(goal, this.settings.continuationLimits.automaticTurns, ctx.ui.theme));
+    ctx.ui.setStatus(STATUS_KEY, formatFooterStatus(goal, this.continuationLimits.automaticTurns, ctx.ui.theme));
   }
 
   stopActiveGoal(ctx: StatusContext, request: GoalStopRequest) {
@@ -771,6 +772,8 @@ export class GoalRuntime {
 
   limitActiveGoalForBudget(ctx: StatusContext, sendWrapUp: boolean) {
     const goal = this.activeGoal;
+    // A live edit is enforced after the entire tool turn, not between parallel tools.
+    if (goal && this.pendingLimitBoundary === goal.id) return false;
     if (goal?.status !== "active" || goal.tokenBudget === undefined || goal.tokensUsed < goal.tokenBudget) {
       return false;
     }
@@ -809,14 +812,14 @@ export class GoalRuntime {
     goal.lastToolFreeOutputFingerprint = next.lastToolFreeOutputFingerprint;
     this.persistGoal(goal);
     this.updateStatus(ctx, goal);
-    const limit = this.settings.continuationLimits.noProgressTurns;
+    const limit = this.continuationLimits.noProgressTurns;
     if (limit === null || goal.toolFreeRepeatCount < limit) return false;
     return this.pauseGoalForSafety(ctx, "no_progress", false);
   }
 
   enforceAutomaticTurnLimit(ctx: StatusContext, abortTurn: boolean) {
     const goal = this.activeGoal;
-    const limit = this.settings.continuationLimits.automaticTurns;
+    const limit = this.continuationLimits.automaticTurns;
     if (goal?.status !== "active" || limit === null || goal.automaticModelTurns < limit) {
       return false;
     }
@@ -825,7 +828,7 @@ export class GoalRuntime {
 
   enforceNoProgressLimit(ctx: StatusContext, abortTurn = false) {
     const goal = this.activeGoal;
-    const limit = this.settings.continuationLimits.noProgressTurns;
+    const limit = this.continuationLimits.noProgressTurns;
     if (goal?.status !== "active" || limit === null || goal.toolFreeRepeatCount < limit) {
       return false;
     }
@@ -835,7 +838,7 @@ export class GoalRuntime {
   pauseGoalForSafety(ctx: StatusContext, cause: SafetyPauseCause, abortTurn: boolean) {
     const goal = this.activeGoal;
     if (goal?.status !== "active") return false;
-    const automaticLimit = this.settings.continuationLimits.automaticTurns;
+    const automaticLimit = this.continuationLimits.automaticTurns;
     const count =
       cause === "continuation_limit"
         ? `${goal.automaticModelTurns} of ${automaticLimit ?? "Unlimited"} automatic model responses`
@@ -1210,11 +1213,49 @@ export class GoalRuntime {
     return undefined;
   }
 
+  private pendingLimitBoundary?: string;
+  private policySignature?: string;
+  private policyVersion = 0;
+  /** Service-epoch scoped revision; accounting updates do not stale a limit editor. */
+  get policyRevision() {
+    const goal = this.activeGoal;
+    const signature = JSON.stringify([goal?.id, goal?.tokenBudget, goal?.continuationLimits, this.settings.continuationLimits]);
+    if (signature !== this.policySignature) { this.policySignature = signature; this.policyVersion++; }
+    return this.policyVersion;
+  }
+  get continuationLimits(): GoalContinuationLimits {
+    return resolveGoalLimits(this.activeGoal?.continuationLimits, this.settings.continuationLimits);
+  }
+  updateGoalLimits(ctx: ExtensionContext, goalId: string, revision: number, tokenBudget: number | null, continuationLimits: Partial<GoalContinuationLimits>) {
+    const goal = this.activeGoal;
+    if (!goal || goal.id !== goalId || goal.status === "complete" || this.policyRevision !== revision)
+      throw new Error("Goal identity or policy revision changed");
+    if (tokenBudget !== null && (!Number.isSafeInteger(tokenBudget) || tokenBudget < 1 || tokenBudget > 1_000_000)) throw new Error("Invalid token budget");
+    if (continuationLimits === undefined) throw new Error("Explicit continuation limits required");
+    validateGoalLimitOverrides(continuationLimits);
+    const next = { ...goal, tokenBudget: tokenBudget ?? undefined, tokenBudgetExplicit: tokenBudget !== null,
+      continuationLimits: structuredClone(continuationLimits) };
+    this.persistGoal(next);
+    this.activeGoal = next;
+    this.pendingLimitBoundary = next.id;
+    // RPC handlers never abort a running tool. Enforce at the next turn boundary;
+    // an idle/waiting engine is already at a safe boundary.
+    if (ctx.isIdle()) this.enforceGoalLimitsAtBoundary(ctx);
+    this.updateStatus(ctx, this.activeGoal!);
+  }
+  enforceGoalLimitsAtBoundary(ctx: StatusContext) {
+    if (!this.activeGoal || this.pendingLimitBoundary !== this.activeGoal.id) return false;
+    this.pendingLimitBoundary = undefined;
+    return this.limitActiveGoalForBudget(ctx, false) || this.enforceAutomaticTurnLimit(ctx, true) || this.enforceNoProgressLimit(ctx, true);
+  }
+
   persistGoal(goal: ActiveGoal) {
     if (!isTerminalGoalStatus(goal.status) || this.terminalDetails?.goalId !== goal.id) {
       this.clearTerminalDetails();
     }
     this.pi.appendEntry(GOAL_STATE_ENTRY_TYPE, serializeGoalState(goal));
+    const signature = JSON.stringify([goal.id, goal.tokenBudget, goal.continuationLimits, this.settings.continuationLimits]);
+    if (signature !== this.policySignature) { this.policySignature = signature; this.policyVersion++; }
     this.pi.events.emit("pi:goal-progress", {});
     this.publishGoalState(buildGoalStateSnapshot(goal, this.terminalDetails?.summary, this.terminalDetails?.reason));
   }

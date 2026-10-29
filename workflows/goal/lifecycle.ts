@@ -555,6 +555,7 @@ export function registerGoalLifecycle(
   pi.on("turn_end", (event, ctx) => {
     if (!sessionActive) return;
     runtime.recordAutomaticTurn(ctx, event.message);
+    runtime.enforceGoalLimitsAtBoundary(ctx);
     // Terminal Goal tools transition state synchronously, but their inactive contract
     // must wait until Pi has persisted the real tool result at this turn boundary.
     if (runtime.activeGoal?.status !== "active") {
@@ -564,6 +565,8 @@ export function registerGoalLifecycle(
 
   pi.on("agent_end", (event, ctx) => {
     if (!sessionActive) return;
+    // Error/abort paths may end without another turn_end; tools have settled here.
+    runtime.enforceGoalLimitsAtBoundary(ctx);
     const run = runtime.finishAgentRun();
     if (run.goalId === null) return;
     if (!runtime.canRecordGoalUsage() && !runtime.hasActiveBudgetWrapUp()) return;

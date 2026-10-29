@@ -1,4 +1,5 @@
 import { isNonNegativeFiniteNumber, nonNegativeFiniteNumber, normalizeTokenBudget } from "./accounting.js";
+import { validateGoalLimitOverrides, type GoalContinuationLimits } from "../../shared/delegated-goal-policy.ts";
 import type { GoalStatus } from "./prompts.js";
 import { type GoalWait, normalizeGoalWait } from "./wait.js";
 
@@ -18,6 +19,8 @@ export interface ActiveGoal {
   updatedAt: number;
   iteration: number;
   tokenBudget?: number;
+  /** Per-goal user policy, retained across reload/Resume without resetting counters. */
+  continuationLimits?: Partial<GoalContinuationLimits>;
   /** Distinguishes explicit caps from the old silent 250k default during migration. */
   tokenBudgetExplicit?: boolean;
   tokensUsed: number;
@@ -222,6 +225,7 @@ export function clearLegacyPersistedGoal(_cwd: string) {
 
 function isStoredGoal(value: unknown): value is LegacyStoredGoal {
   if (!isRecord(value)) return false;
+  try { validateGoalLimitOverrides(value.continuationLimits); } catch { return false; }
   return (
     typeof value.id === "string" &&
     Boolean(value.id) &&

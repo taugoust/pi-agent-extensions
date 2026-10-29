@@ -112,3 +112,38 @@ test("actual service permits busy parent metadata create and fences independent 
     rmSync(root, { recursive: true, force: true });
   }
 });
+
+test("assigned limits API is available while busy and fences identity, revision, extra fields and replays", async () => {
+  const root = mkdtempSync(join(tmpdir(), "assigned-limit-service-")), previous = process.env.PI_DELEGATED_GOALS_STATE_ROOT;
+  process.env.PI_DELEGATED_GOALS_STATE_ROOT = root;
+  let service;
+  try {
+    const sessionId = randomUUID(), calls = [];
+    const runtime = { activeGoal: { id: "assigned", text: "Keep objective", status: "active", tokensUsed: 50 }, policyRevision: 4,
+      continuationLimits: { automaticTurns: 8, noProgressTurns: 3 }, settings: { continuationLimits: { automaticTurns: null, noProgressTurns: null } },
+      snapshotSettingsApplicationState: () => ({}),
+      updateGoalLimits(ctx, id, revision, budget, limits) {
+        if (id !== this.activeGoal.id || revision !== this.policyRevision) throw Error("Goal identity or policy revision changed");
+        calls.push({ id, revision, budget, limits }); this.policyRevision++;
+      } };
+    const ctx = { cwd: root, isIdle: () => false, hasPendingMessages: () => true, ui: { setStatus() {} }, model: null,
+      sessionManager: { getSessionId: () => sessionId, getBranch: () => [], getEntries: () => [], getLeafId: () => "leaf" } };
+    service = createWorkflowService({ appendEntry() { throw Error("No direct session mutation"); }, exec: async () => ({ code: 0, stdout: "" }) }, ctx, runtime, {}, { get: () => ({}) }, () => true);
+    const request = { operation: "start", sessionId, serviceEpoch: service.serviceEpoch, requestId: randomUUID(), action: "goal.limits",
+      expectedGoalId: "assigned", expectedPolicyRevision: 4, tokenBudget: null, continuationLimits: { automaticTurns: 5, noProgressTurns: null } };
+    await assert.rejects(service.handle({ ...request, serviceEpoch: randomUUID() }), /Stale/);
+    await assert.rejects(service.handle({ ...request, objective: "not allowed" }), /Invalid/);
+    await assert.rejects(service.handle({ ...request, expectedPolicyRevision: 3 }), /revision changed/);
+    const snapshot = await service.handle(request);
+    assert.equal(snapshot.capabilities.goalLimitEditing, true); assert.equal(snapshot.goal.policyRevision, 5);
+    assert.deepEqual(snapshot.goal.effectiveLimits, runtime.continuationLimits);
+    assert.equal(calls.length, 1); assert.equal(calls[0].budget, null);
+    await service.handle(request); assert.equal(calls.length, 1);
+    await assert.rejects(service.handle({ ...request, requestId: randomUUID() }), /revision changed/);
+    await assert.rejects(service.handle({ ...request, tokenBudget: 100 }), /Request ID conflict/);
+  } finally {
+    service?.dispose();
+    if (previous === undefined) delete process.env.PI_DELEGATED_GOALS_STATE_ROOT; else process.env.PI_DELEGATED_GOALS_STATE_ROOT = previous;
+    rmSync(root, { recursive: true, force: true });
+  }
+});

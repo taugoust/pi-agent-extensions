@@ -16,7 +16,7 @@ export type DelegatedGoalEntry = {
   story?: GoalStory;
 };
 export type DelegatedGoals = { version: 1; revision: number; entries: DelegatedGoalEntry[] };
-export type DelegatedGoalAction = "goals.create" | "goals.start" | "goals.pause" | "goals.resume" | "goals.edit" | "goals.clear" | "goals.add_task" | "goals.answer";
+export type DelegatedGoalAction = "goals.create" | "goals.start" | "goals.pause" | "goals.resume" | "goals.edit" | "goals.limits" | "goals.clear" | "goals.add_task" | "goals.answer";
 export type DelegatedGoalRequest = {
   action: DelegatedGoalAction; requestId: string; expectedGoalId: string | null;
   expectedEntryRevision?: number; expectedRegistryRevision?: number;
@@ -33,6 +33,7 @@ export interface DelegatedGoalExecutor {
   start(entry: Readonly<DelegatedGoalEntry>): Promise<DelegatedGoalChild>;
   resume(entry: Readonly<DelegatedGoalEntry>): Promise<DelegatedGoalChild>;
   pause(entry: Readonly<DelegatedGoalEntry>): Promise<void | DelegatedGoalObservation>;
+  updateLimits?(entry: Readonly<DelegatedGoalEntry>): Promise<void>;
   observe?(entry: Readonly<DelegatedGoalEntry>): Promise<DelegatedGoalObservation | null>;
   answer?(entry: Readonly<DelegatedGoalEntry>, reply: GoalQuestionReply, requestId: string): Promise<DelegatedGoalObservation>;
   verifyStopped?(entry: Readonly<DelegatedGoalEntry>): Promise<void>;
@@ -137,7 +138,7 @@ export class DelegatedGoalRegistry {
     if (this.pending && (r.expectedGoalId === this.pending.entryId ||
       ["goals.start", "goals.resume", "goals.pause"].includes(r.action))) throw new Error(this.blockedReason()!);
     let performedEffect = false;
-    const fields = ["operation", "sessionId", "serviceEpoch", "requestId", "action", "expectedGoalId", ...(r.action === "goals.create" ? ["expectedRegistryRevision", "objective", "tokenBudget", "continuationLimits"] : ["expectedEntryRevision", ...(r.action === "goals.edit" ? ["objective", "tokenBudget", "continuationLimits"] : r.action === "goals.add_task" ? ["text"] : r.action === "goals.answer" ? ["questionId", "questionRevision", "workerEpoch", "answer"] : [])])];
+    const fields = ["operation", "sessionId", "serviceEpoch", "requestId", "action", "expectedGoalId", ...(r.action === "goals.create" ? ["expectedRegistryRevision", "objective", "tokenBudget", "continuationLimits"] : ["expectedEntryRevision", ...(r.action === "goals.edit" ? ["objective", "tokenBudget", "continuationLimits"] : r.action === "goals.limits" ? ["tokenBudget", "continuationLimits"] : r.action === "goals.add_task" ? ["text"] : r.action === "goals.answer" ? ["questionId", "questionRevision", "workerEpoch", "answer"] : [])])];
     if (Object.keys(r).some(key => !fields.includes(key))) throw new Error("Unknown delegated goal request fields");
     if (r.action === "goals.create") {
       if (r.expectedGoalId !== null || r.expectedEntryRevision !== undefined) throw new Error("Create requires null goal identity");
@@ -219,6 +220,17 @@ export class DelegatedGoalRegistry {
             await this.executor.verifyStopped(copy(entry));
           }
           entry.status = "cleared"; break;
+        case "goals.limits": {
+          if (r.tokenBudget === undefined || r.continuationLimits === undefined) throw new Error("Explicit limit policy required");
+          entry.tokenBudget = r.tokenBudget === null ? null : budget(r.tokenBudget)!;
+          validateGoalLimitOverrides(r.continuationLimits);
+          entry.continuationLimits = copy(r.continuationLimits);
+          if (entry.child) {
+            if (!this.executor.updateLimits) throw new Error("Worker does not support limit editing");
+            await effect(() => this.executor.updateLimits!(copy(entry)));
+          }
+          break;
+        }
         case "goals.edit":
           if (entry.status === "active") throw new Error("Pause goal before editing metadata");
           entry.text = objective(r.objective, 4000);
@@ -236,7 +248,7 @@ export class DelegatedGoalRegistry {
     }
     const changed = r.action === "goals.create" ? next.entries.at(-1)! : next.entries.find(entry => entry.id === r.expectedGoalId)!;
     changed.story ??= emptyGoalStory();
-    const kind = ({ "goals.create": "created", "goals.start": "started", "goals.pause": changed.status === "complete" ? "completed" : "paused", "goals.resume": "resumed", "goals.edit": "edited", "goals.clear": "cleared", "goals.add_task": "task", "goals.answer": undefined } as const)[r.action];
+    const kind = ({ "goals.create": "created", "goals.start": "started", "goals.pause": changed.status === "complete" ? "completed" : "paused", "goals.resume": "resumed", "goals.edit": "edited", "goals.limits": "edited", "goals.clear": "cleared", "goals.add_task": "task", "goals.answer": undefined } as const)[r.action];
     if (r.action !== "goals.answer") recordGoalEvent(changed.story, kind!, r.action === "goals.add_task" ? `Task added: ${r.text?.trim()}` : `Goal ${kind}`);
     next.revision++;
     next.entries.forEach(normalizeTaskDescriptions);

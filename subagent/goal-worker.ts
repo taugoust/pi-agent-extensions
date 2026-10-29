@@ -36,13 +36,20 @@ export default async function goalWorker(pi: ExtensionAPI) {
       const service = (globalThis as any).__paeDelegatedChildGoalV1 as ReturnType<typeof createDelegatedChildGoalService> | undefined;
       if (!service) throw new Error("Dedicated child goal engine is unavailable");
       if (!input || typeof input !== "object") throw new Error("Invalid child goal request");
-      const r = input as { operation: string; entry?: DelegatedGoalEntry; reply?: GoalQuestionReply; requestId?: string };
-      if (Object.keys(r).some(k => !["operation", "entry", "reply", "requestId"].includes(k))) throw new Error("Unknown child goal request field");
+      const r = input as { operation: string; entry?: DelegatedGoalEntry; reply?: GoalQuestionReply; requestId?: string; expectedGoalId?: string; expectedPolicyRevision?: number };
+      if (Object.keys(r).some(k => !["operation", "entry", "reply", "requestId", "expectedGoalId", "expectedPolicyRevision"].includes(k))) throw new Error("Unknown child goal request field");
       let snapshot = service.snapshot();
       if (!sameGoalLimits(policy.continuationLimits, snapshot.limits)) throw new Error("Dedicated child effective limits differ from parent confirmation");
       if (r.operation !== "start" && snapshot.entryId !== binding.entryId) throw new Error("Dedicated parent goal identity changed");
-      if (r.entry && !sameGoalLimits(policy.continuationLimits, r.entry.continuationLimits)) throw new Error("Goal metadata differs from confirmed continuation limits");
-      if (r.operation === "start" && r.entry) {
+      if (r.entry && r.operation !== "limits" && !sameGoalLimits(policy.continuationLimits, r.entry.continuationLimits)) throw new Error("Goal metadata differs from confirmed continuation limits");
+      if (r.operation === "limits") {
+        if (!r.entry || r.entry.id !== binding.entryId || r.expectedGoalId !== snapshot.childGoalId || r.expectedPolicyRevision !== snapshot.policyRevision)
+          throw new Error("Dedicated child identity or policy revision changed");
+        const nextPolicy = dedicatedGoalPolicy({ continuationLimits: r.entry.continuationLimits });
+        snapshot = await service.updateLimits(binding.entryId, r.expectedGoalId!, r.expectedPolicyRevision, r.entry);
+        policy.continuationLimits = nextPolicy.continuationLimits;
+      }
+      else if (r.operation === "start" && r.entry) {
         if (r.entry.id !== binding.entryId) throw new Error("Dedicated parent goal identity changed");
         snapshot = await service.bootstrap(r.entry);
       }
@@ -67,6 +74,7 @@ export default async function goalWorker(pi: ExtensionAPI) {
         executionStopped: ctx.isIdle() && !ctx.hasPendingMessages(), waiting: snapshot.goal.waiting,
         tasks: snapshot.goal.tasks, tokensUsed: snapshot.goal.tokensUsed,
         automaticTurns: snapshot.goal.automaticTurns, noProgressTurns: snapshot.goal.noProgressTurns,
+        policyRevision: snapshot.policyRevision, tokenBudget: snapshot.tokenBudget, limitsEditable: true,
         summary: snapshot.goal.summary, story: { ...(snapshot.story ?? { version: 1, timeline: [], activity: [] }), questions: questions!.snapshot() }, limits: snapshot.limits };
     } });
   });

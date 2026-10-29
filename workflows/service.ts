@@ -54,7 +54,7 @@ type Operation = {
 	reject?: (error: Error) => void;
 };
 const actions = [
-	"goals.create", "goals.start", "goals.pause", "goals.resume", "goals.edit", "goals.clear", "goals.add_task", "goals.answer",
+	"goals.create", "goals.start", "goals.pause", "goals.resume", "goals.edit", "goals.limits", "goals.clear", "goals.add_task", "goals.answer",
 	"worktree.add",
 	"worktree.remove",
 	"worktree.prune",
@@ -64,6 +64,7 @@ const actions = [
 	"goal.start",
 	"goal.create_paused",
 	"goal.edit",
+	"goal.limits",
 	"goal.pause",
 	"goal.resume",
 	"goal.clear",
@@ -110,6 +111,11 @@ export function createWorkflowService(
 		start: entry => childExecutor().start({ ...entry, continuationLimits: resolveGoalLimits(entry.continuationLimits, runtime.settings.continuationLimits) }),
 		resume: entry => childExecutor().resume({ ...entry, continuationLimits: resolveGoalLimits(entry.continuationLimits, runtime.settings.continuationLimits) }),
 		pause: entry => childExecutor().pause(entry),
+		updateLimits: entry => {
+			const executor = childExecutor();
+			if (!executor.updateLimits) throw new Error("Worker does not support limit editing; reload required");
+			return executor.updateLimits({ ...entry, continuationLimits: resolveGoalLimits(entry.continuationLimits, runtime.settings.continuationLimits) });
+		},
 		answer: (entry, reply, requestId) => {
 			const executor = childExecutor();
 			if (!executor.answer) throw new Error("Goal answers unavailable in this runtime");
@@ -515,7 +521,7 @@ export function createWorkflowService(
 			terminal = runtime.snapshotSettingsApplicationState().terminalDetails;
 		return {
 			protocol: 1,
-			capabilities: { ownedWorktreeCompletion: true, createPausedGoal: false, delegatedGoals: true, delegatedGoalExecution: executionUnavailableReason() === null },
+			capabilities: { goalLimitEditing: true, ownedWorktreeCompletion: true, createPausedGoal: false, delegatedGoals: true, delegatedGoalExecution: executionUnavailableReason() === null },
 			delegatedGoals: delegated.snapshot(),
 			sessionId,
 			serviceEpoch,
@@ -539,6 +545,9 @@ export function createWorkflowService(
 			goal: goal
 				? {
 						id: goal.id,
+						policyRevision: runtime.policyRevision,
+						continuationLimits: goal.continuationLimits,
+						effectiveLimits: runtime.continuationLimits,
 						text: goal.text,
 						status: goal.status,
 						tasks: readGoalTasks(ctx, goal),
@@ -881,6 +890,7 @@ export function createWorkflowService(
 						"action",
 						"expectedGoalId",
 						"expectedEntryRevision",
+						"expectedPolicyRevision",
 						"expectedRegistryRevision",
 						"objective",
 						"text",
@@ -954,7 +964,7 @@ export function createWorkflowService(
 			reply(r.value);
 			return snapshot();
 		}
-		if (operation || (!r.action?.startsWith("goals.") && externalBusy()) || !actions.includes(r.action))
+		if (operation || (!r.action?.startsWith("goals.") && r.action !== "goal.limits" && externalBusy()) || !actions.includes(r.action))
 			throw new Error("Workflow busy or invalid action");
 		if (["goal.start", "goal.create_paused", "goal.resume", "goal.edit"].includes(r.action))
 			throw new Error("Use dedicated delegated goals; legacy parent goal execution is read-only");
@@ -962,6 +972,15 @@ export function createWorkflowService(
 			if (typeof r.taskId !== "string" || !/^subagent-task-[a-f0-9]{24}$/.test(r.taskId) || r.path !== undefined) throw new Error("Completion/cleanup requires an owned task ID, not a path");
 			if (r.action === "worktree.complete" && (typeof r.reason !== "string" || !r.reason.trim() || r.reason.length > 2000)) throw new Error("Completion rationale required (1–2000 characters)");
 			if (r.action === "worktree.cleanup" && r.reason !== undefined) throw new Error("Cleanup cannot replace completion rationale");
+		}
+		if (r.action === "goal.limits") {
+			const fields = ["operation", "sessionId", "serviceEpoch", "requestId", "action", "expectedGoalId", "expectedPolicyRevision", "tokenBudget", "continuationLimits"];
+			if (Object.keys(r).some(key => !fields.includes(key)) || typeof r.expectedGoalId !== "string" || !Number.isSafeInteger(r.expectedPolicyRevision))
+				throw new Error("Invalid goal limit request");
+			runtime.updateGoalLimits(ctx, r.expectedGoalId, r.expectedPolicyRevision, r.tokenBudget, r.continuationLimits);
+			requests.set(r.requestId, fingerprint);
+			notice = null;
+			return snapshot();
 		}
 		if (r.action.startsWith("goal.")) {
 			if ((runtime.activeGoal?.id ?? null) !== r.expectedGoalId)
@@ -1024,7 +1043,7 @@ export function createWorkflowService(
 			}
 			if (typeof r.expectedGoalId !== "string" || !uuid.test(r.expectedGoalId) || !Number.isSafeInteger(r.expectedEntryRevision) || r.expectedEntryRevision < 1)
 				throw new Error("Expected delegated goal identity and revision");
-			if (["goals.edit", "goals.add_task", "goals.clear", "goals.answer"].includes(r.action)) {
+			if (["goals.edit", "goals.limits", "goals.add_task", "goals.clear", "goals.answer"].includes(r.action)) {
 				// Definitive metadata result: rejected edits retain the caller's draft.
 				// Cache at service level only AFTER success; failed retries must reach
 				// the registry's retained rejection instead of looking applied.

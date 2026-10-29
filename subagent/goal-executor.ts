@@ -7,6 +7,8 @@ export type ChildGoalSnapshot = {
   tasks?: DelegatedGoalEntry["tasks"]; tokensUsed?: number; automaticTurns?: number;
   noProgressTurns?: number; summary?: string | null;
   story?: DelegatedGoalEntry["story"];
+  limitsEditable?: boolean; policyRevision?: number; tokenBudget?: number | null;
+  limits?: DelegatedGoalEntry["continuationLimits"];
 };
 export async function resumeRestoredGoal(
   observe: () => Promise<ChildGoalSnapshot>,
@@ -26,6 +28,7 @@ export type GoalChildHandle = {
   pause(): Promise<ChildGoalSnapshot>;
   observe(): Promise<ChildGoalSnapshot>;
   answer?(reply: GoalQuestionReply, requestId: string): Promise<ChildGoalSnapshot>;
+  updateLimits?(entry: Readonly<DelegatedGoalEntry>, expectedGoalId: string, expectedPolicyRevision: number): Promise<ChildGoalSnapshot>;
   /** Resolves only once the owned execution and its process group have exited. */
   stop(completion?: ChildGoalSnapshot): Promise<void>;
 };
@@ -120,6 +123,22 @@ export function createDelegatedGoalExecutor(options: {
     // Edits are parent metadata only. The next explicit Resume synchronizes
     // that durable entry into the restored, paused engine before activation.
     update: (entry: Readonly<DelegatedGoalEntry>) => serialize(() => verifyStopped(entry)),
+    updateLimits: (entry: Readonly<DelegatedGoalEntry>) => serialize(async () => {
+      // Stopped workers consume the durable parent policy only on explicit Resume.
+      if (!bindings.has(entry.id)) { await verifyStopped(entry); return; }
+      const b = binding(entry);
+      if (b.stopped) return;
+      const before = validate(await b.handle.observe(), b.goalId);
+      if (!before.limitsEditable || !Number.isSafeInteger(before.policyRevision) || !b.handle.updateLimits)
+        throw new Error("Worker does not support live limit editing; reload required");
+      binding(entry);
+      const observed = validate(await b.handle.updateLimits(entry, b.goalId, before.policyRevision!), b.goalId);
+      binding(entry);
+      if (observed.tokenBudget !== entry.tokenBudget || JSON.stringify(observed.limits) !== JSON.stringify(entry.continuationLimits))
+        throw new Error("Child limit policy receipt differs from requested policy");
+      // Do not stop a process here: it may be finishing a tool at the safe boundary.
+      b.last = structuredClone(observed);
+    }),
     answer: (entry: Readonly<DelegatedGoalEntry>, reply: GoalQuestionReply, requestId: string) => serialize(async () => {
       const b = binding(entry);
       if (b.stopped || !b.handle.answer || reply.workerEpoch !== b.identity.workerEpoch) throw new Error("Goal question worker is unavailable or changed");

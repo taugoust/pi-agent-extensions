@@ -2105,7 +2105,7 @@ export default function (pi: ExtensionAPI) {
             const request = async (operation: string, value?: unknown) => {
               if (generation !== sessionGeneration || lifecycleClosing || activeSessionId !== sessionId) throw new Error("Dedicated goal parent runtime changed");
               const observed = await requestGoalWorker(binding.path, { token: binding.token, identity,
-                request: { operation, ...(value === undefined ? {} : operation === "answer" ? value as Record<string, unknown> : { entry: value }) } }) as ChildGoalSnapshot;
+                request: { operation, ...(value === undefined ? {} : ["answer", "limits"].includes(operation) ? value as Record<string, unknown> : { entry: value }) } }) as ChildGoalSnapshot;
               lastObservation = structuredClone(observed);
               return observed;
             };
@@ -2114,7 +2114,8 @@ export default function (pi: ExtensionAPI) {
                 await request("pause");
                 await rpc!.pauseWorkflowExecution();
                 return await request("observe");
-              }, observe: () => request("observe"), answer: (reply, requestId) => request("answer", { reply, requestId }), stop };
+              }, updateLimits: (entry, expectedGoalId, expectedPolicyRevision) => request("limits", { entry, expectedGoalId, expectedPolicyRevision }),
+              observe: () => request("observe"), answer: (reply, requestId) => request("answer", { reply, requestId }), stop };
             return handle;
           },
         });

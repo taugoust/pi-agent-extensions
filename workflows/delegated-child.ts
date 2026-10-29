@@ -12,7 +12,7 @@ export function createDelegatedChildGoalService(pi: ExtensionAPI, initial: Exten
   const sessionId = ctx.sessionManager.getSessionId();
   const active = () => runtime.activeGoal;
   // The authenticated launcher seeds these from the parent's confirmed policy.
-  const confirmedLimits = { ...runtime.settings.continuationLimits };
+  let confirmedLimits = { ...runtime.settings.continuationLimits };
   const applyConfirmedLimits = () => { runtime.settings = { ...runtime.settings, continuationLimits: { ...confirmedLimits } }; };
   let binding: string | undefined, boundProgressId: string | undefined;
   for (const entry of ctx.sessionManager.getBranch() as any[]) {
@@ -55,7 +55,7 @@ export function createDelegatedChildGoalService(pi: ExtensionAPI, initial: Exten
     if (completed && Number.isSafeInteger(completed.endedAt)) recordState(completed.endedAt);
     const goal = runtime.activeGoal ?? completed?.state;
     const terminal = runtime.snapshotSettingsApplicationState().terminalDetails;
-    return { entryId: binding ?? null, childGoalId: goal?.id ?? null, story: recorder?.snapshot(), limits: { ...runtime.settings.continuationLimits }, goal: goal ? {
+    return { entryId: binding ?? null, childGoalId: goal?.id ?? null, story: recorder?.snapshot(), limits: { ...runtime.settings.continuationLimits }, policyRevision: runtime.policyRevision, tokenBudget: goal?.tokenBudget ?? null, goal: goal ? {
       status: goal.status, tasks: readGoalTasks(ctx, goal), tokensUsed: goal.tokensUsed,
       automaticTurns: goal.automaticModelTurns, noProgressTurns: goal.toolFreeRepeatCount,
       summary: completed?.summary ?? (terminal?.goalId === goal.id ? terminal.summary ?? terminal.reason ?? null : null),
@@ -105,6 +105,22 @@ export function createDelegatedChildGoalService(pi: ExtensionAPI, initial: Exten
       recordState();
       return snapshot();
     }); },
+    updateLimits(entryId: string, childGoalId: string, revision: number, entry: Readonly<DelegatedGoalEntry>) { return serial(() => {
+      current(entryId, childGoalId);
+      if (entry.id !== entryId) throw new Error("Limit policy belongs to another goal");
+      validateDelegatedGoals({ version: 1, revision: 0, entries: [structuredClone(entry)] });
+      if (runtime.policyRevision !== revision) throw new Error("Child goal policy changed");
+      const previousSettings = runtime.settings;
+      // The parent sends resolved policy: null here means unlimited, not the
+      // previous launch's finite default. Change defaults and policy together.
+      runtime.settings = { ...runtime.settings, continuationLimits: { ...entry.continuationLimits! } as typeof confirmedLimits };
+      try { runtime.updateGoalLimits(ctx, childGoalId, runtime.policyRevision, entry.tokenBudget, entry.continuationLimits!); }
+      catch (error) { runtime.settings = previousSettings; throw error; }
+      confirmedLimits = { ...runtime.continuationLimits };
+      applyConfirmedLimits();
+      recordState();
+      return snapshot();
+    }); },
     resume(entryId: string, childGoalId: string, entry?: Readonly<DelegatedGoalEntry>) { return serial(async () => {
       current(entryId, childGoalId);
       if (!ctx.isIdle() || ctx.hasPendingMessages()) throw new Error("Dedicated child is not idle");
@@ -118,7 +134,7 @@ export function createDelegatedChildGoalService(pi: ExtensionAPI, initial: Exten
         // Edit is metadata-only in the parent. Synchronize into this existing
         // paused engine BEFORE activation; never bootstrap a second goal here.
         runtime.activeGoal = { ...goal, text: entry.text, tokenBudget: entry.tokenBudget ?? undefined,
-          tokenBudgetExplicit: entry.tokenBudget !== null };
+          tokenBudgetExplicit: entry.tokenBudget !== null, continuationLimits: entry.continuationLimits };
         runtime.persistGoal(runtime.activeGoal);
         writeProgress(pi, ctx, entry.tasks, goal.id, true);
       }
