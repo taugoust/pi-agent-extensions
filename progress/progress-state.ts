@@ -163,7 +163,6 @@ export function validateProgressArguments(value: unknown): { steps: ProgressStep
   }
 
   const steps: ProgressStep[] = [];
-  const inProgressIndices: number[] = [];
   for (const [index, entry] of value.steps.entries()) {
     const item = index + 1;
     if (!isRecord(entry)) rejectProgress(`item ${item} must be an object.`);
@@ -181,15 +180,11 @@ export function validateProgressArguments(value: unknown): { steps: ProgressStep
       rejectProgress(`item ${item} status must be pending, in_progress, completed, or blocked.`);
     }
     const status = entry.status as ProgressStatus;
-    if (status === "in_progress") inProgressIndices.push(item);
 
     if (entry.id !== undefined && (typeof entry.id !== "string" || !entry.id.trim() || entry.id.length > 128)) rejectProgress(`item ${item} has an invalid task id.`);
     steps.push({ text: entry.text, status, ...(entry.id !== undefined ? { id: entry.id as string } : {}) });
   }
 
-  if (inProgressIndices.length > 1) {
-    rejectProgress(`items ${inProgressIndices.join(" and ")} are in_progress; keep at most one in_progress item.`);
-  }
   return { steps, ...(value.goal_id !== undefined ? { goal_id: value.goal_id as string | null } : {}) };
 }
 

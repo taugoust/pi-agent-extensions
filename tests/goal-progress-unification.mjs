@@ -51,6 +51,18 @@ function fixture(options = {}) {
   const update = (extra = {}) => mutate({ action: "update", request_id: "update", goal_id: runtime.activeGoal.id, expected_revision: runtime.activeGoal.revision, steps: [], ...extra });
   return { pi, ctx, runtime, entries, tools, messages, handlers, dispose, mutate, create, update, idle: value => idle = value, busy: value => busy = value };
 }
+test("coordinators can create, update and restore multiple concurrent tasks", () => {
+  const f = fixture();
+  const created = f.create({ start: false, steps: Array.from({length:8}, (_,i) => ({text:`Parallel task ${i + 1}`,status:'in_progress'})) });
+  assert.equal(created.steps.filter(step => step.status === 'in_progress').length, 8);
+  const updated = f.update({ steps: [{...created.steps[0],status:'completed'}, {text:'Additional parallel task',status:'in_progress'}] });
+  assert.equal(updated.steps.filter(step => step.status === 'in_progress').length, 8);
+  assert.equal(updated.steps.length, 9);
+  assert.deepEqual(reconstructProgress(f.entries), updated.steps);
+  assert.deepEqual(loadGoalStateFromSession(f.ctx).goal.tasks, updated.steps);
+  assert.equal(f.runtime.activeGoal.status, 'paused');
+  f.dispose();
+});
 test("checklist change timestamp is recorded without treating accounting as progress", () => {
   const f = fixture(), created = f.create({ start: false });
   const at = f.runtime.activeGoal.lastTaskUpdateAt;
