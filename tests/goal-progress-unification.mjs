@@ -19,6 +19,7 @@ const { GoalRuntime, createGoal, nextGoalInstance, transitionGoal } = await jiti
 const { bindGoalMutations } = await jiti.import("../workflows/goal/mutations.ts");
 const { mutateProgress, readGoalTasks } = await jiti.import("../shared/goal-progress.ts");
 const { loadGoalStateFromSession } = await jiti.import("../workflows/goal/persistence.ts");
+const { readGoalHistory } = await jiti.import("../workflows/goal/history.ts");
 const { validateProgressMutation, reconstructProgress, readScopedProgress } = await jiti.import("../progress/progress-state.ts");
 const { registerGoalTools } = await jiti.import("../workflows/goal/tools.ts");
 const { registerGoalLifecycle } = await jiti.import("../workflows/goal/lifecycle.ts");
@@ -33,7 +34,7 @@ function fixture(options = {}) {
     appendEntry(customType, data) { entries.push({ type: "custom", customType, data: structuredClone(data) }); },
     registerCommand() {}, registerTool(tool) { tools.set(tool.name, tool); }, on(name, fn) { const list = handlers.get(name) ?? []; list.push(fn); handlers.set(name, list); },
     getActiveTools: () => ["goal_complete", "goal_wait", "goal_blocked", "update_progress"],
-    sendMessage(...args) { messages.push(args); }, sendUserMessage() {},
+    sendMessage(...args) { messages.push(args); }, sendUserMessage(...args) { messages.push(["user", ...args]); },
   };
   const ctx = { cwd: "/unused", model: { id: "offline" }, hasUI: false,
     isIdle: () => idle, hasPendingMessages: () => false,
@@ -194,6 +195,112 @@ test("goal_manage status is authoritative and completion still rejects unfinishe
   const result = await f.tools.get("goal_complete").execute("complete2", { goal_id: created.goalId, activation_id: created.activationId, summary: "Verified result" }, undefined, undefined, f.ctx);
   assert.equal(result.terminate, true); assert.equal(f.runtime.activeGoal, undefined);
   f.runtime.clearCompletionStatusTimer();
+});
+function completionRequest(f, extra = {}) {
+  const goal = f.runtime.activeGoal;
+  return { action: "complete", goal_id: goal.id, activation_id: goal.activationId, expected_revision: goal.revision,
+    user_authorized: true, summary: "Verified the outcome with passing offline regression tests.", ...extra };
+}
+function manage(f, args) {
+  return f.tools.get("goal_manage").execute("manage", args, undefined, undefined, f.ctx);
+}
+for (const draft of [true, false]) test(`explicit paused completion preserves verified history without activation (${draft ? "draft" : "previously active"})`, async () => {
+  const f = fixture(); registerGoalLifecycle(f.pi, f.runtime, {});
+  const created = f.create({ start: !draft });
+  f.update({ steps: [{ ...created.steps[0], status: "completed" }] });
+  if (!draft) {
+    f.entries.push({ type: "message", message: { role: "assistant", usage: { totalTokens: 37 } } });
+    await manage(f, { ...completionRequest(f), action: "pause", summary: undefined });
+    assert.equal(f.runtime.activeGoal.tokensUsed, 37);
+  }
+  const previous = structuredClone(f.runtime.activeGoal);
+  f.entries.push({ type: "message", message: { role: "assistant", usage: { totalTokens: 91 } } });
+  f.runtime.beginAgentRun(null, "manual");
+  f.runtime.acquireWorkflow = () => { throw new Error("Completion must not acquire autonomy"); };
+  const beginAgentRun = f.runtime.beginAgentRun.bind(f.runtime);
+  f.runtime.beginAgentRun = (goalId, origin) => { assert.equal(goalId, null, "completion may only revoke run ownership"); beginAgentRun(goalId, origin); };
+  f.runtime.ensureGoalContextContract = () => { throw new Error("Completion must not create an active contract"); };
+  f.ctx.model = undefined;
+  const messageCount = f.messages.length;
+  const args = completionRequest(f, { summary: "  Verified the outcome with passing offline regression tests.  " });
+  try {
+    const result = await manage(f, args);
+    assert.equal(result.terminate, true);
+    assert.equal(result.details.summary, args.summary.trim());
+    assert.equal(result.details.goal_id, previous.id);
+    assert.equal(result.details.presentation.action, "complete");
+    assert.equal(f.runtime.activeGoal, undefined);
+    assert.equal(f.runtime.ownsWorkflow(), false);
+    assert.equal(f.runtime.continuationIntent, undefined);
+    assert.equal(f.runtime.continuationDelivery, undefined);
+    assert.equal(f.runtime.goalWaitTimer.timer, undefined);
+    assert.equal(f.runtime.goalRecovery, undefined);
+    assert.equal(f.runtime.budgetWrapUp, undefined);
+    const completed = f.entries.filter(e => e.customType === "goal-state" && e.data.goal?.status === "complete").at(-1).data.goal;
+    assert.equal(completed.activationId, previous.activationId);
+    assert.equal(completed.revision, previous.revision + 1);
+    assert.deepEqual(completed.tasks, previous.tasks);
+    assert.equal(completed.tokensUsed, previous.tokensUsed, "paused chat must not be charged to Goal usage");
+    assert.equal(completed.timeUsedSeconds, previous.timeUsedSeconds);
+    assert.equal(completed.automaticModelTurns, previous.automaticModelTurns);
+    assert.equal(completed.waiting, undefined);
+    assert.equal(loadGoalStateFromSession(f.ctx).goal, undefined);
+    const [history] = readGoalHistory(f.ctx);
+    assert.equal(history.id, previous.id); assert.equal(history.status, "completed");
+    assert.equal(history.summary, args.summary.trim()); assert.deepEqual(history.tasks, previous.tasks);
+    // If best-effort archiving fails, the accepted state + matching result still retain evidence.
+    const fallbackEntries = f.entries.filter(e => e.customType !== "goal-history");
+    fallbackEntries.push({ type: "message", message: { role: "toolResult", toolName: "goal_manage", ...result } });
+    assert.equal(readGoalHistory({ sessionManager: { getBranch: () => fallbackEntries } })[0].summary, args.summary.trim());
+    fallbackEntries.at(-1).message.isError = true;
+    assert.equal(readGoalHistory({ sessionManager: { getBranch: () => fallbackEntries } })[0].summary, null);
+    assert.deepEqual(reconstructProgress(f.entries), []);
+    f.idle(true);
+    for (const handler of f.handlers.get("agent_settled")) await handler({}, f.ctx);
+    for (const [message, options] of f.messages.slice(messageCount)) {
+      assert.equal(message.customType, "goal-contract");
+      assert.equal(message.details.state, "inactive");
+      assert.equal(options.triggerTurn, false);
+    }
+    assert.equal(f.runtime.dispatchContinuationIfSettled(f.ctx), false);
+    const count = f.entries.length;
+    await assert.rejects(manage(f, args), /identity/);
+    assert.equal(f.entries.length, count, "completion cannot replay against an absent goal");
+  } finally { f.runtime.clearCompletionStatusTimer(); }
+});
+test("paused completion fails closed on unfinished tasks, authorization, stale identity and automatic origin", async () => {
+  const f = fixture(), created = f.create({ start: false });
+  const rejectUnchanged = async (extra, pattern) => {
+    const before = structuredClone(f.runtime.activeGoal), entries = structuredClone(f.entries), messages = structuredClone(f.messages);
+    await assert.rejects(manage(f, completionRequest(f, extra)), pattern);
+    assert.deepEqual(f.runtime.activeGoal, before); assert.deepEqual(f.entries, entries); assert.deepEqual(f.messages, messages);
+  };
+  for (const status of ["pending", "in_progress", "blocked"]) {
+    f.update({ request_id: `task-${status}`, steps: [{ ...created.steps[0], status }] });
+    await rejectUnchanged({}, /required tasks/);
+  }
+  f.update({ steps: [{ ...created.steps[0], status: "completed" }] });
+  for (const user_authorized of [undefined, false]) await rejectUnchanged({ user_authorized }, /fresh explicit user authorization/);
+  for (const extra of [{ goal_id: undefined }, { goal_id: "foreign" }, { activation_id: undefined }, { activation_id: "stale" },
+    { expected_revision: undefined }, { expected_revision: f.runtime.activeGoal.revision - 1 }]) await rejectUnchanged(extra, /identity, activation or revision changed/);
+  for (const summary of [undefined, "", "   ", "x".repeat(4001), "The goal is not complete."]) await rejectUnchanged({ summary }, /summary/);
+  f.runtime.beginAgentRun(f.runtime.activeGoal.id, "automatic");
+  await rejectUnchanged({}, /automatic continuation/);
+  f.runtime.beginAgentRun(null, "manual");
+  for (const status of ["active", "blocked", "budget_limited", "usage_limited", "complete"]) {
+    f.runtime.activeGoal.status = status;
+    await rejectUnchanged({}, /requires a paused goal/);
+  }
+});
+test("autonomous goal_complete still rejects paused goals without execution authority", async () => {
+  const f = fixture(), created = f.create({ start: false, steps: [{ text: "Verified", status: "completed" }] });
+  for (const ownedRun of [false, true]) {
+    f.runtime.beginAgentRun(ownedRun ? created.goalId : null, "manual");
+    const before = structuredClone(f.runtime.activeGoal), count = f.entries.length;
+    const result = await f.tools.get("goal_complete").execute("autonomous", { goal_id: created.goalId, activation_id: created.activationId, summary: "Verified outcome" }, undefined, undefined, f.ctx);
+    assert.match(result.content[0].text, /rejected/); assert.notEqual(result.terminate, true);
+    assert.deepEqual(f.runtime.activeGoal, before); assert.equal(f.entries.length, count);
+  }
 });
 test("branch navigation pauses selected goal, preserves branch tasks/counters, and invalidates old callbacks", async () => {
   const f = fixture(); registerGoalLifecycle(f.pi, f.runtime, {}); f.idle(true);

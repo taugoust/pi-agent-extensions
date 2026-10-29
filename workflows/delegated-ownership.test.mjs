@@ -37,7 +37,7 @@ test('dedicated registration rejects every model management mutation before goal
   try{
     const manage=f.tools.get('goal_manage');
     assert.deepEqual(await manage.execute('status',{action:'status'}),f.state);
-    for(const action of ['create','update','pause','resume','clear']){
+    for(const action of ['create','update','pause','resume','clear','complete']){
       await assert.rejects(manage.execute('mutate',{action,goal_id:f.state.id,objective:'replace scope'}),/authenticated parent/);
       assert.deepEqual(f.data.state,f.state);
     }

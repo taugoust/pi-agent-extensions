@@ -119,7 +119,7 @@ function completionSummary(entries: unknown[], start: number, goalId: string): s
 		const details = isRecord(message?.details) ? message.details : undefined;
 		if (
 			message?.role === "toolResult" &&
-			message.toolName === "goal_complete" &&
+			(message.toolName === "goal_complete" || message.toolName === "goal_manage") &&
 			!message.isError &&
 			details?.goal_id === goalId &&
 			typeof details.summary === "string" &&

@@ -8,6 +8,7 @@ import { nextGoalInstance, resetGoalSafetyEpoch, transitionGoal, type GoalRuntim
 import { mutateProgress, readGoalTasks } from "../../shared/goal-progress.ts";
 import { ProgressParameters } from "../../progress/progress-state.js";
 import { mergeGoalTasks } from "./mutations.ts";
+import { completeVerifiedGoal, MAX_COMPLETION_SUMMARY_LENGTH } from "./completion.js";
 
 /** Chat controls and progress share the runtime's single persisted goal record. */
 export function registerGoalManagement(pi: ExtensionAPI, runtime: GoalRuntime) {
@@ -15,16 +16,17 @@ export function registerGoalManagement(pi: ExtensionAPI, runtime: GoalRuntime) {
     name: "goal_manage",
     label: "Goal manage",
     executionMode: "sequential",
-    description: "Inspect or manage the current goal and its authoritative checklist. status is read-only and returns stable id, activationId, revision, tasks and effective limits. Prefer update_progress create to atomically create a goal and tasks: creation authorizes autonomous continuation by default; start:false is a paused draft. create here is an alias with the same semantics and requires request_id. Never replaces an existing goal. Existing lifecycle/objective changes require exact goal_id, activation_id, expected_revision and fresh user_authorized:true; they cannot originate in automatic continuation. Task-only updates use update_progress and never resume or complete a goal. token_budget is create/update-only: omit on create for no token cap; omit on update to preserve it. Removal is explicit by task ID after a user scope change.",
+    description: "Inspect or manage the current goal and its authoritative checklist. status is read-only and returns stable id, activationId, revision, tasks and effective limits. Prefer update_progress create to atomically create a goal and tasks: creation authorizes autonomous continuation by default; start:false is a paused draft. create here is an alias with the same semantics and requires request_id. Never replaces an existing goal. Existing lifecycle/objective changes require exact goal_id, activation_id, expected_revision and fresh user_authorized:true; they cannot originate in automatic continuation. complete is paused-only: on explicit user request, supply a nonempty verification summary after all required tasks are completed; it archives completion without resuming or starting a turn. Active autonomous completion still uses goal_complete. Task-only updates use update_progress and never resume or complete a goal. token_budget is create/update-only: omit on create for no token cap; omit on update to preserve it. Removal is explicit by task ID after a user scope change.",
     promptSnippet: "Inspect goal identity/revision, tasks and limits; explicitly manage lifecycle without losing progress.",
     promptGuidelines: [
       "Use a concise outcome-only objective (at most 320 characters); put implementation and verification steps in update_progress.",
       "update_progress create (or goal_manage create) authorizes autonomous continuation with configured limits unless start:false. Creation is not permission to bypass an existing goal, pending approvals, or another workflow.",
       "After pause, blocker or safety limit, wait for fresh user authorization to resume. Task updates do not resume. Complete only after verifying every required task and the outcome.",
       "Read status for the current stable goal_id, activation_id and revision. Never reuse an old activation token after resume or objective changes.",
+      "When the user explicitly asks to complete a verified paused goal, use goal_manage action:complete with summary and fresh user_authorized:true. Do not resume it or create an active Goal contract merely to complete it. All required tasks must already be completed.",
     ],
     parameters: Type.Object({
-      action: Type.Union(["status", "create", "update", "pause", "resume", "clear"].map(value => Type.Literal(value))),
+      action: Type.Union(["status", "create", "update", "pause", "resume", "clear", "complete"].map(value => Type.Literal(value))),
       goal_id: Type.Optional(Type.String({ minLength: 1, maxLength: 128 })),
       activation_id: Type.Optional(Type.String({ minLength: 1, maxLength: 128 })),
       expected_revision: Type.Optional(Type.Integer({ minimum: 1 })),
@@ -34,6 +36,7 @@ export function registerGoalManagement(pi: ExtensionAPI, runtime: GoalRuntime) {
       start: Type.Optional(Type.Boolean()),
       token_budget: Type.Optional(Type.Integer({ minimum: 1, maximum: 1_000_000 })),
       user_authorized: Type.Optional(Type.Boolean()),
+      summary: Type.Optional(Type.String({ minLength: 1, maxLength: MAX_COMPLETION_SUMMARY_LENGTH, description: "complete-only: what was completed and the evidence verifying the outcome and every required task." })),
       remove_task_ids: Type.Optional(Type.Array(Type.String({ minLength: 1, maxLength: 128 }), { maxItems: 50 })),
     }, { additionalProperties: false }),
     renderCall(args, theme) { return new Text(theme.fg("toolTitle", theme.bold(goalManageTitle(args))), 0, 0); },
@@ -44,6 +47,7 @@ export function registerGoalManagement(pi: ExtensionAPI, runtime: GoalRuntime) {
     async execute(_id, params, signal, _update, ctx) {
       signal?.throwIfAborted();
       const previous = runtime.activeGoal;
+      if (params.action !== "complete" && params.summary !== undefined) throw new Error("Summary is complete-only");
       if (params.action === "create") {
         const created = mutateProgress(pi, ctx, { action: "create", request_id: params.request_id!, objective: params.objective!, steps: params.steps ?? [], start: params.start }, params.token_budget);
         return { content: [{ type: "text", text: JSON.stringify(created) }], details: { presentation: goalManagePresentation("create", params.objective), ...created } };
@@ -55,6 +59,13 @@ export function registerGoalManagement(pi: ExtensionAPI, runtime: GoalRuntime) {
         if (params.user_authorized !== true) throw new Error("This lifecycle/scope change requires fresh explicit user authorization");
         if (params.steps !== undefined || params.start !== undefined || params.request_id !== undefined) throw new Error("Use update_progress for task mutations; start and request_id here are create-only");
         if (params.action !== "update" && (params.objective !== undefined || params.token_budget !== undefined || params.remove_task_ids !== undefined)) throw new Error("Objective, budget and task removal are update-only");
+        if (params.action === "complete") {
+          if (previous.status !== "paused") throw new Error("Explicit completion requires a paused goal; active autonomous completion uses goal_complete");
+          const summary = typeof params.summary === "string" ? params.summary.trim() : "";
+          completeVerifiedGoal(runtime, ctx, previous, summary);
+          runtime.ensureInactiveGoalContextContract(ctx);
+          return { content: [{ type: "text", text: `Goal complete: ${summary}` }], details: { goal_id: previous.id, summary, presentation: goalManagePresentation("complete", previous.text) }, terminate: true };
+        }
         if (params.action === "pause" || params.action === "clear") {
           const commands = new GoalCommandController(runtime);
           if (params.action === "pause") commands.pauseGoal(ctx); else commands.clearGoal(ctx);
@@ -94,7 +105,7 @@ export function registerGoalManagement(pi: ExtensionAPI, runtime: GoalRuntime) {
   pi.on("context", (event, ctx) => {
     const messages = event.messages.filter(message => !(message.role === "custom" && message.customType === "goal-task-context"));
     const goal = runtime.activeGoal;
-    if (goal) messages.push({ role: "custom", customType: "goal-task-context", content: `Current goal data: ${JSON.stringify({ goal_id: goal.id, activation_id: goal.activationId ?? goal.id, revision: goal.revision, status: goal.status, objective: goal.text, tasks: readGoalTasks(ctx, goal) })}\nUse update_progress action:update with this exact goal_id and expected_revision, a new request_id, and only changed/new steps. Omitted tasks remain. Task updates never resume or complete the goal. ${goal.status === "active" ? "Continue toward the outcome; do not call goal_complete while any required task is unfinished." : "Autonomous continuation is disabled; resume requires fresh user authorization."}`, display: false, timestamp: 0 });
+    if (goal) messages.push({ role: "custom", customType: "goal-task-context", content: `Current goal data: ${JSON.stringify({ goal_id: goal.id, activation_id: goal.activationId ?? goal.id, revision: goal.revision, status: goal.status, objective: goal.text, tasks: readGoalTasks(ctx, goal) })}\nUse update_progress action:update with this exact goal_id and expected_revision, a new request_id, and only changed/new steps. Omitted tasks remain. Task updates never resume or complete the goal. ${goal.status === "active" ? "Continue toward the outcome; do not call goal_complete while any required task is unfinished." : "Autonomous continuation is disabled; resume requires fresh user authorization. If the user explicitly requests completion of a verified paused goal, use goal_manage action:complete with summary, exact goal_id/activation_id/expected_revision and user_authorized:true; do not resume merely to complete it."}`, display: false, timestamp: 0 });
     return { messages };
   });
 }

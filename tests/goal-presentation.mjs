@@ -91,6 +91,29 @@ for (const objective of ['Validate this outcome.', 'Quotes: "yes"; path \\tmp; e
   });
 }
 
+test('paused completion presentation preserves verification evidence without exposing machine controls', async () => {
+  const f = fixture();
+  const objective = 'Verified paused outcome.';
+  await f.execute({ action: 'create', objective, request_id: 'create', start: false, steps: [{ text: 'Verify', status: 'completed' }] });
+  const previous = f.runtime.activeGoal;
+  const args = { action: 'complete', goal_id: previous.id, activation_id: previous.activationId, expected_revision: previous.revision,
+    user_authorized: true, summary: 'Verified all requirements with passing tests.' };
+  try {
+    assert.ok(f.tool.parameters.properties.action.anyOf.some(action => action.const === 'complete'));
+    assert.equal(f.tool.parameters.properties.summary.maxLength, 4000);
+    assert.equal(text(f.tool.renderCall(args, theme, context(args))), 'Goal manage complete');
+    const result = await f.execute(args), snapshot = structuredClone(result);
+    assert.equal(plain(result), `Goal complete: ${args.summary}`);
+    assert.equal(result.details.summary, args.summary); assert.equal(result.details.goal_id, previous.id);
+    assert.equal(result.terminate, true); assert.equal(f.runtime.activeGoal, undefined);
+    assert.deepEqual(result.details.presentation, { version: 1, tool: 'goal_manage', action: 'complete', objective });
+    for (const expanded of [false, true])
+      assert.equal(text(f.tool.renderResult(result, { expanded }, theme, context(args))), `Objective: ${objective}`);
+    assert.deepEqual(normalizeGoalManageDisplay(JSON.parse(JSON.stringify(result))), { text: `Objective: ${objective}`, isError: false });
+    assert.deepEqual(result, snapshot);
+  } finally { f.runtime.clearCompletionStatusTimer(); }
+});
+
 test('errors override structured objective; missing objective is never fabricated from arguments', async () => {
   const f = fixture();
   const args = { action: 'resume', goal_id: 'stale-id', objective: 'Do not display me', user_authorized: true };

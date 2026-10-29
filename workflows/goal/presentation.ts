@@ -1,7 +1,7 @@
 /** Presentation-only DTO shared by Pi renderers and native transcript adapters.
  * Never substitute this for model-facing content or canonical Goal state.
  */
-export const GOAL_MANAGE_ACTIONS = ["status", "create", "update", "pause", "resume", "clear"] as const;
+export const GOAL_MANAGE_ACTIONS = ["status", "create", "update", "pause", "resume", "clear", "complete"] as const;
 export type GoalManageAction = typeof GOAL_MANAGE_ACTIONS[number];
 
 export function goalManagePresentation(action: GoalManageAction, objective?: string) {

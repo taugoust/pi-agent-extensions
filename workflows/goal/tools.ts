@@ -8,20 +8,16 @@ import {
 } from "@earendil-works/pi-coding-agent";
 import { Markdown } from "@earendil-works/pi-tui";
 import { Type } from "typebox";
-import { readGoalTasks } from "../../shared/goal-progress.ts";
+import { completeVerifiedGoal, completionSummaryRejection, MAX_COMPLETION_SUMMARY_LENGTH } from "./completion.js";
 import { registerGoalManagement } from "./model-control.js";
 import { notifyTerminal, safeTerminalText } from "./errors.js";
 import {
-  formatFooterStatus,
   GOAL_BLOCKED_TOOL,
   GOAL_COMPLETE_TOOL,
   GOAL_WAIT_TOOL,
   type GoalRuntime,
   goalIdRejectionReason,
-  isContradictoryCompletionSummary,
   MAX_GOAL_ID_LENGTH,
-  STATUS_KEY,
-  transitionGoal,
   truncateNotification,
 } from "./runtime.js";
 import {
@@ -56,7 +52,6 @@ interface GoalWaitDetails {
 }
 
 const MAX_GOAL_TEXT_LENGTH = 4_000;
-const MAX_COMPLETION_SUMMARY_LENGTH = 4_000;
 const MAX_BLOCKER_REASON_LENGTH = 1_000;
 const MAX_BLOCKER_EVIDENCE_LENGTH = 4_000;
 
@@ -138,13 +133,7 @@ export function registerGoalTools(pi: ExtensionAPI, runtime: GoalRuntime) {
         };
       }
 
-      const rejectionReason = !summary
-        ? "summary is empty"
-        : summary.length > MAX_COMPLETION_SUMMARY_LENGTH
-          ? "summary is too long"
-          : isContradictoryCompletionSummary(summary)
-            ? "summary says the goal is not complete"
-            : undefined;
+      const rejectionReason = completionSummaryRejection(summary);
       if (rejectionReason) {
         runtime.recordGoalUsage(completedGoal, ctx);
         runtime.persistGoal(completedGoal);
@@ -160,18 +149,7 @@ export function registerGoalTools(pi: ExtensionAPI, runtime: GoalRuntime) {
         };
       }
 
-      const unfinished = readGoalTasks(ctx, completedGoal).filter(step => step.status !== "completed");
-      if (unfinished.length) throw new Error(`Goal completion rejected: ${unfinished.length} required tasks remain unfinished: ${unfinished.map(step => step.text).join("; ")}`);
-      runtime.clearGoalWaitTimer();
-      runtime.activeGoal = transitionGoal(completedGoal, "complete");
-      runtime.setCompletionSummary(runtime.activeGoal.id, summary);
-      runtime.recordGoalUsage(runtime.activeGoal, ctx);
-      runtime.persistGoal(runtime.activeGoal);
-
-      ctx.ui.setStatus(STATUS_KEY, formatFooterStatus(runtime.activeGoal, runtime.continuationLimits.automaticTurns, ctx.ui.theme));
-      runtime.clearCompletedGoal(ctx);
-      runtime.showCompletionStatus(ctx);
-      notifyTerminal(ctx.ui, `Goal complete: ${goal}`, "info");
+      completeVerifiedGoal(runtime, ctx, completedGoal, summary);
 
       return {
         content: toolContent(`Goal complete: ${summary}`),

@@ -201,7 +201,7 @@ export function createWorkflowService(
 				const message = later.type === "message" ? later.message : undefined;
 				if (
 					message?.role === "toolResult" &&
-					message.toolName === "goal_complete" &&
+					(message.toolName === "goal_complete" || message.toolName === "goal_manage") &&
 					!message.isError &&
 					message.details?.goal_id === goal.id &&
 					typeof message.details.summary === "string" &&
