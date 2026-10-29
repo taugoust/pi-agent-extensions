@@ -1460,21 +1460,13 @@ export function formatStatus(
 ) {
   if (!goal) return undefined;
   if (goal.status === "complete") return "complete";
+  // Keep pause reasons and limit counters in goal details, not the footer.
+  if (goal.status === "paused") return "Goal ■";
   const automatic =
     automaticTurnLimit === null ? "automatic Unlimited" : `automatic ${goal.automaticModelTurns}/${automaticTurnLimit}`;
   if (goal.waiting) {
     return `waiting ${safeGoalMenuText(goal.waiting.reason)} · ${automatic}`;
   }
-  if (goal.status === "paused" && goal.safetyPauseCause === "continuation_limit") {
-    if (automaticTurnLimit === null) {
-      return `paused · previous automatic limit at ${goal.automaticModelTurns}`;
-    }
-    if (goal.automaticModelTurns < automaticTurnLimit) {
-      return `paused · automatic ${goal.automaticModelTurns}/${automaticTurnLimit}`;
-    }
-    return `paused · automatic limit ${goal.automaticModelTurns}/${automaticTurnLimit}`;
-  }
-  if (goal.status === "paused") return `paused · ${automatic}`;
   if (goal.status === "blocked") return `blocked · ${automatic}`;
   if (goal.status === "usage_limited") return `usage · ${automatic}`;
   if (goal.status === "budget_limited") return `budget ${formatBudget(goal)} · ${automatic}`;

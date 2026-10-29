@@ -10,6 +10,7 @@ const { createJiti } = await import(pathToFileURL(join(sdk, 'node_modules/jiti/l
 const alias = { '@earendil-works/pi-coding-agent': join(sdk,'dist/index.js'), '@sinclair/typebox':join(sdk,'node_modules/typebox/build/index.mjs') };
 for (const name of ['pi-ai','pi-tui','pi-agent-core']) alias[`@earendil-works/${name}`] = join(sdk,`node_modules/@earendil-works/${name}/dist/${name === 'pi-ai' ? 'compat' : 'index'}.js`);
 for (const [key,value] of Object.entries(alias)) if(key.startsWith('@earendil-works/')) alias[key.replace('@earendil-works/','@mariozechner/')]=value;
+alias.typebox = join(sdk,'node_modules/typebox/build/index.mjs');
 const jiti = createJiti(import.meta.url, { alias });
 const { ToolExecutionComponent } = await import(pathToFileURL(join(sdk,'dist/modes/interactive/components/tool-execution.js')));
 const { initTheme } = await import(pathToFileURL(join(sdk,'dist/modes/interactive/theme/theme.js')));
@@ -19,6 +20,14 @@ function load(module) {
  const pi = { registerTool(t) { if (t.name === module.replace('-', '_')) tool=t; }, on(){}, registerCommand(){}, registerShortcut(){}, registerFlag(){}, events:new EventEmitter(), getFlag(){}, appendEntry(){} };
  return jiti.import(join(source,module,'index.ts')).then(async m => { await m.default(pi); assert.ok(tool, `registered ${module}`); return tool; });
 }
+const { formatStatus, goalSummary } = await jiti.import(join(source,'workflows/goal/runtime.ts'));
+const pausedGoal = { status:'paused', text:'Footer regression', automaticModelTurns:3, safetyPauseCause:'continuation_limit', iteration:1, timeUsedSeconds:0, tokensUsed:0 };
+for (const limit of [3, 10, null]) {
+ assert.equal(formatStatus(pausedGoal, limit), 'Goal ■');
+ assert.match(goalSummary(pausedGoal, limit), /Automatic work: 3/);
+ assert.match(goalSummary(pausedGoal, limit), /Safety pause:/);
+}
+assert.equal(formatStatus(undefined), undefined);
 const job = await load('background-job');
 const name='Repeated output fixture';
 for (const action of ['output','reap']) for (const partial of [false,true]) for (const width of [64,120]) {

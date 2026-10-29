@@ -1034,7 +1034,7 @@ function childPromptMetadata(metadata: PromptMetadata, request: SubagentPermissi
 function gateStatus(ctx: ExtensionContext, state: "ready" | "waiting" | "error" = "ready"): void {
   if (!ctx.hasUI) return;
   const color = state === "error" ? "error" : state === "waiting" ? "warning" : "success";
-  const text = state === "error" ? "AgentSH gate ✗" : state === "waiting" ? "AgentSH gate ?" : "AgentSH gate ■";
+  const text = state === "error" ? "AgentSH gate ✗" : state === "waiting" ? "AgentSH gate ?" : "AgentSH gate ✓";
   ctx.ui.setStatus("permission-gate", ctx.ui.theme.fg(color, text));
 }
 

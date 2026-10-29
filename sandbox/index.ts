@@ -879,7 +879,7 @@ function showTerminalApprovalPrompt(
 function setStatus(state: SupervisorState, ctx = state.ctx) {
   if (!ctx?.hasUI) return;
   const theme = ctx.ui.theme;
-  if (!state.active) return ctx.ui.setStatus("sandbox", theme.fg("muted", "agentsh inactive"));
+  if (!state.active) return ctx.ui.setStatus("sandbox", undefined);
   if (state.status === "starting") return ctx.ui.setStatus("sandbox", theme.fg("muted", "agentsh start…"));
   if (state.status === "connecting") return ctx.ui.setStatus("sandbox", theme.fg("muted", "agentsh …"));
   if (state.status === "error") return ctx.ui.setStatus("sandbox", theme.fg("error", "agentsh ✗"));

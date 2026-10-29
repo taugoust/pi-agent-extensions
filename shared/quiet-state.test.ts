@@ -222,6 +222,7 @@ await terminalReload.emit('agent_settled');
 terminalReloadQuiet.enqueue(ctx,{kind:'job',id:'quota-blocked',requires_guidance:true});
 terminalReloadQuiet.enqueue(ctx,{kind:'subagent',id:'quota-completion',completion:true});await pause(80);
 assert.equal(terminalReload.messages.length,2,'guidance quota blocked completion');
+assert.notEqual(ctx.ui.status.get('quiet-state'),'quiet guidance quota','internal quota must not clutter the footer');
 await terminalReload.emit('session_before_compact');
 terminalReloadQuiet.enqueue(ctx,{kind:'subagent',id:'compact-completion',completion:true});await pause(80);
 assert.equal(terminalReload.messages.length,2);

@@ -162,7 +162,7 @@ function restore(h:Hub,ctx:any){
   }
 }
 function guidancePending(h:Hub){return [...h.pending.values()].some(i=>i.data.requires_guidance===true);}
-function refreshStatus(h:Hub){const ctx=h.ctx;if(!ctx?.hasUI)return;const guidance=[...h.pending.values()].filter(i=>i.data.requires_guidance).length;const text=disabled(h)?'quiet off':h.compacting?'quiet compacting':h.guidanceDisabled?'quiet guidance paused':h.stats.guidanceDelivered>=MAX_GUIDANCE_PER_SESSION?'quiet guidance quota':guidance?`quiet guidance ${guidance}`:undefined;try{ctx.ui.setStatus('quiet-state',text);}catch{}}
+function refreshStatus(h:Hub){const ctx=h.ctx;if(!ctx?.hasUI)return;const guidance=[...h.pending.values()].filter(i=>i.data.requires_guidance).length;const text=disabled(h)?'quiet off':h.compacting?'quiet compacting':h.guidanceDisabled?'quiet guidance paused':h.stats.guidanceDelivered>=MAX_GUIDANCE_PER_SESSION?undefined:guidance?`quiet guidance ${guidance}`:undefined;try{ctx.ui.setStatus('quiet-state',text);}catch{}}
 function notificationEntries(ctx:any):QuietUpdate[]{return (ctx.sessionManager.getBranch?.()??ctx.sessionManager.getEntries?.()??[]).map((e:any)=>e?.type==='custom'&&e.customType===NOTIFICATION_CUSTOM?e.data?.update:undefined).filter(validUpdate);}
 const commandApis:WeakSet<object>=new WeakSet();
 function installCommands(pi:any){

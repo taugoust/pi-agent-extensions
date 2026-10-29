@@ -1429,7 +1429,7 @@ bound to one target.
   those tools through `/api/v1/sessions/{id}/tools/*`. The separate adaptive
   `subagent` extension is the sole registration and consumes the sandbox's
   AgentSH backend when active.
-- **Status bar**: `agentsh inactive`, `agentsh start…`,
+- **Status bar**: hidden while inactive; `agentsh start…`,
   `agentsh …`, `agentsh ✓`, `agentsh net ✓`,
   `agentsh net ?`, `agentsh ? N`, or `agentsh ✗`
 - **Mock helper/check**: `sandbox/mock-supervisor.mjs` and

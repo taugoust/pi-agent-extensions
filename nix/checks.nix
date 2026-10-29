@@ -2812,7 +2812,7 @@ in
             const ctx = createContext();
             await startSession(pi, ctx);
 
-            assert(ctx.statuses.some((entry) => entry.name === "sandbox" && entry.value === "agentsh inactive"), "missing env did not mark relay inactive");
+            assert(ctx.statuses.some((entry) => entry.name === "sandbox" && entry.value === undefined), "inactive relay did not clear its footer status");
             assert(ctx.selectCalls.length === 0, "inactive relay should not prompt");
             const inactiveState = globalThis.__AGENTSH_PI__.getSupervisorState();
             assert(!inactiveState.configured && !inactiveState.active && inactiveState.protocol === "", "inactive supervisor state semantics are incorrect");
