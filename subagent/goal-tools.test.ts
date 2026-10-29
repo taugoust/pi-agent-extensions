@@ -8,6 +8,8 @@ test("dedicated bootstrap narrows parent capability; every denied goal tool fail
   const before = [...normal];
   assert.deepEqual(dedicatedGoalTools(normal), [...DEDICATED_GOAL_TOOLS]);
   assert.deepEqual(normal, before, "normal worker tool list remains untouched");
+  assert.deepEqual(dedicatedGoalTools([...normal, "questionnaire"]), [...DEDICATED_GOAL_TOOLS, "questionnaire"]);
+  assert.ok(!dedicatedGoalTools(normal).includes("questionnaire"), "optional questions cannot widen the parent allowlist");
   for (const denied of DEDICATED_GOAL_TOOLS) {
     assert.throws(() => dedicatedGoalTools(normal.filter(tool => tool !== denied)), new RegExp(denied));
   }

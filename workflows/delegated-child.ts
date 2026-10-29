@@ -4,6 +4,7 @@ import type { GoalCommandController } from "./goal/commands.js";
 import { validateDelegatedGoals, type DelegatedGoalEntry } from "./delegated-goals.ts";
 import { readGoalTasks, writeProgress } from "../shared/goal-progress.ts";
 
+import { createGoalStoryRecorder, GOAL_STORY_ENTRY } from "./goal-story-recorder.ts";
 const BINDING = "delegated-goal-child-binding-v1";
 /** Trusted worker-only seam into the EXISTING per-child engine. No parent registry. */
 export function createDelegatedChildGoalService(pi: ExtensionAPI, initial: ExtensionContext, runtime: GoalRuntime, commands: GoalCommandController) {
@@ -20,6 +21,12 @@ export function createDelegatedChildGoalService(pi: ExtensionAPI, initial: Exten
       boundProgressId = typeof entry.data.progressId === "string" ? entry.data.progressId : undefined;
     }
   }
+  let recorder = binding ? createGoalStoryRecorder(binding, ctx.sessionManager.getBranch() as unknown[], data => pi.appendEntry(GOAL_STORY_ENTRY, data)) : undefined;
+  const storyState = () => {
+    const goal = runtime.activeGoal ?? completedProjection()?.state;
+    return goal ? { status: goal.status, tasks: readGoalTasks(ctx, goal) } : undefined;
+  };
+  function recordState(at?: number) { const state = storyState(); if (state) recorder?.observe(state, at); }
   function bindProgress(goal: NonNullable<GoalRuntime["activeGoal"]>) {
     const progressId = goal.progressId ?? goal.id;
     if (boundProgressId && boundProgressId !== progressId) throw new Error("Child goal lineage changed");
@@ -45,9 +52,10 @@ export function createDelegatedChildGoalService(pi: ExtensionAPI, initial: Exten
   function snapshot() {
     current();
     const completed = runtime.activeGoal ? undefined : completedProjection();
+    if (completed && Number.isSafeInteger(completed.endedAt)) recordState(completed.endedAt);
     const goal = runtime.activeGoal ?? completed?.state;
     const terminal = runtime.snapshotSettingsApplicationState().terminalDetails;
-    return { entryId: binding ?? null, childGoalId: goal?.id ?? null, limits: { ...runtime.settings.continuationLimits }, goal: goal ? {
+    return { entryId: binding ?? null, childGoalId: goal?.id ?? null, story: recorder?.snapshot(), limits: { ...runtime.settings.continuationLimits }, goal: goal ? {
       status: goal.status, tasks: readGoalTasks(ctx, goal), tokensUsed: goal.tokensUsed,
       automaticTurns: goal.automaticModelTurns, noProgressTurns: goal.toolFreeRepeatCount,
       summary: completed?.summary ?? (terminal?.goalId === goal.id ? terminal.summary ?? terminal.reason ?? null : null),
@@ -64,6 +72,8 @@ export function createDelegatedChildGoalService(pi: ExtensionAPI, initial: Exten
   } });
   return {
     protocol: 1 as const, sessionId, snapshot,
+    recordState,
+    recordActivity(id: string, text: string) { current(); recorder?.activity(id, text); },
     bootstrap(entry: Readonly<DelegatedGoalEntry>) { return serial(async () => {
       current();
       if (binding && binding !== entry.id) throw new Error("Dedicated child belongs to another goal");
@@ -71,6 +81,7 @@ export function createDelegatedChildGoalService(pi: ExtensionAPI, initial: Exten
       if (runtime.activeGoal) throw new Error("Dedicated child already has a goal; inspect or resume it");
       if (!ctx.isIdle() || ctx.hasPendingMessages()) throw new Error("Dedicated child is not idle");
       if (!binding) { pi.appendEntry(BINDING, { goalId: entry.id }); binding = entry.id; }
+      recorder = createGoalStoryRecorder(binding, ctx.sessionManager.getBranch() as unknown[], data => pi.appendEntry(GOAL_STORY_ENTRY, data));
       applyConfirmedLimits();
       let activatedGoalId: string | undefined;
       await commands.startGoal(entry.text, entry.tokenBudget ?? undefined, commandContext(), goal => {
@@ -80,6 +91,7 @@ export function createDelegatedChildGoalService(pi: ExtensionAPI, initial: Exten
         // Seed its existing checklist before its first goal prompt is dispatched.
         runtime.persistGoal(goal);
         if (entry.tasks.length) writeProgress(pi, ctx, entry.tasks, goal.id, true);
+        recorder?.baseline({ status: goal.status, tasks: readGoalTasks(ctx, goal) });
       }, undefined, () => !closed);
       const observed = snapshot();
       if (!activatedGoalId || observed.childGoalId !== activatedGoalId
@@ -90,6 +102,7 @@ export function createDelegatedChildGoalService(pi: ExtensionAPI, initial: Exten
       current(entryId, childGoalId);
       if (runtime.activeGoal?.status === "active") commands.pauseGoal(commandContext());
       if (runtime.activeGoal?.status === "active") throw new Error("Child goal did not pause");
+      recordState();
       return snapshot();
     }); },
     resume(entryId: string, childGoalId: string, entry?: Readonly<DelegatedGoalEntry>) { return serial(async () => {
@@ -112,6 +125,7 @@ export function createDelegatedChildGoalService(pi: ExtensionAPI, initial: Exten
       const resumedLineage = boundProgressId;
       applyConfirmedLimits();
       await commands.resumeGoal(commandContext());
+      recordState();
       const observed = snapshot();
       if (!resumedLineage || boundProgressId !== resumedLineage || observed.childGoalId === childGoalId
         || !["active", "complete"].includes(observed.goal?.status ?? "")) throw new Error("Child goal resume failed");
@@ -144,7 +158,7 @@ export function retainedGoalCompletion(branch: any[], binding?: string, boundPro
       const call = prior.findLast(e => e.type === "message" && e.message?.role === "assistant"
         && e.message.content?.some((part: any) => part.type === "toolCall" && part.name === "goal_complete"
           && part.id === accepted.message.toolCallId && part.arguments?.goal_id === history.id && part.arguments?.summary === history.summary));
-      if (call) return { state, summary: history.summary };
+      if (call) return { state, summary: history.summary, endedAt: history.endedAt };
     }
     return undefined;
 }

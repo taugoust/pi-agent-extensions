@@ -54,7 +54,7 @@ type Operation = {
 	reject?: (error: Error) => void;
 };
 const actions = [
-	"goals.create", "goals.start", "goals.pause", "goals.resume", "goals.edit", "goals.clear", "goals.add_task",
+	"goals.create", "goals.start", "goals.pause", "goals.resume", "goals.edit", "goals.clear", "goals.add_task", "goals.answer",
 	"worktree.add",
 	"worktree.remove",
 	"worktree.prune",
@@ -110,6 +110,11 @@ export function createWorkflowService(
 		start: entry => childExecutor().start({ ...entry, continuationLimits: resolveGoalLimits(entry.continuationLimits, runtime.settings.continuationLimits) }),
 		resume: entry => childExecutor().resume({ ...entry, continuationLimits: resolveGoalLimits(entry.continuationLimits, runtime.settings.continuationLimits) }),
 		pause: entry => childExecutor().pause(entry),
+		answer: (entry, reply, requestId) => {
+			const executor = childExecutor();
+			if (!executor.answer) throw new Error("Goal answers unavailable in this runtime");
+			return executor.answer(entry, reply, requestId);
+		},
 		verifyStopped: entry => {
 			const executor = childExecutor();
 			if (!executor.verifyStopped) throw new Error("Owned child stop verification is unavailable");
@@ -881,6 +886,10 @@ export function createWorkflowService(
 						"text",
 						"tokenBudget",
 						"continuationLimits",
+						"questionId",
+						"questionRevision",
+						"workerEpoch",
+						"answer",
 						"operationId",
 						"dialogId",
 						"value",
@@ -1015,7 +1024,7 @@ export function createWorkflowService(
 			}
 			if (typeof r.expectedGoalId !== "string" || !uuid.test(r.expectedGoalId) || !Number.isSafeInteger(r.expectedEntryRevision) || r.expectedEntryRevision < 1)
 				throw new Error("Expected delegated goal identity and revision");
-			if (["goals.edit", "goals.add_task", "goals.clear"].includes(r.action)) {
+			if (["goals.edit", "goals.add_task", "goals.clear", "goals.answer"].includes(r.action)) {
 				// Definitive metadata result: rejected edits retain the caller's draft.
 				// Cache at service level only AFTER success; failed retries must reach
 				// the registry's retained rejection instead of looking applied.

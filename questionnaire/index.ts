@@ -198,7 +198,7 @@ export default function questionnaire(pi: ExtensionAPI) {
         label: q.label || `Q${i + 1}`,
         allowOther: q.allowOther !== false,
       }));
-      const interactions = workerInteractionsService();
+      const interactions = workerInteractionsService("questionnaire");
       if (interactions) {
         if (signal?.aborted) return errorResult("Error: Questionnaire aborted", questions);
         try {

@@ -956,7 +956,7 @@ async function resolveAgentSHPrompt(
   try {
     const title = promptTitle(metadata);
     const options = [DENY_CHOICE, ALLOW_CHOICE];
-    const interactions = workerInteractionsService();
+    const interactions = workerInteractionsService("permission");
     if (interactions) {
       try {
         const answer = await interactions.request({

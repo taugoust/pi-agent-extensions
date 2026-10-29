@@ -1,10 +1,12 @@
 import type { DelegatedGoalEntry, DelegatedGoalChild } from "../workflows/delegated-goals.ts";
 import { sameGoalWorker, type GoalWorkerIdentity } from "./goal-rpc.ts";
+import type { GoalQuestionReply } from "../workflows/goal-story.ts";
 
 export type ChildGoalSnapshot = {
   goalId: string; status: DelegatedGoalEntry["status"]; executionStopped: boolean; waiting: string | null;
   tasks?: DelegatedGoalEntry["tasks"]; tokensUsed?: number; automaticTurns?: number;
   noProgressTurns?: number; summary?: string | null;
+  story?: DelegatedGoalEntry["story"];
 };
 export async function resumeRestoredGoal(
   observe: () => Promise<ChildGoalSnapshot>,
@@ -23,6 +25,7 @@ export type GoalChildHandle = {
   resume(): Promise<ChildGoalSnapshot>;
   pause(): Promise<ChildGoalSnapshot>;
   observe(): Promise<ChildGoalSnapshot>;
+  answer?(reply: GoalQuestionReply, requestId: string): Promise<ChildGoalSnapshot>;
   /** Resolves only once the owned execution and its process group have exited. */
   stop(completion?: ChildGoalSnapshot): Promise<void>;
 };
@@ -117,6 +120,13 @@ export function createDelegatedGoalExecutor(options: {
     // Edits are parent metadata only. The next explicit Resume synchronizes
     // that durable entry into the restored, paused engine before activation.
     update: (entry: Readonly<DelegatedGoalEntry>) => serialize(() => verifyStopped(entry)),
+    answer: (entry: Readonly<DelegatedGoalEntry>, reply: GoalQuestionReply, requestId: string) => serialize(async () => {
+      const b = binding(entry);
+      if (b.stopped || !b.handle.answer || reply.workerEpoch !== b.identity.workerEpoch) throw new Error("Goal question worker is unavailable or changed");
+      const observed = validate(await b.handle.answer(reply, requestId), b.goalId);
+      binding(entry); b.last = structuredClone(observed);
+      return structuredClone(observed);
+    }),
     start: (entry: Readonly<DelegatedGoalEntry>) => serialize(() => launch(entry, false)),
     resume: (entry: Readonly<DelegatedGoalEntry>) => serialize(() => launch(entry, true)),
     pause: (entry: Readonly<DelegatedGoalEntry>) => serialize(async () => {

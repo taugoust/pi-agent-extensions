@@ -46,7 +46,12 @@ export default function fakeProvider(pi) {
       options.signal?.addEventListener("abort", () => finish(true), {once:true});
       if (isChild) {
         if (!goal?.id) throw new Error("Child model call lacks actual active Goal identity");
-        if (goal.text.includes("pause-race") && calls === 1) {
+        if (goal.text.includes("Question workflow")) {
+          response.stopReason="toolUse";
+          if(calls===1) response.content=[{type:"toolCall",id:"question-"+process.pid,name:"questionnaire",arguments:{questions:[{id:"direction",prompt:"Use the tested design?",options:[{value:"yes",label:"Yes"},{value:"no",label:"No"}],allowOther:false}]}}];
+          else if(calls===2) response.content=[{type:"toolCall",id:"activity-"+process.pid,name:"notify_parent",arguments:{message:"Explicit fixture activity after the user's answer"}}];
+          else response.content=[{type:"toolCall",id:"question-complete-"+process.pid,name:"goal_complete",arguments:{goal_id:goal.id,summary:"Verified authenticated goal question answer"}}];
+        } else if (goal.text.includes("pause-race") && calls === 1) {
           response.stopReason="toolUse";response.content=[{type:"toolCall",id:"race-"+process.pid,name:"goal_complete",arguments:{goal_id:goal.id,summary:"Verified owned pause/completion race"}}];
         } else if (goal.text.includes("independent") && calls <= 2) {
           response.stopReason="toolUse"; response.content=[{type:"toolCall",id:"complete-"+process.pid+"-"+calls,name:"goal_complete",arguments:{goal_id:calls===1?"stale-foreign-goal-id":goal.id,summary:"Verified isolated deterministic child completion"}}];
@@ -65,10 +70,11 @@ const parent = String.raw`
 import workflows from "./workflows/index.ts";
 import subagent from "./subagent/index.ts";
 import progress from "./progress/index.ts";
+import questionnaire from "./questionnaire/index.ts";
 import provider from "./fake-provider.ts";
 import { createServer } from "node:net";
 export default function fixture(pi) {
-  provider(pi); progress(pi); workflows(pi); subagent(pi);
+  provider(pi); progress(pi); questionnaire(pi); workflows(pi); subagent(pi);
   let server, allowedTools;
   pi.on("session_start", async () => {
     allowedTools = pi.getActiveTools();
@@ -144,9 +150,9 @@ try {
 import provider from "../fake-provider.ts";
 import worker from "./goal-worker-real.ts";
 import { appendFileSync, writeFileSync } from "node:fs";
-export default function(pi) {
+export default async function(pi) {
   globalThis.__fixtureActivation=false;
-  provider(pi); worker(pi);
+  provider(pi); await worker(pi);
   pi.on("session_start",async()=>{
     const service=globalThis.__paeDelegatedChildGoalV1;
     for(const name of ["bootstrap","resume"]) {
@@ -191,7 +197,7 @@ export default function(pi) {
   const env={PATH:process.env.PATH,HOME:home,LANG:"C.UTF-8",TMPDIR:root,PI_CODING_AGENT_DIR:agent,
     PI_SUBAGENT_BIN:raw,PI_TUI_WORKER_LAUNCHER:raw,PI_AGENTSH_MODE:"none",TEST_SOCKET:join(root,"fixture.sock"),TEST_CALLS:join(root,"calls.jsonl"),TEST_RECEIPTS:join(root,"receipts.jsonl"),TEST_PAUSE_RELEASE:join(root,"pause-release")};
   const launchParent=()=>{
-    child=spawn(raw,["--mode","rpc","--no-extensions","--extension",join(copied,"runtime-parent.ts"),"--provider","harness-test","--model","gpt-6.1-sol","--session",join(root,"parent.jsonl"),"--tools","read,bash,edit,write,goal_manage,goal_complete,goal_blocked,goal_wait,update_progress"],{cwd,env,stdio:["pipe","pipe","pipe"]});
+    child=spawn(raw,["--mode","rpc","--no-extensions","--extension",join(copied,"runtime-parent.ts"),"--provider","harness-test","--model","gpt-6.1-sol","--session",join(root,"parent.jsonl"),"--tools","read,bash,edit,write,goal_manage,goal_complete,goal_blocked,goal_wait,update_progress,questionnaire"],{cwd,env,stdio:["pipe","pipe","pipe"]});
     child.stdin.on("error",()=>{});
     child.stdout.on("data",chunk=>{ const text=chunk.toString(); if(text.includes('"success":false')||text.includes('"type":"extension_error"'))output+=text; });
     child.stderr.on("data",chunk=>{output+=chunk.toString();});
@@ -344,6 +350,18 @@ export default function(pi) {
   assert.equal(racing.status,"complete","exact owned completion wins Pause race, never downgrades to paused");
   const raceTask=JSON.parse(await readFile(join(agent,"state","native-tasks-v1",racing.child.taskId,"state.json"),"utf8"));
   assert.equal(raceTask.history.at(-1).outcome,"delivered");assert.equal(raceTask.history.at(-1).execution,"completed");
+  state=await settle(await mutate("goals.create",{expectedGoalId:null,expectedRegistryRevision:state.goals.revision,objective:"Question workflow"}));
+  let questioning=state.goals.entries.at(-1);
+  state=await settle(await mutate("goals.start",{expectedGoalId:questioning.id,expectedEntryRevision:questioning.revision}));
+  state=await until(async()=>{const s=await snapshot();return s.goals.entries.at(-1).story?.questions?.some(q=>q.status==="pending")?s:null;},"actual child questionnaire reaches goal story");
+  questioning=state.goals.entries.at(-1);const question=questioning.story.questions.find(q=>q.status==="pending");
+  await assert.rejects(mutate("goals.answer",{expectedGoalId:questioning.id,expectedEntryRevision:questioning.revision,questionId:question.id,questionRevision:question.revision,workerEpoch:"foreign",answer:{kind:"questionnaire",cancelled:false,answers:[{id:"direction",value:"yes",wasCustom:false}]}}));
+  state=await settle(await mutate("goals.answer",{expectedGoalId:questioning.id,expectedEntryRevision:questioning.revision,questionId:question.id,questionRevision:question.revision,workerEpoch:question.workerEpoch,answer:{kind:"questionnaire",cancelled:false,answers:[{id:"direction",value:"yes",wasCustom:false}]}}));
+  state=await until(async()=>{const s=await snapshot();return s.goals.entries.at(-1).status==="complete"?s:null;},"answered child completes without parent prompt");
+  const story=state.goals.entries.at(-1).story;
+  assert.equal(story.questions.find(q=>q.id===question.id).status,"answered");
+  assert(story.activity.some(event=>event.text==="Explicit fixture activity after the user's answer"));
+  assert(story.timeline.some(event=>event.kind==="completed"));
   calls=(await readFile(join(root,"calls.jsonl"),"utf8")).trim().split("\n").map(JSON.parse);
   assert.equal(calls.filter(c=>!c.isChild).length,1,"registry never dispatches parent goal prompts");
   assert(calls.filter(c=>c.isChild).every(c=>c.model==="gpt-6.1-sol"&&c.provider==="harness-test"&&c.goalId&&c.activated));

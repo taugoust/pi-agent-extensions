@@ -110,13 +110,15 @@ export type WorkerInteractionsService = {
   protocol: 1;
   mode: "headless";
   workerEpoch: string;
+  supportedKinds?: Array<TaskInteractionInput["kind"]>;
   request(input: TaskInteractionInput, signal?: AbortSignal): Promise<TaskInteractionAnswer>;
 };
 export function foregroundTasksService(): ForegroundTasksService | undefined {
   const value = (globalThis as any)[FOREGROUND_TASKS_KEY];
   return value?.protocol === 1 && typeof value.sessionId === "string" && typeof value.epoch === "string" && typeof value.execute === "function" ? value : undefined;
 }
-export function workerInteractionsService(): WorkerInteractionsService | undefined {
+export function workerInteractionsService(kind?: TaskInteractionInput["kind"]): WorkerInteractionsService | undefined {
   const value = (globalThis as any)[WORKER_INTERACTIONS_KEY];
+  if (kind && Array.isArray(value?.supportedKinds) && !value.supportedKinds.includes(kind)) return undefined;
   return value?.protocol === 1 && value.mode === "headless" && typeof value.workerEpoch === "string" && typeof value.request === "function" ? value : undefined;
 }

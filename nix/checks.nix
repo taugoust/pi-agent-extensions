@@ -256,6 +256,7 @@ in
         cp ${self}/questionnaire/index.ts "$srcdir/questionnaire/index.ts"
         mkdir -p "$srcdir/shared"
         cp ${self}/shared/foreground-tasks.ts "$srcdir/shared/foreground-tasks.ts"
+        cp ${self}/shared/tool-presentation.ts "$srcdir/shared/tool-presentation.ts"
 
         test ${toString (builtins.length (builtins.attrNames moduleFiles))} = 4
         test -f ${moduleFiles.".pi/agent/extensions/shared".source}/foreground-tasks.ts
@@ -1168,6 +1169,10 @@ in
         workdir="$TMPDIR/permission-gate-check"
         mkdir -p "$workdir/src/permission-gate" "$workdir/src/shared" "$workdir/out"
         cp ${self}/permission-gate/index.ts "$workdir/src/permission-gate/index.ts"
+        cp ${self}/permission-gate/settings.ts "$workdir/src/permission-gate/settings.ts"
+        cp ${self}/shared/extension-defaults.ts "$workdir/src/shared/extension-defaults.ts"
+        mkdir -p "$workdir/out/shared"
+        cp ${self}/shared/extension-config-manifest.json "$workdir/out/shared/extension-config-manifest.json"
         cp ${self}/shared/agentsh-mode.ts "$workdir/src/shared/agentsh-mode.ts"
         cp ${self}/shared/bash-command-transform.ts "$workdir/src/shared/bash-command-transform.ts"
         cp ${self}/shared/subagent-permission.ts "$workdir/src/shared/subagent-permission.ts"
@@ -1183,6 +1188,8 @@ in
           --rootDir "$workdir/src" \
           --outDir "$workdir/out" \
           "$workdir/src/permission-gate/index.ts" \
+          "$workdir/src/permission-gate/settings.ts" \
+          "$workdir/src/shared/extension-defaults.ts" \
           "$workdir/src/shared/agentsh-mode.ts" \
           "$workdir/src/shared/bash-command-transform.ts" \
           "$workdir/src/shared/subagent-permission.ts" \
@@ -1981,6 +1988,25 @@ in
         EOF
 
         cd "$workdir"
+        # Keep the production preference reader; only the SDK directory lookup
+        # and Node's JSON-module loading are fixture boundaries here.
+        cat > fixture-hooks.mjs <<'EOF'
+        import { registerHooks } from 'node:module';
+        import { readFileSync } from 'node:fs';
+        registerHooks({
+          resolve(specifier, context, next) {
+            if (specifier === '@earendil-works/pi-coding-agent') return { url: 'data:text/javascript,export const getAgentDir = () => process.env.PI_CODING_AGENT_DIR;', shortCircuit: true };
+            return next(specifier, context);
+          },
+          load(url, context, next) {
+            if (url.endsWith('/extension-config-manifest.json')) return { format: 'module', source: 'export default ' + readFileSync(new URL(url), 'utf8'), shortCircuit: true };
+            return next(url, context);
+          },
+        });
+        EOF
+        export PI_CODING_AGENT_DIR="$workdir/agent"
+        mkdir -p "$PI_CODING_AGENT_DIR"
+        export NODE_OPTIONS="--import=$workdir/fixture-hooks.mjs"
         node test.mjs
         touch "$out"
       '';

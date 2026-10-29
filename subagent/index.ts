@@ -114,7 +114,7 @@ import { dedicatedGoalPolicy, type DedicatedGoalPolicy } from "./goal-policy.ts"
 type Mode = "single" | "parallel" | "chain";
 
 type SubagentSpec = {
-  goalExecution?: { completion?: ChildGoalSnapshot; goalTools: string[]; binding: { path: string; token: string; entryId: string; policy: DedicatedGoalPolicy; identity: GoalWorkerIdentity }; ready(rpc: NativeSubagentRpcSession): Promise<void> };
+  goalExecution?: { completion?: ChildGoalSnapshot; goalTools: string[]; binding: { path: string; token: string; entryId: string; policy: DedicatedGoalPolicy; identity: GoalWorkerIdentity; questionnaireEnabled?: boolean }; ready(rpc: NativeSubagentRpcSession): Promise<void> };
   task: string;
   acceptance?: string[];
   verification?: VerificationGate[];
@@ -2015,12 +2015,14 @@ export default function (pi: ExtensionAPI) {
             const completed = retainedGoalCompletion(branch, entry.id, binding.data.progressId);
             if (!completed) return null;
             const goal = completed.state;
+            const { readRecordedGoalStory } = await import("../workflows/goal-story.ts");
+            const story = readRecordedGoalStory(branch, entry.id);
             const last = record.history.at(-1);
             if (last?.attempt !== record.attempt || last?.outcome !== "delivered")
               await store.finish(sessionId, record.taskId, record.childId, { outcome: "delivered", execution: "completed", summary: completed.summary });
             return { goalId: goal.id, status: "complete", executionStopped: true, waiting: null,
               tasks: readGoalTasks({ sessionManager: manager }, goal), tokensUsed: goal.tokensUsed, automaticTurns: goal.automaticModelTurns,
-              noProgressTurns: goal.toolFreeRepeatCount, summary: completed.summary };
+              noProgressTurns: goal.toolFreeRepeatCount, summary: completed.summary, story };
           },
           async launch(entry, previous) {
             const policy = dedicatedGoalPolicy({ continuationLimits: entry.continuationLimits });
@@ -2041,6 +2043,14 @@ export default function (pi: ExtensionAPI) {
             const role = await resolveCoordinatorRole(retained?.spec, input => resolveSubagentProfiles(input, ctx));
             if (retained) tools = tools.filter(tool => retained.spec.tools?.includes(tool));
             else if (role?.tools) tools = tools.filter(tool => role.tools.includes(tool));
+            if ((retained && !retained.spec.tools?.includes("questionnaire")) || (role?.tools && !role.tools.includes("questionnaire"))) {
+              const questionnaire = goalTools.indexOf("questionnaire");
+              if (questionnaire >= 0) goalTools.splice(questionnaire, 1);
+            }
+            if (goalTools.includes("questionnaire")) {
+              nativeHelperEntrypoint("../questionnaire/index", Boolean(authority));
+              tools.push("questionnaire"); // retain the explicit optional capability for Resume
+            }
             // Fail model resolution before changing the retained attempt.
             const selectedModel = resolveSubagentModel(role?.model, subagentModelSettings, ctx, readInheritedSessionRoutingProfile(ctx));
             const coordinatorPrompt = role?.systemPrompt;
@@ -2054,7 +2064,7 @@ export default function (pi: ExtensionAPI) {
               throw new Error("Dedicated goal parent runtime changed before spawn");
             }
             await fs.promises.writeFile(path.join(directory, "goal-settings.json"), JSON.stringify({ rpc: { enabled: false }, ...policy }), { mode: 0o600 });
-            const binding = { path: path.join(directory, "worker.sock"), token: randomBytes(32).toString("hex"), entryId: entry.id, policy, identity };
+            const binding = { path: path.join(directory, "worker.sock"), token: randomBytes(32).toString("hex"), entryId: entry.id, policy, identity, questionnaireEnabled: goalTools.includes("questionnaire") };
             const abort = new AbortController();
             let rpc: NativeSubagentRpcSession | undefined;
             let resolveReady!: () => void, rejectReady!: (error: Error) => void;
@@ -2095,7 +2105,7 @@ export default function (pi: ExtensionAPI) {
             const request = async (operation: string, value?: unknown) => {
               if (generation !== sessionGeneration || lifecycleClosing || activeSessionId !== sessionId) throw new Error("Dedicated goal parent runtime changed");
               const observed = await requestGoalWorker(binding.path, { token: binding.token, identity,
-                request: { operation, ...(value === undefined ? {} : { entry: value }) } }) as ChildGoalSnapshot;
+                request: { operation, ...(value === undefined ? {} : operation === "answer" ? value as Record<string, unknown> : { entry: value }) } }) as ChildGoalSnapshot;
               lastObservation = structuredClone(observed);
               return observed;
             };
@@ -2104,7 +2114,7 @@ export default function (pi: ExtensionAPI) {
                 await request("pause");
                 await rpc!.pauseWorkflowExecution();
                 return await request("observe");
-              }, observe: () => request("observe"), stop };
+              }, observe: () => request("observe"), answer: (reply, requestId) => request("answer", { reply, requestId }), stop };
             return handle;
           },
         });
