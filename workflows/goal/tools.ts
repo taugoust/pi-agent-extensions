@@ -12,7 +12,7 @@ import { readGoalTasks } from "../../shared/goal-progress.ts";
 import { registerGoalManagement } from "./model-control.js";
 import { notifyTerminal, safeTerminalText } from "./errors.js";
 import {
-  formatStatus,
+  formatFooterStatus,
   GOAL_BLOCKED_TOOL,
   GOAL_COMPLETE_TOOL,
   GOAL_WAIT_TOOL,
@@ -174,7 +174,7 @@ export function registerGoalTools(pi: ExtensionAPI, runtime: GoalRuntime) {
       runtime.recordGoalUsage(runtime.activeGoal, ctx);
       runtime.persistGoal(runtime.activeGoal);
 
-      ctx.ui.setStatus(STATUS_KEY, formatStatus(runtime.activeGoal));
+      ctx.ui.setStatus(STATUS_KEY, formatFooterStatus(runtime.activeGoal, runtime.settings.continuationLimits.automaticTurns, ctx.ui.theme));
       runtime.clearCompletedGoal(ctx);
       runtime.showCompletionStatus(ctx);
       notifyTerminal(ctx.ui, `Goal complete: ${goal}`, "info");

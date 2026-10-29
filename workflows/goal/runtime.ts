@@ -105,6 +105,7 @@ export interface StatusContext {
     confirm: (title: string, message: string) => Promise<boolean>;
     notify: (message: string, level?: "info" | "warning" | "error") => void;
     setStatus: (key: string, value: string | undefined) => void;
+    theme?: { fg(color: "warning" | "success", text: string): string };
   };
   isIdle?: () => boolean;
   hasPendingMessages?: () => boolean;
@@ -589,7 +590,7 @@ export class GoalRuntime {
 
   updateStatus(ctx: StatusContext, goal: ActiveGoal) {
     this.clearCompletionStatusTimer();
-    ctx.ui.setStatus(STATUS_KEY, formatStatus(goal, this.settings.continuationLimits.automaticTurns));
+    ctx.ui.setStatus(STATUS_KEY, formatFooterStatus(goal, this.settings.continuationLimits.automaticTurns, ctx.ui.theme));
   }
 
   stopActiveGoal(ctx: StatusContext, request: GoalStopRequest) {
@@ -1326,7 +1327,7 @@ export class GoalRuntime {
 
   showCompletionStatus(ctx: StatusContext) {
     this.clearCompletionStatusTimer();
-    ctx.ui.setStatus(STATUS_KEY, "Goal ✓");
+    ctx.ui.setStatus(STATUS_KEY, ctx.ui.theme?.fg("success", "Goal ✓") ?? "Goal ✓");
     this.completionStatusTimer = setTimeout(() => {
       this.completionStatusTimer = undefined;
       try {
@@ -1452,6 +1453,13 @@ export function editedGoalStatus(status: GoalStatus): GoalStatus {
 
 export function incrementGoal(goal: ActiveGoal): ActiveGoal {
   return { ...goal, iteration: goal.iteration + 1, updatedAt: Date.now() };
+}
+
+export function formatFooterStatus(goal: ActiveGoal | undefined, limit: number | null, theme?: StatusContext["ui"]["theme"]) {
+  const text = formatStatus(goal, limit);
+  if (!goal || text === undefined) return undefined;
+  const tone = goal.status === "complete" || (goal.status === "active" && !goal.waiting) ? "success" : "warning";
+  return theme?.fg(tone, text) ?? text;
 }
 
 export function formatStatus(

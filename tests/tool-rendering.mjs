@@ -20,13 +20,17 @@ function load(module) {
  const pi = { registerTool(t) { if (t.name === module.replace('-', '_')) tool=t; }, on(){}, registerCommand(){}, registerShortcut(){}, registerFlag(){}, events:new EventEmitter(), getFlag(){}, appendEntry(){} };
  return jiti.import(join(source,module,'index.ts')).then(async m => { await m.default(pi); assert.ok(tool, `registered ${module}`); return tool; });
 }
-const { formatStatus, goalSummary } = await jiti.import(join(source,'workflows/goal/runtime.ts'));
+const { formatStatus, formatFooterStatus, goalSummary } = await jiti.import(join(source,'workflows/goal/runtime.ts'));
 const pausedGoal = { status:'paused', text:'Footer regression', automaticModelTurns:3, safetyPauseCause:'continuation_limit', iteration:1, timeUsedSeconds:0, tokensUsed:0 };
 for (const limit of [3, 10, null]) {
  assert.equal(formatStatus(pausedGoal, limit), 'Goal ■');
  assert.match(goalSummary(pausedGoal, limit), /Automatic work: 3/);
  assert.match(goalSummary(pausedGoal, limit), /Safety pause:/);
 }
+const footerTheme = {fg:(tone,text)=>`${tone}:${text}`};
+assert.equal(formatFooterStatus(pausedGoal, null, footerTheme), 'warning:Goal ■');
+assert.equal(formatFooterStatus({...pausedGoal,status:'active'}, null, footerTheme), 'success:Goal ✓');
+assert.equal(formatFooterStatus(undefined, null, footerTheme), undefined);
 assert.equal(formatStatus(undefined), undefined);
 assert.equal(formatStatus({...pausedGoal,status:'active'}, null), 'Goal ✓');
 assert.equal(formatStatus({...pausedGoal,status:'complete'}, null), 'Goal ✓');
