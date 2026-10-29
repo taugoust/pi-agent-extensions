@@ -73,8 +73,9 @@ export function registerGoalTools(pi: ExtensionAPI, runtime: GoalRuntime) {
         minLength: 1,
         maxLength: MAX_GOAL_ID_LENGTH,
         description:
-          "The exact goal_id shown in the current active /goal prompt. Used only to reject stale completion calls from older turns.",
+          "The stable goal_id shown in the current active /goal prompt. Also supply activation_id to reject calls from older activations.",
       }),
+      activation_id: Type.String({ minLength: 1, maxLength: MAX_GOAL_ID_LENGTH, description: "Exact activation_id in the latest Goal contract; changes on resume." }),
       summary: Type.String({
         minLength: 1,
         maxLength: MAX_COMPLETION_SUMMARY_LENGTH,
@@ -117,21 +118,14 @@ export function registerGoalTools(pi: ExtensionAPI, runtime: GoalRuntime) {
           details: completionDetails(goal, requestedGoalId, summary),
         };
       }
-      const staleGoalRejection = goalIdRejectionReason(completedGoal, requestedGoalId);
+      const staleGoalRejection = goalIdRejectionReason(completedGoal, requestedGoalId, params.activation_id);
       if (staleGoalRejection) {
         const rejection = `Goal completion rejected: ${staleGoalRejection}.`;
         notifyTerminal(ctx.ui, rejection, "warning");
-        if (completingDuringBudgetWrapUp) {
-          runtime.recordGoalUsage(completedGoal, ctx);
-          runtime.persistGoal(completedGoal);
-          runtime.updateStatus(ctx, completedGoal);
-          runtime.clearBudgetWrapUp();
-        }
-
+        // A stale activation cannot mutate or terminate the current wrap-up.
         return {
           content: toolContent(rejection),
           details: completionDetails(goal, requestedGoalId, summary),
-          terminate: completingDuringBudgetWrapUp || undefined,
         };
       }
       if (completedGoal.status !== "active" && !completingDuringBudgetWrapUp) {
@@ -174,7 +168,7 @@ export function registerGoalTools(pi: ExtensionAPI, runtime: GoalRuntime) {
       runtime.recordGoalUsage(runtime.activeGoal, ctx);
       runtime.persistGoal(runtime.activeGoal);
 
-      ctx.ui.setStatus(STATUS_KEY, formatFooterStatus(runtime.activeGoal, runtime.settings.continuationLimits.automaticTurns, ctx.ui.theme));
+      ctx.ui.setStatus(STATUS_KEY, formatFooterStatus(runtime.activeGoal, runtime.continuationLimits.automaticTurns, ctx.ui.theme));
       runtime.clearCompletedGoal(ctx);
       runtime.showCompletionStatus(ctx);
       notifyTerminal(ctx.ui, `Goal complete: ${goal}`, "info");
@@ -198,6 +192,7 @@ export function registerGoalTools(pi: ExtensionAPI, runtime: GoalRuntime) {
         maxLength: MAX_GOAL_ID_LENGTH,
         description: "The exact goal_id shown in the current active /goal prompt.",
       }),
+      activation_id: Type.String({ minLength: 1, maxLength: MAX_GOAL_ID_LENGTH, description: "Exact activation_id in the latest Goal contract; changes on resume." }),
       reason: Type.String({
         minLength: 1,
         maxLength: MAX_BLOCKER_REASON_LENGTH,
@@ -234,7 +229,7 @@ export function registerGoalTools(pi: ExtensionAPI, runtime: GoalRuntime) {
       if (!runtime.canRecordGoalUsage()) {
         return reject("current run does not own the active goal");
       }
-      const staleGoalRejection = goalIdRejectionReason(blockedGoal, requestedGoalId);
+      const staleGoalRejection = goalIdRejectionReason(blockedGoal, requestedGoalId, params.activation_id);
       if (staleGoalRejection) return reject(staleGoalRejection);
       if (blockedGoal.status !== "active") {
         return reject(`goal is ${blockedGoal.status}, not active`);
@@ -273,6 +268,7 @@ export function registerGoalTools(pi: ExtensionAPI, runtime: GoalRuntime) {
         maxLength: MAX_GOAL_ID_LENGTH,
         description: "The exact goal_id shown in the current active /goal prompt.",
       }),
+      activation_id: Type.String({ minLength: 1, maxLength: MAX_GOAL_ID_LENGTH, description: "Exact activation_id in the latest Goal contract; changes on resume." }),
       reason: Type.String({
         minLength: 1,
         maxLength: MAX_GOAL_WAIT_REASON_LENGTH,
@@ -305,7 +301,7 @@ export function registerGoalTools(pi: ExtensionAPI, runtime: GoalRuntime) {
       if (!runtime.canRecordGoalUsage()) {
         return reject("current run does not own the active goal");
       }
-      const staleGoalRejection = goalIdRejectionReason(activeGoal, requestedGoalId);
+      const staleGoalRejection = goalIdRejectionReason(activeGoal, requestedGoalId, params.activation_id);
       if (staleGoalRejection) return reject(staleGoalRejection);
       if (activeGoal.status !== "active") {
         return reject(`goal is ${activeGoal.status}, not active`);

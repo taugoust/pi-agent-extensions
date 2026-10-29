@@ -18,6 +18,7 @@ import {
   goalSummary,
   isResumableGoalStatus,
   nextGoalInstance,
+  sameGoalActivation,
   queueGoalSafetyReset,
   STATUS_KEY,
   type StatusContext,
@@ -65,7 +66,7 @@ export class GoalCommandController {
         return;
       }
       if (isRequestCurrent && !isRequestCurrent()) return;
-      if (this.runtime.activeGoal?.id !== existingGoal.id) {
+      if (!sameGoalActivation(this.runtime.activeGoal, existingGoal)) {
         notifyTerminal(ctx.ui, "The active goal changed while confirmation was open. Try again.", "warning");
         return;
       }
@@ -96,7 +97,7 @@ export class GoalCommandController {
     const startedGoal = this.runtime.activeGoal;
     onActivated?.(startedGoal);
     if (!legacyQueueBeforeActivation) this.runtime.persistGoal(startedGoal);
-    if (this.runtime.activeGoal?.id !== startedGoal.id || !this.runtime.ownsWorkflow(this.runtime.activeGoal)) {
+    if (!sameGoalActivation(this.runtime.activeGoal, startedGoal) || !this.runtime.ownsWorkflow(startedGoal)) {
       return;
     }
     this.runtime.updateStatus(ctx, startedGoal);
@@ -110,7 +111,7 @@ export class GoalCommandController {
     if (
       sent &&
       legacyQueueBeforeActivation &&
-      this.runtime.activeGoal?.id === startedGoal.id &&
+      sameGoalActivation(this.runtime.activeGoal, startedGoal) &&
       this.runtime.activeGoal.status === "active"
     ) {
       this.runtime.legacyQueueState = undefined;
@@ -119,7 +120,7 @@ export class GoalCommandController {
     if (isActivationCurrent && !isActivationCurrent(startedGoal)) return;
     if (!sent) {
       let rolledBackStartedGoal = false;
-      if (this.runtime.activeGoal?.id === startedGoal.id) {
+      if (sameGoalActivation(this.runtime.activeGoal, startedGoal)) {
         rolledBackStartedGoal = true;
         if (existingGoal) {
           this.runtime.recordGoalUsage(existingGoal, ctx);
@@ -133,7 +134,7 @@ export class GoalCommandController {
             this.runtime.activeGoal = existingGoal;
             this.runtime.clearStaleGoalToolCallBlock();
             this.runtime.persistGoal(existingGoal);
-            if (this.runtime.activeGoal?.id === existingGoal.id) {
+            if (sameGoalActivation(this.runtime.activeGoal, existingGoal)) {
               this.runtime.updateStatus(ctx, existingGoal);
             }
           } else {
@@ -165,10 +166,10 @@ export class GoalCommandController {
       }
       return;
     }
-    if (this.runtime.activeGoal?.id !== startedGoal.id || !this.runtime.ownsWorkflow(this.runtime.activeGoal)) {
+    if (!sameGoalActivation(this.runtime.activeGoal, startedGoal) || !this.runtime.ownsWorkflow(startedGoal)) {
       return;
     }
-    const automaticLimit = this.runtime.settings.continuationLimits.automaticTurns;
+    const automaticLimit = this.runtime.continuationLimits.automaticTurns;
     notifyTerminal(
       ctx.ui,
       `${existingGoal ? "Goal replaced" : "Goal started"}: ${objective}. ${
@@ -258,7 +259,7 @@ export class GoalCommandController {
       buildResumePrompt(resumedGoal, stoppedStatus),
     );
     if (!sent) {
-      if (this.runtime.activeGoal?.id === resumedGoal.id && this.runtime.activeGoal.status === "active") {
+      if (sameGoalActivation(this.runtime.activeGoal, resumedGoal) && this.runtime.activeGoal?.status === "active") {
         this.runtime.activeGoal = stoppedGoal;
         this.runtime.persistGoal(this.runtime.activeGoal);
         this.runtime.updateStatus(ctx, this.runtime.activeGoal);
@@ -270,7 +271,7 @@ export class GoalCommandController {
       return;
     }
     if (!this.runtime.ownsWorkflow(resumedGoal)) return;
-    const automaticLimit = this.runtime.settings.continuationLimits.automaticTurns;
+    const automaticLimit = this.runtime.continuationLimits.automaticTurns;
     notifyTerminal(
       ctx.ui,
       `Goal resumed from ${stoppedStatusLabel(stoppedStatus)}: ${resumedGoal.text}. ${
@@ -298,7 +299,7 @@ export class GoalCommandController {
     }
     if (!this.runtime.clearGoalWait(ctx, waitingGoal.id)) return;
     const resumedGoal = this.runtime.activeGoal;
-    if (!resumedGoal || resumedGoal.id !== waitingGoal.id || resumedGoal.status !== "active") return;
+    if (!resumedGoal || !sameGoalActivation(resumedGoal, waitingGoal) || resumedGoal.status !== "active") return;
     const sent = await this.runtime.sendOwnedGoalPrompt(
       ctx,
       resumedGoal.id,
@@ -306,7 +307,7 @@ export class GoalCommandController {
       false,
     );
     if (!sent) {
-      if (this.runtime.activeGoal?.id === waitingGoal.id) {
+      if (sameGoalActivation(this.runtime.activeGoal, waitingGoal)) {
         this.runtime.enterGoalWait(ctx, waitingGoal.id, waiting);
       }
       return;
@@ -415,7 +416,7 @@ export class GoalCommandController {
       this.runtime.clearStaleGoalToolCallBlock();
       const sent = await this.runtime.sendOwnedGoalPrompt(ctx, editedGoal.id, buildObjectiveUpdatedPrompt(editedGoal));
       if (!sent) {
-        if (this.runtime.activeGoal?.id === editedGoal.id) {
+        if (sameGoalActivation(this.runtime.activeGoal, editedGoal)) {
           if (previousStatus === "active" && previousGoal.waiting) {
             this.runtime.activeGoal = previousGoal;
             this.runtime.clearStaleGoalToolCallBlock();
@@ -426,7 +427,7 @@ export class GoalCommandController {
             this.runtime.activeGoal = previousGoal;
             this.runtime.clearStaleGoalToolCallBlock();
             this.runtime.persistGoal(previousGoal);
-            if (this.runtime.activeGoal?.id === previousGoal.id) {
+            if (sameGoalActivation(this.runtime.activeGoal, previousGoal)) {
               this.runtime.updateStatus(ctx, previousGoal);
             }
           } else {
@@ -475,7 +476,7 @@ export class GoalCommandController {
     this.runtime.updateStatus(ctx, this.runtime.activeGoal);
     this.reportGoalStatus(
       ctx,
-      goalSummary(this.runtime.activeGoal, this.runtime.settings.continuationLimits.automaticTurns),
+      goalSummary(this.runtime.activeGoal, this.runtime.continuationLimits.automaticTurns),
     );
   }
 

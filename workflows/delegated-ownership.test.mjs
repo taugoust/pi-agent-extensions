@@ -12,6 +12,7 @@ const seams = {
     pi.registerCommand('goal',{async handler(args){if(args.trim()!=='status')fixture.state={...fixture.state,id:'command-rotated',text:args}}});
     return {runtime:{get activeGoal(){return fixture.state}},commands:{}};
   }`,
+  "./goal/mutations.ts": "export function bindGoalMutations(){return ()=>{}}",
   "./worktree/worktree.js": "export default function worktree(){}",
   "./worktree/settings.js": "export function createWorktreeSettingsRuntime(){return {}};export const settingsFilePath='unused'",
   "./service.js": "export function createWorkflowService(){throw Error('not started in isolated registration test')}",
@@ -27,7 +28,7 @@ function fixture(delegatedChild) {
   const state={id:'owned-goal',progressId:'stable-lineage',text:'owned scope',status:'active',tokensUsed:23};
   const data={state:structuredClone(state)};
   globalThis.__ownershipFixture=data;
-  workflows({registerTool:d=>tools.set(d.name,d),registerCommand:(name,d)=>commands.set(name,d),on(){}},{delegatedChild});
+  workflows({events:{on(){}},registerTool:d=>tools.set(d.name,d),registerCommand:(name,d)=>commands.set(name,d),on(){}},{delegatedChild});
   return {data,state,tools,commands,ctx:{hasUI:true,ui:{notify:text=>notices.push(text)}},notices};
 }
 

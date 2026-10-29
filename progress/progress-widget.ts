@@ -5,7 +5,7 @@ import type {
   ExtensionCommandContext,
   ExtensionContext,
 } from "@earendil-works/pi-coding-agent";
-import { writeProgress, GOAL_PROGRESS_EVENT } from "../shared/goal-progress.ts";
+import { mutateProgress, GOAL_PROGRESS_EVENT } from "../shared/goal-progress.ts";
 import { renderCompletionSummary, renderProgressWidget, sanitizeProgressText } from "./progress-renderer.js";
 import { showProgressSettings } from "./progress-settings-ui.js";
 import {
@@ -18,7 +18,7 @@ import {
   type ProgressDetails,
   ProgressParameters,
   type ProgressStep,
-  prepareProgressArguments,
+  validateProgressMutation,
   progressBoundaryContent,
   reconcileProgressContext,
   reconstructProgress,
@@ -156,15 +156,16 @@ export default function progressWidgetExtension(pi: ExtensionAPI, dependencies: 
     label: "Progress",
     executionMode: "sequential",
     description:
-      "Update the existing checklist with the full steps array. Tasks default to the current goal; use goal_id:null for standalone work. Keep at most one in_progress step. Never remove unfinished goal tasks silently; only an explicitly authorized goal scope change may remove them.",
+      "Create or update the conversation's goal-backed checklist. create requires objective, steps and request_id; it authorizes and starts autonomous continuation by DEFAULT with configured limits. start:false creates a paused draft. Never replaces an existing goal. update requires explicit non-null goal_id, expected_revision and request_id. Supplied IDs must belong to that goal; omitted IDs create tasks; omitted tasks remain. Removal requires explicit remove_task_ids after a user scope change. Reuse the identical request_id and payload on retries. No standalone writes; inspect goal_manage status for current identity/revision. Task updates never resume or complete a goal.",
     promptSnippet: "Show users what has been done, what is happening now, and what is planned next",
     promptGuidelines: [
       "Use update_progress for multi-step work when meaningful progress changes; skip simple tasks and avoid redundant updates.",
       "Report actual progress. Use blocked when work depends on an external action or condition, include what is needed to continue in the step text, and do not mark blocked work completed.",
-      "For a goal, maintain its required tasks here and mark completed only with evidence. Keep existing task IDs when refining wording or adding blocker details; omit IDs for new tasks. Include unfinished tasks in every update; goal_complete rejects unfinished linked tasks. Standalone work remains valid with goal_id:null.",
+      "Creation is authorization for bounded autonomous continuation unless start:false. Do not create a replacement to bypass a paused goal, permissions or workflow ownership. Resuming a paused goal still requires fresh user authorization.",
+      "Maintain required tasks and mark completed only with evidence. Keep existing task IDs when refining wording or blockers; omit IDs for new tasks. Omitted tasks remain unchanged. goal_complete verifies completion separately. Historical standalone checklists are read-only.",
     ],
     parameters: ProgressParameters,
-    prepareArguments: prepareProgressArguments,
+    prepareArguments: validateProgressMutation,
     renderCall(args, theme) {
       const summary = Array.isArray(args.steps)
         ? (args.steps as unknown[]).filter(
@@ -198,10 +199,11 @@ export default function progressWidgetExtension(pi: ExtensionAPI, dependencies: 
       if (!ownsSession(ctx)) {
         throw new Error("Cannot update progress because the session changed.");
       }
-      const validated = validateProgressArguments(params);
-      const scoped = writeProgress(pi, ctx, validated.steps, validated.goal_id, false, false);
-      const nextSteps = scoped.steps;
+      const validated = validateProgressMutation(params);
       const wasComplete = allProgressCompleted(steps);
+      const scoped = mutateProgress(pi, ctx, validated);
+      // A durable retry returns its original receipt, not a rollback of the live UI.
+      const nextSteps = reconstructProgress(ctx.sessionManager.getBranch());
       cancelCompletionSummary();
       widgetHidden = false;
       steps = cloneProgressSteps(nextSteps);
@@ -211,12 +213,14 @@ export default function progressWidgetExtension(pi: ExtensionAPI, dependencies: 
 
       const details: ProgressDetails = {
         version: PROGRESS_DETAILS_VERSION,
-        steps: steps.map(({ text, status }) => ({ text, status })),
-        ...(scoped.goalId ? { goalId: scoped.goalId } : {}),
+        steps: cloneProgressSteps(scoped.steps),
+        goalId: scoped.goalId,
+        revision: scoped.revision,
+        activationId: scoped.activationId,
       };
       if (steps.length === 0) {
         return {
-          content: [{ type: "text", text: "Progress cleared." }],
+          content: [{ type: "text", text: JSON.stringify(scoped) }],
           details,
         };
       }
@@ -228,7 +232,7 @@ export default function progressWidgetExtension(pi: ExtensionAPI, dependencies: 
       if (blocked > 0) counts.push(`⊘ ${blocked} blocked`);
       if (pending > 0) counts.push(`… ${pending} remaining`);
       return {
-        content: [{ type: "text", text: `update_progress: ${counts.join("; ")}` }],
+        content: [{ type: "text", text: `update_progress: ${counts.join("; ")}\n${JSON.stringify(scoped)}` }],
         details,
       };
     },

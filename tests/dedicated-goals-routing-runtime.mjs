@@ -20,7 +20,7 @@ pi.registerProvider("openai",{api:"openai-responses",apiKey:"WRONG-provider-defa
 streamSimple(model,_context,options){const goal=ctx.sessionManager.getBranch().findLast(e=>e.type==="custom"&&e.customType==="goal-state")?.data?.goal;
 appendFileSync(process.env.TEST_CALLS,JSON.stringify({child:process.env.PI_DEDICATED_GOAL_CHILD==="1",selectedAccount:options.apiKey==="selected-alpha-key",wrongDefault:options.apiKey==="WRONG-provider-default"||options.apiKey==="store-default-beta-key",model:model.id,provider:model.provider,goalId:goal?.id})+"\n");
 if(!goal?.id)throw new Error("Unexpected parent model execution");
-const message={role:"assistant",api:"openai-responses",provider:model.provider,model:model.id,timestamp:Date.now(),stopReason:"toolUse",content:[{type:"toolCall",id:"complete-"+process.pid,name:"goal_complete",arguments:{goal_id:goal.id,summary:"Verified inherited selected named account offline"}}],usage:{input:1,output:1,cacheRead:0,cacheWrite:0,totalTokens:2,cost:{input:0,output:0,cacheRead:0,cacheWrite:0,total:0}}};
+const message={role:"assistant",api:"openai-responses",provider:model.provider,model:model.id,timestamp:Date.now(),stopReason:"toolUse",content:[{type:"toolCall",id:"complete-"+process.pid,name:"goal_complete",arguments:{goal_id:goal.id,activation_id:goal.activationId,summary:"Verified inherited selected named account offline"}}],usage:{input:1,output:1,cacheRead:0,cacheWrite:0,totalTokens:2,cost:{input:0,output:0,cacheRead:0,cacheWrite:0,total:0}}};
 const stream=createAssistantMessageEventStream();queueMicrotask(()=>{stream.push({type:"start",partial:message});stream.push({type:"done",reason:"toolUse",message});stream.end(message);});return stream;}});}
 `;
 const parent=String.raw`

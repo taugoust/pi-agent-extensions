@@ -6,6 +6,8 @@ Implemented and deployed for unpublished review. Production build/switch succeed
 
 ## Changes
 
+Historical deployment notes below describe the prior contract. The goal/checklist API unification supersedes its standalone-write and create-paused defaults; see [current API and migration notes](../workflows/README.md#existing-per-childterminal-goal-engine-model-managed-goals-and-tasks). This does not claim deployment of that follow-up.
+
 - `goal_manage` creates, inspects, updates, pauses, resumes and clears the existing candidate Goal engine from chat. Explicit user authorization enables autonomy; automatic turns cannot mutate Goal controls to reset themselves.
 - Activation joins the current tool run, not recursive prompt submission. Existing budget, continuation, no-progress, wait and blocker safeguards remain.
 - `update_progress` is still the checklist source. It defaults to the current goal; `goal_id:null` supports standalone work. Scoped session entries and stable task IDs preserve progress across wording changes, goal-instance rotation, reload, branching and compaction.

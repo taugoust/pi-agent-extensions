@@ -63,8 +63,8 @@ export default function provider(pi) {
           ["parent_bash",{command:"sudo sh -c 'printf DENIED > "+base+"/denied-write.txt'"}],
           ["parent_bash",{command:"cat "+base+"/allowed-read.txt"}],
           ["parent_bash",{command:"printf ALLOWED > "+base+"/allowed-write.txt"}],
-          ["goal_complete",{goal_id:"stale-foreign-goal-id",summary:"Verified actual guarded fixture allow and deny outcomes"}],
-          ["goal_complete",{goal_id:goal.id,summary:"Verified actual guarded fixture allow and deny outcomes"}],
+          ["goal_complete",{goal_id:"stale-foreign-goal-id",activation_id:goal.activationId,summary:"Verified actual guarded fixture allow and deny outcomes"}],
+          ["goal_complete",{goal_id:goal.id,activation_id:goal.activationId,summary:"Verified actual guarded fixture allow and deny outcomes"}],
         ];
         if(sequence[calls-1])[name,args]=sequence[calls-1];
       } else {

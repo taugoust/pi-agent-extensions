@@ -57,6 +57,7 @@ interface ManagedRun {
   runId: string;
   generation: number;
   goalId?: string;
+  activationId?: string;
   lastStatus?: GoalRunStatus;
   closed: boolean;
   cancelRequested: boolean;
@@ -218,7 +219,7 @@ export class GoalRunController {
         parsed.tokenBudget,
         session.ctx,
         (goal) => {
-          if (this.ownsRun(run, session.generation)) run.goalId = goal.id;
+          if (this.ownsRun(run, session.generation)) { run.goalId = goal.id; run.activationId = goal.activationId ?? goal.id; }
         },
         () => this.ownsRun(run, session.generation),
       );
@@ -246,7 +247,7 @@ export class GoalRunController {
       this.emitError(runId, "start", "ACTIVATION_FAILED", "Goal activation did not create a Goal.");
       return;
     }
-    if (currentActiveGoal(this.runtime)?.id !== run.goalId) {
+    if (currentActiveGoal(this.runtime)?.id !== run.goalId || (this.runtime.activeGoal?.activationId ?? this.runtime.activeGoal?.id) !== run.activationId) {
       this.closeCurrentRun();
       this.emitError(runId, "start", "SUPERSEDED", "The managed Goal was superseded.");
       return;
@@ -283,7 +284,7 @@ export class GoalRunController {
   private cancelActiveRun(run: ManagedRun, session: BoundSession, reason: string | undefined) {
     if (!this.ownsRun(run, session.generation)) return;
     const goal = this.runtime.activeGoal;
-    if (!goal || goal.id !== run.goalId) {
+    if (!goal || goal.id !== run.goalId || (goal.activationId ?? goal.id) !== run.activationId) {
       this.closeCurrentRun();
       this.emitError(run.runId, "cancel", "SUPERSEDED", "The managed Goal was superseded.");
       return;
@@ -300,7 +301,7 @@ export class GoalRunController {
   private handleGoalState(snapshot: GoalStateSnapshot) {
     const run = this.run;
     if (!run || run.closed || !run.goalId) return;
-    if (run.goalId !== snapshot.goalId) {
+    if (run.goalId !== snapshot.goalId || run.activationId !== snapshot.activationId) {
       if (currentActiveGoal(this.runtime)?.id !== snapshot.goalId) return;
       this.publishStateEvent(run, {
         goalId: run.goalId,

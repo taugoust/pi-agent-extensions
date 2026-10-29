@@ -5,6 +5,7 @@ export type GoalStatus = "active" | "paused" | "blocked" | "usage_limited" | "bu
 
 export interface GoalPromptContext {
   id: string;
+  activationId?: string;
   text: string;
   status: GoalStatus;
   iteration: number;
@@ -65,7 +66,7 @@ function goalObjectiveBlock(goal: GoalPromptContext) {
 }
 
 function goalCompletionGuardBlock(goal: GoalPromptContext) {
-  return `<goal_id>\n${escapeXmlText(goal.id)}\n</goal_id>\nThis goal_id is only the goal_complete tool stale-turn guard, not part of the objective. If and only if the goal is fully complete, pass this exact goal_id to goal_complete with the completion summary.`;
+  return `<goal_id>\n${escapeXmlText(goal.id)}\n</goal_id>\n<activation_id>\n${escapeXmlText(goal.activationId ?? goal.id)}\n</activation_id>\nThe goal_id is stable; activation_id is the stale-turn guard and changes on resume or objective updates. Pass both exact values to goal_complete, goal_wait and goal_blocked. Only complete after verifying the outcome and all required tasks.`;
 }
 
 function goalModeRules(goalLabel: string) {
@@ -73,17 +74,17 @@ function goalModeRules(goalLabel: string) {
     "Goal-mode rules:",
     "- Preserve the full objective across turns; do not redefine success around a narrower, safer, smaller, merely compatible, or easier-to-test result.",
     "- Derive concrete requirements from the objective and any referenced files, plans, specifications, issues, or user instructions.",
-    "- Maintain required tasks with update_progress, which defaults to this goal. Preserve unfinished tasks across updates; use goal_id:null only for genuinely standalone work. Complete the goal only after all required tasks and the outcome are verified.",
+    "- Maintain required tasks with update_progress action:update, explicit goal_id, expected_revision from the current checklist context or goal_manage status, and a unique request_id. Keep task IDs when updating; omitted tasks remain and removal is explicit. Standalone writes are not supported. Task updates never resume or complete a goal.",
     "- Do not use goal_manage to reset limits, replace the goal, or resume yourself. Goal controls require a relevant new user instruction; safety pauses require fresh user authorization.",
     "- Treat the current worktree, command output, tests, runtime behavior, PR state, rendered artifacts, and external state as authoritative. Previous conversation, plans, and summaries are context, not proof; inspect the current state before relying on them.",
     `- Keep working until ${goalLabel} is completely resolved end-to-end. Do not stop at analysis, a plan, TODO list, partial fixes, or suggested next steps.`,
     "- Autonomously implement and verify the work. If a tool fails, try reasonable alternatives instead of yielding early.",
     "- Before completion, treat completion as unproven and audit requirement by requirement. For every explicit requirement, artifact, command, test, gate, invariant, and deliverable, inspect authoritative evidence and match verification scope to requirement scope.",
     "- Weak, indirect, missing, or merely consistent evidence is not enough; gather stronger evidence and keep working.",
-    `- Only call the goal_complete tool after evidence proves every requirement of ${goalLabel} is satisfied and no required work remains. Pass this exact goal_id and never reuse an id from an older, stopped, replaced, or cleared turn.`,
+    `- Only call the goal_complete tool after evidence proves every requirement of ${goalLabel} is satisfied and no required work remains. Pass this exact goal_id and activation_id; never reuse an activation from an older, stopped, replaced, or cleared turn.`,
     "- Use goal_blocked only at a true impasse after the same blocker recurs for at least three consecutive goal turns, with concrete evidence that user or external action is required. Never use it merely because work is hard, slow, uncertain, incomplete, needs ordinary clarification, or hit a recoverable failure.",
     "- After a blocked goal is resumed, start a fresh three-turn blocker audit before using goal_blocked again.",
-    "- When progress genuinely depends on a later external event, first arrange a non-goal wake message, then call goal_wait with the exact current goal_id to keep the goal active without automatic continuation. Use resume_after_ms only as a bounded safety wake-up, not as a polling interval.",
+    "- When progress genuinely depends on a later external event, first arrange a non-goal wake message, then call goal_wait with the exact current goal_id and activation_id to keep the goal active without automatic continuation. Use resume_after_ms only as a bounded safety wake-up, not as a polling interval.",
     `- Prefer longer goal_wait deadlines measured in minutes to avoid busy polling. Requests below ${MIN_GOAL_WAIT_DELAY_MS}ms are clamped to ${MIN_GOAL_WAIT_DELAY_MS}ms, and omitting resume_after_ms keeps the goal quiet until external input or explicit resume.`,
     "- Call goal_wait alone because parallel sibling tools can prevent immediate turn termination. Do not use it for ordinary unfinished work, and do not use goal_blocked for a recoverable external wait.",
     "- If the goal is incomplete at the end of a turn and goal_wait was not accepted, expect automatic continuation and keep working from the current state.",

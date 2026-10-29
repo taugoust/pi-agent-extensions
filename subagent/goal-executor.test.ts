@@ -14,10 +14,10 @@ test("two child bindings retain tasks across attempts; pause awaits halt and rej
       // Explicit/retained role choices must survive the same exact-child lane.
       model: e.id === "a" ? "owning-provider/gpt-6-astra:low" : "owning-provider/gpt-6.1-sol:high",
       identity: { sessionId: "s", runtimeId: "r", taskId: previous?.taskId ?? `task-${e.id}`, childId: `child-${e.id}-${attempt}`, jobId: `job-${e.id}-${attempt}`, attempt, workerEpoch: `epoch-${e.id}-${attempt}` },
-      async start() { contractIds.set(e.id, e.id); return { goalId: e.id, status: "active", waiting: null, executionStopped: false }; },
-      async resume() { const goalId = `${e.id}-contract-${attempt}`; contractIds.set(e.id, goalId); return { goalId, status: "active", waiting: null, executionStopped: false }; },
-      async pause() { return { goalId: contractIds.get(e.id)!, status: "paused", waiting: null, executionStopped: validPause }; },
-      async observe() { return { goalId: contractIds.get(e.id)!, status: "active", waiting: null, executionStopped: false }; },
+      async start() { contractIds.set(e.id, e.id); return { goalId: e.id, activationId: e.id, status: "active", waiting: null, executionStopped: false }; },
+      async resume() { const goalId = `${e.id}-contract-${attempt}`; contractIds.set(e.id, goalId); return { goalId: e.id, activationId: goalId, status: "active", waiting: null, executionStopped: false }; },
+      async pause() { return { goalId: e.id, activationId: contractIds.get(e.id)!, status: "paused", waiting: null, executionStopped: validPause }; },
+      async observe() { return { goalId: e.id, activationId: contractIds.get(e.id)!, status: "active", waiting: null, executionStopped: false }; },
       async stop() { await Promise.resolve(); halted++; },
     }; handles.push(handle); return handle;
   } });
@@ -37,7 +37,8 @@ test("two child bindings retain tasks across attempts; pause awaits halt and rej
   a.child = await executor.resume(a);
   assert.equal(a.child.taskId, stale.child!.taskId);
   assert.equal(a.child.attempt, 2);
-  assert.equal((await executor.observe(a))?.goalId, "a-contract-2", "Resume rotates engine contract while retaining task identity");
+  assert.equal((await executor.observe(a))?.goalId, "a", "Resume retains goal identity");
+  assert.equal((await executor.observe(a))?.activationId, "a-contract-2", "Resume rotates only the activation token");
   contractIds.set("a", "a");
   await assert.rejects(executor.observe(a), /Invalid dedicated child goal observation/, "ordinary observation must still reject the old pre-resume contract");
   contractIds.set("a", "a-contract-2");

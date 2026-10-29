@@ -239,7 +239,7 @@ try {
 	assert.ok(git(cwd, "show-ref", "refs/heads/workflow-live"));
 	evidence.checks.cleanRemovalPreservedBranch = true;
 	const proof = `workflow-live-proof-${randomUUID()}`;
-	const objective = `In this disposable fixture only, use write to create goal-proof.txt containing exactly ${JSON.stringify(proof + "\n")}. Then use read to verify the file. Finish with goal_complete using the current goal_id and a summary of the verified evidence. Do not modify any other file, commit, push, use subagents, run shell commands, or use network tools. This is a bounded live smoke test.`;
+	const objective = `In this disposable fixture only, use write to create goal-proof.txt containing exactly ${JSON.stringify(proof + "\n")}. Then use read to verify the file. Finish with goal_complete using the current goal_id and activation_id and a summary of the verified evidence. Do not modify any other file, commit, push, use subagents, run shell commands, or use network tools. This is a bounded live smoke test.`;
 	await start("goal.start", { objective, tokenBudget: 100000 });
 	await answer("confirm", /Start Goal/, true);
 	const completed = await until(

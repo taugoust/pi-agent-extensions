@@ -3,7 +3,7 @@ import { sameGoalWorker, type GoalWorkerIdentity } from "./goal-rpc.ts";
 import type { GoalQuestionReply } from "../workflows/goal-story.ts";
 
 export type ChildGoalSnapshot = {
-  goalId: string; status: DelegatedGoalEntry["status"]; executionStopped: boolean; waiting: string | null;
+  goalId: string; activationId?: string; revision?: number; status: DelegatedGoalEntry["status"]; executionStopped: boolean; waiting: string | null;
   tasks?: DelegatedGoalEntry["tasks"]; tokensUsed?: number; automaticTurns?: number;
   noProgressTurns?: number; summary?: string | null;
   story?: DelegatedGoalEntry["story"];
@@ -24,11 +24,11 @@ export type GoalChildHandle = {
   identity: GoalWorkerIdentity;
   model: string;
   start(entry: Readonly<DelegatedGoalEntry>): Promise<ChildGoalSnapshot>;
-  resume(): Promise<ChildGoalSnapshot>;
-  pause(): Promise<ChildGoalSnapshot>;
+  resume(expectedGoalId?: string, expectedActivationId?: string): Promise<ChildGoalSnapshot>;
+  pause(expectedGoalId?: string, expectedActivationId?: string): Promise<ChildGoalSnapshot>;
   observe(): Promise<ChildGoalSnapshot>;
   answer?(reply: GoalQuestionReply, requestId: string): Promise<ChildGoalSnapshot>;
-  updateLimits?(entry: Readonly<DelegatedGoalEntry>, expectedGoalId: string, expectedPolicyRevision: number): Promise<ChildGoalSnapshot>;
+  updateLimits?(entry: Readonly<DelegatedGoalEntry>, expectedGoalId: string, expectedPolicyRevision: number, expectedActivationId: string): Promise<ChildGoalSnapshot>;
   /** Resolves only once the owned execution and its process group have exited. */
   stop(completion?: ChildGoalSnapshot): Promise<void>;
 };
@@ -54,9 +54,9 @@ export function createDelegatedGoalExecutor(options: {
       throw new Error("Stale dedicated goal child binding");
     return b;
   };
-  const validate = (snapshot: ChildGoalSnapshot, goalId?: string) => {
+  const validate = (snapshot: ChildGoalSnapshot, goalId?: string, activationId?: string) => {
     if (!snapshot || typeof snapshot.goalId !== "string" || !snapshot.goalId
-      || (goalId && snapshot.goalId !== goalId) || !["active", "paused", "blocked", "usage_limited", "budget_limited", "complete"].includes(snapshot.status)
+      || (goalId && snapshot.goalId !== goalId) || (activationId && snapshot.activationId !== activationId) || !["active", "paused", "blocked", "usage_limited", "budget_limited", "complete"].includes(snapshot.status)
       || typeof snapshot.executionStopped !== "boolean"
       || !(snapshot.waiting === null || typeof snapshot.waiting === "string"))
       throw new Error("Invalid dedicated child goal observation");
@@ -82,10 +82,11 @@ export function createDelegatedGoalExecutor(options: {
         if (entryId !== entry.id && (owned.identity.taskId === id.taskId || owned.identity.childId === id.childId))
           throw new Error("Dedicated child execution is already bound to another goal");
       }
-      if (resume) validate(await handle.observe(), previous?.goalId);
-      // The existing engine rotates its contract goal_id on explicit Resume.
-      // Fence the restored contract above, then bind the newly activated one.
-      const snapshot = validate(await (resume ? handle.resume() : handle.start(structuredClone(entry))));
+      const restored = resume ? validate(await handle.observe(), previous?.goalId, previous?.last.activationId) : undefined;
+      // Goal identity is stable. Bind the new activation separately; the native
+      // worker epoch still fences this exact process/attempt.
+      const snapshot = validate(await (resume ? handle.resume(restored!.goalId, restored!.activationId) : handle.start(structuredClone(entry))));
+      if (restored && (snapshot.goalId !== restored.goalId || !snapshot.activationId || snapshot.activationId === restored.activationId)) throw new Error("Dedicated goal activation did not change on Resume");
       if (!sameGoalWorker(id, handle.identity)) throw new Error("Dedicated goal attempt changed during launch");
       if (snapshot.status === "paused") throw new Error("Dedicated child goal did not become active");
       const bound = { handle, identity: id, goalId: snapshot.goalId, stopped: false, last: structuredClone(snapshot) };
@@ -128,12 +129,13 @@ export function createDelegatedGoalExecutor(options: {
       if (!bindings.has(entry.id)) { await verifyStopped(entry); return; }
       const b = binding(entry);
       if (b.stopped) return;
-      const before = validate(await b.handle.observe(), b.goalId);
-      if (!before.limitsEditable || !Number.isSafeInteger(before.policyRevision) || !b.handle.updateLimits)
+      const before = validate(await b.handle.observe(), b.goalId, b.last.activationId);
+      if (!before.limitsEditable || !Number.isSafeInteger(before.policyRevision) || !before.activationId || !b.handle.updateLimits)
         throw new Error("Worker does not support live limit editing; reload required");
       binding(entry);
-      const observed = validate(await b.handle.updateLimits(entry, b.goalId, before.policyRevision!), b.goalId);
+      const observed = validate(await b.handle.updateLimits(entry, b.goalId, before.policyRevision!, before.activationId!), b.goalId);
       binding(entry);
+      if (observed.activationId !== before.activationId) throw new Error("Child goal activation changed during limit edit");
       if (observed.tokenBudget !== entry.tokenBudget || JSON.stringify(observed.limits) !== JSON.stringify(entry.continuationLimits))
         throw new Error("Child limit policy receipt differs from requested policy");
       // Do not stop a process here: it may be finishing a tool at the safe boundary.
@@ -142,7 +144,7 @@ export function createDelegatedGoalExecutor(options: {
     answer: (entry: Readonly<DelegatedGoalEntry>, reply: GoalQuestionReply, requestId: string) => serialize(async () => {
       const b = binding(entry);
       if (b.stopped || !b.handle.answer || reply.workerEpoch !== b.identity.workerEpoch) throw new Error("Goal question worker is unavailable or changed");
-      const observed = validate(await b.handle.answer(reply, requestId), b.goalId);
+      const observed = validate(await b.handle.answer(reply, requestId), b.goalId, b.last.activationId);
       binding(entry); b.last = structuredClone(observed);
       return structuredClone(observed);
     }),
@@ -152,7 +154,7 @@ export function createDelegatedGoalExecutor(options: {
       if (!bindings.has(entry.id)) { await verifyStopped(entry); return; }
       const b = binding(entry);
       if (b.stopped) return structuredClone(b.last);
-      const snapshot = validate(await b.handle.pause(), b.goalId);
+      const snapshot = validate(await b.handle.pause(b.goalId, b.last.activationId), b.goalId, b.last.activationId);
       binding(entry);
       if (snapshot.status !== "complete" && (!["paused", "blocked", "usage_limited", "budget_limited"].includes(snapshot.status) || !snapshot.executionStopped))
         throw new Error("Dedicated child goal pause did not verify stopped execution");
@@ -200,7 +202,7 @@ export function createDelegatedGoalExecutor(options: {
           return null;
         }
       }
-      const snapshot = validate(observed, b.goalId);
+      const snapshot = validate(observed, b.goalId, b.last.activationId);
       restorationFailures.delete(entry.id);
       binding(entry);
       if (snapshot.status !== "active") {

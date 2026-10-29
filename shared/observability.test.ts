@@ -1,4 +1,7 @@
 import { test, expect } from "bun:test";
+import { EventEmitter } from "node:events";
+import { GoalRuntime } from "../workflows/goal/runtime.ts";
+import { bindGoalMutations } from "../workflows/goal/mutations.ts";
 import { DEFAULT_STAMP_SETTINGS } from '../stamp/format.js';
 import stamp, { stampRecords } from "../stamp/index.ts";
 import progress from "../progress/index.ts";
@@ -18,18 +21,21 @@ function fixture(mode = "rpc") {
 	let id = "session-1";
 	const manager = { getBranch: () => branch, getSessionId: () => id };
 	const ctx: any = {
+		cwd: "/unused-observability-test", isIdle: () => true, hasPendingMessages: () => false,
 		mode,
 		hasUI: mode !== "json",
 		thinkingLevel: "low",
 		sessionManager: manager,
 		modelRegistry: { find: () => undefined },
 		ui: {
-			setWidget() {},
+			setStatus() {}, setWidget() {},
 			notify() {},
 			theme: { fg: (_: string, s: string) => s, bold: (s: string) => s },
 		},
 	};
+	const bus = new EventEmitter();
 	const pi: any = {
+		events: { emit: (...args: any[]) => bus.emit(args[0], ...args.slice(1)), on(name: string, fn: (...args: any[]) => void) { bus.on(name, fn); return () => bus.off(name, fn); } },
 		on: (name: string, fn: Function) => {
 			handlers.set(name, [...(handlers.get(name) ?? []), fn]);
 		},
@@ -113,13 +119,15 @@ for (const mode of ["rpc", "json"])
 			await f.emit("session_shutdown");
 		}
 	});
-test("progress persists via validated tool results and restores active branch without waking a model", async () => {
+test("progress persists an authoritative goal draft and restores active branch without waking a model", async () => {
 	const f = fixture();
+	const runtime = new GoalRuntime(f.pi); runtime.bindWorkflowSession(f.ctx.sessionManager);
+	bindGoalMutations(f.pi, f.ctx, runtime, { child: false, busy: () => false });
 	progress(f.pi);
 	await f.emit("session_start");
 	try {
 		const tool = f.tools.get("update_progress");
-		const params = { steps: [{ text: "wait for review", status: "blocked" }] };
+		const params = { action: "create", objective: "Review outcome", request_id: "observability", start: false, steps: [{ text: "wait for review", status: "blocked" }] };
 		const result = await tool.execute(
 			"call",
 			params,

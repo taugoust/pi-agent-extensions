@@ -37,11 +37,12 @@ export function createDelegatedChildGoalService(pi: ExtensionAPI, initial: Exten
   }
   // Upgrade an existing paused binding before any authenticated Resume can run.
   if (binding && runtime.activeGoal) bindProgress(runtime.activeGoal);
-  function current(entryId?: string, childGoalId?: string) {
+  function current(entryId?: string, childGoalId?: string, activationId?: string) {
     if (closed || ctx.sessionManager.getSessionId() !== sessionId) throw new Error("Stale child goal service");
     if (entryId !== undefined && binding !== entryId) throw new Error("Child goal ownership changed");
     if (childGoalId !== undefined && (runtime.activeGoal?.id ?? completedProjection()?.state.id) !== childGoalId)
       throw new Error("Child goal identity changed");
+    if (childGoalId !== undefined && activationId !== (runtime.activeGoal?.activationId ?? completedProjection()?.state.activationId ?? childGoalId)) throw new Error("Child goal activation changed");
     if (runtime.activeGoal && boundProgressId && (runtime.activeGoal.progressId ?? runtime.activeGoal.id) !== boundProgressId)
       throw new Error("Child goal lineage changed");
   }
@@ -55,7 +56,7 @@ export function createDelegatedChildGoalService(pi: ExtensionAPI, initial: Exten
     if (completed && Number.isSafeInteger(completed.endedAt)) recordState(completed.endedAt);
     const goal = runtime.activeGoal ?? completed?.state;
     const terminal = runtime.snapshotSettingsApplicationState().terminalDetails;
-    return { entryId: binding ?? null, childGoalId: goal?.id ?? null, story: recorder?.snapshot(), limits: { ...runtime.settings.continuationLimits }, policyRevision: runtime.policyRevision, tokenBudget: goal?.tokenBudget ?? null, goal: goal ? {
+    return { entryId: binding ?? null, childGoalId: goal?.id ?? null, childActivationId: goal?.activationId ?? goal?.id ?? null, revision: goal?.revision ?? null, story: recorder?.snapshot(), limits: { ...runtime.continuationLimits }, policyRevision: runtime.policyRevision, tokenBudget: goal?.tokenBudget ?? null, goal: goal ? {
       status: goal.status, tasks: readGoalTasks(ctx, goal), tokensUsed: goal.tokensUsed,
       automaticTurns: goal.automaticModelTurns, noProgressTurns: goal.toolFreeRepeatCount,
       summary: completed?.summary ?? (terminal?.goalId === goal.id ? terminal.summary ?? terminal.reason ?? null : null),
@@ -85,12 +86,11 @@ export function createDelegatedChildGoalService(pi: ExtensionAPI, initial: Exten
       applyConfirmedLimits();
       let activatedGoalId: string | undefined;
       await commands.startGoal(entry.text, entry.tokenBudget ?? undefined, commandContext(), goal => {
-        // Bind the stable lineage BEFORE dispatch; resumed contract IDs rotate.
+        // Bind the stable lineage BEFORE dispatch; only activation tokens rotate.
         bindProgress(goal);
         activatedGoalId = goal.id;
         // Seed its existing checklist before its first goal prompt is dispatched.
-        runtime.persistGoal(goal);
-        if (entry.tasks.length) writeProgress(pi, ctx, entry.tasks, goal.id, true);
+        goal.tasks = structuredClone(entry.tasks);
         recorder?.baseline({ status: goal.status, tasks: readGoalTasks(ctx, goal) });
       }, undefined, () => !closed);
       const observed = snapshot();
@@ -98,15 +98,15 @@ export function createDelegatedChildGoalService(pi: ExtensionAPI, initial: Exten
         || !["active", "complete"].includes(observed.goal?.status ?? "")) throw new Error("Child goal activation failed");
       return observed;
     }); },
-    pause(entryId: string, childGoalId: string) { return serial(() => {
-      current(entryId, childGoalId);
+    pause(entryId: string, childGoalId: string, activationId: string) { return serial(() => {
+      current(entryId, childGoalId, activationId);
       if (runtime.activeGoal?.status === "active") commands.pauseGoal(commandContext());
       if (runtime.activeGoal?.status === "active") throw new Error("Child goal did not pause");
       recordState();
       return snapshot();
     }); },
-    updateLimits(entryId: string, childGoalId: string, revision: number, entry: Readonly<DelegatedGoalEntry>) { return serial(() => {
-      current(entryId, childGoalId);
+    updateLimits(entryId: string, childGoalId: string, revision: number, entry: Readonly<DelegatedGoalEntry>, activationId: string) { return serial(() => {
+      current(entryId, childGoalId, activationId);
       if (entry.id !== entryId) throw new Error("Limit policy belongs to another goal");
       validateDelegatedGoals({ version: 1, revision: 0, entries: [structuredClone(entry)] });
       if (runtime.policyRevision !== revision) throw new Error("Child goal policy changed");
@@ -121,8 +121,8 @@ export function createDelegatedChildGoalService(pi: ExtensionAPI, initial: Exten
       recordState();
       return snapshot();
     }); },
-    resume(entryId: string, childGoalId: string, entry?: Readonly<DelegatedGoalEntry>) { return serial(async () => {
-      current(entryId, childGoalId);
+    resume(entryId: string, childGoalId: string, entry: Readonly<DelegatedGoalEntry> | undefined, activationId: string) { return serial(async () => {
+      current(entryId, childGoalId, activationId);
       if (!ctx.isIdle() || ctx.hasPendingMessages()) throw new Error("Dedicated child is not idle");
       if (runtime.activeGoal?.status === "active") throw new Error("Child goal already active");
       if (!entry) throw new Error("Resume requires current delegated goal metadata");
@@ -143,7 +143,7 @@ export function createDelegatedChildGoalService(pi: ExtensionAPI, initial: Exten
       await commands.resumeGoal(commandContext());
       recordState();
       const observed = snapshot();
-      if (!resumedLineage || boundProgressId !== resumedLineage || observed.childGoalId === childGoalId
+      if (!resumedLineage || boundProgressId !== resumedLineage || observed.childGoalId !== childGoalId || observed.childActivationId === activationId
         || !["active", "complete"].includes(observed.goal?.status ?? "")) throw new Error("Child goal resume failed");
       return observed;
     }); },
@@ -165,7 +165,8 @@ export function retainedGoalCompletion(branch: any[], binding?: string, boundPro
       const state = prior.findLast(e => e.type === "custom" && e.customType === "goal-state" && e.data?.goal?.id === history.id)?.data?.goal;
       const contract = prior.findLast(e => e.type === "custom_message" && e.customType === "goal-contract");
       if (state?.status !== "complete" || (state.progressId ?? state.id) !== boundProgressId
-        || contract?.details?.state !== "active" || contract.details.goalId !== history.id) continue;
+        || contract?.details?.state !== "active" || contract.details.goalId !== history.id
+        || (state.activationId !== undefined && contract.details.activationId !== state.activationId)) continue;
       const accepted = branch.slice(index + 1).find(e => e.type === "message" && e.message?.role === "toolResult"
         && e.message.toolName === "goal_complete" && e.message.isError !== true
         && e.message.details?.goal_id === history.id && e.message.details?.summary === history.summary
@@ -173,7 +174,8 @@ export function retainedGoalCompletion(branch: any[], binding?: string, boundPro
       if (!accepted) continue;
       const call = prior.findLast(e => e.type === "message" && e.message?.role === "assistant"
         && e.message.content?.some((part: any) => part.type === "toolCall" && part.name === "goal_complete"
-          && part.id === accepted.message.toolCallId && part.arguments?.goal_id === history.id && part.arguments?.summary === history.summary));
+          && part.id === accepted.message.toolCallId && part.arguments?.goal_id === history.id && part.arguments?.summary === history.summary
+          && (state.activationId === undefined || part.arguments?.activation_id === state.activationId)));
       if (call) return { state, summary: history.summary, endedAt: history.endedAt };
     }
     return undefined;

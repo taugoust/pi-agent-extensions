@@ -81,6 +81,7 @@ test("actual Pi records stamps and progress, exports cache snapshots, then inval
 										id: "progress-call",
 										name: "update_progress",
 										arguments: {
+											action: "create", objective: "Review fixture progress", request_id: "observability-progress", start: false,
 											steps: [
 												{ text: "Review implementation", status: "completed" },
 												{ text: "Native iOS check", status: "blocked" },
@@ -125,7 +126,7 @@ test("actual Pi records stamps and progress, exports cache snapshots, then inval
 			noPromptTemplates: true,
 			noThemes: true,
 			noContextFiles: true,
-			additionalExtensionPaths: ["stamp", "progress", "cache-hit-monitor"].map(
+			additionalExtensionPaths: ["workflows", "stamp", "progress", "cache-hit-monitor"].map(
 				(x) => join(root, x, "index.ts"),
 			),
 			extensionFactories: [provider],

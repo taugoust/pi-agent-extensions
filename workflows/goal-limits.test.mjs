@@ -11,9 +11,10 @@ registerHooks({ resolve(specifier, context, next) {
   if (context.parentURL?.endsWith("/subagent/goal-worker.ts") && ["../workflows/index.ts", "../progress/index.ts"].includes(specifier))
     return { url: "data:text/javascript,export default function(){}", shortCircuit: true };
   const seams = {
-    "@earendil-works/pi-coding-agent": "export const getAgentDir=()=>'/unused-goal-limits-test';",
-    "@earendil-works/pi-ai": "export const isContextOverflow=()=>false; export const isRetryableAssistantError=()=>false;",
+    "@earendil-works/pi-coding-agent": "export const getAgentDir=()=>'/unused-goal-limits-test'; export const buildSessionContext=()=>({messages:[]});",
+    "@earendil-works/pi-ai": "export const isContextOverflow=()=>false; export const isRetryableAssistantError=()=>false; export const StringEnum=values=>({enum:values});",
     "@earendil-works/pi-tui": "export const stripTerminalSequences=x=>x;",
+    "typebox": "export const Type=new Proxy({}, {get:(_,type)=>(...args)=>({type,args})});",
   };
   if (specifier.endsWith("/shared/goal-progress.ts")) return { url: `data:text/javascript,${encodeURIComponent("export const readGoalTasks=()=>[]; export const writeProgress=()=>{throw Error('Limit updates cannot write progress')};")}`, shortCircuit: true };
   if (seams[specifier]) return { url: `data:text/javascript,${encodeURIComponent(seams[specifier])}`, shortCircuit: true };
@@ -93,11 +94,11 @@ test("authenticated child seam changes launch policy, including finite to unlimi
   const before = service.snapshot();
   const entry = { id, revision: 2, text: "Parent metadata must not replace objective", tasks: [], child: null, status: "paused", tokenBudget: null,
     tokensUsed: 0, automaticTurns: 0, noProgressTurns: 0, summary: null, waiting: null, continuationLimits: { automaticTurns: null, noProgressTurns: null } };
-  const after = await service.updateLimits(id, before.childGoalId, before.policyRevision, entry);
+  const after = await service.updateLimits(id, before.childGoalId, before.policyRevision, entry, before.childActivationId);
   assert.deepEqual(after.limits, entry.continuationLimits); assert.deepEqual(runtime.continuationLimits, entry.continuationLimits);
   assert.equal(runtime.activeGoal.text, "Keep this objective"); assert.equal(after.goal.tokensUsed, 100); assert.equal(after.goal.automaticTurns, 8);
-  await assert.rejects(service.updateLimits(id, before.childGoalId, before.policyRevision, entry), /policy changed/);
-  await assert.rejects(service.updateLimits("foreign", before.childGoalId, after.policyRevision, entry), /ownership/);
+  await assert.rejects(service.updateLimits(id, before.childGoalId, before.policyRevision, entry, before.childActivationId), /policy changed/);
+  await assert.rejects(service.updateLimits("foreign", before.childGoalId, after.policyRevision, entry, before.childActivationId), /ownership/);
   assert.equal(f.entries.filter(e => e.customType === "progress").length, 0);
 });
 
@@ -119,7 +120,7 @@ test("real worker socket updates confirmed policy and rejects stale revisions, g
     await workerHandlers.get("session_start")({}, ctx);
     const request = (request, overrides = {}) => requestGoalWorker(binding.path, { token: binding.token, identity: binding.identity, request, ...overrides });
     const before = await request({ operation: "observe" }); assert.equal(before.limitsEditable, true);
-    const update = { operation: "limits", expectedGoalId: before.goalId, expectedPolicyRevision: before.policyRevision,
+    const update = { operation: "limits", expectedGoalId: before.goalId, expectedActivationId: before.activationId, expectedPolicyRevision: before.policyRevision,
       entry: { id: entryId, revision: 1, text: "Not applied", tasks: [], status: "paused", child: null, tokenBudget: null, tokensUsed: 0, automaticTurns: 0, noProgressTurns: 0, summary: null, waiting: null,
         continuationLimits: { automaticTurns: null, noProgressTurns: null } } };
     await assert.rejects(request(update, { token: "wrong" }), /identity/);

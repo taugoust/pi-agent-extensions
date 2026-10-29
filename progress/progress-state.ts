@@ -25,7 +25,7 @@ const PREVIOUS_TODO_DETAILS_VERSION = 2;
 const LEGACY_TODO_DETAILS_VERSION = 1;
 const PROGRESS_STATUSES = ["pending", "in_progress", "completed", "blocked"] as const;
 const NON_BLOCKED_STATUSES = ["pending", "in_progress", "completed"] as const;
-const RESUBMIT_GUIDANCE = "Fix the input and resubmit the complete steps array.";
+const RESUBMIT_GUIDANCE = "Fix the input and retry with the current goal identity and revision.";
 
 type ProgressStatus = (typeof PROGRESS_STATUSES)[number];
 type PreviousTodoStatus = (typeof NON_BLOCKED_STATUSES)[number];
@@ -46,6 +46,8 @@ export interface ProgressDetails {
   version: typeof PROGRESS_DETAILS_VERSION;
   steps: ProgressStep[];
   goalId?: string;
+  revision?: number;
+  activationId?: string;
 }
 
 type TodoV3 =
@@ -71,11 +73,17 @@ const progressTextSchema = Type.String({
 
 export const ProgressParameters = Type.Object(
   {
-    goal_id: Type.Optional(Type.Union([Type.String({ minLength: 1, maxLength: 128 }), Type.Null()], { description: "Defaults to the current goal when one exists. Supply its exact ID explicitly, or null for standalone work." })),
+    action: StringEnum(["create", "update"] as const),
+    request_id: Type.String({ minLength: 1, maxLength: 128, description: "Unique mutation ID. Reuse exactly the same request on retries." }),
+    objective: Type.Optional(Type.String({ minLength: 1, maxLength: 320, description: "Create only: concise verifiable outcome." })),
+    start: Type.Optional(Type.Boolean({ description: "Create only. Defaults to true: creation authorizes autonomous continuation with configured limits. False creates a paused draft." })),
+    goal_id: Type.Optional(Type.String({ minLength: 1, maxLength: 128, description: "Required for update: exact stable goal ID from goal_manage status. Never null." })),
+    expected_revision: Type.Optional(Type.Integer({ minimum: 1, description: "Required for update: current shared goal revision from status or the last result." })),
+    remove_task_ids: Type.Optional(Type.Array(Type.String({ minLength: 1, maxLength: 128 }), { maxItems: MAX_PROGRESS_STEPS, description: "Update only: explicit task IDs to remove after a user scope change. Omitted tasks are otherwise preserved." })),
     steps: Type.Array(
       Type.Object(
         {
-          id: Type.Optional(Type.String({ minLength: 1, maxLength: 128, description: "Existing goal task ID from the current checklist. Keep it when changing task wording; omit for new tasks or standalone progress." })),
+          id: Type.Optional(Type.String({ minLength: 1, maxLength: 128, description: "Existing task ID belonging to this goal. Retain when refining wording; omit to create a new task." })),
           text: progressTextSchema,
           status: StringEnum(PROGRESS_STATUSES, { description: "The step's current status" }),
         },
@@ -83,13 +91,36 @@ export const ProgressParameters = Type.Object(
       ),
       {
         maxItems: MAX_PROGRESS_STEPS,
-        description: "The complete current progress state; send an empty array to clear it",
+        description: "Tasks to create or update. Omitted existing tasks remain unchanged; an empty array does not clear the checklist.",
       },
     ),
   },
   { additionalProperties: false },
 );
 
+export type ProgressMutation =
+  | { action: "create"; request_id: string; objective: string; steps: ProgressStep[]; start?: boolean }
+  | { action: "update"; request_id: string; goal_id: string; expected_revision: number; steps: ProgressStep[]; remove_task_ids?: string[] };
+
+export function validateProgressMutation(value: unknown): ProgressMutation {
+  if (!isRecord(value)) rejectProgress("input must be an object.");
+  if (typeof value.request_id !== "string" || !value.request_id.trim() || value.request_id.length > 128) rejectProgress("request_id is required (1–128 characters).");
+  const steps = prepareProgressArguments({ steps: value.steps }).steps;
+  if (value.action === "create") {
+    if (!hasOnlyKeys(value, ["action", "request_id", "objective", "steps", "start"])) rejectProgress("create accepts only objective, steps, request_id and optional start.");
+    if (typeof value.objective !== "string" || !value.objective.trim() || value.objective.length > 320) rejectProgress("create requires a concise objective (1–320 characters).");
+    if (value.start !== undefined && typeof value.start !== "boolean") rejectProgress("start must be boolean.");
+    if (steps.some(step => step.id !== undefined)) rejectProgress("create allocates task IDs; omit supplied IDs.");
+    return { action: "create", request_id: value.request_id, objective: value.objective.trim(), steps, start: value.start !== false };
+  }
+  if (value.action !== "update" || !hasOnlyKeys(value, ["action", "request_id", "goal_id", "expected_revision", "steps", "remove_task_ids"])) rejectProgress("action must be create or update with its documented fields.");
+  if (typeof value.goal_id !== "string" || !value.goal_id.trim() || value.goal_id.length > 128) rejectProgress("update requires an explicit non-null goal_id; standalone writes are not supported.");
+  if (!Number.isSafeInteger(value.expected_revision) || (value.expected_revision as number) < 1) rejectProgress("update requires expected_revision from goal_manage status.");
+  if (value.remove_task_ids !== undefined && (!Array.isArray(value.remove_task_ids) || value.remove_task_ids.length > MAX_PROGRESS_STEPS || value.remove_task_ids.some(id => typeof id !== "string" || !id.trim() || id.length > 128))) rejectProgress("remove_task_ids must contain explicit task IDs.");
+  return { action: "update", request_id: value.request_id, goal_id: value.goal_id, expected_revision: value.expected_revision as number, steps, ...(value.remove_task_ids !== undefined ? { remove_task_ids: value.remove_task_ids as string[] } : {}) };
+}
+
+/** Legacy step decoder, also used by migration. Not the mutation API validator. */
 export function prepareProgressArguments(value: unknown): { steps: ProgressStep[]; goal_id?: string | null } {
   if (typeof value !== "object" || value === null || Array.isArray(value)) {
     return validateProgressArguments(value);
@@ -174,10 +205,19 @@ export function currentProgressGoal(entries: readonly SessionEntry[]): { id: str
 
 export function readScopedProgress(entries: readonly SessionEntry[], goalKey: string | null): ProgressStep[] {
   let restored: ProgressStep[] = [];
+  let authoritative = false;
   for (const entry of entries) {
+    if (goalKey !== null && entry.type === "custom" && entry.customType === "goal-state") {
+      const goal = (entry.data as any)?.goal;
+      if (goal && (goal.id === goalKey || goal.progressId === goalKey) && Array.isArray(goal.tasks)) {
+        restored = validateProgressArguments({ steps: goal.tasks }).steps;
+        authoritative = true;
+      }
+      continue;
+    }
     if (entry.type === "custom" && entry.customType === GOAL_PROGRESS_ENTRY_TYPE) {
       const data = entry.data as any;
-      if (data?.version === 1 && data.goalKey === goalKey) restored = validateProgressArguments({ steps: data.steps }).steps;
+      if (!authoritative && data?.version === 1 && data.goalKey === goalKey) restored = validateProgressArguments({ steps: data.steps }).steps;
       continue;
     }
     if (goalKey !== null || entry.type !== "message") continue;
@@ -401,7 +441,7 @@ function decodePersistedResult(
 ): { version: SupportedStateVersion; steps: ProgressStep[] } | undefined {
   if (!isRecord(value) || typeof value.version !== "number") return undefined;
   if (toolName === TOOL_NAME && value.version === PROGRESS_DETAILS_VERSION) {
-    if (!hasOnlyKeys(value, ["version", "steps", "goalId"]) || !isProgressSteps(value.steps)) return undefined;
+    if (!hasOnlyKeys(value, ["version", "steps", "goalId", "revision", "activationId"]) || !isProgressSteps(value.steps)) return undefined;
     return { version: 5, steps: cloneProgressSteps(value.steps) };
   }
   if (toolName === TOOL_NAME && value.version === 4) {
@@ -439,7 +479,7 @@ function decodeToolArguments(
     // Pi retains raw calls but stores prepared results. Match the same narrow input
     // normalization as execution without loosening persisted-result validation.
     try {
-      return prepareProgressArguments(value).steps;
+      return (Object.hasOwn(value, "action") ? validateProgressMutation(value) : prepareProgressArguments(value)).steps;
     } catch {
       return undefined;
     }

@@ -14,7 +14,7 @@ programs.pi.extensions = {
 };
 ```
 
-All three publish read-only, session-owned data for the companion Paseo bridge. They make no additional provider requests or automatic continuation prompts. Progress adds the model tool `update_progress`; enabling it changes the tool prefix once.
+All three publish read-only, session-owned display snapshots for the companion Paseo bridge. Reading snapshots never starts work. Progress also exposes the **mutating** model tool `update_progress`: its create action starts the Goal engine's automatic continuation by default (use `start:false` for a draft). Progress writes require the Workflows extension; Stamp and Cache monitor do not start provider requests.
 
 ## Native display defaults
 
@@ -36,7 +36,9 @@ Paseo's Activity → Response stamps view shows the latest 50 stamp records with
 
 ## Progress
 
-`update_progress` replaces the complete current snapshot with up to 50 `{text, status}` steps. Status is `pending`, `in_progress`, `completed`, or `blocked`; at most one step may be in progress. Model guidance recommends meaningful updates and avoids mandatory/redundant reporting.
+`update_progress` creates or updates a goal-backed checklist with up to 50 `{id?, text, status}` tasks. `action:create` requires `objective`, `steps`, and `request_id` and starts autonomous continuation by default; `start:false` saves a paused draft. `action:update` requires explicit non-null `goal_id`, `expected_revision`, `request_id`, and `steps`. Omitted tasks remain; missing IDs create tasks, existing IDs update only their owning goal's tasks, and removal is explicit through `remove_task_ids`. Retries reuse the exact request ID and payload. Standalone historical checklists are read-only. See [the goal API and migration notes](workflows/README.md#required-tasks).
+
+Status is `pending`, `in_progress`, `completed`, or `blocked`; at most one task may be in progress across the merged checklist. Task updates do not resume or complete the goal. Model guidance recommends meaningful updates and avoids redundant reporting.
 
 `/progress` manages display; `/progress clear` hides the terminal widget without deleting saved state. `/progress settings` edits display preferences in TUI; RPC reports the settings file path. Native dialogs and a lightweight width-safe renderer replace the toolkit. The widget prioritizes active/blocked work and briefly shows completion before hiding. Paseo keeps completed progress available for review.
 

@@ -119,7 +119,7 @@ test("assigned limits API is available while busy and fences identity, revision,
   let service;
   try {
     const sessionId = randomUUID(), calls = [];
-    const runtime = { activeGoal: { id: "assigned", text: "Keep objective", status: "active", tokensUsed: 50 }, policyRevision: 4,
+    const runtime = { activeGoal: { id: "assigned", activationId: "assigned-activation", revision: 7, text: "Keep objective", status: "active", tokensUsed: 50 }, policyRevision: 4,
       continuationLimits: { automaticTurns: 8, noProgressTurns: 3 }, settings: { continuationLimits: { automaticTurns: null, noProgressTurns: null } },
       snapshotSettingsApplicationState: () => ({}),
       updateGoalLimits(ctx, id, revision, budget, limits) {
@@ -130,9 +130,10 @@ test("assigned limits API is available while busy and fences identity, revision,
       sessionManager: { getSessionId: () => sessionId, getBranch: () => [], getEntries: () => [], getLeafId: () => "leaf" } };
     service = createWorkflowService({ appendEntry() { throw Error("No direct session mutation"); }, exec: async () => ({ code: 0, stdout: "" }) }, ctx, runtime, {}, { get: () => ({}) }, () => true);
     const request = { operation: "start", sessionId, serviceEpoch: service.serviceEpoch, requestId: randomUUID(), action: "goal.limits",
-      expectedGoalId: "assigned", expectedPolicyRevision: 4, tokenBudget: null, continuationLimits: { automaticTurns: 5, noProgressTurns: null } };
+      expectedGoalId: "assigned", expectedActivationId: "assigned-activation", expectedPolicyRevision: 4, tokenBudget: null, continuationLimits: { automaticTurns: 5, noProgressTurns: null } };
     await assert.rejects(service.handle({ ...request, serviceEpoch: randomUUID() }), /Stale/);
     await assert.rejects(service.handle({ ...request, objective: "not allowed" }), /Invalid/);
+    await assert.rejects(service.handle({ ...request, expectedActivationId: "stale" }), /activation changed/);
     await assert.rejects(service.handle({ ...request, expectedPolicyRevision: 3 }), /revision changed/);
     const snapshot = await service.handle(request);
     assert.equal(snapshot.capabilities.goalLimitEditing, true); assert.equal(snapshot.goal.policyRevision, 5);

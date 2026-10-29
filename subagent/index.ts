@@ -2105,16 +2105,16 @@ export default function (pi: ExtensionAPI) {
             const request = async (operation: string, value?: unknown) => {
               if (generation !== sessionGeneration || lifecycleClosing || activeSessionId !== sessionId) throw new Error("Dedicated goal parent runtime changed");
               const observed = await requestGoalWorker(binding.path, { token: binding.token, identity,
-                request: { operation, ...(value === undefined ? {} : ["answer", "limits"].includes(operation) ? value as Record<string, unknown> : { entry: value }) } }) as ChildGoalSnapshot;
+                request: { operation, ...(value === undefined ? {} : ["answer", "limits", "pause", "resume"].includes(operation) ? value as Record<string, unknown> : { entry: value }) } }) as ChildGoalSnapshot;
               lastObservation = structuredClone(observed);
               return observed;
             };
             const handle: GoalChildHandle = { identity, model: selectedModel, start: value => request("start", value),
-              resume: () => resumeRestoredGoal(() => request("observe"), () => request("resume", entry)), pause: async () => {
-                await request("pause");
+              resume: (expectedGoalId, expectedActivationId) => resumeRestoredGoal(() => request("observe"), () => request("resume", { entry, expectedGoalId, expectedActivationId })), pause: async (expectedGoalId, expectedActivationId) => {
+                await request("pause", { expectedGoalId, expectedActivationId });
                 await rpc!.pauseWorkflowExecution();
                 return await request("observe");
-              }, updateLimits: (entry, expectedGoalId, expectedPolicyRevision) => request("limits", { entry, expectedGoalId, expectedPolicyRevision }),
+              }, updateLimits: (entry, expectedGoalId, expectedPolicyRevision, expectedActivationId) => request("limits", { entry, expectedGoalId, expectedPolicyRevision, expectedActivationId }),
               observe: () => request("observe"), answer: (reply, requestId) => request("answer", { reply, requestId }), stop };
             return handle;
           },

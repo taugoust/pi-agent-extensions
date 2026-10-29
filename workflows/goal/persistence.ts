@@ -1,6 +1,8 @@
 import { isNonNegativeFiniteNumber, nonNegativeFiniteNumber, normalizeTokenBudget } from "./accounting.js";
 import { validateGoalLimitOverrides, type GoalContinuationLimits } from "../../shared/delegated-goal-policy.ts";
 import type { GoalStatus } from "./prompts.js";
+import { createHash } from "node:crypto";
+import { readScopedProgress, validateProgressArguments, type ProgressStep } from "../../progress/progress-state.js";
 import { type GoalWait, normalizeGoalWait } from "./wait.js";
 
 const GOAL_STATE_ENTRY_TYPE = "goal-state";
@@ -11,7 +13,12 @@ const LEGACY_IMPLICIT_TOKEN_BUDGET = 250_000;
 
 export interface ActiveGoal {
   id: string;
-  /** Stable checklist identity across goal-instance rotations. */
+  /** Rotates on activation; never use the stable id as a stale-turn guard. */
+  activationId?: string;
+  revision?: number;
+  tasks?: ProgressStep[];
+  requests?: Record<string, { fingerprint: string; result: { goalId: string; activationId: string; revision: number; status: string; steps: ProgressStep[] } }>;
+  /** Legacy checklist key retained for faithful migration and history. */
   progressId?: string;
   text: string;
   status: GoalStatus;
@@ -66,7 +73,9 @@ interface SessionContext {
 }
 
 export function serializeGoalState(goal: ActiveGoal | undefined): GoalStateEntryData {
-  return { goal: goal ?? null };
+  // Session managers may retain the supplied data object in memory. Accounting
+  // and later mutations must never rewrite an earlier branch checkpoint.
+  return { goal: goal ? structuredClone(goal) : null };
 }
 
 export function loadGoalStateFromSession(ctx: SessionContext): LoadedGoalState {
@@ -74,12 +83,25 @@ export function loadGoalStateFromSession(ctx: SessionContext): LoadedGoalState {
   const canonicalEntry = entries
     .filter((entry) => entry.type === "custom" && entry.customType === GOAL_STATE_ENTRY_TYPE)
     .pop();
-  if (canonicalEntry) return loadCanonicalGoalState(canonicalEntry.data);
+  if (canonicalEntry) return migrateTasks(loadCanonicalGoalState(canonicalEntry.data), entries);
 
   const legacyEntry = entries
     .filter((entry) => entry.type === "custom" && entry.customType === LEGACY_GOALS_STATE_ENTRY_TYPE)
     .pop();
-  return legacyEntry ? loadLegacyGoalsState(legacyEntry.data) : emptyGoalState();
+  return legacyEntry ? migrateTasks(loadLegacyGoalsState(legacyEntry.data), entries) : emptyGoalState();
+}
+
+function migrateTasks(loaded: LoadedGoalState, entries: SessionEntry[]): LoadedGoalState {
+  const goal = loaded.goal;
+  if (goal && goal.tasks === undefined) {
+    // Only an explicit legacy scope key establishes ownership. Never associate
+    // standalone history by text, timing, or the mere presence of a goal.
+    goal.tasks = readScopedProgress(entries as any, goal.progressId ?? goal.id).map((step, index) => ({
+      ...step,
+      id: step.id ?? `legacy-${createHash("sha256").update(JSON.stringify([goal.progressId ?? goal.id, index, step])).digest("hex").slice(0, 32)}`,
+    }));
+  }
+  return loaded;
 }
 
 function loadCanonicalGoalState(data: unknown): LoadedGoalState {
@@ -187,6 +209,8 @@ export function normalizeLoadedGoal(goal: ActiveGoal): ActiveGoal {
   return {
     ...goal,
     status,
+    activationId: goal.activationId ?? goal.id,
+    revision: goal.revision ?? 0,
     progressId: typeof goal.progressId === "string" && goal.progressId.length > 0 && goal.progressId.length <= 128 ? goal.progressId : goal.id,
     startedAt: isNonNegativeFiniteNumber(goal.startedAt) ? goal.startedAt : now,
     updatedAt: isNonNegativeFiniteNumber(goal.updatedAt) ? goal.updatedAt : now,
@@ -225,7 +249,15 @@ export function clearLegacyPersistedGoal(_cwd: string) {
 
 function isStoredGoal(value: unknown): value is LegacyStoredGoal {
   if (!isRecord(value)) return false;
-  try { validateGoalLimitOverrides(value.continuationLimits); } catch { return false; }
+  try {
+    validateGoalLimitOverrides(value.continuationLimits);
+    if (value.tasks !== undefined) {
+      const tasks = validateProgressArguments({ steps: value.tasks }).steps;
+      if (tasks.some(step => !step.id) || new Set(tasks.map(step => step.id)).size !== tasks.length) return false;
+    }
+  } catch { return false; }
+  if (value.activationId !== undefined && (typeof value.activationId !== "string" || !value.activationId || value.activationId.length > 128)) return false;
+  if (value.revision !== undefined && (!Number.isSafeInteger(value.revision) || (value.revision as number) < 0)) return false;
   return (
     typeof value.id === "string" &&
     Boolean(value.id) &&

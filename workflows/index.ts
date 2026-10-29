@@ -8,6 +8,7 @@ import {
 } from "./worktree/settings.js";
 import { createWorkflowService } from "./service.js";
 import { createDelegatedChildGoalService } from "./delegated-child.ts";
+import { bindGoalMutations } from "./goal/mutations.ts";
 
 export default function workflows(
 	pi: ExtensionAPI,
@@ -26,6 +27,10 @@ export default function workflows(
 		__paeDelegatedChildGoalV1?: ReturnType<typeof createDelegatedChildGoalService>;
 	};
 	let goalState: ReturnType<typeof goal>;
+	let disposeMutations: (() => void) | undefined;
+	let pendingPermissions = 0;
+	pi.events.on("permission-gate:waiting", () => { pendingPermissions++; });
+	pi.events.on("permission-gate:resolved", () => { pendingPermissions = Math.max(0, pendingPermissions - 1); });
 	const api = new Proxy(pi, {
 		get(target, key) {
 			if (key === "registerTool")
@@ -35,7 +40,7 @@ export default function workflows(
 					execute: async (...args: any[]) => {
 						if (options.delegatedChild && args[1]?.action !== "status")
 							throw new Error("Dedicated child goal management is owned by its authenticated parent; only goal_manage status is available");
-						if (commandBusy || service?.hasOperation()) throw new Error("Finish the current workflow operation before changing the goal");
+						if (args[1]?.action !== "status" && (commandBusy || service?.hasOperation() || pendingPermissions > 0)) throw new Error("Finish pending permission/workflow operations before changing the goal");
 						return definition.execute(...args);
 					},
 				});
@@ -78,6 +83,9 @@ export default function workflows(
 		createWorktreeSettingsRuntime({ path: settingsFilePath });
 	if (!options.delegatedChild) worktree(api, { settings });
 	function dispose() {
+		disposeMutations?.();
+		disposeMutations = undefined;
+		pendingPermissions = 0;
 		childService?.dispose();
 		if (global.__paeDelegatedChildGoalV1 === childService) delete global.__paeDelegatedChildGoalV1;
 		childService = undefined;
@@ -87,6 +95,10 @@ export default function workflows(
 	}
 	pi.on("session_start", async (_event, ctx) => {
 		dispose();
+		disposeMutations = bindGoalMutations(pi, ctx, goalState.runtime, {
+			child: options.delegatedChild === true,
+			busy: () => commandBusy || !!service?.hasOperation() || pendingPermissions > 0,
+		});
 		if (options.delegatedChild) {
 			childService = createDelegatedChildGoalService(pi, ctx, goalState.runtime, goalState.commands);
 			global.__paeDelegatedChildGoalV1 = childService;

@@ -8,7 +8,7 @@ export { DEDICATED_GOAL_LIMITS } from "../shared/delegated-goal-policy.ts";
 export type DelegatedGoalStatus = "paused" | "active" | "blocked" | "usage_limited" | "budget_limited" | "complete" | "cleared";
 export type DelegatedGoalChild = { taskId: string; childId: string; jobId: string; attempt: number };
 export type DelegatedGoalEntry = {
-  id: string; revision: number; text: string; status: DelegatedGoalStatus;
+  id: string; revision: number; policyRevision?: number; text: string; status: DelegatedGoalStatus;
   tasks: Array<{ id: string; text: string; status: "pending" | "in_progress" | "completed" | "blocked" }>;
   child: DelegatedGoalChild | null; tokenBudget: number | null; tokensUsed: number;
   continuationLimits?: Partial<GoalContinuationLimits>;
@@ -19,7 +19,7 @@ export type DelegatedGoals = { version: 1; revision: number; entries: DelegatedG
 export type DelegatedGoalAction = "goals.create" | "goals.start" | "goals.pause" | "goals.resume" | "goals.edit" | "goals.limits" | "goals.clear" | "goals.add_task" | "goals.answer";
 export type DelegatedGoalRequest = {
   action: DelegatedGoalAction; requestId: string; expectedGoalId: string | null;
-  expectedEntryRevision?: number; expectedRegistryRevision?: number;
+  expectedEntryRevision?: number; expectedPolicyRevision?: number; expectedRegistryRevision?: number;
   objective?: string; text?: string; tokenBudget?: number | null;
   questionId?: string; questionRevision?: number; workerEpoch?: string; answer?: GoalQuestionReply["answer"];
   continuationLimits?: Partial<GoalContinuationLimits>;
@@ -50,6 +50,7 @@ export function validateDelegatedGoals(state: DelegatedGoals): void {
   const ids = new Set<string>(), childTasks = new Set<string>();
   for (const e of state.entries) {
     if (!e || !/^[a-f0-9-]{36}$/i.test(e.id) || ids.has(e.id) || !Number.isSafeInteger(e.revision) || e.revision < 1) throw new Error("Invalid delegated identity");
+    if (e.policyRevision !== undefined && (!Number.isSafeInteger(e.policyRevision) || e.policyRevision < 1)) throw new Error("Invalid goal policy revision");
     ids.add(e.id); objective(e.text, 4000);
     if (!["paused", "active", "blocked", "usage_limited", "budget_limited", "complete", "cleared"].includes(e.status)) throw new Error("Invalid delegated status");
     budget(e.tokenBudget === null ? undefined : e.tokenBudget);
@@ -95,7 +96,7 @@ export class DelegatedGoalRegistry {
     private journal: { initial?: DelegatedGoalIntent | null; save: (intent: DelegatedGoalIntent | null) => void } = { save() {} }) {
     validateDelegatedGoals(initial);
     this.state = copy(initial);
-    this.state.entries.forEach(normalizeTaskDescriptions);
+    this.state.entries.forEach(entry => { normalizeTaskDescriptions(entry); entry.policyRevision ??= entry.revision; });
     this.pending = copy(journal.initial ?? null);
   }
   blockedReason(): string | null { return this.pending ? `Dedicated child delivery requires reconciliation (${this.pending.action}, goal ${this.pending.entryId}); affected-goal mutations and new child execution are blocked to prevent duplicate execution` : null; }
@@ -111,12 +112,16 @@ export class DelegatedGoalRegistry {
         if (!observed) continue;
         if (observed.status === "cleared") throw new Error("Child cannot clear parent goal history");
         const previous = JSON.stringify(entry);
+        const previousStatus = entry.status;
         for (const key of ["status", "tasks", "tokensUsed", "automaticTurns", "noProgressTurns", "summary", "waiting"] as const) {
           if (Object.hasOwn(observed, key)) (entry as any)[key] = copy(observed[key]);
         }
         if (observed.story) entry.story = mergeGoalStory(entry.story, observed.story);
         normalizeTaskDescriptions(entry);
-        if (JSON.stringify(entry) !== previous) { entry.revision++; changed = true; }
+        if (JSON.stringify(entry) !== previous) {
+          if (entry.status !== previousStatus) entry.policyRevision = (entry.policyRevision ?? 1) + 1;
+          entry.revision++; changed = true;
+        }
       }
       if (changed) { next.revision++; validateDelegatedGoals(next); this.persist(copy(next)); this.state = next; }
     });
@@ -138,18 +143,18 @@ export class DelegatedGoalRegistry {
     if (this.pending && (r.expectedGoalId === this.pending.entryId ||
       ["goals.start", "goals.resume", "goals.pause"].includes(r.action))) throw new Error(this.blockedReason()!);
     let performedEffect = false;
-    const fields = ["operation", "sessionId", "serviceEpoch", "requestId", "action", "expectedGoalId", ...(r.action === "goals.create" ? ["expectedRegistryRevision", "objective", "tokenBudget", "continuationLimits"] : ["expectedEntryRevision", ...(r.action === "goals.edit" ? ["objective", "tokenBudget", "continuationLimits"] : r.action === "goals.limits" ? ["tokenBudget", "continuationLimits"] : r.action === "goals.add_task" ? ["text"] : r.action === "goals.answer" ? ["questionId", "questionRevision", "workerEpoch", "answer"] : [])])];
+    const fields = ["operation", "sessionId", "serviceEpoch", "requestId", "action", "expectedGoalId", ...(r.action === "goals.create" ? ["expectedRegistryRevision", "objective", "tokenBudget", "continuationLimits"] : [r.action === "goals.limits" ? "expectedPolicyRevision" : "expectedEntryRevision", ...(r.action === "goals.edit" ? ["objective", "tokenBudget", "continuationLimits"] : r.action === "goals.limits" ? ["tokenBudget", "continuationLimits"] : r.action === "goals.add_task" ? ["text"] : r.action === "goals.answer" ? ["questionId", "questionRevision", "workerEpoch", "answer"] : [])])];
     if (Object.keys(r).some(key => !fields.includes(key))) throw new Error("Unknown delegated goal request fields");
     if (r.action === "goals.create") {
       if (r.expectedGoalId !== null || r.expectedEntryRevision !== undefined) throw new Error("Create requires null goal identity");
       if (r.expectedRegistryRevision !== undefined && r.expectedRegistryRevision !== next.revision) throw new Error("Registry changed");
       if (next.entries.length >= 1000) throw new Error("Delegated goal history limit reached");
-      next.entries.push({ id: randomUUID(), revision: 1, text: objective(r.objective, 4000), status: "paused", tasks: [], child: null,
+      next.entries.push({ id: randomUUID(), revision: 1, policyRevision: 1, text: objective(r.objective, 4000), status: "paused", tasks: [], child: null,
         ...(r.continuationLimits === undefined ? {} : { continuationLimits: copy(r.continuationLimits) }),
         tokenBudget: budget(r.tokenBudget) ?? null, tokensUsed: 0, automaticTurns: 0, noProgressTurns: 0, summary: null, waiting: null });
     } else {
       const entry = next.entries.find(e => e.id === r.expectedGoalId);
-      if (!entry || entry.revision !== r.expectedEntryRevision) throw new Error("Goal identity or revision changed");
+      if (!entry || (r.action === "goals.limits" ? entry.policyRevision !== r.expectedPolicyRevision : entry.revision !== r.expectedEntryRevision)) throw new Error("Goal identity or revision changed");
       // Reconcile authenticated completion before writing a lifecycle intent.
       // A stale Pause/Resume is an observation, never a new execution.
       if (entry.child && ["goals.pause", "goals.resume"].includes(r.action)) {
@@ -159,6 +164,7 @@ export class DelegatedGoalRegistry {
             if (Object.hasOwn(observed, key)) (entry as any)[key] = copy(observed[key]);
           if (observed?.story) entry.story = mergeGoalStory(entry.story, observed.story);
           entry.waiting = null;
+          entry.policyRevision = (entry.policyRevision ?? 1) + 1;
           entry.revision++; next.revision++;
           validateDelegatedGoals(next); this.persist(copy(next)); this.state = next;
           return this.snapshot();
@@ -244,6 +250,7 @@ export class DelegatedGoalRegistry {
           break;
         default: throw new Error("Unknown delegated goal action");
       }
+      entry.policyRevision = (entry.policyRevision ?? 1) + 1;
       entry.revision++;
     }
     const changed = r.action === "goals.create" ? next.entries.at(-1)! : next.entries.find(entry => entry.id === r.expectedGoalId)!;

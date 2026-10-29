@@ -2,7 +2,7 @@ import type { GoalPromptContext } from "./prompts.js";
 import { buildGoalContextPrompt } from "./prompts.js";
 
 export const GOAL_CONTRACT_MESSAGE_TYPE = "goal-contract";
-export const GOAL_CONTRACT_VERSION = 2;
+export const GOAL_CONTRACT_VERSION = 3;
 
 const INACTIVE_GOAL_CONTRACT_CONTENT = [
   "Goal mode is inactive.",
@@ -29,11 +29,11 @@ export function createGoalContextContract(goal: GoalPromptContext) {
     customType: GOAL_CONTRACT_MESSAGE_TYPE,
     content: [
       "This Goal contract supersedes every earlier goal-contract message.",
-      "Only the objective and goal_id in this latest Goal contract are current.",
+      "Only the objective, goal_id and activation_id in this latest Goal contract are current.",
       buildGoalContextPrompt(goal),
     ].join("\n\n"),
     display: false,
-    details: { version: GOAL_CONTRACT_VERSION, state: "active", goalId: goal.id },
+    details: { version: GOAL_CONTRACT_VERSION, state: "active", goalId: goal.id, activationId: goal.activationId ?? goal.id },
     timestamp: 0,
   };
 }

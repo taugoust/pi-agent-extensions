@@ -10,12 +10,13 @@ export async function showGoalManager(
 ) {
 	const generation = runtime.menuGeneration,
 		owner = runtime.menuController,
-		goalId = runtime.activeGoal?.id;
+		goalId = runtime.activeGoal?.id,
+		activationId = runtime.activeGoal?.activationId;
 	const sameSession = () =>
 		runtime.menuGeneration === generation &&
 		runtime.menuController === owner &&
 		!owner.signal.aborted;
-	const current = () => sameSession() && runtime.activeGoal?.id === goalId;
+	const current = () => sameSession() && runtime.activeGoal?.id === goalId && runtime.activeGoal?.activationId === activationId;
 	commands.showGoal(ctx);
 	if (!ctx.hasUI || !current()) return;
 	const action = await ctx.ui.select(

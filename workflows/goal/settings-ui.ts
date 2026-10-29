@@ -5,8 +5,12 @@ export async function showGoalSettings(
 	ctx: ExtensionCommandContext,
 	_options?: unknown,
 ) {
+	if (!ctx.hasUI) return;
+	const format = (value: number | null) => value === null ? "unlimited" : String(value);
+	const defaults = runtime.settings.continuationLimits;
+	const effective = runtime.continuationLimits;
 	ctx.ui.notify(
-		`Goal limits: ${runtime.settings.continuationLimits.automaticTurns} automatic responses, ${runtime.settings.continuationLimits.noProgressTurns} repeated no-progress runs. Configure pi-goal.json to change limits.`,
+		`Default limits: ${format(defaults.automaticTurns)} automatic responses, ${format(defaults.noProgressTurns)} repeated no-progress runs. Configure pi-goal.json to change defaults.${runtime.activeGoal ? ` Current goal effective limits: ${format(effective.automaticTurns)} automatic responses, ${format(effective.noProgressTurns)} repeated no-progress runs; use the goal limit editor for this goal.` : ""}`,
 		"info",
 	);
 }

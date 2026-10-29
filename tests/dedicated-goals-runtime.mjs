@@ -50,13 +50,13 @@ export default function fakeProvider(pi) {
           response.stopReason="toolUse";
           if(calls===1) response.content=[{type:"toolCall",id:"question-"+process.pid,name:"questionnaire",arguments:{questions:[{id:"direction",prompt:"Use the tested design?",options:[{value:"yes",label:"Yes"},{value:"no",label:"No"}],allowOther:false}]}}];
           else if(calls===2) response.content=[{type:"toolCall",id:"activity-"+process.pid,name:"notify_parent",arguments:{message:"Explicit fixture activity after the user's answer"}}];
-          else response.content=[{type:"toolCall",id:"question-complete-"+process.pid,name:"goal_complete",arguments:{goal_id:goal.id,summary:"Verified authenticated goal question answer"}}];
+          else response.content=[{type:"toolCall",id:"question-complete-"+process.pid,name:"goal_complete",arguments:{goal_id:goal.id,activation_id:goal.activationId,summary:"Verified authenticated goal question answer"}}];
         } else if (goal.text.includes("pause-race") && calls === 1) {
-          response.stopReason="toolUse";response.content=[{type:"toolCall",id:"race-"+process.pid,name:"goal_complete",arguments:{goal_id:goal.id,summary:"Verified owned pause/completion race"}}];
+          response.stopReason="toolUse";response.content=[{type:"toolCall",id:"race-"+process.pid,name:"goal_complete",arguments:{goal_id:goal.id,activation_id:goal.activationId,summary:"Verified owned pause/completion race"}}];
         } else if (goal.text.includes("independent") && calls <= 2) {
-          response.stopReason="toolUse"; response.content=[{type:"toolCall",id:"complete-"+process.pid+"-"+calls,name:"goal_complete",arguments:{goal_id:calls===1?"stale-foreign-goal-id":goal.id,summary:"Verified isolated deterministic child completion"}}];
+          response.stopReason="toolUse"; response.content=[{type:"toolCall",id:"complete-"+process.pid+"-"+calls,name:"goal_complete",arguments:{goal_id:calls===1?"stale-foreign-goal-id":goal.id,activation_id:goal.activationId,summary:"Verified isolated deterministic child completion"}}];
         } else if (!goal.text.includes("independent") && calls === 1) {
-          response.stopReason="toolUse"; response.content=[{type:"toolCall",id:"wait-"+process.pid,name:"goal_wait",arguments:{goal_id:goal.id,reason:"isolated test explicit wake"}}];
+          response.stopReason="toolUse"; response.content=[{type:"toolCall",id:"wait-"+process.pid,name:"goal_wait",arguments:{goal_id:goal.id,activation_id:goal.activationId,reason:"isolated test explicit wake"}}];
         }
         if(goal.text.includes("pause-race")&&calls===1)void(async()=>{while(!finished&&!existsSync(process.env.TEST_PAUSE_RELEASE))await new Promise(resolve=>setTimeout(resolve,5));if(!finished)finish(false);})();
         else queueMicrotask(() => finish(false));

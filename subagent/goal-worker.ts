@@ -36,17 +36,17 @@ export default async function goalWorker(pi: ExtensionAPI) {
       const service = (globalThis as any).__paeDelegatedChildGoalV1 as ReturnType<typeof createDelegatedChildGoalService> | undefined;
       if (!service) throw new Error("Dedicated child goal engine is unavailable");
       if (!input || typeof input !== "object") throw new Error("Invalid child goal request");
-      const r = input as { operation: string; entry?: DelegatedGoalEntry; reply?: GoalQuestionReply; requestId?: string; expectedGoalId?: string; expectedPolicyRevision?: number };
-      if (Object.keys(r).some(k => !["operation", "entry", "reply", "requestId", "expectedGoalId", "expectedPolicyRevision"].includes(k))) throw new Error("Unknown child goal request field");
+      const r = input as { operation: string; entry?: DelegatedGoalEntry; reply?: GoalQuestionReply; requestId?: string; expectedGoalId?: string; expectedActivationId?: string; expectedPolicyRevision?: number };
+      if (Object.keys(r).some(k => !["operation", "entry", "reply", "requestId", "expectedGoalId", "expectedActivationId", "expectedPolicyRevision"].includes(k))) throw new Error("Unknown child goal request field");
       let snapshot = service.snapshot();
       if (!sameGoalLimits(policy.continuationLimits, snapshot.limits)) throw new Error("Dedicated child effective limits differ from parent confirmation");
       if (r.operation !== "start" && snapshot.entryId !== binding.entryId) throw new Error("Dedicated parent goal identity changed");
       if (r.entry && r.operation !== "limits" && !sameGoalLimits(policy.continuationLimits, r.entry.continuationLimits)) throw new Error("Goal metadata differs from confirmed continuation limits");
       if (r.operation === "limits") {
-        if (!r.entry || r.entry.id !== binding.entryId || r.expectedGoalId !== snapshot.childGoalId || r.expectedPolicyRevision !== snapshot.policyRevision)
+        if (!r.entry || r.entry.id !== binding.entryId || r.expectedGoalId !== snapshot.childGoalId || r.expectedActivationId !== snapshot.childActivationId || r.expectedPolicyRevision !== snapshot.policyRevision)
           throw new Error("Dedicated child identity or policy revision changed");
         const nextPolicy = dedicatedGoalPolicy({ continuationLimits: r.entry.continuationLimits });
-        snapshot = await service.updateLimits(binding.entryId, r.expectedGoalId!, r.expectedPolicyRevision, r.entry);
+        snapshot = await service.updateLimits(binding.entryId, r.expectedGoalId!, r.expectedPolicyRevision, r.entry, r.expectedActivationId!);
         policy.continuationLimits = nextPolicy.continuationLimits;
       }
       else if (r.operation === "start" && r.entry) {
@@ -58,9 +58,10 @@ export default async function goalWorker(pi: ExtensionAPI) {
         if (r.operation === "resume" && (!r.entry || r.entry.id !== binding.entryId)) throw new Error("Dedicated Resume requires matching parent metadata");
         if (r.operation === "resume" || r.operation === "pause") {
           if (!snapshot.entryId || !snapshot.childGoalId) throw new Error("Dedicated child binding is missing");
+          if (r.expectedGoalId !== snapshot.childGoalId || r.expectedActivationId !== snapshot.childActivationId) throw new Error("Dedicated child goal identity or activation changed");
           snapshot = r.operation === "resume"
-            ? await service.resume(snapshot.entryId, snapshot.childGoalId, r.entry!)
-            : await service.pause(snapshot.entryId, snapshot.childGoalId);
+            ? await service.resume(snapshot.entryId, r.expectedGoalId!, r.entry!, r.expectedActivationId!)
+            : await service.pause(snapshot.entryId, r.expectedGoalId!, r.expectedActivationId!);
         } else if (r.operation === "answer") {
           if (!binding.questionnaireEnabled || !r.reply || !r.requestId) throw new Error("Goal question reply unavailable");
           questions!.answer(r.reply, r.requestId);
@@ -70,7 +71,7 @@ export default async function goalWorker(pi: ExtensionAPI) {
       if (snapshot.entryId !== binding.entryId) throw new Error("Dedicated parent goal identity changed");
       if (!sameGoalLimits(policy.continuationLimits, snapshot.limits)) throw new Error("Dedicated child effective limits changed during operation");
       if (!snapshot.childGoalId || !snapshot.goal) throw new Error("Dedicated child goal state is missing");
-      return { goalId: snapshot.childGoalId, status: snapshot.goal.status,
+      return { goalId: snapshot.childGoalId, activationId: snapshot.childActivationId, revision: snapshot.revision, status: snapshot.goal.status,
         executionStopped: ctx.isIdle() && !ctx.hasPendingMessages(), waiting: snapshot.goal.waiting,
         tasks: snapshot.goal.tasks, tokensUsed: snapshot.goal.tokensUsed,
         automaticTurns: snapshot.goal.automaticTurns, noProgressTurns: snapshot.goal.noProgressTurns,

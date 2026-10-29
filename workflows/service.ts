@@ -545,6 +545,8 @@ export function createWorkflowService(
 			goal: goal
 				? {
 						id: goal.id,
+						activationId: goal.activationId ?? goal.id,
+						revision: goal.revision,
 						policyRevision: runtime.policyRevision,
 						continuationLimits: goal.continuationLimits,
 						effectiveLimits: runtime.continuationLimits,
@@ -891,6 +893,8 @@ export function createWorkflowService(
 						"expectedGoalId",
 						"expectedEntryRevision",
 						"expectedPolicyRevision",
+						"expectedActivationId",
+						"expectedGoalRevision",
 						"expectedRegistryRevision",
 						"objective",
 						"text",
@@ -974,17 +978,18 @@ export function createWorkflowService(
 			if (r.action === "worktree.cleanup" && r.reason !== undefined) throw new Error("Cleanup cannot replace completion rationale");
 		}
 		if (r.action === "goal.limits") {
-			const fields = ["operation", "sessionId", "serviceEpoch", "requestId", "action", "expectedGoalId", "expectedPolicyRevision", "tokenBudget", "continuationLimits"];
+			const fields = ["operation", "sessionId", "serviceEpoch", "requestId", "action", "expectedGoalId", "expectedActivationId", "expectedPolicyRevision", "tokenBudget", "continuationLimits"];
 			if (Object.keys(r).some(key => !fields.includes(key)) || typeof r.expectedGoalId !== "string" || !Number.isSafeInteger(r.expectedPolicyRevision))
 				throw new Error("Invalid goal limit request");
+			if (r.expectedActivationId !== (runtime.activeGoal?.activationId ?? runtime.activeGoal?.id)) throw new Error("Goal activation changed");
 			runtime.updateGoalLimits(ctx, r.expectedGoalId, r.expectedPolicyRevision, r.tokenBudget, r.continuationLimits);
 			requests.set(r.requestId, fingerprint);
 			notice = null;
 			return snapshot();
 		}
 		if (r.action.startsWith("goal.")) {
-			if ((runtime.activeGoal?.id ?? null) !== r.expectedGoalId)
-				throw new Error("Goal changed");
+			if ((runtime.activeGoal?.id ?? null) !== r.expectedGoalId || (runtime.activeGoal && (r.expectedActivationId !== (runtime.activeGoal.activationId ?? runtime.activeGoal.id) || r.expectedGoalRevision !== runtime.activeGoal.revision)))
+				throw new Error("Goal identity, activation or revision changed");
 			if (r.action === "goal.create_paused") {
 				if (runtime.activeGoal)
 					throw new Error(
@@ -1041,7 +1046,8 @@ export function createWorkflowService(
 				notice = null;
 				return snapshot();
 			}
-			if (typeof r.expectedGoalId !== "string" || !uuid.test(r.expectedGoalId) || !Number.isSafeInteger(r.expectedEntryRevision) || r.expectedEntryRevision < 1)
+			const expectedRevision = r.action === "goals.limits" ? r.expectedPolicyRevision : r.expectedEntryRevision;
+			if (typeof r.expectedGoalId !== "string" || !uuid.test(r.expectedGoalId) || !Number.isSafeInteger(expectedRevision) || expectedRevision < 1)
 				throw new Error("Expected delegated goal identity and revision");
 			if (["goals.edit", "goals.limits", "goals.add_task", "goals.clear", "goals.answer"].includes(r.action)) {
 				// Definitive metadata result: rejected edits retain the caller's draft.

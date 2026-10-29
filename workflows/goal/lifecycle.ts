@@ -18,6 +18,7 @@ import {
   type GoalRuntime,
   GOAL_CONTINUATION_MESSAGE_TYPE,
   incrementGoal,
+  nextGoalInstance,
   isGoalContextOverflow,
   isRetryableGoalInterruption,
   isUsageLimitedGoalInterruption,
@@ -169,6 +170,50 @@ export function registerGoalLifecycle(
     }
   });
 
+  pi.on("session_tree", (_event, ctx) => {
+    if (!sessionActive) return;
+    // History navigation is not authorization to replay autonomous work. Revoke
+    // the old branch's leases before reading the selected branch's record.
+    const previousGoal = runtime.activeGoal;
+    runtime.replaceMenuSession();
+    runtime.clearGoalWaitTimer();
+    runtime.cancelContinuationWork();
+    runtime.clearPendingGoalPrompts();
+    runtime.clearGoalRecovery();
+    runtime.clearBudgetWrapUp();
+    runtime.releaseWorkflow();
+    runtime.activeGoal = undefined;
+    runtime.beginAgentRun(null, undefined);
+    runtime.guardAbortGoalId = undefined;
+    runtime.legacyQueueState = undefined;
+    if (!ctx.isIdle()) abortCurrentTurn(ctx);
+    try {
+      const loaded = loadGoalStateFromSession(ctx);
+      runtime.legacyQueueState = loaded.legacyQueueState;
+      if (loaded.goal) {
+        const restored = nextGoalInstance(loaded.goal);
+        // Revisions also fence task callbacks, whose API deliberately does not
+        // require an activation token. Never reuse a pre-navigation revision.
+        restored.revision = Math.max(restored.revision ?? 0, previousGoal?.id === restored.id ? (previousGoal.revision ?? 0) : 0);
+        // Keep accounting, safety counters, task IDs and stopped states intact.
+        const paused = restored.status === "active" ? transitionGoal(restored, "paused") : restored;
+        runtime.persistGoal(paused);
+        runtime.blockStaleGoalToolCalls();
+        runtime.updateStatus(ctx, paused);
+      } else {
+        runtime.clearStaleGoalToolCallBlock();
+        ctx.ui.setStatus(STATUS_KEY, undefined);
+      }
+      runtime.ensureInactiveGoalContextContract(ctx);
+    } catch (error) {
+      // Leave malformed history untouched and fail closed rather than guessing
+      // an association or continuing execution from the previously viewed branch.
+      runtime.activeGoal = undefined;
+      runtime.blockStaleGoalToolCalls();
+      notifyTerminal(ctx.ui, `Goal branch restore failed: ${error instanceof Error ? error.message : String(error)}`, "warning");
+    }
+  });
+
   pi.on("session_shutdown", (_event, ctx) => {
     sessionActive = false;
     const shutdownSession = ctx.sessionManager;
@@ -223,7 +268,7 @@ export function registerGoalLifecycle(
     }
 
     const restoredState = loadGoalStateFromSession(ctx);
-    if (restoredState.goal?.id === runtime.activeGoal.id) {
+    if (restoredState.goal?.id === runtime.activeGoal.id && (restoredState.goal.activationId ?? restoredState.goal.id) === (runtime.activeGoal.activationId ?? runtime.activeGoal.id)) {
       runtime.activeGoal = restoredState.goal;
     }
     const usageRecorded = runtime.recordGoalUsage(runtime.activeGoal, ctx);
@@ -468,6 +513,10 @@ export function registerGoalLifecycle(
     }
     const ownedPromptGoalId = goalPromptGoalId ?? continuationGoalId;
     const ownedPromptBoundary = runtime.hasOwnedPromptBoundary(prompt);
+    if (!ownedPromptGoalId && !ownedPromptBoundary && (extractGoalPromptMarker(prompt) || extractContinuationMarker(prompt))) {
+      runtime.beginAgentRun(null, undefined);
+      return abortCurrentTurn(ctx);
+    }
     const activeBudgetWrapUp = runtime.hasActiveBudgetWrapUp();
     const activeGoalRecovery = runtime.hasActiveGoalRecovery();
     const queuedNonGoalInput = activeBudgetWrapUp
@@ -570,7 +619,7 @@ export function registerGoalLifecycle(
     const run = runtime.finishAgentRun();
     if (run.goalId === null) return;
     if (!runtime.canRecordGoalUsage() && !runtime.hasActiveBudgetWrapUp()) return;
-    if (run.goalId && run.goalId !== runtime.activeGoal?.id) return;
+    if (run.goalId && (run.goalId !== runtime.activeGoal?.id || run.activationId !== (runtime.activeGoal?.activationId ?? runtime.activeGoal?.id))) return;
     if (!runtime.activeGoal) return;
     if (runtime.activeGoal.status === "budget_limited" && runtime.budgetWrapUp?.goalId === runtime.activeGoal.id) {
       runtime.recordGoalUsage(runtime.activeGoal, ctx);
@@ -606,6 +655,7 @@ export function registerGoalLifecycle(
         }
         runtime.goalRecovery = {
           goalId,
+          activationId: runtime.activeGoal.activationId ?? runtime.activeGoal.id,
           kind: isGoalContextOverflow(finalAssistant) ? "compaction_retry" : "provider_retry",
           automaticOwner: run.origin === "automatic",
           errorMessage: finalAssistant.errorMessage,

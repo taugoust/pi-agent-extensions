@@ -11,6 +11,8 @@ globalThis.fetch = () => { throw new Error('Network forbidden in Goal lifecycle 
 globalThis.WebSocket = class { constructor() { throw new Error('Network forbidden'); } };
 const { createJiti } = await import(pathToFileURL(join(sdkRoot, 'node_modules/jiti/lib/jiti.mjs')));
 const jiti = createJiti(import.meta.url, { alias: {
+  '@earendil-works/pi-coding-agent': join(sdkRoot, 'dist/index.js'),
+  '@earendil-works/pi-ai': join(sdkRoot, 'node_modules/@earendil-works/pi-ai/dist/index.js'),
   '@earendil-works/pi-tui': join(sdkRoot, 'node_modules/@earendil-works/pi-tui/dist/index.js'),
   'typebox': join(sdkRoot, 'node_modules/typebox/build/index.mjs'),
 } });
@@ -139,10 +141,10 @@ for (const status of ['paused', 'blocked']) {
 {
   for (const automation of ['recovery', 'budget-wrapup-delivered', 'budget-wrapup-pending']) {
     const f = fixture();
-    if (automation === 'recovery') f.runtime.goalRecovery = { goalId: f.runtime.activeGoal.id, kind: 'provider_retry', automaticOwner: true };
+    if (automation === 'recovery') f.runtime.goalRecovery = { goalId: f.runtime.activeGoal.id, activationId: f.runtime.activeGoal.activationId, kind: 'provider_retry', automaticOwner: true };
     else {
       f.runtime.activeGoal.status = 'budget_limited';
-      f.runtime.budgetWrapUp = { goalId: f.runtime.activeGoal.id, delivered: automation.endsWith('delivered') };
+      f.runtime.budgetWrapUp = { goalId: f.runtime.activeGoal.id, activationId: f.runtime.activeGoal.activationId, delivered: automation.endsWith('delivered') };
     }
     await f.emit('before_agent_start', { prompt: `internal ${automation}` });
     assert.equal(f.runtime.staleGoalToolCallsBlocked, true);

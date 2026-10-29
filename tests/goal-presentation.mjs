@@ -11,10 +11,13 @@ const { createJiti } = await import(pathToFileURL(join(sdkRoot, 'node_modules/ji
 globalThis.fetch = () => { throw new Error('Network forbidden in Goal presentation check'); };
 const jiti = createJiti(import.meta.url, { alias: {
   'typebox': join(sdkRoot, 'node_modules/typebox/build/index.mjs'),
+  '@earendil-works/pi-coding-agent': join(sdkRoot, 'dist/index.js'),
+  '@earendil-works/pi-ai': join(sdkRoot, 'node_modules/@earendil-works/pi-ai/dist/index.js'),
   '@earendil-works/pi-tui': join(sdkRoot, 'node_modules/@earendil-works/pi-tui/dist/index.js'),
 } });
 const { registerGoalManagement } = await jiti.import(join(sourceRoot, 'workflows/goal/model-control.ts'));
 const { GoalRuntime } = await jiti.import(join(sourceRoot, 'workflows/goal/runtime.ts'));
+const { bindGoalMutations } = await jiti.import(join(sourceRoot, 'workflows/goal/mutations.ts'));
 const { writeProgress } = await jiti.import(join(sourceRoot, 'shared/goal-progress.ts'));
 const { normalizeGoalManageDisplay } = await jiti.import(join(sourceRoot, 'workflows/goal/presentation.ts'));
 const theme = { fg: (_color, text) => text, bold: text => text };
@@ -29,10 +32,12 @@ function fixture() {
   const runtime = new GoalRuntime(pi);
   const ctx = {
     cwd: '/nonexistent/offline-goal-presentation', model: { id: 'offline' },
-    sessionManager: { getBranch: () => entries, getEntries: () => entries },
+    sessionManager: { getSessionId: () => 'offline', getBranch: () => entries, getEntries: () => entries },
     ui: { setStatus() {}, notify() {} }, getContextUsage: () => ({ tokens: 0 }),
-    isIdle: () => true, abort() {},
+    isIdle: () => true, hasPendingMessages: () => false, abort() {},
   };
+  runtime.bindWorkflowSession(ctx.sessionManager);
+  bindGoalMutations(pi, ctx, runtime, { child: false, busy: () => false });
   registerGoalManagement(pi, runtime);
   return { pi, runtime, tool, ctx, execute: params => tool.execute('test', params, undefined, undefined, ctx) };
 }
@@ -46,7 +51,8 @@ for (const objective of ['Validate this outcome.', 'Quotes: "yes"; path \\tmp; e
     try {
       for (const action of ['create', 'status', 'update', 'resume', 'pause', 'clear']) {
         const previous = f.runtime.activeGoal;
-        const args = { action, ...(previous ? { goal_id: previous.id } : {}),
+        const args = { action, ...(previous ? { goal_id: previous.id, activation_id: previous.activationId, expected_revision: previous.revision } : {}),
+          ...(action === 'create' ? { request_id: 'create', start: false } : {}),
           ...(['update', 'resume', 'pause', 'clear'].includes(action) ? { user_authorized: true } : {}),
           ...(['create', 'update'].includes(action) ? { objective } : {}),
         };
@@ -54,15 +60,18 @@ for (const objective of ['Validate this outcome.', 'Quotes: "yes"; path \\tmp; e
         const result = await f.execute(args);
         const goal = f.runtime.activeGoal;
         if (action === 'pause' || action === 'clear') {
-          assert.equal(plain(result), action === 'pause' ? 'Goal paused. Do not continue until the user resumes it.' : 'Goal moved to Completed.');
+          assert.equal(plain(result), action === 'pause' ? 'Goal paused. Wait for explicit resume.' : 'Goal moved to Completed.');
           assert.equal(result.details.goalId, previous.id);
           assert.equal(result.terminate, action === 'pause');
         } else {
-          const expected = goal.status === 'active'
-            ? `Goal mode is active. Current goal_id: ${goal.id}. Objective: ${JSON.stringify(objective)}`
-            : `Goal ${goal.id} is ${goal.status}: ${objective}. Autonomous continuation is not enabled. Resume only on explicit user instruction.`;
-          assert.equal(plain(result), `${expected}\nRequired tasks: []\nUse update_progress with this goal_id for its checklist; use goal_id:null only for standalone work.`);
-          assert.deepEqual(result.details.goal, { id: goal.id, objective, status: goal.status, tokenBudget: undefined, tasks: [] });
+          const payload = JSON.parse(plain(result));
+          assert.equal(payload.activationId, goal.activationId);
+          assert.equal(payload.revision, goal.revision);
+          if (action === 'create') assert.equal(payload.goalId, goal.id);
+          else {
+            assert.equal(payload.id, goal.id); assert.equal(payload.objective, objective);
+            assert.deepEqual(result.details.goal.tasks, []);
+          }
         }
         const snapshot = structuredClone(result);
         assert.deepEqual(result.details.presentation, { version: 1, tool: 'goal_manage', action, objective });
@@ -85,7 +94,7 @@ for (const objective of ['Validate this outcome.', 'Quotes: "yes"; path \\tmp; e
 test('errors override structured objective; missing objective is never fabricated from arguments', async () => {
   const f = fixture();
   const args = { action: 'resume', goal_id: 'stale-id', objective: 'Do not display me', user_authorized: true };
-  await assert.rejects(f.execute(args), /Goal changed/);
+  await assert.rejects(f.execute(args), /Goal identity/);
   const result = { content: [{ type: 'text', text: 'Goal changed; get status and use the current goal_id' }],
     details: { goal: { objective: 'Not success' }, presentation: { version: 1, tool: 'goal_manage', action: 'resume', objective: 'Not success' } } };
   for (const errorSource of ['context', 'result']) {
@@ -109,12 +118,12 @@ test('errors override structured objective; missing objective is never fabricate
 
 test('required task IDs and full control contract remain machine-facing only', async () => {
   const f = fixture();
-  await f.execute({ action: 'create', objective: 'A concise outcome.' });
+  await f.execute({ action: 'create', objective: 'A concise outcome.', request_id: 'create', start: false });
   const progress = writeProgress(f.pi, f.ctx, [{ text: 'Verify the outcome', status: 'pending' }], f.runtime.activeGoal.id, false, false);
   const result = await f.execute({ action: 'status' });
   assert.deepEqual(result.details.goal.tasks, progress.steps);
   assert.ok(plain(result).includes(JSON.stringify(progress.steps)));
-  assert.ok(plain(result).includes('Use update_progress with this goal_id'));
+  assert.equal(JSON.parse(plain(result)).revision, f.runtime.activeGoal.revision);
   const snapshot = structuredClone(result);
   assert.equal(text(f.tool.renderResult(result, { expanded: true }, theme, context({ action: 'status' }))), 'Objective: A concise outcome.');
   assert.deepEqual(result, snapshot);

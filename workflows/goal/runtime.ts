@@ -39,6 +39,7 @@ export {
 
 export interface ContinuationTicket {
   goalId: string;
+  activationId?: string;
   iteration: number;
   marker: string;
   prompt: string;
@@ -46,6 +47,7 @@ export interface ContinuationTicket {
 
 export interface BudgetWrapUp {
   goalId: string;
+  activationId?: string;
   delivered: boolean;
 }
 
@@ -55,6 +57,7 @@ export type GoalRunOrigin = "manual" | "automatic";
 
 export interface GoalRecovery {
   goalId: string;
+  activationId?: string;
   kind: GoalRecoveryKind;
   automaticOwner: boolean;
   errorMessage?: string;
@@ -62,6 +65,7 @@ export interface GoalRecovery {
 
 export interface CompletedGoalRun {
   goalId?: string | null;
+  activationId?: string;
   origin?: GoalRunOrigin;
   toolAttempted: boolean;
 }
@@ -123,6 +127,7 @@ export type GoalStateSnapshotStatus = GoalStatus | "cleared";
 
 export interface GoalStateSnapshot {
   goalId: string;
+  activationId?: string;
   status: GoalStateSnapshotStatus;
   summary?: string;
   reason?: string;
@@ -138,7 +143,7 @@ function buildGoalStateSnapshot(
   summary: string | undefined,
   reason: string | undefined,
 ): GoalStateSnapshot {
-  const snapshot: GoalStateSnapshot = { goalId: goal.id, status: goal.status };
+  const snapshot: GoalStateSnapshot = { goalId: goal.id, activationId: goal.activationId ?? goal.id, status: goal.status };
   if (goal.status === "complete" && summary) snapshot.summary = summary;
   else if (goal.status !== "complete" && isTerminalGoalStatus(goal.status) && reason) {
     snapshot.reason = reason;
@@ -178,6 +183,7 @@ interface PendingGoalContract {
 
 interface PendingGoalPrompt {
   goalId: string;
+  activationId?: string;
   resetSafetyEpoch: boolean;
   fingerprint: string;
   prompt: string;
@@ -212,7 +218,28 @@ const CONTRADICTORY_COMPLETION_PATTERNS = [
 export class GoalRuntime {
   settings: GoalSettings = DEFAULT_GOAL_SETTINGS;
   settingsLoadIssue?: GoalSettingsLoadIssue;
-  activeGoal?: ActiveGoal;
+  private currentGoal?: ActiveGoal;
+  get activeGoal() { return this.currentGoal; }
+  set activeGoal(goal: ActiveGoal | undefined) {
+    const previous = this.currentGoal;
+    if (previous && !sameGoalActivation(previous, goal)) {
+      // A stable identity is not an execution lease. Revoke every queued owner
+      // and captured timer before exposing a different activation.
+      this.clearGoalWaitTimer();
+      this.cancelContinuationWork();
+      for (const [marker, pending] of this.pendingGoalPromptMarkers) this.rememberCancelledGoalPromptMarker(marker, pending.prompt);
+      this.pendingGoalPromptMarkers.clear();
+      this.claimedGoalPromptMarkers.clear();
+      this.claimedContinuationMarkers.clear();
+      this.clearGoalRecovery();
+      this.clearBudgetWrapUp();
+      this.clearTerminalDetails();
+      this.pendingLimitBoundary = undefined;
+      this.beginAgentRun(null, undefined);
+      this.guardAbortGoalId = undefined;
+    }
+    this.currentGoal = goal;
+  }
   /** Terminal details captured for the matching persisted-state snapshot. */
   private terminalDetails?: GoalTerminalDetails;
   private goalStateSink?: (snapshot: GoalStateSnapshot) => void;
@@ -233,6 +260,7 @@ export class GoalRuntime {
   budgetWrapUp?: BudgetWrapUp;
   /** `null` marks a run that must not be charged to the active goal. */
   agentRunGoalId?: string | null;
+  agentRunActivationId?: string;
   agentRunOrigin?: GoalRunOrigin;
   agentRunToolAttempted = false;
   guardAbortGoalId?: string;
@@ -292,7 +320,7 @@ export class GoalRuntime {
   }
 
   ownsWorkflow(goal: ActiveGoal | undefined = this.activeGoal) {
-    return goal?.status === "active" && this.workflowMutex.isOwner(this.workflowOwner);
+    return goal?.status === "active" && sameGoalActivation(goal, this.activeGoal) && this.workflowMutex.isOwner(this.workflowOwner);
   }
 
   releaseWorkflow() {
@@ -331,6 +359,7 @@ export class GoalRuntime {
   canRecordGoalUsage(goalId?: string) {
     return (
       this.agentRunGoalId !== null &&
+      (this.agentRunActivationId === undefined || this.agentRunActivationId === (this.activeGoal?.activationId ?? this.activeGoal?.id)) &&
       (goalId === undefined || this.agentRunGoalId === undefined || this.agentRunGoalId === goalId)
     );
   }
@@ -339,16 +368,18 @@ export class GoalRuntime {
     return (
       this.activeGoal?.status === "budget_limited" &&
       this.budgetWrapUp?.goalId === this.activeGoal.id &&
+      this.budgetWrapUp.activationId === (this.activeGoal.activationId ?? this.activeGoal.id) &&
       this.budgetWrapUp.delivered
     );
   }
 
   hasActiveGoalRecovery() {
-    return Boolean(this.activeGoal && this.goalRecovery?.goalId === this.activeGoal.id);
+    return Boolean(this.activeGoal && this.goalRecovery?.goalId === this.activeGoal.id && this.goalRecovery.activationId === (this.activeGoal.activationId ?? this.activeGoal.id));
   }
 
   beginAgentRun(goalId: string | null | undefined, origin: GoalRunOrigin | undefined) {
     this.agentRunGoalId = goalId;
+    this.agentRunActivationId = goalId && goalId === this.activeGoal?.id ? (this.activeGoal.activationId ?? this.activeGoal.id) : undefined;
     this.agentRunOrigin = origin;
     this.agentRunToolAttempted = false;
   }
@@ -356,7 +387,7 @@ export class GoalRuntime {
   beginRecoveryRunIfNeeded() {
     if (this.agentRunGoalId !== undefined || !this.activeGoal) return;
     const recovery = this.goalRecovery;
-    if (!recovery || recovery.goalId !== this.activeGoal.id) return;
+    if (!recovery || recovery.goalId !== this.activeGoal.id || recovery.activationId !== (this.activeGoal.activationId ?? this.activeGoal.id)) return;
     this.beginAgentRun(recovery.goalId, recovery.automaticOwner ? "automatic" : "manual");
   }
 
@@ -367,6 +398,7 @@ export class GoalRuntime {
   finishAgentRun(): CompletedGoalRun {
     const run = {
       goalId: this.agentRunGoalId,
+      activationId: this.agentRunActivationId,
       origin: this.agentRunOrigin,
       toolAttempted: this.agentRunToolAttempted,
     };
@@ -376,6 +408,7 @@ export class GoalRuntime {
 
   clearAgentRun() {
     this.agentRunGoalId = undefined;
+    this.agentRunActivationId = undefined;
     this.agentRunOrigin = undefined;
     this.agentRunToolAttempted = false;
   }
@@ -404,6 +437,7 @@ export class GoalRuntime {
     const marker = continuationMarker(goal);
     this.continuationIntent = {
       goalId: goal.id,
+      activationId: goal.activationId ?? goal.id,
       iteration: goal.iteration,
       marker,
       prompt: buildContinuePrompt(goal, marker),
@@ -425,6 +459,7 @@ export class GoalRuntime {
     if (
       !this.activeGoal ||
       this.activeGoal.id !== intent.goalId ||
+      (this.activeGoal.activationId ?? this.activeGoal.id) !== intent.activationId ||
       this.activeGoal.status !== "active" ||
       this.activeGoal.waiting
     ) {
@@ -454,7 +489,7 @@ export class GoalRuntime {
       if (this.continuationDelivery?.marker === intent.marker) {
         this.continuationDelivery = undefined;
       }
-      if (this.activeGoal?.id === intent.goalId && this.activeGoal.status === "active") {
+      if (this.activeGoal?.id === intent.goalId && (this.activeGoal.activationId ?? this.activeGoal.id) === intent.activationId && this.activeGoal.status === "active") {
         this.continuationIntent = intent;
       }
       notifyWhenSessionAlive(ctx, `Goal prompt failed: ${formatError(error)}`, "error");
@@ -525,13 +560,13 @@ export class GoalRuntime {
     if (retryAttempt) this.goalWaitDeadlineRetry = undefined;
     if (!this.clearGoalWait(ctx, goal.id)) return false;
     const resumedGoal = this.activeGoal;
-    if (!resumedGoal || resumedGoal.id !== goal.id || resumedGoal.status !== "active") return false;
+    if (!resumedGoal || !sameGoalActivation(resumedGoal, goal) || resumedGoal.status !== "active") return false;
     this.requestContinuation(resumedGoal);
     const dispatched = this.dispatchContinuationIfSettled(ctx);
     if (dispatched) return true;
     if (
-      this.activeGoal?.id === goal.id &&
-      this.activeGoal.status === "active" &&
+      sameGoalActivation(this.activeGoal, goal) &&
+      this.activeGoal?.status === "active" &&
       this.continuationIntent?.goalId === goal.id
     ) {
       this.restoreGoalWaitAfterDeadlineFailure(ctx, goal.id, waiting, !retryAttempt);
@@ -545,9 +580,9 @@ export class GoalRuntime {
   }
 
   private scheduleGoalWaitTimer(ctx: StatusContext, goalId: string, wakeAt: number) {
-    const generation = this.menuGeneration;
+    const generation = this.menuGeneration, activation = this.activeGoal;
     this.goalWaitTimer.schedule(wakeAt, () => {
-      if (generation !== this.menuGeneration || this.activeGoal?.id !== goalId || !this.ownsWorkflow(this.activeGoal)) {
+      if (generation !== this.menuGeneration || !sameGoalActivation(activation, this.activeGoal) || this.activeGoal?.id !== goalId || !this.ownsWorkflow(this.activeGoal)) {
         return;
       }
       try {
@@ -725,14 +760,16 @@ export class GoalRuntime {
     const candidate = message as {
       role?: unknown;
       customType?: unknown;
-      details?: { goalId?: unknown };
+      details?: { goalId?: unknown; activationId?: unknown };
     };
     return (
       candidate.role === "custom" &&
       candidate.customType === BUDGET_WRAP_UP_MESSAGE_TYPE &&
       typeof candidate.details?.goalId === "string" &&
       candidate.details.goalId === this.budgetWrapUp?.goalId &&
-      candidate.details.goalId === this.activeGoal?.id
+      candidate.details.goalId === this.activeGoal?.id &&
+      candidate.details.activationId === this.budgetWrapUp?.activationId &&
+      candidate.details.activationId === (this.activeGoal?.activationId ?? this.activeGoal?.id)
     );
   }
 
@@ -747,8 +784,8 @@ export class GoalRuntime {
 
   queueBudgetWrapUp(ctx: StatusContext, goal: ActiveGoal) {
     if (!this.ownsWorkflow(goal)) return false;
-    if (!this.budgetWrapUp || this.budgetWrapUp.goalId !== goal.id) {
-      this.budgetWrapUp = { goalId: goal.id, delivered: false };
+    if (!this.budgetWrapUp || this.budgetWrapUp.goalId !== goal.id || this.budgetWrapUp.activationId !== (goal.activationId ?? goal.id)) {
+      this.budgetWrapUp = { goalId: goal.id, activationId: goal.activationId ?? goal.id, delivered: false };
     }
     if (this.budgetWrapUp.delivered) return true;
     this.budgetWrapUp.delivered = true;
@@ -758,7 +795,7 @@ export class GoalRuntime {
           customType: BUDGET_WRAP_UP_MESSAGE_TYPE,
           content: BUDGET_WRAP_UP_PROMPT,
           display: true,
-          details: { goalId: goal.id },
+          details: { goalId: goal.id, activationId: goal.activationId ?? goal.id },
         },
         { deliverAs: "steer" },
       );
@@ -876,7 +913,7 @@ export class GoalRuntime {
     if (!recovery) return false;
     this.goalRecovery = undefined;
     const goal = this.activeGoal;
-    if (goal?.id !== recovery.goalId || goal.status !== "active" || !this.ownsWorkflow(goal)) {
+    if (goal?.id !== recovery.goalId || (goal.activationId ?? goal.id) !== recovery.activationId || goal.status !== "active" || !this.ownsWorkflow(goal)) {
       return false;
     }
     const details = recovery.errorMessage ? `: ${truncateNotification(recovery.errorMessage)}` : "";
@@ -998,9 +1035,11 @@ export class GoalRuntime {
     isCurrent?: () => boolean,
   ) {
     if (this.activeGoal?.id !== goalId || !this.ownsWorkflow(this.activeGoal)) return false;
+    const activation = this.activeGoal;
     const pending = this.rememberPendingGoalPrompt(goalId, prompt, resetSafetyEpoch);
-    const sent = await sendPrompt(this.pi, ctx, pending.prompt, isCurrent);
-    if (!sent || (isCurrent && !isCurrent()) || this.activeGoal?.id !== goalId || !this.ownsWorkflow(this.activeGoal)) {
+    const current = () => sameGoalActivation(activation, this.activeGoal) && (isCurrent?.() ?? true);
+    const sent = await sendPrompt(this.pi, ctx, pending.prompt, current);
+    if (!sent || !current() || !this.ownsWorkflow(this.activeGoal)) {
       this.pendingGoalPromptMarkers.delete(pending.marker);
       return false;
     }
@@ -1021,10 +1060,10 @@ export class GoalRuntime {
 
   scheduleContinuationDispatch(ctx: StatusContext, goalId: string) {
     this.clearContinuationDispatchTimer();
-    const generation = this.menuGeneration;
+    const generation = this.menuGeneration, activation = this.activeGoal;
     this.continuationDispatchTimer = setTimeout(() => {
       this.continuationDispatchTimer = undefined;
-      if (generation !== this.menuGeneration || this.activeGoal?.id !== goalId || !this.ownsWorkflow(this.activeGoal)) {
+      if (generation !== this.menuGeneration || !sameGoalActivation(activation, this.activeGoal) || this.activeGoal?.id !== goalId || !this.ownsWorkflow(this.activeGoal)) {
         return;
       }
       this.dispatchContinuationIfSettled(ctx);
@@ -1186,6 +1225,7 @@ export class GoalRuntime {
 
   markContinuationStarted(prompt: string) {
     const marker = extractContinuationMarker(prompt);
+    if (marker && marker.split(":")[1] !== (this.activeGoal?.activationId ?? this.activeGoal?.id)) return undefined;
     if (!marker) {
       // A user, retry, or another extension started newer work. Cancel both an
       // unsent intent and a delivery that may have lost the non-atomic idle race;
@@ -1219,7 +1259,7 @@ export class GoalRuntime {
   /** Service-epoch scoped revision; accounting updates do not stale a limit editor. */
   get policyRevision() {
     const goal = this.activeGoal;
-    const signature = JSON.stringify([goal?.id, goal?.tokenBudget, goal?.continuationLimits, this.settings.continuationLimits]);
+    const signature = JSON.stringify([goal?.id, goal?.activationId, goal?.tokenBudget, goal?.continuationLimits, this.settings.continuationLimits]);
     if (signature !== this.policySignature) { this.policySignature = signature; this.policyVersion++; }
     return this.policyVersion;
   }
@@ -1253,8 +1293,10 @@ export class GoalRuntime {
     if (!isTerminalGoalStatus(goal.status) || this.terminalDetails?.goalId !== goal.id) {
       this.clearTerminalDetails();
     }
+    goal.revision = Math.max(goal.revision ?? 0, this.activeGoal?.id === goal.id ? (this.activeGoal.revision ?? 0) : 0) + 1;
     this.pi.appendEntry(GOAL_STATE_ENTRY_TYPE, serializeGoalState(goal));
-    const signature = JSON.stringify([goal.id, goal.tokenBudget, goal.continuationLimits, this.settings.continuationLimits]);
+    this.activeGoal = goal;
+    const signature = JSON.stringify([goal.id, goal.activationId, goal.tokenBudget, goal.continuationLimits, this.settings.continuationLimits]);
     if (signature !== this.policySignature) { this.policySignature = signature; this.policyVersion++; }
     this.pi.events.emit("pi:goal-progress", {});
     this.publishGoalState(buildGoalStateSnapshot(goal, this.terminalDetails?.summary, this.terminalDetails?.reason));
@@ -1266,6 +1308,7 @@ export class GoalRuntime {
     if (clearedGoal) {
       this.publishGoalState({
         goalId: clearedGoal.id,
+        activationId: clearedGoal.activationId ?? clearedGoal.id,
         status: "cleared",
         reason,
       });
@@ -1391,6 +1434,7 @@ export class GoalRuntime {
     const ownedPrompt = appendGoalPromptMarker(prompt, marker);
     this.pendingGoalPromptMarkers.set(marker, {
       goalId,
+      activationId: this.activeGoal?.activationId ?? this.activeGoal?.id,
       resetSafetyEpoch,
       fingerprint: inputFingerprint(ownedPrompt),
       prompt: ownedPrompt,
@@ -1406,7 +1450,7 @@ export class GoalRuntime {
     const marker = extractGoalPromptMarker(prompt);
     if (!marker) return undefined;
     const pending = this.pendingGoalPromptMarkers.get(marker);
-    if (!pending || !preservesOwnedPromptAtTerminalBoundary(prompt, pending.prompt)) {
+    if (!pending || pending.activationId !== (this.activeGoal?.activationId ?? this.activeGoal?.id) || !preservesOwnedPromptAtTerminalBoundary(prompt, pending.prompt)) {
       return undefined;
     }
     this.pendingGoalPromptMarkers.delete(marker);
@@ -1451,6 +1495,9 @@ export function createGoal(text: string, tokenBudget: number | undefined, baseli
   const now = Date.now();
   return {
     id: randomUUID(),
+    activationId: randomUUID(),
+    revision: 0,
+    tasks: [],
     text,
     status: "active",
     startedAt: now,
@@ -1483,8 +1530,12 @@ export function transitionGoal(goal: ActiveGoal, requestedStatus: GoalStatus): A
   return next;
 }
 
+export function sameGoalActivation(left: ActiveGoal | undefined, right: ActiveGoal | undefined): boolean {
+  return !!left && !!right && left.id === right.id && (left.activationId ?? left.id) === (right.activationId ?? right.id);
+}
+
 export function nextGoalInstance(goal: ActiveGoal): ActiveGoal {
-  return { ...goal, progressId: goal.progressId ?? goal.id, id: randomUUID(), updatedAt: Date.now() };
+  return { ...goal, activationId: randomUUID(), updatedAt: Date.now() };
 }
 
 export function editedGoalStatus(status: GoalStatus): GoalStatus {
@@ -1591,10 +1642,11 @@ export function isContradictoryCompletionSummary(summary: string) {
   return CONTRADICTORY_COMPLETION_PATTERNS.some((pattern) => pattern.test(summary));
 }
 
-export function goalIdRejectionReason(goal: ActiveGoal, requestedGoalId: string) {
+export function goalIdRejectionReason(goal: ActiveGoal, requestedGoalId: string, activationId?: string) {
   if (!requestedGoalId) return "missing goal_id";
   if (requestedGoalId.length > MAX_GOAL_ID_LENGTH) return "goal_id is too long";
   if (requestedGoalId !== goal.id) return "goal_id does not match the active goal";
+  if (activationId !== (goal.activationId ?? goal.id)) return "activation_id does not match the current activation";
   return undefined;
 }
 
@@ -1666,7 +1718,7 @@ function goalCommandHint(goal: ActiveGoal) {
 }
 
 function continuationMarker(goal: ActiveGoal) {
-  return `${goal.id}:${goal.iteration}:${randomUUID()}`;
+  return `${goal.id}:${goal.activationId ?? goal.id}:${goal.iteration}:${randomUUID()}`;
 }
 
 export type { AssistantMessageLike } from "./errors.js";
