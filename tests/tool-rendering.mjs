@@ -28,6 +28,8 @@ for (const limit of [3, 10, null]) {
  assert.match(goalSummary(pausedGoal, limit), /Safety pause:/);
 }
 assert.equal(formatStatus(undefined), undefined);
+assert.equal(formatStatus({...pausedGoal,status:'active'}, null), 'Goal ✓');
+assert.equal(formatStatus({...pausedGoal,status:'complete'}, null), 'Goal ✓');
 const job = await load('background-job');
 const name='Repeated output fixture';
 for (const action of ['output','reap']) for (const partial of [false,true]) for (const width of [64,120]) {

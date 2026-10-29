@@ -1326,7 +1326,7 @@ export class GoalRuntime {
 
   showCompletionStatus(ctx: StatusContext) {
     this.clearCompletionStatusTimer();
-    ctx.ui.setStatus(STATUS_KEY, "complete");
+    ctx.ui.setStatus(STATUS_KEY, "Goal ✓");
     this.completionStatusTimer = setTimeout(() => {
       this.completionStatusTimer = undefined;
       try {
@@ -1459,7 +1459,8 @@ export function formatStatus(
   automaticTurnLimit: number | null = DEFAULT_GOAL_SETTINGS.continuationLimits.automaticTurns,
 ) {
   if (!goal) return undefined;
-  if (goal.status === "complete") return "complete";
+  if (goal.status === "complete") return "Goal ✓";
+  if (goal.status === "active" && !goal.waiting) return "Goal ✓";
   // Keep pause reasons and limit counters in goal details, not the footer.
   if (goal.status === "paused") return "Goal ■";
   const automatic =

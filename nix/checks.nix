@@ -1364,7 +1364,8 @@ in
             assert(operator.applyMode(sessionId, false).enabled === false, "operator mode not applied");
             assert(operator.status(sessionId).enabled === false, "operator status not updated");
             assert(JSON.stringify(pi.modeEvents) === JSON.stringify([{ sessionId, enabled: false }]), "operator event lost exact mode");
-            assert(ctx.statuses.some((entry) => entry.name === "permission-gate-mode" && entry.value?.includes("OFF")), "operator UI not updated");
+            assert(ctx.statuses.findLast((entry) => entry.name === "permission-gate")?.value?.includes("AgentSH gate ✗"), "disabled prompt mode must show gate cross");
+            assert(ctx.statuses.findLast((entry) => entry.name === "permission-gate-mode")?.value === undefined, "separate prompt-mode label must be cleared");
           }
           if (["mode-off", "mode-on", "reload-child", "new-session-child", "structured-mode-off"].includes(name)) {
             await pi.commands.get("permission-gate").handler("off", ctx);

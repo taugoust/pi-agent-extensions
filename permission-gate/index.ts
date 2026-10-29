@@ -1031,10 +1031,11 @@ function childPromptMetadata(metadata: PromptMetadata, request: SubagentPermissi
   };
 }
 
-function gateStatus(ctx: ExtensionContext, state: "ready" | "waiting" | "error" = "ready"): void {
+function renderGateStatus(ctx: ExtensionContext, state: "ready" | "waiting" | "error" = "ready", promptsEnabled = true): void {
   if (!ctx.hasUI) return;
-  const color = state === "error" ? "error" : state === "waiting" ? "warning" : "success";
-  const text = state === "error" ? "AgentSH gate ✗" : state === "waiting" ? "AgentSH gate ?" : "AgentSH gate ✓";
+  const color = state === "error" ? "error" : !promptsEnabled ? "warning" : state === "waiting" ? "warning" : "success";
+  const text = state === "error" || !promptsEnabled ? "AgentSH gate ✗" : state === "waiting" ? "AgentSH gate ?" : "AgentSH gate ✓";
+  ctx.ui.setStatus("permission-gate-mode", undefined);
   ctx.ui.setStatus("permission-gate", ctx.ui.theme.fg(color, text));
 }
 
@@ -1094,6 +1095,8 @@ export default function permissionGate(pi: ExtensionAPI) {
   const modeChanges = new Set<AbortController>();
   const promptsEnabled = () => inheritedGateClaim?.promptMode?.sessionId !== activePiSessionId
     || inheritedGateClaim?.promptMode?.enabled !== false;
+  const gateStatus = (ctx: ExtensionContext, state: "ready" | "waiting" | "error" = "ready") =>
+    renderGateStatus(ctx, state, inheritedGateClaim ? promptsEnabled() : enabled);
   const resolveSessionPrompt = async (
     ctx: ExtensionContext, metadata: PromptMetadata, timeoutMs: number,
     transportSignal: AbortSignal, callerSignal: AbortSignal | undefined = ctx.signal,
@@ -1273,7 +1276,6 @@ export default function permissionGate(pi: ExtensionAPI) {
       inheritedGateClaim!.promptMode = { sessionId, enabled };
       if (!enabled) for (const controller of modeChanges) controller.abort();
       gateStatus(ctx, "ready");
-      if (ctx.hasUI) ctx.ui.setStatus("permission-gate-mode", enabled ? undefined : "AgentSH prompts OFF (session + children)");
       pi.events.emit("permission-gate:mode-changed", { sessionId, enabled });
       return { sessionId, enabled };
     },
@@ -1302,7 +1304,6 @@ export default function permissionGate(pi: ExtensionAPI) {
           return;
         }
         gateStatus(ctx, failure ? "error" : "ready");
-        ctx.ui.setStatus("permission-gate-mode", promptsEnabled() ? undefined : "AgentSH prompts OFF (session + children)");
         ctx.ui.notify(
           `AgentSH permission prompts ${promptsEnabled() ? "on" : "off"} for parent and all children; authorization remains mandatory.`
             + (failure ? ` Failed closed: ${boundedError(failure)}` : ""),
@@ -1352,7 +1353,7 @@ export default function permissionGate(pi: ExtensionAPI) {
         if (inheritedGateClaim.promptMode?.sessionId !== activePiSessionId) {
           inheritedGateClaim.promptMode = { sessionId: activePiSessionId, enabled: true };
         }
-        if (ctx.hasUI) ctx.ui.setStatus("permission-gate-mode", promptsEnabled() ? undefined : "AgentSH prompts OFF (session + children)");
+        gateStatus(ctx, "waiting");
         boundAuthority.bind(
           authorityOwner,
           activePiSessionId,

@@ -95,13 +95,22 @@ let
       name:
       let
         entry = registry.extensions.${name};
+        source =
+          "${bundle}/${entry.manifestPath}"
+          + lib.optionalString (entry ? installSubdir) "/${entry.installSubdir}";
+        # Jiti can retain relative-import resolutions across a switch of the
+        # stable Home Manager symlinks. Enter local extensions through their
+        # immutable bundle path so /reload gets the entire new module graph.
+        autoloadSource = pkgs.runCommand "pi-${name}-autoload" { } ''
+          cp -rs ${lib.escapeShellArg source} "$out"
+          rm "$out/index.ts"
+          printf '%s\n' ${lib.escapeShellArg "export { default } from \"${source}/index.ts\"; export * from \"${source}/index.ts\";"} > "$out/index.ts"
+        '';
       in
       {
         name = "${cfg.agentDir}/extensions/${entry.installName}";
         value = {
-          source =
-            "${bundle}/${entry.manifestPath}"
-            + lib.optionalString (entry ? installSubdir) "/${entry.installSubdir}";
+          source = if builtins.elem name registry.localExtensionNames then autoloadSource else source;
           # Link source files, never the containing directory: upstream Fast Mode
           # persists config.json alongside its sources.
           recursive = true;
