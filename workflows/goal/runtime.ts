@@ -1311,7 +1311,7 @@ export class GoalRuntime {
     const session = this.workflowSession as { getBranch?: () => Array<{ type?: string; customType?: string; data?: { goal?: ActiveGoal | null } }> } | undefined;
     const previous = session?.getBranch?.().findLast(entry => entry.type === "custom" && entry.customType === GOAL_STATE_ENTRY_TYPE)?.data?.goal;
     if (goal.tasks?.length && previous?.id !== goal.id) goal.lastTaskUpdateAt = Date.now();
-    else if (previous?.id === goal.id && Array.isArray(previous.tasks) && JSON.stringify(previous.tasks) !== JSON.stringify(goal.tasks)) goal.lastTaskUpdateAt = Date.now();
+    else if (previous?.id === goal.id && Array.isArray(previous.tasks) && JSON.stringify(previous.tasks.map(task => [task.id, task.text, task.status])) !== JSON.stringify(goal.tasks?.map(task => [task.id, task.text, task.status]))) goal.lastTaskUpdateAt = Date.now();
     const changed = !previous || goalMutationSignature(previous) !== goalMutationSignature(goal);
     const revision = Math.max(goal.revision ?? 0, previous?.id === goal.id ? (previous.revision ?? 0) : 0,
       this.activeGoal?.id === goal.id ? (this.activeGoal.revision ?? 0) : 0);

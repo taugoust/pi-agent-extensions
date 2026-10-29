@@ -57,6 +57,9 @@ test("checklist change timestamp is recorded without treating accounting as prog
   assert.ok(Number.isSafeInteger(at));
   f.runtime.activeGoal.tokensUsed++; f.runtime.persistGoal(f.runtime.activeGoal);
   assert.equal(f.runtime.activeGoal.lastTaskUpdateAt, at);
+  f.runtime.activeGoal.tasks = f.runtime.activeGoal.tasks.map(task => ({ id: task.id, status: task.status, text: task.text }));
+  f.runtime.persistGoal(f.runtime.activeGoal);
+  assert.equal(f.runtime.activeGoal.lastTaskUpdateAt, at, 'serialization key order is not checklist progress');
   f.runtime.activeGoal.lastTaskUpdateAt = 1;
   f.update({ steps: [{ ...created.steps[0], status: 'completed' }] });
   assert.ok(f.runtime.activeGoal.lastTaskUpdateAt > 1);
