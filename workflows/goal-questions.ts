@@ -1,7 +1,7 @@
 import { randomUUID, createHash } from "node:crypto";
 import type { TaskInteractionInput, TaskInteractionAnswer } from "../shared/foreground-tasks.ts";
 import { validInteractionInput, validInteractionAnswer } from "../shared/task-interactions.ts";
-import { validateGoalStory, type GoalQuestion, type GoalQuestionReply } from "./goal-story.ts";
+import { validateGoalStory, boundQuestionHistory, type GoalQuestion, type GoalQuestionReply } from "./goal-story.ts";
 export const GOAL_QUESTIONS_ENTRY = "delegated-goal-questions-v1";
 /** Owns actual outstanding questionnaire promises. No permission decisions and
  * no text prompts are dispatched by this service. Reply authority is supplied
@@ -23,6 +23,7 @@ export function createGoalQuestions(entryId: string, workerEpoch: string, branch
     }
   }
   const save = (next: GoalQuestion[], nextReceipts = receipts) => {
+    next = boundQuestionHistory(next);
     persist({ entryId, workerEpoch, questions: structuredClone(next), receipts: [...nextReceipts] });
     questions = next;
     if (nextReceipts !== receipts) { receipts.clear(); for (const [id, hash] of nextReceipts) receipts.set(id, hash); }

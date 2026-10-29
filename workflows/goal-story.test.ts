@@ -24,6 +24,15 @@ test("story records explicit state changes and updates, persists and deduplicate
 
 const input={kind:"questionnaire" as const,questions:[{id:"choice",prompt:"Which direction?",options:[{value:"a",label:"A"}],allowOther:false}]};
 const answer={kind:"questionnaire" as const,cancelled:false,answers:[{id:"choice",value:"a",wasCustom:false}]};
+test("recorded activity remains within the RPC byte budget with long Unicode updates",()=>{
+ const recorder=createGoalStoryRecorder("bounded",[],()=>{});
+ for(let i=0;i<200;i++)recorder.activity(`note-${i}`,"🐈".repeat(2000),i);
+ const story=recorder.snapshot();
+ assert.ok(Buffer.byteLength(JSON.stringify([story.timeline,story.activity]))<=128*1024);
+ assert.equal(story.activity.at(-1)?.at,199);
+ assert.ok(story.activity.length<200);
+});
+
 test("goal questions require exact live epoch, revision and answer; retries settle one actual request",async()=>{
  const branch:any[]=[];const persist=(data:unknown)=>branch.push({type:"custom",customType:GOAL_QUESTIONS_ENTRY,data});
  const service=createGoalQuestions("goal","epoch",branch,persist);

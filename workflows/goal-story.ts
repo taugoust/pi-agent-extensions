@@ -9,6 +9,22 @@ export type GoalTimelineEvent = { id: string; at: number; kind: GoalTimelineKind
 export type GoalActivityEvent = { id: string; at: number; text: string };
 export type GoalStory = { version: 1; timeline: GoalTimelineEvent[]; activity: GoalActivityEvent[]; questions?: GoalQuestion[] };
 export const GOAL_STORY_LIMIT = 200;
+export function boundStoryEvents(story: GoalStory): void {
+  while (Buffer.byteLength(JSON.stringify([story.timeline, story.activity])) > 128 * 1024) {
+    if (!story.timeline.length && !story.activity.length) break;
+    if (!story.activity.length || (story.timeline.length && story.timeline[0].at <= story.activity[0].at)) story.timeline.shift();
+    else story.activity.shift();
+  }
+}
+export function boundQuestionHistory(questions: GoalQuestion[]): GoalQuestion[] {
+  const result = [...questions];
+  while (result.length > 100 || Buffer.byteLength(JSON.stringify(result)) > 256 * 1024) {
+    const index = result.findIndex(question => question.status !== "pending");
+    if (index < 0) throw new Error("Pending goal questions exceed history capacity");
+    result.splice(index, 1);
+  }
+  return result;
+}
 /** Read only extension-owned records for an already authenticated goal lineage. */
 export function readRecordedGoalStory(branch: unknown[], entryId: string): GoalStory | undefined {
   let story: GoalStory | undefined, questions: GoalQuestion[] | undefined;
@@ -41,13 +57,15 @@ export function mergeGoalStory(target: GoalStory | undefined, observed: GoalStor
     if (!prior || question.revision > prior.revision) questions.set(question.id, structuredClone(question));
     else if (question.revision === prior.revision && JSON.stringify(prior) !== JSON.stringify(question)) throw new Error("Goal question revision conflict");
   }
-  merged.questions = [...questions.values()].sort((a, b) => a.at - b.at || a.id.localeCompare(b.id)).slice(-100);
+  merged.questions = boundQuestionHistory([...questions.values()].sort((a, b) => a.at - b.at || a.id.localeCompare(b.id)));
+  boundStoryEvents(merged);
   return merged;
 }
 export function emptyGoalStory(): GoalStory { return { version: 1, timeline: [], activity: [], questions: [] }; }
 export function recordGoalEvent(story: GoalStory, kind: GoalTimelineKind, text: string, taskId?: string, at = Date.now()): void {
   story.timeline.push({ id: randomUUID(), at, kind, text: text.slice(0, 4000), ...(taskId ? { taskId } : {}) });
   story.timeline = story.timeline.slice(-GOAL_STORY_LIMIT);
+  boundStoryEvents(story);
 }
 export function validateGoalStory(value: unknown): asserts value is GoalStory | undefined {
   if (value === undefined) return; // old entries have no fabricated history
@@ -55,6 +73,8 @@ export function validateGoalStory(value: unknown): asserts value is GoalStory | 
   const story = value as GoalStory;
   if (story.version !== 1 || !Array.isArray(story.timeline) || !Array.isArray(story.activity)
     || story.timeline.length > GOAL_STORY_LIMIT || story.activity.length > GOAL_STORY_LIMIT) throw new Error("Invalid goal story");
+  if (Buffer.byteLength(JSON.stringify([story.timeline, story.activity])) > 128 * 1024
+    || Buffer.byteLength(JSON.stringify(story.questions ?? [])) > 256 * 1024) throw new Error("Goal story exceeds transport budget");
   for (const events of [story.timeline, story.activity]) {
     const ids = new Set<string>();
     for (const event of events) {

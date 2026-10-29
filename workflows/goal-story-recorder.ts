@@ -1,5 +1,5 @@
 import { createHash } from "node:crypto";
-import { emptyGoalStory, recordGoalEvent, validateGoalStory, GOAL_STORY_LIMIT, type GoalStory, type GoalTimelineKind } from "./goal-story.ts";
+import { emptyGoalStory, recordGoalEvent, validateGoalStory, boundStoryEvents, GOAL_STORY_LIMIT, type GoalStory, type GoalTimelineKind } from "./goal-story.ts";
 
 type Task = { id: string; text: string; status: string };
 type State = { status: string; tasks: Task[] };
@@ -45,6 +45,7 @@ export function createGoalStoryRecorder(entryId: string, branch: unknown[], pers
       notifications.add(id);
       story.activity.push({ id: `notification:${createHash("sha256").update(id).digest("hex")}`, at, text: text.trim().slice(0, 4000) });
       story.activity = story.activity.slice(-GOAL_STORY_LIMIT);
+      boundStoryEvents(story);
       save();
     },
   };
