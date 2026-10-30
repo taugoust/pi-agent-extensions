@@ -11,6 +11,7 @@ import type { TuiPlacedWorkerManifest, TuiWorkerManifest, TuiWorkerPlacement } f
 import { TuiWorkerStore, atomicPrivateJson, readPrivateJson } from "./tui-worker-store.ts";
 import { callTuiWorker } from "./tui-worker-client.ts";
 import { TaskNameStore } from "./task-name-store.ts";
+import { guidanceLaunchEnvironment } from "./guidance.ts";
 import { subagentTmuxName, subagentTmuxAlias } from "./tui-names.ts";
 
 const exec = promisify(execFile);
@@ -228,7 +229,7 @@ export class TuiWorkerTmux {
       await writeFile(promptPath, input.systemPrompt, { flag: "wx", mode: 0o600 });
       argv.push("--append-system-prompt", promptPath);
     }
-    if (input.tools) argv.push("--tools", [...new Set([...input.tools, "notify_parent", "task_outcome"])].join(","));
+    if (input.tools) argv.push("--tools", [...new Set([...input.tools, "notify_parent", "task_outcome", "request_guidance", "guidance"])].join(","));
     // Fresh child-local authority is supplied by immutable launcher. Never reuse
     // parent's relay capability or accidentally inherit full supervisor markers.
     const remove = ["AGENTSH_PERMISSION_GATE_SOCKET", "PI_SUBAGENT_PERMISSION_SOCKET", "PI_SUBAGENT_PERMISSION_TOKEN", "PI_SUBAGENT_OUTCOME_PATH",
@@ -237,6 +238,7 @@ export class TuiWorkerTmux {
     const routing = input.routingEnvironment ?? {};
     if (Object.keys(routing).some(key => !["PI_SESSION_ROUTING_FILE", "PI_SESSION_ROUTING_OWNER_SESSION"].includes(key))) throw new Error("Invalid private routing environment");
     const identityEnv: Record<string, string> = {
+      ...guidanceLaunchEnvironment({ ownerSessionId: input.ownerSessionId, taskId: input.taskId, childId: input.childId, attempt: input.attempt, workerEpoch }),
       // Use the caller's config/defaults, not the tmux server's stale environment.
       PI_CODING_AGENT_DIR: getAgentDir(),
       ...routing,

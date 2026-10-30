@@ -35,7 +35,7 @@ Extensions are **opt-in**. [Build a selective bundle or install without Nix →]
 | --- | --- |
 | [BTW](btw/README.md) | Ask a side question without cluttering the main conversation. |
 | [Workflows](workflows/README.md) | Manage Git worktrees and explicitly authorized Goals. |
-| [Subagent](docs/subagent-profiles.md) | Delegate single, parallel or chained work with named profiles and optional [supervised runtime verification](docs/subagent-verification.md). |
+| [Subagent](docs/subagent-profiles.md) | Delegate single, parallel or chained work with named profiles, [coordinator-first guidance](subagent/GUIDANCE.md), and optional [supervised runtime verification](docs/subagent-verification.md). |
 | [Background jobs](background-job) | Run, monitor and clean up durable shell jobs. |
 | [Progress](OBSERVABILITY.md) | Keep multi-step work visible. |
 | [Auto](auto) | Opt into automatic continuation with `/auto`. |

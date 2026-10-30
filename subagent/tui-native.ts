@@ -1,4 +1,5 @@
 import { resultPage } from "./result-page.ts";
+import { pendingGuidance } from "./guidance.ts";
 import { nativeResultReport } from "./result-report.ts";
 import { validateToolPresentation, validateToolPresentationArguments } from "../shared/tool-presentation.ts";
 import { randomBytes, createHash } from "node:crypto";
@@ -30,7 +31,7 @@ type Child = { childId: string; taskId: string; attempt: number; directory: stri
   verification?: unknown; historicalVerification?: unknown; acceptedDelivery?: boolean;
   notifiedSequence: number; needsAttention?: boolean; idleDecisionNotified?: string; runSequence?: number; pendingActivitySequence?: number; terminalNotification?: string; lastOutcome?: unknown; requiresCompaction?: boolean; };
 type Group = { windowName?: string; renameWindowWithFirstChild?: boolean; version: 1; id: string; owner: string; createdAt: string; mode: "single" | "parallel" | "chain";
-  background: boolean; cancelled: boolean; children: Child[]; caller: TuiWorkerPlacement;
+  background: boolean; guidanceYielded?: boolean; cancelled: boolean; children: Child[]; caller: TuiWorkerPlacement;
   parentOwnerToken: string;
   operatorEnabled: boolean; launcher: string; launchMode: "none" | "guard-only"; promotionPending?: boolean; };
 type Disposition = "native" | "guard-only" | "full" | "unavailable";
@@ -639,9 +640,10 @@ export class TuiNativeManager {
     const notificationState = c.state === "completed" && c.spec?.verification?.length && (c.verification as any)?.status !== "passed" ? "failed" : c.state;
     const token = terminalToken(c);
     if (c.terminalNotification === token) return;
-    // Foreground callers receive their result directly. Persist the baseline
-    // so promotion/restart cannot turn an already-observed result into a wake.
-    if (!g.background) { c.terminalNotification = token; return; }
+    // Foreground callers normally receive their result directly. A guidance
+    // yield returned early, so notify completion without changing pane/lifetime
+    // ownership or pretending this was an explicit background promotion.
+    if (!g.background && !g.guidanceYielded) { c.terminalNotification = token; return; }
     const identity = createHash("sha256").update(token).digest("hex").slice(0, 24);
     if (this.notify?.({ kind: "subagent", id: `${g.id}:${c.childId}:terminal:${identity}`,
       job_id: g.id, child_id: c.childId, displayName: this.canonicalTitle(c), state: notificationState, completion: true,
@@ -701,6 +703,10 @@ export class TuiNativeManager {
     if (signal?.aborted) abortForeground();
     try {
       while (!g.background && g.children.some(active)) {
+        if (pendingGuidance(owner, g.children.map(child => child.childId))) {
+          g.guidanceYielded = true; this.save(g);
+          return response(`${this.text(g)}\nCoordinator guidance is waiting; use guidance list. Workers remain live.`, { operation: "start", job_id: g.id, group: this.publicGroup(g), guidance_waiting: true });
+        }
         if (this.closed) throw new Error("Foreground subagent controller closed");
         if (signal?.aborted) { await this.serial(() => this.cancelGroup(g)); throw new Error("Foreground subagent cancelled"); }
         try { update?.(response(this.text(g), { group: this.publicGroup(g), job_id: g.id })); } catch { /* Rendering cannot abandon a live foreground execution. */ }

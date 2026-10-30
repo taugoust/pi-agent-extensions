@@ -55,6 +55,13 @@ for (const [name, value] of [["cancelled", undefined], ["empty", ""], ["blank", 
   });
 }
 
+test("only explicit remote Cancel carries human cancellation provenance", async () => {
+  bridge(async () => "Cancel questionnaire");
+  assert.deepEqual(await answerQuestionnaireInPaseo([question]), { kind: "cancelled", byUser: true });
+  bridge(async () => { throw new Error("unavailable"); });
+  assert.deepEqual(await answerQuestionnaireInPaseo([question]), { kind: "cancelled" });
+});
+
 test("remote input failure cancels rather than becoming a selected answer", async () => {
   bridge(async () => other, async () => { throw new Error("disconnected"); });
   assert.deepEqual(await answerQuestionnaireInPaseo([question]), { kind: "cancelled" });

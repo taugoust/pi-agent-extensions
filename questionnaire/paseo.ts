@@ -24,7 +24,7 @@ export interface PaseoAnswer {
 
 export type PaseoQuestionnaireOutcome =
   | { kind: "answered"; answers: PaseoAnswer[] }
-  | { kind: "cancelled" }
+  | { kind: "cancelled"; byUser?: true }
   | { kind: "terminal" };
 
 type RemoteQuestionnaireSettings = {
@@ -123,7 +123,7 @@ export async function answerQuestionnaireInPaseo(
 
     if (choice === TERMINAL_CHOICE) return { kind: "terminal" };
     if (choice === undefined) return unavailableReply(bridge, signal);
-    if (choice === CANCEL_CHOICE) return { kind: "cancelled" };
+    if (choice === CANCEL_CHOICE) return { kind: "cancelled", byUser: true };
     if (choice === OTHER_CHOICE && canInput) {
       let value: string | undefined;
       try {

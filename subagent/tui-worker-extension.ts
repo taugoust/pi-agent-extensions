@@ -7,6 +7,7 @@ import { TUI_WORKER_MANIFEST_ENV } from "../shared/tui-worker-protocol.ts";
 import { WORKER_INTERACTIONS_KEY } from "../shared/foreground-tasks.ts";
 import { currentSubagentPermissionAuthority } from "../shared/subagent-permission.ts";
 import { TuiWorkerStore } from "./tui-worker-store.ts";
+import guidanceWorker from "./guidance-worker.ts";
 import { TuiWorkerServer } from "./tui-worker-server.ts";
 import { callTuiWorker } from "./tui-worker-client.ts";
 import { TaskNameStore } from "./task-name-store.ts";
@@ -19,6 +20,7 @@ import type { LocalJobController } from "../shared/background-job.ts";
 export default function tuiWorkerExtension(pi: ExtensionAPI): void {
   const manifestPath = process.env[TUI_WORKER_MANIFEST_ENV];
   if (!manifestPath) return;
+  guidanceWorker(pi);
   // Unattended TUI workers must not wait at a trust dialog before their control
   // socket exists. Keep saved/global policy; decline only the unresolved ask,
   // for this process alone. Never read untrusted project settings to decide.
@@ -180,9 +182,9 @@ export default function tuiWorkerExtension(pi: ExtensionAPI): void {
       if (manifest.execution === "rpc-headless") {
         const configured = manifest.tools ?? (typeof (pi as any).getActiveTools === "function" ? (pi as any).getActiveTools() : []);
         const headlessTools = configured.filter((name: string) => name !== "subagent" && name !== "background_job");
-        if (typeof (pi as any).setActiveTools === "function") pi.setActiveTools([...new Set([...headlessTools, "notify_parent", "task_outcome"])]);
+        if (typeof (pi as any).setActiveTools === "function") pi.setActiveTools([...new Set([...headlessTools, "notify_parent", "task_outcome", "request_guidance"])]);
       } else if (manifest.tools !== undefined && typeof (pi as any).setActiveTools === "function") {
-        pi.setActiveTools([...new Set([...manifest.tools, "notify_parent", "task_outcome"])]);
+        pi.setActiveTools([...new Set([...manifest.tools, "notify_parent", "task_outcome", "request_guidance", "guidance"])]);
       }
       const actualSession = ctx.sessionManager.getSessionFile();
       if (!actualSession || resolve(actualSession) !== resolve(manifest.sessionFile)) throw new Error("Worker Pi session does not match launch manifest");

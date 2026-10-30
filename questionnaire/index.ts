@@ -49,6 +49,9 @@ interface QuestionnaireResult {
   questions: Question[];
   answers: Answer[];
   cancelled: boolean;
+  /** Bounded tool-result metadata, not part of TaskInteractionAnswer wire DTO. */
+  failure?: { code: "interaction_unavailable" };
+  cancelledByHuman?: true;
 }
 
 type AgentEventPublisher = (
@@ -110,10 +113,12 @@ const QuestionnaireParams = Type.Object({
 function errorResult(
   message: string,
   questions: Question[] = [],
-): { content: { type: "text"; text: string }[]; details: QuestionnaireResult } {
+  cancelledByHuman = false,
+): { content: { type: "text"; text: string }[]; details: QuestionnaireResult; isError: boolean } {
   return {
     content: [{ type: "text", text: message }],
-    details: { questions, answers: [], cancelled: true },
+    details: { questions, answers: [], cancelled: true, ...(cancelledByHuman ? { cancelledByHuman: true as const } : { failure: { code: "interaction_unavailable" as const } }) },
+    isError: !cancelledByHuman,
   };
 }
 
@@ -143,7 +148,7 @@ function normalizeExternalAnswer(
       index: typeof a.index === "number" ? a.index : undefined,
     }));
   if (!candidate.cancelled && answers.length === 0) return undefined;
-  return { questions, answers, cancelled: Boolean(candidate.cancelled) };
+  return { questions, answers, cancelled: Boolean(candidate.cancelled), ...(candidate.cancelled ? { cancelledByHuman: true as const } : {}) };
 }
 
 async function pollExternalAnswer(
@@ -214,7 +219,7 @@ export default function questionnaire(pi: ExtensionAPI) {
           if (!answer || answer.kind !== "questionnaire" || typeof answer.cancelled !== "boolean") {
             return errorResult("Error: Headless questionnaire returned an invalid response", questions);
           }
-          if (answer.cancelled) return errorResult("User cancelled the questionnaire", questions);
+          if (answer.cancelled) return errorResult("User cancelled the questionnaire", questions, true);
           const byId = new Map(questions.map((question) => [question.id, question]));
           if (!Array.isArray(answer.answers) || answer.answers.length !== questions.length) {
             return errorResult("Error: Headless questionnaire returned incomplete answers", questions);
@@ -332,6 +337,7 @@ export default function questionnaire(pi: ExtensionAPI) {
                 questions,
                 answers: Array.from(answers.values()),
                 cancelled,
+                ...(cancelled ? { cancelledByHuman: true as const } : {}),
               },
               cancelled,
             );
@@ -630,12 +636,14 @@ export default function questionnaire(pi: ExtensionAPI) {
           questions,
           answers: winner.outcome.kind === "answered" ? winner.outcome.answers : [],
           cancelled: winner.outcome.kind === "cancelled",
+          ...(winner.outcome.kind === "cancelled" ? (winner.outcome.byUser ? { cancelledByHuman: true as const } : { failure: { code: "interaction_unavailable" as const } }) : {}),
         };
-        if (result.cancelled) ctx.abort();
+        if (result.cancelledByHuman) ctx.abort();
         completeFromExternal?.(result);
       }
       signal?.removeEventListener("abort", abortRemote);
       completed = true;
+      if (result.failure) return { content: [{ type: "text", text: "Questionnaire interaction unavailable; no human answer or cancellation recorded" }], details: result, isError: true };
 
       await publishQuestionnaireEvent(
         "agent.question.answered",
@@ -691,6 +699,7 @@ export default function questionnaire(pi: ExtensionAPI) {
         const text = result.content[0];
         return new Text(text?.type === "text" ? text.text : "", 0, 0);
       }
+      if (details.failure) return new Text(theme.fg("warning", "Interaction unavailable"), 0, 0);
       if (details.cancelled) {
         return new Text(theme.fg("warning", "Cancelled"), 0, 0);
       }

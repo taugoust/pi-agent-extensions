@@ -1,4 +1,5 @@
 import { resultPage } from "./result-page.ts";
+import { guidanceLaunchEnvironment, pendingGuidance } from "./guidance.ts";
 import { nativeResultReport } from "./result-report.ts";
 import { getAgentDir } from "@earendil-works/pi-coding-agent";
 import { spawn, execFile } from "node:child_process";
@@ -37,7 +38,7 @@ const stripControls = (text: string) => text.replace(/\x1b\][\s\S]*?(?:\x07|\x1b
 
 type Spec = { name?: string; displayName?: string; task: string; cwd: string; model?: string; tools?: string[]; systemPrompt?: string; acceptance?: string[]; verification?: import("./acceptance.ts").VerificationGate[]; worktree?: WorktreeOption; worktreeInfo?: { path: string; branch: string; baseCommit: string; includedChanges: boolean } };
 type Child = { taskId: string; childId: string; attempt: number; directory: string; spec: Spec; status: ForegroundTask["status"]; createdAt: string; updatedAt: string; started: boolean; launching?: boolean; reaped?: boolean; report?: string; outcome?: unknown; error?: string; workerAlive?: boolean; requiresCompaction?: boolean; notifiedSequence?: number; launcherPid?: number; launcherToken?: string; ownerToken: string; operatorCapability: string; resumeMessage?: string; compactBeforePrompt?: boolean; stopRequested?: boolean; initialPromptDispatching?: boolean; };
-type Group = { version: 1; id: string; owner: string; ownerToken: string; createdAt: string; mode: "single" | "parallel" | "chain"; cancelled: boolean; launchMode: "none" | "guard-only"; launcher: string; children: Child[] };
+type Group = { version: 1; id: string; owner: string; ownerToken: string; createdAt: string; mode: "single" | "parallel" | "chain"; cancelled: boolean; guidanceYielded?: boolean; guidanceCompletion?: string; launchMode: "none" | "guard-only"; launcher: string; children: Child[] };
 type Disposition = "native" | "guard-only" | "full" | "unavailable";
 const active = (c: Child) => ["pending", "running", "waiting-input", "waiting-permission"].includes(c.status);
 const statusText = (child: Child) => child.status === "waiting-input" ? "waiting-input (open the Foreground panel in Paseo)"
@@ -176,7 +177,9 @@ export class HeadlessForegroundManager {
     if (this.closed) return;
     if (this.observerFlight) return this.observerFlight;
     const flight = Promise.all([...this.groups.values()].filter(group => group.owner === owner)
-      .flatMap(group => group.children.map(child => this.observe(group, child)))).then(() => undefined);
+      .flatMap(group => group.children.map(child => this.observe(group, child)))).then(() => {
+        for (const group of this.groups.values()) if (group.owner === owner) this.notifyGuidanceCompletion(group);
+      });
     this.observerFlight = flight;
     try { await flight; } finally { if (this.observerFlight === flight) this.observerFlight = undefined; }
   }
@@ -279,8 +282,9 @@ export class HeadlessForegroundManager {
     const runtimePrompt = [child.spec.systemPrompt, HEADLESS_WORKER_RUNTIME_POLICY].filter(Boolean).join("\n\n");
     writeFileSync(promptPath, runtimePrompt, { flag: "wx", mode: 0o600 });
     args.push("--append-system-prompt", promptPath);
-    if (child.spec.tools) args.push("--tools", [...new Set([...child.spec.tools, "notify_parent", "task_outcome"])].join(","));
+    if (child.spec.tools) args.push("--tools", [...new Set([...child.spec.tools, "notify_parent", "task_outcome", "request_guidance"])].join(","));
     const childEnv: Record<string, string> = {
+      ...guidanceLaunchEnvironment({ ownerSessionId: group.owner, taskId: child.taskId, childId: child.childId, attempt: child.attempt, workerEpoch }),
       // Headless workers share the caller's selected config/defaults root.
       PI_CODING_AGENT_DIR: getAgentDir(),
       ...this.routingEnvironment(),
@@ -518,12 +522,28 @@ export class HeadlessForegroundManager {
   }
   launch(params: any, owner: string, cwd: string, signal?: AbortSignal, update?: (value: any) => void,
     resume?: { taskId: string; sessionFile: string; attempt: number; spec: Spec; message?: string; compact?: boolean }): Promise<any> {
-    const flight = this.launchImpl(params, owner, cwd, signal, update, resume);
+    // Return the coordinator's turn when its child needs a structured answer.
+    // Keep the existing chain/parallel scheduler alive; do not abandon later work.
+    const lifetime = new AbortController(); let yielded = false;
+    const abort = () => lifetime.abort(signal?.reason);
+    signal?.addEventListener("abort", abort, { once: true }); if (signal?.aborted) abort();
+    let yieldGuidance!: (value: any) => void;
+    const guidance = new Promise<any>(resolve => { yieldGuidance = resolve; });
+    const flight = this.launchImpl(params, owner, cwd, lifetime.signal, value => { if (!yielded) update?.(value); }, resume, value => {
+      if (yielded) return;
+      const group = this.groups.get(value.details.job_id)!; group.guidanceYielded = true; this.persist(group);
+      yielded = true; signal?.removeEventListener("abort", abort);
+      yieldGuidance({ ...value, content: [...value.content, { type: "text", text: "Coordinator guidance is waiting; use guidance list. Workers remain live." }], details: { ...value.details, guidance_waiting: true } });
+    });
     this.activeLaunches.add(flight);
-    return flight.finally(() => this.activeLaunches.delete(flight));
+    const settled = flight.finally(() => {
+      this.activeLaunches.delete(flight); signal?.removeEventListener("abort", abort);
+      if (yielded) for (const group of this.groups.values()) if (group.owner === owner) this.notifyGuidanceCompletion(group);
+    });
+    return Promise.race([settled, guidance]);
   }
   private async launchImpl(params: any, owner: string, cwd: string, signal?: AbortSignal, update?: (value: any) => void,
-    resume?: { taskId: string; sessionFile: string; attempt: number; spec: Spec; message?: string; compact?: boolean }) {
+    resume?: { taskId: string; sessionFile: string; attempt: number; spec: Spec; message?: string; compact?: boolean }, yieldGuidance?: (value: any) => void) {
     if (this.owner !== owner || this.closed || this.reapReserved) throw new Error("Headless foreground manager is not active for this session or cleanup reserved");
     const forms = [typeof params.task === "string" && params.task.trim(), Array.isArray(params.tasks) && params.tasks.length, Array.isArray(params.chain) && params.chain.length].filter(Boolean);
     if (forms.length !== 1) throw new Error("Provide exactly one task/tasks/chain form");
@@ -564,9 +584,11 @@ export class HeadlessForegroundManager {
       if (group.mode === "parallel") {
         for (let start = 0; start < group.children.length; start += 4) {
           if (signal?.aborted) throw new Error("Foreground task cancelled");
-          const batch = group.children.slice(start, start + 4);
+          if (group.cancelled) return this.result(group);
+          const batch = group.children.slice(start, start + 4).filter(child => !child.stopRequested);
           await Promise.all(batch.map(child => this.launchWorker(group, child, resume?.sessionFile, signal)));
           while (batch.some(active)) {
+            if (pendingGuidance(owner, batch.map(child => child.childId))) yieldGuidance?.(this.result(group));
             if (this.closed) throw new Error("Headless foreground owner is shutting down");
             if (signal?.aborted) throw new Error("Foreground task cancelled");
             await Promise.all(batch.map(child => this.observe(group, child)));
@@ -577,7 +599,9 @@ export class HeadlessForegroundManager {
       } else {
         for (let index = 0; index < group.children.length; index++) {
           if (signal?.aborted) throw new Error("Foreground task cancelled");
+          if (group.cancelled) return this.result(group);
           const child = group.children[index]!;
+          if (child.stopRequested) continue;
           if (group.mode === "chain" && index > 0) {
             const prior = group.children[index - 1]!;
             while (active(prior)) { if (this.closed) throw new Error("Headless foreground owner is shutting down"); await this.observe(group, prior); await pause(200); if (signal?.aborted) throw new Error("Foreground task cancelled"); }
@@ -587,6 +611,7 @@ export class HeadlessForegroundManager {
           }
           await this.launchWorker(group, child, resume?.sessionFile, signal);
           while (active(child)) {
+            if (pendingGuidance(owner, [child.childId])) yieldGuidance?.(this.result(group));
             if (this.closed) throw new Error("Headless foreground owner is shutting down");
             if (signal?.aborted) throw new Error("Foreground task cancelled");
             await this.observe(group, child);
@@ -611,6 +636,18 @@ export class HeadlessForegroundManager {
       }
       throw error;
     }
+  }
+  private notifyGuidanceCompletion(group: Group): void {
+    if (this.closed || !group.guidanceYielded || group.children.some(active)) return;
+    const token = createHash("sha256").update(JSON.stringify(group.children.map(child => [child.childId, child.attempt, child.status, child.report ?? null]))).digest("hex").slice(0, 24);
+    if (group.guidanceCompletion === token) return;
+    const state = group.cancelled || group.children.some(child => child.status === "cancelled") ? "cancelled"
+      : group.children.some(child => ["failed", "lost"].includes(child.status)) ? "failed" : "completed";
+    try {
+      if (this.notify?.({ kind: "subagent", id: `${group.id}:guidance-terminal:${token}`, job_id: group.id, state, completion: true })) {
+        group.guidanceCompletion = token; this.persist(group);
+      }
+    } catch { /* Existing observer retries; quiet-state receipt IDs deduplicate. */ }
   }
   private startupDiagnostics(child: Child): string {
     try {
