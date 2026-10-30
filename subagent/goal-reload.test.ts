@@ -13,9 +13,9 @@ test("parent reload reconciles only exact stopped execution and never implicitly
       assert.equal(previous?.taskId, "task");
       return { model: "gpt-6.1-sol", identity: { sessionId: "session", runtimeId: "new-runtime", taskId: "task", childId: "new-child", jobId: "new-job", attempt: 2, workerEpoch: "new-epoch" },
         async start() { throw new Error("must not start new assignment"); },
-        async resume() { return { goalId: "new-contract", status: "active", waiting: null, executionStopped: false }; },
-        async pause() { return { goalId: "new-contract", status: "paused", waiting: null, executionStopped: true }; },
-        async observe() { return { goalId: "restored-contract", status: "paused", waiting: null, executionStopped: true }; },
+        async resume() { return { goalId: "restored-contract", activationId: "new-activation", status: "active", waiting: null, executionStopped: false }; },
+        async pause() { return { goalId: "restored-contract", activationId: "new-activation", status: "paused", waiting: null, executionStopped: true }; },
+        async observe() { return { goalId: "restored-contract", activationId: "old-activation", status: "paused", waiting: null, executionStopped: true }; },
         async stop() {},
       };
     },
