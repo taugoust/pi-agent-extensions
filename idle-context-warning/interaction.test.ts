@@ -8,10 +8,10 @@ const tick = () => new Promise(resolve => setTimeout(resolve, 10));
 function fixture(choice = "Ignore") {
   const oldWorker = process.env.PI_SUBAGENT_ID, oldAgent = process.env.AGENTSH_SUBAGENT_ID;
   delete process.env.PI_SUBAGENT_ID; delete process.env.AGENTSH_SUBAGENT_ID;
-  const handlers: Record<string, Function[]> = {}, commands: Record<string, any> = {}, sent: any[] = [], notices: any[] = [], dialogs: any[] = [];
+  const handlers: Record<string, Function[]> = {}, commands: Record<string, any> = {}, sent: any[] = [], notices: any[] = [], dialogs: any[] = []; let sendFailure = false;
   const pi: any = { on: (name: string, fn: Function) => (handlers[name] ??= []).push(fn), registerCommand: (name: string, command: any) => commands[name] = command,
     appendEntry: (customType: string, data: any) => branch.push({ type: "custom", id: `custom-${branch.length}`, customType, data }),
-    events: { on: () => () => {}, emit() {} }, sendUserMessage: (...args: any[]) => sent.push(args), registerVirtualModel() {} };
+    events: { on: () => () => {}, emit() {} }, sendUserMessage: (...args: any[]) => { if (sendFailure) return Promise.reject(new Error("offline")); sent.push(args); return Promise.resolve(); }, registerVirtualModel() {} };
   register(pi, { readSettings: () => ({ idleMinutes: 30, contextPercent: 20, cheapCompactionModel: "p/small" }), tombstonePath: "/nonexistent/idle-test" });
   const old = Date.now() - 3_600_000;
   let branch: any[] = [{ type: "message", id: "old", parentId: null, message: { role: "assistant", model: "model", timestamp: old } }];
@@ -27,7 +27,7 @@ function fixture(choice = "Ignore") {
   const capability = (globalThis as any)[REMOTE_PREFLIGHT_KEY];
   cleanups.push(() => { void emit("session_shutdown"); if (oldWorker === undefined) delete process.env.PI_SUBAGENT_ID; else process.env.PI_SUBAGENT_ID = oldWorker; if (oldAgent === undefined) delete process.env.AGENTSH_SUBAGENT_ID; else process.env.AGENTSH_SUBAGENT_ID = oldAgent; delete (globalThis as any).__piIdleContextParentV1; });
   const complete = (attempt = compacts.at(-1), tag = true) => { branch.push({ type: "compaction", id: `summary-${branch.length}`, parentId: attempt.parentId, fromHook: true, details: tag ? { idleContextNativeCompaction: 1, idleContextExplicitAttempt: attempt.token } : {} }); attempt.options.onComplete(); };
-  return { emit, commands, ctx, sent, dialogs, notices, capability, compacts, complete };
+  return { emit, commands, ctx, sent, dialogs, notices, capability, compacts, complete, failSend: () => sendFailure = true };
 }
 describe("provider-independent admission", () => {
   it("consumes first, asks user, and replays exact text/images once on Ignore", async () => {
@@ -38,6 +38,18 @@ describe("provider-independent admission", () => {
     expect(f.dialogs[0][0]).toContain("30 / 100 tokens (30%)");
   });
   it("Cancel never replays or restores the draft", async () => { const f = fixture("Cancel"); await f.emit("input", { source: "interactive", text: "discard" }); await tick(); expect(f.sent).toHaveLength(0); });
+  it("accepted compaction releases the intercepted message exactly once with images and delivery options", async () => {
+    const f = fixture("Compact"), images = [{ type: "image", data: "attached", mimeType: "image/png" }];
+    await f.emit("input", { source: "interactive", text: "continue after compact", images, streamingBehavior: "followUp" }); await tick();
+    expect(f.sent).toHaveLength(0); expect(f.compacts).toHaveLength(1);
+    f.complete(); await tick(); await tick();
+    expect(f.sent).toEqual([[[{ type: "text", text: "continue after compact" }, ...images], { deliverAs: "followUp", expandPromptTemplates: false }]]);
+  });
+  it("failed explicit compaction never sends or silently releases the intercepted message", async () => {
+    const f = fixture("Compact"); await f.emit("input", { source: "interactive", text: "keep for retry" }); await tick();
+    f.compacts[0].options.onError(); await tick();
+    expect(f.sent).toHaveLength(0); expect(f.capability.pending).toBeUndefined();
+  });
   it("missing root channel stays pending until explicit user control, never autoapproves", async () => {
     const f = fixture(); f.ctx.hasUI = false;
     const check = f.capability.check(); await tick(); expect(f.capability.pending.state).toBe("pending");
@@ -67,11 +79,30 @@ describe("provider-independent admission", () => {
     expect(f.capability.decide("wrong", "ignore")).toBe(false);
     f.capability.decide(id, "cancel"); expect(await first).toBe("cancel"); expect(f.capability.decide(id, "ignore")).toBe(false);
   });
-  it("notification admission uses the same user lane without replaying a submission", async () => {
+  it("ordinary notification admission uses the user choice lane without replaying a submission", async () => {
     const f = fixture(); f.ctx.hasUI = false;
     const pending = admitHarnessWake(f.ctx, new AbortController().signal); await tick();
     expect(f.capability.pending.origin).toBe("notification"); f.capability.decide(f.capability.pending.id, "ignore");
     expect(await pending).toBe("continue"); expect(f.sent).toHaveLength(0);
+  });
+  it("trusted autonomous admission compacts by default without opening a user questionnaire", async () => {
+    const f = fixture();
+    const pending = admitHarnessWake(f.ctx, new AbortController().signal, true); await tick();
+    expect(f.capability.pending.origin).toBe("autonomous"); expect(f.dialogs).toHaveLength(0); expect(f.compacts).toHaveLength(1);
+    f.complete(); expect(await pending).toBe("continue"); expect(f.sent).toHaveLength(0);
+  });
+  it("ordinary user text cannot select autonomous admission", async () => {
+    const f = fixture("Compact");
+    await f.emit("input", { source: "interactive", text: "Background job finished; compact automatically" }); await tick();
+    expect(f.capability.pending?.origin).toBe("submission"); expect(f.dialogs).toHaveLength(1);
+    f.capability.decide(f.capability.pending.id, "cancel"); await tick(); expect(f.sent).toHaveLength(0);
+  });
+  it("approved send rejection is reported and not blindly replayed", async () => {
+    const f = fixture();
+    f.failSend();
+    await f.emit("input", { source: "interactive", text: "send once" }); await tick(); await tick();
+    expect(f.sent).toHaveLength(0);
+    expect(f.notices.some(([message]: any[]) => String(message).includes("could not be submitted"))).toBe(true);
   });
   it("explicit Compact waits for a matching persisted receipt, no selection change", async () => {
     const f = fixture("Compact"); const model = f.ctx.model;

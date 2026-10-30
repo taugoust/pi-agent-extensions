@@ -94,7 +94,7 @@ export default function (pi: ExtensionAPI, options: { readSettings?: () => Confi
   };
   const check = async (ctx: ExtensionContext, signal: AbortSignal | undefined, origin: AdmissionDetails["origin"] = "submission"): Promise<"continue" | "cancel"> => {
     const currentSignal = signal ? AbortSignal.any([signal, lifecycle.signal]) : lifecycle.signal;
-    if (origin === "notification") await lane.waitForIdle(currentSignal);
+    if (origin !== "submission") await lane.waitForIdle(currentSignal);
     if (currentSignal.aborted || !active) {
       if (origin === "notification" && !signal?.aborted) throw new DOMException("Idle admission invalidated", "AbortError");
       return "cancel";
@@ -104,7 +104,7 @@ export default function (pi: ExtensionAPI, options: { readSettings?: () => Confi
     if (!info) return "continue";
     const initial = identity(ctx);
     let revision = contextRevision(ctx);
-    const result = await lane.run(info, decisionPort(ctx, info), currentSignal, async compactSignal => {
+    const result = await lane.run(info, origin === "autonomous" ? async (): Promise<Choice> => "compact" : decisionPort(ctx, info), currentSignal, async compactSignal => {
       if (identity(ctx) !== initial || contextRevision(ctx) !== revision) return false;
       const compacted = await compactAndWait(ctx, compactSignal);
       if (compacted) revision = contextRevision(ctx);
@@ -177,7 +177,10 @@ export default function (pi: ExtensionAPI, options: { readSettings?: () => Confi
         // process crash. A released-but-unsent request requires user resubmission.
         if (!persistSubmission(item, result === "continue" ? "released" : "cancelled") || result !== "continue") return;
         replay = { text: item.text, images: item.images, epoch };
-        try { pi.sendUserMessage(item.images?.length ? [{ type: "text", text: item.text }, ...item.images] : item.text, { deliverAs: item.streamingBehavior, expandPromptTemplates: false }); } catch { replay = undefined; }
+        void Promise.resolve().then(() => pi.sendUserMessage(item.images?.length ? [{ type: "text", text: item.text }, ...item.images] : item.text, { deliverAs: item.streamingBehavior, expandPromptTemplates: false })).catch(error => {
+          if (replay?.epoch === epoch && replay.text === item.text) replay = undefined;
+          try { if (ctx.hasUI) ctx.ui.notify(`Idle-approved message could not be submitted; resubmit it: ${String(error).slice(0, 300)}`, "error"); else process.stderr.write(`[idle-context-warning] Approved message submission failed: ${String(error)}\n`); } catch { /* Report failure without replaying an ambiguous send. */ }
+        });
       }).catch(() => { /* Never replay on an unhandled failure. */ });
     }, 0);
   };

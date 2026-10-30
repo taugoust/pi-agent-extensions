@@ -1,7 +1,7 @@
 import { randomUUID } from "node:crypto";
 
 export type Choice = "ignore" | "compact" | "cancel";
-export type AdmissionDetails = { model: string; idleMinutes: number; contextPercent: number; title: string; origin: "submission" | "notification"; session: string };
+export type AdmissionDetails = { model: string; idleMinutes: number; contextPercent: number; title: string; origin: "submission" | "notification" | "autonomous"; session: string };
 export type PendingAdmission = AdmissionDetails & { id: string; state: "deciding" | "pending" | "compacting" };
 
 /** A session-local decision lane. No model/provider access and no implicit consent.

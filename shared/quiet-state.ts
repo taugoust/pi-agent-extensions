@@ -79,15 +79,15 @@ function controlPending(h:Hub):boolean{return [...h.pending.values()].some(i=>co
 function controlResolved(h:Hub,data:QuietUpdate):boolean{return controlUpdate(data)&&[...h.receipts.values()].some(r=>r.update.kind==='notification'&&r.update.child_id===data.child_id&&r.update.admission_control?.kind==='idle-decision-resolved'&&r.update.admission_control.request_id===data.admission_control?.request_id&&r.update.admission_control.worker_epoch===data.admission_control?.worker_epoch);}
 function revokeConsumedWake(h:Hub):void{if(h.wakeAdmission&&h.wakeItems&&![...h.wakeItems].some(([key,rev])=>h.pending.get(key)?.revision===rev))h.wakeAdmission.abort();}
 /** Gate the existing durable notification queue, not a duplicate wake message.
- * Approval-control requests alone can bypass admission to avoid parent/child
- * recursion; mixed ordinary updates never inherit that exemption. */
+ * Only batches made entirely of producer-confirmed terminal completions or
+ * identity-bound idle-decision controls use automatic compaction admission. */
+function trustedAutonomousUpdate(data:QuietUpdate):boolean{return isCompletion(data)||controlUpdate(data);}
 async function admitBatch(h:Hub,items:Item[]):Promise<boolean>{
-  if(items.every(item=>controlUpdate(item.data)))return true;
   if(h.wakeAdmission||!h.ctx)return false;
   const controller=new AbortController(),writer=h.writer,ctx=h.ctx;
   h.wakeAdmission=controller;h.wakeItems=new Map(items.map(item=>[item.key,item.revision]));
   try{
-    const decision=await admitHarnessWake(ctx,controller.signal);
+    const decision=await admitHarnessWake(ctx,controller.signal,items.length>0&&items.every(item=>trustedAutonomousUpdate(item.data)));
     if(controller.signal.aborted||h.writer!==writer||!h.ctx||session(h.ctx)!==session(ctx))return false;
     if(decision==='continue')return true;
     // Explicit Cancel suppresses this exact wake revision, not retained history.
