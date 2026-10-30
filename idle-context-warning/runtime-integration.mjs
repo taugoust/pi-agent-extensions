@@ -51,6 +51,7 @@ async function fixture(options = {}) {
       models: ['model', 'small-model'].map(id => ({ id, name: `${provider}/${id}`, reasoning: true, input: ['text'], cost, contextWindow: 10000, maxTokens: 1000 })),
       streamSimple(model, transcript, streamOptions) {
         stats[model.id === 'small-model' ? 'summary' : 'physical']++;
+        if (model.id === 'small-model') options.duringSummary?.(ctx, manager, stats);
         if (model.id !== 'small-model') stats.requestUsers.push(transcript.messages.filter(message => message.role === 'user').map(message => message.content));
         const stream = new AssistantMessageEventStream();
         queueMicrotask(async () => { try {
@@ -125,18 +126,40 @@ test('explicit Compact persists native cheap summary before one ordinary-model r
     assert.equal(f.stats.requestUsers.flat().filter(content => JSON.stringify(content).includes('after summary')).length, 1, 'the original intercepted text must reach an ordinary model request exactly once after compaction');
   } finally { await f.close(); }
 });
-test('bridge preflight Compact is followed by the original extension-sourced prompt exactly once', async () => {
-  const f = await fixture(); try {
+test('bridge preflight Compact preserves notification entries and original prompt exactly once', async () => {
+  const f = await fixture({ duringSummary: (_ctx, manager) => manager.appendCustomMessageEntry('harness-state', 'Background work finished during compaction.', true) }); try {
     const preflight = f.capability.check(); await until(() => f.capability.pending);
     f.capability.decide(f.capability.pending.id, 'compact'); assert.equal(await preflight, 'continue');
     const compaction = f.manager.getBranch().findLast(entry => entry.type === 'compaction');
     assert.ok(compaction, 'preflight must finish compacting before the bridge submits its original payload');
-    await f.session.prompt('bridge preflight original', { source: 'extension' });
+    const notification = f.manager.getBranch().findLast(entry => entry.type === 'custom_message' && entry.customType === 'harness-state');
+    assert.ok(notification, 'the asynchronous notification must remain on the active branch');
+    assert.equal(compaction.parentId, notification.id, 'Pi appends the valid summary after the notification added during summary generation');
+    const prompt = 'bridge preflight original';
+    await f.session.prompt(prompt, { source: 'extension' });
     await until(() => f.stats.physical === 1); await f.session.waitForIdle();
-    assert.equal(f.stats.requestUsers.flat().filter(content => JSON.stringify(content).includes('bridge preflight original')).length, 1);
-    const original = f.manager.getBranch().findLast(entry => entry.type === 'message' && entry.message?.role === 'user' && JSON.stringify(entry.message.content).includes('bridge preflight original'));
+    const delivered = f.stats.requestUsers.flat().filter(content => JSON.stringify(content).includes(prompt));
+    assert.equal(delivered.length, 1, 'the exact original prompt reaches one ordinary model request');
+    assert.ok(JSON.stringify(delivered[0]).includes(prompt), 'the original prompt text reaches the model unchanged');
+    const original = f.manager.getBranch().findLast(entry => entry.type === 'message' && entry.message?.role === 'user' && JSON.stringify(entry.message.content).includes(prompt));
     const activeBranch = f.manager.getBranch();
     assert.ok(activeBranch.findIndex(entry => entry.id === compaction.id) < activeBranch.findIndex(entry => entry.id === original.id), 'original message follows the compaction in the active branch');
+    assert.equal(f.stats.physical, 1);
+  } finally { await f.close(); }
+});
+test('a real branch switch during summary generation still cancels the original bridge prompt', async () => {
+  let oldLeaf;
+  const f = await fixture({ duringSummary: (_ctx, manager) => {
+    oldLeaf = manager.getLeafId();
+    manager.branch(manager.getBranch()[0].id);
+  } });
+  try {
+    const preflight = f.capability.check(); await until(() => f.capability.pending);
+    f.capability.decide(f.capability.pending.id, 'compact');
+    assert.equal(await preflight, 'cancel', 'the captured leaf no longer belongs to the selected branch');
+    assert.notDeepEqual(f.manager.getLeafId(), oldLeaf);
+    assert.equal(f.stats.summary, 1, 'Pi performed the summary operation');
+    assert.equal(f.stats.physical, 0, 'a prompt must not dispatch on a switched branch');
   } finally { await f.close(); }
 });
 test('trusted completion wake auto-compacts and dispatches once without a questionnaire', async () => {

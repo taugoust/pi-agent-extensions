@@ -10,14 +10,15 @@ function fixture(choice = "Ignore") {
   delete process.env.PI_SUBAGENT_ID; delete process.env.AGENTSH_SUBAGENT_ID;
   const handlers: Record<string, Function[]> = {}, commands: Record<string, any> = {}, sent: any[] = [], notices: any[] = [], dialogs: any[] = []; let sendFailure = false;
   const pi: any = { on: (name: string, fn: Function) => (handlers[name] ??= []).push(fn), registerCommand: (name: string, command: any) => commands[name] = command,
-    appendEntry: (customType: string, data: any) => branch.push({ type: "custom", id: `custom-${branch.length}`, customType, data }),
+    appendEntry: (customType: string, data: any) => branch.push({ type: "custom", id: `custom-${branch.length}`, parentId: branch.at(-1)?.id, customType, data }),
     events: { on: () => () => {}, emit() {} }, sendUserMessage: (...args: any[]) => { if (sendFailure) return Promise.reject(new Error("offline")); sent.push(args); return Promise.resolve(); }, registerVirtualModel() {} };
   register(pi, { readSettings: () => ({ idleMinutes: 30, contextPercent: 20, cheapCompactionModel: "p/small" }), tombstonePath: "/nonexistent/idle-test" });
   const old = Date.now() - 3_600_000;
+  let sessionId = "test";
   let branch: any[] = [{ type: "message", id: "old", parentId: null, message: { role: "assistant", model: "model", timestamp: old } }];
   const compacts: any[] = [];
   const ctx: any = { hasUI: true, mode: "tui", model: { provider: "p", id: "model" }, thinkingLevel: "low", isIdle: () => true, hasPendingMessages: () => false,
-    sessionManager: { getBranch: () => branch, getSessionId: () => "test", getLeafId: () => branch.at(-1)?.id },
+    sessionManager: { getBranch: () => branch, getSessionId: () => sessionId, getLeafId: () => branch.at(-1)?.id },
     getContextUsage: () => ({ tokens: 30, contextWindow: 100, percent: 30 }),
     ui: { select: async (...args: any[]) => { dialogs.push(args); return choice; }, setStatus() {}, notify: (...args: any[]) => notices.push(args) },
     compact: (options: any) => compacts.push({ options, token: (globalThis as any).__piIdleContextForceCheapV1.token, parentId: branch.at(-1)?.id }),
@@ -26,8 +27,15 @@ function fixture(choice = "Ignore") {
   for (const fn of handlers.session_start ?? []) void fn({}, ctx);
   const capability = (globalThis as any)[REMOTE_PREFLIGHT_KEY];
   cleanups.push(() => { void emit("session_shutdown"); if (oldWorker === undefined) delete process.env.PI_SUBAGENT_ID; else process.env.PI_SUBAGENT_ID = oldWorker; if (oldAgent === undefined) delete process.env.AGENTSH_SUBAGENT_ID; else process.env.AGENTSH_SUBAGENT_ID = oldAgent; delete (globalThis as any).__piIdleContextParentV1; });
-  const complete = (attempt = compacts.at(-1), tag = true) => { branch.push({ type: "compaction", id: `summary-${branch.length}`, parentId: attempt.parentId, fromHook: true, details: tag ? { idleContextNativeCompaction: 1, idleContextExplicitAttempt: attempt.token } : {} }); attempt.options.onComplete(); };
-  return { emit, commands, ctx, sent, dialogs, notices, capability, compacts, complete, pi, failSend: () => sendFailure = true };
+  const complete = (attempt = compacts.at(-1), options: { tag?: boolean; token?: string; afterSummary?: (entry: any) => void; afterCallback?: (entry: any) => void; duplicateReceipt?: boolean } = {}) => {
+    const receipt = options.tag === false ? {} : { idleContextNativeCompaction: 1, idleContextExplicitAttempt: options.token ?? attempt.token };
+    const entry = { type: "compaction", id: `summary-${branch.length}`, parentId: branch.at(-1)?.id, firstKeptEntryId: "old", fromHook: true, details: receipt };
+    branch.push(entry); options.afterSummary?.(entry);
+    if (options.duplicateReceipt) branch.push({ type: "compaction", id: `duplicate-${branch.length}`, parentId: branch.at(-1)?.id, firstKeptEntryId: "old", fromHook: true, details: receipt });
+    attempt.options.onComplete(); options.afterCallback?.(entry);
+  };
+  return { emit, commands, ctx, sent, dialogs, notices, capability, compacts, complete, pi, branch: () => branch,
+    replaceBranch: (next: any[]) => branch = next, setSession: (next: string) => sessionId = next, failSend: () => sendFailure = true };
 }
 describe("provider-independent admission", () => {
   it("consumes first, asks user, and replays exact text/images once on Ignore", async () => {
@@ -44,6 +52,47 @@ describe("provider-independent admission", () => {
     expect(f.sent).toHaveLength(0); expect(f.compacts).toHaveLength(1);
     f.complete(); await tick(); await tick();
     expect(f.sent).toEqual([[[{ type: "text", text: "continue after compact" }, ...images], { deliverAs: "followUp", expandPromptTemplates: false }]]);
+  });
+  it("accepts a valid compact summary across benign branch appends and preserves original payload/options once", async () => {
+    const f = fixture("Compact"), images = [{ type: "image", data: "attached", mimeType: "image/png" }];
+    await f.emit("input", { source: "interactive", text: "exact prompt", images, streamingBehavior: "followUp" }); await tick();
+    f.branch().push({ type: "custom_message", id: "notice", parentId: f.ctx.sessionManager.getLeafId(), customType: "harness-state", content: "background work completed", display: true });
+    f.branch().push({ type: "usage", id: "usage", parentId: "notice", kind: "cache_warm", usage: {} });
+    f.complete(undefined, {
+      afterSummary: entry => f.branch().push({ type: "custom_message", id: "later-notice", parentId: entry.id, customType: "harness-state", content: "another update", display: true }),
+      afterCallback: () => f.branch().push({ type: "custom_message", id: "post-callback-notice", parentId: f.ctx.sessionManager.getLeafId(), customType: "harness-state", content: "late but benign", display: true }),
+    });
+    await tick(); await tick();
+    expect(f.sent).toEqual([[[{ type: "text", text: "exact prompt" }, ...images], { deliverAs: "followUp", expandPromptTemplates: false }]]);
+  });
+  it("still rejects branch navigation and model-visible entries during compaction", async () => {
+    for (const mutate of [
+      (f: ReturnType<typeof fixture>) => f.replaceBranch([{ type: "message", id: "other", parentId: null }]),
+      (f: ReturnType<typeof fixture>) => f.branch().push({ type: "message", id: "other-message", parentId: "old", message: { role: "user", content: "different turn" } }),
+    ]) {
+      const f = fixture("Compact"); const check = f.capability.check(); await tick(); mutate(f); f.complete();
+      expect(await check).toBe("cancel"); expect(f.sent).toHaveLength(0);
+    }
+  });
+  it("rechecks the branch after callback and rejects a late model-visible append", async () => {
+    const f = fixture("Compact"); const check = f.capability.check(); await tick();
+    f.complete(undefined, { afterCallback: entry => f.branch().push({ type: "message", id: "late-user", parentId: entry.id, message: { role: "user", content: "new request" } }) });
+    expect(await check).toBe("cancel"); expect(f.sent).toHaveLength(0);
+  });
+  it("rejects a stale or forged summary attempt receipt", async () => {
+    const f = fixture("Compact"); const check = f.capability.check(); await tick();
+    f.complete(undefined, { token: "not-the-current-attempt" });
+    expect(await check).toBe("cancel"); expect(f.sent).toHaveLength(0);
+  });
+  it("rejects duplicate summaries bearing the same approval token", async () => {
+    const f = fixture("Compact"); const check = f.capability.check(); await tick();
+    f.complete(undefined, { duplicateReceipt: true });
+    expect(await check).toBe("cancel"); expect(f.sent).toHaveLength(0);
+  });
+  it("session identity change during compaction still cancels delivery", async () => {
+    const f = fixture("Compact"); const check = f.capability.check(); await tick();
+    f.setSession("replacement-session"); f.complete();
+    expect(await check).toBe("cancel"); expect(f.sent).toHaveLength(0);
   });
   it("uses Pi's awaited submitUserMessage admission receipt when available", async () => {
     const f = fixture(); let fallbackCalls = 0;
@@ -137,7 +186,7 @@ describe("provider-independent admission", () => {
     expect(await check).toBe("cancel"); f.complete(); expect(f.sent).toHaveLength(0); expect(f.capability.decide(id, "ignore")).toBe(false);
   });
   it("callback alone or wrong receipt cannot release admission", async () => {
-    const f = fixture("Compact"); const check = f.capability.check(); await tick(); f.complete(undefined, false); expect(await check).toBe("cancel");
+    const f = fixture("Compact"); const check = f.capability.check(); await tick(); f.complete(undefined, { tag: false }); expect(await check).toBe("cancel");
   });
   for (const event of ["model_select", "thinking_level_select", "session_before_tree", "session_before_fork", "session_before_switch", "session_start", "session_shutdown"]) it(`${event} revokes pending approval and late compaction`, async () => {
     const f = fixture("Compact"); const pending = f.capability.check(); await tick(); const old = f.compacts[0];

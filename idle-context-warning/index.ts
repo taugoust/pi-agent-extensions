@@ -1,7 +1,7 @@
 import { existsSync } from "node:fs";
 import { randomUUID } from "node:crypto";
 import { join } from "node:path";
-import { getAgentDir, type ExtensionAPI, type ExtensionContext } from "@earendil-works/pi-coding-agent";
+import { getAgentDir, type ExtensionAPI, type ExtensionContext, type SessionEntry } from "@earendil-works/pi-coding-agent";
 import { readExtensionDefaults, readPreferenceDocument, mergeExtensionSettings } from "../shared/extension-defaults.js";
 import { getSessionRoutingProfile, onSessionRoutingChanged } from "../shared/session-routing.ts";
 import { installWakeAdmission } from "../shared/idle-admission.ts";
@@ -72,24 +72,60 @@ export default function (pi: ExtensionAPI, options: { readSettings?: () => Confi
   };
   const identity = (ctx: ExtensionContext) => JSON.stringify([epoch, ctx.sessionManager.getSessionId(), ctx.model?.provider, ctx.model?.id, ctx.thinkingLevel, getSessionRoutingProfile(ctx)]);
   const contextRevision = (ctx: ExtensionContext) => ctx.sessionManager.getBranch().findLast(entry => ["message", "custom_message", "compaction", "branch_summary", "context_edit"].includes(entry.type))?.id;
+  const SAFE_COMPACTION_INTERLEAVINGS = new Set(["custom_message", "usage", "session_info"]);
+  function hasSafeCompactionBranch(branch: SessionEntry[], capturedLeaf: string | null, token: string): boolean {
+    const leafIndex = branch.findIndex(entry => entry.id === capturedLeaf);
+    const receiptIndexes = branch.flatMap((entry, index) => entry.type === "compaction"
+      && (entry.details as Record<string, unknown> | undefined)?.idleContextExplicitAttempt === token ? [index] : []);
+    if (leafIndex < 0 || receiptIndexes.length !== 1) return false;
+    const compactionIndex = receiptIndexes[0];
+    if (compactionIndex <= leafIndex) return false;
+    // getBranch() is the active parent chain. Reject branch navigation and any
+    // context-changing entry on either side of the summary; allow only entries
+    // that do not replace prepared model history or invalidate the summary.
+    for (let index = 1; index < branch.length; index += 1) {
+      if (branch[index].parentId !== branch[index - 1].id) return false;
+    }
+    const entry = branch[compactionIndex];
+    if (entry.type !== "compaction" || entry.parentId !== branch[compactionIndex - 1]?.id) return false;
+    if (entry.firstKeptEntryId !== entry.id) {
+      const firstKeptIndex = branch.findIndex(candidate => candidate.id === entry.firstKeptEntryId);
+      if (firstKeptIndex < 0 || firstKeptIndex > leafIndex) return false;
+    }
+    for (let index = leafIndex + 1; index < branch.length; index += 1) {
+      if (index === compactionIndex) continue;
+      if (!SAFE_COMPACTION_INTERLEAVINGS.has(branch[index].type)) return false;
+    }
+    return true;
+  }
   const compactAndWait = async (ctx: ExtensionContext, signal: AbortSignal): Promise<boolean> => {
     if (signal.aborted || !ctx.isIdle() || ctx.hasPendingMessages()) return false;
     const initial = identity(ctx), leaf = ctx.sessionManager.getLeafId(), sessionId = ctx.sessionManager.getSessionId(), token = randomUUID();
     const forced = { sessionId, token };
     globals[FORCE_CHEAP_COMPACTION_KEY] = forced;
     try {
-      return await new Promise<boolean>(resolve => {
+      const completed = await new Promise<boolean>(resolve => {
         let finished = false;
         const finish = (ok: boolean) => { if (finished) return; finished = true; clearTimeout(timer); signal.removeEventListener("abort", abort); resolve(ok && !signal.aborted && identity(ctx) === initial); };
         const abort = () => finish(false);
         const timer = setTimeout(() => finish(false), 120_000);
         signal.addEventListener("abort", abort, { once: true });
         try { ctx.compact({ onError: () => finish(false), onComplete: () => {
-          const entry = ctx.sessionManager.getBranch().findLast(item => item.type === "compaction");
+          const branch = ctx.sessionManager.getBranch();
+          const attempts = branch.filter(item => item.type === "compaction"
+            && (item.details as Record<string, unknown> | undefined)?.idleContextExplicitAttempt === token);
+          const entry = attempts.length === 1 ? attempts[0] : undefined;
           const data = entry?.type === "compaction" ? entry.details as Record<string, unknown> | undefined : undefined;
-          finish(entry?.type === "compaction" && entry.parentId === leaf && ctx.sessionManager.getLeafId() === entry.id && entry.fromHook === true && data?.idleContextNativeCompaction === 1 && data?.idleContextExplicitAttempt === token);
+          const safeBranch = hasSafeCompactionBranch(branch, leaf, token);
+          finish(entry?.type === "compaction" && safeBranch
+            && entry.fromHook === true && data?.idleContextNativeCompaction === 1
+            && data?.idleContextExplicitAttempt === token);
         } }); } catch { finish(false); }
       });
+      // Pi may append cache-usage or other entries before ctx.compact() fully
+      // settles after onComplete. Recheck the active chain at the await boundary.
+      return completed && !signal.aborted && identity(ctx) === initial
+        && hasSafeCompactionBranch(ctx.sessionManager.getBranch(), leaf, token);
     } finally { if (globals[FORCE_CHEAP_COMPACTION_KEY] === forced) delete globals[FORCE_CHEAP_COMPACTION_KEY]; }
   };
   const check = async (ctx: ExtensionContext, signal: AbortSignal | undefined, origin: AdmissionDetails["origin"] = "submission"): Promise<"continue" | "cancel"> => {
