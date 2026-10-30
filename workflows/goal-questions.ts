@@ -7,14 +7,15 @@ export const GOAL_QUESTIONS_ENTRY = "delegated-goal-questions-v1";
  * no text prompts are dispatched by this service. Reply authority is supplied
  * by the private goal-worker RPC and exact epoch/revision checks below. */
 export function createGoalQuestions(entryId: string, workerEpoch: string, branch: unknown[], persist: (data: unknown) => void) {
-  let questions: GoalQuestion[] = [], closed = false;
+  let questions: GoalQuestion[] = [], closed = false, truncated: boolean | undefined = false;
   const waiters = new Map<string, { resolve(value: TaskInteractionAnswer): void; reject(error: Error): void }>();
   const receipts = new Map<string, string>();
   for (const raw of branch) {
-    const entry = raw as { type?: string; customType?: string; data?: { entryId?: string; workerEpoch?: string; questions?: GoalQuestion[]; receipts?: Array<[string, string]> } };
+    const entry = raw as { type?: string; customType?: string; data?: { entryId?: string; workerEpoch?: string; questions?: GoalQuestion[]; truncated?: boolean; receipts?: Array<[string, string]> } };
     if (entry.type !== "custom" || entry.customType !== GOAL_QUESTIONS_ENTRY || entry.data?.entryId !== entryId) continue;
     validateGoalStory({ version: 1, timeline: [], activity: [], questions: entry.data.questions });
     questions = structuredClone(entry.data.questions ?? []);
+    truncated = typeof entry.data.truncated === "boolean" ? entry.data.truncated : undefined;
     receipts.clear();
     if (entry.data.workerEpoch === workerEpoch) {
       const stored = entry.data.receipts ?? [];
@@ -23,8 +24,10 @@ export function createGoalQuestions(entryId: string, workerEpoch: string, branch
     }
   }
   const save = (next: GoalQuestion[], nextReceipts = receipts) => {
-    next = boundQuestionHistory(next);
-    persist({ entryId, workerEpoch, questions: structuredClone(next), receipts: [...nextReceipts] });
+    const bounded = boundQuestionHistory(next);
+    if (bounded.length < next.length) truncated = true;
+    next = bounded;
+    persist({ entryId, workerEpoch, questions: structuredClone(next), ...(truncated === undefined ? {} : { truncated }), receipts: [...nextReceipts] });
     questions = next;
     if (nextReceipts !== receipts) { receipts.clear(); for (const [id, hash] of nextReceipts) receipts.set(id, hash); }
   };
@@ -37,12 +40,14 @@ export function createGoalQuestions(entryId: string, workerEpoch: string, branch
   }
   return {
     snapshot: () => structuredClone(questions),
+    coverage: () => truncated,
     async request(input: TaskInteractionInput, signal?: AbortSignal): Promise<TaskInteractionAnswer> {
       if (closed || signal?.aborted || input.kind !== "questionnaire" || !validInteractionInput(input)) throw new Error("Goal questionnaire unavailable or invalid");
       if (waiters.size >= 4) throw new Error("Too many pending goal questions");
       const id = randomUUID();
       const question: GoalQuestion = { id, revision: 1, at: Date.now(), workerEpoch, status: "pending", request: structuredClone(input) };
       const retained = questions.length >= 100 ? questions.filter(q => q.status === "pending").concat(questions.filter(q => q.status !== "pending").slice(-95)) : questions;
+      if (retained.length < questions.length) truncated = true;
       save([...retained, question]);
       const promise = new Promise<TaskInteractionAnswer>((resolve, reject) => waiters.set(id, { resolve, reject }));
       const abort = () => { try { cancel(id); } catch (error) { waiters.get(id)?.reject(error instanceof Error ? error : new Error("Question cancellation failed")); waiters.delete(id); } };

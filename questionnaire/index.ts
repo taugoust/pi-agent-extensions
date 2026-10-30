@@ -31,6 +31,8 @@ interface Question {
   id: string;
   label: string;
   prompt: string;
+  background?: string;
+  recommendation?: string;
   options: QuestionOption[];
   allowOther: boolean;
 }
@@ -87,6 +89,8 @@ const QuestionSchema = Type.Object({
     }),
   ),
   prompt: Type.String({ description: "The full question text to display" }),
+  background: Type.Optional(Type.String({ maxLength: 2000, description: "Brief authored context for this question" })),
+  recommendation: Type.Optional(Type.String({ maxLength: 256, description: "Suggested option value for review only; never selected or submitted automatically" })),
   options: Type.Array(QuestionOptionSchema, {
     description: "Available options to choose from",
   }),
@@ -204,7 +208,7 @@ export default function questionnaire(pi: ExtensionAPI) {
         try {
           const answer = await interactions.request({
             kind: "questionnaire",
-            questions: questions.map(({ id, label, prompt, options, allowOther }) => ({ id, label, prompt, options, allowOther })),
+            questions: questions.map(({ id, label, prompt, options, allowOther, background, recommendation }) => ({ id, label, prompt, options, allowOther, ...(background === undefined ? {} : { background }), ...(recommendation === undefined ? {} : { recommendation }) })),
           }, signal);
           if (signal?.aborted) return errorResult("Error: Questionnaire aborted", questions);
           if (!answer || answer.kind !== "questionnaire" || typeof answer.cancelled !== "boolean") {

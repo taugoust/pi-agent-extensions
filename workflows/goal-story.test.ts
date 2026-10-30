@@ -2,7 +2,7 @@ import { test } from "node:test";
 import assert from "node:assert/strict";
 import { createGoalStoryRecorder, GOAL_STORY_ENTRY } from "./goal-story-recorder.ts";
 import { createGoalQuestions, GOAL_QUESTIONS_ENTRY } from "./goal-questions.ts";
-import { mergeGoalStory, emptyGoalStory } from "./goal-story.ts";
+import { mergeGoalStory, emptyGoalStory, recordGoalEvent, validateGoalStory } from "./goal-story.ts";
 import { DelegatedGoalRegistry } from "./delegated-goals.ts";
 import { workerInteractionsService, WORKER_INTERACTIONS_KEY } from "../shared/foreground-tasks.ts";
 
@@ -34,6 +34,24 @@ test("recorded activity remains within the RPC byte budget with long Unicode upd
  assert.ok(Buffer.byteLength(JSON.stringify([story.timeline,story.activity]))<=128*1024);
  assert.equal(story.activity.at(-1)?.at,199);
  assert.ok(story.activity.length<200);
+});
+
+test("coverage records count/byte eviction, retains unknown legacy coverage, and validates authored question context",()=>{
+ const story=emptyGoalStory();for(let i=0;i<205;i++)recordGoalEvent(story,"edited",`event ${i}`,undefined,i);
+ assert.equal(story.timeline.length,200);assert.equal(story.coverage?.timelineTruncated,true);
+ const merged=mergeGoalStory(story,{version:1,timeline:[],activity:[]});assert.equal(merged.coverage?.timelineTruncated,true);assert.equal(merged.coverage?.activityTruncated,undefined);
+ assert.throws(()=>validateGoalStory({...story,coverage:{unknown:true}}),/coverage/);
+ const q={id:"q",revision:1,at:1,workerEpoch:"epoch",status:"pending",request:{...input,questions:[{...input.questions[0],background:"Authored context",recommendation:"a"}]}};
+ validateGoalStory({...emptyGoalStory(),questions:[q]});
+ assert.throws(()=>validateGoalStory({...emptyGoalStory(),questions:[{...q,request:{...q.request,questions:[{...q.request.questions[0],recommendation:"missing"}]}}]}),/question/);
+});
+
+test("observation health changes without mutating durable paused tasks or entry revisions",async()=>{
+ let available=true;const registry=new DelegatedGoalRegistry("session",{async start(){return {taskId:"task",childId:"child",jobId:"job",attempt:1};},async resume(){throw Error("unused");},async pause(){},async observe(){if(!available)throw Error("offline");return {tasks:[]};}},()=>{});
+ let state=await registry.mutate("session",{action:"goals.create",requestId:"c",expectedGoalId:null,objective:"Health"});const id=state.entries[0].id;
+ state=await registry.mutate("session",{action:"goals.start",requestId:"s",expectedGoalId:id,expectedEntryRevision:1});const revision=state.entries[0].revision;
+ await registry.refresh();state=registry.snapshot();assert.equal(state.entries[0].observation?.state,"current");const at=state.entries[0].observation?.at;assert.equal(state.entries[0].revision,revision);
+ available=false;await registry.refresh();state=registry.snapshot();assert.equal(state.entries[0].observation?.state,"unavailable");assert.equal(state.entries[0].observation?.at,at);assert.equal(state.entries[0].status,"active");assert.equal(state.entries[0].revision,revision);
 });
 
 test("goal questions require exact live epoch, revision and answer; retries settle one actual request",async()=>{

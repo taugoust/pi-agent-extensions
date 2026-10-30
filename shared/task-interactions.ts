@@ -14,6 +14,8 @@ export function validInteractionInput(input: any): input is TaskInteractionInput
     if (!question || typeof question.id !== "string" || !/^[a-zA-Z0-9._:-]{1,128}$/.test(question.id) || ids.has(question.id)
       || typeof question.prompt !== "string" || !question.prompt.length || Buffer.byteLength(question.prompt) > 4096
       || typeof question.allowOther !== "boolean" || !Array.isArray(question.options) || question.options.length > 12) return false;
+    if ((question.background !== undefined && (typeof question.background !== "string" || question.background.length > 2000 || Buffer.byteLength(question.background) > 4096))
+      || (question.recommendation !== undefined && (typeof question.recommendation !== "string" || !question.options.some((option: any) => option.value === question.recommendation)))) return false;
     ids.add(question.id);
     const values = new Set<string>();
     return question.options.every((option: any) => option && typeof option.value === "string" && option.value.length > 0

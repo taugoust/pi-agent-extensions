@@ -8,13 +8,19 @@ export type GoalTimelineKind = "created" | "started" | "paused" | "resumed" | "b
 export type GoalTaskStatus = "pending" | "in_progress" | "completed" | "blocked";
 export type GoalTimelineEvent = { id: string; at: number; kind: GoalTimelineKind; text: string; taskId?: string; taskStatus?: GoalTaskStatus };
 export type GoalActivityEvent = { id: string; at: number; text: string };
-export type GoalStory = { version: 1; timeline: GoalTimelineEvent[]; activity: GoalActivityEvent[]; questions?: GoalQuestion[] };
+export type GoalCoverage = { timelineTruncated?: boolean; activityTruncated?: boolean; questionsTruncated?: boolean };
+export type GoalStory = { version: 1; timeline: GoalTimelineEvent[]; activity: GoalActivityEvent[]; questions?: GoalQuestion[]; coverage?: GoalCoverage };
+export function markStoryTruncated(story: GoalStory, key: keyof GoalCoverage): void { (story.coverage ??= {})[key] = true; }
 export const GOAL_STORY_LIMIT = 200;
 export function boundStoryEvents(story: GoalStory): void {
+  for (const key of ["timeline", "activity"] as const) if (story[key].length > GOAL_STORY_LIMIT) {
+    story[key].splice(0, story[key].length - GOAL_STORY_LIMIT);
+    markStoryTruncated(story, key === "timeline" ? "timelineTruncated" : "activityTruncated");
+  }
   while (Buffer.byteLength(JSON.stringify([story.timeline, story.activity])) > 128 * 1024) {
     if (!story.timeline.length && !story.activity.length) break;
-    if (!story.activity.length || (story.timeline.length && story.timeline[0].at <= story.activity[0].at)) story.timeline.shift();
-    else story.activity.shift();
+    if (!story.activity.length || (story.timeline.length && story.timeline[0].at <= story.activity[0].at)) { story.timeline.shift(); markStoryTruncated(story, "timelineTruncated"); }
+    else { story.activity.shift(); markStoryTruncated(story, "activityTruncated"); }
   }
 }
 export function boundQuestionHistory(questions: GoalQuestion[]): GoalQuestion[] {
@@ -28,14 +34,14 @@ export function boundQuestionHistory(questions: GoalQuestion[]): GoalQuestion[] 
 }
 /** Read only extension-owned records for an already authenticated goal lineage. */
 export function readRecordedGoalStory(branch: unknown[], entryId: string): GoalStory | undefined {
-  let story: GoalStory | undefined, questions: GoalQuestion[] | undefined;
+  let story: GoalStory | undefined, questions: GoalQuestion[] | undefined, questionsTruncated: boolean | undefined;
   for (const raw of branch) {
-    const entry = raw as { type?: string; customType?: string; data?: { entryId?: string; story?: GoalStory; questions?: GoalQuestion[] } };
+    const entry = raw as { type?: string; customType?: string; data?: { entryId?: string; story?: GoalStory; questions?: GoalQuestion[]; truncated?: boolean } };
     if (entry.type !== "custom" || entry.data?.entryId !== entryId) continue;
     if (entry.customType === "delegated-goal-story-v1" && entry.data.story) { validateGoalStory(entry.data.story); story = structuredClone(entry.data.story); }
-    if (entry.customType === "delegated-goal-questions-v1") { validateGoalStory({ version: 1, timeline: [], activity: [], questions: entry.data.questions }); questions = structuredClone(entry.data.questions ?? []); }
+    if (entry.customType === "delegated-goal-questions-v1") { validateGoalStory({ version: 1, timeline: [], activity: [], questions: entry.data.questions }); questions = structuredClone(entry.data.questions ?? []); questionsTruncated = typeof entry.data.truncated === "boolean" ? entry.data.truncated : undefined; }
   }
-  return story || questions ? { ...(story ?? emptyGoalStory()), ...(questions ? { questions } : {}) } : undefined;
+  return story || questions ? { ...(story ?? emptyGoalStory()), ...(questions ? { questions, coverage: { ...story?.coverage, ...(questionsTruncated === undefined ? {} : { questionsTruncated }) } } : {}) } : undefined;
 }
 export function mergeGoalStory(target: GoalStory | undefined, observed: GoalStory): GoalStory {
   validateGoalStory(observed);
@@ -47,7 +53,14 @@ export function mergeGoalStory(target: GoalStory | undefined, observed: GoalStor
       if (prior && JSON.stringify(prior) !== JSON.stringify(event)) throw new Error("Goal story event identity changed");
       events.set(event.id, event);
     }
-    return [...events.values()].sort((a, b) => a.at - b.at || a.id.localeCompare(b.id)).slice(-GOAL_STORY_LIMIT);
+    return [...events.values()].sort((a, b) => a.at - b.at || a.id.localeCompare(b.id));
+  }
+  merged.coverage = {};
+  for (const key of ["timelineTruncated", "activityTruncated", "questionsTruncated"] as const) {
+    const before = target?.coverage?.[key], incoming = observed.coverage?.[key];
+    // Legacy absence is unknown, never evidence of complete history.
+    if (before === true || incoming === true) merged.coverage[key] = true;
+    else if ((!target || before === false) && incoming === false) merged.coverage[key] = false;
   }
   merged.timeline = merge(merged.timeline, observed.timeline);
   merged.activity = merge(merged.activity, observed.activity);
@@ -59,19 +72,20 @@ export function mergeGoalStory(target: GoalStory | undefined, observed: GoalStor
     else if (question.revision === prior.revision && JSON.stringify(prior) !== JSON.stringify(question)) throw new Error("Goal question revision conflict");
   }
   merged.questions = boundQuestionHistory([...questions.values()].sort((a, b) => a.at - b.at || a.id.localeCompare(b.id)));
+  if (merged.questions.length < questions.size) markStoryTruncated(merged, "questionsTruncated");
   boundStoryEvents(merged);
   return merged;
 }
-export function emptyGoalStory(): GoalStory { return { version: 1, timeline: [], activity: [], questions: [] }; }
+export function emptyGoalStory(): GoalStory { return { version: 1, timeline: [], activity: [], questions: [], coverage: { timelineTruncated: false, activityTruncated: false, questionsTruncated: false } }; }
 export function recordGoalEvent(story: GoalStory, kind: GoalTimelineKind, text: string, taskId?: string, at = Date.now(), taskStatus?: GoalTaskStatus): void {
   story.timeline.push({ id: randomUUID(), at, kind, text: text.slice(0, 4000), ...(taskId ? { taskId } : {}), ...(taskStatus ? { taskStatus } : {}) });
-  story.timeline = story.timeline.slice(-GOAL_STORY_LIMIT);
   boundStoryEvents(story);
 }
 export function validateGoalStory(value: unknown): asserts value is GoalStory | undefined {
   if (value === undefined) return; // old entries have no fabricated history
   if (!value || typeof value !== "object" || Array.isArray(value)) throw new Error("Invalid goal story");
   const story = value as GoalStory;
+  if (story.coverage !== undefined && (!story.coverage || typeof story.coverage !== "object" || Array.isArray(story.coverage) || Object.entries(story.coverage).some(([key, value]) => !["timelineTruncated", "activityTruncated", "questionsTruncated"].includes(key) || typeof value !== "boolean"))) throw new Error("Invalid goal history coverage");
   if (story.version !== 1 || !Array.isArray(story.timeline) || !Array.isArray(story.activity)
     || story.timeline.length > GOAL_STORY_LIMIT || story.activity.length > GOAL_STORY_LIMIT) throw new Error("Invalid goal story");
   if (Buffer.byteLength(JSON.stringify([story.timeline, story.activity])) > 128 * 1024

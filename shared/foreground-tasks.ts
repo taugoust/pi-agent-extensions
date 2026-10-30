@@ -42,6 +42,9 @@ export type TaskQuestion = {
   id: string;
   label?: string;
   prompt: string;
+  /** Authored context only: never an instruction to select or submit an option. */
+  background?: string;
+  recommendation?: string;
   options: Array<{ value: string; label: string; description?: string }>;
   allowOther: boolean;
 };

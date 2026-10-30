@@ -44,7 +44,6 @@ export function createGoalStoryRecorder(entryId: string, branch: unknown[], pers
       if (!id || notifications.has(id) || !text.trim()) return;
       notifications.add(id);
       story.activity.push({ id: `notification:${createHash("sha256").update(id).digest("hex")}`, at, text: text.trim().slice(0, 4000) });
-      story.activity = story.activity.slice(-GOAL_STORY_LIMIT);
       boundStoryEvents(story);
       save();
     },

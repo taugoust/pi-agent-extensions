@@ -81,7 +81,7 @@ export default async function goalWorker(pi: ExtensionAPI) {
         tasks: snapshot.goal.tasks, tokensUsed: snapshot.goal.tokensUsed,
         automaticTurns: snapshot.goal.automaticTurns, noProgressTurns: snapshot.goal.noProgressTurns,
         policyRevision: snapshot.policyRevision, tokenBudget: snapshot.tokenBudget, limitsEditable: true,
-        summary: snapshot.goal.summary, story: { ...(snapshot.story ?? { version: 1, timeline: [], activity: [] }), questions: questions!.snapshot() }, limits: snapshot.limits };
+        summary: snapshot.goal.summary, story: { ...(snapshot.story ?? { version: 1, timeline: [], activity: [] }), questions: questions!.snapshot(), coverage: { ...snapshot.story?.coverage, ...(questions!.coverage() === undefined ? {} : { questionsTruncated: questions!.coverage() }) } }, limits: snapshot.limits };
     } });
   });
   pi.on("tool_result", (event) => {

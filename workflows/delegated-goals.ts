@@ -14,6 +14,8 @@ export type DelegatedGoalEntry = {
   continuationLimits?: Partial<GoalContinuationLimits>;
   automaticTurns: number; noProgressTurns: number; summary: string | null; waiting: string | null;
   story?: GoalStory;
+  /** Projection only: not a lifecycle transition or authority to execute. */
+  observation?: { state: "current" | "unavailable"; at?: number; reason?: string };
 };
 export type DelegatedGoals = { version: 1; revision: number; entries: DelegatedGoalEntry[] };
 export type DelegatedGoalAction = "goals.create" | "goals.start" | "goals.pause" | "goals.resume" | "goals.edit" | "goals.limits" | "goals.clear" | "goals.add_task" | "goals.answer";
@@ -91,26 +93,38 @@ export class DelegatedGoalRegistry {
   private lane: Promise<unknown> = Promise.resolve();
   private requests = new Map<string, { fingerprint: string; promise: Promise<DelegatedGoals> }>();
   private pending: DelegatedGoalIntent | null;
+  private observations = new Map<string, NonNullable<DelegatedGoalEntry["observation"]>>();
   constructor(readonly sessionId: string, private executor: DelegatedGoalExecutor,
     private persist: (state: DelegatedGoals) => void,
     initial: DelegatedGoals = { version: 1, revision: 0, entries: [] },
     private journal: { initial?: DelegatedGoalIntent | null; save: (intent: DelegatedGoalIntent | null) => void } = { save() {} }) {
     validateDelegatedGoals(initial);
     this.state = copy(initial);
-    this.state.entries.forEach(entry => { normalizeTaskDescriptions(entry); entry.policyRevision ??= entry.revision; });
+    this.state.entries.forEach(entry => { normalizeTaskDescriptions(entry); entry.policyRevision ??= entry.revision; delete entry.observation; });
     this.pending = copy(journal.initial ?? null);
   }
   blockedReason(): string | null { return this.pending ? `Dedicated child delivery requires reconciliation (${this.pending.action}, goal ${this.pending.entryId}); affected-goal mutations and new child execution are blocked to prevent duplicate execution` : null; }
-  snapshot(): DelegatedGoals { return copy(this.state); }
+  snapshot(): DelegatedGoals {
+    const result = copy(this.state);
+    for (const entry of result.entries) if (entry.child) entry.observation = copy(this.observations.get(entry.id) ?? { state: "unavailable" });
+    return result;
+  }
   refresh(): Promise<void> {
     const result = this.lane.then(async () => {
       if (!this.executor.observe || this.pending) return;
-      const next = this.snapshot();
+      const next = copy(this.state);
       let changed = false;
       for (const entry of next.entries) {
         if (!entry.child || entry.status !== "active") continue;
-        const observed = await this.executor.observe(copy(entry));
-        if (!observed) continue;
+        let observed: DelegatedGoalObservation | null;
+        try {
+          observed = await this.executor.observe(copy(entry));
+          if (!observed) throw new Error("Child observation unavailable");
+        } catch (error) {
+          const previous = this.observations.get(entry.id);
+          this.observations.set(entry.id, { state: "unavailable", ...(previous?.at === undefined ? {} : { at: previous.at }), reason: String(error instanceof Error ? error.message : error).slice(0, 1000) });
+          continue;
+        }
         if (observed.status === "cleared") throw new Error("Child cannot clear parent goal history");
         const previous = JSON.stringify(entry);
         const previousStatus = entry.status;
@@ -119,6 +133,8 @@ export class DelegatedGoalRegistry {
         }
         if (observed.story) entry.story = mergeGoalStory(entry.story, observed.story);
         normalizeTaskDescriptions(entry);
+        validateDelegatedGoals({ version: 1, revision: next.revision, entries: [entry] });
+        this.observations.set(entry.id, { state: "current", at: Date.now() });
         if (JSON.stringify(entry) !== previous) {
           if (entry.status !== previousStatus) entry.policyRevision = (entry.policyRevision ?? 1) + 1;
           entry.revision++; changed = true;
@@ -140,7 +156,7 @@ export class DelegatedGoalRegistry {
     return promise.then(copy);
   }
   private async apply(r: DelegatedGoalRequest): Promise<DelegatedGoals> {
-    const next = this.snapshot();
+    const next = copy(this.state);
     if (this.pending && (r.expectedGoalId === this.pending.entryId ||
       ["goals.start", "goals.resume", "goals.pause"].includes(r.action))) throw new Error(this.blockedReason()!);
     let performedEffect = false;
