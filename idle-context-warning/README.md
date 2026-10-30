@@ -20,7 +20,9 @@ Model, thinking, routing/account, branch/fork/session changes cancel stale admis
 
 `shared/quiet-state.ts` retains its existing completion/guidance queue, receipts, deduplication and generation checks. It now requests admission **before** sending its existing model wake message. It does not create a second wake queue or a second notification message. Ordinary completion/guidance waits for busy work and queued messages to drain. Result reads, explicit Cancel and newer activity can consume/supersede the exact pending revision. Reload restores queued notifications, never their approval.
 
-A narrowly typed, owning-controller-generated **child idle-decision control request** is exempt from parent admission. This prevents recursive parent/child approval deadlock. Such control requests are batched separately; ordinary findings/guidance/completions cannot inherit the exemption. `notify_parent` model parameters cannot set control metadata. The `subagent idle_decision` operation continues to require owning parent, child ID, request ID and worker epoch. This exemption permits a parent model control turn even while an unrelated ordinary admission is pending; it is intentionally not a general model-submission bypass.
+Producer-confirmed terminal completions, identity-bound child idle-decision controls, and validated job/subagent guidance use **automatic compaction** when cold-context admission is needed. These autonomous wakes do not ask the root user to choose Compact. Classification uses structured producer metadata, never message text; every item in a batch must qualify. User submissions retain their explicit choice. Notification admission waits for an existing submission decision to settle; invalidation or failed compaction preserves the durable wake for retry rather than consuming it as an explicit Cancel.
+
+`notify_parent` model parameters cannot set idle-control metadata. The `subagent idle_decision` operation continues to require owning parent, child ID, request ID and worker epoch. Automatic admission does not grant permission approvals or bypass worker ownership checks.
 
 ## Compaction is separate
 
