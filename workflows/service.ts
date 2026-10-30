@@ -55,7 +55,7 @@ type Operation = {
 	reject?: (error: Error) => void;
 };
 const actions = [
-	"goals.create", "goals.start", "goals.pause", "goals.resume", "goals.edit", "goals.limits", "goals.clear", "goals.add_task", "goals.answer", "goals.reference",
+	"goals.create", "goals.start", "goals.pause", "goals.resume", "goals.edit", "goals.limits", "goals.clear", "goals.add_task", "goals.answer", "goals.reference", "goals.dependencies", "goals.blocker.add", "goals.blocker.clear",
 	"worktree.add",
 	"worktree.remove",
 	"worktree.prune",
@@ -530,7 +530,7 @@ export function createWorkflowService(
 			terminal = runtime.snapshotSettingsApplicationState().terminalDetails;
 		return {
 			protocol: 1,
-			capabilities: { goalReview: goalReviewAvailable(), goalLimitEditing: true, ownedWorktreeCompletion: true, createPausedGoal: false, delegatedGoals: true, delegatedGoalExecution: executionUnavailableReason() === null },
+			capabilities: { goalPlanning: true, goalReview: goalReviewAvailable(), goalLimitEditing: true, ownedWorktreeCompletion: true, createPausedGoal: false, delegatedGoals: true, delegatedGoalExecution: executionUnavailableReason() === null },
 			delegatedGoals: delegated.snapshot(),
 			sessionId,
 			serviceEpoch,
@@ -928,7 +928,7 @@ export function createWorkflowService(
 						"questionRevision",
 						"workerEpoch",
 						"answer",
-            "reviewTitle", "reviewTarget", "reviewRole",
+            "reviewTitle", "reviewTarget", "reviewRole", "waitsFor", "blockerReason", "blockerEvidence", "blockerTaskId", "blockerId",
 						"operationId",
 						"dialogId",
 						"value",
@@ -1074,7 +1074,7 @@ export function createWorkflowService(
 			const expectedRevision = r.action === "goals.limits" ? r.expectedPolicyRevision : r.expectedEntryRevision;
 			if (typeof r.expectedGoalId !== "string" || !uuid.test(r.expectedGoalId) || !Number.isSafeInteger(expectedRevision) || expectedRevision < 1)
 				throw new Error("Expected delegated goal identity and revision");
-			if (["goals.edit", "goals.limits", "goals.add_task", "goals.clear", "goals.answer", "goals.reference"].includes(r.action)) {
+			if (["goals.edit", "goals.limits", "goals.add_task", "goals.clear", "goals.answer", "goals.reference", "goals.dependencies", "goals.blocker.add", "goals.blocker.clear"].includes(r.action)) {
 				// Definitive metadata result: rejected edits retain the caller's draft.
 				// Cache at service level only AFTER success; failed retries must reach
 				// the registry's retained rejection instead of looking applied.

@@ -68,6 +68,14 @@ test("actual service permits busy parent metadata create and fences independent 
     await assert.rejects(service.handle(staleEdit), /revision/);
     await assert.rejects(service.handle(staleEdit), /revision/);
     snapshot = await snap(); assert.deepEqual(snapshot.delegatedGoals, afterAdd);
+    snapshot = await request({action:"goals.add_task",expectedGoalId:second.id,expectedEntryRevision:snapshot.delegatedGoals.entries[1].revision,text:"Second planned task"});
+    const plannedTasks=snapshot.delegatedGoals.entries[1].tasks;
+    snapshot = await request({action:"goals.dependencies",expectedGoalId:second.id,expectedEntryRevision:snapshot.delegatedGoals.entries[1].revision,taskId:plannedTasks[1].id,waitsFor:[plannedTasks[0].id]});
+    assert.equal(snapshot.capabilities.goalPlanning,true);assert.deepEqual(snapshot.delegatedGoals.entries[1].planning.dependencies,[{taskId:plannedTasks[1].id,waitsFor:[plannedTasks[0].id]}]);
+    snapshot = await request({action:"goals.blocker.add",expectedGoalId:second.id,expectedEntryRevision:snapshot.delegatedGoals.entries[1].revision,blockerReason:"External service",blockerEvidence:"Recorded service failure"});
+    const recorded=snapshot.delegatedGoals.entries[1].planning.blockers[0];
+    snapshot = await request({action:"goals.blocker.clear",expectedGoalId:second.id,expectedEntryRevision:snapshot.delegatedGoals.entries[1].revision,blockerId:recorded.id});
+    assert.equal(snapshot.delegatedGoals.entries[1].planning.blockers[0].evidence,"Recorded service failure");assert.ok(snapshot.delegatedGoals.entries[1].planning.blockers[0].clearedAt);assert.equal(snapshot.delegatedGoals.entries[1].status,"paused");assert.deepEqual(snapshot.delegatedGoals.entries[1].tasks,plannedTasks);
     assert.equal(snapshot.operationId, null); assert.equal(snapshot.notice, null); assert.deepEqual(calls, []);
     assert.ok(!readdirSync(root).some(name => name.endsWith(".intent")));
     globalThis.__paeDelegatedGoalExecutorV1.executionAvailable = () => false;
