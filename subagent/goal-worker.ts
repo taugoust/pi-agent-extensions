@@ -76,12 +76,13 @@ export default async function goalWorker(pi: ExtensionAPI) {
       if (snapshot.entryId !== binding.entryId) throw new Error("Dedicated parent goal identity changed");
       if (!sameGoalLimits(policy.continuationLimits, snapshot.limits)) throw new Error("Dedicated child effective limits changed during operation");
       if (!snapshot.childGoalId || !snapshot.goal) throw new Error("Dedicated child goal state is missing");
+      const { questionsTruncated: _previousQuestionCoverage, ...eventCoverage } = snapshot.story?.coverage ?? {};
       return { goalId: snapshot.childGoalId, activationId: snapshot.childActivationId, revision: snapshot.revision, status: snapshot.goal.status,
         executionStopped: ctx.isIdle() && !ctx.hasPendingMessages(), waiting: snapshot.goal.waiting,
         tasks: snapshot.goal.tasks, tokensUsed: snapshot.goal.tokensUsed,
         automaticTurns: snapshot.goal.automaticTurns, noProgressTurns: snapshot.goal.noProgressTurns,
         policyRevision: snapshot.policyRevision, tokenBudget: snapshot.tokenBudget, limitsEditable: true,
-        summary: snapshot.goal.summary, diagnostics: snapshot.goal.diagnostics, story: { ...(snapshot.story ?? { version: 1, timeline: [], activity: [] }), questions: questions!.snapshot(), coverage: { ...snapshot.story?.coverage, ...(questions!.coverage() === undefined ? {} : { questionsTruncated: questions!.coverage() }) } }, limits: snapshot.limits };
+        summary: snapshot.goal.summary, diagnostics: snapshot.goal.diagnostics, story: { ...(snapshot.story ?? { version: 1, timeline: [], activity: [] }), questions: questions!.snapshot(), coverage: { ...eventCoverage, ...(questions!.coverage() === undefined ? {} : { questionsTruncated: questions!.coverage() }) } }, limits: snapshot.limits };
     } });
   });
   pi.on("tool_result", (event) => {

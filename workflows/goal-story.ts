@@ -41,7 +41,8 @@ export function readRecordedGoalStory(branch: unknown[], entryId: string): GoalS
     if (entry.customType === "delegated-goal-story-v1" && entry.data.story) { validateGoalStory(entry.data.story); story = structuredClone(entry.data.story); }
     if (entry.customType === "delegated-goal-questions-v1") { validateGoalStory({ version: 1, timeline: [], activity: [], questions: entry.data.questions }); questions = structuredClone(entry.data.questions ?? []); questionsTruncated = typeof entry.data.truncated === "boolean" ? entry.data.truncated : undefined; }
   }
-  return story || questions ? { ...(story ?? emptyGoalStory()), ...(questions ? { questions, coverage: { ...story?.coverage, ...(questionsTruncated === undefined ? {} : { questionsTruncated }) } } : {}) } : undefined;
+  const { questionsTruncated: _previousQuestionCoverage, ...eventCoverage } = story?.coverage ?? {};
+  return story || questions ? { ...(story ?? emptyGoalStory()), ...(questions ? { questions, coverage: { ...eventCoverage, ...(questionsTruncated === undefined ? {} : { questionsTruncated }) } } : {}) } : undefined;
 }
 export function mergeGoalStory(target: GoalStory | undefined, observed: GoalStory): GoalStory {
   validateGoalStory(observed);

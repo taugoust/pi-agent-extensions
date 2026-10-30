@@ -2,7 +2,7 @@ import { test } from "node:test";
 import assert from "node:assert/strict";
 import { createGoalStoryRecorder, GOAL_STORY_ENTRY } from "./goal-story-recorder.ts";
 import { createGoalQuestions, GOAL_QUESTIONS_ENTRY } from "./goal-questions.ts";
-import { mergeGoalStory, emptyGoalStory, recordGoalEvent, validateGoalStory } from "./goal-story.ts";
+import { mergeGoalStory, emptyGoalStory, recordGoalEvent, validateGoalStory, readRecordedGoalStory } from "./goal-story.ts";
 import { DelegatedGoalRegistry } from "./delegated-goals.ts";
 import { workerInteractionsService, WORKER_INTERACTIONS_KEY } from "../shared/foreground-tasks.ts";
 
@@ -41,6 +41,8 @@ test("coverage records count/byte eviction, retains unknown legacy coverage, and
  assert.equal(story.timeline.length,200);assert.equal(story.coverage?.timelineTruncated,true);
  const merged=mergeGoalStory(story,{version:1,timeline:[],activity:[]});assert.equal(merged.coverage?.timelineTruncated,true);assert.equal(merged.coverage?.activityTruncated,undefined);
  assert.throws(()=>validateGoalStory({...story,coverage:{unknown:true}}),/coverage/);
+ const legacyQuestions=readRecordedGoalStory([{type:"custom",customType:GOAL_STORY_ENTRY,data:{entryId:"g",story:emptyGoalStory()}},{type:"custom",customType:GOAL_QUESTIONS_ENTRY,data:{entryId:"g",questions:[]}}],"g");
+ assert.equal(legacyQuestions?.coverage?.questionsTruncated,undefined,"event recorder cannot claim complete coverage for legacy question history");
  const q={id:"q",revision:1,at:1,workerEpoch:"epoch",status:"pending",request:{...input,questions:[{...input.questions[0],background:"Authored context",recommendation:"a"}]}};
  validateGoalStory({...emptyGoalStory(),questions:[q]});
  assert.throws(()=>validateGoalStory({...emptyGoalStory(),questions:[{...q,request:{...q.request,questions:[{...q.request.questions[0],recommendation:"missing"}]}}]}),/question/);
