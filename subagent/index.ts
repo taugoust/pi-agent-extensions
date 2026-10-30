@@ -1999,6 +1999,13 @@ export default function (pi: ExtensionAPI) {
             const store = new NativeTaskStore(path.join(getAgentDir(), "state", "native-tasks-v1"));
             await store.verifyStopped(sessionId, child.taskId, child.childId, child.attempt);
           },
+          async reviewRoot(entry) {
+            if (!entry.child || !pi.getActiveTools().includes("read")) throw new Error("Goal review read access unavailable");
+            const store = new NativeTaskStore(path.join(getAgentDir(), "state", "native-tasks-v1"));
+            const record = store.get(sessionId, entry.child.taskId);
+            const { goalReviewRoot } = await import("../workflows/goal-review.ts");
+            return goalReviewRoot(sessionId, entry, record, pi.getActiveTools().includes("read"));
+          },
           async retainedCompletion(entry) {
             if (!entry.child) return null;
             const store = new NativeTaskStore(path.join(getAgentDir(), "state", "native-tasks-v1"));

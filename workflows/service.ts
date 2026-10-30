@@ -1,5 +1,6 @@
 import { randomUUID } from "node:crypto";
 import { DelegatedGoalRegistry, type DelegatedGoalExecutor } from "./delegated-goals.ts";
+import { registerGoalReview, previewGoalReview } from "./goal-review.ts";
 import { resolveGoalLimits } from "../shared/delegated-goal-policy.ts";
 import { delegatedGoalStore } from "./delegated-goal-store.ts";
 import { basename, isAbsolute, relative, sep } from "node:path";
@@ -54,7 +55,7 @@ type Operation = {
 	reject?: (error: Error) => void;
 };
 const actions = [
-	"goals.create", "goals.start", "goals.pause", "goals.resume", "goals.edit", "goals.limits", "goals.clear", "goals.add_task", "goals.answer",
+	"goals.create", "goals.start", "goals.pause", "goals.resume", "goals.edit", "goals.limits", "goals.clear", "goals.add_task", "goals.answer", "goals.reference",
 	"worktree.add",
 	"worktree.remove",
 	"worktree.prune",
@@ -111,6 +112,11 @@ export function createWorkflowService(
 		start: entry => childExecutor().start({ ...entry, continuationLimits: resolveGoalLimits(entry.continuationLimits, runtime.settings.continuationLimits) }),
 		resume: entry => childExecutor().resume({ ...entry, continuationLimits: resolveGoalLimits(entry.continuationLimits, runtime.settings.continuationLimits) }),
 		pause: entry => childExecutor().pause(entry),
+    registerReview: async (entry, title, target, role) => {
+      const executor = childExecutor();
+      if (!executor.reviewRoot) throw new Error("Goal review requires a newer runtime");
+      return registerGoalReview(await executor.reviewRoot(entry), entry, title, target, role);
+    },
 		updateLimits: entry => {
 			const executor = childExecutor();
 			if (!executor.updateLimits) throw new Error("Worker does not support limit editing; reload required");
@@ -506,7 +512,10 @@ export function createWorkflowService(
 		});
 		return reading;
 	}
-	async function snapshot() {
+	function goalReviewAvailable(): boolean {
+    try { return typeof childExecutor().reviewRoot === "function"; } catch { return false; }
+  }
+  async function snapshot() {
 		current();
 		try { await delegated.refresh(); } catch { /* Child unavailability must not hide durable metadata. */ }
 		current();
@@ -521,7 +530,7 @@ export function createWorkflowService(
 			terminal = runtime.snapshotSettingsApplicationState().terminalDetails;
 		return {
 			protocol: 1,
-			capabilities: { goalLimitEditing: true, ownedWorktreeCompletion: true, createPausedGoal: false, delegatedGoals: true, delegatedGoalExecution: executionUnavailableReason() === null },
+			capabilities: { goalReview: goalReviewAvailable(), goalLimitEditing: true, ownedWorktreeCompletion: true, createPausedGoal: false, delegatedGoals: true, delegatedGoalExecution: executionUnavailableReason() === null },
 			delegatedGoals: delegated.snapshot(),
 			sessionId,
 			serviceEpoch,
@@ -885,6 +894,17 @@ export function createWorkflowService(
 		const r = input as any;
 		if (r.sessionId !== sessionId || r.serviceEpoch !== serviceEpoch)
 			throw new Error("Stale workflow identity");
+    if (r.operation === "review") {
+      if (Object.keys(r).some(key => !["operation", "sessionId", "serviceEpoch", "expectedGoalId", "expectedEntryRevision", "referenceId"].includes(key))) throw new Error("Unknown review fields");
+      const entry = delegated.snapshot().entries.find(entry => entry.id === r.expectedGoalId);
+      if (!entry || entry.revision !== r.expectedEntryRevision || typeof r.referenceId !== "string") throw new Error("Goal review changed; refresh");
+      const executor = childExecutor();
+      if (!executor.reviewRoot) throw new Error("Goal review requires a newer runtime");
+      const preview = await previewGoalReview(await executor.reviewRoot(entry), entry, r.referenceId);
+      current();
+      if (delegated.snapshot().entries.find(item => item.id === entry.id)?.revision !== entry.revision) throw new Error("Goal review changed; refresh");
+      return { sessionId, serviceEpoch, preview };
+    }
 		const allowed =
 			r.operation === "snapshot"
 				? ["operation", "sessionId", "serviceEpoch"]
@@ -908,6 +928,7 @@ export function createWorkflowService(
 						"questionRevision",
 						"workerEpoch",
 						"answer",
+            "reviewTitle", "reviewTarget", "reviewRole",
 						"operationId",
 						"dialogId",
 						"value",
@@ -1053,7 +1074,7 @@ export function createWorkflowService(
 			const expectedRevision = r.action === "goals.limits" ? r.expectedPolicyRevision : r.expectedEntryRevision;
 			if (typeof r.expectedGoalId !== "string" || !uuid.test(r.expectedGoalId) || !Number.isSafeInteger(expectedRevision) || expectedRevision < 1)
 				throw new Error("Expected delegated goal identity and revision");
-			if (["goals.edit", "goals.limits", "goals.add_task", "goals.clear", "goals.answer"].includes(r.action)) {
+			if (["goals.edit", "goals.limits", "goals.add_task", "goals.clear", "goals.answer", "goals.reference"].includes(r.action)) {
 				// Definitive metadata result: rejected edits retain the caller's draft.
 				// Cache at service level only AFTER success; failed retries must reach
 				// the registry's retained rejection instead of looking applied.

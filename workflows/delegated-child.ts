@@ -61,6 +61,7 @@ export function createDelegatedChildGoalService(pi: ExtensionAPI, initial: Exten
       automaticTurns: goal.automaticModelTurns, noProgressTurns: goal.toolFreeRepeatCount,
       summary: completed?.summary ?? (terminal?.goalId === goal.id ? terminal.summary ?? terminal.reason ?? null : null),
       waiting: goal.waiting?.reason ?? null,
+      diagnostics: { waitDeadline: goal.waiting?.resumeAt ?? null, lastTaskUpdateAt: goal.lastTaskUpdateAt ?? null, lastWake: goal.lastWake ?? null, lastBlocker: goal.lastBlocker ?? null },
     } : null };
   }
   function serial<T>(fn: () => Promise<T> | T): Promise<T> {

@@ -1,7 +1,7 @@
 import { registerHooks } from "node:module";
 import { test } from "node:test";
 import assert from "node:assert/strict";
-import { mkdtempSync, readdirSync, rmSync } from "node:fs";
+import { mkdtempSync, readdirSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { randomUUID } from "node:crypto";
@@ -42,6 +42,7 @@ test("actual service permits busy parent metadata create and fences independent 
     const pi = { appendEntry() { throw Error("Parent session mutation forbidden"); }, exec: async () => ({ code: 0, stdout: "", stderr: "" }) };
     globalThis.__paeDelegatedGoalExecutorV1 = { protocol: 1, sessionId,
       executionAvailable: () => true,
+      async reviewRoot() { return root; },
       executionUnavailableReason: () => "Required child lifecycle tools denied by effective allowlist",
       async start(entry) { calls.push(`start:${entry.id}`); return { taskId: `task:${entry.id}`, childId: `child:${entry.id}:1`, jobId: `job:${entry.id}:1`, attempt: 1 }; },
       async pause(entry) { calls.push(`pause:${entry.id}`); },
@@ -87,6 +88,16 @@ test("actual service permits busy parent metadata create and fences independent 
     snapshot = await snap(); first = snapshot.delegatedGoals.entries[0];
     assert.equal(first.status, "active"); assert.equal(calls.length, 1);
     assert.equal(snapshot.delegatedGoals.entries[1].status, "paused");
+    writeFileSync(join(root,"spec.md"),"Explicit registered source");
+    snapshot = await request({ action: "goals.reference", expectedGoalId: first.id, expectedEntryRevision: first.revision, reviewTitle: "Spec", reviewTarget: "spec.md", reviewRole: "source" });
+    first = snapshot.delegatedGoals.entries[0];
+    const previewRequest = { ...identity, operation: "review", expectedGoalId: first.id, expectedEntryRevision: first.revision, referenceId: first.review[0].id };
+    assert.deepEqual((await service.handle(previewRequest)).preview,{kind:"text",text:"Explicit registered source"});
+    await assert.rejects(service.handle({...previewRequest,path:"/etc/passwd"}),/fields/);
+    await assert.rejects(service.handle({...previewRequest,expectedEntryRevision:first.revision-1}),/changed/);
+    await assert.rejects(service.handle({...previewRequest,referenceId:randomUUID()}),/unavailable/);
+    writeFileSync(join(root,"spec.md"),"Changed source");await assert.rejects(service.handle(previewRequest),/changed/);
+    assert.equal(calls.length,1,"review must not launch, resume, prompt or pause execution");
     await assert.rejects(service.handle({ ...identity, serviceEpoch: randomUUID(), operation: "snapshot" }), /Stale/);
     await assert.rejects(request({ action: "goals.pause", expectedGoalId: first.id, expectedEntryRevision: 0 }), /revision/);
     await assert.rejects(request({ action: "goal.start", expectedGoalId: "legacy", objective: "forbidden" }), /busy|read-only/);

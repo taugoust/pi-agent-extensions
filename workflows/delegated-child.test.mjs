@@ -28,6 +28,10 @@ test("structured child seam uses injected existing engine, binds ownership and s
   let result = await service.bootstrap(entry);
   assert.equal(result.entryId, entry.id); assert.equal(result.childGoalId, "child-goal-id"); assert.equal(result.goal.status, "active");
   assert.equal(result.goal.tasks[0].id, "task");
+  runtime.activeGoal.lastBlocker = { at: 100, reason: "External dependency", evidence: "Recorded tool failure", repeatedTurns: 2 };
+  runtime.activeGoal.lastWake = { at: 200, reason: "explicit_resume" };
+  assert.deepEqual(service.snapshot().goal.diagnostics.lastBlocker, runtime.activeGoal.lastBlocker);
+  assert.deepEqual(service.snapshot().goal.diagnostics.lastWake, runtime.activeGoal.lastWake);
   const persistedBinding = entries.find(e => e.customType === "delegated-goal-child-binding-v1" && e.data.progressId);
   assert.equal(persistedBinding.data.progressId, "child-goal-id");
   assert.ok(entries.indexOf(persistedBinding) >= 0);

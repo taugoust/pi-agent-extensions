@@ -7,6 +7,7 @@ export type ChildGoalSnapshot = {
   tasks?: DelegatedGoalEntry["tasks"]; tokensUsed?: number; automaticTurns?: number;
   noProgressTurns?: number; summary?: string | null;
   story?: DelegatedGoalEntry["story"];
+  diagnostics?: DelegatedGoalEntry["diagnostics"];
   limitsEditable?: boolean; policyRevision?: number; tokenBudget?: number | null;
   limits?: DelegatedGoalEntry["continuationLimits"];
 };
@@ -39,6 +40,7 @@ export function createDelegatedGoalExecutor(options: {
   verifyStopped?(entry: Readonly<DelegatedGoalEntry>): Promise<void>;
   retainedCompletion?(entry: Readonly<DelegatedGoalEntry>): Promise<ChildGoalSnapshot | null>;
   executionUnavailableReason?(): string | null;
+  reviewRoot?(entry: Readonly<DelegatedGoalEntry>): Promise<string>;
 }) {
   const bindings = new Map<string, { handle: GoalChildHandle; identity: GoalWorkerIdentity; goalId: string; stopped: boolean; last: ChildGoalSnapshot }>();
   const restorationFailures = new Map<string, string>();
@@ -121,6 +123,11 @@ export function createDelegatedGoalExecutor(options: {
     executionAvailable: () => restorationFailures.size === 0 && (options.executionUnavailableReason?.() ?? null) === null,
     executionUnavailableReason: () => restorationFailures.values().next().value ?? options.executionUnavailableReason?.() ?? null,
     verifyStopped: (entry: Readonly<DelegatedGoalEntry>) => serialize(() => verifyStopped(entry)),
+    reviewRoot: (entry: Readonly<DelegatedGoalEntry>) => serialize(async () => {
+      if (!entry.child || !options.reviewRoot) throw new Error("Goal review access unavailable");
+      if (bindings.has(entry.id)) binding(entry);
+      return options.reviewRoot(entry);
+    }),
     // Edits are parent metadata only. The next explicit Resume synchronizes
     // that durable entry into the restored, paused engine before activation.
     update: (entry: Readonly<DelegatedGoalEntry>) => serialize(() => verifyStopped(entry)),
