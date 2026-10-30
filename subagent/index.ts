@@ -2116,13 +2116,15 @@ export default function (pi: ExtensionAPI) {
               lastObservation = structuredClone(observed);
               return observed;
             };
-            const handle: GoalChildHandle = { identity, model: selectedModel, start: value => request("start", value),
+            const settle = async (expectedGoalId: string, expectedActivationId?: string) => {
+              await rpc!.pauseWorkflowExecution();
+              return await request("settle", { expectedGoalId, expectedActivationId });
+            };
+            const handle: GoalChildHandle = { identity, model: selectedModel, start: value => request("start", value), settle,
               resume: (expectedGoalId, expectedActivationId) => resumeRestoredGoal(() => request("observe"), () => request("resume", { entry, expectedGoalId, expectedActivationId })), pause: async (expectedGoalId, expectedActivationId) => {
                 await request("pause", { expectedGoalId, expectedActivationId });
-                await rpc!.pauseWorkflowExecution();
                 // Cancel actual pending promises before taking the final receipt.
-                // The worker requires the exact activation and verified idle state.
-                return await request("settle", { expectedGoalId, expectedActivationId });
+                return await settle(expectedGoalId!, expectedActivationId);
               }, updateLimits: (entry, expectedGoalId, expectedPolicyRevision, expectedActivationId) => request("limits", { entry, expectedGoalId, expectedPolicyRevision, expectedActivationId }),
               observe: () => request("observe"), answer: (reply, requestId) => request("answer", { reply, requestId }), stop };
             return handle;

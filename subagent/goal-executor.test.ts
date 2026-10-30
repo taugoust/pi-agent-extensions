@@ -2,7 +2,22 @@ import assert from "node:assert/strict";
 import { test } from "node:test";
 import { createDelegatedGoalExecutor, type GoalChildHandle } from "./goal-executor.ts";
 import type { DelegatedGoalEntry } from "../workflows/delegated-goals.ts";
+import { createGoalQuestions } from "../workflows/goal-questions.ts";
 const entry = (id: string): DelegatedGoalEntry => ({ id, revision: 1, text: id, status: "paused", tasks: [], child: null, tokenBudget: null, tokensUsed: 0, automaticTurns: 0, noProgressTurns: 0, summary: null, waiting: null });
+for (const stoppedStatus of ["blocked", "usage_limited", "budget_limited", "complete"] as const) test(`automatic ${stoppedStatus} stop captures actual question cancellation before teardown`, async () => {
+  const questions = createGoalQuestions("e", "epoch", [], () => {});
+  const pending = questions.request({ kind: "questionnaire", questions: [{ id: "q", prompt: "Choose", options: [{ value: "a", label: "A" }], allowOther: false }] });
+  const rejected = assert.rejects(pending, /cancelled/);
+  let status: "active" | typeof stoppedStatus = "active", stopped = false;
+  const snapshot = () => ({ goalId: "g", activationId: "activation", status, executionStopped: status !== "active", waiting: null, story: { version: 1 as const, timeline: [], activity: [], questions: questions.snapshot() } });
+  const executor = createDelegatedGoalExecutor({ sessionId: "s", runtimeId: "r", async launch() {
+    return { identity: { sessionId: "s", runtimeId: "r", taskId: "task", childId: "child", jobId: "job", attempt: 1, workerEpoch: "epoch" }, model: "actual", start: async () => snapshot(), resume: async () => snapshot(), pause: async () => snapshot(), observe: async () => snapshot(), settle: async (goalId, activationId) => { assert.equal(goalId, "g"); assert.equal(activationId, "activation"); questions.cancelPending(); return snapshot(); }, stop: async () => { assert.equal(questions.snapshot()[0].status, "cancelled"); stopped = true; } };
+  } });
+  const e = entry("e"); e.child = await executor.start(e); status = stoppedStatus;
+  const observed = await executor.observe(e); await rejected;
+  assert.equal(stopped, true); assert.equal(observed?.story?.questions?.[0].status, "cancelled"); assert.equal(observed?.status, stoppedStatus); questions.dispose();
+});
+
 test("two child bindings retain tasks across attempts; pause awaits halt and rejects stale attempts", async () => {
   let halted = 0, validPause = false;
   const contractIds = new Map<string, string>();

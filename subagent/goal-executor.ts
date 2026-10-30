@@ -28,6 +28,8 @@ export type GoalChildHandle = {
   resume(expectedGoalId?: string, expectedActivationId?: string): Promise<ChildGoalSnapshot>;
   pause(expectedGoalId?: string, expectedActivationId?: string): Promise<ChildGoalSnapshot>;
   observe(): Promise<ChildGoalSnapshot>;
+  /** Idle stop receipt cancels actual pending waiters before process teardown. */
+  settle?(expectedGoalId: string, expectedActivationId?: string): Promise<ChildGoalSnapshot>;
   answer?(reply: GoalQuestionReply, requestId: string): Promise<ChildGoalSnapshot>;
   updateLimits?(entry: Readonly<DelegatedGoalEntry>, expectedGoalId: string, expectedPolicyRevision: number, expectedActivationId: string): Promise<ChildGoalSnapshot>;
   /** Resolves only once the owned execution and its process group have exited. */
@@ -64,6 +66,12 @@ export function createDelegatedGoalExecutor(options: {
       throw new Error("Invalid dedicated child goal observation");
     return snapshot;
   };
+  async function settle(handle: GoalChildHandle, snapshot: ChildGoalSnapshot): Promise<ChildGoalSnapshot> {
+    if (!handle.settle) return snapshot; // Older executors have no cancellation receipt.
+    const settled = validate(await handle.settle(snapshot.goalId, snapshot.activationId), snapshot.goalId, snapshot.activationId);
+    if (settled.status !== snapshot.status || !settled.executionStopped) throw new Error("Goal stop settlement changed lifecycle or is not idle");
+    return settled;
+  }
   async function launch(entry: Readonly<DelegatedGoalEntry>, resume: boolean): Promise<DelegatedGoalChild> {
     const unavailable = restorationFailures.values().next().value ?? options.executionUnavailableReason?.();
     if (unavailable) throw new Error(unavailable);
@@ -87,13 +95,16 @@ export function createDelegatedGoalExecutor(options: {
       const restored = resume ? validate(await handle.observe(), previous?.goalId, previous?.last.activationId) : undefined;
       // Goal identity is stable. Bind the new activation separately; the native
       // worker epoch still fences this exact process/attempt.
-      const snapshot = validate(await (resume ? handle.resume(restored!.goalId, restored!.activationId) : handle.start(structuredClone(entry))));
+      let snapshot = validate(await (resume ? handle.resume(restored!.goalId, restored!.activationId) : handle.start(structuredClone(entry))));
       if (restored && (snapshot.goalId !== restored.goalId || !snapshot.activationId || snapshot.activationId === restored.activationId)) throw new Error("Dedicated goal activation did not change on Resume");
       if (!sameGoalWorker(id, handle.identity)) throw new Error("Dedicated goal attempt changed during launch");
       if (snapshot.status === "paused") throw new Error("Dedicated child goal did not become active");
       const bound = { handle, identity: id, goalId: snapshot.goalId, stopped: false, last: structuredClone(snapshot) };
       bindings.set(entry.id, bound);
       if (snapshot.status !== "active") {
+        snapshot = await settle(handle, snapshot);
+        if (!sameGoalWorker(id, handle.identity)) throw new Error("Dedicated goal attempt changed during settlement");
+        bound.last = structuredClone(snapshot);
         await handle.stop(snapshot.status === "complete" ? snapshot : undefined);
         bound.stopped = true;
         bound.last.executionStopped = true;
@@ -210,10 +221,12 @@ export function createDelegatedGoalExecutor(options: {
           return null;
         }
       }
-      const snapshot = validate(observed, b.goalId, b.last.activationId);
+      let snapshot = validate(observed, b.goalId, b.last.activationId);
       restorationFailures.delete(entry.id);
       binding(entry);
       if (snapshot.status !== "active") {
+        snapshot = await settle(b.handle, snapshot);
+        binding(entry);
         await b.handle.stop(snapshot.status === "complete" ? snapshot : undefined);
         binding(entry);
         b.stopped = true;
