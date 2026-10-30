@@ -64,6 +64,8 @@ export function createGoalQuestions(entryId: string, workerEpoch: string, branch
       save(questions.map(item => item.id === q.id ? { ...item, revision: item.revision + 1, status: reply.answer.cancelled ? "cancelled" : "answered", answer: structuredClone(reply.answer), answeredAt: Math.max(Date.now(), item.at) } : item), new Map(receipts).set(requestId, fingerprint));
       const waiter = waiters.get(q.id)!; waiters.delete(q.id); waiter.resolve(structuredClone(reply.answer));
     },
+    // Called only by the authenticated worker stop lane after execution is idle.
+    cancelPending() { for (const id of [...waiters.keys()]) cancel(id); },
     dispose() { closed = true; for (const id of [...waiters.keys()]) cancel(id); },
   };
 }

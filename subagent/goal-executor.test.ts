@@ -24,11 +24,14 @@ test("two child bindings retain tasks across attempts; pause awaits halt and rej
   const a = entry("a"), b = entry("b");
   a.child = await executor.start(a); b.child = await executor.start(b);
   assert.notEqual(a.child.taskId, b.child.taskId);
+  assert.equal(a.child.model, "owning-provider/gpt-6-astra:low");
+  assert.equal(b.child.model, "owning-provider/gpt-6.1-sol:high");
   await assert.rejects(executor.update(a), /execution is not stopped/);
   await assert.rejects(executor.pause(a), /did not verify stopped execution/);
   assert.equal(halted, 0);
   validPause = true;
-  await executor.pause(a); assert.equal(halted, 1);
+  const paused = await executor.pause(a); assert.equal(halted, 1);
+  assert.equal(paused?.status, "paused");
   a.text = "Updated while paused";
   const launchedBeforeEdit = handles.length;
   await executor.update(a);

@@ -2113,7 +2113,9 @@ export default function (pi: ExtensionAPI) {
               resume: (expectedGoalId, expectedActivationId) => resumeRestoredGoal(() => request("observe"), () => request("resume", { entry, expectedGoalId, expectedActivationId })), pause: async (expectedGoalId, expectedActivationId) => {
                 await request("pause", { expectedGoalId, expectedActivationId });
                 await rpc!.pauseWorkflowExecution();
-                return await request("observe");
+                // Cancel actual pending promises before taking the final receipt.
+                // The worker requires the exact activation and verified idle state.
+                return await request("settle", { expectedGoalId, expectedActivationId });
               }, updateLimits: (entry, expectedGoalId, expectedPolicyRevision, expectedActivationId) => request("limits", { entry, expectedGoalId, expectedPolicyRevision, expectedActivationId }),
               observe: () => request("observe"), answer: (reply, requestId) => request("answer", { reply, requestId }), stop };
             return handle;

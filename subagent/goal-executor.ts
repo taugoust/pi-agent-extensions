@@ -72,7 +72,7 @@ export function createDelegatedGoalExecutor(options: {
     const handle = await options.launch(structuredClone(entry), resume ? structuredClone(entry.child!) : undefined);
     const id = structuredClone(handle.identity);
     try {
-      if (typeof handle.model !== "string" || !handle.model.trim() || id.sessionId !== options.sessionId || id.runtimeId !== options.runtimeId
+      if (typeof handle.model !== "string" || !handle.model.trim() || handle.model.length > 512 || id.sessionId !== options.sessionId || id.runtimeId !== options.runtimeId
         || !Number.isSafeInteger(id.attempt) || id.attempt < 1
         || !id.taskId || !id.childId || !id.jobId || !id.workerEpoch
         || (resume && (id.taskId !== entry.child!.taskId || id.attempt !== entry.child!.attempt + 1
@@ -96,7 +96,7 @@ export function createDelegatedGoalExecutor(options: {
         bound.stopped = true;
         bound.last.executionStopped = true;
       }
-      return { taskId: id.taskId, childId: id.childId, jobId: id.jobId, attempt: id.attempt };
+      return { taskId: id.taskId, childId: id.childId, jobId: id.jobId, attempt: id.attempt, model: handle.model };
     } catch (error) { await handle.stop(); throw error; }
   }
   async function verifyStopped(entry: Readonly<DelegatedGoalEntry>): Promise<void> {
@@ -164,6 +164,7 @@ export function createDelegatedGoalExecutor(options: {
       b.stopped = true;
       restorationFailures.delete(entry.id);
       b.last = structuredClone(snapshot);
+      return structuredClone(b.last);
     }),
     observe: (entry: Readonly<DelegatedGoalEntry>) => serialize(async () => {
       // A missing in-memory binding is not stop evidence. Reconcile only from

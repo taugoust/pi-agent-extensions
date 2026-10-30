@@ -56,7 +56,12 @@ export default async function goalWorker(pi: ExtensionAPI) {
       else {
         if (r.entry !== undefined && r.operation !== "resume") throw new Error("Entry is start/resume-only");
         if (r.operation === "resume" && (!r.entry || r.entry.id !== binding.entryId)) throw new Error("Dedicated Resume requires matching parent metadata");
-        if (r.operation === "resume" || r.operation === "pause") {
+        if (r.operation === "settle") {
+          if (r.expectedGoalId !== snapshot.childGoalId || r.expectedActivationId !== snapshot.childActivationId || snapshot.goal?.status === "active" || !ctx.isIdle() || ctx.hasPendingMessages())
+            throw new Error("Goal questionnaire stop is not verified");
+          questions!.cancelPending();
+          snapshot = service.snapshot();
+        } else if (r.operation === "resume" || r.operation === "pause") {
           if (!snapshot.entryId || !snapshot.childGoalId) throw new Error("Dedicated child binding is missing");
           if (r.expectedGoalId !== snapshot.childGoalId || r.expectedActivationId !== snapshot.childActivationId) throw new Error("Dedicated child goal identity or activation changed");
           snapshot = r.operation === "resume"

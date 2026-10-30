@@ -6,7 +6,7 @@ import { validateGoalLimitOverrides, type GoalContinuationLimits } from "../shar
 export { DEDICATED_GOAL_LIMITS } from "../shared/delegated-goal-policy.ts";
 
 export type DelegatedGoalStatus = "paused" | "active" | "blocked" | "usage_limited" | "budget_limited" | "complete" | "cleared";
-export type DelegatedGoalChild = { taskId: string; childId: string; jobId: string; attempt: number };
+export type DelegatedGoalChild = { taskId: string; childId: string; jobId: string; attempt: number; model?: string };
 export type DelegatedGoalEntry = {
   id: string; revision: number; policyRevision?: number; text: string; status: DelegatedGoalStatus;
   tasks: Array<{ id: string; text: string; status: "pending" | "in_progress" | "completed" | "blocked" }>;
@@ -65,6 +65,7 @@ export function validateDelegatedGoals(state: DelegatedGoals): void {
     }
     if (e.child !== null && (!e.child || ![e.child.taskId, e.child.childId, e.child.jobId].every(id => typeof id === "string" && id.length > 0 && id.length <= 128) || !Number.isSafeInteger(e.child.attempt) || e.child.attempt < 1)) throw new Error("Invalid child linkage");
     if (e.child) {
+      if (e.child.model !== undefined && (typeof e.child.model !== "string" || !e.child.model.trim() || e.child.model.length > 512)) throw new Error("Invalid child launch model");
       if (childTasks.has(e.child.taskId)) throw new Error("Dedicated child task cannot belong to multiple goals");
       childTasks.add(e.child.taskId);
     }

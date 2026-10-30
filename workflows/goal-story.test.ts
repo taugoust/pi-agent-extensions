@@ -85,6 +85,14 @@ test("registry answers only the exact active goal question and preserves idempot
  assert.deepEqual(await registry.mutate("session",request),answered);assert.equal(calls,1);
 });
 
+test("verified idle stop settles only pending questions before final snapshot and preserves answered receipts",async()=>{
+ const saved:any[]=[];const service=createGoalQuestions("goal","epoch",[],data=>saved.push(data));
+ const first=service.request(input);const q=service.snapshot()[0];service.answer({questionId:q.id,questionRevision:1,workerEpoch:"epoch",answer},"answered");await first;
+ const pending=service.request(input);const rejected=assert.rejects(pending,/cancelled/);service.cancelPending();await rejected;
+ const questions=service.snapshot();assert.equal(questions[0].status,"answered");assert.equal(questions[1].status,"cancelled");assert.equal(questions[1].revision,2);assert.ok(saved.at(-1).questions[1].answeredAt);
+ service.cancelPending();assert.deepEqual(service.snapshot(),questions);service.dispose();
+});
+
 test("abort and restored pending questions cancel, never approve or replay",async()=>{
  const branch:any[]=[];const persist=(data:unknown)=>branch.push({type:"custom",customType:GOAL_QUESTIONS_ENTRY,data});
  const controller=new AbortController();const service=createGoalQuestions("goal","epoch",branch,persist);
