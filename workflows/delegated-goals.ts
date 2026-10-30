@@ -3,7 +3,7 @@ import { emptyGoalStory, recordGoalEvent, validateGoalStory, mergeGoalStory, typ
 import { validInteractionAnswer } from "../shared/task-interactions.ts";
 import { validateGoalPlanning, pruneGoalDependencies, setGoalDependencies, addGoalBlocker, clearGoalBlocker, goalPlanningFields, type GoalPlanning, type GoalPlanningAction } from "./goal-planning.ts";
 import { validateGoalDiagnostics, type GoalDiagnostics } from "./goal-diagnostics.ts";
-import { validateGoalReview, type GoalReviewReference } from "./goal-review.ts";
+import { validateGoalReview, mergeGoalReview, type GoalReviewReference } from "./goal-review.ts";
 import { validateGoalLimitOverrides, type GoalContinuationLimits } from "../shared/delegated-goal-policy.ts";
 
 export { DEDICATED_GOAL_LIMITS } from "../shared/delegated-goal-policy.ts";
@@ -18,6 +18,7 @@ export type DelegatedGoalEntry = {
   automaticTurns: number; noProgressTurns: number; summary: string | null; waiting: string | null;
   story?: GoalStory;
   review?: GoalReviewReference[];
+  reviewTruncated?: boolean;
   diagnostics?: GoalDiagnostics;
   planning?: GoalPlanning;
   /** Projection only: not a lifecycle transition or authority to execute. */
@@ -35,7 +36,7 @@ export type DelegatedGoalRequest = {
   continuationLimits?: Partial<GoalContinuationLimits>;
 };
 /** Child execution is deliberately injected: this registry never runs a parent goal. */
-export type DelegatedGoalObservation = Partial<Pick<DelegatedGoalEntry, "status" | "tasks" | "tokensUsed" | "automaticTurns" | "noProgressTurns" | "summary" | "waiting" | "story" | "diagnostics">>;
+export type DelegatedGoalObservation = Partial<Pick<DelegatedGoalEntry, "status" | "tasks" | "tokensUsed" | "automaticTurns" | "noProgressTurns" | "summary" | "waiting" | "story" | "diagnostics" | "review">>;
 export interface DelegatedGoalExecutor {
   /** Live preflight; object presence alone does not authorize executable tools. */
   executionAvailable?(): boolean;
@@ -69,6 +70,8 @@ export function validateDelegatedGoals(state: DelegatedGoals): void {
     validateGoalLimitOverrides(e.continuationLimits);
     validateGoalStory(e.story);
     validateGoalReview(e.review, e.id);
+    if(e.reviewTruncated !== undefined && typeof e.reviewTruncated !== "boolean")throw Error("Invalid review coverage");
+    for(const question of e.story?.questions??[])for(const id of question.attachmentIds??[]){const ref=e.review?.find(ref=>ref.id===id);if(!ref ? e.reviewTruncated!==true : ref.questionId!==question.id||ref.workerEpoch!==question.workerEpoch)throw Error("Question review reference ownership changed");}
     validateGoalDiagnostics(e.diagnostics);
     validateGoalPlanning(e.planning, e.tasks);
     if (![e.tokensUsed, e.automaticTurns, e.noProgressTurns].every(n => typeof n === "number" && Number.isFinite(n) && n >= 0)) throw new Error("Invalid delegated accounting");
@@ -87,6 +90,10 @@ export function validateDelegatedGoals(state: DelegatedGoals): void {
     if (e.status === "active" && !e.child) throw new Error("Active delegated goal requires child linkage");
     for (const [value, max] of [[e.summary, 6000], [e.waiting, 1000]] as const) if (value !== null && (typeof value !== "string" || value.length > max)) throw new Error("Invalid delegated status detail");
   }
+}
+function mergeObservedMetadata(entry: DelegatedGoalEntry, observed: DelegatedGoalObservation): void {
+  if(observed.story)entry.story=mergeGoalStory(entry.story,observed.story);
+  if(observed.review){validateGoalReview(observed.review,entry.id);for(const ref of observed.review)if(!entry.review?.some(previous=>previous.id===ref.id)&&(ref.taskId!==entry.child?.taskId||ref.childId!==entry.child?.childId||ref.attempt!==entry.child?.attempt))throw Error("Observed review belongs to another child attempt");const merged=mergeGoalReview(entry.review,observed.review,(entry.story?.questions??[]).filter(question=>question.status==="pending").flatMap(question=>question.attachmentIds??[]));entry.review=merged.refs;if(merged.truncated)entry.reviewTruncated=true;}
 }
 function normalizeTaskDescriptions(entry: DelegatedGoalEntry): void {
   const dependencies = JSON.stringify(entry.planning?.dependencies);
@@ -147,7 +154,7 @@ export class DelegatedGoalRegistry {
         for (const key of ["status", "tasks", "tokensUsed", "automaticTurns", "noProgressTurns", "summary", "waiting", "diagnostics"] as const) {
           if (Object.hasOwn(observed, key)) (entry as any)[key] = copy(observed[key]);
         }
-        if (observed.story) entry.story = mergeGoalStory(entry.story, observed.story);
+        mergeObservedMetadata(entry,observed);
         normalizeTaskDescriptions(entry);
         validateDelegatedGoals({ version: 1, revision: next.revision, entries: [entry] });
         this.observations.set(entry.id, { state: "current", at: Date.now() });
@@ -196,7 +203,7 @@ export class DelegatedGoalRegistry {
         if (observed?.status === "complete" || entry.status === "complete") {
           if (observed) for (const key of ["status", "tasks", "tokensUsed", "automaticTurns", "noProgressTurns", "summary", "waiting", "diagnostics"] as const)
             if (Object.hasOwn(observed, key)) (entry as any)[key] = copy(observed[key]);
-          if (observed?.story) entry.story = mergeGoalStory(entry.story, observed.story);
+          if (observed) mergeObservedMetadata(entry,observed);
           entry.waiting = null;
           entry.policyRevision = (entry.policyRevision ?? 1) + 1;
           entry.revision++; next.revision++;
@@ -236,7 +243,7 @@ export class DelegatedGoalRegistry {
               for (const key of ["tasks", "tokensUsed", "automaticTurns", "noProgressTurns", "summary", "waiting", "diagnostics"] as const)
                 if (Object.hasOwn(observed, key)) (entry as any)[key] = copy(observed[key]);
             }
-            if (observed?.story) entry.story = mergeGoalStory(entry.story, observed.story);
+            if (observed) mergeObservedMetadata(entry,observed);
             entry.status = observed?.status && observed.status !== "active" ? observed.status : "paused";
             if (entry.status === "complete") entry.waiting = null;
           });
@@ -250,7 +257,7 @@ export class DelegatedGoalRegistry {
           // poison the lifecycle journal. Lost receipts reconcile via observation.
           const observed = await this.executor.answer!(copy(entry), { questionId: question.id, questionRevision: question.revision, workerEpoch: question.workerEpoch, answer: r.answer! }, r.requestId);
           if (!observed.story) throw new Error("Goal answer receipt is missing");
-          entry.story = mergeGoalStory(entry.story, observed.story);
+          mergeObservedMetadata(entry,observed);
           break;
         }
         case "goals.clear":

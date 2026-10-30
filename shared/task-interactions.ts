@@ -16,6 +16,7 @@ export function validInteractionInput(input: any): input is TaskInteractionInput
       || typeof question.allowOther !== "boolean" || !Array.isArray(question.options) || question.options.length > 12) return false;
     if ((question.background !== undefined && (typeof question.background !== "string" || question.background.length > 2000 || Buffer.byteLength(question.background) > 4096))
       || (question.recommendation !== undefined && (typeof question.recommendation !== "string" || !question.options.some((option: any) => option.value === question.recommendation)))) return false;
+    if (question.attachmentIds !== undefined && (!Array.isArray(question.attachmentIds) || question.attachmentIds.length > 8 || new Set(question.attachmentIds).size !== question.attachmentIds.length || question.attachmentIds.some((id: unknown) => typeof id !== "string" || !/^[a-f0-9-]{36}$/.test(id)))) return false;
     ids.add(question.id);
     const values = new Set<string>();
     return question.options.every((option: any) => option && typeof option.value === "string" && option.value.length > 0

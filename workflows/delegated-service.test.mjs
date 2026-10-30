@@ -105,6 +105,16 @@ test("actual service permits busy parent metadata create and fences independent 
     await assert.rejects(service.handle({...previewRequest,expectedEntryRevision:first.revision-1}),/changed/);
     await assert.rejects(service.handle({...previewRequest,referenceId:randomUUID()}),/unavailable/);
     writeFileSync(join(root,"spec.md"),"Changed source");await assert.rejects(service.handle(previewRequest),/changed/);
+    writeFileSync(join(root,"spec.md"),"Explicit registered source");
+    const questionId=randomUUID(),attachment={...first.review[0],id:randomUUID(),workerEpoch:"attachment-epoch",questionId};
+    const question={id:questionId,revision:1,at:1,workerEpoch:"attachment-epoch",status:"pending",attachmentIds:[attachment.id],request:{kind:"questionnaire",questions:[{id:"q",prompt:"Review registered source",options:[{value:"yes",label:"Yes"}],allowOther:false}]}};
+    globalThis.__paeDelegatedGoalExecutorV1.observe=async()=>({story:{version:1,timeline:[],activity:[],questions:[question]},review:[attachment]});
+    snapshot=await snap();first=snapshot.delegatedGoals.entries[0];
+    const attachmentRequest={...previewRequest,expectedEntryRevision:first.revision,referenceId:attachment.id,question:{questionId,questionRevision:1,workerEpoch:"attachment-epoch"}};
+    assert.equal((await service.handle(attachmentRequest)).preview.text,"Explicit registered source");
+    await assert.rejects(service.handle({...attachmentRequest,question:undefined}),/ownership/);
+    await assert.rejects(service.handle({...attachmentRequest,question:{...attachmentRequest.question,questionRevision:2}}),/revision/);
+    await assert.rejects(service.handle({...attachmentRequest,question:{...attachmentRequest.question,permission:true}}),/target/);
     assert.equal(calls.length,1,"review must not launch, resume, prompt or pause execution");
     await assert.rejects(service.handle({ ...identity, serviceEpoch: randomUUID(), operation: "snapshot" }), /Stale/);
     await assert.rejects(request({ action: "goals.pause", expectedGoalId: first.id, expectedEntryRevision: 0 }), /revision/);

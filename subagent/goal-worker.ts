@@ -5,18 +5,20 @@ import { serveGoalWorker, type GoalWorkerIdentity } from "./goal-rpc.ts";
 import type { DelegatedGoalEntry } from "../workflows/delegated-goals.ts";
 import { dirname, join } from "node:path";
 import { WORKER_INTERACTIONS_KEY } from "../shared/foreground-tasks.ts";
-import { createGoalQuestions, GOAL_QUESTIONS_ENTRY } from "../workflows/goal-questions.ts";
+import { createGoalQuestions, GOAL_QUESTIONS_ENTRY, GOAL_QUESTION_RECORDER_KEY } from "../workflows/goal-questions.ts";
 import type { GoalQuestionReply } from "../workflows/goal-story.ts";
 import { dedicatedGoalPolicy, sameGoalLimits, type DedicatedGoalPolicy } from "./goal-policy.ts";
 import type { createDelegatedChildGoalService } from "../workflows/delegated-child.ts";
+import { createWorkerGoalReview, GOAL_REVIEW_ENTRY, GOAL_REVIEW_WORKER_KEY } from "../workflows/goal-review-worker.ts";
 
-/** Explicit helper extension, including for guarded workers. It registers no
- * shell/file tools and does not alter the inherited permission/tool allowlist. */
+/** Explicit helper extension, including guarded workers. It grants no additional
+ * filesystem authority: optional review registration delegates to the inherited
+ * read tool/hooks and never widens the parent/profile/retained allowlist. */
 export default async function goalWorker(pi: ExtensionAPI) {
   if (process.env.PI_DEDICATED_GOAL_CHILD !== "1") throw new Error("Dedicated goal worker mode is required");
   const raw = process.env.PI_DEDICATED_GOAL_BINDING;
   if (!raw) throw new Error("Dedicated goal worker binding is missing");
-  const binding = JSON.parse(raw) as { path: string; token: string; entryId: string; policy: DedicatedGoalPolicy; identity: GoalWorkerIdentity; questionnaireEnabled?: boolean };
+  const binding = JSON.parse(raw) as { path: string; token: string; entryId: string; policy: DedicatedGoalPolicy; identity: GoalWorkerIdentity; questionnaireEnabled?: boolean; reviewEnabled?: boolean };
   if (!binding.path || !binding.entryId || !binding.identity || binding.identity.childId !== process.env.PI_SUBAGENT_ID)
     throw new Error("Dedicated goal worker launch identity mismatch");
   const policy = dedicatedGoalPolicy(binding.policy);
@@ -25,13 +27,17 @@ export default async function goalWorker(pi: ExtensionAPI) {
   workflows(pi, { delegatedChild: true, goalSettingsPath: join(dirname(binding.path), "goal-settings.json") });
   let current = false;
   let questions: ReturnType<typeof createGoalQuestions> | undefined;
+  let reviews: ReturnType<typeof createWorkerGoalReview> | undefined;
   let server: Awaited<ReturnType<typeof serveGoalWorker>> | undefined;
   pi.on("session_start", async (_event, ctx) => {
     if (server) { current = false; await server.close(); server = undefined; }
-    questions?.dispose();
-    questions = createGoalQuestions(binding.entryId, binding.identity.workerEpoch, ctx.sessionManager.getBranch() as unknown[], data => pi.appendEntry(GOAL_QUESTIONS_ENTRY, data));
+    questions?.dispose();reviews?.dispose();
+    reviews = binding.reviewEnabled ? createWorkerGoalReview({entryId:binding.entryId,child:{taskId:binding.identity.taskId,childId:binding.identity.childId,jobId:binding.identity.jobId,attempt:binding.identity.attempt},workerEpoch:binding.identity.workerEpoch,root:ctx.cwd,branch:ctx.sessionManager.getBranch() as unknown[],persist:data=>pi.appendEntry(GOAL_REVIEW_ENTRY,data),current:()=>{const service=(globalThis as any).__paeDelegatedChildGoalV1;if(!current||!service)throw Error("Goal reference worker unavailable");return service.snapshot();},readEnabled:()=>pi.getActiveTools().includes("read")&&pi.getActiveTools().includes("goal_reference")}) : undefined;
+    if(reviews)(globalThis as any)[GOAL_REVIEW_WORKER_KEY]={protocol:1,sessionId:ctx.sessionManager.getSessionId(),workerEpoch:binding.identity.workerEpoch,register:reviews.register};
+    questions = createGoalQuestions(binding.entryId, binding.identity.workerEpoch, ctx.sessionManager.getBranch() as unknown[], data => pi.appendEntry(GOAL_QUESTIONS_ENTRY, data), {bindAttachments:(id,input)=>{if(!reviews&&input.questions.some(question=>question.attachmentIds?.length))throw Error("Goal attachment registration unavailable");return reviews?.bindAttachments(id,input)??[];}});
     if (binding.questionnaireEnabled) (globalThis as any)[WORKER_INTERACTIONS_KEY] = { protocol: 1, mode: "headless", workerEpoch: binding.identity.workerEpoch, supportedKinds: ["questionnaire"], request: questions.request };
     current = true;
+    if(binding.questionnaireEnabled)(globalThis as any)[GOAL_QUESTION_RECORDER_KEY]={protocol:1,sessionId:ctx.sessionManager.getSessionId(),workerEpoch:binding.identity.workerEpoch,request:(input:any,signal:AbortSignal|undefined,upstream:any)=>{if(!current||!questions)throw Error("Goal question recorder unavailable");return questions.request(input,signal,upstream.request===questions.request?undefined:(request,forwardSignal)=>upstream.request(request,forwardSignal));}};
     server = await serveGoalWorker({ ...binding, isCurrent: () => current, async handle(input) {
       const service = (globalThis as any).__paeDelegatedChildGoalV1 as ReturnType<typeof createDelegatedChildGoalService> | undefined;
       if (!service) throw new Error("Dedicated child goal engine is unavailable");
@@ -82,7 +88,7 @@ export default async function goalWorker(pi: ExtensionAPI) {
         tasks: snapshot.goal.tasks, tokensUsed: snapshot.goal.tokensUsed,
         automaticTurns: snapshot.goal.automaticTurns, noProgressTurns: snapshot.goal.noProgressTurns,
         policyRevision: snapshot.policyRevision, tokenBudget: snapshot.tokenBudget, limitsEditable: true,
-        summary: snapshot.goal.summary, diagnostics: snapshot.goal.diagnostics, story: { ...(snapshot.story ?? { version: 1, timeline: [], activity: [] }), questions: questions!.snapshot(), coverage: { ...eventCoverage, ...(questions!.coverage() === undefined ? {} : { questionsTruncated: questions!.coverage() }) } }, limits: snapshot.limits };
+        ...(reviews ? {review:reviews.snapshot()} : {}), summary: snapshot.goal.summary, diagnostics: snapshot.goal.diagnostics, story: { ...(snapshot.story ?? { version: 1, timeline: [], activity: [] }), questions: questions!.snapshot(), coverage: { ...eventCoverage, ...(questions!.coverage() === undefined ? {} : { questionsTruncated: questions!.coverage() }) } }, limits: snapshot.limits };
     } });
   });
   pi.on("tool_result", (event) => {
@@ -95,7 +101,8 @@ export default async function goalWorker(pi: ExtensionAPI) {
     if (current) ((globalThis as any).__paeDelegatedChildGoalV1 as ReturnType<typeof createDelegatedChildGoalService> | undefined)?.recordState();
   });
   pi.on("session_shutdown", async () => {
-    current = false; questions?.dispose();
+    current = false; questions?.dispose();reviews?.dispose();
+    for(const key of [GOAL_REVIEW_WORKER_KEY,GOAL_QUESTION_RECORDER_KEY])if((globalThis as any)[key]?.workerEpoch===binding.identity.workerEpoch)delete (globalThis as any)[key];
     if ((globalThis as any)[WORKER_INTERACTIONS_KEY]?.workerEpoch === binding.identity.workerEpoch) delete (globalThis as any)[WORKER_INTERACTIONS_KEY];
     await server?.close(); server = undefined;
   });

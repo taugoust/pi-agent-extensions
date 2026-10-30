@@ -7,6 +7,7 @@ export type ChildGoalSnapshot = {
   tasks?: DelegatedGoalEntry["tasks"]; tokensUsed?: number; automaticTurns?: number;
   noProgressTurns?: number; summary?: string | null;
   story?: DelegatedGoalEntry["story"];
+  review?: DelegatedGoalEntry["review"];
   diagnostics?: DelegatedGoalEntry["diagnostics"];
   limitsEditable?: boolean; policyRevision?: number; tokenBudget?: number | null;
   limits?: DelegatedGoalEntry["continuationLimits"];

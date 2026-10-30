@@ -895,12 +895,12 @@ export function createWorkflowService(
 		if (r.sessionId !== sessionId || r.serviceEpoch !== serviceEpoch)
 			throw new Error("Stale workflow identity");
     if (r.operation === "review") {
-      if (Object.keys(r).some(key => !["operation", "sessionId", "serviceEpoch", "expectedGoalId", "expectedEntryRevision", "referenceId"].includes(key))) throw new Error("Unknown review fields");
+      if (Object.keys(r).some(key => !["operation", "sessionId", "serviceEpoch", "expectedGoalId", "expectedEntryRevision", "referenceId", "question"].includes(key))) throw new Error("Unknown review fields");
       const entry = delegated.snapshot().entries.find(entry => entry.id === r.expectedGoalId);
       if (!entry || entry.revision !== r.expectedEntryRevision || typeof r.referenceId !== "string") throw new Error("Goal review changed; refresh");
       const executor = childExecutor();
       if (!executor.reviewRoot) throw new Error("Goal review requires a newer runtime");
-      const preview = await previewGoalReview(await executor.reviewRoot(entry), entry, r.referenceId);
+      const preview = await previewGoalReview(await executor.reviewRoot(entry), entry, r.referenceId, r.question);
       current();
       if (delegated.snapshot().entries.find(item => item.id === entry.id)?.revision !== entry.revision) throw new Error("Goal review changed; refresh");
       return { sessionId, serviceEpoch, preview };

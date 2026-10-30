@@ -17,6 +17,7 @@ import {
 import { Type } from "@sinclair/typebox";
 import { answerQuestionnaireInPaseo } from "./paseo.js";
 import { workerInteractionsService } from "../shared/foreground-tasks.ts";
+import { GOAL_QUESTION_RECORDER_KEY } from "../workflows/goal-questions.ts";
 
 // Types
 interface QuestionOption {
@@ -33,6 +34,7 @@ interface Question {
   prompt: string;
   background?: string;
   recommendation?: string;
+  attachmentIds?: string[];
   options: QuestionOption[];
   allowOther: boolean;
 }
@@ -94,6 +96,7 @@ const QuestionSchema = Type.Object({
   prompt: Type.String({ description: "The full question text to display" }),
   background: Type.Optional(Type.String({ maxLength: 2000, description: "Brief authored context for this question" })),
   recommendation: Type.Optional(Type.String({ maxLength: 256, description: "Suggested option value for review only; never selected or submitted automatically" })),
+  attachmentIds: Type.Optional(Type.Array(Type.String({minLength:36,maxLength:36}),{maxItems:8,description:"Explicit goal_reference IDs from this goal worker; no paths or approval authority"})),
   options: Type.Array(QuestionOptionSchema, {
     description: "Available options to choose from",
   }),
@@ -207,14 +210,20 @@ export default function questionnaire(pi: ExtensionAPI) {
         label: q.label || `Q${i + 1}`,
         allowOther: q.allowOther !== false,
       }));
+      const recorder = (globalThis as any)[GOAL_QUESTION_RECORDER_KEY];
+      const goalRecorder = recorder?.protocol === 1 && recorder.sessionId === ctx.sessionManager.getSessionId() && typeof recorder.request === "function" ? recorder : undefined;
+      if (questions.some(question=>question.attachmentIds?.length) && !goalRecorder) return errorResult("Error: Question attachments require the exact dedicated goal recorder",questions);
       const interactions = workerInteractionsService("questionnaire");
       if (interactions) {
         if (signal?.aborted) return errorResult("Error: Questionnaire aborted", questions);
         try {
-          const answer = await interactions.request({
-            kind: "questionnaire",
-            questions: questions.map(({ id, label, prompt, options, allowOther, background, recommendation }) => ({ id, label, prompt, options, allowOther, ...(background === undefined ? {} : { background }), ...(recommendation === undefined ? {} : { recommendation }) })),
-          }, signal);
+          const input = {
+            kind: "questionnaire" as const,
+            questions: questions.map(({ id, label, prompt, options, allowOther, background, recommendation, attachmentIds }) => ({ id, label, prompt, options, allowOther, ...(background === undefined ? {} : { background }), ...(recommendation === undefined ? {} : { recommendation }), ...(attachmentIds === undefined ? {} : {attachmentIds}) })),
+          };
+          const answer = goalRecorder
+            ? await goalRecorder.request(input,signal,interactions)
+            : await interactions.request(input,signal);
           if (signal?.aborted) return errorResult("Error: Questionnaire aborted", questions);
           if (!answer || answer.kind !== "questionnaire" || typeof answer.cancelled !== "boolean") {
             return errorResult("Error: Headless questionnaire returned an invalid response", questions);

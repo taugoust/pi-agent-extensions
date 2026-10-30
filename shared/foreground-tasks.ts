@@ -45,6 +45,8 @@ export type TaskQuestion = {
   /** Authored context only: never an instruction to select or submit an option. */
   background?: string;
   recommendation?: string;
+  /** Explicit goal_reference IDs only; no paths or read authority. */
+  attachmentIds?: string[];
   options: Array<{ value: string; label: string; description?: string }>;
   allowOther: boolean;
 };

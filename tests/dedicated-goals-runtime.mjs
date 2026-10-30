@@ -48,8 +48,9 @@ export default function fakeProvider(pi) {
         if (!goal?.id) throw new Error("Child model call lacks actual active Goal identity");
         if (goal.text.includes("Question workflow")) {
           response.stopReason="toolUse";
-          if(calls===1) response.content=[{type:"toolCall",id:"question-"+process.pid,name:"questionnaire",arguments:{questions:[{id:"direction",prompt:"Use the tested design?",options:[{value:"yes",label:"Yes"},{value:"no",label:"No"}],allowOther:false}]}}];
-          else if(calls===2) response.content=[{type:"toolCall",id:"activity-"+process.pid,name:"notify_parent",arguments:{message:"Explicit fixture activity after the user's answer"}}];
+          if(calls===1) response.content=[{type:"toolCall",id:"reference-"+process.pid,name:"goal_reference",arguments:{goal_id:goal.id,activation_id:goal.activationId,expected_revision:goal.revision,request_id:"reference-"+process.pid,title:"Registered fixture evidence",target:"artifact.txt",role:"source"}}];
+          else if(calls===2) { const reference=ctx.sessionManager.getBranch().findLast(e=>e.type==="message"&&e.message?.role==="toolResult"&&e.message.toolName==="goal_reference"&&!e.message.isError)?.message.details?.reference_id;if(!reference)throw Error("Actual goal_reference tool did not register evidence");response.content=[{type:"toolCall",id:"question-"+process.pid,name:"questionnaire",arguments:{questions:[{id:"direction",prompt:"Use the tested design?",options:[{value:"yes",label:"Yes"},{value:"no",label:"No"}],allowOther:false,attachmentIds:[reference]}]}}]; }
+          else if(calls===3) response.content=[{type:"toolCall",id:"activity-"+process.pid,name:"notify_parent",arguments:{message:"Explicit fixture activity after the user's answer"}}];
           else response.content=[{type:"toolCall",id:"question-complete-"+process.pid,name:"goal_complete",arguments:{goal_id:goal.id,activation_id:goal.activationId,summary:"Verified authenticated goal question answer"}}];
         } else if (goal.text.includes("pause-race") && calls === 1) {
           response.stopReason="toolUse";response.content=[{type:"toolCall",id:"race-"+process.pid,name:"goal_complete",arguments:{goal_id:goal.id,activation_id:goal.activationId,summary:"Verified owned pause/completion race"}}];
@@ -142,6 +143,7 @@ async function settle(snapshotValue) {
 }
 try {
   await mkdir(agent,{recursive:true}); await mkdir(cwd,{recursive:true});
+  await writeFile(join(cwd,"artifact.txt"),"Registered isolated fixture evidence");
   await cp(source,copied,{recursive:true,filter:path=>!path.split("/").some(part=>[".git",".direnv",".dev","node_modules","plans"].includes(part))});
   await writeFile(join(copied,"fake-provider.ts"),provider);
   await writeFile(join(copied,"runtime-parent.ts"),parent);
@@ -197,7 +199,7 @@ export default async function(pi) {
   const env={PATH:process.env.PATH,HOME:home,LANG:"C.UTF-8",TMPDIR:root,PI_CODING_AGENT_DIR:agent,
     PI_SUBAGENT_BIN:raw,PI_TUI_WORKER_LAUNCHER:raw,PI_AGENTSH_MODE:"none",TEST_SOCKET:join(root,"fixture.sock"),TEST_CALLS:join(root,"calls.jsonl"),TEST_RECEIPTS:join(root,"receipts.jsonl"),TEST_PAUSE_RELEASE:join(root,"pause-release")};
   const launchParent=()=>{
-    child=spawn(raw,["--mode","rpc","--no-extensions","--extension",join(copied,"runtime-parent.ts"),"--provider","harness-test","--model","gpt-6.1-sol","--session",join(root,"parent.jsonl"),"--tools","read,bash,edit,write,goal_manage,goal_complete,goal_blocked,goal_wait,update_progress,questionnaire"],{cwd,env,stdio:["pipe","pipe","pipe"]});
+    child=spawn(raw,["--mode","rpc","--no-extensions","--extension",join(copied,"runtime-parent.ts"),"--provider","harness-test","--model","gpt-6.1-sol","--session",join(root,"parent.jsonl"),"--tools","read,bash,edit,write,goal_manage,goal_complete,goal_blocked,goal_wait,update_progress,questionnaire,goal_reference"],{cwd,env,stdio:["pipe","pipe","pipe"]});
     child.stdin.on("error",()=>{});
     child.stdout.on("data",chunk=>{ const text=chunk.toString(); if(text.includes('"success":false')||text.includes('"type":"extension_error"'))output+=text; });
     child.stderr.on("data",chunk=>{output+=chunk.toString();});
@@ -237,7 +239,7 @@ export default async function(pi) {
   await rpc({fixture:"hide-completion"});
   state=await settle(await mutate("goals.start",{expectedGoalId:second.id,expectedEntryRevision:second.revision}));
   const staleSecond=structuredClone(state.goals.entries[1]);
-  assert.equal(staleSecond.status,"active");
+  assert.equal(staleSecond.status,"active",JSON.stringify({notice:state.notice,entry:staleSecond}));
   await until(async()=>{
     const session=await readFile(join(agent,"state","native-tasks-v1",staleSecond.child.taskId,"session.jsonl"),"utf8");
     return session.includes('Goal complete: Verified isolated deterministic child completion');
@@ -351,12 +353,17 @@ export default async function(pi) {
   assert.equal(racing.status,"complete","exact owned completion wins Pause race, never downgrades to paused");
   const raceTask=JSON.parse(await readFile(join(agent,"state","native-tasks-v1",racing.child.taskId,"state.json"),"utf8"));
   assert.equal(raceTask.history.at(-1).outcome,"delivered");assert.equal(raceTask.history.at(-1).execution,"completed");
+  const rootCallsBeforeHumanRequest=(await readFile(join(root,"calls.jsonl"),"utf8")).trim().split("\n").map(JSON.parse).filter(call=>!call.isChild).length;
+  assert.equal(rootCallsBeforeHumanRequest,1,"registry-only lifecycle phases never prompt the parent");
   state=await settle(await mutate("goals.create",{expectedGoalId:null,expectedRegistryRevision:state.goals.revision,objective:"Question workflow"}));
   let questioning=state.goals.entries.at(-1);
   state=await settle(await mutate("goals.start",{expectedGoalId:questioning.id,expectedEntryRevision:questioning.revision}));
   state=await until(async()=>{const s=await snapshot();return s.goals.entries.at(-1).story?.questions?.some(q=>q.status==="pending")?s:null;},"actual child questionnaire reaches goal story");
   const questionEvidence=structuredClone(state);
   questioning=state.goals.entries.at(-1);const question=questioning.story.questions.find(q=>q.status==="pending");
+  assert.equal(question.attachmentIds.length,1,"actual worker tool registration must reach the owning question");
+  const attached=questioning.review.find(ref=>ref.id===question.attachmentIds[0]);assert.equal(attached.questionId,question.id);assert.equal(attached.workerEpoch,question.workerEpoch);assert.equal(attached.childId,questioning.child.childId);
+  const preview=await rpc({operation:"review",expectedGoalId:questioning.id,expectedEntryRevision:questioning.revision,referenceId:attached.id,question:{questionId:question.id,questionRevision:question.revision,workerEpoch:question.workerEpoch}});assert.equal(preview.preview.text,"Registered isolated fixture evidence");
   await assert.rejects(mutate("goals.answer",{expectedGoalId:questioning.id,expectedEntryRevision:questioning.revision,questionId:question.id,questionRevision:question.revision,workerEpoch:"foreign",answer:{kind:"questionnaire",cancelled:false,answers:[{id:"direction",value:"yes",wasCustom:false}]}}));
   state=await settle(await mutate("goals.answer",{expectedGoalId:questioning.id,expectedEntryRevision:questioning.revision,questionId:question.id,questionRevision:question.revision,workerEpoch:question.workerEpoch,answer:{kind:"questionnaire",cancelled:false,answers:[{id:"direction",value:"yes",wasCustom:false}]}}));
   state=await until(async()=>{const s=await snapshot();return s.goals.entries.at(-1).status==="complete"?s:null;},"answered child completes without parent prompt");
@@ -369,7 +376,9 @@ export default async function(pi) {
     await writeFile(process.env.PI_GOAL_STORY_EVIDENCE,JSON.stringify({pending:plain(questionEvidence),completed:plain(state)}),{mode:0o600});
   }
   calls=(await readFile(join(root,"calls.jsonl"),"utf8")).trim().split("\n").map(JSON.parse);
-  assert.equal(calls.filter(c=>!c.isChild).length,1,"registry never dispatches parent goal prompts");
+  const rootCalls=calls.filter(c=>!c.isChild);
+  assert(rootCalls.length<=rootCallsBeforeHumanRequest+1,"one owner-human guidance notification may wake the top-level agent");
+  assert(rootCalls.every(call=>call.goalId===null&&call.goalText===null&&!call.activated),"guidance wake must never activate or execute a parent goal");
   assert(calls.filter(c=>c.isChild).every(c=>c.model==="gpt-6.1-sol"&&c.provider==="harness-test"&&c.goalId&&c.activated));
   for(const call of calls.filter(c=>c.isChild)) assert.deepEqual(call.limits,call.goalText?.includes("independent second")?{automaticTurns:11,noProgressTurns:6}:{automaticTurns:7,noProgressTurns:5},"effective child limits must match confirmed per-goal override or parent defaults");
   assert(confirmations.length>=3);

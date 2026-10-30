@@ -1,7 +1,7 @@
 import { randomUUID } from "node:crypto";
 import type { TaskInteractionInput, TaskInteractionAnswer } from "../shared/foreground-tasks.ts";
 import { validInteractionInput, validInteractionAnswer } from "../shared/task-interactions.ts";
-export type GoalQuestion = { id: string; revision: number; at: number; workerEpoch: string; status: "pending" | "answered" | "cancelled"; request: Extract<TaskInteractionInput, { kind: "questionnaire" }>; answer?: Extract<TaskInteractionAnswer, { kind: "questionnaire" }>; answeredAt?: number };
+export type GoalQuestion = { id: string; revision: number; at: number; workerEpoch: string; status: "pending" | "answered" | "cancelled"; attachmentIds?: string[]; request: Extract<TaskInteractionInput, { kind: "questionnaire" }>; answer?: Extract<TaskInteractionAnswer, { kind: "questionnaire" }>; answeredAt?: number };
 export type GoalQuestionReply = { questionId: string; questionRevision: number; workerEpoch: string; answer: Extract<TaskInteractionAnswer, { kind: "questionnaire" }> };
 
 export type GoalTimelineKind = "created" | "started" | "paused" | "resumed" | "blocked" | "completed" | "cleared" | "edited" | "task";
@@ -68,7 +68,7 @@ export function mergeGoalStory(target: GoalStory | undefined, observed: GoalStor
   const questions = new Map((merged.questions ?? []).map(question => [question.id, question]));
   for (const question of observed.questions ?? []) {
     const prior = questions.get(question.id);
-    if (prior && (prior.workerEpoch !== question.workerEpoch || JSON.stringify(prior.request) !== JSON.stringify(question.request))) throw new Error("Goal question identity changed");
+    if (prior && (prior.workerEpoch !== question.workerEpoch || JSON.stringify(prior.request) !== JSON.stringify(question.request) || JSON.stringify(prior.attachmentIds??[]) !== JSON.stringify(question.attachmentIds??[]))) throw new Error("Goal question identity changed");
     if (!prior || question.revision > prior.revision) questions.set(question.id, structuredClone(question));
     else if (question.revision === prior.revision && JSON.stringify(prior) !== JSON.stringify(question)) throw new Error("Goal question revision conflict");
   }
@@ -111,6 +111,7 @@ export function validateGoalStory(value: unknown): asserts value is GoalStory | 
         || (q.status === "pending" && (q.answer !== undefined || q.answeredAt !== undefined))
         || (q.status === "answered" && (!q.answer || q.answer.cancelled))
         || (q.status !== "pending" && (!Number.isSafeInteger(q.answeredAt) || q.answeredAt! < q.at))) throw new Error("Invalid goal question");
+      if (q.attachmentIds !== undefined && (!Array.isArray(q.attachmentIds) || q.attachmentIds.length > 8 || new Set(q.attachmentIds).size !== q.attachmentIds.length || q.attachmentIds.some(id => typeof id !== "string" || !/^[a-f0-9-]{36}$/.test(id)))) throw new Error("Invalid goal question attachments");
       ids.add(q.id);
     }
   }

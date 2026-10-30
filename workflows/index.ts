@@ -9,6 +9,7 @@ import {
 import { createWorkflowService } from "./service.js";
 import { createDelegatedChildGoalService } from "./delegated-child.ts";
 import { bindGoalMutations } from "./goal/mutations.ts";
+import { registerGoalReferenceTool } from "./goal-reference-tool.ts";
 
 export default function workflows(
 	pi: ExtensionAPI,
@@ -78,6 +79,7 @@ export default function workflows(
 		},
 	});
 	goalState = goal(api, { settingsPath: options.goalSettingsPath, restorePaused: options.delegatedChild === true });
+  registerGoalReferenceTool(api);
 	const settings =
 		options.worktreeSettings ??
 		createWorktreeSettingsRuntime({ path: settingsFilePath });

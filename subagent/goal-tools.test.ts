@@ -10,6 +10,8 @@ test("dedicated bootstrap narrows parent capability; every denied goal tool fail
   assert.deepEqual(normal, before, "normal worker tool list remains untouched");
   assert.deepEqual(dedicatedGoalTools([...normal, "questionnaire"]), [...DEDICATED_GOAL_TOOLS, "questionnaire"]);
   assert.ok(!dedicatedGoalTools(normal).includes("questionnaire"), "optional questions cannot widen the parent allowlist");
+  assert.ok(dedicatedGoalTools([...normal,"goal_reference"]).includes("goal_reference"));
+  assert.ok(!dedicatedGoalTools([...normal.filter(tool=>tool!=="read"),"goal_reference"]).includes("goal_reference"),"registration never grants read capability");
   for (const denied of DEDICATED_GOAL_TOOLS) {
     assert.throws(() => dedicatedGoalTools(normal.filter(tool => tool !== denied)), new RegExp(denied));
   }
