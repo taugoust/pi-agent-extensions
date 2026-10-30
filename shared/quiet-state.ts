@@ -81,7 +81,15 @@ function revokeConsumedWake(h:Hub):void{if(h.wakeAdmission&&h.wakeItems&&![...h.
 /** Gate the existing durable notification queue, not a duplicate wake message.
  * Only batches made entirely of producer-confirmed terminal completions or
  * identity-bound idle-decision controls use automatic compaction admission. */
-function trustedAutonomousUpdate(data:QuietUpdate):boolean{return isCompletion(data)||controlUpdate(data);}
+function trustedAutonomousUpdate(data:QuietUpdate):boolean{
+  if(isCompletion(data)||controlUpdate(data))return true;
+  if(data.requires_guidance!==true)return false;
+  const validChild=typeof data.child_id==='string'&&/^subagent-child-[0-9a-f]{24}$/.test(data.child_id);
+  const validJob=typeof (data.job_id??data.id)==='string'&&/^(?:job|subagent-job)-[0-9a-f]{24}$/.test(String(data.job_id??data.id));
+  if(data.kind==='subagent')return validChild&&validJob;
+  if(data.kind==='job')return validJob;
+  return data.kind==='notification'&&validChild;
+}
 async function admitBatch(h:Hub,items:Item[]):Promise<boolean>{
   if(h.wakeAdmission||!h.ctx)return false;
   const controller=new AbortController(),writer=h.writer,ctx=h.ctx;

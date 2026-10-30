@@ -96,22 +96,27 @@ export default function (pi: ExtensionAPI, options: { readSettings?: () => Confi
     const currentSignal = signal ? AbortSignal.any([signal, lifecycle.signal]) : lifecycle.signal;
     if (origin !== "submission") await lane.waitForIdle(currentSignal);
     if (currentSignal.aborted || !active) {
-      if (origin === "notification" && !signal?.aborted) throw new DOMException("Idle admission invalidated", "AbortError");
+      if (origin !== "submission" && !signal?.aborted) throw new DOMException("Idle admission invalidated", "AbortError");
       return "cancel";
     }
     let info: AdmissionDetails | undefined;
-    try { info = details(ctx, settings(), origin); } catch { return "cancel"; }
+    try { info = details(ctx, settings(), origin); }
+    catch (error) {
+      if (origin !== "submission") throw new DOMException(`Idle notification admission failed: ${String(error)}`, "AbortError");
+      return "cancel";
+    }
     if (!info) return "continue";
     const initial = identity(ctx);
-    let revision = contextRevision(ctx);
+    let revision = contextRevision(ctx), compactFailed = false;
     const result = await lane.run(info, origin === "autonomous" ? async (): Promise<Choice> => "compact" : decisionPort(ctx, info), currentSignal, async compactSignal => {
       if (identity(ctx) !== initial || contextRevision(ctx) !== revision) return false;
       const compacted = await compactAndWait(ctx, compactSignal);
-      if (compacted) revision = contextRevision(ctx);
+      if (compacted) revision = contextRevision(ctx); else compactFailed = true;
       return compacted;
     });
+    if (compactFailed && origin !== "submission") throw new DOMException("Idle notification compaction failed", "AbortError");
     if (currentSignal.aborted || identity(ctx) !== initial || contextRevision(ctx) !== revision) {
-      if (origin === "notification" && !signal?.aborted) throw new DOMException("Idle admission invalidated", "AbortError");
+      if (origin !== "submission" && !signal?.aborted) throw new DOMException("Idle admission invalidated", "AbortError");
       return "cancel";
     }
     return result;
@@ -177,10 +182,28 @@ export default function (pi: ExtensionAPI, options: { readSettings?: () => Confi
         // process crash. A released-but-unsent request requires user resubmission.
         if (!persistSubmission(item, result === "continue" ? "released" : "cancelled") || result !== "continue") return;
         replay = { text: item.text, images: item.images, epoch };
-        void Promise.resolve().then(() => pi.sendUserMessage(item.images?.length ? [{ type: "text", text: item.text }, ...item.images] : item.text, { deliverAs: item.streamingBehavior, expandPromptTemplates: false })).catch(error => {
-          if (replay?.epoch === epoch && replay.text === item.text) replay = undefined;
-          try { if (ctx.hasUI) ctx.ui.notify(`Idle-approved message could not be submitted; resubmit it: ${String(error).slice(0, 300)}`, "error"); else process.stderr.write(`[idle-context-warning] Approved message submission failed: ${String(error)}\n`); } catch { /* Report failure without replaying an ambiguous send. */ }
-        });
+        const content = item.images?.length ? [{ type: "text" as const, text: item.text }, ...item.images] : item.text;
+        const options = { deliverAs: item.streamingBehavior, expandPromptTemplates: false };
+        void (async () => {
+          try {
+            // Newer supervised Pi builds expose submitUserMessage(), whose
+            // receipt resolves at the real prompt-admission boundary. Stock Pi
+            // 1.4's sendUserMessage() is fire-and-forget at the extension facade.
+            const submit = (pi as any).submitUserMessage;
+            if (typeof submit === "function") {
+              const receipt = await submit.call(pi, content, options);
+              if (!receipt || !["started", "queued"].includes(receipt.disposition)) throw new Error(`Prompt was not admitted (${receipt?.disposition ?? "invalid receipt"})`);
+            } else {
+              const delivery = pi.sendUserMessage(content, options);
+              if (delivery && typeof delivery.then === "function") await delivery;
+            }
+          } catch (error) {
+            if (replay?.epoch === epoch && replay.text === item.text) replay = undefined;
+            // This is only emitted when dispatch is positively rejected. Do not
+            // retry automatically: an ambiguous accepted send could duplicate.
+            try { if (ctx.hasUI) ctx.ui.notify(`Idle-approved message could not be submitted; resubmit it: ${String(error).slice(0, 300)}`, "error"); else process.stderr.write(`[idle-context-warning] Approved message submission failed: ${String(error)}\n`); } catch { /* Report failure without replaying an ambiguous send. */ }
+          }
+        })();
       }).catch(() => { /* Never replay on an unhandled failure. */ });
     }, 0);
   };

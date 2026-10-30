@@ -27,7 +27,7 @@ function fixture(choice = "Ignore") {
   const capability = (globalThis as any)[REMOTE_PREFLIGHT_KEY];
   cleanups.push(() => { void emit("session_shutdown"); if (oldWorker === undefined) delete process.env.PI_SUBAGENT_ID; else process.env.PI_SUBAGENT_ID = oldWorker; if (oldAgent === undefined) delete process.env.AGENTSH_SUBAGENT_ID; else process.env.AGENTSH_SUBAGENT_ID = oldAgent; delete (globalThis as any).__piIdleContextParentV1; });
   const complete = (attempt = compacts.at(-1), tag = true) => { branch.push({ type: "compaction", id: `summary-${branch.length}`, parentId: attempt.parentId, fromHook: true, details: tag ? { idleContextNativeCompaction: 1, idleContextExplicitAttempt: attempt.token } : {} }); attempt.options.onComplete(); };
-  return { emit, commands, ctx, sent, dialogs, notices, capability, compacts, complete, failSend: () => sendFailure = true };
+  return { emit, commands, ctx, sent, dialogs, notices, capability, compacts, complete, pi, failSend: () => sendFailure = true };
 }
 describe("provider-independent admission", () => {
   it("consumes first, asks user, and replays exact text/images once on Ignore", async () => {
@@ -44,6 +44,16 @@ describe("provider-independent admission", () => {
     expect(f.sent).toHaveLength(0); expect(f.compacts).toHaveLength(1);
     f.complete(); await tick(); await tick();
     expect(f.sent).toEqual([[[{ type: "text", text: "continue after compact" }, ...images], { deliverAs: "followUp", expandPromptTemplates: false }]]);
+  });
+  it("uses Pi's awaited submitUserMessage admission receipt when available", async () => {
+    const f = fixture(); let fallbackCalls = 0;
+    f.pi.sendUserMessage = (...args: any[]) => { fallbackCalls++; f.sent.push(args); };
+    f.pi.submitUserMessage = async (content: any, options: any) => {
+      await f.emit("input", { source: "extension", text: "receipt-backed" });
+      f.sent.push([content, options]); return { disposition: "started" };
+    };
+    await f.emit("input", { source: "interactive", text: "receipt-backed" }); await tick(); await tick();
+    expect(f.sent).toHaveLength(1); expect(fallbackCalls).toBe(0);
   });
   it("failed explicit compaction never sends or silently releases the intercepted message", async () => {
     const f = fixture("Compact"); await f.emit("input", { source: "interactive", text: "keep for retry" }); await tick();
@@ -90,6 +100,18 @@ describe("provider-independent admission", () => {
     const pending = admitHarnessWake(f.ctx, new AbortController().signal, true); await tick();
     expect(f.capability.pending.origin).toBe("autonomous"); expect(f.dialogs).toHaveLength(0); expect(f.compacts).toHaveLength(1);
     f.complete(); expect(await pending).toBe("continue"); expect(f.sent).toHaveLength(0);
+  });
+  it("autonomous wake compaction failure rejects for durable retry instead of returning user-cancel", async () => {
+    const f = fixture(), pending = admitHarnessWake(f.ctx, new AbortController().signal, true); await tick();
+    f.compacts[0].options.onError();
+    await expect(pending).rejects.toMatchObject({ name: "AbortError" });
+    expect(f.sent).toHaveLength(0);
+  });
+  it("autonomous admission invalidation rejects so the durable wake is retried", async () => {
+    const f = fixture(), pending = admitHarnessWake(f.ctx, new AbortController().signal, true); await tick();
+    await f.emit("model_select");
+    await expect(pending).rejects.toMatchObject({ name: "AbortError" });
+    expect(f.sent).toHaveLength(0);
   });
   it("ordinary user text cannot select autonomous admission", async () => {
     const f = fixture("Compact");

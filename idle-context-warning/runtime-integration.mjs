@@ -40,7 +40,7 @@ async function fixture(options = {}) {
   if (options.worker) process.env.PI_SUBAGENT_ID = 'test-child';
   let network = 0;
   globalThis.fetch = async () => { network++; throw Error('NETWORK FORBIDDEN'); };
-  const stats = { physical: 0, summary: 0, messages: [], hooks: [], modelSelections: [], errors: [] };
+  const stats = { physical: 0, summary: 0, messages: [], requestUsers: [], hooks: [], modelSelections: [], errors: [] };
   const settings = SettingsManager.inMemory({ compaction: { enabled: false, keepRecentTokens: 128 }, retry: { enabled: false }, cacheWarming: 'off' });
   const modelRuntime = await ModelRuntime.create({ authPath: join(dir, 'auth.json'), modelsPath: null, modelsStorePath: join(dir, 'models'), allowModelNetwork: false, refreshOnCreate: false });
   let ctx, quiet;
@@ -51,6 +51,7 @@ async function fixture(options = {}) {
       models: ['model', 'small-model'].map(id => ({ id, name: `${provider}/${id}`, reasoning: true, input: ['text'], cost, contextWindow: 10000, maxTokens: 1000 })),
       streamSimple(model, transcript, streamOptions) {
         stats[model.id === 'small-model' ? 'summary' : 'physical']++;
+        if (model.id !== 'small-model') stats.requestUsers.push(transcript.messages.filter(message => message.role === 'user').map(message => message.content));
         const stream = new AssistantMessageEventStream();
         queueMicrotask(async () => { try {
           await streamOptions?.onPayload?.({ messages: transcript.messages }, model);
@@ -121,34 +122,57 @@ test('explicit Compact persists native cheap summary before one ordinary-model r
     const compaction = f.manager.getBranch().findLast(e => e.type === 'compaction');
     assert.equal(compaction.details.idleContextNativeCompaction, 1); assert.ok(compaction.details.idleContextExplicitAttempt);
     assert.equal(f.stats.summary, 1); assert.equal(f.session.model.provider, 'probe');
+    assert.equal(f.stats.requestUsers.flat().filter(content => JSON.stringify(content).includes('after summary')).length, 1, 'the original intercepted text must reach an ordinary model request exactly once after compaction');
   } finally { await f.close(); }
 });
-test('existing quiet completion queue asks root user, deduplicates while pending, and sends once', async () => {
+test('bridge preflight Compact is followed by the original extension-sourced prompt exactly once', async () => {
+  const f = await fixture(); try {
+    const preflight = f.capability.check(); await until(() => f.capability.pending);
+    f.capability.decide(f.capability.pending.id, 'compact'); assert.equal(await preflight, 'continue');
+    const compaction = f.manager.getBranch().findLast(entry => entry.type === 'compaction');
+    assert.ok(compaction, 'preflight must finish compacting before the bridge submits its original payload');
+    await f.session.prompt('bridge preflight original', { source: 'extension' });
+    await until(() => f.stats.physical === 1); await f.session.waitForIdle();
+    assert.equal(f.stats.requestUsers.flat().filter(content => JSON.stringify(content).includes('bridge preflight original')).length, 1);
+    const original = f.manager.getBranch().findLast(entry => entry.type === 'message' && entry.message?.role === 'user' && JSON.stringify(entry.message.content).includes('bridge preflight original'));
+    const activeBranch = f.manager.getBranch();
+    assert.ok(activeBranch.findIndex(entry => entry.id === compaction.id) < activeBranch.findIndex(entry => entry.id === original.id), 'original message follows the compaction in the active branch');
+  } finally { await f.close(); }
+});
+test('trusted completion wake auto-compacts and dispatches once without a questionnaire', async () => {
   const f = await fixture(); try {
     const update = { kind: 'job', id: 'done', completion: true };
     assert.equal(f.quiet.enqueue(f.ctx, update), true); assert.equal(f.quiet.enqueue(f.ctx, update), true);
-    await until(() => f.capability.pending); assert.equal(f.capability.pending.origin, 'notification'); assert.equal(f.stats.physical, 0);
-    assert.equal(f.quiet.enqueue(f.ctx, update), true); f.capability.decide(f.capability.pending.id, 'ignore');
     await until(() => f.stats.physical === 1); await f.session.waitForIdle();
     const messages = f.manager.getBranch().filter(e => e.type === 'custom_message' && e.customType === 'harness-state');
+    assert.equal(f.stats.summary, 1); assert.equal(f.capability.pending, undefined);
     assert.equal(messages.length, 1); assert.equal(messages[0].details.updates.length, 1);
   } finally { await f.close(); }
 });
-test('ordinary guidance requires root admission; Cancel is durable across reload', async () => {
+test('validated subagent guidance auto-compacts without a questionnaire', async () => {
   const f = await fixture(); try {
-    f.quiet.enqueue(f.ctx, { kind: 'notification', id: 'guidance-cancel', requires_guidance: true, message: 'ordinary guidance' });
-    await until(() => f.capability.pending); assert.equal(f.stats.physical, 0);
-    f.capability.decide(f.capability.pending.id, 'cancel'); await until(() => !f.capability.pending);
-    await f.session.reload(); await tick(); assert.equal(f.capability.pending, undefined); assert.equal(f.stats.physical, 0);
+    f.quiet.enqueue(f.ctx, { kind: 'notification', id: 'guidance', child_id: 'subagent-child-' + '7'.repeat(24), requires_guidance: true, message: 'Need a parent decision' });
+    await until(() => f.stats.physical === 1); await f.session.waitForIdle();
+    const messages = f.manager.getBranch().filter(e => e.type === 'custom_message' && e.customType === 'harness-state');
+    assert.equal(f.stats.summary, 1); assert.equal(f.capability.pending, undefined);
+    assert.equal(messages.length, 1); assert.equal(messages[0].details.updates[0].message, 'Need a parent decision');
   } finally { await f.close(); }
 });
-test('routing-relevant selection change revokes approval but retains queued completion', async () => {
+test('validated job guidance auto-compacts without a questionnaire', async () => {
   const f = await fixture(); try {
-    f.quiet.enqueue(f.ctx, { kind: 'job', id: 'rethink', completion: true }); await until(() => f.capability.pending);
-    const id = f.capability.pending.id; f.session.setThinkingLevel('low');
-    await until(() => f.capability.pending && f.capability.pending.id !== id);
-    assert.equal(f.capability.decide(id, 'ignore'), false); assert.equal(f.stats.physical, 0);
-    f.capability.decide(f.capability.pending.id, 'cancel'); await until(() => !f.capability.pending);
+    f.quiet.enqueue(f.ctx, { kind: 'job', id: 'job-' + '8'.repeat(24), job_id: 'job-' + '8'.repeat(24), requires_guidance: true, message: 'Job needs a decision' });
+    await until(() => f.stats.physical === 1); await f.session.waitForIdle();
+    const messages = f.manager.getBranch().filter(e => e.type === 'custom_message' && e.customType === 'harness-state');
+    assert.equal(f.stats.summary, 1); assert.equal(f.capability.pending, undefined);
+    assert.equal(messages.length, 1); assert.equal(messages[0].details.updates[0].message, 'Job needs a decision');
+  } finally { await f.close(); }
+});
+test('routing-relevant selection change does not discard queued autonomous completion', async () => {
+  const f = await fixture(); try {
+    f.quiet.enqueue(f.ctx, { kind: 'job', id: 'rethink', completion: true }); f.session.setThinkingLevel('low');
+    await until(() => f.stats.physical === 1); await f.session.waitForIdle();
+    assert.equal(f.capability.pending, undefined);
+    assert.equal(f.manager.getBranch().filter(e => e.type === 'custom_message' && e.customType === 'harness-state').length, 1);
   } finally { await f.close(); }
 });
 test('owning-parent worker decisions never open worker UI; missing parent stays pending', async () => {
@@ -160,18 +184,18 @@ test('owning-parent worker decisions never open worker UI; missing parent stays 
     assert.equal(await f.capability.check(), 'continue'); assert.equal(requested.model, 'probe/model'); assert.equal(f.stats.physical, 0);
   } finally { await f.close(); }
 });
-test('idle-decision control wake alone bypasses parent admission; ordinary guidance stays queued for root', async () => {
+test('idle-decision control wake auto-compacts after an active user decision is cancelled', async () => {
   const f = await fixture(); try {
-    // Keep a normal root approval pending so a child cannot depend on that same
-    // approval to deliver its parent-decision request.
+    // A control notification queues behind an existing user decision, then
+    // proceeds autonomously once that user decision is cancelled.
     const root = f.capability.check(); await until(() => f.capability.pending);
-    f.quiet.enqueue(f.ctx, { kind: 'notification', id: 'normal-help', requires_guidance: true, message: 'ordinary guidance' });
     f.quiet.enqueue(f.ctx, { kind: 'notification', id: 'idle-help', child_id: 'subagent-child-' + '1'.repeat(24), requires_guidance: true,
       admission_control: { kind: 'idle-decision', request_id: 'idle:' + '2'.repeat(32), worker_epoch: '3'.repeat(32) }, message: 'resolve child idle decision' });
-    await until(() => f.stats.physical === 1); await f.session.waitForIdle();
+    f.capability.decide(f.capability.pending.id, 'cancel'); assert.equal(await root, 'cancel');
+    await until(() => f.stats.physical >= 1); await f.session.waitForIdle();
     const sent = f.manager.getBranch().find(e => e.type === 'custom_message' && e.customType === 'harness-state');
     assert.deepEqual(sent.details.updates.map(u => u.id), ['idle-help']);
-    f.capability.decide(f.capability.pending.id, 'cancel'); assert.equal(await root, 'cancel');
+    assert.equal(f.capability.pending, undefined);
   } finally { await f.close(); }
 });
 test('resolved child idle-control requests stay suppressed even when old polling arrives after resolution or reload', async () => {
@@ -185,12 +209,11 @@ test('resolved child idle-control requests stay suppressed even when old polling
     await tick(); assert.equal(f.stats.physical, 0);
   } finally { await f.close(); }
 });
-test('result read while notification admission waits suppresses the stale wake', async () => {
+test('result read before autonomous wake admission suppresses the stale completion', async () => {
   const f = await fixture(); try {
-    f.quiet.enqueue(f.ctx, { kind: 'job', id: 'read-first', completion: true }); await until(() => f.capability.pending);
-    const id = f.capability.pending.id;
+    f.quiet.enqueue(f.ctx, { kind: 'job', id: 'read-first', completion: true });
     f.quiet.consume(f.ctx, 'job', 'read-first');
-    await until(() => !f.capability.pending); assert.equal(f.capability.decide(id, 'ignore'), false); await tick(); assert.equal(f.stats.physical, 0);
+    await tick(); assert.equal(f.capability.pending, undefined); assert.equal(f.stats.physical, 0);
   } finally { await f.close(); }
 });
 test('legacy selected alias resolves through public model selection, no proxy/provider request', async () => {
@@ -212,26 +235,23 @@ test('reload restores durable pending submission but never reuses approval', asy
     assert.equal(records.at(-1).data.state, 'released');
   } finally { await f.close(); }
 });
-test('reload preserves queued notification, no duplicate wake or approval across runtimes', async () => {
+test('reload after autonomous completion delivery does not duplicate the wake', async () => {
   const f = await fixture(); try {
-    f.quiet.enqueue(f.ctx, { kind: 'job', id: 'reload-job', completion: true }); await until(() => f.capability.pending);
-    const previous = f.capability, oldId = previous.pending.id;
-    await f.session.reload(); await until(() => f.capability.pending);
-    assert.equal(previous.decide(oldId, 'ignore'), false); assert.equal(f.stats.physical, 0);
-    f.capability.decide(f.capability.pending.id, 'ignore'); await until(() => f.stats.physical === 1); await f.session.waitForIdle();
+    f.quiet.enqueue(f.ctx, { kind: 'job', id: 'reload-job', completion: true });
+    await until(() => f.stats.physical === 1); await f.session.waitForIdle();
     await f.session.reload(); await tick(); assert.equal(f.stats.physical, 1);
   } finally { await f.close(); }
 });
-test('busy completion stays in existing queue and asks admission only after settlement', async () => {
+test('busy completion stays queued and auto-compacts only after settlement', async () => {
   let release; const held = new Promise(resolve => release = resolve);
   const f = await fixture({ physical: async count => { if (count === 1) await held; return { ...response(), timestamp: Date.now() - 120000 }; } });
   try {
     const active = f.session.prompt('synthetic in-flight turn', { source: 'extension' }); await until(() => f.stats.physical === 1);
     f.quiet.enqueue(f.ctx, { kind: 'job', id: 'busy-job', completion: true }); await tick();
     assert.equal(f.capability.pending, undefined); assert.equal(f.stats.physical, 1);
-    release(); await active; await until(() => f.capability.pending);
-    assert.equal(f.stats.physical, 1); f.capability.decide(f.capability.pending.id, 'ignore');
+    release(); await active;
     await until(() => f.stats.physical === 2); await f.session.waitForIdle();
+    assert.equal(f.capability.pending, undefined);
   } finally { release(); await f.close(); }
 });
 test('shutdown revokes a pending decision; no stale approval or fake dispatch survives', async () => {
