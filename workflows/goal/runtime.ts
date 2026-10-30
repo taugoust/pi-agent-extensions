@@ -1433,16 +1433,7 @@ export class GoalRuntime {
 
   showCompletionStatus(ctx: StatusContext) {
     this.clearCompletionStatusTimer();
-    ctx.ui.setStatus(STATUS_KEY, ctx.ui.theme?.fg("success", "Goal ✓") ?? "Goal ✓");
-    this.completionStatusTimer = setTimeout(() => {
-      this.completionStatusTimer = undefined;
-      try {
-        ctx.ui.setStatus(STATUS_KEY, undefined);
-      } catch {
-        // The completion status is best-effort; the captured ctx may be stale after
-        // session replacement or reload before this timer fires.
-      }
-    }, 8_000);
+    ctx.ui.setStatus(STATUS_KEY, undefined);
   }
 
   clearCompletionStatusTimer() {
@@ -1588,7 +1579,7 @@ export function incrementGoal(goal: ActiveGoal): ActiveGoal {
 export function formatFooterStatus(goal: ActiveGoal | undefined, limit: number | null, theme?: StatusContext["ui"]["theme"]) {
   const text = formatStatus(goal, limit);
   if (!goal || text === undefined) return undefined;
-  const tone = goal.status === "complete" || (goal.status === "active" && !goal.waiting) ? "success" : "warning";
+  const tone = goal.status === "active" ? "success" : "warning";
   return theme?.fg(tone, text) ?? text;
 }
 
@@ -1596,21 +1587,10 @@ export function formatStatus(
   goal: ActiveGoal | undefined,
   automaticTurnLimit: number | null = DEFAULT_GOAL_SETTINGS.continuationLimits.automaticTurns,
 ) {
-  if (!goal) return undefined;
-  if (goal.status === "complete") return "Goal ✓";
-  if (goal.status === "active" && !goal.waiting) return "Goal ✓";
-  // Keep pause reasons and limit counters in goal details, not the footer.
-  if (goal.status === "paused") return "Goal ■";
-  const automatic =
-    automaticTurnLimit === null ? "automatic Unlimited" : `automatic ${goal.automaticModelTurns}/${automaticTurnLimit}`;
-  if (goal.waiting) {
-    return `waiting ${safeGoalMenuText(goal.waiting.reason)} · ${automatic}`;
-  }
-  if (goal.status === "blocked") return `blocked · ${automatic}`;
-  if (goal.status === "usage_limited") return `usage · ${automatic}`;
-  if (goal.status === "budget_limited") return `budget ${formatBudget(goal)} · ${automatic}`;
-  if (goal.tokenBudget !== undefined) return `active ${formatBudget(goal)} · ${automatic}`;
-  return `active ${formatDuration(goal.timeUsedSeconds)} · ${automatic}`;
+  if (!goal || goal.status === "complete") return undefined;
+  // The footer is a compact execution indicator, never goal details.
+  // Waiting keeps an active goal active; every stopped state uses the square.
+  return goal.status === "active" ? "Goal ✓" : "Goal ■";
 }
 
 export function formatBudget(goal: ActiveGoal) {

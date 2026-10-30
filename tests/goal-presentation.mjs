@@ -16,7 +16,7 @@ const jiti = createJiti(import.meta.url, { alias: {
   '@earendil-works/pi-tui': join(sdkRoot, 'node_modules/@earendil-works/pi-tui/dist/index.js'),
 } });
 const { registerGoalManagement } = await jiti.import(join(sourceRoot, 'workflows/goal/model-control.ts'));
-const { GoalRuntime } = await jiti.import(join(sourceRoot, 'workflows/goal/runtime.ts'));
+const { GoalRuntime, formatFooterStatus } = await jiti.import(join(sourceRoot, 'workflows/goal/runtime.ts'));
 const { bindGoalMutations } = await jiti.import(join(sourceRoot, 'workflows/goal/mutations.ts'));
 const { writeProgress } = await jiti.import(join(sourceRoot, 'shared/goal-progress.ts'));
 const { normalizeGoalManageDisplay } = await jiti.import(join(sourceRoot, 'workflows/goal/presentation.ts'));
@@ -41,6 +41,22 @@ function fixture() {
   registerGoalManagement(pi, runtime);
   return { pi, runtime, tool, ctx, execute: params => tool.execute('test', params, undefined, undefined, ctx) };
 }
+test('footer contains only the running tick or stopped square, never details', () => {
+  const goal = { text: 'Private goal objective', waiting: { reason: 'Long private waiting explanation', resumeAt: 123 }, automaticModelTurns: 7, tokenBudget: 42, tokensUsed: 12 };
+  for (const limit of [null, 10]) {
+    assert.equal(formatFooterStatus(undefined, limit, theme), undefined);
+    for (const waiting of [undefined, goal.waiting]) {
+      assert.equal(formatFooterStatus({ ...goal, waiting, status: 'active' }, limit, theme), 'Goal ✓');
+      for (const status of ['paused', 'blocked', 'usage_limited', 'budget_limited']) assert.equal(formatFooterStatus({ ...goal, waiting, status }, limit, theme), 'Goal ■');
+      assert.equal(formatFooterStatus({ ...goal, waiting, status: 'complete' }, limit, theme), undefined);
+    }
+  }
+  const f = fixture();
+  const calls = [];
+  f.ctx.ui.setStatus = (...args) => calls.push(args);
+  f.runtime.showCompletionStatus(f.ctx);
+  assert.deepEqual(calls, [['goal', undefined]], 'completion must remove the indicator immediately');
+});
 const context = (args, isError = false) => ({ args, isError });
 const text = component => component.render(2000).map(line => line.trimEnd()).join('\n');
 const plain = result => result.content.map(b => b.text).join('\n');
