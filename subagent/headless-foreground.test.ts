@@ -8,6 +8,8 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { TuiWorkerStore, atomicPrivateJson, validateWorkerManifest } from "./tui-worker-store.ts";
 import { HeadlessForegroundManager } from "./headless-foreground.ts";
+import { TuiWorkerServer } from "./tui-worker-server.ts";
+import { callTuiWorker } from "./tui-worker-client.ts";
 import { processIdentity, processIsAlive } from "./tui-worker-tmux.ts";
 import { pageHeadlessHistory } from "./headless-foreground.ts";
 import { parseTuiWorkerRequest, publicTuiWorkerManifest } from "../shared/tui-worker-protocol.ts";
@@ -63,6 +65,103 @@ test("headless routing callbacks preserve trusted environment and rebind legacy 
   assert.equal(manager.resolveRoleModel("old-provider/role-model"), "routed-provider/role-model");
   assert.equal(manager.resolveRoleModel(undefined), undefined);
   assert.deepEqual(Object.keys(manager.routingEnvironment()), ["PI_SESSION_ROUTING_FILE", "PI_SESSION_ROUTING_OWNER_SESSION"]);
+});
+
+test("parallel launch failure preserves an authenticated settled sibling result", async () => {
+  const root = await mkdtemp(join(tmpdir(), "headless-parallel-settlement-"));
+  const manager: any = new HeadlessForegroundManager(root, () => "native", () => true);
+  const owner = "parallel-settlement-owner";
+  let worker: TuiWorkerServer | undefined;
+  try {
+    // The fixture worker must have a runtime PID distinct from the committed
+    // foreground-owner PID while remaining a real authenticated local server.
+    manager.processToken = (pid: number) => pid === process.pid ? `${pid}:owner-fixture` : undefined;
+    manager.activate(owner);
+    manager.sealAndReap = async (_group: any, child: any) => {
+      child.status = "reaped";
+      child.workerAlive = false;
+    };
+    let aSettled!: () => void;
+    const settled = new Promise<void>(resolve => { aSettled = resolve; });
+    let promptCount = 0;
+    manager.launchWorker = async (group: any, child: any) => {
+      if (child.spec.task === "already settled") {
+        await mkdir(child.directory, { mode: 0o700 });
+        const store = new TuiWorkerStore(child.directory, true);
+        const sessionFile = store.path("session.jsonl");
+        await writeFile(sessionFile, "", { mode: 0o600 });
+        const runtimeToken = await processIdentity(process.pid);
+        const manifest = { ...identity, ownerSessionId: group.owner, taskId: child.taskId, runtimeId: "rpc-settled-fixture",
+          groupId: group.id, childId: child.childId, attempt: child.attempt, workerEpoch: "a".repeat(32),
+          controlSocket: store.path("control.sock"), controlToken: "b".repeat(64), sessionFile,
+          execution: "rpc-headless", presentation: "headless-foreground", launchMode: "none",
+          processPid: process.pid, processToken: runtimeToken, fifoPath: store.path("stdin.fifo"),
+          foregroundOwner: { pid: process.pid + 1, token: group.ownerToken } } as any;
+        store.writeManifest(manifest);
+        await writeFile(store.path("stdin.fifo"), "", { mode: 0o600 });
+        worker = new TuiWorkerServer(store, { isIdle: () => true,
+          send() {
+            promptCount++;
+            setImmediate(() => {
+              worker!.outcome({ version: 1, state: "delivered", summary: "Completed before sibling startup failed.", acceptance: [], artifacts: [], remaining: [] });
+              worker!.settled({ assistant: { role: "assistant", content: [{ type: "text", text: "settled fixture" }], stopReason: "stop" } });
+              aSettled();
+            });
+          }, abort() {}, shutdown() {} });
+        await worker.start();
+        const readyManifest = await manager.waitReady(manifest, 1000);
+        const accepted = await callTuiWorker(readyManifest, { operation: "prompt", mode: "steer", message: "fixture initial prompt" },
+          { requestId: `initial:${child.childId}` });
+        assert.equal(accepted.ok, true);
+        child.started = true;
+        child.workerAlive = true;
+        child.status = "running";
+        return readyManifest;
+      }
+      await settled;
+      const store = new TuiWorkerStore(child.directory, true);
+      const manifest = { ...identity, ownerSessionId: group.owner, taskId: child.taskId, runtimeId: "rpc-timeout-fixture",
+        groupId: group.id, childId: child.childId, attempt: child.attempt, workerEpoch: "c".repeat(32),
+        controlSocket: store.path("control.sock"), controlToken: "d".repeat(64), sessionFile: store.path("session.jsonl"),
+        execution: "rpc-headless", presentation: "headless-foreground", launchMode: "none",
+        processPid: process.pid + 1, processToken: `${process.pid + 1}:fixture`, fifoPath: store.path("stdin.fifo"),
+        foregroundOwner: { pid: process.pid + 2, token: group.ownerToken } } as any;
+      await manager.waitReady(manifest, 25);
+      throw new Error("Fixture readiness unexpectedly succeeded");
+    };
+    manager.result = (group: any) => ({ content: [{ type: "text", text: "fixture result" }], details: { job_id: group.id } });
+    const priorLauncher = process.env.PI_TUI_WORKER_LAUNCHER;
+    const priorMode = process.env.PI_TUI_WORKER_LAUNCH_MODE;
+    process.env.PI_TUI_WORKER_LAUNCHER = "/nix/store/headless-test-launcher";
+    process.env.PI_TUI_WORKER_LAUNCH_MODE = "none";
+    try {
+      await assert.rejects((manager as any).launchImpl({ tasks: [
+        { task: "already settled" }, { task: "startup timeout" },
+      ] }, owner, process.cwd()), /fixture result/);
+    } finally {
+      if (priorLauncher === undefined) delete process.env.PI_TUI_WORKER_LAUNCHER; else process.env.PI_TUI_WORKER_LAUNCHER = priorLauncher;
+      if (priorMode === undefined) delete process.env.PI_TUI_WORKER_LAUNCH_MODE; else process.env.PI_TUI_WORKER_LAUNCH_MODE = priorMode;
+    }
+
+    const group = [...manager.groups.values()][0] as any;
+    assert.equal(promptCount, 1, "authenticated initial prompt must dispatch exactly once");
+    assert.equal(group.children[0].status, "reaped", "cleanup must reach its mocked destructive boundary");
+    assert.match(group.children[0].report, /report-\d+-[a-f0-9]{16}\.json$/);
+    const retainedReport = JSON.parse(await readFile(group.children[0].report, "utf8"));
+    assert.equal(retainedReport.assistant.content[0].text, "settled fixture");
+    assert.equal(group.children[0].outcome.state, "delivered");
+    assert.equal(group.children[0].error, undefined);
+    const readonlyA = manager.readonlyTaskList(owner).find((task: any) => task.childId === group.children[0].childId);
+    assert.equal(readonlyA?.status, "completed", "retained task list must project the authenticated settled report");
+    assert.doesNotMatch(group.children[0].error ?? "", /startup timed out/, "sibling timeout must not poison settled child");
+    assert.equal(group.children[1].status, "failed", "failing startup child should retain its error");
+    assert.match(group.children[1].error, /startup timed out/);
+    assert.equal(group.cancelled, true, "existing group cancellation fence remains active");
+  } finally {
+    await worker?.close();
+    await manager.shutdown(false);
+    await rm(root, { recursive: true, force: true });
+  }
 });
 
 test("headless group waits honor validated durations above 60 seconds, early completion and observation cancellation", async (t) => {

@@ -1,5 +1,5 @@
 export type WaitGroup = { job_id: string; status: string; background?: boolean; children: Array<{ child: number; status: string; [key: string]: unknown }>; [key: string]: unknown };
-const active = (status: string) => ["pending", "launching", "running", "waiting-input", "waiting-permission", "cancelling"].includes(status);
+const active = (status: string) => ["pending", "launching", "running", "waiting", "waiting-input", "waiting-permission", "cancelling"].includes(status);
 const waitable = (group: WaitGroup) => group.background !== false || group.execution === "rpc-headless";
 /** One bounded observation over both backends. New groups/old finished children
  * never join the snapshot; cancelling observation never cancels execution. */

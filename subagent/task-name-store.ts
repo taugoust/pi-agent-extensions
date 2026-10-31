@@ -1,5 +1,5 @@
 import { createHash } from "node:crypto";
-import { constants, openSync, closeSync, unlinkSync, readdirSync } from "node:fs";
+import { constants, openSync, closeSync, unlinkSync, readdirSync, watch, lstatSync } from "node:fs";
 import { basename, dirname, join } from "node:path";
 import type { TuiWorkerManifest } from "../shared/tui-worker-protocol.ts";
 import { atomicPrivateJson, privateDirectory, readPrivateJson } from "./tui-worker-store.ts";
@@ -24,11 +24,42 @@ export class TaskNameStore {
     this.root = join(dirname(dirname(workerDirectory)), "task-names");
     this.path = join(this.root, createHash("sha256").update(JSON.stringify([identity.ownerSessionId, identity.taskId])).digest("hex") + ".json");
   }
-  private locked<T>(fn: () => T): T {
+  private async locked<T>(fn: () => T): Promise<T> {
     privateDirectory(this.root, true);
     const lock = join(this.root, ".write-lock");
-    const fd = openSync(lock, constants.O_WRONLY | constants.O_CREAT | constants.O_EXCL | constants.O_NOFOLLOW, 0o600);
-    try { return fn(); } finally { closeSync(fd); unlinkSync(lock); }
+    // Subscribe before attempting acquisition so release cannot race the wait.
+    // Never remove somebody else's lock, even if its owner appears dead.
+    let changed = false;
+    let wake: (() => void) | undefined;
+    let failure: Error | undefined;
+    const watcher = watch(this.root, () => { changed = true; wake?.(); });
+    watcher.on("error", error => { failure = error; wake?.(); });
+    const deadline = setTimeout(() => { failure = new Error("Canonical name lock contention timed out; lock retained (owner may be crashed)"); wake?.(); }, 5000);
+    try {
+      for (;;) {
+        if (failure) throw failure;
+        changed = false;
+        let fd: number;
+        try { fd = openSync(lock, constants.O_WRONLY | constants.O_CREAT | constants.O_EXCL | constants.O_NOFOLLOW, 0o600); }
+        catch (error: any) {
+          if (error.code !== "EEXIST") throw error;
+          try {
+            const info = lstatSync(lock);
+            if (!info.isFile() || info.isSymbolicLink() || (info.mode & 0o077) !== 0 || (process.getuid && info.uid !== process.getuid())) throw new Error("Unsafe canonical name lock");
+          } catch (inspection: any) { if (inspection.code === "ENOENT") continue; throw inspection; }
+          // Filesystem notifications may coalesce a rapid release/reacquire
+          // across processes. A low-frequency async retry is a safety fallback,
+          // not a busy wait; the absolute deadline still bounds orphan locks.
+          if (!changed && !failure) await new Promise<void>(resolve => {
+            const retry = setTimeout(resolve, 100);
+            wake = () => { clearTimeout(retry); resolve(); };
+          });
+          wake = undefined;
+          continue;
+        }
+        try { return fn(); } finally { closeSync(fd); unlinkSync(lock); }
+      }
+    } finally { clearTimeout(deadline); watcher.close(); }
   }
   read(currentAttempt = true): TaskNameRecord | undefined {
     let record: TaskNameRecord;
@@ -52,7 +83,7 @@ export class TaskNameStore {
     }
     return subagentTmuxAlias(name, occupied);
   }
-  claim(name: string): TaskNameRecord {
+  async claim(name: string): Promise<TaskNameRecord> {
     const displayName = validateSubagentDisplayName(name);
     if (!displayName) throw new Error("Canonical task name is required");
     return this.locked(() => {
@@ -65,7 +96,7 @@ export class TaskNameStore {
       return record;
     });
   }
-  rename(name: string, expectedRevision: number, source: "pi" | "paseo"): TaskNameRecord {
+  async rename(name: string, expectedRevision: number, source: "pi" | "paseo"): Promise<TaskNameRecord> {
     const displayName = validateSubagentDisplayName(name);
     if (!displayName) throw new Error("Canonical task name is required");
     return this.locked(() => {

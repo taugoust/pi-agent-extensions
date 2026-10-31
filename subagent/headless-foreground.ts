@@ -330,7 +330,7 @@ export class HeadlessForegroundManager {
       tools: child.spec.tools, verification: child.spec.verification, sessionFile, presentation: "headless-foreground", execution: "rpc-headless", processPid: childProc.pid,
       processToken, fifoPath };
     store.writeManifest(manifest);
-    new TaskNameStore(child.directory, manifest).claim(child.spec.displayName ?? canonicalSubagentName(child.spec.task, undefined, child.spec.name));
+    await new TaskNameStore(child.directory, manifest).claim(child.spec.displayName ?? canonicalSubagentName(child.spec.task, undefined, child.spec.name));
     child.launching = false;
     atomicPrivateJson(store.path("launch-intent.json"), { groupId: group.id, childId: child.childId, runtimeId, workerEpoch, fifoPath });
     await import("node:fs/promises").then(fs => fs.writeFile(gate, "ready\n", { flag: "wx", mode: 0o600 }));
@@ -627,6 +627,10 @@ export class HeadlessForegroundManager {
       if (!signal?.aborted && !this.closed) {
         const message = error instanceof Error ? error.message : String(error);
         for (const child of group.children) {
+          // A parallel sibling may have completed and committed its authenticated
+          // report before another launch/readiness promise rejects. Group cleanup
+          // must not replace that settled result with the unrelated startup error.
+          if (child.report && ["completed", "cancelled", "failed", "lost", "reaped"].includes(child.status)) continue;
           const diagnostic = this.startupDiagnostics(child);
           child.error = boundedUtf8(`${message}${diagnostic ? `\nWorker stderr: ${diagnostic}` : ""}`, 3000);
           child.status = "failed"; child.updatedAt = new Date().toISOString();

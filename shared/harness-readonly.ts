@@ -62,7 +62,7 @@ export type ReadonlySubagentTask = {
   groupId: string;
   runtimeId: string | null;
   attempt: number;
-  status: "pending" | "running" | "completed" | "failed" | "cancelled" | "skipped" | "lost" | "unknown";
+  status: "pending" | "running" | "waiting" | "completed" | "failed" | "cancelled" | "skipped" | "lost" | "unknown";
   /** Pane cleanup lifecycle, independent of task execution status. */
   reaped?: boolean;
   title: string;

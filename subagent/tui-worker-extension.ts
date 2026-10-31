@@ -56,9 +56,9 @@ export default function tuiWorkerExtension(pi: ExtensionAPI): void {
     });
     void aliasProjection.request(alias);
   };
-  const applyName = (name: string, source: "pi" | "paseo", expectedRevision = nameRevision) => {
+  const applyName = async (name: string, source: "pi" | "paseo", expectedRevision = nameRevision) => {
     if (!nameStore || !context) throw new Error("Canonical naming unavailable");
-    const record = nameStore.rename(name, expectedRevision, source);
+    const record = await nameStore.rename(name, expectedRevision, source);
     nameRevision = record.revision;
     appliedName = record.displayName;
     if (context.sessionManager.getSessionName() !== record.displayName) pi.setSessionName(record.displayName);
@@ -296,7 +296,7 @@ export default function tuiWorkerExtension(pi: ExtensionAPI): void {
         },
       });
       await worker.start();
-      if (nameStore && appliedName) applyName(appliedName, "pi");
+      if (nameStore && appliedName) await applyName(appliedName, "pi");
       if (nameStore) {
         nameWatch = setInterval(() => {
           try {
@@ -476,9 +476,9 @@ export default function tuiWorkerExtension(pi: ExtensionAPI): void {
       worker.outcome(outcome);
       return { content: [{ type: "text", text: `Recorded ${outcome.state}; execution completion and explicit reap remain separate.` }], details: { task_outcome: outcome } };
     } });
-  pi.on("session_info_changed", (event: any, ctx) => {
+  pi.on("session_info_changed", async (event: any, ctx) => {
     if (!nameStore || event.name === appliedName || ctx.sessionManager.getSessionName() !== event.name) return;
-    try { applyName(event.name, "pi"); }
+    try { await applyName(event.name, "pi"); }
     catch (error) {
       // Reject invalid/stale writes visibly; never silently truncate a user's rename.
       if (appliedName && ctx.sessionManager.getSessionName() !== appliedName) pi.setSessionName(appliedName);

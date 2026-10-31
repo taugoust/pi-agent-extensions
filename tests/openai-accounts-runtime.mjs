@@ -295,6 +295,36 @@ async function dispose(f) {
   else process.env.PI_CODING_AGENT_DIR = f.previousAgentDir;
 }
 
+test("atomic default-source guard permits provider changes but refuses pins and malformed guards", async () => {
+  const f = await fixture();
+  try {
+    assert.equal(f.initial.guardedDefaultSwitchVersion, 1);
+    const destination = await f.service.getSnapshot({ sessionId: f.sessionId, providerId: 'openai-codex' });
+    const request = {
+      protocol: 1, providerId: 'openai-codex', requestId: 'guarded-provider',
+      expectedSessionId: f.sessionId, expectedServiceEpoch: f.initial.serviceEpoch,
+      expectedSelectionRevision: destination.selectionRevision,
+      expectedRoutingRevision: f.initial.sessionRouting.revision,
+      expectedDefaultSource: { providerId: 'openai', selectionRevision: f.initial.selectionRevision }, accountId: null,
+    };
+    const malformed = await f.service.switchAccount({ ...request, requestId: 'missing-route', expectedRoutingRevision: undefined });
+    assert.equal(malformed.reason, 'invalid-request');
+    const changed = await f.service.switchAccount(request);
+    assert.equal(changed.ok, true, JSON.stringify(changed));
+    assert.equal(changed.snapshot.sessionRouting.providerId, 'openai-codex');
+    assert.equal(changed.snapshot.currentAccountId, null);
+    const pinned = await switchRequest(f, 'Work', 'pin-codex', changed.snapshot.selectionRevision, 'openai-codex', changed.snapshot.sessionRouting.revision);
+    assert.equal(pinned.ok, true);
+    const source = pinned.snapshot;
+    const target = await f.service.getSnapshot({ sessionId: f.sessionId, providerId: 'openai' });
+    const refused = await f.service.switchAccount({ ...request, providerId: 'openai', requestId: 'preserve-pin',
+      expectedSelectionRevision: target.selectionRevision, expectedRoutingRevision: source.sessionRouting.revision,
+      expectedDefaultSource: { providerId: 'openai-codex', selectionRevision: source.selectionRevision } });
+    assert.equal(refused.reason, 'stale-selection');
+    assert.equal(routingModule.getSessionRoutingProfile(f.ctx).accountId, 'Work');
+  } finally { await dispose(f); }
+});
+
 test("session reload restores only current branch account and routing entries", async () => {
   const f = await fixture();
   try {

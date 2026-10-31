@@ -32,6 +32,8 @@ export interface AccountControlsSnapshot {
 	serviceEpoch: string;
 	providerId?: AccountProviderId;
 	supportedProviders?: readonly AccountProviderId[];
+	/** Atomic default-only source guard; consumers must fail closed when absent. */
+	guardedDefaultSwitchVersion?: 1;
 	/** Optional committed execution route; also declares coherent provider/account switching support. */
 	sessionRouting?: { version: 1; providerId: AccountProviderId; revision: number };
 	/** Monotonic per-session selection revision; incremented on every accepted selection change. */
@@ -94,6 +96,8 @@ export interface AccountSwitchRequest {
 	expectedSelectionRevision: number;
 	/** Optional cross-provider route epoch for newer server integrations. */
 	expectedRoutingRevision?: number;
+	/** Requires accountId=null, no inherit, and expectedRoutingRevision. Checked again at commit. */
+	expectedDefaultSource?: { providerId: AccountProviderId; selectionRevision: number };
 	/** null explicitly restores Pi's built-in default authentication. */
 	accountId: string | null;
 	/** Clear this session's override and follow its nearest ancestor; requires accountId=null. */

@@ -489,13 +489,14 @@ export default function accountsExtension(
 					.map((key) => key.slice(prefix.length)),
 				providerId,
 			);
-			return { ...snapshot, ...committedRoutingSnapshot(owner), ...(isInheritedSessionRouting(owner.context) ? { inheritance: readInheritedSessionRoutingProfile(owner.context) ? "inherited" as const : "explicit" as const } : {}) };
+			return { ...snapshot, guardedDefaultSwitchVersion: 1, ...committedRoutingSnapshot(owner), ...(isInheritedSessionRouting(owner.context) ? { inheritance: readInheritedSessionRoutingProfile(owner.context) ? "inherited" as const : "explicit" as const } : {}) };
 		} catch {
 			return {
 				protocol: ACCOUNT_CONTROLS_PROTOCOL,
 				serviceEpoch,
 				providerId,
 				supportedProviders: SUPPORTED_PROVIDER_IDS,
+				guardedDefaultSwitchVersion: 1,
 				...committedRoutingSnapshot(owner),
 				selectionRevision: owner.selectionRevisions.get(providerId) ?? 0,
 				sessionId: owner.sessionId,
@@ -544,9 +545,11 @@ export default function accountsExtension(
 		const bounded = (value: unknown, maximum: number): string | null =>
 			typeof value === "string" && value.length <= maximum ? value : null;
 		const scopedRequestId = `${providerId}:${requestId}`;
+		const sourceGuard = raw.expectedDefaultSource as Record<string, unknown> | undefined;
 		const fingerprint = JSON.stringify([
 			providerId,
 			raw.inherit ?? false,
+			sourceGuard === undefined ? null : [sourceGuard?.providerId, sourceGuard?.selectionRevision],
 			raw.accountId === null ||
 			(typeof raw.accountId === "string" && raw.accountId.length <= 64)
 				? raw.accountId
@@ -567,6 +570,9 @@ export default function accountsExtension(
 				: "<invalid-protocol>",
 		]);
 		const requestValid =
+			(sourceGuard === undefined || (sourceGuard !== null && typeof sourceGuard === "object" &&
+				(sourceGuard.providerId === "openai" || sourceGuard.providerId === "openai-codex") && Number.isSafeInteger(sourceGuard.selectionRevision) && (sourceGuard.selectionRevision as number) >= 0 &&
+				raw.accountId === null && !raw.inherit && raw.expectedRoutingRevision !== undefined)) &&
 			(raw.inherit === undefined || raw.inherit === false || (raw.inherit === true && raw.accountId === null)) &&
 			raw.protocol === ACCOUNT_CONTROLS_PROTOCOL &&
 			typeof raw.expectedSessionId === "string" &&
@@ -708,6 +714,18 @@ export default function accountsExtension(
 			return failure("stale-selection");
 		if (!owner.context.isIdle() || owner.pendingSyncTasks.has(providerId))
 			return failure("busy");
+		const routeAtAdmission = owner.routingProfile;
+		const selectionAtAdmission = owner.selectionRevisions.get(providerId) ?? 0;
+		const commitIsCurrent = () => {
+			const source = request.expectedDefaultSource;
+			return !signal.aborted && isOwnerCurrent(owner) && activeOwner === owner &&
+				accountControlsService.sessionId === owner.sessionId && request.expectedServiceEpoch === serviceEpoch &&
+				(owner.selectionRevisions.get(providerId) ?? 0) === selectionAtAdmission &&
+				owner.routingProfile === routeAtAdmission &&
+				(!source || (owner.routingProfile?.providerId === source.providerId &&
+					(owner.selections[source.providerId] ?? null) === null &&
+					(owner.selectionRevisions.get(source.providerId) ?? 0) === source.selectionRevision));
+		};
 		const deadline = AbortSignal.timeout(30_000);
 		const signal = AbortSignal.any([owner.signal, deadline]);
 		const run = async (): Promise<AccountSwitchResult> => {
@@ -761,8 +779,11 @@ export default function accountsExtension(
 				return failure("stale-selection");
 			if (request.expectedRoutingRevision !== undefined && owner.routingProfile?.revision !== request.expectedRoutingRevision)
 				return failure("stale-selection");
+			if (!commitIsCurrent()) return failure("stale-selection");
 			if (!(await selectSessionPhysicalModel(owner, providerId, false)))
 				return failure("activation-failed");
+			// Validation-only model resolution yields: recheck immediately at commit.
+			if (!commitIsCurrent()) return failure("stale-selection");
 			if (
 				!owner.context.isIdle() ||
 				owner.pendingSyncTasks.has(providerId) ||
@@ -776,12 +797,14 @@ export default function accountsExtension(
 					providerId,
 					accountId,
 					() =>
-						isOwnerCurrent(owner) &&
-						activeOwner === owner &&
-						owner.context.isIdle(),
+						commitIsCurrent() && owner.context.isIdle(),
 				)
 			)
 				return failure("busy");
+			const routeAtCommit = owner.routingProfile;
+			const committedSelections = SUPPORTED_PROVIDER_IDS.map(id => owner.selectionRevisions.get(id) ?? 0);
+			const activationIsCurrent = () => !signal.aborted && isOwnerCurrent(owner) && activeOwner === owner &&
+				SUPPORTED_PROVIDER_IDS.every((id, index) => (owner.selectionRevisions.get(id) ?? 0) === committedSelections[index]);
 			const activated = await syncProvider(
 				providerId,
 				owner.context,
@@ -792,9 +815,10 @@ export default function accountsExtension(
 				return failure("stale-session");
 			if (signal.aborted || activated.status === "error")
 				return failure("activation-failed");
+			if (!activationIsCurrent() || owner.routingProfile !== routeAtCommit) return failure("stale-selection");
 			if (!(await selectSessionPhysicalModel(owner, providerId)))
 				return failure("activation-failed");
-			if (!isOwnerCurrent(owner) || activeOwner !== owner) return failure("stale-session");
+			if (!activationIsCurrent()) return failure("stale-selection");
 			owner.routingProviderId = providerId;
 			if (!publishRoutingProfile(owner, owner.context, providerId, accountId))
 				return failure("activation-failed");
@@ -1100,12 +1124,20 @@ export default function accountsExtension(
 				)
 			: owner.selections;
 		selections = setAccountSelection(selections, providerId, accountName);
-		if (owner.routingProfile?.providerId === providerId && !invalidateRoutingProfile(owner)) return false;
-		owner.sessionManager.appendCustomEntry(
-			ACCOUNT_SELECTION_ENTRY_TYPE,
-			createAccountSelectionEntryData(owner.sessionId, selections),
-		);
+		try {
+			owner.sessionManager.appendCustomEntry(
+				ACCOUNT_SELECTION_ENTRY_TYPE,
+				createAccountSelectionEntryData(owner.sessionId, selections),
+			);
+		} catch (error) {
+			// Preserve fail-closed revocation on persistence failure.
+			if (owner.routingProfile?.providerId === providerId) invalidateRoutingProfile(owner);
+			throw error;
+		}
 		if (!isOwnerCurrent(owner) || !isCurrent()) return false;
+		// Both guard evaluations must precede our own route revocation. This
+		// transaction is synchronous: no competing selection can interleave.
+		if (owner.routingProfile?.providerId === providerId && !invalidateRoutingProfile(owner)) return false;
 		owner.sessionManager.appendCustomEntry("pi-session-routing-mode", { sessionId: owner.sessionId, mode: "explicit" });
 		setSessionRoutingOverride(owner.context, true);
 		owner.selections = selections;
@@ -2234,7 +2266,8 @@ async function loginAccount(
 	}
 }
 
-async function switchAccount(
+/** @internal Exported for deterministic admission-race regression tests. */
+export async function switchAccount(
 	ctx: ExtensionCommandContext,
 	store: AccountStore,
 	adapter: AccountProviderAdapter,
@@ -2259,6 +2292,11 @@ async function switchAccount(
 		return;
 	}
 	const selectionRevision = session.selectionRevisions.get(adapter.id) ?? 0;
+	const routeAtAdmission = session.routingProfile;
+	const commitIsCurrent = () => isCurrent() && !signal.aborted && ctx.isIdle() &&
+		session.openAIRequestCount === 0 && session.switchReserved === 0 &&
+		session.routingProfile === routeAtAdmission &&
+		(session.selectionRevisions.get(adapter.id) ?? 0) === selectionRevision;
 	const name = nameArg.trim();
 	if (!name) {
 		ctx.ui.notify(
@@ -2285,7 +2323,7 @@ async function switchAccount(
 				ctx.ui.notify(`No matching physical ${adapter.displayName} model is available; selection was not changed.`, "error");
 				return;
 			}
-			if (!persistSelection(session, adapter.id, null, isCurrent)) return;
+			if (!persistSelection(session, adapter.id, null, commitIsCurrent)) return;
 		} catch (error) {
 			if (!isCurrent()) return;
 			ctx.ui.notify(
@@ -2294,8 +2332,11 @@ async function switchAccount(
 			);
 			return;
 		}
+		const committedSelections = SUPPORTED_PROVIDER_IDS.map(id => session.selectionRevisions.get(id) ?? 0);
+		const activationIsCurrent = () => isCurrent() && !signal.aborted && session.switchReserved === 0 &&
+			SUPPORTED_PROVIDER_IDS.every((id, index) => (session.selectionRevisions.get(id) ?? 0) === committedSelections[index]);
 		const result = await syncProvider(adapter.id, ctx, session, signal);
-		if (!isCurrent()) return;
+		if (!activationIsCurrent()) return;
 		if (result.status === "error") {
 			ctx.ui.notify(
 				`Could not restore default Pi ${adapter.displayName} login; requests will fail closed: ${result.message}`,
@@ -2307,6 +2348,7 @@ async function switchAccount(
 			ctx.ui.notify(`No matching physical ${adapter.displayName} model is available; account selection remains saved but the conversation model was not switched.`, "error");
 			return;
 		}
+		if (!activationIsCurrent()) return;
 		session.routingProviderId = adapter.id;
 		if (!publishRoutingProfile(session, ctx, adapter.id, null)) {
 			ctx.ui.notify("Could not publish the selected session route; helper routing is blocked.", "error");
@@ -2343,7 +2385,7 @@ async function switchAccount(
 			ctx.ui.notify(`No matching physical ${adapter.displayName} model is available; selection was not changed.`, "error");
 			return;
 		}
-		if (!persistSelection(session, adapter.id, parsed.name, isCurrent)) return;
+		if (!persistSelection(session, adapter.id, parsed.name, commitIsCurrent)) return;
 	} catch (error) {
 		if (!isCurrent()) return;
 		ctx.ui.notify(
@@ -2352,8 +2394,11 @@ async function switchAccount(
 		);
 		return;
 	}
+	const committedSelections = SUPPORTED_PROVIDER_IDS.map(id => session.selectionRevisions.get(id) ?? 0);
+	const activationIsCurrent = () => isCurrent() && !signal.aborted && session.switchReserved === 0 &&
+		SUPPORTED_PROVIDER_IDS.every((id, index) => (session.selectionRevisions.get(id) ?? 0) === committedSelections[index]);
 	const result = await syncProvider(adapter.id, ctx, session, signal);
-	if (!isCurrent()) return;
+	if (!activationIsCurrent()) return;
 	if (result.status === "error") {
 		ctx.ui.notify(formatActivationMessage("Activated", adapter, parsed.name, result), "error");
 		return;
@@ -2362,6 +2407,7 @@ async function switchAccount(
 		ctx.ui.notify(`No matching physical ${adapter.displayName} model is available; account selection remains saved but the conversation model was not switched.`, "error");
 		return;
 	}
+	if (!activationIsCurrent()) return;
 	session.routingProviderId = adapter.id;
 	if (!publishRoutingProfile(session, ctx, adapter.id, parsed.name)) {
 		ctx.ui.notify("Could not publish the selected session route; helper routing is blocked.", "error");

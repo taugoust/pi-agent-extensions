@@ -28,6 +28,14 @@ test("foreground RPC helpers are included in global waits without making staged 
   assert.equal(result.terminal?.group?.job_id, "headless");
   assert.equal(result.timed_out, false);
 });
+test("idle tool-only workers remain nonterminal in group waits", async () => {
+  for (const operation of ["wait_any", "wait_all"] as const) {
+    const result = await waitForGroupSnapshot(async () => [{ job_id: "yielded", background: true, status: "waiting", children: [{ child: 1, status: "waiting" }] }], operation, 0);
+    assert.equal(result.timed_out, true);
+    assert.equal(result.remaining_children, 1);
+    assert.equal(result.terminal, undefined);
+  }
+});
 test("wait timeout, empty snapshot and cancellation are observation-only", async () => {
   assert.equal((await waitForGroupSnapshot(async () => [group("live", ["running"])], "wait_any", 0)).timed_out, true);
   assert.equal((await waitForGroupSnapshot(async () => [], "wait_any", 0)).timed_out, false);

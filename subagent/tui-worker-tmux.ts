@@ -319,7 +319,7 @@ export class TuiWorkerTmux {
       ...(input.foreground ? { foregroundOwner: { pid: process.pid, token: await processIdentity(process.pid) } } : {}),
       ...(input.operatorCapabilityHash ? { operatorCapabilityHash: input.operatorCapabilityHash } : {}) };
     store.writeManifest(m);
-    if (input.displayName) new TaskNameStore(input.directory, m).claim(input.displayName);
+    if (input.displayName) await new TaskNameStore(input.directory, m).claim(input.displayName);
     await writeFile(gate, "ready\n", { flag: "wx", mode: 0o600 });
     return m;
   }

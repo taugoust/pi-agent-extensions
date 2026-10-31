@@ -33,11 +33,11 @@ test("task lookup after disk reload selects highest attempt, not random group ID
     const identity = { ownerSessionId: "parent", taskId, groupId: "old-group", childId: children[0].childId,
       attempt: 3, runtimeId: "old-runtime", workerEpoch: "old-epoch" };
     const names = new TaskNameStore(children[0].directory, identity);
-    names.claim("Worktree UI");
+    await names.claim("Worktree UI");
     const selected = restored.byChild("parent", taskId).child;
     const successor = { ...identity, attempt: selected.attempt + 1, childId: "new-child", runtimeId: "new-runtime", workerEpoch: "new-epoch" };
-    assert.throws(() => new TaskNameStore(children[0].directory, { ...successor, attempt: 3 }).claim("Worktree UI"), /competing attempt/);
-    assert.equal(new TaskNameStore(children[0].directory, successor).claim("Worktree UI").attempt, 4);
+    await assert.rejects(new TaskNameStore(children[0].directory, { ...successor, attempt: 3 }).claim("Worktree UI"), /competing attempt/);
+    assert.equal((await new TaskNameStore(children[0].directory, successor).claim("Worktree UI")).attempt, 4);
     await restored.shutdown(false);
   } finally { await manager.shutdown(false); await rm(root, { recursive: true, force: true }); }
 });
@@ -67,15 +67,15 @@ test("read-only native task snapshot/report avoids refresh and excludes private 
     assert.equal(tasks[0].attempt, 2);
     assert.equal(tasks[0].lastUpdated, null);
     const names = new TaskNameStore(directory, manifest);
-    names.claim("Parser Review");
+    await names.claim("Parser Review");
     assert.equal(manager.readonlyTaskList("parent")[0].title, "Parser Review");
-    names.rename("User Parser Name", 1, "paseo");
+    await names.rename("User Parser Name", 1, "paseo");
     const renamedTasks = manager.readonlyTaskList("parent");
     assert.equal(renamedTasks[0].title, "User Parser Name");
     assert.equal(renamedTasks[0].taskId, tasks[0].taskId);
     assert.equal(renamedTasks[0].runtimeId, tasks[0].runtimeId);
     assert.equal(renamedTasks[0].attempt, 2);
-    new TaskNameStore(join(root, "workers", "new-attempt"), { ...manifest, attempt: 3, runtimeId: "new-runtime", workerEpoch: "new-epoch" }).claim("Do Not Replace");
+    await new TaskNameStore(join(root, "workers", "new-attempt"), { ...manifest, attempt: 3, runtimeId: "new-runtime", workerEpoch: "new-epoch" }).claim("Do Not Replace");
     assert.equal(manager.readonlyTaskList("parent")[0].title, "User Parser Name", "retained attempt shares stable canonical name");
     assert.equal(JSON.stringify(tasks).includes("controlToken"), false);
     const answer = manager.readonlyTaskReport("parent", manifest.taskId, 48 * 1024);
@@ -129,7 +129,7 @@ test("direct human turn clears old outcome; aborted assistant cancels chain inst
     await manager.refresh("parent");
     assert.equal(durableWrites, 2, "changed transition was not persisted");
     await server.start(); server.running(true);
-    server.outcome({ state: "delivered" });
+    server.outcome({ version: 1, state: "delivered", summary: "Done", acceptance: [{ criterion: "fix", status: "passed", evidence: "test" }], artifacts: [], remaining: [] });
     await manager.refresh('parent');
     assert.equal(notifications.filter(u=>u.completion).length,0,'outcome woke parent before settlement');
     server.settled({ assistant: { stopReason: "stop" } });
@@ -180,8 +180,8 @@ test("native idle request notifies parent, appears in status, and resolves only 
   try {
     await worker.start();
     const names = new TaskNameStore(directory, manifest);
-    names.claim("Original Review");
-    names.rename("Renamed Review", 1, "pi");
+    await names.claim("Original Review");
+    await names.rename("Renamed Review", 1, "pi");
     const pending = worker.requestIdleDecision({ model: "provider/model", idleMinutes: 31, contextPercent: 86 });
     void pending.catch(() => undefined);
     await manager.observe(group, child, true);
@@ -282,7 +282,7 @@ test("native resume compacts only measured high context or an explicit request",
   try {
     await worker.start();
     const settle = (tokens: number) => {
-      worker.outcome({ version: 1, state: "checkpointed", summary: "Saved milestone" });
+      worker.outcome({ version: 1, state: "checkpointed", summary: "Saved milestone", acceptance: [], artifacts: [], remaining: ["continue"], next_action: "Continue" });
       worker.settled({ contextTokens: tokens, contextWindow: 1_000_000,
         assistant: { stopReason: "stop", content: [{ type: "text", text: "Retained milestone" }] } });
     };
@@ -341,7 +341,7 @@ test("authority loss is a failed native result, including old tool-only reports"
   const child: any = { childId: manifest.childId, taskId: manifest.taskId, directory, spec: { task: "work" }, state: "running", started: true, notifiedSequence: 0 };
   const group: any = { id: manifest.groupId, owner: "parent", background: true, mode: "single", launchMode: "none", caller: manifest.placement, children: [child] };
   manager.groups.set(group.id, group);
-  const assistant = { role: "assistant", stopReason: "toolUse", content: [{ type: "toolCall", name: "bash", arguments: { command: "" } }] };
+  const assistant = { role: "assistant", stopReason: "toolUse", content: [{ type: "toolCall", name: "subagent", arguments: { operation: "yield", job_id: `subagent-job-${"f".repeat(24)}` } }] };
   try {
     await server.start();
     for (const error of [undefined, "Worker command authority unavailable at settlement"]) {
@@ -358,11 +358,59 @@ test("authority loss is a failed native result, including old tool-only reports"
     available = true;
     await manager.observe(group, child);
     assert.equal(child.state, "failed");
-    // Successful terminating tools remain legitimate; toolUse alone is not failure.
+    const notifications: any[] = [];
+    manager.notify = (update: any) => { notifications.push(update); return true; };
+    group.background = false; group.guidanceYielded = true;
+    group.parentOwnerToken = manager.processToken(process.pid);
+    // Yielding a foreground turn while descendants run is idle, not completion.
     server.running(true); server.settled({ assistant });
-    await manager.observe(group, child);
-    assert.equal(child.state, "completed");
+    await manager.refresh("parent");
+    assert.equal(child.state, "waiting");
     assert.equal(child.error, undefined);
+    assert.equal(notifications.filter(u => u.completion).length, 0);
+    assert.equal(manager.publicGroup(group).status, "waiting");
+    const idleResult = await manager.operation({ operation: "result", job_id: group.id }, "parent");
+    assert.match(idleResult.content[0].text, /task completion has not been reported/);
+    assert.equal(idleResult.details.terminal_id, undefined);
+    const snapshot = (server as any).snapshot.bind(server);
+    (server as any).snapshot = () => ({ ...snapshot(), workerEpoch: "f".repeat(32) });
+    await manager.observe(group, child);
+    assert.match(child.observationError, /identity mismatch/);
+    assert.equal(notifications.filter(u => u.completion).length, 0);
+    (server as any).snapshot = snapshot;
+    await manager.refresh("parent");
+    const restored: any = new TuiNativeManager(root, () => "native", () => true, 16);
+    restored.notify = manager.notify;
+    await restored.refresh("parent");
+    assert.equal(notifications.filter(u => u.completion).length, 0, "reload promoted idle toolUse to completion");
+    await restored.shutdown(false);
+    // A later human followup clears old evidence; a tool-only delivered outcome
+    // settles legitimately and has a useful report without assistant prose.
+    server.running(true);
+    server.outcome({ version: 1, state: "delivered", summary: "Validated the fix.",
+      acceptance: [{ criterion: "fix", status: "passed", evidence: "test" }], artifacts: [], remaining: [] });
+    server.settled({ assistant });
+    await manager.refresh("parent");
+    assert.equal(child.state, "completed");
+    assert.equal(notifications.filter(u => u.completion).length, 1);
+    manager.owner = "parent";
+    assert.match(manager.readonlyTaskReport("parent", child.taskId).text, /Validated the fix/);
+    await manager.refresh("parent");
+    const reloaded: any = new TuiNativeManager(root, () => "native", () => true, 16);
+    reloaded.notify = manager.notify;
+    await reloaded.refresh("parent");
+    assert.equal(notifications.filter(u => u.completion).length, 1, "terminal receipt duplicated across reload");
+    await reloaded.shutdown(false);
+    // New user activity supersedes that delivery; late tool-only reports cannot
+    // reuse its outcome. Explicit errors must still wake exactly once.
+    server.running(true); server.settled({ assistant });
+    await manager.refresh("parent");
+    assert.equal(child.state, "waiting");
+    assert.equal(child.lastOutcome, undefined);
+    assert.equal(notifications.filter(u => u.completion).length, 1);
+    server.running(true); server.settled({ assistant, error: "Explicit execution failure" });
+    await manager.refresh("parent"); await manager.refresh("parent");
+    assert.equal(notifications.filter(u => u.completion && u.state === "failed").length, 1);
   } finally { await server.close(); await manager.shutdown(false); await rm(root, { recursive: true, force: true }); }
 });
 
