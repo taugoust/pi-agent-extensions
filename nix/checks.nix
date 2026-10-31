@@ -257,6 +257,7 @@ in
         mkdir -p "$srcdir/shared"
         cp ${self}/shared/foreground-tasks.ts "$srcdir/shared/foreground-tasks.ts"
         cp ${self}/shared/tool-presentation.ts "$srcdir/shared/tool-presentation.ts"
+        cp ${self}/shared/goal-question-recorder.ts "$srcdir/shared/goal-question-recorder.ts"
 
         test ${toString (builtins.length (builtins.attrNames moduleFiles))} = 4
         test -f ${moduleFiles.".pi/agent/extensions/shared".source}/foreground-tasks.ts
@@ -269,6 +270,9 @@ in
         # Keep the existing strict helper check. The entrypoint has host-only
         # SDK/UI imports; transpile it separately and exercise its real execute
         # path with explicit UI stubs below, rather than weakening that check.
+        # This isolated compile has no @types/node package, so declare only the
+        # process.env surface used by foreground-tasks.
+        printf '%s\n' 'declare const process: { env: Record<string, string | undefined> };' > "$srcdir/node-globals.d.ts"
         tsc \
           --strict \
           --skipLibCheck \
@@ -277,7 +281,7 @@ in
           --target es2022 \
           --rootDir "$srcdir" \
           --outDir "$outdir" \
-          "$srcdir/questionnaire/paseo.ts" "$srcdir/shared/foreground-tasks.ts"
+          "$srcdir/questionnaire/paseo.ts" "$srcdir/shared/foreground-tasks.ts" "$srcdir/node-globals.d.ts"
         tsc --noCheck --skipLibCheck --module nodenext --moduleResolution nodenext \
           --rewriteRelativeImportExtensions \
           --target es2022 --rootDir "$srcdir" --outDir "$outdir" "$srcdir/questionnaire/index.ts"
@@ -297,6 +301,22 @@ in
         EOF
         node ${self}/questionnaire/headless.test.mjs "$outdir"
         node --experimental-strip-types --test ${self}/questionnaire/paseo.test.mjs
+
+        # Compile and load the actual selected package bundle, not a hand-picked
+        # source subset. This catches runtime imports whose implementations are
+        # absent from the package closure (notably workflows/goal-questions.ts).
+        bundledir="$workdir/bundle"
+        bundleout="$workdir/bundle-out"
+        cp -R ${questionnaireBundle} "$bundledir"
+        test ! -e "$bundledir/workflows/goal-questions.ts"
+        tsc --noCheck --skipLibCheck --module nodenext --moduleResolution nodenext \
+          --rewriteRelativeImportExtensions --target es2022 --rootDir "$bundledir" \
+          --outDir "$bundleout" "$bundledir/questionnaire/index.ts"
+        cp "$bundledir/package.json" "$bundleout/package.json"
+        mkdir -p "$bundleout/node_modules"
+        cp -R "$outdir/node_modules/@mariozechner" "$bundleout/node_modules/"
+        cp -R "$outdir/node_modules/@sinclair" "$bundleout/node_modules/"
+        node ${self}/questionnaire/headless.test.mjs "$bundleout"
 
         cat > "$workdir/test.mjs" <<'EOF'
         import { pathToFileURL } from "node:url";

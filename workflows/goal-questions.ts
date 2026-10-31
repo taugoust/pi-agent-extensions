@@ -2,8 +2,9 @@ import { randomUUID, createHash } from "node:crypto";
 import type { TaskInteractionInput, TaskInteractionAnswer } from "../shared/foreground-tasks.ts";
 import { validInteractionInput, validInteractionAnswer } from "../shared/task-interactions.ts";
 import { validateGoalStory, boundQuestionHistory, type GoalQuestion, type GoalQuestionReply } from "./goal-story.ts";
+import { GOAL_QUESTION_RECORDER_KEY } from "../shared/goal-question-recorder.ts";
+export { GOAL_QUESTION_RECORDER_KEY } from "../shared/goal-question-recorder.ts";
 export const GOAL_QUESTIONS_ENTRY = "delegated-goal-questions-v1";
-export const GOAL_QUESTION_RECORDER_KEY = "__paeGoalQuestionRecorderV1";
 /** Owns actual outstanding questionnaire promises. No permission decisions and
  * no text prompts are dispatched by this service. Reply authority is supplied
  * by the private goal-worker RPC and exact epoch/revision checks below. */

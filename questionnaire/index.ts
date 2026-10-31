@@ -17,7 +17,7 @@ import {
 import { Type } from "@sinclair/typebox";
 import { answerQuestionnaireInPaseo } from "./paseo.js";
 import { workerInteractionsService } from "../shared/foreground-tasks.ts";
-import { GOAL_QUESTION_RECORDER_KEY } from "../workflows/goal-questions.ts";
+import { GOAL_QUESTION_RECORDER_KEY } from "../shared/goal-question-recorder.ts";
 
 // Types
 interface QuestionOption {
