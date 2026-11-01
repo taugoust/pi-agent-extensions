@@ -8,13 +8,16 @@ import { type CompletionHost, type CompletionInspection, type WorktreeCompletion
 
 const within = (root: string, path: string) => { const part = relative(root, path); return !part || (!isAbsolute(part) && part !== ".." && !part.startsWith(`..${sep}`)); };
 /** On-demand same-user process evidence. Unsupported/inaccessible evidence fails closed. */
-export async function worktreeHasActiveUsers(path: string): Promise<boolean> {
+export async function worktreeHasActiveUsers(path: string, excludeCurrentProcess = false): Promise<boolean> {
   if (process.platform !== "linux" || !process.getuid) throw new Error("Active-user inspection is unavailable on this platform");
   const processes = (await fs.readdir("/proc")).filter(name => /^\d+$/.test(name));
   if (processes.length > 16384) throw new Error("Active-user process inventory exceeds the safe inspection limit");
   let descriptors = 0;
   for (const name of processes) {
     if (!/^\d+$/.test(name)) continue;
+    // A reserved root's authenticated, idle owner is allowed to inspect/reap its
+    // own checkout. Its current cwd and descriptors are not independent users.
+    if (excludeCurrentProcess && name === String(process.pid)) continue;
     const base = join("/proc", name);
     try {
       if ((await fs.stat(base)).uid !== process.getuid()) continue;
@@ -129,11 +132,12 @@ export function ownedWorktreeCompletionHost(ctx: CompletionContext, safety: Comp
       catch (error: any) { if (error.code !== "ENOENT") throw error; throw new Error("Branch history evidence unavailable"); }
       branchIdentity = digest.digest("hex");
     }
+    const idleReservedRoot = reservedRoot && ctx.isIdle() && !ctx.hasPendingMessages();
     let processActive = true;
-    try { processActive = await worktreeHasActiveUsers(r.path); }
+    try { processActive = await worktreeHasActiveUsers(r.path, idleReservedRoot); }
     catch (error: any) { activityUnavailable = error.message; }
     return { activityUnavailable, owned: true, released: r.released, retained: !!r.retain || r.state !== "ready" || !!r.error || (!reservedRoot && extra.retained),
-      active: (!reservedRoot && extra.active) || !ctx.isIdle() || ctx.hasPendingMessages() || within(r.path, ctx.cwd) || processActive,
+      active: (!reservedRoot && extra.active) || !ctx.isIdle() || ctx.hasPendingMessages() || (!idleReservedRoot && within(r.path, ctx.cwd)) || processActive,
       remainingFiles, identityChanged, worktreeExists: exists, branchOid, branchIdentity };
   }
   async function guarded(task: string, oid: string, removed: boolean) {

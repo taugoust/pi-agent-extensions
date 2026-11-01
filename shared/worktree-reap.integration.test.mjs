@@ -39,6 +39,28 @@ async function fixture(action) {
 const req = (records, extra = {}) => ({ actorSessionId: actor, root: { ownerSessionId: records[0].ownerSessionId, taskId: records[0].taskId, childId: records[0].childId },
   descendants: records.slice(1, 3).map((record, index) => ({ ownerSessionId: record.ownerSessionId, taskId: record.taskId, childId: record.childId, reaped: true, attempt: index + 1 })),
   ownedSessionIds: ["nested-owner", "leaf-owner"], context: { cwd: process.cwd(), isIdle: () => true, hasPendingMessages: () => false, safety: async () => ({ active: false, retained: false }) }, ...extra });
+test("authenticated idle coordinator can reap its own current root checkout", async () => fixture(async (_root, records) => {
+  const originalCwd = process.cwd();
+  try {
+    process.chdir(records[0].path);
+    const request = req(records);
+    request.context.cwd = records[0].path;
+    const report = await reapOwnedWorktrees(request);
+    assert.equal(report.removed.length, 3);
+    assert.ok((await ownedWorktrees(records[0].ownerSessionId)).find(row => row.taskId === records[0].taskId).reap.phase === "cleaned");
+  } finally { process.chdir(originalCwd); }
+}));
+test("busy coordinator remains an activity blocker for its root checkout", async () => fixture(async (_root, records) => {
+  const originalCwd = process.cwd();
+  try {
+    process.chdir(records[0].path);
+    const request = req(records);
+    request.context.cwd = records[0].path;
+    request.context.isIdle = () => false;
+    await assert.rejects(reapOwnedWorktrees(request), /active agent, process, or user/);
+    assert.ok(await fs.stat(records[0].path));
+  } finally { process.chdir(originalCwd); }
+}));
 test("reaps authenticated root and nested owner records without deleting branches", async () => fixture(async (_root, records) => {
   const report = await reapOwnedWorktrees(req(records)); assert.equal(report.removed.length, 3);
   assert.equal(report.scope, "registered-harness-worktrees-only"); assert.match(report.limitation, /unregistered worktrees are not inventoried or removed/);
@@ -108,6 +130,20 @@ test("force audit appends coordinator identity and records uncertain provenance"
   row = (await ownedWorktrees()).find(item => item.taskId === records[2].taskId);
   assert.equal(row.reapAudits.at(-1).provenance, "uncertain"); assert.match(row.reapAudits.at(-1).uncertainty, /physical identity/i);
   assert.ok(await fs.stat(records[2].path));
+}));
+test("unreadable same-UID external process evidence remains fail-closed", async () => fixture(async (_root, records) => {
+  const stat = fs.stat.bind(fs), readlink = fs.readlink.bind(fs), pid = "424242";
+  pids.add(pid);
+  fs.stat = async (path, ...args) => path === `/proc/${pid}` ? { uid: process.getuid() } : stat(path, ...args);
+  fs.readlink = async (path, ...args) => {
+    if (path === `/proc/${pid}/cwd`) throw Object.assign(new Error("Permission denied"), { code: "EACCES" });
+    return readlink(path, ...args);
+  };
+  try {
+    await assert.rejects(reapOwnedWorktrees(req(records)), /Cannot verify active users: Permission denied/);
+    assert.ok(await fs.stat(records[0].path));
+    assert.ok(await fs.stat(records[1].path));
+  } finally { fs.stat = stat; fs.readlink = readlink; pids.delete(pid); }
 }));
 test("retention, active OS users, and unowned foreign/sibling owners remain untouched", async () => fixture(async (_root, records) => {
   await saveOwnedWorktree({ ...records[1], retain: true });

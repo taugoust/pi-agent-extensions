@@ -1,5 +1,25 @@
 # Coordinator worktree reap validation
 
+## Follow-up: coordinator self-activity and inaccessible external processes
+
+Follow-up base: `77afe3e10e07c7da217a1b7abe94d06c32ac8602`.
+
+The deployed root-only refusal had a concrete self-activity false positive: root inspection unconditionally counted the current authenticated coordinator's cwd (`ctx.cwd`) and its own `/proc/<pid>` cwd/descriptors as independent users, even when the coordinator was idle with no pending messages. For a reserved root only, inspection now excludes those self observations when the existing owner context reports idle and no pending messages. A busy coordinator remains a blocker. Descendants and all other processes retain the existing checks.
+
+For PID 41773, read-only host metadata showed `Name=systemd`, UID 2016, cgroup `/user.slice/user-2016.slice/user@2016.service/init.scope`, `loginuid=2016`, `/proc` directory owner UID 2016, and `ptrace_scope=1`. `readlink /proc/41773/cwd` and `/proc/41773/fd/0` returned EACCES; the proc mount had no `hidepid` option. These observations are consistent with ptrace access restrictions but do **not** prove Yama caused this specific EACCES, nor prove this same-UID process has no worktree cwd/open descriptor. The scanner therefore still fails closed on this external unreadable process. No exception was added for UID, process name, cgroup, age, or EACCES/EPERM. On this host, normal cleanup may remain blocked until activity is inspectable or an independently sound ownership/activity boundary is established.
+
+Regression coverage includes the original root-self scenario, a busy-root negative control, and an unreadable same-UID external PID that must still block without deleting any path. Existing dirty, live-process, foreign-owner, unknown attribution, root-last, and interrupted-removal/retry safeguards remain covered.
+
+Live canary retest after parent review and separately authorized activation: reload the candidate; use a bounded disposable repository and an explicitly isolated coordinator (`worktree: {}`) with one nested worker; read the completed result and normally reap the worker, then request normal coordinator reap. Confirm both exact registered paths are removed while branches/source remain. Do not use paused Goals or real user worktrees. If EACCES recurs, verify all paths remain, record only safe `/proc/<pid>/status` identity/cgroup and error metadata, and stop; do not force-reap or remove paths to get a green result. This test may remain blocked on unreadable external processes and cannot be reported as successful until the live result establishes otherwise.
+
+Focused command:
+
+```sh
+node --experimental-transform-types --test shared/worktree-reap.integration.test.mjs shared/worktree-completion.test.ts shared/worktree-completion.integration.test.mjs
+```
+
+Passed **43/43** after this follow-up.
+
 Base: `02ab4282c1419c160576be345fc75cfb96e7f075`.
 All model/runtime fixtures use disposable local state and synthetic providers; no user workers, accounts or paid inference are used by these tests.
 
