@@ -11,7 +11,7 @@ export type WorktreeReapRequest = {
   descendants: ReapTarget[];
   /** All reachable owner sessions; every registry record for these owners is accounted for. */
   ownedSessionIds: string[];
-  context: Pick<CompletionContext, "cwd" | "isIdle" | "hasPendingMessages"> & { safety?: CompletionSafety };
+  context: Pick<CompletionContext, "cwd" | "isIdle" | "hasPendingMessages"> & { safety?: CompletionSafety; managedWorktreeActivity?: (path: string) => Promise<boolean> };
   force?: boolean;
   reason?: string;
 };
@@ -36,6 +36,7 @@ export async function reapOwnedWorktrees(first: ReapHost | WorktreeReapRequest, 
   if (targets.size !== request.descendants.length) throw new Error("Duplicate attributed reap target");
   const safety: CompletionSafety = request.context.safety ?? (async record => ({ active: targets.get(`${record.ownerSessionId}\0${record.taskId}`)?.reaped !== true, retained: false }));
   const ctx: CompletionContext = { cwd: request.context.cwd, isIdle: request.context.isIdle, hasPendingMessages: request.context.hasPendingMessages,
+    ...(request.context.managedWorktreeActivity ? { managedWorktreeActivity: request.context.managedWorktreeActivity } : {}),
     sessionManager: { getSessionId: () => request.actorSessionId } };
   const host = maybeRequest ? first as ReapHost : ownedWorktreeReapHost(ctx, safety, undefined, undefined, request.root, request.descendants, request.ownedSessionIds);
   if (!request.actorSessionId) throw new Error("Authenticated actor session is required");

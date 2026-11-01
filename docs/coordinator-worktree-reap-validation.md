@@ -1,24 +1,38 @@
 # Coordinator worktree reap validation
 
-## Follow-up: coordinator self-activity and inaccessible external processes
+## Follow-up: coordinator managed-activity boundary
 
-Follow-up base: `77afe3e10e07c7da217a1b7abe94d06c32ac8602`.
+Follow-up base: `0d1ace7479a70ee2d56cca318c97032850b45cd2`.
 
-The deployed root-only refusal had a concrete self-activity false positive: root inspection unconditionally counted the current authenticated coordinator's cwd (`ctx.cwd`) and its own `/proc/<pid>` cwd/descriptors as independent users, even when the coordinator was idle with no pending messages. For a reserved root only, inspection now excludes those self observations when the existing owner context reports idle and no pending messages. A busy coordinator remains a blocker. Descendants and all other processes retain the existing checks.
+The root-only refusal was caused by counting the authenticated coordinator's own cwd and `/proc/<pid>` cwd/descriptors as independent users, even when idle. `0d1ace7` corrected that self false-positive. Parent-provided live evidence also showed PID 41773 as same-UID `systemd` in `/user.slice/user-2016.slice/user@2016.service/init.scope`, with `ptrace_scope=1`; read-only `readlink` of its cwd/fd returned EACCES and `/proc` had no `hidepid` option. This is consistent with ptrace restrictions, but does **not** prove Yama caused this EACCES. The process is not assumed idle; after the user's explicit acceptance of the narrower harness-managed boundary, coordinator reap no longer inspects unrelated host processes, so this external PID is outside that policy.
 
-For PID 41773, read-only host metadata showed `Name=systemd`, UID 2016, cgroup `/user.slice/user-2016.slice/user@2016.service/init.scope`, `loginuid=2016`, `/proc` directory owner UID 2016, and `ptrace_scope=1`. `readlink /proc/41773/cwd` and `/proc/41773/fd/0` returned EACCES; the proc mount had no `hidepid` option. These observations are consistent with ptrace access restrictions but do **not** prove Yama caused this specific EACCES, nor prove this same-UID process has no worktree cwd/open descriptor. The scanner therefore still fails closed on this external unreadable process. No exception was added for UID, process name, cgroup, age, or EACCES/EPERM. On this host, normal cleanup may remain blocked until activity is inspectable or an independently sound ownership/activity boundary is established.
+Coordinator cleanup-on-reap now uses the existing reserved native/foreground worker controllers. It re-observes known managed tasks whose effective checkout is the target; any unreaped task blocks, and failed/unknown relevant controller observations fail closed. Existing worker `prepareReap` still verifies/reaps authenticated descendants and supervised jobs before worktree cleanup. The authenticated idle owner self-observation is excluded; busy owner, active managed worker/job, unknown managed inventory, dirty/unpreserved/retained/foreign identity, and root-last/retry protections remain. Ordinary `/worktree cleanup` retains host-wide same-UID cwd/fd inspection.
 
-Regression coverage includes the original root-self scenario, a busy-root negative control, and an unreadable same-UID external PID that must still block without deleting any path. Existing dirty, live-process, foreign-owner, unknown attribution, root-last, and interrupted-removal/retry safeguards remain covered.
+Accepted boundary: coordinator reap does **not** inspect arbitrary untracked editors, terminals, shells, or other non-harness processes. A harness-managed worker known to use the same checkout remains a blocker even outside the current ancestry. No process is killed/restarted and no host/Yama permission is changed.
 
-Live canary retest after parent review and separately authorized activation: reload the candidate; use a bounded disposable repository and an explicitly isolated coordinator (`worktree: {}`) with one nested worker; read the completed result and normally reap the worker, then request normal coordinator reap. Confirm both exact registered paths are removed while branches/source remain. Do not use paused Goals or real user worktrees. If EACCES recurs, verify all paths remain, record only safe `/proc/<pid>/status` identity/cgroup and error metadata, and stop; do not force-reap or remove paths to get a green result. This test may remain blocked on unreadable external processes and cannot be reported as successful until the live result establishes otherwise.
+Regression coverage includes the original root-self case, busy-root negative control, unreadable unrelated PID bypass under managed scope, active/unavailable managed activity blockers, and an external unreaped controller-owned worker sharing the checkout. Existing dirty, foreign, attribution, root-last and interrupted-removal/retry safeguards remain covered.
 
-Focused command:
+Live canary retest after parent review and separately authorized activation: reload the candidate; use a bounded disposable repository and an explicitly isolated coordinator (`worktree: {}`) with one nested worker; read the completed result and normally reap the worker, then request normal coordinator reap. Confirm both exact registered paths are removed while branches/source remain. Also confirm a synthetic or known managed worker sharing a target checkout blocks reap until normally reaped. Do not use paused Goals or real user worktrees. If any managed activity/controller evidence is unavailable, verify all paths remain and stop; do not force-reap or remove paths to get a green result.
+
+Focused commands:
 
 ```sh
 node --experimental-transform-types --test shared/worktree-reap.integration.test.mjs shared/worktree-completion.test.ts shared/worktree-completion.integration.test.mjs
 ```
 
-Passed **43/43** after this follow-up.
+Passed **44/44** shared lifecycle tests. The Nix subagent suite includes **177/177** passing native/runtime tests (including the external managed-worker activity regression); workflows-runtime passes **114/114**. The isolated native coordinator canary passes: it removes its guarded root and preserves source/branch. Full task gate command passed:
+
+```sh
+nix build .#checks.x86_64-linux.subagent .#checks.x86_64-linux.workflows-runtime .#checks.x86_64-linux.subagent-profiles --no-link --keep-going -L
+```
+
+After parent review and separately authorized activation, use this disposable installed-runtime canary:
+
+1. From a clean disposable Git repository, launch one native `subagent` with `agent: "coordinator"`, `worktree: {}`, and a task directing it to launch exactly one nested worker with its own `worktree: {}`, read the nested result, and normally reap that worker. Do not involve Goals.
+2. Read the coordinator result, then normally `reap` the coordinator group. Verify both exact registered worktree directories are absent, their branches remain, and the source branch/tree is unchanged.
+3. In a separate fixture only, have a known managed worker share the coordinator checkout; confirm coordinator reap blocks until that worker is normally reaped. If relevant worker/job inventory is unavailable, verify all paths remain and stop. Do not force-reap or clean paths manually to manufacture success.
+
+The user-accepted policy intentionally does not check unrelated untracked editors/terminals.
 
 Base: `02ab4282c1419c160576be345fc75cfb96e7f075`.
 All model/runtime fixtures use disposable local state and synthetic providers; no user workers, accounts or paid inference are used by these tests.

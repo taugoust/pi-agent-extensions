@@ -2184,6 +2184,13 @@ export default function (pi: ExtensionAPI) {
           if (lifecycleClosing || activeSessionId !== sessionId) throw new Error("Subagent cleanup session changed");
           return [...(native?.worktreeReapTargets(sessionId) ?? []), ...(foreground?.worktreeReapTargets(sessionId, native?.worktreeReapOwners(sessionId)) ?? [])];
         },
+        worktreeReapActivity: async (path: string) => {
+          if (lifecycleClosing || activeSessionId !== sessionId) throw new Error("Subagent cleanup session changed");
+          if (native && await native.worktreeReapActivity(sessionId, path)) return true;
+          if (foreground && await foreground.worktreeReapActivity(sessionId, path)) return true;
+          if (!native && !foreground && !headlessWorker) throw new Error("Managed worker activity controllers unavailable");
+          return false;
+        },
         prepareReap: async (preserve: (report: unknown) => Promise<void>, options: { force?: true; reason?: string } = {}) => {
           if (lifecycleClosing || activeSessionId !== sessionId) throw new Error("Subagent cleanup session changed");
           const releases: (() => void)[] = [];

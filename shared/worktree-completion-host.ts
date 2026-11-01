@@ -36,6 +36,8 @@ export type CompletionContext = {
   cwd: string;
   isIdle(): boolean;
   hasPendingMessages(): boolean;
+  /** Authenticated worker-controller observation used only by coordinator reap. */
+  managedWorktreeActivity?: (path: string) => Promise<boolean>;
 };
 /** Terminal retained evidence is never inferred to be disposable from release alone. */
 export async function currentOwnerWorktreeSafety(ctx: CompletionContext, record: OwnedWorktree) {
@@ -134,8 +136,14 @@ export function ownedWorktreeCompletionHost(ctx: CompletionContext, safety: Comp
     }
     const idleReservedRoot = reservedRoot && ctx.isIdle() && !ctx.hasPendingMessages();
     let processActive = true;
-    try { processActive = await worktreeHasActiveUsers(r.path, idleReservedRoot); }
-    catch (error: any) { activityUnavailable = error.message; }
+    try {
+      // Coordinator reap uses its authenticated agent/job controllers instead
+      // of host-wide process enumeration. General worktree completion leaves
+      // the Linux cwd/fd inspection unchanged.
+      processActive = ctx.managedWorktreeActivity
+        ? await ctx.managedWorktreeActivity(r.path)
+        : await worktreeHasActiveUsers(r.path, idleReservedRoot);
+    } catch (error: any) { activityUnavailable = error.message; }
     return { activityUnavailable, owned: true, released: r.released, retained: !!r.retain || r.state !== "ready" || !!r.error || (!reservedRoot && extra.retained),
       active: (!reservedRoot && extra.active) || !ctx.isIdle() || ctx.hasPendingMessages() || (!idleReservedRoot && within(r.path, ctx.cwd)) || processActive,
       remainingFiles, identityChanged, worktreeExists: exists, branchOid, branchIdentity };

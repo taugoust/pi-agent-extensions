@@ -257,19 +257,23 @@ export default function tuiWorkerExtension(pi: ExtensionAPI): void {
             throw new Error("Worktree cleanup reservation/session identity changed");
           const actorSessionId = session.sessionManager.getSessionId();
           const subagents = (globalThis as any).__paeLocalSubagentControllerV1;
-          if (manifest.execution !== "rpc-headless" && (subagents?.sessionId !== actorSessionId || typeof subagents.worktreeReapTargets !== "function"))
-            throw new Error("Authenticated descendant worktree inventory unavailable; recover the child controller");
+          // RPC-headless execution is runtime-forbidden from delegation; its
+          // supervised jobs are separately required to settle in prepareReap.
+          const headlessWithoutDelegation = manifest.execution === "rpc-headless";
+          if (!headlessWithoutDelegation && (subagents?.sessionId !== actorSessionId || typeof subagents.worktreeReapTargets !== "function" || typeof subagents.worktreeReapActivity !== "function"))
+            throw new Error("Authenticated managed-worker activity inventory unavailable; recover the child controller");
           const descendants = manifest.execution === "rpc-headless" ? [] : subagents.worktreeReapTargets();
           const previousCwd = process.cwd();
-          // Do not exempt the coordinator from active-user inspection. Move only
-          // its own reserved process out; every other process/descriptor still blocks.
+          // Keep the sealed worker's own cwd in its private state directory while
+          // its authenticated managed-worktree activity inventory is reconciled.
           if (!options.force) process.chdir(store.directory);
           try {
             return await reapOwnedWorktrees({ actorSessionId,
               root: { ownerSessionId: manifest.ownerSessionId, taskId: manifest.taskId, childId: manifest.childId },
               descendants, ownedSessionIds: manifest.execution === "rpc-headless" ? [actorSessionId] : subagents.worktreeReapOwners(),
               context: { cwd: process.cwd(), isIdle: () => session.isIdle(),
-                hasPendingMessages: () => session.hasPendingMessages() }, ...options });
+                hasPendingMessages: () => session.hasPendingMessages(),
+                managedWorktreeActivity: (path: string) => headlessWithoutDelegation ? Promise.resolve(false) : subagents.worktreeReapActivity(path) }, ...options });
           } catch (error) {
             if (!options.force) {
               try { process.chdir(previousCwd); } catch { /* Partial removal is durable; keep the live controller in its safe state directory. */ }

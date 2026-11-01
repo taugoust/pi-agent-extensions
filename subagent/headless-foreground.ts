@@ -7,7 +7,7 @@ import { spawn, execFile } from "node:child_process";
 import { provisionWorktrees, releaseWorktree, worktreeOption, type WorktreeOption } from "../shared/subagent-worktrees.ts";
 import { promisify } from "node:util";
 import { constants, chmodSync, closeSync, fstatSync, lstatSync, openSync, readFileSync, readdirSync, readSync, unlinkSync, writeFileSync } from "node:fs";
-import { basename, dirname, join, resolve } from "node:path";
+import { basename, dirname, join, resolve, relative, sep, isAbsolute } from "node:path";
 import { fileURLToPath } from "node:url";
 import { createHash, randomBytes } from "node:crypto";
 import { TUI_WORKER_DISCOVERY_ENV, TUI_WORKER_MANIFEST_ENV, type HeadlessWorkerManifest, type TuiWorkerEvent } from "../shared/tui-worker-protocol.ts";
@@ -42,6 +42,7 @@ type Child = { taskId: string; childId: string; attempt: number; directory: stri
 type Group = { version: 1; id: string; owner: string; ownerToken: string; createdAt: string; mode: "single" | "parallel" | "chain"; cancelled: boolean; guidanceYielded?: boolean; guidanceCompletion?: string; launchMode: "none" | "guard-only"; launcher: string; children: Child[] };
 type Disposition = "native" | "guard-only" | "full" | "unavailable";
 const active = (c: Child) => ["pending", "running", "waiting-input", "waiting-permission"].includes(c.status);
+const pathWithin = (root: string, path: string) => { const part = relative(root, path); return !part || (!isAbsolute(part) && part !== ".." && !part.startsWith(`..${sep}`)); };
 const statusText = (child: Child) => child.status === "waiting-input" ? "waiting-input (open the Foreground panel in Paseo)"
   : child.status === "waiting-permission" ? "waiting-permission (open the Foreground panel in Paseo)" : child.status;
 const contentText = (message: any): string => typeof message?.content === "string" ? message.content : Array.isArray(message?.content) ? message.content.filter((p: any) => p?.type === "text" && typeof p.text === "string").map((p: any) => p.text).join("\n") : "";
@@ -1002,7 +1003,8 @@ export class HeadlessForegroundManager {
     try {
       return await reapOwnedWorktrees({ actorSessionId: group.owner,
         root: { ownerSessionId: group.owner, taskId: child.taskId, childId: child.childId }, descendants: [], ownedSessionIds: [],
-        context: { cwd: process.cwd(), isIdle: () => !active(child), hasPendingMessages: () => false }, ...options });
+        context: { cwd: process.cwd(), isIdle: () => !active(child), hasPendingMessages: () => false,
+          managedWorktreeActivity: path => this.worktreeReapActivity(group.owner, path, { ownerSessionId: group.owner, taskId: child.taskId, childId: child.childId, attempt: child.attempt }) }, ...options });
     } catch (error) {
       try {
         const artifact = new TuiWorkerStore(child.directory).retainWorktreeReapFailure(error);
@@ -1117,6 +1119,22 @@ export class HeadlessForegroundManager {
   worktreeReapTargets(owner: string, verifiedOwners: string[] = [owner]) {
     if (this.owner !== owner || !this.reapReserved) throw new Error("Worktree cleanup requires the owning foreground reservation");
     return this.retainedWorktreeReapTargets([owner, ...verifiedOwners]);
+  }
+  /** Observe any known managed task whose effective checkout is the path being reaped. */
+  async worktreeReapActivity(owner: string, path: string, justReaped?: { ownerSessionId: string; taskId: string; childId: string; attempt: number }): Promise<boolean> {
+    if (!isAbsolute(path) || (!justReaped && this.owner !== owner) || (!this.reapReserved && !justReaped)) throw new Error("Worktree cleanup requires the owning foreground reservation");
+    const inventory = new HeadlessForegroundManager(this.root, this.disposition, () => false, this.groupLimit);
+    if (inventory.inventoryErrors.length) throw new Error("Managed foreground activity inventory is unavailable");
+    for (const group of inventory.groups.values()) for (const child of group.children) {
+      if (justReaped && group.owner === justReaped.ownerSessionId && child.taskId === justReaped.taskId && child.childId === justReaped.childId && child.attempt === justReaped.attempt) continue;
+      const effectiveCwd = child.spec.worktreeInfo?.path ?? child.spec.cwd;
+      if (typeof effectiveCwd !== "string" || !isAbsolute(effectiveCwd) || !pathWithin(path, resolve(effectiveCwd))) continue;
+      await inventory.observe(group, child);
+      if (child.error?.includes("unavailable") || child.workerAlive === undefined && child.status !== "reaped")
+        throw new Error(`Managed foreground worker activity is unavailable for ${group.owner}/${group.id}/${child.childId}`);
+      if (child.reaped !== true || child.status !== "reaped" || child.workerAlive !== false || active(child)) return true;
+    }
+    return false;
   }
   /** Internal ancestry reader: owners must come from validated manifest/session traversal. */
   retainedWorktreeReapTargets(verifiedOwners: string[]) {

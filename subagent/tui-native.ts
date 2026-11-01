@@ -8,7 +8,7 @@ import { randomBytes, createHash } from "node:crypto";
 import { provisionWorktrees, releaseWorktree, worktreeOption, type WorktreeOption } from "../shared/subagent-worktrees.ts";
 import { waitForGroupSnapshot } from "./group-wait.ts";
 import { readdirSync, existsSync, readFileSync, writeFileSync, unlinkSync, openSync, closeSync, readSync, constants, lstatSync, realpathSync } from "node:fs";
-import { join, resolve, basename } from "node:path";
+import { join, resolve, basename, relative, sep, isAbsolute } from "node:path";
 import { validateAcceptance, validateTaskOutcome } from "./outcome.ts";
 import { validateVerification, currentVerification, verificationSummary, verificationContract, workspaceIdentity, type VerificationGate } from "./acceptance.ts";
 import { TaskNameStore } from "./task-name-store.ts";
@@ -39,6 +39,7 @@ type Group = { windowName?: string; renameWindowWithFirstChild?: boolean; versio
   operatorEnabled: boolean; launcher: string; launchMode: "none" | "guard-only"; promotionPending?: boolean; reaping?: boolean; };
 type Disposition = "native" | "guard-only" | "full" | "unavailable";
 const active = (child: Child) => ["pending", "launching", "running", "waiting"].includes(child.state);
+const pathWithin = (root: string, path: string) => { const part = relative(root, path); return !part || (!isAbsolute(part) && part !== ".." && !part.startsWith(`..${sep}`)); };
 const outcomeState = (child: Child) => (child.lastOutcome as any)?.state;
 const hasDeliveredClaim = (child: Child) => outcomeState(child) === "delivered";
 const verificationFailedForDelivery = (child: Child) => !!child.spec?.verification?.length && hasDeliveredClaim(child)
@@ -348,7 +349,12 @@ export class TuiNativeManager {
         root: { ownerSessionId: g.owner, taskId: c.taskId, childId: c.childId },
         descendants: [...this.worktreeTargets(nested), ...foreground.retainedWorktreeReapTargets([...owners])],
         ownedSessionIds: [...owners],
-        context: { cwd: process.cwd(), isIdle: () => !active(c), hasPendingMessages: () => false }, ...options });
+        context: { cwd: process.cwd(), isIdle: () => !active(c), hasPendingMessages: () => false,
+          managedWorktreeActivity: async path => {
+            const justReaped = { ownerSessionId: g.owner, taskId: c.taskId, childId: c.childId, attempt: c.attempt };
+            if (await this.worktreeReapActivity(g.owner, path, justReaped)) return true;
+            return foreground.worktreeReapActivity(g.owner, path, justReaped);
+          } }, ...options });
     } catch (error) {
       try {
         const artifact = new TuiWorkerStore(c.directory).retainWorktreeReapFailure(error);
@@ -1065,6 +1071,23 @@ export class TuiNativeManager {
     const groups = [...this.groups.values()].filter(g => g.owner === owner);
     const all = [...groups, ...this.descendantGroups(owner, groups, undefined, true)];
     return this.worktreeTargets(all);
+  }
+  /** Observe any known managed task whose effective checkout is the path being reaped. */
+  async worktreeReapActivity(owner: string, path: string, justReaped?: { ownerSessionId: string; taskId: string; childId: string; attempt: number }): Promise<boolean> {
+    if ((!justReaped && this.owner !== owner) || (!this.reapReserved && !justReaped)) throw new Error("Worktree cleanup requires the owning subagent reservation");
+    if (!isAbsolute(path) || this.inventoryErrors.length) throw new Error("Managed subagent activity inventory is unavailable");
+    if (justReaped && ![...this.groups.values()].some(group => group.owner === justReaped.ownerSessionId
+      && group.children.some(child => child.taskId === justReaped.taskId && child.childId === justReaped.childId && child.attempt === justReaped.attempt)))
+      throw new Error("Recently reaped managed worker identity is unavailable");
+    for (const group of this.groups.values()) for (const child of group.children) {
+      if (justReaped && group.owner === justReaped.ownerSessionId && child.taskId === justReaped.taskId && child.childId === justReaped.childId && child.attempt === justReaped.attempt) continue;
+      const effectiveCwd = child.spec.worktreeInfo?.path ?? child.spec.cwd;
+      if (typeof effectiveCwd !== "string" || !isAbsolute(effectiveCwd) || !pathWithin(path, resolve(effectiveCwd))) continue;
+      await this.observe(group, child, true);
+      if (child.observationError) throw new Error(`Managed worker activity is unavailable for ${group.owner}/${group.id}/${child.childId}: ${child.observationError}`);
+      if (child.reaped !== true || active(child)) return true;
+    }
+    return false;
   }
   private worktreeTargets(all: Group[]) {
     const latest = new Map<string, { ownerSessionId: string; taskId: string; childId: string; reaped: boolean; attempt: number }>();

@@ -131,19 +131,31 @@ test("force audit appends coordinator identity and records uncertain provenance"
   assert.equal(row.reapAudits.at(-1).provenance, "uncertain"); assert.match(row.reapAudits.at(-1).uncertainty, /physical identity/i);
   assert.ok(await fs.stat(records[2].path));
 }));
-test("unreadable same-UID external process evidence remains fail-closed", async () => fixture(async (_root, records) => {
-  const stat = fs.stat.bind(fs), readlink = fs.readlink.bind(fs), pid = "424242";
+test("unreadable unrelated process does not block when managed controllers verify no user", async () => fixture(async (_root, records) => {
+  const stat = fs.stat.bind(fs), readlink = fs.readlink.bind(fs), pid = "424242"; let unreadableReads = 0;
   pids.add(pid);
   fs.stat = async (path, ...args) => path === `/proc/${pid}` ? { uid: process.getuid() } : stat(path, ...args);
   fs.readlink = async (path, ...args) => {
-    if (path === `/proc/${pid}/cwd`) throw Object.assign(new Error("Permission denied"), { code: "EACCES" });
+    if (path === `/proc/${pid}/cwd`) { unreadableReads++; throw Object.assign(new Error("Permission denied"), { code: "EACCES" }); }
     return readlink(path, ...args);
   };
   try {
-    await assert.rejects(reapOwnedWorktrees(req(records)), /Cannot verify active users: Permission denied/);
-    assert.ok(await fs.stat(records[0].path));
-    assert.ok(await fs.stat(records[1].path));
+    const request = req(records);
+    request.context.managedWorktreeActivity = async () => false;
+    const result = await reapOwnedWorktrees(request);
+    assert.equal(result.removed.length, 3);
+    assert.equal(unreadableReads, 0, "coordinator cleanup must not inspect unrelated host processes");
   } finally { fs.stat = stat; fs.readlink = readlink; pids.delete(pid); }
+}));
+test("tracked active and unavailable managed activity continue to block coordinator reap", async () => fixture(async (_root, records) => {
+  const active = req(records);
+  active.context.managedWorktreeActivity = async path => path === records[1].path;
+  await assert.rejects(reapOwnedWorktrees(active), /active agent, process, or user/);
+  assert.ok(await fs.stat(records[1].path));
+  const unknown = req(records);
+  unknown.context.managedWorktreeActivity = async () => { throw new Error("Managed worker activity inventory unavailable"); };
+  await assert.rejects(reapOwnedWorktrees(unknown), /Managed worker activity inventory unavailable/);
+  assert.ok(await fs.stat(records[0].path));
 }));
 test("retention, active OS users, and unowned foreign/sibling owners remain untouched", async () => fixture(async (_root, records) => {
   await saveOwnedWorktree({ ...records[1], retain: true });

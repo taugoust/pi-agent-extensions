@@ -67,6 +67,30 @@ test("retained manifest/spec policy disagreement cannot silently opt out of clea
   finally { await manager.shutdown(false); await rm(root, { recursive: true, force: true }); }
 });
 
+test("managed activity observes known external workers sharing a coordinator checkout", async () => {
+  const root = await mkdtemp(join(tmpdir(), "worktree-reap-managed-activity-"));
+  const manager: any = new TuiNativeManager(root, () => "native", () => false, 16);
+  const owner = "current-owner", externalOwner = "external-owner", c = child(root, "g", true), external = child(root, "i", true);
+  c.spec.cwd = external.spec.cwd = join(root, "coordinator-checkout");
+  const group: any = { id: `subagent-job-${"h".repeat(24)}`, owner, children: [c] };
+  const externalGroup: any = { id: `subagent-job-${"j".repeat(24)}`, owner: externalOwner, children: [external] };
+  manager.owner = owner; manager.reapReserved = true; manager.groups.set(group.id, group); manager.groups.set(externalGroup.id, externalGroup);
+  manager.observe = async (_g: any, observed: any) => { observed.observationError = undefined; };
+  const justReaped = { ownerSessionId: owner, taskId: c.taskId, childId: c.childId, attempt: c.attempt };
+  try {
+    assert.equal(await manager.worktreeReapActivity(owner, c.spec.cwd, justReaped), true, "the exactly reaped coordinator is excluded while an external managed worker remains");
+    external.reaped = true;
+    assert.equal(await manager.worktreeReapActivity(owner, c.spec.cwd, justReaped), false, "verified reaping releases the external managed activity");
+    external.reaped = false;
+    manager.observe = async (_g: any, observed: any) => { observed.observationError = "controller unavailable"; };
+    await assert.rejects(manager.worktreeReapActivity(owner, c.spec.cwd, justReaped), /Managed worker activity is unavailable/);
+  } finally {
+    manager.reapReserved = false;
+    await manager.shutdown(false);
+    await rm(root, { recursive: true, force: true });
+  }
+});
+
 test("reserved manager target projection is exact and emits no profile policy fields", async () => {
   const root = await mkdtemp(join(tmpdir(), "worktree-reap-targets-"));
   const manager: any = new TuiNativeManager(root, () => "native", () => false, 16);
