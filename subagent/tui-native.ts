@@ -310,7 +310,8 @@ export class TuiNativeManager {
       c.reaped = true;
       this.save(g);
     }
-    if (c.spec.worktree && !options.force) await releaseWorktree(g.owner, c.taskId, c.childId);
+    // Release only the worker's ownership lease; never remove its Git worktree.
+    if (c.spec.worktree) await releaseWorktree(g.owner, c.taskId, c.childId);
   }
   private async reapStoppedDescendants(groups: Group[], options: { force?: true; reason?: string } = {}): Promise<void> {
     for (let nested of [...groups].reverse()) {

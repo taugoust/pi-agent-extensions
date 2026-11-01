@@ -985,7 +985,8 @@ export class HeadlessForegroundManager {
       runtimeProcessToken: manifest.runtimeProcessToken, reapedAt: new Date().toISOString() });
     child.status = child.stopRequested ? "cancelled" : "reaped";
     child.workerAlive = false; child.updatedAt = new Date().toISOString(); this.persist(group);
-    if (child.spec.worktree && !options.force) await releaseWorktree(group.owner, child.taskId, child.childId);
+    // Release only the worker's ownership lease; retain the Git worktree.
+    if (child.spec.worktree) await releaseWorktree(group.owner, child.taskId, child.childId);
   }
   private verifyCleanupProof(child: Child, manifest: HeadlessWorkerManifest): void {
     const store = new TuiWorkerStore(child.directory);
