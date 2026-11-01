@@ -19,7 +19,7 @@ import { physicalPath } from "./physical-path.ts";
 import { callTuiWorker, awaitTuiWorkerVerification, applyTuiWorkerOperatorMode } from "./tui-worker-client.ts";
 import { publicTuiWorkerManifest, parseTuiWorkerJobParams } from "../shared/tui-worker-protocol.ts";
 import { truncateUtf8 } from "../shared/harness-readonly.ts";
-import { readRetainedConversation, validateRetainedConversationFile } from "./retained-conversation.ts";
+import { readRetainedConversation, readRetainedSessionCwd, validateRetainedConversationFile } from "./retained-conversation.ts";
 import { validateLiveEvents, validateLiveStatus } from "./live-conversation.ts";
 import type { QuietUpdate } from "../shared/quiet-state.ts";
 import type { TuiWorkerManifest, TuiWorkerPlacement } from "../shared/tui-worker-protocol.ts";
@@ -1099,16 +1099,28 @@ export class TuiNativeManager {
         throw new Error(`Managed worker launch identity is unavailable for ${group.owner}/${group.id}/${child.childId}`);
       if (child.activityCwd !== undefined && manifest && manifest.activityCwd !== child.activityCwd)
         throw new Error(`Managed worker launch-time checkout identity changed for ${group.owner}/${group.id}/${child.childId}`);
-      const activityCwd = child.activityCwd ?? manifest?.activityCwd;
+      let activityCwd = child.activityCwd ?? manifest?.activityCwd;
+      // Pre-activityCwd initial launches still have Pi's original physical cwd
+      // in their private session header. Never reinterpret a lexical symlink,
+      // resumed session, arbitrary file, or missing header as launch evidence.
+      if (!activityCwd && manifest && child.attempt === 1 && !child.resumeSessionFile
+        && manifest.sessionFile === join(child.directory, "session.jsonl")) {
+        try {
+          const originalCwd = readRetainedSessionCwd(manifest.sessionFile);
+          if (originalCwd === resolve(child.spec.cwd)) activityCwd = originalCwd;
+        } catch { /* Missing/invalid legacy evidence remains fail-closed below. */ }
+      }
       if (!activityCwd || !isAbsolute(activityCwd))
         throw new Error(`Managed worker launch-time checkout identity unavailable for ${group.owner}/${group.id}/${child.childId}`);
       if (child.activityCwd === undefined && manifest?.activityCwd) { child.activityCwd = activityCwd; this.save(group); }
+      // Attribute by recorded launch identity before touching a possibly
+      // removed, unrelated historical checkout.
+      if (!pathWithin(targetPath, activityCwd)) continue;
       let physicalCwd: { path: string; exists: boolean };
       try { physicalCwd = physicalPath(activityCwd); }
       catch { throw new Error(`Managed worker physical checkout identity is unavailable for ${group.owner}/${group.id}/${child.childId}`); }
       if (!physicalCwd.exists || physicalCwd.path !== activityCwd)
         throw new Error(`Managed worker physical checkout identity is unavailable for ${group.owner}/${group.id}/${child.childId}`);
-      if (!pathWithin(targetPath, activityCwd)) continue;
       await this.observe(group, child, true);
       if (child.observationError) throw new Error(`Managed worker activity is unavailable for ${group.owner}/${group.id}/${child.childId}: ${child.observationError}`);
       if (child.reaped !== true || active(child)) return true;

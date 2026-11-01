@@ -1,6 +1,6 @@
 import assert from "node:assert/strict";
 import { test } from "node:test";
-import { mkdir, mkdtemp, rm, symlink, unlink } from "node:fs/promises";
+import { mkdir, mkdtemp, rm, symlink, unlink, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { TuiNativeManager } from "./tui-native.ts";
@@ -86,10 +86,11 @@ test("managed activity observes known external workers sharing a coordinator che
   manager = new TuiNativeManager(root, () => "native", () => false, 16);
   manager.owner = owner; manager.reapReserved = true;
   const tracked: any = manager.groups.get(externalGroup.id).children[0];
+  let legacySession = false;
   manager.manifest = (observed: any) => {
     const found = [...manager.groups.values()].find((candidate: any) => candidate.children.includes(observed));
-    return observed.activityCwd ? { ownerSessionId: found.owner, groupId: found.id, taskId: observed.taskId, childId: observed.childId,
-      attempt: observed.attempt, activityCwd: observed.activityCwd } : undefined;
+    return observed.activityCwd || legacySession ? { ownerSessionId: found.owner, groupId: found.id, taskId: observed.taskId, childId: observed.childId,
+      attempt: observed.attempt, activityCwd: observed.activityCwd, sessionFile: join(observed.directory, "session.jsonl") } : undefined;
   };
   manager.observe = async (_g: any, observed: any) => { observed.observationError = undefined; };
   const justReaped = { ownerSessionId: owner, taskId: c.taskId, childId: c.childId, attempt: c.attempt };
@@ -98,10 +99,28 @@ test("managed activity observes known external workers sharing a coordinator che
     await unlink(alias); await symlink(retarget, alias);
     assert.equal(await manager.worktreeReapActivity(owner, checkout, justReaped), true, "retargeting the lexical alias cannot hide the launch-time checkout");
     assert.equal(await manager.worktreeReapActivity(owner, retarget, justReaped), false, "retargeting does not move the authenticated worker identity");
-    tracked.activityCwd = loop;
+    tracked.activityCwd = join(checkout, "missing-checkout");
     await assert.rejects(manager.worktreeReapActivity(owner, checkout, justReaped), /Managed worker physical checkout identity is unavailable/);
     tracked.activityCwd = undefined;
     await assert.rejects(manager.worktreeReapActivity(owner, checkout, justReaped), /launch-time checkout identity unavailable/);
+    legacySession = true;
+    await mkdir(tracked.directory, { recursive: true, mode: 0o700 });
+    const sessionFile = join(tracked.directory, "session.jsonl");
+    const header = (cwd: string) => JSON.stringify({ type: "session", id: "legacy-worker-session", cwd }) + "\n";
+    await writeFile(sessionFile, header(checkout), { mode: 0o600 });
+    tracked.spec.cwd = checkout;
+    assert.equal(await manager.worktreeReapActivity(owner, checkout, justReaped), true, "legacy physical session cwd still detects relevant active workers");
+    tracked.resumeSessionFile = sessionFile;
+    await assert.rejects(manager.worktreeReapActivity(owner, checkout, justReaped), /launch-time checkout identity unavailable/, "resumed legacy header cannot attest a new launch cwd");
+    delete tracked.resumeSessionFile;
+    tracked.spec.cwd = alias;
+    await assert.rejects(manager.worktreeReapActivity(owner, checkout, justReaped), /launch-time checkout identity unavailable/, "lexical symlink is not substituted for physical session identity");
+    tracked.spec.cwd = join(root, "removed-legacy-checkout");
+    await writeFile(sessionFile, header(tracked.spec.cwd));
+    assert.equal(await manager.worktreeReapActivity(owner, checkout, justReaped), false, "unrelated removed legacy checkout does not block cleanup");
+    await writeFile(sessionFile, "invalid session header\n");
+    await assert.rejects(manager.worktreeReapActivity(owner, checkout, justReaped), /launch-time checkout identity unavailable/);
+    legacySession = false;
     tracked.activityCwd = unrelated; tracked.spec.cwd = unrelated;
     assert.equal(await manager.worktreeReapActivity(owner, checkout, justReaped), false, "an unrelated active managed checkout does not block");
     tracked.reaped = true;

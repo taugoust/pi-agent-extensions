@@ -1,6 +1,6 @@
 import { extractRetainedToolPresentation, extractToolPresentationArguments, type ToolPresentation, type ToolPresentationArguments } from "../shared/tool-presentation.ts";
 import { closeSync, constants, fstatSync, lstatSync, openSync, readSync } from "node:fs";
-import { dirname } from "node:path";
+import { dirname, isAbsolute, resolve } from "node:path";
 import { truncateUtf8 } from "../shared/harness-readonly.ts";
 import { boundedToolResultText } from "../shared/tool-result-text.ts";
 
@@ -71,6 +71,22 @@ function openValidatedConversation(path: string) {
 export function validateRetainedConversationFile(path: string): void {
   const { fd } = openValidatedConversation(path);
   closeSync(fd);
+}
+
+/** Read the original physical cwd recorded by Pi at session creation. */
+export function readRetainedSessionCwd(path: string): string {
+  const { fd } = openValidatedConversation(path);
+  try {
+    const bytes = Buffer.alloc(8192);
+    const length = readSync(fd, bytes, 0, bytes.length, 0);
+    const newline = bytes.subarray(0, length).indexOf(10);
+    if (newline < 0) throw new Error("Session header unavailable");
+    const header = JSON.parse(bytes.subarray(0, newline).toString("utf8"));
+    if (header.type !== "session" || typeof header.id !== "string" || !header.id
+      || typeof header.cwd !== "string" || !isAbsolute(header.cwd) || resolve(header.cwd) !== header.cwd)
+      throw new Error("Session launch cwd unavailable");
+    return header.cwd;
+  } finally { closeSync(fd); }
 }
 
 /** Read the newest bounded page by default; cursor is the exclusive end of an explicit older page. */
