@@ -49,6 +49,45 @@ async function fixture() {
     close: async () => { await server.close(); await manager.shutdown(false); await rm(root, { recursive: true, force: true }); } };
 }
 
+test("reserved worktree inventory follows exact session ancestry including nested headless and excludes foreign owners", async () => {
+  const f = await fixture();
+  const foreground: any = new HeadlessForegroundManager(f.root, () => "native", () => false, 16);
+  try {
+    const digit = "e".repeat(24), childId = `subagent-child-${digit}`, taskId = `subagent-task-${digit}`;
+    const group = { version: 1, id: `subagent-job-${digit}`, owner: "session-2", ownerToken: "fixture",
+      createdAt: new Date().toISOString(), mode: "single", cancelled: false, launchMode: "none", launcher: "unused",
+      children: [{ childId, taskId, attempt: 1, directory: join(f.root, "workers", digit),
+        spec: { task: "nested flat fixture", cwd: f.root }, status: "reaped", reaped: true, started: true,
+        ownerToken: "fixture", operatorCapability: "e".repeat(64) }] };
+    atomicPrivateJson(join(f.root, "headless-groups", `${group.id}.json`), group);
+    f.manager.reapReserved = true;
+    foreground.owner = "session-0"; foreground.reapReserved = true;
+    const owners = f.manager.worktreeReapOwners("session-0");
+    assert.deepEqual(owners, ["session-0", "session-1", "session-2", "session-3"]);
+    const native = f.manager.worktreeReapTargets("session-0");
+    assert.deepEqual(native.map((row: any) => row.childId), f.manifests.slice(0, 3).map(row => row.childId));
+    assert.equal(native.at(-1).reaped, false, "live nested child remains a cleanup blocker");
+    const flat = foreground.worktreeReapTargets("session-0", owners);
+    assert.deepEqual(flat, [{ ownerSessionId: "session-2", taskId, childId, reaped: true, attempt: 1 }]);
+    assert.ok(!native.some((row: any) => row.ownerSessionId === "unrelated"));
+    await rm(f.manifests[1].sessionFile);
+    assert.throws(() => f.manager.worktreeReapOwners("session-0"), /session header unavailable/);
+  } finally {
+    f.manager.reapReserved = false; foreground.reapReserved = false;
+    await foreground.shutdown(false); await f.close();
+  }
+});
+
+test("parent worktree reconciliation refuses a live recovered owner even when forced", async () => {
+  const f = await fixture();
+  const release = f.manager.observerLease("session-1");
+  assert.equal(typeof release, "function");
+  try {
+    await assert.rejects(f.manager.reconcileWorktrees(f.groups[0], f.groups[0].children[0],
+      { force: true, reason: "retain old pane" }), /Live descendant owner blocks worktree reap: session-1/);
+  } finally { release(); await f.close(); }
+});
+
 test("tasks presentation retains descendant blockers and IDs without granting resume authority", () => {
   const descendants = [{ job_id: "nested-job", children: [
     { child_id: "nested-child", task_id: "nested-task", status: "running", task: "nested blocker", reaped: false },

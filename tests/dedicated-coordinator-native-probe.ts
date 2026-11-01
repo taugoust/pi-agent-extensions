@@ -35,7 +35,8 @@ export function registerDedicatedCoordinatorProbe(pi: any, append: (row: any) =>
       const executor = (globalThis as any).__paeDelegatedGoalExecutorV1;
       assert(executor, "actual subagent session_start must install the dedicated executor");
       const entry = { id: randomUUID(), revision: 1, text: "Offline deterministic coordinator role fixture", status: "paused", tasks: [], child: null as any,
-        tokenBudget: null, tokensUsed: 0, automaticTurns: 0, noProgressTurns: 0, summary: null, waiting: null };
+        tokenBudget: null, tokensUsed: 0, automaticTurns: 0, noProgressTurns: 0, summary: null, waiting: null,
+        continuationLimits: { automaticTurns: null, noProgressTurns: null } };
       const store = new NativeTaskStore(join(getAgentDir(), "state", "native-tasks-v1"));
       const owner = ctx.sessionManager.getSessionId();
       entry.child = await executor.start(entry);
@@ -43,6 +44,7 @@ export function registerDedicatedCoordinatorProbe(pi: any, append: (row: any) =>
       const first = store.get(owner, entry.child.taskId);
       assert.equal(first.spec.model, "offline-profile-fixture/gpt-6.1-sol:high");
       assert.match(first.spec.systemPrompt!, /single-coordinator execution controls/);
+      assert.equal(first.spec.cleanupWorktreesOnReap, true);
       await executor.pause(entry);
       const stale = structuredClone(entry);
       // This edit must affect NEW launches, never this retained coordinator.
@@ -56,6 +58,7 @@ export function registerDedicatedCoordinatorProbe(pi: any, append: (row: any) =>
       assert.equal(resumed.spec.model, first.spec.model);
       assert.equal(resumed.spec.systemPrompt, first.spec.systemPrompt);
       assert.deepEqual(resumed.spec.tools, first.spec.tools);
+      assert.equal(resumed.spec.cleanupWorktreesOnReap, true);
       await assert.rejects(executor.observe(stale), /Stale dedicated goal child binding/);
       await assert.rejects(executor.start(entry), /already has a child/);
       await executor.pause(entry);

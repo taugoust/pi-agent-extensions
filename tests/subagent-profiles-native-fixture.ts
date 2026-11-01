@@ -30,6 +30,18 @@ export default async function profileFixture(pi: any) {
     await appendFile(log, `${JSON.stringify(row)}\n`, { mode: 0o600 });
   };
 
+  // These disposable raw-Pi profile workers install no background-job tool or
+  // persisted job inventory. Explicitly attest that test-only empty inventory,
+  // as in tui-worker-test-empty-jobs.ts, rather than weakening production reap.
+  if (process.env.PI_TUI_WORKER_MANIFEST) pi.on("session_start", (_event: any, ctx: any) => {
+    if (pi.getAllTools().some((tool: any) => tool.name === "background_job")) throw new Error("Profile fixture unexpectedly has a real job tool");
+    (globalThis as any).__paeLocalJobControllerV1 = { protocol: 1, sessionId: ctx.sessionManager.getSessionId(),
+      async prepareReap(preserve: (report: unknown) => Promise<void>) {
+        await preserve({ jobs: [], fixture: "isolated profile worker; no job tool installed" });
+        return () => {};
+      } };
+  });
+
   const scenario = JSON.parse(process.env.PROFILE_SCENARIO ?? "{}");
   if (scenario.dedicated && !process.env.PI_SUBAGENT_ID) {
     const { registerDedicatedCoordinatorProbe } = await import("./dedicated-coordinator-native-probe.ts");

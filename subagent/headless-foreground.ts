@@ -1,4 +1,5 @@
 import { resultPage } from "./result-page.ts";
+import { reapOwnedWorktrees } from "../shared/worktree-reap.ts";
 import { guidanceLaunchEnvironment, pendingGuidance } from "./guidance.ts";
 import { nativeResultReport } from "./result-report.ts";
 import { getAgentDir } from "@earendil-works/pi-coding-agent";
@@ -36,7 +37,7 @@ const MAX_HISTORY_MESSAGES = 100;
 const MAX_MESSAGE_TEXT = 4 * 1024;
 const stripControls = (text: string) => text.replace(/\x1b\][\s\S]*?(?:\x07|\x1b\\)/g, "").replace(/(?:\x1b\[|\x9b)[0-?]*[ -/]*[@-~]/g, "").replace(/[\x00-\x08\x0b-\x1f\x7f-\x9f]/g, "");
 
-type Spec = { name?: string; displayName?: string; task: string; cwd: string; model?: string; tools?: string[]; systemPrompt?: string; acceptance?: string[]; verification?: import("./acceptance.ts").VerificationGate[]; worktree?: WorktreeOption; worktreeInfo?: { path: string; branch: string; baseCommit: string; includedChanges: boolean } };
+type Spec = { name?: string; displayName?: string; task: string; cwd: string; model?: string; tools?: string[]; systemPrompt?: string; acceptance?: string[]; verification?: import("./acceptance.ts").VerificationGate[]; cleanupWorktreesOnReap?: boolean; worktree?: WorktreeOption; worktreeInfo?: { path: string; branch: string; baseCommit: string; includedChanges: boolean } };
 type Child = { taskId: string; childId: string; attempt: number; directory: string; spec: Spec; status: ForegroundTask["status"]; createdAt: string; updatedAt: string; started: boolean; launching?: boolean; reaped?: boolean; report?: string; outcome?: unknown; error?: string; workerAlive?: boolean; requiresCompaction?: boolean; notifiedSequence?: number; launcherPid?: number; launcherToken?: string; ownerToken: string; operatorCapability: string; resumeMessage?: string; compactBeforePrompt?: boolean; stopRequested?: boolean; initialPromptDispatching?: boolean; verificationBypasses?: Array<{ attempt: number; workerEpoch: string; reason: string; at: string }>; };
 type Group = { version: 1; id: string; owner: string; ownerToken: string; createdAt: string; mode: "single" | "parallel" | "chain"; cancelled: boolean; guidanceYielded?: boolean; guidanceCompletion?: string; launchMode: "none" | "guard-only"; launcher: string; children: Child[] };
 type Disposition = "native" | "guard-only" | "full" | "unavailable";
@@ -143,7 +144,11 @@ export class HeadlessForegroundManager {
             && ((child.launcherPid === undefined && child.launcherToken === undefined)
               || Number.isSafeInteger(child.launcherPid) && child.launcherPid! > 0 && typeof child.launcherToken === "string" && /^[a-zA-Z0-9:._-]{1,256}$/.test(child.launcherToken))
             && typeof child.directory === "string" && /^[a-f0-9]{24}$/.test(basename(child.directory))
-            && child.directory === join(this.root, "workers", basename(child.directory)))) this.groups.set(group.id, group);
+            && child.directory === join(this.root, "workers", basename(child.directory))
+            && (child.spec?.cleanupWorktreesOnReap === undefined || typeof child.spec.cleanupWorktreesOnReap === "boolean"))) {
+          for (const child of group.children) child.spec.cleanupWorktreesOnReap ??= false;
+          this.groups.set(group.id, group);
+        }
         else this.inventoryErrors.push(file);
       } catch { this.inventoryErrors.push(file); /* Invalid manifests never authorize execution or deletion. */ }
     }
@@ -235,6 +240,7 @@ export class HeadlessForegroundManager {
       if (manifest.execution !== "rpc-headless" || manifest.taskId !== child.taskId || manifest.childId !== child.childId
         || manifest.ownerSessionId !== group.owner || manifest.groupId !== group.id || manifest.attempt !== child.attempt
         || manifest.foregroundOwner?.token !== group.ownerToken) throw new Error("Headless worker identity mismatch");
+      if ((manifest.cleanupWorktreesOnReap === true) !== (child.spec.cleanupWorktreesOnReap === true)) throw new Error("Headless worker trusted reap policy mismatch");
       return manifest;
     } catch (error) { if ((error as NodeJS.ErrnoException).code === "ENOENT") return; throw error; }
   }
@@ -327,7 +333,7 @@ export class HeadlessForegroundManager {
       childId: child.childId, attempt: child.attempt, workerEpoch, controlSocket, controlToken: randomBytes(32).toString("hex"),
       operatorCapabilityHash: contract.launchMode === "guard-only" ? createHash("sha256").update(capability).digest("hex") : undefined,
       launchMode: contract.launchMode, foregroundOwner: { pid: process.pid, token: this.ownerToken! }, acceptance: child.spec.acceptance ?? [],
-      tools: child.spec.tools, verification: child.spec.verification, sessionFile, presentation: "headless-foreground", execution: "rpc-headless", processPid: childProc.pid,
+      tools: child.spec.tools, verification: child.spec.verification, cleanupWorktreesOnReap: child.spec.cleanupWorktreesOnReap === true, sessionFile, presentation: "headless-foreground", execution: "rpc-headless", processPid: childProc.pid,
       processToken, fifoPath };
     store.writeManifest(manifest);
     await new TaskNameStore(child.directory, manifest).claim(child.spec.displayName ?? canonicalSubagentName(child.spec.task, undefined, child.spec.name));
@@ -555,7 +561,8 @@ export class HeadlessForegroundManager {
       const unavailable = (spec.tools ?? []).filter((tool: string) => ["subagent", "background_job"].includes(tool));
       if (unavailable.length) throw new Error(`Headless foreground tasks cannot enable tmux/delegation tools: ${unavailable.join(", ")}`);
       return { name: validateSubagentName(spec.name), displayName: canonicalSubagentName(spec.task, spec.displayName, spec.name), task: spec.task, cwd: resolve(spec.cwd ?? cwd), model: spec.model, tools: spec.tools,
-        systemPrompt: spec.systemPrompt, acceptance: validateAcceptance(spec.acceptance), ...(spec.verification !== undefined ? { verification: validateVerification(spec.verification) } : {}), worktree: worktreeOption(spec.worktree) };
+        systemPrompt: spec.systemPrompt, acceptance: validateAcceptance(spec.acceptance), ...(spec.verification !== undefined ? { verification: validateVerification(spec.verification) } : {}),
+        cleanupWorktreesOnReap: spec.cleanupWorktreesOnReap === true, worktree: worktreeOption(spec.worktree) };
     });
     if (specs.length > 8) throw new Error("At most eight subagent children are allowed");
     if (!this.ready()) throw new Error("Parent AgentSH authority is not active; refusing headless worker launch");
@@ -661,7 +668,7 @@ export class HeadlessForegroundManager {
     } catch { return ""; }
   }
   private result(group: Group, selected?: Child, options: { operation?: string; offset?: number; limit?: number; diagnostics?: boolean; retained?: boolean } = {}): any {
-    const children = group.children.map((child, index) => ({ child: index + 1, child_id: child.childId, task_id: child.taskId, status: child.status, attempt: child.attempt, displayName: this.canonicalTitle(child), task: child.spec.task.slice(0, 500), cwd: child.spec.cwd, worktree: child.spec.worktreeInfo, error: child.error, task_outcome: child.outcome, verification: { status: child.spec.verification?.length ? "unavailable" : "not-configured" }, accepted_delivery: !child.spec.verification?.length && child.status === "completed" && (child.outcome as any)?.state === "delivered", verification_bypasses: child.verificationBypasses ?? [], review: "not-configured" }));
+    const children = group.children.map((child, index) => ({ child: index + 1, child_id: child.childId, task_id: child.taskId, status: child.status, attempt: child.attempt, displayName: this.canonicalTitle(child), task: child.spec.task.slice(0, 500), cwd: child.spec.cwd, worktree: child.spec.worktreeInfo, worktree_reap_policy: { enabled: child.spec.cleanupWorktreesOnReap === true, scope: "registered-harness-worktrees-only", limitation: "External/unregistered worktrees are not inventoried or removed" }, error: child.error, task_outcome: child.outcome, verification: { status: child.spec.verification?.length ? "unavailable" : "not-configured" }, accepted_delivery: !child.spec.verification?.length && child.status === "completed" && (child.outcome as any)?.state === "delivered", verification_bypasses: child.verificationBypasses ?? [], review: "not-configured" }));
     const failed = group.children.some(child => ["failed", "lost"].includes(child.status));
     const operation = options.operation ?? "result";
     const cancelled = group.cancelled || group.children.some(child => child.status === "cancelled");
@@ -980,13 +987,29 @@ export class HeadlessForegroundManager {
       if (await this.runtimeState(manifest) === "alive") throw new Error("Headless Pi runtime did not exit after sealed cleanup");
     }
     this.verifyCleanupProof(child, manifest);
+    if (child.spec.cleanupWorktreesOnReap === true) await this.reconcileWorktrees(group, child, options);
     atomicPrivateJson(new TuiWorkerStore(child.directory).path("reaped.json"), { workerEpoch: manifest.workerEpoch,
       processPid: manifest.processPid, processToken: manifest.processToken, runtimePid: manifest.runtimePid,
       runtimeProcessToken: manifest.runtimeProcessToken, reapedAt: new Date().toISOString() });
     child.status = child.stopRequested ? "cancelled" : "reaped";
+    child.reaped = true;
     child.workerAlive = false; child.updatedAt = new Date().toISOString(); this.persist(group);
     // Release only the worker's ownership lease; retain the Git worktree.
     if (child.spec.worktree) await releaseWorktree(group.owner, child.taskId, child.childId);
+  }
+  private async reconcileWorktrees(group: Group, child: Child, options: { force?: true; reason?: string }) {
+    // Headless delegation is runtime-forbidden, so there are no descendant owners.
+    try {
+      return await reapOwnedWorktrees({ actorSessionId: group.owner,
+        root: { ownerSessionId: group.owner, taskId: child.taskId, childId: child.childId }, descendants: [], ownedSessionIds: [],
+        context: { cwd: process.cwd(), isIdle: () => !active(child), hasPendingMessages: () => false }, ...options });
+    } catch (error) {
+      try {
+        const artifact = new TuiWorkerStore(child.directory).retainWorktreeReapFailure(error);
+        if (error instanceof Error) error.message += ` Full worktree cleanup failure report: ${artifact}`;
+      } catch { /* Retain the original refusal even when evidence storage fails. */ }
+      throw error;
+    }
   }
   private verifyCleanupProof(child: Child, manifest: HeadlessWorkerManifest): void {
     const store = new TuiWorkerStore(child.directory);
@@ -1091,7 +1114,24 @@ export class HeadlessForegroundManager {
         : group.children.some(child => ["failed", "lost"].includes(child.status)) ? "failed" : "completed",
       children: group.children.map((child, index) => ({ child: index + 1, child_id: child.childId, task_id: child.taskId, status: child.status })) }));
   }
-  async prepareReap(owner: string, preserve: (report: unknown) => Promise<void>): Promise<() => void> {
+  worktreeReapTargets(owner: string, verifiedOwners: string[] = [owner]) {
+    if (this.owner !== owner || !this.reapReserved) throw new Error("Worktree cleanup requires the owning foreground reservation");
+    return this.retainedWorktreeReapTargets([owner, ...verifiedOwners]);
+  }
+  /** Internal ancestry reader: owners must come from validated manifest/session traversal. */
+  retainedWorktreeReapTargets(verifiedOwners: string[]) {
+    const inventory = new HeadlessForegroundManager(this.root, this.disposition, () => false, this.groupLimit);
+    if (inventory.inventoryErrors.length) throw new Error("Foreground worktree ancestry inventory is unverifiable");
+    const owners = new Set(verifiedOwners);
+    const latest = new Map<string, { ownerSessionId: string; taskId: string; childId: string; reaped: boolean; attempt: number }>();
+    for (const g of inventory.groups.values()) if (owners.has(g.owner)) for (const c of g.children) {
+      const key = `${g.owner}\0${c.taskId}`, prior = latest.get(key);
+      if (!prior || prior.attempt < c.attempt) latest.set(key, { ownerSessionId: g.owner, taskId: c.taskId,
+        childId: c.childId, reaped: (c.reaped === true || c.status === "reaped") && !active(c), attempt: c.attempt });
+    }
+    return [...latest.values()];
+  }
+  async prepareReap(owner: string, preserve: (report: unknown) => Promise<void>, options: { force?: true; reason?: string } = {}): Promise<() => void> {
     if (this.owner !== owner || this.closed || this.reapReserved) throw new Error("Foreground cleanup authority unavailable");
     this.reapReserved = true;
     try {
@@ -1120,10 +1160,13 @@ export class HeadlessForegroundManager {
               try { lstatSync(child.directory); }
               catch (error) { if ((error as NodeJS.ErrnoException).code === "ENOENT") untouched = true; else throw error; }
             }
-            if (untouched) { child.reaped = true; if (child.spec.worktree) await releaseWorktree(group.owner, child.taskId, child.childId); continue; }
+            if (untouched) {
+              if (child.spec.cleanupWorktreesOnReap === true) await this.reconcileWorktrees(group, child, options);
+              child.reaped = true; if (child.spec.worktree) await releaseWorktree(group.owner, child.taskId, child.childId); continue;
+            }
             throw new Error(`Foreground descendant manifest unavailable: ${group.id}/${child.childId}`);
           }
-          await this.sealAndReap(group, child, manifest);
+          await this.sealAndReap(group, child, manifest, options);
         }
         this.persist(group);
       }
@@ -1208,6 +1251,7 @@ export class HeadlessForegroundManager {
         if (!targetManifest) {
           let absent = false; try { lstatSync(targetChild.directory); } catch (error: any) { if (error.code === "ENOENT") absent = true; else throw error; }
           if (absent && !targetChild.started && !targetChild.workerAlive && !targetChild.launcherPid && !targetChild.launching && !targetChild.initialPromptDispatching) {
+            if (targetChild.spec.cleanupWorktreesOnReap === true) await this.reconcileWorktrees(group, targetChild, params.force === true ? { force: true, reason: params.reason } : {});
             targetChild.reaped = true;
             if (targetChild.spec.worktree) await releaseWorktree(group.owner, targetChild.taskId, targetChild.childId);
             continue;

@@ -125,3 +125,120 @@ test("artifact write failure prevents successful cleanup and keeps worker usable
     assert.equal(server.running(), true);
   });
 });
+
+test("opted coordinator cleans worktrees after jobs and before seal/shutdown", async () => {
+  const calls: string[] = [];
+  await fixture({
+    async prepareJobReap(preserve) { calls.push("jobs"); await preserve({ jobs: [] }); return () => calls.push("release"); },
+    async prepareWorktreeReap(options) { calls.push("worktrees"); assert.deepEqual(options, {}); return { removed: ["registered-worktree"] }; },
+    shutdown() { calls.push("shutdown"); },
+  }, async (server, store, manifest) => {
+    (server as any).manifest.cleanupWorktreesOnReap = true;
+    assert.equal((await callTuiWorker(manifest, { operation: "prepare_reap" })).ok, true);
+    assert.deepEqual(calls.slice(0, 2), ["jobs", "worktrees"]);
+    assert.equal(server.sealed, true);
+    assert.match(await readFile(store.readState().jobCleanup!.artifact, "utf8"), /registered-worktree/);
+  });
+});
+
+test("worktree cleanup failure retains an opted-in coordinator for same-request repair", async () => {
+  let fail = true, cleanups = 0, shutdowns = 0;
+  await fixture({
+    async prepareJobReap(preserve) { await preserve({ jobs: [] }); return () => {}; },
+    async prepareWorktreeReap(options) { cleanups++; assert.deepEqual(options, {}); if (fail) throw new Error("registry busy"); return { removed: [] }; },
+    shutdown() { shutdowns++; },
+  }, async (server, store, manifest) => {
+    // Install the policy in the server's already loaded manifest too, matching a profile-created launch.
+    (server as any).manifest.cleanupWorktreesOnReap = true;
+    const request = { operation: "prepare_reap" as const };
+    const first = await callTuiWorker(manifest, request, { requestId: "worktree-retry" });
+    assert.equal(first.ok, false);
+    if (!first.ok) assert.match(first.message, /registry busy/);
+    assert.equal(server.sealed, false);
+    assert.equal(server.preparingReap, false);
+    assert.equal(store.readState().sealed, false);
+    assert.equal(shutdowns, 0);
+    fail = false;
+    assert.equal((await callTuiWorker(manifest, request, { requestId: "worktree-retry" })).ok, true);
+    assert.equal(cleanups, 2);
+  });
+});
+
+test("force options reach policy cleanup without fabricating verification acceptance", async () => {
+  let received: unknown;
+  await fixture({
+    async prepareJobReap(preserve) { await preserve({ jobs: [] }); return () => {}; },
+    async prepareWorktreeReap(options) { received = options; return { removed: [] }; },
+  }, async (server, _store, manifest) => {
+    (server as any).manifest.cleanupWorktreesOnReap = true;
+    const result = await callTuiWorker(manifest, { operation: "prepare_reap", force: true, reason: "explicit cleanup" });
+    assert.equal(result.ok, true);
+    assert.deepEqual(received, { force: true, reason: "explicit cleanup" });
+    assert.equal((server.state as any).verification?.status, undefined);
+    assert.equal((server.state as any).verificationBypasses, undefined);
+  });
+});
+
+test("activity racing asynchronous worktree cleanup prevents seal and shutdown", async () => {
+  let entered!: () => void, finish!: () => void, shutdowns = 0;
+  const started = new Promise<void>(resolve => { entered = resolve; });
+  const gate = new Promise<void>(resolve => { finish = resolve; });
+  await fixture({
+    async prepareJobReap(preserve) { await preserve({ jobs: [] }); return () => {}; },
+    async prepareWorktreeReap() { entered(); await gate; return { removed: [] }; },
+    shutdown() { shutdowns++; },
+  }, async (server, store, manifest) => {
+    (server as any).manifest.cleanupWorktreesOnReap = true;
+    const reap = callTuiWorker(manifest, { operation: "prepare_reap" });
+    await started;
+    server.running(true);
+    finish();
+    const result = await reap;
+    assert.equal(result.ok, false);
+    if (!result.ok) assert.match(result.message, /activity changed/);
+    assert.equal(server.sealed, false);
+    assert.equal(store.readState().sealed, false);
+    assert.equal(shutdowns, 0);
+  });
+});
+
+test("blocked policy cleanup preserves its full exact report without publishing a cleanup seal", async () => {
+  const report = { remainingWorktrees: Array.from({ length: 120 }, (_, i) => ({
+    ownerSessionId: "nested-owner", taskId: `task-${i}`, childId: `child-${i}`, path: `/fixture/${i}/${"x".repeat(80)}`,
+  })) };
+  await fixture({
+    async prepareJobReap(preserve) { await preserve({ jobs: [] }); return () => {}; },
+    async prepareWorktreeReap() { throw Object.assign(new Error("blocked: " + "x".repeat(12000)), { report }); },
+  }, async (server, store, manifest, shutdowns) => {
+    server.manifest.cleanupWorktreesOnReap = true;
+    const result = await callTuiWorker(manifest, { operation: "prepare_reap" });
+    assert.equal(result.ok, false);
+    const path = (result.data as any)?.worktreeCleanupFailure;
+    assert.equal(typeof path, "string");
+    const retained = JSON.parse(await readFile(path, "utf8"));
+    assert.deepEqual(retained.report, report);
+    assert.equal(retained.worktreeCleanupFailed, true);
+    assert.equal(store.readState().jobCleanup, undefined);
+    assert.equal(server.sealed, false);
+    assert.equal(shutdowns(), 0);
+  });
+});
+
+test("no-policy worker ignores optional worktree cleanup and true policy requires its callback", async () => {
+  let calls = 0;
+  await fixture({
+    async prepareJobReap(preserve) { await preserve({ jobs: [] }); return () => {}; },
+    async prepareWorktreeReap() { calls++; return {}; },
+  }, async (_server, _store, manifest) => {
+    assert.equal((await callTuiWorker(manifest, { operation: "prepare_reap" })).ok, true);
+    assert.equal(calls, 0);
+  });
+  await fixture({ async prepareJobReap(preserve) { await preserve({ jobs: [] }); return () => {}; } }, async (server, store, manifest) => {
+    (server as any).manifest.cleanupWorktreesOnReap = true;
+    const result = await callTuiWorker(manifest, { operation: "prepare_reap" });
+    assert.equal(result.ok, false);
+    if (!result.ok) assert.match(result.message, /Policy requires guarded worktree cleanup/);
+    assert.equal(server.sealed, false);
+    assert.equal(store.readState().sealed, false);
+  });
+});

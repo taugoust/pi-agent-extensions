@@ -5,7 +5,7 @@ import { execFileSync } from 'node:child_process';
 
 export const TASK_ID_PATTERN=/^subagent-task-[0-9a-f]{24}$/;
 export const createTaskId=()=>`subagent-task-${randomBytes(12).toString('hex')}`;
-export type NativeTaskSpec={task:string;cwd:string;model?:string;tools?:string[];systemPrompt?:string;acceptance?:string[]};
+export type NativeTaskSpec={task:string;cwd:string;model?:string;tools?:string[];systemPrompt?:string;acceptance?:string[];cleanupWorktreesOnReap?:boolean};
 export type NativeTaskRecord={version:1;taskId:string;ownerSessionId:string;sessionId:string;spec:NativeTaskSpec;state:'running'|'idle';attempt:number;childId:string;ownerPid:number;ownerToken:string;childPid?:number;childToken?:string;createdAt:string;updatedAt:string;contextTokens?:number;contextWindow?:number;checkpointed?:boolean;requiresCompaction?:boolean;nextAction?:string;latestSummary?:string;latestSummaryAttempt?:number;recoveryAfter?:number;history:Array<{attempt:number;childId:string;finishedAt:string;outcome?:string;execution?:string}>};
 function token(pid:number):string|undefined {
  try {
@@ -23,6 +23,8 @@ function validateSpec(s:NativeTaskSpec){
  if(s.tools!==undefined&&(!Array.isArray(s.tools)||s.tools.length>32||s.tools.some(t=>typeof t!=='string'||!/^[-a-zA-Z0-9_.]{1,64}$/.test(t))))throw new Error('Invalid retained tools');
  if(s.systemPrompt!==undefined&&(typeof s.systemPrompt!=='string'||Buffer.byteLength(s.systemPrompt)>32768))throw new Error('Invalid retained system prompt');
  if(s.acceptance!==undefined&&(!Array.isArray(s.acceptance)||s.acceptance.length>16||s.acceptance.some(c=>typeof c!=='string'||!c||Buffer.byteLength(c)>500)))throw new Error('Invalid retained acceptance criteria');
+ if(s.cleanupWorktreesOnReap!==undefined&&typeof s.cleanupWorktreesOnReap!=='boolean')throw new Error('Invalid retained cleanup policy');
+ s.cleanupWorktreesOnReap ??= false;
 }
 export class NativeTaskStore {
  readonly root:string;

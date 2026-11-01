@@ -94,6 +94,7 @@ export function validateWorkerManifest(value: unknown): TuiWorkerManifest {
   if (!value || typeof value !== "object" || Array.isArray(value)) throw new Error("Invalid worker manifest");
   const m = value as TuiWorkerManifest;
   validateVerification(m.verification);
+  if (m.cleanupWorktreesOnReap !== undefined && typeof m.cleanupWorktreesOnReap !== "boolean") throw new Error("Invalid retained cleanup policy");
   parseTuiWorkerRequest({ protocol: m.protocol, requestId: "validate", token: m.controlToken,
     ownerSessionId: m.ownerSessionId, taskId: m.taskId, runtimeId: m.runtimeId,
     groupId: m.groupId, childId: m.childId, attempt: m.attempt, workerEpoch: m.workerEpoch, operation: "status" });
@@ -122,7 +123,9 @@ export function validateWorkerManifest(value: unknown): TuiWorkerManifest {
   if ((m.panePid === undefined) !== (m.paneProcessToken === undefined)
     || (m.panePid !== undefined && (!Number.isSafeInteger(m.panePid) || m.panePid < 1))
     || (m.paneProcessToken !== undefined && (typeof m.paneProcessToken !== "string" || !/^[a-zA-Z0-9:._-]{1,256}$/.test(m.paneProcessToken)))) throw new Error("Invalid pane process identity");
-  return structuredClone(m);
+  const normalized = structuredClone(m);
+  normalized.cleanupWorktreesOnReap ??= false;
+  return normalized;
 }
 
 /** Single writer: the child owns state; launcher owns placement manifest only. */
@@ -249,6 +252,14 @@ export class TuiWorkerStore {
     } finally { closeSync(fd); }
   }
   report(sequence: number, report: unknown): string { return this.artifact("report", sequence, report); }
+  /** Failed cleanup evidence is not a seal or successful job-cleanup receipt. */
+  retainWorktreeReapFailure(error: unknown): string {
+    return this.artifact("job-cleanup", this.readState(false).sequence + 1, {
+      workerEpoch: this.readManifest().workerEpoch, retainedAt: new Date().toISOString(),
+      worktreeCleanupFailed: true, message: error instanceof Error ? error.message : String(error),
+      report: (error as any)?.report,
+    });
+  }
   artifact(kind: "report" | "notification" | "outcome" | "job-cleanup", sequence: number, report: unknown): string {
     const name = `${kind}-${sequence}-${randomBytes(8).toString("hex")}.json`;
     // Reports are independent immutable snapshots, not the bounded event ring.

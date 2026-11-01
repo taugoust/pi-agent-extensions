@@ -5,6 +5,7 @@ import { closeSync, constants, fstatSync, openSync, writeSync } from "node:fs";
 import { randomBytes } from "node:crypto";
 import { TUI_WORKER_MANIFEST_ENV } from "../shared/tui-worker-protocol.ts";
 import { WORKER_INTERACTIONS_KEY } from "../shared/foreground-tasks.ts";
+import { reapOwnedWorktrees } from "../shared/worktree-reap.ts";
 import { currentSubagentPermissionAuthority } from "../shared/subagent-permission.ts";
 import { TuiWorkerStore } from "./tui-worker-store.ts";
 import guidanceWorker from "./guidance-worker.ts";
@@ -228,7 +229,7 @@ export default function tuiWorkerExtension(pi: ExtensionAPI): void {
           return await controller.execute(`tui:${worker!.manifest.workerEpoch}:${requestId}`, params);
         },
         recursiveCleanup: true,
-        prepareJobReap: async preserve => {
+        prepareJobReap: async (preserve, options = {}) => {
           const session = context;
           const controller = (globalThis as any).__paeLocalJobControllerV1 as LocalJobController | undefined;
           if (!session || controller?.protocol !== 1 || controller.sessionId !== session.sessionManager.getSessionId() || !controller.prepareReap) throw new Error("Child-local job cleanup controller unavailable for this session; reload/recover the child before reaping");
@@ -244,11 +245,37 @@ export default function tuiWorkerExtension(pi: ExtensionAPI): void {
           const releaseSubagents = await subagents.prepareReap(async (report: unknown) => {
             subagentReport = report;
             await preserve({ subagents: report });
-          });
+          }, options);
           try {
             const releaseJobs = await controller.prepareReap(async report => { await preserve({ ...report as Record<string, unknown>, subagents: subagentReport }); });
             return () => { releaseJobs(); releaseSubagents(); };
           } catch (error) { releaseSubagents(); throw error; }
+        },
+        prepareWorktreeReap: async options => {
+          const session = context;
+          if (!session || !worker?.preparingReap || session.sessionManager.getSessionFile() !== manifest.sessionFile)
+            throw new Error("Worktree cleanup reservation/session identity changed");
+          const actorSessionId = session.sessionManager.getSessionId();
+          const subagents = (globalThis as any).__paeLocalSubagentControllerV1;
+          if (manifest.execution !== "rpc-headless" && (subagents?.sessionId !== actorSessionId || typeof subagents.worktreeReapTargets !== "function"))
+            throw new Error("Authenticated descendant worktree inventory unavailable; recover the child controller");
+          const descendants = manifest.execution === "rpc-headless" ? [] : subagents.worktreeReapTargets();
+          const previousCwd = process.cwd();
+          // Do not exempt the coordinator from active-user inspection. Move only
+          // its own reserved process out; every other process/descriptor still blocks.
+          if (!options.force) process.chdir(store.directory);
+          try {
+            return await reapOwnedWorktrees({ actorSessionId,
+              root: { ownerSessionId: manifest.ownerSessionId, taskId: manifest.taskId, childId: manifest.childId },
+              descendants, ownedSessionIds: manifest.execution === "rpc-headless" ? [actorSessionId] : subagents.worktreeReapOwners(),
+              context: { cwd: process.cwd(), isIdle: () => session.isIdle(),
+                hasPendingMessages: () => session.hasPendingMessages() }, ...options });
+          } catch (error) {
+            if (!options.force) {
+              try { process.chdir(previousCwd); } catch { /* Partial removal is durable; keep the live controller in its safe state directory. */ }
+            }
+            throw error;
+          }
         },
         clearQueue: () => sendRpcCommand("clear_queue"),
         // TUI abort is void: the server waits for agent_settled/live idle.

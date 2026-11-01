@@ -1,6 +1,6 @@
 import assert from "node:assert/strict";
 import { test } from "node:test";
-import { mkdtemp, mkdir, writeFile, readFile, rm, stat, symlink } from "node:fs/promises";
+import { mkdtemp, mkdir, writeFile, readFile, rename, rm, stat, symlink } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { BackgroundSubagentManager } from "./background.js";
@@ -42,6 +42,89 @@ for (const status of ["completed", "failed", "cancelled"]) {
   });
 }
 
+test("opted-in legacy coordinator remains retained on normal reap without ancestry proof", async t => {
+  const childId = `subagent-child-${"b".repeat(24)}`, taskId = `subagent-task-${"c".repeat(24)}`;
+  const f = await fixture(t, { schemaVersion: 3, children: [{ childId, taskId, label: "coordinator", cleanupWorktreesOnReap: true }] });
+  await assert.rejects(f.manager.reapNative(f.id, "owner"), /cannot be proven.*retain the coordinator.*force:true/i);
+  await stat(f.state);
+  assert.equal((await f.manager.get(f.id)).status, "completed");
+  assert.deepEqual(await (await import("node:fs/promises")).readdir(f.root), ["jobs"]);
+});
+
+test("forced opted-in legacy reap preserves durable uncertainty and known leftover identities", async t => {
+  const childId = `subagent-child-${"b".repeat(24)}`, taskId = `subagent-task-${"c".repeat(24)}`;
+  const f = await fixture(t, { schemaVersion: 3, children: [{ childId, taskId, label: "coordinator", cleanupWorktreesOnReap: true }] });
+  const sessionId = "12345678-1234-1234-1234-123456789abc";
+  const worktree = { ownerSessionId: "owner", taskId, childId, path: "/worktrees/retained", repo: "/repo",
+    commonDir: "/repo/.git", branch: "pi/coordinator-task", physicalIdentity: { dev: "1", ino: "2", birthtimeMs: "3" } };
+  const nestedWorktree = { ownerSessionId: sessionId, taskId: `subagent-task-${"d".repeat(24)}`, childId: `subagent-child-${"e".repeat(24)}`,
+    path: "/worktrees/nested", repo: "/repo", commonDir: "/repo/.git", branch: "pi/nested-task" };
+  const result = await f.manager.reapNative(f.id, "owner", { force: true, reason: "retain after known ownership gap",
+    worktreeInventory: async () => ({ knownWorktrees: [worktree, nestedWorktree],
+      provenChildSessions: [{ taskId, childId, sessionId, provenance: "native-task-store" }], uncertainty: ["nested session ancestry unavailable"] }) });
+  const audit = result.worktreeReapAudit!;
+  assert.equal(audit.cleanupAttempted, false);
+  assert.equal(audit.reason, "retain after known ownership gap");
+  assert.deepEqual(audit.knownWorktrees, [worktree, nestedWorktree]);
+  assert.deepEqual(audit.provenChildSessions, [{ taskId, childId, sessionId, provenance: "native-task-store" }]);
+  assert.ok(audit.uncertainty.some(item => /ancestry/i.test(item)));
+  assert.ok(audit.uncertainty.includes("nested session ancestry unavailable"));
+  assert.equal((await stat(audit.auditPath)).mode & 0o777, 0o600);
+  const { auditPath, ...persistedAudit } = audit;
+  assert.deepEqual(JSON.parse(await readFile(auditPath, "utf8")), persistedAudit);
+  await assert.rejects(stat(f.directory), { code: "ENOENT" });
+  const reloaded = new BackgroundSubagentManager(f.root);
+  await reloaded.initialize();
+  assert.deepEqual(await reloaded.list("owner"), []);
+  assert.ok((await readFile(auditPath, "utf8")).includes(worktree.path), "audit survives removal of legacy job storage and manager reload");
+});
+
+for (const mutation of [
+  { name: "active state", patch: { status: "running" } },
+  { name: "foreign owner", patch: { sessionId: "foreign" } },
+  { name: "other state contents", patch: { latest: "externally changed" } },
+]) {
+  test(`forced legacy reap revalidates ${mutation.name} after async inventory`, async t => {
+    const childId = `subagent-child-${"b".repeat(24)}`, taskId = `subagent-task-${"c".repeat(24)}`;
+    const f = await fixture(t, { schemaVersion: 3, children: [{ childId, taskId, label: "coordinator", cleanupWorktreesOnReap: true }] });
+    const changed = { ...f.record, ...mutation.patch };
+    await assert.rejects(f.manager.reapNative(f.id, "owner", { force: true, reason: "test concurrent mutation",
+      worktreeInventory: async () => {
+        await writeFile(f.state, JSON.stringify(changed), { mode: 0o600 });
+        return {};
+      } }), /changed during reap/);
+    assert.deepEqual(JSON.parse(await readFile(f.state, "utf8")), changed);
+    assert.equal((await f.manager.get(f.id)).status, "completed");
+  });
+}
+
+test("forced legacy reap refuses a replaced job directory after async inventory", async t => {
+  const childId = `subagent-child-${"b".repeat(24)}`, taskId = `subagent-task-${"c".repeat(24)}`;
+  const f = await fixture(t, { schemaVersion: 3, children: [{ childId, taskId, label: "coordinator", cleanupWorktreesOnReap: true }] });
+  const originalDirectory = `${f.directory}-original`;
+  await assert.rejects(f.manager.reapNative(f.id, "owner", { force: true, reason: "test directory replacement",
+    worktreeInventory: async () => {
+      await rename(f.directory, originalDirectory);
+      await mkdir(f.directory, { mode: 0o700 });
+      await writeFile(f.state, JSON.stringify(f.record), { mode: 0o600 });
+      return {};
+    } }), /identity changed during reap/);
+  assert.deepEqual(JSON.parse(await readFile(f.state, "utf8")), f.record);
+  await stat(join(originalDirectory, "state.json"));
+  await stat(f.state);
+});
+
+test("forced legacy reap requires a reason and rejects mismatched worktree identities into explicit uncertainty", async t => {
+  const childId = `subagent-child-${"b".repeat(24)}`, taskId = `subagent-task-${"c".repeat(24)}`;
+  const f = await fixture(t, { schemaVersion: 3, children: [{ childId, taskId, label: "coordinator", cleanupWorktreesOnReap: true }] });
+  await assert.rejects(f.manager.reapNative(f.id, "owner", { force: true }), /requires a non-empty audited reason/);
+  const result = await f.manager.reapNative(f.id, "owner", { force: true, reason: "uncertain inventory", worktreeInventory: async () => ({
+    knownWorktrees: [{ ownerSessionId: "owner", taskId, childId: `subagent-child-${"d".repeat(24)}`, path: "/elsewhere", repo: "/repo", commonDir: "/repo/.git", branch: "other" }],
+  }) });
+  assert.equal(result.worktreeReapAudit?.knownWorktrees.length, 0);
+  assert.ok(result.worktreeReapAudit?.uncertainty.some(item => /could not be tied/i.test(item)));
+});
+
 test("foreign sessions and AgentSH rejected without deleting storage", async t => {
   const native = await fixture(t);
   await assert.rejects(native.manager.reapNative(native.id, "foreign"), /another Pi session/);
@@ -60,6 +143,7 @@ test("running, cancelling, reload, and shutdown never let reap cancel work", asy
     return new Promise(resolve => { finish = resolve; });
   });
   await assert.rejects(f.manager.reapNative(running.id, "owner"), /active/);
+  await assert.rejects(f.manager.reapNative(running.id, "owner", { force: true, reason: "must not cancel active task" }), /active/);
   assert.equal(signal.aborted, false);
   f.manager.beginReloadAdoption("owner", 1000);
   await assert.rejects(f.manager.reapNative(running.id, "owner"), /active/);

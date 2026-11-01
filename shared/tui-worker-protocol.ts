@@ -48,6 +48,8 @@ type TuiWorkerManifestBase = {
   acceptance?: string[];
   verification?: import("../subagent/acceptance.ts").VerificationGate[];
   tools?: string[];
+  /** Trusted profile policy; absent in legacy manifests and therefore false. */
+  cleanupWorktreesOnReap?: boolean;
   sessionFile: string;
 };
 export type TuiWorkerManifest = TuiWorkerManifestBase & (
@@ -113,7 +115,7 @@ export type TuiWorkerResponse = {
   workerEpoch: string;
 } & (
   | { ok: true; receipt: "accepted" | "applied"; sequence: number; data?: unknown }
-  | { ok: false; code: "unauthorized" | "stale" | "invalid" | "busy" | "sealed" | "ambiguous" | "unavailable" | "compact_failed" | "interrupt_incomplete" | "cleanup_failed" | "verification_cleanup_incomplete"; message: string; receipt?: "failed"; data?: { abortRequested: true; replacementDispatched: false } }
+  | { ok: false; code: "unauthorized" | "stale" | "invalid" | "busy" | "sealed" | "ambiguous" | "unavailable" | "compact_failed" | "interrupt_incomplete" | "cleanup_failed" | "verification_cleanup_incomplete"; message: string; receipt?: "failed"; data?: { abortRequested: true; replacementDispatched: false } | { worktreeCleanupFailure: string } }
 );
 
 export type TuiWorkerEvent = {
@@ -243,5 +245,6 @@ export function publicTuiWorkerManifest(manifest: TuiWorkerManifest): Omit<TuiWo
     presentation: manifest.presentation, execution: manifest.execution, launchMode: manifest.launchMode,
     ...(manifest.execution === "rpc-headless" ? { processPid: manifest.processPid, processToken: manifest.processToken,
         ...(manifest.runtimePid !== undefined ? { runtimePid: manifest.runtimePid, runtimeProcessToken: manifest.runtimeProcessToken } : {}) } :
-      { panePid: manifest.panePid, paneProcessToken: manifest.paneProcessToken }), tools: manifest.tools });
+      { panePid: manifest.panePid, paneProcessToken: manifest.paneProcessToken }), tools: manifest.tools,
+    cleanupWorktreesOnReap: manifest.cleanupWorktreesOnReap === true });
 }

@@ -57,15 +57,30 @@ export async function currentOwnerWorktreeSafety(ctx: CompletionContext, record:
 }
 export type CompletionSafety = (record: OwnedWorktree) => Promise<{ active: boolean; retained: boolean }>;
 /** Identity is captured from a real command/service context, never from request data. */
-export function ownedWorktreeCompletionHost(ctx: CompletionContext, safety: CompletionSafety, signal?: AbortSignal, guard: () => void = () => {}): CompletionHost {
+export type WorktreeReapHost = CompletionHost & {
+  inspectForReap(task: string, reservedRoot?: boolean, subjectOwner?: string): Promise<CompletionInspection>;
+  removeForReap(task: string, oid: string, allowReservedUnreleased: boolean, subjectOwner?: string, expectedBranchIdentity?: string): Promise<void>;
+};
+export function ownedWorktreeCompletionHost(ctx: CompletionContext, safety: CompletionSafety, signal?: AbortSignal, guard: () => void = () => {}, reapRoot?: { ownerSessionId: string; taskId: string; childId: string }, reapAllowed: { ownerSessionId: string; taskId: string; childId: string }[] = [], reapOwnerIds: string[] = []): WorktreeReapHost {
   const owner = ctx.sessionManager.getSessionId();
   const current = () => { guard(); if (!owner || ctx.sessionManager.getSessionId() !== owner || signal?.aborted) throw new Error("Worktree owner session changed or operation cancelled"); };
-  const record = async (task: string) => { current(); const value = (await ownedWorktrees(owner)).find(r => r.taskId === task); if (!value) throw new Error("Worktree is not owned by the current session"); return value; };
+  const record = async (task: string, subjectOwner = owner, allowManifestRoot = false) => {
+    current();
+    const permitted = subjectOwner === owner || (allowManifestRoot && (reapOwnerIds.includes(subjectOwner)
+      || (reapRoot?.ownerSessionId === subjectOwner && reapRoot.taskId === task)
+      || reapAllowed.some(target => target.ownerSessionId === subjectOwner && target.taskId === task)));
+    if (!permitted) throw new Error("Worktree is not in authenticated ancestry");
+    const value = (await ownedWorktrees(subjectOwner)).find(r => r.taskId === task);
+    const exact = reapRoot?.ownerSessionId === subjectOwner && reapRoot.taskId === task ? reapRoot : reapAllowed.find(target => target.ownerSessionId === subjectOwner && target.taskId === task);
+    if (!value) throw new Error(subjectOwner === owner ? "Worktree is not owned by the current session" : "Exact attributed worktree registry identity unavailable");
+    if (allowManifestRoot && exact && value.childId !== exact.childId) throw new Error("Exact attributed worktree registry identity unavailable");
+    return value;
+  };
   const exec = async (_command: string, args: string[], options: any = {}) => ({ code: 0, killed: false, stderr: "", stdout: await worktreeGit(args, options.cwd, signal) });
-  async function inspect(task: string): Promise<CompletionInspection> {
-    const r = await record(task);
+  async function inspect(task: string, reservedRoot = false, subjectOwner = owner): Promise<CompletionInspection> {
+    const r = await record(task, subjectOwner, true);
     let activityUnavailable: string | undefined;
-    const extra = await safety(r).catch(error => { activityUnavailable = error.message; return { active: true, retained: false }; });
+    const extra = await safety(r).catch(error => { if (!reservedRoot) activityUnavailable = error.message; return { active: true, retained: false }; });
     let exists = true;
     try { const stat = await fs.lstat(r.path); if (!stat.isDirectory() || stat.isSymbolicLink()) throw new Error("Worktree path replaced"); }
     catch (error: any) { if (error.code === "ENOENT") exists = false; else throw error; }
@@ -117,8 +132,8 @@ export function ownedWorktreeCompletionHost(ctx: CompletionContext, safety: Comp
     let processActive = true;
     try { processActive = await worktreeHasActiveUsers(r.path); }
     catch (error: any) { activityUnavailable = error.message; }
-    return { activityUnavailable, owned: true, released: r.released, retained: !!r.retain || r.state !== "ready" || !!r.error || extra.retained,
-      active: extra.active || !ctx.isIdle() || ctx.hasPendingMessages() || within(r.path, ctx.cwd) || processActive,
+    return { activityUnavailable, owned: true, released: r.released, retained: !!r.retain || r.state !== "ready" || !!r.error || (!reservedRoot && extra.retained),
+      active: (!reservedRoot && extra.active) || !ctx.isIdle() || ctx.hasPendingMessages() || within(r.path, ctx.cwd) || processActive,
       remainingFiles, identityChanged, worktreeExists: exists, branchOid, branchIdentity };
   }
   async function guarded(task: string, oid: string, removed: boolean) {
@@ -127,7 +142,8 @@ export function ownedWorktreeCompletionHost(ctx: CompletionContext, safety: Comp
       || !state.released || state.active || state.retained || state.identityChanged || state.remainingFiles || state.worktreeExists === removed) throw new Error("Worktree cleanup preconditions changed");
     return r;
   }
-  return {
+  const host: Omit<WorktreeReapHost, "removeForReap"> = {
+    inspectForReap: async (task: string, reservedRoot = false, subjectOwner = owner) => inspect(task, reservedRoot, subjectOwner),
     authorize: async task => { await record(task); return { ownerSessionId: owner, actorSessionId: owner }; },
     exclusive: async (session, task, action) => { if (session !== owner) throw new Error("Owner mismatch"); return serialized(owner, task, action); },
     load: async (_session, task) => (await record(task)).completion,
@@ -136,4 +152,23 @@ export function ownedWorktreeCompletionHost(ctx: CompletionContext, safety: Comp
     removeWorktree: async (_session, task, oid) => { const r = await guarded(task, oid, false); await worktreeGit(["worktree", "remove", r.path], r.repo, signal); },
     deleteBranch: async (_session, task, oid) => { const r = await guarded(task, oid, true); await worktreeGit(["update-ref", "-d", `refs/heads/${r.branch}`, oid], r.repo, signal); },
   };
+  return Object.assign(host, {
+    removeForReap: async (task: string, oid: string, allowReservedUnreleased: boolean, subjectOwner = owner, expectedBranchIdentity?: string) => {
+      current(); const r = await record(task, subjectOwner, true), state = await inspect(task, allowReservedUnreleased, subjectOwner);
+      if (!state.owned) throw new Error("Harness ownership cannot be verified");
+      if (!allowReservedUnreleased && !state.released) throw new Error("Worktree lifecycle is not released");
+      if (state.retained) throw new Error("Explicit retention or retained evidence prevents worktree reap");
+      if (state.activityUnavailable) throw new Error(state.activityUnavailable);
+      if (state.active) throw new Error("An agent, process, or user is still using the worktree");
+      if (state.identityChanged) throw new Error("Worktree path, physical identity, repository, or branch identity changed");
+      if (state.remainingFiles) throw new Error("Worktree contains remaining files or protected repository state");
+      if (!state.worktreeExists) throw new Error("Recorded worktree path is missing before removal");
+      if (state.branchOid !== oid || state.branchIdentity !== expectedBranchIdentity) throw new Error("Branch identity or history changed since reap intent");
+      await worktreeGit(["worktree", "remove", r.path], r.repo, signal);
+    },
+  });
+}
+
+export function ownedWorktreeReapHost(ctx: CompletionContext, safety: CompletionSafety, signal?: AbortSignal, guard: () => void = () => {}, root?: { ownerSessionId: string; taskId: string; childId: string }, allowed: { ownerSessionId: string; taskId: string; childId: string }[] = [], ownerIds: string[] = []): WorktreeReapHost {
+  return ownedWorktreeCompletionHost(ctx, safety, signal, guard, root, allowed, ownerIds);
 }

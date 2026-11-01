@@ -1,9 +1,10 @@
 // Real offline Pi RPC parent and native subagent processes for named-profile acceptance.
 import assert from "node:assert/strict";
-import { spawn } from "node:child_process";
+import { spawn, execFile } from "node:child_process";
+import { promisify } from "node:util";
 import { createInterface } from "node:readline";
 import { EventEmitter } from "node:events";
-import { mkdtemp, mkdir, readFile, readdir, rm, writeFile } from "node:fs/promises";
+import { mkdtemp, mkdir, readFile, readdir, rm, writeFile, stat } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { dirname, join, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
@@ -18,11 +19,23 @@ const fixture = resolve(fixtureArg ?? join(here, "subagent-profiles-native-fixtu
 const profile = (model = "legacy-profile-provider/scout-v1", thinking = "high", body = "PROFILE_SCOUT_INSTRUCTION_V1") =>
   `---\nname: fixture-scout\ndescription: Offline named profile acceptance fixture\nmodel: ${model}\nthinking: ${thinking}\ntools: read, bash\n---\n${body}\n`;
 
-async function startParent(root, scenario, { projectTrust = false, agentSH = false, startupDefault = false } = {}) {
+const executeFile = promisify(execFile);
+async function fixtureGit(cwd, ...args) {
+  return executeFile("git", ["-c", "core.hooksPath=/dev/null", ...args], { cwd, timeout: 10000,
+    env: { PATH: process.env.PATH, HOME: cwd, GIT_CONFIG_NOSYSTEM: "1", GIT_CONFIG_GLOBAL: "/dev/null", GIT_TERMINAL_PROMPT: "0" } });
+}
+async function startParent(root, scenario, { projectTrust = false, agentSH = false, startupDefault = false, gitRepo = false } = {}) {
   const home = join(root, "home"), agentDir = join(home, "agent"), cwd = join(root, "workspace");
   await mkdir(join(agentDir, "agents"), { recursive: true });
   await mkdir(join(agentDir, "extensions"), { recursive: true });
   await mkdir(cwd, { recursive: true });
+  if (gitRepo) {
+    await fixtureGit(cwd, "init", "-b", "main");
+    await writeFile(join(cwd, "tracked"), "offline fixture\n");
+    await fixtureGit(cwd, "add", "tracked");
+    await fixtureGit(cwd, "-c", "user.name=Fixture", "-c", "user.email=fixture@example.invalid", "commit", "-m", "fixture");
+    await writeFile(join(agentDir, "pi-worktree.json"), JSON.stringify({ worktreeRoot: join(root, "worktrees") }));
+  }
   await writeFile(join(agentDir, "settings.json"), JSON.stringify({ defaultModel: "gpt-6-astra", defaultProvider: "offline-profile-fixture", retry: { enabled: false }, compaction: { enabled: false }, defaultProjectTrust: "never", extensions: [fixture] }));
   await writeFile(join(agentDir, "agents", "fixture-scout.md"), profile());
   const log = join(root, "dispatch.jsonl"), stateRoot = join(root, "worker-state");
@@ -164,7 +177,7 @@ try {
   assert.equal(childRequest.provider, "offline-profile-fixture");
   assert.equal(childRequest.model, "scout-v1");
   assert.equal(childRequest.reasoning, "high");
-  assert.deepEqual(activeTools(childRequest), ["notify_parent", "read", "task_outcome"].sort());
+  assert.deepEqual(activeTools(childRequest), ["notify_parent", "read", "request_guidance", "task_outcome"].sort());
   const requestText = JSON.stringify(childRequest);
   assert.match(requestText, /PROFILE_SCOUT_INSTRUCTION_V1/);
   assert.match(requestText, /inspect fixture acceptance/);
@@ -174,6 +187,7 @@ try {
   assert.deepEqual(record.spec.tools, ["read"]);
   assert.match(record.spec.systemPrompt, /PROFILE_SCOUT_INSTRUCTION_V1/);
   assert.deepEqual(record.spec.acceptance, ["inspect fixture acceptance"]);
+  assert.equal(record.spec.cleanupWorktreesOnReap, false);
 
   // Editing the profile after completion must not change the retained spec or
   // actual resumed request. The same parent RPC session owns both attempts.
@@ -185,7 +199,7 @@ try {
   const resumed = childRequests[1];
   assert.equal(resumed.model, "scout-v1");
   assert.equal(resumed.reasoning, "high");
-  assert.deepEqual(activeTools(resumed), ["notify_parent", "read", "task_outcome"].sort());
+  assert.deepEqual(activeTools(resumed), ["notify_parent", "read", "request_guidance", "task_outcome"].sort());
   assert.match(JSON.stringify(resumed), /PROFILE_SCOUT_INSTRUCTION_V1/);
   assert.doesNotMatch(JSON.stringify(resumed), /PROFILE_SCOUT_INSTRUCTION_V2/);
   const resumedRecord = (await taskRecords(parent.stateRoot))[0];
@@ -193,6 +207,7 @@ try {
   assert.equal(resumedRecord.spec.model, record.spec.model);
   assert.equal(resumedRecord.spec.systemPrompt, record.spec.systemPrompt);
   assert.deepEqual(resumedRecord.spec.tools, record.spec.tools);
+  assert.equal(resumedRecord.spec.cleanupWorktreesOnReap, false);
   await cleanup(parent); parent = undefined;
 
   // Native dispatch supports named profiles for single, parallel, and chain items.
@@ -214,7 +229,7 @@ try {
       assert.equal(actual.length, count, `${label} did not dispatch every named-profile child`);
       assert(actual.every((row) => row.model === "scout-v1" && row.reasoning === "high"), `${label} child model/thinking differs`);
       assert(actual.every((row) => /PROFILE_SCOUT_INSTRUCTION_V1/.test(JSON.stringify(row))), `${label} missed profile instruction`);
-      if (label === "zero-tools") assert.deepEqual(activeTools(actual[0]), ["notify_parent", "task_outcome"].sort(), "empty native profile allowlist must not inherit business tools");
+      if (label === "zero-tools") assert.deepEqual(activeTools(actual[0]), ["notify_parent", "request_guidance", "task_outcome"].sort(), "empty native profile allowlist must not inherit business tools");
     } finally { await cleanup(instance); }
   }
 
@@ -234,7 +249,33 @@ try {
       assert.equal(actual[0].provider, "offline-profile-fixture");
       assert.equal(actual[0].model, model);
       assert.equal(actual[0].reasoning, thinking);
+      const [retained] = await taskRecords(instance.stateRoot);
+      assert.equal(retained.spec.cleanupWorktreesOnReap, params.agent === "coordinator");
     } finally { await cleanup(instance); }
+  }
+
+  // Actual isolated coordinator Pi must evacuate only its own reserved cwd,
+  // remove its registered root before reap, and preserve its branch/source.
+  {
+    const instance = await startParent(join(root, "isolated-coordinator"), { params: {
+      task: "offline isolated coordinator", acceptance: ["record isolated role"], agent: "coordinator", worktree: {},
+    } }, { gitRepo: true });
+    let closed = false;
+    try {
+      await instance.promptAndWait("launch isolated coordinator");
+      const [record] = await taskRecords(instance.stateRoot);
+      assert(record?.spec.worktreeInfo, `isolated coordinator absent: ${JSON.stringify(instance.events)}`);
+      const { path, branch } = record.spec.worktreeInfo;
+      assert.equal(record.spec.cleanupWorktreesOnReap, true);
+      assert.ok(await stat(path));
+      await cleanup(instance); closed = true;
+      const audits = instance.events.filter(event => event.type === "message_end" && event.message?.role === "toolResult" && event.message.toolName === "subagent");
+      assert.notEqual(audits.at(-1).message.isError, true, JSON.stringify(audits.at(-1)));
+      await assert.rejects(stat(path), { code: "ENOENT" });
+      assert.match((await fixtureGit(instance.cwd, "show-ref", "--verify", `refs/heads/${branch}`)).stdout, /refs\/heads\/pi\//);
+      assert.equal(await readFile(join(instance.cwd, "tracked"), "utf8"), "offline fixture\n");
+      console.log("PASS actual isolated coordinator: guarded root removal before reap; source and branch preserved");
+    } finally { if (!closed) await cleanup(instance); }
   }
 
   // Profile-only arguments are removed before the AgentSH adapter boundary,
@@ -249,7 +290,7 @@ try {
       await instance.promptAndWait("dispatch through AgentSH adapter");
       const rows = await assertOffline(instance.log);
       const adapterCall = rows.find((row) => row.event === "adapter_call");
-      assert(adapterCall, "selected AgentSH backend did not invoke the adapter");
+      assert(adapterCall, `selected AgentSH backend did not invoke the adapter; toolResults=${JSON.stringify(instance.events.filter(event => event.type === "message_end" && event.message?.role === "toolResult"))}; errors=${instance.errors.join("\\n")}`);
       assert.equal(Object.hasOwn(adapterCall.args, "agent"), false);
       assert.equal(Object.hasOwn(adapterCall.args, "agentScope"), false);
       assert(adapterCall.args.tasks.every((task) => !Object.hasOwn(task, "agent") && !Object.hasOwn(task, "agentScope")));

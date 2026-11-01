@@ -18,6 +18,7 @@ export interface AgentProfile {
   model?: string;
   thinking?: string;
   tools?: string[];
+  cleanupWorktreesOnReap?: boolean;
   source: AgentProfileSource;
   filePath: string;
 }
@@ -32,7 +33,7 @@ const TOOL_NAME = /^[a-z][a-z0-9_-]{0,63}$/;
 /** Portable native core tools accepted by profile selection; runtime guards remain authoritative. */
 export const PROFILE_SUPPORTED_TOOLS = ["read", "bash", "edit", "write"] as const;
 const PROFILE_SUPPORTED_TOOL_SET: ReadonlySet<string> = new Set(PROFILE_SUPPORTED_TOOLS);
-const VALID_FIELDS = new Set(["name", "description", "model", "thinking", "tools"]);
+const VALID_FIELDS = new Set(["name", "description", "model", "thinking", "tools", "cleanupWorktreesOnReap"]);
 const BUILTIN_DIR = path.join(path.dirname(fileURLToPath(import.meta.url)), "agents");
 
 function fail(file: string, message: string): never {
@@ -81,7 +82,7 @@ function parseProfileMarkdown(content: string, file: string): { fields: Record<s
   const end = lines.findIndex((line, i) => i > 0 && line === "---");
   if (end < 0) fail(file, "frontmatter closing --- delimiter is missing");
   const front = lines.slice(1, end);
-  const fields: Record<string, string | string[]> = Object.create(null) as Record<string, string | string[]>;
+  const fields: Record<string, string | string[] | boolean> = Object.create(null) as Record<string, string | string[] | boolean>;
   for (let i = 0; i < front.length; i++) {
     const line = front[i]!;
     const lineNo = i + 2;
@@ -92,6 +93,11 @@ function parseProfileMarkdown(content: string, file: string): { fields: Record<s
     if (!VALID_FIELDS.has(field)) fail(file, `unsupported field '${field}'`);
     if (Object.hasOwn(fields, field)) fail(file, `duplicate field '${field}'`);
     const raw = (key[2] ?? "").trim();
+    if (field === "cleanupWorktreesOnReap") {
+      if (raw !== "true" && raw !== "false") fail(file, `'cleanupWorktreesOnReap' must be true or false on line ${lineNo}`);
+      fields[field] = raw === "true";
+      continue;
+    }
     if (field === "tools") {
       const items: string[] = [];
       if (raw === "" || raw === "|" || raw === "|-" || raw === ">" || raw === ">-") {
@@ -130,7 +136,7 @@ function parseProfileMarkdown(content: string, file: string): { fields: Record<s
   return { fields, body };
 }
 
-function scalar(fields: Record<string, string | string[]>, key: string, file: string, required = false): string | undefined {
+function scalar(fields: Record<string, string | string[] | boolean>, key: string, file: string, required = false): string | undefined {
   const value = fields[key];
   if (value === undefined) {
     if (required) fail(file, `required '${key}' field is missing`);
@@ -176,8 +182,9 @@ async function readProfile(filePath: string, canonicalPath: string, source: Agen
   if (thinking && !THINKING_LEVELS.has(thinking)) fail(filePath, `'thinking' must be one of ${[...THINKING_LEVELS].join(", ")}`);
   const toolsValue = parsed.fields.tools;
   const tools = toolsValue as string[] | undefined;
+  const cleanupWorktreesOnReap = parsed.fields.cleanupWorktreesOnReap as boolean | undefined;
   if (tools?.some((tool) => !TOOL_NAME.test(tool))) fail(filePath, "'tools' contains a malformed tool name");
-  return { profile: { name, description, systemPrompt: parsed.body, ...(model ? { model } : {}), ...(thinking ? { thinking } : {}), ...(tools !== undefined ? { tools: [...new Set(tools)] } : {}), source, filePath }, size: bytes.byteLength };
+  return { profile: { name, description, systemPrompt: parsed.body, ...(model ? { model } : {}), ...(thinking ? { thinking } : {}), ...(tools !== undefined ? { tools: [...new Set(tools)] } : {}), ...(cleanupWorktreesOnReap !== undefined ? { cleanupWorktreesOnReap } : {}), source, filePath }, size: bytes.byteLength };
 }
 
 interface MarkdownCandidate { filePath: string; canonicalPath: string }
@@ -274,6 +281,7 @@ export async function discoverAgentProfiles(options: {
 
 export interface AgentProfileLaunchInput {
   agent?: string;
+  cleanupWorktreesOnReap?: boolean;
   agentScope?: AgentProfileScope;
   model?: string;
   systemPrompt?: string;
@@ -287,8 +295,9 @@ export function resolveAgentProfileLaunch<T extends AgentProfileLaunchInput>(
   profiles: readonly AgentProfile[],
   options: { defaultModel: string },
 ): Omit<T, "agent" | "agentScope"> {
-  const { agent, agentScope: _agentScope, ...plain } = input;
-  if (agent === undefined) return { ...plain } as Omit<T, "agent" | "agentScope">;
+  const { agent, agentScope: _agentScope, cleanupWorktreesOnReap: _untrustedCleanupPolicy, ...plain } = input;
+  if (Object.hasOwn(input, "cleanupWorktreesOnReap")) throw new Error("'cleanupWorktreesOnReap' is trusted profile metadata and cannot be set on launch input");
+  if (agent === undefined) return { ...plain, cleanupWorktreesOnReap: false } as Omit<T, "agent" | "agentScope">;
   if (typeof agent !== "string" || !agent.trim()) throw new Error("'agent' must be a non-empty profile name");
   const profile = profiles.find((candidate) => candidate.name === agent.trim());
   if (!profile) throw new Error(`Unknown agent profile '${agent}'`);
@@ -324,5 +333,5 @@ export function resolveAgentProfileLaunch<T extends AgentProfileLaunchInput>(
   const suffixPrompt = typeof input.systemPrompt === "string" && input.systemPrompt.length ? input.systemPrompt : undefined;
   const systemPrompt = suffixPrompt ? `${profile.systemPrompt}\n\n${suffixPrompt}` : profile.systemPrompt;
   if (Buffer.byteLength(systemPrompt, "utf8") > MAX_PROMPT_BYTES) throw new Error(`Resolved system prompt exceeds ${MAX_PROMPT_BYTES} bytes`);
-  return { ...plain, model, systemPrompt, ...(tools !== undefined ? { tools } : {}) } as Omit<T, "agent" | "agentScope">;
+  return { ...plain, model, systemPrompt, ...(tools !== undefined ? { tools } : {}), cleanupWorktreesOnReap: profile.cleanupWorktreesOnReap ?? false } as Omit<T, "agent" | "agentScope">;
 }

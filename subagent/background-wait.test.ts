@@ -188,7 +188,7 @@ async function profileContractCheck() {
   try {
     const agents = path.join(root, "agents");
     await mkdir(agents);
-    await writeFile(path.join(agents, "fixture.md"), "---\nname: fixture\ndescription: Contract fixture\nmodel: fixture-model\nthinking: high\ntools: read, bash\n---\nPROFILE_INSTRUCTIONS\n");
+    await writeFile(path.join(agents, "fixture.md"), "---\nname: fixture\ndescription: Contract fixture\nmodel: fixture-model\nthinking: high\ntools: read, bash\ncleanupWorktreesOnReap: true\n---\nPROFILE_INSTRUCTIONS\n");
     const ctx = { cwd: root, isProjectTrusted: () => false };
     const task = { agent: "fixture", task: "Inspect", acceptance: ["Concrete acceptance"], systemPrompt: "EXPLICIT_EXTRA", tools: ["read"] };
     for (const kind of ["tasks", "chain"]) {
@@ -200,12 +200,17 @@ async function profileContractCheck() {
       assert.equal(item.model, "fixture-model:high");
       assert.match(item.systemPrompt, /PROFILE_INSTRUCTIONS[\s\S]*EXPLICIT_EXTRA/);
       assert.deepEqual(item.tools, ["read"]);
+      assert.equal(item.cleanupWorktreesOnReap, true);
       assert.deepEqual(item.acceptance, task.acceptance, "profiles do not supply or replace acceptance");
     }
     await assert.rejects(resolveSubagentProfiles({ tasks: [task], agent: "fixture" }, ctx, root), /each task/);
     await assert.rejects(resolveSubagentProfiles({ task: "Plain", agentScope: "user" }, ctx, root), /requires an agent/);
     await assert.rejects(resolveSubagentProfiles({ ...task, agentScope: "project" }, ctx, root), /project trust/);
     await assert.rejects(resolveSubagentProfiles({ action: "review", agent: "fixture" }, ctx, root), /Draft disposition/);
+    assert.equal((await resolveSubagentProfiles({ task: "Plain" }, ctx, root)).cleanupWorktreesOnReap, false);
+    assert.equal((await resolveSubagentProfiles({ agent: "coordinator", task: "Coordinate" }, ctx, root)).cleanupWorktreesOnReap, true);
+    await assert.rejects(resolveSubagentProfiles({ task: "forged", cleanupWorktreesOnReap: true }, ctx, root), /trusted profile metadata/);
+    await assert.rejects(resolveSubagentProfiles({ tasks: [{ task: "forged", cleanupWorktreesOnReap: true }] }, ctx, root), /trusted profile metadata/);
   } finally { await rm(root, { recursive: true, force: true }); }
 }
 await profileContractCheck();

@@ -116,6 +116,7 @@ export type TuiWorkerLaunch = {
   systemPrompt?: string;
   acceptance?: string[];
   verification?: import("./acceptance.ts").VerificationGate[];
+  cleanupWorktreesOnReap?: boolean;
   resumeSessionFile?: string;
   tools?: string[];
   operatorCapabilityHash?: string;
@@ -319,6 +320,7 @@ export class TuiWorkerTmux {
       controlSocket, controlToken: randomBytes(32).toString("hex"), sessionFile, placement, panePid, paneProcessToken,
       presentation: input.foreground ? "foreground-staged" : "background", execution: "tmux", launchMode: input.launchMode,
       acceptance: input.acceptance ?? [], verification: input.verification, tools: input.tools,
+      cleanupWorktreesOnReap: input.cleanupWorktreesOnReap === true,
       ...(input.foreground ? { foregroundOwner: { pid: process.pid, token: await processIdentity(process.pid) } } : {}),
       ...(input.operatorCapabilityHash ? { operatorCapabilityHash: input.operatorCapabilityHash } : {}) };
     store.writeManifest(m);
@@ -422,7 +424,7 @@ export class TuiWorkerTmux {
     }
     return promoted;
   }
-  async reap(manifest: TuiWorkerManifest, timeoutMs = verificationBudget(manifest), options: { force?: true; reason?: string } = {}): Promise<void> {
+  async reap(manifest: TuiWorkerManifest, timeoutMs = verificationBudget(manifest), options: { force?: true; reason?: string; beforeRemove?: () => Promise<void> } = {}): Promise<void> {
     const store = new TuiWorkerStore(dirname(manifest.sessionFile));
     // A prior verified deletion is idempotent. No other pane is sought by name.
     try {
@@ -453,6 +455,7 @@ export class TuiWorkerTmux {
       const panes = (await this.run(requiredPlacement(manifest).socketPath, ["list-panes", "-a", "-F", "#{pane_id}"])).split("\n");
       if (panes.includes(requiredPlacement(manifest).paneId)) throw error;
       verifyCleanup();
+      await options.beforeRemove?.();
       atomicPrivateJson(store.path("reaped.json"), { ...intent, reapedAt: new Date().toISOString() });
       return;
     }
@@ -472,6 +475,9 @@ export class TuiWorkerTmux {
     // from death (or inspect another session's job store using parent authority).
     // Only a child-written seal + cleanup receipt proves pre-reap verification.
     verifyCleanup();
+    // Guarded worktree reconciliation must finish (or audit a forced bypass)
+    // while the retained coordinator pane is still available on failure.
+    await options.beforeRemove?.();
     // Reverify immediately before the sole destructive tmux operation.
     info = await this.inspect(manifest);
     if (!info.dead) throw new Error("Worker is active; refusing reap");

@@ -134,6 +134,18 @@ describe("agent profile discovery", () => {
     await assert.rejects(discover(root, { scope: "user" }), /ELOOP/);
   });
 
+  it("parses the trusted reap policy only as an explicit boolean", async () => {
+    const root = await temp();
+    await profile(path.join(root, "builtins", "enabled.md"), "name: enabled\ndescription: Enabled\ncleanupWorktreesOnReap: true");
+    await profile(path.join(root, "builtins", "disabled.md"), "name: disabled\ndescription: Disabled\ncleanupWorktreesOnReap: false");
+    const profiles = await discover(root);
+    assert.equal(profiles.find(({ name }) => name === "enabled")?.cleanupWorktreesOnReap, true);
+    assert.equal(profiles.find(({ name }) => name === "disabled")?.cleanupWorktreesOnReap, false);
+    await fs.rm(path.join(root, "builtins", "enabled.md"));
+    await profile(path.join(root, "builtins", "enabled.md"), "name: enabled\ndescription: Enabled\ncleanupWorktreesOnReap: yes");
+    await assert.rejects(discover(root), /must be true or false/);
+  });
+
   it("ships coordinator and four adapted builtins with guarded native tool names", async () => {
     const root = await temp();
     const profiles = await discoverAgentProfiles({ cwd: root, agentDir: path.join(root, "home"), projectTrusted: false });
@@ -142,6 +154,8 @@ describe("agent profile discovery", () => {
     assert.deepEqual(profiles.find(({ name }) => name === "reviewer")?.tools, ["read", "bash"]);
     assert.deepEqual(profiles.find(({ name }) => name === "oracle")?.tools, ["read", "bash"]);
     assert.deepEqual(profiles.find(({ name }) => name === "worker")?.tools, ["read", "bash", "edit", "write"]);
+    assert.equal(profiles.find(({ name }) => name === "coordinator")?.cleanupWorktreesOnReap, true);
+    for (const item of profiles.filter(({ name }) => name !== "coordinator")) assert.notEqual(item.cleanupWorktreesOnReap, true);
     for (const item of profiles) assert.ok(item.systemPrompt.trim());
   });
 
@@ -164,7 +178,7 @@ describe("agent profile launch resolution", () => {
   });
   it("uses launch model over profile model and suffix over profile thinking", () => {
     const result = resolveAgentProfileLaunch({ agent: "reviewer", model: "launch/model:low", task: "Inspect" }, [base], { defaultModel: "provider/default:medium" });
-    assert.deepEqual(result, { model: "launch/model:low", task: "Inspect", systemPrompt: "Profile prompt", tools: ["read", "bash"] });
+    assert.deepEqual(result, { model: "launch/model:low", task: "Inspect", systemPrompt: "Profile prompt", tools: ["read", "bash"], cleanupWorktreesOnReap: false });
   });
   it("applies profile thinking to model without suffix and uses default model for thinking-only profile", () => {
     assert.equal(resolveAgentProfileLaunch({ agent: "reviewer", model: "launch/model" }, [base], { defaultModel: "default:model" }).model, "launch/model:high");
@@ -173,7 +187,7 @@ describe("agent profile launch resolution", () => {
   });
   it("appends explicit launch prompt after profile instructions and strips profile selectors", () => {
     const result = resolveAgentProfileLaunch({ agent: "reviewer", agentScope: "project", systemPrompt: "Extra", task: "Do it" }, [base], { defaultModel: "default:model" });
-    assert.deepEqual(result, { task: "Do it", model: "profile/model:high", systemPrompt: "Profile prompt\n\nExtra", tools: ["read", "bash"] });
+    assert.deepEqual(result, { task: "Do it", model: "profile/model:high", systemPrompt: "Profile prompt\n\nExtra", tools: ["read", "bash"], cleanupWorktreesOnReap: false });
   });
   it("preserves omitted profile tools and narrows explicit profile allowlists only", () => {
     const unrestricted = { ...base, tools: undefined };
@@ -192,8 +206,16 @@ describe("agent profile launch resolution", () => {
     assert.throws(() => resolveAgentProfileLaunch({ agent: "reviewer", tools: ["find"] }, [noTools], { defaultModel: "m" }), /unsupported native tools: find/);
     assert.throws(() => resolveAgentProfileLaunch({ agent: "reviewer", tools: ["read", "ls"] }, [base], { defaultModel: "m" }), /unsupported native tools: ls/);
   });
-  it("does not require profile lookup when no agent is selected and errors on unknown profile", () => {
-    assert.deepEqual(resolveAgentProfileLaunch({ agentScope: "user", task: "x" }, [], { defaultModel: "m" }), { task: "x" });
+  it("does not require profile lookup when no agent is selected, defaults policy off, rejects direct policy input, and errors on unknown profile", () => {
+    assert.deepEqual(resolveAgentProfileLaunch({ agentScope: "user", task: "x" }, [], { defaultModel: "m" }), { task: "x", cleanupWorktreesOnReap: false });
+    assert.equal(resolveAgentProfileLaunch({ agent: "reviewer" }, [base], { defaultModel: "m" }).cleanupWorktreesOnReap, false);
+    assert.equal(resolveAgentProfileLaunch({ agent: "reviewer" }, [{ ...base, cleanupWorktreesOnReap: true }], { defaultModel: "m" }).cleanupWorktreesOnReap, true);
+    assert.equal(resolveAgentProfileLaunch({ agent: "reviewer" }, [{ ...base, cleanupWorktreesOnReap: false }], { defaultModel: "m" }).cleanupWorktreesOnReap, false);
+    assert.throws(() => resolveAgentProfileLaunch({ cleanupWorktreesOnReap: true }, [], { defaultModel: "m" }), /trusted profile metadata/);
+    assert.equal(resolveAgentProfileLaunch({ name: "coordinator", displayName: "Coordinator", systemPrompt: "I am a coordinator" }, [], { defaultModel: "m" }).cleanupWorktreesOnReap, false);
+    for (const name of ["worker", "scout", "coordinator"]) for (const policy of [true, false]) {
+      assert.equal(resolveAgentProfileLaunch({ agent: name }, [{ ...base, name, cleanupWorktreesOnReap: policy }], { defaultModel: "m" }).cleanupWorktreesOnReap, policy);
+    }
     assert.throws(() => resolveAgentProfileLaunch({ agent: "missing" }, [], { defaultModel: "m" }), /Unknown agent profile/);
   });
   it("enforces the final prompt byte bound", () => {

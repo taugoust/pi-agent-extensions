@@ -35,6 +35,8 @@ export type BackgroundSubagentChildDescriptor = {
   taskId?: string;
   label: string;
   task?: string;
+  /** Trusted profile policy captured before the legacy child is launched. */
+  cleanupWorktreesOnReap?: boolean;
 };
 
 export type BackgroundSubagentChildProgress = Omit<BackgroundSubagentChildDescriptor, "childId"> & {
@@ -77,6 +79,8 @@ export type BackgroundSubagentRecord = {
   artifacts?: BackgroundSubagentArtifact[];
   taskOutcomes?: TaskOutcomeSummary[];
   error?: string;
+  /** Returned only by forced legacy reap; the durable audit lives outside deleted job storage. */
+  worktreeReapAudit?: LegacyWorktreeReapAudit & { auditPath: string };
 };
 
 export type BackgroundSubagentOutcome = {
@@ -85,6 +89,20 @@ export type BackgroundSubagentOutcome = {
   reports?: RetainedSubagentReport[];
   taskOutcomes?: TaskOutcomeSummary[];
 };
+
+export type LegacyWorktreeReapAudit = {
+  schemaVersion: 1;
+  jobId: string;
+  sessionId: string;
+  attemptedAt: string;
+  reason: string;
+  optedInChildren: Array<{ childId?: string; taskId?: string; label: string }>;
+  provenChildSessions: Array<{ taskId: string; childId: string; sessionId: string; provenance: "native-task-store" }>;
+  knownWorktrees: Array<{ ownerSessionId: string; taskId: string; childId: string; path: string; repo: string; commonDir: string; branch: string; physicalIdentity?: { dev: string; ino: string; birthtimeMs: string } }>;
+  uncertainty: string[];
+  cleanupAttempted: false;
+};
+export type LegacyWorktreeReapInventory = { knownWorktrees?: unknown[]; provenChildSessions?: unknown[]; uncertainty?: string[] };
 
 export type BackgroundSubagentResultPage = {
   child: number;
@@ -114,6 +132,7 @@ type RuntimeRegistry = {
   sessions: Map<string, { phase: BackgroundSessionPhase; generation: number }>;
   storageReaders: Map<string, number>;
   reaped: Set<string>;
+  reaping: Set<string>;
 };
 
 const RUNTIME_KEY = "__paeBackgroundSubagentRuntimeV3";
@@ -133,6 +152,7 @@ function runtimeRegistry(): RuntimeRegistry {
     existing.sessions ??= new Map();
     existing.storageReaders ??= new Map();
     existing.reaped ??= new Set();
+    existing.reaping ??= new Set();
     return existing as RuntimeRegistry;
   }
   const created: RuntimeRegistry = {
@@ -142,6 +162,7 @@ function runtimeRegistry(): RuntimeRegistry {
     sessions: new Map(),
     storageReaders: new Map(),
     reaped: new Set(),
+    reaping: new Set(),
   };
   root[RUNTIME_KEY] = created;
   return created;
@@ -211,7 +232,7 @@ function parseChildren(value: unknown): BackgroundSubagentChildDescriptor[] {
   return value.map((entry) => {
     if (!entry || typeof entry !== "object" || Array.isArray(entry)) throw new Error("invalid background subagent child");
     const child = entry as Record<string, unknown>;
-    const allowed = new Set(["childId", "taskId", "label", "task"]);
+    const allowed = new Set(["childId", "taskId", "label", "task", "cleanupWorktreesOnReap"]);
     for (const key of Object.keys(child)) if (!allowed.has(key)) throw new Error(`unknown background subagent child field ${key}`);
     const childId = child.childId === undefined
       ? undefined
@@ -222,11 +243,13 @@ function parseChildren(value: unknown): BackgroundSubagentChildDescriptor[] {
     if (childId) ids.add(childId);
     const taskId = child.taskId;
     if (taskId !== undefined && (typeof taskId !== "string" || !/^subagent-task-[0-9a-f]{24}$/.test(taskId))) throw new Error("Invalid task identity");
+    if (child.cleanupWorktreesOnReap !== undefined && typeof child.cleanupWorktreesOnReap !== "boolean") throw new Error("Invalid trusted worktree cleanup policy");
     return {
       ...(childId ? { childId } : {}),
       ...(taskId ? { taskId: taskId as string } : {}),
       label: requiredString(child.label, "background subagent child label", 256),
       ...(child.task === undefined ? {} : { task: requiredString(child.task, "background subagent child task", 2048) }),
+      cleanupWorktreesOnReap: child.cleanupWorktreesOnReap === true,
     };
   });
 }
@@ -485,7 +508,7 @@ export class BackgroundSubagentManager {
     const snapshot = structuredClone(record);
     const previous = this.writeChains.get(record.id) ?? Promise.resolve();
     const current = previous.catch(() => undefined).then(() => {
-      if (this.runtime.reaped.has(this.jobDir(record.id))) throw new Error(`Reaped background subagent: ${record.id}`);
+      if (this.runtime.reaped.has(this.jobDir(record.id)) || this.runtime.reaping.has(this.jobDir(record.id))) throw new Error(`Reaped or reaping background subagent: ${record.id}`);
       return writeAtomicBytes(this.statePath(record.id), serializeBoundedState(snapshot));
     });
     this.writeChains.set(record.id, current);
@@ -872,7 +895,11 @@ export class BackgroundSubagentManager {
   }
 
   /** Legacy subprocess records have no child PID/pane identity. Reap storage only. */
-  async reapNative(id: string, sessionId: string): Promise<BackgroundSubagentRecord> {
+  async reapNative(id: string, sessionId: string, options: {
+    force?: true;
+    reason?: string;
+    worktreeInventory?: (record: BackgroundSubagentRecord) => Promise<LegacyWorktreeReapInventory>;
+  } = {}): Promise<BackgroundSubagentRecord> {
     await this.initialize();
     await this.refreshMigratedRecords();
     // No awaits below: validation and deletion cannot interleave with local
@@ -881,10 +908,12 @@ export class BackgroundSubagentManager {
     if (!current) throw new Error(`Unknown background subagent: ${id}`);
     if (!sessionId || current.sessionId !== sessionId) throw new Error("Legacy subagent belongs to another Pi session");
     if (current.backend !== "native") throw new Error("AgentSH groups cannot be reaped here; use AgentSH's supported lifecycle controls. No state was removed.");
+    if (options.force === true && (!options.reason?.trim() || Buffer.byteLength(options.reason) > 1000)) throw new Error("Forced legacy reap requires a non-empty audited reason of at most 1000 bytes");
+    if (options.force !== undefined && options.force !== true) throw new Error("Invalid forced legacy reap option");
     const directory = this.jobDir(id);
     if (isBackgroundSubagentActive(current) || this.runtime.controllers.has(id)
       || this.runtime.pendingLaunches.has(id) || this.runtime.flushTimers.has(id)
-      || this.writeChains.has(id) || this.runtime.storageReaders.has(directory)) {
+      || this.writeChains.has(id) || this.runtime.storageReaders.has(directory) || this.runtime.reaping.has(directory)) {
       throw new Error("Legacy native group is active or its retained storage is busy; wait for terminal completion and retry reap. Reap never cancels work.");
     }
     const privateEntry = (file: string, directory = false) => {
@@ -895,17 +924,19 @@ export class BackgroundSubagentManager {
       }
       return info;
     };
-    privateEntry(this.root, true);
-    privateEntry(this.jobsRoot, true);
-    privateEntry(directory, true);
+    const rootInfo = privateEntry(this.root, true);
+    const jobsInfo = privateEntry(this.jobsRoot, true);
+    const directoryInfo = privateEntry(directory, true);
     const stateInfo = privateEntry(this.statePath(id));
     if (stateInfo.size > MAX_STATE_BYTES) throw new Error("Legacy native state is too large");
     const fd = openSync(this.statePath(id), constants.O_RDONLY | (constants.O_NOFOLLOW ?? 0));
     let persisted: BackgroundSubagentRecord;
+    let persistedText: string;
     try {
       const opened = fstatSync(fd);
       if (opened.dev !== stateInfo.dev || opened.ino !== stateInfo.ino) throw new Error("Legacy native state identity changed");
-      persisted = parseRecord(JSON.parse(readFileSync(fd, "utf8")));
+      persistedText = readFileSync(fd, "utf8");
+      persisted = parseRecord(JSON.parse(persistedText));
     } finally { closeSync(fd); }
     if (persisted.id !== id || persisted.sessionId !== sessionId || persisted.backend !== "native"
       || persisted.createdAt !== current.createdAt || persisted.ownerPid !== current.ownerPid
@@ -916,37 +947,150 @@ export class BackgroundSubagentManager {
     // Another live executor can still write the record even after reporting a
     // terminal status. Lost is not proof of death. Fail closed on unknown PID
     // identity; never signal a PID from this pre-child-identity schema.
-    if (persisted.ownerPid !== process.pid || persisted.status === "lost" || this.adoptLegacyReload) {
-      let alive = true;
-      try {
-        if (process.platform === "linux") {
-          const stat = readFileSync(`/proc/${persisted.ownerPid}/stat`, "utf8");
-          const close = stat.lastIndexOf(")");
-          const token = close >= 0 ? stat.slice(close + 2).split(" ")[19] : undefined;
-          // PID reuse grants no authority over the new process. Only two valid
-          // Linux start-tick identities can prove reuse; historical pid:time
-          // fallback tokens and malformed /proc data must fail closed.
-          if (token && /^[0-9]+$/.test(token) && /^[0-9]+$/.test(persisted.ownerStartToken)
-            && token !== persisted.ownerStartToken) alive = false;
-        } else {
-          process.kill(persisted.ownerPid, 0);
+    const verifyExecutorStopped = () => {
+      if (persisted.ownerPid !== process.pid || persisted.status === "lost" || this.adoptLegacyReload) {
+        let alive = true;
+        try {
+          if (process.platform === "linux") {
+            const procStat = readFileSync(`/proc/${persisted.ownerPid}/stat`, "utf8");
+            const close = procStat.lastIndexOf(")");
+            const token = close >= 0 ? procStat.slice(close + 2).split(" ")[19] : undefined;
+            if (token && /^[0-9]+$/.test(token) && /^[0-9]+$/.test(persisted.ownerStartToken)
+              && token !== persisted.ownerStartToken) alive = false;
+          } else process.kill(persisted.ownerPid, 0);
+        } catch (error) {
+          if (["ENOENT", "ESRCH"].includes((error as NodeJS.ErrnoException).code ?? "")) alive = false;
         }
-      } catch (error) {
-        if (["ENOENT", "ESRCH"].includes((error as NodeJS.ErrnoException).code ?? "")) alive = false;
+        if (alive) throw new Error("Legacy executor may still be alive; reap refused. Stop/exit that executor separately, then restart Pi and retry. No process was signalled or state removed.");
       }
-      if (alive) throw new Error("Legacy executor may still be alive; reap refused. Stop/exit that executor separately, then restart Pi and retry. No process was signalled or state removed.");
-    }
+    };
+    verifyExecutorStopped();
     const files = readdirSync(directory);
+    const fileSnapshots = new Map<string, { dev: number; ino: number; size: number; mtimeMs: number }>();
     for (const file of files) {
       if (!/^(?:state\.json|notified|result-[1-8]\.md)$/.test(file)) throw new Error("Unexpected legacy storage entry; no state was removed");
-      privateEntry(join(directory, file));
+      const info = privateEntry(join(directory, file));
+      fileSnapshots.set(file, { dev: info.dev, ino: info.ino, size: info.size, mtimeMs: info.mtimeMs });
     }
-    this.runtime.reaped.add(directory);
-    for (const file of files) unlinkSync(join(directory, file));
-    rmdirSync(directory);
-    this.records.delete(id);
-    this.migratedRecordIds.delete(id);
-    return structuredClone(persisted);
+    const optedIn = (persisted.children ?? []).filter(child => child.cleanupWorktreesOnReap === true);
+    if (optedIn.length && options.force !== true) {
+      throw new Error("Legacy coordinator worktree cleanup cannot be proven by this subprocess manager; retain the coordinator or retry with force:true and a reason to durably audit known leftovers and inventory uncertainty. No worktrees or retained records were removed.");
+    }
+    if (options.force === true && !optedIn.length) throw new Error("Forced legacy reap is unsupported unless a retained child opted into cleanupWorktreesOnReap; no state was removed.");
+
+    this.runtime.reaping.add(directory);
+    let auditResult: (LegacyWorktreeReapAudit & { auditPath: string }) | undefined;
+    try {
+      if (optedIn.length) {
+        const uncertainty = ["Legacy subprocess records do not retain authenticated recursive child-session ancestry; no complete worktree inventory or cleanup proof is available."];
+        let inventory: LegacyWorktreeReapInventory = {};
+        if (options.worktreeInventory) {
+          try { inventory = await options.worktreeInventory(structuredClone(persisted)); }
+          catch (error) { uncertainty.push(`Known worktree inventory query failed: ${String(error).slice(0, 1000)}`); }
+        } else uncertainty.push("No trusted worktree registry observer was available.");
+        for (const item of inventory.uncertainty ?? []) {
+          if (typeof item === "string" && item.trim()) uncertainty.push(item.trim().slice(0, 1000));
+          else uncertainty.push("Worktree registry observer returned malformed uncertainty metadata.");
+        }
+        const optedKeys = new Set(optedIn.filter(c => c.childId && c.taskId).map(c => `${c.taskId}\\0${c.childId}`));
+        const provenChildSessions: LegacyWorktreeReapAudit["provenChildSessions"] = [];
+        for (const value of inventory.provenChildSessions ?? []) {
+          const row = value as any;
+          if (!row || typeof row.taskId !== "string" || typeof row.childId !== "string" || typeof row.sessionId !== "string"
+            || !optedKeys.has(`${row.taskId}\\0${row.childId}`) || !/^[a-f0-9-]{36}$/.test(row.sessionId)
+            || row.provenance !== "native-task-store"
+            || provenChildSessions.some(proven => proven.taskId === row.taskId && proven.childId === row.childId)) {
+            uncertainty.push("Task store returned a child session that could not be tied to one opted-in child identity.");
+            continue;
+          }
+          provenChildSessions.push({ taskId: row.taskId, childId: row.childId, sessionId: row.sessionId, provenance: row.provenance });
+        }
+        const provenSessionIds = new Set(provenChildSessions.map(proven => proven.sessionId));
+        const knownWorktrees: LegacyWorktreeReapAudit["knownWorktrees"] = [];
+        const seenWorktrees = new Set<string>();
+        for (const value of inventory.knownWorktrees ?? []) {
+          const row = value as any;
+          const physical = row?.physicalIdentity;
+          const parentProvisioned = row?.ownerSessionId === sessionId && typeof row?.taskId === "string" && typeof row?.childId === "string"
+            && optedKeys.has(`${row.taskId}\\0${row.childId}`);
+          const directlyProvenChild = typeof row?.ownerSessionId === "string" && provenSessionIds.has(row.ownerSessionId);
+          if (!row || (!parentProvisioned && !directlyProvenChild) || typeof row.taskId !== "string" || typeof row.childId !== "string"
+            || ![row.path, row.repo, row.commonDir].every((v: unknown) => typeof v === "string" && v.startsWith("/") && Buffer.byteLength(v) <= 4096)
+            || typeof row.branch !== "string" || !row.branch || Buffer.byteLength(row.branch) > 256
+            || physical !== undefined && (!physical || ![physical.dev, physical.ino, physical.birthtimeMs].every((v: unknown) => typeof v === "string" && v.length <= 128))) {
+            uncertainty.push("Registry observer returned a worktree that could not be tied to an opted-in child identity; omitted from known leftovers.");
+            continue;
+          }
+          const key = `${row.taskId}\\0${row.childId}`;
+          if (seenWorktrees.has(key)) continue;
+          seenWorktrees.add(key);
+          knownWorktrees.push({ ownerSessionId: row.ownerSessionId, taskId: row.taskId, childId: row.childId, path: row.path,
+            repo: row.repo, commonDir: row.commonDir, branch: row.branch,
+            ...(physical ? { physicalIdentity: { dev: physical.dev, ino: physical.ino, birthtimeMs: physical.birthtimeMs } } : {}) });
+        }
+        const uniqueUncertainty = [...new Set(uncertainty)].slice(0, 16);
+        const audit: LegacyWorktreeReapAudit = { schemaVersion: 1, jobId: id, sessionId, attemptedAt: new Date().toISOString(),
+          reason: options.reason!.trim(), optedInChildren: optedIn.map(child => ({ ...(child.childId ? { childId: child.childId } : {}),
+            ...(child.taskId ? { taskId: child.taskId } : {}), label: child.label.slice(0, 256) })), provenChildSessions, knownWorktrees,
+          uncertainty: uniqueUncertainty, cleanupAttempted: false };
+        const auditDocument = `${JSON.stringify(audit)}\n`;
+        if (Buffer.byteLength(auditDocument) > MAX_STATE_BYTES) throw new Error("Legacy worktree reap audit exceeds its durable size bound; no retained storage was removed");
+        const auditPath = join(this.root, `worktree-reap-audit-${id}-${randomBytes(8).toString("hex")}.json`);
+        await writeAtomicBytes(auditPath, auditDocument);
+        auditResult = { ...audit, auditPath };
+      }
+      // Async inventory/audit work leaves time for another process to replace
+      // the retained record or storage. Recheck every destructive authority
+      // immediately before deletion, synchronously and without an intervening
+      // await; any discrepancy leaves the job storage intact.
+      if (this.records.get(id) !== current || JSON.stringify(current) !== JSON.stringify(persisted)
+        || isBackgroundSubagentActive(current) || this.runtime.controllers.has(id)
+        || this.runtime.pendingLaunches.has(id) || this.runtime.flushTimers.has(id)
+        || this.writeChains.has(id) || this.runtime.storageReaders.has(directory)
+        || !this.runtime.reaping.has(directory)) {
+        throw new Error("Legacy native state or activity changed during reap; retained storage was not removed");
+      }
+      const sameEntry = (path: string, expected: { dev: number; ino: number }, isDirectory = false) => {
+        const actual = privateEntry(path, isDirectory);
+        if (actual.dev !== expected.dev || actual.ino !== expected.ino) throw new Error("Legacy native storage identity changed during reap; retained storage was not removed");
+      };
+      sameEntry(this.root, rootInfo, true);
+      sameEntry(this.jobsRoot, jobsInfo, true);
+      sameEntry(directory, directoryInfo, true);
+      const finalFiles = readdirSync(directory);
+      if (finalFiles.length !== files.length || finalFiles.some(file => !fileSnapshots.has(file))) {
+        throw new Error("Legacy native storage contents changed during reap; retained storage was not removed");
+      }
+      for (const file of files) {
+        const info = privateEntry(join(directory, file));
+        const expected = fileSnapshots.get(file)!;
+        if (info.dev !== expected.dev || info.ino !== expected.ino || info.size !== expected.size || info.mtimeMs !== expected.mtimeMs) {
+          throw new Error("Legacy native storage file changed during reap; retained storage was not removed");
+        }
+      }
+      const finalStateInfo = privateEntry(this.statePath(id));
+      if (finalStateInfo.dev !== stateInfo.dev || finalStateInfo.ino !== stateInfo.ino || finalStateInfo.size > MAX_STATE_BYTES) {
+        throw new Error("Legacy native state identity changed during reap; retained storage was not removed");
+      }
+      const finalFd = openSync(this.statePath(id), constants.O_RDONLY | (constants.O_NOFOLLOW ?? 0));
+      let finalText: string;
+      try {
+        const opened = fstatSync(finalFd);
+        if (opened.dev !== stateInfo.dev || opened.ino !== stateInfo.ino) throw new Error("Legacy native state identity changed during reap; retained storage was not removed");
+        finalText = readFileSync(finalFd, "utf8");
+      } finally { closeSync(finalFd); }
+      if (finalText !== persistedText) throw new Error("Legacy native owner/backend/status/contents changed during reap; retained storage was not removed");
+      // Also repeat the liveness proof after the asynchronous interval.
+      verifyExecutorStopped();
+      this.runtime.reaped.add(directory);
+      for (const file of files) unlinkSync(join(directory, file));
+      rmdirSync(directory);
+      this.records.delete(id);
+      this.migratedRecordIds.delete(id);
+      const result = structuredClone(persisted);
+      if (auditResult) result.worktreeReapAudit = auditResult;
+      return result;
+    } finally { this.runtime.reaping.delete(directory); }
   }
 
   async cancel(id: string): Promise<BackgroundSubagentRecord> {
@@ -1047,9 +1191,11 @@ export class BackgroundSubagentManager {
 
   async markNotified(id: string): Promise<boolean> {
     await this.get(id);
+    const directory = this.jobDir(id);
+    if (this.runtime.reaping.has(directory) || this.runtime.reaped.has(directory)) throw new Error("Legacy group reap is reserved; notification state was not changed");
     try {
-      const handle = await open(this.notifiedPath(id), "wx", 0o600);
-      await handle.close();
+      const fd = openSync(this.notifiedPath(id), constants.O_WRONLY | constants.O_CREAT | constants.O_EXCL | (constants.O_NOFOLLOW ?? 0), 0o600);
+      closeSync(fd);
       return true;
     } catch (error) {
       if ((error as NodeJS.ErrnoException).code === "EEXIST") return false;

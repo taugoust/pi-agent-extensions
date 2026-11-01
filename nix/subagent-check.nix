@@ -261,6 +261,8 @@ pkgs.runCommand "subagent-check"
       "$workdir/tui-runtime/subagent/live-conversation.test.ts" \
       "$workdir/tui-runtime/subagent/retained-conversation.test.ts" \
       "$workdir/tui-runtime/subagent/tui-worker-reap.test.ts" \
+      "$workdir/tui-runtime/subagent/worktree-reap-manager.test.ts" \
+      "$workdir/tui-runtime/subagent/tui-worker-tmux-reap-policy.test.ts" \
       "$workdir/tui-runtime/subagent/tui-worker-extension.test.ts" \
       "$workdir/tui-runtime/subagent/model-inactivity.test.ts" \
       "$workdir/tui-runtime/subagent/headless-foreground.test.ts" \

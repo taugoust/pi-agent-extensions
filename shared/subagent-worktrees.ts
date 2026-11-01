@@ -9,10 +9,28 @@ import { loadWorktreeSettings } from "../workflows/worktree/settings.ts";
 
 export type WorktreeOption = { changes?: "include" | "exclude"; base?: string };
 import { validateWorktreeCompletion, type WorktreeCompletion } from "./worktree-completion.ts";
-export type OwnedWorktree = { completion?: WorktreeCompletion; retain?: boolean; version: 1; ownerSessionId: string; taskId: string; childId: string; title: string; canonicalDisplayName?: string; repo: string; commonDir: string;
+export type WorktreeReap = { version: 1; phase: "intent" | "worktree-removed" | "cleaned"; requestedAt: string; branchOid: string; branchIdentity?: string };
+export type WorktreeReapAudit = { at: string; actorSessionId: string; root?: { ownerSessionId: string; taskId: string; childId: string }; recordedIdentity: { ownerSessionId: string; taskId: string; childId: string }; requestedRoot?: { ownerSessionId: string; taskId: string; childId: string }; reason: string; path: string; recordedPhysicalIdentity?: { dev: string; ino: string; birthtimeMs: string }; observedPathIdentity?: { dev: string; ino: string; birthtimeMs: string }; provenance: "verified" | "uncertain" | "missing"; uncertainty?: string };
+export type OwnedWorktree = { reapAudits?: WorktreeReapAudit[]; reap?: WorktreeReap; completion?: WorktreeCompletion; retain?: boolean; version: 1; ownerSessionId: string; taskId: string; childId: string; title: string; canonicalDisplayName?: string; repo: string; commonDir: string;
   path: string; cwd: string; branch: string; baseCommit: string; includedChanges: boolean; createdAt: string;
   released: boolean; state: "preparing" | "ready" | "failed"; physicalIdentity?: { dev: string; ino: string; birthtimeMs: string }; error?: string };
 const registry = () => join(getAgentDir(), "state", "subagent-worktrees-v1");
+function validateReap(value: WorktreeReap | undefined, record: Pick<OwnedWorktree, "ownerSessionId" | "taskId" | "path" | "physicalIdentity" | "reapAudits">) {
+  const validIdentity = (identity: unknown) => !!identity && typeof identity === "object" && ["dev", "ino", "birthtimeMs"].every(key => typeof (identity as any)[key] === "string");
+  const validTuple = (tuple: unknown) => !!tuple && typeof tuple === "object" && ["ownerSessionId", "taskId", "childId"].every(key => typeof (tuple as any)[key] === "string" && !!(tuple as any)[key]);
+  if (record.reapAudits !== undefined && (!Array.isArray(record.reapAudits) || record.reapAudits.length > 32 || record.reapAudits.some(audit =>
+    !audit || typeof audit.actorSessionId !== "string" || !audit.actorSessionId || typeof audit.reason !== "string" || !audit.reason.trim() || Buffer.byteLength(audit.reason) > 1000
+    || audit.path !== record.path || !Number.isFinite(Date.parse(audit.at)) || !["verified", "uncertain", "missing"].includes(audit.provenance)
+    || (audit.recordedPhysicalIdentity !== undefined && !validIdentity(audit.recordedPhysicalIdentity))
+    || (audit.observedPathIdentity !== undefined && !validIdentity(audit.observedPathIdentity))
+    || (audit.uncertainty !== undefined && (typeof audit.uncertainty !== "string" || audit.uncertainty.length > 2000))
+    || !validTuple(audit.recordedIdentity) || (audit.root !== undefined && !validTuple(audit.root))
+    || (audit.requestedRoot !== undefined && !validTuple(audit.requestedRoot))))) throw new Error("Invalid worktree reap audit");
+  if (!value) return;
+  if (value.version !== 1 || !["intent", "worktree-removed", "cleaned"].includes(value.phase)
+    || !Number.isFinite(Date.parse(value.requestedAt)) || !/^[a-f0-9]{40,64}$/.test(value.branchOid)
+    || (value.branchIdentity !== undefined && !/^[a-f0-9]{64}$/.test(value.branchIdentity))) throw new Error("Invalid worktree reap record");
+}
 const recordFile = (owner: string, task: string) => join(registry(), `${createHash("sha256").update(`${owner}\0${task}`).digest("hex")}.json`);
 export function worktreeOption(value: unknown): WorktreeOption | undefined {
   if (value === undefined) return;
@@ -60,8 +78,9 @@ function gitClient(input?: Buffer) {
 }
 export async function saveOwnedWorktree(record: OwnedWorktree) {
   if (record.completion) validateWorktreeCompletion(record.completion, record.ownerSessionId, record.taskId);
+  validateReap(record.reap, record);
   const document = JSON.stringify(record);
-  if (Buffer.byteLength(document) > 16384) throw new Error("Worktree ownership record exceeds the safe inventory limit");
+  if (Buffer.byteLength(document) > 16384) throw new Error("Worktree ownership record exceeds the 16 KiB durable inventory limit; audit history was not dropped, so operator archival/review is required before retrying");
   await fs.mkdir(registry(), { recursive: true, mode: 0o700 });
   const stat = await fs.lstat(registry());
   if (!stat.isDirectory() || stat.isSymbolicLink() || (stat.mode & 0o777) !== 0o700 || stat.uid !== process.getuid?.()) throw new Error("Worktree ownership registry unavailable");
@@ -87,6 +106,7 @@ export async function ownedWorktrees(owner?: string): Promise<OwnedWorktree[]> {
       || ![record.path, record.repo, record.cwd, record.commonDir].every(p => typeof p === "string" && isAbsolute(p))
       || recordFile(record.ownerSessionId, record.taskId) !== path) throw new Error("Invalid worktree ownership identity");
     if (record.completion) validateWorktreeCompletion(record.completion, record.ownerSessionId, record.taskId);
+    validateReap(record.reap, record);
     if (record.retain !== undefined && typeof record.retain !== "boolean") throw new Error("Invalid worktree retention marker");
     if (!owner || record.ownerSessionId === owner) records.push(record);
   }
@@ -179,6 +199,7 @@ export async function provisionWorktrees(children: Child[], owner: string, signa
     for (const child of requested) await serialized(owner, child.taskId, async () => {
       const record = (await ownedWorktrees(owner)).find(row => row.taskId === child.taskId);
       if (record?.completion) throw new Error("Completed worktree cannot be resumed; retained completion must be reviewed by its owner");
+      if (record?.reap) throw new Error("Worktree removal is recorded; explicit owner recovery or a new task is required");
       if (!record || record.state !== "ready" || record.cwd !== child.spec.cwd) throw new Error("Retained worktree identity is unavailable");
       if (!within(record.path, await fs.realpath(record.cwd)) || (await worktreeGit(["rev-parse", "--path-format=absolute", "--git-common-dir"], record.path, signal)).trim() !== record.commonDir) throw new Error("Retained worktree directory identity changed");
       const list = await listWorktrees(gitClient(), record.commonDir, signal);

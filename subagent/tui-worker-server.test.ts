@@ -5,7 +5,7 @@ import { mkdtemp, rm } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { createHash } from "node:crypto";
-import { TuiWorkerStore } from "./tui-worker-store.ts";
+import { TuiWorkerStore, validateWorkerManifest } from "./tui-worker-store.ts";
 import { TuiWorkerServer } from "./tui-worker-server.ts";
 import { workspaceIdentity } from "./acceptance.ts";
 import { callTuiWorker, applyTuiWorkerOperatorMode, workerRequest } from "./tui-worker-client.ts";
@@ -20,6 +20,18 @@ export function manifestAt(directory: string): TuiWorkerManifest {
     placement: { socketPath: "/tmp/tmux-test", serverEpoch: "123:456", sessionId: "$1", windowId: "@1", paneId: "%1", ownershipNonce: "e".repeat(64) },
     presentation: "background", launchMode: "none" };
 }
+
+test("trusted cleanup policy survives manifest persistence and old manifests default false", async () => {
+  const directory = await mkdtemp(join(tmpdir(), "pi-worker-policy-"));
+  try {
+    const store = new TuiWorkerStore(directory, true);
+    const manifest = { ...manifestAt(directory), cleanupWorktreesOnReap: true };
+    store.writeManifest(manifest);
+    assert.equal(store.readManifest().cleanupWorktreesOnReap, true);
+    assert.equal(validateWorkerManifest({ ...manifest, cleanupWorktreesOnReap: undefined }).cleanupWorktreesOnReap, false);
+    assert.throws(() => validateWorkerManifest({ ...manifest, cleanupWorktreesOnReap: "yes" }), /cleanup policy/);
+  } finally { await rm(directory, { recursive: true, force: true }); }
+});
 
 test("idle settlement/partial outcome never dispatch gates; delivered outcome and explicit verify do", async () => {
   const directory = await mkdtemp(join(tmpdir(), "pi-worker-verify-trigger-"));

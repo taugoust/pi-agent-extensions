@@ -25,7 +25,9 @@ export type TuiWorkerAdapter = {
   compact?(): Promise<void | { compaction: "not-needed"; reason: "nothing-to-compact" | "already-compacted" }>;
   /** Reserve job creation, preserve terminal results, clean only owned terminal jobs.
    * Return a release callback; failures must release the local reservation. */
-  prepareJobReap?(preserve: (report: unknown) => Promise<void>): Promise<() => void>;
+  prepareJobReap?(preserve: (report: unknown) => Promise<void>, options?: { force?: true; reason?: string }): Promise<() => void>;
+  /** Trusted profile policy cleanup, after job/descendant reservation and before sealing. */
+  prepareWorktreeReap?(options: { force?: true; reason?: string }): Promise<unknown>;
   /** Adapter includes session-bound recursive subagent cleanup, not only jobs. */
   recursiveCleanup?: boolean;
   jobs?(params: import("../shared/tui-worker-protocol.ts").TuiWorkerJobParams, requestId: string): Promise<unknown>;
@@ -647,16 +649,28 @@ export class TuiWorkerServer {
     this.reapInterrupted = false;
     let release: (() => void) | undefined;
     let artifact: string | undefined;
+    let worktreeCleanupStarted = false;
     try {
       if (!this.adapter.prepareJobReap) throw new Error("Child-local job cleanup controller unavailable; keep worker alive and reload/recover its controller");
       release = await this.adapter.prepareJobReap(async report => {
         artifact = this.store.artifact("job-cleanup", this.state.sequence + 1, {
           workerEpoch: this.manifest.workerEpoch, retainedAt: new Date().toISOString(), report,
         });
-      });
+      }, r.force === true ? { force: true, reason: r.reason! } : {});
       if (!artifact) throw new Error("Child-local job cleanup did not preserve a verification report");
       if (this.reapInterrupted || this.state.active || !this.adapter.isIdle() || this.closing || this.failed) {
         throw new Error("Worker activity changed during job cleanup; refusing reap");
+      }
+      if (this.manifest.cleanupWorktreesOnReap === true) {
+        if (!this.adapter.prepareWorktreeReap) throw new Error("Policy requires guarded worktree cleanup; recover the child controller before reaping");
+        worktreeCleanupStarted = true;
+        const worktrees = await this.adapter.prepareWorktreeReap(r.force === true ? { force: true, reason: r.reason! } : {});
+        artifact = this.store.artifact("job-cleanup", this.state.sequence + 1, {
+          workerEpoch: this.manifest.workerEpoch, retainedAt: new Date().toISOString(),
+          report: { ...(readPrivateJson(artifact) as any).report, worktrees },
+        });
+        if (this.reapInterrupted || this.state.active || !this.adapter.isIdle() || this.closing || this.failed)
+          throw new Error("Worker activity changed during worktree cleanup; refusing reap");
       }
       if (r.force === true && this.manifest.verification?.length) {
         this.state.verificationBypasses ??= [];
@@ -681,12 +695,20 @@ export class TuiWorkerServer {
         delete this.state.jobCleanup;
         delete this.state.receipts[receiptKey];
       }
+      let failureArtifact: string | undefined;
+      if (worktreeCleanupStarted) {
+        try {
+          failureArtifact = this.store.retainWorktreeReapFailure(error);
+        } catch { /* Persistence failure never permits sealing or deletion. */ }
+      }
       const message = `Worker reap refused: ${error instanceof Error ? error.message : String(error)}`;
       const bytes = Buffer.from(message);
       let end = Math.min(bytes.length, 8192);
       while (end < bytes.length && end > 0 && (bytes[end] & 0xc0) === 0x80) end--;
       return this.response(r, { ok: false, code: "cleanup_failed",
-        message: bytes.subarray(0, end).toString("utf8") + (end < bytes.length ? " [truncated; inspect child job inventory]" : "") });
+        message: bytes.subarray(0, end).toString("utf8") + (end < bytes.length ? " [truncated; inspect retained cleanup report/inventory]" : "")
+          + (failureArtifact ? ` Full worktree cleanup failure report: ${failureArtifact}` : ""),
+        ...(failureArtifact ? { data: { worktreeCleanupFailure: failureArtifact } } : {}) });
     } finally {
       release?.();
       this.preparingReap = false;

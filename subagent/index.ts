@@ -26,6 +26,7 @@ import { readSubagentModelSettings, resolveSubagentModel } from "./config.ts";
 import { discoverAgentProfiles, resolveAgentProfileLaunch, type AgentProfileScope } from "./profiles.ts";
 import { resolveCoordinatorRole } from "./coordinator-role.ts";
 import { prepareSessionRoutingRequest, readInheritedSessionRoutingProfile, readSessionRoutingProfile, registerSessionRouting, sessionRoutingEnvironment } from "../shared/session-routing.ts";
+import { ownedWorktrees } from "../shared/subagent-worktrees.ts";
 
 import { Container, Markdown, Spacer, Text } from "@mariozechner/pi-tui";
 import { Type } from "@sinclair/typebox";
@@ -126,6 +127,7 @@ type SubagentSpec = {
   systemPrompt?: string;
   model?: string;
   tools?: string[];
+  cleanupWorktreesOnReap?: boolean;
   cwd?: string;
 };
 
@@ -781,7 +783,7 @@ async function runSingleSubagent(
     identity.taskId ??= createTaskId();
     taskRecord = spec.resumeTask
       ? taskStore.get(ownerSessionId, identity.taskId)
-      : await taskStore.create(ownerSessionId, identity.taskId, { task: spec.task, cwd: launchCwd, model: spec.model, tools: effectiveTools, systemPrompt: spec.systemPrompt, acceptance }, subagentId);
+      : await taskStore.create(ownerSessionId, identity.taskId, { task: spec.task, cwd: launchCwd, model: spec.model, tools: effectiveTools, systemPrompt: spec.systemPrompt, acceptance, cleanupWorktreesOnReap: spec.cleanupWorktreesOnReap === true }, subagentId);
     if (taskRecord.childId !== subagentId || taskRecord.state !== "running") throw new Error("Native task attempt is not owned by this child");
     currentResult.task_id = taskRecord.taskId;
     currentResult.attempt = taskRecord.attempt;
@@ -1102,12 +1104,14 @@ export async function resolveSubagentProfiles(params: any, ctx: { cwd: string; i
   const items = Array.isArray(params.tasks) ? params.tasks : Array.isArray(params.chain) ? params.chain : undefined;
   if (items && params.agent !== undefined) throw new Error("Set agent on each task/chain item, not on the group");
   const selected = items ?? [params];
+  if (Object.hasOwn(params, "cleanupWorktreesOnReap") || selected.some((item: any) => item && Object.hasOwn(item, "cleanupWorktreesOnReap")))
+    throw new Error("cleanupWorktreesOnReap is trusted profile metadata and cannot be set on launch input");
   if (params.action && (params.agent !== undefined || params.agentScope !== undefined || selected.some((item: any) => item.agent !== undefined || item.agentScope !== undefined)))
     throw new Error("Draft disposition cannot select agent profiles");
   const hasProfiles = selected.some((item: any) => item?.agent !== undefined);
   if (!hasProfiles) {
     if (params.agentScope !== undefined || selected.some((item: any) => item?.agentScope !== undefined)) throw new Error("agentScope requires an agent profile or operation=profiles");
-    return params;
+    return { ...params, cleanupWorktreesOnReap: false };
   }
   const catalogues = new Map<string, Awaited<ReturnType<typeof discoverAgentProfiles>>>();
   const resolve = async (item: any) => {
@@ -1140,6 +1144,7 @@ function specFromParams(params: any): SubagentSpec {
     systemPrompt: typeof params.systemPrompt === "string" ? params.systemPrompt : undefined,
     model: typeof params.model === "string" ? params.model : undefined,
     tools: normalizeStringArray(params.tools),
+    cleanupWorktreesOnReap: params.cleanupWorktreesOnReap === true,
     cwd: typeof params.cwd === "string" ? params.cwd : undefined,
   };
 }
@@ -1218,12 +1223,13 @@ function createChildIdentities(params: any, native = true): SubagentChildIdentit
   }));
 }
 
-function childDescriptors(children: readonly SubagentChildIdentity[]): BackgroundSubagentChildDescriptor[] {
-  return children.map(({ childId, taskId, label, task }) => ({
+function childDescriptors(children: readonly SubagentChildIdentity[], specs?: readonly any[]): BackgroundSubagentChildDescriptor[] {
+  return children.map(({ childId, taskId, label, task }, index) => ({
     childId,
     ...(taskId ? {taskId} : {}),
     label: truncateByBytes(label, 256),
     ...(task === undefined ? {} : { task: truncateByBytes(task, 2048) }),
+    cleanupWorktreesOnReap: specs?.[index]?.cleanupWorktreesOnReap === true,
   }));
 }
 
@@ -1738,8 +1744,8 @@ function subagentParams() {
   draft_id: Type.Optional(Type.String({ pattern: "^session-[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$", description: "Exact retained AgentSH Draft identity." })),
   background: Type.Optional(Type.Boolean({ description: "Launch only (omit operation): return immediately and continue a task/tasks/chain request in the background. Not accepted by resume; execution placement follows the retained backend, not a new launch option." })),
   operation: Type.Optional(Type.String({ pattern: "^(list|status|output|yield|result|cancel|reap|promote|prompt|resume|tasks|idle_decision|profiles|verify)$", description: "Omit for new launches/Draft disposition. Accepted fields besides operation: profiles {agentScope?}; resume {task_id, message?, compact?}; prompt {child_id, message, job_id?, control_mode?, wait_for_response?}; verify {job_id?, child_id?}; reap {job_id, force?, reason?}; idle_decision {child_id, request_id, worker_epoch, choice, job_id?}; list/tasks {limit?}; status/output/cancel/promote {job_id}; yield {job_id?} returns current state immediately and ends only the current run when sole tool (not the conversation); result {job_id?, child_id?, child?, offset?, limit?, diagnostics?} (job_id or child_id required; child and child_id exclusive). No launch fields with operations, except the profiles discovery scope." })),
-  force: Type.Optional(Type.Boolean({ description: "reap only: false or omitted uses normal verification-gated reap; true bypasses verification only and requires reason. Does not bypass activity, job/descendant cleanup, ownership or pane safety." })),
-  reason: Type.Optional(Type.String({ minLength: 1, maxLength: 1000, description: "Required with reap force:true; durably audited verification bypass reason." })),
+  force: Type.Optional(Type.Boolean({ description: "reap only: false or omitted uses normal verification-gated reap; true bypasses verification and opted-in worktree removal, with a required audited reason and discoverable leftover inventory. Does not bypass activity, job/descendant cleanup, ownership, permissions or pane safety." })),
+  reason: Type.Optional(Type.String({ minLength: 1, maxLength: 1000, description: "Required with reap force:true; durably audited verification/worktree-removal bypass reason." })),
   job_id: Type.Optional(Type.String({ pattern: "^subagent-job-[0-9a-f]{24}$", description: "Required for status/output/cancel/reap/promote; result needs job_id or child_id. Optional for yield to select an owned group snapshot, or prompt as an assertion that child_id belongs to this group (mismatch rejects before delivery). Omit for resume/list/tasks." })),
   child_id: Type.Optional(Type.String({ pattern: "^subagent-child-[0-9a-f]{24}$", description: "Opaque per-child ID; required by operation=prompt/idle_decision and accepted instead of child by operation=result." })),
   request_id: Type.Optional(Type.String({ pattern: "^idle:[a-f0-9]{32}$", description: "idle_decision only: exact pending idle-warning request reported by child status/notification." })),
@@ -2125,7 +2131,7 @@ export default function (pi: ExtensionAPI) {
             const goalExecution: NonNullable<SubagentSpec["goalExecution"]> = { goalTools, binding, async ready(session) { rpc = session; resolveReady(); } };
             let lastObservation: ChildGoalSnapshot | undefined;
             const run = runSingleSubagent(ctx.cwd, { task: entry.text, acceptance: ["Execute the dedicated goal through the existing goal engine."],
-              model: selectedModel, systemPrompt: coordinatorPrompt, tools, resumeTask, goalExecution },
+              model: selectedModel, systemPrompt: coordinatorPrompt, tools, cleanupWorktreesOnReap: role?.cleanupWorktreesOnReap === true, resumeTask, goalExecution },
               launchIdentity, undefined, abort.signal, undefined,
               results => ({ mode: "single", results } as SubagentDetails), authority, sessionId,
               { agentDir: getAgentDir(), routingEnvironment: sessionRoutingEnvironment(ctx) });
@@ -2170,14 +2176,22 @@ export default function (pi: ExtensionAPI) {
       const foreground = !headlessWorker && process.platform === "linux" ? headlessNative(ctx) : undefined;
       (globalThis as any).__paeLocalSubagentControllerV1 = {
         protocol: 1, sessionId,
-        prepareReap: async (preserve: (report: unknown) => Promise<void>) => {
+        worktreeReapOwners: () => {
+          if (lifecycleClosing || activeSessionId !== sessionId) throw new Error("Subagent cleanup session changed");
+          return native?.worktreeReapOwners(sessionId) ?? [sessionId];
+        },
+        worktreeReapTargets: () => {
+          if (lifecycleClosing || activeSessionId !== sessionId) throw new Error("Subagent cleanup session changed");
+          return [...(native?.worktreeReapTargets(sessionId) ?? []), ...(foreground?.worktreeReapTargets(sessionId, native?.worktreeReapOwners(sessionId)) ?? [])];
+        },
+        prepareReap: async (preserve: (report: unknown) => Promise<void>, options: { force?: true; reason?: string } = {}) => {
           if (lifecycleClosing || activeSessionId !== sessionId) throw new Error("Subagent cleanup session changed");
           const releases: (() => void)[] = [];
           const reports: unknown[] = [];
           const retain = async (report: unknown) => { reports.push(report); await preserve({ subagents: reports }); };
           try {
-            if (foreground) releases.push(await foreground.prepareReap(sessionId, retain));
-            if (native) releases.push(await native.prepareReap(sessionId, retain));
+            if (foreground) releases.push(await foreground.prepareReap(sessionId, retain, options));
+            if (native) releases.push(await native.prepareReap(sessionId, retain, options));
             if (!foreground && !native) await retain({ groups: [] });
             return () => { for (const release of releases.reverse()) release(); };
           } catch (error) { for (const release of releases.reverse()) release(); throw error; }
@@ -2501,7 +2515,7 @@ export default function (pi: ExtensionAPI) {
       'Prompt shape: {operation:"prompt",child_id,message,job_id?,control_mode?,wait_for_response?}; optional job_id must match the child’s group.',
       "Inspect and control groups using job_id, message workers using child_id, and resume retained tasks using task_id.",
       "Native workers share their interactive session with the user and Paseo.",
-      "Set worktree:{} to isolate a native Linux worker. If its repository is dirty, worktree.changes must explicitly be include or exclude. Each parallel/chain item selects its own worktree. Resume retains that worktree; reap never removes it.",
+      "Set worktree:{} to isolate a native Linux worker. If its repository is dirty, worktree.changes must explicitly be include or exclude. Each parallel/chain item selects its own worktree. Resume retains that worktree. Reap retains it unless the trusted profile opts into cleanupWorktreesOnReap (coordinator defaults on); guarded removal preserves branch refs, and force:true with reason audits leftovers instead. Cleanup covers registered harness worktrees only; external/unregistered worktrees are not inventoried or removed.",
       "mode defaults to shared; draft requires an active AgentSH supervisor.",
     ].join(" "),
     promptSnippet: "Delegate work to foreground or background subagents.",
@@ -2559,8 +2573,10 @@ export default function (pi: ExtensionAPI) {
           details: { operation: "profiles", profiles: profiles.map(({ name, description, model, thinking, tools, source }) => ({ name, description, model, thinking, tools, source })) } };
       }
       if (!params.operation) {
-        const namedProfile = [params, ...(params.tasks ?? []), ...(params.chain ?? [])].some(item => item?.agent !== undefined);
-        params = await resolveSubagentProfiles(params, ctx);
+        const namedProfile = !internalManagedExecution && [params, ...(params.tasks ?? []), ...(params.chain ?? [])].some(item => item?.agent !== undefined);
+        // Managed foreground/background recursion carries the already-resolved
+        // trusted spec under an unforgeable in-process Symbol, never JSON input.
+        if (!internalManagedExecution) params = await resolveSubagentProfiles(params, ctx);
         // AgentSH's legacy protocol omits --tools for an empty list, which
         // would turn an explicit zero-tool profile into backend defaults.
         if (namedProfile && selectSubagentBackend(agentSHBridge(), agentSHStartup).kind === "agentsh") {
@@ -2652,13 +2668,61 @@ export default function (pi: ExtensionAPI) {
       }
       if (params.operation === "verify") throw new Error("verify requires a current native worker with configured verification gates; unsupported or legacy backends do not fall back");
       if (params.operation === "reap") {
-        if (params.force === true) throw new Error("Forced verification bypass is supported only for current native workers; legacy cleanup remains unchanged");
+        if (params.reason !== undefined && params.force !== true) throw new Error("reason is accepted only with reap force:true");
         if (typeof backgroundManager.reapNative !== "function") {
           throw new Error("The retained legacy manager predates safe reap; restart Pi before retrying. No work was cancelled or removed.");
         }
-        const record = await backgroundManager.reapNative(params.job_id, stableSessionId(ctx));
-        return { content: [{ type: "text", text: `Reaped legacy native group ${record.id}: removed retained record/reports only. No processes or panes were touched.` }],
-          details: { background_subagent: true, operation: "reap", job_id: record.id, backend: "native", reaped: true, records_only: true } };
+        const owner = stableSessionId(ctx);
+        const record = await backgroundManager.reapNative(params.job_id, owner, params.force === true ? {
+          force: true, reason: params.reason,
+          worktreeInventory: async retained => {
+            const optedIn = (retained.children ?? []).filter(child => child.cleanupWorktreesOnReap === true);
+            const taskStore = new NativeTaskStore(path.join(getAgentDir(), "state", "native-tasks-v1"));
+            const provenChildSessions: Array<{ taskId: string; childId: string; sessionId: string; provenance: "native-task-store" }> = [];
+            const uncertainty: string[] = [];
+            for (const child of optedIn) {
+              if (!child.taskId || !child.childId) {
+                uncertainty.push(`Opted-in child ${child.childId ?? "(missing child ID)"} lacks a task identity; its task session cannot be proven.`);
+                continue;
+              }
+              try {
+                const task = taskStore.get(owner, child.taskId);
+                if (task.childId !== child.childId || task.spec.cleanupWorktreesOnReap !== true) {
+                  uncertainty.push(`Task store identity or trusted cleanup policy mismatched opted-in child ${child.childId}; no child session was inferred.`);
+                  continue;
+                }
+                provenChildSessions.push({ taskId: child.taskId, childId: child.childId, sessionId: task.sessionId, provenance: "native-task-store" });
+              } catch (error) {
+                uncertainty.push(`Task store metadata unavailable for opted-in child ${child.childId}: ${String(error).slice(0, 500)}`);
+              }
+            }
+            let worktrees;
+            try { worktrees = await ownedWorktrees(); }
+            catch (error) {
+              uncertainty.push(`Worktree registry inventory failed: ${String(error).slice(0, 500)}`);
+              return { provenChildSessions, uncertainty };
+            }
+            const provenSessions = new Set([owner, ...provenChildSessions.map(proven => proven.sessionId)]);
+            const knownWorktrees = worktrees.filter(worktree =>
+              worktree.ownerSessionId === owner && optedIn.some(child => child.taskId === worktree.taskId && child.childId === worktree.childId)
+              || provenSessions.has(worktree.ownerSessionId) && worktree.ownerSessionId !== owner)
+              .map(({ ownerSessionId, taskId, childId, path, repo, commonDir, branch, physicalIdentity }) => ({
+                ownerSessionId, taskId, childId, path, repo, commonDir, branch, physicalIdentity,
+              }));
+            for (const child of optedIn) {
+              if (child.taskId && child.childId && !knownWorktrees.some(worktree => worktree.taskId === child.taskId && worktree.childId === child.childId)) {
+                uncertainty.push(`No direct registry worktree record matched opted-in child ${child.childId}; absence is not proof of no worktree.`);
+              }
+            }
+            return { knownWorktrees, provenChildSessions, uncertainty };
+          },
+        } : {});
+        const audit = record.worktreeReapAudit;
+        return { content: [{ type: "text", text: audit
+          ? `Reaped legacy native group ${record.id}: retained record/reports removed; no worktrees or processes were touched. Forced worktree cleanup was not attempted. Durable uncertainty/leftover audit: ${audit.auditPath}`
+          : `Reaped legacy native group ${record.id}: removed retained record/reports only. No processes or panes were touched.` }],
+          details: { background_subagent: true, operation: "reap", job_id: record.id, backend: "native", reaped: true, records_only: true,
+            ...(audit ? { worktree_reap_audit: audit } : {}) } };
       }
       if (params.operation) {
         const ownerSessionId = stableSessionId(ctx);
@@ -2947,7 +3011,7 @@ export default function (pi: ExtensionAPI) {
         const sessionId = stableSessionId(ctx);
         const executionContext = snapshotSubagentExecutionContext(ctx);
         const childIdentities = internalChildIdentities ?? createChildIdentities(launchedParams, backend.kind === "native");
-        const descriptors = childDescriptors(childIdentities);
+        const descriptors = childDescriptors(childIdentities, launchedParams.tasks ?? launchedParams.chain ?? [launchedParams]);
         const childProgress = createChildProgressBridge(descriptors);
         const record = await backgroundManager.start({
           sessionId,
@@ -3010,7 +3074,7 @@ export default function (pi: ExtensionAPI) {
         const sessionId = stableSessionId(ctx);
         const executionContext = snapshotSubagentExecutionContext(ctx);
         const childIdentities = createChildIdentities(params, backend.kind === "native");
-        const descriptors = childDescriptors(childIdentities);
+        const descriptors = childDescriptors(childIdentities, params.tasks ?? params.chain ?? [params]);
         if (activeForegroundSubagents.has(toolCallId)) throw new Error(`Duplicate active subagent tool-call ID: ${toolCallId}`);
         let execution!: DetachableForegroundExecution<any, any, BackgroundSubagentRecord>;
         execution = new DetachableForegroundExecution(
