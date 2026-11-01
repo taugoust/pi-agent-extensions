@@ -82,6 +82,9 @@ test("managed activity observes known external workers sharing a coordinator che
     external.reaped = true;
     assert.equal(await manager.worktreeReapActivity(owner, c.spec.cwd, justReaped), false, "verified reaping releases the external managed activity");
     external.reaped = false;
+    const externalCwd = external.spec.cwd; external.spec.cwd = "";
+    await assert.rejects(manager.worktreeReapActivity(owner, c.spec.cwd, justReaped), /Managed worker checkout identity is unavailable/);
+    external.spec.cwd = externalCwd;
     manager.observe = async (_g: any, observed: any) => { observed.observationError = "controller unavailable"; };
     await assert.rejects(manager.worktreeReapActivity(owner, c.spec.cwd, justReaped), /Managed worker activity is unavailable/);
   } finally {

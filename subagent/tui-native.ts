@@ -1082,7 +1082,11 @@ export class TuiNativeManager {
     for (const group of this.groups.values()) for (const child of group.children) {
       if (justReaped && group.owner === justReaped.ownerSessionId && child.taskId === justReaped.taskId && child.childId === justReaped.childId && child.attempt === justReaped.attempt) continue;
       const effectiveCwd = child.spec.worktreeInfo?.path ?? child.spec.cwd;
-      if (typeof effectiveCwd !== "string" || !isAbsolute(effectiveCwd) || !pathWithin(path, resolve(effectiveCwd))) continue;
+      if (typeof effectiveCwd !== "string" || !isAbsolute(effectiveCwd)) {
+        if (child.reaped !== true || active(child)) throw new Error(`Managed worker checkout identity is unavailable for ${group.owner}/${group.id}/${child.childId}`);
+        continue;
+      }
+      if (!pathWithin(path, resolve(effectiveCwd))) continue;
       await this.observe(group, child, true);
       if (child.observationError) throw new Error(`Managed worker activity is unavailable for ${group.owner}/${group.id}/${child.childId}: ${child.observationError}`);
       if (child.reaped !== true || active(child)) return true;

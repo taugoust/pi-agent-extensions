@@ -1128,7 +1128,12 @@ export class HeadlessForegroundManager {
     for (const group of inventory.groups.values()) for (const child of group.children) {
       if (justReaped && group.owner === justReaped.ownerSessionId && child.taskId === justReaped.taskId && child.childId === justReaped.childId && child.attempt === justReaped.attempt) continue;
       const effectiveCwd = child.spec.worktreeInfo?.path ?? child.spec.cwd;
-      if (typeof effectiveCwd !== "string" || !isAbsolute(effectiveCwd) || !pathWithin(path, resolve(effectiveCwd))) continue;
+      if (typeof effectiveCwd !== "string" || !isAbsolute(effectiveCwd)) {
+        if (child.reaped !== true || child.status !== "reaped" || child.workerAlive !== false || active(child))
+          throw new Error(`Managed foreground checkout identity is unavailable for ${group.owner}/${group.id}/${child.childId}`);
+        continue;
+      }
+      if (!pathWithin(path, resolve(effectiveCwd))) continue;
       await inventory.observe(group, child);
       if (child.error?.includes("unavailable") || child.workerAlive === undefined && child.status !== "reaped")
         throw new Error(`Managed foreground worker activity is unavailable for ${group.owner}/${group.id}/${child.childId}`);
