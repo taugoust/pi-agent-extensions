@@ -129,7 +129,7 @@ test("direct human turn clears old outcome; aborted assistant cancels chain inst
     await manager.refresh("parent");
     assert.equal(durableWrites, 2, "changed transition was not persisted");
     await server.start(); server.running(true);
-    server.outcome({ version: 1, state: "delivered", summary: "Done", acceptance: [{ criterion: "fix", status: "passed", evidence: "test" }], artifacts: [], remaining: [] });
+    await server.outcome({ version: 1, state: "delivered", summary: "Done", acceptance: [{ criterion: "fix", status: "passed", evidence: "test" }], artifacts: [], remaining: [] });
     await manager.refresh('parent');
     assert.equal(notifications.filter(u=>u.completion).length,0,'outcome woke parent before settlement');
     server.settled({ assistant: { stopReason: "stop" } });
@@ -387,7 +387,7 @@ test("authority loss is a failed native result, including old tool-only reports"
     // A later human followup clears old evidence; a tool-only delivered outcome
     // settles legitimately and has a useful report without assistant prose.
     server.running(true);
-    server.outcome({ version: 1, state: "delivered", summary: "Validated the fix.",
+    await server.outcome({ version: 1, state: "delivered", summary: "Validated the fix.",
       acceptance: [{ criterion: "fix", status: "passed", evidence: "test" }], artifacts: [], remaining: [] });
     server.settled({ assistant });
     await manager.refresh("parent");

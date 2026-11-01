@@ -7,7 +7,7 @@ import { createHash, randomBytes, timingSafeEqual } from "node:crypto";
 import { decodeTuiWorkerRequest, TUI_WORKER_MAX_FRAME_BYTES } from "../shared/tui-worker-protocol.ts";
 import type { TuiWorkerEvent, TuiWorkerManifest, TuiWorkerRequest, TuiWorkerResponse } from "../shared/tui-worker-protocol.ts";
 import { TuiWorkerStore, readPrivateJson } from "./tui-worker-store.ts";
-import { readTaskOutcome } from "./outcome.ts";
+import { readTaskOutcome, validateTaskOutcome } from "./outcome.ts";
 import { validateVerification, initialVerification, currentVerification, runVerification, recoverVerification, verificationSummary, type VerificationIdentity, type VerificationJobs } from "./acceptance.ts";
 import type { WorkerState } from "./tui-worker-store.ts";
 
@@ -31,7 +31,7 @@ export type TuiWorkerAdapter = {
   jobs?(params: import("../shared/tui-worker-protocol.ts").TuiWorkerJobParams, requestId: string): Promise<unknown>;
   applyOperatorMode?(enabled: boolean): unknown | Promise<unknown>;
 };
-const MUTATIONS = new Set(["prompt", "user_prompt", "cancel", "compact", "prepare_reap", "promote", "respond_interaction", "idle_decision"]);
+const MUTATIONS = new Set(["prompt", "user_prompt", "cancel", "compact", "verify", "prepare_reap", "promote", "respond_interaction", "idle_decision"]);
 
 /** Runs inside the actual TUI process. Observers own no lifetime-critical fd. */
 export class TuiWorkerServer {
@@ -58,6 +58,7 @@ export class TuiWorkerServer {
   private interruptTimeoutMs: number;
   private verificationAbort?: AbortController;
   private verificationFlight?: Promise<void>;
+  private pendingNormalReapRequests = 0;
   private verificationGeneration = 0;
   constructor(store: TuiWorkerStore, adapter: TuiWorkerAdapter, interruptTimeoutMs = 5000) {
     this.interruptTimeoutMs = interruptTimeoutMs;
@@ -77,6 +78,12 @@ export class TuiWorkerServer {
         this.state.active = false;
         if (this.state.verificationReport && !this.state.lastReport) { this.state.lastReport = this.state.verificationReport; this.state.phase = "settled"; }
       }
+      for (const receipt of Object.values(this.state.receipts)) {
+        if (receipt.response?.receipt === "accepted" && (receipt.response.data as any)?.operation === "verify") {
+          receipt.response = { ...receipt.response, ok: false, code: "unavailable", receipt: "failed",
+            message: "Verification was interrupted by worker reload; inspect status and explicitly retry" } as TuiWorkerResponse;
+        }
+      }
       this.persist();
     }
   }
@@ -85,6 +92,7 @@ export class TuiWorkerServer {
     return { ownerSessionId: m.ownerSessionId, taskId: m.taskId, childId: m.childId, attempt: m.attempt,
       workerEpoch: m.workerEpoch, runtimeId: m.runtimeId, cwd: this.adapter.verificationCwd?.() ?? process.cwd() };
   }
+  getVerificationSummary() { return this.verificationSnapshot(); }
   private verificationSnapshot() {
     const gates = validateVerification(this.manifest.verification);
     const record = this.verificationFlight && this.state.verification ? this.state.verification : currentVerification(this.state.verification, this.verificationIdentity(), gates);
@@ -129,33 +137,16 @@ export class TuiWorkerServer {
   settled(report: unknown): void {
     if (this.closing || this.failed || this.preparingReap || !this.adapter.isIdle()
       || this.state.phase === "settled" && !this.state.active) return;
-    if (this.manifest.verification?.length && !this.verificationFlight) {
-      this.state.active = true;
-      this.state.verification = initialVerification(this.verificationIdentity(), this.manifest.verification);
-      this.state.verificationReport = this.store.report(this.state.sequence + 1, report);
-      const record = this.state.verification, generation = ++this.verificationGeneration;
-      this.verificationAbort = new AbortController();
-      this.persist();
-      const flight = runVerification(record, this.manifest.verification, this.adapter.verificationJobs?.(), () => this.persist(), this.verificationAbort.signal)
-        .catch(error => { record.status = "unavailable"; if (record.runs.at(-1)) record.runs.at(-1)!.error = String(error); this.persist(); })
-        .then(() => {
-          if (generation !== this.verificationGeneration || this.closing || this.failed) return;
-          this.state.active = false;
-          this.state.lastReport = this.store.report(this.state.sequence + 1, { ...(report as object), runtimeVerification: record });
-          this.state.phase = "settled";
-          this.event("settled", { report: this.state.lastReport, verification: record.status });
-          for (const check of this.idleWaiters) check();
-        }).finally(() => { if (this.verificationFlight === flight) this.verificationFlight = undefined; });
-      this.verificationFlight = flight;
-      return;
-    }
     if (this.verificationFlight) {
       const generation = this.verificationGeneration;
       void this.verificationFlight.then(() => { if (generation === this.verificationGeneration) this.settled(report); });
       return;
     }
     this.activityGeneration++;
-    this.state.lastReport = this.store.report(this.state.sequence + 1, report);
+    const reportData = this.manifest.verification?.length && this.deliveredClaim()
+      ? { ...(report && typeof report === "object" && !Array.isArray(report) ? report as object : { report }), runtimeVerification: this.state.verification }
+      : report;
+    this.state.lastReport = this.store.report(this.state.sequence + 1, reportData);
     this.state.active = false;
     this.state.phase = "settled";
     this.event("settled", { report: this.state.lastReport });
@@ -218,13 +209,87 @@ export class TuiWorkerServer {
     const artifact = this.store.artifact("notification", this.state.sequence + 1, data);
     this.event("notification", { artifact });
   }
-  outcome(data: unknown): void {
+  async outcome(data: unknown, signal?: AbortSignal): Promise<void> {
+    if (signal?.aborted) throw new Error("Outcome tool cancelled before recording; worker state is unchanged");
     const artifact = this.store.artifact("outcome", this.state.sequence + 1, data);
     this.state.lastOutcome = artifact;
-    // This is model-reported evidence, not runtime acceptance. Do not wake a terminal
-    // delivery receipt before configured verification has settled.
-    if (this.manifest.verification?.length) this.persist();
-    else this.event("outcome", { artifact });
+    const outcome = validateTaskOutcome(data, this.manifest.acceptance ?? []);
+    if (outcome.state === "delivered" && this.manifest.verification?.length) {
+      this.persist();
+      await this.awaitVerification(this.ensureVerificationFlight(), signal);
+      return;
+    }
+    this.event("outcome", { artifact });
+  }
+  private ensureVerificationFlight(): { generation: number; flight: Promise<void>; record: any; owned: boolean } {
+    const gates = validateVerification(this.manifest.verification);
+    if (!gates.length) throw new Error("No verification gates are configured");
+    const existing = this.verificationFlight;
+    const priorGeneration = this.verificationGeneration;
+    if (!existing) void this.startVerification().catch(() => undefined);
+    const flight = this.verificationFlight;
+    const record = this.state.verification;
+    if (!flight || !record) throw new Error("Verification could not be started");
+    return { generation: this.verificationGeneration, flight, record, owned: !existing && this.verificationGeneration !== priorGeneration };
+  }
+  private cancelVerification(generation: number): boolean {
+    if (generation !== this.verificationGeneration || !this.verificationFlight || !this.verificationAbort) return false;
+    this.verificationAbort.abort(new Error("Verification tool cancelled"));
+    return true;
+  }
+  private async awaitVerification(lease: { generation: number; flight: Promise<void>; record: any; owned: boolean }, signal?: AbortSignal) {
+    let cancelWaiting!: () => void;
+    const cancelled = new Promise<void>(resolve => { cancelWaiting = resolve; });
+    const onAbort = () => {
+      if (lease.owned) this.cancelVerification(lease.generation);
+      else cancelWaiting();
+    };
+    if (signal?.aborted) onAbort(); else signal?.addEventListener("abort", onAbort, { once: true });
+    try {
+      if (lease.owned || !signal) await lease.flight;
+      else await Promise.race([lease.flight, cancelled.then(() => { throw new Error("Verification wait cancelled; shared check continues"); })]);
+    } finally { signal?.removeEventListener("abort", onAbort); }
+    return verificationSummary(lease.record);
+  }
+  private async startVerification(): Promise<void> {
+    const gates = validateVerification(this.manifest.verification);
+    if (!gates.length) return;
+    if (this.verificationFlight) return this.verificationFlight;
+    const record = this.state.verification = initialVerification(this.verificationIdentity(), gates);
+    record.status = "checking";
+    const generation = ++this.verificationGeneration;
+    const controller = new AbortController();
+    this.verificationAbort = controller;
+    this.persist();
+    const flight = new Promise<void>(resolve => setImmediate(resolve))
+      .then(() => {
+        if (generation !== this.verificationGeneration || controller.signal.aborted || this.closing || this.failed) {
+          if (record === this.state.verification && record.status === "checking") {
+            record.status = controller.signal.aborted || this.closing ? "cancelled" : "unavailable";
+            this.persist();
+          }
+          return;
+        }
+        return runVerification(record, gates, this.adapter.verificationJobs?.(), () => this.persist(), controller.signal);
+      })
+      .catch(error => { record.status = controller.signal.aborted ? "cancelled" : "unavailable"; if (record.runs.at(-1)) record.runs.at(-1)!.error = String(error); this.persist(); })
+      .then(() => {
+        if (generation !== this.verificationGeneration || this.closing || this.failed) return;
+        this.event("verification_settled", { verification: record.status });
+        const artifact = this.state.lastOutcome;
+        if (artifact) this.event("outcome", { artifact, verification: record.status });
+      }).finally(() => { if (this.verificationFlight === flight) this.verificationFlight = undefined; });
+    this.verificationFlight = flight;
+    return flight;
+  }
+  beginVerification(): ReturnType<typeof verificationSummary> {
+    if (!this.manifest.verification?.length) throw new Error("No verification gates are configured");
+    this.ensureVerificationFlight();
+    return this.verificationSnapshot();
+  }
+  async verify(signal?: AbortSignal): Promise<ReturnType<typeof verificationSummary>> {
+    if (!this.manifest.verification?.length) throw new Error("No verification gates are configured");
+    return await this.awaitVerification(this.ensureVerificationFlight(), signal);
   }
   /** An external intervention closes this assignment's automatic-continuation window. */
   inhibitAutoContinuation(): void {
@@ -260,7 +325,7 @@ export class TuiWorkerServer {
     const verification = this.verificationSnapshot();
     return { ownerSessionId: this.manifest.ownerSessionId, taskId: this.manifest.taskId, runtimeId: this.manifest.runtimeId,
       groupId: this.manifest.groupId, childId: this.manifest.childId, attempt: this.manifest.attempt,
-      workerEpoch: this.manifest.workerEpoch, active: this.state.active || !this.adapter.isIdle() || this.idleDecisions.size > 0, sealed: this.sealed, phase: this.state.phase,
+      workerEpoch: this.manifest.workerEpoch, active: this.state.active || !this.adapter.isIdle() || this.idleDecisions.size > 0 || !!this.verificationFlight, sealed: this.sealed, phase: this.state.phase,
       lastReport: this.state.lastReport, lastOutcome: this.state.lastOutcome, sequence: this.state.sequence, pid: process.pid,
       sessionFile: this.manifest.sessionFile, presentation: this.manifest.presentation,
       interactions: (this.state.interactions ?? []).filter(item => !item.answer && !item.cancelledAt).slice(-2)
@@ -271,6 +336,7 @@ export class TuiWorkerServer {
       }).at(-1), liveText: this.currentLiveText,
       worker_finished: this.adapter.isIdle(), worker_reported_acceptance: this.state.lastOutcome,
       verification, verification_quarantine: this.state.verificationQuarantine,
+      verification_bypasses: structuredClone(this.state.verificationBypasses ?? []),
       accepted_delivery: this.state.phase === "settled" && !this.state.active && (!this.manifest.verification?.length || verification?.status === "passed")
         && this.successfulSettlement() && this.deliveredClaim(),
       review: "not-configured",
@@ -288,9 +354,18 @@ export class TuiWorkerServer {
     return { protocol: 1, requestId: r.requestId, workerEpoch: r.workerEpoch, ...extra } as TuiWorkerResponse;
   }
   async handle(r: TuiWorkerRequest): Promise<TuiWorkerResponse> {
+    // Status/events always bypass mutation serialization. Cancellation also
+    // bypasses while checks/reap are pending, including the interval before a
+    // reap-triggered verification flight is installed.
+    if (["status", "events"].includes(r.operation)
+      || r.operation === "cancel" && (this.verificationFlight !== undefined || this.pendingNormalReapRequests > 0))
+      return await this.dispatch(r);
+    const pendingNormalReap = r.operation === "prepare_reap" && r.force !== true && !!this.manifest.verification?.length;
+    if (pendingNormalReap) this.pendingNormalReapRequests++;
     const work = this.queue.catch(() => undefined).then(() => this.dispatch(r));
     this.queue = work;
-    return await work;
+    try { return await work; }
+    finally { if (pendingNormalReap) this.pendingNormalReapRequests--; }
   }
   private async dispatch(r: TuiWorkerRequest): Promise<TuiWorkerResponse> {
     const fail = (code: string, message: string) => this.response(r, { ok: false, code, message });
@@ -341,8 +416,37 @@ export class TuiWorkerServer {
         || old.ownershipNonce !== next.ownershipNonce) return fail("invalid", "Promotion must preserve server and owned pane");
     }
     if (mutation && Object.keys(this.state.receipts).length >= 4096) return fail("unavailable", "Worker receipt capacity exhausted");
+    if (r.operation === "verify") {
+      if (!this.manifest.verification?.length) return fail("invalid", "No verification gates are configured");
+      this.state.receipts[receiptKey] = { digest };
+      const accepted = this.response(r, { ok: true, receipt: "accepted", sequence: this.state.sequence,
+        data: { operation: "verify", verification: this.beginVerification() } });
+      this.state.receipts[receiptKey].response = accepted;
+      this.persist();
+      const flight = this.verificationFlight;
+      if (flight) void flight.then(() => {
+        const receipt = this.state.receipts[receiptKey];
+        if (receipt?.digest !== digest) return;
+        receipt.response = this.response(r, { ok: true, receipt: "applied", sequence: this.state.sequence,
+          data: { operation: "verify", verification: this.verificationSnapshot() } });
+        this.persist();
+      }, () => undefined);
+      return accepted;
+    }
     if (r.operation === "prepare_reap" && this.state.verification?.runs.some(run => !["cleaned", "not-dispatched"].includes(run.dispatchState ?? "") && (run.jobId || run.dispatchId)))
       return fail("verification_cleanup_incomplete", "Unresolved verification dispatch/evidence blocks recursive reap; recover the supervised job output before removing its worker");
+    if (r.operation === "prepare_reap" && r.force !== true && this.manifest.verification?.length) {
+      const current = currentVerification(this.state.verification, this.verificationIdentity(), this.manifest.verification);
+      if (current.status !== "passed") {
+        if (this.verificationFlight) await this.verificationFlight;
+        const fresh = currentVerification(this.state.verification, this.verificationIdentity(), this.manifest.verification);
+        if (fresh.status !== "passed") {
+          try { await this.verify(); } catch { /* Fail closed below; preserve controller and evidence. */ }
+        }
+        if (currentVerification(this.state.verification, this.verificationIdentity(), this.manifest.verification).status !== "passed")
+          return fail("unavailable", "Current configured verification has not passed; worker retained");
+      }
+    }
     if (r.operation === "prepare_reap") return await this.prepareReap(r, receiptKey, digest);
     // Persist intent before side effects. A lost post-dispatch write is explicitly ambiguous.
     this.state.receipts[receiptKey] = { digest };
@@ -419,14 +523,16 @@ export class TuiWorkerServer {
       }
       case "cancel":
         this.inhibitAutoContinuation();
+        const verificationCancellationPending = !!this.verificationFlight;
         this.verificationAbort?.abort();
-        if (this.verificationFlight) await this.verificationFlight;
+        // Cancellation acknowledges the abort request immediately. The gate
+        // flight owns its supervised cleanup and keeps reap blocked until done.
         this.cancelPendingIdleDecisions(new Error("Worker cancelled by parent"));
         await this.adapter.clearQueue?.();
         await this.adapter.abort();
         this.state.active = !this.adapter.isIdle();
         this.event("cancelled");
-        data = this.snapshot();
+        data = { ...this.snapshot(), verificationCancellationPending };
         break;
       case "promote":
         if (!this.manifest.placement) return fail("invalid", "Headless worker promotion is unsupported");
@@ -551,6 +657,10 @@ export class TuiWorkerServer {
       if (!artifact) throw new Error("Child-local job cleanup did not preserve a verification report");
       if (this.reapInterrupted || this.state.active || !this.adapter.isIdle() || this.closing || this.failed) {
         throw new Error("Worker activity changed during job cleanup; refusing reap");
+      }
+      if (r.force === true && this.manifest.verification?.length) {
+        this.state.verificationBypasses ??= [];
+        this.state.verificationBypasses.push({ workerEpoch: this.manifest.workerEpoch, attempt: this.manifest.attempt, reason: r.reason!, at: new Date().toISOString(), requestId: r.requestId });
       }
       this.state.sealed = true;
       this.state.reapReservation ??= randomBytes(16).toString("hex");

@@ -185,7 +185,7 @@ type SubagentDetails = {
 
 type BackgroundSubagentDetails = {
   background_subagent: true;
-  operation: "start" | "list" | "status" | "output" | "yield" | "result" | "cancel" | "idle_decision";
+  operation: "start" | "list" | "status" | "output" | "yield" | "result" | "cancel" | "idle_decision" | "verify";
   job_id?: string;
   status?: BackgroundSubagentRecord["status"];
   backend?: "native" | "agentsh";
@@ -1519,6 +1519,9 @@ export async function dispatchIdleDecision(manager: { operation(params: any, own
 }
 
 export function validateBackgroundOperation(params: any): void {
+  if (params?.force !== undefined && (params.operation !== "reap" || typeof params.force !== "boolean"))
+    throw new Error("force is a boolean option supported only for reap");
+  if (params?.operation !== "reap" && params?.reason !== undefined) throw new Error("reason is supported only with reap force:true");
   if (params?.diagnostics !== undefined && (params.operation !== "result" || typeof params.diagnostics !== "boolean")) {
     throw new Error("diagnostics is a boolean option for operation=result only");
   }
@@ -1527,8 +1530,22 @@ export function validateBackgroundOperation(params: any): void {
     throw new Error("Background subagent operation must be a non-empty string");
   }
   const operation = params.operation;
-  if (!["list", "status", "output", "yield", "result", "cancel", "reap", "promote", "prompt", "resume", "tasks", "idle_decision", "profiles"].includes(operation)) {
+  if (!["list", "status", "output", "yield", "result", "cancel", "reap", "promote", "prompt", "resume", "tasks", "idle_decision", "profiles", "verify"].includes(operation)) {
     throw new Error(`Unknown background subagent operation: ${operation}`);
+  }
+  if (operation === "verify") {
+    if (Object.keys(params).some(key => !["operation", "job_id", "child_id"].includes(key))) throw new Error("verify accepts only operation and a worker/group target");
+    if (params.job_id !== undefined && (typeof params.job_id !== "string" || !BACKGROUND_SUBAGENT_ID_PATTERN.test(params.job_id))) throw new Error("verify job_id is invalid");
+    if (params.child_id !== undefined && (typeof params.child_id !== "string" || !SUBAGENT_CHILD_ID_PATTERN.test(params.child_id))) throw new Error("verify child_id is invalid");
+    if (params.job_id === undefined && params.child_id === undefined) throw new Error("verify requires job_id or child_id");
+    return;
+  }
+  if (operation === "reap") {
+    if (Object.keys(params).some(key => !["operation", "job_id", "force", "reason"].includes(key))) throw new Error("reap accepts job_id and optional force/reason fields");
+    if (params.force === true && (typeof params.reason !== "string" || !params.reason.trim() || Buffer.byteLength(params.reason) > 1000)) throw new Error("Forced reap requires a non-empty reason (max 1000 bytes)");
+    if (params.force !== true && params.reason !== undefined) throw new Error("reap reason requires force:true");
+    if (typeof params.job_id !== "string" || !BACKGROUND_SUBAGENT_ID_PATTERN.test(params.job_id)) throw new Error("reap requires a valid job_id");
+    return;
   }
   if (operation === "yield") {
     if (Object.keys(params).some(key => !["operation", "job_id"].includes(key))) throw new Error("yield accepts only optional job_id; it does not wait or set a deadline");
@@ -1720,7 +1737,9 @@ function subagentParams() {
   action: Type.Optional(Type.String({ pattern: "^(review|apply|discard)$", description: "AgentSH Draft disposition; use with mode=draft and draft_id instead of task/tasks/chain." })),
   draft_id: Type.Optional(Type.String({ pattern: "^session-[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$", description: "Exact retained AgentSH Draft identity." })),
   background: Type.Optional(Type.Boolean({ description: "Launch only (omit operation): return immediately and continue a task/tasks/chain request in the background. Not accepted by resume; execution placement follows the retained backend, not a new launch option." })),
-  operation: Type.Optional(Type.String({ pattern: "^(list|status|output|yield|result|cancel|reap|promote|prompt|resume|tasks|idle_decision|profiles)$", description: "Omit for new launches/Draft disposition. Accepted fields besides operation: profiles {agentScope?}; resume {task_id, message?, compact?}; prompt {child_id, message, job_id?, control_mode?, wait_for_response?}; idle_decision {child_id, request_id, worker_epoch, choice, job_id?}; list/tasks {limit?}; status/output/cancel/reap/promote {job_id}; yield {job_id?} returns current state immediately and ends only the current run when sole tool (not the conversation); result {job_id?, child_id?, child?, offset?, limit?, diagnostics?} (job_id or child_id required; child and child_id exclusive). No launch fields with operations, except the profiles discovery scope." })),
+  operation: Type.Optional(Type.String({ pattern: "^(list|status|output|yield|result|cancel|reap|promote|prompt|resume|tasks|idle_decision|profiles|verify)$", description: "Omit for new launches/Draft disposition. Accepted fields besides operation: profiles {agentScope?}; resume {task_id, message?, compact?}; prompt {child_id, message, job_id?, control_mode?, wait_for_response?}; verify {job_id?, child_id?}; reap {job_id, force?, reason?}; idle_decision {child_id, request_id, worker_epoch, choice, job_id?}; list/tasks {limit?}; status/output/cancel/promote {job_id}; yield {job_id?} returns current state immediately and ends only the current run when sole tool (not the conversation); result {job_id?, child_id?, child?, offset?, limit?, diagnostics?} (job_id or child_id required; child and child_id exclusive). No launch fields with operations, except the profiles discovery scope." })),
+  force: Type.Optional(Type.Boolean({ description: "reap only: false or omitted uses normal verification-gated reap; true bypasses verification only and requires reason. Does not bypass activity, job/descendant cleanup, ownership or pane safety." })),
+  reason: Type.Optional(Type.String({ minLength: 1, maxLength: 1000, description: "Required with reap force:true; durably audited verification bypass reason." })),
   job_id: Type.Optional(Type.String({ pattern: "^subagent-job-[0-9a-f]{24}$", description: "Required for status/output/cancel/reap/promote; result needs job_id or child_id. Optional for yield to select an owned group snapshot, or prompt as an assertion that child_id belongs to this group (mismatch rejects before delivery). Omit for resume/list/tasks." })),
   child_id: Type.Optional(Type.String({ pattern: "^subagent-child-[0-9a-f]{24}$", description: "Opaque per-child ID; required by operation=prompt/idle_decision and accepted instead of child by operation=result." })),
   request_id: Type.Optional(Type.String({ pattern: "^idle:[a-f0-9]{32}$", description: "idle_decision only: exact pending idle-warning request reported by child status/notification." })),
@@ -2631,7 +2650,9 @@ export default function (pi: ExtensionAPI) {
         }
         if (params.operation === "promote") throw new Error("promote requires an owned native TUI group; legacy native records and AgentSH groups cannot be promoted");
       }
+      if (params.operation === "verify") throw new Error("verify requires a current native worker with configured verification gates; unsupported or legacy backends do not fall back");
       if (params.operation === "reap") {
+        if (params.force === true) throw new Error("Forced verification bypass is supported only for current native workers; legacy cleanup remains unchanged");
         if (typeof backgroundManager.reapNative !== "function") {
           throw new Error("The retained legacy manager predates safe reap; restart Pi before retrying. No work was cancelled or removed.");
         }

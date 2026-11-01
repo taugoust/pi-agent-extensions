@@ -6,6 +6,7 @@ import { join } from "node:path";
 import { TuiNativeManager } from "./tui-native.ts";
 import { TuiWorkerStore, readPrivateJson, atomicPrivateJson } from "./tui-worker-store.ts";
 import { TuiWorkerServer } from "./tui-worker-server.ts";
+import { callTuiWorker } from "./tui-worker-client.ts";
 import type { VerificationJobs } from "./acceptance.ts";
 
 /** Actual manager operations and authenticated native worker socket, no provider. */
@@ -25,7 +26,7 @@ async function fixture() {
     async execute() { return { details: { job_id: jobId, status: "completed", exit_code: 0, streams: { available: true, stdout: "literal historical stdout\n", stderr: "literal historical stderr\n" } } }; } };
   const server = new TuiWorkerServer(store, { isIdle: () => true, verificationCwd: () => cwd, verificationJobs: () => jobs, send() {}, abort() {}, shutdown() {} });
   await server.start(); server.running(true);
-  server.outcome({ version: 1, state: "delivered", summary: "Worker reported delivery", acceptance: [{ criterion: "fixture", status: "passed", evidence: "worker evidence" }], artifacts: [], remaining: [] });
+  await server.outcome({ version: 1, state: "delivered", summary: "Worker reported delivery", acceptance: [{ criterion: "fixture", status: "passed", evidence: "worker evidence" }], artifacts: [], remaining: [] });
   server.settled({ assistant: { content: "Historical worker answer café 🐈", stopReason: "stop" }, timestamp: new Date().toISOString() });
   await (server as any).verificationFlight;
   const group: any = { version: 1, id: manifest.groupId, owner: "parent", createdAt: new Date().toISOString(), mode: "single", background: true,
@@ -50,6 +51,99 @@ function unaccepted(c: any) {
   assert.notEqual(c.verification.status, "passed"); assert.equal(c.accepted_delivery, false);
   for (const run of c.verification.runs ?? []) assert.notEqual(run.status, "passed", "historical per-command pass leaked into current check state");
 }
+
+test("parent verify operation independently invokes configured worker gates", async () => {
+  const f = await fixture();
+  try {
+    const result = await f.operation(f.manager, "verify");
+    assert.equal(result.details.operation, "verify");
+    assert.ok(["checking", "passed"].includes(result.details.results[0].verification.status));
+    assert.equal(result.details.pending, result.details.results.some((entry: any) => entry.verification.status === "checking"));
+    assert.equal(result.details.failed, false, "checking is pending, not a failed gate result");
+    assert.equal(result.isError, false);
+    for (let attempt = 0; attempt < 100; attempt++) {
+      const current = child(await f.operation(f.manager, "status"));
+      if (current.verification.status === "passed") break;
+      await new Promise(resolve => setTimeout(resolve, 10));
+    }
+    const finished = child(await f.operation(f.manager, "status"));
+    assert.equal(finished.verification.status, "passed");
+    assert.equal(finished.accepted_delivery, true);
+  } finally { await f.close(f.manager); }
+});
+
+test("normal reap gate stays outside manager serialization; status and cancel remain responsive", async () => {
+  const f = await fixture();
+  let releaseStart!: () => void;
+  const blocked = new Promise<void>(resolve => { releaseStart = resolve; });
+  const jobId = `job-${"9".repeat(24)}`;
+  let starts = 0;
+  try {
+    writeFileSync(join(f.cwd, "invalidate-pass"), "workspace changed");
+    (f.server as any).adapter.verificationJobs = () => ({
+      async start() { starts++; await blocked; return { details: { job_id: jobId } }; },
+      async resolve() { return jobId; }, async attest() { return true; },
+      async execute(_id: string, params: any) {
+        if (params.action === "reap" || params.action === "cancel") return { isError: false };
+        return { details: { job_id: jobId, status: "completed", exit_code: 0,
+          streams: { available: true, stdout: "cancelled check output", stderr: "" } } };
+      },
+    });
+    f.manager.tmux.reap = async (manifest: any, _timeout: any, options: any) => {
+      const reply = await callTuiWorker(manifest, { operation: "prepare_reap", ...(options?.force ? options : {}) }, { requestId: "reap-gate" });
+      if (!reply.ok) throw new Error(`${reply.code}: ${reply.message}`);
+    };
+    const reap = f.operation(f.manager, "reap");
+    for (let attempt = 0; attempt < 100 && starts === 0; attempt++) await new Promise(resolve => setTimeout(resolve, 10));
+    assert.equal(starts, 1, "normal reap started the invalidated gate");
+    const status = await f.operation(f.manager, "status");
+    assert.equal(status.details.group.reaping, true);
+    assert.equal(child(status).verification.status, "checking");
+    const cancelled = await Promise.race([f.operation(f.manager, "cancel"), new Promise(resolve => setTimeout(() => resolve(undefined), 100))]);
+    assert.ok(cancelled, "parent cancellation is not serialized behind the gate");
+    releaseStart();
+    await assert.rejects(reap, /unavailable|cancelled/i, "cancelled verification prevents normal reap");
+    assert.equal(f.store.readState().sealed, false, "failed/cancelled verification never seals the worker");
+    assert.equal(child(await f.operation(f.manager, "status")).reaped, false, "worker remains available for repair");
+    assert.equal(f.manager.groups.get(f.group.id).reaping, undefined);
+    assert.equal(f.store.readState().verification?.status, "cancelled");
+  } finally { releaseStart(); await f.close(f.manager); }
+});
+
+test("forced mixed-group reap audits only gated children and does not alter acceptance", async () => {
+  const f = await fixture();
+  try {
+    const gated = f.group.children[0];
+    await f.manager.observe(f.group, gated);
+    assert.equal(gated.state, "completed", "force-reap fixture must reconcile the settled worker before cleanup");
+    const ungatedId = `subagent-child-${"1".repeat(24)}`;
+    const ungatedTaskId = `subagent-task-${"2".repeat(24)}`;
+    const directory = join(f.root, "workers", "f".repeat(24));
+    const ungatedManifest = { ...f.manifest, childId: ungatedId, taskId: ungatedTaskId, directory,
+      controlSocket: join(directory, "control.sock"), sessionFile: join(directory, "session.jsonl"), verification: undefined,
+      placement: { ...f.manifest.placement, paneId: "%2", ownershipNonce: "9".repeat(64) } };
+    const { mkdirSync } = await import("node:fs"); mkdirSync(directory, { recursive: true, mode: 0o700 });
+    const ungatedStore = new TuiWorkerStore(directory, true); ungatedStore.writeManifest(ungatedManifest);
+    writeFileSync(ungatedManifest.sessionFile, JSON.stringify({ type: "session", id: "ungated-session" }) + "\n", { mode: 0o600 });
+    const ungated: any = { ...gated, childId: ungatedId, taskId: ungatedTaskId, directory,
+      spec: { ...gated.spec, verification: undefined, worktree: { path: join(f.root, "retained-worktree") } },
+      state: "completed", reaped: false, verificationBypasses: undefined };
+    f.group.children.push(ungated);
+    gated.acceptedDelivery = false;
+    gated.verification = { status: "failed", runs: [] } as any;
+    const calls: any[] = [];
+    f.manager.tmux.reap = async (manifest: any, timeout: any, options: any) => { calls.push({ manifest, timeout, options }); };
+    await (f.manager as any).reapChild(f.group, gated, { force: true, reason: "retain failed worker" });
+    await (f.manager as any).reapChild(f.group, ungated, { force: true, reason: "retain failed worker" });
+    assert.equal(calls.length, 2, "force reaches both gated and ungated children");
+    assert.equal(calls[0].options.force, true); assert.equal(calls[1].options.force, true);
+    assert.equal(gated.verificationBypasses.length, 1);
+    assert.equal(ungated.verificationBypasses, undefined, "ungated sibling has no verification bypass to audit");
+    assert.equal(gated.acceptedDelivery, false, "force never turns a failed check into accepted delivery");
+    assert.equal(ungated.reaped, true);
+    assert.equal(ungated.spec.worktree.path, join(f.root, "retained-worktree"), "force retains worktree metadata for coordinator review");
+  } finally { await f.close(f.manager); }
+});
 
 test("manager status/list/result revoke a disconnected completed worker's cached acceptance and retain historical evidence", async () => {
   const f = await fixture(); let restored: any;

@@ -11,9 +11,9 @@ import { validateAcceptance, validateTaskOutcome } from "./outcome.ts";
 import { validateVerification, currentVerification, verificationSummary, verificationContract, workspaceIdentity, type VerificationGate } from "./acceptance.ts";
 import { TaskNameStore } from "./task-name-store.ts";
 import { subagentTmuxName, validateSubagentName, canonicalSubagentName, subagentTmuxAlias } from "./tui-names.ts";
-import { TuiWorkerTmux, tuiWorkerLaunchContract, processIdentity } from "./tui-worker-tmux.ts";
+import { TuiWorkerTmux, tuiWorkerLaunchContract, processIdentity, verificationBudget } from "./tui-worker-tmux.ts";
 import { TuiWorkerStore, privateDirectory, atomicPrivateJson, readPrivateJson } from "./tui-worker-store.ts";
-import { callTuiWorker, applyTuiWorkerOperatorMode } from "./tui-worker-client.ts";
+import { callTuiWorker, awaitTuiWorkerVerification, applyTuiWorkerOperatorMode } from "./tui-worker-client.ts";
 import { publicTuiWorkerManifest, parseTuiWorkerJobParams } from "../shared/tui-worker-protocol.ts";
 import { truncateUtf8 } from "../shared/harness-readonly.ts";
 import { readRetainedConversation, validateRetainedConversationFile } from "./retained-conversation.ts";
@@ -29,13 +29,19 @@ type Child = { childId: string; taskId: string; attempt: number; directory: stri
   state: "pending" | "launching" | "running" | "waiting" | "completed" | "failed" | "cancelled" | "lost" | "skipped";
   operatorCapability: string; started: boolean; reaped?: boolean; error?: string; observationError?: string; report?: string;
   verification?: unknown; historicalVerification?: unknown; acceptedDelivery?: boolean;
+  verificationBypasses?: Array<{ workerEpoch: string; attempt: number; reason: string; at: string }>;
   notifiedSequence: number; needsAttention?: boolean; idleDecisionNotified?: string; runSequence?: number; pendingActivitySequence?: number; terminalNotification?: string; lastOutcome?: unknown; requiresCompaction?: boolean; };
 type Group = { windowName?: string; renameWindowWithFirstChild?: boolean; version: 1; id: string; owner: string; createdAt: string; mode: "single" | "parallel" | "chain";
   background: boolean; guidanceYielded?: boolean; cancelled: boolean; children: Child[]; caller: TuiWorkerPlacement;
   parentOwnerToken: string;
-  operatorEnabled: boolean; launcher: string; launchMode: "none" | "guard-only"; promotionPending?: boolean; };
+  operatorEnabled: boolean; launcher: string; launchMode: "none" | "guard-only"; promotionPending?: boolean; reaping?: boolean; };
 type Disposition = "native" | "guard-only" | "full" | "unavailable";
 const active = (child: Child) => ["pending", "launching", "running", "waiting"].includes(child.state);
+const outcomeState = (child: Child) => (child.lastOutcome as any)?.state;
+const hasDeliveredClaim = (child: Child) => outcomeState(child) === "delivered";
+const verificationFailedForDelivery = (child: Child) => !!child.spec?.verification?.length && hasDeliveredClaim(child)
+  && !["passed", "checking"].includes((child.verification as any)?.status);
+const unfinishedAssignment = (child: Child) => !!child.spec?.verification?.length && outcomeState(child) !== "delivered";
 const terminalToken = (child: Child) => `${child.report ?? `terminal:${child.attempt ?? 1}:${child.runSequence ?? 0}`}${child.spec?.verification?.length ? `:verification:${(child.verification as any)?.status ?? "unavailable"}` : ""}`;
 const taskOutcome = (value: unknown, criteria: string[]) => {
   try { return validateTaskOutcome(value, criteria); } catch { return undefined; }
@@ -54,6 +60,7 @@ export class TuiNativeManager {
   private persistenceWriter = atomicPrivateJson;
   private queue: Promise<unknown> = Promise.resolve();
   private refreshFlight?: Promise<void>;
+  private reapFlights = new Set<Promise<void>>();
   private verificationObservations = new WeakMap<Child, { digest: string; manifest: string; contract: string; accepted: boolean }>();
   private verificationObservationTurns = new WeakMap<Child, number>();
   private modeQueue: Promise<unknown> = Promise.resolve();
@@ -94,6 +101,7 @@ export class TuiNativeManager {
           || !/^[a-f0-9]{24}$/.test(basename(c.directory)) || c.directory !== join(this.root, "workers", basename(c.directory)))) throw new Error("Invalid retained child");
         // Old already-terminal records were previously observed without wakes.
         // Baseline them instead of replaying historical completions on upgrade.
+        delete g.reaping; // Parent restart interrupts only the in-memory reap flight; workers remain safely retained.
         for (const c of g.children) {
           if (c.terminalNotification === undefined) c.terminalNotification = active(c) ? '' : terminalToken(c);
           if (c.spec.verification?.length) {
@@ -168,6 +176,7 @@ export class TuiNativeManager {
     this.closed = true; this.generation++;
     if (this.timer) clearInterval(this.timer);
     await this.queue.catch(() => undefined);
+    while (this.reapFlights.size) await Promise.allSettled([...this.reapFlights]);
     await this.modeQueue.catch(() => undefined);
     if (cancelForeground && this.owner) {
       for (const g of this.groups.values()) if (g.owner === this.owner && !g.background) await this.cancelGroup(g);
@@ -286,19 +295,24 @@ export class TuiNativeManager {
     }
     return groups;
   }
-  private async reapChild(g: Group, c: Child): Promise<void> {
+  private async reapChild(g: Group, c: Child, options: { force?: true; reason?: string } = {}): Promise<void> {
     if (active(c)) throw new Error(`Active child blocks reap: ${g.id}/${c.childId}`);
     if (!c.reaped) {
       const manifest = this.manifest(c);
-      if (manifest) await this.tmux.reap(manifest);
+      if (manifest) await this.tmux.reap(manifest, undefined, options);
       else if (c.started) throw new Error(`Descendant manifest unavailable: ${g.id}/${c.childId}`);
+      // Audit only after all worker cleanup and ownership checks have succeeded.
+      if (options.force && c.spec.verification?.length) {
+        c.verificationBypasses ??= [];
+        c.verificationBypasses.push({ workerEpoch: manifest?.workerEpoch ?? "unavailable", attempt: c.attempt ?? 1, reason: options.reason!, at: new Date().toISOString() });
+      }
       // Terminal children cancelled/skipped before launch have no pane to reap.
       c.reaped = true;
       this.save(g);
     }
-    if (c.spec.worktree) await releaseWorktree(g.owner, c.taskId, c.childId);
+    if (c.spec.worktree && !options.force) await releaseWorktree(g.owner, c.taskId, c.childId);
   }
-  private async reapStoppedDescendants(groups: Group[]): Promise<void> {
+  private async reapStoppedDescendants(groups: Group[], options: { force?: true; reason?: string } = {}): Promise<void> {
     for (let nested of [...groups].reverse()) {
       const release = this.observerLease(nested.owner);
       if (!release) continue; // Live parents recurse through their own cleanup boundary.
@@ -310,7 +324,7 @@ export class TuiNativeManager {
           await this.observe(nested, c, true);
           if (active(c)) throw new Error(`Active descendant blocks reap: ${nested.id}/${c.childId}`);
           if (c.report) this.retainedArtifact(c, c.report, "report");
-          await this.reapChild(nested, c);
+          await this.reapChild(nested, c, options);
         }
       } finally { release(); }
     }
@@ -383,6 +397,7 @@ export class TuiNativeManager {
   private publicGroup(g: Group) {
     return { job_id: g.id, mode: g.mode, background: g.background, created_at: g.createdAt,
       status: g.children.some(c => active(c) && c.state !== "waiting") ? "running" : g.children.some(c => c.state === "waiting") ? "waiting" : g.cancelled || g.children.some(c => c.state === "cancelled") ? "cancelled" : g.children.some(c => ["failed", "lost"].includes(c.state)) ? "failed" : "completed",
+      reaping: g.reaping === true,
       children: g.children.map((c, i) => {
         let manifest: TuiWorkerManifest | undefined;
         try { manifest = this.manifest(c); }
@@ -399,7 +414,7 @@ export class TuiNativeManager {
         return { child: i + 1, child_id: c.childId, task_id: c.taskId,
           status: c.state, attempt: c.attempt ?? 1, reaped: !!c.reaped, displayName: this.canonicalTitle(c), task: c.spec.task.slice(0, 500), error: c.error, observation_error: c.observationError,
           cwd: c.spec.cwd, ...(c.spec.worktreeInfo ? { worktree: c.spec.worktreeInfo } : {}),
-          report: c.report, task_outcome: c.lastOutcome, historical_verification: c.historicalVerification, verification: c.verification ?? { status: c.spec.verification?.length ? "interrupted" : "not-configured" }, accepted_delivery: c.acceptedDelivery === true, review: "not-configured", ...(idleDecision ? { idle_decision: idleDecision } : {}),
+          report: c.report, task_outcome: c.lastOutcome, historical_verification: c.historicalVerification, verification: c.verification ?? { status: c.spec.verification?.length ? "interrupted" : "not-configured" }, accepted_delivery: c.acceptedDelivery === true, verification_bypasses: c.verificationBypasses ?? [], review: "not-configured", ...(idleDecision ? { idle_decision: idleDecision } : {}),
           ...(manifest ? { runtime: publicTuiWorkerManifest(manifest) } : {}) };
       }) };
   }
@@ -445,13 +460,14 @@ export class TuiNativeManager {
             const report = this.retainedArtifact(c, state.lastReport, "report");
             c.report = state.lastReport;
             c.error = typeof report.error === "string" ? report.error.slice(0, 2000) : undefined;
+            c.lastOutcome = state.lastOutcome ? this.retainedArtifact(c, state.lastOutcome, "outcome") : undefined;
             if (c.spec.verification?.length) {
               c.verification = this.retainedVerification(g, c);
-              if ((c.verification as any)?.status !== "passed") c.error = `Runtime verification ${(c.verification as any)?.status}; accepted delivery blocked`;
+              if (verificationFailedForDelivery(c)) c.error = `Runtime verification ${(c.verification as any)?.status}; accepted delivery blocked`;
             }
             c.state = c.error || report.assistant?.stopReason === "error" ? "failed"
-              : report.assistant?.stopReason === "aborted" || g.cancelled ? "cancelled" : "completed";
-            c.lastOutcome = state.lastOutcome ? this.retainedArtifact(c, state.lastOutcome, "outcome") : undefined;
+              : report.assistant?.stopReason === "aborted" || g.cancelled ? "cancelled"
+              : unfinishedAssignment(c) || c.spec.verification?.length && (c.verification as any)?.status === "checking" ? "waiting" : "completed";
           }
           else { c.state = "lost"; c.error = "Reaped worker has no retained settlement"; }
         }
@@ -465,6 +481,9 @@ export class TuiNativeManager {
       if (state.workerEpoch !== m.workerEpoch || state.childId !== c.childId || state.taskId !== c.taskId
         || state.attempt !== (c.attempt ?? 1)) throw new Error("Worker status identity mismatch");
       c.lastOutcome = state.lastOutcome ? taskOutcome(this.retainedArtifact(c, state.lastOutcome, "outcome"), c.spec.acceptance ?? []) : undefined;
+      // Use this authenticated snapshot's current verdict before deciding
+      // whether a delivered claim failed; a prior cached status may be stale.
+      this.observeVerification(g, c, m, state, observationTurn);
       c.needsAttention = !!(state.idleDecision?.workerEpoch === m.workerEpoch
         || state.interactions?.some((interaction: any) => interaction.workerEpoch === m.workerEpoch));
       if (!observationOnly && state.idleDecision?.requestId && state.idleDecision.workerEpoch === m.workerEpoch && state.idleDecision.model
@@ -485,16 +504,16 @@ export class TuiNativeManager {
         c.error = typeof report.error === "string" ? report.error.slice(0, 2000)
           : report.assistant?.stopReason === "toolUse" && state.readyForPrompts === false
             ? "Worker command authority unavailable" : undefined;
-        if (c.spec.verification?.length && state.verification?.status !== "passed") c.error = `Runtime verification ${state.verification?.status ?? "unavailable"}; worker completion is not accepted delivery`;
+        if (verificationFailedForDelivery(c)) c.error = `Runtime verification ${state.verification?.status ?? "unavailable"}; delivered claim is not accepted`;
         c.state = c.error || report.assistant?.stopReason === "error" ? "failed"
           : report.assistant?.stopReason === "aborted" || g.cancelled ? "cancelled"
-          : report.assistant?.stopReason === "toolUse" && !c.lastOutcome ? "waiting" : "completed";
+          : unfinishedAssignment(c) || c.spec.verification?.length && state.verification?.status === "checking"
+            || report.assistant?.stopReason === "toolUse" && !c.lastOutcome ? "waiting" : "completed";
         // Settlement is reported through the replay cursor below, never a text injection.
       }
       // Current-turn state is authoritative even after a replay gap. Only
       // newer events may supersede this snapshot (a human can act mid-poll).
       if (!state.lastReport) { c.report = undefined; c.requiresCompaction = false; }
-      this.observeVerification(g, c, m, state, observationTurn);
       if (observationOnly) return; // Ancestor observation never consumes/reroutes notifications or dispatches work.
       if (state.active) this.notifyActivity(g, c, state.sequence);
       const events = await callTuiWorker(m, { operation: "events", afterSequence: c.notifiedSequence }, { timeoutMs: 1000 });
@@ -572,7 +591,7 @@ export class TuiNativeManager {
     }
     const task = c.resumeSessionFile ? `Continue the retained session, not a new assignment. Latest parent instruction: ${c.resumeMessage ?? "Continue from the saved checkpoint."}`
       : g.mode === "chain" ? c.spec.task.replaceAll("{previous}", previous) : c.spec.task;
-    const prompt = `Task: ${task}\n\nAcceptance criteria: ${JSON.stringify(c.spec.acceptance ?? [])}\nReport useful findings with notify_parent and your outcome with task_outcome. The parent handles pane cleanup.`;
+    const prompt = `Task: ${task}\n\nAcceptance criteria: ${JSON.stringify(c.spec.acceptance ?? [])}\nReport useful findings with notify_parent and your outcome with task_outcome. A delivered outcome runs configured verification before completion; failures are reported back for correction. You may call verify to start configured checks explicitly; it does not itself claim delivery. The parent handles pane cleanup.`;
     const accepted = await callTuiWorker(m, { operation: "prompt", mode: "steer", message: prompt }, { requestId: `initial:${c.childId}` });
     if (!accepted.ok) throw new Error(`Initial prompt not confirmed: ${accepted.code}`);
     this.notifyActivity(g, c, accepted.sequence);
@@ -586,6 +605,7 @@ export class TuiNativeManager {
       if (this.closed) return;
       for (const g of this.groups.values()) {
         if (g.owner !== owner) continue;
+        if (g.reaping) continue; // Read-only surfaces use the retained in-flight snapshot; do not race worker cleanup.
         if (!g.background && g.parentOwnerToken !== this.processToken(process.pid) && !g.cancelled) await this.cancelGroup(g);
         if (!this.reapReserved && g.children.some(c => c.state === "pending") && !g.cancelled) {
           const caller = await this.tmux.resolveCaller();
@@ -645,7 +665,7 @@ export class TuiNativeManager {
       try { manifest = this.manifest(c); } catch { this.invalidateVerification(c, "unavailable", "Worker manifest unavailable at terminal notification"); }
       this.currentVerification(c, manifest);
     }
-    const notificationState = c.state === "completed" && c.spec?.verification?.length && (c.verification as any)?.status !== "passed" ? "failed" : c.state;
+    const notificationState = verificationFailedForDelivery(c) ? "failed" : c.state;
     const token = terminalToken(c);
     if (c.terminalNotification === token) return;
     // Foreground callers normally receive their result directly. A guidance
@@ -721,7 +741,7 @@ export class TuiNativeManager {
         await pause(200);
       }
       return response(this.text(g, !g.background), { operation: g.background ? "start" : "result", job_id: g.id, group: this.publicGroup(g),
-        failed: !g.background && g.children.some(child => ["failed", "lost"].includes(child.state) || child.spec.verification?.length && (child.verification as any)?.status !== "passed") });
+        failed: !g.background && g.children.some(child => ["failed", "lost"].includes(child.state) || verificationFailedForDelivery(child)) });
     } finally { signal?.removeEventListener("abort", abortForeground); this.foregroundWaits.delete(g.id); }
   }
   private async cancelGroup(g: Group) {
@@ -987,9 +1007,49 @@ export class TuiNativeManager {
     } catch (error) { this.reapReserved = false; throw error; }
   }
   hasOwnedGroups(owner: string): boolean { return [...this.groups.values()].some(g => g.owner === owner); }
+  private async reapGroup(g: Group, owner: string, descendants: Group[], params: any): Promise<void> {
+    let ownsReapFlight = false;
+    try {
+      await this.serial(async () => {
+        if (g.reaping) throw new Error("Group reap is already in progress");
+        if (g.children.some(c => c.state === "running" || c.state === "waiting")) throw new Error("Group is busy; reap never cancels active or waiting work");
+        if (g.children.some(c => c.state === "pending" || c.state === "launching")) throw new Error("Pending group work must finish or be explicitly cancelled before reap");
+        const nestedIds = new Set(this.descendantGroups(owner, [g]).map(group => group.id));
+        const blockers = descendants.filter(group => nestedIds.has(group.id)).flatMap(group => group.children.filter(active).map(c => `${group.id}/${c.childId} ${c.state}`));
+        if (blockers.length) throw new Error(`Active descendants block ancestor reap: ${blockers.slice(0, 32).join(", ")}`);
+        g.reaping = true; ownsReapFlight = true;
+        for (const c of g.children) if (c.spec.verification?.length && (c.verification as any)?.status !== "passed") {
+          c.verification = { status: "checking", runs: [] }; c.acceptedDelivery = false;
+        }
+        this.save(g);
+      });
+      // Do not keep the manager's mutation queue held while the child runs its
+      // potentially long verification/cleanup flight. Status and cancellation
+      // can proceed; g.reaping prevents prompts, launches and duplicate reap.
+      const nestedIds = new Set(this.descendantGroups(owner, [g]).map(group => group.id));
+      // Stopped/reaped intermediate parents no longer run a scheduler. Recover
+      // only their proven descendants, deepest first; live parents perform
+      // their own recursive cleanup through prepare_reap instead.
+      await this.reapStoppedDescendants(descendants.filter(group => nestedIds.has(group.id)), params.force === true ? { force: true, reason: params.reason } : {});
+      for (const c of g.children) await this.reapChild(g, c, params.force === true ? { force: true, reason: params.reason } : {});
+      await this.serial(async () => { delete g.reaping; this.save(g); });
+      ownsReapFlight = false;
+    } catch (error) {
+      if (ownsReapFlight) {
+        await this.serial(async () => { delete g.reaping; this.save(g); });
+        try { await this.refresh(owner); } catch { /* Preserve the reap failure; status remains fail-closed. */ }
+      }
+      throw error;
+    }
+  }
   async operation(params: any, owner: string, signal?: AbortSignal): Promise<any | undefined> {
     const op = params.operation;
     if (!op) return;
+    if (params.force !== undefined && (op !== "reap" || typeof params.force !== "boolean"))
+      throw new Error("force is a boolean option supported only for reap");
+    if (op === "reap" && params.force === true && (typeof params.reason !== "string" || !params.reason.trim() || Buffer.byteLength(params.reason) > 1000))
+      throw new Error("Forced reap requires a non-empty reason (max 1000 bytes)");
+    if (op === "reap" && params.reason !== undefined && params.force !== true) throw new Error("reap reason requires force:true");
     if (this.closed || this.reapReserved) throw new Error("Native TUI controller is closing or cleanup reserved");
     if (op === "reap") {
       const inventory = new TuiNativeManager(this.root, this.disposition, () => false, this.groupLimit);
@@ -1019,10 +1079,10 @@ export class TuiNativeManager {
           descendant = fresh;
           for (const c of descendant.children) await this.observe(descendant, c, true);
           if (descendant.children.some(active)) throw new Error(`Active descendant blocks reap: ${descendant.id}`);
-          await this.reapStoppedDescendants(nested);
+          await this.reapStoppedDescendants(nested, params.force === true ? { force: true, reason: params.reason } : {});
           for (const c of descendant.children) {
             if (c.report) readPrivateJson(c.report); // Require readable retained results before deletion.
-            await this.reapChild(descendant, c);
+            await this.reapChild(descendant, c, params.force === true ? { force: true, reason: params.reason } : {});
           }
         } finally { release(); }
       }
@@ -1038,7 +1098,7 @@ export class TuiNativeManager {
         this.currentVerification(c, manifest);
         return response(bytes.subarray(offset, offset + limit).toString("utf8"), { operation: op, job_id: descendant.id, child_id: c.childId,
           verification: c.verification ?? { status: c.spec.verification?.length ? "unavailable" : "not-configured" }, historical_verification: c.historicalVerification,
-          accepted_delivery: c.acceptedDelivery === true, failed: !!c.spec.verification?.length && (c.verification as any)?.status !== "passed",
+          accepted_delivery: c.acceptedDelivery === true, failed: c.state === "failed" || verificationFailedForDelivery(c),
           descendant: true, artifact: c.report, offset, next_offset: Math.min(bytes.length, offset + limit), complete: offset + limit >= bytes.length });
       }
       return response(this.text(descendant, op === "output"), { operation: op, job_id: descendant.id, descendant: true, group: this.publicGroup(descendant) });
@@ -1111,6 +1171,34 @@ export class TuiNativeManager {
       return response(waited.groups.map(g => `${g.job_id} ${g.status}`).join("\n") || "No running TUI groups", { operation: op, ...waited });
     }
     const g = selected!;
+    if (g.reaping && !["status", "output", "result", "cancel"].includes(op))
+      throw new Error(op === "reap" ? "Group reap is already in progress" : "Worker control is unavailable while group reap is in progress");
+    if (op === "verify") {
+      const targets = child ? [child] : g.children.filter(target => target.spec.verification?.length);
+      const results = [];
+      for (const target of targets) {
+        const manifest = this.manifest(target);
+        if (!manifest || target.reaped) throw new Error(`Verification unavailable for closed worker ${target.childId}`);
+        const requestId = `parent-verify:${manifest.workerEpoch}:${randomBytes(12).toString("hex")}`;
+        const checked = await awaitTuiWorkerVerification(manifest, requestId, verificationBudget(manifest), signal);
+        if (!checked.response.ok) throw new Error(`Worker verification failed: ${checked.response.code}: ${checked.response.message}`);
+        const receiptVerification = (checked.response.data as any)?.verification;
+        await this.observe(g, target);
+        let currentManifest: TuiWorkerManifest | undefined;
+        try { currentManifest = this.manifest(target); } catch { /* Fresh verification below fails closed without the current manifest. */ }
+        this.currentVerification(target, currentManifest);
+        const verification = target.verification as any;
+        if (!verification?.status) throw new Error("Fresh worker verification observation returned no structured status");
+        results.push({ child_id: target.childId, verification, receipt_verification: receiptVerification,
+          accepted_delivery: target.acceptedDelivery === true, ...(checked.timedOut ? { timed_out: true } : {}) });
+      }
+      if (!results.length) throw new Error("No verification gates are configured for this worker group");
+      const pending = results.some(result => result.verification?.status === "checking");
+      const timedOut = results.some(result => result.timed_out === true);
+      const failed = results.some(result => !["passed", "checking"].includes(result.verification?.status));
+      const rendered = response(results.map(result => `${result.child_id}: ${result.verification?.status ?? "unavailable"}${result.timed_out ? " (verification wait timed out)" : ""}`).join("\n"), { operation: op, job_id: g.id, results, pending, timed_out: timedOut, failed });
+      return { ...rendered, isError: failed || timedOut };
+    }
     if (op === "idle_decision") {
       const m = this.manifest(child!);
       if (!m || child!.childId !== params.child_id || m.workerEpoch !== params.worker_epoch) throw new Error("Idle decision target is stale");
@@ -1159,18 +1247,11 @@ export class TuiNativeManager {
     }
     if (op === "cancel") await this.serial(() => this.cancelGroup(g));
     if (op === "promote") await this.promote(owner, g.id);
-    if (op === "reap") await this.serial(async () => {
-      if (g.children.some(c => c.state === "running" || c.state === "waiting")) throw new Error("Group is busy; reap never cancels active or waiting work");
-      if (g.children.some(c => c.state === "pending" || c.state === "launching")) throw new Error("Pending group work must finish or be explicitly cancelled before reap");
-      const nestedIds = new Set(this.descendantGroups(owner, [g]).map(group => group.id));
-      const blockers = descendants.filter(group => nestedIds.has(group.id)).flatMap(group => group.children.filter(active).map(c => `${group.id}/${c.childId} ${c.state}`));
-      if (blockers.length) throw new Error(`Active descendants block ancestor reap: ${blockers.slice(0, 32).join(", ")}`);
-      // Stopped/reaped intermediate parents no longer run a scheduler. Recover
-      // only their proven descendants, deepest first; live parents perform
-      // their own recursive cleanup through prepare_reap instead.
-      await this.reapStoppedDescendants(descendants.filter(group => nestedIds.has(group.id)));
-      for (const c of g.children) await this.reapChild(g, c);
-    });
+    if (op === "reap") {
+      const flight = this.reapGroup(g, owner, descendants, params);
+      this.reapFlights.add(flight);
+      try { await flight; } finally { this.reapFlights.delete(flight); }
+    }
     if (op === "wait" || op === "wait_group") {
       const deadline = Date.now() + (params.wait_ms ?? 1000);
       while (g.children.some(active) && Date.now() < deadline) { if (signal?.aborted) throw new Error("Wait cancelled; worker continues"); await pause(100); await this.refresh(owner); }
@@ -1186,11 +1267,13 @@ export class TuiNativeManager {
       const text = nativeResultReport(raw, { reportText: reportText(c, raw), diagnostics: params.diagnostics === true,
         jobId: g.id, childId: c.childId, taskId: c.taskId, attempt: c.attempt, state: c.state,
         retained: retainedResult, error: c.error, verification: c.verification, acceptedDelivery: c.acceptedDelivery,
-        verificationWarning: c.spec.verification?.length && (c.verification as any)?.status !== "passed"
-          ? `Current runtime verification ${(c.verification as any)?.status ?? "unavailable"}; retained command evidence is historical, accepted_delivery=false.` : undefined });
+        verificationWarning: verificationFailedForDelivery(c)
+          ? `Current runtime verification ${(c.verification as any)?.status ?? "unavailable"}; retained command evidence is historical, delivered claim is not accepted, accepted_delivery=false.`
+          : c.spec.verification?.length && hasDeliveredClaim(c) && (c.verification as any)?.status === "checking"
+            ? "Runtime verification is checking; accepted_delivery=false." : undefined });
       const page = resultPage(text, params.offset, params.limit);
       return response(page.text, { operation: op, job_id: g.id, child_id: c.childId, task_id: c.taskId, attempt: c.attempt,
-        artifact: c.report, retained: retainedResult, failed: !!c.spec.verification?.length && (c.verification as any)?.status !== "passed", ...(!active(c) ? { terminal_id: createHash("sha256").update(terminalToken(c)).digest("hex").slice(0, 24) } : {}),
+        artifact: c.report, retained: retainedResult, failed: c.state === "failed" || verificationFailedForDelivery(c), ...(!active(c) ? { terminal_id: createHash("sha256").update(terminalToken(c)).digest("hex").slice(0, 24) } : {}),
         report_sequence: Number(c.report.match(/report-(\d+)-[a-f0-9]{16}\.json$/)?.[1]) || c.runSequence || 0,
         offset: page.offset, next_offset: page.nextOffset, complete: page.complete, task_outcome: c.lastOutcome, historical_verification: c.historicalVerification, verification: c.verification ?? { status: c.spec.verification?.length ? "unavailable" : "not-configured" }, accepted_delivery: c.acceptedDelivery === true, review: "not-configured" });
     }

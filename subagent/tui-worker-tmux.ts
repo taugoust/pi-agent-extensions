@@ -5,7 +5,7 @@ import { access, readFile, realpath, writeFile, copyFile, chmod } from "node:fs/
 import { constants } from "node:fs";
 import { dirname, isAbsolute, join } from "node:path";
 import { fileURLToPath } from "node:url";
-import { randomBytes } from "node:crypto";
+import { createHash, randomBytes } from "node:crypto";
 import { TUI_WORKER_DISCOVERY_ENV, TUI_WORKER_MANIFEST_ENV } from "../shared/tui-worker-protocol.ts";
 import type { TuiPlacedWorkerManifest, TuiWorkerManifest, TuiWorkerPlacement } from "../shared/tui-worker-protocol.ts";
 import { TuiWorkerStore, atomicPrivateJson, readPrivateJson } from "./tui-worker-store.ts";
@@ -17,6 +17,9 @@ import { subagentTmuxName, subagentTmuxAlias } from "./tui-names.ts";
 const exec = promisify(execFile);
 const quote = (s: string) => `'${s.replaceAll("'", `'\\''`)}'`;
 const pause = (ms: number) => new Promise(resolve => setTimeout(resolve, ms));
+export const verificationBudget = (manifest: Pick<TuiWorkerManifest, "verification">) => manifest.verification?.length
+  ? manifest.verification.reduce((total, gate) => total + (gate.timeoutMs ?? 120_000) + 20_000, 10_000)
+  : 10_000;
 const NONCE = "@pi_tui_worker_nonce";
 const GROUP = "@pi_subagent_group_id";
 // Reloaded extension factories and separate backend instances must share ordering.
@@ -419,7 +422,7 @@ export class TuiWorkerTmux {
     }
     return promoted;
   }
-  async reap(manifest: TuiWorkerManifest, timeoutMs = 10_000): Promise<void> {
+  async reap(manifest: TuiWorkerManifest, timeoutMs = verificationBudget(manifest), options: { force?: true; reason?: string } = {}): Promise<void> {
     const store = new TuiWorkerStore(dirname(manifest.sessionFile));
     // A prior verified deletion is idempotent. No other pane is sought by name.
     try {
@@ -453,11 +456,13 @@ export class TuiWorkerTmux {
       atomicPrivateJson(store.path("reaped.json"), { ...intent, reapedAt: new Date().toISOString() });
       return;
     }
+    if (info.dead && manifest.verification?.length && !options.force)
+      throw new Error("Configured verification cannot be freshly run on a dead worker; use force:true with an audited reason to bypass verification only");
     if (!info.dead) {
       const status = await callTuiWorker(manifest, { operation: "status" }, { timeoutMs: 1000 });
       if (!status.ok) throw new Error(`Worker cleanup capability query failed (${status.code}); recover its controller before retrying reap. No pane was killed`);
       if ((status.data as any)?.recursiveCleanup !== true) throw new Error("Worker lacks recursive subagent cleanup support. A legacy worker may be pinned to an old immutable --extension entrypoint, so ordinary reload/resume may not upgrade it. Preserve the pane and recover a current child-local controller with verified job/subagent cleanup before reaping; no pane was killed");
-      const response = await callTuiWorker(manifest, { operation: "prepare_reap" }, { requestId: `reap:${manifest.workerEpoch}`, timeoutMs: 30_000 });
+      const response = await callTuiWorker(manifest, { operation: "prepare_reap", ...(options.force ? { force: true, reason: options.reason! } : {}) }, { requestId: `reap:${manifest.workerEpoch}:${options.force ? createHash("sha256").update(options.reason!).digest("hex").slice(0, 12) : "verify"}`, timeoutMs: verificationBudget(manifest) });
       if (!response.ok) throw new Error(`Worker reap rejected: ${response.code}: ${response.message}`);
       const deadline = Date.now() + timeoutMs;
       while (!info.dead && Date.now() < deadline) { await pause(50); info = await this.inspect(manifest); }

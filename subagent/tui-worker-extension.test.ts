@@ -7,7 +7,7 @@ import { join } from "node:path";
 import workerExtension from "./tui-worker-extension.ts";
 import { TuiWorkerStore } from "./tui-worker-store.ts";
 import { processIdentity } from "./tui-worker-tmux.ts";
-import { callTuiWorker } from "./tui-worker-client.ts";
+import { callTuiWorker, awaitTuiWorkerVerification } from "./tui-worker-client.ts";
 import type { TuiWorkerManifest } from "../shared/tui-worker-protocol.ts";
 
 test("worker trust skips only unresolved asks without persisting trust or loading project policy", async () => {
@@ -42,6 +42,104 @@ test("worker trust skips only unresolved asks without persisting trust or loadin
   }
 });
 
+test("verification tools await final verdict and abort only a flight they started", async () => {
+  const root = await mkdtemp(join(tmpdir(), "worker-tool-verification-"));
+  const cwd = join(root, "workspace"), workerDirectory = join(root, "workers", "a".repeat(24));
+  await mkdir(cwd); await mkdir(workerDirectory, { recursive: true, mode: 0o700 });
+  const store = new TuiWorkerStore(workerDirectory);
+  const sessionFile = store.path("session.jsonl");
+  await writeFile(sessionFile, "", { mode: 0o600 });
+  const manifest: TuiWorkerManifest = {
+    protocol: 1, ownerSessionId: "parent", taskId: "task", runtimeId: "runtime", groupId: `subagent-job-${"a".repeat(24)}`,
+    childId: `subagent-child-${"b".repeat(24)}`, attempt: 1, workerEpoch: "c".repeat(32), controlToken: "d".repeat(64),
+    controlSocket: store.path("control.sock"), sessionFile, launchMode: "none", acceptance: ["complete"],
+    verification: [{ command: "echo fixture", timeoutMs: 5000 }], tools: ["bash"], presentation: "background",
+    placement: { socketPath: "/tmp/tmux", serverEpoch: "1:2", sessionId: "$1", windowId: "@1", paneId: "%1", ownershipNonce: "e".repeat(64) },
+  };
+  store.writeManifest(manifest);
+  const previous = { manifest: process.env.PI_TUI_WORKER_MANIFEST, canonicalNames: process.env.PI_SUBAGENT_CANONICAL_NAMES,
+    jobs: (globalThis as any).__paeLocalJobControllerV1 };
+  delete process.env.PI_SUBAGENT_CANONICAL_NAMES;
+  process.env.PI_TUI_WORKER_MANIFEST = store.path("manifest.json");
+  let starts = 0;
+  const states = new Map<string, string>(), abortedJobs = new Set<string>(), cancelledJobs = new Set<string>();
+  (globalThis as any).__paeLocalJobControllerV1 = {
+    protocol: 1, sessionId: "child-session",
+    async startVerification(_callId: string, _command: string, signal?: AbortSignal) {
+      const jobId = `job-${String(++starts).padStart(24, "0")}`;
+      states.set(jobId, "running");
+      signal?.addEventListener("abort", () => abortedJobs.add(jobId), { once: true });
+      return { details: { job_id: jobId } };
+    },
+    async execute(_callId: string, params: any) {
+      const jobId = params.job_id;
+      if (params.action === "cancel") { cancelledJobs.add(jobId); states.set(jobId, "cancelled"); }
+      if (params.action === "reap") states.set(jobId, "reaped");
+      const status = states.get(jobId) ?? "lost";
+      if (params.action === "output" || ["completed", "failed", "cancelled", "lost"].includes(status)) return { details: { job_id: jobId, status, exit_code: status === "completed" ? 0 : 130,
+        streams: { available: true, stdout: status === "completed" ? "pass\\n" : "", stderr: "", stdout_truncated: false, stderr_truncated: false } } };
+      return { details: { job_id: jobId, status } };
+    },
+    async resolveVerification(_callId: string, _command: string, jobId?: string) { return jobId; },
+    async attestVerification() { return true; },
+  };
+  const handlers = new Map<string, Function>(), tools = new Map<string, any>(), startupErrors: string[] = [];
+  const ctx = { mode: "tui", cwd, hasUI: true, ui: { notify(message: string) { startupErrors.push(message); }, setStatus() {} },
+    isIdle: () => true, hasPendingMessages: () => false, abort() {}, shutdown() {}, getContextUsage: () => undefined,
+    sessionManager: { getSessionFile: () => sessionFile, getSessionId: () => "child-session", getLeafId: () => null, getSessionName: () => undefined } };
+  const waitForStarts = async (expected: number) => {
+    const deadline = Date.now() + 3000;
+    while (starts < expected && Date.now() < deadline) await new Promise(resolve => setTimeout(resolve, 5));
+    assert.equal(starts, expected, "verification gate did not start");
+  };
+  try {
+    workerExtension({ registerTool(tool: any) { tools.set(tool.name, tool); }, on: (name: string, fn: Function) => handlers.set(name, fn) } as any);
+    await handlers.get("session_start")!({}, ctx);
+    assert.deepEqual(startupErrors, [], "worker startup must succeed before testing tool-owned verification");
+    const verifyAbort = new AbortController();
+    const verifyPending = tools.get("verify").execute("verify-owned", {}, verifyAbort.signal);
+    await waitForStarts(1); verifyAbort.abort();
+    const verifyResult = await verifyPending;
+    const verifyJob = `job-${String(1).padStart(24, "0")}`;
+    assert.equal(abortedJobs.has(verifyJob), true, "verify tool abort must reach the supervisor gate signal");
+    assert.equal(cancelledJobs.has(verifyJob), true);
+    assert.equal(verifyResult.details.verification.status, "cancelled");
+    assert.equal(verifyResult.isError, true);
+
+    const outcomeAbort = new AbortController();
+    const delivered = { version: 1, state: "delivered", summary: "Done", acceptance: [{ criterion: "complete", status: "passed", evidence: "fixture" }], artifacts: [], remaining: [] };
+    const outcomePending = tools.get("task_outcome").execute("outcome-owned", delivered, outcomeAbort.signal);
+    await waitForStarts(2); outcomeAbort.abort();
+    const outcomeResult = await outcomePending;
+    const outcomeJob = `job-${String(2).padStart(24, "0")}`;
+    assert.equal(abortedJobs.has(outcomeJob), true, "delivered task_outcome abort must reach the supervisor gate signal");
+    assert.equal(cancelledJobs.has(outcomeJob), true);
+    assert.equal(outcomeResult.details.verification.status, "cancelled");
+    assert.equal(outcomeResult.isError, true);
+
+    const parentStarted = await callTuiWorker(manifest, { operation: "verify" }, { requestId: "parent-started-shared-check" });
+    assert.equal(parentStarted.ok, true);
+    await waitForStarts(3);
+    const sharedAbort = new AbortController();
+    const sharedWait = tools.get("verify").execute("verify-shared", {}, sharedAbort.signal);
+    sharedAbort.abort();
+    await assert.rejects(sharedWait, /shared check continues/);
+    const sharedJob = `job-${String(3).padStart(24, "0")}`;
+    assert.equal(abortedJobs.has(sharedJob), false, "joining tool cancellation must not abort a prior parent-owned check");
+    assert.equal(cancelledJobs.has(sharedJob), false);
+    states.set(sharedJob, "completed");
+    const final = await awaitTuiWorkerVerification(manifest, "parent-started-shared-check", 5000);
+    assert.equal(final.response.ok, true);
+    assert.equal((final.response.data as any)?.verification?.status, "passed", JSON.stringify(final.response));
+  } finally {
+    await handlers.get("session_shutdown")?.({}, ctx);
+    if (previous.manifest === undefined) delete process.env.PI_TUI_WORKER_MANIFEST; else process.env.PI_TUI_WORKER_MANIFEST = previous.manifest;
+    if (previous.canonicalNames === undefined) delete process.env.PI_SUBAGENT_CANONICAL_NAMES; else process.env.PI_SUBAGENT_CANONICAL_NAMES = previous.canonicalNames;
+    if (previous.jobs === undefined) delete (globalThis as any).__paeLocalJobControllerV1; else (globalThis as any).__paeLocalJobControllerV1 = previous.jobs;
+    await rm(root, { recursive: true, force: true });
+  }
+});
+
 test("final boundary continues routine partial once, never blockers, errors or intervention", async () => {
   for (const scenario of ["routine", "legacy-partial", "needs-input", "blocked", "checkpointed", "error", "aborted", "pending", "guidance", "ui", "user-input", "tool-error", "cancel", "sealed"] ) {
     const root = await mkdtemp(join(tmpdir(), "pi-boundary-")), store = new TuiWorkerStore(root);
@@ -61,6 +159,7 @@ test("final boundary continues routine partial once, never blockers, errors or i
     try {
       workerExtension({ registerTool(tool: any) { tools.set(tool.name, tool); }, on: (name: string, fn: Function) => handlers.set(name, fn) } as any);
       await handlers.get("session_start")!({}, ctx);
+      assert.ok(tools.has("verify"), "worker-facing standalone verification tool is registered");
       handlers.get("agent_start")!({}, ctx);
       const state = ["blocked", "checkpointed"].includes(scenario) ? scenario : "partial";
       const outcome = { version: 1, state, summary: "Work remains", acceptance: [], artifacts: [], remaining: ["test"], next_action: "Run tests",

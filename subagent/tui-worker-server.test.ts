@@ -7,6 +7,7 @@ import { join } from "node:path";
 import { createHash } from "node:crypto";
 import { TuiWorkerStore } from "./tui-worker-store.ts";
 import { TuiWorkerServer } from "./tui-worker-server.ts";
+import { workspaceIdentity } from "./acceptance.ts";
 import { callTuiWorker, applyTuiWorkerOperatorMode, workerRequest } from "./tui-worker-client.ts";
 import { validateLiveEvents, validateLiveStatus } from "./live-conversation.ts";
 import type { TuiWorkerManifest } from "../shared/tui-worker-protocol.ts";
@@ -19,6 +20,145 @@ export function manifestAt(directory: string): TuiWorkerManifest {
     placement: { socketPath: "/tmp/tmux-test", serverEpoch: "123:456", sessionId: "$1", windowId: "@1", paneId: "%1", ownershipNonce: "e".repeat(64) },
     presentation: "background", launchMode: "none" };
 }
+
+test("idle settlement/partial outcome never dispatch gates; delivered outcome and explicit verify do", async () => {
+  const directory = await mkdtemp(join(tmpdir(), "pi-worker-verify-trigger-"));
+  const cwd = join(directory, "workspace");
+  const { mkdir } = await import("node:fs/promises"); await mkdir(cwd);
+  const manifest = { ...manifestAt(directory), verification: [{ command: "fixture verify" }] } as TuiWorkerManifest;
+  const store = new TuiWorkerStore(directory); store.writeManifest(manifest);
+  let idle = false, starts = 0;
+  const jobId = `job-${"a".repeat(24)}`;
+  const jobs = { async start() { starts++; return { details: { job_id: jobId } }; }, async resolve() { return jobId; }, async attest() { return true; },
+    async execute(_id: string, params: any) { return params.action === "reap" ? { isError: false } : { details: { job_id: jobId, status: "completed", exit_code: 0, streams: { available: true, stdout: "ok\\n", stderr: "" } } }; } };
+  const server = new TuiWorkerServer(store, { isIdle: () => idle, verificationCwd: () => cwd, verificationJobs: () => jobs, send() {}, abort() {}, shutdown() {} });
+  const delivered = { version: 1, state: "delivered", summary: "Done", acceptance: [{ criterion: "fixture", status: "passed", evidence: "test" }], artifacts: [], remaining: [] };
+  const partial = { version: 1, state: "partial", summary: "More work", acceptance: [], artifacts: [], remaining: ["continue"], next_action: "Continue" };
+  try {
+    await server.start();
+    server.running(true); idle = true; server.settled({ assistant: { stopReason: "stop" } });
+    assert.equal(starts, 0, "idle-only end of turn must not run verification");
+    server.running(true); await server.outcome(partial); assert.equal(starts, 0, "partial outcome must not run verification");
+    idle = true; server.settled({ assistant: { stopReason: "stop" } }); assert.equal(starts, 0);
+    idle = false; server.running(true);
+    const delivery = server.outcome(delivered);
+    await new Promise(resolve => setImmediate(resolve));
+    assert.equal(starts, 1, "delivered task_outcome starts verification before idle settlement");
+    await delivery;
+    assert.equal(server.getVerificationSummary().status, "passed");
+    // A separate RPC verification also runs while the model is active and does not confer delivery.
+    const explicit = await callTuiWorker(manifest, { operation: "verify" });
+    assert.equal(explicit.ok, true); assert.equal(explicit.receipt, "accepted");
+    assert.equal((explicit.data as any).verification.status, "checking"); assert.equal(starts, 2);
+    let status: any;
+    for (let attempt = 0; attempt < 100; attempt++) {
+      status = await callTuiWorker(manifest, { operation: "status" });
+      if ((status.data as any).verification.status !== "checking") break;
+      await new Promise(resolve => setTimeout(resolve, 10));
+    }
+    assert.equal((status.data as any).active, true, "verification does not hide concurrent model activity");
+    assert.equal((status.data as any).accepted_delivery, false, "checking alone cannot accept while the task turn is active");
+    const retry = await callTuiWorker(manifest, { operation: "verify" }, { requestId: explicit.requestId });
+    assert.equal(retry.receipt, "applied", "completed request retries receive the persisted terminal response");
+    assert.equal((retry.data as any).verification.status, "passed");
+  } finally { await server.close(); await rm(directory, { recursive: true, force: true }); }
+});
+
+test("slow explicit verification leaves status and cancellation responsive", async () => {
+  const directory = await mkdtemp(join(tmpdir(), "pi-worker-verify-control-"));
+  const cwd = join(directory, "workspace");
+  const { mkdir } = await import("node:fs/promises"); await mkdir(cwd);
+  const manifest = { ...manifestAt(directory), verification: [{ command: "fixture verify" }] } as TuiWorkerManifest;
+  const store = new TuiWorkerStore(directory); store.writeManifest(manifest);
+  const jobId = `job-${"a".repeat(24)}`; let releaseStart!: () => void;
+  const blocked = new Promise<void>(resolve => { releaseStart = resolve; });
+  const jobs = { async start() { await blocked; return { details: { job_id: jobId } }; }, async resolve() { return jobId; }, async attest() { return true; },
+    async execute(_id: string, params: any) { return params.action === "reap" ? { isError: false } : { details: { job_id: jobId, status: "completed", exit_code: 0, streams: { available: true, stdout: "ok\\n", stderr: "" } } }; } };
+  const server = new TuiWorkerServer(store, { isIdle: () => true, verificationCwd: () => cwd, verificationJobs: () => jobs, send() {}, abort() {}, shutdown() {} });
+  try {
+    await server.start();
+    const started = await callTuiWorker(manifest, { operation: "verify" }, { requestId: "slow-verify" });
+    assert.equal(started.ok, true); assert.equal(started.receipt, "accepted");
+    const status = await callTuiWorker(manifest, { operation: "status" }, { timeoutMs: 1000 });
+    assert.equal(status.ok, true); assert.equal((status.data as any).verification.status, "checking");
+    const cancel = callTuiWorker(manifest, { operation: "cancel" }, { requestId: "cancel-slow-verify", timeoutMs: 5000 });
+    await new Promise(resolve => setImmediate(resolve));
+    const whileCancelling = await callTuiWorker(manifest, { operation: "status" }, { timeoutMs: 1000 });
+    assert.equal(whileCancelling.ok, true, "status remains responsive while cancellation awaits verification cleanup");
+    const cancelled = await Promise.race([cancel, new Promise(resolve => setTimeout(() => resolve(undefined), 100))]);
+    assert.ok(cancelled, "cancel acknowledges promptly without waiting for the slow gate start");
+    assert.equal(cancelled.ok, true); assert.equal((cancelled.data as any).verificationCancellationPending, true);
+    releaseStart();
+    await server["verificationFlight" as any];
+    const afterCleanup = await callTuiWorker(manifest, { operation: "status" });
+    assert.equal((afterCleanup.data as any).verification.status, "cancelled");
+  } finally { releaseStart(); await server.close(); await rm(directory, { recursive: true, force: true }); }
+});
+
+test("activity aborts verification before deferred start without dispatching any gate", async () => {
+  const directory = await mkdtemp(join(tmpdir(), "pi-worker-verify-deferred-abort-"));
+  const cwd = join(directory, "workspace");
+  const { mkdir } = await import("node:fs/promises"); await mkdir(cwd);
+  const manifest = { ...manifestAt(directory), verification: [{ command: "fixture verify" }] } as TuiWorkerManifest;
+  const store = new TuiWorkerStore(directory); store.writeManifest(manifest);
+  let starts = 0;
+  const jobs = { async start() { starts++; return { details: { job_id: `job-${"a".repeat(24)}` } }; }, async resolve() { return null; }, async attest() { return true; }, async execute() { throw new Error("no job should have been dispatched"); } };
+  const server = new TuiWorkerServer(store, { isIdle: () => true, verificationCwd: () => cwd, verificationJobs: () => jobs, send() {}, abort() {}, shutdown() {} });
+  try {
+    await server.start();
+    assert.equal(server.beginVerification().status, "checking");
+    server.running(true);
+    await new Promise(resolve => setImmediate(resolve));
+    await server["verificationFlight" as any];
+    assert.equal(starts, 0, "superseded deferred verification must not dispatch with a replacement controller");
+    assert.equal(server.getVerificationSummary().status, "cancelled");
+  } finally { await server.close(); await rm(directory, { recursive: true, force: true }); }
+});
+
+test("configured verification failure blocks delivered notification; forced reap audits only a completed verification bypass", async () => {
+  const directory = await mkdtemp(join(tmpdir(), "pi-worker-verify-reap-"));
+  const cwd = join(directory, "workspace");
+  const { mkdir } = await import("node:fs/promises"); await mkdir(cwd);
+  const manifest = { ...manifestAt(directory), verification: [{ command: "fixture verify" }] } as TuiWorkerManifest;
+  const store = new TuiWorkerStore(directory); store.writeManifest(manifest);
+  const jobId = `job-${"a".repeat(24)}`; let starts = 0, cleanupCalls = 0, shutdowns = 0, releaseStart!: () => void;
+  let hold = true;
+  const blockedStart = new Promise<void>(resolve => { releaseStart = resolve; });
+  const jobs = { async start() { starts++; if (hold) await blockedStart; return { details: { job_id: jobId } }; }, async resolve() { return jobId; }, async attest() { return true; },
+    async execute(_id: string, params: any) { return params.action === "reap" ? { isError: false } : { details: { job_id: jobId, status: "completed", exit_code: 7, streams: { available: true, stdout: "failed\\n", stderr: "" } } }; } };
+  const server = new TuiWorkerServer(store, { isIdle: () => true, verificationCwd: () => cwd, verificationJobs: () => jobs,
+    async prepareJobReap(preserve: (report: unknown) => Promise<void>) { cleanupCalls++; await preserve({ jobs: [] }); return () => {}; }, send() {}, abort() {}, shutdown() { shutdowns++; } });
+  const outcome = { version: 1, state: "delivered", summary: "Claimed delivery", acceptance: [{ criterion: "fixture", status: "passed", evidence: "model" }], artifacts: [], remaining: [] };
+  try {
+    await server.start(); server.running(true);
+    const pending = server.outcome(outcome);
+    await new Promise(resolve => setImmediate(resolve));
+    assert.equal(starts, 1, "delivered tool call dispatches verification immediately");
+    assert.equal(store.readState().events.filter(event => event.kind === "outcome").length, 0, "delivered notification waits for verification");
+    releaseStart(); hold = false; await pending;
+    assert.equal(server.getVerificationSummary().status, "failed");
+    assert.equal(store.readState().events.filter(event => event.kind === "outcome").length, 1);
+    assert.equal(store.readState().events.filter(event => event.kind === "verification_settled").length, 1);
+    server.settled({ assistant: { stopReason: "stop" } });
+    const normal = await callTuiWorker(manifest, { operation: "prepare_reap" }, { requestId: "normal-reap" });
+    assert.equal(normal.ok, false, "failed current gates block normal reap");
+    assert.equal(cleanupCalls, 0); assert.equal(store.readState().sealed, false);
+    // Even a force request must not bypass ordinary child-local job cleanup safety.
+    server["adapter" as any].prepareJobReap = async () => { cleanupCalls++; throw new Error("active local job"); };
+    const forcedBlocked = await callTuiWorker(manifest, { operation: "prepare_reap", force: true, reason: "retain failed worker" }, { requestId: "force-blocked" });
+    assert.equal(forcedBlocked.ok, false); assert.equal(store.readState().sealed, false);
+    assert.equal(cleanupCalls, 1); assert.equal(shutdowns, 0);
+    assert.equal(store.readState().verificationBypasses?.length ?? 0, 0, "a refused reap must not be recorded as an executed bypass");
+    const status = await callTuiWorker(manifest, { operation: "status" });
+    assert.equal((status.data as any).accepted_delivery, false); assert.equal((status.data as any).verification.status, "failed");
+    server["adapter" as any].prepareJobReap = async (preserve: (report: unknown) => Promise<void>) => { cleanupCalls++; await preserve({ jobs: [] }); return () => {}; };
+    const forced = await callTuiWorker(manifest, { operation: "prepare_reap", force: true, reason: "retain failed worker" }, { requestId: "force-clean" });
+    assert.equal(forced.ok, true); assert.equal(cleanupCalls, 2);
+    const audit = store.readState().verificationBypasses;
+    assert.equal(audit?.length, 1); assert.equal(audit?.[0].reason, "retain failed worker");
+    assert.equal(store.readState().verification?.status, "failed", "force bypass does not turn failed verification into a pass");
+  } finally { await server.close(); await rm(directory, { recursive: true, force: true }); }
+});
 
 test("authenticated live conversation stream reports tool start then authoritative completion", async () => {
   const directory = await mkdtemp(join(tmpdir(), "pi-live-conversation-"));
@@ -369,7 +509,7 @@ test("parent prompt invalidates prior turn receipt before custom-message agent_s
   try {
     await server.start();
     server.settled({ final: "previous checkpoint turn" });
-    server.outcome({ version: 1, state: "checkpointed" });
+    await server.outcome({ version: 1, state: "checkpointed", summary: "Checkpoint", acceptance: [], artifacts: [], remaining: ["resume"], next_action: "Resume the task" });
     assert.ok(store.readState().lastReport);
     assert.ok(store.readState().lastOutcome);
 
@@ -399,7 +539,7 @@ test("human activity starting during pending compaction stays authoritative afte
   try {
     await server.start();
     server.settled({ previous: "report" });
-    server.outcome({ previous: "outcome" });
+    await server.outcome({ version: 1, state: "partial", summary: "Partial", acceptance: [], artifacts: [], remaining: ["continue"], next_action: "Continue work" });
     assert.ok(store.readState().lastReport);
     assert.ok(store.readState().lastOutcome);
 

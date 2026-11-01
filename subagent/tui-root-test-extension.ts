@@ -18,9 +18,10 @@ import { canonicalSubagentName } from "./tui-names.ts";
 /** Explicit real-root integration fixture. Never enabled outside tests. */
 export default function rootTest(pi: ExtensionAPI) {
   let tool: any;
+  let guidanceTool: any;
   const commands = new Map<string, any>();
   const proxy = new Proxy(pi, { get(target, property) {
-    if (property === "registerTool") return (value: any) => { if (value.name === "subagent") tool = value; return target.registerTool(value); };
+    if (property === "registerTool") return (value: any) => { if (value.name === "subagent") tool = value; if (value.name === "guidance") guidanceTool = value; return target.registerTool(value); };
     if (property === "registerCommand") return (name: string, value: any) => { commands.set(name, value); return target.registerCommand(name, value); };
     const value = Reflect.get(target, property); return typeof value === "function" ? value.bind(target) : value;
   } });
@@ -69,6 +70,15 @@ export default function rootTest(pi: ExtensionAPI) {
         target = { taskId: task.taskId, childId: task.childId, workerEpoch: task.workerEpoch };
         const view = await service.execute({ sessionId: service.sessionId, epoch: service.epoch, operation: "view", target });
         interaction = view.view?.interactions?.find((item: any) => item.request.kind === kind);
+        // Human questionnaires now route through the owning coordinator broker,
+        // not the legacy worker-local panel interaction lane. Permission consent
+        // must still use its existing authenticated worker interaction below.
+        if (!interaction && kind === "questionnaire") {
+          const listedGuidance = await guidanceTool.execute(`root-guidance-list-${++sequence}`, { operation: "list", limit: 4 }, undefined, undefined, ctx);
+          const records = JSON.parse(listedGuidance.content[0].text).records;
+          const request = records.find((record: any) => record.childId === target.childId && record.workerEpoch === target.workerEpoch && record.status === "pending" && record.input.kind === "human");
+          if (request) interaction = { id: request.requestId, request: request.input.questionnaire, guidanceTarget: request.target };
+        }
         if (interaction) break;
       }
       await sleep(100);
@@ -90,10 +100,43 @@ export default function rootTest(pi: ExtensionAPI) {
       }
       throw new Error(`Headless ${kind} adapter did not publish its typed pending request: ${JSON.stringify(diagnostic).slice(0, 20_000)}`);
     }
-    const receipt = await service.execute({ sessionId: service.sessionId, epoch: service.epoch, operation: "respond",
-      target, requestId: `root-answer-${marker}`, interactionId: interaction.id, answer });
-    assert.equal(receipt.accepted, true, JSON.stringify(receipt));
-    const result = await pendingRun;
+    if (interaction.guidanceTarget) {
+      // Test-only deterministic human UI adapter. Exercise the actual broker's
+      // human operation; never submit a model reply as a human/permission answer.
+      let asked = false;
+      const humanContext = new Proxy(ctx, { get(original, property) {
+        if (property === "executeTool") return async (name: string, input: any) => {
+          assert.equal(name, "questionnaire");
+          assert.deepEqual(input.questions, interaction.request.questions);
+          asked = true;
+          return { isError: false, result: { details: answer } };
+        };
+        const value = Reflect.get(original, property);
+        return typeof value === "function" ? value.bind(original) : value;
+      } });
+      await guidanceTool.execute(`root-human-answer-${++sequence}`, { operation: "human", target: interaction.guidanceTarget }, undefined, undefined, humanContext);
+      assert.equal(asked, true, "human guidance must invoke the top-level questionnaire adapter");
+    } else {
+      const receipt = await service.execute({ sessionId: service.sessionId, epoch: service.epoch, operation: "respond",
+        target, requestId: `root-answer-${marker}`, interactionId: interaction.id, answer });
+      assert.equal(receipt.accepted, true, JSON.stringify(receipt));
+    }
+    const initialResult = await pendingRun;
+    // A structured guidance waiter intentionally yields the parent call before
+    // worker execution finishes. Answering it resumes the retained worker; wait
+    // for that actual completion instead of treating the earlier yield as final.
+    let result = initialResult;
+    if (initialResult.details.guidance_waiting) {
+      const completionDeadline = Date.now() + 30_000;
+      for (;;) {
+        const listed = await service.execute({ sessionId: service.sessionId, epoch: service.epoch, operation: "list" });
+        const task = listed.tasks?.find((item: any) => item.childId === target.childId);
+        if (task && ["completed", "failed", "cancelled", "lost", "reaped"].includes(task.status)) break;
+        assert.ok(Date.now() < completionDeadline, "Headless worker did not finish after its human questionnaire was answered");
+        await sleep(100);
+      }
+      result = await execute(ctx, { operation: "result", job_id: initialResult.details.job_id });
+    }
     assert.equal(result.details.group.status, "completed", JSON.stringify(result));
     return result;
   };
@@ -134,14 +177,39 @@ export default function rootTest(pi: ExtensionAPI) {
           assert.equal(store.readState().verification?.runs[0].stdout, "verified literal stdout\n");
         }
       }
-      await execute(ctx, { operation: "reap", job_id: launched.details.job_id });
+      const bypassReason = code === 0 && permission ? undefined : "fixture intentionally exercises failed or unavailable verification";
+      await execute(ctx, { operation: "reap", job_id: launched.details.job_id,
+        ...(bypassReason ? { force: true, reason: bypassReason } : {}) });
     }
+    // Exercise the actual parent verify operation independently of delivery.
+    const idle = await execute(ctx, { task: "Idle verification boundary", acceptance: ["fixture"], model: "harness-test/mock:off", background: true,
+      cwd, tools: ["read", "bash"], verification: [{ command: "printf 'standalone verification\\n'", timeoutMs: 20000 }] });
+    const idleDeadline = Date.now() + 30_000;
+    let idleResult: any;
+    for (;;) {
+      idleResult = await execute(ctx, { operation: "status", job_id: idle.details.job_id });
+      if (idleResult.details.group.children[0].report) break;
+      assert.ok(Date.now() < idleDeadline, "worker did not settle its ordinary idle turn");
+      await sleep(100);
+    }
+    const idleChild = idleResult.details.group.children[0];
+    assert.equal(idleResult.details.group.status, "waiting", "unreported idle waits for guidance rather than failing final verification");
+    assert.equal(idleChild.verification.runs.length, 0, "idle must not dispatch verification");
+    assert.equal(idleChild.accepted_delivery, false);
+    const standalone = await execute(ctx, { operation: "verify", child_id: idleChild.child_id });
+    assert.equal(standalone.details.results[0].verification.status, permission ? "passed" : "unavailable", JSON.stringify(standalone));
+    assert.equal(standalone.details.results[0].accepted_delivery, false, "standalone checks must not fabricate delivery");
+    assert.notEqual(standalone.details.pending, true, "verify must await the actual verdict");
+    await execute(ctx, { operation: "cancel", job_id: idle.details.job_id });
+    await execute(ctx, { operation: "reap", job_id: idle.details.job_id,
+      ...(!permission ? { force: true, reason: "fixture standalone verification has no permission backend" } : {}) });
     const readonly = await execute(ctx, { task: "REPORT_OUTCOME", acceptance: ["fixture"], model: "harness-test/mock:off", background: true,
       cwd, tools: ["read"], verification: [{ command: "printf MUST_NOT_RUN", timeoutMs: 20000 }] });
     const denied = await terminalSnapshot(ctx, readonly.details.job_id);
     assert.equal(denied.details.group.children[0].verification.status, "unavailable");
     assert.equal(denied.details.group.children[0].accepted_delivery, false);
-    await execute(ctx, { operation: "reap", job_id: readonly.details.job_id });
+    await execute(ctx, { operation: "reap", job_id: readonly.details.job_id, force: true,
+      reason: "fixture intentionally exercises unavailable verification" });
     return { nativeManager: true, realPermissionGate: !!permission };
   });
   register("tui-root-background", async ctx => {
@@ -434,7 +502,8 @@ export default function rootTest(pi: ExtensionAPI) {
     const status = await callTuiWorker(manifest, { operation: "status" });
     assert.ok(status.ok);
     const saved = { rootPid: process.pid, job: started.details.job_id, childPid: (status.data as any).pid, sessionId: ctx.sessionManager.getSessionId(),
-      headlessPid: orphanManifest.runtimePid, headlessToken: orphanManifest.runtimeProcessToken, headlessEpoch: orphanManifest.workerEpoch };
+      headlessPid: orphanManifest.runtimePid, headlessToken: orphanManifest.runtimeProcessToken, headlessEpoch: orphanManifest.workerEpoch,
+      questionnaireChildId: questionnaire.details.group.children[0].child_id };
     await writeFile(backgroundFile, JSON.stringify(saved));
     return saved;
   });
@@ -571,7 +640,11 @@ export default function rootTest(pi: ExtensionAPI) {
     const parallelGroup = await wait(ctx, parallel.details.job_id);
     assert.equal(parallelGroup.children[0].runtime.placement.windowId, parallelGroup.children[1].runtime.placement.windowId);
     const readOnly = await execute(ctx, { operation: "result", job_id: parallel.details.job_id, child: 1 });
-    assert.equal(readOnly.content[0].text, "TOOLS:notify_parent,read,task_outcome");
+    assert.match(readOnly.content[0].text, /^TOOLS:/);
+    const exposedReadOnlyTools = readOnly.content[0].text.slice("TOOLS:".length).split(",");
+    for (const required of ["read", "notify_parent", "task_outcome"]) assert.ok(exposedReadOnlyTools.includes(required));
+    assert.ok(exposedReadOnlyTools.every((name: string) => ["read", "notify_parent", "task_outcome", "verify", "request_guidance", "guidance"].includes(name)),
+      "read-only workers may expose only read plus harness reporting/verification/guidance tools");
     assert.equal(parallelGroup.children[1].task_outcome?.state, "delivered");
     if (gate) {
       const guarded = manifestFor(parallelGroup, 1);
@@ -636,8 +709,10 @@ export default function rootTest(pi: ExtensionAPI) {
     assert.ok(notifications.length > 0, "background completion must notify the parent");
     assert.ok(notifications.every(entry => Array.isArray(entry.details?.updates)
       && entry.details.updates.length > 0
-      && entry.details.updates.every((update: any) => update.kind === "subagent" && update.completion === true)),
-      "routine child updates must remain quiet");
+      && entry.details.updates.every((update: any) => update.kind === "subagent" && update.completion === true
+        || update.kind === "notification" && update.requires_guidance === true
+          && update.child_id === saved.questionnaireChildId && update.message.startsWith("Structured human request "))),
+      `routine child updates must remain quiet; only the fixture's explicit human request may wake: ${JSON.stringify(notifications.map(entry => entry.details?.updates))}`);
     assert.ok(entries.some(entry => entry.type === "custom" && entry.customType === "harness-state-receipt"));
     return { rootTool: true, guard: Boolean(gate), survivorPid: saved.childPid, parallel: parallel.details.job_id, chain: chain.details.job_id, resume: resumed.details.job_id };
   });

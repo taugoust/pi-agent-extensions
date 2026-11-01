@@ -91,11 +91,12 @@ export type TuiWorkerOperation =
   | { operation: "user_prompt"; message: string }
   | { operation: "cancel" }
   | { operation: "compact" }
+  | { operation: "verify" }
   | { operation: "jobs"; params: TuiWorkerJobParams }
   // prepare_reap reserves input while the child controller preserves/cleans
   // owned terminal jobs, then seals the boundary before a launcher removes the
   // verified pane. It must reject a busy child; cancel is never implicit.
-  | { operation: "prepare_reap" }
+  | { operation: "prepare_reap"; force?: boolean; reason?: string }
   | { operation: "promote"; placement: TuiWorkerPlacement }
   | { operation: "respond_interaction"; interactionId: string; answer: import("./foreground-tasks.ts").TaskInteractionAnswer }
   | { operation: "idle_decision"; decisionRequestId: string; choice: "ignore" | "compact" | "cancel" };
@@ -112,7 +113,7 @@ export type TuiWorkerResponse = {
   workerEpoch: string;
 } & (
   | { ok: true; receipt: "accepted" | "applied"; sequence: number; data?: unknown }
-  | { ok: false; code: "unauthorized" | "stale" | "invalid" | "busy" | "sealed" | "ambiguous" | "unavailable" | "compact_failed" | "interrupt_incomplete"; message: string; receipt?: "failed"; data?: { abortRequested: true; replacementDispatched: false } }
+  | { ok: false; code: "unauthorized" | "stale" | "invalid" | "busy" | "sealed" | "ambiguous" | "unavailable" | "compact_failed" | "interrupt_incomplete" | "cleanup_failed" | "verification_cleanup_incomplete"; message: string; receipt?: "failed"; data?: { abortRequested: true; replacementDispatched: false } }
 );
 
 export type TuiWorkerEvent = {
@@ -120,7 +121,7 @@ export type TuiWorkerEvent = {
   workerEpoch: string;
   sequence: number;
   timestamp: string;
-  kind: "ready" | "running" | "settled" | "notification" | "outcome" | "cancelled" | "closing" | "interaction_pending" | "interaction_resolved" | "interaction_cancelled" | "idle_decision_pending" | "idle_decision_resolved" | "idle_decision_cancelled" | "conversation_tool_start" | "conversation_tool_end";
+  kind: "ready" | "running" | "settled" | "verification_settled" | "notification" | "outcome" | "cancelled" | "closing" | "interaction_pending" | "interaction_resolved" | "interaction_cancelled" | "idle_decision_pending" | "idle_decision_resolved" | "idle_decision_cancelled" | "conversation_tool_start" | "conversation_tool_end";
   data?: unknown;
 };
 
@@ -162,12 +163,13 @@ export function parseTuiWorkerRequest(value: unknown): TuiWorkerRequest {
   const base = ["protocol", "requestId", "token", "ownerSessionId", "taskId", "runtimeId", "groupId", "childId", "attempt", "workerEpoch", "operation"];
   const fields: Record<string, string[]> = {
     status: [], events: ["afterSequence"], prompt: ["mode", "message"], user_prompt: ["message"],
-    cancel: [], compact: [], jobs: ["params"], prepare_reap: [], promote: ["placement"],
+    cancel: [], compact: [], verify: [], jobs: ["params"], prepare_reap: [], promote: ["placement"],
     respond_interaction: ["interactionId", "answer"], idle_decision: ["decisionRequestId", "choice"],
   };
   const operation = text(data.operation, 32);
   if (!Object.hasOwn(fields, operation)) throw new Error("Unknown worker operation");
-  exactKeys(data, [...base, ...fields[operation]]);
+  const optionalFields = operation === "prepare_reap" ? ["force", "reason"].filter(key => Object.hasOwn(data, key)) : [];
+  exactKeys(data, [...base, ...fields[operation].filter(key => !optionalFields.includes(key)), ...optionalFields]);
   if (data.protocol !== TUI_WORKER_PROTOCOL) throw new Error("Unsupported worker protocol");
   const identity = {
     protocol: TUI_WORKER_PROTOCOL,
@@ -210,7 +212,14 @@ export function parseTuiWorkerRequest(value: unknown): TuiWorkerRequest {
         || Buffer.byteLength(JSON.stringify(answer)) > 24 * 1024) throw new Error("Invalid interaction answer");
       return { ...identity, operation, interactionId, answer };
     }
-    case "status": case "cancel": case "compact": case "prepare_reap": return { ...identity, operation };
+    case "prepare_reap": {
+      if (data.force !== undefined && typeof data.force !== "boolean") throw new Error("force must be boolean");
+      if (data.reason !== undefined) text(data.reason, 1000);
+      if (data.force === true && !String(data.reason ?? "").trim()) throw new Error("Forced reap requires a reason");
+      if (data.force !== true && data.reason !== undefined) throw new Error("reason requires force: true");
+      return { ...identity, operation, ...(data.force !== undefined ? { force: data.force } : {}), ...(data.force === true ? { reason: String(data.reason) } : {}) };
+    }
+    case "status": case "cancel": case "compact": case "verify": return { ...identity, operation };
     default: throw new Error("Unknown worker operation");
   }
 }

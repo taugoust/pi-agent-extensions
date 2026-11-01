@@ -133,6 +133,22 @@ pkgs.runCommand "subagent-check"
     mkdir -p "$workdir/out/node_modules/@earendil-works/pi-coding-agent"
     printf '%s\n' '{ "name": "@earendil-works/pi-coding-agent", "type": "module", "main": "./index.js" }' \
       > "$workdir/out/node_modules/@earendil-works/pi-coding-agent/package.json"
+    # Guidance tool registration also imports the SDK's schema helpers. Keep
+    # this offline double narrow; the real-Pi fixtures below use the actual SDK.
+    mkdir -p "$workdir/out/node_modules/@earendil-works/pi-ai"
+    printf '%s\n' '{ "name": "@earendil-works/pi-ai", "type": "module", "main": "./index.js" }' \
+      > "$workdir/out/node_modules/@earendil-works/pi-ai/package.json"
+    cat > "$workdir/out/node_modules/@earendil-works/pi-ai/index.js" <<'EOF'
+    const optional = Symbol.for("TypeBox.Optional");
+    export const Type = {
+      String: (options = {}) => ({ type: "string", ...options }),
+      Optional: schema => ({ ...schema, [optional]: "Optional" }),
+      Object: (properties, options = {}) => {
+        const required = Object.keys(properties).filter(key => properties[key][optional] !== "Optional");
+        return { type: "object", properties, ...(required.length ? { required } : {}), ...options };
+      },
+    };
+    EOF
     export PI_SUBAGENT_TEST_AGENT_DIR="$workdir/isolated-agent"
     mkdir -p "$PI_SUBAGENT_TEST_AGENT_DIR"
     # This is a deliberately narrow test double, not the SDK implementation.
@@ -188,7 +204,8 @@ pkgs.runCommand "subagent-check"
     node "$workdir/out/shared/quiet-state.test.js"
     TEST_MKFIFO=${pkgs.coreutils}/bin/mkfifo node "$workdir/out/subagent/native-rpc.test.js"
 
-    # Native TUI tests use Node's TS stripping and the real Pi when supplied by
+    # Native TUI tests use Node's TS transformation (including constructor
+    # parameter properties) and the real Pi when supplied by
     # the parent check composition. No model/API requests: provider is local.
     mkdir -p "$workdir/tui-runtime"
     cp -R ${self}/subagent ${self}/shared ${self}/workflows ${self}/permission-gate ${self}/background-job ${self}/questionnaire "$workdir/tui-runtime/"
@@ -217,7 +234,11 @@ pkgs.runCommand "subagent-check"
       }
       export PI_TUI_ROOT_MODE=${if tuiWorkerLauncher != null then "guard-only" else "none"}
     ''}
-    node --experimental-strip-types --test \
+    # Fixture children also load source TypeScript; CLI flags alone are not
+    # inherited by those Node processes. Avoid timer-test starvation from many
+    # simultaneous source transformations and native fixture subprocesses.
+    export NODE_OPTIONS="''${NODE_OPTIONS:+$NODE_OPTIONS }--experimental-transform-types"
+    node --experimental-transform-types --test --test-concurrency=1 \
       "$workdir/tui-runtime/shared/tool-result-text.test.ts" \
       "$workdir/tui-runtime/subagent/acceptance.test.ts" \
       "$workdir/tui-runtime/subagent/acceptance-adversarial.test.ts" \

@@ -60,10 +60,17 @@ test("panel user prompts have a separate authenticated origin from parent instru
   assert.throws(() => parseTuiWorkerRequest({ ...identity, operation: "user_prompt", message: "/permission-gate off", mode: "interrupt" }));
 });
 
-test("cancel and idle-reap reservation are distinct operations", () => {
+test("cancel, explicit verify and idle-reap reservation are distinct operations", () => {
   assert.equal(parseTuiWorkerRequest({ ...identity, operation: "cancel" }).operation, "cancel");
+  assert.equal(parseTuiWorkerRequest({ ...identity, operation: "verify" }).operation, "verify");
   assert.equal(parseTuiWorkerRequest({ ...identity, operation: "prepare_reap" }).operation, "prepare_reap");
+  assert.deepEqual(parseTuiWorkerRequest({ ...identity, operation: "prepare_reap", force: true, reason: "retain failed worker" }),
+    { ...identity, operation: "prepare_reap", force: true, reason: "retain failed worker" });
+  assert.deepEqual(parseTuiWorkerRequest({ ...identity, operation: "prepare_reap", force: false }),
+    { ...identity, operation: "prepare_reap", force: false });
   assert.throws(() => parseTuiWorkerRequest({ ...identity, operation: "prepare_reap", force: true }));
+  assert.throws(() => parseTuiWorkerRequest({ ...identity, operation: "prepare_reap", force: "yes" }));
+  assert.throws(() => parseTuiWorkerRequest({ ...identity, operation: "prepare_reap", force: false, reason: "no" }));
 });
 
 test("public discovery strips control capability and clones nested placement", () => {

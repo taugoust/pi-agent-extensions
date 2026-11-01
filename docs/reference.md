@@ -885,7 +885,9 @@ options (`task`, `tasks`, `chain`, `model`, `background`, `tools`, `cwd`, etc.).
 | `resume` | `task_id`, `message?`, `compact?` |
 | `prompt` | `child_id`, `message`, `job_id?`, `control_mode?`, `wait_for_response?` |
 | `list`, `tasks` | `limit?` (1–50) |
-| `status`, `output`, `cancel`, `reap`, `promote` | `job_id` |
+| `status`, `output`, `cancel`, `promote` | `job_id` |
+| `verify` | `job_id?`, `child_id?`; require a worker or group target |
+| `reap` | `job_id`, `force?`, `reason?`; omitted/false is normal gated reap; `force:true` requires a nonblank bypass reason |
 | `yield` | `job_id?` (immediate snapshot; sole tool ends the current run) |
 | `result` | `job_id?`, `child_id?`, `child?`, `offset?`, `limit?`, `diagnostics?`; require `job_id` or `child_id`; never both `child` and `child_id` |
 
@@ -1092,6 +1094,11 @@ backends keep their existing execution model and never silently fall back to nat
   resumes with the parent; it is not a separate autonomous supervisor.
 - Completion or cancellation retains the Pi TUI and reports. `operation=reap`
   explicitly closes verified owned panes and rejects active human/model work.
+  Configured runtime verification must currently pass before normal reap; missing
+  or stale checks run first, and failure retains the affected worker. Exceptional
+  `force:true` with a required `reason` records a verification bypass, not acceptance.
+  It does not bypass any ownership, activity or recursive job-cleanup safeguards,
+  imply permission to merge, or delete unmerged worktrees.
   Before closing a native child, its authenticated local job controller preserves
   bounded terminal status/output in retained `job-cleanup-*.json` artifacts and
   reaps its owned terminal background jobs. Active/starting jobs, adopted jobs,
@@ -1238,7 +1245,14 @@ status/result operations. Without configured runtime verification, existing
 execution statuses and failure semantics remain unchanged.
 
 Optional `verification` command gates are separate from the mandatory criteria
-and worker reports. Native TUI workers run them through their own supervised jobs
+and worker reports. Ordinary turn completion or idleness never launches checks.
+The worker's `task_outcome` with `state:"delivered"` awaits configured verification;
+`partial`, `blocked` and `checkpointed` do not trigger it. Checks are also available
+standalone through the worker's `verify` tool or the parent's `subagent operation=verify`.
+Normal reap requires current passing checks when gates are configured and runs them
+if needed; exceptional `reap` with `force:true` and a required reason bypasses only
+that requirement and records the bypass without claiming acceptance.
+Native TUI workers run them through their own supervised jobs
 and live command permissions in the actual worker cwd/worktree; read-only tools
 never gain command authority. All configured gates must pass before
 `accepted_delivery` can be true. Nonzero exit, timeout, cancellation, unavailable

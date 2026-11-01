@@ -94,7 +94,7 @@ test("parallel launch failure preserves an authenticated settled sibling result"
         const manifest = { ...identity, ownerSessionId: group.owner, taskId: child.taskId, runtimeId: "rpc-settled-fixture",
           groupId: group.id, childId: child.childId, attempt: child.attempt, workerEpoch: "a".repeat(32),
           controlSocket: store.path("control.sock"), controlToken: "b".repeat(64), sessionFile,
-          execution: "rpc-headless", presentation: "headless-foreground", launchMode: "none",
+          execution: "rpc-headless", presentation: "headless-foreground", launchMode: "none", acceptance: child.spec.acceptance ?? [],
           processPid: process.pid, processToken: runtimeToken, fifoPath: store.path("stdin.fifo"),
           foregroundOwner: { pid: process.pid + 1, token: group.ownerToken } } as any;
         store.writeManifest(manifest);
@@ -102,8 +102,10 @@ test("parallel launch failure preserves an authenticated settled sibling result"
         worker = new TuiWorkerServer(store, { isIdle: () => true,
           send() {
             promptCount++;
-            setImmediate(() => {
-              worker!.outcome({ version: 1, state: "delivered", summary: "Completed before sibling startup failed.", acceptance: [], artifacts: [], remaining: [] });
+            setImmediate(async () => {
+              await worker!.outcome({ version: 1, state: "delivered", summary: "Completed before sibling startup failed.",
+                acceptance: (manifest.acceptance ?? []).map((criterion: string) => ({ criterion, status: "passed", evidence: "authenticated settled fixture" })),
+                artifacts: [], remaining: [] });
               worker!.settled({ assistant: { role: "assistant", content: [{ type: "text", text: "settled fixture" }], stopReason: "stop" } });
               aSettled();
             });
@@ -136,7 +138,7 @@ test("parallel launch failure preserves an authenticated settled sibling result"
     process.env.PI_TUI_WORKER_LAUNCH_MODE = "none";
     try {
       await assert.rejects((manager as any).launchImpl({ tasks: [
-        { task: "already settled" }, { task: "startup timeout" },
+        { task: "already settled", acceptance: ["fixture"] }, { task: "startup timeout", acceptance: ["fixture"] },
       ] }, owner, process.cwd()), /fixture result/);
     } finally {
       if (priorLauncher === undefined) delete process.env.PI_TUI_WORKER_LAUNCHER; else process.env.PI_TUI_WORKER_LAUNCHER = priorLauncher;

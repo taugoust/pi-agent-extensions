@@ -182,9 +182,9 @@ export default function tuiWorkerExtension(pi: ExtensionAPI): void {
       if (manifest.execution === "rpc-headless") {
         const configured = manifest.tools ?? (typeof (pi as any).getActiveTools === "function" ? (pi as any).getActiveTools() : []);
         const headlessTools = configured.filter((name: string) => name !== "subagent" && name !== "background_job");
-        if (typeof (pi as any).setActiveTools === "function") pi.setActiveTools([...new Set([...headlessTools, "notify_parent", "task_outcome", "request_guidance"])]);
+        if (typeof (pi as any).setActiveTools === "function") pi.setActiveTools([...new Set([...headlessTools, "notify_parent", "task_outcome", "verify", "request_guidance"])]);
       } else if (manifest.tools !== undefined && typeof (pi as any).setActiveTools === "function") {
-        pi.setActiveTools([...new Set([...manifest.tools, "notify_parent", "task_outcome", "request_guidance", "guidance"])]);
+        pi.setActiveTools([...new Set([...manifest.tools, "notify_parent", "task_outcome", "verify", "request_guidance", "guidance"])]);
       }
       const actualSession = ctx.sessionManager.getSessionFile();
       if (!actualSession || resolve(actualSession) !== resolve(manifest.sessionFile)) throw new Error("Worker Pi session does not match launch manifest");
@@ -465,16 +465,28 @@ export default function tuiWorkerExtension(pi: ExtensionAPI): void {
       worker.notification({ message: params.message, requires_guidance: params.requires_guidance === true });
       return { content: [{ type: "text", text: "Queued for the parent; no reply yet." }], details: {} };
     } });
-  pi.registerTool({ name: "task_outcome", label: "Report task outcome", description: "Report delivery with evidence. Incomplete outcomes require remaining work and next_action. For partial only, continuation=routine explicitly attests that all remaining work is routine and already authorized, with no external dependency, failed check, safety decision or user input needed; permits at most one automatic continuation. Otherwise omit continuation or use needs_input; genuine blockers must use blocked. This is not new authority.",
+  pi.registerTool({ name: "verify", label: "Verify task", description: "Run and await the configured runtime verification gates. Aborting cancels only a verification flight this tool started; joining an existing check stops only this wait. Does not authorize or imply accepted delivery.", parameters: { type: "object", properties: {}, additionalProperties: false }, async execute(_id, _params, signal?: AbortSignal) {
+    if (!worker || worker.sealed) throw new Error("Worker verification unavailable");
+    const result = await worker.verify(signal);
+    const pending = result.status === "checking";
+    const failed = result.status !== "passed";
+    return { content: [{ type: "text", text: `Verification ${result.status}; this operation does not confer accepted delivery.` }], details: { verification: result, pending, failed, accepted_delivery: false }, isError: failed };
+  } });
+  pi.registerTool({ name: "task_outcome", label: "Report task outcome", description: "Report delivery with evidence. Delivered outcomes await configured runtime verification; abort cancels only a verification flight this tool started. Incomplete outcomes require remaining work and next_action. For partial only, continuation=routine explicitly attests that all remaining work is routine and already authorized, with no external dependency, failed check, safety decision or user input needed; permits at most one automatic continuation. Otherwise omit continuation or use needs_input; genuine blockers must use blocked. This is not new authority.",
     parameters: { type: "object", properties: { version: { type: "integer", const: 1 }, state: { type: "string", enum: ["delivered", "partial", "blocked", "checkpointed"] }, summary: { type: "string", maxLength: 2000 },
       acceptance: { type: "array", maxItems: 16, items: { type: "object", properties: { criterion: { type: "string" }, status: { type: "string", enum: ["passed", "failed", "not_run"] }, evidence: { type: "string" } }, required: ["criterion", "status"] } },
       artifacts: { type: "array", maxItems: 16, items: { type: "object", properties: { path: { type: "string" }, sha256: { type: "string" } }, required: ["path"] } }, remaining: { type: "array", maxItems: 16, items: { type: "string" } }, next_action: { type: "string" }, continuation: { type: "string", enum: ["routine", "needs_input"] } },
       required: ["version", "state", "summary", "acceptance", "artifacts", "remaining"], additionalProperties: false } as any,
-    async execute(_id, params: any) {
+    async execute(_id, params: any, signal?: AbortSignal) {
       if (!worker || worker.sealed) throw new Error("Worker outcome unavailable");
       const outcome = validateTaskOutcome(params, worker.manifest.acceptance ?? []);
-      worker.outcome(outcome);
-      return { content: [{ type: "text", text: `Recorded ${outcome.state}; execution completion and explicit reap remain separate.` }], details: { task_outcome: outcome } };
+      await worker.outcome(outcome, signal);
+      const verification = outcome.state === "delivered" && worker.manifest.verification?.length ? worker.getVerificationSummary() : undefined;
+      const failed = !!verification && verification.status !== "passed";
+      return { content: [{ type: "text", text: failed
+        ? `Recorded the delivered claim, but runtime verification ${verification!.status}; accepted_delivery=false. Correct the issue and report again.`
+        : `Recorded ${outcome.state}; execution completion and explicit reap remain separate${verification ? `; verification ${verification.status}` : ""}.` }],
+        details: { task_outcome: outcome, ...(verification ? { verification, accepted_delivery: false } : {}), failed }, isError: failed };
     } });
   pi.on("session_info_changed", async (event: any, ctx) => {
     if (!nameStore || event.name === appliedName || ctx.sessionManager.getSessionName() !== event.name) return;

@@ -12,9 +12,9 @@ import { createHash, randomBytes } from "node:crypto";
 import { TUI_WORKER_DISCOVERY_ENV, TUI_WORKER_MANIFEST_ENV, type HeadlessWorkerManifest, type TuiWorkerEvent } from "../shared/tui-worker-protocol.ts";
 import { extractRetainedToolPresentation, extractToolPresentationArguments } from "../shared/tool-presentation.ts";
 import { FOREGROUND_TASKS_PROTOCOL, type ForegroundTask, type ForegroundTaskRequest, type ForegroundTaskResponse, type ForegroundTasksService, type TaskMessage, type TaskTarget, type TaskView } from "../shared/foreground-tasks.ts";
-import { processIdentity, processIsAlive, tuiWorkerLaunchContract } from "./tui-worker-tmux.ts";
+import { processIdentity, processIsAlive, tuiWorkerLaunchContract, verificationBudget } from "./tui-worker-tmux.ts";
 import { TuiWorkerStore, atomicPrivateJson, privateDirectory, readPrivateJson } from "./tui-worker-store.ts";
-import { callTuiWorker, applyTuiWorkerOperatorMode } from "./tui-worker-client.ts";
+import { callTuiWorker, awaitTuiWorkerVerification, applyTuiWorkerOperatorMode } from "./tui-worker-client.ts";
 import { validateAcceptance } from "./outcome.ts";
 import { validateVerification } from "./acceptance.ts";
 import { readRetainedConversation, validateRetainedConversationFile } from "./retained-conversation.ts";
@@ -37,7 +37,7 @@ const MAX_MESSAGE_TEXT = 4 * 1024;
 const stripControls = (text: string) => text.replace(/\x1b\][\s\S]*?(?:\x07|\x1b\\)/g, "").replace(/(?:\x1b\[|\x9b)[0-?]*[ -/]*[@-~]/g, "").replace(/[\x00-\x08\x0b-\x1f\x7f-\x9f]/g, "");
 
 type Spec = { name?: string; displayName?: string; task: string; cwd: string; model?: string; tools?: string[]; systemPrompt?: string; acceptance?: string[]; verification?: import("./acceptance.ts").VerificationGate[]; worktree?: WorktreeOption; worktreeInfo?: { path: string; branch: string; baseCommit: string; includedChanges: boolean } };
-type Child = { taskId: string; childId: string; attempt: number; directory: string; spec: Spec; status: ForegroundTask["status"]; createdAt: string; updatedAt: string; started: boolean; launching?: boolean; reaped?: boolean; report?: string; outcome?: unknown; error?: string; workerAlive?: boolean; requiresCompaction?: boolean; notifiedSequence?: number; launcherPid?: number; launcherToken?: string; ownerToken: string; operatorCapability: string; resumeMessage?: string; compactBeforePrompt?: boolean; stopRequested?: boolean; initialPromptDispatching?: boolean; };
+type Child = { taskId: string; childId: string; attempt: number; directory: string; spec: Spec; status: ForegroundTask["status"]; createdAt: string; updatedAt: string; started: boolean; launching?: boolean; reaped?: boolean; report?: string; outcome?: unknown; error?: string; workerAlive?: boolean; requiresCompaction?: boolean; notifiedSequence?: number; launcherPid?: number; launcherToken?: string; ownerToken: string; operatorCapability: string; resumeMessage?: string; compactBeforePrompt?: boolean; stopRequested?: boolean; initialPromptDispatching?: boolean; verificationBypasses?: Array<{ attempt: number; workerEpoch: string; reason: string; at: string }>; };
 type Group = { version: 1; id: string; owner: string; ownerToken: string; createdAt: string; mode: "single" | "parallel" | "chain"; cancelled: boolean; guidanceYielded?: boolean; guidanceCompletion?: string; launchMode: "none" | "guard-only"; launcher: string; children: Child[] };
 type Disposition = "native" | "guard-only" | "full" | "unavailable";
 const active = (c: Child) => ["pending", "running", "waiting-input", "waiting-permission"].includes(c.status);
@@ -349,8 +349,8 @@ export class HeadlessForegroundManager {
     if (child.stopRequested || group.cancelled) { await this.sealAndReap(group, child, manifest); child.status = "cancelled"; this.persist(group); return manifest; }
     child.initialPromptDispatching = true; child.updatedAt = new Date().toISOString(); this.bumpGeneration(child); this.persist(group);
     const prompt = child.attempt > 1
-      ? `Continue the retained session, not a new assignment. Latest parent instruction: ${child.resumeMessage ?? "Continue from the saved checkpoint."}\n\nDo not replay the original task. Report useful findings with notify_parent and your outcome with task_outcome. This is a flat foreground helper: do not delegate further.`
-      : `Task: ${child.spec.task}\n\nAcceptance criteria: ${JSON.stringify(child.spec.acceptance ?? [])}\nReport useful findings with notify_parent and your outcome with task_outcome. This is a flat foreground helper: do not delegate further. Report a concise final answer.`;
+      ? `Continue the retained session, not a new assignment. Latest parent instruction: ${child.resumeMessage ?? "Continue from the saved checkpoint."}\n\nDo not replay the original task. Report useful findings with notify_parent and your outcome with task_outcome. Use verify to explicitly start configured gates; delivered outcomes trigger gates, and failures require correction. This is a flat foreground helper: do not delegate further.`
+      : `Task: ${child.spec.task}\n\nAcceptance criteria: ${JSON.stringify(child.spec.acceptance ?? [])}\nReport useful findings with notify_parent and your outcome with task_outcome. Use verify to explicitly start configured gates; delivered outcomes trigger gates, and failures require correction. This is a flat foreground helper: do not delegate further. Report a concise final answer.`;
     const accepted = await callTuiWorker(manifest, { operation: "prompt", mode: "steer", message: prompt }, { requestId: `initial:${child.childId}`, signal });
     child.initialPromptDispatching = false;
     if (!accepted.ok) throw new Error(`Initial prompt not confirmed: ${accepted.code}`);
@@ -661,7 +661,7 @@ export class HeadlessForegroundManager {
     } catch { return ""; }
   }
   private result(group: Group, selected?: Child, options: { operation?: string; offset?: number; limit?: number; diagnostics?: boolean; retained?: boolean } = {}): any {
-    const children = group.children.map((child, index) => ({ child: index + 1, child_id: child.childId, task_id: child.taskId, status: child.status, attempt: child.attempt, displayName: this.canonicalTitle(child), task: child.spec.task.slice(0, 500), cwd: child.spec.cwd, worktree: child.spec.worktreeInfo, error: child.error, task_outcome: child.outcome, verification: { status: child.spec.verification?.length ? "unavailable" : "not-configured" }, accepted_delivery: !child.spec.verification?.length && child.status === "completed" && (child.outcome as any)?.state === "delivered", review: "not-configured" }));
+    const children = group.children.map((child, index) => ({ child: index + 1, child_id: child.childId, task_id: child.taskId, status: child.status, attempt: child.attempt, displayName: this.canonicalTitle(child), task: child.spec.task.slice(0, 500), cwd: child.spec.cwd, worktree: child.spec.worktreeInfo, error: child.error, task_outcome: child.outcome, verification: { status: child.spec.verification?.length ? "unavailable" : "not-configured" }, accepted_delivery: !child.spec.verification?.length && child.status === "completed" && (child.outcome as any)?.state === "delivered", verification_bypasses: child.verificationBypasses ?? [], review: "not-configured" }));
     const failed = group.children.some(child => ["failed", "lost"].includes(child.status));
     const operation = options.operation ?? "result";
     const cancelled = group.cancelled || group.children.some(child => child.status === "cancelled");
@@ -970,10 +970,10 @@ export class HeadlessForegroundManager {
     const service: ForegroundTasksService = { protocol: FOREGROUND_TASKS_PROTOCOL, sessionId: this.owner!, epoch: this.epoch, execute: request => this.execute(request) };
     return service;
   }
-  private async sealAndReap(group: Group, child: Child, initial: HeadlessWorkerManifest): Promise<void> {
+  private async sealAndReap(group: Group, child: Child, initial: HeadlessWorkerManifest, options: { force?: true; reason?: string } = {}): Promise<void> {
     const manifest = await this.ensureRuntimeIdentity(initial);
     if (await this.runtimeState(manifest) === "alive") {
-      const response = await callTuiWorker(manifest, { operation: "prepare_reap" }, { requestId: `reap:${manifest.workerEpoch}`, timeoutMs: 30_000 });
+      const response = await callTuiWorker(manifest, { operation: "prepare_reap", ...(options.force ? { force: true, reason: options.reason! } : {}) }, { requestId: `reap:${manifest.workerEpoch}:${options.force ? createHash("sha256").update(options.reason!).digest("hex").slice(0, 12) : "verify"}`, timeoutMs: 30_000 });
       if (!response.ok) throw new Error(`Headless worker reap refused: ${response.code}: ${response.message}`);
       const deadline = Date.now() + 10_000;
       while (Date.now() < deadline && await this.runtimeState(manifest) === "alive") await pause(100);
@@ -985,7 +985,7 @@ export class HeadlessForegroundManager {
       runtimeProcessToken: manifest.runtimeProcessToken, reapedAt: new Date().toISOString() });
     child.status = child.stopRequested ? "cancelled" : "reaped";
     child.workerAlive = false; child.updatedAt = new Date().toISOString(); this.persist(group);
-    if (child.spec.worktree) await releaseWorktree(group.owner, child.taskId, child.childId);
+    if (child.spec.worktree && !options.force) await releaseWorktree(group.owner, child.taskId, child.childId);
   }
   private verifyCleanupProof(child: Child, manifest: HeadlessWorkerManifest): void {
     const store = new TuiWorkerStore(child.directory);
@@ -1172,11 +1172,30 @@ export class HeadlessForegroundManager {
       child = indexed;
     }
     if (group && !child) {
-      if (!["cancel", "reap", "wait", "wait_group", "result", "output", "prompt", "resume", "jobs", "promote"].includes(op)) return undefined;
+      if (!["cancel", "reap", "wait", "wait_group", "result", "output", "prompt", "resume", "jobs", "promote", "verify"].includes(op)) return undefined;
       child = group.children[(params.child ?? 1) - 1];
     }
     if (!group || !child) return undefined;
     if (op === "promote") throw new Error("Headless foreground workers cannot be promoted without restarting or replaying; promotion is unsupported");
+    if (op === "verify") {
+      const targets = params.child_id ? [child] : group.children.filter(target => target.spec.verification?.length);
+      const results = [];
+      for (const target of targets) {
+        const targetManifest = this.manifest(target);
+        if (!targetManifest || target.reaped) throw new Error(`Verification unavailable for closed headless worker ${target.childId}`);
+        const requestId = `parent-verify:${targetManifest.workerEpoch}:${randomBytes(12).toString("hex")}`;
+        const checked = await awaitTuiWorkerVerification(targetManifest, requestId, verificationBudget(targetManifest), signal);
+        if (!checked.response.ok) throw new Error(`Headless verification failed: ${checked.response.code}: ${checked.response.message}`);
+        const verification = (checked.response.data as any)?.verification;
+        if (!verification?.status) throw new Error("Headless verification returned no structured status");
+        results.push({ child_id: target.childId, verification, accepted_delivery: false, ...(checked.timedOut ? { timed_out: true } : {}) });
+      }
+      if (!results.length) throw new Error("No verification gates are configured for this worker group");
+      const pending = results.some(result => result.verification?.status === "checking");
+      const timedOut = results.some(result => result.timed_out === true);
+      const failed = results.some(result => !["passed", "checking"].includes(result.verification?.status));
+      return { content: [{ type: "text", text: results.map(result => `${result.child_id}: ${result.verification?.status ?? "unavailable"}${result.timed_out ? " (verification wait timed out)" : ""}`).join("\n") }], details: { operation: op, backend: "native", results, accepted_delivery: false, pending, timed_out: timedOut, failed }, isError: failed || timedOut };
+    }
     if (op === "jobs") throw new Error("Child-local tmux job control is unavailable for headless workers; no pane was created");
     let manifest = this.manifest(child);
     if (op === "cancel") { await this.stopGroup(group); return this.result(group); }
@@ -1194,7 +1213,12 @@ export class HeadlessForegroundManager {
           }
           throw new Error("Headless worker manifest is missing; process death and job cleanup cannot be verified");
         }
-        await this.sealAndReap(group, targetChild, targetManifest);
+        await this.sealAndReap(group, targetChild, targetManifest, params.force === true ? { force: true, reason: params.reason } : {});
+        if (params.force === true && targetChild.spec.verification?.length) {
+          targetChild.verificationBypasses ??= [];
+          targetChild.verificationBypasses.push({ attempt: targetChild.attempt, workerEpoch: targetManifest.workerEpoch, reason: params.reason, at: new Date().toISOString() });
+          this.persist(group);
+        }
       }
       this.persist(group);
       return this.result(group);

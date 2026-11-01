@@ -14,6 +14,7 @@ export type WorkerState = {
   verification?: VerificationRecord;
   verificationReport?: string;
   verificationQuarantine?: string;
+  verificationBypasses?: Array<{ workerEpoch: string; attempt: number; reason: string; at: string; requestId: string }>;
   /** Durable fail-closed budget: never replenished by reload, steering or repeated outcomes. */
   autoContinuation?: { used: boolean; inhibited: boolean };
   jobCleanup?: { workerEpoch: string; artifact: string };

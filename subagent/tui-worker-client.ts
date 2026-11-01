@@ -16,6 +16,31 @@ export async function callTuiWorker(manifest: TuiWorkerManifest, operation: TuiW
   return await exchangeTuiWorker(manifest.controlSocket, request, manifest.workerEpoch, options);
 }
 
+/** Poll the same durable verify receipt until its final verdict or a bounded deadline. */
+export async function awaitTuiWorkerVerification(manifest: TuiWorkerManifest, requestId: string, timeoutMs: number,
+  signal?: AbortSignal): Promise<{ response: TuiWorkerResponse; timedOut: boolean }> {
+  if (!Number.isSafeInteger(timeoutMs) || timeoutMs < 1) throw new Error("Invalid verification wait budget");
+  const deadline = Date.now() + timeoutMs;
+  const delay = (ms: number) => new Promise<void>((resolve, reject) => {
+    if (signal?.aborted) { reject(new Error("Worker verification wait cancelled; checks continue")); return; }
+    const timer = setTimeout(() => { signal?.removeEventListener("abort", abort); resolve(); }, ms);
+    const abort = () => { clearTimeout(timer); signal?.removeEventListener("abort", abort); reject(new Error("Worker verification wait cancelled; checks continue")); };
+    signal?.addEventListener("abort", abort, { once: true });
+  });
+  let response = await callTuiWorker(manifest, { operation: "verify" }, { requestId, timeoutMs: Math.min(5000, timeoutMs), signal });
+  for (;;) {
+    if (!response.ok) return { response, timedOut: false };
+    const status = (response.data as any)?.verification?.status;
+    if (status !== "checking") return { response, timedOut: false };
+    const remaining = deadline - Date.now();
+    if (remaining <= 0) return { response, timedOut: true };
+    await delay(Math.min(250, remaining));
+    const nextBudget = deadline - Date.now();
+    if (nextBudget <= 0) return { response, timedOut: true };
+    response = await callTuiWorker(manifest, { operation: "verify" }, { requestId, timeoutMs: Math.min(5000, nextBudget), signal });
+  }
+}
+
 export async function exchangeTuiWorker(socketPath: string, request: { requestId: string }, workerEpoch: string,
   options: { timeoutMs?: number; signal?: AbortSignal } = {}): Promise<TuiWorkerResponse> {
   const timeoutMs = options.timeoutMs ?? 10_000;

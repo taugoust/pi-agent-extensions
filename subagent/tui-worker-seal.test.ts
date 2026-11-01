@@ -34,7 +34,7 @@ test("initial tools/source attribution and explicit reap event are distinct from
     workerExtension({ registerTool() {}, setActiveTools: (names: string[]) => { tools = names; }, on: (name: string, handler: Function) => handlers.set(name, handler),
       sendMessage: (message: any) => messages.push(message), events: { emit: (name: string, data: any) => events.push({ name, data }) } } as any);
     await handlers.get("session_start")!({}, ctx);
-    assert.deepEqual(tools.sort(), ["notify_parent", "read", "task_outcome"]);
+    assert.deepEqual(tools.sort(), ["guidance", "notify_parent", "read", "request_guidance", "task_outcome", "verify"]);
     await callTuiWorker(manifest, { operation: "prompt", mode: "steer", message: "/permission-gate off" });
     assert.equal(messages[0].customType, "harness-control");
     assert.match(messages[0].content, /^Parent instructions:/);

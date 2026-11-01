@@ -111,7 +111,7 @@ test("root discovers multilevel orphan, blocks active ancestor reap, reconciles 
     assert.doesNotMatch(listing.content[0].text, /subagent-job-[0-9a-f]{24}/, "readable status uses names, while exact IDs stay in details");
     await assert.rejects(f.manager.operation({ operation: "reap", job_id: f.groups[0].id }, "session-0"), /Active descendants/);
     assert.deepEqual(f.reaped, []);
-    f.server.outcome({ state: "delivered" });
+    await f.server.outcome({ version: 1, state: "delivered", summary: "Done", acceptance: [{ criterion: "fixture", status: "passed", evidence: "test" }], artifacts: [], remaining: [] });
     await assert.rejects(f.manager.operation({ operation: "reap", job_id: f.groups[0].id }, "session-0"), /Active descendants/);
     f.server.settled({ assistant: { stopReason: "stop", content: [{ type: "text", text: "leaf final answer" }] } });
     const done = await f.manager.operation({ operation: "list" }, "session-0");
