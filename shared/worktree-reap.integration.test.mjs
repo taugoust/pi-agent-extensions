@@ -72,6 +72,20 @@ test("reaps authenticated root and nested owner records without deleting branche
   for (const row of records.slice(3)) { assert.ok(await fs.stat(row.path)); assert.equal((await ownedWorktrees(row.ownerSessionId)).find(item => item.taskId === row.taskId).reap, undefined); }
   assert.equal((await ownedWorktrees()).filter(row => records.slice(0, 3).some(target => row.taskId === target.taskId)).every(row => row.reap.phase === "cleaned"), true);
 }));
+test("nested cleanup reconciles after its source coordinator checkout has been removed", async () => fixture(async (root, records) => {
+  const parent = records[0], path = join(root, "actual-nested-checkout"), branch = "pi/actual-nested";
+  await git(["worktree", "add", "-b", branch, path], parent.path);
+  const admin = (await git(["rev-parse", "--path-format=absolute", "--git-dir"], path)).trim(), stat = await fs.stat(admin);
+  const nested = { ...parent, ownerSessionId: "actual-nested-owner", taskId: taskId("f"), childId: childId("f"), repo: parent.path,
+    path, cwd: path, branch, released: true, physicalIdentity: { dev: String(stat.dev), ino: String(stat.ino), birthtimeMs: String(stat.birthtimeMs) } };
+  await saveOwnedWorktree(nested);
+  const request = req(records, { descendants: [{ ownerSessionId: nested.ownerSessionId, taskId: nested.taskId, childId: nested.childId, reaped: true, attempt: 1 }], ownedSessionIds: [nested.ownerSessionId] });
+  assert.equal((await reapOwnedWorktrees(request)).removed.length, 2);
+  await assert.rejects(fs.stat(parent.path), { code: "ENOENT" });
+  await assert.rejects(fs.stat(path), { code: "ENOENT" });
+  assert.equal((await reapOwnedWorktrees(request)).removed.length, 2, "parent-side replay reconciles the child-side cleanup without the deleted source checkout");
+  assert.equal((await git(["rev-parse", branch], parent.repo)).trim(), parent.unmergedOid, "nested branch preserved");
+}));
 test("newer root registry child is refused and force only audits requested/current identity", async () => fixture(async (_root, records) => {
   const request = req(records), oldRoot = request.root, newer = { ...records[0], childId: childId("f"), released: true };
   await saveOwnedWorktree(newer);

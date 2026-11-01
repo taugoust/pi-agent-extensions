@@ -90,11 +90,20 @@ export function ownedWorktreeCompletionHost(ctx: CompletionContext, safety: Comp
     try { const stat = await fs.lstat(r.path); if (!stat.isDirectory() || stat.isSymbolicLink()) throw new Error("Worktree path replaced"); }
     catch (error: any) { if (error.code === "ENOENT") exists = false; else throw error; }
     if (!isAbsolute(r.path) || !r.branch.startsWith("pi/") || r.path === r.repo || !r.physicalIdentity) throw new Error("Harness worktree provenance unavailable");
-    if (await fs.realpath(r.commonDir) !== r.commonDir || await fs.realpath(r.repo) !== r.repo) throw new Error("Repository identity changed");
-    const common = (await worktreeGit(["rev-parse", "--path-format=absolute", "--git-common-dir"], r.repo, signal)).trim();
+    if (await fs.realpath(r.commonDir) !== r.commonDir) throw new Error("Repository identity changed");
+    let repository = r.repo;
+    try { if (await fs.realpath(repository) !== repository) throw new Error("Repository identity changed"); }
+    catch (error: any) {
+      // A nested record may have been provisioned from the coordinator root.
+      // After verified root-last cleanup that source no longer exists. Only
+      // reconcile a durably removed target through its stable common Git dir.
+      if (error.code !== "ENOENT" || exists || !r.reap || !["worktree-removed", "cleaned"].includes(r.reap.phase)) throw error;
+      repository = r.commonDir;
+    }
+    const common = (await worktreeGit(["rev-parse", "--path-format=absolute", "--git-common-dir"], repository, signal)).trim();
     if (common !== r.commonDir) throw new Error("Repository common directory changed");
-    await worktreeGit(["check-ref-format", `refs/heads/${r.branch}`], r.repo, signal);
-    const trees = await listWorktrees({ exec }, r.repo, signal);
+    await worktreeGit(["check-ref-format", `refs/heads/${r.branch}`], repository, signal);
+    const trees = await listWorktrees({ exec }, repository, signal);
     const own = trees.find(t => t.path === r.path);
     let identityChanged = exists ? !own || own.branch !== r.branch || own.lockedReason !== undefined || own.prunableReason !== undefined : !!own;
     if (trees.some(t => t.path !== r.path && (t.branch === r.branch || within(r.path, t.path) || within(t.path, r.path)))) identityChanged = true;
@@ -121,7 +130,7 @@ export function ownedWorktreeCompletionHost(ctx: CompletionContext, safety: Comp
       await inspectDirectory(r.path);
     }
     let branchOid: string | undefined, branchIdentity: string | undefined;
-    const refs = await worktreeGit(["for-each-ref", "--format=%(refname)%00%(objectname)", `refs/heads/${r.branch}`], r.repo, signal);
+    const refs = await worktreeGit(["for-each-ref", "--format=%(refname)%00%(objectname)", `refs/heads/${r.branch}`], repository, signal);
     const exact = refs.trim().split("\n").find(line => line.split("\0")[0] === `refs/heads/${r.branch}`);
     if (exact) {
       branchOid = exact.split("\0")[1];
