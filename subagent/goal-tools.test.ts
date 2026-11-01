@@ -1,7 +1,16 @@
 import assert from "node:assert/strict";
 import { test } from "node:test";
-import { dedicatedGoalTools, DEDICATED_GOAL_TOOLS } from "./goal-tools.ts";
+import { dedicatedGoalTools, guardedGoalBaseTools, DEDICATED_GOAL_TOOLS } from "./goal-tools.ts";
 import { createDelegatedGoalExecutor } from "./goal-executor.ts";
+
+test("guarded Goal bootstrap separates only explicitly authorized optional extension tools", () => {
+  const requested = ["read", "bash", "questionnaire", "goal_reference"];
+  assert.deepEqual(guardedGoalBaseTools(requested, ["questionnaire", "goal_reference"]), ["read", "bash"]);
+  assert.deepEqual(guardedGoalBaseTools(requested, ["questionnaire"]), ["read", "bash", "goal_reference"]);
+  assert.deepEqual(guardedGoalBaseTools(requested), requested, "ordinary workers cannot bypass the guarded tool allowlist");
+  assert.deepEqual(guardedGoalBaseTools(["read", "arbitrary_tool"], ["arbitrary_tool"]), ["read", "arbitrary_tool"], "unrecognized extensions still fail the guarded allowlist");
+  assert.deepEqual(requested, ["read", "bash", "questionnaire", "goal_reference"], "retained tool policy is not mutated");
+});
 
 test("dedicated bootstrap narrows parent capability; every denied goal tool fails closed", async () => {
   const normal = ["read", "bash", "edit", ...DEDICATED_GOAL_TOOLS];

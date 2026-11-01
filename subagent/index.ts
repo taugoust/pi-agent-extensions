@@ -110,7 +110,7 @@ import { validateVerification, type VerificationGate } from "./acceptance.ts";
 import { randomBytes, randomUUID } from "node:crypto";
 import { createDelegatedGoalExecutor, resumeRestoredGoal, type GoalChildHandle, type ChildGoalSnapshot } from "./goal-executor.ts";
 import { requestGoalWorker, type GoalWorkerIdentity } from "./goal-rpc.ts";
-import { dedicatedGoalTools } from "./goal-tools.ts";
+import { dedicatedGoalTools, guardedGoalBaseTools } from "./goal-tools.ts";
 import { setDedicatedGoalEnvironment } from "./goal-environment.ts";
 import { dedicatedGoalPolicy, type DedicatedGoalPolicy } from "./goal-policy.ts";
 
@@ -704,7 +704,7 @@ async function runSingleSubagent(
   args.push("--extension", nativeHelperEntrypoint("outcome-proxy", Boolean(permissionAuthority)));
   args.push("--extension", nativeHelperEntrypoint("notify-proxy", Boolean(permissionAuthority)));
   args.push("--extension", nativeHelperEntrypoint("guidance-worker", Boolean(permissionAuthority)));
-  const permissionTools = permissionAuthority ? guardedNativeTools(spec.tools) : undefined;
+  const permissionTools = permissionAuthority ? guardedNativeTools(guardedGoalBaseTools(spec.tools, spec.goalExecution?.goalTools)) : undefined;
   if (permissionAuthority) {
     const permissionProxyEntrypoint = installedPermissionProxyEntrypoint();
     await permissionAuthority.waitUntilActive(signal);

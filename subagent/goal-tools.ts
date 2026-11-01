@@ -1,3 +1,8 @@
+/** Optional Goal extensions are loaded separately, never through the basic permission proxy. */
+export function guardedGoalBaseTools(requested: string[] | undefined, authorizedGoalTools?: readonly string[]): string[] | undefined {
+  return requested?.filter(tool => !(["questionnaire", "goal_reference"].includes(tool) && authorizedGoalTools?.includes(tool)));
+}
+
 export const DEDICATED_GOAL_TOOLS = ["goal_manage", "goal_complete", "goal_blocked", "goal_wait", "update_progress"] as const;
 /** Goal bootstrap must never undo an explicit caller/profile tool restriction. */
 export function dedicatedGoalTools(parentTools: readonly string[]): string[] {
