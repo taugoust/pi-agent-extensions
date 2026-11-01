@@ -369,10 +369,13 @@ test("managed foreground reap resolves physical checkout aliases and skips only 
     mode: "single", cancelled: false, launchMode: "none", launcher: "fixture", children: [child] };
   manager.owner = "activity-caller"; manager.reapReserved = true;
   const prototype = HeadlessForegroundManager.prototype as any;
-  const originalObserve = prototype.observe, originalManifest = prototype.manifest;
+  const originalObserve = prototype.observe, originalManifest = prototype.manifest, originalRuntimeState = prototype.runtimeState;
+  let legacyManifest = false, legacyRuntime = "unknown";
+  prototype.runtimeState = async () => legacyRuntime;
   prototype.observe = async () => {};
   prototype.manifest = function(observed: any) {
     const found = [...this.groups.values()].find((candidate: any) => candidate.children.includes(observed));
+    if (legacyManifest) return { tools: ["read", "bash"] };
     return observed.activityCwd ? { execution: "rpc-headless", ownerSessionId: found.owner, groupId: found.id,
       taskId: observed.taskId, childId: observed.childId, attempt: observed.attempt, activityCwd: observed.activityCwd } : undefined;
   };
@@ -396,8 +399,14 @@ test("managed foreground reap resolves physical checkout aliases and skips only 
     await assert.rejects(manager.worktreeReapActivity("activity-caller", checkout), /launch-time checkout identity unavailable/, "unknown worker liveness still fails closed");
     child.workerAlive = true; manager.persist(group);
     await assert.rejects(manager.worktreeReapActivity("activity-caller", checkout), /launch-time checkout identity unavailable/, "live worker cannot use legacy terminal exemption");
+    child.status = "cancelled"; child.workerAlive = false; manager.persist(group); legacyManifest = true;
+    await assert.rejects(manager.worktreeReapActivity("activity-caller", checkout), /launch-time checkout identity unavailable/, "unknown actual runtime cannot use cached death");
+    legacyRuntime = "alive";
+    await assert.rejects(manager.worktreeReapActivity("activity-caller", checkout), /launch-time checkout identity unavailable/, "live actual runtime cannot use cached death");
+    legacyRuntime = "dead";
+    assert.equal(await manager.worktreeReapActivity("activity-caller", checkout), false, "confirmed dead legacy flat helper does not block unrelated cleanup");
   } finally {
-    prototype.observe = originalObserve; prototype.manifest = originalManifest;
+    prototype.observe = originalObserve; prototype.manifest = originalManifest; prototype.runtimeState = originalRuntimeState;
     manager.reapReserved = false;
     await manager.shutdown(false);
     await rm(root, { recursive: true, force: true });

@@ -1144,6 +1144,12 @@ export class HeadlessForegroundManager {
       let manifest: HeadlessWorkerManifest | undefined;
       try { manifest = inventory.manifest(child); }
       catch { throw new Error(`Managed foreground launch identity is unavailable for ${group.owner}/${group.id}/${child.childId}`); }
+      // Legacy flat helpers could settle without being reaped. They cannot
+      // create supervised jobs/agents, and a freshly authenticated dead runtime
+      // is not activity. Do not infer death from cached workerAlive alone.
+      if (!child.activityCwd && manifest && !manifest.activityCwd && !active(child) && child.workerAlive === false
+        && Array.isArray(manifest.tools) && manifest.tools.every(tool => ["read", "bash", "edit", "write"].includes(tool))
+        && await inventory.runtimeState(manifest) === "dead") continue;
       if (child.activityCwd !== undefined && manifest && manifest.activityCwd !== child.activityCwd)
         throw new Error(`Managed foreground launch-time checkout identity changed for ${group.owner}/${group.id}/${child.childId}`);
       const activityCwd = child.activityCwd ?? manifest?.activityCwd;
