@@ -132,6 +132,13 @@ test("managed activity observes known external workers sharing a coordinator che
     tracked.spec.cwd = alias;
     manager.observe = async (_g: any, observed: any) => { observed.observationError = "controller unavailable"; };
     await assert.rejects(manager.worktreeReapActivity(owner, checkout, justReaped), /Managed worker activity is unavailable/);
+    tracked.reaped = true;
+    const reservedRoot = manager.groups.get(group.id).children[0];
+    reservedRoot.activityCwd = checkout;
+    manager.observe = async (_g: any, observed: any) => { observed.observationError = undefined; };
+    assert.equal(await manager.worktreeReapActivity(owner, checkout), true, "unreaped coordinator otherwise counts as its own active user");
+    assert.equal(await manager.worktreeReapActivity(owner, checkout, justReaped), false, "exact authenticated reserved self is not an independent user");
+    await assert.rejects(manager.worktreeReapActivity(owner, checkout, { ...justReaped, attempt: 999 }), /identity is unavailable/, "mismatched self identity cannot bypass managed activity");
   } finally {
     manager.reapReserved = false;
     await manager.shutdown(false);

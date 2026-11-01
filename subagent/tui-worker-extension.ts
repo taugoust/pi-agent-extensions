@@ -273,7 +273,8 @@ export default function tuiWorkerExtension(pi: ExtensionAPI): void {
               descendants, ownedSessionIds: manifest.execution === "rpc-headless" ? [actorSessionId] : subagents.worktreeReapOwners(),
               context: { cwd: process.cwd(), isIdle: () => session.isIdle(),
                 hasPendingMessages: () => session.hasPendingMessages(),
-                managedWorktreeActivity: (path: string) => headlessWithoutDelegation ? Promise.resolve(false) : subagents.worktreeReapActivity(path) }, ...options });
+                managedWorktreeActivity: (path: string) => headlessWithoutDelegation ? Promise.resolve(false) : subagents.worktreeReapActivity(path,
+                  { ownerSessionId: manifest.ownerSessionId, taskId: manifest.taskId, childId: manifest.childId, attempt: manifest.attempt }) }, ...options });
           } catch (error) {
             if (!options.force) {
               try { process.chdir(previousCwd); } catch { /* Partial removal is durable; keep the live controller in its safe state directory. */ }

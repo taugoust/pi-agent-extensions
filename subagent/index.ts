@@ -2184,10 +2184,18 @@ export default function (pi: ExtensionAPI) {
           if (lifecycleClosing || activeSessionId !== sessionId) throw new Error("Subagent cleanup session changed");
           return [...(native?.worktreeReapTargets(sessionId) ?? []), ...(foreground?.worktreeReapTargets(sessionId, native?.worktreeReapOwners(sessionId)) ?? [])];
         },
-        worktreeReapActivity: async (path: string) => {
+        worktreeReapActivity: async (targetPath: string, reservedSelf?: { ownerSessionId: string; taskId: string; childId: string; attempt: number }) => {
           if (lifecycleClosing || activeSessionId !== sessionId) throw new Error("Subagent cleanup session changed");
-          if (native && await native.worktreeReapActivity(sessionId, path)) return true;
-          if (foreground && await foreground.worktreeReapActivity(sessionId, path)) return true;
+          if (reservedSelf) {
+            const manifestPath = process.env[TUI_WORKER_MANIFEST_ENV];
+            if (!manifestPath || !ctx.isIdle() || ctx.hasPendingMessages()) throw new Error("Worker self-exemption requires its idle cleanup reservation");
+            const self = new TuiWorkerStore(path.dirname(path.resolve(manifestPath))).readManifest();
+            if (self.sessionFile !== ctx.sessionManager.getSessionFile() || self.ownerSessionId !== reservedSelf.ownerSessionId
+              || self.taskId !== reservedSelf.taskId || self.childId !== reservedSelf.childId || self.attempt !== reservedSelf.attempt)
+              throw new Error("Worker cleanup self identity mismatch");
+          }
+          if (native && await native.worktreeReapActivity(sessionId, targetPath, reservedSelf)) return true;
+          if (foreground && await foreground.worktreeReapActivity(sessionId, targetPath, reservedSelf)) return true;
           if (!native && !foreground && !headlessWorker) throw new Error("Managed worker activity controllers unavailable");
           return false;
         },

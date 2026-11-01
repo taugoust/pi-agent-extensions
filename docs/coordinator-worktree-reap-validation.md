@@ -4,6 +4,8 @@
 
 Initial, unresumed native launches predating `activityCwd` may recover their original physical launch directory from the private, single-link session header referenced by their authenticated manifest. Recovery requires the fixed worker session path and agreement with the saved launch cwd; missing/invalid headers, lexical aliases and resumed legacy sessions remain fail-closed. Relevant active or unavailable workers still block cleanup. Unrelated recorded launch directories are filtered before inspecting a possibly removed historical checkout. This does not reap historical tasks, delete their files or waive job/ownership/dirty-work safeguards.
 
+The sealed, idle coordinator also supplies its exact authenticated parent/task/child/attempt identity to managed-activity inspection. Only that reserved self is excluded; another managed worker using the same checkout still blocks. The controller validates the worker manifest/session binding and idle/pending-message state before accepting this exemption.
+
 ## Follow-up: coordinator managed-activity boundary
 
 Follow-up base: `0d1ace7479a70ee2d56cca318c97032850b45cd2`.
