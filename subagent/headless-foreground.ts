@@ -15,6 +15,7 @@ import { extractRetainedToolPresentation, extractToolPresentationArguments } fro
 import { FOREGROUND_TASKS_PROTOCOL, type ForegroundTask, type ForegroundTaskRequest, type ForegroundTaskResponse, type ForegroundTasksService, type TaskMessage, type TaskTarget, type TaskView } from "../shared/foreground-tasks.ts";
 import { processIdentity, processIsAlive, tuiWorkerLaunchContract, verificationBudget } from "./tui-worker-tmux.ts";
 import { TuiWorkerStore, atomicPrivateJson, privateDirectory, readPrivateJson } from "./tui-worker-store.ts";
+import { physicalPath } from "./physical-path.ts";
 import { callTuiWorker, awaitTuiWorkerVerification, applyTuiWorkerOperatorMode } from "./tui-worker-client.ts";
 import { validateAcceptance } from "./outcome.ts";
 import { validateVerification } from "./acceptance.ts";
@@ -1125,15 +1126,20 @@ export class HeadlessForegroundManager {
     if (!isAbsolute(path) || (!justReaped && this.owner !== owner) || (!this.reapReserved && !justReaped)) throw new Error("Worktree cleanup requires the owning foreground reservation");
     const inventory = new HeadlessForegroundManager(this.root, this.disposition, () => false, this.groupLimit);
     if (inventory.inventoryErrors.length) throw new Error("Managed foreground activity inventory is unavailable");
+    let targetPath: string;
+    try { targetPath = physicalPath(path).path; }
+    catch { throw new Error("Managed foreground target physical identity is unavailable"); }
     for (const group of inventory.groups.values()) for (const child of group.children) {
       if (justReaped && group.owner === justReaped.ownerSessionId && child.taskId === justReaped.taskId && child.childId === justReaped.childId && child.attempt === justReaped.attempt) continue;
+      if (child.reaped === true && child.status === "reaped" && child.workerAlive === false && !active(child)) continue;
       const effectiveCwd = child.spec.worktreeInfo?.path ?? child.spec.cwd;
-      if (typeof effectiveCwd !== "string" || !isAbsolute(effectiveCwd)) {
-        if (child.reaped !== true || child.status !== "reaped" || child.workerAlive !== false || active(child))
-          throw new Error(`Managed foreground checkout identity is unavailable for ${group.owner}/${group.id}/${child.childId}`);
-        continue;
-      }
-      if (!pathWithin(path, resolve(effectiveCwd))) continue;
+      if (typeof effectiveCwd !== "string" || !isAbsolute(effectiveCwd))
+        throw new Error(`Managed foreground checkout identity is unavailable for ${group.owner}/${group.id}/${child.childId}`);
+      let physicalCwd: { path: string; exists: boolean };
+      try { physicalCwd = physicalPath(effectiveCwd); }
+      catch { throw new Error(`Managed foreground physical checkout identity is unavailable for ${group.owner}/${group.id}/${child.childId}`); }
+      if (!physicalCwd.exists) throw new Error(`Managed foreground physical checkout identity is unavailable for ${group.owner}/${group.id}/${child.childId}`);
+      if (!pathWithin(targetPath, physicalCwd.path)) continue;
       await inventory.observe(group, child);
       if (child.error?.includes("unavailable") || child.workerAlive === undefined && child.status !== "reaped")
         throw new Error(`Managed foreground worker activity is unavailable for ${group.owner}/${group.id}/${child.childId}`);

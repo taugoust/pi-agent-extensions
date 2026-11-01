@@ -15,6 +15,7 @@ import { TaskNameStore } from "./task-name-store.ts";
 import { subagentTmuxName, validateSubagentName, canonicalSubagentName, subagentTmuxAlias } from "./tui-names.ts";
 import { TuiWorkerTmux, tuiWorkerLaunchContract, processIdentity, verificationBudget } from "./tui-worker-tmux.ts";
 import { TuiWorkerStore, privateDirectory, atomicPrivateJson, readPrivateJson } from "./tui-worker-store.ts";
+import { physicalPath } from "./physical-path.ts";
 import { callTuiWorker, awaitTuiWorkerVerification, applyTuiWorkerOperatorMode } from "./tui-worker-client.ts";
 import { publicTuiWorkerManifest, parseTuiWorkerJobParams } from "../shared/tui-worker-protocol.ts";
 import { truncateUtf8 } from "../shared/harness-readonly.ts";
@@ -1076,17 +1077,23 @@ export class TuiNativeManager {
   async worktreeReapActivity(owner: string, path: string, justReaped?: { ownerSessionId: string; taskId: string; childId: string; attempt: number }): Promise<boolean> {
     if ((!justReaped && this.owner !== owner) || (!this.reapReserved && !justReaped)) throw new Error("Worktree cleanup requires the owning subagent reservation");
     if (!isAbsolute(path) || this.inventoryErrors.length) throw new Error("Managed subagent activity inventory is unavailable");
+    let targetPath: string;
+    try { targetPath = physicalPath(path).path; }
+    catch { throw new Error("Managed subagent target physical identity is unavailable"); }
     if (justReaped && ![...this.groups.values()].some(group => group.owner === justReaped.ownerSessionId
       && group.children.some(child => child.taskId === justReaped.taskId && child.childId === justReaped.childId && child.attempt === justReaped.attempt)))
       throw new Error("Recently reaped managed worker identity is unavailable");
     for (const group of this.groups.values()) for (const child of group.children) {
       if (justReaped && group.owner === justReaped.ownerSessionId && child.taskId === justReaped.taskId && child.childId === justReaped.childId && child.attempt === justReaped.attempt) continue;
+      if (child.reaped === true && !active(child)) continue;
       const effectiveCwd = child.spec.worktreeInfo?.path ?? child.spec.cwd;
-      if (typeof effectiveCwd !== "string" || !isAbsolute(effectiveCwd)) {
-        if (child.reaped !== true || active(child)) throw new Error(`Managed worker checkout identity is unavailable for ${group.owner}/${group.id}/${child.childId}`);
-        continue;
-      }
-      if (!pathWithin(path, resolve(effectiveCwd))) continue;
+      if (typeof effectiveCwd !== "string" || !isAbsolute(effectiveCwd))
+        throw new Error(`Managed worker checkout identity is unavailable for ${group.owner}/${group.id}/${child.childId}`);
+      let physicalCwd: { path: string; exists: boolean };
+      try { physicalCwd = physicalPath(effectiveCwd); }
+      catch { throw new Error(`Managed worker physical checkout identity is unavailable for ${group.owner}/${group.id}/${child.childId}`); }
+      if (!physicalCwd.exists) throw new Error(`Managed worker physical checkout identity is unavailable for ${group.owner}/${group.id}/${child.childId}`);
+      if (!pathWithin(targetPath, physicalCwd.path)) continue;
       await this.observe(group, child, true);
       if (child.observationError) throw new Error(`Managed worker activity is unavailable for ${group.owner}/${group.id}/${child.childId}: ${child.observationError}`);
       if (child.reaped !== true || active(child)) return true;
