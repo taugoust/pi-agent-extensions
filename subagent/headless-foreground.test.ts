@@ -1,7 +1,7 @@
 import { extractToolPresentation, extractToolPresentationArguments } from "../shared/tool-presentation.ts";
 import assert from "node:assert/strict";
 import { test } from "node:test";
-import { mkdtemp, mkdir, writeFile, readFile, chmod, rm, lstat, symlink } from "node:fs/promises";
+import { mkdtemp, mkdir, writeFile, readFile, chmod, rm, lstat, symlink, unlink } from "node:fs/promises";
 import { spawn } from "node:child_process";
 import { once } from "node:events";
 import { tmpdir } from "node:os";
@@ -356,30 +356,42 @@ test("dead launcher identity cannot authorize resume or reap while authenticated
 test("managed foreground reap resolves physical checkout aliases and skips only fully reaped records", async () => {
   const root = await mkdtemp(join(tmpdir(), "headless-managed-activity-"));
   const manager: any = new HeadlessForegroundManager(root, () => "native", () => true);
-  const checkout = join(root, "checkout"), alias = join(root, "checkout-alias"), unrelated = join(root, "unrelated");
-  const loop = join(root, "loop");
-  await mkdir(checkout); await mkdir(unrelated); await symlink(checkout, alias); await symlink(loop, loop);
+  const checkout = join(root, "checkout"), alias = join(root, "checkout-alias"), retarget = join(root, "retargeted");
+  const unrelated = join(root, "unrelated"), loop = join(root, "loop");
+  await mkdir(checkout); await mkdir(retarget); await mkdir(unrelated); await symlink(checkout, alias); await symlink(loop, loop);
   const owner = "managed-activity-owner", groupId = `subagent-job-${"1".repeat(24)}`;
   const child: any = { taskId: `subagent-task-${"2".repeat(24)}`, childId: `subagent-child-${"3".repeat(24)}`, attempt: 1,
-    directory: join(root, "workers", "4".repeat(24)), spec: { task: "managed fixture", cwd: alias }, status: "running",
+    directory: join(root, "workers", "4".repeat(24)), activityCwd: checkout,
+    spec: { task: "managed fixture", cwd: alias, worktreeInfo: { path: checkout, branch: "pi/worker", baseCommit: "a".repeat(40), includedChanges: false } }, status: "running",
     createdAt: new Date().toISOString(), updatedAt: new Date().toISOString(), started: true, reaped: false,
     ownerToken: "owner-token", operatorCapability: "5".repeat(64), workerAlive: true };
   const group: any = { version: 1, id: groupId, owner, ownerToken: "owner-token", createdAt: new Date().toISOString(),
     mode: "single", cancelled: false, launchMode: "none", launcher: "fixture", children: [child] };
   manager.owner = "activity-caller"; manager.reapReserved = true;
-  const originalObserve = (HeadlessForegroundManager.prototype as any).observe;
-  (HeadlessForegroundManager.prototype as any).observe = async () => {};
+  const prototype = HeadlessForegroundManager.prototype as any;
+  const originalObserve = prototype.observe, originalManifest = prototype.manifest;
+  prototype.observe = async () => {};
+  prototype.manifest = function(observed: any) {
+    const found = [...this.groups.values()].find((candidate: any) => candidate.children.includes(observed));
+    return observed.activityCwd ? { execution: "rpc-headless", ownerSessionId: found.owner, groupId: found.id,
+      taskId: observed.taskId, childId: observed.childId, attempt: observed.attempt, activityCwd: observed.activityCwd } : undefined;
+  };
   try {
     manager.persist(group);
-    assert.equal(await manager.worktreeReapActivity("activity-caller", checkout), true, "symlink alias to target blocks cleanup");
-    child.spec.cwd = loop; manager.persist(group);
+    assert.equal(await manager.worktreeReapActivity("activity-caller", checkout), true, "stable symlink alias blocks cleanup");
+    await unlink(alias); await symlink(retarget, alias);
+    assert.equal(await manager.worktreeReapActivity("activity-caller", checkout), true, "retargeting cannot hide launch-time checkout activity");
+    assert.equal(await manager.worktreeReapActivity("activity-caller", retarget), false, "retargeting does not move the authenticated worker identity");
+    child.activityCwd = loop; manager.persist(group);
     await assert.rejects(manager.worktreeReapActivity("activity-caller", checkout), /physical checkout identity is unavailable/);
-    child.spec.cwd = unrelated; manager.persist(group);
+    child.activityCwd = undefined; manager.persist(group);
+    await assert.rejects(manager.worktreeReapActivity("activity-caller", checkout), /launch-time checkout identity unavailable/);
+    child.activityCwd = unrelated; child.spec.cwd = unrelated; manager.persist(group);
     assert.equal(await manager.worktreeReapActivity("activity-caller", checkout), false, "unrelated active inventory permits cleanup");
     child.spec.cwd = join(root, "removed-worktree"); child.status = "reaped"; child.reaped = true; child.workerAlive = false; manager.persist(group);
     assert.equal(await manager.worktreeReapActivity("activity-caller", checkout), false, "fully reaped removed-worktree records do not block cleanup");
   } finally {
-    (HeadlessForegroundManager.prototype as any).observe = originalObserve;
+    prototype.observe = originalObserve; prototype.manifest = originalManifest;
     manager.reapReserved = false;
     await manager.shutdown(false);
     await rm(root, { recursive: true, force: true });

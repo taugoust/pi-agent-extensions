@@ -3,7 +3,7 @@ import { execFile } from "node:child_process";
 import { promisify } from "node:util";
 import { access, readFile, realpath, writeFile, copyFile, chmod } from "node:fs/promises";
 import { constants } from "node:fs";
-import { dirname, isAbsolute, join } from "node:path";
+import { dirname, isAbsolute, join, relative, resolve, sep } from "node:path";
 import { fileURLToPath } from "node:url";
 import { createHash, randomBytes } from "node:crypto";
 import { TUI_WORKER_DISCOVERY_ENV, TUI_WORKER_MANIFEST_ENV } from "../shared/tui-worker-protocol.ts";
@@ -22,6 +22,7 @@ export const verificationBudget = (manifest: Pick<TuiWorkerManifest, "verificati
   : 10_000;
 const NONCE = "@pi_tui_worker_nonce";
 const GROUP = "@pi_subagent_group_id";
+const pathWithin = (root: string, path: string) => { const part = relative(root, path); return !part || (!isAbsolute(part) && part !== ".." && !part.startsWith(`..${sep}`)); };
 // Reloaded extension factories and separate backend instances must share ordering.
 const aliasQueueKey = Symbol.for("pi-agent-extensions.worker-tmux-alias-queue.v1");
 const aliasGlobals = globalThis as unknown as Record<symbol, Map<string, Promise<void>> | undefined>;
@@ -97,6 +98,10 @@ export type TuiWorkerLaunch = {
   directory: string;
   ownerSessionId: string; taskId: string; groupId: string; childId: string; attempt: number;
   cwd: string;
+  /** Lexical path selected by trusted worktreeInfo precedence; launcher resolves before spawn. */
+  activityCwd?: string;
+  /** Exact provisioned root when activityCwd is selected from worktreeInfo. */
+  worktreeRoot?: string;
   caller: TuiWorkerPlacement;
   foreground: boolean;
   /** Join a verified same-group window, including a staged foreground window. */
@@ -201,6 +206,10 @@ export class TuiWorkerTmux {
     if (!launcher.startsWith("/nix/store/")) throw new Error("Worker launcher must resolve to immutable Nix store executable");
     await access(launcher, constants.X_OK);
     const cwd = await realpath(input.cwd);
+    const worktreeRoot = input.worktreeRoot === undefined ? undefined : await realpath(input.worktreeRoot);
+    if (input.worktreeRoot !== undefined && worktreeRoot !== resolve(input.worktreeRoot)) throw new Error("Provisioned worktree root physical identity changed before launch");
+    const activityCwd = worktreeRoot ?? (input.activityCwd === undefined || input.activityCwd === input.cwd ? cwd : await realpath(input.activityCwd));
+    if (!pathWithin(activityCwd, cwd)) throw new Error("Worker launch cwd is outside its trusted effective checkout");
     const store = new TuiWorkerStore(input.directory, true);
     // Never reuse a committed launch gate or spawn a second Pi for an attempt.
     // Reconnect through the existing manifest instead of retrying launch.
@@ -320,7 +329,7 @@ export class TuiWorkerTmux {
       controlSocket, controlToken: randomBytes(32).toString("hex"), sessionFile, placement, panePid, paneProcessToken,
       presentation: input.foreground ? "foreground-staged" : "background", execution: "tmux", launchMode: input.launchMode,
       acceptance: input.acceptance ?? [], verification: input.verification, tools: input.tools,
-      cleanupWorktreesOnReap: input.cleanupWorktreesOnReap === true,
+      cleanupWorktreesOnReap: input.cleanupWorktreesOnReap === true, activityCwd,
       ...(input.foreground ? { foregroundOwner: { pid: process.pid, token: await processIdentity(process.pid) } } : {}),
       ...(input.operatorCapabilityHash ? { operatorCapabilityHash: input.operatorCapabilityHash } : {}) };
     store.writeManifest(m);

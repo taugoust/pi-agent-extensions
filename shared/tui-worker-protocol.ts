@@ -50,6 +50,8 @@ type TuiWorkerManifestBase = {
   tools?: string[];
   /** Trusted profile policy; absent in legacy manifests and therefore false. */
   cleanupWorktreesOnReap?: boolean;
+  /** Physical launch-time effective checkout identity; absent only in legacy manifests. */
+  activityCwd?: string;
   sessionFile: string;
 };
 export type TuiWorkerManifest = TuiWorkerManifestBase & (

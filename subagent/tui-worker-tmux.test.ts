@@ -2,7 +2,7 @@ import assert from "node:assert/strict";
 import { test } from "node:test";
 import { execFile, spawn } from "node:child_process";
 import { promisify } from "node:util";
-import { mkdtemp, mkdir, writeFile, rm, readFile, stat } from "node:fs/promises";
+import { mkdtemp, mkdir, writeFile, rm, readFile, stat, symlink, unlink, realpath } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
@@ -70,6 +70,31 @@ test(`routing launch input publishes identity before tmux creation (foreground=$
 });
 
 }
+
+test("native launcher persists the physical checkout selected before a lexical alias is retargeted", async () => {
+  const root = await mkdtemp(join(tmpdir(), "pi-launch-cwd-"));
+  const target = join(root, "original-checkout"), retarget = join(root, "retargeted-checkout"), alias = join(root, "checkout-link");
+  await mkdir(target); await mkdir(retarget); await symlink(target, alias);
+  const backend = new TuiWorkerTmux(), calls: string[][] = [];
+  (backend as any).epoch = async () => "1:2";
+  (backend as any).locate = async (_socket: string, pane: string, nonce: string) => ({ socketPath: "/tmp/fake", serverEpoch: "1:2", sessionId: "$1", windowId: "@1", paneId: pane, ownershipNonce: nonce });
+  (backend as any).run = async (_socket: string, args: string[]) => {
+    calls.push(args);
+    if (args[0] === "new-window") { await unlink(alias); await symlink(retarget, alias); return "%42"; }
+    if (args.at(-1) === "#{pane_pid}" || args.at(-1) === "#{pid}") return String(process.pid);
+    return "";
+  };
+  try {
+    const manifest = await backend.launch({ directory: root, ownerSessionId: "owner", taskId: "task", groupId: `subagent-job-${"1".repeat(24)}`,
+      childId: `subagent-child-${"2".repeat(24)}`, attempt: 1, cwd: alias, activityCwd: alias,
+      caller: { socketPath: "/tmp/fake", serverEpoch: "1:2", sessionId: "$1", windowId: "@1", paneId: "%1", ownershipNonce: "caller" },
+      foreground: false, parentDisposition: "native", launcher: rawPi ?? "/nix/store/vjns3phzh830d4qyajb637z4fnk56n4n-pi-1.4.0/bin/pi", launchMode: "none" });
+    assert.equal(manifest.activityCwd, target);
+    assert.equal(calls.find(args => args[0] === "new-window")?.[calls.find(args => args[0] === "new-window")!.indexOf("-c") + 1], target,
+      "tmux starts the worker in the same physical checkout persisted in its manifest");
+    assert.equal(await realpath(alias), retarget, "fixture retargeted the lexical alias after launcher resolution");
+  } finally { await rm(root, { recursive: true, force: true }); }
+});
 
 test("startup timeout retains a safe trust diagnosis rather than terminal secrets", async () => {
   const root = await mkdtemp(join(tmpdir(), "worker-startup-diagnostic-"));

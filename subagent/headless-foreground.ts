@@ -39,7 +39,7 @@ const MAX_MESSAGE_TEXT = 4 * 1024;
 const stripControls = (text: string) => text.replace(/\x1b\][\s\S]*?(?:\x07|\x1b\\)/g, "").replace(/(?:\x1b\[|\x9b)[0-?]*[ -/]*[@-~]/g, "").replace(/[\x00-\x08\x0b-\x1f\x7f-\x9f]/g, "");
 
 type Spec = { name?: string; displayName?: string; task: string; cwd: string; model?: string; tools?: string[]; systemPrompt?: string; acceptance?: string[]; verification?: import("./acceptance.ts").VerificationGate[]; cleanupWorktreesOnReap?: boolean; worktree?: WorktreeOption; worktreeInfo?: { path: string; branch: string; baseCommit: string; includedChanges: boolean } };
-type Child = { taskId: string; childId: string; attempt: number; directory: string; spec: Spec; status: ForegroundTask["status"]; createdAt: string; updatedAt: string; started: boolean; launching?: boolean; reaped?: boolean; report?: string; outcome?: unknown; error?: string; workerAlive?: boolean; requiresCompaction?: boolean; notifiedSequence?: number; launcherPid?: number; launcherToken?: string; ownerToken: string; operatorCapability: string; resumeMessage?: string; compactBeforePrompt?: boolean; stopRequested?: boolean; initialPromptDispatching?: boolean; verificationBypasses?: Array<{ attempt: number; workerEpoch: string; reason: string; at: string }>; };
+type Child = { taskId: string; childId: string; attempt: number; directory: string; activityCwd?: string; spec: Spec; status: ForegroundTask["status"]; createdAt: string; updatedAt: string; started: boolean; launching?: boolean; reaped?: boolean; report?: string; outcome?: unknown; error?: string; workerAlive?: boolean; requiresCompaction?: boolean; notifiedSequence?: number; launcherPid?: number; launcherToken?: string; ownerToken: string; operatorCapability: string; resumeMessage?: string; compactBeforePrompt?: boolean; stopRequested?: boolean; initialPromptDispatching?: boolean; verificationBypasses?: Array<{ attempt: number; workerEpoch: string; reason: string; at: string }>; };
 type Group = { version: 1; id: string; owner: string; ownerToken: string; createdAt: string; mode: "single" | "parallel" | "chain"; cancelled: boolean; guidanceYielded?: boolean; guidanceCompletion?: string; launchMode: "none" | "guard-only"; launcher: string; children: Child[] };
 type Disposition = "native" | "guard-only" | "full" | "unavailable";
 const active = (c: Child) => ["pending", "running", "waiting-input", "waiting-permission"].includes(c.status);
@@ -145,6 +145,7 @@ export class HeadlessForegroundManager {
             && /^[a-f0-9]{64}$/.test(child.operatorCapability)
             && ((child.launcherPid === undefined && child.launcherToken === undefined)
               || Number.isSafeInteger(child.launcherPid) && child.launcherPid! > 0 && typeof child.launcherToken === "string" && /^[a-zA-Z0-9:._-]{1,256}$/.test(child.launcherToken))
+            && (child.activityCwd === undefined || typeof child.activityCwd === "string" && isAbsolute(child.activityCwd))
             && typeof child.directory === "string" && /^[a-f0-9]{24}$/.test(basename(child.directory))
             && child.directory === join(this.root, "workers", basename(child.directory))
             && (child.spec?.cleanupWorktreesOnReap === undefined || typeof child.spec.cleanupWorktreesOnReap === "boolean"))) {
@@ -242,6 +243,7 @@ export class HeadlessForegroundManager {
       if (manifest.execution !== "rpc-headless" || manifest.taskId !== child.taskId || manifest.childId !== child.childId
         || manifest.ownerSessionId !== group.owner || manifest.groupId !== group.id || manifest.attempt !== child.attempt
         || manifest.foregroundOwner?.token !== group.ownerToken) throw new Error("Headless worker identity mismatch");
+      if (child.activityCwd !== undefined && manifest.activityCwd !== child.activityCwd) throw new Error("Headless worker launch-time checkout identity mismatch");
       if ((manifest.cleanupWorktreesOnReap === true) !== (child.spec.cleanupWorktreesOnReap === true)) throw new Error("Headless worker trusted reap policy mismatch");
       return manifest;
     } catch (error) { if ((error as NodeJS.ErrnoException).code === "ENOENT") return; throw error; }
@@ -268,7 +270,13 @@ export class HeadlessForegroundManager {
     child.launching = true; child.updatedAt = new Date().toISOString(); this.persist(group);
     const launcher = await import("node:fs/promises").then(fs => fs.realpath(contract.launcher));
     if (!launcher.startsWith("/nix/store/")) throw new Error("Worker launcher must resolve inside immutable Nix store");
-    const cwd = await import("node:fs/promises").then(fs => fs.realpath(child.spec.cwd));
+    const fs = await import("node:fs/promises");
+    const cwd = await fs.realpath(child.spec.cwd);
+    const worktreeRoot = child.spec.worktreeInfo ? await fs.realpath(child.spec.worktreeInfo.path) : undefined;
+    if (child.spec.worktreeInfo && worktreeRoot !== resolve(child.spec.worktreeInfo.path)) throw new Error("Provisioned worktree root physical identity changed before launch");
+    const activityCwd = worktreeRoot ?? cwd;
+    if (!pathWithin(activityCwd, cwd)) throw new Error("Worker launch cwd is outside its trusted effective checkout");
+    child.activityCwd = activityCwd; child.updatedAt = new Date().toISOString(); this.persist(group);
     const store = new TuiWorkerStore(child.directory, true);
     await writeFileSync(store.path("launch.lock"), "committed\n", { flag: "wx", mode: 0o600 });
     const sessionFile = store.path("session.jsonl"), fifoPath = store.path("stdin.fifo"), gate = store.path("launch-ready");
@@ -335,7 +343,8 @@ export class HeadlessForegroundManager {
       childId: child.childId, attempt: child.attempt, workerEpoch, controlSocket, controlToken: randomBytes(32).toString("hex"),
       operatorCapabilityHash: contract.launchMode === "guard-only" ? createHash("sha256").update(capability).digest("hex") : undefined,
       launchMode: contract.launchMode, foregroundOwner: { pid: process.pid, token: this.ownerToken! }, acceptance: child.spec.acceptance ?? [],
-      tools: child.spec.tools, verification: child.spec.verification, cleanupWorktreesOnReap: child.spec.cleanupWorktreesOnReap === true, sessionFile, presentation: "headless-foreground", execution: "rpc-headless", processPid: childProc.pid,
+      tools: child.spec.tools, verification: child.spec.verification, cleanupWorktreesOnReap: child.spec.cleanupWorktreesOnReap === true,
+      activityCwd, sessionFile, presentation: "headless-foreground", execution: "rpc-headless", processPid: childProc.pid,
       processToken, fifoPath };
     store.writeManifest(manifest);
     await new TaskNameStore(child.directory, manifest).claim(child.spec.displayName ?? canonicalSubagentName(child.spec.task, undefined, child.spec.name));
@@ -1132,14 +1141,21 @@ export class HeadlessForegroundManager {
     for (const group of inventory.groups.values()) for (const child of group.children) {
       if (justReaped && group.owner === justReaped.ownerSessionId && child.taskId === justReaped.taskId && child.childId === justReaped.childId && child.attempt === justReaped.attempt) continue;
       if (child.reaped === true && child.status === "reaped" && child.workerAlive === false && !active(child)) continue;
-      const effectiveCwd = child.spec.worktreeInfo?.path ?? child.spec.cwd;
-      if (typeof effectiveCwd !== "string" || !isAbsolute(effectiveCwd))
-        throw new Error(`Managed foreground checkout identity is unavailable for ${group.owner}/${group.id}/${child.childId}`);
+      let manifest: HeadlessWorkerManifest | undefined;
+      try { manifest = inventory.manifest(child); }
+      catch { throw new Error(`Managed foreground launch identity is unavailable for ${group.owner}/${group.id}/${child.childId}`); }
+      if (child.activityCwd !== undefined && manifest && manifest.activityCwd !== child.activityCwd)
+        throw new Error(`Managed foreground launch-time checkout identity changed for ${group.owner}/${group.id}/${child.childId}`);
+      const activityCwd = child.activityCwd ?? manifest?.activityCwd;
+      if (!activityCwd || !isAbsolute(activityCwd))
+        throw new Error(`Managed foreground launch-time checkout identity unavailable for ${group.owner}/${group.id}/${child.childId}`);
+      if (child.activityCwd === undefined && manifest?.activityCwd) { child.activityCwd = activityCwd; inventory.persist(group); }
       let physicalCwd: { path: string; exists: boolean };
-      try { physicalCwd = physicalPath(effectiveCwd); }
+      try { physicalCwd = physicalPath(activityCwd); }
       catch { throw new Error(`Managed foreground physical checkout identity is unavailable for ${group.owner}/${group.id}/${child.childId}`); }
-      if (!physicalCwd.exists) throw new Error(`Managed foreground physical checkout identity is unavailable for ${group.owner}/${group.id}/${child.childId}`);
-      if (!pathWithin(targetPath, physicalCwd.path)) continue;
+      if (!physicalCwd.exists || physicalCwd.path !== activityCwd)
+        throw new Error(`Managed foreground physical checkout identity is unavailable for ${group.owner}/${group.id}/${child.childId}`);
+      if (!pathWithin(targetPath, activityCwd)) continue;
       await inventory.observe(group, child);
       if (child.error?.includes("unavailable") || child.workerAlive === undefined && child.status !== "reaped")
         throw new Error(`Managed foreground worker activity is unavailable for ${group.owner}/${group.id}/${child.childId}`);

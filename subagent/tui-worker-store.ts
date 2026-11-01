@@ -117,6 +117,8 @@ export function validateWorkerManifest(value: unknown): TuiWorkerManifest {
     if (typeof path !== "string" || !isAbsolute(path) || path.includes("\0")) throw new Error("Invalid worker path");
   }
   if (Buffer.byteLength(m.controlSocket) > 100) throw new Error("Worker socket path is too long");
+  if (m.activityCwd !== undefined && (typeof m.activityCwd !== "string" || !isAbsolute(m.activityCwd)
+    || m.activityCwd.includes("\0") || Buffer.byteLength(m.activityCwd) > 4096)) throw new Error("Invalid worker launch-time checkout identity");
   if (m.presentation !== "foreground-staged" && m.presentation !== "background" && m.presentation !== "headless-foreground") throw new Error("Invalid presentation");
   if (m.launchMode !== undefined && m.launchMode !== "guard-only" && m.launchMode !== "none") throw new Error("Invalid launch mode");
   if (m.operatorCapabilityHash !== undefined && !/^[a-f0-9]{64}$/.test(m.operatorCapabilityHash)) throw new Error("Invalid operator capability hash");

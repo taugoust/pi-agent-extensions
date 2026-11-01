@@ -1,6 +1,6 @@
 import assert from "node:assert/strict";
 import { test } from "node:test";
-import { mkdir, mkdtemp, rm, symlink } from "node:fs/promises";
+import { mkdir, mkdtemp, rm, symlink, unlink } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { TuiNativeManager } from "./tui-native.ts";
@@ -69,33 +69,54 @@ test("retained manifest/spec policy disagreement cannot silently opt out of clea
 
 test("managed activity observes known external workers sharing a coordinator checkout", async () => {
   const root = await mkdtemp(join(tmpdir(), "worktree-reap-managed-activity-"));
-  const manager: any = new TuiNativeManager(root, () => "native", () => false, 16);
-  const owner = "current-owner", externalOwner = "external-owner", c = child(root, "g", true), external = child(root, "i", true);
-  const checkout = join(root, "coordinator-checkout"), alias = join(root, "checkout-alias"), unrelated = join(root, "unrelated-checkout"), loop = join(root, "checkout-loop");
-  await mkdir(checkout); await mkdir(unrelated); await symlink(checkout, alias); await symlink(loop, loop);
-  c.spec.cwd = checkout; external.spec.cwd = alias; external.state = "running";
-  const group: any = { id: `subagent-job-${"h".repeat(24)}`, owner, children: [c] };
-  const externalGroup: any = { id: `subagent-job-${"j".repeat(24)}`, owner: externalOwner, children: [external] };
-  manager.owner = owner; manager.reapReserved = true; manager.groups.set(group.id, group); manager.groups.set(externalGroup.id, externalGroup);
+  let manager: any = new TuiNativeManager(root, () => "native", () => false, 16);
+  const initialManager = manager;
+  const owner = "current-owner", externalOwner = "external-owner", c = child(root, "a", true), external = child(root, "b", true);
+  const checkout = join(root, "coordinator-checkout"), alias = join(root, "checkout-alias"), retarget = join(root, "retargeted-checkout");
+  const unrelated = join(root, "unrelated-checkout"), loop = join(root, "checkout-loop");
+  await mkdir(checkout); await mkdir(retarget); await mkdir(unrelated); await symlink(checkout, alias); await symlink(loop, loop);
+  c.directory = join(root, "workers", "1".repeat(24)); c.operatorCapability = "1".repeat(64);
+  external.directory = join(root, "workers", "2".repeat(24)); external.operatorCapability = "2".repeat(64);
+  c.spec.cwd = checkout; external.spec.cwd = alias; external.spec.worktreeInfo = { path: checkout, branch: "pi/worker", baseCommit: "a".repeat(40), includedChanges: false };
+  external.activityCwd = checkout; external.state = "running";
+  const group: any = { version: 1, id: `subagent-job-${"c".repeat(24)}`, owner, children: [c] };
+  const externalGroup: any = { version: 1, id: `subagent-job-${"d".repeat(24)}`, owner: externalOwner, children: [external] };
+  manager.groups.set(group.id, group); manager.groups.set(externalGroup.id, externalGroup);
+  manager.save(group); manager.save(externalGroup);
+  manager = new TuiNativeManager(root, () => "native", () => false, 16);
+  manager.owner = owner; manager.reapReserved = true;
+  const tracked: any = manager.groups.get(externalGroup.id).children[0];
+  manager.manifest = (observed: any) => {
+    const found = [...manager.groups.values()].find((candidate: any) => candidate.children.includes(observed));
+    return observed.activityCwd ? { ownerSessionId: found.owner, groupId: found.id, taskId: observed.taskId, childId: observed.childId,
+      attempt: observed.attempt, activityCwd: observed.activityCwd } : undefined;
+  };
   manager.observe = async (_g: any, observed: any) => { observed.observationError = undefined; };
   const justReaped = { ownerSessionId: owner, taskId: c.taskId, childId: c.childId, attempt: c.attempt };
   try {
-    assert.equal(await manager.worktreeReapActivity(owner, checkout, justReaped), true, "physical resolution detects a managed worker using a symlink alias");
-    external.spec.cwd = loop;
+    assert.equal(await manager.worktreeReapActivity(owner, checkout, justReaped), true, "launch-time identity detects a stable managed symlink alias");
+    await unlink(alias); await symlink(retarget, alias);
+    assert.equal(await manager.worktreeReapActivity(owner, checkout, justReaped), true, "retargeting the lexical alias cannot hide the launch-time checkout");
+    assert.equal(await manager.worktreeReapActivity(owner, retarget, justReaped), false, "retargeting does not move the authenticated worker identity");
+    tracked.activityCwd = loop;
     await assert.rejects(manager.worktreeReapActivity(owner, checkout, justReaped), /Managed worker physical checkout identity is unavailable/);
-    external.spec.cwd = unrelated;
+    tracked.activityCwd = undefined;
+    await assert.rejects(manager.worktreeReapActivity(owner, checkout, justReaped), /launch-time checkout identity unavailable/);
+    tracked.activityCwd = unrelated; tracked.spec.cwd = unrelated;
     assert.equal(await manager.worktreeReapActivity(owner, checkout, justReaped), false, "an unrelated active managed checkout does not block");
-    external.reaped = true;
-    external.state = "completed";
-    external.spec.cwd = join(root, "removed-worktree");
+    tracked.reaped = true;
+    tracked.state = "completed";
+    tracked.spec.cwd = join(root, "removed-worktree");
     assert.equal(await manager.worktreeReapActivity(owner, checkout, justReaped), false, "a fully reaped removed-worktree record does not block");
-    external.reaped = false;
-    external.spec.cwd = alias;
+    tracked.reaped = false;
+    tracked.activityCwd = checkout;
+    tracked.spec.cwd = alias;
     manager.observe = async (_g: any, observed: any) => { observed.observationError = "controller unavailable"; };
     await assert.rejects(manager.worktreeReapActivity(owner, checkout, justReaped), /Managed worker activity is unavailable/);
   } finally {
     manager.reapReserved = false;
     await manager.shutdown(false);
+    await initialManager.shutdown(false);
     await rm(root, { recursive: true, force: true });
   }
 });

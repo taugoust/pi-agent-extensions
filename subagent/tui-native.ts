@@ -27,7 +27,7 @@ import type { TuiWorkerManifest, TuiWorkerPlacement } from "../shared/tui-worker
 const id = (prefix: string) => `${prefix}-${randomBytes(12).toString("hex")}`;
 const pause = (ms: number) => new Promise(resolve => setTimeout(resolve, ms));
 type Spec = { name?: string; displayName?: string; tmuxAlias?: string; task: string; cwd: string; model?: string; tools?: string[]; systemPrompt?: string; acceptance?: string[]; verification?: VerificationGate[]; cleanupWorktreesOnReap?: boolean; worktree?: WorktreeOption; worktreeInfo?: { path: string; branch: string; baseCommit: string; includedChanges: boolean } };
-type Child = { childId: string; taskId: string; attempt: number; directory: string; spec: Spec;
+type Child = { childId: string; taskId: string; attempt: number; directory: string; activityCwd?: string; spec: Spec;
   resumeSessionFile?: string; resumeMessage?: string; compactBeforePrompt?: boolean;
   state: "pending" | "launching" | "running" | "waiting" | "completed" | "failed" | "cancelled" | "lost" | "skipped";
   operatorCapability: string; started: boolean; reaped?: boolean; error?: string; observationError?: string; report?: string;
@@ -103,6 +103,7 @@ export class TuiNativeManager {
         if (g.children.some(c => !/^subagent-child-[a-f0-9]{24}$/.test(c.childId) || !/^subagent-task-[a-f0-9]{24}$/.test(c.taskId)
           || c.spec?.cleanupWorktreesOnReap !== undefined && typeof c.spec.cleanupWorktreesOnReap !== "boolean"
           || !/^[a-f0-9]{64}$/.test(c.operatorCapability) || typeof c.directory !== "string"
+          || c.activityCwd !== undefined && (typeof c.activityCwd !== "string" || !isAbsolute(c.activityCwd))
           || !/^[a-f0-9]{24}$/.test(basename(c.directory)) || c.directory !== join(this.root, "workers", basename(c.directory)))) throw new Error("Invalid retained child");
         // Old already-terminal records were previously observed without wakes.
         // Baseline them instead of replaying historical completions on upgrade.
@@ -206,6 +207,7 @@ export class TuiNativeManager {
     try {
       const m = new TuiWorkerStore(c.directory).readManifest();
       if (m.childId !== c.childId || m.taskId !== c.taskId) throw new Error("Worker identity mismatch");
+      if (c.activityCwd !== undefined && m.activityCwd !== c.activityCwd) throw new Error("Worker launch-time checkout identity mismatch");
       if ((m.cleanupWorktreesOnReap === true) !== (c.spec.cleanupWorktreesOnReap === true)) throw new Error("Worker trusted reap policy mismatch");
       return m;
     } catch (error) { if ((error as NodeJS.ErrnoException).code === "ENOENT") return; throw error; }
@@ -688,6 +690,7 @@ export class TuiNativeManager {
               g.launcher = contract.launcher; // disk executable paths never authorize new launches
               const manifest = await this.tmux.launch({ directory: c.directory, ownerSessionId: owner, taskId: c.taskId,
                 groupId: g.id, childId: c.childId, attempt: c.attempt ?? 1, caller: g.caller, cwd: c.spec.cwd,
+                activityCwd: c.spec.worktreeInfo?.path ?? c.spec.cwd, worktreeRoot: c.spec.worktreeInfo?.path,
                 foreground: !g.background, groupWindowId: existing?.placement?.windowId,
                 windowName: g.windowName ?? subagentTmuxName(g.children[0].spec.task, g.children[0].spec.name),
                 paneTitle: c.spec.tmuxAlias ?? subagentTmuxName(c.spec.task, c.spec.name),
@@ -696,6 +699,8 @@ export class TuiNativeManager {
                 parentDisposition: this.disposition(), launcher: g.launcher, launchMode: g.launchMode,
                 model: this.resolveRoleModel(c.spec.model), routingEnvironment: this.routingEnvironment(), tools: c.spec.tools, systemPrompt: c.spec.systemPrompt, acceptance: c.spec.acceptance, verification: c.spec.verification, cleanupWorktreesOnReap: c.spec.cleanupWorktreesOnReap === true, resumeSessionFile: c.resumeSessionFile,
                 operatorCapabilityHash: createHash("sha256").update(c.operatorCapability).digest("hex") });
+              if (!manifest.activityCwd) throw new Error("Worker launch-time checkout identity unavailable");
+              c.activityCwd = manifest.activityCwd; this.save(g);
               await this.tmux.waitReady(manifest);
               await this.startPrompt(g, c, manifest);
               running++;
@@ -1086,14 +1091,24 @@ export class TuiNativeManager {
     for (const group of this.groups.values()) for (const child of group.children) {
       if (justReaped && group.owner === justReaped.ownerSessionId && child.taskId === justReaped.taskId && child.childId === justReaped.childId && child.attempt === justReaped.attempt) continue;
       if (child.reaped === true && !active(child)) continue;
-      const effectiveCwd = child.spec.worktreeInfo?.path ?? child.spec.cwd;
-      if (typeof effectiveCwd !== "string" || !isAbsolute(effectiveCwd))
-        throw new Error(`Managed worker checkout identity is unavailable for ${group.owner}/${group.id}/${child.childId}`);
+      let manifest: TuiWorkerManifest | undefined;
+      try { manifest = this.manifest(child); }
+      catch { throw new Error(`Managed worker launch identity is unavailable for ${group.owner}/${group.id}/${child.childId}`); }
+      if (manifest && (manifest.ownerSessionId !== group.owner || manifest.groupId !== group.id || manifest.taskId !== child.taskId
+        || manifest.childId !== child.childId || manifest.attempt !== (child.attempt ?? 1)))
+        throw new Error(`Managed worker launch identity is unavailable for ${group.owner}/${group.id}/${child.childId}`);
+      if (child.activityCwd !== undefined && manifest && manifest.activityCwd !== child.activityCwd)
+        throw new Error(`Managed worker launch-time checkout identity changed for ${group.owner}/${group.id}/${child.childId}`);
+      const activityCwd = child.activityCwd ?? manifest?.activityCwd;
+      if (!activityCwd || !isAbsolute(activityCwd))
+        throw new Error(`Managed worker launch-time checkout identity unavailable for ${group.owner}/${group.id}/${child.childId}`);
+      if (child.activityCwd === undefined && manifest?.activityCwd) { child.activityCwd = activityCwd; this.save(group); }
       let physicalCwd: { path: string; exists: boolean };
-      try { physicalCwd = physicalPath(effectiveCwd); }
+      try { physicalCwd = physicalPath(activityCwd); }
       catch { throw new Error(`Managed worker physical checkout identity is unavailable for ${group.owner}/${group.id}/${child.childId}`); }
-      if (!physicalCwd.exists) throw new Error(`Managed worker physical checkout identity is unavailable for ${group.owner}/${group.id}/${child.childId}`);
-      if (!pathWithin(targetPath, physicalCwd.path)) continue;
+      if (!physicalCwd.exists || physicalCwd.path !== activityCwd)
+        throw new Error(`Managed worker physical checkout identity is unavailable for ${group.owner}/${group.id}/${child.childId}`);
+      if (!pathWithin(targetPath, activityCwd)) continue;
       await this.observe(group, child, true);
       if (child.observationError) throw new Error(`Managed worker activity is unavailable for ${group.owner}/${group.id}/${child.childId}: ${child.observationError}`);
       if (child.reaped !== true || active(child)) return true;
