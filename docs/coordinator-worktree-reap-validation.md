@@ -19,7 +19,19 @@ Task gate command:
 nix build .#checks.x86_64-linux.subagent .#checks.x86_64-linux.workflows-runtime .#checks.x86_64-linux.subagent-profiles --no-link --keep-going -L
 ```
 
-Final task-gate result is recorded below after the retained-source checks finish.
+**Passed, exit 0**, against committed implementation `5546473760e5f94432eef7f5ebea6aca20403f65`:
+
+```text
+subagent: legacy reap 27/27; config 6/6; profiles 20/20; routing 13/13
+subagent native/runtime suite: 176/176
+workflows-runtime: 110/110
+PASS actual dedicated coordinator: launch/resume retains trusted policy
+PASS actual isolated coordinator: guarded root removal before reap; source and branch preserved
+PASS native Pi named-profile acceptance: offline requests, saved/resumed contract,
+     single/parallel/chain dispatch, and fail-before-launch boundaries
+```
+
+The isolated raw-Pi profile fixture explicitly attests an empty local job inventory because it installs no job tool or prior job state. Production missing/unknown job-controller refusal is unchanged. The fixture now also supplies the already-required confirmed continuation limits and expects the mandatory guidance tool; no production Goal-limit behavior was changed.
 
 The broader command was also run:
 
