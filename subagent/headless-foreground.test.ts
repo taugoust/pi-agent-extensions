@@ -390,6 +390,12 @@ test("managed foreground reap resolves physical checkout aliases and skips only 
     assert.equal(await manager.worktreeReapActivity("activity-caller", checkout), false, "unrelated active inventory permits cleanup");
     child.spec.cwd = join(root, "removed-worktree"); child.status = "reaped"; child.reaped = true; child.workerAlive = false; manager.persist(group);
     assert.equal(await manager.worktreeReapActivity("activity-caller", checkout), false, "fully reaped removed-worktree records do not block cleanup");
+    delete child.reaped; delete child.activityCwd; manager.persist(group);
+    assert.equal(await manager.worktreeReapActivity("activity-caller", checkout), false, "legacy terminal reaped/dead record needs neither redundant flag nor launch identity");
+    child.workerAlive = undefined; manager.persist(group);
+    await assert.rejects(manager.worktreeReapActivity("activity-caller", checkout), /launch-time checkout identity unavailable/, "unknown worker liveness still fails closed");
+    child.workerAlive = true; manager.persist(group);
+    await assert.rejects(manager.worktreeReapActivity("activity-caller", checkout), /launch-time checkout identity unavailable/, "live worker cannot use legacy terminal exemption");
   } finally {
     prototype.observe = originalObserve; prototype.manifest = originalManifest;
     manager.reapReserved = false;

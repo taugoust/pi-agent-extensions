@@ -1140,7 +1140,7 @@ export class HeadlessForegroundManager {
     catch { throw new Error("Managed foreground target physical identity is unavailable"); }
     for (const group of inventory.groups.values()) for (const child of group.children) {
       if (justReaped && group.owner === justReaped.ownerSessionId && child.taskId === justReaped.taskId && child.childId === justReaped.childId && child.attempt === justReaped.attempt) continue;
-      if (child.reaped === true && child.status === "reaped" && child.workerAlive === false && !active(child)) continue;
+      if (child.status === "reaped" && child.workerAlive === false && !active(child)) continue;
       let manifest: HeadlessWorkerManifest | undefined;
       try { manifest = inventory.manifest(child); }
       catch { throw new Error(`Managed foreground launch identity is unavailable for ${group.owner}/${group.id}/${child.childId}`); }
