@@ -9,14 +9,15 @@ piPackage.overrideAttrs (old: {
   pname = "pi-goal-fresh-prompt-check";
   preBuild = (old.preBuild or "") + ''
     mkdir goal-test-source
-    cp -R ${self}/workflows ${self}/shared ${self}/progress goal-test-source/
+    cp -R ${self}/workflows ${self}/shared ${self}/progress ${self}/tests goal-test-source/
     chmod -R u+w goal-test-source
     ln -s "$PWD/node_modules" goal-test-source/node_modules
     timeout 30s node ${../tests/goal-fresh-prompt.mjs} "$PWD/goal-test-source" "$PWD"
     timeout 30s node ${../tests/goal-presentation.mjs} "$PWD/goal-test-source" "$PWD"
-    timeout 30s node ${../tests/goal-progress-unification.mjs} "$PWD"
-    timeout 30s node ${../tests/goal-progress-runtime.mjs} "$PWD"
-    timeout 30s node ${../tests/goal-wait-runtime.mjs} "$PWD"
+    # These suites resolve production modules relative to their own URL.
+    timeout 30s node goal-test-source/tests/goal-progress-unification.mjs "$PWD"
+    timeout 30s node goal-test-source/tests/goal-progress-runtime.mjs "$PWD"
+    timeout 30s node goal-test-source/tests/goal-wait-runtime.mjs "$PWD"
     # Restore the original stale-guard behavior in the disposable fixture.
     # The identical real-runtime test must fail at its fresh-input assertion.
     node --input-type=module - ${../tests/goal-fresh-prompt.mjs} "$PWD" <<'JS'

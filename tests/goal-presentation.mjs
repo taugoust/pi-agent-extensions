@@ -41,6 +41,19 @@ function fixture() {
   registerGoalManagement(pi, runtime);
   return { pi, runtime, tool, ctx, execute: params => tool.execute('test', params, undefined, undefined, ctx) };
 }
+test('registered goal_manage exposes saved list/start schema and dispatches through the owner service, not the current Goal',async()=>{
+ const f=fixture();const calls=[];
+ assert.match(JSON.stringify(f.tool.parameters),/"saved"/);assert.match(JSON.stringify(f.tool.parameters),/"list"/);assert.match(JSON.stringify(f.tool.parameters),/"start"/);
+ globalThis.__paeWorkflowsV1={protocol:1,sessionId:'offline',async manageSavedGoal(params,ctx){calls.push({params,ctx});return {scope:'saved',goals:[{id:'saved-id',status:'paused',revision:9}]};}};
+ try{
+  const list=await f.execute({scope:'saved',action:'list'});assert.equal(JSON.parse(plain(list)).goals[0].id,'saved-id');assert.equal(f.runtime.activeGoal,undefined);assert.equal(calls[0].ctx,f.ctx);
+  const params={scope:'saved',action:'start',goal_id:'saved-id',expected_revision:9,request_id:'explicit-start',user_authorized:true};await f.execute(params);assert.deepEqual(calls[1].params,params);assert.equal(f.runtime.activeGoal,undefined);
+  assert.equal(text(f.tool.renderCall(params,theme)),'Goal manage saved start');
+  await assert.rejects(f.execute({action:'start',goal_id:'saved-id'}),/scope:saved/);
+  globalThis.__paeWorkflowsV1.sessionId='foreign';await assert.rejects(f.execute({scope:'saved',action:'list'}),/unavailable/);
+ }finally{delete globalThis.__paeWorkflowsV1;}
+});
+
 test('footer contains only the running tick or stopped square, never details', () => {
   const goal = { text: 'Private goal objective', waiting: { reason: 'Long private waiting explanation', resumeAt: 123 }, automaticModelTurns: 7, tokenBudget: 42, tokensUsed: 12 };
   for (const limit of [null, 10]) {

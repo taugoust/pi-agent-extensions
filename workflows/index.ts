@@ -39,9 +39,9 @@ export default function workflows(
 					...definition,
 					...(options.delegatedChild ? { description: "Inspect this dedicated child's parent-owned goal with action=status. Creating, updating, pausing, resuming or clearing it is restricted to the authenticated parent control path." } : {}),
 					execute: async (...args: any[]) => {
-						if (options.delegatedChild && args[1]?.action !== "status")
+						if (options.delegatedChild && (args[1]?.action !== "status" || args[1]?.scope === "saved"))
 							throw new Error("Dedicated child goal management is owned by its authenticated parent; only goal_manage status is available");
-						if (args[1]?.action !== "status" && (commandBusy || service?.hasOperation() || pendingPermissions > 0)) throw new Error("Finish pending permission/workflow operations before changing the goal");
+						if (!["status", "list"].includes(args[1]?.action) && (commandBusy || service?.hasOperation() || pendingPermissions > 0)) throw new Error("Finish pending permission/workflow operations before changing the goal");
 						return definition.execute(...args);
 					},
 				});

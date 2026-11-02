@@ -64,6 +64,20 @@ PI_DEDICATED_TEST_PI=/nix/store/.../libexec/pi/pi \
 
 Use an immutable **raw Pi executable**, not an AgentSH wrapper. Guarded execution also supports an immutable Node/Bun interpreter running the immutable CLI declared by an authenticated Pi package manifest; it never selects a runtime or CLI from PATH or `PI_SUBAGENT_BIN`. The first check creates two paused entries during a real non-idle parent turn, with no executor or additional prompts. The second exercises the actual parent service → registry → native executor → child Goal engine path: denied tools, explicit confirmation, reload without automatic wake, same-task/new-attempt resume, paused metadata synchronization, stale completion rejection, completion before the Start reply, delivered bookkeeping, and owned-process exit recovery. It confirms inherited 7/5 defaults and an independent 11/6 per-goal override, then exercises a real child questionnaire, stale-epoch rejection, direct answer delivery, explicit activity and completion history. All inference is local fixture code; it does not call a provider API. This test exercises the native unguarded launch path; an actual guarded Permission Gate launch remains a separate integration check against an immutable packaged candidate.
 
+## Direct saved-Goal tool controls
+
+`goal_manage` defaults to the existing **current** Goal engine. Use explicit `scope:"saved"` for the owning parent's independent saved registry; this does not activate, replace or create a parent Goal contract.
+
+```json
+{"scope":"saved","action":"list"}
+{"scope":"saved","action":"status","goal_id":"<existing saved ID>"}
+{"scope":"saved","action":"start","goal_id":"<existing saved ID>","expected_revision":9,"request_id":"<unique>","user_authorized":true}
+```
+
+List returns up to 50 summaries with `next_offset` (`null` at the end); pass that offset for another page. Status returns the exact saved revision, checklist, limits and child binding. `start` requires an unstarted paused entry; `resume` retains the linked native task and advances its attempt. `pause`, `clear` and paused `complete` use the same explicit ID/revision/request/authorization fields. Complete also requires `summary`; `task_evidence:[{task_id,evidence}]` reconciles verified existing tasks through the same parent-completion checks described above. Active/uncertain execution, unanswered questions and unresolved blockers cannot be bypassed.
+
+Mutations require a fresh user instruction, not automatic continuation. The registered model tool supplies the real owner context and explicit authorization directly—not synthetic dialog replies or a script. It reuses the existing serialized/idempotent registry, durable intent and native child executor, including execution availability, inherited account/model restrictions, stop proofs and context/limit fences. A pending workflow/permission operation blocks mutations. Dedicated children cannot use saved-scope controls. Current-scope activation IDs, task mutations, create/update and child/provider/tool overrides are rejected in saved scope. Native/Paseo UI Start/Resume keeps its existing confirmation flow; the network protocol and capability schemas are unchanged. Neither deployment nor inspection automatically starts a saved Goal.
+
 ## Existing per-child/terminal Goal engine: model-managed goals and tasks
 
 `update_progress` and `goal_manage` use one authoritative goal record and mutation service. Objectives are concise outcome-only statements (at most 320 characters); implementation and verification steps live in that record's tasks. **Creation authorizes autonomous continuation by default**, with configured limits; `start:false` creates a paused draft. This is the tool contract, not a request to separately assert `user_authorized:true` on creation. Existing goals—including paused goals—must be explicitly cleared or successfully completed before another is created. Creation cannot bypass pending permissions, another workflow, or native dedicated-child ownership. Tool-driven activation binds the current run rather than recursively submitting a prompt.

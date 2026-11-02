@@ -11,16 +11,19 @@ import { mergeGoalTasks } from "./mutations.ts";
 import { completeVerifiedGoal, MAX_COMPLETION_SUMMARY_LENGTH } from "./completion.js";
 import { GOAL_WAIT_WAKE_SEMANTICS } from "./wait.js";
 import { readGoalSessionActivity } from "./activity.js";
+import { manageSavedGoal } from "../saved-goal-control.ts";
 
-/** Chat controls and progress share the runtime's single persisted goal record. */
+/** Current-scope controls share the single runtime record; saved-scope controls
+ * dispatch to the authenticated parent's independent Goal registry. */
 export function registerGoalManagement(pi: ExtensionAPI, runtime: GoalRuntime) {
   pi.registerTool(defineTool({
     name: "goal_manage",
     label: "Goal manage",
     executionMode: "sequential",
-    description: "Inspect or manage the current goal and its authoritative checklist. status is read-only and returns stable id, activationId, revision, tasks and effective limits. Prefer update_progress create to atomically create a goal and tasks: creation authorizes autonomous continuation by default; start:false is a paused draft. create here is an alias with the same semantics and requires request_id. Never replaces an existing goal. Existing lifecycle/objective changes require exact goal_id, activation_id, expected_revision and fresh user_authorized:true; they cannot originate in automatic continuation. complete is paused-only: on explicit user request, supply a nonempty verification summary after all required tasks are completed; it archives completion without resuming or starting a turn. Active autonomous completion still uses goal_complete. Task-only updates use update_progress and never resume or complete a goal. token_budget is create/update-only: omit on create for no token cap; omit on update to preserve it. Removal is explicit by task ID after a user scope change.",
-    promptSnippet: "Inspect goal identity/revision, tasks and limits; explicitly manage lifecycle without losing progress.",
+    description: "Inspect/manage the current goal (default scope:current) or saved independent Goals (explicit scope:saved). Saved controls: list (pages of 50; use offset/next_offset), status by goal_id, start/resume/pause/clear/complete with exact goal_id, expected_revision, unique request_id and fresh user_authorized:true. Saved start launches a separate paid coordinator through the existing Goal executor; resume retains its child task. It never activates/replaces the parent's current Goal. Saved complete requires summary and evidence for every unfinished existing task (task_evidence). Do not use activation_id, create/update or update_progress for saved records. Current scope: Inspect or manage the current goal and its authoritative checklist. status is read-only and returns stable id, activationId, revision, tasks and effective limits. Prefer update_progress create to atomically create a goal and tasks: creation authorizes autonomous continuation by default; start:false is a paused draft. create here is an alias with the same semantics and requires request_id. Never replaces an existing goal. Existing lifecycle/objective changes require exact goal_id, activation_id, expected_revision and fresh user_authorized:true; they cannot originate in automatic continuation. complete is paused-only: on explicit user request, supply a nonempty verification summary after all required tasks are completed; it archives completion without resuming or starting a turn. Active autonomous completion still uses goal_complete. Task-only updates use update_progress and never resume or complete a goal. token_budget is create/update-only: omit on create for no token cap; omit on update to preserve it. Removal is explicit by task ID after a user scope change.",
+    promptSnippet: "Manage the current Goal or list/status/start/resume saved Goals directly with explicit scope:saved; preserve their IDs and lifecycle.",
     promptGuidelines: [
+      "Use goal_manage scope:saved action:list/status to inspect existing saved Goals, and start/resume to launch their own coordinators directly. Use their exact saved IDs/revisions and fresh user authorization; never create replacement workers or activate the parent's Goal as a substitute.",
       "Use a concise outcome-only objective (at most 320 characters); put implementation and verification steps in update_progress.",
       "update_progress create (or goal_manage create) authorizes autonomous continuation with configured limits unless start:false. Creation is not permission to bypass an existing goal, pending approvals, or another workflow.",
       "After pause, blocker or safety limit, wait for fresh user authorization to resume. Task updates do not resume. Complete only after verifying every required task and the outcome.",
@@ -28,7 +31,10 @@ export function registerGoalManagement(pi: ExtensionAPI, runtime: GoalRuntime) {
       "When the user explicitly asks to complete a verified paused goal, use goal_manage action:complete with summary and fresh user_authorized:true. Do not resume it or create an active Goal contract merely to complete it. All required tasks must already be completed.",
     ],
     parameters: Type.Object({
-      action: Type.Union(["status", "create", "update", "pause", "resume", "clear", "complete"].map(value => Type.Literal(value))),
+      action: Type.Union(["status", "list", "start", "create", "update", "pause", "resume", "clear", "complete"].map(value => Type.Literal(value))),
+      scope: Type.Optional(Type.Union([Type.Literal("current"), Type.Literal("saved")])),
+      offset: Type.Optional(Type.Integer({ minimum: 0, maximum: 1000 })),
+      task_evidence: Type.Optional(Type.Array(Type.Object({ task_id: Type.String({ minLength: 1, maxLength: 128 }), evidence: Type.String({ minLength: 1, maxLength: 1000 }) }, { additionalProperties: false }), { maxItems: 50 })),
       goal_id: Type.Optional(Type.String({ minLength: 1, maxLength: 128 })),
       activation_id: Type.Optional(Type.String({ minLength: 1, maxLength: 128 })),
       expected_revision: Type.Optional(Type.Integer({ minimum: 1 })),
@@ -48,6 +54,12 @@ export function registerGoalManagement(pi: ExtensionAPI, runtime: GoalRuntime) {
     },
     async execute(_id, params, signal, _update, ctx) {
       signal?.throwIfAborted();
+      if (params.scope === "saved") {
+        const result = await manageSavedGoal(params, ctx, signal);
+        return { content: [{ type: "text", text: JSON.stringify(result) }], details: { scope: "saved", savedGoals: result, presentation: goalManagePresentation(params.action) } };
+      }
+      if (params.action === "list" || params.action === "start" || params.offset !== undefined || params.task_evidence !== undefined)
+        throw new Error("list/start, offset and task_evidence require explicit scope:saved");
       const previous = runtime.activeGoal;
       if (params.action !== "complete" && params.summary !== undefined) throw new Error("Summary is complete-only");
       if (params.action === "create") {

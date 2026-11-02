@@ -3,6 +3,7 @@ import { DelegatedGoalRegistry, type DelegatedGoalExecutor } from "./delegated-g
 import { registerGoalReview, previewGoalReview } from "./goal-review.ts";
 import { resolveGoalLimits } from "../shared/delegated-goal-policy.ts";
 import { delegatedGoalStore } from "./delegated-goal-store.ts";
+import { validateSavedGoalControl, type SavedGoalControl } from "./saved-goal-control.ts";
 import { basename, isAbsolute, relative, sep } from "node:path";
 import { workspaceRepositories } from "./worktree/repositories.js";
 import { ownedWorktrees, recordedWorktreeOwner, worktreeGit, type OwnedWorktree } from "../shared/subagent-worktrees.ts";
@@ -87,6 +88,7 @@ export function createWorkflowService(
 		closed = false,
 		operation: Operation | undefined,
 		notice: string | null = null;
+	let toolMutation: { check(): void } | undefined;
 	const sessionId = ctx.sessionManager.getSessionId(),
 		serviceEpoch = randomUUID();
 	const requests = new Map<string, string>();
@@ -244,6 +246,7 @@ export function createWorkflowService(
 			(op && (operation !== op || op.controller.signal.aborted))
 		)
 			throw new Error("Workflow session changed or operation cancelled");
+		toolMutation?.check();
 	}
 	function cancel() {
 		const op = operation;
@@ -562,7 +565,7 @@ export function createWorkflowService(
 			serviceEpoch,
 			cwd: ctx.cwd,
 			model: ctx.model ? `${ctx.model.provider}/${ctx.model.id}` : null,
-			busy: !!operation || externalBusy(),
+			busy: !!operation || !!toolMutation || externalBusy(),
 			idle: ctx.isIdle() && !ctx.hasPendingMessages(),
 			notice: notice ?? delegated.blockedReason() ?? executionUnavailableReason(),
 			operationId: operation?.id ?? null,
@@ -1020,7 +1023,7 @@ export function createWorkflowService(
 			reply(r.value);
 			return snapshot();
 		}
-		if (operation || (!r.action?.startsWith("goals.") && r.action !== "goal.limits" && externalBusy()) || !actions.includes(r.action))
+		if (operation || toolMutation || (!r.action?.startsWith("goals.") && r.action !== "goal.limits" && externalBusy()) || !actions.includes(r.action))
 			throw new Error("Workflow busy or invalid action");
 		if (["goal.start", "goal.create_paused", "goal.resume", "goal.edit"].includes(r.action))
 			throw new Error("Use dedicated delegated goals; legacy parent goal execution is read-only");
@@ -1175,12 +1178,64 @@ export function createWorkflowService(
 		void run(op, r);
 		return snapshot();
 	}
+	function savedGoalView(entry: ReturnType<typeof delegated.snapshot>["entries"][number], tasks = true) {
+		return { id: entry.id, objective: tasks ? entry.text : entry.text.slice(0, 320), status: entry.status,
+			revision: entry.revision, policyRevision: entry.policyRevision, child: entry.child,
+			taskCount: entry.tasks.length, completedTasks: entry.tasks.filter(task => task.status === "completed").length,
+			...(tasks ? { tasks: entry.tasks, waiting: entry.waiting, summary: entry.summary,
+				continuationLimits: entry.continuationLimits, tokenBudget: entry.tokenBudget, tokensUsed: entry.tokensUsed,
+				observation: entry.observation, planning: entry.planning } : {}) };
+	}
+	async function manageSavedGoal(params: SavedGoalControl, caller: ExtensionContext, signal?: AbortSignal) {
+		current(); signal?.throwIfAborted(); validateSavedGoalControl(params);
+		if (caller.sessionManager.getSessionId() !== sessionId || caller.cwd !== ctx.cwd) throw new Error("Saved-Goal owner session/workspace changed");
+		const read = params.action === "list" || params.action === "status";
+		if (read) {
+			await delegated.refresh(); current(); signal?.throwIfAborted();
+			const entries = delegated.snapshot().entries;
+			if (params.action === "list") {
+				const offset = params.offset ?? 0;
+				return { scope: "saved", goals: entries.slice(offset, offset + 50).map(entry => savedGoalView(entry, false)),
+					next_offset: offset + 50 < entries.length ? offset + 50 : null };
+			}
+			const entry = entries.find(entry => entry.id === params.goal_id);
+			if (!entry) throw new Error("Saved Goal not found in this owner session");
+			return { scope: "saved", goal: savedGoalView(entry) };
+		}
+		if (runtime.agentRunOrigin === "automatic") throw new Error("Saved-Goal controls require a new user instruction, not automatic continuation");
+		if (operation || toolMutation || externalBusy()) throw new Error("Finish pending workflow/permission operations before saved-Goal mutations");
+		const entry = delegated.snapshot().entries.find(entry => entry.id === params.goal_id);
+		if (!entry) throw new Error("Saved Goal not found in this owner session");
+		const cwd = ctx.cwd, limits = JSON.stringify(resolveGoalLimits(entry.continuationLimits, runtime.settings.continuationLimits));
+		const launch = params.action === "start" || params.action === "resume";
+		const fence = { check() {
+			signal?.throwIfAborted();
+			if (caller.sessionManager.getSessionId() !== sessionId || ctx.cwd !== cwd ||
+				(launch && limits !== JSON.stringify(resolveGoalLimits(entry.continuationLimits, runtime.settings.continuationLimits))))
+				throw new Error("Saved-Goal launch context or limits changed");
+		} };
+		toolMutation = fence;
+		try {
+			current();
+			if (launch) { const unavailable = executionUnavailableReason(); if (unavailable) throw new Error(unavailable); }
+			// Fresh authorization was supplied through the registered model tool,
+			// not a fabricated UI-dialog response. All registry/executor fences,
+			// durable intent, exact child identity and stop proofs are shared.
+			await delegated.mutate(sessionId, { action: `goals.${params.action}` as any, requestId: params.request_id!,
+				expectedGoalId: params.goal_id!, expectedEntryRevision: params.expected_revision!,
+				...(params.action === "complete" ? { user_authorized: true, summary: params.summary,
+					...(params.task_evidence === undefined ? {} : { taskEvidence: params.task_evidence.map(item => ({ taskId: item.task_id, evidence: item.evidence })) }) } : {}) });
+			current();
+			return { scope: "saved", goal: savedGoalView(delegated.snapshot().entries.find(entry => entry.id === params.goal_id)!) };
+		} finally { if (toolMutation === fence) toolMutation = undefined; }
+	}
 	return {
 		protocol: 1,
 		sessionId,
 		serviceEpoch,
 		handle,
-		hasOperation: () => !!operation,
+		manageSavedGoal,
+		hasOperation: () => !!operation || !!toolMutation,
 		refreshContext(next: ExtensionContext) {
 			if (!closed && next.sessionManager.getSessionId() === sessionId) {
 				if (next.cwd !== ctx.cwd) {

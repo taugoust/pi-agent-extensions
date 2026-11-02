@@ -31,17 +31,69 @@ function deferred() { let resolve; const promise = new Promise(r => { resolve = 
 async function bounded(promise) {
  let timer;try{return await Promise.race([promise,new Promise((_,reject)=>{timer=setTimeout(()=>reject(Error('Goal control blocked by discovery')),4000);})]);}finally{clearTimeout(timer);}
 }
-function discoveryFixture(t) {
+function discoveryFixture(t, busy = true) {
  const root=mkdtempSync(join(tmpdir(),'workflow-discovery-')),prior=process.env.PI_DELEGATED_GOALS_STATE_ROOT;
  process.env.PI_DELEGATED_GOALS_STATE_ROOT=root;const sessionId=randomUUID();let starts=0;
  const runtime={activeGoal:undefined,snapshotSettingsApplicationState:()=>({}),settings:{continuationLimits:{automaticTurns:null,noProgressTurns:null}}};
  const ctx={cwd:root,isIdle:()=>false,hasPendingMessages:()=>true,sessionManager:{getSessionId:()=>sessionId,getLeafId:()=>null,getBranch:()=>[],getEntries:()=>[]},ui:{setStatus(){}},model:null};
  globalThis.__paeDelegatedGoalExecutorV1={protocol:1,sessionId,executionAvailable:()=>true,async start(e){starts++;return {taskId:'task:'+e.id,childId:'child:'+e.id,jobId:'job:'+e.id,attempt:1};},async pause(){},async resume(){}};
- const service=createWorkflowService({appendEntry(){throw Error('No parent message');}},ctx,runtime,{}, {get:()=>({})},()=>true);
+ const service=createWorkflowService({appendEntry(){throw Error('No parent message');}},ctx,runtime,{}, {get:()=>({})},()=>busy);
  const identity={sessionId,serviceEpoch:service.serviceEpoch};
  t.after(()=>{service.dispose();delete globalThis.__testOwnershipDiscovery;delete globalThis.__testRepositoryDiscovery;delete globalThis.__paeDelegatedGoalExecutorV1;if(prior===undefined)delete process.env.PI_DELEGATED_GOALS_STATE_ROOT;else process.env.PI_DELEGATED_GOALS_STATE_ROOT=prior;rmSync(root,{recursive:true,force:true});});
- return {service,ctx,root,starts:()=>starts,snapshot:()=>bounded(service.handle({...identity,operation:'snapshot'})),send:r=>bounded(service.handle({...identity,operation:'start',requestId:randomUUID(),...r})),reply:r=>bounded(service.handle({...identity,operation:'send',requestId:randomUUID(),...r}))};
+ return {service,ctx,runtime,root,starts:()=>starts,snapshot:()=>bounded(service.handle({...identity,operation:'snapshot'})),send:r=>bounded(service.handle({...identity,operation:'start',requestId:randomUUID(),...r})),reply:r=>bounded(service.handle({...identity,operation:'send',requestId:randomUUID(),...r}))};
 }
+
+test('direct saved-Goal controls start two existing IDs independently and retain exact child identity on resume',async t=>{
+ const f=discoveryFixture(t,false);const parent={id:'unrelated-current',status:'paused',text:'Retain parent Goal'};f.runtime.activeGoal=parent;
+ let s=await f.send({action:'goals.create',expectedGoalId:null,objective:'Saved one'});
+ s=await f.send({action:'goals.create',expectedGoalId:null,objective:'Saved two'});const [a,b]=s.delegatedGoals.entries;
+ const control=p=>f.service.manageSavedGoal({scope:'saved',...p},f.ctx);
+ const list=await control({action:'list'});assert.equal(list.goals.length,2);assert.equal(list.goals[0].id,a.id);
+ const first={action:'start',goal_id:a.id,expected_revision:a.revision,request_id:'direct-first',user_authorized:true};
+ const started=await control(first);await control(first);assert.equal(f.starts(),1,'Exact replay must not launch another child');
+ const second=await control({action:'start',goal_id:b.id,expected_revision:b.revision,request_id:'direct-second',user_authorized:true});
+ assert.equal(f.starts(),2);assert.notEqual(started.goal.child.taskId,second.goal.child.taskId);assert.equal(started.goal.id,a.id);assert.equal(second.goal.id,b.id);
+ const paused=await control({action:'pause',goal_id:a.id,expected_revision:started.goal.revision,request_id:'pause-first',user_authorized:true});assert.equal(paused.goal.status,'paused');
+ globalThis.__paeDelegatedGoalExecutorV1.resume=async e=>({...e.child,childId:'new-child',jobId:'new-job',attempt:e.child.attempt+1});
+ const resumed=await control({action:'resume',goal_id:a.id,expected_revision:paused.goal.revision,request_id:'resume-first',user_authorized:true});
+ assert.equal(resumed.goal.child.taskId,started.goal.child.taskId);assert.equal(resumed.goal.child.attempt,2);assert.equal(resumed.goal.status,'active');
+ assert.equal(f.runtime.activeGoal,parent);assert.equal(f.runtime.activeGoal.status,'paused');
+});
+
+test('direct saved-Goal controls preserve user, automatic-run, owner, revision and field fences',async t=>{
+ const f=discoveryFixture(t,false);const s=await f.send({action:'goals.create',expectedGoalId:null,objective:'Existing saved outcome'}),e=s.delegatedGoals.entries[0];
+ const p={scope:'saved',action:'start',goal_id:e.id,expected_revision:e.revision,request_id:'guard',user_authorized:true};
+ for(const bad of [{...p,user_authorized:false},{...p,request_id:undefined},{...p,activation_id:'foreign-current'},{...p,steps:[]},{...p,expected_revision:99}])await assert.rejects(f.service.manageSavedGoal(bad,f.ctx),/authorization|request_id|fields|revision/);
+ f.runtime.agentRunOrigin='automatic';await assert.rejects(f.service.manageSavedGoal(p,f.ctx),/automatic/);f.runtime.agentRunOrigin='manual';
+ await assert.rejects(f.service.manageSavedGoal(p,{...f.ctx,sessionManager:{getSessionId:()=> 'foreign'}}),/owner/);
+ await assert.rejects(f.service.manageSavedGoal({...p,action:'create'},f.ctx),/Unsupported/);
+ const abort=new AbortController();abort.abort();await assert.rejects(f.service.manageSavedGoal(p,f.ctx,abort.signal));assert.equal(f.starts(),0);
+ assert.equal((await f.service.manageSavedGoal({scope:'saved',action:'status',goal_id:e.id},f.ctx)).goal.status,'paused');
+});
+
+test('direct saved completion uses the existing evidence and stopped-child guards rather than root Goal completion',async t=>{
+ const f=discoveryFixture(t,false);let s=await f.send({action:'goals.create',expectedGoalId:null,objective:'Verified parent delivery'}),e=s.delegatedGoals.entries[0];
+ s=await f.send({action:'goals.add_task',expectedGoalId:e.id,expectedEntryRevision:e.revision,text:'Verify output'});e=s.delegatedGoals.entries[0];
+ const p={scope:'saved',action:'complete',goal_id:e.id,expected_revision:e.revision,request_id:'finish-direct',user_authorized:true,summary:'Verified passing output tests.'};
+ await assert.rejects(f.service.manageSavedGoal(p,f.ctx),/evidence|unfinished|completed/);
+ const result=await f.service.manageSavedGoal({...p,request_id:'finish-evidence',task_evidence:[{task_id:e.tasks[0].id,evidence:'Inspected passing output tests.'}]},f.ctx);
+ assert.equal(result.goal.status,'complete');assert.equal(result.goal.tasks[0].status,'completed');assert.equal(f.runtime.activeGoal,undefined);assert.equal(f.starts(),0);
+ s=await f.send({action:'goals.create',expectedGoalId:null,objective:'Linked stopped proof'});e=s.delegatedGoals.entries.at(-1);
+ const linked=await f.service.manageSavedGoal({scope:'saved',action:'start',goal_id:e.id,expected_revision:e.revision,request_id:'linked-start',user_authorized:true},f.ctx);
+ const paused=await f.service.manageSavedGoal({scope:'saved',action:'pause',goal_id:e.id,expected_revision:linked.goal.revision,request_id:'linked-pause',user_authorized:true},f.ctx);
+ const complete={scope:'saved',action:'complete',goal_id:e.id,expected_revision:paused.goal.revision,request_id:'linked-unproven',user_authorized:true,summary:'Verified linked outcome.'};
+ await assert.rejects(f.service.manageSavedGoal(complete,f.ctx),/stop|verification/i);
+ globalThis.__paeDelegatedGoalExecutorV1.verifyStopped=async entry=>{assert.deepEqual(entry.child,linked.goal.child);};
+ const verified=await f.service.manageSavedGoal({...complete,request_id:'linked-proven'},f.ctx);assert.equal(verified.goal.status,'complete');assert.deepEqual(verified.goal.child,linked.goal.child);
+});
+
+test('direct saved-Goal reads reject pagination/identity confusion and a stale launch revision never changes either goal',async t=>{
+ const f=discoveryFixture(t,false);let s=await f.send({action:'goals.create',expectedGoalId:null,objective:'First saved'}),e=s.delegatedGoals.entries[0];
+ await assert.rejects(f.service.manageSavedGoal({scope:'saved',action:'list',goal_id:e.id},f.ctx),/List omits/);
+ await assert.rejects(f.service.manageSavedGoal({scope:'saved',action:'status',goal_id:e.id,offset:1},f.ctx),/list-only/);
+ await assert.rejects(f.service.manageSavedGoal({scope:'saved',action:'status',goal_id:'foreign'},f.ctx),/not found/);
+ const page=await f.service.manageSavedGoal({scope:'saved',action:'list',offset:50},f.ctx);assert.deepEqual(page.goals,[]);assert.equal(page.next_offset,null);
+});
 
 test('cold stalled ownership never delays Goal snapshots or confirmed child startup; reads are single-flight',async t=>{
  const f=discoveryFixture(t),gate=deferred();let reads=0;
