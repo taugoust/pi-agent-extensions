@@ -23,7 +23,8 @@ function validateWorkerManifest(m: any): any {
 }
 
 export type JobOwner = { sessionId: string; childId?: string };
-export type JobAncestry = { owners: JobOwner[]; fingerprint: string; unavailable?: boolean };
+export type JobAncestryEdge = { ownerSessionId: string; taskId: string; childId: string; sessionId: string };
+export type JobAncestry = { owners: JobOwner[]; edges: JobAncestryEdge[]; fingerprint: string; unavailable?: boolean };
 const MAX_GROUPS = 10000, MAX_WORKERS = 20000;
 export const MAX_READONLY_SNAPSHOT_BYTES = 64 * 1024 * 1024;
 class AncestryCapacityError extends Error {}
@@ -50,9 +51,9 @@ export function readJobAncestry(root: string, owner: string, maxBytes = MAX_READ
   if (!Number.isSafeInteger(maxBytes) || maxBytes < 1 || maxBytes > MAX_READONLY_SNAPSHOT_BYTES) throw new Error("Invalid read-only ancestry byte bound");
   const budget = { remaining: maxBytes };
   const hash = createHash("sha256").update(owner);
-  const owners: JobOwner[] = [{ sessionId: owner }];
+  const owners: JobOwner[] = [{ sessionId: owner }], edges: JobAncestryEdge[] = [];
   try { lstatSync(root); } catch (error) {
-    if ((error as NodeJS.ErrnoException).code === "ENOENT") return { owners, fingerprint: hash.digest("hex") };
+    if ((error as NodeJS.ErrnoException).code === "ENOENT") return { owners, edges, fingerprint: hash.digest("hex") };
     throw error;
   }
   root = privateEvidenceDirectory(root);
@@ -130,6 +131,9 @@ export function readJobAncestry(root: string, owner: string, maxBytes = MAX_READ
           descendant = header.id;
         } finally { closeSync(fd); }
         hash.update(descendant);
+        // Read-only provenance: retain the exact authenticated parent/worker/session
+        // edge, including resumed attempts. Never derive these links from paths/names.
+        edges.push({ ownerSessionId: session, taskId: child.taskId, childId: child.childId, sessionId: descendant });
         // Resumed attempts legitimately retain a session ID. Already-authorized
         // sessions (including cycles) add no authority and must not be traversed twice.
         if (seen.has(descendant)) continue;
@@ -144,7 +148,7 @@ export function readJobAncestry(root: string, owner: string, maxBytes = MAX_READ
       }
     }
   }
-  return { owners, fingerprint: hash.digest("hex"), ...(unavailable ? { unavailable: true } : {}) };
+  return { owners, edges, fingerprint: hash.digest("hex"), ...(unavailable ? { unavailable: true } : {}) };
 }
 export function ownsJob(owners: JobOwner[], metadata: { sessionId?: string; childId?: string; infrastructure?: boolean }): boolean {
   return !metadata.infrastructure && owners.some(owner => owner.sessionId === metadata.sessionId && owner.childId === metadata.childId);

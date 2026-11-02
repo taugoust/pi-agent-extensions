@@ -1,4 +1,7 @@
 import { randomUUID } from "node:crypto";
+import { homedir } from "node:os";
+import { ancestryStateRoot, readJobAncestry, type JobAncestry } from "../shared/readonly-job-ancestry.ts";
+import { worktreeGoalProvenance } from "./worktree-goal-provenance.ts";
 import { DelegatedGoalRegistry, type DelegatedGoalExecutor } from "./delegated-goals.ts";
 import { registerGoalReview, previewGoalReview } from "./goal-review.ts";
 import { resolveGoalLimits } from "../shared/delegated-goal-policy.ts";
@@ -357,13 +360,19 @@ export function createWorkflowService(
 				const mine = ownership.filter(
 					(record) => record.ownerSessionId === sessionId,
 				);
+				let ancestry: JobAncestry | undefined;
+				try { ancestry = readJobAncestry(ancestryStateRoot(process.env, homedir()), sessionId); } catch {}
+				const provenance = worktreeGoalProvenance(sessionId, delegated.snapshot().entries, ancestry);
+				const presentationOwned = ownership.filter(record => provenance(record).goalScopeSessionId === sessionId);
 				const createdRecords = await read(() => allSessionCreatedRecords(inventorySignal));
-				const roots = new Set(mine.map((record) => record.commonDir));
+				// Discovery only: descendant records do not enter completion/removal ownership.
+				const roots = new Set([...mine, ...presentationOwned].map((record) => record.commonDir));
 				for (const item of createdRecords) roots.add(item.commonDir);
 				const discovered = await read(() => repositories(inventorySignal));
 				const active = discovered.active;
 				for (const root of discovered.roots) roots.add(root);
 				const warnings = [...discovered.warnings];
+				if (!ancestry || ancestry.unavailable) warnings.push("Some Goal worktree ancestry is unavailable; only verified associations are shown.");
 				if (discovered.limited || roots.size > 64)
 					warnings.push(
 						"Repository discovery is limited to two directory levels and 64 repository roots; open a repository directly to inspect more.",
@@ -484,7 +493,7 @@ export function createWorkflowService(
 							stale: record.prunableReason !== undefined,
 							detached: record.detached,
 							changedFiles,
-							...(recordedOwner ? { recordedOwner } : {}),
+							...(recordedOwner ? { recordedOwner, ...provenance(recordedOwner) } : {}),
 							ownerTaskId: owned?.taskId,
 							ownerTitle: owned?.title,
 							workerStatus: worker?.status,

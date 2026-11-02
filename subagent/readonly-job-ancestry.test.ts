@@ -7,6 +7,7 @@ import { createHash } from "node:crypto";
 import { spawnSync } from "node:child_process";
 import { atomicPrivateJson, TuiWorkerStore } from "./tui-worker-store.ts";
 import { readJobAncestry, ownsJob } from "../shared/readonly-job-ancestry.ts";
+import { worktreeGoalProvenance } from "../workflows/worktree-goal-provenance.ts";
 function fixture(depth = 3) {
   const root = mkdtempSync(join(tmpdir(), "job-ancestry-"));
   mkdirSync(join(root, "groups"), { mode: 0o700 });
@@ -38,6 +39,20 @@ test("verified direct, nested and grandchild sessions and broker child identitie
     assert.equal(ownsJob(proof.owners, { sessionId: "session-0", childId: f.manifests[3].childId }), false);
     assert.equal(ownsJob(proof.owners, { sessionId: "session-3", infrastructure: true }), false);
     assert.equal(readJobAncestry(f.root, "session-0").fingerprint, proof.fingerprint);
+    assert.deepEqual(proof.edges.map(edge => [edge.ownerSessionId, edge.taskId, edge.childId, edge.sessionId]), f.manifests.slice(0, 3).map((m, i) => [m.ownerSessionId, m.taskId, m.childId, `session-${i + 1}`]));
+  } finally { f.close(); }
+});
+test("Goal presentation consumes only nonce-verified coordinator ancestry, including descendant workers", () => {
+  const f = fixture(); try {
+    const m = f.manifests[0]!;
+    const entries = [{ id: "goal-a", text: "Goal A", child: { taskId: m.taskId, childId: m.childId, jobId: m.groupId, attempt: 1 } }];
+    const resolve = () => worktreeGoalProvenance("session-0", entries, readJobAncestry(f.root, "session-0"));
+    const worker = { ownerSessionId: "session-2", taskId: f.manifests[2]!.taskId, childId: f.manifests[2]!.childId };
+    assert.equal(resolve()(worker).worktreeGoal?.id, "goal-a");
+    f.groups[0].children[0].operatorCapability = "f".repeat(64);
+    atomicPrivateJson(join(f.root, "groups", `${m.groupId}.json`), f.groups[0]);
+    assert.deepEqual(resolve()(worker), {}, "nonce mismatch cannot grant session scope or Goal attribution");
+    assert.deepEqual(readJobAncestry(f.root, "session-0").edges, []);
   } finally { f.close(); }
 });
 test("malformed attributable groups warn only reachable owners and do not perturb unrelated cursors", () => {
