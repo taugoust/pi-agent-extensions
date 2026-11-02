@@ -25,6 +25,57 @@ function fixture() {
   return { registry, executor, calls, saves, create, act, launches: () => launches };
 }
 
+test('parent completes a verified paused child without resuming it and completion survives reload',async()=>{
+ const f=fixture();await f.create('Deliver verified output');let e=f.registry.snapshot().entries[0];
+ await f.act(e,'goals.add_task',{text:'Validate the delivered output'});e=f.registry.snapshot().entries[0];
+ await f.act(e,'goals.start');await f.act(f.registry.snapshot().entries[0],'goals.pause');e=f.registry.snapshot().entries[0];
+ const child=structuredClone(e.child),calls=f.calls.length;
+ const request={action:'goals.complete' as const,requestId:'parent-complete',expectedGoalId:e.id,expectedEntryRevision:e.revision,user_authorized:true,summary:'Verified output with passing tests and inspected artifacts.',taskEvidence:[{taskId:e.tasks[0].id,evidence:'Inspected artifact hash and passing test output.'}]};
+ const [first,repeated]=await Promise.all([f.registry.mutate('parent',request),f.registry.mutate('parent',request)]);assert.deepEqual(first,repeated);
+ const done=first.entries[0];assert.equal(done.status,'complete');assert.equal(done.tasks[0].status,'completed');assert.equal(done.summary,request.summary);assert.deepEqual(done.child,child);assert.equal(done.tokensUsed,e.tokensUsed);assert.equal(f.calls.length,calls+1);assert.equal(f.calls.at(-1),'verified-stopped:'+e.id);assert.equal(f.registry.blockedReason(),null);
+ assert.ok(done.story!.timeline.some(item=>item.kind==='completed'&&item.text.includes('Parent verified completion')));
+ f.executor.observe=async()=>({status:'paused',tasks:e.tasks});const restored=new DelegatedGoalRegistry('parent',f.executor,()=>{},first);await restored.refresh();assert.equal(restored.snapshot().entries[0].status,'complete');
+ const terminal=await restored.mutate('parent',{action:'goals.resume',requestId:'cannot-resume',expectedGoalId:done.id,expectedEntryRevision:done.revision});assert.equal(terminal.entries[0].status,'complete');assert.equal(terminal.entries[0].summary,request.summary);assert.equal(terminal.entries[0].tasks[0].status,'completed');assert.equal(f.calls.length,calls+1);
+});
+
+test('parent completion rejects unfinished checklists, missing authorization and malformed evidence without mutation',async()=>{
+ const f=fixture();await f.create('Verified scope');await f.act(f.registry.snapshot().entries[0],'goals.add_task',{text:'Run verification'});const e=f.registry.snapshot().entries[0],before=f.registry.snapshot();
+ const base={user_authorized:true,summary:'Verified requested result.',taskEvidence:[{taskId:e.tasks[0].id,evidence:'Passing regression results inspected.'}]};
+ for(const bad of [{user_authorized:false},{user_authorized:undefined},{summary:''},{summary:'Still incomplete'},{summary:'x'.repeat(4001)},{taskEvidence:[]},{taskEvidence:[{taskId:'foreign',evidence:'Passed'}]},{taskEvidence:[base.taskEvidence[0],base.taskEvidence[0]]},{taskEvidence:[{taskId:e.tasks[0].id,evidence:''}]},{taskEvidence:[{taskId:e.tasks[0].id,evidence:'x'.repeat(1001)}]}]){
+  await assert.rejects(f.act(e,'goals.complete',{...base,...bad}));assert.deepEqual(f.registry.snapshot(),before);assert.equal(f.registry.blockedReason(),null);
+ }
+ assert.equal(f.launches(),0);
+});
+
+test('parent completion requires paused state and authoritative exact child stop proof',async()=>{
+ const f=fixture();await f.create('Verified');await f.act(f.registry.snapshot().entries[0],'goals.start');let e=f.registry.snapshot().entries[0];
+ await assert.rejects(f.act(e,'goals.complete',{user_authorized:true,summary:'Verified result.'}),/paused/);
+ await f.act(e,'goals.pause');e=f.registry.snapshot().entries[0];const before=f.registry.snapshot();
+ f.executor.verifyStopped=async()=>{throw Error('Owned child may still be active');};await assert.rejects(f.act(e,'goals.complete',{user_authorized:true,summary:'Verified result.'}),/may still be active/);assert.deepEqual(f.registry.snapshot(),before);
+ delete f.executor.verifyStopped;await assert.rejects(f.act(e,'goals.complete',{user_authorized:true,summary:'Verified result.'}),/stop is verified/);assert.deepEqual(f.registry.snapshot(),before);
+ for(const status of ['blocked','usage_limited','budget_limited'] as const){const state=structuredClone(before);state.entries[0].status=status;const registry=new DelegatedGoalRegistry('parent',f.executor,()=>{},state);await assert.rejects(registry.mutate('parent',{action:'goals.complete',requestId:status,expectedGoalId:e.id,expectedEntryRevision:e.revision,user_authorized:true,summary:'Verified result.'}),/paused/);}
+});
+
+test('parent completion cannot hide recorded blockers or bypass identity and pending delivery fences',async()=>{
+ const f=fixture();await f.create('Verified');let e=f.registry.snapshot().entries[0];await f.act(e,'goals.blocker.add',{blockerReason:'External issue',blockerEvidence:'Unresolved check'});e=f.registry.snapshot().entries[0];
+ const request={action:'goals.complete' as const,requestId:'finish',expectedGoalId:e.id,expectedEntryRevision:e.revision,user_authorized:true,summary:'Verified result.'};
+ await assert.rejects(f.registry.mutate('parent',request),/blockers/);await assert.rejects(f.registry.mutate('foreign',{...request,requestId:'foreign'}),/session/);await assert.rejects(f.registry.mutate('parent',{...request,requestId:'stale',expectedEntryRevision:e.revision-1}),/revision/);
+ const fenced=new DelegatedGoalRegistry('parent',f.executor,()=>{},f.registry.snapshot(),{initial:{requestId:'uncertain',entryId:e.id,action:'goals.start',expectedEntryRevision:e.revision},save(){throw Error('Must not mutate intent');}});await assert.rejects(fenced.mutate('parent',request),/reconciliation/);
+});
+
+test('parent completion cannot resolve a pending human question implicitly',async()=>{
+ const f=fixture();await f.create('Verified implementation');const initial=f.registry.snapshot(),e=initial.entries[0];
+ e.story!.questions=[{id:'question',revision:1,at:0,workerEpoch:'epoch',status:'pending',request:{kind:'questionnaire',questions:[{id:'choice',prompt:'Choose the required direction',options:[{value:'yes',label:'Yes'}],allowOther:false}]}}];
+ const registry=new DelegatedGoalRegistry('parent',f.executor,()=>{},initial);
+ await assert.rejects(registry.mutate('parent',{action:'goals.complete',requestId:'finish',expectedGoalId:e.id,expectedEntryRevision:e.revision,user_authorized:true,summary:'Verified implementation.'}),/pending questions/);assert.equal(registry.snapshot().entries[0].story!.questions![0].status,'pending');
+});
+
+test('completion persistence failure leaves the original checklist and lifecycle unchanged',async()=>{
+ const f=fixture();await f.create('Verified output');await f.act(f.registry.snapshot().entries[0],'goals.add_task',{text:'Inspect output'});const before=f.registry.snapshot(),e=before.entries[0];
+ const registry=new DelegatedGoalRegistry('parent',f.executor,()=>{throw Error('Persist failed');},before);
+ await assert.rejects(registry.mutate('parent',{action:'goals.complete',requestId:'finish',expectedGoalId:e.id,expectedEntryRevision:e.revision,user_authorized:true,summary:'Verified result.',taskEvidence:[{taskId:e.tasks[0].id,evidence:'Inspected output and regressions.'}]}),/Persist failed/);assert.deepEqual(registry.snapshot(),before);assert.equal(registry.blockedReason(),null);assert.equal(f.launches(),0);
+});
+
 test("per-goal limits persist independently, validate, and clear back to inherited defaults", async () => {
   const f = fixture();
   let state = await f.registry.mutate("parent", { action: "goals.create", requestId: "limits", expectedGoalId: null, objective: "bounded", continuationLimits: { automaticTurns: 9, noProgressTurns: null } });

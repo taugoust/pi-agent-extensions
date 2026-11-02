@@ -26,6 +26,21 @@ registerHooks({ resolve(specifier, context, nextResolve) {
 } });
 const { createWorkflowService } = await import("./service.ts");
 
+test('authenticated parent completion is a metadata-only service action while parent work remains untouched',async()=>{
+ const root=mkdtempSync(join(tmpdir(),'delegated-parent-complete-')),previous=process.env.PI_DELEGATED_GOALS_STATE_ROOT;process.env.PI_DELEGATED_GOALS_STATE_ROOT=root;let service;
+ try{
+  const sessionId=randomUUID(),runtime={activeGoal:{id:'unrelated',status:'active',text:'Unrelated parent work'},snapshotSettingsApplicationState:()=>({}),settings:{continuationLimits:{automaticTurns:null,noProgressTurns:null}}},before=structuredClone(runtime.activeGoal);
+  const ctx={cwd:root,isIdle:()=>false,hasPendingMessages:()=>true,sessionManager:{getSessionId:()=>sessionId,getLeafId:()=> 'leaf',getBranch:()=>[],getEntries:()=>[]},ui:{setStatus(){}},model:null};
+  globalThis.__paeDelegatedGoalExecutorV1={protocol:1,sessionId,executionAvailable:()=>false,start(){throw Error('No child execution');},resume(){throw Error('No child execution');},pause(){throw Error('No child execution');}};
+  service=createWorkflowService({appendEntry(){throw Error('No parent message mutation');}},ctx,runtime,{}, {get:()=>({})},()=>false);
+  const identity={sessionId,serviceEpoch:service.serviceEpoch},send=r=>service.handle({...identity,operation:'start',requestId:randomUUID(),...r});
+  let s=await send({action:'goals.create',expectedGoalId:null,objective:'Output already verified directly'});let e=s.delegatedGoals.entries[0];
+  s=await send({action:'goals.add_task',expectedGoalId:e.id,expectedEntryRevision:e.revision,text:'Inspect direct verification evidence'});e=s.delegatedGoals.entries[0];
+  s=await send({action:'goals.complete',expectedGoalId:e.id,expectedEntryRevision:e.revision,user_authorized:true,summary:'Verified direct delivery using inspected tests and artifacts.',taskEvidence:[{taskId:e.tasks[0].id,evidence:'Inspected passing tests and artifact hashes.'}]});
+  assert.deepEqual(Object.keys(s.capabilities).sort(),['createPausedGoal','delegatedGoalExecution','delegatedGoals','goalLimitEditing','goalPlanning','goalReview','ownedWorktreeCompletion'].sort());assert.equal(s.delegatedGoals.entries[0].status,'complete');assert.equal(s.delegatedGoals.entries[0].tasks[0].status,'completed');assert.equal(s.operationAction,null);assert.deepEqual(runtime.activeGoal,before);
+ }finally{service?.dispose();delete globalThis.__paeDelegatedGoalExecutorV1;if(previous===undefined)delete process.env.PI_DELEGATED_GOALS_STATE_ROOT;else process.env.PI_DELEGATED_GOALS_STATE_ROOT=previous;rmSync(root,{recursive:true,force:true});}
+});
+
 test("actual service permits busy parent metadata create and fences independent confirmed child actions", async () => {
   const root = mkdtempSync(join(tmpdir(), "delegated-service-"));
   const previous = process.env.PI_DELEGATED_GOALS_STATE_ROOT;

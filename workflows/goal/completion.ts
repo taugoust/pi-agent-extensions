@@ -2,19 +2,10 @@ import type { ExtensionContext } from "@earendil-works/pi-coding-agent";
 import { readGoalTasks } from "../../shared/goal-progress.ts";
 import { notifyTerminal } from "./errors.js";
 import type { ActiveGoal } from "./persistence.js";
-import { formatFooterStatus, isContradictoryCompletionSummary, STATUS_KEY, transitionGoal, type GoalRuntime } from "./runtime.js";
+import { formatFooterStatus, STATUS_KEY, transitionGoal, type GoalRuntime } from "./runtime.js";
 
-export const MAX_COMPLETION_SUMMARY_LENGTH = 4_000;
-
-export function completionSummaryRejection(summary: string): string | undefined {
-  return !summary
-    ? "summary is empty"
-    : summary.length > MAX_COMPLETION_SUMMARY_LENGTH
-      ? "summary is too long"
-      : isContradictoryCompletionSummary(summary)
-        ? "summary says the goal is not complete"
-        : undefined;
-}
+import { completionSummaryRejection } from './completion-summary.ts';
+export { completionSummaryRejection, MAX_COMPLETION_SUMMARY_LENGTH } from './completion-summary.ts';
 
 /** Callers must authorize the lifecycle transition before invoking shared verification/cleanup. */
 export function completeVerifiedGoal(runtime: GoalRuntime, ctx: ExtensionContext, goal: ActiveGoal, summary: string) {

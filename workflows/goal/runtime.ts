@@ -202,11 +202,7 @@ const BUDGET_WRAP_UP_MESSAGE_TYPE = "goal-budget-wrap-up";
 export const GOAL_CONTINUATION_MESSAGE_TYPE = "goal-continuation";
 const BUDGET_WRAP_UP_PROMPT =
   "The active /goal token budget is exhausted. Stop substantive work and do not call substantive tools. Summarize progress, verified results, remaining work, and blockers concisely. Treat completion as unproven. Do not call goal_complete unless authoritative, requirement-by-requirement evidence already proves every requirement is complete. Weak, indirect, or missing evidence is not enough. Budget exhaustion is not completion.";
-const CONTRADICTORY_COMPLETION_PATTERNS = [
-  /(?<!could\s)\bnot\s+(?:yet\s+)?(?:complete|completed|done|finished)\b/i,
-  /\bstill\s+(?:incomplete|failing|failing\s+tests?|fails?)\b/i,
-  /\btests?\s+(?:still\s+)?fail(?:ing)?\b/i,
-] as const;
+export { isContradictoryCompletionSummary } from './completion-summary.ts';
 // One instance belongs to one extension factory. It owns all mutable session state
 // and the cross-cutting invariants used by command and lifecycle orchestration.
 // Keep this state machine cohesive despite its size: prompt ownership, continuation,
@@ -1654,10 +1650,6 @@ export function stoppedStatusLabel(status: GoalStatus) {
   if (status === "usage_limited") return "usage-limited";
   if (status === "budget_limited") return "budget-limited";
   return status;
-}
-
-export function isContradictoryCompletionSummary(summary: string) {
-  return CONTRADICTORY_COMPLETION_PATTERNS.some((pattern) => pattern.test(summary));
 }
 
 export function goalIdRejectionReason(goal: ActiveGoal, requestedGoalId: string, activationId?: string) {
