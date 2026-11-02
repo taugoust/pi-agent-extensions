@@ -91,16 +91,18 @@ export async function saveOwnedWorktree(record: OwnedWorktree) {
   const directory = await fs.open(registry(), "r");
   try { await directory.sync(); } finally { await directory.close(); }
 }
-export async function ownedWorktrees(owner?: string): Promise<OwnedWorktree[]> {
+export async function ownedWorktrees(owner?: string, signal?: AbortSignal): Promise<OwnedWorktree[]> {
+  signal?.throwIfAborted();
   let files: string[];
   try { files = await fs.readdir(registry()); } catch (error: any) { if (error.code === "ENOENT") return []; throw error; }
   const records: OwnedWorktree[] = [];
   const names = files.filter(name => /^[a-f0-9]{64}\.json$/.test(name));
   if (names.length > 1000) throw new Error("Worktree ownership inventory exceeds its supported limit; cleanup requires operator review");
   for (const file of names) {
+    signal?.throwIfAborted();
     const path = join(registry(), file), stat = await fs.lstat(path);
     if (!stat.isFile() || stat.isSymbolicLink() || stat.uid !== process.getuid?.() || (stat.mode & 0o777) !== 0o600 || stat.size > 16384) throw new Error("Invalid worktree ownership record");
-    const record = JSON.parse(await fs.readFile(path, "utf8")) as OwnedWorktree;
+    const record = JSON.parse(await fs.readFile(path, { encoding: "utf8", signal })) as OwnedWorktree;
     if (record.version !== 1 || !/^subagent-task-[a-f0-9]{24}$/.test(record.taskId) || typeof record.ownerSessionId !== "string"
       || !/^subagent-child-[a-f0-9]{24}$/.test(record.childId) || typeof record.released !== "boolean"
       || ![record.path, record.repo, record.cwd, record.commonDir].every(p => typeof p === "string" && isAbsolute(p))

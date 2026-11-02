@@ -9,8 +9,8 @@ import { randomUUID } from "node:crypto";
 // Real service and registry; narrow dependency seams isolate filesystem inventories,
 // legacy goal commands and SDK types. No Pi process, provider or child is launched.
 const seams = {
-  "./worktree/repositories.js": "export async function workspaceRepositories(){return {roots:[],active:null,container:true}}",
-  "../shared/subagent-worktrees.ts": "export function recordedWorktreeOwner(){}; export async function ownedWorktrees(){return []}; export async function worktreeGit(){return {stdout:''}}",
+  "./worktree/repositories.js": "export async function workspaceRepositories(...args){return globalThis.__testRepositoryDiscovery ? globalThis.__testRepositoryDiscovery(...args) : {roots:[],active:null,container:true}}",
+  "../shared/subagent-worktrees.ts": "export function recordedWorktreeOwner(){}; export async function ownedWorktrees(...args){return globalThis.__testOwnershipDiscovery ? globalThis.__testOwnershipDiscovery(...args) : []}; export async function worktreeGit(){return {stdout:''}}",
   "../shared/harness-readonly.ts": "export function harnessReadOnlyRegistry(){return {}}",
   "../shared/goal-progress.ts": "export function readGoalTasks(){return []};export function addGoalTask(){throw Error('legacy mutation forbidden')}",
   "./goal/history.js": "export function readGoalHistory(){return []}",
@@ -25,6 +25,65 @@ registerHooks({ resolve(specifier, context, nextResolve) {
   return nextResolve(specifier, context);
 } });
 const { createWorkflowService } = await import("./service.ts");
+
+const turn = () => new Promise(resolve => setImmediate(resolve));
+function deferred() { let resolve; const promise = new Promise(r => { resolve = r; }); return { promise, resolve }; }
+async function bounded(promise) {
+ let timer;try{return await Promise.race([promise,new Promise((_,reject)=>{timer=setTimeout(()=>reject(Error('Goal control blocked by discovery')),4000);})]);}finally{clearTimeout(timer);}
+}
+function discoveryFixture(t) {
+ const root=mkdtempSync(join(tmpdir(),'workflow-discovery-')),prior=process.env.PI_DELEGATED_GOALS_STATE_ROOT;
+ process.env.PI_DELEGATED_GOALS_STATE_ROOT=root;const sessionId=randomUUID();let starts=0;
+ const runtime={activeGoal:undefined,snapshotSettingsApplicationState:()=>({}),settings:{continuationLimits:{automaticTurns:null,noProgressTurns:null}}};
+ const ctx={cwd:root,isIdle:()=>false,hasPendingMessages:()=>true,sessionManager:{getSessionId:()=>sessionId,getLeafId:()=>null,getBranch:()=>[],getEntries:()=>[]},ui:{setStatus(){}},model:null};
+ globalThis.__paeDelegatedGoalExecutorV1={protocol:1,sessionId,executionAvailable:()=>true,async start(e){starts++;return {taskId:'task:'+e.id,childId:'child:'+e.id,jobId:'job:'+e.id,attempt:1};},async pause(){},async resume(){}};
+ const service=createWorkflowService({appendEntry(){throw Error('No parent message');}},ctx,runtime,{}, {get:()=>({})},()=>true);
+ const identity={sessionId,serviceEpoch:service.serviceEpoch};
+ t.after(()=>{service.dispose();delete globalThis.__testOwnershipDiscovery;delete globalThis.__testRepositoryDiscovery;delete globalThis.__paeDelegatedGoalExecutorV1;if(prior===undefined)delete process.env.PI_DELEGATED_GOALS_STATE_ROOT;else process.env.PI_DELEGATED_GOALS_STATE_ROOT=prior;rmSync(root,{recursive:true,force:true});});
+ return {service,ctx,root,starts:()=>starts,snapshot:()=>bounded(service.handle({...identity,operation:'snapshot'})),send:r=>bounded(service.handle({...identity,operation:'start',requestId:randomUUID(),...r})),reply:r=>bounded(service.handle({...identity,operation:'send',requestId:randomUUID(),...r}))};
+}
+
+test('cold stalled ownership never delays Goal snapshots or confirmed child startup; reads are single-flight',async t=>{
+ const f=discoveryFixture(t),gate=deferred();let reads=0;
+ globalThis.__testOwnershipDiscovery=()=>{reads++;return gate.promise;};
+ const initial=await f.snapshot();assert.equal(reads,0,'No inventory work on the foreground snapshot');assert.equal(initial.worktreeLoading,true);
+ await turn();assert.equal(reads,1);
+ let s=await f.send({action:'goals.create',expectedGoalId:null,objective:'Independent Goal'}),e=s.delegatedGoals.entries[0];
+ s=await f.send({action:'goals.start',expectedGoalId:e.id,expectedEntryRevision:e.revision});assert.equal(s.dialog.kind,'confirm');
+ await f.reply({operationId:s.operationId,dialogId:s.dialog.id,value:true});
+ for(let i=0;i<20;i++){s=await f.snapshot();if(s.delegatedGoals.entries[0].child)break;}
+ assert.equal(f.starts(),1);assert.equal(s.delegatedGoals.entries[0].status,'active');assert.equal(reads,1);
+ f.service.dispose();gate.resolve([]);await turn();
+});
+
+test('cold repository discovery leaves cached status responsive and publishes only after it finishes',async t=>{
+ const f=discoveryFixture(t),entered=deferred(),gate=deferred();let scans=0;
+ globalThis.__testRepositoryDiscovery=()=>{scans++;entered.resolve();return gate.promise;};
+ const first=await f.snapshot();assert.equal(scans,0);assert.equal(first.worktreeLoading,true);
+ await bounded(entered.promise);
+ for(let i=0;i<10;i++)assert.equal((await f.snapshot()).worktreeLoading,true);
+ assert.equal(scans,1);gate.resolve({roots:[],active:null,warnings:[],limited:false});await turn();await turn();
+ assert.equal((await f.snapshot()).worktreeLoading,false);assert.equal(scans,1);
+});
+
+test('discovery deadline reports partial state; late ignored-cancellation results cannot replace it',async t=>{
+ const f=discoveryFixture(t),entered=deferred(),gate=deferred();
+ globalThis.__testRepositoryDiscovery=(_pi,_cwd,signal)=>{entered.resolve(signal);return gate.promise;};
+ await f.snapshot();const signal=await bounded(entered.promise);
+ await new Promise((resolve,reject)=>{const timer=setTimeout(()=>reject(Error('No discovery deadline')),3000);signal.addEventListener('abort',()=>{clearTimeout(timer);resolve();},{once:true});});
+ const s=await f.snapshot();assert.equal(s.worktreeLoading,false);assert.match(s.worktreeError,/timed out/);
+ gate.resolve({roots:['/unverified-late-result'],active:null,warnings:[],limited:false});await turn();
+ assert.deepEqual((await f.snapshot()).worktrees,[]);assert.match((await f.snapshot()).worktreeError,/timed out/);
+});
+
+test('context changes abort old discovery and cannot publish old cache into the new workspace',async t=>{
+ const f=discoveryFixture(t),entered=deferred(),gate=deferred();let calls=0;
+ globalThis.__testRepositoryDiscovery=(_pi,cwd,signal)=>{calls++;if(calls===1){entered.resolve(signal);return gate.promise;}return {roots:[],active:null,warnings:[],limited:false};};
+ await f.snapshot();const signal=await bounded(entered.promise);
+ f.service.refreshContext({...f.ctx,cwd:join(f.root,'new-workspace')});assert.equal(signal.aborted,true);
+ gate.resolve({roots:['/old-workspace'],active:null,warnings:[],limited:false});await turn();
+ await f.snapshot();await turn();await turn();const s=await f.snapshot();assert.equal(s.cwd,join(f.root,'new-workspace'));assert.deepEqual(s.worktrees,[]);
+});
 
 test('authenticated parent completion is a metadata-only service action while parent work remains untouched',async()=>{
  const root=mkdtempSync(join(tmpdir(),'delegated-parent-complete-')),previous=process.env.PI_DELEGATED_GOALS_STATE_ROOT;process.env.PI_DELEGATED_GOALS_STATE_ROOT=root;let service;

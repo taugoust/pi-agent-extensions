@@ -5,7 +5,8 @@ import { resolveGoalLimits } from "../shared/delegated-goal-policy.ts";
 import { delegatedGoalStore } from "./delegated-goal-store.ts";
 import { basename, isAbsolute, relative, sep } from "node:path";
 import { workspaceRepositories } from "./worktree/repositories.js";
-import { ownedWorktrees, recordedWorktreeOwner, worktreeGit } from "../shared/subagent-worktrees.ts";
+import { ownedWorktrees, recordedWorktreeOwner, worktreeGit, type OwnedWorktree } from "../shared/subagent-worktrees.ts";
+import { withinDiscoveryBudget, yieldDiscovery } from "./worktree/discovery-budget.ts";
 import { harnessReadOnlyRegistry } from "../shared/harness-readonly.ts";
 import { readGoalTasks, addGoalTask } from "../shared/goal-progress.ts";
 import { readGoalHistory } from "./goal/history.js";
@@ -151,6 +152,10 @@ export function createWorkflowService(
 		  }
 		| undefined;
 	let reading: Promise<void> | undefined;
+	let scheduled: ReturnType<typeof setImmediate> | undefined;
+	let inventoryController: AbortController | undefined;
+	let inventoryGeneration = 0;
+	let completionInventory: { records: OwnedWorktree[]; error: string | null } | undefined;
 	let repositoryCache:
 		| {
 				cwd: string;
@@ -162,14 +167,14 @@ export function createWorkflowService(
 		const item = await stat(path);
 		return { dev: String(item.dev), ino: String(item.ino), birthtimeMs: String(item.birthtimeMs) };
 	}
-	async function repositories() {
+	async function repositories(signal = lifetime.signal) {
 		const cwd = ctx.cwd;
 		if (
 			repositoryCache?.cwd === cwd &&
 			Date.now() - repositoryCache.at < 30_000
 		)
 			return repositoryCache.value;
-		const value = await workspaceRepositories(pi, cwd, lifetime.signal);
+		const value = await withinDiscoveryBudget(signal, () => workspaceRepositories(pi, cwd, signal));
 		current();
 		if (cwd !== ctx.cwd)
 			throw new Error("Workspace changed during repository discovery");
@@ -301,9 +306,9 @@ export function createWorkflowService(
 	function samePhysicalIdentity(actual: any, expected: any) {
 		return validPhysicalIdentity(expected) && actual.dev === expected.dev && actual.ino === expected.ino && actual.birthtimeMs === expected.birthtimeMs;
 	}
-	async function allSessionCreatedRecords() {
+	async function allSessionCreatedRecords(signal?: AbortSignal) {
 		const manual = sessionCreatedRecords();
-		const owned = (await ownedWorktrees(sessionId)).filter(record => record.ownerSessionId === sessionId && validPhysicalIdentity(record.physicalIdentity));
+		const owned = (await ownedWorktrees(sessionId, signal)).filter(record => record.ownerSessionId === sessionId && validPhysicalIdentity(record.physicalIdentity));
 		return [...manual, ...owned.map(record => ({ ownerSessionId: record.ownerSessionId, path: record.path, commonDir: record.commonDir, identity: record.physicalIdentity }))];
 	}
 	async function locateTrackedWorktree(path: string, tracked: any[], signal: AbortSignal) {
@@ -316,19 +321,43 @@ export function createWorkflowService(
 		}
 		return undefined;
 	}
+	function scheduleWorktrees() {
+		if (closed || scheduled || reading || (worktreeCache && Date.now() - worktreeCache.at < 5000)) return;
+		// Serve the foreground reply before any cold filesystem/Git work starts.
+		scheduled = setImmediate(() => {
+			scheduled = undefined;
+			if (!closed) void refreshWorktrees();
+		});
+		scheduled.unref();
+	}
 	async function refreshWorktrees() {
 		if (reading) return reading;
-		if (worktreeCache && Date.now() - worktreeCache.at < 5000) return;
+		if (closed || (worktreeCache && Date.now() - worktreeCache.at < 5000)) return;
+		const cwd = ctx.cwd, generation = inventoryGeneration;
+		const controller = new AbortController();
+		inventoryController = controller;
+		const inventorySignal = AbortSignal.any([lifetime.signal, controller.signal, AbortSignal.timeout(2000)]);
+		const valid = () => !closed && generation === inventoryGeneration && ctx.cwd === cwd;
+		const read = <T>(fn: () => Promise<T>) => withinDiscoveryBudget(inventorySignal, fn);
+		const rows: any[] = [];
+		const timedOut = () => {
+			if (!valid()) return;
+			const message = "Worktree discovery timed out; cached or partial data is shown. Open a repository directly for a narrower view.";
+			completionInventory = { records: completionInventory?.records ?? [], error: message };
+			worktreeCache = { at: Date.now(), rows: rows.length ? [...rows] : worktreeCache?.rows ?? [], error: message };
+		};
+		inventorySignal.addEventListener("abort", timedOut, { once: true });
 		reading = (async () => {
 			try {
-				const ownership = await ownedWorktrees();
+				const ownership = await read(() => ownedWorktrees(undefined, inventorySignal));
+				if (valid() && !inventorySignal.aborted) completionInventory = { records: ownership.filter(record => record.ownerSessionId === sessionId), error: null };
 				const mine = ownership.filter(
 					(record) => record.ownerSessionId === sessionId,
 				);
-				const createdRecords = await allSessionCreatedRecords();
+				const createdRecords = await read(() => allSessionCreatedRecords(inventorySignal));
 				const roots = new Set(mine.map((record) => record.commonDir));
 				for (const item of createdRecords) roots.add(item.commonDir);
-				const discovered = await repositories();
+				const discovered = await read(() => repositories(inventorySignal));
 				const active = discovered.active;
 				for (const root of discovered.roots) roots.add(root);
 				const warnings = [...discovered.warnings];
@@ -349,12 +378,8 @@ export function createWorkflowService(
 					const key = pathIdentity(record.path);
 					sessionCreated.set(key, [...(sessionCreated.get(key) ?? []), record]);
 				}
-				const rows: any[] = [];
-				const inventorySignal = AbortSignal.any([
-					lifetime.signal,
-					AbortSignal.timeout(15_000),
-				]);
 				for (const root of [...roots].slice(0, 64)) {
+					if (!valid()) return;
 					if (inventorySignal.aborted) {
 						lifetime.signal.throwIfAborted();
 						warnings.push(
@@ -366,7 +391,8 @@ export function createWorkflowService(
 					if (rows.length >= 100) break;
 					let records;
 					try {
-						records = await listWorktrees(pi, root, inventorySignal);
+						await yieldDiscovery(inventorySignal);
+						records = await read(() => listWorktrees(pi, root, inventorySignal));
 					} catch {
 						lifetime.signal.throwIfAborted();
 						warnings.push(`Cannot list worktrees for ${root}`);
@@ -385,6 +411,7 @@ export function createWorkflowService(
 					);
 					for (const record of records) {
 						if (rows.length >= 100 || inventorySignal.aborted) break;
+						await yieldDiscovery(inventorySignal);
 						if (rows.some((row) => pathsEqual(row.path, record.path))) continue;
 						const owned = ownership.find(
 							(row) => pathsEqual(row.path, record.path) && row.branch === record.branch,
@@ -488,6 +515,7 @@ export function createWorkflowService(
 						Number(b.main) - Number(a.main) ||
 						a.path.localeCompare(b.path),
 				);
+				if (!valid() || inventorySignal.aborted) return;
 				worktreeCache = {
 					at: Date.now(),
 					error: warnings.length
@@ -498,17 +526,17 @@ export function createWorkflowService(
 					container: !active,
 				};
 			} catch (error) {
-				if (!closed)
-					worktreeCache = {
-						at: Date.now(),
-						rows: [],
-						error: stripTerminalControls(
-							error instanceof Error ? error.message : "Git unavailable",
-						).slice(0, 2000),
-					};
+				if (inventorySignal.aborted) timedOut();
+				else if (valid()) {
+					const message = stripTerminalControls(error instanceof Error ? error.message : "Git unavailable").slice(0, 2000);
+					completionInventory = { records: completionInventory?.records ?? [], error: message };
+					worktreeCache = { at: Date.now(), rows: rows.length ? rows : worktreeCache?.rows ?? [], error: message };
+				}
 			}
 		})().finally(() => {
+			inventorySignal.removeEventListener("abort", timedOut);
 			reading = undefined;
+			if (inventoryController === controller) inventoryController = undefined;
 		});
 		return reading;
 	}
@@ -519,12 +547,10 @@ export function createWorkflowService(
 		current();
 		try { await delegated.refresh(); } catch { /* Child unavailability must not hide durable metadata. */ }
 		current();
-		void refreshWorktrees();
-		let worktreeCompletionError: string | null = null;
-		const completionRecords = await ownedWorktrees(sessionId).catch(error => {
-			worktreeCompletionError = stripTerminalControls(error instanceof Error ? error.message : String(error)).slice(0, 2000);
-			return [];
-		});
+		scheduleWorktrees();
+		// Presentation cache only: destructive actions retain their fresh checks.
+		const completionRecords = completionInventory?.records ?? [];
+		const worktreeCompletionError = completionInventory?.error ?? null;
 		current();
 		const goal = runtime.activeGoal,
 			terminal = runtime.snapshotSettingsApplicationState().terminalDetails;
@@ -1156,13 +1182,26 @@ export function createWorkflowService(
 		handle,
 		hasOperation: () => !!operation,
 		refreshContext(next: ExtensionContext) {
-			if (!closed && next.sessionManager.getSessionId() === sessionId)
+			if (!closed && next.sessionManager.getSessionId() === sessionId) {
+				if (next.cwd !== ctx.cwd) {
+					inventoryGeneration++;
+					inventoryController?.abort();
+					if (scheduled) clearImmediate(scheduled);
+					scheduled = undefined;
+					worktreeCache = undefined;
+					completionInventory = undefined;
+					repositoryCache = undefined;
+				}
 				ctx = next;
+			}
 		},
 		dispose() {
 			if (closed) return;
 			closed = true;
 			lifetime.abort();
+			inventoryController?.abort();
+			if (scheduled) clearImmediate(scheduled);
+			scheduled = undefined;
 			cancel();
 			operation = undefined;
 			requests.clear();
