@@ -111,13 +111,15 @@ import { randomBytes, randomUUID } from "node:crypto";
 import { createDelegatedGoalExecutor, resumeRestoredGoal, type GoalChildHandle, type ChildGoalSnapshot } from "./goal-executor.ts";
 import { requestGoalWorker, type GoalWorkerIdentity } from "./goal-rpc.ts";
 import { dedicatedGoalTools, guardedGoalBaseTools } from "./goal-tools.ts";
+import { guardedPiInvocation, trustedNixStoreFile } from "./pi-invocation.ts";
+import { DelegatedGoalNoEffectError } from "../shared/delegated-goal-errors.ts";
 import { setDedicatedGoalEnvironment } from "./goal-environment.ts";
 import { dedicatedGoalPolicy, type DedicatedGoalPolicy } from "./goal-policy.ts";
 
 type Mode = "single" | "parallel" | "chain";
 
 type SubagentSpec = {
-  goalExecution?: { completion?: ChildGoalSnapshot; goalTools: string[]; binding: { path: string; token: string; entryId: string; policy: DedicatedGoalPolicy; identity: GoalWorkerIdentity; questionnaireEnabled?: boolean; reviewEnabled?: boolean }; ready(rpc: NativeSubagentRpcSession): Promise<void> };
+  goalExecution?: { spawnAttempted?: true; completion?: ChildGoalSnapshot; goalTools: string[]; binding: { path: string; token: string; entryId: string; policy: DedicatedGoalPolicy; identity: GoalWorkerIdentity; questionnaireEnabled?: boolean; reviewEnabled?: boolean }; ready(rpc: NativeSubagentRpcSession): Promise<void> };
   task: string;
   acceptance?: string[];
   verification?: VerificationGate[];
@@ -547,18 +549,6 @@ function installedFinalizerEntrypoint(requireTrusted = false): string | undefine
   return undefined;
 }
 
-function trustedNixStoreFile(candidate: string, executable = false): string | undefined {
-  try {
-    const resolved = fs.realpathSync(candidate);
-    const info = fs.statSync(resolved);
-    if (!resolved.startsWith("/nix/store/") || !info.isFile() || info.uid !== 0 || (info.mode & 0o022) !== 0) return undefined;
-    if (executable) fs.accessSync(resolved, fs.constants.X_OK);
-    return resolved;
-  } catch {
-    return undefined;
-  }
-}
-
 function installedPermissionProxyEntrypoint(): string | undefined {
   // Anchor the proxy to the already-loaded immutable source tree. Do not
   // follow a separately replaceable Home Manager sibling symlink.
@@ -574,14 +564,7 @@ function installedPermissionProxyEntrypoint(): string | undefined {
 }
 
 function resolvePiInvocation(args: string[], requireRaw = false): { command: string; args: string[]; warning?: string } {
-  if (requireRaw) {
-    const trustedExecutable = trustedNixStoreFile("/proc/self/exe", true);
-    const execName = trustedExecutable ? path.basename(trustedExecutable).toLowerCase() : "";
-    if (!trustedExecutable || /^(node|bun)(\.exe)?$/.test(execName)) {
-      throw new Error("Guarded native subagents require the current Pi process to be an immutable Nix-store executable");
-    }
-    return { command: trustedExecutable, args };
-  }
+  if (requireRaw) return guardedPiInvocation(args);
 
   const configured = process.env.PI_SUBAGENT_BIN;
   if (configured) return { command: configured, args };
@@ -824,12 +807,6 @@ async function runSingleSubagent(
       return currentResult;
     }
 
-    const invocation = resolvePiInvocation(args, Boolean(permissionAuthority));
-    currentResult.command = invocation.command;
-    currentResult.args = invocation.args;
-    currentResult.warning = invocation.warning;
-    if (invocation.warning) currentResult.stderr += `Warning: ${invocation.warning}\n`;
-
     const env: NodeJS.ProcessEnv = {
       ...process.env,
       PI_CODING_AGENT_DIR: runtime.routingEnvironment.PI_SESSION_ROUTING_FILE ? runtime.agentDir : childAgentDir,
@@ -854,6 +831,14 @@ async function runSingleSubagent(
     delete env[SUBAGENT_PERMISSION_SOCKET_ENV];
     delete env[SUBAGENT_PERMISSION_TOKEN_ENV];
     if (permissionRelay) Object.assign(env, permissionRelay.environment);
+    // Resolve after all extensions are appended: interpreted Pi prefixes a copied argv.
+    const invocation = resolvePiInvocation(args, Boolean(permissionAuthority));
+    currentResult.command = invocation.command;
+    currentResult.args = invocation.args;
+    currentResult.warning = invocation.warning;
+    if (invocation.warning) currentResult.stderr += `Warning: ${invocation.warning}\n`;
+    // Mark before attempting spawn. Any failure from here remains conservatively ambiguous.
+    if (spec.goalExecution) spec.goalExecution.spawnAttempted = true;
     const nativeProcess = spawnNativeSubagentProcess(invocation.command, invocation.args, {
       cwd: launchCwd,
       env,
@@ -2023,6 +2008,7 @@ export default function (pi: ExtensionAPI) {
               if (sessionRoutingEnvironment(ctx).PI_SESSION_ROUTING_FILE)
                 nativeHelperEntrypoint("../openai-accounts/accounts", Boolean(authority));
               if (authority && !installedPermissionProxyEntrypoint()) throw new Error("Dedicated goal permission proxy is unavailable");
+              resolvePiInvocation([], Boolean(authority));
               return null;
             } catch (error) { return error instanceof Error ? error.message : "Dedicated goal execution is unavailable"; }
           },
@@ -2148,7 +2134,12 @@ export default function (pi: ExtensionAPI) {
             };
             const control = { stop }; dedicatedGoalRuns.add(control);
             try { await ready; }
-            catch (error) { await stop(); throw error; }
+            catch (error) {
+              await stop(); // Failed cleanup cannot certify a safe retry.
+              if (!previous && !goalExecution.spawnAttempted)
+                throw new DelegatedGoalNoEffectError(error instanceof Error ? error.message : String(error));
+              throw error;
+            }
             const request = async (operation: string, value?: unknown) => {
               if (generation !== sessionGeneration || lifecycleClosing || activeSessionId !== sessionId) throw new Error("Dedicated goal parent runtime changed");
               const observed = await requestGoalWorker(binding.path, { token: binding.token, identity,

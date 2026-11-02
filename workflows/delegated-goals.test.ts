@@ -6,6 +6,7 @@ import { join } from "node:path";
 import { DelegatedGoalRegistry, type DelegatedGoalEntry, type DelegatedGoalExecutor } from "./delegated-goals.ts";
 import { delegatedGoalStore } from "./delegated-goal-store.ts";
 import { resolveGoalLimits, DEDICATED_GOAL_LIMITS } from "../shared/delegated-goal-policy.ts";
+import { DelegatedGoalNoEffectError } from "../shared/delegated-goal-errors.ts";
 
 function fixture() {
   const calls: string[] = [];
@@ -203,6 +204,73 @@ test("durable pre-effect fence prevents duplicate start after persistence failur
     await assert.rejects(reloaded.mutate("parent", { action: "goals.start", requestId: "reload-id", expectedGoalId: entry.id, expectedEntryRevision: entry.revision }), /reconciliation/);
     assert.equal(f.launches(), 1);
   } finally { rmSync(root, { recursive: true, force: true }); }
+});
+
+test("certified no-effect launch rejection clears durable intent and allows a new retry", async () => {
+  const root = mkdtempSync(join(tmpdir(), "delegated-no-effect-"));
+  try {
+    const store = delegatedGoalStore("parent", root), f = fixture();
+    const make = () => new DelegatedGoalRegistry("parent", f.executor, state => store.save(state), store.load(), {
+      initial: store.loadIntent(), save: intent => store.saveIntent(intent),
+    });
+    const registry = make();
+    await registry.mutate("parent", { action: "goals.create", requestId: "create", expectedGoalId: null, objective: "retryable" });
+    const entry = registry.snapshot().entries[0];
+    const realStart = f.executor.start.bind(f.executor);
+    let rejectBeforeExecution = true;
+    f.executor.start = async goal => {
+      if (rejectBeforeExecution) {
+        rejectBeforeExecution = false;
+        throw new DelegatedGoalNoEffectError("launcher positively confirmed no child was spawned");
+      }
+      return realStart(goal);
+    };
+    await assert.rejects(registry.mutate("parent", { action: "goals.start", requestId: "rejected", expectedGoalId: entry.id, expectedEntryRevision: entry.revision }), DelegatedGoalNoEffectError);
+    assert.equal(store.loadIntent(), null);
+    assert.equal(registry.blockedReason(), null);
+    assert.equal(registry.snapshot().entries[0].status, "paused");
+
+    await registry.mutate("parent", { action: "goals.start", requestId: "retry", expectedGoalId: entry.id, expectedEntryRevision: entry.revision });
+    assert.equal(f.launches(), 1);
+    assert.equal(store.loadIntent(), null, "successful launch persists state then clears its intent");
+    assert.equal(registry.snapshot().entries[0].status, "active");
+  } finally { rmSync(root, { recursive: true, force: true }); }
+});
+
+test("generic launch failure retains durable fence across registry restore", async () => {
+  const root = mkdtempSync(join(tmpdir(), "delegated-ambiguous-"));
+  try {
+    const store = delegatedGoalStore("parent", root), f = fixture();
+    const make = () => new DelegatedGoalRegistry("parent", f.executor, state => store.save(state), store.load(), {
+      initial: store.loadIntent(), save: intent => store.saveIntent(intent),
+    });
+    const registry = make();
+    await registry.mutate("parent", { action: "goals.create", requestId: "create", expectedGoalId: null, objective: "ambiguous" });
+    const entry = registry.snapshot().entries[0];
+    f.executor.start = async () => { throw new Error("transport disconnected; spawn status unknown"); };
+    await assert.rejects(registry.mutate("parent", { action: "goals.start", requestId: "unknown", expectedGoalId: entry.id, expectedEntryRevision: entry.revision }), /spawn status unknown/);
+    assert.equal(store.loadIntent()!.entryId, entry.id);
+    assert.ok(registry.blockedReason());
+    const restored = make();
+    assert.ok(restored.blockedReason());
+    await assert.rejects(restored.mutate("parent", { action: "goals.start", requestId: "retry", expectedGoalId: entry.id, expectedEntryRevision: entry.revision }), /reconciliation/);
+    assert.equal(f.launches(), 0);
+  } finally { rmSync(root, { recursive: true, force: true }); }
+});
+
+test("no-effect classification cannot clear intent when journal cleanup fails", async () => {
+  const f = fixture(); await f.create("cleanup failure");
+  let intent: any = null, cleanupFailure = false;
+  const registry = new DelegatedGoalRegistry("parent", f.executor, () => {}, f.registry.snapshot(), { save: value => {
+    if (value === null && cleanupFailure) throw Error("journal cleanup failed");
+    intent = value;
+  } });
+  const entry = registry.snapshot().entries[0];
+  f.executor.start = async () => { throw new DelegatedGoalNoEffectError("no spawn"); };
+  cleanupFailure = true;
+  await assert.rejects(registry.mutate("parent", { action: "goals.start", requestId: "cleanup", expectedGoalId: entry.id, expectedEntryRevision: entry.revision }), /journal cleanup failed/);
+  assert.equal(intent.entryId, entry.id);
+  assert.ok(registry.blockedReason());
 });
 
 test("deterministic execution preflight refusal never poisons pending journal", async () => {

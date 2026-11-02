@@ -5,6 +5,7 @@ import { validateGoalPlanning, pruneGoalDependencies, setGoalDependencies, addGo
 import { validateGoalDiagnostics, type GoalDiagnostics } from "./goal-diagnostics.ts";
 import { validateGoalReview, mergeGoalReview, type GoalReviewReference } from "./goal-review.ts";
 import { validateGoalLimitOverrides, type GoalContinuationLimits } from "../shared/delegated-goal-policy.ts";
+import { DelegatedGoalNoEffectError } from "../shared/delegated-goal-errors.ts";
 
 export { DEDICATED_GOAL_LIMITS } from "../shared/delegated-goal-policy.ts";
 
@@ -220,7 +221,15 @@ export class DelegatedGoalRegistry {
         this.journal.save(copy(intent));
         this.pending = intent;
         performedEffect = true;
-        return await call();
+        try {
+          return await call();
+        } catch (error) {
+          if (error instanceof DelegatedGoalNoEffectError) {
+            this.journal.save(null);
+            this.pending = null;
+          }
+          throw error;
+        }
       };
       switch (r.action) {
         case "goals.start":

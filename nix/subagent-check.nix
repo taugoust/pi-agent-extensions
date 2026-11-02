@@ -37,6 +37,8 @@ pkgs.runCommand "subagent-check"
     workdir="$TMPDIR/subagent-check"
     mkdir -p "$workdir/src/subagent" "$workdir/src/shared" "$workdir/out"
     cp -R ${self}/workflows "$workdir/src/"
+    cp ${self}/subagent/pi-invocation.ts "$workdir/src/subagent/pi-invocation.ts"
+    cp ${self}/subagent/pi-invocation.test.ts "$workdir/src/subagent/pi-invocation.test.ts"
     cp ${self}/subagent/config.ts "$workdir/src/subagent/config.ts"
     cp ${self}/subagent/config.test.ts "$workdir/src/subagent/config.test.ts"
     cp ${self}/subagent/profiles.ts "$workdir/src/subagent/profiles.ts"
@@ -93,6 +95,7 @@ pkgs.runCommand "subagent-check"
       "$workdir/src/subagent/control.ts" \
       "$workdir/src/subagent/outcome.ts" \
       "$workdir/src/subagent/config.test.ts" \
+      "$workdir/src/subagent/pi-invocation.test.ts" \
       "$workdir/src/subagent/profiles.test.ts" \
       "$workdir/src/shared/session-routing.test.ts" \
       "$workdir/src/subagent/outcome.test.ts" \
@@ -201,6 +204,7 @@ pkgs.runCommand "subagent-check"
     node "$workdir/out/subagent/outcome.test.js"
     node "$workdir/out/subagent/resume.test.js"
     node "$workdir/out/subagent/dashboard.test.js"
+    node "$workdir/out/subagent/pi-invocation.test.js"
     node "$workdir/out/shared/quiet-state.test.js"
     TEST_MKFIFO=${pkgs.coreutils}/bin/mkfifo node "$workdir/out/subagent/native-rpc.test.js"
 
