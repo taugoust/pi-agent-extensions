@@ -14,7 +14,7 @@ const mode = process.env.PI_TUI_ROOT_MODE ?? "none";
 const sleep = (ms: number) => new Promise(resolve => setTimeout(resolve, ms));
 const quote = (s: string) => `'${s.replaceAll("'", `'\\''`)}'`;
 
-test("actual root subagent tool: guarded/native launch, crash hydration, group control, explicit resume and reap", { skip: !launcher, timeout: 240_000 }, async () => {
+test("actual root subagent tool: guarded/native launch, crash hydration, group control, explicit resume and reap", { skip: !launcher, timeout: 360_000 }, async () => {
   const root = await mkdtemp(join(tmpdir(), "pi-root-"));
   const socket = join(root, "tmux.sock"), config = join(root, "agent"), result = join(root, "result.json"), permissionFile = join(root, "permission-target");
   await writeFile(permissionFile, "guarded fixture\n", { mode: 0o600 });
@@ -61,6 +61,15 @@ test("actual root subagent tool: guarded/native launch, crash hydration, group c
     await tmux("set-option", "-p", "-t", parentPane, "remain-on-exit", "on");
     for (const [key, value] of Object.entries(environment)) await tmux("set-environment", "-g", key, value);
     await waitForReady();
+    await send("/tui-root-automatic-worktrees");
+    const automaticWorktrees = await waitFile(result, 120_000);
+    assert.equal(automaticWorktrees.ok, true, JSON.stringify(automaticWorktrees));
+    assert.equal(automaticWorktrees.result.automaticNonGoalProvision, true);
+    assert.equal(automaticWorktrees.result.authenticatedNestedReuse, true);
+    assert.equal(automaticWorktrees.result.optionalParentCleanup, true);
+    assert.equal(automaticWorktrees.result.sourceUnchanged, true);
+    if (process.env.PI_TUI_AUTO_WORKTREE_ONLY === "1") return;
+    await rm(result);
     await send("/tui-root-goal-start");
     const goalStart = await waitFile(result, 60_000);
     assert.equal(goalStart.ok, true, JSON.stringify(goalStart));

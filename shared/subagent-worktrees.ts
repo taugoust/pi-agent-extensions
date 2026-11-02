@@ -7,11 +7,15 @@ import { addWorktree, currentWorktreePath, defaultWorktreePath, listWorktrees, p
 import { canonicalSubagentName, validateSubagentDisplayName } from "../subagent/tui-names.ts";
 import { loadWorktreeSettings } from "../workflows/worktree/settings.ts";
 
-export type WorktreeOption = { changes?: "include" | "exclude"; base?: string };
+import type { WorkerWorktreeContext, WorktreeIdentity } from "./worker-worktree-context.ts";
+export type WorktreeOption = boolean | { changes?: "include" | "exclude"; base?: string };
+export type WorktreeInfo = { path: string; branch: string; baseCommit: string; includedChanges: boolean; identity?: WorktreeIdentity; borrowed?: boolean };
+export type WorktreeBorrower = WorktreeIdentity & { released: boolean; supervisor?: WorktreeIdentity };
+export const sameWorktreeIdentity = (a: WorktreeIdentity | undefined, b: WorktreeIdentity | undefined) => !!a && !!b && a.ownerSessionId === b.ownerSessionId && a.taskId === b.taskId && a.childId === b.childId;
 import { validateWorktreeCompletion, type WorktreeCompletion } from "./worktree-completion.ts";
 export type WorktreeReap = { version: 1; phase: "intent" | "worktree-removed" | "cleaned"; requestedAt: string; branchOid: string; branchIdentity?: string };
 export type WorktreeReapAudit = { at: string; actorSessionId: string; root?: { ownerSessionId: string; taskId: string; childId: string }; recordedIdentity: { ownerSessionId: string; taskId: string; childId: string }; requestedRoot?: { ownerSessionId: string; taskId: string; childId: string }; reason: string; path: string; recordedPhysicalIdentity?: { dev: string; ino: string; birthtimeMs: string }; observedPathIdentity?: { dev: string; ino: string; birthtimeMs: string }; provenance: "verified" | "uncertain" | "missing"; uncertainty?: string };
-export type OwnedWorktree = { reapAudits?: WorktreeReapAudit[]; reap?: WorktreeReap; completion?: WorktreeCompletion; retain?: boolean; version: 1; ownerSessionId: string; taskId: string; childId: string; title: string; canonicalDisplayName?: string; repo: string; commonDir: string;
+export type OwnedWorktree = { borrowers?: WorktreeBorrower[]; reapAudits?: WorktreeReapAudit[]; reap?: WorktreeReap; completion?: WorktreeCompletion; retain?: boolean; version: 1; ownerSessionId: string; taskId: string; childId: string; title: string; canonicalDisplayName?: string; repo: string; commonDir: string;
   path: string; cwd: string; branch: string; baseCommit: string; includedChanges: boolean; createdAt: string;
   released: boolean; state: "preparing" | "ready" | "failed"; physicalIdentity?: { dev: string; ino: string; birthtimeMs: string }; error?: string };
 const registry = () => join(getAgentDir(), "state", "subagent-worktrees-v1");
@@ -34,6 +38,7 @@ function validateReap(value: WorktreeReap | undefined, record: Pick<OwnedWorktre
 const recordFile = (owner: string, task: string) => join(registry(), `${createHash("sha256").update(`${owner}\0${task}`).digest("hex")}.json`);
 export function worktreeOption(value: unknown): WorktreeOption | undefined {
   if (value === undefined) return;
+  if (typeof value === "boolean") return value;
   if (!value || typeof value !== "object" || Array.isArray(value)) throw new Error("worktree must be an object with optional changes and base");
   const v = value as Record<string, unknown>;
   if (Object.keys(v).some(key => !["changes", "base"].includes(key)) || (v.changes !== undefined && !["include", "exclude"].includes(String(v.changes)))
@@ -79,6 +84,7 @@ function gitClient(input?: Buffer) {
 export async function saveOwnedWorktree(record: OwnedWorktree) {
   if (record.completion) validateWorktreeCompletion(record.completion, record.ownerSessionId, record.taskId);
   validateReap(record.reap, record);
+  validateBorrowers(record.borrowers);
   const document = JSON.stringify(record);
   if (Buffer.byteLength(document) > 16384) throw new Error("Worktree ownership record exceeds the 16 KiB durable inventory limit; audit history was not dropped, so operator archival/review is required before retrying");
   await fs.mkdir(registry(), { recursive: true, mode: 0o700 });
@@ -110,6 +116,7 @@ export async function ownedWorktrees(owner?: string, signal?: AbortSignal): Prom
     if (record.completion) validateWorktreeCompletion(record.completion, record.ownerSessionId, record.taskId);
     validateReap(record.reap, record);
     if (record.retain !== undefined && typeof record.retain !== "boolean") throw new Error("Invalid worktree retention marker");
+    validateBorrowers(record.borrowers);
     if (!owner || record.ownerSessionId === owner) records.push(record);
   }
   return records;
@@ -143,10 +150,20 @@ export async function serialized<T>(owner: string, taskId: string, action: () =>
   }); queues.set(key, next);
   try { return await next; } finally { if (queues.get(key) === next) queues.delete(key); }
 }
+function validateBorrowers(value: OwnedWorktree["borrowers"]) {
+  const valid = (id: WorktreeIdentity) => id && typeof id.ownerSessionId === "string" && !!id.ownerSessionId
+    && /^subagent-task-[a-f0-9]{24}$/.test(id.taskId) && /^subagent-child-[a-f0-9]{24}$/.test(id.childId);
+  if (value !== undefined && (!Array.isArray(value) || value.length > 32 || value.some(row => !valid(row) || typeof row.released !== "boolean"
+    || row.supervisor !== undefined && !valid(row.supervisor)) || new Set(value.map(row => `${row.ownerSessionId}\0${row.taskId}`)).size !== value.length)) throw new Error("Invalid worktree borrower inventory");
+}
 export async function releaseWorktree(owner: string, taskId: string, childId: string) {
-  await serialized(owner, taskId, async () => {
-    const record = (await ownedWorktrees(owner)).find(row => row.taskId === taskId);
-    if (record && record.childId === childId && !record.released) await save({ ...record, released: true });
+  const identity = { ownerSessionId: owner, taskId, childId };
+  const matches = (await ownedWorktrees()).filter(row => sameWorktreeIdentity(row, identity) || row.borrowers?.some(b => sameWorktreeIdentity(b, identity)));
+  for (const match of matches) await serialized(match.ownerSessionId, match.taskId, async () => {
+    const record = (await ownedWorktrees(match.ownerSessionId)).find(row => row.taskId === match.taskId);
+    if (!record) throw new Error("Worktree attachment ownership disappeared during release");
+    const borrowers = record.borrowers?.map(row => sameWorktreeIdentity(row, identity) ? { ...row, released: true } : row);
+    await save({ ...record, ...(sameWorktreeIdentity(record, identity) ? { released: true } : {}), ...(borrowers ? { borrowers } : {}) });
   });
 }
 async function capture(repo: string, signal?: AbortSignal) {
@@ -184,7 +201,7 @@ async function capture(repo: string, signal?: AbortSignal) {
   for (const file of files) digest.update(file.path).update(String(file.mode)).update(file.link ?? file.bytes!);
   return { status, staged, unstaged, files, digest: digest.digest("hex") };
 }
-type Child = { taskId: string; childId: string; spec: { task: string; name?: string; displayName?: string; cwd?: string; systemPrompt?: string; worktree?: WorktreeOption; worktreeInfo?: { path: string; branch: string; baseCommit: string; includedChanges: boolean } } };
+type Child = { taskId: string; childId: string; spec: { task: string; name?: string; displayName?: string; cwd?: string; systemPrompt?: string; worktree?: WorktreeOption; worktreeInfo?: WorktreeInfo } };
 function within(root: string, path: string) {
   const part = relative(root, path);
   return !part || (!isAbsolute(part) && part !== ".." && !part.startsWith(`..${sep}`));
@@ -193,33 +210,114 @@ function attachContext(child: Child, record: OwnedWorktree) {
   const note = `[Isolated worktree]\nWork in ${record.path} on branch ${record.branch}. The source checkout ${record.repo} is separate and must remain unchanged. Treat paths referring to that checkout as references; make your edits in this worktree. Retain the worktree and branch for parent review; do not merge or remove them automatically.`;
   if (!child.spec.systemPrompt?.includes(note)) child.spec.systemPrompt = [child.spec.systemPrompt, note].filter(Boolean).join("\n\n");
 }
+function worktreeInfo(record: OwnedWorktree, borrowed = false): WorktreeInfo {
+  return { path: record.path, branch: record.branch, baseCommit: record.baseCommit, includedChanges: record.includedChanges,
+    identity: { ownerSessionId: record.ownerSessionId, taskId: record.taskId, childId: record.childId }, ...(borrowed ? { borrowed: true } : {}) };
+}
+async function validateReusableWorktree(record: OwnedWorktree, cwd: string, signal?: AbortSignal) {
+  if (record.state !== "ready" || record.error || record.completion || record.reap || record.retain) throw new Error("Retained worktree is failed, completed, retained as evidence or being removed; owner review required");
+  if (!record.physicalIdentity || record.path === record.repo || await fs.realpath(record.path) !== record.path
+    || !within(record.path, await fs.realpath(cwd))) throw new Error("Retained worktree physical identity or cwd changed");
+  const common = (await worktreeGit(["rev-parse", "--path-format=absolute", "--git-common-dir"], record.path, signal)).trim();
+  const admin = (await worktreeGit(["rev-parse", "--path-format=absolute", "--git-dir"], record.path, signal)).trim(), stat = await fs.stat(admin);
+  if (common !== record.commonDir || String(stat.dev) !== record.physicalIdentity.dev || String(stat.ino) !== record.physicalIdentity.ino
+    || String(stat.birthtimeMs) !== record.physicalIdentity.birthtimeMs) throw new Error("Retained worktree physical identity changed");
+  const trees = await listWorktrees(gitClient(), record.commonDir, signal);
+  if (!trees.some(row => row.path === record.path && row.branch === record.branch && row.lockedReason === undefined && row.prunableReason === undefined)) throw new Error("Retained worktree branch/path identity changed");
+}
+/** A supervisor may lend its own launch checkout, but not a sibling's active checkout. */
+function supervisingAttachments(record: OwnedWorktree, owner: string, supervision?: WorkerWorktreeContext): WorktreeIdentity[] {
+  if (!supervision || supervision.sessionId !== owner) return [];
+  if (sameWorktreeIdentity(record, supervision.self)) return [supervision.self];
+  if (!sameWorktreeIdentity(record, supervision.worktree)) return [];
+  const chain: WorktreeIdentity[] = [];
+  let cursor: WorktreeIdentity | undefined = supervision.self;
+  while (cursor) {
+    if (chain.some(row => sameWorktreeIdentity(row, cursor))) throw new Error("Worktree supervision attachment cycle");
+    chain.push(cursor);
+    if (sameWorktreeIdentity(cursor, record)) return chain;
+    const borrower = record.borrowers?.find(row => sameWorktreeIdentity(row, cursor) && !row.released);
+    if (!borrower) return [];
+    cursor = borrower.supervisor;
+  }
+  return chain;
+}
+export type WorktreeReuseActivity = (path: string, supervisors: WorktreeIdentity[]) => Promise<boolean>;
+async function borrowWorktree(child: Child, owner: string, identity: WorktreeIdentity, signal: AbortSignal | undefined, current: () => boolean,
+  supervision?: WorkerWorktreeContext, previousChildId?: string, activity?: WorktreeReuseActivity) {
+  await serialized(identity.ownerSessionId, identity.taskId, async () => {
+    const record = (await ownedWorktrees(identity.ownerSessionId)).find(row => row.taskId === identity.taskId);
+    if (!record || !sameWorktreeIdentity(record, identity)) throw new Error("Retained worktree ownership identity changed");
+    const supervisors = supervisingAttachments(record, owner, supervision);
+    if (record.ownerSessionId !== owner && !supervisors.length) throw new Error("Worktree is not owned by this supervising parent; foreign ownership cannot be reused");
+    await validateReusableWorktree(record, child.spec.cwd!, signal);
+    if (!record.released && !supervisors.some(row => sameWorktreeIdentity(row, record))) throw new Error("Worktree creator is still attached; reap it before replacement reuse");
+    const borrowers = record.borrowers ?? [], prior = borrowers.find(row => row.ownerSessionId === owner && row.taskId === child.taskId);
+    if (previousChildId && (!prior || prior.childId !== previousChildId || !prior.released)) throw new Error("Retained borrower replacement identity changed or was not released");
+    if (borrowers.some(row => !row.released && !supervisors.some(id => sameWorktreeIdentity(id, row)))) throw new Error("Worktree has a conflicting active borrower; reap it before reuse");
+    if (!activity) throw new Error("Managed worktree activity inspection unavailable; refusing reuse");
+    if (await activity(record.path, supervisors)) throw new Error("A conflicting managed worker is still using the worktree");
+    if (signal?.aborted || !current()) throw new Error("Worktree reuse context changed");
+    const attachment: WorktreeBorrower = { ownerSessionId: owner, taskId: child.taskId, childId: child.childId, released: false,
+      ...(supervisors.length ? { supervisor: supervision!.self } : {}) };
+    if (!prior && borrowers.length >= 32) throw new Error("Worktree attachment history is full; owner review required");
+    await save({ ...record, borrowers: [...borrowers.filter(row => row !== prior), attachment] });
+    child.spec.cwd = await fs.realpath(child.spec.cwd!);
+    child.spec.worktreeInfo = worktreeInfo(record, true);
+    attachContext(child, record);
+  });
+}
 /** Preflight every requested tree before creating any; never mutate the parent's index or checkout. */
-export async function provisionWorktrees(children: Child[], owner: string, signal: AbortSignal | undefined, current: () => boolean, resume = false) {
-  const requested = children.filter(child => child.spec.worktree !== undefined);
+export async function provisionWorktrees(children: Child[], owner: string, signal: AbortSignal | undefined, current: () => boolean, resume = false, supervision?: WorkerWorktreeContext, previousChildId?: string, activity?: WorktreeReuseActivity) {
+  try { await provision(children, owner, signal, current, resume, supervision, previousChildId, activity); }
+  catch (error) {
+    for (const child of children) if (child.spec.worktree) await releaseWorktree(owner, child.taskId, child.childId);
+    throw error;
+  }
+}
+async function provision(children: Child[], owner: string, signal: AbortSignal | undefined, current: () => boolean, resume: boolean, supervision?: WorkerWorktreeContext, previousChildId?: string, activity?: WorktreeReuseActivity) {
+  const requested = children.filter(child => child.spec.worktree !== undefined && child.spec.worktree !== false);
   if (!requested.length) return;
   if (resume) {
-    for (const child of requested) await serialized(owner, child.taskId, async () => {
+    for (const child of requested) {
+      if (child.spec.worktreeInfo?.borrowed) {
+        await borrowWorktree(child, owner, child.spec.worktreeInfo.identity!, signal, current, supervision, previousChildId, activity);
+        continue;
+      }
+      await serialized(owner, child.taskId, async () => {
       const record = (await ownedWorktrees(owner)).find(row => row.taskId === child.taskId);
       if (record?.completion) throw new Error("Completed worktree cannot be resumed; retained completion must be reviewed by its owner");
       if (record?.reap) throw new Error("Worktree removal is recorded; explicit owner recovery or a new task is required");
       if (!record || record.state !== "ready" || record.cwd !== child.spec.cwd) throw new Error("Retained worktree identity is unavailable");
+      await validateReusableWorktree(record, record.cwd, signal);
+      if (!activity || await activity(record.path, [])) throw new Error("Managed worktree activity is unavailable or conflicting; refusing resume");
+      if (!record.released || previousChildId && record.childId !== previousChildId || record.borrowers?.some(b => !b.released)) throw new Error("Retained worktree has a conflicting attachment or replacement identity");
       if (!within(record.path, await fs.realpath(record.cwd)) || (await worktreeGit(["rev-parse", "--path-format=absolute", "--git-common-dir"], record.path, signal)).trim() !== record.commonDir) throw new Error("Retained worktree directory identity changed");
       const list = await listWorktrees(gitClient(), record.commonDir, signal);
       if (!list.some(row => row.path === record.path && row.branch === record.branch)) throw new Error("Retained worktree moved or was removed");
       if (signal?.aborted || !current()) throw new Error("Worktree resume context changed");
       await save({ ...record, childId: child.childId, released: false });
-      child.spec.worktreeInfo = { path: record.path, branch: record.branch, baseCommit: record.baseCommit, includedChanges: record.includedChanges };
+      child.spec.worktreeInfo = worktreeInfo({ ...record, childId: child.childId });
       attachContext(child, record);
     });
+    }
     return;
   }
   const settings = await loadWorktreeSettings();
   if (settings.kind === "invalid") throw new Error("Worktree settings are invalid");
   const plans = [];
   for (const child of requested) {
-    const choice = worktreeOption(child.spec.worktree)!;
+    const option = worktreeOption(child.spec.worktree)!;
     const sourceCwd = await fs.realpath(child.spec.cwd!);
-    const repo = await currentWorktreePath(gitClient(), sourceCwd, signal);
+    let repo: string;
+    try { repo = await currentWorktreePath(gitClient(), sourceCwd, signal); }
+    catch (error) { throw new Error(`Automatic worktree requires a Git repository cwd; discover/select its repository first, or set worktree:false for intentional non-Git work. ${String(error)}`); }
+    if (option === true) {
+      const matches = (await ownedWorktrees()).filter(row => row.path === repo);
+      if (matches.length > 1) throw new Error("Ambiguous registered worktree ownership; owner review required");
+      if (matches.length) { await borrowWorktree(child, owner, matches[0], signal, current, supervision, undefined, activity); continue; }
+    }
+    const choice = typeof option === "object" ? option : {};
     if (!within(repo, sourceCwd)) throw new Error("Source cwd is outside its Git checkout");
     const status = await worktreeGit(["status", "--porcelain=v1", "-z", "--untracked-files=all", "--ignore-submodules=none"], repo, signal);
     if (status && !choice.changes) throw new Error(`Repository ${repo} has uncommitted changes. Set worktree.changes to "include" or "exclude".`);
@@ -292,7 +390,7 @@ export async function provisionWorktrees(children: Child[], owner: string, signa
       if (!delta && choice.changes !== "exclude" && (await worktreeGit(["status", "--porcelain=v1", "-z", "--untracked-files=all", "--ignore-submodules=none"], record.repo, signal))) throw new Error("Source became dirty during worktree creation; retry with an explicit changes choice");
       if (signal?.aborted || !current()) throw new Error("Worktree launch context changed");
       record.state = "ready"; await save(record); plan.child.spec.cwd = record.cwd;
-      plan.child.spec.worktreeInfo = { path: record.path, branch: record.branch, baseCommit: record.baseCommit, includedChanges: record.includedChanges };
+      plan.child.spec.worktreeInfo = worktreeInfo(record);
       attachContext(plan.child, record);
     });
   } catch (error) {

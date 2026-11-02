@@ -56,6 +56,29 @@ test("foreground retained tool pairing preserves canonical typed metadata and ra
   } finally { await manager.shutdown(false); await rm(root, { recursive: true, force: true }); }
 });
 
+test("headless optional cleanup runs after verified job sealing and retains blocked workers for retry", async () => {
+  const root = await mkdtemp(join(tmpdir(), "headless-optional-worktree-"));
+  const directory = join(root, "worker"); new TuiWorkerStore(directory, true);
+  const manager: any = new HeadlessForegroundManager(root, () => "native", () => true);
+  const child: any = { directory, spec: { task: "fixture", cwd: root }, status: "completed", reaped: false, cleanupWorktreeRequested: true, attempt: 1 };
+  const manifest: any = { ...identity, processPid: 123, processToken: "fixture:123", runtimePid: 124, runtimeProcessToken: "fixture:124" };
+  const group: any = { owner: "fixture", children: [child] };
+  let sealed = false, blocked = true, cleanups = 0;
+  manager.ensureRuntimeIdentity = async () => manifest;
+  manager.runtimeState = async () => "dead";
+  manager.verifyCleanupProof = () => { sealed = true; };
+  manager.reconcileWorktrees = async () => { assert.equal(sealed, true); cleanups++; if (blocked) throw new Error("dirty shared evidence retained"); };
+  manager.persist = () => {};
+  try {
+    await assert.rejects(manager.sealAndReap(group, child, manifest), /dirty shared evidence/);
+    assert.equal(child.reaped, false); await assert.rejects(readFile(join(directory, "reaped.json")), { code: "ENOENT" });
+    blocked = false; await manager.sealAndReap(group, child, manifest);
+    assert.equal(child.reaped, true); assert.equal(cleanups, 2);
+    await manager.sealAndReap(group, child, manifest);
+    assert.equal(cleanups, 3, "closed records still reconcile retained cleanup intent on retry");
+  } finally { await manager.shutdown(false); await rm(root, { recursive: true, force: true }); }
+});
+
 test("headless routing callbacks preserve trusted environment and rebind legacy role model", () => {
   const root = "/tmp/headless-routing-fixture";
   const manager: any = new HeadlessForegroundManager(root, () => "native", () => true, 16, undefined,

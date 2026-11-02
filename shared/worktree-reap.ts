@@ -1,5 +1,5 @@
 import { promises as fs } from "node:fs";
-import { ownedWorktrees, saveOwnedWorktree, serialized, type OwnedWorktree } from "./subagent-worktrees.ts";
+import { ownedWorktrees, saveOwnedWorktree, serialized, sameWorktreeIdentity, type OwnedWorktree } from "./subagent-worktrees.ts";
 import { ownedWorktreeReapHost, type CompletionContext, type CompletionSafety, type WorktreeReapHost } from "./worktree-completion-host.ts";
 
 export type ReapTarget = { ownerSessionId: string; taskId: string; childId: string; reaped: boolean; attempt?: number };
@@ -12,11 +12,13 @@ export type WorktreeReapRequest = {
   /** All reachable owner sessions; every registry record for these owners is accounted for. */
   ownedSessionIds: string[];
   context: Pick<CompletionContext, "cwd" | "isIdle" | "hasPendingMessages"> & { safety?: CompletionSafety; managedWorktreeActivity?: (path: string) => Promise<boolean> };
+  /** Explicit parent request to remove a borrowed physical root, rather than release its attachment. */
+  cleanupBorrowedRoot?: boolean;
   force?: boolean;
   reason?: string;
 };
 export type ReapIdentity = { ownerSessionId: string; taskId: string; childId: string; path: string; physicalIdentity?: OwnedWorktree["physicalIdentity"] };
-export type ReapReport = { scope: "registered-harness-worktrees-only"; limitation: "Externally created or unregistered worktrees are not inventoried or removed"; removed: string[]; blocked: (ReapIdentity & { requestedRoot?: Pick<ReapTarget, "ownerSessionId" | "taskId" | "childId">; reason: string })[]; remaining: string[]; remainingWorktrees: ReapIdentity[]; audited: boolean };
+export type ReapReport = { scope: "registered-harness-worktrees-only"; limitation: "Externally created or unregistered worktrees are not inventoried or removed"; removed: string[]; blocked: (ReapIdentity & { requestedRoot?: Pick<ReapTarget, "ownerSessionId" | "taskId" | "childId">; reason: string })[]; remaining: string[]; remainingWorktrees: ReapIdentity[]; retainedParentWorktrees: ReapIdentity[]; audited: boolean };
 export class WorktreeReapError extends Error {
   readonly report: ReapReport;
   constructor(message: string, report: ReapReport) { super(message); this.report = report; this.name = "WorktreeReapError"; }
@@ -31,23 +33,32 @@ const sameIdentity = (a: OwnedWorktree, b: OwnedWorktree) => a.ownerSessionId ==
 export async function reapOwnedWorktrees(host: ReapHost, request: WorktreeReapRequest): Promise<ReapReport>;
 export async function reapOwnedWorktrees(request: WorktreeReapRequest): Promise<ReapReport>;
 export async function reapOwnedWorktrees(first: ReapHost | WorktreeReapRequest, maybeRequest?: WorktreeReapRequest): Promise<ReapReport> {
-  const request = maybeRequest ?? first as WorktreeReapRequest;
+  const supplied = maybeRequest ?? first as WorktreeReapRequest;
+  const inventory = await ownedWorktrees();
+  const borrowed = supplied.root && !inventory.some(row => row.ownerSessionId === supplied.root!.ownerSessionId && row.taskId === supplied.root!.taskId)
+    ? inventory.filter(row => row.borrowers?.some(b => sameWorktreeIdentity(b, supplied.root))) : [];
+  if (borrowed.length > 1) throw new Error("Ambiguous worktree attachment ownership; refusing reap");
+  const borrowedRoot = borrowed[0];
+  const retainBorrowedRoot = !!borrowedRoot && !supplied.cleanupBorrowedRoot && !supplied.force;
+  const request: WorktreeReapRequest = borrowedRoot ? { ...supplied, root: retainBorrowedRoot ? undefined
+    : { ownerSessionId: borrowedRoot.ownerSessionId, taskId: borrowedRoot.taskId, childId: borrowedRoot.childId } } : supplied;
   const targets = new Map(request.descendants.map(row => [`${row.ownerSessionId}\0${row.taskId}`, row]));
   if (targets.size !== request.descendants.length) throw new Error("Duplicate attributed reap target");
   const safety: CompletionSafety = request.context.safety ?? (async record => ({ active: targets.get(`${record.ownerSessionId}\0${record.taskId}`)?.reaped !== true, retained: false }));
   const ctx: CompletionContext = { cwd: request.context.cwd, isIdle: request.context.isIdle, hasPendingMessages: request.context.hasPendingMessages,
     ...(request.context.managedWorktreeActivity ? { managedWorktreeActivity: request.context.managedWorktreeActivity } : {}),
     sessionManager: { getSessionId: () => request.actorSessionId } };
-  const host = maybeRequest ? first as ReapHost : ownedWorktreeReapHost(ctx, safety, undefined, undefined, request.root, request.descendants, request.ownedSessionIds);
+  const host = maybeRequest ? first as ReapHost : ownedWorktreeReapHost(ctx, safety, undefined, undefined, request.root, request.descendants, request.ownedSessionIds, borrowedRoot ? supplied.root : undefined);
   if (!request.actorSessionId) throw new Error("Authenticated actor session is required");
   if (request.force && (!request.reason?.trim() || Buffer.byteLength(request.reason) > 1000)) throw new Error("Force audit requires a reason of 1–1000 bytes");
   const ownerIds = new Set(request.ownedSessionIds);
-  const inventory = await ownedWorktrees();
-  const records = inventory.filter(row => ownerIds.has(row.ownerSessionId));
+  const records = inventory.filter(row => ownerIds.has(row.ownerSessionId) && !(retainBorrowedRoot && sameWorktreeIdentity(row, borrowedRoot)));
   const rootCandidate = request.root && inventory.find(row => row.ownerSessionId === request.root!.ownerSessionId && row.taskId === request.root!.taskId);
   if (rootCandidate && !records.some(row => row.taskId === rootCandidate.taskId && row.ownerSessionId === rootCandidate.ownerSessionId)) records.push(rootCandidate);
   const report: ReapReport = { scope: "registered-harness-worktrees-only", limitation: "Externally created or unregistered worktrees are not inventoried or removed",
-    removed: [], blocked: [], remaining: [], remainingWorktrees: [], audited: !!request.force };
+    removed: [], blocked: [], remaining: [], remainingWorktrees: [], retainedParentWorktrees: retainBorrowedRoot ? [identity(borrowedRoot!)] : [], audited: !!request.force };
+  if (borrowedRoot && !retainBorrowedRoot && !borrowedRoot.released && !request.force) report.blocked.push({ ...identity(borrowedRoot), requestedRoot: supplied.root,
+    reason: "Borrowed worktree creator/supervisor remains attached; retain the shared tree and reap its owner instead" });
   const rootRecord = rootCandidate?.childId === request.root?.childId ? rootCandidate : undefined;
   const rootIdentityMismatch = !!request.root && !!rootCandidate && !rootRecord;
   if (rootIdentityMismatch && !request.force) report.blocked.push({ ...identity(rootCandidate!), requestedRoot: request.root,
@@ -85,9 +96,9 @@ export async function reapOwnedWorktrees(first: ReapHost | WorktreeReapRequest, 
             }
           } catch (error) { uncertainty = error instanceof Error ? error.message.slice(0, 2000) : String(error).slice(0, 2000); }
           if (!observedPathIdentity && uncertainty?.includes("ENOENT")) provenance = "missing";
-          const audit = { at: new Date().toISOString(), actorSessionId: request.actorSessionId, ...(request.root ? { root: request.root } : {}),
+          const audit = { at: new Date().toISOString(), actorSessionId: request.actorSessionId, ...(supplied.root ? { root: supplied.root } : {}),
             recordedIdentity: { ownerSessionId: record.ownerSessionId, taskId: record.taskId, childId: record.childId },
-            ...(isRoot ? { requestedRoot: request.root } : {}), reason: request.reason!.trim(), path: record.path, ...(record.physicalIdentity ? { recordedPhysicalIdentity: record.physicalIdentity } : {}),
+            ...(isRoot ? { requestedRoot: supplied.root } : {}), reason: request.reason!.trim(), path: record.path, ...(record.physicalIdentity ? { recordedPhysicalIdentity: record.physicalIdentity } : {}),
             ...(observedPathIdentity ? { observedPathIdentity } : {}), provenance, ...(uncertainty ? { uncertainty } : {}) };
           const audits = latest.reapAudits ?? [];
           const auditIdentity = (entry: typeof audit) => JSON.stringify({ ...entry, at: undefined });
@@ -160,8 +171,9 @@ export async function reapOwnedWorktrees(first: ReapHost | WorktreeReapRequest, 
 }
 async function reconcileFinalInventory(report: ReapReport, previous: OwnedWorktree[], request: WorktreeReapRequest, auditOnly: boolean) {
   const owners = new Set(request.ownedSessionIds);
-  const current = (await ownedWorktrees()).filter(row => owners.has(row.ownerSessionId)
-    || !!request.root && row.ownerSessionId === request.root.ownerSessionId && row.taskId === request.root.taskId);
+  const current = (await ownedWorktrees()).filter(row => (owners.has(row.ownerSessionId)
+    || !!request.root && row.ownerSessionId === request.root.ownerSessionId && row.taskId === request.root.taskId)
+    && !report.retainedParentWorktrees.some(retained => sameWorktreeIdentity(retained, row)));
   for (const row of current) {
     const known = previous.some(record => sameIdentity(record, row));
     if (!known || !auditOnly && await exists(row.path)) report.blocked.push({ ...identity(row),

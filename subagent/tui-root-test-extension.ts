@@ -15,6 +15,7 @@ import { HARNESS_READONLY_KEY } from "../shared/harness-readonly.ts";
 import type { TuiWorkerManifest } from "../shared/tui-worker-protocol.ts";
 import { processIdentity } from "./tui-worker-tmux.ts";
 import { callTuiWorker } from "./tui-worker-client.ts";
+import { ownedWorktrees, worktreeGit } from "../shared/subagent-worktrees.ts";
 import { canonicalSubagentName } from "./tui-names.ts";
 
 /** Explicit real-root integration fixture. Never enabled outside tests. */
@@ -63,6 +64,46 @@ export default function rootTest(pi: ExtensionAPI) {
     assert.equal(value.details.group.status, "completed", JSON.stringify(value));
     return value.details.group;
   };
+  register("tui-root-automatic-worktrees", async ctx => {
+    const repo = join(dirname(output), "automatic-worktree-repository");
+    await mkdir(repo); await writeFile(join(repo, "tracked"), "preserved source\n");
+    await worktreeGit(["init", "-b", "main"], repo);
+    await worktreeGit(["config", "user.email", "fixture@example.invalid"], repo);
+    await worktreeGit(["config", "user.name", "Fixture"], repo);
+    await worktreeGit(["add", "."], repo); await worktreeGit(["commit", "-m", "offline fixture"], repo);
+    await writeFile(join(getAgentDir(), "pi-worktree.json"), JSON.stringify({ worktreeRoot: join(dirname(output), "automatic-worktrees") }));
+    for (const reuse of [false, true]) {
+      const prior = new Set((await ownedWorktrees()).map(row => row.taskId));
+      const launched = await execute(ctx, { agent: "coordinator", task: "AUTOMATIC_WORKTREE_COORDINATOR_FIXTURE", cwd: repo,
+        ...(reuse ? { worktree: {} } : {}), background: true, acceptance: ["Spawn, read and normally reap a non-Goal ordinary worker using authenticated parent automatic-worktree defaults"] });
+      const group = await wait(ctx, launched.details.job_id), m = manifestFor(group);
+      assert.equal(m.automaticWorktrees, true);
+      const result = await execute(ctx, { operation: "result", job_id: launched.details.job_id });
+      assert.match(result.content[0].text, /AUTOMATIC_WORKTREE_NESTED_REAP_COMPLETE/);
+      const records = (await ownedWorktrees()).filter(row => !prior.has(row.taskId));
+      assert.equal(records.length, 1, "nested owned-cwd reuse must not copy a second snapshot");
+      if (reuse) {
+        assert.equal(records[0].ownerSessionId, ctx.sessionManager.getSessionId());
+        assert.equal(records[0].borrowers?.length, 1);
+        assert.equal(records[0].borrowers?.[0].released, true, "nested normal worker reap releases its exact borrower attachment");
+      } else {
+        assert.notEqual(records[0].ownerSessionId, ctx.sessionManager.getSessionId(), "ordinary parent must not isolate the coordinator root automatically");
+        assert.equal(records[0].released, true, "nested ordinary worker reap retains its created tree");
+      }
+      assert.ok((await lstat(records[0].path)).isDirectory());
+      await execute(ctx, { operation: "reap", job_id: launched.details.job_id });
+      await assert.rejects(lstat(records[0].path), { code: "ENOENT" });
+      assert.ok((await worktreeGit(["rev-parse", records[0].branch], repo)).trim());
+    }
+    const optional = await execute(ctx, { task: "Ordinary optional cleanup fixture", cwd: repo, worktree: {}, background: true,
+      model: "harness-test/mock:off", acceptance: ["Explicit parent cleanup removes the isolated ordinary worker checkout"] });
+    const optionalGroup = await wait(ctx, optional.details.job_id), optionalPath = optionalGroup.children[0].worktree.path;
+    await execute(ctx, { operation: "reap", job_id: optional.details.job_id, cleanup_worktree: true });
+    await assert.rejects(lstat(optionalPath), { code: "ENOENT" });
+    assert.equal(await worktreeGit(["status", "--porcelain"], repo), "");
+    assert.equal((await worktreeGit(["branch", "--show-current"], repo)).trim(), "main");
+    return { automaticNonGoalProvision: true, authenticatedNestedReuse: true, optionalParentCleanup: true, sourceUnchanged: true };
+  });
   const answerHeadlessInteraction = async (ctx: any, marker: string, answer: any, kind: string) => {
     const pendingRun = tool.execute(`root-test-interaction-${marker}-${Date.now()}`, { displayName: canonicalSubagentName(marker), task: marker, model: "harness-test/mock:off", acceptance: ["The requested typed interaction is answered and the worker completes"] }, undefined, undefined, ctx);
     void pendingRun.catch(() => undefined);

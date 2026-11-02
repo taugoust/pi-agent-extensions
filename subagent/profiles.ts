@@ -19,6 +19,7 @@ export interface AgentProfile {
   thinking?: string;
   tools?: string[];
   cleanupWorktreesOnReap?: boolean;
+  automaticWorktrees?: boolean;
   source: AgentProfileSource;
   filePath: string;
 }
@@ -33,7 +34,7 @@ const TOOL_NAME = /^[a-z][a-z0-9_-]{0,63}$/;
 /** Portable native core tools accepted by profile selection; runtime guards remain authoritative. */
 export const PROFILE_SUPPORTED_TOOLS = ["read", "bash", "edit", "write"] as const;
 const PROFILE_SUPPORTED_TOOL_SET: ReadonlySet<string> = new Set(PROFILE_SUPPORTED_TOOLS);
-const VALID_FIELDS = new Set(["name", "description", "model", "thinking", "tools", "cleanupWorktreesOnReap"]);
+const VALID_FIELDS = new Set(["name", "description", "model", "thinking", "tools", "cleanupWorktreesOnReap", "automaticWorktrees"]);
 const BUILTIN_DIR = path.join(path.dirname(fileURLToPath(import.meta.url)), "agents");
 
 function fail(file: string, message: string): never {
@@ -75,7 +76,7 @@ function unquote(value: string, file: string, line: number): string {
 }
 
 /** Adapted from upstream's simple-scalar parser, with strict malformed-input errors. */
-function parseProfileMarkdown(content: string, file: string): { fields: Record<string, string | string[]>; body: string } {
+function parseProfileMarkdown(content: string, file: string): { fields: Record<string, string | string[] | boolean>; body: string } {
   const text = content.replace(/\r\n/g, "\n");
   if (!text.startsWith("---\n")) fail(file, "frontmatter must start with --- on the first line");
   const lines = text.split("\n");
@@ -93,8 +94,8 @@ function parseProfileMarkdown(content: string, file: string): { fields: Record<s
     if (!VALID_FIELDS.has(field)) fail(file, `unsupported field '${field}'`);
     if (Object.hasOwn(fields, field)) fail(file, `duplicate field '${field}'`);
     const raw = (key[2] ?? "").trim();
-    if (field === "cleanupWorktreesOnReap") {
-      if (raw !== "true" && raw !== "false") fail(file, `'cleanupWorktreesOnReap' must be true or false on line ${lineNo}`);
+    if (field === "cleanupWorktreesOnReap" || field === "automaticWorktrees") {
+      if (raw !== "true" && raw !== "false") fail(file, `'${field}' must be true or false on line ${lineNo}`);
       fields[field] = raw === "true";
       continue;
     }
@@ -183,8 +184,9 @@ async function readProfile(filePath: string, canonicalPath: string, source: Agen
   const toolsValue = parsed.fields.tools;
   const tools = toolsValue as string[] | undefined;
   const cleanupWorktreesOnReap = parsed.fields.cleanupWorktreesOnReap as boolean | undefined;
+  const automaticWorktrees = parsed.fields.automaticWorktrees as boolean | undefined;
   if (tools?.some((tool) => !TOOL_NAME.test(tool))) fail(filePath, "'tools' contains a malformed tool name");
-  return { profile: { name, description, systemPrompt: parsed.body, ...(model ? { model } : {}), ...(thinking ? { thinking } : {}), ...(tools !== undefined ? { tools: [...new Set(tools)] } : {}), ...(cleanupWorktreesOnReap !== undefined ? { cleanupWorktreesOnReap } : {}), source, filePath }, size: bytes.byteLength };
+  return { profile: { name, description, systemPrompt: parsed.body, ...(model ? { model } : {}), ...(thinking ? { thinking } : {}), ...(tools !== undefined ? { tools: [...new Set(tools)] } : {}), ...(cleanupWorktreesOnReap !== undefined ? { cleanupWorktreesOnReap } : {}), ...(automaticWorktrees !== undefined ? { automaticWorktrees } : {}), source, filePath }, size: bytes.byteLength };
 }
 
 interface MarkdownCandidate { filePath: string; canonicalPath: string }
@@ -282,6 +284,7 @@ export async function discoverAgentProfiles(options: {
 export interface AgentProfileLaunchInput {
   agent?: string;
   cleanupWorktreesOnReap?: boolean;
+  automaticWorktrees?: boolean;
   agentScope?: AgentProfileScope;
   model?: string;
   systemPrompt?: string;
@@ -295,9 +298,9 @@ export function resolveAgentProfileLaunch<T extends AgentProfileLaunchInput>(
   profiles: readonly AgentProfile[],
   options: { defaultModel: string },
 ): Omit<T, "agent" | "agentScope"> {
-  const { agent, agentScope: _agentScope, cleanupWorktreesOnReap: _untrustedCleanupPolicy, ...plain } = input;
-  if (Object.hasOwn(input, "cleanupWorktreesOnReap")) throw new Error("'cleanupWorktreesOnReap' is trusted profile metadata and cannot be set on launch input");
-  if (agent === undefined) return { ...plain, cleanupWorktreesOnReap: false } as Omit<T, "agent" | "agentScope">;
+  const { agent, agentScope: _agentScope, cleanupWorktreesOnReap: _untrustedCleanupPolicy, automaticWorktrees: _untrustedAutomaticPolicy, ...plain } = input;
+  for (const field of ["cleanupWorktreesOnReap", "automaticWorktrees"]) if (Object.hasOwn(input, field)) throw new Error(`'${field}' is trusted profile metadata and cannot be set on launch input`);
+  if (agent === undefined) return { ...plain, cleanupWorktreesOnReap: false, automaticWorktrees: false } as Omit<T, "agent" | "agentScope">;
   if (typeof agent !== "string" || !agent.trim()) throw new Error("'agent' must be a non-empty profile name");
   const profile = profiles.find((candidate) => candidate.name === agent.trim());
   if (!profile) throw new Error(`Unknown agent profile '${agent}'`);
@@ -333,5 +336,5 @@ export function resolveAgentProfileLaunch<T extends AgentProfileLaunchInput>(
   const suffixPrompt = typeof input.systemPrompt === "string" && input.systemPrompt.length ? input.systemPrompt : undefined;
   const systemPrompt = suffixPrompt ? `${profile.systemPrompt}\n\n${suffixPrompt}` : profile.systemPrompt;
   if (Buffer.byteLength(systemPrompt, "utf8") > MAX_PROMPT_BYTES) throw new Error(`Resolved system prompt exceeds ${MAX_PROMPT_BYTES} bytes`);
-  return { ...plain, model, systemPrompt, ...(tools !== undefined ? { tools } : {}), cleanupWorktreesOnReap: profile.cleanupWorktreesOnReap ?? false } as Omit<T, "agent" | "agentScope">;
+  return { ...plain, model, systemPrompt, ...(tools !== undefined ? { tools } : {}), cleanupWorktreesOnReap: profile.cleanupWorktreesOnReap ?? false, automaticWorktrees: profile.automaticWorktrees ?? false } as Omit<T, "agent" | "agentScope">;
 }

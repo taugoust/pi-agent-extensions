@@ -123,6 +123,8 @@ export type TuiWorkerLaunch = {
   acceptance?: string[];
   verification?: import("./acceptance.ts").VerificationGate[];
   cleanupWorktreesOnReap?: boolean;
+  automaticWorktrees?: boolean;
+  worktreeIdentity?: import("../shared/worker-worktree-context.ts").WorktreeIdentity;
   resumeSessionFile?: string;
   tools?: string[];
   operatorCapabilityHash?: string;
@@ -332,7 +334,8 @@ export class TuiWorkerTmux {
       presentation: input.foreground ? "foreground-staged" : "background", execution: "tmux", launchMode: input.launchMode,
       acceptance: input.acceptance ?? [], verification: input.verification, tools: input.tools,
       ...(input.assignedGoal ? { assignedGoal: input.assignedGoal } : {}),
-      cleanupWorktreesOnReap: input.cleanupWorktreesOnReap === true, activityCwd,
+      cleanupWorktreesOnReap: input.cleanupWorktreesOnReap === true, automaticWorktrees: input.automaticWorktrees === true,
+      ...(input.worktreeIdentity ? { worktreeIdentity: input.worktreeIdentity } : {}), activityCwd,
       ...(input.foreground ? { foregroundOwner: { pid: process.pid, token: await processIdentity(process.pid) } } : {}),
       ...(input.operatorCapabilityHash ? { operatorCapabilityHash: input.operatorCapabilityHash } : {}) };
     store.writeManifest(m);

@@ -25,6 +25,7 @@ pkgs.runCommand "subagent-check"
   {
     nativeBuildInputs = [
       pkgs.gnugrep
+      pkgs.git
       pkgs.jq
       pkgs.nodejs
       pkgs.typescript

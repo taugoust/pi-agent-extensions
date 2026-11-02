@@ -1,7 +1,7 @@
 import { promises as fs } from "node:fs";
 import { createHash } from "node:crypto";
 import { isAbsolute, relative, sep, join } from "node:path";
-import { ownedWorktrees, saveOwnedWorktree, serialized, worktreeGit, type OwnedWorktree } from "./subagent-worktrees.ts";
+import { ownedWorktrees, saveOwnedWorktree, serialized, worktreeGit, sameWorktreeIdentity, type OwnedWorktree } from "./subagent-worktrees.ts";
 import { listWorktrees, worktreeInventory } from "../workflows/worktree/git.ts";
 import { harnessReadOnlyRegistry } from "./harness-readonly.ts";
 import { type CompletionHost, type CompletionInspection, type WorktreeCompletion } from "./worktree-completion.ts";
@@ -66,7 +66,7 @@ export type WorktreeReapHost = CompletionHost & {
   inspectForReap(task: string, reservedRoot?: boolean, subjectOwner?: string): Promise<CompletionInspection>;
   removeForReap(task: string, oid: string, allowReservedUnreleased: boolean, subjectOwner?: string, expectedBranchIdentity?: string): Promise<void>;
 };
-export function ownedWorktreeCompletionHost(ctx: CompletionContext, safety: CompletionSafety, signal?: AbortSignal, guard: () => void = () => {}, reapRoot?: { ownerSessionId: string; taskId: string; childId: string }, reapAllowed: { ownerSessionId: string; taskId: string; childId: string }[] = [], reapOwnerIds: string[] = []): WorktreeReapHost {
+export function ownedWorktreeCompletionHost(ctx: CompletionContext, safety: CompletionSafety, signal?: AbortSignal, guard: () => void = () => {}, reapRoot?: { ownerSessionId: string; taskId: string; childId: string }, reapAllowed: { ownerSessionId: string; taskId: string; childId: string }[] = [], reapOwnerIds: string[] = [], reservedBorrower?: import("./worker-worktree-context.ts").WorktreeIdentity): WorktreeReapHost {
   const owner = ctx.sessionManager.getSessionId();
   const current = () => { guard(); if (!owner || ctx.sessionManager.getSessionId() !== owner || signal?.aborted) throw new Error("Worktree owner session changed or operation cancelled"); };
   const record = async (task: string, subjectOwner = owner, allowManifestRoot = false) => {
@@ -154,7 +154,7 @@ export function ownedWorktreeCompletionHost(ctx: CompletionContext, safety: Comp
         : await worktreeHasActiveUsers(r.path, idleReservedRoot);
     } catch (error: any) { activityUnavailable = error.message; }
     return { activityUnavailable, owned: true, released: r.released, retained: !!r.retain || r.state !== "ready" || !!r.error || (!reservedRoot && extra.retained),
-      active: (!reservedRoot && extra.active) || !ctx.isIdle() || ctx.hasPendingMessages() || (!idleReservedRoot && within(r.path, ctx.cwd)) || processActive,
+      active: !!r.borrowers?.some(b => !b.released && !(reservedRoot && sameWorktreeIdentity(b, reservedBorrower))) || (!reservedRoot && extra.active) || !ctx.isIdle() || ctx.hasPendingMessages() || (!idleReservedRoot && within(r.path, ctx.cwd)) || processActive,
       remainingFiles, identityChanged, worktreeExists: exists, branchOid, branchIdentity };
   }
   async function guarded(task: string, oid: string, removed: boolean) {
@@ -190,6 +190,6 @@ export function ownedWorktreeCompletionHost(ctx: CompletionContext, safety: Comp
   });
 }
 
-export function ownedWorktreeReapHost(ctx: CompletionContext, safety: CompletionSafety, signal?: AbortSignal, guard: () => void = () => {}, root?: { ownerSessionId: string; taskId: string; childId: string }, allowed: { ownerSessionId: string; taskId: string; childId: string }[] = [], ownerIds: string[] = []): WorktreeReapHost {
-  return ownedWorktreeCompletionHost(ctx, safety, signal, guard, root, allowed, ownerIds);
+export function ownedWorktreeReapHost(ctx: CompletionContext, safety: CompletionSafety, signal?: AbortSignal, guard: () => void = () => {}, root?: { ownerSessionId: string; taskId: string; childId: string }, allowed: { ownerSessionId: string; taskId: string; childId: string }[] = [], ownerIds: string[] = [], reservedBorrower?: import("./worker-worktree-context.ts").WorktreeIdentity): WorktreeReapHost {
+  return ownedWorktreeCompletionHost(ctx, safety, signal, guard, root, allowed, ownerIds, reservedBorrower);
 }

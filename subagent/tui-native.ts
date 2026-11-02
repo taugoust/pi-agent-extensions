@@ -4,12 +4,13 @@ import { requestGoalWorker } from "./goal-rpc.ts";
 import type { ChildGoalSnapshot } from "./goal-executor.ts";
 import type { DelegatedGoalChild } from "../workflows/delegated-goals.ts";
 import { HeadlessForegroundManager } from "./headless-foreground.ts";
-import { reapOwnedWorktrees } from "../shared/worktree-reap.ts";
+import { reapOwnedWorktrees, type ReapReport } from "../shared/worktree-reap.ts";
 import { pendingGuidance } from "./guidance.ts";
 import { nativeResultReport } from "./result-report.ts";
 import { validateToolPresentation, validateToolPresentationArguments } from "../shared/tool-presentation.ts";
 import { randomBytes, createHash } from "node:crypto";
-import { provisionWorktrees, releaseWorktree, worktreeOption, type WorktreeOption } from "../shared/subagent-worktrees.ts";
+import { workerWorktreeContext, type WorktreeIdentity } from "../shared/worker-worktree-context.ts";
+import { provisionWorktrees, releaseWorktree, worktreeOption, type WorktreeOption, type WorktreeInfo } from "../shared/subagent-worktrees.ts";
 import { waitForGroupSnapshot } from "./group-wait.ts";
 import { readdirSync, existsSync, readFileSync, writeFileSync, unlinkSync, openSync, closeSync, readSync, constants, lstatSync, realpathSync } from "node:fs";
 import { join, resolve, basename, relative, sep, isAbsolute } from "node:path";
@@ -30,11 +31,11 @@ import type { TuiWorkerManifest, TuiWorkerPlacement } from "../shared/tui-worker
 
 const id = (prefix: string) => `${prefix}-${randomBytes(12).toString("hex")}`;
 const pause = (ms: number) => new Promise(resolve => setTimeout(resolve, ms));
-type Spec = { assignedGoal?: ManagedGoalAssignment; name?: string; displayName?: string; tmuxAlias?: string; task: string; cwd: string; model?: string; tools?: string[]; systemPrompt?: string; acceptance?: string[]; verification?: VerificationGate[]; cleanupWorktreesOnReap?: boolean; worktree?: WorktreeOption; worktreeInfo?: { path: string; branch: string; baseCommit: string; includedChanges: boolean } };
+type Spec = { assignedGoal?: ManagedGoalAssignment; name?: string; displayName?: string; tmuxAlias?: string; task: string; cwd: string; model?: string; tools?: string[]; systemPrompt?: string; acceptance?: string[]; verification?: VerificationGate[]; cleanupWorktreesOnReap?: boolean; automaticWorktrees?: boolean; worktree?: WorktreeOption; worktreeInfo?: WorktreeInfo };
 type Child = { childId: string; taskId: string; attempt: number; directory: string; activityCwd?: string; spec: Spec;
   resumeSessionFile?: string; resumeMessage?: string; compactBeforePrompt?: boolean;
   state: "pending" | "launching" | "running" | "waiting" | "completed" | "failed" | "cancelled" | "lost" | "skipped";
-  operatorCapability: string; started: boolean; reaped?: boolean; error?: string; observationError?: string; report?: string;
+  operatorCapability: string; started: boolean; reaped?: boolean; cleanupWorktreeRequested?: boolean; worktreeCleanup?: ReapReport; error?: string; observationError?: string; report?: string;
   verification?: unknown; historicalVerification?: unknown; acceptedDelivery?: boolean;
   verificationBypasses?: Array<{ workerEpoch: string; attempt: number; reason: string; at: string }>;
   notifiedSequence: number; needsAttention?: boolean; idleDecisionNotified?: string; runSequence?: number; pendingActivitySequence?: number; terminalNotification?: string; lastOutcome?: unknown; requiresCompaction?: boolean; };
@@ -106,6 +107,7 @@ export class TuiNativeManager {
         if (g.version !== 1 || `${g.id}.json` !== name || typeof g.owner !== "string" || !Array.isArray(g.children) || g.children.length > 8) throw new Error("Invalid retained group");
         if (g.children.some(c => !/^subagent-child-[a-f0-9]{24}$/.test(c.childId) || !/^subagent-task-[a-f0-9]{24}$/.test(c.taskId)
           || c.spec?.cleanupWorktreesOnReap !== undefined && typeof c.spec.cleanupWorktreesOnReap !== "boolean"
+          || c.spec?.automaticWorktrees !== undefined && typeof c.spec.automaticWorktrees !== "boolean"
           || !/^[a-f0-9]{64}$/.test(c.operatorCapability) || typeof c.directory !== "string"
           || c.activityCwd !== undefined && (typeof c.activityCwd !== "string" || !isAbsolute(c.activityCwd))
           || !/^[a-f0-9]{24}$/.test(basename(c.directory)) || c.directory !== join(this.root, "workers", basename(c.directory)))) throw new Error("Invalid retained child");
@@ -114,6 +116,7 @@ export class TuiNativeManager {
         delete g.reaping; // Parent restart interrupts only the in-memory reap flight; workers remain safely retained.
         for (const c of g.children) {
           c.spec.cleanupWorktreesOnReap ??= false;
+          c.spec.automaticWorktrees ??= false;
           if (c.terminalNotification === undefined) c.terminalNotification = active(c) ? '' : terminalToken(c);
           if (c.spec.verification?.length) {
             if (c.historicalVerification) c.historicalVerification = { ...(c.historicalVerification as object), provenance: "retained-unverified", last_observed_status: undefined };
@@ -213,6 +216,7 @@ export class TuiNativeManager {
       if (m.childId !== c.childId || m.taskId !== c.taskId) throw new Error("Worker identity mismatch");
       if (c.activityCwd !== undefined && m.activityCwd !== c.activityCwd) throw new Error("Worker launch-time checkout identity mismatch");
       if ((m.cleanupWorktreesOnReap === true) !== (c.spec.cleanupWorktreesOnReap === true)) throw new Error("Worker trusted reap policy mismatch");
+      if ((m.automaticWorktrees === true) !== (c.spec.automaticWorktrees === true)) throw new Error("Worker trusted automatic worktree policy mismatch");
       return m;
     } catch (error) { if ((error as NodeJS.ErrnoException).code === "ENOENT") return; throw error; }
   }
@@ -315,14 +319,16 @@ export class TuiNativeManager {
     }
     return groups;
   }
-  private async reapChild(g: Group, c: Child, options: { force?: true; reason?: string } = {}): Promise<void> {
+  private async reapChild(g: Group, c: Child, options: { force?: true; reason?: string; cleanupWorktree?: boolean } = {}): Promise<void> {
     if (active(c)) throw new Error(`Active child blocks reap: ${g.id}/${c.childId}`);
+    if (options.cleanupWorktree && !c.cleanupWorktreeRequested) { c.cleanupWorktreeRequested = true; this.save(g); }
+    const cleanup = c.spec.cleanupWorktreesOnReap === true || c.cleanupWorktreeRequested === true;
     if (!c.reaped) {
       const manifest = this.manifest(c);
       if (manifest) await this.tmux.reap(manifest, undefined, { ...options,
-        ...(c.spec.cleanupWorktreesOnReap === true ? { beforeRemove: () => this.reconcileWorktrees(g, c, options) } : {}) });
+        ...(cleanup ? { beforeRemove: () => this.reconcileWorktrees(g, c, options) } : {}) });
       else if (c.started) throw new Error(`Descendant manifest unavailable: ${g.id}/${c.childId}`);
-      else if (c.spec.cleanupWorktreesOnReap === true) await this.reconcileWorktrees(g, c, options);
+      else if (cleanup) await this.reconcileWorktrees(g, c, options);
       // Audit only after all worker cleanup and ownership checks have succeeded.
       if (options.force && c.spec.verification?.length) {
         c.verificationBypasses ??= [];
@@ -331,7 +337,7 @@ export class TuiNativeManager {
       // Terminal children cancelled/skipped before launch have no pane to reap.
       c.reaped = true;
       this.save(g);
-    } else if (c.spec.cleanupWorktreesOnReap === true) {
+    } else if (cleanup) {
       // A forced prior reap deliberately retained discoverable worktrees. A
       // later normal retry still reconciles them instead of silently succeeding.
       await this.reconcileWorktrees(g, c, options);
@@ -352,7 +358,7 @@ export class TuiNativeManager {
         if (!release) throw new Error(`Live descendant owner blocks worktree reap: ${owner}; recover/reap through its current controller`);
         leases.push(release);
       }
-      return await reapOwnedWorktrees({ actorSessionId: g.owner,
+      const report = await reapOwnedWorktrees({ actorSessionId: g.owner, cleanupBorrowedRoot: c.cleanupWorktreeRequested === true,
         root: { ownerSessionId: g.owner, taskId: c.taskId, childId: c.childId },
         descendants: [...this.worktreeTargets(nested), ...foreground.retainedWorktreeReapTargets([...owners])],
         ownedSessionIds: [...owners],
@@ -362,6 +368,8 @@ export class TuiNativeManager {
             if (await this.worktreeReapActivity(g.owner, path, justReaped)) return true;
             return foreground.worktreeReapActivity(g.owner, path, justReaped);
           } }, ...options });
+      c.worktreeCleanup = report; this.save(g);
+      return report;
     } catch (error) {
       try {
         const artifact = new TuiWorkerStore(c.directory).retainWorktreeReapFailure(error);
@@ -710,7 +718,8 @@ export class TuiNativeManager {
                 displayName: c.spec.displayName ?? canonicalSubagentName(c.spec.task, undefined, c.spec.name),
                 nameWindow: g.renameWindowWithFirstChild === true && c === g.children[0],
                 parentDisposition: this.disposition(), launcher: g.launcher, launchMode: g.launchMode,
-                model: this.resolveRoleModel(c.spec.model), routingEnvironment: this.routingEnvironment(), tools: c.spec.tools, systemPrompt: c.spec.systemPrompt, acceptance: c.spec.acceptance, verification: c.spec.verification, cleanupWorktreesOnReap: c.spec.cleanupWorktreesOnReap === true, resumeSessionFile: c.resumeSessionFile,
+                model: this.resolveRoleModel(c.spec.model), routingEnvironment: this.routingEnvironment(), tools: c.spec.tools, systemPrompt: c.spec.systemPrompt, acceptance: c.spec.acceptance, verification: c.spec.verification, cleanupWorktreesOnReap: c.spec.cleanupWorktreesOnReap === true,
+                automaticWorktrees: c.spec.automaticWorktrees === true, worktreeIdentity: c.spec.worktreeInfo?.identity, resumeSessionFile: c.resumeSessionFile,
                 operatorCapabilityHash: createHash("sha256").update(c.operatorCapability).digest("hex"), assignedGoal: c.spec.assignedGoal });
               if (!manifest.activityCwd) throw new Error("Worker launch-time checkout identity unavailable");
               c.activityCwd = manifest.activityCwd; this.save(g);
@@ -759,7 +768,8 @@ export class TuiNativeManager {
       if (s.systemPrompt !== undefined && (typeof s.systemPrompt !== "string" || Buffer.byteLength(s.systemPrompt) > 64 * 1024)) throw new Error("Invalid system prompt");
       if (s.model !== undefined && (typeof s.model !== "string" || Buffer.byteLength(s.model) > 512)) throw new Error("Invalid model");
       if (s.tools !== undefined && (!Array.isArray(s.tools) || s.tools.length > 64 || s.tools.some((tool: any) => typeof tool !== "string" || !/^[a-zA-Z0-9_-]{1,128}$/.test(tool)))) throw new Error("Invalid tool selection");
-      return { ...(assignedGoal ? { assignedGoal } : {}), name: validateSubagentName(s.name), displayName: canonicalSubagentName(s.task, s.displayName, s.name), task: s.task, cwd: resolve(s.cwd ?? cwd), model: s.model, tools: s.tools, systemPrompt: s.systemPrompt, acceptance: validateAcceptance(s.acceptance), ...(s.verification !== undefined ? { verification: validateVerification(s.verification) } : {}), cleanupWorktreesOnReap: s.cleanupWorktreesOnReap === true, worktree: worktreeOption(s.worktree) };
+      return { ...(assignedGoal ? { assignedGoal } : {}), name: validateSubagentName(s.name), displayName: canonicalSubagentName(s.task, s.displayName, s.name), task: s.task, cwd: resolve(s.cwd ?? cwd), model: s.model, tools: s.tools, systemPrompt: s.systemPrompt, acceptance: validateAcceptance(s.acceptance), ...(s.verification !== undefined ? { verification: validateVerification(s.verification) } : {}), cleanupWorktreesOnReap: s.cleanupWorktreesOnReap === true, automaticWorktrees: s.automaticWorktrees === true,
+        worktree: worktreeOption(s.worktree), ...(resume?.child.spec.worktreeInfo ? { worktreeInfo: resume.child.spec.worktreeInfo } : {}) };
     });
     if (specs.length > 8) throw new Error("At most eight subagent children are allowed");
     if (signal?.aborted || this.closed || this.reapReserved) throw new Error("Subagent launch cancelled or cleanup reserved");
@@ -787,7 +797,10 @@ export class TuiNativeManager {
       g.windowName = groupName === specs[0].displayName ? specs[0].tmuxAlias
         : subagentTmuxAlias(groupName, [...this.groups.values()].map(group => group.windowName).filter((name): name is string => !!name));
       try {
-        await provisionWorktrees(g.children, owner, signal, () => this.owner === owner && !this.closed && !this.reapReserved && this.ready(), !!resume);
+        await provisionWorktrees(g.children, owner, signal, () => this.owner === owner && !this.closed && !this.reapReserved && this.ready(), !!resume, workerWorktreeContext(owner), resume?.child.childId, async (path, supervisors) => {
+          if (await this.worktreeReuseActivity(path, supervisors)) return true;
+          return new HeadlessForegroundManager(this.root, this.disposition, () => false, this.groupLimit).worktreeReuseActivity(path, supervisors);
+        });
         if (signal?.aborted || this.closed || this.reapReserved || this.owner !== owner) throw new Error("Worktree launch context changed");
         this.groups.set(g.id, g); this.save(g);
       } catch (error) {
@@ -1188,8 +1201,17 @@ export class TuiNativeManager {
     if (justReaped && ![...this.groups.values()].some(group => group.owner === justReaped.ownerSessionId
       && group.children.some(child => child.taskId === justReaped.taskId && child.childId === justReaped.childId && child.attempt === justReaped.attempt)))
       throw new Error("Recently reaped managed worker identity is unavailable");
+    return this.inspectWorktreeActivity(targetPath, justReaped ? [justReaped] : []);
+  }
+  /** Read-only activity gate for provisioning; exemptions are authenticated supervisor attachments. */
+  async worktreeReuseActivity(path: string, supervisors: WorktreeIdentity[]): Promise<boolean> {
+    const fresh = new TuiNativeManager(this.root, this.disposition, () => false, this.groupLimit);
+    if (fresh.inventoryErrors.length) throw new Error("Managed subagent activity inventory is unavailable");
+    return fresh.inspectWorktreeActivity(physicalPath(path).path, supervisors);
+  }
+  private async inspectWorktreeActivity(targetPath: string, supervisors: (WorktreeIdentity & { attempt?: number })[]): Promise<boolean> {
     for (const group of this.groups.values()) for (const child of group.children) {
-      if (justReaped && group.owner === justReaped.ownerSessionId && child.taskId === justReaped.taskId && child.childId === justReaped.childId && child.attempt === justReaped.attempt) continue;
+      if (supervisors.some(self => group.owner === self.ownerSessionId && child.taskId === self.taskId && child.childId === self.childId && (self.attempt === undefined || child.attempt === self.attempt))) continue;
       if (child.reaped === true && !active(child)) continue;
       let manifest: TuiWorkerManifest | undefined;
       try { manifest = this.manifest(child); }
@@ -1261,7 +1283,7 @@ export class TuiNativeManager {
       // only their proven descendants, deepest first; live parents perform
       // their own recursive cleanup through prepare_reap instead.
       await this.reapStoppedDescendants(descendants.filter(group => nestedIds.has(group.id)), params.force === true ? { force: true, reason: params.reason } : {});
-      for (const c of g.children) await this.reapChild(g, c, params.force === true ? { force: true, reason: params.reason } : {});
+      for (const c of g.children) await this.reapChild(g, c, { ...(params.force === true ? { force: true, reason: params.reason } : {}), ...(params.cleanup_worktree === true ? { cleanupWorktree: true } : {}) });
       await this.serial(async () => { delete g.reaping; this.save(g); });
       ownsReapFlight = false;
     } catch (error) {
@@ -1280,6 +1302,7 @@ export class TuiNativeManager {
     if (op === "reap" && params.force === true && (typeof params.reason !== "string" || !params.reason.trim() || Buffer.byteLength(params.reason) > 1000))
       throw new Error("Forced reap requires a non-empty reason (max 1000 bytes)");
     if (op === "reap" && params.reason !== undefined && params.force !== true) throw new Error("reap reason requires force:true");
+    if (params.cleanup_worktree !== undefined && (op !== "reap" || typeof params.cleanup_worktree !== "boolean")) throw new Error("cleanup_worktree is a boolean reap-only option");
     if (this.closed || this.reapReserved) throw new Error("Native TUI controller is closing or cleanup reserved");
     if (op === "reap") {
       const inventory = new TuiNativeManager(this.root, this.disposition, () => false, this.groupLimit);
@@ -1486,6 +1509,10 @@ export class TuiNativeManager {
       const flight = this.reapGroup(g, owner, descendants, params);
       this.reapFlights.add(flight);
       try { await flight; } finally { this.reapFlights.delete(flight); }
+      const cleanup = g.children.filter(c => c.worktreeCleanup).map(c => ({ child_id: c.childId, ...c.worktreeCleanup! }));
+      const retained = cleanup.flatMap(report => report.retainedParentWorktrees ?? []);
+      return response(this.text(g) + (retained.length ? `\nRetained parent-owned worktrees (borrower detached; original owner remains responsible): ${retained.map(row => row.path).join(", ")}` : ""),
+        { operation: op, job_id: g.id, group: this.publicGroup(g), ...(cleanup.length ? { worktree_cleanup: cleanup } : {}) });
     }
     if (op === "wait" || op === "wait_group") {
       const deadline = Date.now() + (params.wait_ms ?? 1000);

@@ -54,6 +54,27 @@ test("manager attributes before-remove cleanup only to the opted-in worker and r
   }
 });
 
+test("optional cleanup is parent-controlled, sticky across blocked retries, and never disables coordinator policy", async () => {
+  const root = await mkdtemp(join(tmpdir(), "worktree-reap-optional-"));
+  const manager: any = new TuiNativeManager(root, () => "native", () => false, 16);
+  const c = child(root, "a", false), group: any = { id: `subagent-job-${"b".repeat(24)}`, owner: "parent", children: [c] };
+  const calls: any[] = []; let blocked = true;
+  manager.manifest = () => ({ ownerSessionId: group.owner, taskId: c.taskId, childId: c.childId });
+  manager.tmux.reap = async (_manifest: any, _timeout: any, options: any) => { assert.equal(typeof options.beforeRemove, "function"); await options.beforeRemove(); };
+  manager.reconcileWorktrees = async (_group: any, _child: any, options: any) => { calls.push(options); if (blocked) throw new Error("dirty owned worktree retained"); };
+  manager.save = () => {};
+  try {
+    await assert.rejects(manager.reapChild(group, c, { cleanupWorktree: true }), /dirty owned worktree/);
+    assert.equal(c.reaped, false); assert.equal(c.cleanupWorktreeRequested, true);
+    blocked = false;
+    await manager.reapChild(group, c);
+    assert.equal(c.reaped, true); assert.equal(calls.length, 2, "retry without option must still reconcile persisted cleanup intent");
+    await manager.reapChild(group, c, { force: true, reason: "retain reviewed evidence" });
+    assert.equal(calls.length, 3, "previously reaped forced leftovers remain reconcilable");
+    assert.equal(c.spec.cleanupWorktreesOnReap, undefined, "optional parent choice does not rewrite trusted child profile");
+  } finally { await manager.shutdown(false); await rm(root, { recursive: true, force: true }); }
+});
+
 test("retained manifest/spec policy disagreement cannot silently opt out of cleanup", async () => {
   const root = await mkdtemp(join(tmpdir(), "worktree-reap-policy-mismatch-"));
   const manager: any = new TuiNativeManager(root, () => "native", () => false, 16);

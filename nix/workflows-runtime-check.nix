@@ -44,6 +44,7 @@ pkgs.runCommand "workflows-immutable-runtime-check"
       ${self}/shared/worktree-completion.test.ts \
       ${self}/shared/worktree-completion.integration.test.mjs \
       ${self}/shared/worktree-reap.integration.test.mjs \
+      ${self}/shared/automatic-worktrees.integration.test.mjs \
       ${self}/shared/subagent-worktrees-metadata.test.mjs \
       ${self}/workflows/worktree-completion-service.test.mjs \
       ${self}/workflows/delegated-service.test.mjs \

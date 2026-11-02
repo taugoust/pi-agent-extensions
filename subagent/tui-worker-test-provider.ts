@@ -42,6 +42,18 @@ export default function deterministicWorkerProvider(pi: ExtensionAPI): void {
             artifacts: [], remaining: partial ? ["Finish routine fixture"] : [], ...(partial ? { next_action: "Finish routine fixture", continuation: "routine" } : {}) } }];
         }
       }
+      if (source.includes("AUTOMATIC_WORKTREE_COORDINATOR_FIXTURE")) {
+        const calls = results.filter((r: any) => r.toolName === "subagent");
+        const launch = calls.find((r: any) => r.details?.operation === "start");
+        const last = calls.at(-1);
+        let args: any;
+        if (!launch) args = { task: "AUTOMATIC_WORKTREE_LEAF_FIXTURE", model: "harness-test/mock:off", background: true, acceptance: ["Complete the offline non-Goal worktree fixture"] };
+        else if (last?.details?.operation === "reap") content = [{ type: "text", text: "AUTOMATIC_WORKTREE_NESTED_REAP_COMPLETE" }];
+        else if (last?.details?.operation === "result") args = { operation: "reap", job_id: launch.details.job_id };
+        else if (last?.details?.group?.status === "completed") args = { operation: "result", job_id: launch.details.job_id };
+        else args = { operation: "status", job_id: launch.details.job_id };
+        if (args) content = [{ type: "toolCall", id: `automatic-worktree-${results.length}`, name: "subagent", arguments: args }];
+      }
       if (process.env.PI_DEDICATED_GOAL_CHILD === "1" && source.includes("MANAGED_GOAL_FIXTURE")) {
         const state = (globalThis as any).__paeDelegatedChildGoalV1?.snapshot();
         if (!state?.childGoalId) throw new Error("Managed Goal fixture missing engine binding");

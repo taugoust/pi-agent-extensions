@@ -50,6 +50,9 @@ type TuiWorkerManifestBase = {
   tools?: string[];
   /** Trusted profile policy; absent in legacy manifests and therefore false. */
   cleanupWorktreesOnReap?: boolean;
+  /** Trusted policy for launches made BY this worker, independently of Goals. */
+  automaticWorktrees?: boolean;
+  worktreeIdentity?: import("./worker-worktree-context.ts").WorktreeIdentity;
   /** Physical launch-time effective checkout identity; absent only in legacy manifests. */
   activityCwd?: string;
   sessionFile: string;
@@ -250,5 +253,6 @@ export function publicTuiWorkerManifest(manifest: TuiWorkerManifest): Omit<TuiWo
     ...(manifest.execution === "rpc-headless" ? { processPid: manifest.processPid, processToken: manifest.processToken,
         ...(manifest.runtimePid !== undefined ? { runtimePid: manifest.runtimePid, runtimeProcessToken: manifest.runtimeProcessToken } : {}) } :
       { panePid: manifest.panePid, paneProcessToken: manifest.paneProcessToken }), tools: manifest.tools,
-    cleanupWorktreesOnReap: manifest.cleanupWorktreesOnReap === true });
+    cleanupWorktreesOnReap: manifest.cleanupWorktreesOnReap === true, automaticWorktrees: manifest.automaticWorktrees === true,
+    ...(manifest.worktreeIdentity ? { worktreeIdentity: manifest.worktreeIdentity } : {}) });
 }

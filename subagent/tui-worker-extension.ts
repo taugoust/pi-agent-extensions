@@ -3,6 +3,7 @@ import { getAgentDir, ProjectTrustStore, SettingsManager } from "@earendil-works
 import { dirname, resolve } from "node:path";
 import { closeSync, constants, fstatSync, openSync, writeSync } from "node:fs";
 import { randomBytes } from "node:crypto";
+import { installWorkerWorktreeContext } from "../shared/worker-worktree-context.ts";
 import { TUI_WORKER_MANIFEST_ENV } from "../shared/tui-worker-protocol.ts";
 import { WORKER_INTERACTIONS_KEY } from "../shared/foreground-tasks.ts";
 import { reapOwnedWorktrees } from "../shared/worktree-reap.ts";
@@ -45,6 +46,8 @@ export default async function tuiWorkerExtension(pi: ExtensionAPI): Promise<void
     }
     return { trusted: "no", remember: false };
   });
+  let clearWorktreeContext: (() => void) | undefined;
+  pi.on("session_shutdown", () => { clearWorktreeContext?.(); clearWorktreeContext = undefined; });
   let worker: TuiWorkerServer | undefined;
   let context: ExtensionContext | undefined;
   let failed = false;
@@ -183,6 +186,7 @@ export default async function tuiWorkerExtension(pi: ExtensionAPI): Promise<void
     if (nameWatch) clearInterval(nameWatch);
     nameWatch = undefined;
     context = ctx;
+    clearWorktreeContext?.(); clearWorktreeContext = undefined;
     try {
       const store = new TuiWorkerStore(dirname(resolve(manifestPath)));
       if (store.path("manifest.json") !== resolve(manifestPath)) throw new Error("Invalid worker manifest filename");
@@ -200,6 +204,7 @@ export default async function tuiWorkerExtension(pi: ExtensionAPI): Promise<void
       }
       const actualSession = ctx.sessionManager.getSessionFile();
       if (!actualSession || resolve(actualSession) !== resolve(manifest.sessionFile)) throw new Error("Worker Pi session does not match launch manifest");
+      clearWorktreeContext = installWorkerWorktreeContext(ctx.sessionManager.getSessionId(), manifest);
       const displayName = process.env.PI_SUBAGENT_NAME?.trim().slice(0, 80);
       if (process.env.PI_SUBAGENT_CANONICAL_NAMES === "1") {
         nameStore = new TaskNameStore(store.directory, manifest);

@@ -100,6 +100,9 @@ export function validateWorkerManifest(value: unknown): TuiWorkerManifest {
     if (m.assignedGoal.goalTools.some(tool => !m.tools?.includes(tool))) throw new Error("Managed Goal exceeds the worker tool allowlist");
   }
   if (m.cleanupWorktreesOnReap !== undefined && typeof m.cleanupWorktreesOnReap !== "boolean") throw new Error("Invalid retained cleanup policy");
+  if (m.automaticWorktrees !== undefined && typeof m.automaticWorktrees !== "boolean") throw new Error("Invalid retained automatic worktree policy");
+  if (m.worktreeIdentity !== undefined && (typeof m.worktreeIdentity.ownerSessionId !== "string" || !m.worktreeIdentity.ownerSessionId
+    || !/^subagent-task-[a-f0-9]{24}$/.test(m.worktreeIdentity.taskId) || !/^subagent-child-[a-f0-9]{24}$/.test(m.worktreeIdentity.childId))) throw new Error("Invalid worktree attachment identity");
   parseTuiWorkerRequest({ protocol: m.protocol, requestId: "validate", token: m.controlToken,
     ownerSessionId: m.ownerSessionId, taskId: m.taskId, runtimeId: m.runtimeId,
     groupId: m.groupId, childId: m.childId, attempt: m.attempt, workerEpoch: m.workerEpoch, operation: "status" });
@@ -132,6 +135,7 @@ export function validateWorkerManifest(value: unknown): TuiWorkerManifest {
     || (m.paneProcessToken !== undefined && (typeof m.paneProcessToken !== "string" || !/^[a-zA-Z0-9:._-]{1,256}$/.test(m.paneProcessToken)))) throw new Error("Invalid pane process identity");
   const normalized = structuredClone(m);
   normalized.cleanupWorktreesOnReap ??= false;
+  normalized.automaticWorktrees ??= false;
   return normalized;
 }
 

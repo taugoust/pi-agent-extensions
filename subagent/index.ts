@@ -26,6 +26,7 @@ import { readSubagentModelSettings, resolveSubagentModel } from "./config.ts";
 import { discoverAgentProfiles, resolveAgentProfileLaunch, type AgentProfileScope } from "./profiles.ts";
 import { resolveCoordinatorRole } from "./coordinator-role.ts";
 import { prepareSessionRoutingRequest, readInheritedSessionRoutingProfile, readSessionRoutingProfile, registerSessionRouting, sessionRoutingEnvironment } from "../shared/session-routing.ts";
+import { applyAutomaticWorktreePolicy } from "../shared/worker-worktree-context.ts";
 import { ownedWorktrees } from "../shared/subagent-worktrees.ts";
 
 import { Container, Markdown, Spacer, Text } from "@mariozechner/pi-tui";
@@ -129,6 +130,7 @@ type SubagentSpec = {
   model?: string;
   tools?: string[];
   cleanupWorktreesOnReap?: boolean;
+  automaticWorktrees?: boolean;
   cwd?: string;
 };
 
@@ -1069,14 +1071,14 @@ export async function resolveSubagentProfiles(params: any, ctx: { cwd: string; i
   const items = Array.isArray(params.tasks) ? params.tasks : Array.isArray(params.chain) ? params.chain : undefined;
   if (items && params.agent !== undefined) throw new Error("Set agent on each task/chain item, not on the group");
   const selected = items ?? [params];
-  if (Object.hasOwn(params, "cleanupWorktreesOnReap") || selected.some((item: any) => item && Object.hasOwn(item, "cleanupWorktreesOnReap")))
-    throw new Error("cleanupWorktreesOnReap is trusted profile metadata and cannot be set on launch input");
+  for (const field of ["cleanupWorktreesOnReap", "automaticWorktrees"]) if (Object.hasOwn(params, field) || selected.some((item: any) => item && Object.hasOwn(item, field)))
+    throw new Error(`${field} is trusted profile metadata and cannot be set on launch input`);
   if (params.action && (params.agent !== undefined || params.agentScope !== undefined || selected.some((item: any) => item.agent !== undefined || item.agentScope !== undefined)))
     throw new Error("Draft disposition cannot select agent profiles");
   const hasProfiles = selected.some((item: any) => item?.agent !== undefined);
   if (!hasProfiles) {
     if (params.agentScope !== undefined || selected.some((item: any) => item?.agentScope !== undefined)) throw new Error("agentScope requires an agent profile or operation=profiles");
-    return { ...params, cleanupWorktreesOnReap: false };
+    return { ...params, cleanupWorktreesOnReap: false, automaticWorktrees: false };
   }
   const catalogues = new Map<string, Awaited<ReturnType<typeof discoverAgentProfiles>>>();
   const resolve = async (item: any) => {
@@ -1110,6 +1112,7 @@ function specFromParams(params: any): SubagentSpec {
     model: typeof params.model === "string" ? params.model : undefined,
     tools: normalizeStringArray(params.tools),
     cleanupWorktreesOnReap: params.cleanupWorktreesOnReap === true,
+    automaticWorktrees: params.automaticWorktrees === true,
     cwd: typeof params.cwd === "string" ? params.cwd : undefined,
   };
 }
@@ -1493,6 +1496,7 @@ export function validateBackgroundOperation(params: any): void {
   if (params?.force !== undefined && (params.operation !== "reap" || typeof params.force !== "boolean"))
     throw new Error("force is a boolean option supported only for reap");
   if (params?.operation !== "reap" && params?.reason !== undefined) throw new Error("reason is supported only with reap force:true");
+  if (params?.operation !== "reap" && params?.cleanup_worktree !== undefined) throw new Error("cleanup_worktree is supported only with reap");
   if (params?.diagnostics !== undefined && (params.operation !== "result" || typeof params.diagnostics !== "boolean")) {
     throw new Error("diagnostics is a boolean option for operation=result only");
   }
@@ -1512,7 +1516,8 @@ export function validateBackgroundOperation(params: any): void {
     return;
   }
   if (operation === "reap") {
-    if (Object.keys(params).some(key => !["operation", "job_id", "force", "reason"].includes(key))) throw new Error("reap accepts job_id and optional force/reason fields");
+    if (Object.keys(params).some(key => !["operation", "job_id", "force", "reason", "cleanup_worktree"].includes(key))) throw new Error("reap accepts job_id and optional cleanup_worktree/force/reason fields");
+    if (params.cleanup_worktree !== undefined && typeof params.cleanup_worktree !== "boolean") throw new Error("cleanup_worktree must be boolean");
     if (params.force === true && (typeof params.reason !== "string" || !params.reason.trim() || Buffer.byteLength(params.reason) > 1000)) throw new Error("Forced reap requires a non-empty reason (max 1000 bytes)");
     if (params.force !== true && params.reason !== undefined) throw new Error("reap reason requires force:true");
     if (typeof params.job_id !== "string" || !BACKGROUND_SUBAGENT_ID_PATTERN.test(params.job_id)) throw new Error("reap requires a valid job_id");
@@ -1660,10 +1665,10 @@ const SubagentDisplayName = Type.Optional(Type.String({ minLength: 1, maxLength:
 const SubagentName = Type.Optional(Type.String({ minLength: 1, maxLength: SUBAGENT_NAME_MAX_LENGTH, pattern: SUBAGENT_NAME_PATTERN,
   description: "Launch only: legacy lowercase kebab-case name (1–28 characters). Converted to a canonical human name when displayName is absent; tmux aliases are derived independently. Prefer displayName." }));
 
-const SubagentWorktree = Type.Optional(Type.Object({
+const SubagentWorktree = Type.Optional(Type.Union([Type.Boolean(), Type.Object({
   changes: Type.Optional(Type.Union([Type.Literal("include"), Type.Literal("exclude")], { description: "Required if the source repository has any staged, unstaged, or untracked changes. Include copies them into the new worktree; exclude uses only the base commit. Ignored files are never copied." })),
   base: Type.Optional(Type.String({ minLength: 1, maxLength: 512, description: "Base commit/ref, default HEAD. Including dirty changes requires HEAD." })),
-}, { additionalProperties: false, description: "Launch this native Linux worker in its own retained Git worktree. An empty object is allowed only with a clean source checkout. The parent's checkout/index/branch are untouched." }));
+}, { additionalProperties: false })], { description: "Native Linux: true automatically reuses an exact supervisor-owned cwd worktree or creates isolation; false disables automatic isolation. An object always creates a new worktree (dirty sources require changes). Omitted uses the spawning parent's trusted profile policy, not the child's profile. No fallback on failure." }));
 
 const SubagentAgent = Type.Optional(Type.String({ minLength: 1, maxLength: 128, description: "Named agent profile (scout, worker, reviewer, oracle, or a custom profile). Separate from the canonical displayName/legacy name. Profile instructions and model/thinking/tool defaults resolve once; resume retains that configuration." }));
 const SubagentAgentScope = Type.Optional(Type.String({ pattern: "^(user|project|both)$", description: "Profile discovery scope. Default both: builtins, user, then trusted project overrides. Untrusted project definitions never load; explicit project scope requires project trust. Also accepted by operation=profiles." }));
@@ -1708,7 +1713,8 @@ function subagentParams() {
   action: Type.Optional(Type.String({ pattern: "^(review|apply|discard)$", description: "AgentSH Draft disposition; use with mode=draft and draft_id instead of task/tasks/chain." })),
   draft_id: Type.Optional(Type.String({ pattern: "^session-[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$", description: "Exact retained AgentSH Draft identity." })),
   background: Type.Optional(Type.Boolean({ description: "Launch only (omit operation): return immediately and continue a task/tasks/chain request in the background. Not accepted by resume; execution placement follows the retained backend, not a new launch option." })),
-  operation: Type.Optional(Type.String({ pattern: "^(list|status|output|yield|result|cancel|reap|promote|prompt|resume|tasks|idle_decision|profiles|verify)$", description: "Omit for new launches/Draft disposition. Accepted fields besides operation: profiles {agentScope?}; resume {task_id, message?, compact?}; prompt {child_id, message, job_id?, control_mode?, wait_for_response?}; verify {job_id?, child_id?}; reap {job_id, force?, reason?}; idle_decision {child_id, request_id, worker_epoch, choice, job_id?}; list/tasks {limit?}; status/output/cancel/promote {job_id}; yield {job_id?} returns current state immediately and ends only the current run when sole tool (not the conversation); result {job_id?, child_id?, child?, offset?, limit?, diagnostics?} (job_id or child_id required; child and child_id exclusive). No launch fields with operations, except the profiles discovery scope." })),
+  operation: Type.Optional(Type.String({ pattern: "^(list|status|output|yield|result|cancel|reap|promote|prompt|resume|tasks|idle_decision|profiles|verify)$", description: "Omit for new launches/Draft disposition. Accepted fields besides operation: profiles {agentScope?}; resume {task_id, message?, compact?}; prompt {child_id, message, job_id?, control_mode?, wait_for_response?}; verify {job_id?, child_id?}; reap {job_id, cleanup_worktree?, force?, reason?}; idle_decision {child_id, request_id, worker_epoch, choice, job_id?}; list/tasks {limit?}; status/output/cancel/promote {job_id}; yield {job_id?} returns current state immediately and ends only the current run when sole tool (not the conversation); result {job_id?, child_id?, child?, offset?, limit?, diagnostics?} (job_id or child_id required; child and child_id exclusive). No launch fields with operations, except the profiles discovery scope." })),
+  cleanup_worktree: Type.Optional(Type.Boolean({ description: "reap only: explicitly request guarded worktree cleanup in the same operation. Omitted/false retains ordinary workers' trees; cannot disable mandatory coordinator cleanup. Dirty, shared or active worktrees block closure; force audits leftovers rather than deleting them." })),
   force: Type.Optional(Type.Boolean({ description: "reap only: false or omitted uses normal verification-gated reap; true bypasses verification and opted-in worktree removal, with a required audited reason and discoverable leftover inventory. Does not bypass activity, job/descendant cleanup, ownership, permissions or pane safety." })),
   reason: Type.Optional(Type.String({ minLength: 1, maxLength: 1000, description: "Required with reap force:true; durably audited verification/worktree-removal bypass reason." })),
   job_id: Type.Optional(Type.String({ pattern: "^subagent-job-[0-9a-f]{24}$", description: "Required for status/output/cancel/reap/promote; result needs job_id or child_id. Optional for yield to select an owned group snapshot, or prompt as an assertion that child_id belongs to this group (mismatch rejects before delivery). Omit for resume/list/tasks." })),
@@ -2114,7 +2120,7 @@ export default function (pi: ExtensionAPI) {
             if (selectedTools.some(tool => !allowed.includes(tool) && !(tool === "bash" && allowed.includes(SUBAGENT_PERMISSION_BASH_TOOL)))) throw new Error("Goal tool policy changed before launch");
             const child = await manager.launchGoal(sessionId, retained?.spec.cwd ?? ctx.cwd, { task: entry.text,
               acceptance: [MANAGED_GOAL_ACCEPTANCE], model: selectedModel, systemPrompt: coordinatorPrompt,
-              tools: selectedTools, cleanupWorktreesOnReap: role?.cleanupWorktreesOnReap === true },
+              tools: selectedTools, cleanupWorktreesOnReap: role?.cleanupWorktreesOnReap === true, automaticWorktrees: role?.automaticWorktrees === true },
               { entryId: entry.id, policy, goalTools, questionnaireEnabled: goalTools.includes("questionnaire"), reviewEnabled: goalTools.includes("goal_reference") },
               previous, previous && !managed ? taskStore.sessionPath(previous.taskId) : undefined);
             return managedHandle(entry, child);
@@ -2479,7 +2485,7 @@ export default function (pi: ExtensionAPI) {
       'Prompt shape: {operation:"prompt",child_id,message,job_id?,control_mode?,wait_for_response?}; optional job_id must match the child’s group.',
       "Inspect and control groups using job_id, message workers using child_id, and resume retained tasks using task_id.",
       "Native workers share their interactive session with the user and Paseo.",
-      "Set worktree:{} to isolate a native Linux worker. If its repository is dirty, worktree.changes must explicitly be include or exclude. Each parallel/chain item selects its own worktree. Resume retains that worktree. Reap retains it unless the trusted profile opts into cleanupWorktreesOnReap (coordinator defaults on); guarded removal preserves branch refs, and force:true with reason audits leftovers instead. Cleanup covers registered harness worktrees only; external/unregistered worktrees are not inventoried or removed.",
+      "The spawning coordinator profile defaults worktree:true for its children, independently of Goals and the selected child profile. Ordinary parents keep isolation opt-in. Per launch/item: true reuses an exact supervisor-owned cwd worktree (including dirty partial work) or provisions isolation; false opts out; an object explicitly creates a new tree. New dirty sources require changes:include or exclude. No fallback on failure. Resume retains the same tree. Ordinary reap retains trees unless cleanup_worktree:true; coordinator cleanup remains mandatory. Guarded cleanup preserves branches, blocks dirty/shared/active/foreign resources, and force:true with reason durably audits leftovers instead of deleting. Only registered harness trees are covered.",
       "mode defaults to shared; draft requires an active AgentSH supervisor.",
     ].join(" "),
     promptSnippet: "Delegate work to foreground or background subagents.",
@@ -2632,6 +2638,7 @@ export default function (pi: ExtensionAPI) {
       }
       if (params.operation === "verify") throw new Error("verify requires a current native worker with configured verification gates; unsupported or legacy backends do not fall back");
       if (params.operation === "reap") {
+        if (params.cleanup_worktree === true) throw new Error("cleanup_worktree requires a current native managed worker; legacy/unsupported backends cannot prove safe worktree cleanup. No retained state was removed.");
         if (params.reason !== undefined && params.force !== true) throw new Error("reason is accepted only with reap force:true");
         if (typeof backgroundManager.reapNative !== "function") {
           throw new Error("The retained legacy manager predates safe reap; restart Pi before retrying. No work was cancelled or removed.");
@@ -2884,8 +2891,9 @@ export default function (pi: ExtensionAPI) {
         };
       }
 
+      params = applyAutomaticWorktreePolicy(params, stableSessionId(ctx));
       validateBackgroundLaunch(params);
-      const requestedWorktrees = params.worktree !== undefined || [...(params.tasks ?? []), ...(params.chain ?? [])].some((item: any) => item.worktree !== undefined);
+      const requestedWorktrees = params.worktree !== undefined && params.worktree !== false || [...(params.tasks ?? []), ...(params.chain ?? [])].some((item: any) => item.worktree !== undefined && item.worktree !== false);
       if (requestedWorktrees) {
         if (params.worktree !== undefined && (params.tasks || params.chain)) throw new Error("Set worktree on each task/chain item, not on the group");
         if (params.action || params.mode === "draft" || process.platform !== "linux" || selectSubagentBackend(agentSHBridge(), agentSHStartup).kind !== "native")
