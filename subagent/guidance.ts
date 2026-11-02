@@ -7,6 +7,8 @@ import { atomicPrivateJson, privateDirectory, readPrivateJson } from "./tui-work
 import { validInteractionInput, validInteractionAnswer } from "../shared/task-interactions.ts";
 import type { TaskInteractionInput, TaskInteractionAnswer } from "../shared/foreground-tasks.ts";
 
+export const GUIDANCE_HISTORY_CUSTOM = 'coordinator-guidance-history-v1';
+export type GuidanceHistory = { archive(record: GuidanceRecord): void; hasRequest(requestId: string): boolean };
 export const GUIDANCE_ENV = "PI_SUBAGENT_GUIDANCE_V1";
 export const GUIDANCE_HUMAN_KEY = "__paeGuidanceHumanV1";
 export type GuidanceScope = { ownerSessionId: string; ownerRuntimeEpoch: string; taskId: string; childId: string; attempt: number; workerEpoch: string; goalId?: string };
@@ -64,7 +66,7 @@ export class GuidanceBroker {
   private closed = false;
   private lockFile: string;
   private inFlight = new Set<string>();
-  constructor(readonly ownerSessionId: string, root: string, private notify: (record: GuidanceRecord) => void = () => {}, private upstream?: GuidanceUpstream) {
+  constructor(readonly ownerSessionId: string, root: string, private notify: (record: GuidanceRecord) => void = () => {}, private upstream?: GuidanceUpstream, private history?: GuidanceHistory) {
     const directory = privateDirectory(join(privateDirectory(root, true), fingerprint(ownerSessionId)), true);
     this.file = join(directory, "guidance.json");
     this.lockFile = join(directory, "owner.lock");
@@ -145,8 +147,18 @@ export class GuidanceBroker {
     if (this.closed || frame.version !== 1 || !binding || canonical(binding.scope) !== canonical(frame.scope)) throw new Error("Stale or foreign guidance owner/worker scope");
     text(frame.requestId, 128); text(frame.workerRuntimeEpoch, 128); validateGuidanceInput(frame.input);
     if (binding.runtime && binding.runtime !== frame.workerRuntimeEpoch) throw new Error("Worker runtime replaced; new launch binding required");
-    if (this.records.some(record => record.requestId === frame.requestId)) throw new Error("Request already recorded; waiter replay forbidden");
-    if (this.records.length >= 1024 || this.waiters.size >= 64) throw new Error("Guidance journal capacity exhausted");
+    if (this.records.some(record => record.requestId === frame.requestId) || this.history?.hasRequest(frame.requestId)) throw new Error("Request already recorded; waiter replay forbidden");
+    if (this.waiters.size >= 64) throw new Error("Guidance live waiter capacity exhausted (64); retain and retry after a waiter resolves");
+    while ((this.records.length >= 1024 || Buffer.byteLength(JSON.stringify(this.records)) >= 8*1024*1024) && this.history) {
+      // Bound the hot journal without a lifetime request limit. Preserve terminal
+      // history in the owning conversation before evicting it; never evict a waiter.
+      const retired = this.records.filter(record => record.status !== 'pending').slice(0,128);
+      if (!retired.length) break;
+      for (const record of retired) if (!this.history.hasRequest(record.requestId)) this.history.archive(structuredClone(record));
+      const ids = new Set(retired.map(record => record.requestId));
+      this.records.splice(0,this.records.length,...this.records.filter(record => !ids.has(record.requestId)));
+    }
+    if (this.records.length >= 1024 || Buffer.byteLength(JSON.stringify(this.records)) >= 8*1024*1024) throw new Error("Guidance journal full; durable history archival unavailable, no waiter discarded");
     binding.runtime = frame.workerRuntimeEpoch;
     const record: GuidanceRecord = { ...binding.scope, version: 1, requestId: frame.requestId, workerRuntimeEpoch: frame.workerRuntimeEpoch, revision: 1, createdAt: new Date().toISOString(), input: structuredClone(frame.input), status: "pending" };
     this.records.push(record);
@@ -155,9 +167,23 @@ export class GuidanceBroker {
     // Human-only requests go up automatically; no intermediary model can answer.
     if (record.input.kind === "human" && this.upstream) {
       void this.forward(guidanceTarget(record), abort.signal).catch(error => { try { this.cancel(record.requestId, `Upstream unavailable: ${String(error)}`, "unavailable"); } catch { /* no answer was manufactured */ } });
-    } else { try { this.notify(structuredClone(record)); } catch { /* durable pending request remains discoverable */ } }
+    } else {
+      try { this.notify(structuredClone(record)); }
+      catch (error) {
+        // Keep the actual waiter alive. The quiet-state reconciler retries from
+        // this journal; list/status must expose enqueue failure, not hide it.
+        record.reason = `Notification deferred: ${String(error)}`;
+        try { this.persist(); } catch { record.reason += '; diagnostic persistence failed'; }
+      }
+    }
   }
   list(): GuidanceRecord[] { return structuredClone(this.records); }
+  /** A journal record alone is not a live waiter after restart/disconnect. */
+  pendingNotifications(): GuidanceRecord[] {
+    return this.list().filter(record => record.status === 'pending' && record.ownerRuntimeEpoch === this.epoch
+      && this.waiters.has(record.requestId) && !this.waiters.get(record.requestId)!.socket.destroyed
+      && !(record.input.kind === 'human' && this.upstream));
+  }
   private locate(target: GuidanceTarget): GuidanceRecord {
     exact(target, [...scopeKeys.filter(key => key !== "goalId"), "requestId", "workerRuntimeEpoch", "expectedRevision"], ["goalId"]);
     const record = this.records.find(item => item.requestId === target.requestId);

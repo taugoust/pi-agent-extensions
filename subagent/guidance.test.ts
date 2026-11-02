@@ -21,6 +21,44 @@ async function fixture(t: any, owner = "root", upstream?: any) {
   return { broker, root, notices };
 }
 
+test("terminal history rolls out of the bounded hot journal without a lifetime quota or replay", async t => {
+  const root = await mkdtemp(join(tmpdir(), 'guidance-history-')), notices = inbox(), archived = new Map<string,GuidanceRecord>();
+  const broker = new GuidanceBroker('history-owner',root,notices.notify,undefined,{archive(record){archived.set(record.requestId,record);},hasRequest(id){return archived.has(id);}});await broker.start();
+  t.after(async()=>{await broker.close();await rm(root,{recursive:true,force:true});});
+  const firstBinding=broker.bind(identity('history-owner',1));
+  const firstPromise=requestGuidance(firstBinding,'runtime-one',input);const first=await notices.next();
+  for(let n=0;n<1023;n++)broker.records.push({...first,requestId:'past-'+n,status:'answered'});
+  const secondBinding=broker.bind(identity('history-owner',2));
+  const secondPromise=requestGuidance(secondBinding,'runtime-two',input);const second=await notices.next();
+  assert.ok(broker.records.length<=1024);assert.equal(archived.size,128);assert.ok(broker.pendingNotifications().some(r=>r.requestId===first.requestId),'rollover evicted a live waiter');
+  await assert.rejects(requestGuidance(secondBinding,'runtime-two',input,undefined,'past-0'),/already recorded/);
+  for(const record of [first,second])broker.reply(guidanceTarget(record),'answer-'+record.requestId,{kind:'guidance',guidance:'Continue the assigned implementation.'});
+  await Promise.all([firstPromise,secondPromise]);
+});
+
+test("byte-bound rollover retires enough terminal history in one request rather than introducing a lifetime byte quota", async t => {
+  const root=await mkdtemp(join(tmpdir(),'guidance-history-bytes-')),notices=inbox(),archived=new Set<string>();
+  const broker=new GuidanceBroker('history-bytes',root,notices.notify,undefined,{archive(record){archived.add(record.requestId);},hasRequest(id){return archived.has(id);}});await broker.start();
+  t.after(async()=>{await broker.close();await rm(root,{recursive:true,force:true});});
+  const one=broker.bind(identity('history-bytes',1)),pending=requestGuidance(one,'runtime',input),first=await notices.next();
+  for(let n=0;n<1023;n++)broker.records.push({...first,requestId:'byte-old-'+n,status:'answered',...(n>=512?{input:{kind:'guidance',prompt:'History',context:'x'.repeat(8192)},receipt:{replyId:'historic',fingerprint:'historic',at:'2020-01-01',answer:{kind:'guidance',guidance:'y'.repeat(8192)}}}: {})});
+  const two=broker.bind(identity('history-bytes',2)),next=requestGuidance(two,'second-runtime',input),second=await notices.next();
+  assert.ok(archived.size>128);assert.ok(Buffer.byteLength(JSON.stringify(broker.records))<8*1024*1024);
+  for(const record of [first,second])broker.reply(guidanceTarget(record),'reply-'+record.requestId,{kind:'guidance',guidance:'Continue.'});await Promise.all([pending,next]);
+});
+
+test("history persistence failure reports backpressure without discarding an existing waiter", async t => {
+  const root=await mkdtemp(join(tmpdir(),'guidance-history-failure-')),notices=inbox();let fail=true;const archived=new Set<string>();
+  const broker=new GuidanceBroker('archive-failure',root,notices.notify,undefined,{archive(record){if(fail)throw Error('history storage unavailable');archived.add(record.requestId);},hasRequest(id){return archived.has(id);}});await broker.start();
+  t.after(async()=>{await broker.close();await rm(root,{recursive:true,force:true});});
+  const one=broker.bind(identity('archive-failure',1)),pending=requestGuidance(one,'runtime',input);const first=await notices.next();
+  for(let n=0;n<1023;n++)broker.records.push({...first,requestId:'old-'+n,status:'cancelled'});
+  const two=broker.bind(identity('archive-failure',2));await assert.rejects(requestGuidance(two,'second-runtime',input),/history storage unavailable/);
+  assert.equal(broker.records.length,1024);assert.equal(broker.pendingNotifications().length,1);
+  fail=false;const retry=requestGuidance(two,'second-runtime',input),second=await notices.next();
+  for(const record of [first,second])broker.reply(guidanceTarget(record),'reply-'+record.requestId,{kind:'guidance',guidance:'Continue.'});await Promise.all([pending,retry]);
+});
+
 test("actual waiter awaits exact owner reply; request/receipt durable before notification/resolution", async t => {
   const { broker, root, notices } = await fixture(t); const binding = broker.bind(identity("root"));
   let resolved = false;

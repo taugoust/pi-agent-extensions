@@ -923,23 +923,27 @@ messages contain result-routing metadata, not report bodies or guidance requests
 Read `subagent operation=result` before relying on the work, then explicitly reap
 when its retained panes are no longer needed. Completion batches are bounded and
 deduplicated durably; failed sends remain queued for retry. They do not share the
-guidance quota or 30-second throttle. Historical terminal records do not replay
+guidance lane's 30-second throttle. Historical terminal records do not replay
 on upgrade/reload, and routine progress/findings remain silent.
 Native polling is single-flight: slow refreshes cannot accumulate timer work.
 Result reads check only the selected worker with a bounded, abortable status
 request, without waiting behind unrelated child polling.
 
-Guidance wake-ups have a 30-second minimum interval, a bounded UTF-8 payload,
-and a conservative 20-guidance-update quota between explicit operator resets.
-Guidance delivery receipts are reserved before scheduling the model: ambiguous failures
-may leave a request available only for explicit review, rather than replay it.
+Guidance wake-ups have a 30-second minimum interval, bounded UTF-8 batches,
+and no lifetime count/byte allowance. Requests are deduplicated by authenticated
+identity and stable request ID, reconciled against actual connected broker waiters,
+and scheduled fairly across children. Persisted custom messages acknowledge delivery;
+ambiguous dispatches require explicit review rather than blind replay. Old quota-only
+pauses migrate automatically without replaying delivered history. See
+[delivery guarantees, limits and recovery](guidance-notifications.md).
 
 Operator controls (do not cancel builds or workers):
-- `/harness-state status` — queue, deduplication, delivery and circuit-breaker counters, including guidance pause/reason.
+- `/harness-state status` — queue and broker counts, affected routing identities, delivery diagnostics, uncertainty and next retry.
 - `/harness-state dismiss-guidance all` or `/harness-state dismiss-guidance <exact child_id>` — durably consume only pending guidance requests in the explicit scope; completions and routine findings are never dismissed.
 - `/harness-state show` — explicitly display the last 25 retained child notifications.
 - `/harness-state disable` — persistently disable automatic delivery for this session.
-- `/harness-state enable` — explicitly re-enable guidance and reset its quota.
+- `/harness-state enable` — explicitly re-enable guidance without erasing uncertain dispatches or historical receipts.
+- `/harness-state retry-guidance <exact key>` — explicitly retry one uncertain wake after inspecting history; may duplicate delivery.
 - `PAE_QUIET_STATE_DISABLED=1` — startup environment kill switch.
 
 When Pi exposes numbered aliases because both job and subagent extensions register

@@ -1,6 +1,6 @@
 import type { ExtensionAPI } from "@earendil-works/pi-coding-agent";
 import { Type } from "@earendil-works/pi-ai";
-import { GuidanceBroker, guidanceTarget, type GuidanceRecord, type GuidanceTarget } from "./guidance.ts";
+import { GuidanceBroker, GUIDANCE_HISTORY_CUSTOM, guidanceTarget, type GuidanceRecord, type GuidanceTarget } from "./guidance.ts";
 import { upstreamGuidance } from "./guidance-worker.ts";
 
 const targetSchema = Type.Object({ ownerSessionId: Type.String(), ownerRuntimeEpoch: Type.String(), taskId: Type.String(), childId: Type.String(), attempt: Type.Integer({ minimum: 1 }), workerEpoch: Type.String(), goalId: Type.Optional(Type.String()), requestId: Type.String(), workerRuntimeEpoch: Type.String(), expectedRevision: Type.Integer({ minimum: 1 }) }, { additionalProperties: false });
@@ -10,7 +10,10 @@ export function installGuidance(pi: ExtensionAPI, root: string, notify: (ctx: an
   pi.on("session_start", async (_event, ctx) => {
     try {
       await broker?.close();
-      broker = new GuidanceBroker(ctx.sessionManager.getSessionId(), root, record => notify(ctx, record), upstreamGuidance());
+      broker = new GuidanceBroker(ctx.sessionManager.getSessionId(), root, record => notify(ctx, record), upstreamGuidance(), {
+        archive(record) { pi.appendEntry(GUIDANCE_HISTORY_CUSTOM,{ownerSessionId:ctx.sessionManager.getSessionId(),record}); },
+        hasRequest(requestId) { return ctx.sessionManager.getEntries().some((entry:any)=>entry.type==='custom'&&entry.customType===GUIDANCE_HISTORY_CUSTOM&&entry.data?.ownerSessionId===ctx.sessionManager.getSessionId()&&entry.data?.record?.requestId===requestId); },
+      });
       await broker.start();
     } catch (error) { try { await broker?.close(); } catch { /* retain original startup error */ } broker = undefined; if (ctx.hasUI) ctx.ui.notify(`Coordinator guidance unavailable: ${String(error)}`, "warning"); }
   });
@@ -24,7 +27,7 @@ export function installGuidance(pi: ExtensionAPI, root: string, notify: (ctx: an
         if (params.target || params.replyId || params.guidance) throw new Error("list accepts no reply fields");
         const records = broker.list().sort((a, b) => Number(b.status === "pending") - Number(a.status === "pending") || b.createdAt.localeCompare(a.createdAt));
         const offset = params.offset ?? 0, limit = params.limit ?? 2;
-        result = { records: records.slice(offset, offset + limit).map(record => ({ ...record, target: guidanceTarget(record) })), total: records.length, ...(offset + limit < records.length ? { nextOffset: offset + limit } : {}) };
+        result = { history: 'Older terminal records are retained in coordinator-guidance-history-v1 session entries, never reconstructed as waiters.', records: records.slice(offset, offset + limit).map(record => ({ ...record, target: guidanceTarget(record) })), total: records.length, ...(offset + limit < records.length ? { nextOffset: offset + limit } : {}) };
       } else {
         if (params.offset !== undefined || params.limit !== undefined) throw new Error("Pagination fields are list-only");
         if (!params.target) throw new Error("Exact guidance target required");
@@ -47,4 +50,10 @@ export function installGuidance(pi: ExtensionAPI, root: string, notify: (ctx: an
       }
       return { content: [{ type: "text", text: JSON.stringify(result) }], details: { coordinatorGuidance: true } };
     } });
+  return {
+    pending(ctx:any):GuidanceRecord[]|undefined {
+      if(!broker||broker.ownerSessionId!==ctx.sessionManager.getSessionId())return undefined;
+      return broker.pendingNotifications();
+    },
+  };
 }

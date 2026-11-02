@@ -64,6 +64,7 @@ pkgs.runCommand "subagent-check"
     cp ${self}/shared/quiet-state.ts "$workdir/src/shared/quiet-state.ts"
     cp ${self}/shared/idle-admission.ts "$workdir/src/shared/idle-admission.ts"
     cp ${self}/shared/quiet-state.test.ts "$workdir/src/shared/quiet-state.test.ts"
+    cp ${self}/shared/guidance-notifications.test.ts "$workdir/src/shared/guidance-notifications.test.ts"
     cp ${self}/subagent/control.test.ts "$workdir/src/subagent/control.test.ts"
     cp ${self}/subagent/foreground-handoff.ts "$workdir/src/subagent/foreground-handoff.ts"
     cp ${self}/subagent/native-rpc.ts "$workdir/src/subagent/native-rpc.ts"
@@ -104,6 +105,7 @@ pkgs.runCommand "subagent-check"
       "$workdir/src/subagent/dashboard.ts" \
       "$workdir/src/subagent/dashboard.test.ts" \
       "$workdir/src/shared/quiet-state.test.ts" \
+      "$workdir/src/shared/guidance-notifications.test.ts" \
       "$workdir/src/subagent/control.test.ts" \
       "$workdir/src/subagent/foreground-handoff.ts" \
       "$workdir/src/subagent/native-rpc.ts" \
@@ -206,6 +208,7 @@ pkgs.runCommand "subagent-check"
     node "$workdir/out/subagent/dashboard.test.js"
     node "$workdir/out/subagent/pi-invocation.test.js"
     node "$workdir/out/shared/quiet-state.test.js"
+    node --test "$workdir/out/shared/guidance-notifications.test.js"
     TEST_MKFIFO=${pkgs.coreutils}/bin/mkfifo node "$workdir/out/subagent/native-rpc.test.js"
 
     # Native TUI tests use Node's TS transformation (including constructor
@@ -244,6 +247,7 @@ pkgs.runCommand "subagent-check"
     export NODE_OPTIONS="''${NODE_OPTIONS:+$NODE_OPTIONS }--experimental-transform-types"
     node --experimental-transform-types --test --test-concurrency=1 \
       "$workdir/tui-runtime/shared/tool-result-text.test.ts" \
+      "$workdir/tui-runtime/subagent/guidance.test.ts" \
       "$workdir/tui-runtime/subagent/acceptance.test.ts" \
       "$workdir/tui-runtime/subagent/acceptance-adversarial.test.ts" \
       "$workdir/tui-runtime/subagent/acceptance-manager.test.ts" \

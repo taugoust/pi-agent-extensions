@@ -56,7 +56,7 @@ quietReload.consume(ctx,'watch','watch-one',8);await pause(40);
 assert.equal(reload.messages.length,1,'consumed guidance generated another wake');
 assert.equal(entries.filter(e=>e.customType===QUIET_STATE_RECEIPT_CUSTOM_TYPE).at(-1).data.state,'delivered');
 
-// Explicit guidance retains its separate quota and is coalesced.
+// Explicit guidance retains separate time-based pacing and is coalesced.
 entries=[];sessionName=`quiet-guidance-${process.pid}`;const guidance=fixture();const quietGuidance=installQuietState(guidance.pi,5);await guidance.emit('session_start');
 quietGuidance.enqueue(ctx,{kind:'job',id:'needs-help',state:'failed',requires_guidance:true});
 quietGuidance.enqueue(ctx,{kind:'subagent',id:'needs-help-2',state:'partial',requires_guidance:true});
@@ -150,12 +150,12 @@ const historic=fixture();const historicQuiet=installQuietState(historic.pi,5);aw
 await historic.commands.get('harness-state').handler('enable',ctx);
 await historic.emit('agent_settled');
 const historicHub=(globalThis as any).__paeQuietHarnessStateV2.get(sessionName);
-assert.equal(historicHub.stats.guidanceDelivered,0,'restoring historical messages re-exhausted the reset quota');
+assert.equal(historicHub.stats.guidanceDelivered,1,'historical delivery counters are diagnostics, not a lifetime allowance');
 historicQuiet.enqueue(ctx,{kind:'notification',id:'current-help',requires_guidance:true,message:'current'});await pause(80);
 assert.equal(historic.messages.length,1);
 const deliveryTime=historicHub.receipts.get('notification:current-help').at;
 await historic.emit('agent_settled');
-assert.equal(historicHub.stats.guidanceDelivered,1);
+assert.equal(historicHub.stats.guidanceDelivered,2);
 assert.equal(historicHub.receipts.get('notification:current-help').at,deliveryTime,'message restore replaced an explicit receipt timestamp');
 await historic.emit('session_shutdown',{reason:'quit'});
 
