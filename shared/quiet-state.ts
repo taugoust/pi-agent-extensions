@@ -182,7 +182,15 @@ function restore(h:Hub,ctx:any){
       h.receipts.set(item.key,{v:1,key:item.key,revision:item.revision,state:'delivered',at,update:item.data});
     }}
   }
-  for(const r of h.receipts.values()){if(r.state==='delivered'&&r.update.requires_guidance===true&&!isCompletion(r.update)){h.stats.guidanceDelivered++;h.stats.guidanceBytes+=bytes(JSON.stringify(r.update));if(r.at>=h.lastGuidanceAt){h.lastGuidanceAt=Math.min(Date.now(),r.at);h.lastGuidanceChild=guidanceGroup(r.update);}}if((r.state==='queued'||r.state==='dispatching')&&(r.update.requires_guidance===true||isCompletion(r.update)))h.pending.set(r.key,toItem(r.update,r.at));}
+  for(const r of h.receipts.values()){
+    if(r.update.requires_guidance===true&&!isCompletion(r.update)){
+      if(r.state==='delivered'){h.stats.guidanceDelivered++;h.stats.guidanceBytes+=bytes(JSON.stringify(r.update));}
+      // An unacknowledged intent may have dispatched. Preserve pacing on
+      // restart without treating uncertainty as a delivered receipt.
+      if((r.state==='delivered'||r.state==='dispatching')&&r.at>=h.lastGuidanceAt){h.lastGuidanceAt=Math.min(Date.now(),r.at);h.lastGuidanceChild=guidanceGroup(r.update);}
+    }
+    if((r.state==='queued'||r.state==='dispatching')&&(r.update.requires_guidance===true||isCompletion(r.update)))h.pending.set(r.key,toItem(r.update,r.at));
+  }
   // Report sequence, not receipt time, orders child turns. Consuming an older
   // result later must not suppress a newer unseen completion after reload.
   for(const [key,item]of h.pending)if(completionSuperseded(h,item.data)||controlResolved(h,item.data))h.pending.delete(key);
@@ -224,6 +232,12 @@ function acknowledgeGuidance(h:Hub):void{
     h.pending.delete(key);h.stats.guidanceDelivered++;
   }
   if(h.diagnostic&&h.diagnostic.keys.length&&h.diagnostic.keys.every(key=>['delivered','consumed','recorded'].includes(latestReceipt(h,key)?.state??'')))clearFailure(h);
+  // Modal admission may cancel the acknowledgement timer. On the next safe
+  // boundary, still surface expired intents instead of silently stranding them.
+  if(!h.ui&&!h.compacting&&!h.dispatching&&Date.now()>=(h.retryAt??0)){
+    const uncertain=[...h.pending.values()].filter(item=>latestReceipt(h,item.key)?.state==='dispatching'&&!h.unsent?.has(item.key)&&Date.now()-latestReceipt(h,item.key)!.at>=ACK_TIMEOUT_MS).map(item=>item.key).slice(0,MAX_BATCH_ITEMS);
+    if(uncertain.length&&(!h.diagnostic?.cause.startsWith('Uncertain guidance dispatch')||JSON.stringify(h.diagnostic.keys)!==JSON.stringify(uncertain)))reportFailure(h,'Uncertain guidance dispatch: no persisted message acknowledgement',uncertain,false);
+  }
 }
 function brokerGuidance(data:QuietUpdate):boolean{return !!data.guidance||data.kind==='notification'&&data.id.startsWith('guidance:');}
 function reconcileGuidance(h:Hub):void{

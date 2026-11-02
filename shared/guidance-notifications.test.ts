@@ -76,11 +76,23 @@ test('unknown acceptance never blindly replays after restart; exact uncertain re
  const receipt=f.entries.findLast(e=>e.customType===QUIET_STATE_RECEIPT_CUSTOM_TYPE&&e.data.state==='dispatching');assert.ok(receipt);
  await f.commands.get('harness-state').handler('retry-guidance '+receipt.data.key,f.ctx);await f.advance(30000);assert.equal(f.messages.length,1);await f.stop();
 });
+test('uncertain dispatch pacing survives restart without muting unrelated new requests',async t=>{
+ const f=fixture(t);f.transport('ambiguous');f.setLive([f.request(1)]);await f.emit('session_start');await f.advance(5);
+ f.transport('ok');f.setLive([f.request(1),f.request(2)]);await f.emit('session_start');await f.advance(5);assert.equal(f.messages.length,0);
+ await f.advance(29995);assert.deepEqual(f.messages.flatMap(m=>m.message.details.updates).map(u=>u.id),[f.request(2).id]);await f.stop();
+});
+
 test('asynchronous real custom-message journal acknowledges dispatch; missing acknowledgement stays visibly uncertain',async t=>{
  const f=fixture(t);f.transport('unacknowledged');f.setLive([f.request(1)]);await f.emit('session_start');await f.advance(5);assert.equal(f.messages.length,1);
  await f.advance(10000);assert.ok(f.notices.some(n=>n.includes('Uncertain guidance dispatch')));await f.advance(60000);assert.equal(f.messages.length,1);
  f.persist(f.messages[0].message);await f.emit('message_end',{message:{role:'custom',customType:'harness-state'}});await f.emit('session_start');await f.advance(60000);assert.equal(f.messages.length,1);await f.stop();
 });
+test('modal cancellation of the acknowledgement timer cannot silently strand an uncertain dispatch',async t=>{
+ const f=fixture(t);f.transport('unacknowledged');f.setLive([f.request(1)]);await f.emit('session_start');await f.advance(5);
+ await f.emit('ui_prompt_start');await f.advance(20000);assert.equal(f.notices.some(n=>n.includes('Uncertain guidance dispatch')),false);
+ await f.emit('ui_prompt_end');assert.ok(f.notices.some(n=>n.includes('Uncertain guidance dispatch')));await f.advance(60000);assert.equal(f.messages.length,1);await f.stop();
+});
+
 test('bounded queue retains overflow in broker, admits multiple children fairly and eventually drains all 600 requests',async t=>{
  const f=fixture(t);f.setBusy(true);f.setLive(Array.from({length:600},(_,n)=>f.request(n,n===599?2:1)));await f.emit('session_start');
  const hub=(globalThis as any).__paeQuietHarnessStateV2.get(f.id);assert.equal(hub.pending.size,512);assert.equal(hub.brokerPending,600);assert.ok(f.notices.some(n=>n.includes('queue full')));
