@@ -263,8 +263,16 @@ export class TuiNativeManager {
         }
         try {
           const bytes = Buffer.alloc(8192); const n = readSync(fd, bytes, 0, bytes.length, 0);
-          const header = JSON.parse(bytes.subarray(0, n).toString("utf8").split("\n")[0]);
-          if (header.type !== "session" || typeof header.id !== "string" || !header.id || header.id.length > 512) throw new Error("Invalid descendant session header");
+          const end = bytes.subarray(0, n).indexOf(10);
+          if (end < 0) {
+            if (n === bytes.length) throw new Error(`Worktree ancestry session header exceeds safe read limit: ${g.id}/${c.childId}`);
+            if (strictWorktrees) throw new Error(`Worktree ancestry session header unavailable (publication incomplete): ${g.id}/${c.childId}; wait for worker startup before cleanup`);
+            continue; // No published identity, hence no ancestry/ownership grant.
+          }
+          let header: any;
+          try { header = JSON.parse(bytes.subarray(0, end).toString("utf8")); }
+          catch { throw new Error(`Invalid descendant session header: ${g.id}/${c.childId}`); }
+          if (!header || header.type !== "session" || typeof header.id !== "string" || !header.id || header.id.length > 512) throw new Error("Invalid descendant session header");
           sessionId = header.id;
         } finally { closeSync(fd); }
         if (seen.has(sessionId)) continue;

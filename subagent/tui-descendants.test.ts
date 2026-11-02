@@ -49,6 +49,28 @@ async function fixture() {
     close: async () => { await server.close(); await manager.shutdown(false); await rm(root, { recursive: true, force: true }); } };
 }
 
+test("ancestry observation waits for a published startup header; strict cleanup and malformed/oversized headers fail closed", async () => {
+  const f = await fixture();
+  try {
+    for (const partial of ["", '{"type":"session","id":"not-yet-published"}']) {
+      await writeFile(f.manifests[0].sessionFile, partial, { mode: 0o600 });
+      assert.deepEqual(f.manager.descendantGroups("session-0"), [], "partial header grants no descendant reachability");
+      assert.throws(() => f.manager.descendantGroups("session-0", undefined, undefined, true), /session header unavailable.*publication incomplete/);
+    }
+    await writeFile(f.manifests[0].sessionFile, JSON.stringify({ type: "session", id: "session-1" }) + "\n", { mode: 0o600 });
+    assert.equal(f.manager.descendantGroups("session-0").length, 2);
+    assert.equal(f.manager.descendantGroups("session-0", undefined, undefined, true).length, 2);
+    for (const malformed of ['{"secret":"must-not-leak"\n', '{}\n', 'null\n']) {
+      await writeFile(f.manifests[0].sessionFile, malformed, { mode: 0o600 });
+      for (const strict of [false, true]) assert.throws(() => f.manager.descendantGroups("session-0", undefined, undefined, strict), error => {
+        assert.match(String(error), /Invalid descendant session header/); assert.doesNotMatch(String(error), /must-not-leak/); return true;
+      });
+    }
+    await writeFile(f.manifests[0].sessionFile, "x".repeat(8192), { mode: 0o600 });
+    for (const strict of [false, true]) assert.throws(() => f.manager.descendantGroups("session-0", undefined, undefined, strict), /header exceeds safe read limit/);
+  } finally { await f.close(); }
+});
+
 test("reserved worktree inventory follows exact session ancestry including nested headless and excludes foreign owners", async () => {
   const f = await fixture();
   const foreground: any = new HeadlessForegroundManager(f.root, () => "native", () => false, 16);
