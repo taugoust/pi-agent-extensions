@@ -1,12 +1,6 @@
 import { createHash } from "node:crypto";
-import {
-	constants,
-	openSync,
-	closeSync,
-	fstatSync,
-	readSync,
-	readFileSync,
-} from "node:fs";
+import { readFileSync } from "node:fs";
+import { readPrivateAuthJson } from "./private-auth-json.js";
 import { join } from "node:path";
 import {
 	getAgentDir,
@@ -247,19 +241,9 @@ function defaultCodexAccountKey(ctx: ExtensionContext): string | undefined {
 		if (unsafeProvider || unsafeModels) return undefined;
 	} catch (error) { if ((error as NodeJS.ErrnoException).code !== "ENOENT") return undefined; }
 	try {
-		const path = join(getAgentDir(), "auth.json");
-		const fd = openSync(path, constants.O_RDONLY | (constants.O_NOFOLLOW ?? 0));
-		try {
-			const stat = fstatSync(fd), max = 1024 * 1024;
-			if (!stat.isFile() || (stat.mode & 0o077) !== 0 || stat.size > max || (process.getuid && stat.uid !== process.getuid())) return undefined;
-			const buffer = Buffer.alloc(max + 1);
-			let size = 0;
-			while (size < buffer.length) { const n = readSync(fd, buffer, size, buffer.length - size, size); if (!n) break; size += n; }
-			if (size > max) return undefined;
-			const entry = JSON.parse(buffer.subarray(0, size).toString("utf8"))?.["openai-codex"];
-			if (!entry || entry.type !== "oauth" || typeof entry.access !== "string") return undefined;
-			return verifiedAccountKey(entry as StoredCredential, "openai-codex").accountKey;
-		} finally { closeSync(fd); }
+		const entry = readPrivateAuthJson(getAgentDir())?.["openai-codex"];
+		if (!entry || entry.type !== "oauth" || typeof entry.access !== "string") return undefined;
+		return verifiedAccountKey(entry as StoredCredential, "openai-codex").accountKey;
 	} catch { return undefined; }
 }
 function officialOrigin(url: unknown): boolean {
@@ -325,41 +309,13 @@ function defaultNativeKey(ctx: ExtensionContext): string | undefined {
 		} catch (error) {
 			if ((error as NodeJS.ErrnoException).code !== "ENOENT") return undefined;
 		}
-		const path = join(getAgentDir(), "auth.json");
-		const fd = openSync(path, constants.O_RDONLY | (constants.O_NOFOLLOW ?? 0));
-		try {
-			const stat = fstatSync(fd);
-			const max = 1024 * 1024;
-			if (
-				!stat.isFile() ||
-				(stat.mode & 0o077) !== 0 ||
-				stat.size > max ||
-				(process.getuid && stat.uid !== process.getuid())
-			)
-				return undefined;
-			const buffer = Buffer.alloc(max + 1);
-			let size = 0;
-			while (size < buffer.length) {
-				const n = readSync(fd, buffer, size, buffer.length - size, size);
-				if (!n) break;
-				size += n;
-			}
-			if (size > max) return undefined;
-			const authFile = JSON.parse(buffer.subarray(0, size).toString("utf8"));
-			const entry = authFile?.openai;
-			if (
-				!entry ||
-				entry.type !== "oauth" ||
-				typeof entry.access !== "string" ||
-				typeof entry.clientId !== "string" ||
-				!Array.isArray(entry.scopes) ||
-				!entry.scopes.includes("chatgpt.tokens.use.direct")
-			)
-				return undefined;
-			return nativeKey(entry as StoredCredential);
-		} finally {
-			closeSync(fd);
-		}
+		const entry = readPrivateAuthJson(getAgentDir())?.openai;
+		if (
+			!entry || entry.type !== "oauth" || typeof entry.access !== "string" ||
+			typeof entry.clientId !== "string" || !Array.isArray(entry.scopes) ||
+			!entry.scopes.includes("chatgpt.tokens.use.direct")
+		) return undefined;
+		return nativeKey(entry as StoredCredential);
 	} catch {
 		return undefined;
 	}

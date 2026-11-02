@@ -170,7 +170,7 @@
             extensionBundle = self.packages.${system}.default;
           };
           openai-accounts-runtime = import ./nix/openai-accounts-runtime-check.nix {
-            inherit pkgs;
+            inherit self pkgs;
             piPackage = self.packages.${system}.pi;
             extensionBundle = self.packages.${system}.default;
           };

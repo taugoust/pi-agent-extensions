@@ -1,5 +1,6 @@
 {
   pkgs,
+  self,
   piPackage,
   extensionBundle,
 }:
@@ -24,6 +25,7 @@ pkgs.runCommand "openai-accounts-immutable-runtime-check"
     export PI_OFFLINE=1
     export NODE_PATH=
     mkdir -p "$HOME" "$PI_CODING_AGENT_DIR"
+    node --test ${self}/tests/account-managed-auth.test.mjs
     timeout 30s node ${../tests/package-load.mjs} ${piPackage}/bin/pi \
       ${extensionBundle}/openai-accounts ${extensionBundle}/openai-usage --expect accounts '!usage'
     # Exercise native identity, isolated subtree overrides, history restoration and
