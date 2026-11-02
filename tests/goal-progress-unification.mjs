@@ -16,7 +16,7 @@ const jiti = createJiti(import.meta.url, { alias: {
   typebox: join(sdk, "node_modules/typebox/build/index.mjs"),
 } });
 const { GoalRuntime, createGoal, nextGoalInstance, transitionGoal } = await jiti.import("../workflows/goal/runtime.ts");
-const { createGoalRecord, transitionGoalRecord, mergeGoalChecklist, updateGoalRecordAccounting } = await jiti.import("../shared/goal-model.ts");
+const { createGoalRecord, transitionGoalRecord, mergeGoalChecklist, updateGoalRecordAccounting, goalControlFingerprint } = await jiti.import("../shared/goal-model.ts");
 const { bindGoalMutations } = await jiti.import("../workflows/goal/mutations.ts");
 const { mutateProgress, readGoalTasks } = await jiti.import("../shared/goal-progress.ts");
 const { loadGoalStateFromSession } = await jiti.import("../workflows/goal/persistence.ts");
@@ -31,6 +31,8 @@ const { DEFAULT_PROGRESS_SETTINGS } = await jiti.import("../progress/settings.ts
 test("canonical Goal domain shares creation, lifecycle, checklist identity and accounting semantics", () => {
   const record = createGoalRecord({ id: "legacy-id", activationId: "activation", text: "Objective", now: 10, baselineTokens: 100, tokenBudget: 20 });
   assert.equal(record.id, "legacy-id"); assert.equal(record.activationId, "activation");
+  assert.equal(goalControlFingerprint(record), goalControlFingerprint({ ...record, tokensUsed: 18, timeUsedSeconds: 42, iteration: 9, automaticModelTurns: 3 }), "accounting and counters must not move the control fence");
+  assert.notEqual(goalControlFingerprint(record), goalControlFingerprint({ ...record, status: "paused" }), "lifecycle control changes must move the fence");
   assert.equal(transitionGoalRecord(record, "paused", 2).timeUsedSeconds, 0, "backward clock does not subtract time");
   const tasks = mergeGoalChecklist([], [{ text: "Verify", status: "pending" }], [], () => "stable-task");
   assert.equal(tasks[0].id, "stable-task");

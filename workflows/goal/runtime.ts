@@ -1,7 +1,7 @@
 import { createHash, randomUUID } from "node:crypto";
 import type { ExtensionAPI, ExtensionContext } from "@earendil-works/pi-coding-agent";
 import { checkpointGoalActiveTime, formatDuration, formatTokenCount, updateGoalUsage } from "./accounting.js";
-import { createGoalRecord, isTerminalGoalStatus as goalStatusIsTerminal, transitionGoalRecord } from "../../shared/goal-model.ts";
+import { createGoalRecord, goalControlFingerprint, isTerminalGoalStatus as goalStatusIsTerminal, transitionGoalRecord } from "../../shared/goal-model.ts";
 import { resolveGoalLimits, validateGoalLimitOverrides, type GoalContinuationLimits } from "../../shared/delegated-goal-policy.ts";
 import { formatError, isStaleContextError, notifyTerminal, safeGoalMenuText, truncateNotification } from "./errors.js";
 import {
@@ -1309,7 +1309,7 @@ export class GoalRuntime {
     const previous = session?.getBranch?.().findLast(entry => entry.type === "custom" && entry.customType === GOAL_STATE_ENTRY_TYPE)?.data?.goal;
     if (goal.tasks?.length && previous?.id !== goal.id) goal.lastTaskUpdateAt = Date.now();
     else if (previous?.id === goal.id && Array.isArray(previous.tasks) && JSON.stringify(previous.tasks.map(task => [task.id, task.text, task.status])) !== JSON.stringify(goal.tasks?.map(task => [task.id, task.text, task.status]))) goal.lastTaskUpdateAt = Date.now();
-    const changed = !previous || goalMutationSignature(previous) !== goalMutationSignature(goal);
+    const changed = !previous || goalControlFingerprint(previous) !== goalControlFingerprint(goal);
     const revision = Math.max(goal.revision ?? 0, previous?.id === goal.id ? (previous.revision ?? 0) : 0,
       this.activeGoal?.id === goal.id ? (this.activeGoal.revision ?? 0) : 0);
     goal.revision = Math.max(1, revision + (changed ? 1 : 0));
@@ -1507,22 +1507,6 @@ export function createGoal(text: string, tokenBudget: number | undefined, baseli
 
 export function transitionGoal(goal: ActiveGoal, requestedStatus: GoalStatus): ActiveGoal {
   return transitionGoalRecord(goal, requestedStatus, Date.now());
-}
-
-/** Optimistic-control revision excludes usage, clocks, iteration and safety counters.
- * A new durable receipt is a mutation even when its task patch is a no-op.
- */
-function goalMutationSignature(goal: ActiveGoal): string {
-  return JSON.stringify([
-    goal.id, goal.activationId ?? goal.id, goal.progressId ?? goal.id,
-    goal.text, goal.status,
-    goal.tasks?.map(task => [task.id, task.text, task.status]),
-    goal.tokenBudget, goal.tokenBudgetExplicit,
-    goal.continuationLimits?.automaticTurns, goal.continuationLimits?.noProgressTurns,
-    goal.waiting ? [goal.waiting.reason, goal.waiting.resumeAt] : undefined,
-    goal.safetyPauseCause, goal.safetyResetPending,
-    Object.entries(goal.requests ?? {}).map(([id, receipt]) => [id, receipt.fingerprint]),
-  ]);
 }
 
 export function sameGoalActivation(left: ActiveGoal | undefined, right: ActiveGoal | undefined): boolean {

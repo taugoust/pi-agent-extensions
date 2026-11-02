@@ -1,7 +1,10 @@
 import { randomUUID } from "node:crypto";
 import { validateProgressArguments, type ProgressStep } from "../progress/progress-state.js";
 
-/** Dependency-free canonical record shape shared by the session engine and saved-goal registry. */
+/** Canonical execution record shared by the session engine and saved-goal registry adapters.
+ * Catalog/ownership metadata is intentionally not part of this execution record; adapters map
+ * catalog revisions and ownership fences separately rather than treating projections as execution state.
+ */
 export type GoalStatus = "active" | "paused" | "blocked" | "usage_limited" | "budget_limited" | "complete";
 
 export interface GoalRecord {
@@ -117,6 +120,24 @@ export function checkpointGoalRecordTime<T extends GoalAccountingRecord>(goal: T
     ? Math.max(0, now - goal.activeStartedAt) / 1000
     : 0;
   return { ...goal, timeUsedSeconds: accumulated + elapsed, activeStartedAt: continueClock ? now : undefined };
+}
+
+/**
+ * Control-plane fingerprint: intentionally excludes usage, clocks, iteration, and safety counters.
+ * Both session and saved adapters should increment/fence their control revision only when this
+ * fingerprint changes, not when an accounting observation refreshes the Goal projection.
+ */
+export function goalControlFingerprint(goal: GoalRecord): string {
+  return JSON.stringify([
+    goal.id, goal.activationId ?? goal.id, goal.progressId ?? goal.id,
+    goal.text, goal.status,
+    goal.tasks?.map(task => [task.id, task.text, task.status]),
+    goal.tokenBudget, goal.tokenBudgetExplicit,
+    goal.continuationLimits?.automaticTurns, goal.continuationLimits?.noProgressTurns,
+    goal.waiting ? [goal.waiting.reason, goal.waiting.resumeAt] : undefined,
+    goal.safetyPauseCause, goal.safetyResetPending,
+    Object.entries(goal.requests ?? {}).map(([id, receipt]) => [id, receipt.fingerprint]),
+  ]);
 }
 
 export function isTerminalGoalStatus(status: GoalStatus | "cleared"): boolean {
