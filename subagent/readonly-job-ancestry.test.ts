@@ -38,6 +38,7 @@ test("verified direct, nested and grandchild sessions and broker child identitie
     assert.equal(ownsJob(proof.owners, { sessionId: "session-0", childId: f.manifests[3].childId }), false);
     assert.equal(ownsJob(proof.owners, { sessionId: "session-3", infrastructure: true }), false);
     assert.equal(readJobAncestry(f.root, "session-0").fingerprint, proof.fingerprint);
+    assert.deepEqual(proof.edges.map(edge => [edge.ownerSessionId, edge.taskId, edge.childId, edge.sessionId]), f.manifests.slice(0, 3).map((m, i) => [m.ownerSessionId, m.taskId, m.childId, `session-${i + 1}`]));
   } finally { f.close(); }
 });
 test("malformed attributable groups warn only reachable owners and do not perturb unrelated cursors", () => {
@@ -91,6 +92,7 @@ test("changed nonce/attempt/header, cycles and unsafe files fail closed", () => 
     atomicPrivateJson(join(f.root, "groups", `${f.groups[1].id}.json`), f.groups[1]);
     assert.equal(readJobAncestry(f.root, "session-0").unavailable, true);
     assert.equal(ownsJob(readJobAncestry(f.root, "session-0").owners, { sessionId: "session-2" }), false);
+    assert.equal(readJobAncestry(f.root, "session-0").edges.some(edge => edge.sessionId === "session-2"), false, "nonce mismatch cannot contribute a presentation edge");
     f.groups[1].children[0].operatorCapability = f.manifests[1].controlToken;
     f.groups[1].children[0].attempt = 2;
     atomicPrivateJson(join(f.root, "groups", `${f.groups[1].id}.json`), f.groups[1]);

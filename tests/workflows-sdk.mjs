@@ -11,7 +11,7 @@ import {
 import { execFileSync } from "node:child_process";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { randomUUID } from "node:crypto";
+import { randomUUID, createHash } from "node:crypto";
 import { createRequire } from "node:module";
 import { setTimeout as delay } from "node:timers/promises";
 const suite = await mkdtemp(join(tmpdir(), "workflows-sdk-")),
@@ -226,6 +226,7 @@ async function fixture(mode = "text", existing) {
 		extensionFactories: [factory],
 	});
 	await loader.reload();
+	assert.deepEqual(loader.getExtensions().errors, [], "SDK fixture extensions must load");
 	({ session } = await sdk.createAgentSession({
 		cwd,
 		agentDir,
@@ -438,6 +439,63 @@ test("session-created worktree ownership survives reload, commits and branch ren
 		else await rm(f.root, { recursive: true, force: true });
 	}
 });
+test("Goal inventory projects authenticated coordinator descendants across repositories without changing direct-session scope or removal ownership", async () => {
+	const f = await fixture();
+	const previousAgentDir = process.env.PI_CODING_AGENT_DIR, previousState = process.env.PI_TUI_WORKER_STATE_ROOT;
+	const previousExecutor = globalThis.__paeDelegatedGoalExecutorV1;
+	process.env.PI_CODING_AGENT_DIR = join(f.root, "agent");
+	process.env.PI_TUI_WORKER_STATE_ROOT = join(f.root, "private-state");
+	const { TuiWorkerStore, atomicPrivateJson } = await jiti.import("../subagent/tui-worker-store.ts");
+	try {
+		const rootSession = f.session.sessionManager.getSessionId(), coordinatorSession = randomUUID();
+		const id = randomUUID().replaceAll("-", "").slice(0, 24), taskId = `subagent-task-${id}`, childId = `subagent-child-${id}`, jobId = `subagent-job-${id}`;
+		globalThis.__paeDelegatedGoalExecutorV1 = { protocol: 1, sessionId: rootSession, executionAvailable: () => true,
+			async start() { return { taskId, childId, jobId, attempt: 1 }; }, async pause() {}, async resume() {} };
+		let s = await f.start("goals.create", { expectedGoalId: null, objective: "Group authoritative worktrees" });
+		const entry = s.delegatedGoals.entries.at(-1);
+		await f.start("goals.start", { expectedGoalId: entry.id, expectedEntryRevision: entry.revision });
+		await f.answer(true);
+		await until(f.snapshot, value => value.delegatedGoals.entries.some(e => e.id === entry.id && e.child?.taskId === taskId), "coordinator linked");
+		const directory = join(process.env.PI_TUI_WORKER_STATE_ROOT, "workers", id), store = new TuiWorkerStore(directory, true), nonce = id.padStart(64, "0");
+		const manifest = { protocol: 1, ownerSessionId: rootSession, taskId, childId, groupId: jobId, runtimeId: "runtime", attempt: 1, workerEpoch: id.padStart(32, "0"), controlToken: nonce,
+			controlSocket: join(directory, "control.sock"), sessionFile: join(directory, "session.jsonl"), presentation: "background", launchMode: "none", operatorCapabilityHash: createHash("sha256").update(nonce).digest("hex"),
+			placement: { socketPath: "/tmp/tmux", serverEpoch: "1:2", sessionId: "$1", windowId: "@1", paneId: "%1", ownershipNonce: nonce } };
+		store.writeManifest(manifest);
+		await writeFile(manifest.sessionFile, JSON.stringify({ type: "session", id: coordinatorSession }) + "\n", { mode: 0o600 });
+		await mkdir(join(process.env.PI_TUI_WORKER_STATE_ROOT, "groups"), { mode: 0o700 });
+		const groupPath = join(process.env.PI_TUI_WORKER_STATE_ROOT, "groups", `${jobId}.json`);
+		const group = { version: 1, id: jobId, owner: rootSession, children: [{ taskId, childId, directory, attempt: 1, started: true, operatorCapability: nonce }] };
+		atomicPrivateJson(groupPath, group);
+		const coordinator = { taskId, childId, spec: { task: "Coordinate", name: "coordinator", cwd: f.cwd, worktree: { changes: "exclude" } } };
+		await provisionWorktrees([coordinator], rootSession, undefined, () => true);
+		const remote = join(f.root, "outside-active-repository");
+		await mkdir(remote); git(remote, "init", "--template=", "--initial-branch=main"); git(remote, "config", "user.name", "Workflow test"); git(remote, "config", "user.email", "test@example.invalid");
+		await writeFile(join(remote, "seed"), "remote\n"); git(remote, "add", "seed"); git(remote, "-c", "commit.gpgsign=false", "commit", "-m", "Remote fixture");
+		const workerId = randomUUID().replaceAll("-", "").slice(0, 24);
+		const worker = { taskId: `subagent-task-${workerId}`, childId: `subagent-child-${workerId}`, spec: { task: "Delegated work", name: "worker", cwd: remote, worktree: { changes: "exclude" } } };
+		await provisionWorktrees([worker], coordinatorSession, undefined, () => true);
+		// Expire only the presentation cache, without changing caller/ownership.
+		const now = Date.now; Date.now = () => now() + 6000;
+		try {
+			s = await until(f.snapshot, value => value.worktrees.some(t => t.path === worker.spec.worktreeInfo.path), "descendant repository discovered");
+			const direct = s.worktrees.find(t => t.path === coordinator.spec.worktreeInfo.path), nested = s.worktrees.find(t => t.path === worker.spec.worktreeInfo.path);
+			assert.equal(direct.createdInSession, true); assert.equal(nested.createdInSession, false, "existing This session predicate is unchanged");
+			for (const tree of [direct, nested]) { assert.equal(tree.goalScopeSessionId, rootSession); assert.equal(tree.worktreeGoal.id, entry.id); assert.equal(tree.worktreeGoal.sessionId, rootSession); }
+			assert.equal(nested.repositoryPath, remote); assert.equal(nested.inUse, true);
+			assert.equal(s.worktreeCompletions.some(record => record.path === nested.path), false, "presentation does not adopt completion ownership");
+			group.children[0].operatorCapability = "f".repeat(64); atomicPrivateJson(groupPath, group);
+			Date.now = () => now() + 12000;
+			// The foreign repository remains discoverable from the cached repository scan only if evidence permits it.
+			await f.snapshot();
+			await until(f.snapshot, value => !value.worktrees.some(t => t.path === nested.path && t.worktreeGoal), "stale nonce loses attribution");
+		} finally { Date.now = now; }
+	} finally {
+		globalThis.__paeDelegatedGoalExecutorV1 = previousExecutor;
+		if (previousAgentDir === undefined) delete process.env.PI_CODING_AGENT_DIR; else process.env.PI_CODING_AGENT_DIR = previousAgentDir;
+		if (previousState === undefined) delete process.env.PI_TUI_WORKER_STATE_ROOT; else process.env.PI_TUI_WORKER_STATE_ROOT = previousState;
+		await f.dispose();
+	}
+});
 test("released subagent worktrees remain session-created after their worker releases them", async () => {
 	const f = await fixture();
 	const previousAgentDir = process.env.PI_CODING_AGENT_DIR;
@@ -452,6 +510,8 @@ test("released subagent worktrees remain session-created after their worker rele
 		const snapshot = await until(f.snapshot, s => s.worktrees.some(row => row.path === child.spec.worktreeInfo.path), "released tree inventory");
 		const row = snapshot.worktrees.find(item => item.path === child.spec.worktreeInfo.path);
 		assert.equal(row.createdInSession, true);
+		assert.equal(row.goalScopeSessionId, f.session.sessionManager.getSessionId());
+		assert.equal(row.worktreeGoal, undefined, "ordinary worktrees remain explicitly unassociated");
 		assert.equal(row.inUse, false);
 	} finally {
 		if (previousAgentDir === undefined) delete process.env.PI_CODING_AGENT_DIR;
