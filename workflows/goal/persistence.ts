@@ -1,8 +1,9 @@
 import { isNonNegativeFiniteNumber, nonNegativeFiniteNumber, normalizeTokenBudget } from "./accounting.js";
+import type { GoalRecord } from "../../shared/goal-model.ts";
 import { validateGoalLimitOverrides, type GoalContinuationLimits } from "../../shared/delegated-goal-policy.ts";
 import type { GoalStatus } from "./prompts.js";
 import { createHash } from "node:crypto";
-import { readScopedProgress, validateProgressArguments, type ProgressStep } from "../../progress/progress-state.js";
+import { readScopedProgress, validateProgressArguments } from "../../progress/progress-state.js";
 import { type GoalWait, type GoalWake, normalizeGoalWait, normalizeGoalWake } from "./wait.js";
 
 const GOAL_STATE_ENTRY_TYPE = "goal-state";
@@ -11,43 +12,12 @@ const LEGACY_GOALS_STATE_ENTRY_TYPE = "goals-state";
 export type SafetyPauseCause = "continuation_limit" | "no_progress";
 const LEGACY_IMPLICIT_TOKEN_BUDGET = 250_000;
 
-export interface ActiveGoal {
-  id: string;
-  /** Rotates on activation; never use the stable id as a stale-turn guard. */
-  activationId?: string;
-  /** Task/control mutation fence; usage-only checkpoints preserve this revision. */
-  revision?: number;
-  tasks?: ProgressStep[];
-  requests?: Record<string, { fingerprint: string; result: { goalId: string; activationId: string; revision: number; status: string; steps: ProgressStep[] } }>;
-  /** Legacy checklist key retained for faithful migration and history. */
-  progressId?: string;
-  text: string;
-  status: GoalStatus;
-  startedAt: number;
-  updatedAt: number;
-  /** Recorded checklist change, not a heartbeat or inferred work progress. */
-  lastTaskUpdateAt?: number;
-  iteration: number;
-  tokenBudget?: number;
+export type ActiveGoal = GoalRecord & {
   /** Per-goal user policy, retained across reload/Resume without resetting counters. */
   continuationLimits?: Partial<GoalContinuationLimits>;
-  /** Distinguishes explicit caps from the old silent 250k default during migration. */
-  tokenBudgetExplicit?: boolean;
-  tokensUsed: number;
-  timeUsedSeconds: number;
-  baselineTokens: number;
-  activeStartedAt?: number;
-  automaticModelTurns: number;
-  toolFreeRepeatCount: number;
-  lastToolFreeOutputFingerprint?: string;
-  safetyPauseCause?: SafetyPauseCause;
-  safetyResetPending?: boolean;
   waiting?: GoalWait;
-  /** Last transition out of waiting; bounded diagnostic data, not authority. */
   lastWake?: GoalWake;
-  /** Most recent accepted, evidenced blocker report; retained across resume. */
-  lastBlocker?: { at: number; reason: string; evidence: string; repeatedTurns: number };
-}
+};
 
 interface LegacyStoredGoal extends Omit<ActiveGoal, "status"> {
   status: GoalStatus | "queued";

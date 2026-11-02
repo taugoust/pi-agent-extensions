@@ -1,4 +1,5 @@
 import { randomUUID, createHash } from "node:crypto";
+import { mergeGoalChecklist } from "../../shared/goal-model.ts";
 import type { ExtensionAPI, ExtensionContext } from "@earendil-works/pi-coding-agent";
 import { GOAL_MUTATION_EVENT, readGoalTasks, type GoalMutationRequest, type ProgressMutationResult } from "../../shared/goal-progress.ts";
 import { cloneProgressSteps, validateProgressArguments, validateProgressMutation, type ProgressStep } from "../../progress/progress-state.js";
@@ -7,18 +8,7 @@ import { createGoal, transitionGoal, type GoalRuntime } from "./runtime.js";
 import type { ActiveGoal } from "./persistence.js";
 
 export function mergeGoalTasks(previous: readonly ProgressStep[], updates: readonly ProgressStep[], removals: readonly string[] = []): ProgressStep[] {
-  const supplied = updates.filter(step => step.id).map(step => step.id!);
-  if (new Set(supplied).size !== supplied.length || new Set(removals).size !== removals.length) throw new Error("Duplicate task ID");
-  const known = new Set(previous.map(step => step.id));
-  if ([...supplied, ...removals].some(id => !known.has(id))) throw new Error("Unknown or foreign task ID; use this goal's current checklist");
-  if (supplied.some(id => removals.includes(id))) throw new Error("Cannot update and remove the same task");
-  const byId = new Map(updates.filter(step => step.id).map(step => [step.id, step]));
-  const next = [
-    ...previous.filter(step => !removals.includes(step.id!)).map(step => byId.get(step.id) ?? step),
-    ...updates.filter(step => !step.id).map(step => ({ ...step, id: randomUUID() })),
-  ];
-  if (new Set(next.map(step => step.text.trim())).size !== next.length) throw new Error("Goal tasks need distinct descriptions");
-  return validateProgressArguments({ steps: next }).steps;
+  return mergeGoalChecklist(previous, updates, removals, randomUUID);
 }
 
 function snapshot(goal: ActiveGoal): ProgressMutationResult {

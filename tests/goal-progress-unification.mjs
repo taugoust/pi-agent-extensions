@@ -16,6 +16,7 @@ const jiti = createJiti(import.meta.url, { alias: {
   typebox: join(sdk, "node_modules/typebox/build/index.mjs"),
 } });
 const { GoalRuntime, createGoal, nextGoalInstance, transitionGoal } = await jiti.import("../workflows/goal/runtime.ts");
+const { createGoalRecord, transitionGoalRecord, mergeGoalChecklist, updateGoalRecordAccounting } = await jiti.import("../shared/goal-model.ts");
 const { bindGoalMutations } = await jiti.import("../workflows/goal/mutations.ts");
 const { mutateProgress, readGoalTasks } = await jiti.import("../shared/goal-progress.ts");
 const { loadGoalStateFromSession } = await jiti.import("../workflows/goal/persistence.ts");
@@ -27,6 +28,17 @@ const { createDelegatedChildGoalService } = await jiti.import("../workflows/dele
 const { GoalCommandController } = await jiti.import("../workflows/goal/commands.ts");
 const { default: progressWidget } = await jiti.import("../progress/progress-widget.ts");
 const { DEFAULT_PROGRESS_SETTINGS } = await jiti.import("../progress/settings.ts");
+test("canonical Goal domain shares creation, lifecycle, checklist identity and accounting semantics", () => {
+  const record = createGoalRecord({ id: "legacy-id", activationId: "activation", text: "Objective", now: 10, baselineTokens: 100, tokenBudget: 20 });
+  assert.equal(record.id, "legacy-id"); assert.equal(record.activationId, "activation");
+  assert.equal(transitionGoalRecord(record, "paused", 2).timeUsedSeconds, 0, "backward clock does not subtract time");
+  const tasks = mergeGoalChecklist([], [{ text: "Verify", status: "pending" }], [], () => "stable-task");
+  assert.equal(tasks[0].id, "stable-task");
+  assert.throws(() => mergeGoalChecklist(tasks, [{ id: "foreign", text: "Foreign", status: "pending" }]), /Unknown or foreign task ID/);
+  const accounted = updateGoalRecordAccounting({ ...record, activeStartedAt: 10 }, 125, 2, false);
+  assert.equal(accounted.tokensUsed, 25); assert.equal(accounted.activeStartedAt, undefined); assert.equal(accounted.timeUsedSeconds, 0);
+  assert.equal(transitionGoalRecord({ ...accounted, tokensUsed: 20 }, "active", 30).status, "budget_limited");
+});
 function fixture(options = {}) {
   const entries = options.entries ?? [], events = new EventEmitter(), tools = new Map(), messages = [], handlers = new Map();
   let idle = false, busy = false;

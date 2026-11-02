@@ -1,4 +1,5 @@
 import type { Usage } from "@earendil-works/pi-ai";
+import { checkpointGoalRecordTime, updateGoalRecordAccounting } from "../../shared/goal-model.ts";
 
 export interface GoalAccountingState {
   status: string;
@@ -19,14 +20,7 @@ interface UsageContext {
 }
 
 export function checkpointGoalActiveTime(goal: GoalAccountingState, now: number, continueClock: boolean) {
-  const accumulated = nonNegativeFiniteNumber(goal.timeUsedSeconds);
-  const startedAt = goal.activeStartedAt;
-  if (typeof startedAt === "number" && Number.isFinite(startedAt)) {
-    goal.timeUsedSeconds = accumulated + Math.max(0, now - startedAt) / 1000;
-  } else {
-    goal.timeUsedSeconds = accumulated;
-  }
-  goal.activeStartedAt = continueClock ? now : undefined;
+  Object.assign(goal, checkpointGoalRecordTime(goal, now, continueClock));
 }
 
 export function updateGoalUsage(
@@ -34,12 +28,8 @@ export function updateGoalUsage(
   ctx: UsageContext,
   continueClock = goal.status === "active",
 ) {
-  const now = Date.now();
-  const baselineTokens = nonNegativeFiniteNumber(goal.baselineTokens);
-  goal.baselineTokens = baselineTokens;
-  goal.tokensUsed = Math.max(0, currentTokenTotal(ctx) - baselineTokens);
-  checkpointGoalActiveTime(goal, now, continueClock);
-  goal.updatedAt = now;
+  const updated = updateGoalRecordAccounting(goal, currentTokenTotal(ctx), Date.now(), continueClock);
+  Object.assign(goal, updated);
 }
 
 export function formatDuration(seconds: number) {

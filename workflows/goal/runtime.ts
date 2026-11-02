@@ -1,6 +1,7 @@
 import { createHash, randomUUID } from "node:crypto";
 import type { ExtensionAPI, ExtensionContext } from "@earendil-works/pi-coding-agent";
 import { checkpointGoalActiveTime, formatDuration, formatTokenCount, updateGoalUsage } from "./accounting.js";
+import { createGoalRecord, isTerminalGoalStatus as goalStatusIsTerminal, transitionGoalRecord } from "../../shared/goal-model.ts";
 import { resolveGoalLimits, validateGoalLimitOverrides, type GoalContinuationLimits } from "../../shared/delegated-goal-policy.ts";
 import { formatError, isStaleContextError, notifyTerminal, safeGoalMenuText, truncateNotification } from "./errors.js";
 import {
@@ -135,7 +136,7 @@ export interface GoalStateSnapshot {
 
 /** Terminal statuses for Goal persistence and managed-run lifecycle publication. */
 export function isTerminalGoalStatus(status: GoalStateSnapshotStatus): boolean {
-  return status !== "active";
+  return goalStatusIsTerminal(status);
 }
 
 function buildGoalStateSnapshot(
@@ -1501,42 +1502,11 @@ export class GoalRuntime {
 }
 
 export function createGoal(text: string, tokenBudget: number | undefined, baselineTokens: number): ActiveGoal {
-  const now = Date.now();
-  return {
-    id: randomUUID(),
-    activationId: randomUUID(),
-    revision: 0,
-    tasks: [],
-    text,
-    status: "active",
-    startedAt: now,
-    updatedAt: now,
-    iteration: 0,
-    tokenBudget,
-    tokenBudgetExplicit: tokenBudget !== undefined,
-    tokensUsed: 0,
-    timeUsedSeconds: 0,
-    baselineTokens,
-    activeStartedAt: now,
-    automaticModelTurns: 0,
-    toolFreeRepeatCount: 0,
-  };
+  return createGoalRecord({ text, tokenBudget, baselineTokens, now: Date.now() });
 }
 
 export function transitionGoal(goal: ActiveGoal, requestedStatus: GoalStatus): ActiveGoal {
-  const now = Date.now();
-  const status =
-    requestedStatus === "active" && goal.tokenBudget !== undefined && goal.tokensUsed >= goal.tokenBudget
-      ? "budget_limited"
-      : requestedStatus;
-  const next = {
-    ...goal,
-    status,
-    updatedAt: now,
-    ...(status === "active" ? {} : { waiting: undefined }),
-  };
-  checkpointGoalActiveTime(next, now, status === "active" && !next.waiting);
-  return next;
+  return transitionGoalRecord(goal, requestedStatus, Date.now());
 }
 
 /** Optimistic-control revision excludes usage, clocks, iteration and safety counters.
