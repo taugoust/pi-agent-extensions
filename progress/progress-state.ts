@@ -1,6 +1,9 @@
 import { StringEnum } from "@earendil-works/pi-ai";
 import { buildSessionContext, type ContextEvent, type SessionEntry } from "@earendil-works/pi-coding-agent";
 import { Type } from "typebox";
+import { MAX_PROGRESS_STEPS, MAX_PROGRESS_TEXT_LENGTH, PROGRESS_STATUSES, hasMaxGraphemeLength, validateProgressArguments as validateGoalChecklistArguments, type ProgressStep } from "../shared/goal-checklist.ts";
+export { MAX_PROGRESS_STEPS, MAX_PROGRESS_TEXT_LENGTH } from "../shared/goal-checklist.ts";
+export type { ProgressStep } from "../shared/goal-checklist.ts";
 
 export const TOOL_NAME = "update_progress";
 export const GOAL_PROGRESS_ENTRY_TYPE = "progress-scoped-state";
@@ -8,9 +11,6 @@ export const PROGRESS_CONTEXT_MESSAGE_TYPE = "progress-status";
 export const PROGRESS_CONTEXT_VERSION = 5;
 export const PROGRESS_DETAILS_VERSION = 5;
 export const PROGRESS_RESTORED_BOUNDARY_ENTRY_TYPE = "progress-restored-context-boundary";
-export const MAX_PROGRESS_STEPS = 50;
-// Losslessly accommodates the old text, separator, and reason.
-export const MAX_PROGRESS_TEXT_LENGTH = 503;
 const LEGACY_TEXT_LENGTH = 300;
 const LEGACY_REASON_LENGTH = 200;
 
@@ -23,7 +23,6 @@ export const PROGRESS_RESTORED_BOUNDARY_VERSION = 1;
 const TODO_DETAILS_VERSION = 3;
 const PREVIOUS_TODO_DETAILS_VERSION = 2;
 const LEGACY_TODO_DETAILS_VERSION = 1;
-const PROGRESS_STATUSES = ["pending", "in_progress", "completed", "blocked"] as const;
 const NON_BLOCKED_STATUSES = ["pending", "in_progress", "completed"] as const;
 const RESUBMIT_GUIDANCE = "Fix the input and retry with the current goal identity and revision.";
 
@@ -31,12 +30,6 @@ type ProgressStatus = (typeof PROGRESS_STATUSES)[number];
 type PreviousTodoStatus = (typeof NON_BLOCKED_STATUSES)[number];
 type SupportedStateVersion = 1 | 2 | 3 | 4 | 5;
 
-export interface ProgressStep {
-  /** Retain this identity when refining a goal task's text or blocker reason. */
-  id?: string;
-  text: string;
-  status: ProgressStatus;
-}
 
 type ProgressV4 =
   | { text: string; status: "pending" | "in_progress" | "completed" }
@@ -153,39 +146,7 @@ export function prepareProgressArguments(value: unknown): { steps: ProgressStep[
 }
 
 export function validateProgressArguments(value: unknown): { steps: ProgressStep[]; goal_id?: string | null } {
-  if (!isRecord(value) || !hasOnlyKeys(value, ["steps", "goal_id"])) {
-    rejectProgress("input must contain steps and optional goal_id.");
-  }
-  if (value.goal_id !== undefined && value.goal_id !== null && (typeof value.goal_id !== "string" || !value.goal_id.trim() || value.goal_id.length > 128)) rejectProgress("goal_id must be the exact current goal ID or null.");
-  if (!Array.isArray(value.steps)) rejectProgress("steps must be an array.");
-  if (value.steps.length > MAX_PROGRESS_STEPS) {
-    rejectProgress(`steps contains ${value.steps.length} items; the maximum is ${MAX_PROGRESS_STEPS}.`);
-  }
-
-  const steps: ProgressStep[] = [];
-  for (const [index, entry] of value.steps.entries()) {
-    const item = index + 1;
-    if (!isRecord(entry)) rejectProgress(`item ${item} must be an object.`);
-    if (!hasOnlyKeys(entry, ["text", "status", "id"])) {
-      rejectProgress(`item ${item} contains an unsupported field.`);
-    }
-    if (typeof entry.text !== "string") rejectProgress(`item ${item} text must be a string.`);
-    if (entry.text.trim().length === 0) {
-      rejectProgress(`item ${item} text must contain non-whitespace text.`);
-    }
-    if (!hasMaxGraphemeLength(entry.text, MAX_PROGRESS_TEXT_LENGTH)) {
-      rejectProgress(`item ${item} text exceeds ${MAX_PROGRESS_TEXT_LENGTH} characters.`);
-    }
-    if (!PROGRESS_STATUSES.includes(entry.status as ProgressStatus)) {
-      rejectProgress(`item ${item} status must be pending, in_progress, completed, or blocked.`);
-    }
-    const status = entry.status as ProgressStatus;
-
-    if (entry.id !== undefined && (typeof entry.id !== "string" || !entry.id.trim() || entry.id.length > 128)) rejectProgress(`item ${item} has an invalid task id.`);
-    steps.push({ text: entry.text, status, ...(entry.id !== undefined ? { id: entry.id as string } : {}) });
-  }
-
-  return { steps, ...(value.goal_id !== undefined ? { goal_id: value.goal_id as string | null } : {}) };
+  return validateGoalChecklistArguments(value);
 }
 
 export function currentProgressGoal(entries: readonly SessionEntry[]): { id: string; key: string; status: string } | undefined {
@@ -686,64 +647,6 @@ function leadingSummaryBoundary(messages: ContextEvent["messages"]): number {
 function hasLeadingSummary(messages: ContextEvent["messages"], boundary: number): boolean {
   const summaryStart = messages[0]?.role === "system" ? 1 : 0;
   return boundary > summaryStart;
-}
-
-// Preserve the historical cluster-counting rules for both legacy decoding and current input.
-function hasMaxGraphemeLength(value: string, maximum: number): boolean {
-  let count = 0;
-  let index = 0;
-  while (index < value.length) {
-    index = nextGraphemeClusterIndex(value, index);
-    count += 1;
-    if (count > maximum) return false;
-  }
-  return true;
-}
-
-function nextGraphemeClusterIndex(value: string, clusterStart: number): number {
-  const start = value.codePointAt(clusterStart) ?? 0;
-  let clusterEnd = clusterStart + codePointLength(start);
-  clusterEnd = consumeGraphemeModifiers(value, clusterEnd);
-  while (clusterEnd < value.length - 1 && value.codePointAt(clusterEnd) === 0x200d) {
-    const next = value.codePointAt(clusterEnd + 1) ?? 0;
-    clusterEnd += 1 + codePointLength(next);
-    clusterEnd = consumeGraphemeModifiers(value, clusterEnd);
-  }
-  if (
-    isBetween(start, 0x1f1e6, 0x1f1ff) &&
-    clusterEnd < value.length &&
-    isBetween(value.codePointAt(clusterEnd) ?? 0, 0x1f1e6, 0x1f1ff)
-  ) {
-    clusterEnd += codePointLength(value.codePointAt(clusterEnd) ?? 0);
-  }
-  return clusterEnd;
-}
-
-function consumeGraphemeModifiers(value: string, start: number): number {
-  let index = start;
-  while (index < value.length) {
-    const point = value.codePointAt(index) ?? 0;
-    if (!isCombiningMark(point) && !isBetween(point, 0xfe00, 0xfe0f)) break;
-    index += codePointLength(point);
-  }
-  return index;
-}
-
-function isCombiningMark(value: number): boolean {
-  return (
-    isBetween(value, 0x0300, 0x036f) ||
-    isBetween(value, 0x1ab0, 0x1aff) ||
-    isBetween(value, 0x1dc0, 0x1dff) ||
-    isBetween(value, 0xfe20, 0xfe2f)
-  );
-}
-
-function codePointLength(value: number): number {
-  return value > 0xffff ? 2 : 1;
-}
-
-function isBetween(value: number, minimum: number, maximum: number): boolean {
-  return value >= minimum && value <= maximum;
 }
 
 function hasOnlyKeys(record: Record<string, unknown>, allowed: readonly string[]): boolean {

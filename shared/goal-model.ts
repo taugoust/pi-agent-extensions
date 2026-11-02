@@ -1,11 +1,11 @@
 import { randomUUID } from "node:crypto";
-import { validateProgressArguments, type ProgressStep } from "../progress/progress-state.js";
+import { validateProgressArguments, type ProgressStep } from "./goal-checklist.ts";
 
 /** Canonical execution record shared by the session engine and saved-goal registry adapters.
  * Catalog/ownership metadata is intentionally not part of this execution record; adapters map
  * catalog revisions and ownership fences separately rather than treating projections as execution state.
  */
-export type GoalStatus = "active" | "paused" | "blocked" | "usage_limited" | "budget_limited" | "complete";
+export type GoalStatus = "active" | "paused" | "blocked" | "usage_limited" | "budget_limited" | "complete" | "cleared";
 
 export interface GoalRecord {
   id: string;
@@ -48,7 +48,7 @@ export interface GoalAccountingRecord {
 
 /** Construct a fresh canonical Goal. IDs and timestamps may be injected by adapters/tests. */
 export function createGoalRecord(
-  input: { id?: string; activationId?: string; text: string; now: number; baselineTokens: number; tokenBudget?: number },
+  input: { id?: string; activationId?: string; text: string; now: number; baselineTokens: number; tokenBudget?: number; status?: GoalStatus },
 ): GoalRecord {
   return {
     id: input.id ?? randomUUID(),
@@ -56,7 +56,7 @@ export function createGoalRecord(
     revision: 0,
     tasks: [],
     text: input.text,
-    status: "active",
+    status: input.status ?? "paused",
     startedAt: input.now,
     updatedAt: input.now,
     iteration: 0,
@@ -65,20 +65,23 @@ export function createGoalRecord(
     tokensUsed: 0,
     timeUsedSeconds: 0,
     baselineTokens: input.baselineTokens,
-    activeStartedAt: input.now,
+    activeStartedAt: input.status === "active" ? input.now : undefined,
     automaticModelTurns: 0,
     toolFreeRepeatCount: 0,
   };
 }
 
-/** The canonical status transition, including refusing activation past an explicit budget. */
+/** The one lifecycle policy used by both execution and catalog adapters. */
+export function resolveGoalTransitionStatus(goal: Pick<GoalRecord, "status" | "tokensUsed" | "tokenBudget">, requestedStatus: GoalStatus): GoalStatus {
+  if (isFinalGoalStatus(goal.status) && requestedStatus !== goal.status) throw new Error("Goal is terminal");
+  return requestedStatus === "active" && goal.tokenBudget !== undefined && goal.tokensUsed >= goal.tokenBudget ? "budget_limited" : requestedStatus;
+}
+
+/** Execution adapters additionally checkpoint their own session clock. */
 export function transitionGoalRecord<T extends GoalRecord>(goal: T, requestedStatus: GoalStatus, now: number): T {
-  const status: GoalStatus = requestedStatus === "active" && goal.tokenBudget !== undefined && goal.tokensUsed >= goal.tokenBudget
-    ? "budget_limited"
-    : requestedStatus;
+  const status = resolveGoalTransitionStatus(goal, requestedStatus);
   const next = { ...goal, status, updatedAt: now, ...(status === "active" ? {} : { waiting: undefined }) } as T;
-  checkpointGoalRecordTime(next, now, status === "active" && !next.waiting);
-  return next;
+  return checkpointGoalRecordTime(next, now, status === "active" && !next.waiting);
 }
 
 /** Stable-ID checklist patch semantics shared by tool/UI and saved Goal mutation adapters. */
@@ -127,7 +130,7 @@ export function checkpointGoalRecordTime<T extends GoalAccountingRecord>(goal: T
  * Both session and saved adapters should increment/fence their control revision only when this
  * fingerprint changes, not when an accounting observation refreshes the Goal projection.
  */
-export function goalControlFingerprint(goal: GoalRecord): string {
+export function goalControlFingerprint(goal: Pick<GoalRecord, "id" | "text" | "status" | "tokensUsed"> & Partial<GoalRecord>): string {
   return JSON.stringify([
     goal.id, goal.activationId ?? goal.id, goal.progressId ?? goal.id,
     goal.text, goal.status,
@@ -140,7 +143,12 @@ export function goalControlFingerprint(goal: GoalRecord): string {
   ]);
 }
 
-export function isTerminalGoalStatus(status: GoalStatus | "cleared"): boolean {
+/** Goal lifetime and execution lifetime are different: a paused Goal is retained. */
+export function isFinalGoalStatus(status: GoalStatus | "cleared"): boolean {
+  return status === "complete" || status === "cleared";
+}
+
+export function isGoalExecutionStopped(status: GoalStatus | "cleared"): boolean {
   return status !== "active";
 }
 

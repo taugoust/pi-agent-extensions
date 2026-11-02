@@ -29,7 +29,7 @@ test("actual root subagent tool: guarded/native launch, crash hydration, group c
   await mkdir(home, { mode: 0o700 });
   await mkdir(stateHome, { mode: 0o700 });
   const environment = { HOME: home, XDG_STATE_HOME: stateHome, PI_CODING_AGENT_DIR: config, PI_TUI_WORKER_STATE_ROOT: join(root, "state"), PI_TUI_ROOT_RESULT: result,
-    PI_TUI_WORKER_LAUNCHER: launcher!, PI_TUI_WORKER_LAUNCH_MODE: mode, PI_TUI_ROOT_PERMISSION_FILE: permissionFile,
+    PI_TUI_WORKER_LAUNCHER: launcher!, PI_TUI_WORKER_LAUNCH_MODE: mode, PI_TUI_ROOT_PERMISSION_FILE: permissionFile, PI_DELEGATED_GOALS_STATE_ROOT: join(root, "goals"),
     PI_PASEO_EXISTING_AGENT_ID: "malicious-parent-agent", PI_PASEO_BRIDGE_FORCE: "1",
     PI_PASEO_TMUX_TARGET: "malicious-session:9", PI_PASEO_CONTROL_SOCKET: "/tmp/malicious-paseo.sock" };
   const command = ["env", "-u", "AGENTSH_PERMISSION_GATE_SOCKET", "-u", "PI_SUBAGENT_ID", "-u", "PI_SUBAGENT_PERMISSION_SOCKET", "-u", "PI_SUBAGENT_PERMISSION_TOKEN",
@@ -61,6 +61,21 @@ test("actual root subagent tool: guarded/native launch, crash hydration, group c
     await tmux("set-option", "-p", "-t", parentPane, "remain-on-exit", "on");
     for (const [key, value] of Object.entries(environment)) await tmux("set-environment", "-g", key, value);
     await waitForReady();
+    await send("/tui-root-goal-start");
+    const goalStart = await waitFile(result, 60_000);
+    assert.equal(goalStart.ok, true, JSON.stringify(goalStart));
+    const oldEpoch = await readFile(`${result}.epoch`, "utf8");
+    await rm(result);
+    await send("/reload");
+    const reloadDeadline = Date.now() + 30_000;
+    while (await readFile(`${result}.epoch`, "utf8") === oldEpoch) { assert.ok(Date.now() < reloadDeadline, "Parent reload did not complete"); await sleep(100); }
+    await send("/tui-root-goal-check");
+    const goalCheck = await waitFile(result, 90_000);
+    assert.equal(goalCheck.ok, true, JSON.stringify(goalCheck));
+    assert.equal(goalCheck.result.reloadRebound, true);
+    assert.equal(goalCheck.result.ordinarySteering, true);
+    if (process.env.PI_TUI_GOAL_ONLY === "1") return;
+    await rm(result);
     await send("Root persistence fixture");
     await waitForPaneText("Deterministic completed task.", 30_000);
     await send("/tui-root-verification");
@@ -88,7 +103,10 @@ test("actual root subagent tool: guarded/native launch, crash hydration, group c
     assert.equal(final.ok, true, JSON.stringify(final));
     assert.equal(final.result.rootTool, true);
     assert.equal(final.result.guard, mode === "guard-only");
-  } catch (error) { console.error("ROOT_TEST_FAILURE", error); throw error; }
+  } catch (error) {
+    for (const pane of (await tmux("list-panes", "-a", "-F", "#{pane_id}").catch(() => "")).split("\n").filter(Boolean)) console.error(`FIXTURE_PANE ${pane}\n${await tmux("capture-pane", "-p", "-S", "-100", "-t", pane).catch(() => "unavailable")}`);
+    console.error("ROOT_TEST_FAILURE", error); throw error;
+  }
   finally {
     // Only this test's isolated tmux server is ever destroyed.
     await tmux("kill-server").catch(() => undefined);

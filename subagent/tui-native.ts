@@ -1,4 +1,8 @@
 import { resultPage } from "./result-page.ts";
+import { managedGoalBinding, validateManagedGoalAssignment, type ManagedGoalAssignment } from "./managed-goal.ts";
+import { requestGoalWorker } from "./goal-rpc.ts";
+import type { ChildGoalSnapshot } from "./goal-executor.ts";
+import type { DelegatedGoalChild } from "../workflows/delegated-goals.ts";
 import { HeadlessForegroundManager } from "./headless-foreground.ts";
 import { reapOwnedWorktrees } from "../shared/worktree-reap.ts";
 import { pendingGuidance } from "./guidance.ts";
@@ -26,7 +30,7 @@ import type { TuiWorkerManifest, TuiWorkerPlacement } from "../shared/tui-worker
 
 const id = (prefix: string) => `${prefix}-${randomBytes(12).toString("hex")}`;
 const pause = (ms: number) => new Promise(resolve => setTimeout(resolve, ms));
-type Spec = { name?: string; displayName?: string; tmuxAlias?: string; task: string; cwd: string; model?: string; tools?: string[]; systemPrompt?: string; acceptance?: string[]; verification?: VerificationGate[]; cleanupWorktreesOnReap?: boolean; worktree?: WorktreeOption; worktreeInfo?: { path: string; branch: string; baseCommit: string; includedChanges: boolean } };
+type Spec = { assignedGoal?: ManagedGoalAssignment; name?: string; displayName?: string; tmuxAlias?: string; task: string; cwd: string; model?: string; tools?: string[]; systemPrompt?: string; acceptance?: string[]; verification?: VerificationGate[]; cleanupWorktreesOnReap?: boolean; worktree?: WorktreeOption; worktreeInfo?: { path: string; branch: string; baseCommit: string; includedChanges: boolean } };
 type Child = { childId: string; taskId: string; attempt: number; directory: string; activityCwd?: string; spec: Spec;
   resumeSessionFile?: string; resumeMessage?: string; compactBeforePrompt?: boolean;
   state: "pending" | "launching" | "running" | "waiting" | "completed" | "failed" | "cancelled" | "lost" | "skipped";
@@ -567,6 +571,10 @@ export class TuiNativeManager {
             || report.assistant?.stopReason === "toolUse" && !c.lastOutcome ? "waiting" : "completed";
         // Settlement is reported through the replay cursor below, never a text injection.
       }
+      if (!state.active && !g.cancelled && m.assignedGoal) {
+        if (state.assignedGoal?.entryId != null && state.assignedGoal.entryId !== m.assignedGoal.entryId) throw new Error("Managed Goal observation changed assignment");
+        if (state.assignedGoal?.status !== "complete") c.state = "waiting";
+      }
       // Current-turn state is authoritative even after a replay gap. Only
       // newer events may supersede this snapshot (a human can act mid-poll).
       if (!state.lastReport) { c.report = undefined; c.requiresCompaction = false; }
@@ -639,6 +647,11 @@ export class TuiNativeManager {
     if (g.launchMode === "guard-only") {
       await this.sendMode(g, c, m);
     }
+    if (c.spec.assignedGoal) {
+      // The same managed worker owns the task. Its authenticated Goal engine,
+      // not an additional generic task prompt, performs the initial dispatch.
+      c.started = true; c.state = "waiting"; this.save(g); return;
+    }
     const index = g.children.indexOf(c);
     const previous = index > 0 && g.children[index - 1].report ? messageText((readPrivateJson(g.children[index - 1].report!) as any).assistant) : "";
     if (c.compactBeforePrompt) {
@@ -698,7 +711,7 @@ export class TuiNativeManager {
                 nameWindow: g.renameWindowWithFirstChild === true && c === g.children[0],
                 parentDisposition: this.disposition(), launcher: g.launcher, launchMode: g.launchMode,
                 model: this.resolveRoleModel(c.spec.model), routingEnvironment: this.routingEnvironment(), tools: c.spec.tools, systemPrompt: c.spec.systemPrompt, acceptance: c.spec.acceptance, verification: c.spec.verification, cleanupWorktreesOnReap: c.spec.cleanupWorktreesOnReap === true, resumeSessionFile: c.resumeSessionFile,
-                operatorCapabilityHash: createHash("sha256").update(c.operatorCapability).digest("hex") });
+                operatorCapabilityHash: createHash("sha256").update(c.operatorCapability).digest("hex"), assignedGoal: c.spec.assignedGoal });
               if (!manifest.activityCwd) throw new Error("Worker launch-time checkout identity unavailable");
               c.activityCwd = manifest.activityCwd; this.save(g);
               await this.tmux.waitReady(manifest);
@@ -737,7 +750,8 @@ export class TuiNativeManager {
       through_sequence: Number(c.report?.match(/report-(\d+)-[a-f0-9]{16}\.json$/)?.[1]) || c.runSequence || 0 })) c.terminalNotification = token;
   }
   async launch(params: any, owner: string, cwd: string, signal?: AbortSignal, update?: (value: any) => void,
-    resume?: { child: Child; sessionFile: string; compact: boolean; message?: string }) {
+    resume?: { child: Child; sessionFile: string; compact: boolean; message?: string }, assignedGoal?: ManagedGoalAssignment) {
+    if (assignedGoal) validateManagedGoalAssignment(assignedGoal);
     const forms = [typeof params.task === "string" && params.task.trim(), Array.isArray(params.tasks) && params.tasks.length, Array.isArray(params.chain) && params.chain.length].filter(Boolean);
     if (forms.length !== 1) throw new Error("Provide exactly one task/tasks/chain form");
     const specs: Spec[] = (params.tasks ?? params.chain ?? [params]).map((s: any) => {
@@ -745,7 +759,7 @@ export class TuiNativeManager {
       if (s.systemPrompt !== undefined && (typeof s.systemPrompt !== "string" || Buffer.byteLength(s.systemPrompt) > 64 * 1024)) throw new Error("Invalid system prompt");
       if (s.model !== undefined && (typeof s.model !== "string" || Buffer.byteLength(s.model) > 512)) throw new Error("Invalid model");
       if (s.tools !== undefined && (!Array.isArray(s.tools) || s.tools.length > 64 || s.tools.some((tool: any) => typeof tool !== "string" || !/^[a-zA-Z0-9_-]{1,128}$/.test(tool)))) throw new Error("Invalid tool selection");
-      return { name: validateSubagentName(s.name), displayName: canonicalSubagentName(s.task, s.displayName, s.name), task: s.task, cwd: resolve(s.cwd ?? cwd), model: s.model, tools: s.tools, systemPrompt: s.systemPrompt, acceptance: validateAcceptance(s.acceptance), ...(s.verification !== undefined ? { verification: validateVerification(s.verification) } : {}), cleanupWorktreesOnReap: s.cleanupWorktreesOnReap === true, worktree: worktreeOption(s.worktree) };
+      return { ...(assignedGoal ? { assignedGoal } : {}), name: validateSubagentName(s.name), displayName: canonicalSubagentName(s.task, s.displayName, s.name), task: s.task, cwd: resolve(s.cwd ?? cwd), model: s.model, tools: s.tools, systemPrompt: s.systemPrompt, acceptance: validateAcceptance(s.acceptance), ...(s.verification !== undefined ? { verification: validateVerification(s.verification) } : {}), cleanupWorktreesOnReap: s.cleanupWorktreesOnReap === true, worktree: worktreeOption(s.worktree) };
     });
     if (specs.length > 8) throw new Error("At most eight subagent children are allowed");
     if (signal?.aborted || this.closed || this.reapReserved) throw new Error("Subagent launch cancelled or cleanup reserved");
@@ -803,13 +817,99 @@ export class TuiNativeManager {
         failed: !g.background && g.children.some(child => ["failed", "lost"].includes(child.state) || verificationFailedForDelivery(child)) });
     } finally { signal?.removeEventListener("abort", abortForeground); this.foregroundWaits.delete(g.id); }
   }
+  ownsGoalGroup(owner: string, child: DelegatedGoalChild) { return !!this.owned(owner, child.jobId); }
+  goalDetails(owner: string, child: DelegatedGoalChild, entryId: string) {
+    const { c, m } = this.goalManifest(owner, child, entryId, true);
+    return { spec: structuredClone(c.spec), sessionFile: m.sessionFile, ownerSessionId: owner, taskId: c.taskId, childId: c.childId, attempt: c.attempt, reaped: c.reaped === true };
+  }
+  private goalManifest(owner: string, child: DelegatedGoalChild, entryId: string, retained = false) {
+    if (this.closed || this.owner !== owner) throw new Error("Managed Goal owner context changed");
+    const g = this.owned(owner, child.jobId), c = g?.children.find(c => c.childId === child.childId);
+    if (!g || !c || c.taskId !== child.taskId || c.attempt !== child.attempt || c.reaped && !retained) throw new Error("Managed Goal task/attempt changed");
+    if (this.byChild(owner, child.taskId)?.child !== c) throw new Error("Managed Goal has a successor attempt");
+    const m = this.manifest(c);
+    if (!m?.assignedGoal || m.assignedGoal.entryId !== entryId) throw new Error("Managed Goal assignment changed");
+    return { g, c, m };
+  }
+  async goalIsLive(owner: string, child: DelegatedGoalChild, entryId: string) {
+    const { c, m } = this.goalManifest(owner, child, entryId, true);
+    return !c.reaped && !(await this.tmux.inspect(m)).dead;
+  }
+  async goalRequest(owner: string, child: DelegatedGoalChild, entryId: string, request: Record<string, unknown>): Promise<ChildGoalSnapshot> {
+    const { m } = this.goalManifest(owner, child, entryId), binding = managedGoalBinding(m);
+    return await requestGoalWorker(binding.path, { token: binding.token, identity: binding.identity, request }) as ChildGoalSnapshot;
+  }
+  goalIdentity(owner: string, child: DelegatedGoalChild, entryId: string) {
+    return managedGoalBinding(this.goalManifest(owner, child, entryId).m).identity;
+  }
+  async verifyGoalStopped(owner: string, child: DelegatedGoalChild, entryId: string) {
+    const { c, m } = this.goalManifest(owner, child, entryId, true);
+    if (c.reaped) {
+      const tombstone = readPrivateJson(new TuiWorkerStore(c.directory).path("reaped.json")) as any;
+      if (tombstone.workerEpoch !== m.workerEpoch || tombstone.paneId !== m.placement?.paneId) throw new Error("Managed Goal stop proof changed");
+      return;
+    }
+    if ((await this.tmux.inspect(m)).dead) return;
+    const [status, goal] = await Promise.all([callTuiWorker(m, { operation: "status" }), this.goalRequest(owner, child, entryId, { operation: "observe" })]);
+    if (!status.ok || (status.data as any)?.active !== false || goal.status === "active" || goal.executionStopped !== true) throw new Error("Managed Goal execution is not authoritatively stopped");
+  }
+  async stopGoal(owner: string, child: DelegatedGoalChild, entryId: string) {
+    const { g, c, m } = this.goalManifest(owner, child, entryId, true);
+    if (c.reaped || (await this.tmux.inspect(m)).dead) { await this.verifyGoalStopped(owner, child, entryId); return; }
+    const cancelled = await callTuiWorker(m, { operation: "cancel" });
+    if (!cancelled.ok) throw new Error("Managed Goal cancellation was not confirmed");
+    await this.verifyGoalStopped(owner, child, entryId);
+    const goal = await this.goalRequest(owner, child, entryId, { operation: "observe" });
+    c.state = goal.status === "complete" ? "completed" : "cancelled"; g.cancelled = goal.status !== "complete"; this.save(g);
+  }
+  async launchGoal(owner: string, cwd: string, spec: Omit<Spec, "cwd">, assignment: ManagedGoalAssignment,
+    previous?: DelegatedGoalChild, legacySession?: string): Promise<DelegatedGoalChild> {
+    validateManagedGoalAssignment(assignment);
+    if (!this.ready() || !["native", "guard-only"].includes(this.disposition())) throw new Error("Ordinary delegation authority unavailable");
+    if (previous) {
+      const existing = this.owned(owner, previous.jobId);
+      if (existing) {
+        const { g, c, m } = this.goalManifest(owner, previous, assignment.entryId, true);
+        await this.verifyGoalStopped(owner, previous, assignment.entryId);
+        if (!c.reaped && !(await this.tmux.inspect(m)).dead) {
+          if (g.launchMode === "guard-only") await this.sendMode(g, c, m);
+          g.cancelled = false; c.state = "waiting"; this.save(g);
+          return previous;
+        }
+        legacySession = m.sessionFile;
+      }
+      if (!legacySession || !existing && this.byChild(owner, previous.taskId)) throw new Error("Legacy Goal resume requires exact stopped retained-session proof");
+    }
+    const resumed = previous ? { child: { taskId: previous.taskId, attempt: previous.attempt, spec: { ...spec, cwd } } as Child,
+      sessionFile: legacySession!, compact: false } : undefined;
+    const result = await this.launch({ ...spec, background: true }, owner, cwd, undefined, undefined, resumed, assignment);
+    const jobId = (result.details as any).job_id;
+    await this.refresh(owner);
+    const g = this.owned(owner, jobId), c = g?.children[0];
+    if (!g || !c || c.state === "failed" || c.state === "lost") throw new Error(c?.error ?? "Managed Goal launch unavailable");
+    const m = this.manifest(c);
+    if (!m) throw new Error("Managed Goal worker did not become ready");
+    await this.tmux.waitReady(m);
+    return { taskId: c.taskId, childId: c.childId, jobId: g.id, attempt: c.attempt, model: c.spec.model };
+  }
   private async cancelGroup(g: Group) {
     g.cancelled = true;
     for (const c of g.children) {
       if (c.state === "pending") { c.state = "cancelled"; continue; }
       const m = this.manifest(c);
       if (m && !c.reaped) {
-        try { await callTuiWorker(m, { operation: "cancel" }); c.state = "cancelled"; } catch {}
+        try {
+          let goal: ChildGoalSnapshot | undefined;
+          const ref = { taskId: c.taskId, childId: c.childId, jobId: g.id, attempt: c.attempt };
+          if (c.spec.assignedGoal) {
+            goal = await this.goalRequest(g.owner, ref, c.spec.assignedGoal.entryId, { operation: "observe" });
+            if (goal.status === "active") await this.goalRequest(g.owner, ref, c.spec.assignedGoal.entryId, { operation: "pause", expectedGoalId: goal.goalId, expectedActivationId: goal.activationId });
+          }
+          const stopped = await callTuiWorker(m, { operation: "cancel" });
+          if (!stopped.ok) throw new Error("Worker cancellation unconfirmed");
+          if (goal) await this.goalRequest(g.owner, ref, c.spec.assignedGoal!.entryId, { operation: "settle", expectedGoalId: goal.goalId, expectedActivationId: goal.activationId });
+          c.state = "cancelled";
+        } catch (error) { if (c.spec.assignedGoal) throw error; }
       }
     }
     this.save(g);
@@ -1341,8 +1441,13 @@ export class TuiNativeManager {
       return response(`Resolved idle decision ${params.request_id} for ${child!.childId}: ${params.choice}.`, { operation: op, child_id: child!.childId, request_id: params.request_id });
     }
     if (op === "prompt" || op === "resume") {
+      if (child?.spec.assignedGoal && op === "resume") throw new Error("Resume the linked Goal with goal_manage scope:saved; ordinary prompt steering remains available while active");
       if (this.disposition() !== (g.launchMode === "guard-only" ? "guard-only" : "native") || !this.ready()) throw new Error("Current authority does not permit native child prompts");
       const c = child!; const m = this.manifest(c);
+      if (c.spec.assignedGoal) {
+        const goal = await this.goalRequest(owner, { taskId: c.taskId, childId: c.childId, jobId: g.id, attempt: c.attempt }, c.spec.assignedGoal.entryId, { operation: "observe" });
+        if (goal.status !== "active") throw new Error("Goal execution is paused or final; use explicit saved-Goal lifecycle controls before new work");
+      }
       // A model checkpoint records progress, not measured context pressure.
       const requiresCompaction = c.requiresCompaction === true;
       if (op === "resume" && requiresCompaction && params.compact === false) throw new Error("High-context continuation requires compaction");

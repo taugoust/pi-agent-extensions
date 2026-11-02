@@ -215,6 +215,13 @@ test("explicit delegated edit null removes budget; omission preserves; create nu
   await assert.rejects(f.registry.mutate("parent", { action: "goals.create", requestId: "invalid-null", expectedGoalId: null, objective: "no", tokenBudget: null }), /budget/);
 });
 
+test('usage-only observations share the execution control-fence semantics',async()=>{
+ const f=fixture();await f.create('Shared Goal model');await f.act(f.registry.snapshot().entries[0],'goals.start');
+ const before=f.registry.snapshot();f.executor.observe=async()=>({status:'active',tokensUsed:123,automaticTurns:4,noProgressTurns:2});await f.registry.refresh();
+ const usage=f.registry.snapshot();assert.equal(usage.entries[0].revision,before.entries[0].revision);assert.equal(usage.entries[0].policyRevision,before.entries[0].policyRevision);assert.ok(usage.revision>before.revision);assert.equal(usage.entries[0].tokensUsed,123);
+ f.executor.observe=async()=>({status:'blocked',tokensUsed:125,waiting:'External dependency'});await f.registry.refresh();assert.ok(f.registry.snapshot().entries[0].revision>usage.entries[0].revision);
+});
+
 test("child observation synchronizes only owned goal fields and retains completed history", async () => {
   const f = fixture(); await f.create("observed"); await f.create("independent");
   await f.act(f.registry.snapshot().entries[0], "goals.start");

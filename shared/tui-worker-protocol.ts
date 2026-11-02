@@ -53,6 +53,8 @@ type TuiWorkerManifestBase = {
   /** Physical launch-time effective checkout identity; absent only in legacy manifests. */
   activityCwd?: string;
   sessionFile: string;
+  /** Private optional Goal binding on an otherwise ordinary managed worker. */
+  assignedGoal?: import("../subagent/managed-goal.ts").ManagedGoalAssignment;
 };
 export type TuiWorkerManifest = TuiWorkerManifestBase & (
   | { execution: "rpc-headless"; presentation: "headless-foreground"; placement?: never; processPid: number; processToken: string; runtimePid?: number; runtimeProcessToken?: string; fifoPath: string; panePid?: never; paneProcessToken?: never }

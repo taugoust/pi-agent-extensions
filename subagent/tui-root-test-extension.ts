@@ -7,6 +7,8 @@ import { sharedBackgroundSubagentManager } from "./background.ts";
 import { execFile } from "node:child_process";
 import { promisify } from "node:util";
 import subagent from "./index.ts";
+import workflows from "../workflows/index.ts";
+import progress from "../progress/index.ts";
 import { TuiWorkerStore, discoverTuiWorkers, atomicPrivateJson } from "./tui-worker-store.ts";
 import { FOREGROUND_TASKS_KEY } from "../shared/foreground-tasks.ts";
 import { HARNESS_READONLY_KEY } from "../shared/harness-readonly.ts";
@@ -19,15 +21,19 @@ import { canonicalSubagentName } from "./tui-names.ts";
 export default function rootTest(pi: ExtensionAPI) {
   let tool: any;
   let guidanceTool: any;
+  let goalTool: any;
   const commands = new Map<string, any>();
   const proxy = new Proxy(pi, { get(target, property) {
-    if (property === "registerTool") return (value: any) => { if (value.name === "subagent") tool = value; if (value.name === "guidance") guidanceTool = value; return target.registerTool(value); };
+    if (property === "registerTool") return (value: any) => { if (value.name === "subagent") tool = value; if (value.name === "guidance") guidanceTool = value; if (value.name === "goal_manage") goalTool = value; return target.registerTool(value); };
     if (property === "registerCommand") return (name: string, value: any) => { commands.set(name, value); return target.registerCommand(name, value); };
     const value = Reflect.get(target, property); return typeof value === "function" ? value.bind(target) : value;
   } });
   subagent(proxy);
-  pi.on("session_start", (_event, ctx) => {
+  progress(proxy);
+  workflows(proxy);
+  pi.on("session_start", async (_event, ctx) => {
     if (ctx.hasUI) ctx.ui.setStatus("root-test-ready", "ROOT_FIXTURE_READY");
+    if (!process.env.PI_TUI_WORKER_MANIFEST) await writeFile(`${process.env.PI_TUI_ROOT_RESULT}.epoch`, JSON.stringify({ pid: process.pid, at: Date.now(), session: ctx.sessionManager.getSessionId() }));
   });
   const output = process.env.PI_TUI_ROOT_RESULT!;
   const backgroundFile = `${output}.background`;
@@ -140,6 +146,53 @@ export default function rootTest(pi: ExtensionAPI) {
     assert.equal(result.details.group.status, "completed", JSON.stringify(result));
     return result;
   };
+  const goalCall = async (ctx: any, params: any) => JSON.parse((await goalTool.execute(`goal-fixture-${++sequence}`, params, undefined, undefined, ctx)).content[0].text);
+  const goalState = async (ctx: any, id: string, predicate: (goal: any) => boolean) => {
+    const deadline = Date.now() + 30_000;
+    while (Date.now() < deadline) { const state = await goalCall(ctx, { scope: "saved", action: "status", goal_id: id }); if (predicate(state.goal)) return state.goal; await sleep(100); }
+    throw new Error("Managed Goal lifecycle observation timed out");
+  };
+  register("tui-root-goal-start", async ctx => {
+    const list = await goalCall(ctx, { scope: "saved", action: "list" });
+    const created = await goalCall(ctx, { scope: "saved", action: "create", objective: "MANAGED_GOAL_FIXTURE", steps: [{ text: "Verify normal managed Goal lifecycle", status: "pending" }], expected_registry_revision: list.registry_revision, request_id: "managed-goal-create", user_authorized: true });
+    assert.equal(created.goal.status, "paused"); assert.equal(created.goal.child, null);
+    const parent = await goalTool.execute("root-goal-unaffected", { action: "status" }, undefined, undefined, ctx);
+    assert.equal(parent.details.goal, null, "Saved creation must not activate the parent's current Goal");
+    const started = await goalCall(ctx, { scope: "saved", action: "start", goal_id: created.goal.id, expected_revision: created.goal.revision, request_id: "managed-goal-start", user_authorized: true });
+    const group = await execute(ctx, { operation: "status", job_id: started.goal.child.jobId });
+    assert.equal(group.details.group.children[0].task_id, started.goal.child.taskId);
+    assert.equal(group.details.group.children[0].runtime.execution, "tmux");
+    const dashboard = await (globalThis as any)[HARNESS_READONLY_KEY].subagents.list({ sessionId: ctx.sessionManager.getSessionId(), limit: 50 });
+    assert.ok(dashboard.items.some((item: any) => item.taskId === started.goal.child.taskId && item.childId === started.goal.child.childId), "Goal coordinator missing from the ordinary Agents inventory");
+    await goalState(ctx, created.goal.id, goal => goal.status === "active" && !!goal.waiting);
+    await writeFile(`${output}.goal`, JSON.stringify({ id: created.goal.id, child: started.goal.child }));
+    return { goal: true, child: started.goal.child };
+  });
+  register("tui-root-goal-check", async ctx => {
+    const saved = JSON.parse(await readFile(`${output}.goal`, "utf8"));
+    let state = await goalState(ctx, saved.id, goal => goal.status === "active");
+    assert.deepEqual(state.child, saved.child, "Parent reload must recover the same normal task, not start another");
+    const dashboard = await (globalThis as any)[HARNESS_READONLY_KEY].subagents.list({ sessionId: ctx.sessionManager.getSessionId(), limit: 50 });
+    assert.ok(dashboard.items.some((item: any) => item.taskId === saved.child.taskId), "Reload lost normal Agents visibility");
+    await execute(ctx, { operation: "prompt", child_id: state.child.childId, message: "STEER_MANAGED_GOAL" });
+    const group = await execute(ctx, { operation: "status", job_id: state.child.jobId });
+    const manifest = manifestFor(group.details.group);
+    const deadline = Date.now() + 30_000;
+    while (!(await readFile(manifest.sessionFile, "utf8")).includes("MANAGED_STEER_ACK")) { assert.ok(Date.now() < deadline, "Normal agent steering was not delivered"); await sleep(100); }
+    state = await goalState(ctx, saved.id, goal => !!goal.waiting);
+    const paused = await goalCall(ctx, { scope: "saved", action: "pause", goal_id: saved.id, expected_revision: state.revision, request_id: "managed-goal-pause", user_authorized: true });
+    assert.equal(paused.goal.status, "paused");
+    const resumed = await goalCall(ctx, { scope: "saved", action: "resume", goal_id: saved.id, expected_revision: paused.goal.revision, request_id: "managed-goal-resume", user_authorized: true });
+    assert.equal(resumed.goal.child.taskId, saved.child.taskId);
+    await goalState(ctx, saved.id, goal => goal.status === "active" && !!goal.waiting);
+    await execute(ctx, { operation: "prompt", child_id: resumed.goal.child.childId, message: "FINISH_MANAGED_GOAL" });
+    const completed = await goalState(ctx, saved.id, goal => goal.status === "complete");
+    assert.ok(completed.tasks.every((task: any) => task.status === "completed"));
+    const final = await wait(ctx, resumed.goal.child.jobId);
+    assert.equal(final.children[0].task_outcome.state, "delivered");
+    await execute(ctx, { operation: "reap", job_id: resumed.goal.child.jobId });
+    return { managedGoal: true, ordinarySteering: true, reloadRebound: true, sameTask: true, completed: true };
+  });
   register("tui-root-verification", async ctx => {
     const permission = (globalThis as any).__PAE_PERMISSION_GATE_OPERATOR_V1__;
     permission?.applyMode(ctx.sessionManager.getSessionId(), false);

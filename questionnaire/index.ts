@@ -184,7 +184,8 @@ async function publishQuestionnaireEvent(
   }
 }
 
-export default function questionnaire(pi: ExtensionAPI) {
+export default function questionnaire(pi: ExtensionAPI, options: { assignedGoalBootstrap?: boolean } = {}) {
+  if (process.env.PI_DEDICATED_GOAL_CHILD === "1" && !options.assignedGoalBootstrap) return;
   pi.registerTool({
     name: "questionnaire",
     label: "Questionnaire",

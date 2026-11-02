@@ -215,7 +215,7 @@ pkgs.runCommand "subagent-check"
     # parameter properties) and the real Pi when supplied by
     # the parent check composition. No model/API requests: provider is local.
     mkdir -p "$workdir/tui-runtime"
-    cp -R ${self}/subagent ${self}/shared ${self}/workflows ${self}/permission-gate ${self}/background-job ${self}/questionnaire "$workdir/tui-runtime/"
+    cp -R ${self}/subagent ${self}/shared ${self}/workflows ${self}/progress ${self}/permission-gate ${self}/background-job ${self}/questionnaire "$workdir/tui-runtime/"
     chmod -R u+rwX "$workdir/tui-runtime"
     ln -s "$workdir/out/node_modules" "$workdir/tui-runtime/node_modules"
     # Raw Node TS fixtures need source-relative TS imports, unlike compiled output.
@@ -265,6 +265,7 @@ pkgs.runCommand "subagent-check"
       "$workdir/tui-runtime/subagent/completion.test.ts" \
       "$workdir/tui-runtime/subagent/tui-worker-jobs.test.ts" \
       "$workdir/tui-runtime/subagent/tui-worker-protocol.test.ts" \
+      "$workdir/tui-runtime/subagent/managed-goal.test.ts" \
       "$workdir/tui-runtime/subagent/tui-worker-server.test.ts" \
       "$workdir/tui-runtime/subagent/live-conversation.test.ts" \
       "$workdir/tui-runtime/subagent/retained-conversation.test.ts" \

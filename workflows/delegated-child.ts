@@ -87,6 +87,13 @@ export function createDelegatedChildGoalService(pi: ExtensionAPI, initial: Exten
       applyConfirmedLimits();
       let activatedGoalId: string | undefined;
       await commands.startGoal(entry.text, entry.tokenBudget ?? undefined, commandContext(), goal => {
+        // New execution binds the saved record itself, not a second Goal ID.
+        // Existing bindings retain their recorded progressId on Resume, so
+        // migration never rewrites historical contracts or checklist lineage.
+        goal.id = entry.id;
+        goal.tokensUsed = entry.tokensUsed;
+        goal.automaticModelTurns = entry.automaticTurns;
+        goal.toolFreeRepeatCount = entry.noProgressTurns;
         // Bind the stable lineage BEFORE dispatch; only activation tokens rotate.
         bindProgress(goal);
         activatedGoalId = goal.id;

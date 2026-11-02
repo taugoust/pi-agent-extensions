@@ -24,31 +24,43 @@ test("structured child seam uses injected existing engine, binds ownership and s
     async resumeGoal() { assert.deepEqual(runtime.settings.continuationLimits, { automaticTurns: 99, noProgressTurns: 88 }); runtime.activeGoal.status = "active"; runtime.activeGoal.progressId ??= runtime.activeGoal.id; runtime.activeGoal.activationId = "resumed"; events.push("owned-child-resume"); },
   };
   const service = createDelegatedChildGoalService(pi, ctx, runtime, commands);
-  const entry = { id: "11111111-1111-4111-8111-111111111111", revision: 1, status: "paused", child: null, text: "objective", tokenBudget: 100, tokensUsed: 0, automaticTurns: 0, noProgressTurns: 0, summary: null, waiting: null, tasks: [{ id: "task", text: "check", status: "pending" }] };
+  const entry = { id: "11111111-1111-4111-8111-111111111111", revision: 1, status: "paused", child: null, text: "objective", tokenBudget: 100, tokensUsed: 7, automaticTurns: 2, noProgressTurns: 1, summary: null, waiting: null, tasks: [{ id: "task", text: "check", status: "pending" }] };
   let result = await service.bootstrap(entry);
-  assert.equal(result.entryId, entry.id); assert.equal(result.childGoalId, "child-goal-id"); assert.equal(result.goal.status, "active");
+  assert.equal(result.entryId, entry.id); assert.equal(result.childGoalId, entry.id); assert.equal(result.goal.status, "active");
   assert.equal(result.goal.tasks[0].id, "task");
+  assert.equal(result.goal.tokensUsed,7);assert.equal(result.goal.automaticTurns,2);assert.equal(result.goal.noProgressTurns,1);
   runtime.activeGoal.lastBlocker = { at: 100, reason: "External dependency", evidence: "Recorded tool failure", repeatedTurns: 2 };
   runtime.activeGoal.lastWake = { at: 200, reason: "explicit_resume" };
   assert.deepEqual(service.snapshot().goal.diagnostics.lastBlocker, runtime.activeGoal.lastBlocker);
   assert.deepEqual(service.snapshot().goal.diagnostics.lastWake, runtime.activeGoal.lastWake);
   const persistedBinding = entries.find(e => e.customType === "delegated-goal-child-binding-v1" && e.data.progressId);
-  assert.equal(persistedBinding.data.progressId, "child-goal-id");
+  assert.equal(persistedBinding.data.progressId, entry.id);
   assert.ok(entries.indexOf(persistedBinding) >= 0);
   assert.deepEqual(result.limits, { automaticTurns: 99, noProgressTurns: 88 });
   await assert.rejects(service.bootstrap({ ...entry, id: "foreign" }), /another goal/);
   await assert.rejects(service.pause("foreign", "child-goal-id"), /ownership/);
   await assert.rejects(service.pause(entry.id, "stale-child"), /identity/);
-  result = await service.pause(entry.id, "child-goal-id", "first"); assert.equal(result.goal.status, "paused");
+  result = await service.pause(entry.id, entry.id, "first"); assert.equal(result.goal.status, "paused");
   runtime.settings.continuationLimits = { automaticTurns: 55, noProgressTurns: 66 };
-  result = await service.resume(entry.id, "child-goal-id", { ...entry, text: "edited while paused", tokenBudget: null, tasks: [...entry.tasks, { id: "new-task", text: "added while paused", status: "pending" }] }, "first"); assert.equal(result.goal.status, "active");
+  result = await service.resume(entry.id, entry.id, { ...entry, text: "edited while paused", tokenBudget: null, tasks: [...entry.tasks, { id: "new-task", text: "added while paused", status: "pending" }] }, "first"); assert.equal(result.goal.status, "active");
   assert.equal(runtime.activeGoal.text, "edited while paused"); assert.equal(runtime.activeGoal.tokenBudget, undefined);
   const synchronized = entries.filter(e => e.customType === "progress-fixture").at(-1);
   assert.equal(synchronized.data.tasks.length, 2);
   assert.ok(events.lastIndexOf("progress-fixture") < events.lastIndexOf("owned-child-resume"));
-  assert.equal(result.childGoalId, "child-goal-id"); assert.equal(result.childActivationId, "resumed");
-  await assert.rejects(service.pause(entry.id, "child-goal-id", "first"), /activation/);
+  assert.equal(result.childGoalId, entry.id); assert.equal(result.childActivationId, "resumed");
+  await assert.rejects(service.pause(entry.id, entry.id, "first"), /activation/);
   service.dispose(); assert.throws(() => service.snapshot(), /Stale/);
+});
+
+test('legacy paused execution keeps its original engine/progress IDs and counters on Resume',async()=>{
+ const entry={id:'11111111-1111-4111-8111-111111111111',revision:4,status:'paused',child:null,text:'Legacy retained Goal',tokenBudget:null,tokensUsed:17,automaticTurns:3,noProgressTurns:2,summary:null,waiting:null,tasks:[]};
+ const entries=[{type:'custom',customType:'delegated-goal-child-binding-v1',data:{goalId:entry.id,progressId:'legacy-lineage'}}];
+ const runtime={activeGoal:{id:'legacy-engine',progressId:'legacy-lineage',activationId:'old-activation',status:'paused',text:entry.text,tokensUsed:17,automaticModelTurns:3,toolFreeRepeatCount:2,tasks:[]},settings:{continuationLimits:{automaticTurns:null,noProgressTurns:null}},get continuationLimits(){return this.settings.continuationLimits},persistGoal(){},snapshotSettingsApplicationState:()=>({})};
+ const ctx={isIdle:()=>true,hasPendingMessages:()=>false,ui:{},sessionManager:{getSessionId:()=> 'legacy-child',getBranch:()=>entries}};
+ const pi={appendEntry(customType,data){entries.push({type:'custom',customType,data});}};
+ const commands={async resumeGoal(){runtime.activeGoal={...runtime.activeGoal,status:'active',activationId:'new-activation'};}};
+ const service=createDelegatedChildGoalService(pi,ctx,runtime,commands);
+ const result=await service.resume(entry.id,'legacy-engine',entry,'old-activation');assert.equal(result.childGoalId,'legacy-engine');assert.equal(runtime.activeGoal.progressId,'legacy-lineage');assert.equal(result.goal.tokensUsed,17);assert.equal(result.goal.automaticTurns,3);assert.equal(result.goal.noProgressTurns,2);
 });
 
 test("terminal projection requires persisted parent lineage and exact successful engine completion, not latest history or text", async () => {
@@ -126,7 +138,7 @@ test("verified completion before bootstrap/resume dispatch returns preserves acc
   const started = fixture(true);
   const completedStart = await started.service.bootstrap(entry);
   assert.equal(started.runtime.activeGoal, undefined);
-  assert.equal(completedStart.childGoalId, "fast-start"); assert.equal(completedStart.goal.status, "complete");
+  assert.equal(completedStart.childGoalId, entry.id); assert.equal(completedStart.goal.status, "complete");
   const entriesBeforeReplay = started.entries.length;
   await assert.rejects(started.service.bootstrap(entry), /already bound.*Resume/);
   assert.equal(started.dispatches, 1, "bootstrap replay cannot dispatch any new prompt");
@@ -135,8 +147,8 @@ test("verified completion before bootstrap/resume dispatch returns preserves acc
   assert.deepEqual(started.service.snapshot(), completedStart, "verified completion remains unchanged after replay");
   const resumed = fixture(false);
   await resumed.service.bootstrap(entry);
-  await resumed.service.pause(entry.id, "fast-start", "fast-first");
-  const completedResume = await resumed.service.resume(entry.id, "fast-start", entry, "fast-first");
+  await resumed.service.pause(entry.id, entry.id, "fast-first");
+  const completedResume = await resumed.service.resume(entry.id, entry.id, entry, "fast-first");
   assert.equal(resumed.runtime.activeGoal, undefined);
-  assert.equal(completedResume.childGoalId, "fast-start"); assert.equal(completedResume.childActivationId, "fast-resumed-contract"); assert.equal(completedResume.goal.status, "complete");
+  assert.equal(completedResume.childGoalId, entry.id); assert.equal(completedResume.childActivationId, "fast-resumed-contract"); assert.equal(completedResume.goal.status, "complete");
 });

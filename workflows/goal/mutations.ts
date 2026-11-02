@@ -4,7 +4,7 @@ import type { ExtensionAPI, ExtensionContext } from "@earendil-works/pi-coding-a
 import { GOAL_MUTATION_EVENT, readGoalTasks, type GoalMutationRequest, type ProgressMutationResult } from "../../shared/goal-progress.ts";
 import { cloneProgressSteps, validateProgressArguments, validateProgressMutation, type ProgressStep } from "../../progress/progress-state.js";
 import { currentTokenTotal } from "./accounting.js";
-import { createGoal, transitionGoal, type GoalRuntime } from "./runtime.js";
+import { createGoal, type GoalRuntime } from "./runtime.js";
 import type { ActiveGoal } from "./persistence.js";
 
 export function mergeGoalTasks(previous: readonly ProgressStep[], updates: readonly ProgressStep[], removals: readonly string[] = []): ProgressStep[] {
@@ -59,12 +59,11 @@ export function bindGoalMutations(pi: ExtensionAPI, ctx: ExtensionContext, runti
       if (options.child) throw new Error("Dedicated child goals are owned by their authenticated parent; creation is forbidden");
       if (runtime.agentRunOrigin === "automatic") throw new Error("An automatic continuation cannot create a replacement goal");
       if (previous || runtime.legacyQueueState) throw new Error("A goal already exists; explicitly clear it before creating another");
-      next = createGoal(mutation.objective, budget, currentTokenTotal(ctx));
+      next = createGoal(mutation.objective, budget, currentTokenTotal(ctx), mutation.start === false ? "paused" : "active");
       next.tasks = mergeGoalTasks([], mutation.steps);
       // Retain configured finite limits on the goal. Null keeps the existing
       // configured-default inheritance semantics.
       next.continuationLimits = { ...runtime.settings.continuationLimits };
-      if (mutation.start === false) next = transitionGoal(next, "paused");
       if (next.status === "active") {
         if (!ctx.model) throw new Error("Select a model before enabling Goal");
         if (ctx.hasPendingMessages()) throw new Error("Resolve pending messages before starting a new goal");

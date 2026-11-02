@@ -9,6 +9,7 @@ import { reapOwnedWorktrees } from "../shared/worktree-reap.ts";
 import { currentSubagentPermissionAuthority } from "../shared/subagent-permission.ts";
 import { TuiWorkerStore } from "./tui-worker-store.ts";
 import guidanceWorker from "./guidance-worker.ts";
+import { managedGoalBinding, MANAGED_GOAL_ACCEPTANCE } from "./managed-goal.ts";
 import { TuiWorkerServer } from "./tui-worker-server.ts";
 import { callTuiWorker } from "./tui-worker-client.ts";
 import { TaskNameStore } from "./task-name-store.ts";
@@ -18,9 +19,15 @@ import { ModelInactivityWatch } from "./model-inactivity.ts";
 import type { LocalJobController } from "../shared/background-job.ts";
 
 /** Explicit -e entry point, loaded inside the one interactive child Pi process. */
-export default function tuiWorkerExtension(pi: ExtensionAPI): void {
+export default async function tuiWorkerExtension(pi: ExtensionAPI): Promise<void> {
   const manifestPath = process.env[TUI_WORKER_MANIFEST_ENV];
   if (!manifestPath) return;
+  const launchManifest = process.env.PI_DEDICATED_GOAL_CHILD === "1" ? new TuiWorkerStore(dirname(manifestPath)).readManifest() : undefined;
+  if (launchManifest?.assignedGoal) {
+    if (launchManifest.childId !== process.env.PI_SUBAGENT_ID || process.env.PI_DEDICATED_GOAL_CHILD !== "1") throw new Error("Managed Goal launch identity changed");
+    process.env.PI_DEDICATED_GOAL_BINDING = JSON.stringify(managedGoalBinding(launchManifest));
+    await (await import("./goal-worker.ts")).default(pi as any);
+  }
   guidanceWorker(pi);
   // Unattended TUI workers must not wait at a trust dialog before their control
   // socket exists. Keep saved/global policy; decline only the unresolved ask,
@@ -67,6 +74,10 @@ export default function tuiWorkerExtension(pi: ExtensionAPI): void {
     pi.events.emit("subagent-name-changed", { taskId: record.taskId, childId: record.childId, attempt: record.attempt, runtimeId: record.runtimeId, workerEpoch: record.workerEpoch, revision: record.revision, displayName: record.displayName });
     return record;
   };
+  let pendingGoalCompletion = false;
+  pi.on("tool_result", (event) => {
+    if (launchManifest?.assignedGoal && event.toolName === "goal_complete" && !event.isError) pendingGoalCompletion = true;
+  });
   let lastAssistant: unknown;
   let liveAssistantText = "";
   let ownerWatch: ReturnType<typeof setInterval> | undefined;
@@ -206,6 +217,7 @@ export default function tuiWorkerExtension(pi: ExtensionAPI): void {
       }
       worker = new TuiWorkerServer(store, {
         isIdle: () => context?.isIdle() === true && context?.hasPendingMessages() !== true,
+        goalState: () => { const snapshot = (globalThis as any).__paeDelegatedChildGoalV1?.snapshot(); return { entryId: snapshot?.entryId ?? null, status: snapshot?.goal?.status ?? null }; },
         canRun: () => allowed(),
         permissionMode: () => {
           try { return (globalThis as any).__PAE_PERMISSION_GATE_OPERATOR_V1__?.status(ctx.sessionManager.getSessionId()).enabled; }
@@ -478,13 +490,26 @@ export default function tuiWorkerExtension(pi: ExtensionAPI): void {
         customType: "harness-auto-continuation", content: message, display: true }] };
     } catch (error) { fail(ctx, error); }
   });
-  pi.on("agent_settled", (_event, ctx) => {
+  pi.on("agent_settled", async (_event, ctx) => {
     modelInactivity.end();
     if (!worker || failed || worker.sealed) return;
     try { worker.settled({ sessionFile: ctx.sessionManager.getSessionFile(), leafId: ctx.sessionManager.getLeafId(), assistant: lastAssistant ?? null,
       ...(!allowed() ? { error: "Worker command authority unavailable at settlement" } : {}),
       contextTokens: ctx.getContextUsage()?.tokens, contextWindow: ctx.model?.contextWindow, timestamp: new Date().toISOString() }); }
     catch (error) { fail(ctx, error); }
+    if (pendingGoalCompletion && worker && !worker.sealed && !failed) {
+      pendingGoalCompletion = false;
+      try {
+      const proof = (globalThis as any).__paeDelegatedChildGoalV1?.snapshot();
+      if (proof?.entryId !== launchManifest?.assignedGoal?.entryId || proof?.goal?.status !== "complete"
+        || !proof.goal.tasks?.every((task: any) => task.status === "completed")
+        || worker.manifest.acceptance?.length !== 1 || worker.manifest.acceptance[0] !== MANAGED_GOAL_ACCEPTANCE) throw new Error("Managed Goal completion proof unavailable");
+      const summary = boundedSuffix(String(proof.goal.summary ?? ""), 850);
+      await worker.outcome({ version: 1, state: "delivered", summary: summary || "Verified assigned Goal completion",
+        acceptance: [{ criterion: MANAGED_GOAL_ACCEPTANCE, status: "passed", evidence: boundedSuffix(`Accepted goal_complete receipt for ${proof.childGoalId}: ${summary}`, 1000) }],
+        artifacts: [{ path: worker.manifest.sessionFile }], remaining: [] });
+      } catch (error) { fail(ctx, error); }
+    }
   });
   // Ordinary local tools: no parent RPC connection is required to retain these.
   pi.registerTool({ name: "notify_parent", label: "Notify parent", description: "Report a finding or blocker to the parent. Continue working unless you need its answer.",
@@ -511,6 +536,7 @@ export default function tuiWorkerExtension(pi: ExtensionAPI): void {
       required: ["version", "state", "summary", "acceptance", "artifacts", "remaining"], additionalProperties: false } as any,
     async execute(_id, params: any, signal?: AbortSignal) {
       if (!worker || worker.sealed) throw new Error("Worker outcome unavailable");
+      if (worker.manifest.assignedGoal && params.state === "delivered" && (globalThis as any).__paeDelegatedChildGoalV1?.snapshot()?.goal?.status !== "complete") throw new Error("Assigned Goal delivery requires its verified goal_complete receipt");
       const outcome = validateTaskOutcome(params, worker.manifest.acceptance ?? []);
       await worker.outcome(outcome, signal);
       const verification = outcome.state === "delivered" && worker.manifest.verification?.length ? worker.getVerificationSummary() : undefined;

@@ -13,6 +13,7 @@ export type SafetyPauseCause = "continuation_limit" | "no_progress";
 const LEGACY_IMPLICIT_TOKEN_BUDGET = 250_000;
 
 export type ActiveGoal = GoalRecord & {
+  status: GoalStatus;
   /** Per-goal user policy, retained across reload/Resume without resetting counters. */
   continuationLimits?: Partial<GoalContinuationLimits>;
   waiting?: GoalWait;

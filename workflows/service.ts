@@ -1195,7 +1195,7 @@ export function createWorkflowService(
 			const entries = delegated.snapshot().entries;
 			if (params.action === "list") {
 				const offset = params.offset ?? 0;
-				return { scope: "saved", goals: entries.slice(offset, offset + 50).map(entry => savedGoalView(entry, false)),
+				return { scope: "saved", registry_revision: delegated.snapshot().revision, goals: entries.slice(offset, offset + 50).map(entry => savedGoalView(entry, false)),
 					next_offset: offset + 50 < entries.length ? offset + 50 : null };
 			}
 			const entry = entries.find(entry => entry.id === params.goal_id);
@@ -1204,14 +1204,15 @@ export function createWorkflowService(
 		}
 		if (runtime.agentRunOrigin === "automatic") throw new Error("Saved-Goal controls require a new user instruction, not automatic continuation");
 		if (operation || toolMutation || externalBusy()) throw new Error("Finish pending workflow/permission operations before saved-Goal mutations");
-		const entry = delegated.snapshot().entries.find(entry => entry.id === params.goal_id);
-		if (!entry) throw new Error("Saved Goal not found in this owner session");
-		const cwd = ctx.cwd, limits = JSON.stringify(resolveGoalLimits(entry.continuationLimits, runtime.settings.continuationLimits));
+		const create = params.action === "create";
+		const entry = create ? undefined : delegated.snapshot().entries.find(entry => entry.id === params.goal_id);
+		if (!create && !entry) throw new Error("Saved Goal not found in this owner session");
+		const cwd = ctx.cwd, limits = JSON.stringify(resolveGoalLimits(entry?.continuationLimits, runtime.settings.continuationLimits));
 		const launch = params.action === "start" || params.action === "resume";
 		const fence = { check() {
 			signal?.throwIfAborted();
 			if (caller.sessionManager.getSessionId() !== sessionId || ctx.cwd !== cwd ||
-				(launch && limits !== JSON.stringify(resolveGoalLimits(entry.continuationLimits, runtime.settings.continuationLimits))))
+				(launch && limits !== JSON.stringify(resolveGoalLimits(entry?.continuationLimits, runtime.settings.continuationLimits))))
 				throw new Error("Saved-Goal launch context or limits changed");
 		} };
 		toolMutation = fence;
@@ -1221,12 +1222,16 @@ export function createWorkflowService(
 			// Fresh authorization was supplied through the registered model tool,
 			// not a fabricated UI-dialog response. All registry/executor fences,
 			// durable intent, exact child identity and stop proofs are shared.
-			await delegated.mutate(sessionId, { action: `goals.${params.action}` as any, requestId: params.request_id!,
-				expectedGoalId: params.goal_id!, expectedEntryRevision: params.expected_revision!,
+			const result = await delegated.mutate(sessionId, { action: `goals.${params.action}` as any, requestId: params.request_id!,
+				...(create ? { expectedGoalId: null, objective: params.objective!, initialTasks: (params.steps ?? []).map(step => step.text),
+					...(params.token_budget === undefined ? {} : { tokenBudget: params.token_budget }),
+					...(params.expected_registry_revision === undefined ? {} : { expectedRegistryRevision: params.expected_registry_revision }) }
+					: { expectedGoalId: params.goal_id!, expectedEntryRevision: params.expected_revision! }),
 				...(params.action === "complete" ? { user_authorized: true, summary: params.summary,
 					...(params.task_evidence === undefined ? {} : { taskEvidence: params.task_evidence.map(item => ({ taskId: item.task_id, evidence: item.evidence })) }) } : {}) });
 			current();
-			return { scope: "saved", goal: savedGoalView(delegated.snapshot().entries.find(entry => entry.id === params.goal_id)!) };
+			const id = create ? result.entries.at(-1)!.id : params.goal_id!;
+			return { scope: "saved", registry_revision: result.revision, goal: savedGoalView(delegated.snapshot().entries.find(entry => entry.id === id)!) };
 		} finally { if (toolMutation === fence) toolMutation = undefined; }
 	}
 	return {

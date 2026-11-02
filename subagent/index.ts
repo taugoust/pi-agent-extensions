@@ -109,17 +109,16 @@ const INTERNAL_OWNER_SESSION_ID = Symbol("subagent-internal-owner-session-id");
 import { validateVerification, type VerificationGate } from "./acceptance.ts";
 import { randomBytes, randomUUID } from "node:crypto";
 import { createDelegatedGoalExecutor, resumeRestoredGoal, type GoalChildHandle, type ChildGoalSnapshot } from "./goal-executor.ts";
-import { requestGoalWorker, type GoalWorkerIdentity } from "./goal-rpc.ts";
-import { dedicatedGoalTools, guardedGoalBaseTools } from "./goal-tools.ts";
+import { dedicatedGoalTools } from "./goal-tools.ts";
 import { guardedPiInvocation, trustedNixStoreFile } from "./pi-invocation.ts";
-import { DelegatedGoalNoEffectError } from "../shared/delegated-goal-errors.ts";
 import { setDedicatedGoalEnvironment } from "./goal-environment.ts";
-import { dedicatedGoalPolicy, type DedicatedGoalPolicy } from "./goal-policy.ts";
+import { dedicatedGoalPolicy, sameGoalLimits } from "./goal-policy.ts";
+import { MANAGED_GOAL_ACCEPTANCE } from "./managed-goal.ts";
+import type { DelegatedGoalEntry, DelegatedGoalChild } from "../workflows/delegated-goals.ts";
 
 type Mode = "single" | "parallel" | "chain";
 
 type SubagentSpec = {
-  goalExecution?: { spawnAttempted?: true; completion?: ChildGoalSnapshot; goalTools: string[]; binding: { path: string; token: string; entryId: string; policy: DedicatedGoalPolicy; identity: GoalWorkerIdentity; questionnaireEnabled?: boolean; reviewEnabled?: boolean }; ready(rpc: NativeSubagentRpcSession): Promise<void> };
   task: string;
   acceptance?: string[];
   verification?: VerificationGate[];
@@ -673,7 +672,6 @@ async function runSingleSubagent(
 ): Promise<SingleResult> {
   const { childId: subagentId, label } = identity;
   const args: string[] = ["--mode", "rpc"];
-  if (spec.goalExecution) args.push("--no-extensions", "--extension", nativeHelperEntrypoint("goal-worker", Boolean(permissionAuthority)));
   const jobAvailable = Boolean(parentJobBroker(ownerSessionId));
   const jobEnabled = jobAvailable && (!spec.tools || spec.tools.includes("background_job"));
   const effectiveTools = spec.tools ?? [...SUBAGENT_PERMISSION_NATIVE_TOOLS, ...(jobEnabled ? ["background_job"] : [])];
@@ -687,7 +685,7 @@ async function runSingleSubagent(
   args.push("--extension", nativeHelperEntrypoint("outcome-proxy", Boolean(permissionAuthority)));
   args.push("--extension", nativeHelperEntrypoint("notify-proxy", Boolean(permissionAuthority)));
   args.push("--extension", nativeHelperEntrypoint("guidance-worker", Boolean(permissionAuthority)));
-  const permissionTools = permissionAuthority ? guardedNativeTools(guardedGoalBaseTools(spec.tools, spec.goalExecution?.goalTools)) : undefined;
+  const permissionTools = permissionAuthority ? guardedNativeTools(spec.tools) : undefined;
   if (permissionAuthority) {
     const permissionProxyEntrypoint = installedPermissionProxyEntrypoint();
     await permissionAuthority.waitUntilActive(signal);
@@ -700,9 +698,9 @@ async function runSingleSubagent(
   if (permissionTools) {
     // A distinct name prevents a missing/broken proxy from falling back to the
     // built-in Bash implementation under Pi's hard CLI tool allowlist.
-    args.push("--tools", [...permissionTools.map((tool) => tool === "bash" ? SUBAGENT_PERMISSION_BASH_TOOL : tool), ...(jobEnabled ? ["background_job"] : []), "task_outcome", "notify_parent", "request_guidance", ...(spec.goalExecution?.goalTools ?? [])].join(","));
+    args.push("--tools", [...permissionTools.map((tool) => tool === "bash" ? SUBAGENT_PERMISSION_BASH_TOOL : tool), ...(jobEnabled ? ["background_job"] : []), "task_outcome", "notify_parent", "request_guidance"].join(","));
   } else {
-    args.push("--tools", [...effectiveTools, "task_outcome", "notify_parent", "request_guidance", ...(spec.goalExecution?.goalTools ?? [])].join(","));
+    args.push("--tools", [...effectiveTools, "task_outcome", "notify_parent", "request_guidance"].join(","));
   }
 
   let tmpPromptDir: string | null = null;
@@ -815,14 +813,9 @@ async function runSingleSubagent(
       PI_SUBAGENT_OUTCOME_PATH: outcomePath,
     };
     Object.assign(env, runtime.routingEnvironment, guidanceLaunchEnvironment({ ownerSessionId, taskId: taskRecord.taskId,
-      childId: subagentId, attempt: taskRecord.attempt, workerEpoch: spec.goalExecution?.binding.identity.workerEpoch ?? randomBytes(16).toString("hex"),
-      ...(spec.goalExecution ? { goalId: spec.goalExecution.binding.entryId } : {}) }));
-    if (spec.goalExecution) {
-      if (spec.goalExecution.binding.identity.taskId !== taskRecord.taskId || spec.goalExecution.binding.identity.attempt !== taskRecord.attempt)
-        throw new Error("Dedicated goal task attempt changed before spawn");
-    }
-    setDedicatedGoalEnvironment(env, spec.goalExecution?.binding);
-    if (runtime.routingEnvironment.PI_SESSION_ROUTING_FILE && (permissionAuthority || spec.goalExecution)) {
+      childId: subagentId, attempt: taskRecord.attempt, workerEpoch: randomBytes(16).toString("hex") }));
+    setDedicatedGoalEnvironment(env, undefined);
+    if (runtime.routingEnvironment.PI_SESSION_ROUTING_FILE && permissionAuthority) {
       // Restricted/dedicated launches skip normal discovery. Explicitly load
       // owning-account enforcement; guarded launches still require immutable code.
       const accountsEntrypoint = nativeHelperEntrypoint("../openai-accounts/accounts", Boolean(permissionAuthority));
@@ -837,8 +830,6 @@ async function runSingleSubagent(
     currentResult.args = invocation.args;
     currentResult.warning = invocation.warning;
     if (invocation.warning) currentResult.stderr += `Warning: ${invocation.warning}\n`;
-    // Mark before attempting spawn. Any failure from here remains conservatively ambiguous.
-    if (spec.goalExecution) spec.goalExecution.spawnAttempted = true;
     const nativeProcess = spawnNativeSubagentProcess(invocation.command, invocation.args, {
       cwd: launchCwd,
       env,
@@ -994,9 +985,7 @@ async function runSingleSubagent(
         rpcSession.terminate(permissionRelayFailure);
       }
     }
-    const exited = spec.goalExecution
-      ? await rpcSession.startWorkflow(() => spec.goalExecution!.ready(rpcSession!))
-      : await rpcSession.start(initialPrompt, spec.compactBeforePrompt === true, spec.resumeTask?.requiresCompaction === true);
+    const exited = await rpcSession.start(initialPrompt, spec.compactBeforePrompt === true, spec.resumeTask?.requiresCompaction === true);
     currentResult.rpcDiagnostics = rpcSession.diagnostics;
     executionSettled = true;
     signal?.removeEventListener("abort", abortHandler);
@@ -1054,17 +1043,8 @@ async function runSingleSubagent(
     currentResult.stderr += `${message}\n`;
     return currentResult;
   } finally {
-    try { currentResult.taskOutcome = !spec.goalExecution && outcomePath ? readTaskOutcome(outcomePath, acceptance) : undefined; }
+    try { currentResult.taskOutcome = outcomePath ? readTaskOutcome(outcomePath, acceptance) : undefined; }
     catch (error) { currentResult.task_outcome = outcomeSummary(identity.child, subagentId, undefined, `Invalid outcome report: ${String(error).slice(0,512)}`); }
-    const completed = spec.goalExecution?.completion;
-    if (completed?.status === "complete" && completed.goalId && completed.summary?.trim()) {
-      currentResult.exitCode = 0;
-      currentResult.stopReason = "completed";
-      currentResult.errorMessage = undefined;
-      currentResult.taskOutcome = { version: 1, state: "delivered", summary: completed.summary.slice(0, 2000),
-        acceptance: acceptance.map(criterion => ({ criterion, status: "passed", evidence: `Owned child goal ${completed.goalId} completed in task ${taskRecord?.taskId}, child ${subagentId}, attempt ${taskRecord?.attempt}.` })),
-        artifacts: [], remaining: [] };
-    }
     currentResult.task_outcome ??= outcomeSummary(identity.child, subagentId, currentResult.taskOutcome);
     currentResult.task_outcome = {...currentResult.task_outcome,task_id:currentResult.task_id,attempt:currentResult.attempt};
     if (taskStore && taskRecord) {
@@ -1770,7 +1750,6 @@ export default function (pi: ExtensionAPI) {
   });
   quietState.setGuidanceSource(ctx=>guidanceNotifications.pending(ctx)?.map(guidanceUpdate));
   pi.on('session_start',async(_event,ctx)=>{quietState.reconcile(ctx);});
-  const dedicatedGoalRuns = new Set<{ stop(): Promise<void> }>();
   const delegatedGoalGlobal = globalThis as typeof globalThis & { __paeDelegatedGoalExecutorV1?: ReturnType<typeof createDelegatedGoalExecutor> };
   const agentSHStartup = classifyAgentSHStartup(process.env);
   const bridgeDisposition = (bridge: AgentSHBridge | undefined) =>
@@ -1986,7 +1965,6 @@ export default function (pi: ExtensionAPI) {
   pi.on("session_start", async (_event, ctx) => {
     lifecycleClosing = true;
     delete delegatedGoalGlobal.__paeDelegatedGoalExecutorV1;
-    await Promise.all([...dedicatedGoalRuns].map(run => run.stop()));
     sessionGeneration += 1;
     const generation = sessionGeneration;
     lifecycleClosing = false;
@@ -1998,11 +1976,37 @@ export default function (pi: ExtensionAPI) {
       activeSessionId = sessionId;
       if (process.env.PI_DEDICATED_GOAL_CHILD !== "1") {
         const runtimeId = randomUUID();
+        const managedHandle = (entry: Readonly<DelegatedGoalEntry>, child: DelegatedGoalChild): GoalChildHandle => {
+          const manager = nativeTui(ctx);
+          if (!manager) throw new Error("Ordinary subagent manager unavailable");
+          const details = manager.goalDetails(sessionId, child, entry.id);
+          const request = (operation: string, fields: Record<string, unknown> = {}) => {
+            if (generation !== sessionGeneration || lifecycleClosing || activeSessionId !== sessionId) throw new Error("Goal parent context changed");
+            return manager.goalRequest(sessionId, child, entry.id, { operation, ...fields });
+          };
+          const settle = async (expectedGoalId: string, expectedActivationId?: string) => {
+            await manager.stopGoal(sessionId, child, entry.id);
+            return request("settle", { expectedGoalId, expectedActivationId });
+          };
+          return { managed: true, identity: manager.goalIdentity(sessionId, child, entry.id), model: details.spec.model!,
+            start: value => request("start", { entry: value }),
+            resume: async (expectedGoalId, expectedActivationId) => {
+              const before = await request("observe");
+              if (!sameGoalLimits(entry.continuationLimits as any, before.limits)) await request("limits", { entry, expectedGoalId, expectedActivationId, expectedPolicyRevision: before.policyRevision });
+              return resumeRestoredGoal(() => request("observe"), () => request("resume", { entry, expectedGoalId, expectedActivationId }));
+            },
+            pause: async (expectedGoalId, expectedActivationId) => { await request("pause", { expectedGoalId, expectedActivationId }); return settle(expectedGoalId!, expectedActivationId); },
+            settle, observe: () => request("observe"),
+            answer: (reply, requestId) => request("answer", { reply, requestId }),
+            updateLimits: (entry, expectedGoalId, expectedPolicyRevision, expectedActivationId) => request("limits", { entry, expectedGoalId, expectedPolicyRevision, expectedActivationId }),
+            stop: () => manager.stopGoal(sessionId, child, entry.id) };
+        };
         delegatedGoalGlobal.__paeDelegatedGoalExecutorV1 = createDelegatedGoalExecutor({ sessionId, runtimeId,
           executionUnavailableReason() {
             try {
               if (generation !== sessionGeneration || lifecycleClosing || activeSessionId !== sessionId) throw new Error("Dedicated goal parent runtime changed");
               dedicatedGoalTools(pi.getActiveTools());
+              if (process.platform !== "linux" || !pi.getActiveTools().includes("subagent")) throw new Error("Saved Goal execution requires the ordinary native subagent capability");
               const disposition = nativeDisposition();
               const authority = currentSubagentPermissionAuthority();
               if (!["native", "guard-only"].includes(disposition) || (disposition === "guard-only" && !authority))
@@ -2019,26 +2023,33 @@ export default function (pi: ExtensionAPI) {
               return null;
             } catch (error) { return error instanceof Error ? error.message : "Dedicated goal execution is unavailable"; }
           },
+          async recover(entry) {
+            if (!entry.child || !nativeTui(ctx)?.ownsGoalGroup(sessionId, entry.child) || !await nativeTui(ctx)!.goalIsLive(sessionId, entry.child, entry.id)) return null;
+            return managedHandle(entry, entry.child);
+          },
           async verifyStopped(entry) {
             if (generation !== sessionGeneration || lifecycleClosing || activeSessionId !== sessionId) throw new Error("Dedicated goal parent runtime changed");
             const child = entry.child;
             if (!child) return;
+            if (nativeTui(ctx)?.ownsGoalGroup(sessionId, child)) { await nativeTui(ctx)!.verifyGoalStopped(sessionId, child, entry.id); return; }
             const store = new NativeTaskStore(path.join(getAgentDir(), "state", "native-tasks-v1"));
             await store.verifyStopped(sessionId, child.taskId, child.childId, child.attempt);
           },
           async reviewRoot(entry) {
             if (!entry.child || !pi.getActiveTools().includes("read")) throw new Error("Goal review read access unavailable");
             const store = new NativeTaskStore(path.join(getAgentDir(), "state", "native-tasks-v1"));
-            const record = store.get(sessionId, entry.child.taskId);
+            const record = nativeTui(ctx)?.ownsGoalGroup(sessionId, entry.child) ? nativeTui(ctx)!.goalDetails(sessionId, entry.child, entry.id) : store.get(sessionId, entry.child.taskId);
             const { goalReviewRoot } = await import("../workflows/goal-review.ts");
             return goalReviewRoot(sessionId, entry, record, pi.getActiveTools().includes("read"));
           },
           async retainedCompletion(entry) {
             if (!entry.child) return null;
             const store = new NativeTaskStore(path.join(getAgentDir(), "state", "native-tasks-v1"));
-            await store.verifyStopped(sessionId, entry.child.taskId, entry.child.childId, entry.child.attempt);
-            const record = store.get(sessionId, entry.child.taskId);
-            const manager = SessionManager.open(store.sessionPath(entry.child.taskId));
+            const ordinary = nativeTui(ctx)?.ownsGoalGroup(sessionId, entry.child);
+            if (ordinary) await nativeTui(ctx)!.verifyGoalStopped(sessionId, entry.child, entry.id);
+            else await store.verifyStopped(sessionId, entry.child.taskId, entry.child.childId, entry.child.attempt);
+            const record = ordinary ? nativeTui(ctx)!.goalDetails(sessionId, entry.child, entry.id) : store.get(sessionId, entry.child.taskId);
+            const manager = SessionManager.open(ordinary ? (record as any).sessionFile : store.sessionPath(entry.child.taskId));
             if (manager.getSessionId() !== record.sessionId) throw new Error("Retained child session identity changed");
             const branch = manager.getBranch() as any[];
             const binding = branch.findLast(e => e.type === "custom" && e.customType === "delegated-goal-child-binding-v1");
@@ -2053,8 +2064,8 @@ export default function (pi: ExtensionAPI) {
             const story = readRecordedGoalStory(branch, entry.id);
             const {readRecordedGoalReview}=await import("../workflows/goal-review-worker.ts");
             const review=readRecordedGoalReview(branch,entry.id);
-            const last = record.history.at(-1);
-            if (last?.attempt !== record.attempt || last?.outcome !== "delivered")
+            const last = ordinary ? undefined : (record as any).history.at(-1);
+            if (!ordinary && (last?.attempt !== record.attempt || last?.outcome !== "delivered"))
               await store.finish(sessionId, record.taskId, record.childId, { outcome: "delivered", execution: "completed", summary: completed.summary });
             return { goalId: goal.id, status: "complete", executionStopped: true, waiting: null,
               tasks: readGoalTasks({ sessionManager: manager }, goal), tokensUsed: goal.tokensUsed, automaticTurns: goal.automaticModelTurns,
@@ -2069,13 +2080,16 @@ export default function (pi: ExtensionAPI) {
               throw new Error("Dedicated native goal execution is unavailable under current permission policy");
             const allowed = pi.getActiveTools();
             const goalTools = dedicatedGoalTools(allowed);
-            let tools = SUBAGENT_PERMISSION_NATIVE_TOOLS.filter(tool => allowed.includes(tool)
-              || (tool === "bash" && allowed.includes(SUBAGENT_PERMISSION_BASH_TOOL)));
+            // Use ordinary inherited task capabilities, not the old filesystem-only
+            // Goal worker subset that prevented coordinators from delegating.
+            let tools = allowed.filter(tool => !["goal_manage", "goal_complete", "goal_blocked", "goal_wait", "update_progress", "questionnaire", "goal_reference"].includes(tool));
             const taskStore = new NativeTaskStore(path.join(getAgentDir(), "state", "native-tasks-v1"));
-            const childId = createSubagentChildId();
-            const taskId = previous?.taskId ?? createTaskId();
-            const retained = previous ? taskStore.get(sessionId, taskId) : undefined;
-            if (previous && (retained!.attempt !== previous.attempt || retained!.childId !== previous.childId)) throw new Error("Dedicated goal retained attempt changed");
+            const manager = nativeTui(ctx);
+            if (!manager || !allowed.includes("subagent")) throw new Error("Ordinary subagent delegation unavailable");
+            const managed = previous && manager.ownsGoalGroup(sessionId, previous);
+            const retained = previous ? managed ? manager.goalDetails(sessionId, previous, entry.id) : taskStore.get(sessionId, previous.taskId) : undefined;
+            if (previous && (retained!.attempt !== previous.attempt || retained!.childId !== previous.childId)) throw new Error("Goal retained attempt changed");
+            if (previous && !managed) await taskStore.verifyStopped(sessionId, previous.taskId, previous.childId, previous.attempt);
             const role = await resolveCoordinatorRole(retained?.spec, input => resolveSubagentProfiles(input, ctx));
             if (retained) tools = tools.filter(tool => retained.spec.tools?.includes(tool));
             else if (role?.tools) tools = tools.filter(tool => role.tools.includes(tool));
@@ -2094,78 +2108,16 @@ export default function (pi: ExtensionAPI) {
             // Fail model resolution before changing the retained attempt.
             const selectedModel = resolveSubagentModel(role?.model, subagentModelSettings, ctx, readInheritedSessionRoutingProfile(ctx));
             const coordinatorPrompt = role?.systemPrompt;
-            const resumeTask = previous ? await taskStore.beginResume(sessionId, taskId, childId) : undefined;
-            const identity: GoalWorkerIdentity = { sessionId, runtimeId, taskId, childId,
-              jobId: `subagent-job-${randomBytes(12).toString("hex")}`, attempt: resumeTask?.attempt ?? 1, workerEpoch: randomBytes(16).toString("hex") };
-            const directory = await fs.promises.mkdtemp(path.join(os.tmpdir(), "pi-goal-"));
-            if (generation !== sessionGeneration || lifecycleClosing || activeSessionId !== sessionId) {
-              if (resumeTask) await taskStore.finish(sessionId, taskId, childId, { execution: "cancelled" });
-              await fs.promises.rm(directory, { recursive: true, force: true });
-              throw new Error("Dedicated goal parent runtime changed before spawn");
-            }
-            await fs.promises.writeFile(path.join(directory, "goal-settings.json"), JSON.stringify({ rpc: { enabled: false }, ...policy }), { mode: 0o600 });
-            const binding = { path: path.join(directory, "worker.sock"), token: randomBytes(32).toString("hex"), entryId: entry.id, policy, identity, questionnaireEnabled: goalTools.includes("questionnaire"), reviewEnabled: goalTools.includes("goal_reference") };
-            const abort = new AbortController();
-            let rpc: NativeSubagentRpcSession | undefined;
-            let resolveReady!: () => void, rejectReady!: (error: Error) => void;
-            const ready = new Promise<void>((resolve, reject) => { resolveReady = resolve; rejectReady = reject; });
-            try {
-              if (generation !== sessionGeneration || lifecycleClosing || activeSessionId !== sessionId) throw new Error("Dedicated goal parent runtime changed before spawn");
-              dedicatedGoalTools(pi.getActiveTools());
-              if (tools.some(tool => !pi.getActiveTools().includes(tool) && !(tool === "bash" && pi.getActiveTools().includes(SUBAGENT_PERMISSION_BASH_TOOL))))
-                throw new Error("Dedicated goal parent tool policy changed before spawn");
-            } catch (error) {
-              if (resumeTask) await taskStore.finish(sessionId, taskId, childId, { execution: "cancelled" });
-              await fs.promises.rm(directory, { recursive: true, force: true });
-              throw error;
-            }
-            const launchIdentity: SubagentChildIdentity = { child: 1, childId, taskId, label: "dedicated goal", task: entry.text };
-            reserveSubagentChildren(sessionId, "native", [launchIdentity]);
-            const goalExecution: NonNullable<SubagentSpec["goalExecution"]> = { goalTools, binding, async ready(session) { rpc = session; resolveReady(); } };
-            let lastObservation: ChildGoalSnapshot | undefined;
-            const run = runSingleSubagent(ctx.cwd, { task: entry.text, acceptance: ["Execute the dedicated goal through the existing goal engine."],
-              model: selectedModel, systemPrompt: coordinatorPrompt, tools, cleanupWorktreesOnReap: role?.cleanupWorktreesOnReap === true, resumeTask, goalExecution },
-              launchIdentity, undefined, abort.signal, undefined,
-              results => ({ mode: "single", results } as SubagentDetails), authority, sessionId,
-              { agentDir: getAgentDir(), routingEnvironment: sessionRoutingEnvironment(ctx) });
-            void run.then(result => rejectReady(new Error(result.errorMessage ?? "Dedicated child exited before readiness")), rejectReady);
-            const stop = async (completion?: ChildGoalSnapshot) => {
-              if (completion?.status === "complete" && lastObservation?.status === "complete" && completion.goalId === lastObservation.goalId)
-                goalExecution.completion = structuredClone(lastObservation);
-              rpc?.terminate(new Error("Dedicated goal execution stopped"));
-              if (!rpc) abort.abort();
-              await run;
-              if (rpc) await rpc.waitForExit();
-              await fs.promises.rm(directory, { recursive: true, force: true });
-              dedicatedGoalRuns.delete(control);
-            };
-            const control = { stop }; dedicatedGoalRuns.add(control);
-            try { await ready; }
-            catch (error) {
-              await stop(); // Failed cleanup cannot certify a safe retry.
-              if (!previous && !goalExecution.spawnAttempted)
-                throw new DelegatedGoalNoEffectError(error instanceof Error ? error.message : String(error));
-              throw error;
-            }
-            const request = async (operation: string, value?: unknown) => {
-              if (generation !== sessionGeneration || lifecycleClosing || activeSessionId !== sessionId) throw new Error("Dedicated goal parent runtime changed");
-              const observed = await requestGoalWorker(binding.path, { token: binding.token, identity,
-                request: { operation, ...(value === undefined ? {} : ["answer", "limits", "pause", "resume", "settle"].includes(operation) ? value as Record<string, unknown> : { entry: value }) } }) as ChildGoalSnapshot;
-              lastObservation = structuredClone(observed);
-              return observed;
-            };
-            const settle = async (expectedGoalId: string, expectedActivationId?: string) => {
-              await rpc!.pauseWorkflowExecution();
-              return await request("settle", { expectedGoalId, expectedActivationId });
-            };
-            const handle: GoalChildHandle = { identity, model: selectedModel, start: value => request("start", value), settle,
-              resume: (expectedGoalId, expectedActivationId) => resumeRestoredGoal(() => request("observe"), () => request("resume", { entry, expectedGoalId, expectedActivationId })), pause: async (expectedGoalId, expectedActivationId) => {
-                await request("pause", { expectedGoalId, expectedActivationId });
-                // Cancel actual pending promises before taking the final receipt.
-                return await settle(expectedGoalId!, expectedActivationId);
-              }, updateLimits: (entry, expectedGoalId, expectedPolicyRevision, expectedActivationId) => request("limits", { entry, expectedGoalId, expectedPolicyRevision, expectedActivationId }),
-              observe: () => request("observe"), answer: (reply, requestId) => request("answer", { reply, requestId }), stop };
-            return handle;
+            if (generation !== sessionGeneration || lifecycleClosing || activeSessionId !== sessionId) throw new Error("Goal parent context changed before launch");
+            dedicatedGoalTools(pi.getActiveTools());
+            const selectedTools = [...new Set([...tools, ...goalTools])];
+            if (selectedTools.some(tool => !allowed.includes(tool) && !(tool === "bash" && allowed.includes(SUBAGENT_PERMISSION_BASH_TOOL)))) throw new Error("Goal tool policy changed before launch");
+            const child = await manager.launchGoal(sessionId, retained?.spec.cwd ?? ctx.cwd, { task: entry.text,
+              acceptance: [MANAGED_GOAL_ACCEPTANCE], model: selectedModel, systemPrompt: coordinatorPrompt,
+              tools: selectedTools, cleanupWorktreesOnReap: role?.cleanupWorktreesOnReap === true },
+              { entryId: entry.id, policy, goalTools, questionnaireEnabled: goalTools.includes("questionnaire"), reviewEnabled: goalTools.includes("goal_reference") },
+              previous, previous && !managed ? taskStore.sessionPath(previous.taskId) : undefined);
+            return managedHandle(entry, child);
           },
         });
       }
@@ -2358,7 +2310,6 @@ export default function (pi: ExtensionAPI) {
   pi.on("session_shutdown", async (event, ctx) => {
     lifecycleClosing = true;
     delete delegatedGoalGlobal.__paeDelegatedGoalExecutorV1;
-    await Promise.all([...dedicatedGoalRuns].map(run => run.stop()));
     const readonlyRegistry = (globalThis as any)[HARNESS_READONLY_KEY] as HarnessReadOnlyRegistry | undefined;
     const readonlySubagents = readonlySubagentsByContext.get(ctx as object);
     if (readonlySubagents && readonlyRegistry?.subagents === readonlySubagents) { delete readonlyRegistry.subagents; if (!readonlyRegistry.jobs) delete (globalThis as any)[HARNESS_READONLY_KEY]; }

@@ -20,6 +20,9 @@ export default function workflows(
 		worktreeSettings?: WorktreeSettingsRuntime;
 	} = {},
 ) {
+	// An assigned Goal installs this same engine once through its trusted worker
+	// bootstrap. Do not also create a second default registry/runtime in it.
+	if (process.env.PI_DEDICATED_GOAL_CHILD === "1" && !options.delegatedChild) return;
 	let service: ReturnType<typeof createWorkflowService> | undefined,
 		childService: ReturnType<typeof createDelegatedChildGoalService> | undefined,
 		commandBusy = false;

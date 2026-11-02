@@ -96,6 +96,7 @@ export async function processIsAlive(pid: number, expectedToken: string): Promis
 
 export type TuiWorkerLaunch = {
   directory: string;
+  assignedGoal?: import("./managed-goal.ts").ManagedGoalAssignment;
   ownerSessionId: string; taskId: string; groupId: string; childId: string; attempt: number;
   cwd: string;
   /** Lexical path selected by trusted worktreeInfo precedence; launcher resolves before spawn. */
@@ -247,7 +248,7 @@ export class TuiWorkerTmux {
     // parent's relay capability or accidentally inherit full supervisor markers.
     const remove = ["AGENTSH_PERMISSION_GATE_SOCKET", "PI_SUBAGENT_PERMISSION_SOCKET", "PI_SUBAGENT_PERMISSION_TOKEN", "PI_SUBAGENT_OUTCOME_PATH",
       "AGENTSH_SESSION_SUPERVISOR", "AGENTSH_CHILD_CAPABILITY", "AGENTSH_APPROVAL_UI_SOCKET",
-      "PI_AGENTSH_ENABLE", "PI_AGENTSH_MOCK_SUPERVISOR", "PI_SUPERVISED", "PI_AUTO", "PI_AGENTSH_REMOTE", "PI_AGENTSH_READ_MODE", "PI_SESSION_ROUTING_FILE", "PI_SESSION_ROUTING_OWNER_SESSION"];
+      "PI_AGENTSH_ENABLE", "PI_AGENTSH_MOCK_SUPERVISOR", "PI_SUPERVISED", "PI_AUTO", "PI_AGENTSH_REMOTE", "PI_AGENTSH_READ_MODE", "PI_SESSION_ROUTING_FILE", "PI_SESSION_ROUTING_OWNER_SESSION", "PI_DEDICATED_GOAL_BINDING"];
     const routing = input.routingEnvironment ?? {};
     if (Object.keys(routing).some(key => !["PI_SESSION_ROUTING_FILE", "PI_SESSION_ROUTING_OWNER_SESSION"].includes(key))) throw new Error("Invalid private routing environment");
     const identityEnv: Record<string, string> = {
@@ -259,6 +260,7 @@ export class TuiWorkerTmux {
       PI_TUI_WORKER_LAUNCH_MODE: input.launchMode,
       PI_TUI_WORKER_LAUNCHER: launcher,
       PI_SUBAGENT_ID: input.childId,
+      PI_DEDICATED_GOAL_CHILD: input.assignedGoal ? "1" : "0",
       PI_SUBAGENT_CANONICAL_NAMES: input.displayName ? "1" : "",
       PI_SUBAGENT_NAME_WINDOW: input.nameWindow === false ? "0" : "1",
       PI_SUBAGENT_NAME: input.displayName ?? paneTitle.replace(/^agt-/, "").replace(/-/g, " ").split(/\s+/).slice(0, 4).join(" "),
@@ -329,10 +331,12 @@ export class TuiWorkerTmux {
       controlSocket, controlToken: randomBytes(32).toString("hex"), sessionFile, placement, panePid, paneProcessToken,
       presentation: input.foreground ? "foreground-staged" : "background", execution: "tmux", launchMode: input.launchMode,
       acceptance: input.acceptance ?? [], verification: input.verification, tools: input.tools,
+      ...(input.assignedGoal ? { assignedGoal: input.assignedGoal } : {}),
       cleanupWorktreesOnReap: input.cleanupWorktreesOnReap === true, activityCwd,
       ...(input.foreground ? { foregroundOwner: { pid: process.pid, token: await processIdentity(process.pid) } } : {}),
       ...(input.operatorCapabilityHash ? { operatorCapabilityHash: input.operatorCapabilityHash } : {}) };
     store.writeManifest(m);
+    if (input.assignedGoal) atomicPrivateJson(store.path("goal-settings.json"), { rpc: { enabled: false }, ...input.assignedGoal.policy });
     if (input.displayName) await new TaskNameStore(input.directory, m).claim(input.displayName);
     await writeFile(gate, "ready\n", { flag: "wx", mode: 0o600 });
     return m;

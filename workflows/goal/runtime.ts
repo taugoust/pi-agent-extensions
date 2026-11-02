@@ -1,7 +1,7 @@
 import { createHash, randomUUID } from "node:crypto";
 import type { ExtensionAPI, ExtensionContext } from "@earendil-works/pi-coding-agent";
 import { checkpointGoalActiveTime, formatDuration, formatTokenCount, updateGoalUsage } from "./accounting.js";
-import { createGoalRecord, goalControlFingerprint, isTerminalGoalStatus as goalStatusIsTerminal, transitionGoalRecord } from "../../shared/goal-model.ts";
+import { createGoalRecord, goalControlFingerprint, isGoalExecutionStopped as goalStatusIsTerminal, transitionGoalRecord } from "../../shared/goal-model.ts";
 import { resolveGoalLimits, validateGoalLimitOverrides, type GoalContinuationLimits } from "../../shared/delegated-goal-policy.ts";
 import { formatError, isStaleContextError, notifyTerminal, safeGoalMenuText, truncateNotification } from "./errors.js";
 import {
@@ -1501,8 +1501,8 @@ export class GoalRuntime {
   }
 }
 
-export function createGoal(text: string, tokenBudget: number | undefined, baselineTokens: number): ActiveGoal {
-  return createGoalRecord({ text, tokenBudget, baselineTokens, now: Date.now() });
+export function createGoal(text: string, tokenBudget: number | undefined, baselineTokens: number, status: "active" | "paused" = "active"): ActiveGoal {
+  return createGoalRecord({ text, tokenBudget, baselineTokens, now: Date.now(), status }) as ActiveGoal;
 }
 
 export function transitionGoal(goal: ActiveGoal, requestedStatus: GoalStatus): ActiveGoal {

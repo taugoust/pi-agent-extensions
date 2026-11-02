@@ -1,7 +1,9 @@
 import { formatTokenCount } from "./accounting.js";
 import { MIN_GOAL_WAIT_DELAY_MS } from "./wait.js";
 
-export type GoalStatus = "active" | "paused" | "blocked" | "usage_limited" | "budget_limited" | "complete";
+import type { GoalStatus as CanonicalGoalStatus } from "../../shared/goal-model.ts";
+/** Cleared records are retained by storage/history, never active session state. */
+export type GoalStatus = Exclude<CanonicalGoalStatus, "cleared">;
 
 export interface GoalPromptContext {
   id: string;

@@ -43,6 +43,35 @@ function discoveryFixture(t, busy = true) {
  return {service,ctx,runtime,root,starts:()=>starts,snapshot:()=>bounded(service.handle({...identity,operation:'snapshot'})),send:r=>bounded(service.handle({...identity,operation:'start',requestId:randomUUID(),...r})),reply:r=>bounded(service.handle({...identity,operation:'send',requestId:randomUUID(),...r}))};
 }
 
+test('direct saved create atomically allocates paused Goal/checklist IDs without a model turn or parent activation',async t=>{
+ const f=discoveryFixture(t,false);const parent={id:'parent-kept',status:'paused'};f.runtime.activeGoal=parent;
+ const before=await f.service.manageSavedGoal({scope:'saved',action:'list'},f.ctx);
+ const p={scope:'saved',action:'create',objective:'Fix ordinary coordinator lifecycle integration',steps:[{text:'Preserve bindings and history',status:'pending'},{text:'Validate ordinary agent lifecycle',status:'pending'}],expected_registry_revision:before.registry_revision,request_id:'create-direct',user_authorized:true};
+ const created=await f.service.manageSavedGoal(p,f.ctx);assert.equal(created.goal.status,'paused');assert.equal(created.goal.child,null);assert.equal(created.goal.tasks.length,2);assert.ok(created.goal.tasks.every(task=>task.status==='pending'&&task.id));assert.notEqual(created.goal.tasks[0].id,created.goal.tasks[1].id);
+ const replay=await f.service.manageSavedGoal(p,f.ctx);assert.deepEqual(replay.goal,created.goal);assert.equal(f.starts(),0);assert.equal(f.runtime.activeGoal,parent);
+ await assert.rejects(f.service.manageSavedGoal({...p,request_id:'stale-create'},f.ctx),/Registry changed/);
+ const active=await f.service.manageSavedGoal({scope:'saved',action:'start',goal_id:created.goal.id,expected_revision:created.goal.revision,request_id:'start-created',user_authorized:true},f.ctx);assert.equal(active.goal.id,created.goal.id);assert.equal(active.goal.status,'active');assert.equal(f.starts(),1);assert.deepEqual(active.goal.tasks,created.goal.tasks);
+});
+
+test('a reloaded saved-create retry cannot duplicate its draft or regenerate checklist IDs',async t=>{
+ const f=discoveryFixture(t,false);const before=await f.service.manageSavedGoal({scope:'saved',action:'list'},f.ctx);
+ const p={scope:'saved',action:'create',objective:'Durable paused draft',steps:[{text:'Keep this ID',status:'pending'}],expected_registry_revision:before.registry_revision,request_id:'create-reload',user_authorized:true};
+ const created=await f.service.manageSavedGoal(p,f.ctx);f.service.dispose();
+ const reloaded=createWorkflowService({},f.ctx,f.runtime,{},{get:()=>({})},()=>false);t.after(()=>reloaded.dispose());
+ await assert.rejects(reloaded.manageSavedGoal(p,f.ctx),/Registry changed/);
+ const list=await reloaded.manageSavedGoal({scope:'saved',action:'list'},f.ctx);assert.equal(list.goals.length,1);assert.equal(list.goals[0].id,created.goal.id);
+ const status=await reloaded.manageSavedGoal({scope:'saved',action:'status',goal_id:created.goal.id},f.ctx);assert.deepEqual(status.goal.tasks,created.goal.tasks);assert.equal(f.starts(),0);
+});
+
+test('saved create rejects activation, task identity/status injection and invalid/duplicate checklists atomically',async t=>{
+ const f=discoveryFixture(t,false);const before=await f.service.manageSavedGoal({scope:'saved',action:'list'},f.ctx);
+ const p={scope:'saved',action:'create',objective:'New paused Goal',expected_registry_revision:before.registry_revision,request_id:'safe-create',user_authorized:true};
+ const bad=[{start:true},{goal_id:'foreign'},{expected_revision:1},{expected_registry_revision:undefined},{activation_id:'foreign'},{user_authorized:false},{steps:[{id:'foreign',text:'Step',status:'pending'}]},{steps:[{text:'Claimed complete',status:'completed'}]},{steps:[{text:'Same',status:'pending'},{text:' Same ',status:'pending'}]}];
+ for(let i=0;i<bad.length;i++)await assert.rejects(f.service.manageSavedGoal({...p,request_id:`invalid-${i}`,...bad[i]},f.ctx));
+ const after=await f.service.manageSavedGoal({scope:'saved',action:'list'},f.ctx);assert.deepEqual(after,before);assert.equal(f.starts(),0);assert.equal(f.runtime.activeGoal,undefined);
+ delete globalThis.__paeDelegatedGoalExecutorV1;const result=await f.service.manageSavedGoal(p,f.ctx);assert.equal(result.goal.status,'paused','Metadata creation needs no execution capability');
+});
+
 test('direct saved-Goal controls start two existing IDs independently and retain exact child identity on resume',async t=>{
  const f=discoveryFixture(t,false);const parent={id:'unrelated-current',status:'paused',text:'Retain parent Goal'};f.runtime.activeGoal=parent;
  let s=await f.send({action:'goals.create',expectedGoalId:null,objective:'Saved one'});

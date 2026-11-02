@@ -1,4 +1,4 @@
-import { randomUUID } from "node:crypto";
+import { createGoalRecord, goalControlFingerprint, isFinalGoalStatus, mergeGoalChecklist, resolveGoalTransitionStatus, type GoalStatus } from "../shared/goal-model.ts";
 import { emptyGoalStory, recordGoalEvent, validateGoalStory, mergeGoalStory, type GoalStory, type GoalQuestionReply } from "./goal-story.ts";
 import { validInteractionAnswer } from "../shared/task-interactions.ts";
 import { validateGoalPlanning, pruneGoalDependencies, setGoalDependencies, addGoalBlocker, clearGoalBlocker, goalPlanningFields, type GoalPlanning, type GoalPlanningAction } from "./goal-planning.ts";
@@ -10,7 +10,7 @@ import { DelegatedGoalNoEffectError } from "../shared/delegated-goal-errors.ts";
 
 export { DEDICATED_GOAL_LIMITS } from "../shared/delegated-goal-policy.ts";
 
-export type DelegatedGoalStatus = "paused" | "active" | "blocked" | "usage_limited" | "budget_limited" | "complete" | "cleared";
+export type DelegatedGoalStatus = GoalStatus;
 export type DelegatedGoalChild = { taskId: string; childId: string; jobId: string; attempt: number; model?: string };
 export type DelegatedGoalEntry = {
   id: string; revision: number; policyRevision?: number; text: string; status: DelegatedGoalStatus;
@@ -32,6 +32,8 @@ export type DelegatedGoalRequest = {
   action: DelegatedGoalAction; requestId: string; expectedGoalId: string | null;
   expectedEntryRevision?: number; expectedPolicyRevision?: number; expectedRegistryRevision?: number;
   objective?: string; text?: string; tokenBudget?: number | null;
+  /** Atomic checklist creation; IDs are allocated by the canonical registry. */
+  initialTasks?: string[];
   reviewTitle?: string; reviewTarget?: string; reviewRole?: "source" | "deliverable";
   taskId?: string; waitsFor?: string[]; blockerReason?: string; blockerEvidence?: string; blockerTaskId?: string; blockerId?: string;
   questionId?: string; questionRevision?: number; workerEpoch?: string; answer?: GoalQuestionReply["answer"];
@@ -59,6 +61,22 @@ export interface DelegatedGoalExecutor {
 export type DelegatedGoalIntent = { requestId: string; action: string; entryId: string; expectedEntryRevision: number };
 const copy = <T>(value: T): T => structuredClone(value);
 const fingerprint = (r: DelegatedGoalRequest) => JSON.stringify(Object.keys(r).sort().map(k => [k, r[k as keyof typeof r]]));
+/** Compatibility projection only: execution state follows the shared Goal domain.
+ * Session clocks/baselines are owned by the executing GoalRuntime, never inferred
+ * or independently accumulated by the catalog. */
+function goalRecord(entry: DelegatedGoalEntry) {
+  return { id: entry.id, text: entry.text, status: entry.status, tasks: entry.tasks,
+    tokensUsed: entry.tokensUsed, tokenBudget: entry.tokenBudget ?? undefined,
+    tokenBudgetExplicit: entry.tokenBudget !== null, continuationLimits: entry.continuationLimits,
+    waiting: entry.waiting ? { reason: entry.waiting, resumeAt: entry.diagnostics?.waitDeadline ?? undefined } : undefined };
+}
+function controlFingerprint(entry: DelegatedGoalEntry) {
+  return JSON.stringify([goalControlFingerprint(goalRecord(entry)), entry.child, entry.story?.questions, entry.planning]);
+}
+function nextStatus(entry: DelegatedGoalEntry, status: GoalStatus) { return resolveGoalTransitionStatus(goalRecord(entry), status); }
+function checklist(previous: DelegatedGoalEntry["tasks"], additions: string[]) {
+  return mergeGoalChecklist(previous, additions.map(text => ({ text: objective(text, 503), status: "pending" as const }))).map(task => ({ ...task, id: task.id! }));
+}
 function objective(value: unknown, max: number) {
   if (typeof value !== "string" || !value.trim() || value.trim().length > max) throw new Error(`Expected text of 1–${max} characters`);
   return value.trim();
@@ -155,6 +173,7 @@ export class DelegatedGoalRegistry {
         }
         if (observed.status === "cleared") throw new Error("Child cannot clear parent goal history");
         const previous = JSON.stringify(entry);
+        const previousControl = controlFingerprint(entry);
         const previousStatus = entry.status;
         for (const key of ["status", "tasks", "tokensUsed", "automaticTurns", "noProgressTurns", "summary", "waiting", "diagnostics"] as const) {
           if (Object.hasOwn(observed, key)) (entry as any)[key] = copy(observed[key]);
@@ -165,7 +184,8 @@ export class DelegatedGoalRegistry {
         this.observations.set(entry.id, { state: "current", at: Date.now() });
         if (JSON.stringify(entry) !== previous) {
           if (entry.status !== previousStatus) entry.policyRevision = (entry.policyRevision ?? 1) + 1;
-          entry.revision++; changed = true;
+          if (controlFingerprint(entry) !== previousControl) entry.revision++;
+          changed = true;
         }
       }
       if (changed) { next.revision++; validateDelegatedGoals(next); this.persist(copy(next)); this.state = next; }
@@ -188,16 +208,19 @@ export class DelegatedGoalRegistry {
     if (this.pending && (r.expectedGoalId === this.pending.entryId ||
       ["goals.start", "goals.resume", "goals.pause"].includes(r.action))) throw new Error(this.blockedReason()!);
     let performedEffect = false;
-    const fields = ["operation", "sessionId", "serviceEpoch", "requestId", "action", "expectedGoalId", ...(r.action === "goals.create" ? ["expectedRegistryRevision", "objective", "tokenBudget", "continuationLimits"] : [r.action === "goals.limits" ? "expectedPolicyRevision" : "expectedEntryRevision", ...(r.action === "goals.edit" ? ["objective", "tokenBudget", "continuationLimits"] : r.action === "goals.limits" ? ["tokenBudget", "continuationLimits"] : r.action === "goals.add_task" ? ["text"] : r.action === "goals.complete" ? ["user_authorized", "summary", "taskEvidence"] : r.action === "goals.reference" ? ["reviewTitle", "reviewTarget", "reviewRole"] : r.action === "goals.answer" ? ["questionId", "questionRevision", "workerEpoch", "answer"] : [])])];
+    const fields = ["operation", "sessionId", "serviceEpoch", "requestId", "action", "expectedGoalId", ...(r.action === "goals.create" ? ["expectedRegistryRevision", "objective", "tokenBudget", "continuationLimits", "initialTasks"] : [r.action === "goals.limits" ? "expectedPolicyRevision" : "expectedEntryRevision", ...(r.action === "goals.edit" ? ["objective", "tokenBudget", "continuationLimits"] : r.action === "goals.limits" ? ["tokenBudget", "continuationLimits"] : r.action === "goals.add_task" ? ["text"] : r.action === "goals.complete" ? ["user_authorized", "summary", "taskEvidence"] : r.action === "goals.reference" ? ["reviewTitle", "reviewTarget", "reviewRole"] : r.action === "goals.answer" ? ["questionId", "questionRevision", "workerEpoch", "answer"] : [])])];
     fields.push(...goalPlanningFields(r.action));
     if (Object.keys(r).some(key => !fields.includes(key))) throw new Error("Unknown delegated goal request fields");
     if (r.action === "goals.create") {
       if (r.expectedGoalId !== null || r.expectedEntryRevision !== undefined) throw new Error("Create requires null goal identity");
       if (r.expectedRegistryRevision !== undefined && r.expectedRegistryRevision !== next.revision) throw new Error("Registry changed");
       if (next.entries.length >= 1000) throw new Error("Delegated goal history limit reached");
-      next.entries.push({ id: randomUUID(), revision: 1, policyRevision: 1, text: objective(r.objective, 4000), status: "paused", tasks: [], child: null,
+      if (r.initialTasks !== undefined && (!Array.isArray(r.initialTasks) || r.initialTasks.length > 50)) throw new Error("Invalid initial Goal checklist");
+      const record = createGoalRecord({ text: objective(r.objective, 4000), tokenBudget: budget(r.tokenBudget), baselineTokens: 0, now: Date.now() });
+      const tasks = checklist([], r.initialTasks ?? []);
+      next.entries.push({ id: record.id, revision: 1, policyRevision: 1, text: record.text, status: record.status, tasks, child: null,
         ...(r.continuationLimits === undefined ? {} : { continuationLimits: copy(r.continuationLimits) }),
-        tokenBudget: budget(r.tokenBudget) ?? null, tokensUsed: 0, automaticTurns: 0, noProgressTurns: 0, summary: null, waiting: null });
+        tokenBudget: record.tokenBudget ?? null, tokensUsed: record.tokensUsed, automaticTurns: record.automaticModelTurns, noProgressTurns: record.toolFreeRepeatCount, summary: null, waiting: null });
     } else {
       const entry = next.entries.find(e => e.id === r.expectedGoalId);
       if (!entry || (r.action === "goals.limits" ? entry.policyRevision !== r.expectedPolicyRevision : entry.revision !== r.expectedEntryRevision)) throw new Error("Goal identity or revision changed");
@@ -219,7 +242,7 @@ export class DelegatedGoalRegistry {
           return this.snapshot();
         }
       }
-      if ((entry.status === "cleared" || entry.status === "complete") && !["goals.reference", "goals.blocker.clear"].includes(r.action)) throw new Error("Goal is terminal");
+      if (isFinalGoalStatus(entry.status) && !["goals.reference", "goals.blocker.clear"].includes(r.action)) throw new Error("Goal is terminal");
       // Write-ahead fence: lost RPC receipts and persistence failures are uncertain.
       const effect = async <T>(call: () => Promise<T>): Promise<T> => {
         if (["goals.start", "goals.resume"].includes(r.action) && this.executor.executionAvailable?.() === false)
@@ -241,14 +264,15 @@ export class DelegatedGoalRegistry {
       switch (r.action) {
         case "goals.start":
           if (entry.status !== "paused" || entry.child) throw new Error("Start requires an unstarted paused goal");
-          entry.child = await effect(() => this.executor.start(copy(entry))); entry.status = "active"; break;
+          if (nextStatus(entry, "active") !== "active") throw new Error("Goal token budget is still reached; edit or remove the cap before Start");
+          entry.child = await effect(() => this.executor.start(copy(entry))); entry.status = nextStatus(entry, "active"); break;
         case "goals.resume": {
           if (entry.status === "active" || !entry.child) throw new Error("Resume requires an inactive linked goal");
-          if (entry.tokenBudget !== null && entry.tokensUsed >= entry.tokenBudget)
+          if (nextStatus(entry, "active") !== "active")
             throw new Error("Goal token budget is still reached; edit or remove the cap before Resume");
           const child = await effect(() => this.executor.resume(copy(entry)));
-          if (child.taskId !== entry.child.taskId || child.attempt <= entry.child.attempt) throw new Error("Child task ownership or attempt changed");
-          entry.child = child; entry.status = "active"; break;
+          if (child.taskId !== entry.child.taskId || !(child.attempt > entry.child.attempt || child.attempt === entry.child.attempt && child.childId === entry.child.childId && child.jobId === entry.child.jobId)) throw new Error("Child task ownership or attempt changed");
+          entry.child = child; entry.status = nextStatus(entry, "active"); break;
         }
         case "goals.pause":
           if (entry.status !== "active" || !entry.child) throw new Error("Goal is not active");
@@ -260,7 +284,7 @@ export class DelegatedGoalRegistry {
                 if (Object.hasOwn(observed, key)) (entry as any)[key] = copy(observed[key]);
             }
             if (observed) mergeObservedMetadata(entry,observed);
-            entry.status = observed?.status && observed.status !== "active" ? observed.status : "paused";
+            entry.status = nextStatus(entry, observed?.status && observed.status !== "active" ? observed.status : "paused");
             if (entry.status === "complete") entry.waiting = null;
           });
           break;
@@ -302,7 +326,7 @@ export class DelegatedGoalRegistry {
             task.status = 'completed';
             recordGoalEvent(entry.story ??= emptyGoalStory(),'task',`Parent verified: ${verified.get(task.id)}`,task.id,Date.now(),'completed');
           }
-          entry.status = 'complete'; entry.summary = summary; entry.waiting = null;
+          entry.status = nextStatus(entry, "complete"); entry.summary = summary; entry.waiting = null;
           if (entry.diagnostics) entry.diagnostics.waitDeadline = null;
           break;
         }
@@ -312,7 +336,7 @@ export class DelegatedGoalRegistry {
             if (!this.executor.verifyStopped) throw new Error("Cannot clear until owned child stop is verified");
             await this.executor.verifyStopped(copy(entry));
           }
-          entry.status = "cleared"; break;
+          entry.status = nextStatus(entry, "cleared"); break;
         case "goals.limits": {
           if (r.tokenBudget === undefined || r.continuationLimits === undefined) throw new Error("Explicit limit policy required");
           entry.tokenBudget = r.tokenBudget === null ? null : budget(r.tokenBudget)!;
@@ -347,7 +371,7 @@ export class DelegatedGoalRegistry {
         case "goals.add_task":
           if (entry.status === "active") throw new Error("Pause goal before editing tasks");
           if (entry.tasks.length >= 50) throw new Error("Goal task limit reached");
-          entry.tasks.push({ id: randomUUID(), text: objective(r.text, 503), status: "pending" });
+          entry.tasks = checklist(entry.tasks, [objective(r.text, 503)]);
           break;
         default: throw new Error("Unknown delegated goal action");
       }

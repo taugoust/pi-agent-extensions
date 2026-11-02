@@ -23,6 +23,8 @@ export async function resumeRestoredGoal(
 }
 
 export type GoalChildHandle = {
+  /** Identity is verified by the ordinary manager, not a separate parent RPC run. */
+  managed?: true;
   identity: GoalWorkerIdentity;
   model: string;
   start(entry: Readonly<DelegatedGoalEntry>): Promise<ChildGoalSnapshot>;
@@ -33,13 +35,14 @@ export type GoalChildHandle = {
   settle?(expectedGoalId: string, expectedActivationId?: string): Promise<ChildGoalSnapshot>;
   answer?(reply: GoalQuestionReply, requestId: string): Promise<ChildGoalSnapshot>;
   updateLimits?(entry: Readonly<DelegatedGoalEntry>, expectedGoalId: string, expectedPolicyRevision: number, expectedActivationId: string): Promise<ChildGoalSnapshot>;
-  /** Resolves only once the owned execution and its process group have exited. */
+  /** Resolves only after exact owned execution stop proof; a normal worker may remain idle. */
   stop(completion?: ChildGoalSnapshot): Promise<void>;
 };
 export function createDelegatedGoalExecutor(options: {
   sessionId: string; runtimeId: string;
   /** Launch the resolved coordinator role without prompting before structured start/resume. */
   launch(entry: Readonly<DelegatedGoalEntry>, previous?: DelegatedGoalChild): Promise<GoalChildHandle>;
+  recover?(entry: Readonly<DelegatedGoalEntry>): Promise<GoalChildHandle | null>;
   verifyStopped?(entry: Readonly<DelegatedGoalEntry>): Promise<void>;
   retainedCompletion?(entry: Readonly<DelegatedGoalEntry>): Promise<ChildGoalSnapshot | null>;
   executionUnavailableReason?(): string | null;
@@ -67,6 +70,16 @@ export function createDelegatedGoalExecutor(options: {
       throw new Error("Invalid dedicated child goal observation");
     return snapshot;
   };
+  async function recover(entry: Readonly<DelegatedGoalEntry>) {
+    if (!entry.child || bindings.has(entry.id) || !options.recover) return;
+    const handle = await options.recover(entry);
+    if (!handle) return;
+    const id = handle.identity, child = entry.child;
+    if (!handle.managed || id.sessionId !== options.sessionId || id.taskId !== child.taskId || id.childId !== child.childId || id.jobId !== child.jobId || id.attempt !== child.attempt || !id.workerEpoch || !id.runtimeId)
+      throw new Error("Managed Goal recovery identity changed");
+    const snapshot = validate(await handle.observe());
+    bindings.set(entry.id, { handle, identity: structuredClone(id), goalId: snapshot.goalId!, stopped: snapshot.status !== "active" && snapshot.executionStopped, last: structuredClone(snapshot) });
+  }
   async function settle(handle: GoalChildHandle, snapshot: ChildGoalSnapshot): Promise<ChildGoalSnapshot> {
     if (!handle.settle) return snapshot; // Older executors have no cancellation receipt.
     const settled = validate(await handle.settle(snapshot.goalId, snapshot.activationId), snapshot.goalId, snapshot.activationId);
@@ -76,6 +89,7 @@ export function createDelegatedGoalExecutor(options: {
   async function launch(entry: Readonly<DelegatedGoalEntry>, resume: boolean): Promise<DelegatedGoalChild> {
     const unavailable = restorationFailures.values().next().value ?? options.executionUnavailableReason?.();
     if (unavailable) throw new Error(unavailable);
+    if (resume) await recover(entry);
     const previous = resume && bindings.has(entry.id) ? binding(entry) : undefined;
     if (resume && (!entry.child || (previous && !previous.stopped))) throw new Error("Previous dedicated goal execution is not stopped");
     if (resume && !previous) await verifyStopped(entry);
@@ -83,17 +97,18 @@ export function createDelegatedGoalExecutor(options: {
     const handle = await options.launch(structuredClone(entry), resume ? structuredClone(entry.child!) : undefined);
     const id = structuredClone(handle.identity);
     try {
-      if (typeof handle.model !== "string" || !handle.model.trim() || handle.model.length > 512 || id.sessionId !== options.sessionId || id.runtimeId !== options.runtimeId
+      if (typeof handle.model !== "string" || !handle.model.trim() || handle.model.length > 512 || id.sessionId !== options.sessionId || (!handle.managed && id.runtimeId !== options.runtimeId)
         || !Number.isSafeInteger(id.attempt) || id.attempt < 1
         || !id.taskId || !id.childId || !id.jobId || !id.workerEpoch
-        || (resume && (id.taskId !== entry.child!.taskId || id.attempt !== entry.child!.attempt + 1
-          || id.childId === entry.child!.childId || (previous && id.workerEpoch === previous.identity.workerEpoch))))
+        || (resume && (id.taskId !== entry.child!.taskId || !(handle.managed && id.attempt === entry.child!.attempt && id.childId === entry.child!.childId && id.jobId === entry.child!.jobId
+          || id.attempt === entry.child!.attempt + 1 && id.childId !== entry.child!.childId && (!previous || id.workerEpoch !== previous.identity.workerEpoch)))))
         throw new Error("Invalid dedicated goal launch identity");
       for (const [entryId, owned] of bindings) {
         if (entryId !== entry.id && (owned.identity.taskId === id.taskId || owned.identity.childId === id.childId))
           throw new Error("Dedicated child execution is already bound to another goal");
       }
       const restored = resume ? validate(await handle.observe(), previous?.goalId, previous?.last.activationId) : undefined;
+      if (restored && (!restored.executionStopped || restored.status === "active")) throw new Error("Goal Resume requires verified stopped execution");
       // Goal identity is stable. Bind the new activation separately; the native
       // worker epoch still fences this exact process/attempt.
       let snapshot = validate(await (resume ? handle.resume(restored!.goalId, restored!.activationId) : handle.start(structuredClone(entry))));
@@ -115,6 +130,7 @@ export function createDelegatedGoalExecutor(options: {
   }
   async function verifyStopped(entry: Readonly<DelegatedGoalEntry>): Promise<void> {
     if (!entry.child) return;
+    await recover(entry);
     if (bindings.has(entry.id)) {
       if (!binding(entry).stopped) throw new Error("Dedicated goal execution is not stopped");
       restorationFailures.delete(entry.id);
@@ -144,6 +160,7 @@ export function createDelegatedGoalExecutor(options: {
     // that durable entry into the restored, paused engine before activation.
     update: (entry: Readonly<DelegatedGoalEntry>) => serialize(() => verifyStopped(entry)),
     updateLimits: (entry: Readonly<DelegatedGoalEntry>) => serialize(async () => {
+      await recover(entry);
       // Stopped workers consume the durable parent policy only on explicit Resume.
       if (!bindings.has(entry.id)) { await verifyStopped(entry); return; }
       const b = binding(entry);
@@ -161,6 +178,7 @@ export function createDelegatedGoalExecutor(options: {
       b.last = structuredClone(observed);
     }),
     answer: (entry: Readonly<DelegatedGoalEntry>, reply: GoalQuestionReply, requestId: string) => serialize(async () => {
+      await recover(entry);
       const b = binding(entry);
       if (b.stopped || !b.handle.answer || reply.workerEpoch !== b.identity.workerEpoch) throw new Error("Goal question worker is unavailable or changed");
       const observed = validate(await b.handle.answer(reply, requestId), b.goalId, b.last.activationId);
@@ -170,6 +188,7 @@ export function createDelegatedGoalExecutor(options: {
     start: (entry: Readonly<DelegatedGoalEntry>) => serialize(() => launch(entry, false)),
     resume: (entry: Readonly<DelegatedGoalEntry>) => serialize(() => launch(entry, true)),
     pause: (entry: Readonly<DelegatedGoalEntry>) => serialize(async () => {
+      await recover(entry);
       if (!bindings.has(entry.id)) { await verifyStopped(entry); return; }
       const b = binding(entry);
       if (b.stopped) return structuredClone(b.last);
@@ -186,6 +205,7 @@ export function createDelegatedGoalExecutor(options: {
       return structuredClone(b.last);
     }),
     observe: (entry: Readonly<DelegatedGoalEntry>) => serialize(async () => {
+      await recover(entry);
       // A missing in-memory binding is not stop evidence. Reconcile only from
       // the exact durable task/attempt process proof, never by relaunching.
       if (!bindings.has(entry.id)) {

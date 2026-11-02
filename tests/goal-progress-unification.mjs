@@ -29,8 +29,13 @@ const { GoalCommandController } = await jiti.import("../workflows/goal/commands.
 const { default: progressWidget } = await jiti.import("../progress/progress-widget.ts");
 const { DEFAULT_PROGRESS_SETTINGS } = await jiti.import("../progress/settings.ts");
 test("canonical Goal domain shares creation, lifecycle, checklist identity and accounting semantics", () => {
-  const record = createGoalRecord({ id: "legacy-id", activationId: "activation", text: "Objective", now: 10, baselineTokens: 100, tokenBudget: 20 });
+  const record = createGoalRecord({ id: "legacy-id", activationId: "activation", text: "Objective", now: 10, baselineTokens: 100, tokenBudget: 20, status: "active" });
   assert.equal(record.id, "legacy-id"); assert.equal(record.activationId, "activation");
+  const paused = createGoalRecord({ text: 'Saved draft', now: 10, baselineTokens: 0 });
+  assert.equal(paused.status, 'paused'); assert.equal(paused.activeStartedAt, undefined); assert.ok(paused.activationId, 'Paused control identity is retained without execution authority');
+  assert.equal(transitionGoalRecord(record, 'paused', 2010).timeUsedSeconds, 2, 'Stopping must retain elapsed execution time');
+  assert.equal(transitionGoalRecord(record, 'paused', 2010).activeStartedAt, undefined);
+  assert.throws(() => transitionGoalRecord({ ...record, status: 'complete' }, 'active', 30), /terminal/);
   assert.equal(goalControlFingerprint(record), goalControlFingerprint({ ...record, tokensUsed: 18, timeUsedSeconds: 42, iteration: 9, automaticModelTurns: 3 }), "accounting and counters must not move the control fence");
   assert.notEqual(goalControlFingerprint(record), goalControlFingerprint({ ...record, status: "paused" }), "lifecycle control changes must move the fence");
   assert.equal(transitionGoalRecord(record, "paused", 2).timeUsedSeconds, 0, "backward clock does not subtract time");

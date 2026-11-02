@@ -13,6 +13,7 @@ import type { WorkerState } from "./tui-worker-store.ts";
 
 export type TuiWorkerAdapter = {
   isIdle(): boolean;
+  goalState?(): { entryId: string | null; status: string | null };
   verificationCwd?(): string;
   verificationJobs?(): VerificationJobs | undefined;
   canRun?(): boolean;
@@ -330,6 +331,7 @@ export class TuiWorkerServer {
       workerEpoch: this.manifest.workerEpoch, active: this.state.active || !this.adapter.isIdle() || this.idleDecisions.size > 0 || !!this.verificationFlight, sealed: this.sealed, phase: this.state.phase,
       lastReport: this.state.lastReport, lastOutcome: this.state.lastOutcome, sequence: this.state.sequence, pid: process.pid,
       sessionFile: this.manifest.sessionFile, presentation: this.manifest.presentation,
+      ...(this.manifest.assignedGoal ? { assignedGoal: this.adapter.goalState?.() } : {}),
       interactions: (this.state.interactions ?? []).filter(item => !item.answer && !item.cancelledAt).slice(-2)
         .map(({ id, workerEpoch, createdAt, request }) => ({ id, workerEpoch, createdAt, request })),
       idleDecision: [...this.idleDecisions.keys()].map(requestId => {

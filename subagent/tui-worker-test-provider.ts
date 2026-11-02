@@ -12,7 +12,7 @@ export default function deterministicWorkerProvider(pi: ExtensionAPI): void {
   pi.registerProvider("harness-test", {
     baseUrl: "http://127.0.0.1:1/never-contacted", apiKey: "test-only", api: "openai-completions",
     models: [{ id: "mock", name: "Deterministic worker fixture", reasoning: false, input: ["text"],
-      cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 }, contextWindow: 32768, maxTokens: 1024 }],
+      cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 }, contextWindow: 32768, maxTokens: 1024 }, { id: "gpt-6.1-sol", name: "Deterministic coordinator fixture", reasoning: true, input: ["text"], cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 }, contextWindow: 32768, maxTokens: 1024 }],
     streamSimple: (_model: unknown, context: any, options: any) => {
       const source = JSON.stringify(context.messages);
       const results = context.messages.filter((m: any) => m.role === "toolResult");
@@ -42,8 +42,20 @@ export default function deterministicWorkerProvider(pi: ExtensionAPI): void {
             artifacts: [], remaining: partial ? ["Finish routine fixture"] : [], ...(partial ? { next_action: "Finish routine fixture", continuation: "routine" } : {}) } }];
         }
       }
+      if (process.env.PI_DEDICATED_GOAL_CHILD === "1" && source.includes("MANAGED_GOAL_FIXTURE")) {
+        const state = (globalThis as any).__paeDelegatedChildGoalV1?.snapshot();
+        if (!state?.childGoalId) throw new Error("Managed Goal fixture missing engine binding");
+        const identity = { goal_id: state.childGoalId, activation_id: state.childActivationId };
+        if (source.includes("FINISH_MANAGED_GOAL")) {
+          content = state.goal.tasks.some((step: any) => step.status !== "completed")
+            ? [{ type: "toolCall", id: `fixture-goal-progress-${results.length}`, name: "update_progress", arguments: { action: "update", goal_id: state.childGoalId, expected_revision: state.revision, request_id: `fixture-finish-${results.length}`, steps: state.goal.tasks.map((step: any) => ({ ...step, status: "completed" })) } }]
+            : [{ type: "toolCall", id: `fixture-goal-complete-${results.length}`, name: "goal_complete", arguments: { ...identity, summary: "Verified ordinary managed Goal lifecycle in the offline native integration fixture." } }];
+        } else if (source.includes("STEER_MANAGED_GOAL") && !results.some((r: any) => r.toolName === "notify_parent")) {
+          content = [{ type: "toolCall", id: `fixture-goal-steer-${results.length}`, name: "notify_parent", arguments: { message: "MANAGED_STEER_ACK", requires_guidance: false } }];
+        } else content = [{ type: "toolCall", id: `fixture-goal-wait-${results.length}`, name: "goal_wait", arguments: { ...identity, reason: "Await deterministic parent steering" } }];
+      }
       const message = { role: "assistant", content,
-        api: "openai-completions", provider: "harness-test", model: "mock", stopReason: content[0]?.type === "toolCall" ? "toolUse" : "stop", timestamp: Date.now(),
+        api: "openai-completions", provider: "harness-test", model: (_model as any).id, stopReason: content[0]?.type === "toolCall" ? "toolUse" : "stop", timestamp: Date.now(),
         usage: { input: 1, output: 1, cacheRead: 0, cacheWrite: 0, totalTokens: 2,
           cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, total: 0 } } };
       return {

@@ -1,6 +1,7 @@
 import { constants, openSync, closeSync, readFileSync, readSync, writeSync, ftruncateSync, writeFileSync, fsyncSync, fstatSync, renameSync, unlinkSync, lstatSync, mkdirSync, readdirSync } from "node:fs";
 import { dirname, resolve, join, isAbsolute } from "node:path";
 import { randomBytes } from "node:crypto";
+import { validateManagedGoalAssignment } from "./managed-goal.ts";
 import { validateVerification, type VerificationRecord } from "./acceptance.ts";
 import { parseTuiWorkerPlacement, parseTuiWorkerRequest } from "../shared/tui-worker-protocol.ts";
 import type { TuiWorkerManifest, TuiWorkerEvent, TuiWorkerResponse } from "../shared/tui-worker-protocol.ts";
@@ -94,6 +95,10 @@ export function validateWorkerManifest(value: unknown): TuiWorkerManifest {
   if (!value || typeof value !== "object" || Array.isArray(value)) throw new Error("Invalid worker manifest");
   const m = value as TuiWorkerManifest;
   validateVerification(m.verification);
+  if (m.assignedGoal !== undefined) {
+    validateManagedGoalAssignment(m.assignedGoal);
+    if (m.assignedGoal.goalTools.some(tool => !m.tools?.includes(tool))) throw new Error("Managed Goal exceeds the worker tool allowlist");
+  }
   if (m.cleanupWorktreesOnReap !== undefined && typeof m.cleanupWorktreesOnReap !== "boolean") throw new Error("Invalid retained cleanup policy");
   parseTuiWorkerRequest({ protocol: m.protocol, requestId: "validate", token: m.controlToken,
     ownerSessionId: m.ownerSessionId, taskId: m.taskId, runtimeId: m.runtimeId,

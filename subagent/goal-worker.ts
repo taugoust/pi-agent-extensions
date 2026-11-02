@@ -22,8 +22,8 @@ export default async function goalWorker(pi: ExtensionAPI) {
   if (!binding.path || !binding.entryId || !binding.identity || binding.identity.childId !== process.env.PI_SUBAGENT_ID)
     throw new Error("Dedicated goal worker launch identity mismatch");
   const policy = dedicatedGoalPolicy(binding.policy);
-  progress(pi);
-  if (binding.questionnaireEnabled) (await import("../questionnaire/index.ts")).default(pi);
+  progress(pi, { assignedGoalBootstrap: true });
+  if (binding.questionnaireEnabled) (await import("../questionnaire/index.ts")).default(pi, { assignedGoalBootstrap: true });
   workflows(pi, { delegatedChild: true, goalSettingsPath: join(dirname(binding.path), "goal-settings.json") });
   let current = false;
   let questions: ReturnType<typeof createGoalQuestions> | undefined;

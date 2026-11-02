@@ -9,6 +9,7 @@ const seams = {
   "./persistence.js": "export function loadGoalStateFromSession(){return globalThis.__restoreFixture}",
   "./runtime.js": `export const GOAL_CONTINUATION_MESSAGE_TYPE='continue', STATUS_KEY='goal';
     export function transitionGoal(goal,status){return {...goal,status,waiting:undefined}};
+    export function nextGoalInstance(goal){return {...goal,activationId:'restored-next'}};
     export function abortCurrentTurn(){};export function blocksStaleGoalToolCalls(){};export function findFinalAssistantMessage(){};
     export function incrementGoal(){};export function isGoalContextOverflow(){};export function isRetryableGoalInterruption(){};
     export function isUsageLimitedGoalInterruption(){};export function resetGoalSafetyEpoch(){};export function truncateNotification(){}`,

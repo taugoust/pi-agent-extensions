@@ -18,21 +18,33 @@ for (const stoppedStatus of ["blocked", "usage_limited", "budget_limited", "comp
   assert.equal(stopped, true); assert.equal(observed?.story?.questions?.[0].status, "cancelled"); assert.equal(observed?.status, stoppedStatus); questions.dispose();
 });
 
+test('normal managed Goal recovers an active task across parent reload and resumes its idle worker without duplication',async()=>{
+ let launches=0,activation=0,status:'active'|'paused'='paused';
+ const snapshot=()=>({goalId:'logical-goal',activationId:`activation-${activation}`,status,executionStopped:status!=='active',waiting:null});
+ const handle:GoalChildHandle={managed:true,model:'owning-provider/model',identity:{sessionId:'owner',runtimeId:'worker-runtime',taskId:'task',childId:'child',jobId:'normal-group',attempt:1,workerEpoch:'worker-epoch'},
+  async start(){status='active';activation++;return snapshot();},async resume(){status='active';activation++;return snapshot();},async pause(){status='paused';return snapshot();},async observe(){return snapshot();},async stop(){assert.equal(status,'paused');}};
+ const make=(runtimeId:string)=>createDelegatedGoalExecutor({sessionId:'owner',runtimeId,async launch(){launches++;return handle;},async recover(){return handle;},async verifyStopped(){assert.equal(status,'paused');}});
+ const e=entry('catalog-goal');const first=make('parent-one');e.child=await first.start(e);const oldChild=structuredClone(e.child);
+ const restored=make('parent-two');assert.equal((await restored.observe(e))?.status,'active');assert.equal(launches,1,'Reload is observation/rebind, not another launch');
+ await restored.pause(e);const resumed=await restored.resume(e);assert.deepEqual(resumed,oldChild);assert.equal(activation,2);assert.equal((await restored.observe({...e,child:resumed}))?.status,'active');
+});
+
 test("two child bindings retain tasks across attempts; pause awaits halt and rejects stale attempts", async () => {
   let halted = 0, validPause = false;
   const contractIds = new Map<string, string>();
   const handles: GoalChildHandle[] = [];
   const executor = createDelegatedGoalExecutor({ sessionId: "s", runtimeId: "r", async launch(e, previous) {
     const attempt = (previous?.attempt ?? 0) + 1;
+    let running = false;
     const handle: GoalChildHandle = {
       // The executor fences child identity, not a hardcoded default model.
       // Explicit/retained role choices must survive the same exact-child lane.
       model: e.id === "a" ? "owning-provider/gpt-6-astra:low" : "owning-provider/gpt-6.1-sol:high",
       identity: { sessionId: "s", runtimeId: "r", taskId: previous?.taskId ?? `task-${e.id}`, childId: `child-${e.id}-${attempt}`, jobId: `job-${e.id}-${attempt}`, attempt, workerEpoch: `epoch-${e.id}-${attempt}` },
-      async start() { contractIds.set(e.id, e.id); return { goalId: e.id, activationId: e.id, status: "active", waiting: null, executionStopped: false }; },
-      async resume() { const goalId = `${e.id}-contract-${attempt}`; contractIds.set(e.id, goalId); return { goalId: e.id, activationId: goalId, status: "active", waiting: null, executionStopped: false }; },
-      async pause() { return { goalId: e.id, activationId: contractIds.get(e.id)!, status: "paused", waiting: null, executionStopped: validPause }; },
-      async observe() { return { goalId: e.id, activationId: contractIds.get(e.id)!, status: "active", waiting: null, executionStopped: false }; },
+      async start() { running = true; contractIds.set(e.id, e.id); return { goalId: e.id, activationId: e.id, status: "active", waiting: null, executionStopped: false }; },
+      async resume() { running = true; const goalId = `${e.id}-contract-${attempt}`; contractIds.set(e.id, goalId); return { goalId: e.id, activationId: goalId, status: "active", waiting: null, executionStopped: false }; },
+      async pause() { if (validPause) running = false; return { goalId: e.id, activationId: contractIds.get(e.id)!, status: "paused", waiting: null, executionStopped: validPause }; },
+      async observe() { return { goalId: e.id, activationId: contractIds.get(e.id)!, status: running ? "active" : "paused", waiting: null, executionStopped: !running }; },
       async stop() { await Promise.resolve(); halted++; },
     }; handles.push(handle); return handle;
   } });
