@@ -108,7 +108,8 @@ export default async function profileFixture(pi: any) {
           const scenario = JSON.parse(process.env.PROFILE_SCENARIO ?? "{}") as Record<string, unknown>;
           args = (scenario.params && typeof scenario.params === "object" ? scenario.params : scenario) as Record<string, unknown>;
         }
-        content = [{ type: "toolCall", id: `profile-test-${++toolCallId}`, name: scenario.dedicated ? "fixture_dedicated_probe" : "subagent", arguments: scenario.dedicated ? {} : args }];
+        const dedicatedProbe = scenario.dedicated && !resume && !reap;
+        content = [{ type: "toolCall", id: `profile-test-${++toolCallId}`, name: dedicatedProbe ? "fixture_dedicated_probe" : "subagent", arguments: dedicatedProbe ? {} : args }];
         stopReason = "toolUse";
       }
       const stream = createAssistantMessageEventStream();

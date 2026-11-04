@@ -43,6 +43,8 @@ async function startParent(root, scenario, { projectTrust = false, agentSH = fal
   if (!launcher) throw new Error("Set PI_TUI_WORKER_LAUNCHER to the immutable Nix pi-tui-worker executable for native acceptance tests");
   const env = {
     PATH: process.env.PATH ?? "", HOME: home, TMPDIR: root,
+    // Inherit genuine placement from this driver's fixture-owned calling pane.
+    ...(process.env.TMUX ? { TMUX: process.env.TMUX, TMUX_PANE: process.env.TMUX_PANE } : {}),
     XDG_CONFIG_HOME: join(home, "config"), XDG_CACHE_HOME: join(home, "cache"),
     PI_CODING_AGENT_DIR: agentDir, PI_OFFLINE: "1", PI_SKIP_VERSION_CHECK: "1", PI_TELEMETRY: "0",
     PROFILE_FIXTURE_LOG: log, PROFILE_SCENARIO: JSON.stringify(scenario), PI_TUI_WORKER_LAUNCHER: launcher,
@@ -100,10 +102,14 @@ async function dispatches(log) {
   catch (error) { if (error?.code === "ENOENT") return []; throw error; }
 }
 async function taskRecords(stateRoot) {
-  const root = join(stateRoot, "headless-groups");
-  const files = await readdir(root).catch((error) => error?.code === "ENOENT" ? [] : Promise.reject(error));
-  const groups = await Promise.all(files.filter((file) => /^subagent-job-[a-f0-9]{24}\.json$/.test(file)).map(async (file) =>
-    JSON.parse(await readFile(join(root, file), "utf8"))));
+  // Ordinary foreground workers and managed Goal workers use their respective
+  // real managers. Inventory both so cleanup proves no fixture group is missed.
+  const groups = (await Promise.all(["headless-groups", "groups"].map(async (directory) => {
+    const root = join(stateRoot, directory);
+    const files = await readdir(root).catch((error) => error?.code === "ENOENT" ? [] : Promise.reject(error));
+    return Promise.all(files.filter((file) => /^subagent-job-[a-f0-9]{24}\.json$/.test(file)).map(async (file) =>
+      JSON.parse(await readFile(join(root, file), "utf8"))));
+  }))).flat();
   return groups.flatMap((group) => group.children.map((child) => ({ ...child, groupId: group.id, groupStatus: group.status })));
 }
 async function cleanup(instance) {
@@ -154,16 +160,18 @@ try {
       assert.notEqual(result?.message?.isError, true);
       assert.equal(proof.exactChildFencing, true);
       assert.equal(proof.verifiedStopped, true);
-      for (const child of [proof.first.child, proof.resumed.child]) {
-        const request = rows.find(row => row.role === "child" && row.childId === child.childId);
-        assert(request, `missing actual dedicated request for ${child.childId}`);
+      assert.equal(proof.sameManagedWorker, true);
+      assert.equal(proof.activationChanged, true);
+      for (const sample of [proof.first, proof.resumed]) {
+        const request = rows.filter(row => row.role === "child" && row.childId === sample.child.childId)[sample.dispatchIndex];
+        assert(request, `missing actual dedicated request for ${sample.child.childId} at ${sample.dispatchIndex}`);
         assert.equal(request.provider, "offline-profile-fixture");
         assert.equal(request.model, "gpt-6.1-sol");
         assert.equal(request.reasoning, "high");
         assert.match(JSON.stringify(request), /single-coordinator execution controls/);
         assert.doesNotMatch(JSON.stringify(request), /CHANGED_COORDINATOR_MUST_NOT_REPLACE_RETAINED/);
       }
-      console.log("PASS actual dedicated coordinator: Sol:high launch + retained Resume after profile edit; exact task/child/attempt fencing; both attempts verified stopped");
+      console.log("PASS actual dedicated coordinator: Sol:high launch + retained managed-worker Resume after profile edit; distinct Goal activation; exact task/child/attempt fencing; both activations verified stopped");
     } finally { await cleanup(instance); }
   }
 
@@ -272,7 +280,8 @@ try {
       const audits = instance.events.filter(event => event.type === "message_end" && event.message?.role === "toolResult" && event.message.toolName === "subagent");
       assert.notEqual(audits.at(-1).message.isError, true, JSON.stringify(audits.at(-1)));
       await assert.rejects(stat(path), { code: "ENOENT" });
-      assert.match((await fixtureGit(instance.cwd, "show-ref", "--verify", `refs/heads/${branch}`)).stdout, /refs\/heads\/pi\//);
+      const sourceOid = (await fixtureGit(instance.cwd, "rev-parse", "HEAD")).stdout.trim();
+      assert.equal((await fixtureGit(instance.cwd, "show-ref", "--verify", `refs/heads/${branch}`)).stdout.trim(), `${sourceOid} refs/heads/${branch}`);
       assert.equal(await readFile(join(instance.cwd, "tracked"), "utf8"), "offline fixture\n");
       console.log("PASS actual isolated coordinator: guarded root removal before reap; source and branch preserved");
     } finally { if (!closed) await cleanup(instance); }
