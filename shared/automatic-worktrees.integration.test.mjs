@@ -157,6 +157,39 @@ test("same-basename repositories sharing an aliased physical worktree root alloc
   }
 }));
 
+test("queued allocation uses the settings root captured by its target reservation", async () => fixture(async ({ root, repo, agent }) => {
+  const oldRoot = join(root, "old-trees"), newRoot = join(root, "new-trees");
+  await fs.mkdir(oldRoot); await fs.mkdir(newRoot);
+  const settingsFile = join(agent, "pi-worktree.json");
+  await fs.writeFile(settingsFile, JSON.stringify({ worktreeRoot: oldRoot }));
+  const commonDir = (await git(["rev-parse", "--path-format=absolute", "--git-common-dir"], repo)).trim();
+  const namespaceKey = `target-namespace:${join(oldRoot, "source")}`;
+  let enterHolder, leaveHolder;
+  const holderEntered = new Promise(resolve => { enterHolder = resolve; });
+  const holderGate = new Promise(resolve => { leaveHolder = resolve; });
+  const holder = withRepositoryAllocations([commonDir, namespaceKey], undefined, async () => { enterHolder(); await holderGate; });
+  await holderEntered;
+  const queuedChild = makeChild(30, repo); queuedChild.spec.displayName = "Queued Settings Snapshot";
+  const allocations = globalThis.__piWorktreeAllocationsV1;
+  const before = allocations.get(commonDir);
+  let launch;
+  try {
+    launch = provision([queuedChild]);
+    const deadline = Date.now() + 1000;
+    while (allocations.get(commonDir) === before && Date.now() < deadline) await new Promise(resolve => setImmediate(resolve));
+    assert.notEqual(allocations.get(commonDir), before, "launch must be queued behind the held repository lock");
+    await fs.writeFile(settingsFile, JSON.stringify({ worktreeRoot: newRoot }));
+    leaveHolder();
+    await Promise.all([holder, launch]);
+  } finally {
+    leaveHolder();
+    await holder;
+    if (launch) await launch.catch(() => undefined);
+  }
+  assert.ok(queuedChild.spec.worktreeInfo.path.startsWith(join(oldRoot, "source") + "/"));
+  assert.ok(!queuedChild.spec.worktreeInfo.path.startsWith(join(newRoot, "source") + "/"));
+}));
+
 test("cancelled repository-queue waiters preserve FIFO for later waiters", { timeout: 1000 }, async () => fixture(async () => {
   const events = [];
   let enterFirst, leaveFirst;

@@ -419,10 +419,10 @@ async function provision(children: Child[], owner: string, signal: AbortSignal |
       const namespace = await canonicalFuturePath(resolve(settings.effectiveRoot, basename(mainPath)));
       if (!reserved.has(commonDir) || !reserved.has(`target-namespace:${namespace}`)) throw new Error("Repository or worktree target namespace changed during allocation; retry after owner review");
     }
-    return provisionUnlocked(children, owner, signal, current, resume, supervision, previousChildId, activity);
+    return provisionUnlocked(children, owner, signal, current, resume, supervision, previousChildId, activity, settings);
   });
 }
-async function provisionUnlocked(children: Child[], owner: string, signal: AbortSignal | undefined, current: () => boolean, resume: boolean, supervision?: WorkerWorktreeContext, previousChildId?: string, activity?: WorktreeReuseActivity) {
+async function provisionUnlocked(children: Child[], owner: string, signal: AbortSignal | undefined, current: () => boolean, resume: boolean, supervision?: WorkerWorktreeContext, previousChildId?: string, activity?: WorktreeReuseActivity, settingsSnapshot?: Awaited<ReturnType<typeof loadWorktreeSettings>>) {
   const requested = children.filter(child => child.spec.worktree !== undefined && child.spec.worktree !== false);
   if (!requested.length) return;
   if (resume) {
@@ -450,7 +450,7 @@ async function provisionUnlocked(children: Child[], owner: string, signal: Abort
     }
     return;
   }
-  const settings = await loadWorktreeSettings();
+  const settings = settingsSnapshot ?? await loadWorktreeSettings();
   if (settings.kind === "invalid") throw new Error("Worktree settings are invalid");
   const plans = [];
   const reservedBranches = new Set<string>();
