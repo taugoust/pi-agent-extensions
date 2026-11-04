@@ -103,12 +103,49 @@ test("parent refs, same-batch prefix conflicts, occupied paths and remote refs a
   assert.equal(occupiedPath.spec.worktreeInfo.branch, "path-collision-2");
 }));
 
-test("same-name launches racing in one repository select distinct branches", async () => fixture(async ({ repo }) => {
+test("same-name launches racing in one repository select distinct branches without stale prompt injection", async () => fixture(async ({ repo }) => {
   const first = makeChild(21, repo), second = makeChild(22, repo);
   first.spec.displayName = second.spec.displayName = "Shared Parser Review";
   await Promise.all([provision([first]), provision([second])]);
   assert.notEqual(first.spec.worktreeInfo.branch, second.spec.worktreeInfo.branch);
   assert.equal(new Set((await ownedWorktrees("owner")).map(row => row.branch)).size, 2);
+  for (const child of [first, second]) {
+    assert.equal((child.spec.systemPrompt.match(/\[Isolated worktree\]/g) ?? []).length, 1);
+    assert.ok(child.spec.systemPrompt.includes(`Work in ${child.spec.worktreeInfo.path} on branch ${child.spec.worktreeInfo.branch}.`));
+  }
+}));
+
+test("worktree context injection preserves user-authored prompt text exactly", async () => fixture(async ({ repo }) => {
+  const child = makeChild(23, repo);
+  const userPrompt = "User note: do not merge or remove them automatically. [Isolated worktree] is my literal text.";
+  child.spec.systemPrompt = userPrompt;
+  await provision([child]);
+  assert.ok(child.spec.systemPrompt.startsWith(userPrompt));
+  assert.equal((child.spec.systemPrompt.match(/\[Isolated worktree\]/g) ?? []).length, 2, "one user phrase and one injected section");
+}));
+
+test("a Git add failure after partial mutation retains its original failed record without retry", async () => fixture(async ({ repo, root }) => {
+  const executable = process.env.PATH.split(":").map(path => join(path, "git"));
+  let realGit;
+  for (const path of executable) { try { await fs.access(path, 1); realGit = path; break; } catch {} }
+  assert.ok(realGit, "test host has a real Git executable");
+  const bin = join(root, "failure-bin"), wrapper = join(bin, "git"); await fs.mkdir(bin);
+  await fs.writeFile(wrapper, `#!/bin/sh\ncase "$*" in *"worktree add"*)\n  "${realGit}" "$@"\n  exit 124\n  ;;\nesac\nexec "${realGit}" "$@"\n`);
+  await fs.chmod(wrapper, 0o700);
+  const originalPath = process.env.PATH; process.env.PATH = `${bin}:${originalPath}`;
+  const child = makeChild(24, repo); child.spec.displayName = "Partial Git Failure";
+  try {
+    await assert.rejects(provision([child]), /124|failed|worktree/i);
+  } finally { process.env.PATH = originalPath; }
+  const record = (await ownedWorktrees("owner")).find(row => row.taskId === child.taskId);
+  assert.ok(record); assert.equal(record.state, "failed");
+  assert.equal(record.branch, "partial-git-failure");
+  assert.equal(record.path, join(root, "trees", "source", "partial-git-failure"));
+  assert.equal((await git(["branch", "--show-current"], record.path)).trim(), record.branch);
+  const worktrees = await git(["worktree", "list", "--porcelain"], repo);
+  assert.ok(worktrees.includes(`worktree ${record.path}`));
+  assert.ok(worktrees.includes(`branch refs/heads/${record.branch}`));
+  assert.equal((await git(["for-each-ref", "--format=%(refname:strip=2)", "refs/heads"], repo)).split(/\r?\n/).filter(Boolean).filter(name => name.startsWith("partial-git-failure")).length, 1);
 }));
 
 test("automatic repository provisioning preserves relative cwd and primary checkout; false permits non-Git", async () => fixture(async ({ repo, root }) => {
@@ -118,6 +155,17 @@ test("automatic repository provisioning preserves relative cwd and primary check
   assert.equal((await ownedWorktrees("owner")).length, 1);
   await provision([makeChild(2, root, false)]); const ordinary = makeChild(3, root); delete ordinary.spec.worktree; await provision([ordinary]);
   await assert.rejects(provision([makeChild(4, root)]), /requires a Git repository cwd.*worktree:false/);
+}));
+
+test("canonical source cwd and symlinked worktree root stay canonical through allocation", async () => fixture(async ({ repo, root, agent }) => {
+  const actualRoot = join(root, "canonical-trees"), rootAlias = join(root, "trees-alias"), sourceAlias = join(root, "source-alias");
+  await fs.mkdir(actualRoot); await fs.symlink(actualRoot, rootAlias); await fs.symlink(repo, sourceAlias);
+  await fs.writeFile(join(agent, "pi-worktree.json"), JSON.stringify({ worktreeRoot: rootAlias }));
+  const child = makeChild(16, join(sourceAlias, "sub")); await provision([child]);
+  const record = (await ownedWorktrees("owner"))[0];
+  assert.equal(record.path, await fs.realpath(record.path));
+  assert.ok(record.path.startsWith(actualRoot + "/"));
+  assert.equal(child.spec.cwd, join(record.path, "sub"));
 }));
 
 test("new dirty sources never imply include/exclude; explicit objects retain new-tree snapshot semantics", async () => fixture(async ({ repo }) => {
@@ -201,7 +249,7 @@ test("managed activity, branch/physical identity and failed preparation remain f
   await assert.rejects(provision([makeChild(2, record.path)], "owner", false, undefined, undefined, async () => { throw new Error("inventory unavailable"); }), /inventory unavailable/);
   const borrowed = makeChild(3, record.path);
   await assert.rejects(provision([borrowed, makeChild(4, root)]), /Git repository cwd/);
-  assert.equal((await ownedWorktrees())[0].borrowers.find(x => x.taskId === borrowed.taskId).released, true, "preflight partial failure releases exact borrower durably");
+  assert.equal((await ownedWorktrees())[0].borrowers?.some(x => x.taskId === borrowed.taskId) ?? false, false, "repository preflight rejects before acquiring any borrower attachment");
   await git(["switch", "-c", "changed-identity"], record.path);
   await assert.rejects(provision([makeChild(5, record.path)]), /branch\/path identity changed/);
   await git(["switch", record.branch], record.path);

@@ -137,6 +137,55 @@ export function recordedWorktreeOwner(record: OwnedWorktree) {
 }
 const save = saveOwnedWorktree;
 const queues: Map<string, Promise<unknown>> = (globalThis as any).__piWorktreeRegistryWritesV1 ??= new Map();
+const repositoryAllocations: Map<string, Promise<void>> = (globalThis as any).__piWorktreeAllocationsV1 ??= new Map();
+async function acquireRepositoryAllocation(repository: string, signal?: AbortSignal) {
+  await fs.mkdir(registry(), { recursive: true, mode: 0o700 });
+  const state = await fs.lstat(registry());
+  if (!state.isDirectory() || state.isSymbolicLink() || (state.mode & 0o777) !== 0o700 || state.uid !== process.getuid?.()) throw new Error("Worktree ownership registry unavailable");
+  const lock = join(registry(), `allocation-${createHash("sha256").update(repository).digest("hex")}.lock`);
+  const deadline = Date.now() + 60_000;
+  while (true) {
+    signal?.throwIfAborted();
+    try {
+      await fs.mkdir(lock, { mode: 0o700 });
+      const identity = await fs.lstat(lock);
+      if (!identity.isDirectory() || identity.isSymbolicLink() || (identity.mode & 0o777) !== 0o700 || identity.uid !== process.getuid?.()) throw new Error("Repository allocation lock identity is unsafe");
+      return async () => {
+        const current = await fs.lstat(lock);
+        if (!current.isDirectory() || current.isSymbolicLink() || current.dev !== identity.dev || current.ino !== identity.ino || current.birthtimeMs !== identity.birthtimeMs) throw new Error("Repository allocation lock identity changed; operator review required");
+        await fs.rmdir(lock);
+      };
+    } catch (error: any) {
+      if (error.code !== "EEXIST") throw error;
+      let existing;
+      try { existing = await fs.lstat(lock); }
+      catch (inspectError: any) { if (inspectError.code === "ENOENT") continue; throw inspectError; }
+      if (!existing.isDirectory() || existing.isSymbolicLink() || (existing.mode & 0o777) !== 0o700 || existing.uid !== process.getuid?.()) throw new Error("Repository allocation lock is unsafe; operator review required");
+      if (Date.now() >= deadline) throw new Error("Repository allocation is locked; wait or review interrupted operation (stale locks are never stolen)");
+      await new Promise(resolve => setTimeout(resolve, 50));
+    }
+  }
+}
+async function withRepositoryAllocations<T>(repositories: string[], signal: AbortSignal | undefined, action: () => Promise<T>): Promise<T> {
+  const releases: (() => void)[] = [];
+  for (const repository of [...new Set(repositories)].sort()) {
+    const previous = repositoryAllocations.get(repository) ?? Promise.resolve();
+    let unlock!: () => void;
+    const gate = new Promise<void>(resolve => { unlock = resolve; });
+    const tail = previous.then(() => gate);
+    repositoryAllocations.set(repository, tail);
+    await previous;
+    releases.push(() => { unlock(); if (repositoryAllocations.get(repository) === tail) repositoryAllocations.delete(repository); });
+  }
+  const diskReleases: (() => Promise<void>)[] = [];
+  try {
+    for (const repository of [...new Set(repositories)].sort()) diskReleases.push(await acquireRepositoryAllocation(repository, signal));
+    return await action();
+  } finally {
+    try { for (const release of diskReleases.reverse()) await release(); }
+    finally { for (const release of releases.reverse()) release(); }
+  }
+}
 export async function serialized<T>(owner: string, taskId: string, action: () => Promise<T>): Promise<T> {
   const key = recordFile(owner, taskId), previous = queues.get(key) ?? Promise.resolve();
   const next = previous.catch(() => undefined).then(async () => {
@@ -246,8 +295,7 @@ function within(root: string, path: string) {
 }
 function attachContext(child: Child, record: OwnedWorktree) {
   const note = `[Isolated worktree]\nWork in ${record.path} on branch ${record.branch}. The source checkout ${record.repo} is separate and must remain unchanged. Treat paths referring to that checkout as references; make your edits in this worktree. Retain the worktree and branch for parent review; do not merge or remove them automatically.`;
-  const prior = (child.spec.systemPrompt ?? "").replace(/\n\n\[Isolated worktree\]\nWork in [^\n]+ on branch [^\n]+\.[\s\S]*?do not merge or remove them automatically\./g, "");
-  if (!prior.endsWith(note)) child.spec.systemPrompt = [prior, note].filter(Boolean).join("\n\n");
+  if (!child.spec.systemPrompt?.includes(note)) child.spec.systemPrompt = [child.spec.systemPrompt, note].filter(Boolean).join("\n\n");
 }
 function worktreeInfo(record: OwnedWorktree, borrowed = false): WorktreeInfo {
   return { path: record.path, branch: record.branch, baseCommit: record.baseCommit, includedChanges: record.includedChanges,
@@ -315,6 +363,20 @@ export async function provisionWorktrees(children: Child[], owner: string, signa
   }
 }
 async function provision(children: Child[], owner: string, signal: AbortSignal | undefined, current: () => boolean, resume: boolean, supervision?: WorkerWorktreeContext, previousChildId?: string, activity?: WorktreeReuseActivity) {
+  const requested = children.filter(child => child.spec.worktree !== undefined && child.spec.worktree !== false);
+  if (resume || !requested.length) return provisionUnlocked(children, owner, signal, current, resume, supervision, previousChildId, activity);
+  const repositories: string[] = [];
+  for (const child of requested) {
+    worktreeOption(child.spec.worktree);
+    const sourceCwd = await fs.realpath(child.spec.cwd!);
+    let repo: string;
+    try { repo = await currentWorktreePath(gitClient(), sourceCwd, signal); }
+    catch (error) { throw new Error(`Automatic worktree requires a Git repository cwd; discover/select its repository first, or set worktree:false for intentional non-Git work. ${String(error)}`); }
+    repositories.push((await worktreeGit(["rev-parse", "--path-format=absolute", "--git-common-dir"], repo, signal)).trim());
+  }
+  return withRepositoryAllocations(repositories, signal, () => provisionUnlocked(children, owner, signal, current, resume, supervision, previousChildId, activity));
+}
+async function provisionUnlocked(children: Child[], owner: string, signal: AbortSignal | undefined, current: () => boolean, resume: boolean, supervision?: WorkerWorktreeContext, previousChildId?: string, activity?: WorktreeReuseActivity) {
   const requested = children.filter(child => child.spec.worktree !== undefined && child.spec.worktree !== false);
   if (!requested.length) return;
   if (resume) {
@@ -401,41 +463,21 @@ async function provision(children: Child[], owner: string, signal: AbortSignal |
       includedChanges: !!delta, createdAt: new Date().toISOString(), released: false, state: "preparing" };
     attachContext(child, record);
     if (Buffer.byteLength(child.spec.systemPrompt ?? "") > 64 * 1024) throw new Error("System prompt plus worktree context exceeds the worker limit");
-    plans.push({ child, record, choice, delta, head, baseBranch });
+    plans.push({ child, record, choice, delta, head });
   }
   const created: OwnedWorktree[] = [];
   try {
     for (const plan of plans) await serialized(owner, plan.record.taskId, async () => {
       if (signal?.aborted || !current()) throw new Error("Worktree launch context changed");
-      const { record, delta, choice, baseBranch } = plan;
+      const { record, delta, choice } = plan;
       const now = await worktreeGit(["status", "--porcelain=v1", "-z", "--untracked-files=all", "--ignore-submodules=none"], record.repo, signal);
       if (now && (!choice.changes || (choice.changes === "include" && !delta))) throw new Error("Repository became dirty during preparation; retry with an explicit include or exclude choice");
       if (delta && ((await resolveCommit(gitClient(), record.repo, "HEAD", signal)) !== plan.head || (await capture(record.repo, signal)).digest !== delta.digest)) throw new Error("Source changes moved during snapshot preparation");
       await save(record); created.push(record);
-      let added = false;
-      for (let collisionAttempt = 0; collisionAttempt < 16; collisionAttempt++) {
-        if (signal?.aborted || !current()) throw new Error("Worktree launch context changed");
-        try {
-          await addWorktree(gitClient(), record.repo, { path: record.path, branch: record.branch, startOid: record.baseCommit }, signal);
-          added = true; break;
-        } catch (error) {
-          const refreshedRefs = (await worktreeGit(["for-each-ref", "--format=%(refname:strip=2)", "refs/heads"], record.repo, signal)).split(/\r?\n/).filter(Boolean);
-          const refreshedTrees = await listWorktrees(gitClient(), record.repo, signal);
-          const branchOccupied = !!branchConflicts([...refreshedRefs, ...refreshedTrees.flatMap(row => row.branch ? [row.branch] : [])], record.branch);
-          const pathOccupied = pathEntryExists(record.path);
-          if (!branchOccupied && !pathOccupied) throw error;
-          const refsAndTrees = [...refreshedRefs, ...refreshedTrees.flatMap(row => row.branch ? [row.branch] : [])];
-          const next = availableBranchCandidates(baseBranch).find(candidate => !branchConflicts(refsAndTrees, candidate)
-            && !pathEntryExists(defaultWorktreePath(refreshedTrees[0]?.path ?? record.repo, candidate, settings.effectiveRoot))
-            && !unresolvableSymlinkAncestor(defaultWorktreePath(refreshedTrees[0]?.path ?? record.repo, candidate, settings.effectiveRoot)));
-          if (!next) throw new Error(`Concurrent worktree creation occupied all safe candidates for ${baseBranch}; original error: ${String(error)}`);
-          record.branch = next;
-          record.path = defaultWorktreePath(refreshedTrees[0]?.path ?? record.repo, next, settings.effectiveRoot);
-          record.cwd = join(record.path, relative(record.repo, plan.child.spec.cwd!));
-          await save(record);
-        }
-      }
-      if (!added) throw new Error(`Concurrent worktree creation did not converge on a free branch/path for ${baseBranch}`);
+      if (signal?.aborted || !current()) throw new Error("Worktree launch context changed");
+      // Repository-scoped allocation is held from ref/path inspection through this mutation.
+      // Any Git failure is ambiguous: retain this exact preparing record as failed and never re-plan.
+      await addWorktree(gitClient(), record.repo, { path: record.path, branch: record.branch, startOid: record.baseCommit }, signal);
       const target = await fs.lstat(record.path);
       if (!target.isDirectory() || target.isSymbolicLink() || !(await listWorktrees(gitClient(), record.repo, signal)).some(row => row.path === record.path && row.branch === record.branch)) throw new Error("Created worktree identity changed");
       const adminStat = await fs.stat((await worktreeGit(["rev-parse", "--path-format=absolute", "--git-dir"], record.path, signal)).trim());
