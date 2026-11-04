@@ -204,30 +204,41 @@ async function capture(repo: string, signal?: AbortSignal) {
 }
 type Child = { taskId: string; childId: string; spec: { task: string; name?: string; displayName?: string; cwd?: string; systemPrompt?: string; worktree?: WorktreeOption; worktreeInfo?: WorktreeInfo } };
 function branchSlug(value: string): string {
-  return value.normalize("NFKD").replace(/[\u0300-\u036f]/g, "").toLowerCase()
-    .replace(/(?<=\d)\.(?=\d)/g, "~").replace(/[^a-z0-9~]+/g, "-").replace(/~/g, ".")
-    .replace(/^-+|-+$/g, "").replace(/-+/g, "-").slice(0, 72).replace(/-+$/g, "") || "work";
+  const slug = value.normalize("NFKD").replace(/[\u0300-\u036f]/g, "").toLowerCase()
+    .replace(/(?<=\d)\.(?=\d)/g, ".").replace(/[^a-z0-9.]+/g, "-")
+    .replace(/\.{2,}/g, "-").replace(/^[.-]+|[.-]+$/g, "").replace(/-+/g, "-")
+    .slice(0, 72).replace(/[.-]+$/g, "");
+  return slug || "work";
+}
+function conciseTaskSubject(value: string): string {
+  const line = value.trim().split(/\r?\n/, 1)[0].split(/(?<=[.!?])\s+(?=[A-Z])/u, 1)[0].split(/\s+[—–;]\s+/u, 1)[0];
+  return line.split(/\s+/u).slice(0, 7).join(" ");
 }
 /** Human-facing branch suggestion; opaque ownership IDs stay only in registry metadata. */
 export function descriptiveWorktreeBranch(spec: { task: string; displayName?: string; name?: string }, override?: string): string {
   if (override !== undefined) return override;
   const task = spec.task.trim();
-  const feature = /^(implement|add|create|build|introduce)\b[\s:,-]*/i.exec(task);
-  if (feature) return `feat/${branchSlug(task.slice(feature[0].length))}`;
-  const fix = /^(fix|repair|resolve)\b[\s:,-]*/i.exec(task);
-  if (fix) return `fix/${branchSlug(task.slice(fix[0].length))}`;
-  const upgrade = /^(upgrade|bump|update)\b[\s:,-]*/i.exec(task);
-  if (upgrade) return `upgrade/${branchSlug(task.slice(upgrade[0].length).replace(/\bto\s+(?=\d)/i, ""))}`;
-  const docs = /^(document|docs|documentation)\b[\s:,-]*/i.exec(task);
-  if (docs) return `docs/${branchSlug(task.slice(docs[0].length))}`;
+  const intent = /^(implement|add|create|build|introduce|fix|repair|resolve|upgrade|bump|update|document|docs|documentation)\b[\s:,-]*/i.exec(task);
+  const intentWord = intent?.[1].toLowerCase();
+  const prefix = intentWord && /^(implement|add|create|build|introduce)$/.test(intentWord) ? "feat"
+    : intentWord && /^(fix|repair|resolve)$/.test(intentWord) ? "fix"
+    : intentWord && /^(upgrade|bump|update)$/.test(intentWord) ? "upgrade"
+    : intentWord ? "docs" : undefined;
   const display = spec.displayName?.trim();
-  if (display && !/^(worker|subagent|agent)$/i.test(display)) return branchSlug(display);
   const legacy = spec.name?.trim();
-  if (legacy && !/^(worker|subagent|agent)$/i.test(legacy)) return branchSlug(legacy);
-  return branchSlug(task);
+  const subject = display && !/^(worker|subagent|agent)$/i.test(display) ? display
+    : legacy && !/^(worker|subagent|agent)$/i.test(legacy) ? legacy
+    : conciseTaskSubject(intent ? task.slice(intent[0].length).replace(/\bto\s+(?=\d)/i, "") : task);
+  const slug = branchSlug(subject);
+  return prefix ? `${prefix}/${slug}` : slug;
 }
-function branchExists(existing: string[], candidate: string) {
-  return existing.some(branch => branch === candidate || branch.startsWith(`${candidate}/`) || candidate.startsWith(`${branch}/`));
+function branchConflicts(existing: Iterable<string>, candidate: string) {
+  for (const branch of existing) if (branch === candidate || branch.startsWith(`${candidate}/`) || candidate.startsWith(`${branch}/`)) return branch;
+  return undefined;
+}
+function availableBranchCandidates(base: string): string[] {
+  const stems = [base, ...(base.includes("/") ? [base.replaceAll("/", "-")] : [])];
+  return stems.flatMap(stem => Array.from({ length: 32 }, (_, index) => index === 0 ? stem : `${stem}-${index + 1}`));
 }
 function within(root: string, path: string) {
   const part = relative(root, path);
@@ -235,7 +246,8 @@ function within(root: string, path: string) {
 }
 function attachContext(child: Child, record: OwnedWorktree) {
   const note = `[Isolated worktree]\nWork in ${record.path} on branch ${record.branch}. The source checkout ${record.repo} is separate and must remain unchanged. Treat paths referring to that checkout as references; make your edits in this worktree. Retain the worktree and branch for parent review; do not merge or remove them automatically.`;
-  if (!child.spec.systemPrompt?.includes(note)) child.spec.systemPrompt = [child.spec.systemPrompt, note].filter(Boolean).join("\n\n");
+  const prior = (child.spec.systemPrompt ?? "").replace(/\n\n\[Isolated worktree\]\nWork in [^\n]+ on branch [^\n]+\.[\s\S]*?do not merge or remove them automatically\./g, "");
+  if (!prior.endsWith(note)) child.spec.systemPrompt = [prior, note].filter(Boolean).join("\n\n");
 }
 function worktreeInfo(record: OwnedWorktree, borrowed = false): WorktreeInfo {
   return { path: record.path, branch: record.branch, baseCommit: record.baseCommit, includedChanges: record.includedChanges,
@@ -367,15 +379,16 @@ async function provision(children: Child[], owner: string, signal: AbortSignal |
     // Validate the unmodified requested intent before adding a readable collision suffix.
     const baseBranch = await validateBranch(gitClient(), repo, suggestion, signal);
     const refs = (await worktreeGit(["for-each-ref", "--format=%(refname:strip=2)", "refs/heads"], repo, signal)).split(/\r?\n/).filter(Boolean);
-    let branch = baseBranch, path = "";
-    for (let suffix = 1; ; suffix++) {
-      const candidate = suffix === 1 ? baseBranch : `${baseBranch}-${suffix}`;
-      if (branchExists(refs, candidate) || records.some(row => row.branch === candidate) || reservedBranches.has(candidate)) continue;
+    let branch: string | undefined, path: string | undefined;
+    const occupiedBranches = [...refs, ...records.flatMap(row => row.branch ? [row.branch] : [])];
+    for (const candidate of availableBranchCandidates(baseBranch)) {
+      if (branchConflicts([...occupiedBranches, ...reservedBranches], candidate)) continue;
       const candidatePath = defaultWorktreePath(records[0]?.path ?? repo, candidate, settings.effectiveRoot);
       if (unresolvableSymlinkAncestor(candidatePath)) throw new Error(`Unsafe symlink ancestor for worktree target: ${candidatePath}`);
       if (pathEntryExists(candidatePath) || reservedPaths.has(candidatePath)) continue;
       branch = candidate; path = candidatePath; reservedBranches.add(branch); reservedPaths.add(path); break;
     }
+    if (!branch || !path) throw new Error(`No safe branch/path available for ${baseBranch}; namespace conflicts or all bounded candidate paths are occupied`);
     let ancestor = dirname(path); const pathSuffix = [basename(path)];
     while (!pathEntryExists(ancestor)) { pathSuffix.unshift(basename(ancestor)); ancestor = dirname(ancestor); }
     path = join(await fs.realpath(ancestor), ...pathSuffix);
@@ -388,19 +401,41 @@ async function provision(children: Child[], owner: string, signal: AbortSignal |
       includedChanges: !!delta, createdAt: new Date().toISOString(), released: false, state: "preparing" };
     attachContext(child, record);
     if (Buffer.byteLength(child.spec.systemPrompt ?? "") > 64 * 1024) throw new Error("System prompt plus worktree context exceeds the worker limit");
-    plans.push({ child, record, choice, delta, head });
+    plans.push({ child, record, choice, delta, head, baseBranch });
   }
   const created: OwnedWorktree[] = [];
   try {
     for (const plan of plans) await serialized(owner, plan.record.taskId, async () => {
       if (signal?.aborted || !current()) throw new Error("Worktree launch context changed");
-      const { record, delta, choice } = plan;
+      const { record, delta, choice, baseBranch } = plan;
       const now = await worktreeGit(["status", "--porcelain=v1", "-z", "--untracked-files=all", "--ignore-submodules=none"], record.repo, signal);
       if (now && (!choice.changes || (choice.changes === "include" && !delta))) throw new Error("Repository became dirty during preparation; retry with an explicit include or exclude choice");
       if (delta && ((await resolveCommit(gitClient(), record.repo, "HEAD", signal)) !== plan.head || (await capture(record.repo, signal)).digest !== delta.digest)) throw new Error("Source changes moved during snapshot preparation");
       await save(record); created.push(record);
-      if (signal?.aborted || !current()) throw new Error("Worktree launch context changed");
-      await addWorktree(gitClient(), record.repo, { path: record.path, branch: record.branch, startOid: record.baseCommit }, signal);
+      let added = false;
+      for (let collisionAttempt = 0; collisionAttempt < 16; collisionAttempt++) {
+        if (signal?.aborted || !current()) throw new Error("Worktree launch context changed");
+        try {
+          await addWorktree(gitClient(), record.repo, { path: record.path, branch: record.branch, startOid: record.baseCommit }, signal);
+          added = true; break;
+        } catch (error) {
+          const refreshedRefs = (await worktreeGit(["for-each-ref", "--format=%(refname:strip=2)", "refs/heads"], record.repo, signal)).split(/\r?\n/).filter(Boolean);
+          const refreshedTrees = await listWorktrees(gitClient(), record.repo, signal);
+          const branchOccupied = !!branchConflicts([...refreshedRefs, ...refreshedTrees.flatMap(row => row.branch ? [row.branch] : [])], record.branch);
+          const pathOccupied = pathEntryExists(record.path);
+          if (!branchOccupied && !pathOccupied) throw error;
+          const refsAndTrees = [...refreshedRefs, ...refreshedTrees.flatMap(row => row.branch ? [row.branch] : [])];
+          const next = availableBranchCandidates(baseBranch).find(candidate => !branchConflicts(refsAndTrees, candidate)
+            && !pathEntryExists(defaultWorktreePath(refreshedTrees[0]?.path ?? record.repo, candidate, settings.effectiveRoot))
+            && !unresolvableSymlinkAncestor(defaultWorktreePath(refreshedTrees[0]?.path ?? record.repo, candidate, settings.effectiveRoot)));
+          if (!next) throw new Error(`Concurrent worktree creation occupied all safe candidates for ${baseBranch}; original error: ${String(error)}`);
+          record.branch = next;
+          record.path = defaultWorktreePath(refreshedTrees[0]?.path ?? record.repo, next, settings.effectiveRoot);
+          record.cwd = join(record.path, relative(record.repo, plan.child.spec.cwd!));
+          await save(record);
+        }
+      }
+      if (!added) throw new Error(`Concurrent worktree creation did not converge on a free branch/path for ${baseBranch}`);
       const target = await fs.lstat(record.path);
       if (!target.isDirectory() || target.isSymbolicLink() || !(await listWorktrees(gitClient(), record.repo, signal)).some(row => row.path === record.path && row.branch === record.branch)) throw new Error("Created worktree identity changed");
       const adminStat = await fs.stat((await worktreeGit(["rev-parse", "--path-format=absolute", "--git-dir"], record.path, signal)).trim());

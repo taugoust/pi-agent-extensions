@@ -19,7 +19,7 @@ const { registerWorktreeCommand } = await import("../workflows/worktree/command.
 const fixturePids = new Set([String(process.pid)]), realReaddir = fs.readdir.bind(fs);
 fs.readdir = async (path, ...args) => path === "/proc" ? [...fixturePids] : realReaddir(path, ...args);
 const task = "subagent-task-" + "a".repeat(24), owner = "fixture-owner";
-async function fixture(action) {
+async function fixture(action, branch = "pi/fixture") {
   const root = await fs.mkdtemp(join(tmpdir(), "pi-completion-fixture-"));
   process.env.PI_WORKTREE_FIXTURE_AGENT_DIR = join(root, "agent");
   try {
@@ -27,25 +27,30 @@ async function fixture(action) {
     await git(["init", "-b", "main"], repo); await git(["config", "user.email", "fixture@example.invalid"], repo); await git(["config", "user.name", "Fixture"], repo);
     await fs.writeFile(join(repo, "tracked"), "fixture\n"); await fs.writeFile(join(repo, ".gitignore"), "ignored\n");
     await git(["add", "."], repo); await git(["commit", "-m", "fixture"], repo);
-    await git(["worktree", "add", "-b", "feat/fixture-work", path], repo);
+    await git(["worktree", "add", "-b", branch, path], repo);
     const commonDir = (await git(["rev-parse", "--path-format=absolute", "--git-common-dir"], repo)).trim();
     const admin = (await git(["rev-parse", "--path-format=absolute", "--git-dir"], path)).trim(), stat = await fs.stat(admin);
-    const row = { version: 1, ownerSessionId: owner, taskId: task, childId: "subagent-child-" + "b".repeat(24), title: "fixture", repo, commonDir, path, cwd: path, branch: "feat/fixture-work", baseCommit: (await git(["rev-parse", "HEAD"], path)).trim(), includedChanges: false, createdAt: new Date().toISOString(), released: true, state: "ready", physicalIdentity: { dev: String(stat.dev), ino: String(stat.ino), birthtimeMs: String(stat.birthtimeMs) } };
+    const row = { version: 1, ownerSessionId: owner, taskId: task, childId: "subagent-child-" + "b".repeat(24), title: "fixture", repo, commonDir, path, cwd: path, branch, baseCommit: (await git(["rev-parse", "HEAD"], path)).trim(), includedChanges: false, createdAt: new Date().toISOString(), released: true, state: "ready", physicalIdentity: { dev: String(stat.dev), ino: String(stat.ino), birthtimeMs: String(stat.birthtimeMs) } };
     await saveOwnedWorktree(row);
     const ctx = { cwd: repo, sessionManager: { getSessionId: () => owner }, isIdle: () => true, hasPendingMessages: () => false };
     const host = ownedWorktreeCompletionHost(ctx, async () => ({ active: false, retained: false }));
     await action({ root, repo, path, row, ctx, host });
   } finally { delete process.env.PI_WORKTREE_FIXTURE_AGENT_DIR; await fs.rm(root, { recursive: true, force: true }); }
 }
-test("real Git lifecycle removes only fixture checkout and completed branch; durable marker survives", () => fixture(async f => {
+test("real Git lifecycle removes legacy pi fixture checkout and completed branch; durable marker survives", () => fixture(async f => {
   await mark(f.host, task, "Owner reviewed fixture output");
   assert.equal((await cleanup(f.host, task)).phase, "cleaned");
   await assert.rejects(fs.stat(f.path), { code: "ENOENT" });
-  assert.equal((await git(["branch", "--list", "feat/fixture-work"], f.repo)).trim(), "");
+  assert.equal((await git(["branch", "--list", f.row.branch], f.repo)).trim(), "");
   assert.equal((await cleanup(f.host, task)).phase, "cleaned");
   assert.equal((await ownedWorktrees(owner))[0].completion.decidedBySessionId, owner);
   assert.ok(await fs.stat(f.repo));
 }));
+test("descriptive registered branch retains completion and cleanup identity checks", () => fixture(async f => {
+  await mark(f.host, task, "Owner reviewed descriptive fixture output");
+  assert.equal((await cleanup(f.host, task)).phase, "cleaned");
+  assert.equal((await git(["branch", "--list", f.row.branch], f.repo)).trim(), "");
+}, "feat/fixture-work"));
 for (const artifact of ["untracked", "ignored"]) test(`${artifact} fixture artifact blocks deletion`, () => fixture(async f => {
   await mark(f.host, task, "Reviewed"); await fs.writeFile(join(f.path, artifact), "valuable");
   assert.match((await cleanup(f.host, task)).blockedReason, /remaining files/);
@@ -58,8 +63,8 @@ test("advance then reset to same OID remains blocked by ref history", () => fixt
 }));
 test("deleted and recreated branch at the same OID is not the completed ref", () => fixture(async f => {
   const marker = await mark(f.host, task, "Reviewed");
-  await git(["update-ref", "-d", "refs/heads/feat/fixture-work", marker.branchOid], f.repo);
-  await git(["update-ref", "--create-reflog", "refs/heads/feat/fixture-work", marker.branchOid], f.repo);
+  await git(["update-ref", "-d", `refs/heads/${f.row.branch}`, marker.branchOid], f.repo);
+  await git(["update-ref", "--create-reflog", `refs/heads/${f.row.branch}`, marker.branchOid], f.repo);
   assert.match((await cleanup(f.host, task)).blockedReason, /history changed/);
   assert.ok(await fs.stat(f.path));
 }));
@@ -78,7 +83,7 @@ test("foreign owner and explicit retention are rejected", () => fixture(async f 
   assert.match((await cleanup(f.host, task)).blockedReason, /retention/);
 }));
 test("replaced checkout administrative identity blocks cleanup", () => fixture(async f => {
-  await mark(f.host, task, "Reviewed"); await git(["worktree", "remove", f.path], f.repo); await git(["worktree", "add", f.path, "feat/fixture-work"], f.repo);
+  await mark(f.host, task, "Reviewed"); await git(["worktree", "remove", f.path], f.repo); await git(["worktree", "add", f.path, f.row.branch], f.repo);
   assert.match((await cleanup(f.host, task)).blockedReason, /identity changed/);
   assert.ok(await fs.stat(f.path));
 }));
@@ -136,7 +141,7 @@ test("failed worker/crash evidence and unavailable verified source remain retain
 }));
 test("branch checked out at another linked path blocks cleanup", () => fixture(async f => {
   await mark(f.host, task, "Reviewed"); await git(["checkout", "--detach"], f.path);
-  await git(["worktree", "add", join(f.root, "linked"), "feat/fixture-work"], f.repo);
+  await git(["worktree", "add", join(f.root, "linked"), f.row.branch], f.repo);
   assert.match((await cleanup(f.host, task)).blockedReason, /identity changed/); assert.ok(await fs.stat(f.path));
 }));
 test("actual harness provisioning/release interoperates with completion and refuses completed resume", () => fixture(async f => {

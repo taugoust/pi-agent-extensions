@@ -89,6 +89,8 @@ export function ownedWorktreeCompletionHost(ctx: CompletionContext, safety: Comp
     let exists = true;
     try { const stat = await fs.lstat(r.path); if (!stat.isDirectory() || stat.isSymbolicLink()) throw new Error("Worktree path replaced"); }
     catch (error: any) { if (error.code === "ENOENT") exists = false; else throw error; }
+    // The authenticated exact registry owner/task/child record is the provenance boundary;
+    // `pi/` was only the legacy naming convention, not an ownership credential.
     if (!isAbsolute(r.path) || !r.branch || r.path === r.repo || !r.physicalIdentity) throw new Error("Harness worktree provenance unavailable");
     if (await fs.realpath(r.commonDir) !== r.commonDir) throw new Error("Repository identity changed");
     let repository = r.repo;

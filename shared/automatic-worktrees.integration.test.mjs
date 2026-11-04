@@ -55,23 +55,60 @@ test("trusted spawning-parent profile policy is independent of child selection, 
 }));
 
 test("descriptive branch suggestions prefer displayName, support legacy names and task intent", () => {
+  assert.equal(descriptiveWorktreeBranch({ task: "Implement a large multi-paragraph change with unrelated instructions", displayName: "Saved Goal Checklist", name: "legacy-name" }), "feat/saved-goal-checklist");
   assert.equal(descriptiveWorktreeBranch({ task: "Review bounded implementation", displayName: "Saved Goal Checklist", name: "legacy-name" }), "saved-goal-checklist");
   assert.equal(descriptiveWorktreeBranch({ task: "Review bounded implementation", name: "legacy-name" }), "legacy-name");
   assert.equal(descriptiveWorktreeBranch({ task: "Upgrade Paseo to 0.15.0", name: "worker" }), "upgrade/paseo-0.15.0");
   assert.equal(descriptiveWorktreeBranch({ task: "Implement saved goal checklist", name: "worker" }), "feat/saved-goal-checklist");
   assert.equal(descriptiveWorktreeBranch({ task: "Fix worktree cleanup", displayName: "Worker" }), "fix/worktree-cleanup");
+  assert.equal(descriptiveWorktreeBranch({ task: "Fix parser cleanup. Then follow these unrelated instructions." }), "fix/parser-cleanup");
   assert.equal(descriptiveWorktreeBranch({ task: "Anything", displayName: "Review", name: "ignored" }, "fix/exact-name"), "fix/exact-name");
+  for (const subject of ["literal~tilde", "version 0.15.0", "ellipsis...tail", "éclair", "...", "a".repeat(100)]) {
+    const branch = descriptiveWorktreeBranch({ task: "Review", displayName: subject });
+    assert.doesNotMatch(branch, /[~\s]|\.\.|[.-]$/);
+  }
 });
 
 test("invalid explicit branch names fail before registry mutation; collisions get readable suffixes", async () => fixture(async ({ repo }) => {
-  await assert.rejects(provision([makeChild(1, repo, { branch: "../foreign" })]), /invalid|branch/i);
-  assert.equal((await ownedWorktrees()).length, 0);
+  for (const branch of ["../foreign", "bad name", "feat/../nested"]) {
+    await assert.rejects(provision([makeChild(1, repo, { branch })]), /invalid|branch/i);
+    assert.equal((await ownedWorktrees()).length, 0);
+  }
   await git(["branch", "feat/saved-goal-checklist"], repo);
   const child = makeChild(2, repo, { branch: "feat/saved-goal-checklist" });
   child.spec.displayName = "Saved Goal Checklist";
   await provision([child]);
   assert.equal(child.spec.worktreeInfo.branch, "feat/saved-goal-checklist-2");
   assert.equal((await git(["rev-parse", "feat/saved-goal-checklist"], repo)).trim(), (await git(["rev-parse", "HEAD"], repo)).trim(), "foreign existing branch remains untouched");
+}));
+
+test("parent refs, same-batch prefix conflicts, occupied paths and remote refs are handled safely", async () => fixture(async ({ repo, root }) => {
+  await git(["branch", "feat"], repo);
+  const nested = makeChild(11, repo, { branch: "feat/saved" }); await provision([nested]);
+  assert.equal(nested.spec.worktreeInfo.branch, "feat-saved", "parent ref namespace falls back to a flattened readable name");
+
+  const [parent, child] = [makeChild(12, repo, { branch: "fix" }), makeChild(13, repo, { branch: "fix/cleanup" })];
+  await provision([parent, child]);
+  assert.notEqual(parent.spec.worktreeInfo.branch, child.spec.worktreeInfo.branch);
+  assert.equal(parent.spec.worktreeInfo.branch, "fix");
+  assert.equal(child.spec.worktreeInfo.branch, "fix-cleanup");
+
+  await git(["update-ref", "refs/remotes/origin/docs/guide", "HEAD"], repo);
+  const remote = makeChild(14, repo, { branch: "docs/guide" }); await provision([remote]);
+  assert.equal(remote.spec.worktreeInfo.branch, "docs/guide", "remote-tracking refs do not occupy local branch names");
+
+  const pathRoot = join(root, "trees", "source"); await fs.mkdir(pathRoot, { recursive: true });
+  await fs.mkdir(join(pathRoot, "path-collision"));
+  const occupiedPath = makeChild(15, repo, { branch: "path-collision" }); await provision([occupiedPath]);
+  assert.equal(occupiedPath.spec.worktreeInfo.branch, "path-collision-2");
+}));
+
+test("same-name launches racing in one repository select distinct branches", async () => fixture(async ({ repo }) => {
+  const first = makeChild(21, repo), second = makeChild(22, repo);
+  first.spec.displayName = second.spec.displayName = "Shared Parser Review";
+  await Promise.all([provision([first]), provision([second])]);
+  assert.notEqual(first.spec.worktreeInfo.branch, second.spec.worktreeInfo.branch);
+  assert.equal(new Set((await ownedWorktrees("owner")).map(row => row.branch)).size, 2);
 }));
 
 test("automatic repository provisioning preserves relative cwd and primary checkout; false permits non-Git", async () => fixture(async ({ repo, root }) => {
@@ -94,8 +131,13 @@ test("new dirty sources never imply include/exclude; explicit objects retain new
   assert.equal(await fs.readFile(join(repo, "partial"), "utf8"), "do not guess\n");
 }));
 
-test("replacement and resumed borrowers preserve dirty staged/untracked partial work in place across reload", async () => fixture(async ({ repo }) => {
+test("replacement and resumed borrowers preserve dirty work and legacy pi branches across reload", async () => fixture(async ({ repo }) => {
   const creator = makeChild(1, repo); await provision([creator]); const path = creator.spec.worktreeInfo.path;
+  const legacyBranch = "pi/legacy-resume";
+  await git(["branch", "-m", creator.spec.worktreeInfo.branch, legacyBranch], path);
+  const registered = (await ownedWorktrees("owner"))[0];
+  await saveOwnedWorktree({ ...registered, branch: legacyBranch });
+  creator.spec.worktreeInfo.branch = legacyBranch;
   await fs.writeFile(join(path, "sub", "tracked"), "staged partial\n"); await git(["add", "sub/tracked"], path);
   await fs.writeFile(join(path, "untracked"), "retained\n");
   await assert.rejects(provision([makeChild(2, path)]), /creator is still attached/);
