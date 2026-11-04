@@ -7,6 +7,7 @@ import { validateGoalReview, mergeGoalReview, type GoalReviewReference } from ".
 import { validateGoalLimitOverrides, type GoalContinuationLimits } from "../shared/delegated-goal-policy.ts";
 import { completionSummaryRejection } from './goal/completion-summary.ts';
 import { DelegatedGoalNoEffectError } from "../shared/delegated-goal-errors.ts";
+import { mutateSavedGoalTasks, savedGoalTaskText } from "./saved-goal-tasks.ts";
 
 export { DEDICATED_GOAL_LIMITS } from "../shared/delegated-goal-policy.ts";
 
@@ -27,7 +28,7 @@ export type DelegatedGoalEntry = {
   observation?: { state: "current" | "unavailable"; at?: number; reason?: string };
 };
 export type DelegatedGoals = { version: 1; revision: number; entries: DelegatedGoalEntry[] };
-export type DelegatedGoalAction = "goals.create" | "goals.start" | "goals.pause" | "goals.resume" | "goals.edit" | "goals.limits" | "goals.clear" | "goals.complete" | "goals.add_task" | "goals.answer" | "goals.reference" | GoalPlanningAction;
+export type DelegatedGoalAction = "goals.create" | "goals.start" | "goals.pause" | "goals.resume" | "goals.edit" | "goals.limits" | "goals.clear" | "goals.complete" | "goals.add_task" | "goals.tasks" | "goals.answer" | "goals.reference" | GoalPlanningAction;
 export type DelegatedGoalRequest = {
   action: DelegatedGoalAction; requestId: string; expectedGoalId: string | null;
   expectedEntryRevision?: number; expectedPolicyRevision?: number; expectedRegistryRevision?: number;
@@ -41,6 +42,8 @@ export type DelegatedGoalRequest = {
   user_authorized?: boolean; summary?: string;
   /** Explicit parent verification for existing tasks; never an implicit blanket completion. */
   taskEvidence?: Array<{ taskId: string; evidence: string }>;
+  taskEdits?: Array<{ id?: string; text?: string; before_task_id?: string | null }>;
+  removeTaskIds?: string[];
 };
 /** Child execution is deliberately injected: this registry never runs a parent goal. */
 export type DelegatedGoalObservation = Partial<Pick<DelegatedGoalEntry, "status" | "tasks" | "tokensUsed" | "automaticTurns" | "noProgressTurns" | "summary" | "waiting" | "story" | "diagnostics" | "review">>;
@@ -75,7 +78,7 @@ function controlFingerprint(entry: DelegatedGoalEntry) {
 }
 function nextStatus(entry: DelegatedGoalEntry, status: GoalStatus) { return resolveGoalTransitionStatus(goalRecord(entry), status); }
 function checklist(previous: DelegatedGoalEntry["tasks"], additions: string[]) {
-  return mergeGoalChecklist(previous, additions.map(text => ({ text: objective(text, 503), status: "pending" as const }))).map(task => ({ ...task, id: task.id! }));
+  return mergeGoalChecklist(previous, additions.map(text => ({ text: savedGoalTaskText(text), status: "pending" as const }))).map(task => ({ ...task, id: task.id! }));
 }
 function objective(value: unknown, max: number) {
   if (typeof value !== "string" || !value.trim() || value.trim().length > max) throw new Error(`Expected text of 1–${max} characters`);
@@ -99,10 +102,10 @@ export function validateDelegatedGoals(state: DelegatedGoals): void {
     validateGoalPlanning(e.planning, e.tasks);
     if (![e.tokensUsed, e.automaticTurns, e.noProgressTurns].every(n => typeof n === "number" && Number.isFinite(n) && n >= 0)) throw new Error("Invalid delegated accounting");
     if (!Array.isArray(e.tasks) || e.tasks.length > 50 || new Set(e.tasks.map(t => t.id)).size !== e.tasks.length) throw new Error("Invalid delegated tasks");
-    if (new Set(e.tasks.map(t => objective(t.text, 503))).size !== e.tasks.length) throw new Error("Goal tasks need distinct descriptions after trimming");
+    if (new Set(e.tasks.map(t => savedGoalTaskText(t.text))).size !== e.tasks.length) throw new Error("Goal tasks need distinct descriptions after trimming");
     for (const task of e.tasks) {
       if (typeof task.id !== "string" || !task.id || task.id.length > 128 || !["pending", "in_progress", "completed", "blocked"].includes(task.status)) throw new Error("Invalid delegated task");
-      objective(task.text, 503);
+      savedGoalTaskText(task.text);
     }
     if (e.child !== null && (!e.child || ![e.child.taskId, e.child.childId, e.child.jobId].every(id => typeof id === "string" && id.length > 0 && id.length <= 128) || !Number.isSafeInteger(e.child.attempt) || e.child.attempt < 1)) throw new Error("Invalid child linkage");
     if (e.child) {
@@ -208,7 +211,7 @@ export class DelegatedGoalRegistry {
     if (this.pending && (r.expectedGoalId === this.pending.entryId ||
       ["goals.start", "goals.resume", "goals.pause"].includes(r.action))) throw new Error(this.blockedReason()!);
     let performedEffect = false;
-    const fields = ["operation", "sessionId", "serviceEpoch", "requestId", "action", "expectedGoalId", ...(r.action === "goals.create" ? ["expectedRegistryRevision", "objective", "tokenBudget", "continuationLimits", "initialTasks"] : [r.action === "goals.limits" ? "expectedPolicyRevision" : "expectedEntryRevision", ...(r.action === "goals.edit" ? ["objective", "tokenBudget", "continuationLimits"] : r.action === "goals.limits" ? ["tokenBudget", "continuationLimits"] : r.action === "goals.add_task" ? ["text"] : r.action === "goals.complete" ? ["user_authorized", "summary", "taskEvidence"] : r.action === "goals.reference" ? ["reviewTitle", "reviewTarget", "reviewRole"] : r.action === "goals.answer" ? ["questionId", "questionRevision", "workerEpoch", "answer"] : [])])];
+    const fields = ["operation", "sessionId", "serviceEpoch", "requestId", "action", "expectedGoalId", ...(r.action === "goals.create" ? ["expectedRegistryRevision", "objective", "tokenBudget", "continuationLimits", "initialTasks"] : [r.action === "goals.limits" ? "expectedPolicyRevision" : "expectedEntryRevision", ...(r.action === "goals.edit" ? ["objective", "tokenBudget", "continuationLimits"] : r.action === "goals.limits" ? ["tokenBudget", "continuationLimits"] : r.action === "goals.add_task" ? ["text"] : r.action === "goals.tasks" ? ["taskEdits", "removeTaskIds"] : r.action === "goals.complete" ? ["user_authorized", "summary", "taskEvidence"] : r.action === "goals.reference" ? ["reviewTitle", "reviewTarget", "reviewRole"] : r.action === "goals.answer" ? ["questionId", "questionRevision", "workerEpoch", "answer"] : [])])];
     fields.push(...goalPlanningFields(r.action));
     if (Object.keys(r).some(key => !fields.includes(key))) throw new Error("Unknown delegated goal request fields");
     if (r.action === "goals.create") {
@@ -371,18 +374,23 @@ export class DelegatedGoalRegistry {
         case "goals.add_task":
           if (entry.status === "active") throw new Error("Pause goal before editing tasks");
           if (entry.tasks.length >= 50) throw new Error("Goal task limit reached");
-          entry.tasks = checklist(entry.tasks, [objective(r.text, 503)]);
+          entry.tasks = checklist(entry.tasks, [savedGoalTaskText(r.text)]);
+          break;
+        case "goals.tasks":
+          if (entry.status === "active") throw new Error("Pause goal before editing tasks");
+          entry.tasks = mutateSavedGoalTasks(entry.tasks, r.taskEdits === undefined ? [] : r.taskEdits, r.removeTaskIds === undefined ? [] : r.removeTaskIds);
+          pruneGoalDependencies(entry.planning, entry.tasks);
           break;
         default: throw new Error("Unknown delegated goal action");
       }
-      entry.policyRevision = (entry.policyRevision ?? 1) + 1;
+      if (r.action !== "goals.tasks") entry.policyRevision = (entry.policyRevision ?? 1) + 1;
       entry.revision++;
     }
     const changed = r.action === "goals.create" ? next.entries.at(-1)! : next.entries.find(entry => entry.id === r.expectedGoalId)!;
     changed.story ??= emptyGoalStory();
-    const kind = ({ "goals.create": "created", "goals.start": "started", "goals.pause": changed.status === "complete" ? "completed" : "paused", "goals.resume": "resumed", "goals.edit": "edited", "goals.limits": "edited", "goals.clear": "cleared", "goals.complete": "completed", "goals.add_task": "task", "goals.answer": undefined, "goals.reference": "edited", "goals.dependencies": "edited", "goals.blocker.add": "edited", "goals.blocker.clear": "edited" } as const)[r.action];
+    const kind = ({ "goals.create": "created", "goals.start": "started", "goals.pause": changed.status === "complete" ? "completed" : "paused", "goals.resume": "resumed", "goals.edit": "edited", "goals.limits": "edited", "goals.clear": "cleared", "goals.complete": "completed", "goals.add_task": "task", "goals.tasks": "edited", "goals.answer": undefined, "goals.reference": "edited", "goals.dependencies": "edited", "goals.blocker.add": "edited", "goals.blocker.clear": "edited" } as const)[r.action];
     const planningText = r.action === "goals.dependencies" ? "Advisory task dependencies updated" : r.action === "goals.blocker.add" ? `Recorded blocker: ${r.blockerReason?.trim()}` : r.action === "goals.blocker.clear" ? `Recorded blocker cleared: ${changed.planning?.blockers.find(blocker => blocker.id === r.blockerId)?.reason}` : undefined;
-    if (r.action !== "goals.answer") recordGoalEvent(changed.story, kind!, planningText ?? (r.action === 'goals.complete' ? `Parent verified completion: ${changed.summary}` : r.action === "goals.add_task" ? `Task added: ${r.text?.trim()}` : `Goal ${kind}`));
+    if (r.action !== "goals.answer") recordGoalEvent(changed.story, kind!, planningText ?? (r.action === 'goals.complete' ? `Parent verified completion: ${changed.summary}` : r.action === "goals.add_task" ? `Task added: ${r.text?.trim()}` : r.action === "goals.tasks" ? "Saved-Goal checklist edited" : `Goal ${kind}`));
     next.revision++;
     next.entries.forEach(normalizeTaskDescriptions);
     validateDelegatedGoals(next);

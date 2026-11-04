@@ -51,6 +51,7 @@ pkgs.runCommand "workflows-immutable-runtime-check"
       ${self}/workflows/delegated-service.test.mjs \
       ${self}/workflows/worktree/repositories.test.ts \
       ${self}/workflows/delegated-goals.test.ts \
+      ${self}/workflows/saved-goal-tasks.test.ts \
       ${self}/workflows/goal-story.test.ts \
       ${self}/workflows/goal-planning.test.ts \
       ${self}/workflows/goal-review.test.ts \

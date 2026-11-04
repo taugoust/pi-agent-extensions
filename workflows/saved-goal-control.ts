@@ -1,6 +1,6 @@
 import type { ExtensionContext } from "@earendil-works/pi-coding-agent";
 
-export const SAVED_GOAL_ACTIONS = ["list", "status", "create", "start", "resume", "pause", "clear", "complete"] as const;
+export const SAVED_GOAL_ACTIONS = ["list", "status", "create", "update", "start", "resume", "pause", "clear", "complete"] as const;
 export type SavedGoalControl = {
 	action: string;
 	scope?: string;
@@ -16,6 +16,8 @@ export type SavedGoalControl = {
 	token_budget?: number;
 	summary?: string;
 	task_evidence?: { task_id: string; evidence: string }[];
+	task_edits?: { id?: string; text?: string; before_task_id?: string | null }[];
+	remove_task_ids?: string[];
 };
 
 /** The harness supplies the context; parameters cannot select another owner. */
@@ -31,18 +33,19 @@ export function validateSavedGoalControl(params: SavedGoalControl): void {
 	const create = params.action === "create";
 	const fields = ["action", "scope", "request_id", "user_authorized", ...(create
 		? ["objective", "steps", "start", "token_budget", "expected_registry_revision"]
-		: ["goal_id", "expected_revision", "summary", "task_evidence", "offset"])];
-	if (Object.keys(params).some(key => !fields.includes(key))) throw new Error("Unsupported saved-Goal fields; current-Goal activation/task controls cannot target saved Goals");
+		: ["goal_id", "expected_revision", "summary", "task_evidence", "offset", "task_edits", "remove_task_ids"])];
+	if (Object.keys(params).some(key => !fields.includes(key))) throw new Error("Unsupported saved-Goal fields; use task_edits for saved checklist changes, not current-Goal activation or steps");
 	if (params.scope !== "saved" || !SAVED_GOAL_ACTIONS.includes(params.action as any)) throw new Error("Unsupported saved-Goal action");
 	const read = params.action === "list" || params.action === "status";
 	if (params.offset !== undefined && (params.action !== "list" || !Number.isSafeInteger(params.offset) || params.offset < 0 || params.offset > 1000)) throw new Error("offset is saved-Goal list-only (0–1000)");
 	if (!create && (params.action === "list" ? params.goal_id !== undefined : typeof params.goal_id !== "string" || !params.goal_id))
 		throw new Error("List omits goal_id; other existing saved-Goal actions require its exact goal_id");
+	if (params.action !== "update" && (params.task_edits !== undefined || params.remove_task_ids !== undefined)) throw new Error("task_edits and remove_task_ids are saved-Goal update-only");
 	if (read) {
 		if ([params.expected_revision, params.request_id, params.user_authorized, params.summary, params.task_evidence].some(value => value !== undefined)) throw new Error("Saved-Goal reads do not accept mutation fields");
 		return;
 	}
-	if (params.user_authorized !== true) throw new Error("Saved-Goal controls require fresh explicit user authorization");
+	if (params.user_authorized !== true) throw new Error("Saved-Goal mutations require fresh explicit user authorization");
 	if (typeof params.request_id !== "string" || !params.request_id.trim() || params.request_id.length > 128) throw new Error("Saved-Goal mutations require a unique request_id");
 	if (create) {
 		if (typeof params.objective !== "string" || !params.objective.trim() || params.objective.length > 320) throw new Error("Saved-Goal creation requires a concise objective (maximum 320 characters)");

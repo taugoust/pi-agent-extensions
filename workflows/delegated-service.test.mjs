@@ -100,6 +100,54 @@ test('direct saved-Goal controls preserve user, automatic-run, owner, revision a
  assert.equal((await f.service.manageSavedGoal({scope:'saved',action:'status',goal_id:e.id},f.ctx)).goal.status,'paused');
 });
 
+test('direct saved checklist updates preserve identities, task statuses and unrelated Goal lifecycle without executing',async t=>{
+ const f=discoveryFixture(t,false);f.runtime.activeGoal={id:'unrelated-current',status:'active',text:'Keep parent running'};const parent=structuredClone(f.runtime.activeGoal);
+ let s=await f.send({action:'goals.create',expectedGoalId:null,objective:'Publish implementation and wait for confirmed merge'}),e=s.delegatedGoals.entries[0];
+ for(const text of ['Implement safe checklist editing','Open only the nix-config pin MR','Wait for explicit user confirmation that the MR merged']){
+  s=await f.send({action:'goals.add_task',expectedGoalId:e.id,expectedEntryRevision:e.revision,text});e=s.delegatedGoals.entries[0];
+ }
+ const original=structuredClone(e),[implementation,mr,confirmation]=e.tasks;
+ s=await f.send({action:'goals.create',expectedGoalId:null,objective:'Independent saved Goal'});const unrelated=structuredClone(s.delegatedGoals.entries[1]);
+ const control=p=>f.service.manageSavedGoal({scope:'saved',...p},f.ctx);
+ const edit={action:'update',goal_id:e.id,expected_revision:e.revision,request_id:'checklist-edit',user_authorized:true,task_edits:[
+  {id:implementation.id,text:'Implement and verify safe checklist editing'},
+  {text:'Create dedicated worktrees and branches before edits',before_task_id:implementation.id},
+  {id:confirmation.id,before_task_id:mr.id},
+ ]};
+ const result=await control(edit),updated=result.goal;await control(edit);
+ assert.equal(updated.id,e.id);assert.equal(updated.status,'paused');assert.equal(updated.child,null);assert.equal(updated.revision,e.revision+1);assert.equal(updated.policyRevision,e.policyRevision);
+ assert.equal(updated.tasks.length,4);assert.equal(updated.tasks[0].text,'Create dedicated worktrees and branches before edits');assert.equal(updated.tasks[0].status,'pending');assert.ok(!e.tasks.some(task=>task.id===updated.tasks[0].id));
+ assert.equal(updated.tasks[1].id,implementation.id);assert.equal(updated.tasks[1].status,implementation.status);assert.deepEqual(updated.tasks.slice(2),[confirmation,mr]);
+ assert.deepEqual((await control({action:'status',goal_id:unrelated.id})).goal.tasks,unrelated.tasks);assert.deepEqual(f.runtime.activeGoal,parent);assert.equal(f.starts(),0);
+ await assert.rejects(control({...edit,task_edits:[{text:'Duplicate replay insertion'}]}),/conflict/);
+ await assert.rejects(control({...edit,request_id:'stale-edit'}),/revision/);
+ const invalid=[{task_edits:[{id:'foreign',text:'Wrong task'}]},{task_edits:[{id:mr.id,status:'completed'}]},{task_edits:[{id:mr.id,before_task_id:mr.id}]},{task_edits:[{id:mr.id},{id:mr.id}]},{task_edits:[{id:mr.id}],remove_task_ids:[mr.id]}];
+ for(const [i,bad]of invalid.entries())await assert.rejects(control({...edit,expected_revision:updated.revision,request_id:'invalid-'+i,...bad}));
+ assert.deepEqual((await control({action:'status',goal_id:e.id})).goal,updated);
+ const removal=await control({action:'update',goal_id:e.id,expected_revision:updated.revision,request_id:'explicit-scope-removal',user_authorized:true,remove_task_ids:[updated.tasks[0].id]});
+ assert.deepEqual(removal.goal.tasks.map(task=>task.id),[implementation.id,confirmation.id,mr.id]);assert.equal(removal.goal.status,original.status);assert.equal(f.starts(),0);
+});
+
+test('saved checklist controls retain owner, fresh authorization, automatic-run, busy and field fences',async t=>{
+ const f=discoveryFixture(t,false);const s=await f.send({action:'goals.create',expectedGoalId:null,objective:'Saved edit guards'}),e=s.delegatedGoals.entries[0];
+ const p={scope:'saved',action:'update',goal_id:e.id,expected_revision:e.revision,request_id:'update-guards',user_authorized:true,task_edits:[{text:'Planned work'}]};
+ for(const bad of [{...p,user_authorized:false},{...p,request_id:undefined},{...p,activation_id:'current'},{...p,steps:[]},{...p,objective:'Scope change'},{...p,summary:'Completion'},{...p,expected_revision:99}])await assert.rejects(f.service.manageSavedGoal(bad,f.ctx));
+ for(const action of ['status','start','complete'])await assert.rejects(f.service.manageSavedGoal({...p,action},f.ctx),/update-only/);
+ f.runtime.agentRunOrigin='automatic';await assert.rejects(f.service.manageSavedGoal(p,f.ctx),/automatic/);f.runtime.agentRunOrigin='manual';
+ await assert.rejects(f.service.manageSavedGoal(p,{...f.ctx,cwd:join(f.root,'foreign')}),/owner/);
+ await assert.rejects(f.service.manageSavedGoal(p,{...f.ctx,sessionManager:{getSessionId:()=> 'foreign'}}),/owner/);
+ const abort=new AbortController();abort.abort();await assert.rejects(f.service.manageSavedGoal(p,f.ctx,abort.signal));
+ assert.deepEqual((await f.service.manageSavedGoal({scope:'saved',action:'status',goal_id:e.id},f.ctx)).goal.tasks,[]);assert.equal(f.starts(),0);
+ const busy=discoveryFixture(t,true);const bs=await busy.send({action:'goals.create',expectedGoalId:null,objective:'Busy owner'}),be=bs.delegatedGoals.entries[0];
+ await assert.rejects(busy.service.manageSavedGoal({...p,goal_id:be.id,expected_revision:be.revision},busy.ctx),/pending/);
+});
+
+test('authenticated checklist protocol action uses the same metadata-only registry lane',async t=>{
+ const f=discoveryFixture(t);let s=await f.send({action:'goals.create',expectedGoalId:null,objective:'Protocol checklist'}),e=s.delegatedGoals.entries[0];
+ s=await f.send({action:'goals.tasks',expectedGoalId:e.id,expectedEntryRevision:e.revision,taskEdits:[{text:'Fixture prerequisite'}]});e=s.delegatedGoals.entries[0];
+ assert.equal(e.tasks[0].text,'Fixture prerequisite');assert.equal(e.status,'paused');assert.equal(e.child,null);assert.equal(f.starts(),0);
+});
+
 test('direct saved completion uses the existing evidence and stopped-child guards rather than root Goal completion',async t=>{
  const f=discoveryFixture(t,false);let s=await f.send({action:'goals.create',expectedGoalId:null,objective:'Verified parent delivery'}),e=s.delegatedGoals.entries[0];
  s=await f.send({action:'goals.add_task',expectedGoalId:e.id,expectedEntryRevision:e.revision,text:'Verify output'});e=s.delegatedGoals.entries[0];

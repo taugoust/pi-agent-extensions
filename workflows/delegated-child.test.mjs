@@ -8,6 +8,7 @@ registerHooks({ resolve(specifier, context, next) {
   return next(specifier, context);
 } });
 const { createDelegatedChildGoalService } = await import("./delegated-child.ts");
+const { mutateSavedGoalTasks } = await import("./saved-goal-tasks.ts");
 
 test("structured child seam uses injected existing engine, binds ownership and seeds checklist before dispatch", async () => {
   const events = [], entries = [];
@@ -42,10 +43,12 @@ test("structured child seam uses injected existing engine, binds ownership and s
   await assert.rejects(service.pause(entry.id, "stale-child"), /identity/);
   result = await service.pause(entry.id, entry.id, "first"); assert.equal(result.goal.status, "paused");
   runtime.settings.continuationLimits = { automaticTurns: 55, noProgressTurns: 66 };
-  result = await service.resume(entry.id, entry.id, { ...entry, text: "edited while paused", tokenBudget: null, tasks: [...entry.tasks, { id: "new-task", text: "added while paused", status: "pending" }] }, "first"); assert.equal(result.goal.status, "active");
+  const editedTasks = mutateSavedGoalTasks(entry.tasks, [{ id: "task", text: "check edited scope" }, { text: "Create worktrees first", before_task_id: "task" }], []);
+  result = await service.resume(entry.id, entry.id, { ...entry, text: "edited while paused", tokenBudget: null, tasks: editedTasks }, "first"); assert.equal(result.goal.status, "active");
   assert.equal(runtime.activeGoal.text, "edited while paused"); assert.equal(runtime.activeGoal.tokenBudget, undefined);
   const synchronized = entries.filter(e => e.customType === "progress-fixture").at(-1);
-  assert.equal(synchronized.data.tasks.length, 2);
+  assert.deepEqual(synchronized.data.tasks, editedTasks);
+  assert.equal(editedTasks[1].id, entry.tasks[0].id); assert.equal(editedTasks[1].status, entry.tasks[0].status);
   assert.ok(events.lastIndexOf("progress-fixture") < events.lastIndexOf("owned-child-resume"));
   assert.equal(result.childGoalId, entry.id); assert.equal(result.childActivationId, "resumed");
   await assert.rejects(service.pause(entry.id, entry.id, "first"), /activation/);

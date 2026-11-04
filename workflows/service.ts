@@ -60,7 +60,7 @@ type Operation = {
 	reject?: (error: Error) => void;
 };
 const actions = [
-	"goals.create", "goals.start", "goals.pause", "goals.resume", "goals.edit", "goals.limits", "goals.clear", "goals.complete", "goals.add_task", "goals.answer", "goals.reference", "goals.dependencies", "goals.blocker.add", "goals.blocker.clear",
+	"goals.create", "goals.start", "goals.pause", "goals.resume", "goals.edit", "goals.limits", "goals.clear", "goals.complete", "goals.add_task", "goals.tasks", "goals.answer", "goals.reference", "goals.dependencies", "goals.blocker.add", "goals.blocker.clear",
 	"worktree.add",
 	"worktree.remove",
 	"worktree.prune",
@@ -966,7 +966,7 @@ export function createWorkflowService(
 						"questionRevision",
 						"workerEpoch",
 						"answer",
-            "summary", "user_authorized", "taskEvidence",
+            "summary", "user_authorized", "taskEvidence", "taskEdits", "removeTaskIds",
             "reviewTitle", "reviewTarget", "reviewRole", "waitsFor", "blockerReason", "blockerEvidence", "blockerTaskId", "blockerId",
 						"operationId",
 						"dialogId",
@@ -1113,7 +1113,7 @@ export function createWorkflowService(
 			const expectedRevision = r.action === "goals.limits" ? r.expectedPolicyRevision : r.expectedEntryRevision;
 			if (typeof r.expectedGoalId !== "string" || !uuid.test(r.expectedGoalId) || !Number.isSafeInteger(expectedRevision) || expectedRevision < 1)
 				throw new Error("Expected delegated goal identity and revision");
-			if (["goals.edit", "goals.limits", "goals.add_task", "goals.clear", "goals.complete", "goals.answer", "goals.reference", "goals.dependencies", "goals.blocker.add", "goals.blocker.clear"].includes(r.action)) {
+			if (["goals.edit", "goals.limits", "goals.add_task", "goals.tasks", "goals.clear", "goals.complete", "goals.answer", "goals.reference", "goals.dependencies", "goals.blocker.add", "goals.blocker.clear"].includes(r.action)) {
 				// Definitive metadata result: rejected edits retain the caller's draft.
 				// Cache at service level only AFTER success; failed retries must reach
 				// the registry's retained rejection instead of looking applied.
@@ -1231,11 +1231,15 @@ export function createWorkflowService(
 			// Fresh authorization was supplied through the registered model tool,
 			// not a fabricated UI-dialog response. All registry/executor fences,
 			// durable intent, exact child identity and stop proofs are shared.
-			const result = await delegated.mutate(sessionId, { action: `goals.${params.action}` as any, requestId: params.request_id!,
+			const result = await delegated.mutate(sessionId, { action: params.action === "update" ? "goals.tasks" : `goals.${params.action}` as any, requestId: params.request_id!,
 				...(create ? { expectedGoalId: null, objective: params.objective!, initialTasks: (params.steps ?? []).map(step => step.text),
 					...(params.token_budget === undefined ? {} : { tokenBudget: params.token_budget }),
 					...(params.expected_registry_revision === undefined ? {} : { expectedRegistryRevision: params.expected_registry_revision }) }
 					: { expectedGoalId: params.goal_id!, expectedEntryRevision: params.expected_revision! }),
+				...(params.action === "update" ? {
+					...(params.task_edits === undefined ? {} : { taskEdits: params.task_edits }),
+					...(params.remove_task_ids === undefined ? {} : { removeTaskIds: params.remove_task_ids }),
+				} : {}),
 				...(params.action === "complete" ? { user_authorized: true, summary: params.summary,
 					...(params.task_evidence === undefined ? {} : { taskEvidence: params.task_evidence.map(item => ({ taskId: item.task_id, evidence: item.evidence })) }) } : {}) });
 			current();
