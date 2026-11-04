@@ -69,6 +69,25 @@ test("descriptive branch suggestions prefer displayName, support legacy names an
   }
 });
 
+test("generated lockfile subjects remain valid Git refs, including after truncation", async () => fixture(async ({ repo }) => {
+  const subjects = [
+    { task: "Update flake.lock" },
+    { task: "Fix cache handling", displayName: "CACHE.LOCK" },
+    { task: "Review", name: "package-lock" },
+    { task: "Review", displayName: `${"a".repeat(67)}.locking` },
+  ];
+  for (const [index, subject] of subjects.entries()) {
+    const child = makeChild(80 + index, repo);
+    Object.assign(child.spec, subject);
+    const suggested = descriptiveWorktreeBranch(child.spec);
+    assert.doesNotMatch(suggested, /\.lock$/i);
+    assert.equal((await git(["check-ref-format", "--branch", suggested], repo)).trim(), suggested);
+    await provision([child]);
+    assert.equal(child.spec.worktreeInfo.branch, suggested);
+    assert.equal((await git(["rev-parse", suggested], repo)).trim(), (await git(["rev-parse", "HEAD"], repo)).trim());
+  }
+}));
+
 test("invalid explicit branch names fail before registry mutation; collisions get readable suffixes", async () => fixture(async ({ repo }) => {
   for (const branch of ["../foreign", "bad name", "feat/../nested"]) {
     await assert.rejects(provision([makeChild(1, repo, { branch })]), /invalid|branch/i);
@@ -80,6 +99,16 @@ test("invalid explicit branch names fail before registry mutation; collisions ge
   await provision([child]);
   assert.equal(child.spec.worktreeInfo.branch, "feat/saved-goal-checklist-2");
   assert.equal((await git(["rev-parse", "feat/saved-goal-checklist"], repo)).trim(), (await git(["rev-parse", "HEAD"], repo)).trim(), "foreign existing branch remains untouched");
+}));
+
+test("explicit checkout shorthand is rejected literally even when Git can expand it", async () => fixture(async ({ repo }) => {
+  await git(["switch", "-c", "previous-fixture-branch"], repo);
+  await git(["switch", "main"], repo);
+  assert.equal((await git(["check-ref-format", "--branch", "@{-1}"], repo)).trim(), "previous-fixture-branch");
+  const before = await git(["for-each-ref", "--format=%(refname)", "refs/heads"], repo);
+  await assert.rejects(provision([makeChild(79, repo, { branch: "@{-1}" })]), /literal|shorthand/);
+  assert.equal((await ownedWorktrees()).length, 0);
+  assert.equal(await git(["for-each-ref", "--format=%(refname)", "refs/heads"], repo), before);
 }));
 
 test("parent refs, same-batch prefix conflicts, occupied paths and remote refs are handled safely", async () => fixture(async ({ repo, root }) => {

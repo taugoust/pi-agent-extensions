@@ -256,7 +256,7 @@ function branchSlug(value: string): string {
   const slug = value.normalize("NFKD").replace(/[\u0300-\u036f]/g, "").toLowerCase()
     .replace(/(?<=\d)\.(?=\d)/g, ".").replace(/[^a-z0-9.]+/g, "-")
     .replace(/\.{2,}/g, "-").replace(/^[.-]+|[.-]+$/g, "").replace(/-+/g, "-")
-    .slice(0, 72).replace(/[.-]+$/g, "");
+    .slice(0, 72).replace(/[.-]+$/g, "").replace(/\.lock$/i, "-lock");
   return slug || "work";
 }
 function conciseTaskSubject(value: string): string {
@@ -440,6 +440,7 @@ async function provisionUnlocked(children: Child[], owner: string, signal: Abort
     const suggestion = descriptiveWorktreeBranch(child.spec, choice.branch);
     // Validate the unmodified requested intent before adding a readable collision suffix.
     const baseBranch = await validateBranch(gitClient(), repo, suggestion, signal);
+    if (baseBranch !== suggestion) throw new Error("Worktree branch must be a literal name; checkout shorthand is not supported");
     const refs = (await worktreeGit(["for-each-ref", "--format=%(refname:strip=2)", "refs/heads"], repo, signal)).split(/\r?\n/).filter(Boolean);
     let branch: string | undefined, path: string | undefined;
     const occupiedBranches = [...refs, ...records.flatMap(row => row.branch ? [row.branch] : [])];
