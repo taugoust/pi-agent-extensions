@@ -29,7 +29,8 @@ try {
     { id: 'detail', value: 'custom detail', label: 'custom detail', wasCustom: true, index: undefined },
   ]);
   assert.match(result.content[0].text, /\n/);
-  assert.equal(requests[0].signal, controller.signal);
+  assert.ok(requests[0].signal instanceof AbortSignal);
+  assert.equal(controller.signal.aborted, false, 'questionnaire cleanup aborted the agent signal');
   assert.equal(requests[0].input.questions[1].allowOther, true);
   service({ ...good, answers: [good.answers[0], { id: 'detail', value: 'default', wasCustom: true }] });
   const customCollision = await execute();

@@ -638,6 +638,10 @@ multiple-choice questions with tab-based navigation.
 - Free-text input option
 - Submit review screen showing all answers
 - Custom rendering in chat history
+- One five-minute deadline for the entire questionnaire, including terminal,
+  Paseo, headless-worker and Goal routes. Expiry dismisses pending interactions
+  and returns only `Questionnaire timed out.` with no selected answers. It does
+  not abort or pause the agent, select a recommendation, or add instructions to stop.
 
 **Key bindings**:
 

@@ -20,9 +20,9 @@ registerHooks({ load(url, context, next) { return next(url, url.endsWith(".json"
 } });
 
 function harness(sessionId: string) {
-  const tools = new Map<string, any>(), handlers = new Map<string, Function[]>();
-  const ctx: any = { mode: "tui", hasUI: false, sessionManager: { getSessionId: () => sessionId } };
-  const pi: any = { registerTool(tool: any) { tools.set(tool.name, tool); }, on(name: string, fn: Function) { handlers.set(name, [...(handlers.get(name) ?? []), fn]); } };
+  const tools = new Map<string, any>(), handlers = new Map<string, Function[]>(), entries: any[] = [];
+  const ctx: any = { mode: "tui", hasUI: false, sessionManager: { getSessionId: () => sessionId, getEntries: () => entries } };
+  const pi: any = { appendEntry(customType: string, data: unknown) { entries.push({type:"custom",customType,data}); }, registerTool(tool: any) { tools.set(tool.name, tool); }, on(name: string, fn: Function) { handlers.set(name, [...(handlers.get(name) ?? []), fn]); } };
   return { pi, ctx, tools, async event(name: string) { for (const handler of handlers.get(name) ?? []) await handler({}, ctx); } };
 }
 function inbox() { const queue: any[] = [], waiters: Function[] = []; return { put(value: any) { const next = waiters.shift(); next ? next(value) : queue.push(value); }, next(): Promise<any> { return queue.length ? Promise.resolve(queue.shift()) : new Promise(resolve => waiters.push(resolve)); } }; }
@@ -74,6 +74,36 @@ for (const cancelled of [false, true]) test(`actual questionnaire ${cancelled ? 
   const result = await waiting; assert.equal(humanCalls, 1); assert.equal(result.details.cancelled, cancelled);
   if (!cancelled) assert.equal(result.details.answers[0].value, "compact");
   else { assert.equal(result.isError, false); assert.equal(result.details.cancelledByHuman, true); }
+});
+
+test("worker questionnaire deadline releases its real coordinator waiter without an answer or agent pause", async t => {
+  const { default: questionnaire } = await import("../questionnaire/index.ts");
+  const { worker, owner, notices, execute } = await setup(t); questionnaire(worker.pi);
+  t.mock.timers.enable({ apis: ["setTimeout"] });
+  const waiting = execute(worker, "questionnaire", { questions: [{ id: "scope", prompt: "Which scope?", options: [{value:"small",label:"Small"}], allowOther: false }] });
+  const record = await notices.next();
+  owner.ctx.executeTool = async (_name: string, _params: unknown, options: any) => new Promise(resolve => {
+    options.signal.addEventListener("abort", () => resolve({isError:true,result:{details:{cancelled:true},content:[{type:"text",text:"Questionnaire aborted"}]}}), {once:true});
+  });
+  const human = execute(owner, "guidance", {operation:"human",target:guidanceTarget(record)});
+  const rejected = assert.rejects(human, /did not return a verified result/);
+  t.mock.timers.tick(300000);
+  const result = await waiting;
+  assert.deepEqual(result.content, [{type:"text",text:"Questionnaire timed out."}]);
+  assert.equal(result.details.timedOut, true); assert.equal(result.details.cancelledByHuman, undefined); assert.deepEqual(result.details.answers, []);
+  await rejected;
+  const listed = JSON.parse((await execute(owner,"guidance",{operation:"list"})).content[0].text);
+  assert.equal(listed.records[0].status,"cancelled"); assert.equal(listed.records[0].receipt,undefined);
+});
+
+test("top-level timeout is never submitted as a human answer or cancellation", async t => {
+  const { default: questionnaire } = await import("../questionnaire/index.ts");
+  const { worker, owner, notices, execute } = await setup(t); questionnaire(worker.pi);
+  const waiting = execute(worker,"questionnaire",{questions:[{id:"scope",prompt:"Which scope?",options:[],allowOther:true}]});
+  const record = await notices.next();
+  owner.ctx.executeTool = async () => ({isError:false,result:{content:[{type:"text",text:"Questionnaire timed out."}],details:{timedOut:true,cancelled:false,answers:[]}}});
+  await assert.rejects(execute(owner,"guidance",{operation:"human",target:guidanceTarget(record)}), /^Error: Questionnaire timed out\.$/);
+  await worker.event("session_shutdown"); await waiting;
 });
 
 test("unavailable top-level questionnaire is not fabricated as human cancellation", async t => {
@@ -216,8 +246,8 @@ test("all native launch paths explicitly bind guidance and activate worker tool"
   const headless = await readFile(new URL("./headless-foreground.ts", import.meta.url), "utf8");
   const worker = await readFile(new URL("./tui-worker-extension.ts", import.meta.url), "utf8");
   assert.match(native, /nativeHelperEntrypoint\("guidance-worker"/); assert.match(native, /guidanceLaunchEnvironment\(\{ ownerSessionId, taskId: taskRecord.taskId/);
-  assert.match(native, /workerEpoch: spec.goalExecution\?\.binding.identity.workerEpoch/); assert.match(native, /goalId: spec.goalExecution.binding.entryId/);
+  assert.match(native, /workerEpoch: randomBytes\(16\)\.toString\("hex"\)/); assert.match(native, /setDedicatedGoalEnvironment\(env, undefined\)/);
   assert.match(tui, /guidanceLaunchEnvironment\(\{ ownerSessionId: input.ownerSessionId/);
   assert.match(headless, /guidanceLaunchEnvironment\(\{ ownerSessionId: group.owner/);
-  assert.match(worker, /guidanceWorker\(pi\)/); assert.match(worker, /headlessTools, "notify_parent", "task_outcome", "request_guidance"/);
+  assert.match(worker, /guidanceWorker\(pi\)/); assert.match(worker, /headlessTools, "notify_parent", "task_outcome", "verify", "request_guidance"/);
 });

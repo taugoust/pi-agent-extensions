@@ -42,6 +42,7 @@ export function installGuidance(pi: ExtensionAPI, root: string, notify: (ctx: an
             if (input.kind !== "questionnaire" || typeof (ctx as any).executeTool !== "function") throw new Error("Existing top-level questionnaire interaction unavailable");
             const outcome = await (ctx as any).executeTool("questionnaire", { questions: input.questions }, { signal: signal ? AbortSignal.any([signal, waiterSignal]) : waiterSignal });
             const details = outcome.result?.details;
+            if (details?.timedOut) throw new Error("Questionnaire timed out.");
             if (outcome.isError || !details || details.failure || typeof details.cancelled !== "boolean"
               || details.cancelled && details.cancelledByHuman !== true) throw new Error("Top-level questionnaire did not return a verified result; request remains pending");
             return { kind: "questionnaire", cancelled: details.cancelled, answers: (details.answers ?? []).map(({ id, value, wasCustom }: any) => ({ id, value, wasCustom })) };

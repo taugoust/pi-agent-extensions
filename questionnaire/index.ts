@@ -16,6 +16,7 @@ import {
 } from "@mariozechner/pi-tui";
 import { Type } from "@sinclair/typebox";
 import { answerQuestionnaireInPaseo } from "./paseo.js";
+import { QUESTIONNAIRE_TIMEOUT_REASON, withQuestionnaireTimeout } from "./timeout.ts";
 import { workerInteractionsService } from "../shared/foreground-tasks.ts";
 import { GOAL_QUESTION_RECORDER_KEY } from "../shared/goal-question-recorder.ts";
 
@@ -54,6 +55,7 @@ interface QuestionnaireResult {
   /** Bounded tool-result metadata, not part of TaskInteractionAnswer wire DTO. */
   failure?: { code: "interaction_unavailable" };
   cancelledByHuman?: true;
+  timedOut?: true;
 }
 
 type AgentEventPublisher = (
@@ -122,6 +124,13 @@ function errorResult(
     content: [{ type: "text", text: message }],
     details: { questions, answers: [], cancelled: true, ...(cancelledByHuman ? { cancelledByHuman: true as const } : { failure: { code: "interaction_unavailable" as const } }) },
     isError: !cancelledByHuman,
+  };
+}
+
+function timeoutResult(questions: Question[]): { content: { type: "text"; text: string }[]; details: QuestionnaireResult } {
+  return {
+    content: [{ type: "text", text: "Questionnaire timed out." }],
+    details: { questions, answers: [], cancelled: false, timedOut: true },
   };
 }
 
@@ -211,6 +220,8 @@ export default function questionnaire(pi: ExtensionAPI, options: { assignedGoalB
         label: q.label || `Q${i + 1}`,
         allowOther: q.allowOther !== false,
       }));
+      let humanCancellation: QuestionnaireResult | undefined;
+      return withQuestionnaireTimeout(signal, async (signal) => {
       const recorder = (globalThis as any)[GOAL_QUESTION_RECORDER_KEY];
       const goalRecorder = recorder?.protocol === 1 && recorder.sessionId === ctx.sessionManager.getSessionId() && typeof recorder.request === "function" ? recorder : undefined;
       if (questions.some(question=>question.attachmentIds?.length) && !goalRecorder) return errorResult("Error: Question attachments require the exact dedicated goal recorder",questions);
@@ -291,10 +302,16 @@ export default function questionnaire(pi: ExtensionAPI, options: { assignedGoalB
         },
       );
 
+      if (signal.aborted) return errorResult("Error: Questionnaire aborted", questions);
       let completed = false;
       let completeFromExternal: ((answer: QuestionnaireResult) => void) | undefined;
       const remoteController = new AbortController();
-      const abortRemote = () => remoteController.abort();
+      const abortRemote = () => {
+        remoteController.abort();
+        completeFromExternal?.(signal.reason === QUESTIONNAIRE_TIMEOUT_REASON
+          ? timeoutResult(questions).details
+          : errorResult("Error: Questionnaire aborted", questions).details);
+      };
       if (signal) {
         if (signal.aborted) remoteController.abort();
         else signal.addEventListener("abort", abortRemote, { once: true });
@@ -334,6 +351,7 @@ export default function questionnaire(pi: ExtensionAPI, options: { assignedGoalB
             if (completed) return;
             completed = true;
             if (abort) {
+              humanCancellation = result;
               ctx.abort();
             }
             done(result);
@@ -648,7 +666,10 @@ export default function questionnaire(pi: ExtensionAPI, options: { assignedGoalB
           cancelled: winner.outcome.kind === "cancelled",
           ...(winner.outcome.kind === "cancelled" ? (winner.outcome.byUser ? { cancelledByHuman: true as const } : { failure: { code: "interaction_unavailable" as const } }) : {}),
         };
-        if (result.cancelledByHuman) ctx.abort();
+        if (result.cancelledByHuman) {
+          humanCancellation = result;
+          ctx.abort();
+        }
         completeFromExternal?.(result);
       }
       signal?.removeEventListener("abort", abortRemote);
@@ -657,19 +678,21 @@ export default function questionnaire(pi: ExtensionAPI, options: { assignedGoalB
 
       await publishQuestionnaireEvent(
         "agent.question.answered",
-        result.cancelled ? "Questionnaire cancelled" : "Questionnaire answered",
-        result.cancelled
-          ? "The questionnaire was cancelled."
+        result.timedOut ? "Questionnaire timed out" : result.cancelled ? "Questionnaire cancelled" : "Questionnaire answered",
+        result.timedOut ? "Questionnaire timed out."
+          : result.cancelled ? "The questionnaire was cancelled."
           : "The questionnaire was answered in Pi.",
         {
           questionnaire_id: questionnaireId,
           cancelled: result.cancelled,
+          ...(result.timedOut ? { timed_out: true } : {}),
           question_count: questions.length,
           answer_count: result.answers.length,
           cwd: ctx.cwd,
         },
       );
 
+      if (result.timedOut) return timeoutResult(questions);
       if (result.cancelled) {
         return {
           content: [{ type: "text", text: "User cancelled the questionnaire" }],
@@ -689,6 +712,9 @@ export default function questionnaire(pi: ExtensionAPI, options: { assignedGoalB
         content: [{ type: "text", text: answerLines.join("\n") }],
         details: result,
       };
+      }, () => timeoutResult(questions), () => humanCancellation
+        ? { content: [{ type: "text" as const, text: "User cancelled the questionnaire" }], details: humanCancellation }
+        : errorResult("Error: Questionnaire aborted", questions));
     },
 
     renderCall(args, theme) {
@@ -709,6 +735,7 @@ export default function questionnaire(pi: ExtensionAPI, options: { assignedGoalB
         const text = result.content[0];
         return new Text(text?.type === "text" ? text.text : "", 0, 0);
       }
+      if (details.timedOut) return new Text(theme.fg("warning", "Timed out"), 0, 0);
       if (details.failure) return new Text(theme.fg("warning", "Interaction unavailable"), 0, 0);
       if (details.cancelled) {
         return new Text(theme.fg("warning", "Cancelled"), 0, 0);

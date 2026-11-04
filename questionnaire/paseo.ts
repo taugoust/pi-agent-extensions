@@ -103,6 +103,7 @@ export async function answerQuestionnaireInPaseo(
 
   const answers: PaseoAnswer[] = [];
   for (const [questionIndex, question] of questions.entries()) {
+    if (signal?.aborted) return { kind: "cancelled" };
     const optionChoices = question.options.map(optionChoice);
     const hasInput = typeof bridge.input === "function";
     const canInput = question.allowOther !== false && hasInput;
@@ -121,6 +122,7 @@ export async function answerQuestionnaireInPaseo(
       return { kind: "cancelled" };
     }
 
+    if (signal?.aborted) return { kind: "cancelled" };
     if (choice === TERMINAL_CHOICE) return { kind: "terminal" };
     if (choice === undefined) return unavailableReply(bridge, signal);
     if (choice === CANCEL_CHOICE) return { kind: "cancelled", byUser: true };
@@ -131,6 +133,7 @@ export async function answerQuestionnaireInPaseo(
       } catch {
         return { kind: "cancelled" };
       }
+      if (signal?.aborted) return { kind: "cancelled" };
       if (value === undefined) return unavailableReply(bridge, signal);
       if (!value.trim()) return { kind: "cancelled" };
       answers.push({ id: question.id, value, label: value, wasCustom: true });

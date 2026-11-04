@@ -254,6 +254,7 @@ in
         mkdir -p "$srcdir/questionnaire" "$outdir"
         cp ${self}/questionnaire/paseo.ts "$srcdir/questionnaire/paseo.ts"
         cp ${self}/questionnaire/index.ts "$srcdir/questionnaire/index.ts"
+        cp ${self}/questionnaire/timeout.ts "$srcdir/questionnaire/timeout.ts"
         mkdir -p "$srcdir/shared"
         cp ${self}/shared/foreground-tasks.ts "$srcdir/shared/foreground-tasks.ts"
         cp ${self}/shared/tool-presentation.ts "$srcdir/shared/tool-presentation.ts"
@@ -281,7 +282,7 @@ in
           --target es2022 \
           --rootDir "$srcdir" \
           --outDir "$outdir" \
-          "$srcdir/questionnaire/paseo.ts" "$srcdir/shared/foreground-tasks.ts" "$srcdir/node-globals.d.ts"
+          "$srcdir/questionnaire/paseo.ts" "$srcdir/questionnaire/timeout.ts" "$srcdir/shared/foreground-tasks.ts" "$srcdir/node-globals.d.ts"
         tsc --noCheck --skipLibCheck --module nodenext --moduleResolution nodenext \
           --rewriteRelativeImportExtensions \
           --target es2022 --rootDir "$srcdir" --outDir "$outdir" "$srcdir/questionnaire/index.ts"
@@ -300,7 +301,7 @@ in
           Boolean: () => ({type:"boolean"}), Optional: value => value, Array: items => ({type:"array",items}) };
         EOF
         node ${self}/questionnaire/headless.test.mjs "$outdir"
-        node --experimental-strip-types --test ${self}/questionnaire/paseo.test.mjs
+        node --experimental-strip-types --test ${self}/questionnaire/paseo.test.mjs ${self}/questionnaire/timeout.test.mjs
 
         # Compile and load the actual selected package bundle, not a hand-picked
         # source subset. This catches runtime imports whose implementations are
