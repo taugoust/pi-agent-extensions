@@ -9,7 +9,7 @@ registerHooks({ load(url, context, next) { if (url.endsWith(".json")) return { s
   if (specifier.endsWith(".js") && specifier.startsWith(".")) { try { return next(specifier.replace(/\.js$/, ".ts"), context); } catch {} }
   return next(specifier, context);
 } });
-const { provisionWorktrees, ownedWorktrees, releaseWorktree, worktreeGit: git, saveOwnedWorktree, worktreeOption } = await import("./subagent-worktrees.ts");
+const { provisionWorktrees, ownedWorktrees, releaseWorktree, worktreeGit: git, saveOwnedWorktree, worktreeOption, descriptiveWorktreeBranch } = await import("./subagent-worktrees.ts");
 const { reapOwnedWorktrees } = await import("./worktree-reap.ts");
 const { applyAutomaticWorktreePolicy, installWorkerWorktreeContext, workerWorktreeContext } = await import("./worker-worktree-context.ts");
 const { discoverAgentProfiles, resolveAgentProfileLaunch } = await import("../subagent/profiles.ts");
@@ -52,6 +52,26 @@ test("trusted spawning-parent profile policy is independent of child selection, 
   } finally { clear(); }
   assert.equal(workerWorktreeContext("coordinator-session"), undefined);
   assert.equal(worktreeOption(false), false); assert.equal(worktreeOption(true), true); assert.throws(() => worktreeOption({ enabled: true }), /Invalid/);
+}));
+
+test("descriptive branch suggestions prefer displayName, support legacy names and task intent", () => {
+  assert.equal(descriptiveWorktreeBranch({ task: "Review bounded implementation", displayName: "Saved Goal Checklist", name: "legacy-name" }), "saved-goal-checklist");
+  assert.equal(descriptiveWorktreeBranch({ task: "Review bounded implementation", name: "legacy-name" }), "legacy-name");
+  assert.equal(descriptiveWorktreeBranch({ task: "Upgrade Paseo to 0.15.0", name: "worker" }), "upgrade/paseo-0.15.0");
+  assert.equal(descriptiveWorktreeBranch({ task: "Implement saved goal checklist", name: "worker" }), "feat/saved-goal-checklist");
+  assert.equal(descriptiveWorktreeBranch({ task: "Fix worktree cleanup", displayName: "Worker" }), "fix/worktree-cleanup");
+  assert.equal(descriptiveWorktreeBranch({ task: "Anything", displayName: "Review", name: "ignored" }, "fix/exact-name"), "fix/exact-name");
+});
+
+test("invalid explicit branch names fail before registry mutation; collisions get readable suffixes", async () => fixture(async ({ repo }) => {
+  await assert.rejects(provision([makeChild(1, repo, { branch: "../foreign" })]), /invalid|branch/i);
+  assert.equal((await ownedWorktrees()).length, 0);
+  await git(["branch", "feat/saved-goal-checklist"], repo);
+  const child = makeChild(2, repo, { branch: "feat/saved-goal-checklist" });
+  child.spec.displayName = "Saved Goal Checklist";
+  await provision([child]);
+  assert.equal(child.spec.worktreeInfo.branch, "feat/saved-goal-checklist-2");
+  assert.equal((await git(["rev-parse", "feat/saved-goal-checklist"], repo)).trim(), (await git(["rev-parse", "HEAD"], repo)).trim(), "foreign existing branch remains untouched");
 }));
 
 test("automatic repository provisioning preserves relative cwd and primary checkout; false permits non-Git", async () => fixture(async ({ repo, root }) => {

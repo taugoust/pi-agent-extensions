@@ -89,7 +89,7 @@ export function ownedWorktreeCompletionHost(ctx: CompletionContext, safety: Comp
     let exists = true;
     try { const stat = await fs.lstat(r.path); if (!stat.isDirectory() || stat.isSymbolicLink()) throw new Error("Worktree path replaced"); }
     catch (error: any) { if (error.code === "ENOENT") exists = false; else throw error; }
-    if (!isAbsolute(r.path) || !r.branch.startsWith("pi/") || r.path === r.repo || !r.physicalIdentity) throw new Error("Harness worktree provenance unavailable");
+    if (!isAbsolute(r.path) || !r.branch || r.path === r.repo || !r.physicalIdentity) throw new Error("Harness worktree provenance unavailable");
     if (await fs.realpath(r.commonDir) !== r.commonDir) throw new Error("Repository identity changed");
     let repository = r.repo;
     try { if (await fs.realpath(repository) !== repository) throw new Error("Repository identity changed"); }

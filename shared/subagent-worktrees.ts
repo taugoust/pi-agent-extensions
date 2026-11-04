@@ -8,7 +8,7 @@ import { canonicalSubagentName, validateSubagentDisplayName } from "../subagent/
 import { loadWorktreeSettings } from "../workflows/worktree/settings.ts";
 
 import type { WorkerWorktreeContext, WorktreeIdentity } from "./worker-worktree-context.ts";
-export type WorktreeOption = boolean | { changes?: "include" | "exclude"; base?: string };
+export type WorktreeOption = boolean | { changes?: "include" | "exclude"; base?: string; branch?: string };
 export type WorktreeInfo = { path: string; branch: string; baseCommit: string; includedChanges: boolean; identity?: WorktreeIdentity; borrowed?: boolean };
 export type WorktreeBorrower = WorktreeIdentity & { released: boolean; supervisor?: WorktreeIdentity };
 export const sameWorktreeIdentity = (a: WorktreeIdentity | undefined, b: WorktreeIdentity | undefined) => !!a && !!b && a.ownerSessionId === b.ownerSessionId && a.taskId === b.taskId && a.childId === b.childId;
@@ -39,10 +39,11 @@ const recordFile = (owner: string, task: string) => join(registry(), `${createHa
 export function worktreeOption(value: unknown): WorktreeOption | undefined {
   if (value === undefined) return;
   if (typeof value === "boolean") return value;
-  if (!value || typeof value !== "object" || Array.isArray(value)) throw new Error("worktree must be an object with optional changes and base");
+  if (!value || typeof value !== "object" || Array.isArray(value)) throw new Error("worktree must be an object with optional changes, base and branch");
   const v = value as Record<string, unknown>;
-  if (Object.keys(v).some(key => !["changes", "base"].includes(key)) || (v.changes !== undefined && !["include", "exclude"].includes(String(v.changes)))
-    || (v.base !== undefined && (typeof v.base !== "string" || !v.base.trim() || v.base.length > 512 || v.base.includes("\0")))) throw new Error("Invalid worktree options");
+  if (Object.keys(v).some(key => !["changes", "base", "branch"].includes(key)) || (v.changes !== undefined && !["include", "exclude"].includes(String(v.changes)))
+    || (v.base !== undefined && (typeof v.base !== "string" || !v.base.trim() || v.base.length > 512 || v.base.includes("\0")))
+    || (v.branch !== undefined && (typeof v.branch !== "string" || !v.branch.trim() || v.branch.length > 200 || v.branch.includes("\0")))) throw new Error("Invalid worktree options");
   return v as WorktreeOption;
 }
 export async function worktreeGit(args: string[], cwd: string, signal?: AbortSignal, input?: Buffer): Promise<string> {
@@ -202,6 +203,32 @@ async function capture(repo: string, signal?: AbortSignal) {
   return { status, staged, unstaged, files, digest: digest.digest("hex") };
 }
 type Child = { taskId: string; childId: string; spec: { task: string; name?: string; displayName?: string; cwd?: string; systemPrompt?: string; worktree?: WorktreeOption; worktreeInfo?: WorktreeInfo } };
+function branchSlug(value: string): string {
+  return value.normalize("NFKD").replace(/[\u0300-\u036f]/g, "").toLowerCase()
+    .replace(/(?<=\d)\.(?=\d)/g, "~").replace(/[^a-z0-9~]+/g, "-").replace(/~/g, ".")
+    .replace(/^-+|-+$/g, "").replace(/-+/g, "-").slice(0, 72).replace(/-+$/g, "") || "work";
+}
+/** Human-facing branch suggestion; opaque ownership IDs stay only in registry metadata. */
+export function descriptiveWorktreeBranch(spec: { task: string; displayName?: string; name?: string }, override?: string): string {
+  if (override !== undefined) return override;
+  const task = spec.task.trim();
+  const feature = /^(implement|add|create|build|introduce)\b[\s:,-]*/i.exec(task);
+  if (feature) return `feat/${branchSlug(task.slice(feature[0].length))}`;
+  const fix = /^(fix|repair|resolve)\b[\s:,-]*/i.exec(task);
+  if (fix) return `fix/${branchSlug(task.slice(fix[0].length))}`;
+  const upgrade = /^(upgrade|bump|update)\b[\s:,-]*/i.exec(task);
+  if (upgrade) return `upgrade/${branchSlug(task.slice(upgrade[0].length).replace(/\bto\s+(?=\d)/i, ""))}`;
+  const docs = /^(document|docs|documentation)\b[\s:,-]*/i.exec(task);
+  if (docs) return `docs/${branchSlug(task.slice(docs[0].length))}`;
+  const display = spec.displayName?.trim();
+  if (display && !/^(worker|subagent|agent)$/i.test(display)) return branchSlug(display);
+  const legacy = spec.name?.trim();
+  if (legacy && !/^(worker|subagent|agent)$/i.test(legacy)) return branchSlug(legacy);
+  return branchSlug(task);
+}
+function branchExists(existing: string[], candidate: string) {
+  return existing.some(branch => branch === candidate || branch.startsWith(`${candidate}/`) || candidate.startsWith(`${branch}/`));
+}
 function within(root: string, path: string) {
   const part = relative(root, path);
   return !part || (!isAbsolute(part) && part !== ".." && !part.startsWith(`..${sep}`));
@@ -306,6 +333,8 @@ async function provision(children: Child[], owner: string, signal: AbortSignal |
   const settings = await loadWorktreeSettings();
   if (settings.kind === "invalid") throw new Error("Worktree settings are invalid");
   const plans = [];
+  const reservedBranches = new Set<string>();
+  const reservedPaths = new Set<string>();
   for (const child of requested) {
     const option = worktreeOption(child.spec.worktree)!;
     const sourceCwd = await fs.realpath(child.spec.cwd!);
@@ -334,11 +363,22 @@ async function provision(children: Child[], owner: string, signal: AbortSignal |
       delta = await capture(repo, signal);
     }
     const records = await listWorktrees(gitClient(), repo, signal);
-    const branch = await validateBranch(gitClient(), repo, `pi/${child.spec.name ?? "worker"}-${child.taskId.slice(-12)}`, signal);
-    let path = defaultWorktreePath(records[0]?.path ?? repo, branch, settings.effectiveRoot);
-    let ancestor = dirname(path); const suffix = [basename(path)];
-    while (!pathEntryExists(ancestor)) { suffix.unshift(basename(ancestor)); ancestor = dirname(ancestor); }
-    path = join(await fs.realpath(ancestor), ...suffix);
+    const suggestion = descriptiveWorktreeBranch(child.spec, choice.branch);
+    // Validate the unmodified requested intent before adding a readable collision suffix.
+    const baseBranch = await validateBranch(gitClient(), repo, suggestion, signal);
+    const refs = (await worktreeGit(["for-each-ref", "--format=%(refname:strip=2)", "refs/heads"], repo, signal)).split(/\r?\n/).filter(Boolean);
+    let branch = baseBranch, path = "";
+    for (let suffix = 1; ; suffix++) {
+      const candidate = suffix === 1 ? baseBranch : `${baseBranch}-${suffix}`;
+      if (branchExists(refs, candidate) || records.some(row => row.branch === candidate) || reservedBranches.has(candidate)) continue;
+      const candidatePath = defaultWorktreePath(records[0]?.path ?? repo, candidate, settings.effectiveRoot);
+      if (unresolvableSymlinkAncestor(candidatePath)) throw new Error(`Unsafe symlink ancestor for worktree target: ${candidatePath}`);
+      if (pathEntryExists(candidatePath) || reservedPaths.has(candidatePath)) continue;
+      branch = candidate; path = candidatePath; reservedBranches.add(branch); reservedPaths.add(path); break;
+    }
+    let ancestor = dirname(path); const pathSuffix = [basename(path)];
+    while (!pathEntryExists(ancestor)) { pathSuffix.unshift(basename(ancestor)); ancestor = dirname(ancestor); }
+    path = join(await fs.realpath(ancestor), ...pathSuffix);
     if (records.some(record => within(record.path, path))) throw new Error("Automatic worktrees must be outside existing checkouts");
     if (pathEntryExists(path) || unresolvableSymlinkAncestor(path) || records.some(row => row.branch === branch)) throw new Error(`Worktree target is occupied: ${path}`);
     const commonDir = (await worktreeGit(["rev-parse", "--path-format=absolute", "--git-common-dir"], repo, signal)).trim();

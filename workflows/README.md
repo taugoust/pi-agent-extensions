@@ -181,7 +181,7 @@ Canonical Goal state is persisted in the session. Reload restores paused/limited
 
 ## Isolated subagent launches
 
-Native Linux subagents accept `worktree: { changes?: "include" | "exclude", base?: string }` on a single launch or each parallel/chain item. Set `cwd` to the source repository (or a directory inside it). Clean checkouts may use `worktree: {}`; the base defaults to the resolved HEAD commit. Any staged, unstaged or untracked changes require an explicit include/exclude choice. Ignored files neither trigger the choice nor get copied.
+Native Linux subagents accept `worktree: { changes?: "include" | "exclude", base?: string, branch?: string }` on a single launch or each parallel/chain item. Set `cwd` to the source repository (or a directory inside it). Clean checkouts may use `worktree: {}`; the base defaults to the resolved HEAD commit. Any staged, unstaged or untracked changes require an explicit include/exclude choice. Ignored files neither trigger the choice nor get copied. New branches use a descriptive display name/name/task slug rather than task IDs. `branch` requests an exact Git-ref-valid name; occupied branches/paths receive readable numeric suffixes and foreign branches are never reused.
 
 Include copies staged/unstaged binary patches and untracked files without stashing, committing or modifying the source index/checkout. A dirty include requires HEAD as its base; unresolved merges, unsafe index flags, dirty submodules and oversized snapshots are refused. Exclude uses only the selected commit. Source changes during preparation fail closed. Each requested child gets its own branch and working copy; chain steps do not inherit the previous step's files.
 

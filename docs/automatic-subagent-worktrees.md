@@ -23,6 +23,8 @@ Each launch (or each parallel/chain item) may override `worktree`:
 
 Discover/select the actual repository cwd before launching an automatically isolated worker. Non-Git cwd, provisioning failures, invalid ownership and unavailable activity evidence fail clearly; there is no fallback to the primary checkout. New dirty sources still require an explicit include/exclude choice. Automatic provisioning never guesses whether to copy or discard working changes. Ignored files are not copied.
 
+New branches are descriptive and contain no task/child/session IDs: an explicit `worktree.branch` wins; recognizable task intent (`Implement …` → `feat/…`, `Fix …` → `fix/…`, `Upgrade …` → `upgrade/…`) comes next, followed by `displayName`, a meaningful legacy `name`, then the task slug. For example, an upgrade task can create `upgrade/paseo-0.15.0`. Set `worktree.branch` on the explicit object form to request an exact branch name; Git ref validation rejects invalid names. If a local branch or default target path is already occupied, provisioning selects the next readable `-2`, `-3`, … suffix. It never checks out or reuses an unrelated branch. Stable task/child/session IDs remain in private ownership metadata and continue to govern resume, borrowing and cleanup.
+
 ## Reuse and partial work
 
 A reused checkout is not copied, reset, merged or transferred to another owner. Staged, unstaged and untracked partial work stays in place. The private registry retains the original physical creator identity and records exact borrower attachments. Resume updates the exact released prior attempt; stale attempts cannot release a replacement.
