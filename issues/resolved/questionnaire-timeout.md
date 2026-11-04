@@ -1,7 +1,7 @@
 # Bound unanswered questionnaires to five minutes
 
 ## Status
-Implemented and verified; publication in progress.
+Resolved.
 
 ## Request
 Questionnaires must not wait indefinitely. The agreed default is five minutes
@@ -28,3 +28,9 @@ integration tests, and the Nix `questionnaire`, `workflows-runtime` (154 tests)
 and `subagent` (199 tests) checks. The guidance fixture now supplies the current
 session-history API and asserts the current ordinary-worker launch contract;
 its initial stale-fixture failures were corrected before the final 15/15 run.
+
+## Resolution
+Implemented in `c8665704661ef874c8bb7893f99f2bc1f612e31f`.
+Expiry returns only the timed-out message, with distinct metadata and no answer
+or automatic agent stop. Publication includes the shared Nix input update;
+host activation and running-session reloads are separate deployment actions.
