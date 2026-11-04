@@ -9,7 +9,7 @@ registerHooks({ load(url, context, next) { if (url.endsWith(".json")) return { s
   if (specifier.endsWith(".js") && specifier.startsWith(".")) { try { return next(specifier.replace(/\.js$/, ".ts"), context); } catch {} }
   return next(specifier, context);
 } });
-const { provisionWorktrees, ownedWorktrees, releaseWorktree, worktreeGit: git, saveOwnedWorktree, worktreeOption, descriptiveWorktreeBranch } = await import("./subagent-worktrees.ts");
+const { provisionWorktrees, ownedWorktrees, releaseWorktree, worktreeGit: git, saveOwnedWorktree, worktreeOption, descriptiveWorktreeBranch, withRepositoryAllocations } = await import("./subagent-worktrees.ts");
 const { reapOwnedWorktrees } = await import("./worktree-reap.ts");
 const { applyAutomaticWorktreePolicy, installWorkerWorktreeContext, workerWorktreeContext } = await import("./worker-worktree-context.ts");
 const { discoverAgentProfiles, resolveAgentProfileLaunch } = await import("../subagent/profiles.ts");
@@ -130,6 +130,49 @@ test("parent refs, same-batch prefix conflicts, occupied paths and remote refs a
   await fs.mkdir(join(pathRoot, "path-collision"));
   const occupiedPath = makeChild(15, repo, { branch: "path-collision" }); await provision([occupiedPath]);
   assert.equal(occupiedPath.spec.worktreeInfo.branch, "path-collision-2");
+}));
+
+test("same-basename repositories sharing an aliased physical worktree root allocate distinct paths and leave sources unchanged", async () => fixture(async ({ root, agent }) => {
+  async function makeRepository(path) {
+    await fs.mkdir(path, { recursive: true });
+    await git(["init", "-b", "main"], path); await git(["config", "user.email", "fixture@example.invalid"], path); await git(["config", "user.name", "Fixture"], path);
+    await fs.writeFile(join(path, "tracked"), "original\n"); await git(["add", "."], path); await git(["commit", "-m", "fixture"], path);
+    return path;
+  }
+  const physicalRoot = join(root, "shared-worktrees"), rootAlias = join(root, "shared-worktrees-alias");
+  await fs.mkdir(physicalRoot); await fs.symlink(physicalRoot, rootAlias);
+  await fs.writeFile(join(agent, "pi-worktree.json"), JSON.stringify({ worktreeRoot: rootAlias }));
+  const firstRepo = await makeRepository(join(root, "first", "repository"));
+  const secondRepo = await makeRepository(join(root, "second", "repository"));
+  const first = makeChild(31, firstRepo), second = makeChild(32, secondRepo);
+  first.spec.displayName = second.spec.displayName = "Shared Parser Review";
+  await Promise.all([provision([first]), provision([second])]);
+  assert.notEqual(first.spec.worktreeInfo.path, second.spec.worktreeInfo.path);
+  assert.notEqual(first.spec.worktreeInfo.branch, second.spec.worktreeInfo.branch);
+  assert.ok(first.spec.worktreeInfo.path.startsWith(join(physicalRoot, "repository") + "/"));
+  assert.ok(second.spec.worktreeInfo.path.startsWith(join(physicalRoot, "repository") + "/"));
+  for (const repo of [firstRepo, secondRepo]) {
+    assert.equal((await git(["branch", "--show-current"], repo)).trim(), "main");
+    assert.equal(await git(["status", "--porcelain"], repo), "");
+  }
+}));
+
+test("cancelled repository-queue waiters preserve FIFO for later waiters", { timeout: 1000 }, async () => fixture(async () => {
+  const events = [];
+  let enterFirst, leaveFirst;
+  const firstEntered = new Promise(resolve => { enterFirst = resolve; });
+  const firstGate = new Promise(resolve => { leaveFirst = resolve; });
+  const key = "repository:abort-order-fixture";
+  const first = withRepositoryAllocations([key], undefined, async () => { events.push("first-enter"); enterFirst(); await firstGate; events.push("first-exit"); });
+  await firstEntered;
+  const controller = new AbortController();
+  const cancelled = withRepositoryAllocations([key], controller.signal, async () => { events.push("cancelled-action"); });
+  const third = withRepositoryAllocations([key], undefined, async () => { events.push("third-action"); });
+  controller.abort();
+  await assert.rejects(cancelled, { name: "AbortError" });
+  assert.deepEqual(events, ["first-enter"], "neither cancelled nor later waiter may pass the holder");
+  leaveFirst(); await Promise.all([first, third]);
+  assert.deepEqual(events, ["first-enter", "first-exit", "third-action"]);
 }));
 
 test("same-name launches racing in one repository select distinct branches without stale prompt injection", async () => fixture(async ({ repo }) => {

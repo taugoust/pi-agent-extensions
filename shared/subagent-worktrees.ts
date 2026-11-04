@@ -166,20 +166,40 @@ async function acquireRepositoryAllocation(repository: string, signal?: AbortSig
     }
   }
 }
-async function withRepositoryAllocations<T>(repositories: string[], signal: AbortSignal | undefined, action: () => Promise<T>): Promise<T> {
-  const releases: (() => void)[] = [];
-  for (const repository of [...new Set(repositories)].sort()) {
-    const previous = repositoryAllocations.get(repository) ?? Promise.resolve();
-    let unlock!: () => void;
-    const gate = new Promise<void>(resolve => { unlock = resolve; });
-    const tail = previous.then(() => gate);
-    repositoryAllocations.set(repository, tail);
-    await previous;
-    releases.push(() => { unlock(); if (repositoryAllocations.get(repository) === tail) repositoryAllocations.delete(repository); });
+async function waitForAllocation(previous: Promise<void>, signal?: AbortSignal): Promise<void> {
+  if (!signal) return previous;
+  signal.throwIfAborted();
+  return new Promise((resolve, reject) => {
+    const abort = () => { signal.removeEventListener("abort", abort); reject(signal.reason ?? new DOMException("Aborted", "AbortError")); };
+    signal.addEventListener("abort", abort, { once: true });
+    previous.then(() => { signal.removeEventListener("abort", abort); resolve(); }, error => { signal.removeEventListener("abort", abort); reject(error); });
+  });
+}
+async function acquireMemoryAllocation(repository: string, signal?: AbortSignal): Promise<() => void> {
+  signal?.throwIfAborted();
+  const previous = repositoryAllocations.get(repository) ?? Promise.resolve();
+  let unlock!: () => void;
+  const gate = new Promise<void>(resolve => { unlock = resolve; });
+  const tail = previous.catch(() => undefined).then(() => gate);
+  repositoryAllocations.set(repository, tail);
+  const release = () => { unlock(); if (repositoryAllocations.get(repository) === tail) repositoryAllocations.delete(repository); };
+  try {
+    await waitForAllocation(previous, signal);
+    signal?.throwIfAborted();
+    return release;
+  } catch (error) {
+    // Keep this placeholder chained until its predecessor settles; later waiters cannot pass it.
+    void previous.then(release, release);
+    throw error;
   }
+}
+export async function withRepositoryAllocations<T>(repositories: string[], signal: AbortSignal | undefined, action: () => Promise<T>): Promise<T> {
+  const keys = [...new Set(repositories)].sort();
+  const releases: (() => void)[] = [];
   const diskReleases: (() => Promise<void>)[] = [];
   try {
-    for (const repository of [...new Set(repositories)].sort()) diskReleases.push(await acquireRepositoryAllocation(repository, signal));
+    for (const repository of keys) releases.push(await acquireMemoryAllocation(repository, signal));
+    for (const repository of keys) diskReleases.push(await acquireRepositoryAllocation(repository, signal));
     return await action();
   } finally {
     try { for (const release of diskReleases.reverse()) await release(); }
@@ -293,6 +313,11 @@ function within(root: string, path: string) {
   const part = relative(root, path);
   return !part || (!isAbsolute(part) && part !== ".." && !part.startsWith(`..${sep}`));
 }
+async function canonicalFuturePath(path: string): Promise<string> {
+  let ancestor = resolve(path); const suffix: string[] = [];
+  while (!pathEntryExists(ancestor)) { suffix.unshift(basename(ancestor)); ancestor = dirname(ancestor); }
+  return join(await fs.realpath(ancestor), ...suffix);
+}
 function attachContext(child: Child, record: OwnedWorktree) {
   const note = `[Isolated worktree]\nWork in ${record.path} on branch ${record.branch}. The source checkout ${record.repo} is separate and must remain unchanged. Treat paths referring to that checkout as references; make your edits in this worktree. Retain the worktree and branch for parent review; do not merge or remove them automatically.`;
   if (!child.spec.systemPrompt?.includes(note)) child.spec.systemPrompt = [child.spec.systemPrompt, note].filter(Boolean).join("\n\n");
@@ -365,16 +390,37 @@ export async function provisionWorktrees(children: Child[], owner: string, signa
 async function provision(children: Child[], owner: string, signal: AbortSignal | undefined, current: () => boolean, resume: boolean, supervision?: WorkerWorktreeContext, previousChildId?: string, activity?: WorktreeReuseActivity) {
   const requested = children.filter(child => child.spec.worktree !== undefined && child.spec.worktree !== false);
   if (resume || !requested.length) return provisionUnlocked(children, owner, signal, current, resume, supervision, previousChildId, activity);
-  const repositories: string[] = [];
+  const allocationKeys: string[] = [];
+  const settings = await loadWorktreeSettings();
+  if (settings.kind === "invalid") throw new Error("Worktree settings are invalid");
   for (const child of requested) {
     worktreeOption(child.spec.worktree);
     const sourceCwd = await fs.realpath(child.spec.cwd!);
     let repo: string;
     try { repo = await currentWorktreePath(gitClient(), sourceCwd, signal); }
     catch (error) { throw new Error(`Automatic worktree requires a Git repository cwd; discover/select its repository first, or set worktree:false for intentional non-Git work. ${String(error)}`); }
-    repositories.push((await worktreeGit(["rev-parse", "--path-format=absolute", "--git-common-dir"], repo, signal)).trim());
+    const commonDir = (await worktreeGit(["rev-parse", "--path-format=absolute", "--git-common-dir"], repo, signal)).trim();
+    const records = await listWorktrees(gitClient(), repo, signal);
+    const mainPath = records[0]?.path ?? repo;
+    const namespace = await canonicalFuturePath(resolve(settings.effectiveRoot, basename(mainPath)));
+    // Ref names are repository-local; target paths are shared by repo basename under the physical configured root.
+    allocationKeys.push(commonDir, `target-namespace:${namespace}`);
   }
-  return withRepositoryAllocations(repositories, signal, () => provisionUnlocked(children, owner, signal, current, resume, supervision, previousChildId, activity));
+  const reserved = new Set(allocationKeys);
+  return withRepositoryAllocations(allocationKeys, signal, async () => {
+    for (const child of requested) {
+      const sourceCwd = await fs.realpath(child.spec.cwd!);
+      let repo: string;
+      try { repo = await currentWorktreePath(gitClient(), sourceCwd, signal); }
+      catch (error) { throw new Error(`Automatic worktree requires a Git repository cwd; discover/select its repository first, or set worktree:false for intentional non-Git work. ${String(error)}`); }
+      const commonDir = (await worktreeGit(["rev-parse", "--path-format=absolute", "--git-common-dir"], repo, signal)).trim();
+      const records = await listWorktrees(gitClient(), repo, signal);
+      const mainPath = records[0]?.path ?? repo;
+      const namespace = await canonicalFuturePath(resolve(settings.effectiveRoot, basename(mainPath)));
+      if (!reserved.has(commonDir) || !reserved.has(`target-namespace:${namespace}`)) throw new Error("Repository or worktree target namespace changed during allocation; retry after owner review");
+    }
+    return provisionUnlocked(children, owner, signal, current, resume, supervision, previousChildId, activity);
+  });
 }
 async function provisionUnlocked(children: Child[], owner: string, signal: AbortSignal | undefined, current: () => boolean, resume: boolean, supervision?: WorkerWorktreeContext, previousChildId?: string, activity?: WorktreeReuseActivity) {
   const requested = children.filter(child => child.spec.worktree !== undefined && child.spec.worktree !== false);
