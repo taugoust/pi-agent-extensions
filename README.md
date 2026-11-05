@@ -82,6 +82,10 @@ Bundled skills: [GitHub search](skills/github-repo-search), [Apple Reminders](sk
 > [!IMPORTANT]
 > Extensions run with your user permissions. Full AgentSH supervision requires a working supervisor; review prompts alone are not isolation. Keep credentials out of Nix values.
 
+## Development
+
+The [Quint differential-testing pilot](tests/quint/README.md) checks retained subagent attempts against the real TypeScript store, including stale completions, competing resumes and ownership boundaries.
+
 ## 📄 License
 
 [MIT](LICENSE) · [Third-party notices](THIRD_PARTY.md) · [Acknowledgements](docs/reference.md#-acknowledgements)

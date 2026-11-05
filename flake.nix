@@ -180,6 +180,7 @@
             piPackage = if pkgs.stdenv.hostPlatform.isLinux then self.packages.${system}.pi else null;
           };
           subagent-finalizer = import ./nix/subagent-finalizer-check.nix { inherit self pkgs; };
+          subagent-quint = import ./nix/subagent-quint-check.nix { inherit self pkgs; };
         }
         // pkgs.lib.optionalAttrs pkgs.stdenv.hostPlatform.isLinux {
           subagent-profiles = import ./nix/subagent-profiles-check.nix {
