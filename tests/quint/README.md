@@ -6,6 +6,25 @@ adapter executes those commands against temporary, private on-disk task/session
 records and compares the persisted projection after every transition.
 No production implementation or live Pi session is changed.
 
+## Development environment
+
+```sh
+nix develop .#quint
+```
+
+The named shell provides Quint, Node.js, TypeScript and `quint-language-server
+--stdio` from this repository's existing locked Nix environment. The shell and
+server packaging follow the [Quint flake template](https://github.com/taugoust/flake-templates/tree/ab2a17e339df8107a9da92ef1fca6e087b3a2118/quint),
+without adding another flake, lock file or toolchain input. The server is built
+from the pinned Quint source release with upstream's locked npm dependencies.
+When updating Quint, also review `nix/quint-language-server.nix` for the server
+version, standalone-build patch and dependency hash.
+
+Launch an editor from this shell so it can find the language server. The server
+does not provide syntax highlighting; editor configuration remains separate.
+For optional direnv integration, use `use flake .#quint` in a local `.envrc` and
+run `direnv allow`. This repository does not automatically activate the shell.
+
 ## Run
 
 ```sh
@@ -20,7 +39,7 @@ Its output contains `report.json` and the three mutation counterexample prefixes
 For a different seed/corpus, or inspectable local artifacts:
 
 ```sh
-nix shell --inputs-from . nixpkgs#quint nixpkgs#nodejs --command \
+nix develop .#quint --command \
   node tests/quint/run.mjs --seed 0x5eed --traces 128 --steps 40 \
   --out-dir .dev/quint-pilot/my-run
 ```
@@ -33,8 +52,16 @@ the decoded command/state sequences are reproducible with the same inputs.
 A failing comparison retains the trace prefix through the first mismatch:
 
 ```sh
-nix shell --inputs-from . nixpkgs#nodejs --command \
+nix develop .#quint --command \
   node tests/quint/run.mjs --replay /path/to/failure.itf.json
+```
+
+The separate language-server check exercises stdio initialization, invalid
+in-memory edits, diagnostics clearing after loading the real model, document
+symbols and clean shutdown, without requiring an editor:
+
+```sh
+nix build .#checks.x86_64-linux.quint-language-server --no-link -L
 ```
 
 Mutation counterexamples intentionally fail only against their matching broken

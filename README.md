@@ -84,7 +84,7 @@ Bundled skills: [GitHub search](skills/github-repo-search), [Apple Reminders](sk
 
 ## Development
 
-The [Quint differential-testing pilot](tests/quint/README.md) checks retained subagent attempts against the real TypeScript store, including stale completions, competing resumes and ownership boundaries.
+The [Quint differential-testing pilot](tests/quint/README.md) checks retained subagent attempts against the real TypeScript store, including stale completions, competing resumes and ownership boundaries. Enter its pinned development environment with `nix develop .#quint` (Quint, Node.js, TypeScript and the Quint language server).
 
 ## 📄 License
 

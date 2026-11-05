@@ -114,6 +114,8 @@
             chmod -R u+rwX "$out"
           '';
 
+          quint-language-server = pkgs.callPackage ./nix/quint-language-server.nix { };
+
           example-auto-extensions = extensionBundle {
             inherit pkgs;
             name = "pi-auto-extensions";
@@ -128,6 +130,23 @@
               "sandbox"
               "auto"
               "subagent-finalizer"
+            ];
+          };
+        }
+      );
+
+      devShells = forAllSystems (
+        system:
+        let
+          pkgs = import nixpkgs { inherit system; };
+        in
+        {
+          quint = pkgs.mkShell {
+            packages = [
+              pkgs.quint
+              pkgs.nodejs
+              pkgs.typescript
+              self.packages.${system}.quint-language-server
             ];
           };
         }
@@ -181,6 +200,7 @@
           };
           subagent-finalizer = import ./nix/subagent-finalizer-check.nix { inherit self pkgs; };
           subagent-quint = import ./nix/subagent-quint-check.nix { inherit self pkgs; };
+          quint-language-server = import ./nix/quint-language-server-check.nix { inherit self pkgs; };
         }
         // pkgs.lib.optionalAttrs pkgs.stdenv.hostPlatform.isLinux {
           subagent-profiles = import ./nix/subagent-profiles-check.nix {
