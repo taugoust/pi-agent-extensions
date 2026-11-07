@@ -29,6 +29,30 @@ test('normal managed Goal recovers an active task across parent reload and resum
  await restored.pause(e);const resumed=await restored.resume(e);assert.deepEqual(resumed,oldChild);assert.equal(activation,2);assert.equal((await restored.observe({...e,child:resumed}))?.status,'active');
 });
 
+test("abrupt child exit replaces cached guard keys with fresh authenticated retained metadata", async () => {
+  const e = entry("guarded"); let reads = 0, stops = 0, marker = "forge-approval:first";
+  const handle: GoalChildHandle = {
+    model: "test/model",
+    identity: { sessionId: "s", runtimeId: "r", taskId: "task", childId: "child", jobId: "job", attempt: 1, workerEpoch: "epoch" },
+    async start() { return { goalId: e.id, activationId: "activation", status: "active", executionStopped: false, waiting: null, completionGuardKeys: [] }; },
+    async resume() { throw Error("unused"); }, async pause() { throw Error("unused"); },
+    async observe() { throw Error("worker exited abruptly"); },
+    async stop() { stops++; },
+  };
+  const executor = createDelegatedGoalExecutor({ sessionId: "s", runtimeId: "r",
+    async launch() { return handle; }, async verifyStopped() {},
+    async retainedCompletion() { reads++; return { goalId: e.id, activationId: "activation", status: "paused", executionStopped: true, waiting: null, completionGuardKeys: [marker] }; },
+  });
+  e.child = await executor.start(e);
+  const first = await executor.observe(e);
+  assert.deepEqual(first?.completionGuardKeys, ["forge-approval:first"]);
+  assert.equal(stops, 1); assert.equal(reads, 1);
+  marker = "forge-approval:changed";
+  const second = await executor.observe(e);
+  assert.deepEqual(second?.completionGuardKeys, ["forge-approval:changed"], "stopped observations re-read retained metadata instead of trusting b.last");
+  assert.equal(reads, 2);
+});
+
 test("two child bindings retain tasks across attempts; pause awaits halt and rejects stale attempts", async () => {
   let halted = 0, validPause = false;
   const contractIds = new Map<string, string>();

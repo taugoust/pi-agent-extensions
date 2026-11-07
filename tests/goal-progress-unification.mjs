@@ -23,6 +23,8 @@ const { loadGoalStateFromSession } = await jiti.import("../workflows/goal/persis
 const { readGoalHistory } = await jiti.import("../workflows/goal/history.ts");
 const { validateProgressMutation, reconstructProgress, readScopedProgress } = await jiti.import("../progress/progress-state.ts");
 const { registerGoalTools } = await jiti.import("../workflows/goal/tools.ts");
+const { bindGoalForgeBridge } = await jiti.import("../workflows/goal/forge-bridge.ts");
+const { registerForgeGoalCompletionGuard } = await jiti.import("../shared/forge-goal.ts");
 const { registerGoalLifecycle } = await jiti.import("../workflows/goal/lifecycle.ts");
 const { createDelegatedChildGoalService } = await jiti.import("../workflows/delegated-child.ts");
 const { GoalCommandController } = await jiti.import("../workflows/goal/commands.ts");
@@ -61,6 +63,9 @@ function fixture(options = {}) {
     sessionManager: { getSessionId: () => "offline", getBranch: () => entries, getEntries: () => entries },
   };
   const runtime = new GoalRuntime(pi);
+  const forgeBridge = bindGoalForgeBridge(pi, runtime);
+  forgeBridge.beginSession(ctx);
+  forgeBridge.markReady();
   runtime.bindWorkflowSession(ctx.sessionManager);
   runtime.settings = { ...runtime.settings, continuationLimits: { automaticTurns: 8, noProgressTurns: 4 } };
   const dispose = bindGoalMutations(pi, ctx, runtime, { child: options.child ?? false, busy: () => busy });
@@ -68,7 +73,7 @@ function fixture(options = {}) {
   const mutate = input => mutateProgress(pi, ctx, input);
   const create = (extra = {}) => mutate({ action: "create", request_id: "create", objective: "Verified offline outcome", steps: [{ text: "verify", status: "pending" }], ...extra });
   const update = (extra = {}) => mutate({ action: "update", request_id: "update", goal_id: runtime.activeGoal.id, expected_revision: runtime.activeGoal.revision, steps: [], ...extra });
-  return { pi, ctx, runtime, entries, tools, messages, handlers, dispose, mutate, create, update, idle: value => idle = value, busy: value => busy = value };
+  return { pi, ctx, runtime, entries, tools, messages, handlers, dispose: () => { dispose(); forgeBridge.shutdown(); }, mutate, create, update, idle: value => idle = value, busy: value => busy = value };
 }
 test("coordinators can create, update and restore multiple concurrent tasks", () => {
   const f = fixture();
@@ -337,6 +342,34 @@ test("paused completion fails closed on unfinished tasks, authorization, stale i
     await rejectUnchanged({}, /requires a paused goal/);
   }
 });
+test("budget wrap-up goal_complete retains exact delivered wrap-up authority", async () => {
+  const f = fixture(), created = f.create({ steps: [{ text: "Verified", status: "completed" }] });
+  const goal = f.runtime.activeGoal;
+  goal.status = "budget_limited";
+  f.runtime.budgetWrapUp = { goalId: goal.id, activationId: goal.activationId, delivered: true };
+  assert.equal(f.runtime.hasActiveBudgetWrapUp(), true);
+  const result = await f.tools.get("goal_complete").execute("wrap-up", { goal_id: created.goalId, activation_id: created.activationId, summary: "Verified budget wrap-up outcome" }, undefined, undefined, f.ctx);
+  assert.equal(result.terminate, true);
+  assert.equal(f.runtime.activeGoal, undefined);
+  f.runtime.clearCompletionStatusTimer();
+});
+
+test("aborting during an awaited async completion guard prevents goal_complete transition", async () => {
+  const f = fixture(), created = f.create({ steps: [{ text: "Verified", status: "completed" }] });
+  let release, entered = false;
+  registerForgeGoalCompletionGuard(f.pi.events, { goalId: created.goalId, activationId: created.activationId }, "cancel-check", async () => {
+    entered = true; await new Promise(resolve => { release = resolve; }); return undefined;
+  });
+  const aborter = new AbortController();
+  const pending = f.tools.get("goal_complete").execute("cancelled", { goal_id: created.goalId, activation_id: created.activationId, summary: "Verified cancellation outcome" }, aborter.signal, undefined, f.ctx);
+  assert.equal(entered, true);
+  aborter.abort(); release();
+  await assert.rejects(pending, /abort/i);
+  assert.equal(f.runtime.activeGoal.status, "active");
+  assert.equal(f.entries.some(entry => entry.type === "custom" && entry.customType === "goal-state" && entry.data.goal?.status === "complete"), false);
+  f.dispose();
+});
+
 test("autonomous goal_complete still rejects paused goals without execution authority", async () => {
   const f = fixture(), created = f.create({ start: false, steps: [{ text: "Verified", status: "completed" }] });
   for (const ownedRun of [false, true]) {

@@ -83,7 +83,7 @@ export function registerGoalTools(pi: ExtensionAPI, runtime: GoalRuntime) {
     renderResult(result) {
       return renderGoalCompletion(result);
     },
-    async execute(_toolCallId, params, _signal, _onUpdate, ctx) {
+    async execute(_toolCallId, params, signal, _onUpdate, ctx) {
       const completedGoal = runtime.activeGoal;
       const goal = completedGoal?.text ?? "unknown goal";
       const requestedGoalId = typeof params.goal_id === "string" ? params.goal_id.trim() : "";
@@ -152,14 +152,17 @@ export function registerGoalTools(pi: ExtensionAPI, runtime: GoalRuntime) {
       }
 
       const completionIdentity = { goalId: completedGoal.id, activationId: completedGoal.activationId ?? completedGoal.id };
-      const guardRejection = await checkForgeGoalCompletionGuards(runtime.pi.events, completionIdentity);
+      signal?.throwIfAborted();
+      const guardRejection = await checkForgeGoalCompletionGuards(runtime.pi.events, completionIdentity, signal);
       if (guardRejection) {
         const rejection = `Goal completion rejected: ${guardRejection}`;
         notifyTerminal(ctx.ui, rejection, "warning");
         return { content: toolContent(rejection), details: completionDetails(goal, requestedGoalId, summary) };
       }
+      signal?.throwIfAborted();
       const latestGoal = runtime.activeGoal;
-      if (!latestGoal || latestGoal.id !== completionIdentity.goalId || (latestGoal.activationId ?? latestGoal.id) !== completionIdentity.activationId || latestGoal.status !== "active") {
+      const retainsWrapUpAuthority = completingDuringBudgetWrapUp && runtime.hasActiveBudgetWrapUp();
+      if (!latestGoal || latestGoal.id !== completionIdentity.goalId || (latestGoal.activationId ?? latestGoal.id) !== completionIdentity.activationId || (latestGoal.status !== "active" && !(latestGoal.status === "budget_limited" && retainsWrapUpAuthority))) {
         const rejection = "Goal completion rejected: Goal activation changed while completion checks were running.";
         notifyTerminal(ctx.ui, rejection, "warning");
         return { content: toolContent(rejection), details: completionDetails(goal, requestedGoalId, summary) };

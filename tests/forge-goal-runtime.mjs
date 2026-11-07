@@ -6,6 +6,10 @@ import { pathToFileURL } from "node:url";
 import { mkdtemp, mkdir, rm } from "node:fs/promises";
 import { tmpdir } from "node:os";
 
+// This disposable SDK root must not inherit a live dedicated worker assignment.
+delete process.env.PI_DEDICATED_GOAL_CHILD;
+delete process.env.PI_DEDICATED_GOAL_BINDING;
+
 const root = fileURLToPath(new URL("../", import.meta.url));
 const sdk = resolve(process.argv[2]);
 const { createJiti } = await import(pathToFileURL(resolve(sdk, "node_modules/jiti/lib/jiti.mjs")));
@@ -30,9 +34,10 @@ function fixture(initial) {
   };
   const otherAPI = { events }; // Deliberately distinct ExtensionAPI object, same supported shared bus.
   const pi = { events, registerTool: tool => tools.set(tool.name, tool), on: () => () => {} };
-  let snapshot = initial, sequence = 0;
+  let snapshot = initial, sequence = 0, ready = true;
   const subscriptions = new Map(), guards = new Map(), required = new Map(), wakes = [];
   const binding = {
+    ready: () => ready,
     snapshot: () => snapshot,
     subscribe(identity) {
       if (!snapshot || snapshot.status !== "active" || snapshot.goalId !== identity.goalId || snapshot.activationId !== identity.activationId) return undefined;
@@ -112,6 +117,9 @@ test("workflows factory serves a distinct watcher API over shared bus before goa
     workflows(workflowsApi, { goalSettingsPath: resolve(agentDir, "goal.json") });
     progressExtension(pi);
     watcherApi = new Proxy(pi, {});
+    assert.equal(bridge.isForgeGoalReady(watcherApi.events), false, "bus binding is not ready during extension factory startup");
+    assert.equal(bridge.getCurrentForgeGoal(watcherApi.events), undefined, "unrestored Goal state is not exposed to early watcher reconciliation");
+    watcherApi.events.on(bridge.FORGE_GOAL_READY_EVENT, () => { assert.equal(bridge.isForgeGoalReady(watcherApi.events), true); });
     watcherApi.on("session_start", (_event, ctx) => { sessionContext = ctx; });
     watcherApi.on("tool_execution_end", () => {
       if (subscribed) return;
@@ -157,6 +165,16 @@ test("workflows factory serves a distinct watcher API over shared bus before goa
     bridge.registerForgeGoalCompletionGuard(watcherApi.events, pausedIdentity, "race-check", async () => undefined);
     releaseCheck(undefined);
     assert.match(await checking, /changed during fresh verification/);
+    const branch = session.sessionManager.getBranch();
+    const markerEntry = branch.findLast(entry => entry.type === "custom" && entry.customType === "forge-goal-completion-guard" && entry.data?.goalId === paused.goalId);
+    const pausedState = branch.findLast(entry => entry.type === "custom" && entry.customType === "goal-state" && entry.data?.goal?.id === paused.goalId);
+    assert.ok(markerEntry && pausedState);
+    await session.navigateTree(pausedState.id, { summarize: false });
+    await session.navigateTree(markerEntry.id, { summarize: false });
+    const restored = bridge.getCurrentForgeGoal(watcherApi.events);
+    const restoredState = session.sessionManager.getBranch().findLast(entry => entry.type === "custom" && entry.customType === "goal-state").data.goal;
+    await assert.rejects(registeredTools.get("goal_manage").execute("complete", { action: "complete", goal_id: restored.goalId, activation_id: restored.activationId, expected_revision: restoredState.revision, user_authorized: true, summary: "Verified after branch navigation" }, undefined, undefined, sessionContext), /completion guard.*unavailable/i);
+    assert.equal(calls, callsAtWait + 1, "branch restoration and rejected completion do not infer");
     await session.abort(); await owner.dispose(); assert.deepEqual(errors, []);
   } finally { await rm(rootDir, { recursive: true, force: true }); }
 });
@@ -181,6 +199,20 @@ test("paused goal_manage complete also awaits the same async guard", async () =>
   const runtime = { pi: f.pi, activeGoal: goal, agentRunOrigin: undefined };
   registerGoalTools(f.pi, runtime);
   await assert.rejects(f.tools.get("goal_manage").execute("call", { action: "complete", goal_id: goal.id, activation_id: goal.activationId, expected_revision: 4, user_authorized: true, summary: "Verified completed work" }, undefined, undefined, { ui: { notify() {} } }), /Review must be refreshed/);
+  assert.equal(runtime.activeGoal, goal); assert.equal(goal.status, "paused");
+});
+
+test("aborting an awaited paused goal_manage guard prevents completion transition", async () => {
+  const identity = { goalId: "cancel-paused", activationId: "a1" }, f = fixture({ ...identity, status: "active", waiting: false });
+  let release, started = false;
+  bridge.registerForgeGoalCompletionGuard(f.otherAPI.events, identity, "cancel-check", async () => { started = true; await new Promise(resolve => { release = resolve; }); return undefined; });
+  const goal = { id: identity.goalId, activationId: identity.activationId, revision: 7, status: "paused", text: "Verified work", tasks: [{ id: "t", text: "Done", status: "completed" }] };
+  const runtime = { pi: f.pi, activeGoal: goal, agentRunOrigin: undefined };
+  registerGoalTools(f.pi, runtime);
+  const aborter = new AbortController();
+  const pending = f.tools.get("goal_manage").execute("cancel", { action: "complete", goal_id: goal.id, activation_id: goal.activationId, expected_revision: 7, user_authorized: true, summary: "Verified paused outcome" }, aborter.signal, undefined, { ui: { notify() {} } });
+  assert.equal(started, true); aborter.abort(); release();
+  await assert.rejects(pending, /abort/i);
   assert.equal(runtime.activeGoal, goal); assert.equal(goal.status, "paused");
 });
 

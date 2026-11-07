@@ -2,6 +2,7 @@ import type { ExtensionAPI } from "@earendil-works/pi-coding-agent";
 
 type ForgeEvents = ExtensionAPI["events"];
 const CHANNEL = "pi-agent-extensions:forge-goal:request:v1";
+export const FORGE_GOAL_READY_EVENT = "pi-agent-extensions:forge-goal:ready:v1";
 export const FORGE_GOAL_GUARD_ENTRY = "forge-goal-completion-guard";
 
 /**
@@ -21,13 +22,14 @@ export interface ForgeGoalSnapshot extends ForgeGoalIdentity {
   waitReason?: string;
 }
 export interface ForgeGoalBinding {
+  ready(): boolean;
   snapshot(): ForgeGoalSnapshot | undefined;
   subscribe(identity: ForgeGoalIdentity): string | undefined;
   wake(identity: ForgeGoalIdentity, subscriptionId: string, message: string): boolean;
   consume(identity: ForgeGoalIdentity, subscriptionId: string): boolean;
   unsubscribe(subscriptionId: string): void;
-  registerGuard(identity: ForgeGoalIdentity, key: string, check: (identity: ForgeGoalIdentity) => Promise<string | undefined>): () => void;
-  checkGuards(identity: ForgeGoalIdentity): Promise<string | undefined>;
+  registerGuard(identity: ForgeGoalIdentity, key: string, check: (identity: ForgeGoalIdentity, signal?: AbortSignal) => Promise<string | undefined>): () => void;
+  checkGuards(identity: ForgeGoalIdentity, signal?: AbortSignal): Promise<string | undefined>;
 }
 
 interface Request { op: string; [key: string]: unknown; reply?: unknown }
@@ -44,17 +46,21 @@ export function bindForgeGoal(events: ForgeEvents, binding: ForgeGoalBinding): (
     const r = raw as Request;
     if (!r || typeof r !== "object") return;
     switch (r.op) {
-      case "snapshot": r.reply = binding.snapshot(); break;
+      case "ready": r.reply = binding.ready(); break;
+      case "snapshot": r.reply = binding.ready() ? binding.snapshot() : undefined; break;
       case "subscribe": r.reply = binding.subscribe(r.identity as ForgeGoalIdentity); break;
       case "wake": r.reply = binding.wake(r.identity as ForgeGoalIdentity, String(r.subscriptionId), String(r.message)); break;
       case "consume": r.reply = binding.consume(r.identity as ForgeGoalIdentity, String(r.subscriptionId)); break;
       case "unsubscribe": r.reply = binding.unsubscribe(String(r.subscriptionId)); break;
-      case "guard-register": r.reply = binding.registerGuard(r.identity as ForgeGoalIdentity, String(r.key), r.check as (identity: ForgeGoalIdentity) => Promise<string | undefined>); break;
-      case "guard-check": r.reply = binding.checkGuards(r.identity as ForgeGoalIdentity); break;
+      case "guard-register": r.reply = binding.registerGuard(r.identity as ForgeGoalIdentity, String(r.key), r.check as (identity: ForgeGoalIdentity, signal?: AbortSignal) => Promise<string | undefined>); break;
+      case "guard-check": r.reply = binding.checkGuards(r.identity as ForgeGoalIdentity, r.signal as AbortSignal | undefined); break;
     }
   });
 }
 
+export function isForgeGoalReady(events: ForgeEvents): boolean {
+  return request<boolean>(events, { op: "ready" }) ?? false;
+}
 export function getCurrentForgeGoal(events: ForgeEvents): ForgeGoalSnapshot | undefined {
   return request(events, { op: "snapshot" });
 }
@@ -72,14 +78,14 @@ export function registerForgeGoalCompletionGuard(
   events: ForgeEvents,
   identity: ForgeGoalIdentity,
   key: string,
-  guard: (identity: ForgeGoalIdentity) => Promise<string | undefined>,
+  guard: (identity: ForgeGoalIdentity, signal?: AbortSignal) => Promise<string | undefined>,
 ): () => void {
   const unsubscribe = request<() => void>(events, { op: "guard-register", identity, key, check: guard });
   if (!unsubscribe) throw new Error("Goal completion guard registration failed closed");
   return unsubscribe;
 }
-export function checkForgeGoalCompletionGuards(events: ForgeEvents, identity: ForgeGoalIdentity): Promise<string | undefined> {
-  const check = request<Promise<string | undefined>>(events, { op: "guard-check", identity });
+export function checkForgeGoalCompletionGuards(events: ForgeEvents, identity: ForgeGoalIdentity, signal?: AbortSignal): Promise<string | undefined> {
+  const check = request<Promise<string | undefined>>(events, { op: "guard-check", identity, signal });
   return check ?? Promise.resolve("Goal completion guard service is unavailable; completion was denied");
 }
 

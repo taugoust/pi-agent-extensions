@@ -226,7 +226,21 @@ export function createDelegatedGoalExecutor(options: {
           summary: "Dedicated child execution stopped during parent reload; explicit Resume is required.", goalId: undefined };
       }
       const b = binding(entry);
-      if (b.stopped) return structuredClone(b.last);
+      if (b.stopped) {
+        // The cached stop receipt proves process state, not current retained Goal
+        // obligations. Completion metadata must be re-read from the authenticated
+        // child session on every stopped-child observation.
+        const retained = await options.retainedCompletion?.(entry);
+        if (retained) {
+          validate(retained, b.goalId);
+          if (!retained.executionStopped || !["complete", "paused"].includes(retained.status) || !Array.isArray(retained.completionGuardKeys)) throw new Error("Invalid fresh retained Goal metadata");
+          b.last = structuredClone(retained);
+          return structuredClone(retained);
+        }
+        const { completionGuardKeys: _staleKeys, ...withoutStaleKeys } = b.last;
+        b.last = withoutStaleKeys;
+        return structuredClone(b.last);
+      }
       let observed: ChildGoalSnapshot;
       try { observed = await b.handle.observe(); }
       catch (error) {
@@ -237,8 +251,16 @@ export function createDelegatedGoalExecutor(options: {
           await b.handle.stop();
           binding(entry);
           b.stopped = true;
-          b.last = { ...b.last, status: "paused", executionStopped: true, waiting: null,
-            summary: "Owned dedicated child execution exited; explicit Resume is required." };
+          const retained = await options.retainedCompletion?.(entry);
+          if (retained) {
+            validate(retained, b.goalId);
+            if (!retained.executionStopped || !["complete", "paused"].includes(retained.status) || !Array.isArray(retained.completionGuardKeys)) throw new Error("Invalid fresh retained Goal metadata");
+            b.last = structuredClone(retained);
+          } else {
+            const { completionGuardKeys: _staleKeys, ...withoutStaleKeys } = b.last;
+            b.last = { ...withoutStaleKeys, status: "paused", executionStopped: true, waiting: null,
+              summary: "Owned dedicated child execution exited; explicit Resume is required." };
+          }
           restorationFailures.delete(entry.id);
           return structuredClone(b.last);
         } catch (proofError) {

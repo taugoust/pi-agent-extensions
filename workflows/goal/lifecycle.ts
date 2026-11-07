@@ -1,4 +1,4 @@
-import type { ExtensionAPI } from "@earendil-works/pi-coding-agent";
+import type { ExtensionAPI, ExtensionContext } from "@earendil-works/pi-coding-agent";
 import { consumeForgeGoalWake } from "../../shared/forge-goal.ts";
 import { currentTokenTotal } from "./accounting.js";
 import { notifyTerminal } from "./errors.js";
@@ -40,6 +40,7 @@ const REMOVED_PERSISTED_QUEUE_WARNING =
 interface GoalLifecycleOptions {
   settingsPath?: string;
   restorePaused?: boolean;
+  refreshForgeGoalMarkers?: (ctx: ExtensionContext) => void;
 }
 
 export function registerGoalLifecycle(
@@ -190,6 +191,7 @@ export function registerGoalLifecycle(
     if (!ctx.isIdle()) abortCurrentTurn(ctx);
     try {
       const loaded = loadGoalStateFromSession(ctx);
+      options.refreshForgeGoalMarkers?.(ctx);
       runtime.legacyQueueState = loaded.legacyQueueState;
       if (loaded.goal) {
         const restored = nextGoalInstance(loaded.goal);
