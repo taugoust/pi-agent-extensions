@@ -2,7 +2,8 @@
 // Usage: node tests/forge-watch-runtime.mjs <installed Pi package directory>
 import assert from "node:assert/strict";
 import test from "node:test";
-import { mkdtemp, mkdir, writeFile, rm } from "node:fs/promises";
+import { mkdtemp, mkdir, readFile, writeFile, rm } from "node:fs/promises";
+import { createHash } from "node:crypto";
 import { tmpdir } from "node:os";
 import { resolve, join } from "node:path";
 import { pathToFileURL, fileURLToPath } from "node:url";
@@ -176,6 +177,57 @@ test("watcher-first factory order preserves retained subscriptions and pending e
     assert.equal(statuses.length, 1, "Not an empty-array/vacuous restore assertion");
     assert.equal(statuses[0].pending, pending);
     assert.equal(restored.requests, 0, "Startup and readiness reconciliation never call the model");
+  } finally { await restored.dispose(); }
+}));
+
+test("same-activation restart reconciles an accepted wake from the actual Goal transcript without another model turn", { timeout: 20000 }, () => isolated(async root => {
+  const first = await fixture(root);
+  const changed = { head, state: "open", comments: [{ id: "durable-note", fingerprint: "durable-change" }], reviews: [], ci: [] };
+  let manager, activationId, stateFile, rawToken, coveredIds;
+  const matchingReceipts = (session, digest) => session.sessionManager.getBranch().filter(entry => entry.type === "custom_message" && entry.customType === "forge-goal-wake" && entry.details?.batchToken === digest);
+  try {
+    await first.session.prompt("Subscribe and wait."); await first.session.waitForIdle();
+    await first.engine.pollOnce(target); first.snapshot = changed;
+    await first.settledAfter(() => first.engine.pollOnce(target));
+    assert.equal(first.requests, 5);
+    const status = (await first.engine.status())[0];
+    rawToken = status.subscription.deliveryToken;
+    coveredIds = status.subscription.deliveryEventIds;
+    assert.ok(rawToken); assert.ok(coveredIds?.length);
+    const digest = createHash("sha256").update(rawToken).digest("hex");
+    assert.equal(matchingReceipts(first.session, digest).length, 1, "Receipt is a real persisted custom message, not a supplied approval/notification result");
+    activationId = first.goal.activationId; manager = first.session.sessionManager;
+    stateFile = join(root, "watch-state", createHash("sha256").update(manager.getSessionId()).digest("hex") + ".json");
+  } finally { await first.dispose(); }
+  // Reproduce the durable boundary after the Goal message was recorded but the
+  // separate watcher receipt write was lost. Engine tests inject the write fault;
+  // this real-session test qualifies authoritative cross-store reconciliation.
+  const stored = JSON.parse(await readFile(stateFile, "utf8"));
+  const subscription = Object.values(stored.state.subscriptions)[0];
+  subscription.deliveryNotified = false; delete subscription.deliveryToken; delete subscription.deliveryEventIds;
+  subscription.deliveryClaim = rawToken; subscription.deliveryClaimOwner = "simulated-crashed-owner"; subscription.deliveryClaimEventIds = coveredIds;
+  const later = { id: "later-note", fingerprint: "later-change" };
+  const latest = { ...changed, comments: [...changed.comments, later] };
+  const queue = Object.values(stored.state.queues)[0];
+  const laterId = String(stored.state.nextEvent++);
+  queue.push({ ...queue[0], id: laterId, fingerprint: "comments:later-note:later-change", at: queue[0].at + 1 });
+  Object.values(stored.state.targets)[0].baseline = latest;
+  await writeFile(stateFile, JSON.stringify(stored));
+  const restored = await fixture(root, { manager, script: ({ goal }) => [call("goal_wait", { ...identity(goal), reason: "Receipt-recovery fixture re-waits" })] });
+  try {
+    assert.equal(restored.goal.activationId, activationId, "Ordinary Goal restore can preserve activation; no assumption of implicit fencing");
+    restored.snapshot = latest;
+    await restored.engine.pollOnce(target);
+    const status = (await restored.engine.status())[0];
+    assert.equal(status.subscription.deliveryNotified, true);
+    assert.equal(status.subscription.deliveryClaim, undefined);
+    assert.equal(status.pending, coveredIds.length + 1);
+    assert.deepEqual(status.subscription.deliveryEventIds, coveredIds, "Recover the old claim before combining newer, unnotified IDs");
+    assert.equal(restored.requests, 0, "A recorded batch never starts another model turn after receipt recovery");
+    assert.equal(matchingReceipts(restored.session, createHash("sha256").update(rawToken).digest("hex")).length, 1);
+    await restored.settledAfter(() => restored.engine.ack({ sessionId: manager.getSessionId(), goalId: restored.goal.goalId, activationId }, coveredIds));
+    assert.equal(restored.requests, 1, "Acknowledging the recovered batch admits the genuinely newer event once");
+    assert.deepEqual((await restored.engine.status())[0].subscription.deliveryEventIds, [laterId]);
   } finally { await restored.dispose(); }
 }));
 
