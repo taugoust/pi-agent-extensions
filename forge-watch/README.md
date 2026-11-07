@@ -70,7 +70,7 @@ Self-hosted hosts must have an explicitly configured server. Git repository name
 }
 ```
 
-Subscribe **before** calling `goal_wait` alone. Do not add a periodic wake deadline merely to poll the forge. Existing content is baselined without a notification flood; subsequent meaningful changes are deduplicated. A notification contains only bounded status/identity data, not trusted instructions or proof of approval. Retrieve details with direct MCP reads, consume the event IDs with `events`, and acknowledge handled IDs with `ack`. Repeated unchanged polling and an already-notified unacknowledged batch remain quiet.
+Subscribe **before** calling `goal_wait` alone. Do not add a periodic wake deadline merely to poll the forge. Existing content is baselined without a notification flood; subsequent meaningful changes are deduplicated. A notification contains only bounded status/identity data, not trusted instructions or proof of approval. Retrieve details with direct MCP reads, consume the event IDs with `events`, and acknowledge handled IDs with `ack`. Repeated unchanged polling and an already-notified unacknowledged batch remain quiet. Acknowledge every handled batch before waiting again: newer events arriving between `events` and `ack` retain their own IDs and are admitted as the next batch after the covered IDs are acknowledged.
 
 Use `ignore_actors` only for expected self/automation discussion activity. It does not suppress head changes, state changes, CI changes or the fresh completion check. Fingerprint persistence and acknowledgement—not a timer-driven agent reaction—prevent loops caused by re-reading the agent's own activity.
 
@@ -89,6 +89,8 @@ GitHub review records expose `user`, `state` and `commit_id`; an approval must b
 ## Persistence, costs and recovery
 
 Per-session private state under `state/forge-watch-v1/` stores target baselines, explicit subscription identities, pending event IDs, delivery receipts, acknowledgements and approval obligations. State is not added to model context. Snapshots are bounded and atomically replaced; malformed, foreign-session or unsafe state fails closed. Overflow/errors are visible rather than silently presenting incomplete event history as complete.
+
+A hashed batch token is recorded in the actual Goal custom-message entry, separately from the watcher's claim/receipt snapshot. Recovery consults that current-session transcript before retrying an uncertain claim; a recorded batch does not start another model turn, while an unknown receipt remains visibly fail-closed. Receipt write failures retry without re-sending accepted work, and shutdown has a finite drain budget. Delivery receipts are bookkeeping, never human-approval evidence.
 
 Polling has latency of approximately the interval plus request duration/backoff; each target may require multiple paginated MCP reads. Equivalent subscriptions share a target poll within the owning runtime, not across unrelated processes or sessions. Choose intervals with API quota and page counts in mind. Timeouts, bounded concurrency, retry-after and jittered backoff prevent tight loops. Rate-limit/auth failures do not create periodic model turns.
 
