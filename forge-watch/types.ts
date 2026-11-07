@@ -78,6 +78,12 @@ export interface ForgeWatchOptions {
   maxEventsPerSubscription?: number;
   maxBackoffMs?: number;
   jitter?: (delayMs: number) => number;
+  random?: () => number;
+  maxSubscriptions?: number;
+  maxTargets?: number;
+  maxBaselineItems?: number;
+  maxQueueEvents?: number;
+  onError?: (error: Error) => void;
 }
 
 export interface ForgeWatchStatus {
