@@ -37,6 +37,7 @@ Extensions are **opt-in**. [Build a selective bundle or install without Nix →]
 | [Workflows](workflows/README.md) | Manage Git worktrees and explicitly authorized Goals. |
 | [Subagent](docs/subagent-profiles.md) | Delegate single, parallel or chained work with named profiles, [coordinator-first guidance](subagent/GUIDANCE.md), [reliable notification delivery and recovery](docs/guidance-notifications.md), [automatic worktree creation/reuse and parent-controlled cleanup](docs/automatic-subagent-worktrees.md), and optional [supervised runtime verification](docs/subagent-verification.md). |
 | [Background jobs](background-job) | Run, monitor and clean up durable shell jobs. |
+| [Forge watch](forge-watch/README.md) | In-progress inference-free MCP forge subscriptions and current-revision approval gates; see backend qualification status. |
 | [Progress](OBSERVABILITY.md) | Keep multi-step work visible. |
 | [Auto](auto) | Opt into automatic continuation with `/auto`. |
 

@@ -3,6 +3,7 @@
     "stamp",
     "progress",
     "workflows",
+    "forge-watch",
     "idle-context-warning",
     "btw",
     "subagent",

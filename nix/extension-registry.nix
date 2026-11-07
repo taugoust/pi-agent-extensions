@@ -13,6 +13,7 @@ let
     "direnv"
     "fence"
     "fetch"
+    "forge-watch"
     "idle-context-warning"
     "openai-accounts"
     "openai-usage"
@@ -48,7 +49,7 @@ let
         dependencies =
           if name == "openai-usage" then
             [ "openai-accounts" ]
-          else if name == "progress" then
+          else if name == "progress" || name == "forge-watch" then
             [ "workflows" ]
           else if name == "sandbox" then
             [ "subagent" ]
@@ -56,7 +57,8 @@ let
             [ "subagent-finalizer" ]
           else
             [ ];
-      };
+      }
+      // (if name == "forge-watch" then { package = ./forge-watch; } else { });
     }) localExtensionNames
   );
 

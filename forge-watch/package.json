@@ -1,0 +1,10 @@
+{
+  "name": "pi-forge-watch",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "description": "Inference-free MCP forge subscriptions and current-revision approval checks",
+  "engines": { "node": ">=22.19.0" },
+  "dependencies": { "@earendil-works/pi-mcp": "1.4.0" },
+  "pi": { "extensions": ["./index.ts"] }
+}

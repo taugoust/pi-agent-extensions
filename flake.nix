@@ -116,6 +116,12 @@
 
           quint-language-server = pkgs.callPackage ./nix/quint-language-server.nix { };
 
+          forge-watch = extensionBundle {
+            inherit pkgs;
+            name = "pi-forge-watch-extensions";
+            extensions = [ "forge-watch" ];
+          };
+
           example-auto-extensions = extensionBundle {
             inherit pkgs;
             name = "pi-auto-extensions";
@@ -182,6 +188,10 @@
             inherit pkgs self;
             piPackage = self.packages.${system}.pi;
             extensionBundle = self.packages.${system}.default;
+          };
+          forge-watch = import ./nix/forge-watch-check.nix {
+            inherit pkgs self;
+            piPackage = self.packages.${system}.pi;
           };
           btw-runtime = import ./nix/btw-runtime-check.nix {
             inherit pkgs;

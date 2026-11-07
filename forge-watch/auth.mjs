@@ -19,7 +19,10 @@ export class ForgeOAuthAuthRequiredError extends Error {
 
 /** Resolve only public package exports, relative to the installed public coding-agent entry. */
 export async function loadOAuth(codingAgentEntry) {
-  const entry = codingAgentEntry ?? process.env.PI_CODING_AGENT_ENTRY ?? import.meta.resolve('@earendil-works/pi-coding-agent');
+  // Normal installs carry this standalone public dependency next to the extension.
+  // The explicit entry is only an SDK/bootstrap fallback, never implicit host-layout discovery.
+  if (!codingAgentEntry && !process.env.PI_CODING_AGENT_ENTRY) return import('@earendil-works/pi-mcp/oauth');
+  const entry = codingAgentEntry ?? process.env.PI_CODING_AGENT_ENTRY;
   // pi-mcp exposes import-only conditions. Jiti (a public coding-agent dependency)
   // resolves these by package name without reaching into private dist paths.
   const { createJiti } = createRequire(entry)('jiti');

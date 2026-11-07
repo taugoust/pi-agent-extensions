@@ -4,8 +4,9 @@ import { spawnSync } from "node:child_process";
 import { mkdtempSync,writeFileSync,rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { pathToFileURL } from "node:url";
+import { fileURLToPath, pathToFileURL } from "node:url";
 import { registerHooks } from "node:module";
+const cliPath=fileURLToPath(new URL("./check-approval.mjs",import.meta.url));
 const packageRoot=process.env.PI_MCP_PACKAGE_ROOT;
 if(packageRoot){const manifest=JSON.parse(await (await import("node:fs/promises")).readFile(join(packageRoot,"package.json"),"utf8"));registerHooks({resolve(specifier,context,nextResolve){const sub=specifier==="@earendil-works/pi-mcp"?".":specifier.startsWith("@earendil-works/pi-mcp/")?specifier.slice("@earendil-works/pi-mcp/".length):undefined;const entry=sub?manifest.exports[sub==="."?".":`./${sub}`]?.import:undefined;return entry?nextResolve(pathToFileURL(join(packageRoot,entry)).href,context):nextResolve(specifier,context);}});}
 const {createForgeAdapter}=await import("./adapters.ts");
@@ -76,10 +77,12 @@ test("approval CLI prints JSON and exits nonzero on incomplete input and read er
   writeFileSync(configPath,JSON.stringify(config));
   const hookSource=`import {registerHooks} from 'node:module';import {readFileSync} from 'node:fs';import {join} from 'node:path';import {pathToFileURL} from 'node:url';const root=process.env.PI_MCP_PACKAGE_ROOT;if(root){const m=JSON.parse(readFileSync(join(root,'package.json'),'utf8'));registerHooks({resolve(s,c,n){const sub=s==='@earendil-works/pi-mcp'?'.':s.startsWith('@earendil-works/pi-mcp/')?s.slice('@earendil-works/pi-mcp/'.length):undefined;const e=sub?m.exports[sub==='.'?'.': './'+sub]?.import:undefined;return e?n(pathToFileURL(join(root,e)).href,c):n(s,c)}})}`;
   const hook=`data:text/javascript,${encodeURIComponent(hookSource)}`;
-  const run=spawnSync(process.execPath,["--import",hook,"--experimental-strip-types","forge-watch/check-approval.mjs","--url",target.url,"--reviewer","taugoust","--head","abc","--config",configPath],{encoding:"utf8",env:process.env});
+  const run=spawnSync(process.execPath,["--import",hook,"--experimental-strip-types",cliPath,"--url",target.url,"--reviewer","taugoust","--head","abc","--config",configPath],{cwd:dir,encoding:"utf8",env:process.env});
+  assert.equal(run.error,undefined);assert.equal(run.signal,null);assert.notEqual(run.stdout.trim(),"",run.stderr);
   assert.equal(run.status,1);const output=JSON.parse(run.stdout);assert.equal(output.approved,false);assert.match(output.reason,/full 40-character/);
   const failedConfig=join(dir,"failed-config.json");writeFileSync(failedConfig,JSON.stringify({requestTimeoutMs:250,servers:[{provider:"github",host:"github.com",url:"https://127.0.0.1:1/mcp"}]}));
-  const failed=spawnSync(process.execPath,["--import",hook,"--experimental-strip-types","forge-watch/check-approval.mjs","--url",target.url,"--reviewer","taugoust","--head","a".repeat(40),"--config",failedConfig],{encoding:"utf8",env:process.env});
+  const failed=spawnSync(process.execPath,["--import",hook,"--experimental-strip-types",cliPath,"--url",target.url,"--reviewer","taugoust","--head","a".repeat(40),"--config",failedConfig],{cwd:dir,encoding:"utf8",env:process.env});
+  assert.equal(failed.error,undefined);assert.equal(failed.signal,null);assert.notEqual(failed.stdout.trim(),"",failed.stderr);
   assert.equal(failed.status,1);const failure=JSON.parse(failed.stdout);assert.equal(failure.approved,false);assert.equal(typeof failure.reason,"string");
  }finally{rmSync(dir,{recursive:true,force:true});}
 });

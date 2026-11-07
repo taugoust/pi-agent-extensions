@@ -13,6 +13,9 @@
     "type": "git",
     "url": "https://github.com/taugoust/pi-agent-extensions.git"
   },
+  "dependencies": {
+    "@earendil-works/pi-mcp": "1.4.0"
+  },
   "peerDependencies": {
     "@earendil-works/pi-ai": "^1.0.0",
     "@earendil-works/pi-agent-core": "^1.0.0",
@@ -33,6 +36,7 @@
       "fence",
       "permission-gate",
       "fetch",
+      "forge-watch",
       "idle-context-warning",
       "openai-accounts",
       "openai-usage",
