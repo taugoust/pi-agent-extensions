@@ -20,6 +20,9 @@ const jiti = createJiti(import.meta.url, { alias: {
   typebox: resolve(sdk, "node_modules/typebox/build/index.mjs"),
 } });
 const { registerGoalTools } = await jiti.import(resolve(root, "workflows/goal/tools.ts"));
+const { bindGoalForgeBridge } = await jiti.import(resolve(root, "workflows/goal/forge-bridge.ts"));
+const { GoalRuntime, createGoal } = await jiti.import(resolve(root, "workflows/goal/runtime.ts"));
+const { serializeGoalState, loadGoalStateFromSession } = await jiti.import(resolve(root, "workflows/goal/persistence.ts"));
 const { default: workflows } = await jiti.import(resolve(root, "workflows/index.ts"));
 const { default: progressExtension } = await jiti.import(resolve(root, "progress/index.ts"));
 const sdkApi = await import(pathToFileURL(resolve(sdk, "dist/index.js")));
@@ -90,6 +93,40 @@ test("distinct extension APIs use the shared event bus; subscriptions precede wa
   assert.equal(bridge.wakeForgeGoal(f.otherAPI.events, identity, sub.subscriptionId, "stale"), false);
 });
 
+test("same-activation session restore recovers only an actual custom-message receipt", () => {
+  const listeners = new Map(), branch = [], sent = [];
+  const events = {
+    on(channel, handler) { const set = listeners.get(channel) ?? new Set(); set.add(handler); listeners.set(channel, set); return () => set.delete(handler); },
+    emit(channel, data) { for (const handler of listeners.get(channel) ?? []) handler(data); },
+  };
+  const pi = { events, sendMessage: (...args) => sent.push(args), appendEntry: (customType, data) => branch.push({ type: "custom", customType, data }) };
+  const token = "d".repeat(64), identity = { goalId: "restored-goal", activationId: "same-activation" };
+  const persistedGoal = createGoal("Restored exact activation", undefined, 0);
+  persistedGoal.id = identity.goalId; persistedGoal.activationId = identity.activationId; persistedGoal.waiting = { reason: "restored wait" };
+  branch.push({ type: "custom", customType: "goal-state", data: serializeGoalState(persistedGoal) });
+  branch.push({ type: "custom_message", customType: "forge-goal-wake", details: { ...identity, batchToken: token } });
+  const runtime = new GoalRuntime(pi);
+  const ctx = { sessionManager: { getSessionId: () => "restore-session", getBranch: () => branch } };
+  runtime.activeGoal = loadGoalStateFromSession(ctx).goal;
+  const server = bindGoalForgeBridge(pi, runtime);
+  assert.equal(bridge.hasDeliveredForgeGoalWake(events, identity, token), undefined, "unrestored bridge reports unavailable rather than a false receipt");
+  server.beginSession(ctx); server.markReady();
+  assert.deepEqual(bridge.getCurrentForgeGoal(events), { ...identity, status: "active", waiting: true, waitReason: "restored wait" });
+  assert.equal(bridge.hasDeliveredForgeGoalWake(events, identity, token), true);
+  assert.equal(bridge.hasDeliveredForgeGoalWake(events, identity, "e".repeat(64)), false, "an unrecorded token is not acknowledged");
+  assert.equal(bridge.hasDeliveredForgeGoalWake(events, identity, "not-sha256"), false, "non-64-hex tokens are never receipts");
+  assert.equal(bridge.hasDeliveredForgeGoalWake(events, { goalId: "foreign", activationId: identity.activationId }, token), false, "foreign identity cannot claim the receipt");
+  server.beginTree();
+  assert.equal(bridge.hasDeliveredForgeGoalWake(events, identity, token), undefined, "tree navigation invalidates old branch context until restoration completes");
+  server.refreshMarkers(ctx); server.markReady();
+  assert.equal(bridge.hasDeliveredForgeGoalWake(events, identity, token), true, "restored current branch receipt becomes queryable");
+  const subscription = bridge.subscribeForgeGoalWake(events, identity); assert.ok(subscription);
+  assert.equal(bridge.wakeForgeGoal(events, identity, subscription.subscriptionId, "recovered duplicate", token), true);
+  assert.equal(sent.length, 0, "recovered receipt does not send a message or trigger a model turn");
+  assert.equal(branch.length, 2, "no synthetic accepted marker is appended beside the real Goal state and message entries");
+  server.shutdown();
+});
+
 test("workflows factory serves a distinct watcher API over shared bus before goal_wait", { timeout: 20000 }, async () => {
   const rootDir = await mkdtemp(resolve(tmpdir(), "forge-goal-workflows-"));
   const cwd = resolve(rootDir, "repo"), agentDir = resolve(rootDir, "agent");
@@ -142,13 +179,19 @@ test("workflows factory serves a distinct watcher API over shared bus before goa
     assert.equal(goal.waiting, true);
     await new Promise(resolve => setTimeout(resolve, 20));
     assert.equal(calls, callsAtWait, "unchanged explicit wait does not infer/poll");
-    assert.equal(bridge.wakeForgeGoal(watcherApi.events, { goalId: goal.goalId, activationId: goal.activationId }, subscribed.subscriptionId, "forge changed"), true);
-    assert.equal(bridge.wakeForgeGoal(watcherApi.events, { goalId: goal.goalId, activationId: goal.activationId }, subscribed.subscriptionId, "duplicate"), false);
+    const batchToken = "b".repeat(64);
+    assert.equal(bridge.wakeForgeGoal(watcherApi.events, { goalId: goal.goalId, activationId: goal.activationId }, subscribed.subscriptionId, "forge changed", batchToken), true);
+    assert.equal(bridge.wakeForgeGoal(watcherApi.events, { goalId: goal.goalId, activationId: goal.activationId }, subscribed.subscriptionId, "duplicate", batchToken), true, "duplicate delivery token is acknowledged without sending twice");
     const eventLog = []; const stopEvents = session.subscribe(event => eventLog.push(event.type));
     const woke = await Promise.race([session.waitForIdle().then(() => true), new Promise(resolve => setTimeout(() => resolve(false), 3000))]);
     stopEvents();
     assert.equal(woke, true, `target wake should settle; events=${eventLog.join(",")}, calls=${calls}`);
     assert.equal(calls, callsAtWait + 1, "one accepted wake caused one model inference");
+    assert.equal(bridge.hasDeliveredForgeGoalWake(watcherApi.events, { goalId: goal.goalId, activationId: goal.activationId }, batchToken), true);
+    assert.equal(bridge.hasDeliveredForgeGoalWake(watcherApi.events, { goalId: goal.goalId, activationId: goal.activationId }, "c".repeat(64)), false);
+    assert.equal(bridge.hasDeliveredForgeGoalWake(watcherApi.events, { goalId: "foreign", activationId: goal.activationId }, batchToken), false);
+    assert.equal(bridge.wakeForgeGoal(watcherApi.events, { goalId: goal.goalId, activationId: goal.activationId }, subscribed.subscriptionId, "duplicate after delivery", batchToken), true);
+    assert.equal(calls, callsAtWait + 1, "durable receipt query/duplicate token do not trigger inference");
     const resumed = bridge.getCurrentForgeGoal(watcherApi.events);
     const pausedSub = bridge.subscribeForgeGoalWake(watcherApi.events, { goalId: resumed.goalId, activationId: resumed.activationId });
     assert.ok(pausedSub, "new wait cycle requires a fresh subscription");

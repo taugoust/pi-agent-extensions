@@ -3,6 +3,7 @@ import type { ExtensionAPI } from "@earendil-works/pi-coding-agent";
 type ForgeEvents = ExtensionAPI["events"];
 const CHANNEL = "pi-agent-extensions:forge-goal:request:v1";
 export const FORGE_GOAL_READY_EVENT = "pi-agent-extensions:forge-goal:ready:v1";
+export const FORGE_GOAL_WAKE_MESSAGE_TYPE = "forge-goal-wake";
 export const FORGE_GOAL_GUARD_ENTRY = "forge-goal-completion-guard";
 
 /**
@@ -25,7 +26,8 @@ export interface ForgeGoalBinding {
   ready(): boolean;
   snapshot(): ForgeGoalSnapshot | undefined;
   subscribe(identity: ForgeGoalIdentity): string | undefined;
-  wake(identity: ForgeGoalIdentity, subscriptionId: string, message: string): boolean;
+  wake(identity: ForgeGoalIdentity, subscriptionId: string, message: string, batchToken?: string): boolean;
+  hasDelivered(identity: ForgeGoalIdentity, batchToken: string): boolean | undefined;
   consume(identity: ForgeGoalIdentity, subscriptionId: string): boolean;
   unsubscribe(subscriptionId: string): void;
   registerGuard(identity: ForgeGoalIdentity, key: string, check: (identity: ForgeGoalIdentity, signal?: AbortSignal) => Promise<string | undefined>): () => void;
@@ -49,7 +51,8 @@ export function bindForgeGoal(events: ForgeEvents, binding: ForgeGoalBinding): (
       case "ready": r.reply = binding.ready(); break;
       case "snapshot": r.reply = binding.ready() ? binding.snapshot() : undefined; break;
       case "subscribe": r.reply = binding.subscribe(r.identity as ForgeGoalIdentity); break;
-      case "wake": r.reply = binding.wake(r.identity as ForgeGoalIdentity, String(r.subscriptionId), String(r.message)); break;
+      case "wake": r.reply = binding.wake(r.identity as ForgeGoalIdentity, String(r.subscriptionId), String(r.message), r.batchToken as string | undefined); break;
+      case "receipt": r.reply = binding.hasDelivered(r.identity as ForgeGoalIdentity, String(r.batchToken)); break;
       case "consume": r.reply = binding.consume(r.identity as ForgeGoalIdentity, String(r.subscriptionId)); break;
       case "unsubscribe": r.reply = binding.unsubscribe(String(r.subscriptionId)); break;
       case "guard-register": r.reply = binding.registerGuard(r.identity as ForgeGoalIdentity, String(r.key), r.check as (identity: ForgeGoalIdentity, signal?: AbortSignal) => Promise<string | undefined>); break;
@@ -68,8 +71,13 @@ export function subscribeForgeGoalWake(events: ForgeEvents, identity: ForgeGoalI
   const subscriptionId = request<string>(events, { op: "subscribe", identity });
   return subscriptionId ? { subscriptionId, unsubscribe: () => request(events, { op: "unsubscribe", subscriptionId }) } : undefined;
 }
-export function wakeForgeGoal(events: ForgeEvents, identity: ForgeGoalIdentity, subscriptionId: string, message: string): boolean {
-  return request<boolean>(events, { op: "wake", identity, subscriptionId, message }) ?? false;
+export function wakeForgeGoal(events: ForgeEvents, identity: ForgeGoalIdentity, subscriptionId: string, message: string, batchToken?: string): boolean {
+  return request<boolean>(events, { op: "wake", identity, subscriptionId, message, batchToken }) ?? false;
+}
+export function hasDeliveredForgeGoalWake(events: ForgeEvents, identity: ForgeGoalIdentity, batchToken: string): boolean | undefined {
+  if (request<boolean>(events, { op: "ready" }) !== true) return undefined;
+  if (!/^[a-f0-9]{64}$/.test(batchToken)) return false;
+  return request<boolean | undefined>(events, { op: "receipt", identity, batchToken });
 }
 export function consumeForgeGoalWake(events: ForgeEvents, identity: ForgeGoalIdentity, subscriptionId: string): boolean {
   return request<boolean>(events, { op: "consume", identity, subscriptionId }) ?? false;
