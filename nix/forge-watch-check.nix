@@ -44,6 +44,7 @@ piPackage.overrideAttrs (old: {
     bun test forge-test-source/forge-watch/engine.test.ts
     node --experimental-transform-types --test \
       forge-test-source/forge-watch/storage.test.ts \
+      forge-test-source/forge-watch/detached-rejection.test.mjs \
       forge-test-source/forge-watch/adapters.test.mjs \
       forge-test-source/forge-watch/mcp.test.mjs
     timeout 60s node forge-test-source/tests/forge-goal-runtime.mjs "$PWD"

@@ -216,7 +216,11 @@ export class ForgeWatchEngine {
     const snapshot = await this.update((state) => structuredClone(state));
     const byToken = new Map<string, { identity: ForgeIdentity; owner: string; ids: string[]; token: string }>();
     for (const sub of Object.values(snapshot.subscriptions)) {
-      if (!sub.deliveryClaim || sub.deliveryClaimOwner === this.runtimeId) continue;
+      if (!sub.deliveryClaim) continue;
+      // An abandoned own-runtime claim (e.g. rejected send plus failed rollback)
+      // needs the same authoritative recovery as a prior process. Never race an
+      // active send or an accepted receipt still pending persistence.
+      if (sub.deliveryClaimOwner === this.runtimeId && (this.wakePending.has(sub.id) || this.pendingReceipts.has(sub.deliveryClaim))) continue;
       const owner = sub.deliveryClaimOwner ?? "legacy-unknown", token = sub.deliveryClaim, key = `${identityKey(sub.identity)}\0${owner}\0${token}`;
       const group = byToken.get(key) ?? { identity: sub.identity, owner, ids: [], token }; group.ids.push(sub.id); byToken.set(key, group);
     }
@@ -316,8 +320,11 @@ export class ForgeWatchEngine {
     }
   }
   private trackReceiptFlush(): void {
-    const task = this.flushPendingReceipts(); this.deliveryWork.add(task);
-    void task.finally(() => this.deliveryWork.delete(task));
+    // Detached startup/retry work must handle rejection as well as cleanup.
+    // A failed wake followed by a failed rollback is reported, never unhandled.
+    const task = this.flushPendingReceipts().catch((error) => { this.report(error); });
+    this.deliveryWork.add(task);
+    void task.then(() => { this.deliveryWork.delete(task); });
   }
   private scheduleReceiptRetry(): void {
     if (this.stopped || this.receiptRetryTimer !== undefined || !this.pendingReceipts.size) return;
