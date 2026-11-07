@@ -18,5 +18,5 @@ try {
   const result=await checkApproval({target,reviewer:options.reviewer,expectedHead:options.head,config});
   console.log(JSON.stringify(result));process.exitCode=result.approved?0:1;
 } catch(error) {
-  console.log(JSON.stringify({approved:false,reason:error instanceof Error?error.message:"configuration or approval check failed"}));process.exitCode=1;
+  console.log(JSON.stringify({approved:false,reason:"configuration or approval check failed"}));process.exitCode=1;
 }

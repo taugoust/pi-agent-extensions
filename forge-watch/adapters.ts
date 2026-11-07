@@ -32,7 +32,8 @@ export function createForgeAdapter(config: ForgeMcpConfig, clientFactory=createF
         const checkRuns=await paged(client,call,"get_check_runs","check_runs","total_count");
         const after=stringAt(objectData(await call("get")),["head","sha"]);
         if(head!==before||after!==before)throw new ForgeError("Pull request head changed during snapshot; retry poll");
-        return {head,state,comments:normalize([...comments,...reviewComments]),reviews:normalize(reviews),ci:normalize([...statuses,...checkRuns])};
+        const statusSummary={id:`summary:${head}`,sha:head,state};
+        return {head,state,comments:normalize(comments,"issue-comment").concat(normalize(reviewComments,"review-comment")),reviews:normalize(reviews,"review"),ci:normalize([statusSummary,...statuses],"status").concat(normalize(checkRuns,"check-run"))};
       } finally { /* cached client remains open until adapter.close() */ }
     },
     async close() { closed=true; await Promise.all([...clients.values()].map(c=>c.close())); clients.clear(); },
@@ -58,7 +59,7 @@ async function reviewCommentPages(client:ReturnType<typeof createForgeMcpClient>
   const data=objectData(await call("get_review_comments",{perPage:100,...(after?{after}:{})}));
   const threads=data?.review_threads,info=data?.pageInfo;
   if(!Array.isArray(threads)||typeof info?.hasNextPage!=="boolean")throw new ForgeError("Unsupported review-thread cursor response; cannot prove pagination completeness");
-  for(const thread of threads){if(!Array.isArray(thread?.comments))throw new ForgeError("Review thread omitted comments");all.push(...thread.comments);}
+  for(const thread of threads){if(!Array.isArray(thread?.comments))throw new ForgeError("Review thread omitted comments");all.push(...thread.comments.map((comment:any)=>({...comment,thread_id:thread.id??thread.node_id??null,thread_resolved:thread.isResolved??thread.resolved??null,thread_outdated:thread.isOutdated??thread.outdated??null})));}
   if(!info.hasNextPage)return all;
   if(typeof info.endCursor!=="string"||!info.endCursor||info.endCursor===after)throw new ForgeError("Review-thread pagination cursor missing or repeated");
   after=info.endCursor;
@@ -72,11 +73,11 @@ function objectData(value:any):any {
  return value;
 }
 function stringAt(value:any,...paths:string[][]):string|undefined {for(const path of paths){let node=value;for(const k of path)node=node?.[k];if(typeof node==="string"&&node)return node;}return undefined;}
-function normalize(values:unknown[]):ForgeSnapshot["comments"] {return values.map((raw:any)=>{
+function normalize(values:unknown[],namespace:string):ForgeSnapshot["comments"] {return values.map((raw:any)=>{
  if(!raw||typeof raw!=="object")throw new ForgeError("Unsupported forge item shape");
- const id=raw.id??raw.databaseId??raw.node_id??raw.sha;
+ const id=raw.id??raw.databaseId??raw.node_id??raw.sha??raw.context;
  if(id===undefined||id===null)throw new ForgeError("Forge item lacks stable ID");
  const actor=raw.user?.login??raw.author?.username??raw.author?.name??raw.actor?.login;
- const stable={id:String(id),actor:actor??null,body:raw.body??raw.message??null,state:raw.state??raw.conclusion??null,commit:raw.commit_id??raw.sha??null,created:raw.created_at??raw.submitted_at??null,updated:raw.updated_at??null,name:raw.name??null,status:raw.status??null};
- return {id:String(id),fingerprint:JSON.stringify(stable),...(typeof actor==="string"?{actor}:{})};
+ const stable={id:String(id),actor:actor??null,body:raw.body??raw.message??null,state:raw.state??raw.conclusion??null,commit:raw.commit_id??raw.sha??null,created:raw.created_at??raw.submitted_at??null,updated:raw.updated_at??null,name:raw.name??null,status:raw.status??null,context:raw.context??null,thread:raw.thread_id??null,resolved:raw.thread_resolved??null,outdated:raw.thread_outdated??null};
+ return {id:`${namespace}:${String(id)}`,fingerprint:JSON.stringify(stable),...(typeof actor==="string"?{actor}:{})};
 });}
