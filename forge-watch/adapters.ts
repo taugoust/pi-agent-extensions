@@ -28,30 +28,49 @@ export function createForgeAdapter(config: ForgeMcpConfig, clientFactory=createF
         const comments=await paged(client,call,"get_comments");
         const reviews=await paged(client,call,"get_reviews");
         const reviewComments=await reviewCommentPages(client,call,target);
-        const statuses=await paged(client,call,"get_status","statuses","total_count");
-        const checkRuns=await paged(client,call,"get_check_runs","check_runs","total_count");
+        const statusResult=await getStatuses(client,call,head);
+        const checkRuns=await paged(client,call,"get_check_runs","check_runs","total_count",true);
         const after=stringAt(objectData(await call("get")),["head","sha"]);
         if(head!==before||after!==before)throw new ForgeError("Pull request head changed during snapshot; retry poll");
-        const statusSummary={id:`summary:${head}`,sha:head,state};
-        return {head,state,comments:normalize(comments,"issue-comment").concat(normalize(reviewComments,"review-comment")),reviews:normalize(reviews,"review"),ci:normalize([statusSummary,...statuses],"status").concat(normalize(checkRuns,"check-run"))};
+        const statusSummary={id:`summary:${statusResult.sha}`,sha:statusResult.sha,state:statusResult.state,total_count:statusResult.total};
+        return {head,state,comments:normalize(comments,"issue-comment").concat(normalize(reviewComments,"review-comment")),reviews:normalize(reviews,"review"),ci:normalize([statusSummary,...statusResult.items],"status").concat(normalize(checkRuns,"check-run"))};
       } finally { /* cached client remains open until adapter.close() */ }
     },
     async close() { closed=true; await Promise.all([...clients.values()].map(c=>c.close())); clients.clear(); },
   };
 }
 type Call=(method:string,extra?:Record<string,unknown>)=>Promise<unknown>;
-async function paged(client:ReturnType<typeof createForgeMcpClient>,call:Call,method:string,itemsKey?:string,totalKey?:string):Promise<unknown[]> {
- const all:unknown[]=[];
+async function paged(client:ReturnType<typeof createForgeMcpClient>,call:Call,method:string,itemsKey?:string,totalKey?:string,requireTotal=false):Promise<unknown[]> {
+ const all:unknown[]=[];let expectedTotal:number|undefined;
  for(let page=1;page<=client.maxPages;page++) {
   const raw=objectData(await call(method,{page,perPage:100}));
   const items=Array.isArray(raw)?raw:firstArray(raw,itemsKey?[itemsKey]:["items","results","data"]);
   if(!items)throw new ForgeError(`Unsupported ${method} response shape; cannot prove pagination completeness`);
+  const total=raw?.[totalKey??"count"];
+  if(requireTotal&&(!Number.isSafeInteger(total)||total<0))throw new ForgeError(`${method} omitted a valid ${totalKey??"count"}`);
+  if(total!==undefined&&(!Number.isSafeInteger(total)||total<0))throw new ForgeError(`${method} returned an invalid ${totalKey??"count"}`);
+  if(expectedTotal!==undefined&&total!==expectedTotal)throw new ForgeError(`${method} total changed during pagination`);
+  if(total!==undefined)expectedTotal=total;
   all.push(...items);
-  const total=typeof raw?.[totalKey??"count"]==="number"?raw[totalKey??"count"]:undefined;
-  if(total!==undefined&&all.length>=total)return all;
-  if(items.length<100){if(total!==undefined&&all.length<total)throw new ForgeError(`${method} reported truncated results`);return all;}
+  if(expectedTotal!==undefined&&all.length===expectedTotal)return all;
+  if(expectedTotal!==undefined&&all.length>expectedTotal)throw new ForgeError(`${method} returned more items than its total`);
+  if(items.length<100){if(expectedTotal!==undefined&&all.length<expectedTotal)throw new ForgeError(`${method} reported truncated results`);return all;}
  }
  throw new ForgeError(`${method} pagination exceeded configured maximum; snapshot incomplete`);
+}
+async function getStatuses(client:ReturnType<typeof createForgeMcpClient>,call:Call,head:string):Promise<{items:unknown[];sha:string;state:string;total:number}>{
+ const items:unknown[]=[];let rootSha:string|undefined,rootState:string|undefined,total:number|undefined;
+ for(let page=1;page<=client.maxPages;page++){
+  const raw=objectData(await call("get_status",{page,perPage:100}));
+  if(!Array.isArray(raw?.statuses)||!Number.isSafeInteger(raw.total_count)||raw.total_count<0||typeof raw.sha!=="string"||typeof raw.state!=="string")throw new ForgeError("get_status omitted valid combined status metadata or total_count");
+  if(raw.sha.toLowerCase()!==head.toLowerCase())throw new ForgeError("Combined status SHA does not match current pull request head");
+  if(rootSha!==undefined&&(raw.sha!==rootSha||raw.state!==rootState||raw.total_count!==total))throw new ForgeError("Combined status metadata changed during pagination");
+  rootSha=raw.sha;rootState=raw.state;total=raw.total_count;items.push(...raw.statuses);
+  if(items.length>total)throw new ForgeError("get_status returned more statuses than total_count");
+  if(items.length===total)return {items,sha:rootSha,state:rootState,total};
+  if(raw.statuses.length<100)throw new ForgeError("get_status returned fewer statuses than total_count");
+ }
+ throw new ForgeError("get_status pagination exceeded configured maximum");
 }
 async function reviewCommentPages(client:ReturnType<typeof createForgeMcpClient>,call:Call,target:ForgeTarget):Promise<unknown[]> {
  const all:unknown[]=[];let after:string|undefined;const threadIds=new Set<string>(),permalinks=new Set<string>();let expectedThreadCount:number|undefined;
