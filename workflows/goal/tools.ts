@@ -9,6 +9,7 @@ import {
 import { Markdown } from "@earendil-works/pi-tui";
 import { Type } from "typebox";
 import { completeVerifiedGoal, completionSummaryRejection, MAX_COMPLETION_SUMMARY_LENGTH } from "./completion.js";
+import { checkForgeGoalCompletionGuards } from "../../shared/forge-goal.ts";
 import { registerGoalManagement } from "./model-control.js";
 import { notifyTerminal, safeTerminalText } from "./errors.js";
 import {
@@ -150,7 +151,20 @@ export function registerGoalTools(pi: ExtensionAPI, runtime: GoalRuntime) {
         };
       }
 
-      completeVerifiedGoal(runtime, ctx, completedGoal, summary);
+      const completionIdentity = { goalId: completedGoal.id, activationId: completedGoal.activationId ?? completedGoal.id };
+      const guardRejection = await checkForgeGoalCompletionGuards(runtime.pi, completionIdentity);
+      if (guardRejection) {
+        const rejection = `Goal completion rejected: ${guardRejection}`;
+        notifyTerminal(ctx.ui, rejection, "warning");
+        return { content: toolContent(rejection), details: completionDetails(goal, requestedGoalId, summary) };
+      }
+      const latestGoal = runtime.activeGoal;
+      if (!latestGoal || latestGoal.id !== completionIdentity.goalId || (latestGoal.activationId ?? latestGoal.id) !== completionIdentity.activationId || latestGoal.status !== "active") {
+        const rejection = "Goal completion rejected: Goal activation changed while completion checks were running.";
+        notifyTerminal(ctx.ui, rejection, "warning");
+        return { content: toolContent(rejection), details: completionDetails(goal, requestedGoalId, summary) };
+      }
+      completeVerifiedGoal(runtime, ctx, latestGoal, summary);
 
       return {
         content: toolContent(`Goal complete: ${summary}`),

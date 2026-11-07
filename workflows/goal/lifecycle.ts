@@ -1,4 +1,5 @@
 import type { ExtensionAPI } from "@earendil-works/pi-coding-agent";
+import { consumeForgeGoalWake } from "../../shared/forge-goal.ts";
 import { currentTokenTotal } from "./accounting.js";
 import { notifyTerminal } from "./errors.js";
 import {
@@ -346,6 +347,14 @@ export function registerGoalLifecycle(
       return;
     }
     if (message.role === "custom") {
+      if (Reflect.get(message, "customType") === "forge-goal-wake") {
+        const details = Reflect.get(message, "details") as { goalId?: unknown; activationId?: unknown; subscriptionId?: unknown } | undefined;
+        const goal = runtime.activeGoal;
+        if (!goal || typeof details?.goalId !== "string" || typeof details.activationId !== "string" || typeof details.subscriptionId !== "string" || !consumeForgeGoalWake(pi, { goalId: details.goalId, activationId: details.activationId }, details.subscriptionId)) {
+          abortCurrentTurn(ctx);
+          return;
+        }
+      }
       if (Reflect.get(message, "customType") === GOAL_CONTRACT_MESSAGE_TYPE) return;
       if (Reflect.get(message, "customType") === GOAL_CONTINUATION_MESSAGE_TYPE) {
         const prompt = typeof message.content === "string" ? message.content : "";

@@ -9,6 +9,7 @@ import { mutateProgress, readGoalTasks } from "../../shared/goal-progress.ts";
 import { ProgressParameters } from "../../progress/progress-state.js";
 import { mergeGoalTasks } from "./mutations.ts";
 import { completeVerifiedGoal, MAX_COMPLETION_SUMMARY_LENGTH } from "./completion.js";
+import { checkForgeGoalCompletionGuards } from "../../shared/forge-goal.ts";
 import { GOAL_WAIT_WAKE_SEMANTICS } from "./wait.js";
 import { readGoalSessionActivity } from "./activity.js";
 import { manageSavedGoal } from "../saved-goal-control.ts";
@@ -82,7 +83,13 @@ export function registerGoalManagement(pi: ExtensionAPI, runtime: GoalRuntime) {
         if (params.action === "complete") {
           if (previous.status !== "paused") throw new Error("Explicit completion requires a paused goal; active autonomous completion uses goal_complete");
           const summary = typeof params.summary === "string" ? params.summary.trim() : "";
-          completeVerifiedGoal(runtime, ctx, previous, summary);
+          const identity = { goalId: previous.id, activationId: previous.activationId ?? previous.id };
+          const guardRejection = await checkForgeGoalCompletionGuards(pi, identity);
+          if (guardRejection) throw new Error(`Goal completion rejected: ${guardRejection}`);
+          const latest = runtime.activeGoal;
+          if (!latest || latest.id !== identity.goalId || (latest.activationId ?? latest.id) !== identity.activationId || latest.status !== "paused")
+            throw new Error("Goal completion rejected: Goal activation changed while completion checks were running");
+          completeVerifiedGoal(runtime, ctx, latest, summary);
           runtime.ensureInactiveGoalContextContract(ctx);
           return { content: [{ type: "text", text: `Goal complete: ${summary}` }], details: { goal_id: previous.id, summary, presentation: goalManagePresentation("complete", previous.text) }, terminate: true };
         }
