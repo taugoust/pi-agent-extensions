@@ -111,7 +111,7 @@ describe("forge watch engine", () => {
     } };
     let snapshot = snap();
     const engine = new ForgeWatchEngine({ storage, adapter: { poll: async () => snapshot }, wake: () => { wakes++; }, setTimer: (cb) => setTimeout(cb, 0), clearTimer: (h) => clearTimeout(h as ReturnType<typeof setTimeout>), jitter: () => 100 }); await engine.watch({ target, identity: identity() }); await engine.pollOnce(target); snapshot = snap("b", "c2"); await engine.pollOnce(target);
-    expect(failed).toBe(true); expect(wakes).toBe(1); expect((await engine.status(identity()))[0]?.subscription.deliveryNotified).toBe(true); await engine.stop();
+    expect(failed).toBe(true); expect(wakes).toBe(1); await engine.stop(); expect((await engine.status(identity()))[0]?.subscription.deliveryNotified).toBe(true);
   });
   test("ack and a newer poll during receipt retry release only the newer batch after commit", async () => {
     const base = new Memory(); let snapshot = snap(), failReceipt = false, failedReceipt!: () => void, wakeEvents: ForgeEvent[][] = [];
@@ -122,17 +122,18 @@ describe("forge watch engine", () => {
       if (failReceipt && receipt) { failReceipt = false; failedReceipt(); throw new Error("receipt commit failed before transaction commit"); }
       base.state = draft; return result;
     } };
-    const engine = new ForgeWatchEngine({ storage, adapter: { poll: async () => snapshot }, wake: (_i, events) => { wakeEvents.push(events); }, setTimer: (cb, delay) => { if (delay < 1000) retryCallback = cb; return 1; }, clearTimer: () => {}, jitter: () => 100 });
-    await engine.watch({ target, identity: identity() }); await engine.pollOnce(target); snapshot = snap("b", "c2"); failReceipt = true;
+    const engine = new ForgeWatchEngine({ storage, adapter: { poll: async () => snapshot }, wake: (_i, events) => { wakeEvents.push(events); }, setTimer: (cb, delay) => { if (delay > 0 && delay < 1000) retryCallback = cb; return 1; }, clearTimer: () => {}, jitter: () => 100 });
+    await engine.watch({ target, identity: identity() }); await engine.pollOnce(target); engine.start(); snapshot = snap("b", "c2"); failReceipt = true;
     const firstPoll = engine.pollOnce(target); await failed;
     const acceptedIds = wakeEvents[0]!.map((event) => event.id); expect(wakeEvents).toHaveLength(1);
     expect(await engine.ack(identity(), acceptedIds)).toBe(3);
     snapshot = snap("c", "c3"); await engine.pollOnce(target);
     retryCallback!(); await firstPoll;
+    while (wakeEvents.length < 2) await new Promise((resolve) => setTimeout(resolve, 0));
     expect(wakeEvents).toHaveLength(2); expect(wakeEvents[1]!.map((event) => event.category).sort()).toEqual(["comments", "comments", "head"]);
     await engine.stop();
   });
-  test("persistent receipt failures remain in accepted state and stop drains until storage recovers", async () => {
+  test("persistent receipt failures keep accepted claim and stop returns within finite budget", async () => {
     const base = new Memory(); let failing = true, failures = 0, wakes = 0, snapshot = snap();
     const storage = { async update<T>(mutate: (state: ForgeWatchState) => T): Promise<T> {
       const draft = structuredClone(base.state), result = mutate(draft);
@@ -141,12 +142,44 @@ describe("forge watch engine", () => {
     } };
     const engine = new ForgeWatchEngine({ storage, adapter: { poll: async () => snapshot }, wake: () => { wakes++; }, setTimer: (cb) => setTimeout(cb, 0), clearTimer: (h) => clearTimeout(h as ReturnType<typeof setTimeout>), jitter: () => 100 });
     await engine.watch({ target, identity: identity() }); await engine.pollOnce(target); snapshot = snap("b", "c2");
-    const polling = engine.pollOnce(target);
-    while (failures < 2) await new Promise((resolve) => setTimeout(resolve, 0));
-    expect((await engine.status(identity()))[0]?.deliveryError).toContain("persistent receipt outage");
-    const stopping = engine.stop(); let drained = false; void stopping.then(() => { drained = true; });
-    await new Promise((resolve) => setTimeout(resolve, 0)); expect(drained).toBe(false); expect(wakes).toBe(1);
-    failing = false; await Promise.all([polling, stopping]); expect(drained).toBe(true); expect((await engine.status(identity()))[0]?.subscription.deliveryNotified).toBe(true);
+    const polling = engine.pollOnce(target); await polling;
+    expect(failures).toBe(1); expect((await engine.status(identity()))[0]?.deliveryError).toContain("persistent receipt outage");
+    await Promise.race([engine.stop(), new Promise((_, reject) => setTimeout(() => reject(new Error("stop exceeded finite budget")), 100))]);
+    expect(failures).toBe(2); expect(wakes).toBe(1); expect((await engine.status(identity()))[0]?.deliveryError).toContain("persistent receipt outage");
+    const sub = Object.values(base.state.subscriptions)[0]!; expect(sub.deliveryClaim).toBeTruthy(); expect(sub.deliveryNotified).toBe(false);
+  });
+  test("restart reconciles recorded delivery before sending only newer queued events", async () => {
+    const base = new Memory(); let snapshot = snap(), failReceipt = false, delivered: ForgeEvent[][] = [];
+    const storage = { async update<T>(mutate: (state: ForgeWatchState) => T): Promise<T> {
+      const draft = structuredClone(base.state), result = mutate(draft);
+      if (failReceipt && Object.values(draft.subscriptions).some((s) => s.deliveryNotified && !!s.deliveryToken)) throw new Error("receipt disk failure");
+      base.state = draft; return result;
+    } };
+    const first = new ForgeWatchEngine({ storage, adapter: { poll: async () => snapshot }, wake: (_i, events) => { delivered.push(events); } });
+    await first.watch({ target, identity: identity() }); await first.pollOnce(target); snapshot = snap("b", "c2"); failReceipt = true; await first.pollOnce(target);
+    const oldIds = (await first.events(identity())).map((event) => event.id); expect(delivered).toHaveLength(1);
+    await first.ack(identity(), oldIds); snapshot = snap("c", "c3"); await first.pollOnce(target); await first.stop();
+    failReceipt = false;
+    const replacement = new ForgeWatchEngine({ storage, adapter: { poll: async () => snapshot }, recoverDelivery: (_identity, token) => token.startsWith("forge-watch:"), wake: (_i, events) => { delivered.push(events); } });
+    await replacement.pollOnce(target);
+    expect(delivered).toHaveLength(2); expect(delivered[1]!.every((event) => !oldIds.includes(event.id))).toBe(true);
+    expect((await replacement.status(identity()))[0]?.subscription.deliveryNotified).toBe(true); await replacement.stop();
+  });
+  test("foreign claim confirmed unsent is cleared and delivered exactly once", async () => {
+    const storage = new Memory(); const first = new ForgeWatchEngine({ storage, adapter: { poll: async () => snap() } });
+    await first.watch({ target, identity: identity() }); await first.pollOnce(target);
+    const sub = Object.values(storage.state.subscriptions)[0]!; storage.state.queues[sub.id]!.push({ id: "99", target, category: "head", fingerprint: "head:a->b", at: 2 }); storage.state.nextEvent = 100;
+    sub.deliveryClaim = "old-token"; sub.deliveryClaimOwner = "old-runtime"; sub.deliveryClaimEventIds = ["99"];
+    let wakes = 0; const replacement = new ForgeWatchEngine({ storage, adapter: { poll: async () => snap() }, recoverDelivery: () => false, wake: () => { wakes++; } });
+    await replacement.pollOnce(target); expect(wakes).toBe(1); expect((await replacement.events(identity())).some((event) => event.id === "99")).toBe(true); await replacement.stop();
+  });
+  test("unknown foreign claim fails closed and blocks sibling targets", async () => {
+    const storage = new Memory(), first = new ForgeWatchEngine({ storage, adapter: { poll: async () => snap() } });
+    await first.watch({ target, identity: identity() }); await first.watch({ target: target2, identity: identity() }); await first.pollOnce();
+    for (const sub of Object.values(storage.state.subscriptions)) storage.state.queues[sub.id]!.push({ id: String(storage.state.nextEvent++), target: sub.target, category: "head", fingerprint: "head:a->b", at: 2 });
+    const claimed = Object.values(storage.state.subscriptions).find((sub) => sub.target.url === target.url)!; claimed.deliveryClaim = "unknown-token"; claimed.deliveryClaimOwner = "old-runtime"; claimed.deliveryClaimEventIds = [storage.state.queues[claimed.id]![0]!.id];
+    let wakes = 0, errors = 0; const replacement = new ForgeWatchEngine({ storage, adapter: { poll: async () => snap() }, onError: () => { errors++; }, wake: () => { wakes++; } });
+    await replacement.pollOnce(); expect(wakes).toBe(0); expect(errors).toBeGreaterThan(0); expect((await replacement.status(identity())).some((status) => status.deliveryError?.includes("fail-closed"))).toBe(true); await replacement.stop();
   });
   test("accepted delivery receipt survives eligibility clearing after send", async () => {
     const storage = new Memory(); let eligible = true, wakeCount = 0, snapshot = snap();

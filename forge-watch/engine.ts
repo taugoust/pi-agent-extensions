@@ -22,6 +22,8 @@ export class ForgeWatchEngine {
   private readonly deliveryWork = new Set<Promise<unknown>>();
   private readonly pollWork = new Set<Promise<void>>();
   private readonly receiptErrors = new Map<string, string>();
+  private readonly pendingReceipts = new Map<string, { ids: string[]; token: string; owner?: string }>();
+  private receiptRetryTimer?: unknown;
   private mutation = Promise.resolve();
   private readonly opts: ForgeWatchOptions;
   private readonly runtimeId = `forge-watch-runtime-${Date.now()}-${++engineSequence}`;
@@ -111,12 +113,25 @@ export class ForgeWatchEngine {
     await this.deliverPending(); return n;
   }
 
-  start(): void { if (!this.stopped) return; this.stopped = false; this.generation++; this.schedule(0); }
+  start(): void { if (!this.stopped) return; this.stopped = false; this.generation++; this.schedule(0); this.trackReceiptFlush(); }
   async stop(): Promise<void> {
     this.stopped = true; this.generation++;
     if (this.timer !== undefined) this.clearTimer(this.timer); this.timer = undefined;
+    if (this.receiptRetryTimer !== undefined) this.clearTimer(this.receiptRetryTimer); this.receiptRetryTimer = undefined;
     for (const c of this.controllers.values()) c.abort(new Error("Forge watcher stopped"));
-    await Promise.allSettled([...this.deliveryWork, ...this.pollWork]);
+    let timeout: unknown;
+    const drain = (async () => {
+      await Promise.allSettled([...this.deliveryWork, ...this.pollWork]);
+      await this.flushPendingReceipts();
+    })();
+    const shutdownBudget = this.opts.shutdownTimeoutMs ?? 2_000;
+    const deadline = new Promise<void>((resolve) => { timeout = this.setTimer(resolve, Number.isFinite(shutdownBudget) ? Math.max(1, Math.min(30_000, shutdownBudget)) : 2_000); });
+    await Promise.race([drain, deadline]);
+    if (timeout !== undefined) this.clearTimer(timeout);
+    if (this.pendingReceipts.size) {
+      const error = new Error(`Forge watcher stopped with ${this.pendingReceipts.size} accepted receipt(s) not persisted; stable batch tokens retained for recovery`);
+      this.report(error); for (const receipt of this.pendingReceipts.values()) for (const id of receipt.ids) this.receiptErrors.set(id, this.receiptErrors.get(id) ?? error.message);
+    }
   }
   async close(): Promise<void> { await this.stop(); }
   private schedule(delay: number): void { if (this.stopped) return; if (this.timer !== undefined) this.clearTimer(this.timer); this.timer = this.setTimer(() => { this.timer = undefined; void this.tick().catch((e) => { this.report(e); this.schedule(this.retryDelay(1000)); }); }, Math.max(0, delay)); }
@@ -196,13 +211,47 @@ export class ForgeWatchEngine {
     const retained = new Set(Object.values(state.subscriptions).map((s) => keyFor(s.target)));
     for (const key of Object.keys(state.targets)) if (!retained.has(key)) delete state.targets[key];
   }
+  private async recoverForeignClaims(generation: number): Promise<Set<string>> {
+    const blocked = new Set<string>();
+    const snapshot = await this.update((state) => structuredClone(state));
+    const byToken = new Map<string, { identity: ForgeIdentity; owner: string; ids: string[]; token: string }>();
+    for (const sub of Object.values(snapshot.subscriptions)) {
+      if (!sub.deliveryClaim || sub.deliveryClaimOwner === this.runtimeId) continue;
+      const owner = sub.deliveryClaimOwner ?? "legacy-unknown", token = sub.deliveryClaim, key = `${identityKey(sub.identity)}\0${owner}\0${token}`;
+      const group = byToken.get(key) ?? { identity: sub.identity, owner, ids: [], token }; group.ids.push(sub.id); byToken.set(key, group);
+    }
+    for (const group of byToken.values()) {
+      if (generation !== this.generation) return blocked;
+      if (!this.opts.recoverDelivery) { blocked.add(identityKey(group.identity)); this.markRecoveryUnknown(group.ids, "Foreign forge delivery claim remains fail-closed: no recoverDelivery callback configured"); continue; }
+      let recorded: boolean | undefined;
+      try { recorded = await this.opts.recoverDelivery(group.identity, group.token); }
+      catch (error) { blocked.add(identityKey(group.identity)); this.markRecoveryUnknown(group.ids, `Foreign forge delivery recovery failed: ${errorOf(error).message}`); continue; }
+      if (generation !== this.generation) return blocked;
+      if (recorded === undefined) { blocked.add(identityKey(group.identity)); this.markRecoveryUnknown(group.ids, "Foreign forge delivery claim remains unknown; delivery is paused fail-closed"); continue; }
+      if (!recorded) {
+        await this.update((state) => { for (const id of group.ids) { const sub = state.subscriptions[id]; if (sub?.deliveryClaim === group.token && sub.deliveryClaimOwner === group.owner) { sub.deliveryClaim = undefined; sub.deliveryClaimOwner = undefined; sub.deliveryClaimEventIds = undefined; } } });
+        for (const id of group.ids) this.receiptErrors.delete(id);
+        continue;
+      }
+      const receipt = { ids: group.ids, token: group.token, owner: group.owner };
+      this.pendingReceipts.set(group.token, receipt);
+      if (!await this.persistAcceptedReceipt(receipt)) blocked.add(identityKey(group.identity));
+    }
+    return blocked;
+  }
+  private markRecoveryUnknown(ids: string[], message: string): void {
+    for (const id of ids) this.receiptErrors.set(id, message);
+    this.report(new Error(message));
+  }
   private async deliverPending(): Promise<void> {
     if (!this.opts.wake) return;
-    const generation = this.generation, snapshot = await this.update((s) => structuredClone(s));
+    const generation = this.generation;
+    const blockedIdentities = await this.recoverForeignClaims(generation);
+    const snapshot = await this.update((s) => structuredClone(s));
     const groups = new Map<string, { identity: ForgeIdentity; ids: string[]; events: ForgeEvent[]; eventIdsBySubscription: Record<string, string[]> }>();
     for (const sub of Object.values(snapshot.subscriptions)) {
       const queue = snapshot.queues[sub.id] ?? [];
-      if (!sub.active || !queue.length || sub.deliveryNotified || sub.deliveryClaim || this.wakePending.has(sub.id) || this.opts.isEligible?.(sub.identity) === false) continue;
+      if (!sub.active || !queue.length || sub.deliveryNotified || sub.deliveryClaim || blockedIdentities.has(identityKey(sub.identity)) || this.wakePending.has(sub.id) || this.opts.isEligible?.(sub.identity) === false) continue;
       const key = identityKey(sub.identity), group = groups.get(key) ?? { identity: sub.identity, ids: [], events: [], eventIdsBySubscription: {} };
       group.ids.push(sub.id); group.events.push(...queue); group.eventIdsBySubscription[sub.id] = queue.map((event) => event.id); groups.set(key, group);
     }
@@ -236,36 +285,48 @@ export class ForgeWatchEngine {
     if (generation !== this.generation || this.opts.isEligible?.(identity) === false) { await this.rollbackClaim(ids, token); return false; }
     try { await this.opts.wake!(identity, events, token); }
     catch (error) { this.report(error); await this.rollbackClaim(ids, token); return false; }
-    // Once wake accepts, never roll back and resend: retry receipt persistence in this owner runtime.
-    await this.persistAcceptedReceipt(ids, token);
+    // Once wake accepts, never resend: retain an in-memory receipt for bounded persistence retries.
+    this.pendingReceipts.set(token, { ids, token });
+    await this.persistAcceptedReceipt({ ids, token });
     return generation === this.generation;
   }
-  private async persistAcceptedReceipt(ids: string[], token: string): Promise<void> {
-    let attempt = 0;
-    while (true) {
-      try {
-        await this.update((current) => {
-          for (const id of ids) {
-            const sub = current.subscriptions[id];
-            if (sub?.deliveryClaim === token && sub.deliveryClaimOwner === this.runtimeId) {
-              sub.deliveryClaim = undefined; sub.deliveryClaimOwner = undefined; sub.deliveryToken = token;
-              const queuedIds = new Set((current.queues[id] ?? []).map((event) => event.id));
-              sub.deliveryEventIds = (sub.deliveryClaimEventIds ?? []).filter((eventId) => queuedIds.has(eventId)); sub.deliveryClaimEventIds = undefined;
-              sub.deliveryNotified = sub.deliveryEventIds.length > 0; sub.deliveryError = undefined;
-            }
+  private async persistAcceptedReceipt(receipt: { ids: string[]; token: string; owner?: string }): Promise<boolean> {
+    try {
+      await this.update((current) => {
+        for (const id of receipt.ids) {
+          const sub = current.subscriptions[id];
+          if (sub?.deliveryClaim === receipt.token && sub.deliveryClaimOwner === (receipt.owner ?? this.runtimeId)) {
+            sub.deliveryClaim = undefined; sub.deliveryClaimOwner = undefined; sub.deliveryToken = receipt.token;
+            const queuedIds = new Set((current.queues[id] ?? []).map((event) => event.id));
+            sub.deliveryEventIds = (sub.deliveryClaimEventIds ?? []).filter((eventId) => queuedIds.has(eventId)); sub.deliveryClaimEventIds = undefined;
+            sub.deliveryNotified = sub.deliveryEventIds.length > 0; sub.deliveryError = undefined;
+          } else if (sub?.deliveryNotified && sub.deliveryToken === receipt.token) {
+            // Idempotent after an adapter that committed before reporting an error.
           }
-        });
-        for (const id of ids) this.receiptErrors.delete(id);
-        return;
-      } catch (error) {
-        const message = `Accepted forge wake receipt persistence failed: ${errorOf(error).message}`;
-        this.report(new Error(message)); for (const id of ids) this.receiptErrors.set(id, message);
-        attempt++;
-        const delay = this.retryDelay(Math.min(this.opts.maxBackoffMs ?? 15 * 60_000, 1000 * 2 ** Math.min(attempt, 16)));
-        await new Promise<void>((resolve) => { this.setTimer(resolve, delay); });
-        // Keep retrying even after stop: stop()/close() drains this task before shared storage may close.
-      }
+        }
+      });
+      this.pendingReceipts.delete(receipt.token);
+      for (const id of receipt.ids) this.receiptErrors.delete(id);
+      return true;
+    } catch (error) {
+      const message = `Accepted forge wake receipt persistence failed: ${errorOf(error).message}`;
+      this.report(new Error(message)); for (const id of receipt.ids) this.receiptErrors.set(id, message);
+      this.scheduleReceiptRetry();
+      return false;
     }
+  }
+  private trackReceiptFlush(): void {
+    const task = this.flushPendingReceipts(); this.deliveryWork.add(task);
+    void task.finally(() => this.deliveryWork.delete(task));
+  }
+  private scheduleReceiptRetry(): void {
+    if (this.stopped || this.receiptRetryTimer !== undefined || !this.pendingReceipts.size) return;
+    const delay = this.retryDelay(1000);
+    this.receiptRetryTimer = this.setTimer(() => { this.receiptRetryTimer = undefined; this.trackReceiptFlush(); }, delay);
+  }
+  private async flushPendingReceipts(): Promise<void> {
+    for (const receipt of [...this.pendingReceipts.values()]) await this.persistAcceptedReceipt(receipt);
+    if (!this.stopped && this.pendingReceipts.size === 0) await this.deliverPending();
   }
   private async rollbackClaim(ids: string[], token: string): Promise<void> {
     await this.update((state) => { for (const id of ids) { const sub = state.subscriptions[id]; if (sub?.deliveryClaim === token && sub.deliveryClaimOwner === this.runtimeId) { sub.deliveryClaim = undefined; sub.deliveryClaimOwner = undefined; sub.deliveryClaimEventIds = undefined; } } });
@@ -297,11 +358,8 @@ function validateSnapshot(value: ForgeSnapshot, opts: ForgeWatchOptions): ForgeS
 }
 function migrateState(state: ForgeWatchState, opts: ForgeWatchOptions, now: number, runtimeId: string): void {
   if (!state || (state.version !== 1 && state.version !== 2) || !state.subscriptions) return;
-  for (const sub of Object.values(state.subscriptions)) {
-    sub.createdAt ??= now; sub.updatedAt ??= sub.createdAt;
-    // A claim owned by a previous engine never reached (or persisted) an authoritative acceptance receipt.
-    if (sub.deliveryClaim && sub.deliveryClaimOwner !== runtimeId) { sub.deliveryClaim = undefined; sub.deliveryClaimOwner = undefined; sub.deliveryClaimEventIds = undefined; }
-  }
+  for (const sub of Object.values(state.subscriptions)) { sub.createdAt ??= now; sub.updatedAt ??= sub.createdAt; }
+  void runtimeId;
   expireInactive(state, opts, now);
 }
 function expireInactive(state: ForgeWatchState, opts: ForgeWatchOptions, now: number): void {

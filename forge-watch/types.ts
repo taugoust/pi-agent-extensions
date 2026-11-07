@@ -93,6 +93,9 @@ export interface ForgeWatchOptions {
   maxBaselineItems?: number;
   maxQueueEvents?: number;
   onError?: (error: Error) => void;
+  recoverDelivery?: (identity: ForgeIdentity, batchToken: string) => Promise<boolean | undefined> | boolean | undefined;
+  receiptPersistenceAttempts?: number;
+  shutdownTimeoutMs?: number;
 }
 
 export interface ForgeWatchStatus {
