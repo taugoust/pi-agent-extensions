@@ -84,7 +84,7 @@ export function registerGoalManagement(pi: ExtensionAPI, runtime: GoalRuntime) {
           if (previous.status !== "paused") throw new Error("Explicit completion requires a paused goal; active autonomous completion uses goal_complete");
           const summary = typeof params.summary === "string" ? params.summary.trim() : "";
           const identity = { goalId: previous.id, activationId: previous.activationId ?? previous.id };
-          const guardRejection = await checkForgeGoalCompletionGuards(pi, identity);
+          const guardRejection = await checkForgeGoalCompletionGuards(pi.events, identity);
           if (guardRejection) throw new Error(`Goal completion rejected: ${guardRejection}`);
           const latest = runtime.activeGoal;
           if (!latest || latest.id !== identity.goalId || (latest.activationId ?? latest.id) !== identity.activationId || latest.status !== "paused")

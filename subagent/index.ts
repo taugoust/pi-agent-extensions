@@ -2065,7 +2065,11 @@ export default function (pi: ExtensionAPI) {
             const { retainedGoalCompletion } = await import("../workflows/delegated-child.ts");
             const { readGoalTasks } = await import("../shared/goal-progress.ts");
             const completed = retainedGoalCompletion(branch, entry.id, binding.data.progressId);
-            if (!completed) return null;
+            const completionGuardKeys = [...new Set(branch.filter(e => e?.type === "custom" && e.customType === "forge-goal-completion-guard" && e.data?.goalId === entry.id).map(e => e.data.key).filter((key: unknown): key is string => typeof key === "string" && key.length > 0))].slice(0, 100);
+            if (!completed) {
+              const goal = branch.findLast(e => e?.type === "custom" && e.customType === "goal-state" && e.data?.goal?.id === entry.id)?.data?.goal;
+              return { goalId: entry.id, activationId: goal?.activationId ?? entry.id, status: "paused", executionStopped: true, waiting: goal?.waiting?.reason ?? null, completionGuardKeys };
+            }
             const goal = completed.state;
             const { readRecordedGoalStory } = await import("../workflows/goal-story.ts");
             const story = readRecordedGoalStory(branch, entry.id);
@@ -2074,7 +2078,7 @@ export default function (pi: ExtensionAPI) {
             const last = ordinary ? undefined : (record as any).history.at(-1);
             if (!ordinary && (last?.attempt !== record.attempt || last?.outcome !== "delivered"))
               await store.finish(sessionId, record.taskId, record.childId, { outcome: "delivered", execution: "completed", summary: completed.summary });
-            return { goalId: goal.id, status: "complete", executionStopped: true, waiting: null,
+            return { goalId: goal.id, status: "complete", executionStopped: true, waiting: null, completionGuardKeys,
               tasks: readGoalTasks({ sessionManager: manager }, goal), tokensUsed: goal.tokensUsed, automaticTurns: goal.automaticModelTurns,
               noProgressTurns: goal.toolFreeRepeatCount, summary: completed.summary, story, review };
           },

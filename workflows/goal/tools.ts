@@ -152,7 +152,7 @@ export function registerGoalTools(pi: ExtensionAPI, runtime: GoalRuntime) {
       }
 
       const completionIdentity = { goalId: completedGoal.id, activationId: completedGoal.activationId ?? completedGoal.id };
-      const guardRejection = await checkForgeGoalCompletionGuards(runtime.pi, completionIdentity);
+      const guardRejection = await checkForgeGoalCompletionGuards(runtime.pi.events, completionIdentity);
       if (guardRejection) {
         const rejection = `Goal completion rejected: ${guardRejection}`;
         notifyTerminal(ctx.ui, rejection, "warning");

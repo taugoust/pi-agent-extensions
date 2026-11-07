@@ -350,7 +350,7 @@ export function registerGoalLifecycle(
       if (Reflect.get(message, "customType") === "forge-goal-wake") {
         const details = Reflect.get(message, "details") as { goalId?: unknown; activationId?: unknown; subscriptionId?: unknown } | undefined;
         const goal = runtime.activeGoal;
-        if (!goal || typeof details?.goalId !== "string" || typeof details.activationId !== "string" || typeof details.subscriptionId !== "string" || !consumeForgeGoalWake(pi, { goalId: details.goalId, activationId: details.activationId }, details.subscriptionId)) {
+        if (!goal || typeof details?.goalId !== "string" || typeof details.activationId !== "string" || typeof details.subscriptionId !== "string" || !consumeForgeGoalWake(pi.events, { goalId: details.goalId, activationId: details.activationId }, details.subscriptionId)) {
           abortCurrentTurn(ctx);
           return;
         }

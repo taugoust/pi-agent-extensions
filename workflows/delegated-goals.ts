@@ -46,7 +46,7 @@ export type DelegatedGoalRequest = {
   removeTaskIds?: string[];
 };
 /** Child execution is deliberately injected: this registry never runs a parent goal. */
-export type DelegatedGoalObservation = Partial<Pick<DelegatedGoalEntry, "status" | "tasks" | "tokensUsed" | "automaticTurns" | "noProgressTurns" | "summary" | "waiting" | "story" | "diagnostics" | "review">>;
+export type DelegatedGoalObservation = Partial<Pick<DelegatedGoalEntry, "status" | "tasks" | "tokensUsed" | "automaticTurns" | "noProgressTurns" | "summary" | "waiting" | "story" | "diagnostics" | "review">> & { completionGuardKeys?: string[] };
 export interface DelegatedGoalExecutor {
   /** Live preflight; object presence alone does not authorize executable tools. */
   executionAvailable?(): boolean;
@@ -322,6 +322,10 @@ export class DelegatedGoalRegistry {
           }
           if (entry.tasks.some(task => task.status !== 'completed' && !verified.has(task.id))) throw new Error('Required tasks remain unfinished; supply explicit verification evidence for each');
           if (entry.child) {
+            if (!this.executor.observe) throw new Error('Cannot complete until exact child Goal completion-guard metadata is read');
+            const observed = await this.executor.observe(copy(entry));
+            if (!observed || !Array.isArray(observed.completionGuardKeys)) throw new Error('Cannot complete until exact child Goal completion-guard metadata is verified');
+            if (observed.completionGuardKeys.length) throw new Error('This Goal has required fresh completion guards; resume the child so its current checker can authorize completion');
             if (!this.executor.verifyStopped) throw new Error('Cannot complete until exact owned child stop is verified');
             await this.executor.verifyStopped(copy(entry));
           }

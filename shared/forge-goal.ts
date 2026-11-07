@@ -1,99 +1,88 @@
 import type { ExtensionAPI } from "@earendil-works/pi-coding-agent";
 
-/**
- * Public in-repo forge/watch bridge. Session scope is the ExtensionAPI instance.
- * Guards cover autonomous goal_complete and explicit paused goal_manage complete
- * only; both routes await checks immediately before shared lifecycle transition.
- * Other extensions' private transitions/post-transition reporting are outside
- * this guard. Checklist/event payloads are never guard results: callbacks must
- * fetch/check their own authority.
- */
-export interface ForgeGoalIdentity {
-  goalId: string;
-  activationId: string;
-}
+type ForgeEvents = ExtensionAPI["events"];
+const CHANNEL = "pi-agent-extensions:forge-goal:request:v1";
+export const FORGE_GOAL_GUARD_ENTRY = "forge-goal-completion-guard";
 
+/**
+ * Bridge scope is the shared pi.events bus, never an extension-specific API proxy.
+ * Checks cover active goal_complete and explicitly authorized paused goal_manage
+ * complete. Stable required keys persist as Goal session entries across resume and
+ * runtime reload; no callback is retained across reload, so missing registration
+ * denies completion. For saved child Goals the authenticated parent observes the
+ * exact child marker and denies parent-side goals.complete; resume the child to
+ * restore a fresh checker. Standalone saved records have no current-session Goal
+ * activation and are outside this bridge.
+ */
+export interface ForgeGoalIdentity { goalId: string; activationId: string }
 export interface ForgeGoalSnapshot extends ForgeGoalIdentity {
   status: "active" | "paused" | "blocked" | "usage_limited" | "budget_limited" | "complete";
   waiting: boolean;
   waitReason?: string;
 }
-
 export interface ForgeGoalBinding {
   snapshot(): ForgeGoalSnapshot | undefined;
-  wakeSubscriptions: Map<string, ForgeGoalIdentity>;
-  completionGuards: Map<string, { identity: ForgeGoalIdentity; check: (identity: ForgeGoalIdentity) => Promise<string | undefined> }>;
-  nextId(): string;
-  sendWake(identity: ForgeGoalIdentity, subscriptionId: string, message: string): boolean;
+  subscribe(identity: ForgeGoalIdentity): string | undefined;
+  wake(identity: ForgeGoalIdentity, subscriptionId: string, message: string): boolean;
+  consume(identity: ForgeGoalIdentity, subscriptionId: string): boolean;
+  unsubscribe(subscriptionId: string): void;
+  registerGuard(identity: ForgeGoalIdentity, key: string, check: (identity: ForgeGoalIdentity) => Promise<string | undefined>): () => void;
+  checkGuards(identity: ForgeGoalIdentity): Promise<string | undefined>;
 }
 
-const bindings = new WeakMap<ExtensionAPI, ForgeGoalBinding>();
-
-/** Internal registration is called once by the in-repo Goal extension. */
-export function bindForgeGoal(pi: ExtensionAPI, binding: ForgeGoalBinding): () => void {
-  bindings.set(pi, binding);
-  return () => { if (bindings.get(pi) === binding) bindings.delete(pi); };
+interface Request { op: string; [key: string]: unknown; reply?: unknown }
+function request<T>(events: ForgeEvents, payload: Request): T | undefined {
+  try {
+    events.emit(CHANNEL, payload);
+    return payload.reply as T | undefined;
+  } catch { return undefined; }
 }
 
-/** Read authoritative live Goal state; absent/terminal goals return undefined. */
-export function getCurrentForgeGoal(pi: ExtensionAPI): ForgeGoalSnapshot | undefined {
-  return bindings.get(pi)?.snapshot();
+/** Goal extension's in-process bus listener. Dispose on session shutdown and rebind on start. */
+export function bindForgeGoal(events: ForgeEvents, binding: ForgeGoalBinding): () => void {
+  return events.on(CHANNEL, raw => {
+    const r = raw as Request;
+    if (!r || typeof r !== "object") return;
+    switch (r.op) {
+      case "snapshot": r.reply = binding.snapshot(); break;
+      case "subscribe": r.reply = binding.subscribe(r.identity as ForgeGoalIdentity); break;
+      case "wake": r.reply = binding.wake(r.identity as ForgeGoalIdentity, String(r.subscriptionId), String(r.message)); break;
+      case "consume": r.reply = binding.consume(r.identity as ForgeGoalIdentity, String(r.subscriptionId)); break;
+      case "unsubscribe": r.reply = binding.unsubscribe(String(r.subscriptionId)); break;
+      case "guard-register": r.reply = binding.registerGuard(r.identity as ForgeGoalIdentity, String(r.key), r.check as (identity: ForgeGoalIdentity) => Promise<string | undefined>); break;
+      case "guard-check": r.reply = binding.checkGuards(r.identity as ForgeGoalIdentity); break;
+    }
+  });
 }
 
-/** Explicitly authorize a watcher to wake exactly one active, waiting activation. */
-export function subscribeForgeGoalWake(pi: ExtensionAPI, identity: ForgeGoalIdentity): { subscriptionId: string; unsubscribe(): void } | undefined {
-  const binding = bindings.get(pi);
-  const current = binding?.snapshot();
-  if (!binding || !current || !current.waiting || current.status !== "active" || !matches(current, identity)) return undefined;
-  const subscriptionId = binding.nextId();
-  binding.wakeSubscriptions.set(subscriptionId, { ...identity });
-  return { subscriptionId, unsubscribe: () => binding.wakeSubscriptions.delete(subscriptionId) };
+export function getCurrentForgeGoal(events: ForgeEvents): ForgeGoalSnapshot | undefined {
+  return request(events, { op: "snapshot" });
 }
-
-export function consumeForgeGoalWake(pi: ExtensionAPI, identity: ForgeGoalIdentity, subscriptionId: string): boolean {
-  const binding = bindings.get(pi);
-  const current = binding?.snapshot();
-  const subscribed = binding?.wakeSubscriptions.get(subscriptionId);
-  if (!binding || !current || !current.waiting || current.status !== "active" || !subscribed || !matches(current, identity) || !matches(subscribed, identity)) return false;
-  binding.wakeSubscriptions.delete(subscriptionId);
-  return true;
+export function subscribeForgeGoalWake(events: ForgeEvents, identity: ForgeGoalIdentity): { subscriptionId: string; unsubscribe(): void } | undefined {
+  const subscriptionId = request<string>(events, { op: "subscribe", identity });
+  return subscriptionId ? { subscriptionId, unsubscribe: () => request(events, { op: "unsubscribe", subscriptionId }) } : undefined;
 }
-
-/** Deliver only through Goal's normal custom-message wake routing. */
-export function wakeForgeGoal(pi: ExtensionAPI, identity: ForgeGoalIdentity, subscriptionId: string, message: string): boolean {
-  return bindings.get(pi)?.sendWake(identity, subscriptionId, message) ?? false;
+export function wakeForgeGoal(events: ForgeEvents, identity: ForgeGoalIdentity, subscriptionId: string, message: string): boolean {
+  return request<boolean>(events, { op: "wake", identity, subscriptionId, message }) ?? false;
 }
-
-/** Register a fresh async completion check; its result is never supplied by the model/event payload. */
+export function consumeForgeGoalWake(events: ForgeEvents, identity: ForgeGoalIdentity, subscriptionId: string): boolean {
+  return request<boolean>(events, { op: "consume", identity, subscriptionId }) ?? false;
+}
 export function registerForgeGoalCompletionGuard(
-  pi: ExtensionAPI,
+  events: ForgeEvents,
   identity: ForgeGoalIdentity,
+  key: string,
   guard: (identity: ForgeGoalIdentity) => Promise<string | undefined>,
 ): () => void {
-  const binding = bindings.get(pi);
-  if (!binding) throw new Error("Goal runtime is not available in this session");
-  const id = binding.nextId();
-  const current = binding.snapshot();
-  if (!current || !matches(current, identity)) throw new Error("Completion guard requires the exact current Goal activation");
-  binding.completionGuards.set(id, { identity: { ...identity }, check: guard });
-  return () => binding.completionGuards.delete(id);
+  const unsubscribe = request<() => void>(events, { op: "guard-register", identity, key, check: guard });
+  if (!unsubscribe) throw new Error("Goal completion guard registration failed closed");
+  return unsubscribe;
+}
+export function checkForgeGoalCompletionGuards(events: ForgeEvents, identity: ForgeGoalIdentity): Promise<string | undefined> {
+  const check = request<Promise<string | undefined>>(events, { op: "guard-check", identity });
+  return check ?? Promise.resolve("Goal completion guard service is unavailable; completion was denied");
 }
 
-export async function checkForgeGoalCompletionGuards(pi: ExtensionAPI, identity: ForgeGoalIdentity): Promise<string | undefined> {
-  const binding = bindings.get(pi);
-  if (!binding) return undefined;
-  for (const entry of [...binding.completionGuards.values()]) {
-    if (!matches(entry.identity, identity)) continue;
-    try {
-      const rejection = await entry.check({ ...identity });
-      if (rejection) return rejection;
-    } catch {
-      return "A registered Goal completion check failed; completion was denied.";
-    }
-  }
-  return undefined;
-}
-
-function matches(a: ForgeGoalIdentity, b: ForgeGoalIdentity): boolean {
-  return a.goalId === b.goalId && a.activationId === b.activationId;
+export function identityMatches(a: ForgeGoalIdentity, b: ForgeGoalIdentity): boolean {
+  return !!a && a.goalId === b.goalId && a.activationId === b.activationId;
 }

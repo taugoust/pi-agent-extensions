@@ -3,6 +3,7 @@ import type { GoalRuntime } from "./goal/runtime.js";
 import type { GoalCommandController } from "./goal/commands.js";
 import { validateDelegatedGoals, type DelegatedGoalEntry } from "./delegated-goals.ts";
 import { readGoalTasks, writeProgress } from "../shared/goal-progress.ts";
+import { FORGE_GOAL_GUARD_ENTRY } from "../shared/forge-goal.ts";
 
 import { createGoalStoryRecorder, GOAL_STORY_ENTRY } from "./goal-story-recorder.ts";
 const BINDING = "delegated-goal-child-binding-v1";
@@ -56,7 +57,8 @@ export function createDelegatedChildGoalService(pi: ExtensionAPI, initial: Exten
     if (completed && Number.isSafeInteger(completed.endedAt)) recordState(completed.endedAt);
     const goal = runtime.activeGoal ?? completed?.state;
     const terminal = runtime.snapshotSettingsApplicationState().terminalDetails;
-    return { entryId: binding ?? null, childGoalId: goal?.id ?? null, childActivationId: goal?.activationId ?? goal?.id ?? null, revision: goal?.revision ?? null, story: recorder?.snapshot(), limits: { ...runtime.continuationLimits }, policyRevision: runtime.policyRevision, tokenBudget: goal?.tokenBudget ?? null, goal: goal ? {
+    const completionGuardKeys = goal ? [...new Set((ctx.sessionManager.getBranch() as any[]).filter(entry => entry.type === "custom" && entry.customType === FORGE_GOAL_GUARD_ENTRY && entry.data?.goalId === goal.id).map(entry => entry.data.key).filter((key): key is string => typeof key === "string"))].slice(0, 100) : [];
+    return { entryId: binding ?? null, childGoalId: goal?.id ?? null, childActivationId: goal?.activationId ?? goal?.id ?? null, revision: goal?.revision ?? null, completionGuardKeys, story: recorder?.snapshot(), limits: { ...runtime.continuationLimits }, policyRevision: runtime.policyRevision, tokenBudget: goal?.tokenBudget ?? null, goal: goal ? {
       status: goal.status, tasks: readGoalTasks(ctx, goal), tokensUsed: goal.tokensUsed,
       automaticTurns: goal.automaticModelTurns, noProgressTurns: goal.toolFreeRepeatCount,
       summary: completed?.summary ?? (terminal?.goalId === goal.id ? terminal.summary ?? terminal.reason ?? null : null),

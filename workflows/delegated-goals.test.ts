@@ -15,6 +15,7 @@ function fixture() {
     async start(e) { calls.push(`start:${e.id}`); launches++; return { taskId: `task:${e.id}`, childId: `child:${e.id}:1`, jobId: `job:${e.id}:1`, attempt: 1 }; },
     async resume(e) { calls.push(`resume:${e.id}`); return { taskId: e.child!.taskId, childId: `child:${e.id}:2`, jobId: `job:${e.id}:2`, attempt: 2 }; },
     async pause(e) { calls.push(`pause:${e.id}`); },
+    async observe() { return { status: "paused" as const, completionGuardKeys: [] }; },
     async verifyStopped(e) { calls.push(`verified-stopped:${e.id}`); },
   };
   const saves: unknown[] = [];
@@ -36,6 +37,13 @@ test('parent completes a verified paused child without resuming it and completio
  assert.ok(done.story!.timeline.some(item=>item.kind==='completed'&&item.text.includes('Parent verified completion')));
  f.executor.observe=async()=>({status:'paused',tasks:e.tasks});const restored=new DelegatedGoalRegistry('parent',f.executor,()=>{},first);await restored.refresh();assert.equal(restored.snapshot().entries[0].status,'complete');
  const terminal=await restored.mutate('parent',{action:'goals.resume',requestId:'cannot-resume',expectedGoalId:done.id,expectedEntryRevision:done.revision});assert.equal(terminal.entries[0].status,'complete');assert.equal(terminal.entries[0].summary,request.summary);assert.equal(terminal.entries[0].tasks[0].status,'completed');assert.equal(f.calls.length,calls+1);
+});
+
+test('parent completion fails closed for an authenticated child with a persisted forge guard marker',async()=>{
+ const f=fixture();await f.create('Guarded output');await f.act(f.registry.snapshot().entries[0],'goals.start');await f.act(f.registry.snapshot().entries[0],'goals.pause');const e=f.registry.snapshot().entries[0],before=f.registry.snapshot();
+ f.executor.observe=async()=>({status:'paused',completionGuardKeys:['approval:repo']});
+ await assert.rejects(f.act(e,'goals.complete',{user_authorized:true,summary:'Verified result.'}),/required fresh completion guards.*resume the child/i);
+ assert.deepEqual(f.registry.snapshot(),before);
 });
 
 test('parent completion rejects unfinished checklists, missing authorization and malformed evidence without mutation',async()=>{

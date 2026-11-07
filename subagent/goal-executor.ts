@@ -11,6 +11,8 @@ export type ChildGoalSnapshot = {
   diagnostics?: DelegatedGoalEntry["diagnostics"];
   limitsEditable?: boolean; policyRevision?: number; tokenBudget?: number | null;
   limits?: DelegatedGoalEntry["continuationLimits"];
+  /** Authenticated read-only Goal session metadata for parent completion gates. */
+  completionGuardKeys?: string[];
 };
 export async function resumeRestoredGoal(
   observe: () => Promise<ChildGoalSnapshot>,
@@ -66,7 +68,8 @@ export function createDelegatedGoalExecutor(options: {
     if (!snapshot || typeof snapshot.goalId !== "string" || !snapshot.goalId
       || (goalId && snapshot.goalId !== goalId) || (activationId && snapshot.activationId !== activationId) || !["active", "paused", "blocked", "usage_limited", "budget_limited", "complete"].includes(snapshot.status)
       || typeof snapshot.executionStopped !== "boolean"
-      || !(snapshot.waiting === null || typeof snapshot.waiting === "string"))
+      || !(snapshot.waiting === null || typeof snapshot.waiting === "string")
+      || (snapshot.completionGuardKeys !== undefined && (!Array.isArray(snapshot.completionGuardKeys) || snapshot.completionGuardKeys.length > 100 || !snapshot.completionGuardKeys.every(key => typeof key === "string" && key.length > 0 && key.length <= 256))))
       throw new Error("Invalid dedicated child goal observation");
     return snapshot;
   };
@@ -215,8 +218,9 @@ export function createDelegatedGoalExecutor(options: {
         const completed = await options.retainedCompletion?.(entry);
         if (completed) {
           validate(completed);
-          if (completed.status !== "complete" || !completed.executionStopped) throw new Error("Invalid retained completion");
-          return completed;
+          if (!completed.executionStopped || !["complete", "paused"].includes(completed.status) || !Array.isArray(completed.completionGuardKeys)) throw new Error("Invalid retained Goal metadata");
+          if (completed.status === "complete") return completed;
+          return { ...completed, summary: completed.summary ?? "Dedicated child execution stopped during parent reload; explicit Resume is required." };
         }
         return { status: "paused" as const, executionStopped: true, waiting: null,
           summary: "Dedicated child execution stopped during parent reload; explicit Resume is required.", goalId: undefined };
