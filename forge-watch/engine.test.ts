@@ -1,6 +1,6 @@
 import { describe, expect, test } from "bun:test";
 import { ForgeWatchEngine } from "./engine.ts";
-import { parseTarget, type ForgeSnapshot, type ForgeWatchState } from "./types.ts";
+import { parseTarget, type ForgeEvent, type ForgeSnapshot, type ForgeWatchState } from "./types.ts";
 const target = parseTarget("https://github.com/acme/repo/pull/7");
 const target2 = parseTarget("https://github.com/acme/other/pull/8");
 const identity = (goalId = "one") => ({ sessionId: "session", goalId, activationId: "activation" });
@@ -65,11 +65,15 @@ describe("forge watch engine", () => {
     expect(new Set(commentEvents.map((e) => e.fingerprint)).size).toBe(3);
   });
   test("one identity with pending events on multiple targets receives one combined wake batch", async () => {
-    const storage = new Memory(), snapshots = new Map([[target.url, snap()], [target2.url, snap()]]); let wakes: string[][] = [];
-    const engine = new ForgeWatchEngine({ storage, maxConcurrency: 2, adapter: { poll: async (t) => snapshots.get(t.url)! }, wake: (_i, events) => { wakes.push(events.map((e) => e.target.url)); } });
+    const storage = new Memory(), snapshots = new Map([[target.url, snap()], [target2.url, snap()]]); let wakes: ForgeEvent[][] = [];
+    const engine = new ForgeWatchEngine({ storage, maxConcurrency: 2, adapter: { poll: async (t) => snapshots.get(t.url)! }, wake: (_i, events) => { wakes.push(events); } });
     await engine.watch({ target, identity: identity() }); await engine.watch({ target: target2, identity: identity() }); await engine.pollOnce();
     snapshots.set(target.url, snap("b", "c2")); snapshots.set(target2.url, snap("b", "c2")); await engine.pollOnce();
-    expect(wakes).toHaveLength(1); expect(new Set(wakes[0])).toEqual(new Set([target.url, target2.url]));
+    expect(wakes).toHaveLength(1); expect(new Set(wakes[0]!.map((e) => e.target.url))).toEqual(new Set([target.url, target2.url]));
+    const firstTargetIds = wakes[0]!.filter((e) => e.target.url === target.url).map((e) => e.id);
+    expect(await engine.ack(identity(), firstTargetIds)).toBe(firstTargetIds.length); expect(wakes).toHaveLength(1);
+    snapshots.set(target.url, snap("c", "c3")); await engine.pollOnce(target);
+    expect(wakes).toHaveLength(2); expect(wakes[1]!.every((event) => event.target.url === target.url)).toBe(true);
   });
   test("stop drains an unsent durable claim so replacement runtime sends it once", async () => {
     const storage = new Memory(); let snapshot = snap(), claimReached!: () => void, release!: () => void;
@@ -86,6 +90,63 @@ describe("forge watch engine", () => {
     expect(Object.values(storage.state.subscriptions)[0]?.deliveryClaim).toBeUndefined();
     const replacement = new ForgeWatchEngine({ storage: blockingStorage, adapter: { poll: async () => snapshot }, wake: () => { wakes++; } });
     await replacement.pollOnce(target); expect(wakes).toBe(1); await replacement.pollOnce(target); expect(wakes).toBe(1);
+  });
+  test("partial acknowledgement releases newer unnotified events only after covered batch is fully acked", async () => {
+    const storage = new Memory(); let snapshot = snap(), wakes = 0;
+    const engine = new ForgeWatchEngine({ storage, adapter: { poll: async () => snapshot }, wake: () => { wakes++; } });
+    await engine.watch({ target, identity: identity() }); await engine.pollOnce(target); snapshot = snap("b", "c2"); await engine.pollOnce(target); expect(wakes).toBe(1);
+    const firstBatch = await engine.events(identity()); expect(firstBatch).toHaveLength(3);
+    snapshot = snap("c", "c3"); await engine.pollOnce(target); expect(wakes).toBe(1);
+    expect(await engine.ack(identity(), [firstBatch[0]!.id])).toBe(1); expect(wakes).toBe(1);
+    expect(await engine.ack(identity(), firstBatch.slice(1).map((e) => e.id))).toBe(2); expect(wakes).toBe(2);
+    expect((await engine.events(identity())).length).toBe(3);
+  });
+  test("receipt write failure retries persistence without resending accepted wake", async () => {
+    const base = new Memory(); let failed = false, wakes = 0;
+    const storage = { async update<T>(mutate: (state: ForgeWatchState) => T): Promise<T> {
+      const draft = structuredClone(base.state), result = mutate(draft);
+      const accepted = Object.values(draft.subscriptions).some((s) => s.deliveryNotified && !!s.deliveryToken);
+      if (accepted && !failed) { failed = true; throw new Error("receipt commit failed"); }
+      base.state = draft; return result;
+    } };
+    let snapshot = snap();
+    const engine = new ForgeWatchEngine({ storage, adapter: { poll: async () => snapshot }, wake: () => { wakes++; }, setTimer: (cb) => setTimeout(cb, 0), clearTimer: (h) => clearTimeout(h as ReturnType<typeof setTimeout>), jitter: () => 100 }); await engine.watch({ target, identity: identity() }); await engine.pollOnce(target); snapshot = snap("b", "c2"); await engine.pollOnce(target);
+    expect(failed).toBe(true); expect(wakes).toBe(1); expect((await engine.status(identity()))[0]?.subscription.deliveryNotified).toBe(true); await engine.stop();
+  });
+  test("ack and a newer poll during receipt retry release only the newer batch after commit", async () => {
+    const base = new Memory(); let snapshot = snap(), failReceipt = false, failedReceipt!: () => void, wakeEvents: ForgeEvent[][] = [];
+    const failed = new Promise<void>((resolve) => { failedReceipt = resolve; }); let retryCallback: (() => void) | undefined;
+    const storage = { async update<T>(mutate: (state: ForgeWatchState) => T): Promise<T> {
+      const draft = structuredClone(base.state), result = mutate(draft);
+      const receipt = Object.values(draft.subscriptions).some((s) => s.deliveryNotified && !!s.deliveryToken);
+      if (failReceipt && receipt) { failReceipt = false; failedReceipt(); throw new Error("receipt commit failed before transaction commit"); }
+      base.state = draft; return result;
+    } };
+    const engine = new ForgeWatchEngine({ storage, adapter: { poll: async () => snapshot }, wake: (_i, events) => { wakeEvents.push(events); }, setTimer: (cb, delay) => { if (delay < 1000) retryCallback = cb; return 1; }, clearTimer: () => {}, jitter: () => 100 });
+    await engine.watch({ target, identity: identity() }); await engine.pollOnce(target); snapshot = snap("b", "c2"); failReceipt = true;
+    const firstPoll = engine.pollOnce(target); await failed;
+    const acceptedIds = wakeEvents[0]!.map((event) => event.id); expect(wakeEvents).toHaveLength(1);
+    expect(await engine.ack(identity(), acceptedIds)).toBe(3);
+    snapshot = snap("c", "c3"); await engine.pollOnce(target);
+    retryCallback!(); await firstPoll;
+    expect(wakeEvents).toHaveLength(2); expect(wakeEvents[1]!.map((event) => event.category).sort()).toEqual(["comments", "comments", "head"]);
+    await engine.stop();
+  });
+  test("persistent receipt failures remain in accepted state and stop drains until storage recovers", async () => {
+    const base = new Memory(); let failing = true, failures = 0, wakes = 0, snapshot = snap();
+    const storage = { async update<T>(mutate: (state: ForgeWatchState) => T): Promise<T> {
+      const draft = structuredClone(base.state), result = mutate(draft);
+      if (failing && Object.values(draft.subscriptions).some((s) => s.deliveryNotified && !!s.deliveryToken)) { failures++; throw new Error("persistent receipt outage"); }
+      base.state = draft; return result;
+    } };
+    const engine = new ForgeWatchEngine({ storage, adapter: { poll: async () => snapshot }, wake: () => { wakes++; }, setTimer: (cb) => setTimeout(cb, 0), clearTimer: (h) => clearTimeout(h as ReturnType<typeof setTimeout>), jitter: () => 100 });
+    await engine.watch({ target, identity: identity() }); await engine.pollOnce(target); snapshot = snap("b", "c2");
+    const polling = engine.pollOnce(target);
+    while (failures < 2) await new Promise((resolve) => setTimeout(resolve, 0));
+    expect((await engine.status(identity()))[0]?.deliveryError).toContain("persistent receipt outage");
+    const stopping = engine.stop(); let drained = false; void stopping.then(() => { drained = true; });
+    await new Promise((resolve) => setTimeout(resolve, 0)); expect(drained).toBe(false); expect(wakes).toBe(1);
+    failing = false; await Promise.all([polling, stopping]); expect(drained).toBe(true); expect((await engine.status(identity()))[0]?.subscription.deliveryNotified).toBe(true);
   });
   test("accepted delivery receipt survives eligibility clearing after send", async () => {
     const storage = new Memory(); let eligible = true, wakeCount = 0, snapshot = snap();

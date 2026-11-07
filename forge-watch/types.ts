@@ -52,6 +52,9 @@ export interface ForgeSubscription {
   deliveryToken?: string;
   deliveryClaim?: string;
   deliveryClaimOwner?: string;
+  deliveryClaimEventIds?: string[];
+  deliveryEventIds?: string[];
+  deliveryError?: string;
   createdAt?: number;
   updatedAt?: number;
   overflow?: string;
@@ -96,6 +99,7 @@ export interface ForgeWatchStatus {
   subscription: ForgeSubscription;
   pending: number;
   lastError?: string;
+  deliveryError?: string;
   nextPollAt?: number;
 }
 

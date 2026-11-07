@@ -19,8 +19,9 @@ export class ForgeWatchEngine {
   private readonly inFlight = new Set<string>();
   private readonly controllers = new Map<string, AbortController>();
   private readonly wakePending = new Set<string>();
-  private readonly deliveryWork = new Set<Promise<void>>();
+  private readonly deliveryWork = new Set<Promise<unknown>>();
   private readonly pollWork = new Set<Promise<void>>();
+  private readonly receiptErrors = new Map<string, string>();
   private mutation = Promise.resolve();
   private readonly opts: ForgeWatchOptions;
   private readonly runtimeId = `forge-watch-runtime-${Date.now()}-${++engineSequence}`;
@@ -49,7 +50,7 @@ export class ForgeWatchEngine {
       state.targets[targetKey] ??= { target: input.target, retryCount: 0, nextPollAt: this.now() };
       const selected = [...new Set(input.categories ?? categories)];
       if (!selected.length || selected.some((c) => !categories.includes(c))) throw new Error("Invalid or empty forge category selection");
-      const value: ForgeSubscription = { id, identity: { ...input.identity }, target: input.target, categories: selected, ignoreActors: (input.ignoreActors ?? []).map((a) => a.toLowerCase()), active: input.active ?? true, deliveryNotified: state.subscriptions[id]?.deliveryNotified ?? false, deliveryToken: state.subscriptions[id]?.deliveryToken, deliveryClaim: state.subscriptions[id]?.deliveryClaim, deliveryClaimOwner: state.subscriptions[id]?.deliveryClaimOwner, createdAt: state.subscriptions[id]?.createdAt ?? this.now(), updatedAt: this.now() };
+      const value: ForgeSubscription = { id, identity: { ...input.identity }, target: input.target, categories: selected, ignoreActors: (input.ignoreActors ?? []).map((a) => a.toLowerCase()), active: input.active ?? true, deliveryNotified: state.subscriptions[id]?.deliveryNotified ?? false, deliveryToken: state.subscriptions[id]?.deliveryToken, deliveryClaim: state.subscriptions[id]?.deliveryClaim, deliveryClaimOwner: state.subscriptions[id]?.deliveryClaimOwner, deliveryClaimEventIds: state.subscriptions[id]?.deliveryClaimEventIds, deliveryEventIds: state.subscriptions[id]?.deliveryEventIds, deliveryError: state.subscriptions[id]?.deliveryError, createdAt: state.subscriptions[id]?.createdAt ?? this.now(), updatedAt: this.now() };
       state.subscriptions[id] = value; state.queues[id] ??= [];
       return structuredClone(value);
     });
@@ -76,14 +77,22 @@ export class ForgeWatchEngine {
 
   async status(identity?: ForgeIdentity): Promise<ForgeWatchStatus[]> {
     if (identity) validateIdentity(identity);
-    return this.update((state) => Object.values(state.subscriptions).filter((s) => !identity || sameIdentity(s.identity, identity)).map((subscription) => ({ subscription: structuredClone(subscription), pending: state.queues[subscription.id]?.length ?? 0, ...(state.targets[keyFor(subscription.target)]?.lastError ? { lastError: state.targets[keyFor(subscription.target)]!.lastError } : {}), ...(state.targets[keyFor(subscription.target)] ? { nextPollAt: state.targets[keyFor(subscription.target)]!.nextPollAt } : {}) })));
+    return this.update((state) => Object.values(state.subscriptions)
+      .filter((sub) => !identity || sameIdentity(sub.identity, identity))
+      .map((subscription) => ({
+        subscription: { ...structuredClone(subscription), ...(this.receiptErrors.get(subscription.id) ? { deliveryError: this.receiptErrors.get(subscription.id) } : {}) },
+        pending: state.queues[subscription.id]?.length ?? 0,
+        ...(state.targets[keyFor(subscription.target)]?.lastError ? { lastError: state.targets[keyFor(subscription.target)]!.lastError } : {}),
+        ...(state.targets[keyFor(subscription.target)] ? { nextPollAt: state.targets[keyFor(subscription.target)]!.nextPollAt } : {}),
+        ...(this.receiptErrors.get(subscription.id) ? { deliveryError: this.receiptErrors.get(subscription.id) } : {}),
+      })));
   }
   async events(identity: ForgeIdentity, consume = false): Promise<ForgeEvent[]> {
     validateIdentity(identity);
     return this.update((state) => {
       const ids = Object.values(state.subscriptions).filter((s) => sameIdentity(s.identity, identity)).map((s) => s.id);
       const all = ids.flatMap((id) => state.queues[id] ?? []).sort((a, b) => Number(a.id) - Number(b.id));
-      if (consume) for (const id of ids) { state.queues[id] = []; state.subscriptions[id]!.deliveryNotified = false; state.subscriptions[id]!.deliveryToken = undefined; }
+      if (consume) for (const id of ids) { state.queues[id] = []; state.subscriptions[id]!.deliveryNotified = false; state.subscriptions[id]!.deliveryToken = undefined; state.subscriptions[id]!.deliveryEventIds = []; }
       return structuredClone(all);
     });
   }
@@ -92,7 +101,10 @@ export class ForgeWatchEngine {
     const n = await this.update((state) => {
       let removed = 0;
       for (const sub of Object.values(state.subscriptions).filter((s) => sameIdentity(s.identity, identity))) {
-        const queue = state.queues[sub.id] ?? [], ids = new Set(eventIds), kept = queue.filter((e) => !ids.has(e.id)); removed += queue.length - kept.length; state.queues[sub.id] = kept; if (!kept.length) { sub.deliveryNotified = false; sub.deliveryToken = undefined; }
+        const queue = state.queues[sub.id] ?? [], ids = new Set(eventIds), kept = queue.filter((e) => !ids.has(e.id)); removed += queue.length - kept.length; state.queues[sub.id] = kept;
+        const remainingReceipt = (sub.deliveryEventIds ?? []).filter((id) => kept.some((event) => event.id === id));
+        if (!remainingReceipt.length) { sub.deliveryNotified = false; sub.deliveryToken = undefined; sub.deliveryEventIds = []; }
+        else sub.deliveryEventIds = remainingReceipt;
       }
       return removed;
     });
@@ -109,7 +121,7 @@ export class ForgeWatchEngine {
   async close(): Promise<void> { await this.stop(); }
   private schedule(delay: number): void { if (this.stopped) return; if (this.timer !== undefined) this.clearTimer(this.timer); this.timer = this.setTimer(() => { this.timer = undefined; void this.tick().catch((e) => { this.report(e); this.schedule(this.retryDelay(1000)); }); }, Math.max(0, delay)); }
 
-  async pollOnce(target?: ForgeTarget): Promise<void> { await this.pollDue(target, false); await this.deliverPending(); }
+  async pollOnce(target?: ForgeTarget): Promise<void> { const generation = this.generation; await this.pollDue(target, false); if (generation === this.generation) await this.deliverPending(); }
   private async pollDue(target: ForgeTarget | undefined, dueOnly: boolean): Promise<void> {
     const state = await this.update((s) => structuredClone(s));
     const limit = Math.max(1, this.opts.maxConcurrency ?? 3), generation = this.generation;
@@ -187,48 +199,76 @@ export class ForgeWatchEngine {
   private async deliverPending(): Promise<void> {
     if (!this.opts.wake) return;
     const generation = this.generation, snapshot = await this.update((s) => structuredClone(s));
-    const groups = new Map<string, { identity: ForgeIdentity; ids: string[]; events: ForgeEvent[] }>();
+    const groups = new Map<string, { identity: ForgeIdentity; ids: string[]; events: ForgeEvent[]; eventIdsBySubscription: Record<string, string[]> }>();
     for (const sub of Object.values(snapshot.subscriptions)) {
       const queue = snapshot.queues[sub.id] ?? [];
       if (!sub.active || !queue.length || sub.deliveryNotified || sub.deliveryClaim || this.wakePending.has(sub.id) || this.opts.isEligible?.(sub.identity) === false) continue;
-      const key = identityKey(sub.identity), group = groups.get(key) ?? { identity: sub.identity, ids: [], events: [] };
-      group.ids.push(sub.id); group.events.push(...queue); groups.set(key, group);
+      const key = identityKey(sub.identity), group = groups.get(key) ?? { identity: sub.identity, ids: [], events: [], eventIdsBySubscription: {} };
+      group.ids.push(sub.id); group.events.push(...queue); group.eventIdsBySubscription[sub.id] = queue.map((event) => event.id); groups.set(key, group);
     }
     for (const group of groups.values()) {
       if (generation !== this.generation || this.opts.isEligible?.(group.identity) === false) return;
       const events = [...new Map(group.events.map((e) => [e.id, e])).values()].sort((a, b) => Number(a.id) - Number(b.id));
       const token = `forge-watch:${group.ids.sort().join("|")}:${events.map((e) => e.id).join(",")}`;
       for (const id of group.ids) this.wakePending.add(id);
-      const work = this.sendBatch(group.identity, group.ids, events, token, generation);
+      const work = this.sendBatch(group.identity, group.ids, events, group.eventIdsBySubscription, token, generation);
       this.deliveryWork.add(work);
-      try { await work; }
+      let accepted = false;
+      try { accepted = await work; }
       finally { this.deliveryWork.delete(work); for (const id of group.ids) this.wakePending.delete(id); }
+      if (accepted && generation === this.generation) await this.deliverPending();
     }
   }
-  private async sendBatch(identity: ForgeIdentity, ids: string[], events: ForgeEvent[], token: string, generation: number): Promise<void> {
+  private async sendBatch(identity: ForgeIdentity, ids: string[], events: ForgeEvent[], eventIdsBySubscription: Record<string, string[]>, token: string, generation: number): Promise<boolean> {
+    let claimed = false;
     try {
-      const claimed = await this.update((current) => {
+      claimed = await this.update((current) => {
         if (generation !== this.generation || this.opts.isEligible?.(identity) === false) return false;
         for (const id of ids) {
           const sub = current.subscriptions[id];
           if (!sub || !sub.active || sub.deliveryNotified || sub.deliveryClaim || !(current.queues[id]?.length)) return false;
         }
-        for (const id of ids) { current.subscriptions[id]!.deliveryClaim = token; current.subscriptions[id]!.deliveryClaimOwner = this.runtimeId; }
+        for (const id of ids) { current.subscriptions[id]!.deliveryClaim = token; current.subscriptions[id]!.deliveryClaimOwner = this.runtimeId; current.subscriptions[id]!.deliveryClaimEventIds = eventIdsBySubscription[id] ?? []; }
         return true;
       });
-      if (!claimed) return;
-      if (generation !== this.generation || this.opts.isEligible?.(identity) === false) { await this.rollbackClaim(ids, token); return; }
-      await this.opts.wake!(identity, events, token);
-      // This durable receipt records the authoritative send result, even if wait eligibility changed during the callback.
-      await this.update((current) => {
-        for (const id of ids) { const sub = current.subscriptions[id]; if (sub?.deliveryClaim === token && sub.deliveryClaimOwner === this.runtimeId) { sub.deliveryClaim = undefined; sub.deliveryClaimOwner = undefined; sub.deliveryToken = token; sub.deliveryNotified = true; } }
-      });
-    } catch {
-      await this.rollbackClaim(ids, token);
+    } catch (error) { this.report(error); return false; }
+    if (!claimed) return false;
+    if (generation !== this.generation || this.opts.isEligible?.(identity) === false) { await this.rollbackClaim(ids, token); return false; }
+    try { await this.opts.wake!(identity, events, token); }
+    catch (error) { this.report(error); await this.rollbackClaim(ids, token); return false; }
+    // Once wake accepts, never roll back and resend: retry receipt persistence in this owner runtime.
+    await this.persistAcceptedReceipt(ids, token);
+    return generation === this.generation;
+  }
+  private async persistAcceptedReceipt(ids: string[], token: string): Promise<void> {
+    let attempt = 0;
+    while (true) {
+      try {
+        await this.update((current) => {
+          for (const id of ids) {
+            const sub = current.subscriptions[id];
+            if (sub?.deliveryClaim === token && sub.deliveryClaimOwner === this.runtimeId) {
+              sub.deliveryClaim = undefined; sub.deliveryClaimOwner = undefined; sub.deliveryToken = token;
+              const queuedIds = new Set((current.queues[id] ?? []).map((event) => event.id));
+              sub.deliveryEventIds = (sub.deliveryClaimEventIds ?? []).filter((eventId) => queuedIds.has(eventId)); sub.deliveryClaimEventIds = undefined;
+              sub.deliveryNotified = sub.deliveryEventIds.length > 0; sub.deliveryError = undefined;
+            }
+          }
+        });
+        for (const id of ids) this.receiptErrors.delete(id);
+        return;
+      } catch (error) {
+        const message = `Accepted forge wake receipt persistence failed: ${errorOf(error).message}`;
+        this.report(new Error(message)); for (const id of ids) this.receiptErrors.set(id, message);
+        attempt++;
+        const delay = this.retryDelay(Math.min(this.opts.maxBackoffMs ?? 15 * 60_000, 1000 * 2 ** Math.min(attempt, 16)));
+        await new Promise<void>((resolve) => { this.setTimer(resolve, delay); });
+        // Keep retrying even after stop: stop()/close() drains this task before shared storage may close.
+      }
     }
   }
   private async rollbackClaim(ids: string[], token: string): Promise<void> {
-    await this.update((state) => { for (const id of ids) { const sub = state.subscriptions[id]; if (sub?.deliveryClaim === token && sub.deliveryClaimOwner === this.runtimeId) { sub.deliveryClaim = undefined; sub.deliveryClaimOwner = undefined; } } });
+    await this.update((state) => { for (const id of ids) { const sub = state.subscriptions[id]; if (sub?.deliveryClaim === token && sub.deliveryClaimOwner === this.runtimeId) { sub.deliveryClaim = undefined; sub.deliveryClaimOwner = undefined; sub.deliveryClaimEventIds = undefined; } } });
   }
 }
 
@@ -260,7 +300,7 @@ function migrateState(state: ForgeWatchState, opts: ForgeWatchOptions, now: numb
   for (const sub of Object.values(state.subscriptions)) {
     sub.createdAt ??= now; sub.updatedAt ??= sub.createdAt;
     // A claim owned by a previous engine never reached (or persisted) an authoritative acceptance receipt.
-    if (sub.deliveryClaim && sub.deliveryClaimOwner !== runtimeId) { sub.deliveryClaim = undefined; sub.deliveryClaimOwner = undefined; }
+    if (sub.deliveryClaim && sub.deliveryClaimOwner !== runtimeId) { sub.deliveryClaim = undefined; sub.deliveryClaimOwner = undefined; sub.deliveryClaimEventIds = undefined; }
   }
   expireInactive(state, opts, now);
 }
@@ -273,7 +313,7 @@ function expireInactive(state: ForgeWatchState, opts: ForgeWatchOptions, now: nu
 function validateState(state: ForgeWatchState, opts: ForgeWatchOptions): void {
   if (!state || state.version !== 1 || !state.targets || !state.subscriptions || !state.queues || !Number.isSafeInteger(state.nextEvent) || state.nextEvent < 1) throw new Error("Invalid persisted forge watch state");
   if (Object.keys(state.targets).length > (opts.maxTargets ?? 256) || Object.keys(state.subscriptions).length > (opts.maxSubscriptions ?? 512)) throw new Error("Persisted forge watch state exceeds retention limits");
-  for (const [id, sub] of Object.entries(state.subscriptions)) { validateIdentity(sub.identity); validateTarget(sub.target); if (id !== sub.id || id !== subscriptionId(sub.identity, sub.target) || (sub.createdAt !== undefined && !Number.isFinite(sub.createdAt)) || (sub.updatedAt !== undefined && !Number.isFinite(sub.updatedAt)) || !Array.isArray(sub.categories) || sub.categories.some((c) => !categories.includes(c)) || !Array.isArray(sub.ignoreActors)) throw new Error("Invalid persisted forge subscription"); }
+  for (const [id, sub] of Object.entries(state.subscriptions)) { validateIdentity(sub.identity); validateTarget(sub.target); if (id !== sub.id || id !== subscriptionId(sub.identity, sub.target) || (sub.createdAt !== undefined && !Number.isFinite(sub.createdAt)) || (sub.updatedAt !== undefined && !Number.isFinite(sub.updatedAt)) || (sub.deliveryNotified !== undefined && typeof sub.deliveryNotified !== "boolean") || (sub.deliveryClaim !== undefined && typeof sub.deliveryClaim !== "string") || (sub.deliveryClaimOwner !== undefined && typeof sub.deliveryClaimOwner !== "string") || (sub.deliveryClaimEventIds !== undefined && (!Array.isArray(sub.deliveryClaimEventIds) || sub.deliveryClaimEventIds.some((eventId) => typeof eventId !== "string"))) || (sub.deliveryEventIds !== undefined && (!Array.isArray(sub.deliveryEventIds) || sub.deliveryEventIds.some((eventId) => typeof eventId !== "string"))) || !Array.isArray(sub.categories) || sub.categories.some((c) => !categories.includes(c)) || !Array.isArray(sub.ignoreActors)) throw new Error("Invalid persisted forge subscription"); }
   const maxQueue = opts.maxEventsPerSubscription ?? 100;
   for (const [id, queue] of Object.entries(state.queues)) if (!state.subscriptions[id] || !Array.isArray(queue) || queue.length > maxQueue || queue.some((e) => !e || typeof e.id !== "string" || !categories.includes(e.category) || typeof e.fingerprint !== "string" || !Number.isFinite(e.at))) throw new Error("Invalid or oversized persisted forge event queue");
   if (Object.values(state.queues).reduce((n, q) => n + q.length, 0) > (opts.maxQueueEvents ?? 10_000)) throw new Error("Persisted forge queues exceed retention limit");
