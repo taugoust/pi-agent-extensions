@@ -49,6 +49,9 @@ export interface ForgeSubscription {
   ignoreActors: string[];
   active: boolean;
   deliveryNotified?: boolean;
+  deliveryToken?: string;
+  createdAt?: number;
+  updatedAt?: number;
   overflow?: string;
 }
 
@@ -67,7 +70,7 @@ export interface ForgeWatchStorage {
 export interface ForgeWatchOptions {
   adapter: ForgeAdapter;
   storage: ForgeWatchStorage;
-  wake?: (identity: ForgeIdentity, events: ForgeEvent[]) => Promise<void> | void;
+  wake?: (identity: ForgeIdentity, events: ForgeEvent[], batchToken: string) => Promise<void> | void;
   isEligible?: (identity: ForgeIdentity) => boolean;
   now?: () => number;
   setTimer?: (callback: () => void, delay: number) => unknown;
@@ -79,6 +82,7 @@ export interface ForgeWatchOptions {
   maxBackoffMs?: number;
   jitter?: (delayMs: number) => number;
   random?: () => number;
+  inactiveTtlMs?: number;
   maxSubscriptions?: number;
   maxTargets?: number;
   maxBaselineItems?: number;
@@ -98,21 +102,22 @@ export function parseTarget(value: string, configuredHosts: string[] = []): Forg
   try { url = new URL(value); } catch { throw new Error("Target must be a fully qualified forge URL"); }
   if (url.protocol !== "https:" || url.username || url.password || url.search || url.hash) throw new Error("Target must be a clean HTTPS URL");
   const host = url.host.toLowerCase();
-  const path = url.pathname.replace(/\/$/, "");
+  let path: string;
+  if (/%2f|%5c/i.test(url.pathname)) throw new Error("Encoded path separators are not supported in forge targets");
+  try { path = decodeURIComponent(url.pathname).replace(/\/$/, ""); } catch { throw new Error("Target URL contains invalid percent encoding"); }
+  if (path.includes("\\") || path.split("/").some((part) => part === "." || part === "..")) throw new Error("Target URL contains an invalid path");
   const allowed = new Set(["github.com", "gitlab.com", ...configuredHosts.map((h) => h.toLowerCase())]);
   if (!allowed.has(host)) throw new Error(`Unconfigured forge host: ${host}`);
   const gh = path.match(/^\/([^/]+)\/([^/]+)\/pull\/(\d+)$/);
-  if (gh) return target("github", host, `${gh[1]}/${gh[2]}`, gh[3]);
+  if (gh && host !== "gitlab.com") return target("github", host, `${gh[1]}/${gh[2]}`, gh[3]);
   const gl = path.match(/^\/(.+)\/\-\/merge_requests\/(\d+)$/);
-  if (gl) return target("gitlab", host, gl[1], gl[2]);
-  const selfGitlab = path.match(/^\/(.+)\/merge_requests\/(\d+)$/);
-  if (selfGitlab && host !== "github.com") return target("gitlab", host, selfGitlab[1], selfGitlab[2]);
+  if (gl && host !== "github.com") return target("gitlab", host, gl[1], gl[2]);
   throw new Error("URL is not a supported GitHub pull request or GitLab merge request");
 }
 
 function target(provider: ForgeProvider, host: string, project: string, raw: string): ForgeTarget {
   const number = Number(raw);
   if (!Number.isSafeInteger(number) || number < 1 || project.split("/").some((part) => !part || part === "." || part === "..")) throw new Error("Invalid forge target");
-  const base = `https://${host}/${project}`;
+  const base = `https://${host}/${project.split("/").map(encodeURIComponent).join("/")}`;
   return { provider, host, project, number, url: provider === "github" ? `${base}/pull/${number}` : `${base}/-/merge_requests/${number}` };
 }

@@ -1,6 +1,6 @@
 import { describe, expect, test } from "bun:test";
-import { ForgeWatchEngine } from "./engine.js";
-import { parseTarget, type ForgeSnapshot, type ForgeWatchState } from "./types.js";
+import { ForgeWatchEngine } from "./engine.ts";
+import { parseTarget, type ForgeSnapshot, type ForgeWatchState } from "./types.ts";
 const target = parseTarget("https://github.com/acme/repo/pull/7");
 const target2 = parseTarget("https://github.com/acme/other/pull/8");
 const identity = (goalId = "one") => ({ sessionId: "session", goalId, activationId: "activation" });
@@ -16,9 +16,13 @@ const setup = (options: { eligible?: boolean; maxEventsPerSubscription?: number;
 }
 
 describe("forge watch engine", () => {
-  test("parses canonical public and explicitly configured self-hosted targets", () => {
+  test("parses canonical URLs, encoded project names and rejects ambiguous provider/host paths", () => {
     expect(parseTarget("https://gitlab.com/group/sub/project/-/merge_requests/2").project).toBe("group/sub/project");
-    expect(parseTarget("https://git.example.test/org/repo/-/merge_requests/4", ["git.example.test"]).provider).toBe("gitlab");
+    expect(parseTarget("https://git.example.test/org/my%20repo/-/merge_requests/4", ["git.example.test"]).project).toBe("org/my repo");
+    expect(parseTarget("https://github.com/acme/my%20repo/pull/5").url).toBe("https://github.com/acme/my%20repo/pull/5");
+    expect(() => parseTarget("https://github.com/group/project/-/merge_requests/2")).toThrow();
+    expect(() => parseTarget("https://gitlab.com/group/project/pull/2")).toThrow();
+    expect(() => parseTarget("https://gitlab.com/group%2Fother/project/-/merge_requests/2")).toThrow();
     expect(() => parseTarget("http://github.com/a/b/pull/1")).toThrow();
   });
   test("baseline emits no flood; unchanged snapshots do not wake; a relevant change emits once", async () => {
@@ -51,7 +55,43 @@ describe("forge watch engine", () => {
     const f2 = setup(); await f2.engine.watch({ target, identity: identity(), ignoreActors: ["bot"] });
     f2.snapshot = initial; await f2.engine.pollOnce(target);
     f2.snapshot = { head: "b", state: "open", comments: [], reviews: [], ci: [] }; await f2.engine.pollOnce(target);
-    expect((await f2.engine.events(identity())).map((e) => e.category).sort()).toEqual(["ci", "head"]); // CI deletion is not ignored
+    expect((await f2.engine.events(identity())).map((e) => e.category).sort()).toEqual(["ci", "head"]);
+  });
+  test("equal fingerprints on different stable IDs remain distinct events", async () => {
+    const f = setup(); await f.engine.watch({ target, identity: identity() }); await f.engine.pollOnce(target);
+    f.snapshot = { head: "a", state: "open", comments: [{ id: "a", fingerprint: "same" }, { id: "b", fingerprint: "same" }], reviews: [], ci: [] }; await f.engine.pollOnce(target);
+    const commentEvents = (await f.engine.events(identity())).filter((e) => e.category === "comments");
+    expect(commentEvents.filter((e) => e.fingerprint.includes(":same")).map((e) => e.fingerprint)).toHaveLength(2);
+    expect(new Set(commentEvents.map((e) => e.fingerprint)).size).toBe(3);
+  });
+  test("one identity with pending events on multiple targets receives one combined wake batch", async () => {
+    const storage = new Memory(), snapshots = new Map([[target.url, snap()], [target2.url, snap()]]); let wakes: string[][] = [];
+    const engine = new ForgeWatchEngine({ storage, maxConcurrency: 2, adapter: { poll: async (t) => snapshots.get(t.url)! }, wake: (_i, events) => { wakes.push(events.map((e) => e.target.url)); } });
+    await engine.watch({ target, identity: identity() }); await engine.watch({ target: target2, identity: identity() }); await engine.pollOnce();
+    snapshots.set(target.url, snap("b", "c2")); snapshots.set(target2.url, snap("b", "c2")); await engine.pollOnce();
+    expect(wakes).toHaveLength(1); expect(new Set(wakes[0])).toEqual(new Set([target.url, target2.url]));
+  });
+  test("accepted delivery receipt survives eligibility clearing after send", async () => {
+    const storage = new Memory(); let eligible = true, wakeCount = 0, snapshot = snap();
+    const engine = new ForgeWatchEngine({ storage, adapter: { poll: async () => snapshot }, isEligible: () => eligible, wake: () => { wakeCount++; eligible = false; } });
+    await engine.watch({ target, identity: identity() }); await engine.pollOnce(target); snapshot = snap("b", "c2"); await engine.pollOnce(target);
+    eligible = true; await engine.pollOnce(target); expect(wakeCount).toBe(1);
+    expect((await engine.status(identity()))[0]?.subscription.deliveryNotified).toBe(true);
+  });
+  test("setActive pauses network polling while retaining queued events and resumes explicitly", async () => {
+    const f = setup(); await f.engine.watch({ target, identity: identity() }); await f.engine.pollOnce(target); f.snapshot = snap("b", "c2"); await f.engine.pollOnce(target);
+    expect(await f.engine.setActive(identity(), false)).toBe(1); const polls = f.polls; f.snapshot = snap("c", "c3"); await f.engine.pollOnce(target);
+    expect(f.polls).toBe(polls); expect((await f.engine.events(identity())).length).toBe(3);
+    expect(await f.engine.setActive(identity(), true)).toBe(1); await f.engine.pollOnce(target); expect(f.polls).toBe(polls + 1);
+  });
+  test("inactive subscriptions expire only when configured; old persisted records migrate timestamps", async () => {
+    const f = setup(); await f.engine.watch({ target, identity: identity() }); await f.engine.setActive(identity(), false);
+    delete f.storage.state.subscriptions[Object.keys(f.storage.state.subscriptions)[0]!]!.createdAt;
+    delete f.storage.state.subscriptions[Object.keys(f.storage.state.subscriptions)[0]!]!.updatedAt;
+    const noTtl = new ForgeWatchEngine({ storage: f.storage, now: () => 100_000 }); expect((await noTtl.status()).length).toBe(1);
+    expect(Number.isFinite(Object.values(f.storage.state.subscriptions)[0]?.createdAt)).toBe(true);
+    const expired = new ForgeWatchEngine({ storage: f.storage, now: () => 100_002, inactiveTtlMs: 1 }); expect((await expired.status()).length).toBe(0);
+    expect(Object.keys(f.storage.state.targets)).toHaveLength(0);
   });
   test("inactive or ineligible identities retain events without waking", async () => {
     const f = setup({ eligible: false }); await f.engine.watch({ target, identity: identity("one") }); await f.engine.watch({ target, identity: identity("two"), active: false });
@@ -60,8 +100,7 @@ describe("forge watch engine", () => {
   });
   test("accepted batches survive reload without repeat wakes; consume resets delivery latch", async () => {
     const f = setup(); await f.engine.watch({ target, identity: identity() }); await f.engine.pollOnce(target); f.snapshot = snap("b", "c2"); await f.engine.pollOnce(target);
-    let reloadSnapshot = snap("b", "c2");
-    const reloaded = new ForgeWatchEngine({ storage: f.storage, adapter: { poll: async () => reloadSnapshot }, wake: () => { f.incrementWakes(); } });
+    let reloadSnapshot = snap("b", "c2"); const reloaded = new ForgeWatchEngine({ storage: f.storage, adapter: { poll: async () => reloadSnapshot }, wake: () => { f.incrementWakes(); } });
     await reloaded.pollOnce(target); expect(f.wakes).toBe(1);
     expect((await reloaded.events(identity(), true)).length).toBe(3);
     expect((await reloaded.status(identity()))[0]?.subscription.deliveryNotified).toBe(false);
@@ -71,8 +110,7 @@ describe("forge watch engine", () => {
     const f = setup({ maxEventsPerSubscription: 1 }); await f.engine.watch({ target, identity: identity() }); await f.engine.pollOnce(target);
     f.snapshot = snap("b", "c2"); await f.engine.pollOnce(target);
     expect((await f.engine.status(identity()))[0]?.subscription.overflow).toContain("limit");
-    const reloaded = new ForgeWatchEngine({ storage: f.storage, adapter: { poll: async () => snap() } });
-    expect((await reloaded.events(identity())).length).toBe(1);
+    const reloaded = new ForgeWatchEngine({ storage: f.storage, adapter: { poll: async () => snap() } }); expect((await reloaded.events(identity())).length).toBe(1);
   });
   test("rate-limit failures preserve status, callback and Retry-After lower bound", async () => {
     let reported = ""; const storage = new Memory(); const engine = new ForgeWatchEngine({ storage, adapter: { poll: async () => { throw Object.assign(new Error("rate limited"), { retryAfterMs: 5000 }); } }, now: () => 100, onError: (e) => { reported = e.message; }, jitter: (d) => d });
@@ -84,24 +122,30 @@ describe("forge watch engine", () => {
     f.storage.state.version = 7 as 1; await expect(f.engine.status()).rejects.toThrow("Invalid persisted forge watch state");
   });
   test("global concurrency cap applies across overlapping pollOnce calls", async () => {
-    const f = setup({ maxConcurrency: 1 }); let active = 0, peak = 0; let release!: () => void;
-    const gate = new Promise<void>((resolve) => { release = resolve; });
+    const f = setup({ maxConcurrency: 1 }); let active = 0, peak = 0; let release!: () => void; const gate = new Promise<void>((resolve) => { release = resolve; });
     const engine = new ForgeWatchEngine({ storage: f.storage, maxConcurrency: 1, adapter: { async poll() { active++; peak = Math.max(peak, active); await gate; active--; return snap(); } } });
     await engine.watch({ target, identity: identity() }); await engine.watch({ target: target2, identity: identity() });
     const one = engine.pollOnce(); const two = engine.pollOnce(); await new Promise((r) => setTimeout(r, 0)); expect(peak).toBe(1); release(); await Promise.all([one, two]);
+  });
+  test("a started engine with no active targets stops scheduling itself", async () => {
+    const timers: Array<() => void> = [], storage = new Memory(); let polls = 0;
+    const engine = new ForgeWatchEngine({ storage, adapter: { poll: async () => { polls++; return snap(); } }, setTimer: (cb) => { timers.push(cb); return timers.length; }, clearTimer: () => {} });
+    engine.start(); timers.shift()!(); await new Promise((r) => setTimeout(r, 0));
+    expect(polls).toBe(0); expect(timers).toHaveLength(0); engine.stop();
   });
   test("scheduled storage failures are reported and schedule bounded retry rather than dying", async () => {
     const timers: Array<{ cb: () => void; delay: number }> = []; let reads = 0, reported = "";
     const storage = { async update<T>(mutate: (state: ForgeWatchState) => T): Promise<T> { reads++; if (reads === 2) throw new Error("disk unavailable"); return mutate({ version: 1, targets: {}, subscriptions: {}, queues: {}, nextEvent: 1 }); } };
     const engine = new ForgeWatchEngine({ storage, adapter: { poll: async () => snap() }, now: () => 100, setTimer: (cb, delay) => { timers.push({ cb, delay }); return timers.length; }, clearTimer: () => {}, onError: (e) => { reported = e.message; }, random: () => 0 });
-    await engine.watch({ target, identity: identity() }); engine.start(); const first = timers.shift()!; first.cb(); await new Promise((r) => setTimeout(r, 0));
-    expect(reported).toBe("disk unavailable"); expect(timers.length).toBeGreaterThan(0); expect(timers[0]!.delay).toBeGreaterThanOrEqual(100);
-    engine.stop();
+    await engine.watch({ target, identity: identity() }); engine.start(); timers.shift()!.cb(); await new Promise((r) => setTimeout(r, 0));
+    expect(reported).toBe("disk unavailable"); expect(timers.length).toBeGreaterThan(0); expect(timers[0]!.delay).toBeGreaterThanOrEqual(100); engine.stop();
   });
   test("stop fences late poll completion and timeout aborts ignored signal", async () => {
-    const storage = new Memory(); let release!: (s: ForgeSnapshot) => void; let signal: AbortSignal | undefined;
-    const engine = new ForgeWatchEngine({ storage, timeoutMs: 10, setTimer: (cb, ms) => setTimeout(cb, ms), clearTimer: (h) => clearTimeout(h as ReturnType<typeof setTimeout>), adapter: { poll: (_t, s) => { signal = s; return new Promise((resolve) => { release = resolve; }); } } });
-    await engine.watch({ target, identity: identity() }); const polling = engine.pollOnce(); await new Promise((r) => setTimeout(r, 20)); expect(signal?.aborted).toBe(true); await polling; expect(storage.state.targets[`${target.provider}:${target.host}/${target.project}#${target.number}`]?.lastError).toContain("timed out");
-    let finish!: (s: ForgeSnapshot) => void; const f = setup(); const e = new ForgeWatchEngine({ storage: f.storage, adapter: { poll: () => new Promise((resolve) => { finish = resolve; }) } }); await e.watch({ target, identity: identity() }); const late = e.pollOnce(); await new Promise((r) => setTimeout(r, 0)); e.stop(); finish(snap()); await late; expect(f.storage.state.targets[`${target.provider}:${target.host}/${target.project}#${target.number}`]?.baseline).toBeUndefined();
+    const storage = new Memory(); let signal: AbortSignal | undefined;
+    const engine = new ForgeWatchEngine({ storage, timeoutMs: 10, adapter: { poll: (_t, s) => { signal = s; return new Promise(() => {}); } } });
+    await engine.watch({ target, identity: identity() }); const polling = engine.pollOnce(); await new Promise((r) => setTimeout(r, 20)); expect(signal?.aborted).toBe(true); await polling;
+    const f = setup(); let finish!: (s: ForgeSnapshot) => void; const e = new ForgeWatchEngine({ storage: f.storage, adapter: { poll: () => new Promise((resolve) => { finish = resolve; }) } });
+    await e.watch({ target, identity: identity() }); const late = e.pollOnce(); await new Promise((r) => setTimeout(r, 0)); e.stop(); finish(snap()); await late;
+    expect(f.storage.state.targets[`${target.provider}:${target.host}/${target.project}#${target.number}`]?.baseline).toBeUndefined();
   });
 });
