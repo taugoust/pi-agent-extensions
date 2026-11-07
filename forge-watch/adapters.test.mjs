@@ -15,16 +15,34 @@ const config={servers:[{provider:"github",host:"github.com",url:"https://api.git
 const iso=(day)=>`2026-01-${String(day).padStart(2,"0")}T12:00:00Z`;
 function factory(responses){const calls=[];return {calls,make:()=>({maxPages:10,async call(_tool,args,signal){calls.push({args,signal});if(args.method==="get")return responses.get.shift();if(args.method==="get_review_comments")return responses.reviewComments.shift();return responses[args.method].shift();},async close(){}})};}
 const item=(id,extra={})=>({id,user:{login:"actor"},body:"comment",...extra});
+const thread=(id,permalink,{resolved=false,outdated=false,comments=1}={})=>({id,is_resolved:resolved,is_outdated:outdated,is_collapsed:false,total_count:comments,comments:Array.from({length:comments},(_,i)=>({body:"thread note",path:"file.ts",original_line:1,author:"reviewer",created_at:"2026-01-01T00:00:00Z",updated_at:"2026-01-01T00:00:00Z",html_url:comments===1?permalink:`${permalink}-${i}`}))});
+function pollFixture(resolved=false){return {get:[{head:{sha:"abc"},state:"open"},{head:{sha:"abc"},state:"open"},{head:{sha:"abc"},state:"open"}],get_comments:[[item(1)]],get_reviews:[[item(2,{state:"APPROVED",commit_id:"abc"})]],reviewComments:[{review_threads:[thread("t1","https://github.com/earendil-works/pi/pull/11910#discussion_r3",{resolved}),thread("t2","https://github.com/earendil-works/pi/pull/11910#discussion_r4",{outdated:true})],totalCount:2,pageInfo:{hasNextPage:false}}],get_status:[{sha:"abc",state:"success",total_count:0,statuses:[]}],get_check_runs:[{total_count:0,check_runs:[]}]};}
 test("GitHub poll follows review comment cursor and normalizes all facets",async()=>{
- const f=factory({get:[{head:{sha:"abc"},state:"open"},{head:{sha:"abc"},state:"open"},{head:{sha:"abc"},state:"open"}],get_comments:[[item(1)]],get_reviews:[[item(2,{state:"APPROVED",commit_id:"abc"})]],reviewComments:[{review_threads:[{comments:[item(3)]}],totalCount:1,pageInfo:{hasNextPage:true,endCursor:"cursor1"}},{review_threads:[{comments:[item(4)]}],totalCount:1,pageInfo:{hasNextPage:false}}],get_status:[{sha:"abc",state:"success",total_count:1,statuses:[item(5)]}],get_check_runs:[{total_count:1,check_runs:[item(6,{name:"test",status:"completed",conclusion:"success"})]}]});
+ const f=factory(pollFixture());
  const adapter=createForgeAdapter(config,()=>f.make());const result=await adapter.poll(target,new AbortController().signal);
- assert.equal(result.head,"abc");assert.equal(result.comments.length,3);assert.equal(result.reviews.length,1);assert.equal(result.ci.length,3);
- assert.deepEqual(f.calls.filter(c=>c.args.method==="get_review_comments").map(c=>c.args.after),[undefined,"cursor1"]);await adapter.close();
+ assert.equal(result.head,"abc");assert.equal(result.comments.length,5);assert.equal(result.comments.find(x=>x.id.endsWith("discussion_r3"))?.actor,"reviewer");assert.equal(result.reviews.length,1);assert.equal(result.ci.length,1);
+ assert.deepEqual(f.calls.filter(c=>c.args.method==="get_review_comments").map(c=>c.args.after),[undefined]);await adapter.close();
+});
+test("review-thread resolved/outdated changes are fingerprinted and comments use permalink identity",async()=>{
+ const first=createForgeAdapter(config,()=>factory(pollFixture(false)).make()),second=createForgeAdapter(config,()=>factory(pollFixture(true)).make());
+ const a=await first.poll(target,new AbortController().signal),b=await second.poll(target,new AbortController().signal);
+ const id="review-comment:thread:t1",eventId="review-comment:https://github.com/earendil-works/pi/pull/11910#discussion_r3";
+ assert.notEqual(a.comments.find(x=>x.id===id).fingerprint,b.comments.find(x=>x.id===id).fingerprint);
+ assert.ok(a.comments.some(x=>x.id===eventId));assert.equal(a.comments.find(x=>x.id===eventId).actor,"reviewer");
+ await first.close();await second.close();
+});
+test("review-thread missing/duplicate permalink or incomplete nested total fails closed",async()=>{
+ for(const invalid of [thread("t1",undefined),{...thread("t1","https://github.com/earendil-works/pi/pull/11910#one"),total_count:2}]){
+  const fixture=pollFixture();fixture.reviewComments=[{review_threads:[invalid],totalCount:1,pageInfo:{hasNextPage:false}}];
+  const adapter=createForgeAdapter(config,()=>factory(fixture).make());await assert.rejects(adapter.poll(target,new AbortController().signal),/permalink|total_count/);await adapter.close();
+ }
+ const repeated=pollFixture();repeated.reviewComments=[{review_threads:[thread("t1","https://github.com/earendil-works/pi/pull/11910#same"),thread("t2","https://github.com/earendil-works/pi/pull/11910#same")],totalCount:2,pageInfo:{hasNextPage:false}}];
+ const adapter=createForgeAdapter(config,()=>factory(repeated).make());await assert.rejects(adapter.poll(target,new AbortController().signal),/duplicated/);await adapter.close();
 });
 test("GitHub poll fails closed on missing cursor, head race, and page limits",async()=>{
- const f=factory({get:[{head:{sha:"abc"},state:"open"},{head:{sha:"abc"},state:"open"},{head:{sha:"abc"},state:"open"}],get_comments:[[]],get_reviews:[[]],reviewComments:[{review_threads:[],pageInfo:{hasNextPage:true}}]});
+ const f=factory({get:[{head:{sha:"abc"},state:"open"},{head:{sha:"abc"},state:"open"},{head:{sha:"abc"},state:"open"}],get_comments:[[]],get_reviews:[[]],reviewComments:[{review_threads:[],totalCount:0,pageInfo:{hasNextPage:true}}]});
  const adapter=createForgeAdapter(config,()=>f.make());await assert.rejects(adapter.poll(target,new AbortController().signal),/cursor/);await adapter.close();
- const race=factory({get:[{head:{sha:"abc"},state:"open"},{head:{sha:"abc"},state:"open"},{head:{sha:"def"},state:"open"}],get_comments:[[]],get_reviews:[[]],reviewComments:[{review_threads:[],pageInfo:{hasNextPage:false}}],get_status:[{sha:"abc",state:"success",total_count:0,statuses:[]}],get_check_runs:[{total_count:0,check_runs:[]}]});
+ const race=factory({get:[{head:{sha:"abc"},state:"open"},{head:{sha:"abc"},state:"open"},{head:{sha:"def"},state:"open"}],get_comments:[[]],get_reviews:[[]],reviewComments:[{review_threads:[],totalCount:0,pageInfo:{hasNextPage:false}}],get_status:[{sha:"abc",state:"success",total_count:0,statuses:[]}],get_check_runs:[{total_count:0,check_runs:[]}]});
  const raced=createForgeAdapter(config,()=>race.make());await assert.rejects(raced.poll(target,new AbortController().signal),/changed during snapshot/);await raced.close();
  const limitedConfig={servers:[{...config.servers[0],maxPages:1}]};
  const limited=factory({get:[{head:{sha:"abc"},state:"open"},{head:{sha:"abc"},state:"open"}],get_comments:[{items:Array.from({length:100},(_,i)=>item(i+1)),count:200}]});
