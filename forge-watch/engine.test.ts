@@ -71,6 +71,22 @@ describe("forge watch engine", () => {
     snapshots.set(target.url, snap("b", "c2")); snapshots.set(target2.url, snap("b", "c2")); await engine.pollOnce();
     expect(wakes).toHaveLength(1); expect(new Set(wakes[0])).toEqual(new Set([target.url, target2.url]));
   });
+  test("stop drains an unsent durable claim so replacement runtime sends it once", async () => {
+    const storage = new Memory(); let snapshot = snap(), claimReached!: () => void, release!: () => void;
+    const reached = new Promise<void>((resolve) => { claimReached = resolve; }), gate = new Promise<void>((resolve) => { release = resolve; });
+    let pauseClaim = false, wakes = 0;
+    const blockingStorage = { async update<T>(mutate: (state: ForgeWatchState) => T): Promise<T> {
+      const result = mutate(storage.state);
+      if (pauseClaim && Object.values(storage.state.subscriptions).some((sub) => !!sub.deliveryClaim)) { pauseClaim = false; claimReached(); await gate; }
+      return result;
+    } };
+    const first = new ForgeWatchEngine({ storage: blockingStorage, adapter: { poll: async () => snapshot }, wake: () => { wakes++; } });
+    await first.watch({ target, identity: identity() }); await first.pollOnce(target); snapshot = snap("b", "c2"); pauseClaim = true;
+    const poll = first.pollOnce(target); await reached; const stopping = first.stop(); release(); await stopping; await poll;
+    expect(Object.values(storage.state.subscriptions)[0]?.deliveryClaim).toBeUndefined();
+    const replacement = new ForgeWatchEngine({ storage: blockingStorage, adapter: { poll: async () => snapshot }, wake: () => { wakes++; } });
+    await replacement.pollOnce(target); expect(wakes).toBe(1); await replacement.pollOnce(target); expect(wakes).toBe(1);
+  });
   test("accepted delivery receipt survives eligibility clearing after send", async () => {
     const storage = new Memory(); let eligible = true, wakeCount = 0, snapshot = snap();
     const engine = new ForgeWatchEngine({ storage, adapter: { poll: async () => snapshot }, isEligible: () => eligible, wake: () => { wakeCount++; eligible = false; } });
@@ -131,21 +147,21 @@ describe("forge watch engine", () => {
     const timers: Array<() => void> = [], storage = new Memory(); let polls = 0;
     const engine = new ForgeWatchEngine({ storage, adapter: { poll: async () => { polls++; return snap(); } }, setTimer: (cb) => { timers.push(cb); return timers.length; }, clearTimer: () => {} });
     engine.start(); timers.shift()!(); await new Promise((r) => setTimeout(r, 0));
-    expect(polls).toBe(0); expect(timers).toHaveLength(0); engine.stop();
+    expect(polls).toBe(0); expect(timers).toHaveLength(0); await engine.stop();
   });
   test("scheduled storage failures are reported and schedule bounded retry rather than dying", async () => {
     const timers: Array<{ cb: () => void; delay: number }> = []; let reads = 0, reported = "";
     const storage = { async update<T>(mutate: (state: ForgeWatchState) => T): Promise<T> { reads++; if (reads === 2) throw new Error("disk unavailable"); return mutate({ version: 1, targets: {}, subscriptions: {}, queues: {}, nextEvent: 1 }); } };
     const engine = new ForgeWatchEngine({ storage, adapter: { poll: async () => snap() }, now: () => 100, setTimer: (cb, delay) => { timers.push({ cb, delay }); return timers.length; }, clearTimer: () => {}, onError: (e) => { reported = e.message; }, random: () => 0 });
     await engine.watch({ target, identity: identity() }); engine.start(); timers.shift()!.cb(); await new Promise((r) => setTimeout(r, 0));
-    expect(reported).toBe("disk unavailable"); expect(timers.length).toBeGreaterThan(0); expect(timers[0]!.delay).toBeGreaterThanOrEqual(100); engine.stop();
+    expect(reported).toBe("disk unavailable"); expect(timers.length).toBeGreaterThan(0); expect(timers[0]!.delay).toBeGreaterThanOrEqual(100); await engine.stop();
   });
   test("stop fences late poll completion and timeout aborts ignored signal", async () => {
     const storage = new Memory(); let signal: AbortSignal | undefined;
     const engine = new ForgeWatchEngine({ storage, timeoutMs: 10, adapter: { poll: (_t, s) => { signal = s; return new Promise(() => {}); } } });
     await engine.watch({ target, identity: identity() }); const polling = engine.pollOnce(); await new Promise((r) => setTimeout(r, 20)); expect(signal?.aborted).toBe(true); await polling;
     const f = setup(); let finish!: (s: ForgeSnapshot) => void; const e = new ForgeWatchEngine({ storage: f.storage, adapter: { poll: () => new Promise((resolve) => { finish = resolve; }) } });
-    await e.watch({ target, identity: identity() }); const late = e.pollOnce(); await new Promise((r) => setTimeout(r, 0)); e.stop(); finish(snap()); await late;
+    await e.watch({ target, identity: identity() }); const late = e.pollOnce(); await new Promise((r) => setTimeout(r, 0)); const stopping = e.stop(); finish(snap()); await Promise.all([late, stopping]);
     expect(f.storage.state.targets[`${target.provider}:${target.host}/${target.project}#${target.number}`]?.baseline).toBeUndefined();
   });
 });

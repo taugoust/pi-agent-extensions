@@ -7,6 +7,7 @@ const subscriptionId = (i: ForgeIdentity, t: ForgeTarget) => `${identityKey(i)}\
 const sameIdentity = (a: ForgeIdentity, b: ForgeIdentity) => identityKey(a) === identityKey(b);
 const empty = (): ForgeWatchState => ({ version: 1, targets: {}, subscriptions: {}, queues: {}, nextEvent: 1 });
 const errorOf = (e: unknown) => e instanceof Error ? e : new Error(String(e));
+let engineSequence = 0;
 
 export class ForgeWatchEngine {
   private readonly now: () => number;
@@ -18,8 +19,11 @@ export class ForgeWatchEngine {
   private readonly inFlight = new Set<string>();
   private readonly controllers = new Map<string, AbortController>();
   private readonly wakePending = new Set<string>();
+  private readonly deliveryWork = new Set<Promise<void>>();
+  private readonly pollWork = new Set<Promise<void>>();
   private mutation = Promise.resolve();
   private readonly opts: ForgeWatchOptions;
+  private readonly runtimeId = `forge-watch-runtime-${Date.now()}-${++engineSequence}`;
 
   constructor(options: ForgeWatchOptions) {
     this.opts = options; this.now = options.now ?? Date.now;
@@ -30,7 +34,7 @@ export class ForgeWatchEngine {
   private report(error: unknown): void { try { this.opts.onError?.(errorOf(error)); } catch { /* Error reporting must not break the scheduler. */ } }
   private update<T>(fn: (state: ForgeWatchState) => T): Promise<T> {
     const operation = this.mutation.then(() => this.opts.storage.update((raw) => {
-      const state = raw ?? empty(); migrateState(state, this.opts, this.now()); validateState(state, this.opts); expireInactive(state, this.opts, this.now()); const result = fn(state); expireInactive(state, this.opts, this.now()); validateState(state, this.opts); return result;
+      const state = raw ?? empty(); migrateState(state, this.opts, this.now(), this.runtimeId); validateState(state, this.opts); expireInactive(state, this.opts, this.now()); const result = fn(state); expireInactive(state, this.opts, this.now()); validateState(state, this.opts); return result;
     }));
     this.mutation = operation.then(() => undefined, (error) => { this.report(error); });
     return operation;
@@ -45,7 +49,7 @@ export class ForgeWatchEngine {
       state.targets[targetKey] ??= { target: input.target, retryCount: 0, nextPollAt: this.now() };
       const selected = [...new Set(input.categories ?? categories)];
       if (!selected.length || selected.some((c) => !categories.includes(c))) throw new Error("Invalid or empty forge category selection");
-      const value: ForgeSubscription = { id, identity: { ...input.identity }, target: input.target, categories: selected, ignoreActors: (input.ignoreActors ?? []).map((a) => a.toLowerCase()), active: input.active ?? true, deliveryNotified: state.subscriptions[id]?.deliveryNotified ?? false, deliveryToken: state.subscriptions[id]?.deliveryToken, createdAt: state.subscriptions[id]?.createdAt ?? this.now(), updatedAt: this.now() };
+      const value: ForgeSubscription = { id, identity: { ...input.identity }, target: input.target, categories: selected, ignoreActors: (input.ignoreActors ?? []).map((a) => a.toLowerCase()), active: input.active ?? true, deliveryNotified: state.subscriptions[id]?.deliveryNotified ?? false, deliveryToken: state.subscriptions[id]?.deliveryToken, deliveryClaim: state.subscriptions[id]?.deliveryClaim, deliveryClaimOwner: state.subscriptions[id]?.deliveryClaimOwner, createdAt: state.subscriptions[id]?.createdAt ?? this.now(), updatedAt: this.now() };
       state.subscriptions[id] = value; state.queues[id] ??= [];
       return structuredClone(value);
     });
@@ -96,7 +100,13 @@ export class ForgeWatchEngine {
   }
 
   start(): void { if (!this.stopped) return; this.stopped = false; this.generation++; this.schedule(0); }
-  stop(): void { this.stopped = true; this.generation++; if (this.timer !== undefined) this.clearTimer(this.timer); this.timer = undefined; for (const c of this.controllers.values()) c.abort(new Error("Forge watcher stopped")); }
+  async stop(): Promise<void> {
+    this.stopped = true; this.generation++;
+    if (this.timer !== undefined) this.clearTimer(this.timer); this.timer = undefined;
+    for (const c of this.controllers.values()) c.abort(new Error("Forge watcher stopped"));
+    await Promise.allSettled([...this.deliveryWork, ...this.pollWork]);
+  }
+  async close(): Promise<void> { await this.stop(); }
   private schedule(delay: number): void { if (this.stopped) return; if (this.timer !== undefined) this.clearTimer(this.timer); this.timer = this.setTimer(() => { this.timer = undefined; void this.tick().catch((e) => { this.report(e); this.schedule(this.retryDelay(1000)); }); }, Math.max(0, delay)); }
 
   async pollOnce(target?: ForgeTarget): Promise<void> { await this.pollDue(target, false); await this.deliverPending(); }
@@ -111,7 +121,10 @@ export class ForgeWatchEngine {
       const selected = due.filter(([key]) => !attempted.has(key) && !this.inFlight.has(key)).slice(0, slots);
       if (!selected.length) break;
       for (const [key] of selected) { attempted.add(key); this.inFlight.add(key); }
-      await Promise.all(selected.map(([key, record]) => this.pollTarget(key, record.target, generation)));
+      const tasks = selected.map(([key, record]) => this.pollTarget(key, record.target, generation));
+      for (const task of tasks) this.pollWork.add(task);
+      await Promise.allSettled(tasks);
+      for (const task of tasks) this.pollWork.delete(task);
     }
   }
   private async tick(): Promise<void> {
@@ -177,7 +190,7 @@ export class ForgeWatchEngine {
     const groups = new Map<string, { identity: ForgeIdentity; ids: string[]; events: ForgeEvent[] }>();
     for (const sub of Object.values(snapshot.subscriptions)) {
       const queue = snapshot.queues[sub.id] ?? [];
-      if (!sub.active || !queue.length || sub.deliveryNotified || this.wakePending.has(sub.id) || this.opts.isEligible?.(sub.identity) === false) continue;
+      if (!sub.active || !queue.length || sub.deliveryNotified || sub.deliveryClaim || this.wakePending.has(sub.id) || this.opts.isEligible?.(sub.identity) === false) continue;
       const key = identityKey(sub.identity), group = groups.get(key) ?? { identity: sub.identity, ids: [], events: [] };
       group.ids.push(sub.id); group.events.push(...queue); groups.set(key, group);
     }
@@ -186,30 +199,36 @@ export class ForgeWatchEngine {
       const events = [...new Map(group.events.map((e) => [e.id, e])).values()].sort((a, b) => Number(a.id) - Number(b.id));
       const token = `forge-watch:${group.ids.sort().join("|")}:${events.map((e) => e.id).join(",")}`;
       for (const id of group.ids) this.wakePending.add(id);
-      try {
-        const claimed = await this.update((current) => {
-          if (generation !== this.generation || this.opts.isEligible?.(group.identity) === false) return false;
-          for (const id of group.ids) {
-            const sub = current.subscriptions[id];
-            if (!sub || !sub.active || sub.deliveryNotified || !(current.queues[id]?.length)) return false;
-          }
-          for (const id of group.ids) { current.subscriptions[id]!.deliveryNotified = true; current.subscriptions[id]!.deliveryToken = token; }
-          return true;
-        });
-        if (!claimed) continue;
-        if (generation !== this.generation || this.opts.isEligible?.(group.identity) === false) {
-          await this.rollbackClaim(group.ids, token, generation); continue;
-        }
-        await this.opts.wake(group.identity, events, token);
-        // The durable claim is the receipt. Eligibility may legitimately clear as a result of this accepted send.
-      } catch {
-        await this.rollbackClaim(group.ids, token, generation);
-      } finally { for (const id of group.ids) this.wakePending.delete(id); }
+      const work = this.sendBatch(group.identity, group.ids, events, token, generation);
+      this.deliveryWork.add(work);
+      try { await work; }
+      finally { this.deliveryWork.delete(work); for (const id of group.ids) this.wakePending.delete(id); }
     }
   }
-  private async rollbackClaim(ids: string[], token: string, generation: number): Promise<void> {
-    if (generation !== this.generation) return;
-    await this.update((state) => { if (generation !== this.generation) return; for (const id of ids) { const sub = state.subscriptions[id]; if (sub?.deliveryToken === token) { sub.deliveryNotified = false; sub.deliveryToken = undefined; } } });
+  private async sendBatch(identity: ForgeIdentity, ids: string[], events: ForgeEvent[], token: string, generation: number): Promise<void> {
+    try {
+      const claimed = await this.update((current) => {
+        if (generation !== this.generation || this.opts.isEligible?.(identity) === false) return false;
+        for (const id of ids) {
+          const sub = current.subscriptions[id];
+          if (!sub || !sub.active || sub.deliveryNotified || sub.deliveryClaim || !(current.queues[id]?.length)) return false;
+        }
+        for (const id of ids) { current.subscriptions[id]!.deliveryClaim = token; current.subscriptions[id]!.deliveryClaimOwner = this.runtimeId; }
+        return true;
+      });
+      if (!claimed) return;
+      if (generation !== this.generation || this.opts.isEligible?.(identity) === false) { await this.rollbackClaim(ids, token); return; }
+      await this.opts.wake!(identity, events, token);
+      // This durable receipt records the authoritative send result, even if wait eligibility changed during the callback.
+      await this.update((current) => {
+        for (const id of ids) { const sub = current.subscriptions[id]; if (sub?.deliveryClaim === token && sub.deliveryClaimOwner === this.runtimeId) { sub.deliveryClaim = undefined; sub.deliveryClaimOwner = undefined; sub.deliveryToken = token; sub.deliveryNotified = true; } }
+      });
+    } catch {
+      await this.rollbackClaim(ids, token);
+    }
+  }
+  private async rollbackClaim(ids: string[], token: string): Promise<void> {
+    await this.update((state) => { for (const id of ids) { const sub = state.subscriptions[id]; if (sub?.deliveryClaim === token && sub.deliveryClaimOwner === this.runtimeId) { sub.deliveryClaim = undefined; sub.deliveryClaimOwner = undefined; } } });
   }
 }
 
@@ -236,9 +255,13 @@ function validateSnapshot(value: ForgeSnapshot, opts: ForgeWatchOptions): ForgeS
   if (count > max) throw new Error(`Forge baseline exceeds ${max} items`);
   return structuredClone(value);
 }
-function migrateState(state: ForgeWatchState, opts: ForgeWatchOptions, now: number): void {
-  if (!state || state.version !== 1 || !state.subscriptions) return;
-  for (const sub of Object.values(state.subscriptions)) { sub.createdAt ??= now; sub.updatedAt ??= sub.createdAt; }
+function migrateState(state: ForgeWatchState, opts: ForgeWatchOptions, now: number, runtimeId: string): void {
+  if (!state || (state.version !== 1 && state.version !== 2) || !state.subscriptions) return;
+  for (const sub of Object.values(state.subscriptions)) {
+    sub.createdAt ??= now; sub.updatedAt ??= sub.createdAt;
+    // A claim owned by a previous engine never reached (or persisted) an authoritative acceptance receipt.
+    if (sub.deliveryClaim && sub.deliveryClaimOwner !== runtimeId) { sub.deliveryClaim = undefined; sub.deliveryClaimOwner = undefined; }
+  }
   expireInactive(state, opts, now);
 }
 function expireInactive(state: ForgeWatchState, opts: ForgeWatchOptions, now: number): void {

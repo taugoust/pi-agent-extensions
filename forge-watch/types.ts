@@ -50,6 +50,8 @@ export interface ForgeSubscription {
   active: boolean;
   deliveryNotified?: boolean;
   deliveryToken?: string;
+  deliveryClaim?: string;
+  deliveryClaimOwner?: string;
   createdAt?: number;
   updatedAt?: number;
   overflow?: string;
