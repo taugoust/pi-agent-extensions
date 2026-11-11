@@ -198,7 +198,7 @@ export class JobStore {
     return join(this.jobsRoot, id);
   }
 
-  path(id: string, name: "metadata.json" | "launch.json" | "process.json" | "result.json" | "result.lock" | "command" | "environment" | "output.log" | "stdout.log" | "stderr.log" | "notified" | "retrieved-at"): string {
+  path(id: string, name: "metadata.json" | "launch.json" | "process.json" | "result.json" | "result.lock" | "command" | "environment" | "output.log" | "output-position.json" | "stdout.log" | "stderr.log" | "notified" | "retrieved-at"): string {
     return join(this.jobDir(id), name);
   }
 
