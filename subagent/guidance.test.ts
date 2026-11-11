@@ -200,3 +200,21 @@ test("launch binding registry explicitly fences absent owner instead of inheriti
   const env = guidanceLaunchEnvironment({ ...identity("root"), goalId: "goal-1" });
   const binding = JSON.parse(env[GUIDANCE_ENV]); assert.equal(binding.scope.ownerRuntimeEpoch, broker.epoch); assert.equal(binding.scope.goalId, "goal-1");
 });
+
+test("closing the owner while it is still starting rejects start instead of hanging", async t => {
+  const settledWithin = (promise: Promise<unknown>, ms: number) => Promise.race([
+    promise.then(() => "resolved", () => "rejected"),
+    new Promise(resolve => setTimeout(() => resolve("pending"), ms)),
+  ]);
+  for (const closeAt of ["before start", "during listen"] as const) {
+    const root = await mkdtemp(join(tmpdir(), "guidance-close-start-"));
+    t.after(() => rm(root, { recursive: true, force: true }));
+    const broker = new GuidanceBroker(`close-${closeAt.replace(" ", "-")}`, root);
+    let starting: Promise<void>;
+    if (closeAt === "before start") { await broker.close(); starting = broker.start(); }
+    else { starting = broker.start(); await broker.close(); }
+    assert.equal(await settledWithin(starting, 2000), "rejected", `start ${closeAt} did not reject`);
+    await assert.rejects(starting, /closed during startup/);
+    assert.throws(() => broker.bind(identity(broker.ownerSessionId)), /unavailable/);
+  }
+});

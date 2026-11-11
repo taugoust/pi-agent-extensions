@@ -91,6 +91,7 @@ export class GuidanceBroker {
   }
   private persist() { atomicPrivateJson(this.file, { version: 1, records: this.records }); }
   async start(): Promise<void> {
+    if (this.closed) throw new Error("Guidance owner closed during startup");
     if (owners.has(this.ownerSessionId)) throw new Error("Guidance owner already active");
     this.socketDirectory = mkdtempSync(join(tmpdir(), "pi-guidance-")); chmodSync(this.socketDirectory, 0o700);
     this.server = createServer(socket => {
@@ -122,10 +123,26 @@ export class GuidanceBroker {
         }
       });
     });
+    // close() can run while listen() is pending (session shutdown racing a late
+    // session_start). A server closed before it emits `listening` never calls
+    // the listen callback, so also settle on `close`; otherwise start() hangs.
     await new Promise<void>((resolve, reject) => {
-      this.server!.once("error", reject);
-      this.server!.listen(join(this.socketDirectory!, "owner.sock"), () => { this.server!.removeListener("error", reject); resolve(); });
+      const server = this.server!;
+      const onError = (error: Error) => { server.removeListener("close", onClose); reject(error); };
+      const onClose = () => { server.removeListener("error", onError); reject(new Error("Guidance owner closed during startup")); };
+      server.once("error", onError);
+      server.once("close", onClose);
+      server.listen(join(this.socketDirectory!, "owner.sock"), () => {
+        server.removeListener("error", onError);
+        server.removeListener("close", onClose);
+        resolve();
+      });
     });
+    if (this.closed) {
+      // close() ran before the server was listening and so could not stop it.
+      await new Promise<void>(resolve => this.server!.close(() => resolve()));
+      throw new Error("Guidance owner closed during startup");
+    }
     this.server.on("error", () => { void this.close().catch(() => undefined); });
     chmodSync(join(this.socketDirectory, "owner.sock"), 0o600); owners.set(this.ownerSessionId, this);
   }
