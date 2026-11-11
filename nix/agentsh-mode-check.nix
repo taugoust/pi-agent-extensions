@@ -20,31 +20,16 @@ let
     name = "agentsh-mode-${name}-bundle-check";
     extensions = [ name ];
   }) consumerNames;
-  homeFilesFor = name:
+  inherit (import ./module-test-harness.nix { inherit self pkgs; }) evaluate valid;
+  # Evaluate through the shared module harness, so options the module relies
+  # on (such as `assertions` for removed options) are declared consistently.
+  homeFilesFor =
+    name:
     let
-      evaluated = pkgs.lib.evalModules {
-        modules = [
-          {
-            options.home.packages = pkgs.lib.mkOption {
-              type = pkgs.lib.types.listOf pkgs.lib.types.package;
-              default = [ ];
-            };
-            options.home.file = pkgs.lib.mkOption {
-              type = pkgs.lib.types.attrsOf pkgs.lib.types.anything;
-              default = { };
-            };
-          }
-          self.homeManagerModules.default
-          {
-            programs.pi.enable = true;
-            programs.pi.package = null;
-            programs.pi.extensions.${name}.enable = true;
-          }
-        ];
-        specialArgs = { inherit pkgs; };
-      };
+      config = evaluate { extensions.${name}.enable = true; };
     in
-    evaluated.config.home.file;
+    assert valid config;
+    config.home.file;
 in
 pkgs.runCommand "agentsh-mode-check"
   {
