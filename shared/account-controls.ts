@@ -1,14 +1,18 @@
 /** Paseo-safe account controls protocol. Contains identifiers/status only; never secrets. */
 export const ACCOUNT_CONTROLS_PROTOCOL = 1 as const;
 export const ACCOUNT_CONTROLS_KEY = "__paeAccountControlsV1" as const;
-export const ACCOUNT_PROVIDER_IDS = ["openai", "openai-codex"] as const;
+/** Only OpenAI Codex is managed. Requests for any other provider are rejected unchanged. */
+export const ACCOUNT_PROVIDER_IDS = ["openai-codex"] as const;
 export type AccountProviderId = (typeof ACCOUNT_PROVIDER_IDS)[number];
 /** Lifetime-owned service on globalThis[ACCOUNT_CONTROLS_KEY], like the existing foreground service. */
 export interface AccountControlsService {
 	protocol: typeof ACCOUNT_CONTROLS_PROTOCOL;
 	sessionId: string;
 	serviceEpoch: string;
-	getSnapshot(request: { sessionId: string; providerId?: AccountProviderId }): Promise<AccountControlsSnapshot>;
+	getSnapshot(request: {
+		sessionId: string;
+		providerId: AccountProviderId;
+	}): Promise<AccountControlsSnapshot>;
 	switchAccount(request: AccountSwitchRequest): Promise<AccountSwitchResult>;
 	manageAccount(
 		request: AccountManagementRequest,
@@ -30,12 +34,7 @@ export interface SafeAccountLabel {
 export interface AccountControlsSnapshot {
 	protocol: typeof ACCOUNT_CONTROLS_PROTOCOL;
 	serviceEpoch: string;
-	providerId?: AccountProviderId;
-	supportedProviders?: readonly AccountProviderId[];
-	/** Atomic default-only source guard; consumers must fail closed when absent. */
-	guardedDefaultSwitchVersion?: 1;
-	/** Optional committed execution route; also declares coherent provider/account switching support. */
-	sessionRouting?: { version: 1; providerId: AccountProviderId; revision: number };
+	providerId: AccountProviderId;
 	/** Monotonic per-session selection revision; incremented on every accepted selection change. */
 	selectionRevision: number;
 	sessionId: string;
@@ -63,10 +62,6 @@ export interface AccountControlsSnapshot {
 		remoteEntitlement: "not-queried";
 		/** Hash of the verified OAuth account/user identity, not of a credential. Absent when unverified. */
 		accountKey?: string;
-		/** Noncredential key linking a verified native OpenAI OAuth registration; absent when unverified. */
-		nativeRegistrationKey?: string;
-		/** Distinguishes an unsupported older service from a rejected current binding. */
-		nativeRegistrationVersion?: 1;
 		settingsUrl:
 			| "https://platform.openai.com/settings/organization/usage"
 			| "https://chatgpt.com/settings/usage"
@@ -79,25 +74,37 @@ export type AccountManagementRequest =
 			accountName?: string;
 			method: "oauth" | "api_key";
 			sessionId: string;
-			providerId?: AccountProviderId;
+			providerId: AccountProviderId;
 	  }
-	| { operation: "cancel-login"; accountName: string; sessionId: string; providerId?: AccountProviderId }
-	| { operation: "rename"; accountId: string; label: string; sessionId: string; providerId?: AccountProviderId }
-	| { operation: "remove"; accountId: string; sessionId: string; providerId?: AccountProviderId }
-	| { operation: "default"; accountId: string | null; sessionId: string; providerId?: AccountProviderId };
+	| {
+			operation: "cancel-login";
+			accountName: string;
+			sessionId: string;
+			providerId: AccountProviderId;
+	  }
+	| {
+			operation: "rename";
+			accountId: string;
+			label: string;
+			sessionId: string;
+			providerId: AccountProviderId;
+	  }
+	| { operation: "remove"; accountId: string; sessionId: string; providerId: AccountProviderId }
+	| {
+			operation: "default";
+			accountId: string | null;
+			sessionId: string;
+			providerId: AccountProviderId;
+	  };
 
 export interface AccountSwitchRequest {
 	protocol: typeof ACCOUNT_CONTROLS_PROTOCOL;
-	providerId?: AccountProviderId;
+	providerId: AccountProviderId;
 	requestId: string;
 	expectedSessionId: string;
 	expectedServiceEpoch: string;
 	/** Rejects stale concurrent-client selections within the same service/session lifetime. */
 	expectedSelectionRevision: number;
-	/** Optional cross-provider route epoch for newer server integrations. */
-	expectedRoutingRevision?: number;
-	/** Requires accountId=null, no inherit, and expectedRoutingRevision. Checked again at commit. */
-	expectedDefaultSource?: { providerId: AccountProviderId; selectionRevision: number };
 	/** null explicitly restores Pi's built-in default authentication. */
 	accountId: string | null;
 	/** Clear this session's override and follow its nearest ancestor; requires accountId=null. */

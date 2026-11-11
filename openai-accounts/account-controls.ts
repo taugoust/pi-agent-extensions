@@ -18,8 +18,8 @@ export async function createAccountControlsSnapshot(
 	store: AccountStore,
 	serviceEpoch: string,
 	pendingAccountNames: readonly string[] = [],
-	providerId: "openai" | "openai-codex" = "openai",
 ): Promise<AccountControlsSnapshot> {
+	const providerId = "openai-codex" as const;
 	const readTimeout = AbortSignal.timeout(5_000);
 	const data = await store.readAsync(
 		AbortSignal.any([owner.signal, readTimeout]),
@@ -55,73 +55,46 @@ export async function createAccountControlsSnapshot(
 	);
 	// A deleted/replaced named profile must never appear as the built-in login.
 	// This is a snapshot of the last verified binding, not an activation side effect.
-	const codexBindingEligible = providerId !== "openai-codex" || officialCodexBinding(owner.context);
-	const defaultCodexKey = providerId === "openai-codex" && currentAccountId === null && codexBindingEligible
+	const codexBindingEligible = officialCodexBinding(owner.context);
+	const defaultCodexKey = currentAccountId === null && codexBindingEligible
 		? defaultCodexAccountKey(owner.context)
 		: undefined;
-	const usage: AccountControlsSnapshot["usage"] =
-		currentAccountId !== null && (!selected || !bindingMatchesStore || !codexBindingEligible)
+	const unavailable = currentAccountId !== null &&
+		(!selected || !bindingMatchesStore || !codexBindingEligible);
+	const usage: AccountControlsSnapshot["usage"] = unavailable
+		? {
+				effectiveCredential: "unavailable",
+				status: "unavailable",
+				remoteEntitlement: "not-queried",
+				settingsUrl: null,
+			}
+		: selected
 			? {
-					effectiveCredential: "unavailable" as const,
-					status: "unavailable" as const,
-					remoteEntitlement: "not-queried" as const,
+					effectiveCredential: selected.type === "api_key"
+						? "api-key-configured"
+						: "chatgpt-grant-matched-refreshed",
+					status: result?.status === "active" && codexBindingEligible
+						? "local-binding-confirmed"
+						: "unavailable",
+					remoteEntitlement: "not-queried",
 					settingsUrl: null,
 				}
-			: providerId === "openai"
-				? effectiveOpenAIUsage(owner.context, selected, result?.status === "active")
-				: selected
-					? { effectiveCredential: selected.type === "api_key" ? "api-key-configured" : "chatgpt-grant-matched-refreshed", status: result?.status === "active" && codexBindingEligible ? "local-binding-confirmed" : "unavailable", remoteEntitlement: "not-queried", settingsUrl: null }
-					: defaultCodexKey
-						? { effectiveCredential: "chatgpt-grant-configured", status: "local-binding-confirmed", remoteEntitlement: "not-queried", settingsUrl: null }
-						: { effectiveCredential: "unknown", status: "unknown", remoteEntitlement: "not-queried", settingsUrl: null };
-	const snapshotRevision = owner.selectionRevisions.get(providerId) ?? 0;
-	let nativeRegistrationKey: string | undefined;
-	if (
-		providerId === "openai" &&
-		currentAccountId !== null &&
-		selected?.type === "oauth" &&
-		bindingMatchesStore &&
-		result?.status === "active" &&
-		!pending
-	) {
-		if (
-			officialOrigin(
-				owner.context.model?.baseUrl ??
-					owner.context.modelRegistry.getProvider("openai")?.baseUrl,
-			) &&
-			owner.context.model?.api === "openai-responses" &&
-			!hasAuthHeaders(owner.context.model?.headers) &&
-			!hasAuthHeaders(
-				owner.context.modelRegistry.getProvider("openai")?.headers,
-			)
-		)
-			nativeRegistrationKey = nativeKey(selected);
-		if (
-			!isOwnerCurrent(owner) ||
-			owner.selections[providerId] !== currentAccountId ||
-			(owner.selectionRevisions.get(providerId) ?? 0) !== snapshotRevision ||
-			owner.appliedIdentities.get(providerId) !==
-				`${currentAccountId}:${selected.access}`
-		)
-			nativeRegistrationKey = undefined;
-	} else if (
-		providerId === "openai" &&
-		currentAccountId === null &&
-		usage.effectiveCredential === "chatgpt-grant-configured" &&
-		usage.status === "local-binding-confirmed"
-	) {
-		nativeRegistrationKey = defaultNativeKey(owner.context);
-		if (
-			!isOwnerCurrent(owner) ||
-			(owner.selections[providerId] ?? null) !== null ||
-			(owner.selectionRevisions.get(providerId) ?? 0) !== snapshotRevision
-		)
-			nativeRegistrationKey = undefined;
-	}
+			: defaultCodexKey
+				? {
+						effectiveCredential: "chatgpt-grant-configured",
+						status: "local-binding-confirmed",
+						remoteEntitlement: "not-queried",
+						settingsUrl: null,
+					}
+				: {
+						effectiveCredential: "unknown",
+						status: "unknown",
+						remoteEntitlement: "not-queried",
+						settingsUrl: null,
+					};
 	return {
 		protocol: 1,
 		providerId,
-		supportedProviders: ["openai", "openai-codex"],
 		serviceEpoch,
 		selectionRevision: owner.selectionRevisions.get(providerId) ?? 0,
 		sessionId: owner.sessionId,
@@ -143,52 +116,16 @@ export async function createAccountControlsSnapshot(
 			: {}),
 		usage: {
 			...usage,
-			...(providerId === "openai" ? { nativeRegistrationVersion: 1 as const } : {}),
-			...(providerId === "openai-codex" && defaultCodexKey ? { accountKey: defaultCodexKey } : {}),
+			...(defaultCodexKey ? { accountKey: defaultCodexKey } : {}),
 			...(bindingMatchesStore &&
 			codexBindingEligible &&
 			result?.status === "active" &&
 			!pending &&
 			selected?.type === "oauth"
-				? verifiedAccountKey(selected, providerId)
+				? verifiedAccountKey(selected)
 				: {}),
-			...(nativeRegistrationKey ? { nativeRegistrationKey } : {}),
 		},
 	};
-}
-
-function nativeKey(credential: StoredCredential): string | undefined {
-	try {
-		if (
-			credential.type !== "oauth" ||
-			typeof credential.access !== "string" ||
-			!validIdentity(credential.clientId) ||
-			!Array.isArray(credential.scopes) ||
-			!credential.scopes.includes("chatgpt.tokens.use.direct")
-		)
-			return undefined;
-		const sub = jwtSubject(credential.access);
-		return sub
-			? createHash("sha256")
-					.update(JSON.stringify(["openai-native", credential.clientId, sub]))
-					.digest("hex")
-			: undefined;
-	} catch {
-		return undefined;
-	}
-}
-
-function jwtSubject(token: string): string | undefined {
-	try {
-		const segments = token.split(".");
-		if (segments.length !== 3) return undefined;
-		const claims = JSON.parse(
-			Buffer.from(segments[1]!, "base64url").toString("utf8"),
-		);
-		return validIdentity(claims?.sub) ? claims.sub : undefined;
-	} catch {
-		return undefined;
-	}
 }
 
 function validIdentity(value: unknown): value is string {
@@ -200,12 +137,6 @@ function validIdentity(value: unknown): value is string {
 	);
 }
 
-function isOwnerCurrent(owner: SessionSelectionOwner): boolean {
-	return (
-		!owner.signal.aborted &&
-		owner.sessionManager.getSessionId() === owner.sessionId
-	);
-}
 function hasAuthHeaders(headers: unknown): boolean {
 	if (headers === undefined) return false;
 	if (!headers || typeof headers !== "object" || Array.isArray(headers))
@@ -243,86 +174,12 @@ function defaultCodexAccountKey(ctx: ExtensionContext): string | undefined {
 	try {
 		const entry = readPrivateAuthJson(getAgentDir())?.["openai-codex"];
 		if (!entry || entry.type !== "oauth" || typeof entry.access !== "string") return undefined;
-		return verifiedAccountKey(entry as StoredCredential, "openai-codex").accountKey;
+		return verifiedAccountKey(entry as StoredCredential).accountKey;
 	} catch { return undefined; }
-}
-function officialOrigin(url: unknown): boolean {
-	try {
-		return (
-			typeof url === "string" &&
-			new URL(url).origin === "https://api.openai.com"
-		);
-	} catch {
-		return false;
-	}
-}
-function defaultNativeKey(ctx: ExtensionContext): string | undefined {
-	try {
-		const provider = ctx.modelRegistry.getProvider("openai");
-		const registered = ctx.modelRegistry.getRegisteredProviderConfig("openai");
-		if (ctx.modelRegistry.getRegisteredNativeProvider("openai"))
-			return undefined;
-		const model = ctx.model;
-		if (
-			!provider ||
-			!model ||
-			!["openai", "idle-guard"].includes(model.provider) ||
-			model.api !== "openai-responses" ||
-			!officialOrigin(model.baseUrl ?? provider.baseUrl) ||
-			!officialOrigin(provider.baseUrl) ||
-			hasAuthHeaders(model.headers) ||
-			hasAuthHeaders(provider.headers)
-		)
-			return undefined;
-		if (
-			registered &&
-			(registered.apiKey ||
-				registered.oauth ||
-				registered.authHeader === false ||
-				hasAuthHeaders(registered.headers) ||
-				(registered.baseUrl && !officialOrigin(registered.baseUrl)))
-		)
-			return undefined;
-		// Stored OAuth must win; do not execute auth resolvers, commands or refreshes.
-		const auth = ctx.modelRegistry.getProviderAuthStatus("openai");
-		const nativeModel = provider.getModels()[0];
-		if (
-			!auth.configured ||
-			auth.source !== "stored" ||
-			!nativeModel ||
-			!ctx.modelRegistry.isUsingOAuth(nativeModel)
-		)
-			return undefined;
-		try {
-			const config = JSON.parse(
-				readFileSync(join(getAgentDir(), "models.json"), "utf8"),
-			)?.providers?.openai;
-			if (
-				config &&
-				(config.authHeader === false ||
-					hasAuthHeaders(config.headers) ||
-					(config.baseUrl && !officialOrigin(config.baseUrl)) ||
-					(Array.isArray(config.models) &&
-						config.models.some((m: any) => hasAuthHeaders(m?.headers))))
-			)
-				return undefined;
-		} catch (error) {
-			if ((error as NodeJS.ErrnoException).code !== "ENOENT") return undefined;
-		}
-		const entry = readPrivateAuthJson(getAgentDir())?.openai;
-		if (
-			!entry || entry.type !== "oauth" || typeof entry.access !== "string" ||
-			typeof entry.clientId !== "string" || !Array.isArray(entry.scopes) ||
-			!entry.scopes.includes("chatgpt.tokens.use.direct")
-		) return undefined;
-		return nativeKey(entry as StoredCredential);
-	} catch {
-		return undefined;
-	}
 }
 
 /** Publish only a noncredential identity for the exact locally applied named grant. */
-function verifiedAccountKey(credential: StoredCredential, providerId: "openai" | "openai-codex" = "openai"): {
+function verifiedAccountKey(credential: StoredCredential): {
 	accountKey?: string;
 } {
 	try {
@@ -350,77 +207,12 @@ function verifiedAccountKey(credential: StoredCredential, providerId: "openai" |
 		return accountId && valid(subject)
 			? {
 					accountKey: createHash("sha256")
-						.update(JSON.stringify([providerId, accountId, subject]))
+						.update(JSON.stringify(["openai-codex", accountId, subject]))
 						.digest("hex"),
 				}
 			: {};
 	} catch {
 		return {};
-	}
-}
-
-function effectiveOpenAIUsage(
-	ctx: ExtensionContext,
-	selected: StoredCredential | undefined,
-	active: boolean,
-): AccountControlsSnapshot["usage"] {
-	if (selected?.type === "api_key") {
-		return {
-			effectiveCredential: active ? "api-key-configured" : "unavailable",
-			status: active ? "local-binding-confirmed" : "unavailable",
-			remoteEntitlement: "not-queried",
-			settingsUrl: "https://platform.openai.com/settings/organization/usage",
-		};
-	}
-	if (selected?.type === "oauth") {
-		return {
-			effectiveCredential: active
-				? "chatgpt-grant-matched-refreshed"
-				: "unavailable",
-			status: active ? "local-binding-confirmed" : "unavailable",
-			remoteEntitlement: "not-queried",
-			settingsUrl: "https://chatgpt.com/settings/usage",
-		};
-	}
-	try {
-		const provider = ctx.modelRegistry.getProvider("openai");
-		const model = provider?.getModels()[0];
-		const authStatus = ctx.modelRegistry.getProviderAuthStatus("openai");
-		if (!authStatus.configured)
-			return {
-				effectiveCredential: "unavailable",
-				status: "unavailable",
-				remoteEntitlement: "not-queried",
-				settingsUrl: null,
-			};
-		if (!model)
-			return {
-				effectiveCredential: "unknown",
-				status: "unknown",
-				remoteEntitlement: "not-queried",
-				settingsUrl: null,
-			};
-		if (ctx.modelRegistry.isUsingOAuth(model)) {
-			return {
-				effectiveCredential: "chatgpt-grant-configured",
-				status: "local-binding-confirmed",
-				remoteEntitlement: "not-queried",
-				settingsUrl: "https://chatgpt.com/settings/usage",
-			};
-		}
-		return {
-			effectiveCredential: "api-key-configured",
-			status: "local-binding-confirmed",
-			remoteEntitlement: "not-queried",
-			settingsUrl: "https://platform.openai.com/settings/organization/usage",
-		};
-	} catch {
-		return {
-			effectiveCredential: "unknown",
-			status: "unknown",
-			remoteEntitlement: "not-queried",
-			settingsUrl: null,
-		};
 	}
 }
 
