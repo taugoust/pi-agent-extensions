@@ -22,12 +22,20 @@ export function scanWatch(file, now=Date.now()) {
   if(w.nextPoll && now<w.nextPoll) return w;
   w.nextPoll=now+w.pollMs;
   try {
-    const fd=fs.openSync(w.path,fs.constants.O_RDONLY|fs.constants.O_NOFOLLOW|fs.constants.O_NONBLOCK);
-    try {
+    const fd=openLog(w);
+    if(fd!==undefined) try {
       const s=fs.fstatSync(fd);if(!s.isFile()||s.uid!==process.getuid?.())throw new Error('Watched path is no longer a same-user regular file');
-      if(s.dev!==w.device||s.ino!==w.inode||s.size<w.offset){emit(s.ino!==w.inode||s.dev!==w.device?'rotated':'truncated');w.offset=0;w.pending='';w.device=s.dev;w.inode=s.ino;}
-      const bytes=Buffer.alloc(Math.min(65536,Math.max(0,s.size-w.offset)));
-      const n=fs.readSync(fd,bytes,0,bytes.length,w.offset);w.offset+=n;
+      // Job logs are rewritten as a bounded tail; w.offset counts the job's
+      // whole output and `start` is where this copy of the tail begins.
+      let start=0;
+      if(w.jobOutput){
+        const position=readJobOutputPosition(w.jobOutput.position,s);
+        if(!position)return finish(w,file,emit);
+        start=position.start;
+        if(w.offset<start){emit('dropped',{bytes:start-w.offset});w.offset=start;w.pending='';}
+      } else if(s.dev!==w.device||s.ino!==w.inode||s.size<w.offset){emit(s.ino!==w.inode||s.dev!==w.device?'rotated':'truncated');w.offset=0;w.pending='';w.device=s.dev;w.inode=s.ino;}
+      const bytes=Buffer.alloc(Math.min(65536,Math.max(0,start+s.size-w.offset)));
+      const n=fs.readSync(fd,bytes,0,bytes.length,w.offset-start);w.offset+=n;
       const data=Buffer.concat([Buffer.from(w.pending||'','base64'),bytes.subarray(0,n)]);
       let begin=0;
       for(let i=0;i<data.length;i++)if(data[i]===10){
@@ -45,10 +53,42 @@ export function scanWatch(file, now=Date.now()) {
     const message=String(error.message).slice(0,256);
     if(w.lastError!==message){w.lastError=message;emit('read-error',{text:message});}
   }
+  return finish(w,file,emit);
+}
+function finish(w,file,emit){
   if(w.resultPath && fs.existsSync(w.resultPath)) {
     try{const r=readWatch(w.resultPath);if(['completed','failed','cancelled','lost'].includes(r.status)){emit('terminal',{status:r.status,exit_code:r.exitCode??null});w.status='completed';}}catch{}
   }
   saveWatch(file,w);return w;
+}
+/** Open the watched log; a job that has not created its log yet has no output. */
+function openLog(w){
+  try{return fs.openSync(w.path,fs.constants.O_RDONLY|fs.constants.O_NOFOLLOW|fs.constants.O_NONBLOCK);}
+  catch(error){if(w.jobOutput&&error.code==='ENOENT')return undefined;throw error;}
+}
+/**
+ * Position of an open job log within the job's whole output, or undefined
+ * while the runner is between rewriting the log and publishing its position.
+ * Runners without a position file never drop output before their 1 MiB bound,
+ * so their log starts at the beginning.
+ */
+export function readJobOutputPosition(positionPath,stat){
+  let position;
+  try{position=JSON.parse(fs.readFileSync(positionPath,'utf8'));}
+  catch(error){if(error.code==='ENOENT')return {start:0};throw error;}
+  if(position?.schemaVersion!==1||!Number.isSafeInteger(position.start)||position.start<0)throw new Error('Invalid job output position');
+  return position.inode===stat.ino&&position.size===stat.size?position:undefined;
+}
+/** Bytes the job has written so far, for watches that start at the end. */
+export function jobOutputEnd(logPath,positionPath){
+  for(let attempt=0;attempt<20;attempt++){
+    let fd;
+    try{fd=fs.openSync(logPath,fs.constants.O_RDONLY|fs.constants.O_NOFOLLOW|fs.constants.O_NONBLOCK);}
+    catch(error){if(error.code==='ENOENT')return 0;throw error;}
+    try{const s=fs.fstatSync(fd);const position=readJobOutputPosition(positionPath,s);if(position)return position.start+s.size;}
+    finally{fs.closeSync(fd);}
+  }
+  throw new Error('Job output kept changing while locating its end');
 }
 async function main(root) {
   let emptySince;

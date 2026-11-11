@@ -4,7 +4,7 @@ import { join, relative, isAbsolute, basename } from 'node:path';
 import { pinRuntimePath } from './runtime-path.ts';
 import { JobStore } from './store.ts';
 import { BackgroundJobManager, resolveExecutable } from './manager.ts';
-import { readWatch, saveWatch } from './watch-runner.mjs';
+import { jobOutputEnd, readWatch, saveWatch } from './watch-runner.mjs';
 
 export type WatchRequest={log_path?:string;patterns:Array<{name:string;match:string}>;from?:'start'|'end';poll_ms?:number;watch_timeout_ms?:number;job_id?:string};
 const runnerPath=pinRuntimePath(new URL('./watch-runner.mjs',import.meta.url),'background-job watch runner');
@@ -30,16 +30,33 @@ export class WatchManager {
     if(p.from!==undefined&&!['start','end'].includes(p.from))throw new Error('Invalid from');
     const base=await realpath(cwd);
     let resultPath:string|undefined;let jobLog:string|undefined;
-    if(p.job_id){const job=await this.jobs.get(p.job_id);if(job.metadata.sessionId!==this.owner||(childId!==undefined&&job.metadata.childId!==childId))throw new Error('Associated job belongs to another owner');childId??=job.metadata.childId;if(job.metadata.pane&&!job.metadata.observed&&!p.log_path)throw new Error('For stage alerts on a tmux pane, provide its append-only log_path. Pane lifetime and output are already tracked without a watcher.');resultPath=this.jobs.store.path(p.job_id,'result.json');jobLog=job.metadata.observed?.logPath??this.jobs.store.path(p.job_id,'output.log');}
-    const file=await realpath(p.log_path??jobLog??'');const rel=relative(base,file);
-    if(file!==jobLog&&(rel==='..'||rel.startsWith('../')||isAbsolute(rel)))throw new Error('Watched log must be within delegated cwd or belong to an owned job');
-    const info=await stat(file);if(!info.isFile()||info.uid!==process.getuid?.())throw new Error('Watch requires a same-user regular log');
+    // A native job's own output: its runner rewrites a bounded tail and
+    // publishes where that tail sits, so the log may not exist yet.
+    let jobOutput:{position:string}|undefined;
+    if(p.job_id){
+      const job=await this.jobs.get(p.job_id);
+      if(job.metadata.sessionId!==this.owner||(childId!==undefined&&job.metadata.childId!==childId))throw new Error('Associated job belongs to another owner');
+      childId??=job.metadata.childId;
+      if(job.metadata.pane&&!job.metadata.observed&&!p.log_path)throw new Error('For stage alerts on a tmux pane, provide its append-only log_path. Pane lifetime and output are already tracked without a watcher.');
+      resultPath=this.jobs.store.path(p.job_id,'result.json');
+      jobLog=job.metadata.observed?.logPath??this.jobs.store.path(p.job_id,'output.log');
+      if(!job.metadata.observed&&!p.log_path)jobOutput={position:this.jobs.store.path(p.job_id,'output-position.json')};
+    }
+    let file:string;let info:{dev?:number;ino?:number;size:number};
+    if(jobOutput){
+      file=jobLog!;info={size:p.from==='start'?0:jobOutputEnd(file,jobOutput.position)};
+    } else {
+      file=await realpath(p.log_path??jobLog??'');const rel=relative(base,file);
+      if(file!==jobLog&&(rel==='..'||rel.startsWith('../')||isAbsolute(rel)))throw new Error('Watched log must be within delegated cwd or belong to an owned job');
+      const s=await stat(file);if(!s.isFile()||s.uid!==process.getuid?.())throw new Error('Watch requires a same-user regular log');
+      info=s;
+    }
     await mkdir(this.root,{recursive:true,mode:0o700});
     const lock=new JobStore(join(this.root,'lock-state'));
     return await lock.withLock(async()=>{
       const all=await this.list();if(all.length>=256)throw new Error('Retained watch limit reached (256); archive old watch records before creating more');if(all.filter(w=>w.status==='running').length>=64)throw new Error('Watch limit reached');
       const id=`watch-${randomBytes(12).toString('hex')}`;
-      const w={version:1,id,owner:this.owner,childId,path:file,cwd:base,patterns:p.patterns,pollMs,resultPath,
+      const w={version:1,id,owner:this.owner,childId,path:file,cwd:base,patterns:p.patterns,pollMs,resultPath,jobOutput,
         status:'running',createdAt:new Date().toISOString(),deadline:p.watch_timeout_ms?Date.now()+p.watch_timeout_ms:undefined,
         device:info.dev,inode:info.ino,offset:p.from==='start'?0:info.size,pending:'',sequence:0,droppedThrough:0,events:[]};
       saveWatch(this.file(id),w);

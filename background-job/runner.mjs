@@ -1,5 +1,5 @@
 #!/usr/bin/env node
-import { linkSync, readFileSync, renameSync, rmSync, unlinkSync, writeFileSync, writeSync } from "node:fs";
+import { fstatSync, linkSync, openSync, closeSync, readFileSync, renameSync, rmSync, unlinkSync, writeFileSync, writeSync } from "node:fs";
 import { spawn, spawnSync } from "node:child_process";
 import { join } from "node:path";
 import { randomBytes } from "node:crypto";
@@ -14,6 +14,9 @@ if (!jobDir || !shell || !Number.isSafeInteger(maximum) || maximum < 65536 || ma
 const commandPath = join(jobDir, "command");
 const environmentPath = join(jobDir, "environment");
 const outputPath = join(jobDir, "output.log");
+// Where output.log's bounded tail sits in the job's whole output, so watchers
+// can follow the job across log rewrites without replaying or skipping lines.
+const outputPositionPath = join(jobDir, "output-position.json");
 const stdoutPath = join(jobDir, "stdout.log");
 const stderrPath = join(jobDir, "stderr.log");
 const processPath = join(jobDir, "process.json");
@@ -69,6 +72,7 @@ function parseEnvironment(bytes) {
 }
 
 let tail = Buffer.alloc(0);
+let outputBytes = 0;
 let stdoutTail = Buffer.alloc(0), stderrTail = Buffer.alloc(0);
 let dirty = false;
 let flushTimer;
@@ -79,10 +83,27 @@ function flush() {
   if (!dirty) return;
   dirty = false;
   const id = `${process.pid}-${++sequence}`;
+  let outputInode;
   for (const [path, data] of [[outputPath, tail], [stdoutPath, stdoutTail], [stderrPath, stderrTail]]) {
     const temporary = `${path}.tmp-${id}`;
-    writeFileSync(temporary, data, { mode: 0o600 });
+    const fd = openSync(temporary, "w", 0o600);
+    try {
+      writeSync(fd, data);
+      if (path === outputPath) outputInode = fstatSync(fd).ino;
+    } finally { closeSync(fd); }
     renameSync(temporary, path);
+  }
+  // Published after the log it describes; readers match it by inode and size.
+  const position = { schemaVersion: 1, inode: outputInode, start: outputBytes - tail.length, size: tail.length };
+  const temporary = `${outputPositionPath}.tmp-${id}`;
+  writeFileSync(temporary, `${JSON.stringify(position)}\n`, { mode: 0o600 });
+  renameSync(temporary, outputPositionPath);
+}
+
+function tryFlush() {
+  try { flush(); } catch (error) {
+    loggerFailed = true;
+    process.stderr.write(`background-job log flush failed: ${error instanceof Error ? error.message : String(error)}\n`);
   }
 }
 
@@ -90,10 +111,7 @@ function scheduleFlush() {
   if (flushTimer) return;
   flushTimer = setTimeout(() => {
     flushTimer = undefined;
-    try { flush(); } catch (error) {
-      loggerFailed = true;
-      process.stderr.write(`background-job log flush failed: ${error instanceof Error ? error.message : String(error)}\n`);
-    }
+    tryFlush();
   }, 250);
   flushTimer.unref();
 }
@@ -101,6 +119,7 @@ function scheduleFlush() {
 function capture(chunk, descriptor) {
   const data = Buffer.from(chunk);
   try { writeSync(descriptor, data); } catch {}
+  outputBytes += data.length;
   tail = tail.length === 0 ? data : Buffer.concat([tail, data]);
   if (tail.length > maximum) tail = tail.subarray(tail.length - maximum);
   let stream = descriptor === 1 ? stdoutTail : stderrTail;
@@ -146,6 +165,9 @@ try {
   const runnerIdentity = { schemaVersion: 1, pid: process.pid, startToken: processStartToken(process.pid), startedAt: new Date().toISOString() };
   const readyTemporary = `${runnerReadyPath}.tmp-${process.pid}`;
   writeFileSync(readyTemporary, `${JSON.stringify(runnerIdentity)}\n`, { mode: 0o600, flag: "wx" });
+  // Logs exist from launch, so a job can be watched before it writes anything.
+  dirty = true;
+  tryFlush();
   renameSync(readyTemporary, runnerReadyPath);
   await waitForLaunchReady();
   try { readFileSync(cancelPath); throw new Error("launch was cancelled"); }
