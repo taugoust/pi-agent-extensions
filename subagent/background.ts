@@ -285,9 +285,13 @@ function parseRecord(value: unknown): BackgroundSubagentRecord {
     // Child descriptors are the authority for controllable identities. Older
     // records and artifacts stay addressable by ordinal without acquiring an
     // identity merely because one appeared in artifact metadata.
+    // Keep the field order artifacts are created with, so a parsed record
+    // serializes exactly like its in-memory original (reap compares the two).
+    const { child, ...rest } = artifact;
     return {
-      ...artifact,
+      child,
       ...(descriptorChildId ? { childId: descriptorChildId } : {}),
+      ...rest,
     };
   });
   return {
