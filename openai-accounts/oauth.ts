@@ -15,7 +15,8 @@ import {
   SettingsManager,
 } from "@earendil-works/pi-coding-agent";
 
-export const SUPPORTED_PROVIDER_IDS = ["openai", "openai-codex"] as const;
+/** Only OpenAI Codex is managed; Pi's built-in `openai` provider is left untouched. */
+export const SUPPORTED_PROVIDER_IDS = ["openai-codex"] as const;
 
 export type AccountProviderId = (typeof SUPPORTED_PROVIDER_IDS)[number];
 
@@ -51,18 +52,6 @@ export function createBuiltinProviderAdapters(
 ): AccountProviderAdapter[] {
   const loader = options.loader ?? defaultProviderModuleLoader;
   return [{
-    id: "openai",
-    displayName: "OpenAI",
-    requiresApiKeyBridge: false,
-    runtimeAuthMode: "api-key",
-    supportsApiKey: true,
-    resolveOAuth: (ctx) => {
-      const oauth = ctx.modelRegistry.getProvider("openai")?.auth.oauth;
-      if (!oauth) throw new Error("Pi's native OpenAI OAuth provider is unavailable.");
-      return oauth;
-    },
-    oauth: createLazyProviderOwnedOAuth("openai", loader),
-  }, {
     id: "openai-codex",
     displayName: "OpenAI Codex",
     requiresApiKeyBridge: true,

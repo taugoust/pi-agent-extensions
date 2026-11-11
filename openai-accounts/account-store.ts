@@ -209,9 +209,9 @@ function normalizeAccountsData(value: unknown): AccountsData {
   if (!isRecord(value.providers)) throw new Error("Invalid accounts data: providers must be an object.");
   const providers = Object.create(null) as Record<string, ProviderAccountsData>;
   for (const [providerId, state] of Object.entries(value.providers)) {
-    // OpenAI phase 2 only interprets the native `openai` section. Preserve every
-    // other provider section as inert JSON so narrowing runtime support cannot
-    // erase unrelated credentials or defaults from a shared upstream store.
+    // Only the `openai-codex` section is interpreted. Every other section,
+    // including a legacy `openai` one, is preserved as inert JSON so narrowing
+    // runtime support cannot erase unrelated credentials or defaults.
     const preserved = isAccountProviderId(providerId)
       ? normalizeProviderState(state)
       : cloneJsonValue(state, new Set(), `providers.${providerId}`);

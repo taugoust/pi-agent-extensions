@@ -4,11 +4,13 @@
 
 Phase 2 implemented and published/deployed for testing. The native Accounts header control's visibility on the user's device remains unresolved and is not device-verified.
 
+Named accounts for the `openai` provider have since been removed: the extension now manages only `openai-codex`, and `openai` uses Pi's built-in login untouched. See [openai-accounts/README.md](../openai-accounts/README.md). The scope below is historical.
+
 ## Scope
 
 Provide named native OpenAI OAuth/API-key credentials with per-session selection and explicit restoration of Pi's built-in default. Keep the account store private, atomic, cross-process safe, preserve unrelated provider sections, and fail closed on activation errors. The native `/accounts` workflow is TUI-only; the versioned Paseo service exposes safe labels/status and idle-only switching, never credential material or login/key-entry actions.
 
-`/usage` reports local effective credential binding and official settings links only. It does not call companion quota endpoints, report numeric allowances, or register `/fast`. Real OpenAI dispatch, physical Astra reached through `idle-guard`, and direct Luna compaction must use the selected account and reject stale auth immediately before payload dispatch. Account switching does not compact or alter conversation context.
+`/usage` reports local effective credential binding and official settings links only. It does not call quota endpoints, report numeric allowances, or register `/fast`. Real OpenAI dispatch, physical Astra reached through `idle-guard`, and direct Luna compaction must use the selected account and reject stale auth immediately before payload dispatch. Account switching does not compact or alter conversation context.
 
 ## Verification
 

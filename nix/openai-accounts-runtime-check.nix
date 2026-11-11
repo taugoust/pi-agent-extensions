@@ -28,8 +28,10 @@ pkgs.runCommand "openai-accounts-immutable-runtime-check"
     node --test ${self}/tests/account-managed-auth.test.mjs
     timeout 30s node ${../tests/package-load.mjs} ${piPackage}/bin/pi \
       ${extensionBundle}/openai-accounts ${extensionBundle}/openai-usage --expect accounts '!usage'
-    # Exercise native identity, isolated subtree overrides, history restoration and
-    # cold resume against the immutable bundle, never a checkout or user accounts.
+    # Exercise Codex-only account routing (subtree overrides, history restoration, cold
+    # resume), rejection of `openai`/missing-provider requests and preservation of a
+    # legacy `providers.openai` section against the immutable bundle, never a checkout
+    # or user accounts.
     mkdir -p fixture/tests
     cp ${../tests/session-routing-native.mjs} fixture/tests/session-routing-native.mjs
     cp ${../tests/session-routing-native-fixture.ts} fixture/tests/session-routing-native-fixture.ts

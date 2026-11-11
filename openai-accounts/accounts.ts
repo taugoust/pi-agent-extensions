@@ -138,10 +138,11 @@ function assertBoundRoutingProfileSnapshot(ctx: ExtensionContext, model: object,
 	if (!sameRoutingProfile(bound, current) || !sameRoutingProfile(bound, getSessionRoutingProfile(ctx))) throw new Error("Inherited account/provider revision changed before dispatch; request blocked.");
 }
 
-function committedRoutingSnapshot(owner: SessionSelectionOwner): Pick<AccountControlsSnapshot, "sessionRouting"> | {} {
-	const profile = owner.routingProfile;
-	if (!profile || owner.routingPublicationFailed || !(SUPPORTED_PROVIDER_IDS as readonly string[]).includes(profile.providerId)) return {};
-	return { sessionRouting: { version: 1, providerId: profile.providerId as AccountProviderId, revision: profile.revision } };
+/** Account controls manage only Codex; `openai` and an omitted provider are unsupported. */
+function requireManagedProvider(value: unknown): AccountProviderId {
+	if (typeof value !== "string" || !isAccountProviderId(value))
+		throw new Error("unsupported-provider");
+	return value;
 }
 
 function notifyRoutingObservers(owner: SessionSelectionOwner): void {
@@ -270,17 +271,6 @@ export default function accountsExtension(
 		ExtensionContext["sessionManager"],
 		SessionSelectionOwner
 	>();
-	const openAIGates = new WeakMap<
-		object,
-		{
-			previous: ReturnType<
-				ExtensionContext["modelRegistry"]["getRegisteredProviderConfig"]
-			>;
-			applied: ReturnType<
-				ExtensionContext["modelRegistry"]["getRegisteredProviderConfig"]
-			>;
-		}
-	>();
 	const codexGates = new WeakMap<object, {
 		previous: ReturnType<ExtensionContext["modelRegistry"]["getRegisteredProviderConfig"]>;
 		applied: ReturnType<ExtensionContext["modelRegistry"]["getRegisteredProviderConfig"]>;
@@ -301,7 +291,9 @@ export default function accountsExtension(
 		protocol: ACCOUNT_CONTROLS_PROTOCOL,
 		sessionId: "",
 		serviceEpoch,
-		getSnapshot: async ({ sessionId, providerId = "openai" }) => {
+		getSnapshot: async (request) => {
+			const providerId = requireManagedProvider(request?.providerId);
+			const sessionId = request.sessionId;
 			if (
 				(globalThis as Record<string, unknown>)[ACCOUNT_CONTROLS_KEY] !==
 				accountControlsService
@@ -326,6 +318,7 @@ export default function accountsExtension(
 		accountControlsService;
 
 	const manageViaService = async (request: AccountManagementRequest) => {
+		const providerId = requireManagedProvider(request?.providerId);
 		if (
 			(globalThis as Record<string, unknown>)[ACCOUNT_CONTROLS_KEY] !==
 			accountControlsService
@@ -341,7 +334,6 @@ export default function accountsExtension(
 		await owner.ready;
 		if (!isOwnerCurrent(owner) || activeOwner !== owner)
 			throw new Error("stale-session");
-		const providerId = request.providerId ?? "openai";
 		if (request.operation === "cancel-login") {
 			paseoLoginInFlight.get(loginKey(providerId, request.accountName))?.abort(new DOMException("Pi account sign-in cancelled", "AbortError"));
 			return { ok: true as const, sessionId: owner.sessionId };
@@ -471,7 +463,7 @@ export default function accountsExtension(
 
 	const snapshotFor = async (
 		owner: SessionSelectionOwner,
-		providerId: AccountProviderId = "openai",
+		providerId: AccountProviderId,
 	): Promise<AccountControlsSnapshot> => {
 		try {
 			if (isInheritedSessionRouting(owner.context) && owner.openAIRequestCount === 0 && owner.pendingSyncTasks.size === 0) {
@@ -487,17 +479,15 @@ export default function accountsExtension(
 				[...paseoLoginInFlight.keys()]
 					.filter((key) => key.startsWith(prefix))
 					.map((key) => key.slice(prefix.length)),
-				providerId,
 			);
-			return { ...snapshot, guardedDefaultSwitchVersion: 1, ...committedRoutingSnapshot(owner), ...(isInheritedSessionRouting(owner.context) ? { inheritance: readInheritedSessionRoutingProfile(owner.context) ? "inherited" as const : "explicit" as const } : {}) };
+			if (!isInheritedSessionRouting(owner.context)) return snapshot;
+			const inherited = readInheritedSessionRoutingProfile(owner.context);
+			return { ...snapshot, inheritance: inherited ? "inherited" : "explicit" };
 		} catch {
 			return {
 				protocol: ACCOUNT_CONTROLS_PROTOCOL,
 				serviceEpoch,
 				providerId,
-				supportedProviders: SUPPORTED_PROVIDER_IDS,
-				guardedDefaultSwitchVersion: 1,
-				...committedRoutingSnapshot(owner),
 				selectionRevision: owner.selectionRevisions.get(providerId) ?? 0,
 				sessionId: owner.sessionId,
 				accounts: [],
@@ -525,8 +515,7 @@ export default function accountsExtension(
 		)
 			throw new Error("stale-service");
 		const raw = (request ?? {}) as unknown as Record<string, unknown>;
-		const providerId = raw.providerId === undefined ? "openai" : raw.providerId;
-		if (providerId !== "openai" && providerId !== "openai-codex") throw new Error("unsupported-provider");
+		const providerId = requireManagedProvider(raw.providerId);
 		const requestId =
 			typeof raw?.requestId === "string" &&
 			raw.requestId.length <= 128 &&
@@ -545,11 +534,9 @@ export default function accountsExtension(
 		const bounded = (value: unknown, maximum: number): string | null =>
 			typeof value === "string" && value.length <= maximum ? value : null;
 		const scopedRequestId = `${providerId}:${requestId}`;
-		const sourceGuard = raw.expectedDefaultSource as Record<string, unknown> | undefined;
 		const fingerprint = JSON.stringify([
 			providerId,
 			raw.inherit ?? false,
-			sourceGuard === undefined ? null : [sourceGuard?.providerId, sourceGuard?.selectionRevision],
 			raw.accountId === null ||
 			(typeof raw.accountId === "string" && raw.accountId.length <= 64)
 				? raw.accountId
@@ -560,19 +547,11 @@ export default function accountsExtension(
 			(raw.expectedSelectionRevision as number) >= 0
 				? raw.expectedSelectionRevision
 				: "<invalid-revision>",
-			raw.expectedRoutingRevision === undefined
-				? "<route-revision-omitted>"
-				: Number.isSafeInteger(raw.expectedRoutingRevision) && (raw.expectedRoutingRevision as number) >= 0
-					? raw.expectedRoutingRevision
-					: "<invalid-route-revision>",
 			raw.protocol === ACCOUNT_CONTROLS_PROTOCOL
 				? raw.protocol
 				: "<invalid-protocol>",
 		]);
 		const requestValid =
-			(sourceGuard === undefined || (sourceGuard !== null && typeof sourceGuard === "object" &&
-				(sourceGuard.providerId === "openai" || sourceGuard.providerId === "openai-codex") && Number.isSafeInteger(sourceGuard.selectionRevision) && (sourceGuard.selectionRevision as number) >= 0 &&
-				raw.accountId === null && !raw.inherit && raw.expectedRoutingRevision !== undefined)) &&
 			(raw.inherit === undefined || raw.inherit === false || (raw.inherit === true && raw.accountId === null)) &&
 			raw.protocol === ACCOUNT_CONTROLS_PROTOCOL &&
 			typeof raw.expectedSessionId === "string" &&
@@ -581,7 +560,6 @@ export default function accountsExtension(
 			raw.expectedServiceEpoch.length <= 256 &&
 			Number.isSafeInteger(raw.expectedSelectionRevision) &&
 			(raw.expectedSelectionRevision as number) >= 0 &&
-			(raw.expectedRoutingRevision === undefined || (Number.isSafeInteger(raw.expectedRoutingRevision) && (raw.expectedRoutingRevision as number) >= 0)) &&
 			(raw.accountId === null ||
 				(typeof raw.accountId === "string" && raw.accountId.length <= 64));
 		if (!requestValid) {
@@ -631,9 +609,6 @@ export default function accountsExtension(
 				reason: "request-id-conflict",
 				snapshot: await snapshotFor(owner, providerId),
 			};
-		}
-		if (raw.expectedRoutingRevision !== undefined && owner.routingProfile?.revision !== raw.expectedRoutingRevision) {
-			return { ok: false, requestId, reason: "stale-selection", snapshot: await snapshotFor(owner, providerId) };
 		}
 		if (inFlightRequests.size + completedRequests.size >= 4096) {
 			return {
@@ -687,7 +662,7 @@ export default function accountsExtension(
 	const performServiceSwitch = async (
 		request: AccountSwitchRequest,
 	): Promise<AccountSwitchResult> => {
-		const providerId = request.providerId ?? "openai";
+		const providerId = requireManagedProvider(request.providerId);
 		const owner = activeOwner;
 		if (!owner || !isOwnerCurrent(owner)) throw new Error("stale-session");
 		const failure = async (
@@ -710,22 +685,16 @@ export default function accountsExtension(
 			(owner.selectionRevisions.get(providerId) ?? 0)
 		)
 			return failure("stale-selection");
-		if (request.expectedRoutingRevision !== undefined && owner.routingProfile?.revision !== request.expectedRoutingRevision)
-			return failure("stale-selection");
 		if (!owner.context.isIdle() || owner.pendingSyncTasks.has(providerId))
 			return failure("busy");
 		const routeAtAdmission = owner.routingProfile;
 		const selectionAtAdmission = owner.selectionRevisions.get(providerId) ?? 0;
-		const commitIsCurrent = () => {
-			const source = request.expectedDefaultSource;
-			return !signal.aborted && isOwnerCurrent(owner) && activeOwner === owner &&
-				accountControlsService.sessionId === owner.sessionId && request.expectedServiceEpoch === serviceEpoch &&
-				(owner.selectionRevisions.get(providerId) ?? 0) === selectionAtAdmission &&
-				owner.routingProfile === routeAtAdmission &&
-				(!source || (owner.routingProfile?.providerId === source.providerId &&
-					(owner.selections[source.providerId] ?? null) === null &&
-					(owner.selectionRevisions.get(source.providerId) ?? 0) === source.selectionRevision));
-		};
+		const commitIsCurrent = () =>
+			!signal.aborted && isOwnerCurrent(owner) && activeOwner === owner &&
+			accountControlsService.sessionId === owner.sessionId &&
+			request.expectedServiceEpoch === serviceEpoch &&
+			(owner.selectionRevisions.get(providerId) ?? 0) === selectionAtAdmission &&
+			owner.routingProfile === routeAtAdmission;
 		const deadline = AbortSignal.timeout(30_000);
 		const signal = AbortSignal.any([owner.signal, deadline]);
 		const run = async (): Promise<AccountSwitchResult> => {
@@ -738,7 +707,9 @@ export default function accountsExtension(
 				const parent = owner.parentRouting;
 				if (!parent || parent.PI_SESSION_ROUTING_OWNER_SESSION === owner.sessionId) return failure("invalid-request");
 				await Promise.all(owner.pendingSyncTasks.values());
-				if (!isOwnerCurrent(owner) || activeOwner !== owner || (owner.selectionRevisions.get(providerId) ?? 0) !== request.expectedSelectionRevision || (request.expectedRoutingRevision !== undefined && owner.routingProfile?.revision !== request.expectedRoutingRevision)) return failure("stale-selection");
+				if (!isOwnerCurrent(owner) || activeOwner !== owner ||
+					(owner.selectionRevisions.get(providerId) ?? 0) !== request.expectedSelectionRevision)
+					return failure("stale-selection");
 				const inheritedProfile = readSessionRoutingProfile(parent.PI_SESSION_ROUTING_FILE, parent.PI_SESSION_ROUTING_OWNER_SESSION);
 				const role = getConfiguredSessionModelReference(owner.context);
 				const physical = role && owner.context.modelRegistry.find(inheritedProfile.providerId, role.id);
@@ -776,8 +747,6 @@ export default function accountsExtension(
 				request.expectedSelectionRevision !==
 				(owner.selectionRevisions.get(providerId) ?? 0)
 			)
-				return failure("stale-selection");
-			if (request.expectedRoutingRevision !== undefined && owner.routingProfile?.revision !== request.expectedRoutingRevision)
 				return failure("stale-selection");
 			if (!commitIsCurrent()) return failure("stale-selection");
 			if (!(await selectSessionPhysicalModel(owner, providerId, false)))
@@ -921,12 +890,14 @@ export default function accountsExtension(
 			ctx.ui.notify(restored.message, "error");
 			return;
 		}
-		let selections =
-			restored.status === "loaded"
-				? restored.selections
-				: cloneAccountSelections(
-						Object.create(null) as ProviderAccountSelections,
-					);
+		// Older sessions may also hold an `openai` selection; it is no longer managed.
+		let selections = providers.reduce<ProviderAccountSelections>(
+			(current, provider) =>
+				restored.status === "loaded" && Object.hasOwn(restored.selections, provider.id)
+					? setAccountSelection(current, provider.id, restored.selections[provider.id] ?? null)
+					: current,
+			cloneAccountSelections(Object.create(null) as ProviderAccountSelections),
+		);
 		const missingProviders = providers.filter(
 			(provider) => !Object.hasOwn(selections, provider.id),
 		);
@@ -976,11 +947,9 @@ export default function accountsExtension(
 
 	const startSessionOwner = (ctx: ExtensionContext): SessionSelectionOwner => {
 		try {
-			installOpenAIGate(ctx);
 			installCodexGate(ctx);
 		} catch (error) {
 			restoreCodexGate(ctx);
-			restoreOpenAIGate(ctx);
 			throw error;
 		}
 		const previous = sessionOwners.get(ctx.sessionManager);
@@ -1290,247 +1259,6 @@ export default function accountsExtension(
 		return bindSessionModelRequest(model.provider === profile.providerId ? model : physical, profile);
 	};
 
-	const installOpenAIGate = (ctx: ExtensionContext): void => {
-		const registry = ctx.modelRegistry;
-		if (openAIGates.has(registry as object)) return;
-		const previous = registry.getRegisteredProviderConfig("openai");
-		if (registry.getRegisteredNativeProvider("openai")) {
-			throw new Error(
-				"Named accounts do not support a separately registered native OpenAI provider; its registration was left untouched.",
-			);
-		}
-		const effectiveProvider = registry.getProvider("openai");
-		if (!effectiveProvider)
-			throw new Error(
-				"Native OpenAI provider is unavailable; OpenAI request gate was not installed.",
-			);
-		const api = effectiveProvider
-			.getModels()
-			.find((model) => model.api === "openai-responses")?.api;
-		if (!api || (previous?.streamSimple && previous.api !== api)) {
-			throw new Error(
-				"OpenAI provider has an incompatible stream override; request gate was not installed.",
-			);
-		}
-		const nativeProvider = registry.getRegisteredNativeProvider("openai");
-		const delegateProvider = previous?.streamSimple
-			? effectiveProvider
-			: (nativeProvider ?? effectiveProvider);
-		const delegate = delegateProvider.streamSimple.bind(delegateProvider);
-		const gateStreamSimple = (
-			model: Parameters<typeof effectiveProvider.streamSimple>[0],
-			context: Parameters<typeof effectiveProvider.streamSimple>[1],
-			options: Parameters<typeof effectiveProvider.streamSimple>[2],
-		) =>
-			lazyStream(model, async () => {
-				const owner = activeOwner;
-				if (
-					!owner ||
-					owner.context.modelRegistry !== registry ||
-					!isOwnerCurrent(owner) ||
-					owner.sessionId !== owner.sessionManager.getSessionId()
-				) {
-					throw new Error("OpenAI account session is stale; request blocked.");
-				}
-				owner.openAIRequestCount += 1;
-				let released = false;
-				const release = () => {
-					if (released) return;
-					released = true;
-					owner.openAIRequestCount = Math.max(0, owner.openAIRequestCount - 1);
-				};
-				try {
-					const routed = await routeNativeRequest(owner, model);
-					if (routed.provider !== model.provider) return trackStreamLifecycle(registry.stream(routed, context, options), release, options?.signal);
-					model = routed;
-					await assertBoundRoutingProfile(owner.context, model, "openai");
-					const revision = owner.selectionRevisions.get("openai") ?? 0;
-					const selection = owner.selections.openai ?? null;
-					const activation = await syncProvider(
-						"openai",
-						owner.context,
-						owner,
-						options?.signal,
-						model,
-					);
-					if (
-						!isOwnerCurrent(owner) ||
-						activeOwner !== owner ||
-						owner.sessionId !== owner.sessionManager.getSessionId()
-					) {
-						throw new Error("OpenAI account session changed; request blocked.");
-					}
-					if (
-						activation.status === "error" ||
-						(selection !== null && activation.status !== "active")
-					) {
-						owner.abortProviders.add("openai");
-						throw new Error(
-							"OpenAI account authentication failed; request blocked.",
-						);
-					}
-					if (
-						(owner.selectionRevisions.get("openai") ?? 0) !== revision ||
-						(owner.selections.openai ?? null) !== selection
-					) {
-						throw new Error(
-							"OpenAI account selection changed; request blocked.",
-						);
-					}
-					let resolved: Awaited<
-						ReturnType<typeof registry.getApiKeyAndHeaders>
-					>;
-					try {
-						resolved = await registry.getApiKeyAndHeaders(model);
-					} catch {
-						throw new Error(
-							"OpenAI account authentication could not be verified; request blocked.",
-						);
-					}
-					if (
-						!isOwnerCurrent(owner) ||
-						activeOwner !== owner ||
-						(owner.selectionRevisions.get("openai") ?? 0) !== revision
-					) {
-						throw new Error(
-							"OpenAI account selection changed; request blocked.",
-						);
-					}
-					if (
-						resolved.ok === false ||
-						(!resolved.apiKey &&
-							!Object.keys(resolved.headers ?? {}).some(
-								(key) => key.toLowerCase() === "authorization",
-							))
-					) {
-						if (selection !== null)
-							throw new Error(
-								"OpenAI account authentication could not be verified; request blocked.",
-							);
-					}
-					const identity = owner.appliedIdentities.get("openai");
-					const userOnPayload = options?.onPayload;
-					const finalOptions = {
-						...options,
-						...(resolved.ok
-							? {
-									apiKey: resolved.apiKey,
-									headers: resolved.headers,
-									env: resolved.env,
-								}
-							: {}),
-						onPayload: async (payload: unknown, payloadModel: typeof model) => {
-							let latestAuth: Awaited<
-								ReturnType<typeof registry.getApiKeyAndHeaders>
-							>;
-							try {
-								latestAuth = await registry.getApiKeyAndHeaders(model);
-							} catch {
-								throw new Error(
-									"OpenAI account authentication changed before dispatch; request blocked.",
-								);
-							}
-							const authStillCurrent =
-								latestAuth.ok &&
-								resolved.ok &&
-								latestAuth.apiKey === resolved.apiKey &&
-								latestAuth.baseUrl === resolved.baseUrl &&
-								JSON.stringify(latestAuth.env ?? {}) ===
-									JSON.stringify(resolved.env ?? {}) &&
-								headersEqual(latestAuth.headers, resolved.headers);
-							if (!authStillCurrent)
-								throw new Error(
-									"OpenAI account authentication changed before dispatch; request blocked.",
-								);
-							if (selection !== null) {
-								let saved;
-								try {
-									const signal = AbortSignal.any([
-										owner.signal,
-										...(options?.signal ? [options.signal] : []),
-										AbortSignal.timeout(5_000),
-									]);
-									saved = await store.readProviderAsync("openai", signal);
-								} catch {
-									throw new Error(
-										"OpenAI account store could not verify the selected credential; request blocked.",
-									);
-								}
-								const credential = getOwnCredential(saved.accounts, selection);
-								const storedIdentity = credential
-									? `${selection}:${credential.type === "api_key" ? credential.key : credential.access}`
-									: undefined;
-								if (!storedIdentity || storedIdentity !== identity) {
-									throw new Error(
-										"OpenAI account credential changed before dispatch; request blocked.",
-									);
-								}
-							}
-							let transformed: unknown;
-							try {
-								transformed = userOnPayload
-									? await userOnPayload(payload, payloadModel)
-									: undefined;
-							} catch {
-								throw new Error(
-									"OpenAI request payload validation failed; request blocked.",
-								);
-							}
-							// The user callback can await the idle-guard's final check. Nothing asynchronous
-							// may follow it: those checks are the last condition before the provider sends.
-							assertBoundRoutingProfileSnapshot(owner.context, model, "openai");
-							const stillCurrent =
-								isOwnerCurrent(owner) &&
-								activeOwner === owner &&
-								owner.sessionId === owner.sessionManager.getSessionId() &&
-								(owner.selectionRevisions.get("openai") ?? 0) === revision &&
-								(owner.selections.openai ?? null) === selection &&
-								owner.switchReserved === 0 &&
-								owner.appliedIdentities.get("openai") === identity;
-							if (!stillCurrent)
-								throw new Error(
-									"OpenAI account selection changed before dispatch; request blocked.",
-								);
-							return transformed;
-						},
-					};
-					const requestModel =
-						resolved.ok && resolved.baseUrl
-							? { ...model, baseUrl: resolved.baseUrl }
-							: model;
-					const stream = delegate(requestModel, context, finalOptions);
-					return trackStreamLifecycle(stream, release, options?.signal);
-				} catch (error) {
-					release();
-					throw error;
-				}
-			});
-		const applied = { ...previous, api, streamSimple: gateStreamSimple };
-		registry.registerProvider("openai", applied);
-		openAIGates.set(registry as object, { previous, applied });
-	};
-
-	const restoreOpenAIGate = (ctx: ExtensionContext): void => {
-		const registry = ctx.modelRegistry;
-		const installed = openAIGates.get(registry as object);
-		if (!installed) return;
-		const current = registry.getRegisteredProviderConfig("openai");
-		if (current?.streamSimple !== installed.applied?.streamSimple) {
-			openAIGates.delete(registry as object);
-			return;
-		}
-		const restored = { ...current };
-		if (installed.previous?.api === undefined) delete restored.api;
-		else restored.api = installed.previous.api;
-		if (installed.previous?.streamSimple === undefined)
-			delete restored.streamSimple;
-		else restored.streamSimple = installed.previous.streamSimple;
-		registry.unregisterProvider("openai");
-		if (Object.keys(restored).length > 0)
-			registry.registerProvider("openai", restored);
-		openAIGates.delete(registry as object);
-	};
-
 	const installCodexGate = (ctx: ExtensionContext): void => {
 		const registry = ctx.modelRegistry;
 		if (codexGates.has(registry as object)) return;
@@ -1801,7 +1529,16 @@ export default function accountsExtension(
 			(owner, providerId) => accountControlsService.getSnapshot({ sessionId: owner.sessionId, providerId }),
 			async (owner, providerId, accountId, inherit = false) => {
 				const snapshot = await snapshotFor(owner, providerId);
-				const result = await switchViaService({ protocol: 1, providerId, requestId: randomUUID(), expectedSessionId: owner.sessionId, expectedServiceEpoch: serviceEpoch, expectedSelectionRevision: snapshot.selectionRevision, ...(snapshot.sessionRouting ? { expectedRoutingRevision: snapshot.sessionRouting.revision } : {}), accountId, ...(inherit ? { inherit: true } : {}) });
+				const result = await switchViaService({
+					protocol: 1,
+					providerId,
+					requestId: randomUUID(),
+					expectedSessionId: owner.sessionId,
+					expectedServiceEpoch: serviceEpoch,
+					expectedSelectionRevision: snapshot.selectionRevision,
+					accountId,
+					...(inherit ? { inherit: true } : {}),
+				});
 				owner.context.ui.notify(result.ok ? (inherit ? "Following parent session account." : "Session account selection updated.") : "Session account could not be changed; refresh and retry while idle.", result.ok ? "info" : "warning");
 			},
 		),
@@ -1941,7 +1678,6 @@ export default function accountsExtension(
 				await coordinator.clear(ctx, true);
 			}),
 		);
-		restoreOpenAIGate(ctx);
 		restoreCodexGate(ctx);
 		setStatus(ctx, undefined);
 		if (
@@ -1982,9 +1718,7 @@ function createAccountCommand(
 			const inherited = isInheritedSessionRouting(ctx);
 			const menuOwner = getMenuOwner(owner);
 			if (!menuOwner.isCurrent()) return;
-			const providerChoice = await ctx.ui.select("Account provider", ["OpenAI", "OpenAI Codex"], { signal: menuOwner.signal });
-			if (!providerChoice || !menuOwner.isCurrent()) return;
-			const providerId: AccountProviderId = providerChoice === "OpenAI Codex" ? "openai-codex" : "openai";
+			const providerId: AccountProviderId = "openai-codex";
 			const adapter = adapters.get(providerId);
 			if (!adapter)
 				return ctx.ui.notify(`${providerId} accounts are unavailable.`, "error");
@@ -2030,7 +1764,11 @@ function createAccountCommand(
 					if (!name || !menuOwner.isCurrent()) continue;
 					const method = await ctx.ui.select(
 						`Add ${adapter.displayName} account`,
-						["ChatGPT sign-in (OAuth)", "API key", "Cancel"],
+						[
+							"ChatGPT sign-in (OAuth)",
+							...(adapter.supportsApiKey ? ["API key"] : []),
+							"Cancel",
+						],
 						{ signal: menuOwner.signal },
 					);
 					if (!method || method === "Cancel" || !menuOwner.isCurrent())
