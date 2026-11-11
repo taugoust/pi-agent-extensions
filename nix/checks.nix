@@ -2139,6 +2139,13 @@ in
         };
         EOF
 
+        # pi-ai re-exports typebox's Type; guidance tools import it from there.
+        mkdir -p "$outdir/node_modules/@earendil-works/pi-ai"
+        printf '%s\n' '{"name":"@earendil-works/pi-ai","type":"module","main":"./index.js"}' \
+          > "$outdir/node_modules/@earendil-works/pi-ai/package.json"
+        printf '%s\n' 'export { Type } from "@sinclair/typebox";' \
+          > "$outdir/node_modules/@earendil-works/pi-ai/index.js"
+
         mkdir -p "$outdir/node_modules/@mariozechner/pi-coding-agent"
         cat > "$outdir/node_modules/@mariozechner/pi-coding-agent/package.json" <<'EOF'
         {
