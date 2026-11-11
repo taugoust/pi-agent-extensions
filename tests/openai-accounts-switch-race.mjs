@@ -10,15 +10,19 @@ for (const mutation of ['pin', 'route', 'reservation', 'cancel', 'owner']) {
     const started = new Promise(resolve => { entered = resolve; });
     const gate = new Promise(resolve => { release = resolve; });
     const controller = new AbortController();
-    const session = { selectionRevisions: new Map([['openai', 0]]), routingProfile: { revision: 1 }, switchReserved: 0, openAIRequestCount: 0 };
+    const session = {
+      selectionRevisions: new Map([['openai-codex', 0]]), routingProfile: { revision: 1 },
+      switchReserved: 0, openAIRequestCount: 0,
+    };
     let current = true, persisted = false;
     const ctx = { isIdle: () => true, ui: { notify() {} } };
-    const pending = switchAccount(ctx, {}, { id: 'openai', displayName: 'OpenAI' }, 'default', controller.signal,
+    const adapter = { id: 'openai-codex', displayName: 'OpenAI Codex' };
+    const pending = switchAccount(ctx, {}, adapter, 'default', controller.signal,
       async () => { throw Error('stale selection must not activate'); },
       (_owner, _provider, _account, guard) => { if (!guard()) return false; persisted = true; return true; },
       session, () => current, async () => { entered(); await gate; return true; });
     await started;
-    if (mutation === 'pin') session.selectionRevisions.set('openai', 1);
+    if (mutation === 'pin') session.selectionRevisions.set('openai-codex', 1);
     if (mutation === 'route') session.routingProfile = { revision: 2 };
     if (mutation === 'reservation') session.switchReserved = 1;
     if (mutation === 'cancel') controller.abort();
