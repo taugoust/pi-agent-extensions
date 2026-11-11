@@ -56,7 +56,7 @@ Extensions are **opt-in**. [Build a selective bundle or install without Nix →]
 
 | Extension | Use it for |
 | --- | --- |
-| [OpenAI accounts](openai-accounts/README.md) | Manage named accounts with `/accounts`. |
+| [OpenAI accounts](openai-accounts/README.md) | Manage named OpenAI Codex accounts with `/accounts`. |
 | [OpenAI usage (legacy)](openai-usage/README.md) | Compatibility selection; credential status and official usage links now live in `/accounts`. |
 | [Stamp](OBSERVABILITY.md) | Record timestamps, response timing and usage metadata. |
 | [Cache monitor](OBSERVABILITY.md) | Inspect prompt-cache reuse. |

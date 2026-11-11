@@ -237,26 +237,26 @@ In Pi's terminal, `/btw` opens the candidate manager and `/btw <question>` start
 </details>
 
 <details>
-<summary><strong>openai-accounts</strong> - Native OpenAI account manager</summary>
+<summary><strong>openai-accounts</strong> - OpenAI Codex account manager</summary>
 <br>
 
 - **Command**: `/accounts` (native Pi TUI only)
-- **Accounts**: named native OpenAI ChatGPT OAuth grants and API keys
+- **Accounts**: named OpenAI Codex (`openai-codex`) ChatGPT sign-ins
 - **Selection**: per session, with an explicit restore-default-Pi-login action
 - **Home Manager**: `programs.pi.extensions.accounts.enable = true;`
 - **Storage**: private atomic `pi-accounts.json`; the runtime lock dependencies are included in the extension layout.
 
-Paseo sees safe account labels/status and may switch an existing account only while idle. It never receives credential values or login/add/remove operations. Switching sends no model call and preserves conversation context. A request-time OpenAI Responses gate covers ordinary OpenAI calls, guarded physical Astra dispatch, and direct Luna compaction; stale selection or failed activation blocks dispatch. The account store preserves other provider sections but this extension enables only Pi's built-in native `openai` (not Codex); if another extension registers a custom native provider under `openai`, the account extension refuses the gate without replacing that provider.
+Paseo sees safe account labels/status and may switch an existing account only while idle; account-control requests must name `providerId: "openai-codex"`. It never receives credential values. Switching sends no model call and preserves conversation context. A request-time Codex gate covers ordinary Codex calls, guarded physical Astra dispatch, and direct Luna compaction; stale selection or failed activation blocks dispatch. Pi's built-in `openai` provider is not managed: its requests, configuration and `auth.json` login are left untouched. The account store keeps other provider sections, including an older `openai` section, unchanged. See the [extension README](../openai-accounts/README.md).
 
 </details>
 <details>
-<summary><strong>openai-usage</strong> - OpenAI credential status and official settings link</summary>
+<summary><strong>openai-usage</strong> - Legacy compatibility selection</summary>
 <br>
 
-- **Command**: `/usage`
-- **Home Manager**: `programs.pi.extensions.usage.enable = true;`
+- **Command**: none (`/usage` is retired)
+- **Home Manager**: `programs.pi.extensions.usage.enable = true;` (installs `openai-accounts`)
 
-Shows the locally effective credential kind and official OpenAI/ChatGPT usage-settings link. It makes no quota calls and displays no fabricated numeric limits. `api-key-configured` means local configuration only; it does not assert remote validity or entitlement.
+Credential status now lives in `/accounts` → **Credential status and usage link**, which shows the local status of the session's Codex account. It makes no quota calls and displays no fabricated numeric limits.
 
 </details>
 <details>
@@ -1868,7 +1868,7 @@ pi
   `.drawio` file, optionally exported to PNG/SVG/PDF
 - **questionnaire:** The LLM will call it automatically when needed
 - **Historical subscription integration:** `sub_get_usage` and
-  `sub_get_all_usage` belonged to the earlier subscription setup; they are not provided by the current OpenAI status extension. Use `/usage` for effective-credential status (no quota queries).
+  `sub_get_all_usage` belonged to the earlier subscription setup; they are not provided by the current extensions. Use `/accounts` for Codex credential status (no quota queries).
 
 ## 📁 Structure
 

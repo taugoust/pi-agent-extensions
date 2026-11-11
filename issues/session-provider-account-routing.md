@@ -4,6 +4,8 @@
 
 Implementation in progress. User approved implementation and Matebook deployment, with both account UIs unchanged. Do not commit or push until the user confirms satisfaction; publication is the final task.
 
+Account controls have since become Codex-only: switching a session between `openai` and `openai-codex` through account controls was removed, and only `openai-codex` accounts are routed to helpers. Generic helper routing of the session's physical provider remains.
+
 ## Required behavior
 
 - The owning Pi session's effective physical provider and selected account govern all subsequent model-using helper requests: new/resumed subagents, idle compaction, and existing/new BTW threads.
