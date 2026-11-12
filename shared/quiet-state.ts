@@ -283,7 +283,18 @@ function reconcileGuidance(h:Hub):void{
 }
 function guidancePending(h:Hub){return [...h.pending.values()].some(i=>i.data.requires_guidance===true&&!isCompletion(i.data));}
 function refreshStatus(h:Hub){const ctx=h.ctx;if(!ctx?.hasUI)return;const guidance=[...h.pending.values()].filter(i=>i.data.requires_guidance).length;const text=disabled(h)?'quiet off':h.compacting?'quiet compacting':h.guidanceDisabled?'quiet guidance paused':h.diagnostic?`quiet delivery error (${guidance} pending): ${h.diagnostic.cause}`:guidance?`quiet guidance ${guidance}`:undefined;try{ctx.ui.setStatus('quiet-state',text);}catch{}}
-function notificationEntries(ctx:any):QuietUpdate[]{return (ctx.sessionManager.getBranch?.()??ctx.sessionManager.getEntries?.()??[]).map((e:any)=>e?.type==='custom'&&e.customType===NOTIFICATION_CUSTOM?e.data?.update:undefined).filter(validUpdate);}
+/** Retained child findings on this branch. RPC children write a notification entry; native
+ * children are only recorded as receipts. Both carry the same update, deduplicated by ID. */
+function notificationEntries(ctx:any):QuietUpdate[]{
+  const seen=new Set<string>(),out:QuietUpdate[]=[];
+  for(const e of ctx.sessionManager.getBranch?.()??ctx.sessionManager.getEntries?.()??[]){
+    if(e?.type!=='custom')continue;
+    const update=e.customType===NOTIFICATION_CUSTOM?e.data?.update:e.customType===QUIET_STATE_RECEIPT_CUSTOM_TYPE?e.data?.update:undefined;
+    if(!validUpdate(update)||update.kind!=='notification'||typeof update.message!=='string'||seen.has(update.id))continue;
+    seen.add(update.id);out.push(update);
+  }
+  return out;
+}
 const commandApis:WeakSet<object>=new WeakSet();
 function installCommands(pi:any){
   if(typeof pi.registerCommand!=='function'||commandApis.has(pi))return;commandApis.add(pi);
