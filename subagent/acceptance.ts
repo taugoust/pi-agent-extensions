@@ -2,7 +2,7 @@
 // src/runs/shared/acceptance.ts at 3ce6185a. MIT, Copyright (c) 2026 Nico Bailon.
 // See agents/LICENSE and THIRD_PARTY.md. No upstream shell runner or cache is used.
 import { createHash, randomBytes } from "node:crypto";
-import { constants, openSync, closeSync, fstatSync, readSync, opendirSync, lstatSync, realpathSync } from "node:fs";
+import { constants, openSync, closeSync, fstatSync, readSync, opendirSync, lstatSync, readFileSync, realpathSync } from "node:fs";
 import { join, dirname } from "node:path";
 import type { JobParams } from "../shared/background-job.ts";
 
@@ -80,9 +80,46 @@ export function initialVerification(identity: VerificationIdentity, gates: Verif
   return { version: 1, identity: structuredClone(identity), contract: verificationContract(gates), status: gates.length ? "interrupted" : "not-configured", runs: [] };
 }
 
+/** Repository-committed scope for workspace identity, relative to the identity root. */
+export const VERIFICATION_SCOPE_FILE = ".pi/verification-scope.json";
+type VerificationScope = { inputs: string[]; outputs: string[] };
+
+function scopePaths(value: unknown, field: string, required: boolean): string[] {
+  if (value === undefined && !required) return [];
+  if (!Array.isArray(value) || (required && !value.length) || value.length > 64)
+    throw new Error(`${VERIFICATION_SCOPE_FILE}: ${field} must be ${required ? "a non-empty" : "an"} array of at most 64 paths`);
+  return value.map(path => {
+    if (typeof path !== "string" || !path || path.length > 512 || path.startsWith("/") || path.endsWith("/")
+      || path.split("/").some(part => !part || part === "." || part === ".." || part === ".git"))
+      throw new Error(`${VERIFICATION_SCOPE_FILE}: ${field} entries must be relative paths inside the workspace, without . or .. segments or .git`);
+    return `/${path}`;
+  });
+}
+
+/** Reads the optional scope file. A present but unreadable, linked or malformed file fails closed. */
+function readVerificationScope(root: string): VerificationScope | undefined {
+  const path = join(root, VERIFICATION_SCOPE_FILE);
+  let text: string;
+  try {
+    if (!lstatSync(path).isFile()) throw new Error(`${VERIFICATION_SCOPE_FILE} must be a regular file`);
+    text = readFileSync(path, "utf8");
+  } catch (error) {
+    if ((error as NodeJS.ErrnoException).code === "ENOENT") return undefined;
+    throw error;
+  }
+  if (Buffer.byteLength(text) > 64 * 1024) throw new Error(`${VERIFICATION_SCOPE_FILE} exceeds 64 KiB`);
+  const value = JSON.parse(text);
+  if (!object(value) || value.version !== 1 || Object.keys(value).some(k => !["version", "inputs", "outputs"].includes(k)))
+    throw new Error(`${VERIFICATION_SCOPE_FILE} must be {"version":1,"inputs":[...],"outputs"?:[...]}`);
+  return { inputs: scopePaths(value.inputs, "inputs", true), outputs: scopePaths(value.outputs, "outputs", false) };
+}
+
+const within = (key: string, path: string) => key === path || key.startsWith(`${path}/`);
+
 /** Cwd tree bytes/modes, including untracked/ignored files, excluding only .git metadata.
  * No git/shell execution, environment fingerprint, cache, or claim of full reproducibility.
- * Refuse symlinks/special files and oversized trees rather than omit relevant inputs. */
+ * Refuse symlinks/special files and oversized trees rather than omit relevant inputs.
+ * A committed verification scope narrows the tree to its declared inputs minus its outputs. */
 export function workspaceIdentity(cwd: string): string {
   const actualCwd = realpathSync(cwd), digest = createHash("sha256");
   let root = actualCwd;
@@ -93,6 +130,11 @@ export function workspaceIdentity(cwd: string): string {
     catch (e) { if ((e as NodeJS.ErrnoException).code !== "ENOENT") throw e; }
     if (dirname(directory) === directory) break;
   }
+  const scope = readVerificationScope(root);
+  // The scope file itself is always an input, so editing it revokes acceptance.
+  const inputs = scope ? [...scope.inputs, `/${VERIFICATION_SCOPE_FILE}`] : undefined;
+  const skip = (key: string) => !!scope && (scope.outputs.some(path => within(key, path))
+    || !inputs!.some(path => within(key, path) || within(path, key)));
   let files = 0, bytes = 0;
   const visit = (directory: string, relative: string, depth: number) => {
     if (depth > 64) throw new Error("Workspace identity depth limit exceeded");
@@ -105,7 +147,7 @@ export function workspaceIdentity(cwd: string): string {
       }
     } finally { handle.closeSync(); }
     for (const name of names.sort()) {
-      if (name === ".git") continue;
+      if (name === ".git" || skip(`${relative}/${name}`)) continue;
       if (++files > 20_000) throw new Error("Workspace identity file limit exceeded");
       const path = join(directory, name), key = `${relative}/${name}`, s = lstatSync(path);
       if (s.isSymbolicLink() || !s.isDirectory() && !s.isFile()) throw new Error(`Workspace identity unsupported entry: ${key}`);
@@ -125,7 +167,7 @@ export function workspaceIdentity(cwd: string): string {
       }
     }
   };
-  digest.update(JSON.stringify({ root, cwd: actualCwd })); visit(root, "", 0); return digest.digest("hex");
+  digest.update(JSON.stringify({ root, cwd: actualCwd, ...(scope ? { scope } : {}) })); visit(root, "", 0); return digest.digest("hex");
 }
 
 /** Adapted from upstream applyTypedVerifyOutput. Literal streams are never trimmed. */
