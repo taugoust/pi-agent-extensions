@@ -1139,10 +1139,13 @@ export class TuiNativeManager {
   }
   taskList(owner: string): any[] {
     const tasks = new Map<string, any>();
-    for (const g of this.groups.values()) if (g.owner === owner) for (const c of g.children) tasks.set(c.taskId,
-      { task_id: c.taskId, child_id: c.childId, attempt: c.attempt ?? 1, state: active(c) && c.state !== "waiting" ? "running" : "idle", title: this.canonicalTitle(c),
+    // Load order is group-ID order, not chronology: keep each task's highest attempt, as byChild() does.
+    for (const g of this.groups.values()) if (g.owner === owner) for (const c of g.children) {
+      if ((tasks.get(c.taskId)?.attempt ?? 0) > (c.attempt ?? 1)) continue;
+      tasks.set(c.taskId, { task_id: c.taskId, child_id: c.childId, attempt: c.attempt ?? 1, state: active(c) && c.state !== "waiting" ? "running" : "idle", title: this.canonicalTitle(c),
         outcome: (c.lastOutcome as any)?.state, execution: c.state, can_resume: !active(c), checkpointed: (c.lastOutcome as any)?.state === "checkpointed",
         requires_compaction: c.requiresCompaction, summary: (c.lastOutcome as any)?.summary, next_action: (c.lastOutcome as any)?.next_action, updated_at: g.createdAt });
+    }
     return [...tasks.values()].reverse().slice(0, 50);
   }
   async jobs(owner: string, taskId: string, params: unknown): Promise<any> {
