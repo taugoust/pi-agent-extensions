@@ -23,7 +23,7 @@ function fixture() {
 			id: "gpt-6-luna",
 			api: "openai-responses",
 		},
-		guard = { provider: "idle-guard", id: "astra" };
+		guard = { provider: "session-follow", id: "astra", api: "pi-virtual" };
 	let sessionId = "parent";
 	const ctx = {
 		hasUI: false,
@@ -160,9 +160,9 @@ test("mutation replay is idempotent, conflicting replay and concurrent send reje
 	f.service.dispose();
 	await turn();
 });
-test("unavailable models and guarded alias never fallback; wrong identity and invalid fields rejected", () => {
+test("unavailable and virtual models never fallback; wrong identity and invalid fields rejected", () => {
 	const f = fixture();
-	for (const model of ["idle-guard/astra", "missing/model"])
+	for (const model of ["session-follow/astra", "missing/model"])
 		assert.throws(
 			() => f.service.handle(f.request("start", { model })),
 			/unavailable/,

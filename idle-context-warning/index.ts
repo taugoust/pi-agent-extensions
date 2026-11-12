@@ -7,7 +7,6 @@ import { getSessionRoutingProfile, onSessionRoutingChanged } from "../shared/ses
 import { installWakeAdmission } from "../shared/idle-admission.ts";
 import { AdmissionLane, type AdmissionDetails, type Choice, type PendingAdmission } from "./admission.ts";
 import { FORCE_CHEAP_COMPACTION_KEY, registerCompaction } from "./compaction.ts";
-import { installLegacyMigration } from "./migration.ts";
 import { lastModelActivity, shouldWarn, warningTitle, type Config } from "./policy.ts";
 export { lastModelActivity, shouldWarn } from "./policy.ts";
 export const REMOTE_PREFLIGHT_KEY = "__piIdleContextPreflightV1";
@@ -19,7 +18,8 @@ export function readConfig(path = configPath(), strict = false): Config {
     const parsed = mergeExtensionSettings(readExtensionDefaults("idle-context-warning"), readPreferenceDocument(path));
     if (!parsed || typeof parsed !== "object" || Array.isArray(parsed)) throw new Error("Configuration must be an object");
     const valid = (value: unknown, fallback: number, max: number) => typeof value === "number" && Number.isFinite(value) && value >= 1 && value <= max ? value : fallback;
-    return { idleMinutes: valid(parsed.idleMinutes, 30, 1440), contextPercent: valid(parsed.contextPercent, 20, 100), cheapCompactionModel: "cheapCompactionModel" in parsed ? parsed.cheapCompactionModel : "cheap", guardedModels: parsed.guardedModels };
+    return { idleMinutes: valid(parsed.idleMinutes, 30, 1440), contextPercent: valid(parsed.contextPercent, 20, 100),
+      cheapCompactionModel: "cheapCompactionModel" in parsed ? parsed.cheapCompactionModel : "cheap" };
   } catch (error) { if (strict) throw new Error(`Cannot read idle-context-warning.json: ${String(error)}`); return DEFAULTS; }
 }
 function isWorker(): boolean { return !!process.env.PI_SUBAGENT_ID || !!process.env.AGENTSH_SUBAGENT_ID; }
@@ -50,7 +50,7 @@ function decisionPort(ctx: ExtensionContext, info: AdmissionDetails): ((signal: 
   };
 }
 
-export default function (pi: ExtensionAPI, options: { readSettings?: () => Config; tombstonePath?: string } = {}) {
+export default function (pi: ExtensionAPI, options: { readSettings?: () => Config } = {}) {
   const settings = options.readSettings ?? (() => readConfig(configPath(), true));
   registerCompaction(pi, settings);
   let active: ExtensionContext | undefined;
@@ -261,8 +261,4 @@ export default function (pi: ExtensionAPI, options: { readSettings?: () => Confi
     if (persistSubmission(item, "pending")) scheduleSubmission(ctx, item);
     return { action: "handled" as const };
   });
-  // Registration still finishes before startup selection. Put the asynchronous
-  // migration session handler AFTER admission readiness, so migration/auth work
-  // cannot expose an unregistered admission service to notification timers.
-  installLegacyMigration(pi, settings, options.tombstonePath);
 }

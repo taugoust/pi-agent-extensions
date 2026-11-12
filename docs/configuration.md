@@ -37,7 +37,7 @@ The source settings modules are the authoritative accepted-value reference.
 | `extensions.workflows.settings.worktree` | `pi-worktree.json` | `worktreeRoot`; [schema](../workflows/worktree/settings.ts) |
 | `extensions.btw.settings.terminal` | `pi-btw.json` | `model`, `thinkingLevel`, `rememberThinkingLevelChanges`, `fullscreenCopyOnSelect`, `layout`, `sidePaneRatio`, `keybindings`; [schema](../btw/candidate/settings.ts) |
 | `extensions.btw.model` / `extensions.btw.settings.paseo` | `btw.json` | Paseo side-chat `model` only. It never changes the terminal side-chat's default model |
-| `extensions.idle-context-warning` named options / `.settings` | `idle-context-warning.json` | `idleMinutes`, `contextPercent`, `cheapCompactionModel`, `guardedModels`; [reader](../idle-context-warning/index.ts) |
+| `extensions.idle-context-warning` named options / `.settings` | `idle-context-warning.json` | `idleMinutes`, `contextPercent`, `cheapCompactionModel`; [reader](../idle-context-warning/index.ts) |
 | `extensions.subagent` model options / `.settings` | `subagent.json` | `defaultModel`, `defaultThinkingLevel` only; [reader](../subagent/config.ts) |
 | `modelTiers` | `model-tiers.json` | Per-provider `cheap`, `expensive`, `superintelligence` model IDs over the built-ins; [reader](../shared/model-tiers.ts) |
 | `extensions.slow-mode.enabledByDefault` / `.settings` | `slow-mode.json` | Startup review visibility; `/slow-mode` controls the session; [reader](../slow-mode/index.ts) |

@@ -12,7 +12,7 @@ function fixture(choice = "Ignore") {
   const pi: any = { on: (name: string, fn: Function) => (handlers[name] ??= []).push(fn), registerCommand: (name: string, command: any) => commands[name] = command,
     appendEntry: (customType: string, data: any) => branch.push({ type: "custom", id: `custom-${branch.length}`, parentId: branch.at(-1)?.id, customType, data }),
     events: { on: () => () => {}, emit() {} }, sendUserMessage: (...args: any[]) => { if (sendFailure) return Promise.reject(new Error("offline")); sent.push(args); return Promise.resolve(); }, registerVirtualModel() {} };
-  register(pi, { readSettings: () => ({ idleMinutes: 30, contextPercent: 20, cheapCompactionModel: "p/small" }), tombstonePath: "/nonexistent/idle-test" });
+  register(pi, { readSettings: () => ({ idleMinutes: 30, contextPercent: 20, cheapCompactionModel: "p/small" }) });
   const old = Date.now() - 3_600_000;
   let sessionId = "test";
   let branch: any[] = [{ type: "message", id: "old", parentId: null, message: { role: "assistant", model: "model", timestamp: old } }];

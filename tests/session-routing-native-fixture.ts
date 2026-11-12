@@ -27,9 +27,7 @@ export default async function fixture(pi: any) {
       readSettings: () => ({
         idleMinutes: 30,
         contextPercent: 20,
-        guardedModels: { astra: `${CODEX}/main-fixture` },
       }),
-      tombstonePath: process.env.PI_CODING_AGENT_DIR + "/aliases.json",
     });
   }
   const service = () => (globalThis as any)[ACCOUNT_CONTROLS_KEY];

@@ -17,7 +17,6 @@ const { default: accounts } = await load.import("../openai-accounts/accounts.ts"
 const oauth = await load.import("../openai-accounts/oauth.ts");
 const { AccountStore, InMemoryAccountStorageBackend } =
   await load.import("../openai-accounts/account-store.ts");
-const { installLegacyMigration } = await load.import("../idle-context-warning/migration.ts");
 const routing = await load.import("../shared/session-routing.ts");
 const CODEX = "openai-codex";
 const claims = (id) => ({ sub: id, "https://api.openai.com/auth": { chatgpt_account_id: id } });
@@ -63,10 +62,6 @@ test("actual AgentSession startup order and retained follower use coherent accou
         ...state, active: "Alpha",
         accounts: { Alpha: oauthCredential("alpha"), Work: oauthCredential("work") },
       }));
-      const settings = {
-        idleMinutes: 30, contextPercent: 20, guardedModels: { astra: `${CODEX}/main-fixture` },
-        cheapCompactionModel: "small-fixture:low",
-      };
       const text = (context) => context.messages.filter((m) => m.role === "user").at(-1)?.content;
       const factory = (refs) => (pi) => {
         for (const provider of ["openai", CODEX]) pi.registerProvider(provider, {
@@ -123,11 +118,7 @@ test("actual AgentSession startup order and retained follower use coherent accou
           registerProvider: (provider, config) => runtime.registerProvider(provider, config),
           on() {},
         });
-        if (!child) runtime.registerVirtualModel({
-          provider: "idle-guard", id: "astra", name: "Legacy idle alias", thinkingLevels: ["low"],
-          route() { throw new Error("Legacy alias is closed until migration resolves it"); },
-        });
-        const [provider, modelId] = child ? [CODEX, "small-fixture"] : ["idle-guard", "astra"];
+        const [provider, modelId] = child ? [CODEX, "small-fixture"] : [CODEX, "main-fixture"];
         const config = SettingsManager.inMemory({
           defaultProvider: provider, defaultModel: modelId, defaultThinkingLevel: "low",
           compaction: { enabled: false }, retry: { enabled: false },
@@ -136,9 +127,6 @@ test("actual AgentSession startup order and retained follower use coherent accou
           factory(refs),
           (pi) => accounts(pi, { store, providers: oauth.createBuiltinProviderAdapters() }),
         ];
-        // Legacy aliases are compatibility selections only; admission is provider-independent.
-        const aliases = join(root, "aliases.json");
-        if (!child) factories.push((pi) => installLegacyMigration(pi, () => settings, aliases));
         const loader = new DefaultResourceLoader({
           cwd: root, agentDir: root, settingsManager: config, noExtensions: true, noSkills: true,
           noPromptTemplates: true, noThemes: true, noContextFiles: true,

@@ -29,7 +29,7 @@ const base = {
   PI_SKIP_VERSION_CHECK: "1", PI_TELEMETRY: "0", ROUTING_FIXTURE_LOG: log,
 };
 const startModels = {
-  parent: ["idle-guard", "astra"],
+  parent: [CODEX, "main-fixture"],
   "plain-parent": ["openai", "main-fixture"],
 };
 

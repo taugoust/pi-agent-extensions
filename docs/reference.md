@@ -198,24 +198,13 @@ Thresholds and optional cheap compaction are configurable in `~/.pi/agent/extens
 {
   "idleMinutes": 30,
   "contextPercent": 20,
-  "cheapCompactionModel": "cheap",
-  "guardedModels": {
-    "astra": "openai/gpt-6-astra"
-  }
+  "cheapCompactionModel": "cheap"
 }
 ```
 
-`guardedModels` defaults to `{}`. Each key names a selectable `idle-guard/<key>` model; its value is the exact physical `provider/model` (without a thinking suffix). Select the guarded name, not the physical model, to enable the dispatch guard. The selection's thinking level is forwarded to the physical model. The cheap summary selector is independent and may include its own thinking suffix.
+`cheapCompactionModel` defaults to `cheap`, the cheap [model tier](#model-tiers) on the session's provider. Set it to `null` for normal Pi compaction. When configured, manual `/compact`, RPC/extension compaction, and automatic threshold/overflow compaction use this model **at or above `idleMinutes`**, regardless of context percentage or UI availability. Below that idle threshold, sessions compact normally with their selected conversation model. The 20% `contextPercent` gate applies only to the prompt warning. This setting alone does not trigger compaction merely because a session is idle and does not automatically choose an action in the warning. Explicit **Compact** requires a configured cheap model and never falls back to the conversation model.
 
-The guarded selection uses a virtual alias plus a private `idle-guard-proxy` provider. The proxy checks idle state again immediately before delegating to the real model registry, including after Pi's automatic-compaction awaits. It also rechecks in the provider's `onPayload` callback after authentication and earlier payload callbacks, before the HTTP send. Custom physical providers must honor Pi's documented `onPayload`-before-send contract, as the built-in providers do. It does not replace the real provider: real credentials, headers, usage and physical response identity stay with that provider. Do not select the private proxy directly. For guarded selections, the idle threshold is independent of `contextPercent`, and the prompt-choice warning is bypassed—the guard, not a dialog choice, controls dispatch.
-
-Cold requests stop locally. Recovery uses native cheap compaction after the run settles; the gate reopens only after validating the persisted compaction and recording its authorization. Cancellation, failed summaries and intervening session/input changes leave the gate closed. Failed/cancelled compaction latches survive reload and do not repeatedly call the cheap model on subsequent input. Fix the cause and use `/idle-guard-retry` to retry compaction without bypassing the gate. Selecting the unguarded physical model explicitly bypasses this protection.
-
-Alias names are remembered in additive files under `~/.pi/agent/idle-guard-aliases.json.d/` so removing a mapping leaves a closed alias rather than silently restoring the last physical model. Keep this runtime state and the extension installed while restoring guarded sessions; disabling/removing the extension itself is outside the guard's protection.
-
-`cheapCompactionModel` defaults to `cheap`, the cheap [model tier](#model-tiers) on the session's provider. Set it to `null` for normal Pi compaction. When configured, manual `/compact`, RPC/extension compaction, and automatic threshold/overflow compaction use this model **at or above `idleMinutes`**, regardless of context percentage or UI availability. Below that idle threshold, unguarded selections compact normally with their selected conversation model. Guarded selections preserve the same warm policy: native automatic/manual compaction uses their exact underlying physical conversation model and selected thinking level, without routing through the alias. Cold compaction and explicit guard recovery use `cheapCompactionModel`. A warm summary that crosses the idle deadline during authentication or payload preparation cancels locally rather than sending cold history; the gate stays closed until explicit recovery succeeds. The 20% `contextPercent` gate applies only to the prompt warning. For unguarded selections, this setting alone does not trigger compaction merely because a session is idle and does not automatically choose an action in the warning. Explicit **Compact** requires a configured cheap model and never falls back to the conversation model. Guarded selections start recovery when a cold request reaches their dispatch gate.
-
-The selector is a tier or a model ID, optionally with `:thinking`; provider and selected account follow the owning session's effective physical provider, including when the main selection is an idle-guard alias. Legacy qualified `provider/model[:thinking]` preferences remain readable but cannot pin another provider. Thinking defaults to `low`; supported suffixes are `off`, `minimal`, `low`, `medium`, `high`, `xhigh`, and `max`. The resolved model must be a direct physical model with sufficient context capacity. Missing models/authentication fail explicitly, without switching provider/account, inferring prices, or truncating the prepared conversation to fit.
+The selector is a tier or a model ID, optionally with `:thinking`; provider and selected account follow the owning session's physical provider. Legacy qualified `provider/model[:thinking]` preferences remain readable but cannot pin another provider. Thinking defaults to `low`; supported suffixes are `off`, `minimal`, `low`, `medium`, `high`, `xhigh`, and `max`. The resolved model must be a direct physical model with sufficient context capacity. Missing models/authentication fail explicitly, without switching provider/account, inferring prices, or truncating the prepared conversation to fit.
 
 The conversation model and thinking level remain unchanged. Cheap compaction reuses Pi's native algorithm and the event's prepared token budgets, retained-message boundary, previous summary, custom instructions, split-turn handling, file tracking, and usage accounting. Credentials and provider headers are resolved through Pi's model registry. Cumulative native file lists survive subsequent cheap or normal compactions while the extension is enabled. Idle time always comes from the latest non-error, non-aborted model response on the active persisted branch, including restored sessions; failed routing/provider requests, user/tool activity, cache warming, and compaction itself do not reset it.
 
@@ -227,7 +216,6 @@ Home Manager installs the extension's helpers and generates the JSON selector:
 programs.pi.extensions.idle-context-warning = {
   enable = true;
   cheapCompactionModel = "cheap"; # tier or model ID, nullable; default "cheap"
-  guardedModels.astra = "openai/gpt-6-astra"; # attrs of exact model IDs; default {}
 };
 ```
 

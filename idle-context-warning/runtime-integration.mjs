@@ -44,7 +44,6 @@ async function fixture(options = {}) {
   const settings = SettingsManager.inMemory({ compaction: { enabled: false, keepRecentTokens: 128 }, retry: { enabled: false }, cacheWarming: 'off' });
   const modelRuntime = await ModelRuntime.create({ authPath: join(dir, 'auth.json'), modelsPath: null, modelsStorePath: join(dir, 'models'), allowModelNetwork: false, refreshOnCreate: false });
   let ctx, quiet;
-  const aliases = options.alias ? { role: 'probe/model' } : undefined;
   const extension = pi => {
     for (const provider of ['probe', 'small']) pi.registerProvider(provider, {
       api: 'openai-completions', apiKey: 'fake', baseUrl: 'https://invalid.invalid',
@@ -62,7 +61,7 @@ async function fixture(options = {}) {
         return stream;
       },
     });
-    idle(pi, { readSettings: () => ({ idleMinutes: 1, contextPercent: 20, cheapCompactionModel: 'probe/small-model:off', guardedModels: aliases }), tombstonePath: join(dir, 'legacy-aliases.json') });
+    idle(pi, { readSettings: () => ({ idleMinutes: 1, contextPercent: 20, cheapCompactionModel: 'probe/small-model:off' }) });
     quiet = installQuietState(pi, 1);
     pi.on('session_start', (_event, context) => { ctx = context; });
     pi.on('message_end', event => stats.messages.push(event.message));
@@ -74,16 +73,15 @@ async function fixture(options = {}) {
   manager.appendMessage({ ...response(), timestamp: Date.now() - 120000 });
   manager.appendMessage({ role: 'user', content: 'Recent request '.repeat(40), timestamp: Date.now() - 119999 });
   manager.appendMessage({ ...response(), timestamp: Date.now() - 119998 });
-  manager.appendModelChange(options.alias ? 'idle-guard' : 'probe', options.alias ? 'role' : 'model');
+  manager.appendModelChange('probe', 'model');
   const loader = new DefaultResourceLoader({ cwd: dir, agentDir: dir, settingsManager: settings, noExtensions: true, noSkills: true, noPromptTemplates: true, noThemes: true, noContextFiles: true, extensionFactories: [extension] });
   await loader.reload();
-  const model = modelRuntime.getModel(options.alias ? 'idle-guard' : 'probe', options.alias ? 'role' : 'model');
+  const model = modelRuntime.getModel('probe', 'model');
   const { session } = await createAgentSession({ cwd: dir, agentDir: dir, modelRuntime, model, sessionManager: manager, settingsManager: settings, resourceLoader: loader, noTools: 'builtin' });
   await session.bindExtensions({ mode: 'rpc', onError: error => stats.errors.push(error) });
   // Extension registrations become available through the bound runtime. Select
   // only synthetic catalog models; no provider defaults or host credentials.
-  await session.setModel(modelRuntime.getModel(options.alias ? 'idle-guard' : 'probe', options.alias ? 'role' : 'model'));
-  if (options.alias) await session.prompt('/idle-context-migrate');
+  await session.setModel(modelRuntime.getModel('probe', 'model'));
   return { dir, session, get ctx() { return ctx; }, manager, stats, get quiet() { return quiet; }, get capability() { return globalThis[REMOTE_PREFLIGHT_KEY]; },
     async close() {
       await session.abort(); session.dispose(); await modelRuntime.dispose?.();
@@ -237,13 +235,6 @@ test('result read before autonomous wake admission suppresses the stale completi
     f.quiet.enqueue(f.ctx, { kind: 'job', id: 'read-first', completion: true });
     f.quiet.consume(f.ctx, 'job', 'read-first');
     await tick(); assert.equal(f.capability.pending, undefined); assert.equal(f.stats.physical, 0);
-  } finally { await f.close(); }
-});
-test('legacy selected alias resolves through public model selection, no proxy/provider request', async () => {
-  const f = await fixture({ alias: true }); try {
-    assert.equal(f.session.model.provider, 'probe'); assert.equal(f.session.model.id, 'model');
-    assert.equal(f.stats.physical, 0); assert.equal(f.stats.summary, 0);
-    assert.equal(f.manager.getBranch().findLast(e => e.type === 'model_change').provider, 'probe');
   } finally { await f.close(); }
 });
 test('reload restores durable pending submission but never reuses approval', async () => {

@@ -30,14 +30,6 @@ Producer-confirmed terminal completions, identity-bound child idle-decision cont
 
 Replay requires a newly persisted matching compaction receipt, not only a callback. Failed, empty, partial, tool-calling or aborted summaries cancel; they never silently fall back to the expensive conversation model. Conversation model/thinking, instructions, retained boundary, usage and cumulative file tracking are preserved. Branch summarization is a different operation, not owned by this extension.
 
-## Legacy alias migration
-
-`guardedModels` is now a **migration mapping**, not a dispatch policy. Known `idle-guard/<name>` (and old proxy) selections resolve through the existing session account/provider routing and public `setModel`/thinking APIs at session start. Explicit physical selections are not changed; startup defaults are not rewritten by the extension. `/idle-context-migrate` retries a failed migration after credentials/configuration are corrected.
-
-Temporary **closed virtual placeholders** preserve old selections during startup and prevent stock Pi from silently falling back to the last answering physical/proxy model. They never route a request. Removed/unknown remembered aliases remain closed until an explicit mapping is supplied. The extension reads old alias tombstones but creates no new ones. Keep these compatibility placeholders until existing/default/imported selections have been inventoried and migrated.
-
-`planSettingsMigration(settings, aliases)` is a pure migration planner for supplied settings: defaults, exact model scopes, per-model thinking and compaction overrides. It rejects ambiguous patterns, unknown aliases and conflicting mapped values, never edits files/accounts or live sessions. Deployment review must apply reviewed configuration changes separately and retain mappings for old sessions. Historical summaries/usage/proofs remain audit records; old guard proofs no longer authorize anything. `/idle-guard-retry` and automatic guard-error/summary/resume behavior are removed.
-
 ## Supported stock Pi boundary
 
 Target: **unmodified stock Pi 1.4.0 / Node 24.21.0**.

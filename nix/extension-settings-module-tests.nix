@@ -20,14 +20,7 @@ let
     extensions.idle-context-warning = {
       enable = true;
       idleMinutes = 40;
-      guardedModels = {
-        retained = "fixture/retained";
-        override = "fixture/named";
-      };
-      settings = {
-        idleMinutes = 12;
-        guardedModels.override = "fixture/raw";
-      };
+      settings.idleMinutes = 12;
     };
     extensions.subagent = {
       enable = true;
@@ -121,11 +114,7 @@ assert
     "npm:second-fixture"
   ];
 assert idle.idleMinutes == 12 && idle.contextPercent == 20;
-assert
-  idle.guardedModels == {
-    retained = "fixture/retained";
-    override = "fixture/raw";
-  };
+assert !(idle ? guardedModels);
 assert subagent == {
   defaultModel = "raw-model";
   defaultThinkingLevel = "low";

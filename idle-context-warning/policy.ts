@@ -1,4 +1,4 @@
-export type Config = { idleMinutes: number; contextPercent: number; cheapCompactionModel?: unknown; guardedModels?: unknown };
+export type Config = { idleMinutes: number; contextPercent: number; cheapCompactionModel?: unknown };
 
 // Use persisted model responses, not process uptime, user input, tools, cache
 // warming, or compaction entries. This also works after reload/resume/fork.

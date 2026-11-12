@@ -55,7 +55,6 @@ let
         idleMinutes
         contextPercent
         cheapCompactionModel
-        guardedModels
         ;
     };
     slow-mode = { inherit (cfg.extensions.slow-mode) enabledByDefault; };
@@ -320,11 +319,6 @@ in
               type = lib.types.ints.between 1 100;
               default = 20;
               description = "Minimum used context percentage for an idle warning.";
-            };
-            guardedModels = lib.mkOption {
-              type = lib.types.attrsOf lib.types.str;
-              default = { };
-              description = "Legacy idle-guard alias mappings used only to migrate saved selections to physical models. Idle admission does not route provider requests.";
             };
             cheapCompactionModel = lib.mkOption {
               type = lib.types.nullOr lib.types.str;
