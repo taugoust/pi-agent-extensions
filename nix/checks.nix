@@ -5381,38 +5381,6 @@ in
             await server.close();
           }
 
-          // Guidance tools only explain AgentSH-owned grants and do not mutate local Pi policy or call the socket.
-          {
-            clearAgentSHEnv();
-            const server = await withApprovalServer(async () => ({ ok: true, approvals: [] }));
-            setAgentSHEnv(server.socketPath);
-            const pi = createPi();
-            sandbox(pi);
-            const ctx = createContext();
-            await startSession(pi, ctx);
-            const requestCountAfterStartup = server.requests.length;
-
-            const toolInputs = new Map([
-              ["sandbox_allow_path", { path: "/tmp/out.txt", reason: "write test" }],
-              ["sandbox_allow_read_path", { path: "/tmp/in.txt", reason: "read test" }],
-              ["sandbox_allow_domain", { domain: "example.org", reason: "network test" }],
-              ["sandbox_allow_unix_socket", { path: "/tmp/sock", reason: "socket test" }],
-            ]);
-            for (const [name, params] of toolInputs) {
-              const tool = pi.tools.get(name);
-              assert(tool, "missing registered guidance tool: " + name);
-              const result = await tool.execute("tool-call", params);
-              const text = result.content?.[0]?.text ?? "";
-              assert(text.includes("AgentSH owns"), name + " did not explain AgentSH-owned enforcement");
-              assert(text.includes("does not mutate local sandbox policy"), name + " did not say local policy is untouched");
-              assert(text.includes("Retry the blocked operation"), name + " did not guide retry flow");
-            }
-
-            assert(server.requests.length === requestCountAfterStartup, "guidance tools unexpectedly called approval socket");
-            assert(!fs.existsSync(path.join(process.cwd(), ".pi", "sandbox.json")), "guidance tools unexpectedly wrote .pi/sandbox.json");
-            await shutdownSession(pi);
-            await server.close();
-          }
         }
 
         await main();

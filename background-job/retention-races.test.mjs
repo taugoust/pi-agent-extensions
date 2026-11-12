@@ -134,7 +134,18 @@ try {
   releasePreserve.resolve(); await cleanup; await expiry;
   assert.equal(deleted, true);
   assert.equal(await store.exists(store.jobDir(sessionId)), false);
-  console.log('background-job retention races passed: cross-process/dead-owner locks, reset-vs-expiry, no resurrection, snapshot completion, session preservation');
+  // A reap sent alongside cancel waits for the cancel to land instead of failing.
+  const reapBackend = {async paneState() { return {exists:true,dead:false}; }, async reap() {}};
+  const reaper = new BackgroundJobManager(store, reapBackend);
+  const stillRunning = await fixture(false);
+  await assert.rejects(reaper.reap(stillRunning), /still running; cancel it before reaping/);
+  await writeFile(join(store.jobDir(stillRunning), 'cancel-requested'), '', { mode: 0o600 });
+  const reaping = reaper.reap(stillRunning);
+  await pause(150);
+  await store.publishResult(stillRunning, { ...terminal, status: 'cancelled' });
+  await reaping;
+  assert.equal(await store.exists(store.jobDir(stillRunning)), false, 'reap after cancel left the job');
+  console.log('background-job retention races passed: cross-process/dead-owner locks, reset-vs-expiry, no resurrection, snapshot completion, session preservation, reap waits for cancel');
 } finally {
   if (child) { const exited = once(child, 'exit'); child.kill('SIGKILL'); await exited; }
   await rm(root, {recursive:true,force:true});

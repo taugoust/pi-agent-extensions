@@ -687,12 +687,28 @@ export class BackgroundJobManager {
   }
 
   async reap(id: string): Promise<void> {
+    await this.awaitCancellation(id);
     await this.store.withRetentionLock(() => this.reapLocked(id));
+  }
+
+  /** A reap issued alongside cancel waits for that cancel to finish instead of failing. */
+  private async awaitCancellation(id: string, timeoutMs = 5000): Promise<void> {
+    const cancelPath = join(this.store.jobDir(id), "cancel-requested");
+    const deadline = Date.now() + timeoutMs;
+    while (!(await this.store.readResult(id).catch(() => undefined))) {
+      if (!(await this.store.exists(cancelPath)) || Date.now() >= deadline) return;
+      await sleep(100);
+    }
   }
 
   private async reapLocked(id: string): Promise<void> {
     const record = await this.get(id);
-    if (!record.result) throw new Error(`Background job ${id} is not terminal; cancel it first`);
+    if (!record.result) {
+      const cancelling = await this.store.exists(join(this.store.jobDir(id), "cancel-requested"));
+      throw new Error(cancelling
+        ? `Background job ${id} is still being cancelled; reap it again once it has stopped`
+        : `Background job ${id} is still running; cancel it before reaping`);
+    }
     if (await this.commandProcess(id)) throw new Error(`Background job ${id} command is still running; cancel it first`);
     if (record.metadata.pane) await reapPane(await resolveExecutable('tmux'), record.metadata.pane);
     if (record.launch) {

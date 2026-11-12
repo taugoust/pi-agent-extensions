@@ -11,6 +11,7 @@ import {
 	prepareProgressArguments,
 	reconstructProgress,
 	reconcileProgressContext,
+	validateProgressMutation,
 } from "../progress/progress-state.ts";
 
 function fixture(mode = "rpc") {
@@ -233,4 +234,12 @@ test('Paseo stamp projection honors metadata/thinking/timing visibility preferen
  expect(stampRecords(entries)[0].model).toBe('astra');
  const hidden = stampRecords(entries,{...DEFAULT_STAMP_SETTINGS,assistantMetadata:'off',responseTiming:'off'})[0];
  expect(hidden.model).toBeUndefined();expect(hidden.thinking).toBeUndefined();expect(hidden.completedAt).toBeUndefined();
+});
+
+test("update_progress create takes an optional token budget and rejects invalid ones", () => {
+	const base = { action: "create", objective: "Ship it", request_id: "budget", steps: [] };
+	expect(validateProgressMutation({ ...base, token_budget: 5000 })).toMatchObject({ token_budget: 5000 });
+	expect("token_budget" in validateProgressMutation(base)).toBe(false);
+	expect(() => validateProgressMutation({ ...base, token_budget: 0 })).toThrow(/token_budget/);
+	expect(() => validateProgressMutation({ ...base, token_budget: 1.5 })).toThrow(/token_budget/);
 });

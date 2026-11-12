@@ -1756,9 +1756,8 @@ nix shell nixpkgs#nodejs --command node sandbox/mock-supervisor-check.mjs
 - detached supervisors support `shadow` and `direct` workspace modes here;
   `overlay`/`auto` are intentionally not used by this extension for Stage 1.
 
-The guidance tools (`sandbox_allow_path`, `sandbox_allow_read_path`,
-`sandbox_allow_domain`, and `sandbox_allow_unix_socket`) remain as explanations
-only; they do not grant access or write local policy files.
+There are no tools for requesting access. When AgentSH denies a command, the
+error says so, and retrying it asks the user for approval when policy allows it.
 
 </details>
 <details>

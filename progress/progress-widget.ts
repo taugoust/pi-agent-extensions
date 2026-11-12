@@ -201,7 +201,7 @@ export default function progressWidgetExtension(pi: ExtensionAPI, dependencies: 
       }
       const validated = validateProgressMutation(params);
       const wasComplete = allProgressCompleted(steps);
-      const scoped = mutateProgress(pi, ctx, validated);
+      const scoped = mutateProgress(pi, ctx, validated, validated.action === "create" ? validated.token_budget : undefined);
       // A durable retry returns its original receipt, not a rollback of the live UI.
       const nextSteps = reconstructProgress(ctx.sessionManager.getBranch());
       cancelCompletionSummary();
