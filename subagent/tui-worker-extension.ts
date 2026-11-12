@@ -524,8 +524,10 @@ export default async function tuiWorkerExtension(pi: ExtensionAPI): Promise<void
       notificationTimes = notificationTimes.filter(time => time > Date.now() - 60_000);
       if (notificationTimes.length >= 5) throw new Error("At most five findings per minute; batch updates or retain them for the final report");
       notificationTimes.push(Date.now());
-      worker.notification({ message: params.message, requires_guidance: params.requires_guidance === true });
-      return { content: [{ type: "text", text: "Queued for the parent; no reply yet." }], details: {} };
+      const requires_guidance = params.requires_guidance === true;
+      const notification_id = worker.notification({ message: params.message, requires_guidance });
+      // Same receipt as the RPC path. Accepted means recorded, not delivered to or answered by the parent.
+      return { content: [{ type: "text", text: "Queued for the parent; no reply yet." }], details: { notification_id, accepted: true, requires_guidance } };
     } });
   pi.registerTool({ name: "verify", label: "Verify task", description: "Run and await the configured runtime verification gates. Aborting cancels only a verification flight this tool started; joining an existing check stops only this wait. Does not authorize or imply accepted delivery.", parameters: { type: "object", properties: {}, additionalProperties: false }, async execute(_id, _params, signal?: AbortSignal) {
     if (!worker || worker.sealed) throw new Error("Worker verification unavailable");

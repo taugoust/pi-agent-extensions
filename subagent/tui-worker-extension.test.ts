@@ -165,7 +165,14 @@ test("final boundary continues routine partial once, never blockers, errors or i
       const outcome = { version: 1, state, summary: "Work remains", acceptance: [], artifacts: [], remaining: ["test"], next_action: "Run tests",
         ...(state === "partial" && scenario !== "legacy-partial" ? { continuation: scenario === "needs-input" ? "needs_input" : "routine" } : {}) };
       await tools.get("task_outcome").execute("outcome", outcome);
-      if (scenario === "guidance") await tools.get("notify_parent").execute("notify", { message: "Need decision", requires_guidance: true });
+      if (scenario === "guidance") {
+        const receipt = await tools.get("notify_parent").execute("notify", { message: "Need decision", requires_guidance: true });
+        // Same receipt shape as the RPC path; the ID is the one the parent retains the finding under.
+        assert.deepEqual(Object.keys(receipt.details).sort(), ["accepted", "notification_id", "requires_guidance"]);
+        assert.equal(receipt.details.accepted, true);
+        assert.equal(receipt.details.requires_guidance, true);
+        assert.equal(receipt.details.notification_id, `${manifest.groupId}:${manifest.childId}:${store.readState().sequence}`);
+      }
       if (scenario === "ui") handlers.get("ui_prompt_start")!({}, ctx);
       if (scenario === "user-input") {
         handlers.get("input")!({ text: "User intervention", source: "interactive" }, ctx);

@@ -207,10 +207,12 @@ export class TuiWorkerServer {
     while (end > 0 && end < bytes.length && (bytes[end]! & 0xc0) === 0x80) end--;
     this.currentLiveText = bytes.subarray(0, end).toString("utf8");
   }
-  notification(data: unknown): void {
+  /** Records a notification for the parent and returns the ID the parent will retain it under. */
+  notification(data: unknown): string {
     if ((data as any)?.requires_guidance === true) this.inhibitAutoContinuation();
     const artifact = this.store.artifact("notification", this.state.sequence + 1, data);
     this.event("notification", { artifact });
+    return `${this.manifest.groupId}:${this.manifest.childId}:${this.state.sequence}`;
   }
   async outcome(data: unknown, signal?: AbortSignal): Promise<void> {
     if (signal?.aborted) throw new Error("Outcome tool cancelled before recording; worker state is unchanged");

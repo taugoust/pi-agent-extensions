@@ -75,7 +75,9 @@ assert.equal(rateReload.messages.length,0,'guidance rate limit did not persist a
 // Retained notifications are available to operators without model delivery.
 entries=[];sessionName=`quiet-notes-${process.pid}`;const notesFixture=fixture();const quietNotes=installQuietState(notesFixture.pi,5);await notesFixture.emit('session_start');
 const child='subagent-child-'+'a'.repeat(24);const owner=ctx.sessionManager.getSessionId();
-notifyParent(owner,child,'finding',{message:'A concise discovery'});
+const rpcReceipt=notifyParent(owner,child,'finding',{message:'A concise discovery'});
+assert.deepEqual(Object.keys(rpcReceipt.details).sort(),['accepted','notification_id','requires_guidance'],'RPC receipt shape');
+assert.equal(rpcReceipt.details.accepted,true);assert.equal(rpcReceipt.details.requires_guidance,false);
 entries.find(e=>e.customType==='harness-child-notification').data.update.displayName='Canonical Review';
 assert.equal(notesFixture.messages.length,0,'routine child finding woke the model');
 await notesFixture.commands.get('harness-state').handler('show',ctx);
