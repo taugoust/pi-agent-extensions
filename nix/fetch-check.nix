@@ -22,11 +22,12 @@ pkgs.runCommand "fetch-extension-check"
     mkdir -p "$workdir/src/fetch" "$workdir/src/sandbox" "$workdir/src/shared" "$workdir/out"
     cp ${self}/fetch/backend.ts "$workdir/src/fetch/backend.ts"
     cp ${self}/fetch/native.ts "$workdir/src/fetch/native.ts"
+    cp ${self}/fetch/response.ts "$workdir/src/fetch/response.ts"
     cp ${self}/sandbox/api.ts "$workdir/src/sandbox/api.ts"
     cp ${self}/shared/agentsh-mode.ts "$workdir/src/shared/agentsh-mode.ts"
     printf '%s\n' '{"type":"module"}' > "$workdir/src/package.json"
     tsc --noCheck --skipLibCheck --module nodenext --moduleResolution nodenext --target es2022 \
-      --rootDir "$workdir/src" --outDir "$workdir/out" "$workdir/src/fetch/backend.ts" "$workdir/src/fetch/native.ts" "$workdir/src/sandbox/api.ts" "$workdir/src/shared/agentsh-mode.ts"
+      --rootDir "$workdir/src" --outDir "$workdir/out" "$workdir/src/fetch/backend.ts" "$workdir/src/fetch/native.ts" "$workdir/src/fetch/response.ts" "$workdir/src/sandbox/api.ts" "$workdir/src/shared/agentsh-mode.ts"
 
     cat > "$workdir/test.mjs" <<'EOF'
     import assert from "node:assert/strict";
@@ -39,6 +40,7 @@ pkgs.runCommand "fetch-extension-check"
 
     const backend = await import(pathToFileURL(path.join(process.argv[2], "fetch/backend.js")).href);
     const native = await import(pathToFileURL(path.join(process.argv[2], "fetch/native.js")).href);
+    const response = await import(pathToFileURL(path.join(process.argv[2], "fetch/response.js")).href);
     const mode = await import(pathToFileURL(path.join(process.argv[2], "shared/agentsh-mode.js")).href);
     const nativeStartup = mode.classifyAgentSHStartup({});
     const fullStartup = mode.classifyAgentSHStartup({ PI_SUPERVISED: "1" });
@@ -140,11 +142,26 @@ pkgs.runCommand "fetch-extension-check"
     await assert.rejects(native.executeNativeFetch({ ...nativeCommon, url: base + "/large", maxBodyBytes: 100, outputPath: nativeOutput }), /exceeded maxBodyBytes/);
     assert.equal(fs.readFileSync(nativeOutput, "utf8"), "old");
     const outsideParent = path.join("/var/empty", "must-not-create", "nested");
-    await assert.rejects(native.executeNativeFetch({ ...nativeCommon, url: base + "/small", outputPath: path.join(outsideParent, "body") }), /restricted/);
+    await assert.rejects(native.executeNativeFetch({ ...nativeCommon, url: base + "/small", outputPath: path.join(outsideParent, "body") }), /fetch saves only under .*choose an outputPath there/);
     assert.equal(fs.existsSync(outsideParent), false, "rejected native outputPath created outside directories");
     const preAborted = new AbortController(); preAborted.abort();
     await assert.rejects(native.executeNativeFetch({ ...nativeCommon, url: base + "/small", signal: preAborted.signal }), /abort/i);
     await assert.rejects(native.executeNativeFetch({ ...nativeCommon, url: base + "/slow", timeoutMs: 50 }), /Timed out/);
+
+    // Shortened output keeps the downloaded bytes in a private file; a capped download is never complete.
+    const whole = await response.truncationNotes(Buffer.from("all of it"), false, true, 1024);
+    assert.equal(fs.readFileSync(whole.fullResponsePath, "utf8"), "all of it");
+    assert.equal(fs.statSync(whole.fullResponsePath).mode & 0o777, 0o600);
+    assert.match(whole.notes.join("\n"), /full downloaded response \(9 bytes\) is saved at/);
+    assert.doesNotMatch(whole.notes.join("\n"), /incomplete/);
+    const capped = await response.truncationNotes(Buffer.from("part"), true, true, 4);
+    assert.match(capped.notes[0], /stopped at maxBodyBytes \(4 bytes\); the response is incomplete/);
+    assert.match(capped.notes[1], /partial downloaded response/);
+    const cappedShown = await response.truncationNotes(Buffer.from("part"), true, false, 4);
+    assert.equal(cappedShown.fullResponsePath, undefined, "fully shown text needs no retained copy");
+    assert.equal(cappedShown.notes.length, 1);
+    const fits = await response.truncationNotes(Buffer.from("x"), false, false, 1024);
+    assert.deepEqual(fits, { notes: [] });
 
     await new Promise((resolve) => server.close(resolve));
     EOF

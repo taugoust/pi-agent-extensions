@@ -37,7 +37,10 @@ async function safeNativeOutputPath(cwd: string, requested: string): Promise<str
   const outputPath = resolve(cwd, requested);
   const lexicalRoot = resolve(tmpdir());
   if (outputPath !== lexicalRoot && !outputPath.startsWith(lexicalRoot + sep)) {
-    throw new Error(`Native fetch outputPath is restricted to ${lexicalRoot}${sep}`);
+    throw new Error(
+      `Without AgentSH, fetch saves only under ${lexicalRoot}${sep}; ` +
+        `choose an outputPath there, for example ${join(lexicalRoot, "download")}`,
+    );
   }
   const root = await realpath(lexicalRoot);
   let ancestor = dirname(outputPath);
