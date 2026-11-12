@@ -124,7 +124,7 @@ export default function rootTest(pi: ExtensionAPI) {
           const listedGuidance = await guidanceTool.execute(`root-guidance-list-${++sequence}`, { operation: "list", limit: 4 }, undefined, undefined, ctx);
           const records = JSON.parse(listedGuidance.content[0].text).records;
           const request = records.find((record: any) => record.childId === target.childId && record.workerEpoch === target.workerEpoch && record.status === "pending" && record.input.kind === "human");
-          if (request) interaction = { id: request.requestId, request: request.input.questionnaire, guidanceTarget: request.target };
+          if (request) interaction = { id: request.requestId, request: request.input.questionnaire, guidanceHandle: request.handle };
         }
         if (interaction) break;
       }
@@ -147,7 +147,7 @@ export default function rootTest(pi: ExtensionAPI) {
       }
       throw new Error(`Headless ${kind} adapter did not publish its typed pending request: ${JSON.stringify(diagnostic).slice(0, 20_000)}`);
     }
-    if (interaction.guidanceTarget) {
+    if (interaction.guidanceHandle) {
       // Test-only deterministic human UI adapter. Exercise the actual broker's
       // human operation; never submit a model reply as a human/permission answer.
       let asked = false;
@@ -161,7 +161,7 @@ export default function rootTest(pi: ExtensionAPI) {
         const value = Reflect.get(original, property);
         return typeof value === "function" ? value.bind(original) : value;
       } });
-      await guidanceTool.execute(`root-human-answer-${++sequence}`, { operation: "human", target: interaction.guidanceTarget }, undefined, undefined, humanContext);
+      await guidanceTool.execute(`root-human-answer-${++sequence}`, { operation: "human", handle: interaction.guidanceHandle }, undefined, undefined, humanContext);
       assert.equal(asked, true, "human guidance must invoke the top-level questionnaire adapter");
     } else {
       const receipt = await service.execute({ sessionId: service.sessionId, epoch: service.epoch, operation: "respond",
