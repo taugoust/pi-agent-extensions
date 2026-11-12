@@ -84,6 +84,19 @@ assert.equal(notesFixture.messages[0].options.triggerTurn,false);
 assert.match(notesFixture.messages[0].message.content,/Canonical Review: A concise discovery/);
 assert.doesNotMatch(notesFixture.messages[0].message.content,/subagent-child-/);
 
+// Native children are recorded only as receipts; show lists them too, once each, without a wake.
+const nativeChild='subagent-child-'+'d'.repeat(24);
+quietNotes.enqueue(ctx,{kind:'notification',id:'native-1',child_id:nativeChild,message:'native finding',requires_guidance:false});
+quietNotes.enqueue(ctx,{kind:'notification',id:'native-1',child_id:nativeChild,message:'native finding',requires_guidance:false});
+await pause(40);
+assert.equal(notesFixture.messages.length,1,'native routine finding woke the model');
+await notesFixture.commands.get('harness-state').handler('show',ctx);
+const shown=notesFixture.messages.at(-1).message.content;
+assert.match(shown,/Canonical Review: A concise discovery/);
+assert.equal(shown.match(/native finding/g)?.length,1,'native finding missing or duplicated');
+assert.equal(shown.match(/A concise discovery/g)?.length,1,'RPC finding duplicated by its receipt');
+notesFixture.messages.splice(1);
+
 // Dismissal requires an explicit scope and consumes only pending guidance, durably.
 const childA='subagent-child-'+'b'.repeat(24),childB='subagent-child-'+'c'.repeat(24);
 await notesFixture.emit('ui_prompt_start');
