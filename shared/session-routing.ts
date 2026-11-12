@@ -25,13 +25,11 @@ interface Registry {
   owners: WeakMap<object, Registration>;
   listeners: WeakMap<object, Set<() => void>>;
   seen: WeakMap<object, RoutingProfile>;
-  modelReferences: WeakMap<object, () => { provider: string; id: string } | undefined>;
   overrides?: WeakSet<object>;
 }
 const key = Symbol.for("pi-agent-extensions.session-routing.v1");
 const globals = globalThis as unknown as Record<symbol, Registry | undefined>;
-const registry = globals[key] ??= { owners: new WeakMap(), listeners: new WeakMap(), seen: new WeakMap(), modelReferences: new WeakMap() };
-registry.modelReferences ??= new WeakMap();
+const registry = globals[key] ??= { owners: new WeakMap(), listeners: new WeakMap(), seen: new WeakMap() };
 registry.overrides ??= new WeakSet();
 
 /** Explicit local choice is distinct from inherited routing, including accountId=null. */
@@ -63,7 +61,6 @@ export function inheritedSessionRoutingEnvironment(env: Environment = process.en
 }
 export const SESSION_ROUTING_FILE_ENV = "PI_SESSION_ROUTING_FILE";
 export const SESSION_ROUTING_OWNER_ENV = "PI_SESSION_ROUTING_OWNER_SESSION";
-export const SESSION_MODEL_REFERENCE_EVENT = "session-routing:configured-model-reference";
 const requestProfileKey = Symbol.for("pi-agent-extensions.session-routing.request.v1");
 
 /** Symbols survive internal model copies but are never serialized to a provider or transcript. */
@@ -75,7 +72,7 @@ export function getSessionModelRequestProfile(model: object): RoutingProfile | u
   return value === undefined ? undefined : validateRoutingProfile(value);
 }
 type Environment = Record<string, string | undefined>;
-const virtualProviders = new Set(["idle-guard", "idle-guard-proxy", "session-follow", "unknown"]);
+const virtualProviders = new Set(["session-follow", "unknown"]);
 
 export function validateRoutingProfile(value: unknown, expectedOwner?: string): RoutingProfile {
   const p = value as Partial<RoutingProfile> | null;
@@ -258,16 +255,12 @@ export function resolveSessionProvider(ctx: RoutingContext, fallbackProvider?: s
   throw new Error("No effective physical session provider; select a provider/model before starting helper work");
 }
 
-/** A virtual owner supplies its configured physical role, without dispatching it. */
-export function registerSessionModelReference(ctx: RoutingContext, resolver: () => { provider: string; id: string } | undefined): () => void {
-  registry.modelReferences.set(ctx.sessionManager, resolver);
-  return () => { if (registry.modelReferences.get(ctx.sessionManager) === resolver) registry.modelReferences.delete(ctx.sessionManager); };
-}
-
-/** Bootstrap only: the configured virtual target before a routing profile exists. */
-export function getConfiguredSessionModelReference(ctx: RoutingContext): { provider: string; id: string } | undefined {
-  if (ctx.model && ctx.model.api !== "pi-virtual" && !virtualProviders.has(ctx.model.provider)) return { provider: ctx.model.provider, id: ctx.model.id };
-  return registry.modelReferences.get(ctx.sessionManager)?.();
+/** The session's selected physical model, if it has one. */
+export function getConfiguredSessionModelReference(
+  ctx: RoutingContext,
+): { provider: string; id: string } | undefined {
+  const provider = physicalSessionProvider(ctx);
+  return provider ? { provider, id: ctx.model!.id } : undefined;
 }
 
 export function resolveSessionPhysicalModelReference(ctx: RoutingContext, snapshot?: RoutingProfile): { provider: string; id: string } {

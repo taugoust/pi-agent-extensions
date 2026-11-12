@@ -21,7 +21,7 @@ const { AccountStore, InMemoryAccountStorageBackend } = accountModule;
 const { createBtwService } = await load.import("../btw/service.ts");
 const {
   SESSION_ROUTING_FILE_ENV, SESSION_ROUTING_OWNER_ENV, prepareSessionRoutingRequest,
-  resolveSessionProvider, registerSessionModelReference, bindSessionModelRequest,
+  resolveSessionProvider, bindSessionModelRequest,
 } = routingModule;
 // A harness worker may inherit live routing descriptors. Fixtures own their routing
 // explicitly; never read or mutate the invoking worker's account/session state.
@@ -278,10 +278,6 @@ async function fixture(options = {}) {
     await fire("model_select", { model });
     return true;
   };
-  if (options.legacyBootstrap) {
-    ctx.model = { provider: "idle-guard", id: "astra", api: "pi-virtual" };
-    registerSessionModelReference(ctx, () => ({ provider: CODEX, id: ROLE }));
-  }
   let startupError;
   if (options.startSession !== false) {
     try {
@@ -608,18 +604,6 @@ test("failed routing history publication revokes descriptor and blocks main/help
       assert.equal(f.codexDelegated.length, 0);
     } finally { await dispose(f); }
   });
-
-test("legacy alias bootstraps account routing from an explicit physical model", async () => {
-  const f = await fixture({ legacyBootstrap: true });
-  try {
-    assert.equal(f.ctx.model.provider, "idle-guard",
-      "account bootstrap alone must not bypass explicit legacy migration");
-    const profile = routingModule.getSessionRoutingProfile(f.ctx);
-    assert.equal(profile.providerId, CODEX);
-    assert.equal(profile.accountId, null);
-    assert.equal(profile.ownerSessionId, f.sessionId);
-  } finally { await dispose(f); }
-});
 
 test("physical model selection publishes credential-free session routing and switches revise it",
   async () => {
@@ -1174,29 +1158,6 @@ test("an older session's openai selection is ignored on restore", async () => {
     assert.deepEqual(Object.keys(latest.data.providers), [CODEX]);
   } finally { await dispose(f); }
 });
-
-test("legacy idle alias migration retains the named account and uses ordinary Codex dispatch",
-  async () => {
-    const { installLegacyMigration } = await load.import("../idle-context-warning/migration.ts");
-    const f = await fixture();
-    try {
-      assert.equal((await switchRequest(f, "alpha", "migration-alpha")).ok, true);
-      installLegacyMigration(f.pi, () => ({
-        idleMinutes: 30, contextPercent: 20, guardedModels: { astra: `${CODEX}/${ROLE}` },
-      }), join(f.root, "aliases.json"));
-      f.ctx.model = { provider: "idle-guard", id: "astra", api: "pi-virtual" };
-      await f.fire("session_start");
-      assert.equal(f.ctx.model.provider, CODEX);
-      assert.equal(f.ctx.model.id, ROLE);
-      assert.equal((await snapshotOf(f)).currentAccountId, "alpha");
-      assert.equal(routingModule.getSessionRoutingProfile(f.ctx).providerId, CODEX);
-      const result = await dispatch(f, f.ctx.model);
-      assert.equal(result.stopReason, "stop", JSON.stringify(result));
-      assert.equal(f.codexDelegated.at(-1).apiKey, ALPHA);
-      assert.equal(f.registry.find("idle-guard-proxy", "astra").api, "pi-virtual",
-        "legacy proxy is only a closed migration sentinel");
-    } finally { await dispose(f); }
-  });
 
 test("Codex gate rejects a named grant replaced during pre-dispatch auth resolution", async () => {
   const f = await fixture();

@@ -14,7 +14,6 @@ const { createJiti } =
 const load = createJiti(import.meta.url);
 const accounts = await load.import("../openai-accounts/accounts.ts");
 const oauth = await load.import("../openai-accounts/oauth.ts");
-const { installLegacyMigration } = await load.import("../idle-context-warning/migration.ts");
 const { AccountStore, InMemoryAccountStorageBackend } = accounts;
 const {
   readSessionRoutingProfile, routingProfilePath, SESSION_ROUTING_FILE_ENV,
@@ -34,7 +33,7 @@ function codexToken(account = "sdk-codex") {
   return `${encode({ alg: "none" })}.${encode(claims)}.fixture`;
 }
 
-test("Pi SDK accounts startup preserves retained follower routing and legacy alias migration",
+test("Pi SDK accounts startup preserves retained follower routing",
   { timeout: 20_000 }, async () => {
     const root = await mkdtemp(join(tmpdir(), "pae-account-follower-sdk-"));
     const oldDir = process.env.PI_CODING_AGENT_DIR;
@@ -65,18 +64,10 @@ test("Pi SDK accounts startup preserves retained follower routing and legacy ali
       },
     }), { mode: 0o600 });
 
-    const makeSession = async (sessionDir, { guardedRoot = false } = {}) => {
+    const makeSession = async (sessionDir) => {
       await mkdir(sessionDir, { recursive: true });
       const runtime = await ModelRuntime.create({
         authPath, modelsPath: null, allowModelNetwork: false, refreshOnCreate: false,
-      });
-      if (guardedRoot) runtime.registerVirtualModel({
-        provider: "idle-guard", id: "astra", name: "Legacy idle alias",
-        thinkingLevels: ["low", "medium", "high"], input: ["text"], contextWindow: 32_000,
-        maxTokens: 4096,
-        route() {
-          throw new Error("Legacy aliases are closed until current migration resolves them");
-        },
       });
       const settings = SettingsManager.inMemory({
         defaultProvider: CODEX, defaultModel: "gpt-6-astra",
@@ -85,9 +76,6 @@ test("Pi SDK accounts startup preserves retained follower routing and legacy ali
       const providerFactory = (pi) => {
         pi.registerProvider(CODEX, codexProvider);
         accounts.default(pi, { store, providers: oauth.createBuiltinProviderAdapters() });
-        installLegacyMigration(pi, () => ({
-          idleMinutes: 30, contextPercent: 20, guardedModels: { astra: `${CODEX}/gpt-6-astra` },
-        }), join(sessionDir, "legacy-aliases.json"));
       };
       const codexProvider = {
         name: "SDK fixture Codex", api: "openai-codex-responses", baseUrl: BASE_URL,
@@ -129,15 +117,9 @@ test("Pi SDK accounts startup preserves retained follower routing and legacy ali
         resourceLoader: loader, sessionManager: SessionManager.inMemory(sessionDir),
         noTools: "builtin",
       });
-      if (guardedRoot) {
-        const alias = runtime.getModel("idle-guard", "astra");
-        assert.ok(alias, "closed migration sentinel exists before session binding");
-        await session.setModel(alias);
-      } else {
-        const roleModel = runtime.getModel(CODEX, "gpt-6-astra");
-        assert.ok(roleModel, "fixture role model exists in the actual SDK ModelRuntime");
-        await session.setModel(roleModel);
-      }
+      const roleModel = runtime.getModel(CODEX, "gpt-6-astra");
+      assert.ok(roleModel, "fixture role model exists in the actual SDK ModelRuntime");
+      await session.setModel(roleModel);
       const services = {
         cwd: sessionDir, agentDir: root, modelRuntime: runtime, settingsManager: settings,
         resourceLoader: loader, diagnostics: [],
@@ -152,7 +134,7 @@ test("Pi SDK accounts startup preserves retained follower routing and legacy ali
     };
 
     try {
-      rootBundle = await makeSession(root, { guardedRoot: true });
+      rootBundle = await makeSession(root);
       const rootSessionId = rootBundle.session.sessionManager.getSessionId();
       const parentModel = rootBundle.session.model;
       assert.equal(parentModel.provider, CODEX);

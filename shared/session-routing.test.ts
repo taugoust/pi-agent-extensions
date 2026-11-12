@@ -3,7 +3,7 @@ import assert from "node:assert/strict";
 import { chmodSync, mkdtempSync, readFileSync, rmSync, statSync, symlinkSync, unlinkSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { writeInheritedSessionRoutingProfile, readSessionRoutingProfile, getSessionRoutingProfile, isInheritedSessionRouting, notifySessionRoutingChanged, onSessionRoutingChanged, prepareSessionRoutingRequest, publishAgentSHRoutingBinding, releaseAgentSHRoutingBinding, readInheritedSessionRoutingProfile, registerSessionModelReference, registerSessionRouting, resolveSessionPhysicalModelReference, resolveSessionModelSelector, routingProfilePath, sessionRoutingEnvironment, validateRoutingProfile, writeSessionRoutingProfile, type RoutingProfile } from "./session-routing.ts";
+import { writeInheritedSessionRoutingProfile, readSessionRoutingProfile, getSessionRoutingProfile, isInheritedSessionRouting, notifySessionRoutingChanged, onSessionRoutingChanged, prepareSessionRoutingRequest, publishAgentSHRoutingBinding, releaseAgentSHRoutingBinding, readInheritedSessionRoutingProfile, registerSessionRouting, resolveSessionModelSelector, routingProfilePath, sessionRoutingEnvironment, validateRoutingProfile, writeSessionRoutingProfile, type RoutingProfile } from "./session-routing.ts";
 const context = (id: string, provider = "openai") => ({ model: { provider, id: "gpt-6-astra" }, sessionManager: { getSessionId: () => id } });
 function fixture(t: any) {
   const dir = mkdtempSync(join(tmpdir(), "session-routing-"));
@@ -21,7 +21,7 @@ test("role defaults and explicit legacy provider prefixes follow physical sessio
 });
 
 test("virtual selection resolves registered physical profile and does not affect another session", t => {
-  const dir = fixture(t), a = context("a", "idle-guard"), b = context("b", "idle-guard");
+  const dir = fixture(t), a = context("a", "session-follow"), b = context("b", "session-follow");
   const offA = registerSessionRouting(a, { file: routingProfilePath(dir, "a"), getProfile: () => profile("a", "openai-codex", "Work") });
   const offB = registerSessionRouting(b, { file: routingProfilePath(dir, "b"), getProfile: () => profile("b", "openai", "Personal") });
   t.after(offA); t.after(offB);
@@ -55,7 +55,7 @@ test("missing, corrupt and wrong-owner inherited routing never falls back", t =>
   writeFileSync(file, "{");
   assert.throws(() => getSessionRoutingProfile(ctx, env));
   assert.throws(() => sessionRoutingEnvironment(ctx, { PI_SESSION_ROUTING_FILE: file }), /Incomplete/);
-  assert.throws(() => validateRoutingProfile({ ...profile(), providerId: "idle-guard" }));
+  assert.throws(() => validateRoutingProfile({ ...profile(), providerId: "session-follow" }));
 });
 
 test("AgentSH request bindings follow the original owner without cross-session or ambient defaults", t => {
@@ -78,16 +78,10 @@ test("AgentSH request bindings follow the original owner without cross-session o
 });
 
 test("registered failed routing cannot fall back through the virtual alias bootstrap", async t => {
-  const ctx = context("failed", "idle-guard"), file = routingProfilePath(fixture(t), "failed");
+  const ctx = context("failed", "session-follow"), file = routingProfilePath(fixture(t), "failed");
   t.after(registerSessionRouting(ctx, { file, getProfile: () => undefined, prepareRequest: async () => undefined }));
   assert.throws(() => resolveSessionModelSelector(ctx, "openai/gpt-6-luna"), /refusing provider fallback/);
   await assert.rejects(prepareSessionRoutingRequest(ctx), /request blocked/);
-});
-
-test("virtual physical role resolution preserves a captured request provider", t => {
-  const ctx = context("virtual", "idle-guard");
-  t.after(registerSessionModelReference(ctx, () => ({ provider: "openai", id: "gpt-6-astra" })));
-  assert.deepEqual(resolveSessionPhysicalModelReference(ctx, profile("virtual", "openai-codex", "Work")), { provider: "openai-codex", id: "gpt-6-astra" });
 });
 
 test("inherited revision rollback and same-revision identity changes fail closed", t => {

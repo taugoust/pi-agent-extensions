@@ -220,8 +220,8 @@ test("actual Pi SDK BTW snapshots route defaults across a virtual guard owner wi
 				return stream;
 			},
 		});
-		runtime.registerVirtualModel({ provider: "idle-guard", id: "astra", name: "Fixture Guard", thinkingLevels: ["low"], route() { throw Error("BTW must not dispatch through the virtual parent"); } });
-		const settings = SettingsManager.inMemory({ defaultProvider: "idle-guard", defaultModel: "astra", defaultThinkingLevel: "low", compaction: { enabled: false }, retry: { enabled: false } });
+		runtime.registerVirtualModel({ provider: "virtual-fixture", id: "astra", name: "Fixture Guard", thinkingLevels: ["low"], route() { throw Error("BTW must not dispatch through the virtual parent"); } });
+		const settings = SettingsManager.inMemory({ defaultProvider: "virtual-fixture", defaultModel: "astra", defaultThinkingLevel: "low", compaction: { enabled: false }, retry: { enabled: false } });
 		const factory = (pi) => {
 			pi.on("session_start", (_event, ctx) => {
 				ownerProfile = { version: 1, ownerSessionId: ctx.sessionManager.getSessionId(), providerId: "openai-codex", accountId: "Work", revision: 1 };
@@ -232,7 +232,7 @@ test("actual Pi SDK BTW snapshots route defaults across a virtual guard owner wi
 		const loader = new DefaultResourceLoader({ cwd: root, agentDir: root, settingsManager: settings, noExtensions: true, noSkills: true, noPromptTemplates: true, noThemes: true, noContextFiles: true, extensionFactories: [factory] });
 		await loader.reload();
 		({ session } = await createAgentSession({ cwd: root, agentDir: root, modelRuntime: runtime, settingsManager: settings, resourceLoader: loader, sessionManager: SessionManager.inMemory(root), noTools: "builtin" }));
-		const virtualGuard = runtime.getModel("idle-guard", "astra");
+		const virtualGuard = runtime.getModel("virtual-fixture", "astra");
 		assert.ok(virtualGuard);
 		await session.setModel(virtualGuard);
 		owner = new AgentSessionRuntime(session, { cwd: root, agentDir: root, modelRuntime: runtime, settingsManager: settings, resourceLoader: loader, diagnostics: [] }, async () => { throw Error("No replacement requested"); });
@@ -240,7 +240,7 @@ test("actual Pi SDK BTW snapshots route defaults across a virtual guard owner wi
 		// The extension's session_start callback registered the owning profile.
 		const service = globalThis.__paeBtwV1;
 		assert.ok(service);
-		assert.equal(session.model.provider, "idle-guard");
+		assert.equal(session.model.provider, "virtual-fixture");
 		assert.equal(ownerProfile.providerId, "openai-codex");
 		const snapshot = (threadId) => service.handle({ operation: "snapshot", sessionId: service.sessionId, serviceEpoch: service.serviceEpoch, ...(threadId ? { threadId } : {}) });
 		const waitForCalls = async (count) => {
@@ -304,7 +304,7 @@ test("actual Pi SDK BTW snapshots route defaults across a virtual guard owner wi
 		const control = (operation) => service.handle({ operation, sessionId: service.sessionId, serviceEpoch: service.serviceEpoch, requestId: randomUUID(), threadId: retainedThread });
 		assert.equal(control("cancel").threads.find((thread) => thread.id === retainedThread)?.state, "cancelled");
 		assert.ok(!control("remove").threads.some((thread) => thread.id === retainedThread));
-		assert.equal(session.model.provider, "idle-guard", "the parent virtual selection is unchanged");
+		assert.equal(session.model.provider, "virtual-fixture", "the parent virtual selection is unchanged");
 		assert.equal(network, 0);
 		service.dispose();
 		unregisterRouting?.(); unregisterRouting = undefined;

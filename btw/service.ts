@@ -74,7 +74,7 @@ export function createBtwService(
 		const provider = effectiveDefault.split("/", 1)[0];
 		const available = ctx.modelRegistry
 			.getAvailable()
-			.filter((m) => m.provider !== "idle-guard" && m.api !== "pi-virtual" && m.provider === provider)
+			.filter((m) => m.api !== "pi-virtual" && m.provider === provider)
 			.map((m) => `${m.provider}/${m.id}`)
 			.filter((id) => id.length <= 512);
 		const models = [
@@ -120,7 +120,6 @@ export function createBtwService(
 				? bindSessionModelRequest(foundModel, routingProfile) : foundModel;
 			if (
 				!model ||
-				model.provider === "idle-guard" ||
 				model.api === "pi-virtual"
 			)
 				throw new Error("Unavailable side model");

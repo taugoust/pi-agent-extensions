@@ -14,8 +14,8 @@ programs.pi = {
   # package = pkgs.pi-supervised; # null installs no executable
   agentDir = ".pi/agent"; # relative to home; also sets PI_CODING_AGENT_DIR
   settings = {
-    defaultProvider = "idle-guard";
-    defaultModel = "astra";
+    defaultProvider = "openai-codex";
+    defaultModel = "gpt-6.1-sol";
     defaultThinkingLevel = "low";
     theme = "light/dark";
   };
@@ -41,12 +41,11 @@ programs.pi = {
       };
     };
     sandbox.enable = true; # includes subagent and its finalizer
-    subagent.defaultModel = "gpt-6-luna";
+    subagent.defaultModel = "cheap";
     idle-context-warning = {
       enable = true;
       idleMinutes = 30;
       contextPercent = 20;
-      guardedModels.astra = "openai/gpt-6-astra";
     };
     openai-fast-mode = {
       enable = true;
@@ -146,10 +145,8 @@ Named typed options remain compatible:
 | `slow-mode.enabledByDefault` | `false` |
 | `idle-context-warning.idleMinutes` | `30` (1–1440) |
 | `idle-context-warning.contextPercent` | `20` (1–100) |
-| `idle-context-warning.guardedModels` | `{}` |
-| `idle-context-warning.cheapCompactionModel` | `null` |
-| `subagent.defaultProvider` | `"openai"` |
-| `subagent.defaultModel` | `"gpt-6-luna"` |
+| `idle-context-warning.cheapCompactionModel` | `"cheap"` |
+| `subagent.defaultModel` | `"cheap"` |
 | `subagent.defaultThinkingLevel` | `"low"` |
 
 Generated defaults recursively merge **named options, then `.settings`**; explicit

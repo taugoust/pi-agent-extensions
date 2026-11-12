@@ -16,7 +16,6 @@ import {
   setSessionRoutingOverride,
   writeInheritedSessionRoutingProfile,
   notifySessionRoutingChanged,
-  SESSION_MODEL_REFERENCE_EVENT,
   getSessionModelRequestProfile,
   getSessionRoutingProfile,
   prepareSessionRoutingRequest,
@@ -836,13 +835,12 @@ export default function accountsExtension(
 		ctx: ExtensionContext,
 	): Promise<void> => {
 		if (readInheritedSessionRoutingProfile(ctx)) return;
-		pi.events.emit?.(SESSION_MODEL_REFERENCE_EVENT, { ctx });
 		const configured = getConfiguredSessionModelReference(ctx);
 		if (!configured) {
 			if (ctx.model?.api === "pi-virtual") ctx.ui.notify("The selected virtual model has no configured physical session role; helper routing is blocked.", "error");
 			return;
 		}
-		const isPhysicalSelection = ctx.model?.api !== "pi-virtual" && ctx.model?.provider !== "idle-guard" && ctx.model?.provider !== "idle-guard-proxy" && ctx.model?.provider !== "session-follow";
+		const isPhysicalSelection = ctx.model?.api !== "pi-virtual" && ctx.model?.provider !== "session-follow";
 		const saved = latestBranchRoutingProfile(owner, ctx);
 		const providerId = isPhysicalSelection ? configured.provider : (saved?.providerId ?? configured.provider);
 		const model = ctx.modelRegistry.find(providerId, configured.id);
@@ -1230,8 +1228,7 @@ export default function accountsExtension(
 	): Promise<boolean> => {
 		const current = owner.context.model;
 		if (!current) return false;
-		const keepVirtualSelection = current.api === "pi-virtual";
-		if (keepVirtualSelection && current.provider !== "idle-guard") return false;
+		if (current.api === "pi-virtual") return false;
 		const snapshot: RoutingProfile = {
 			version: 1,
 			ownerSessionId: owner.sessionId,
@@ -1244,7 +1241,6 @@ export default function accountsExtension(
 		catch { return false; }
 		const target = owner.context.modelRegistry.find(reference.provider, reference.id);
 		if (!target || target.api === "pi-virtual" || target.provider !== providerId || target.id !== reference.id) return false;
-		if (keepVirtualSelection) return true;
 		if (current.provider === target.provider && current.id === target.id) return true;
 		if (!apply) return true;
 		try { return await pi.setModel(target); } catch { return false; }
@@ -1583,7 +1579,7 @@ export default function accountsExtension(
 				undefined,
 				event.model,
 			);
-			if (isOwnerCurrent(owner) && result.status !== "error" && event.model.api !== "pi-virtual" && event.model.provider !== "idle-guard" && event.model.provider !== "idle-guard-proxy")
+			if (isOwnerCurrent(owner) && result.status !== "error" && event.model.api !== "pi-virtual")
 				publishRoutingProfile(owner, ctx, providerId, owner.selections[providerId] ?? null);
 			if (isOwnerCurrent(owner) && result.status === "error") {
 				ctx.ui.notify(
@@ -1607,7 +1603,7 @@ export default function accountsExtension(
 				: await startupProvider(providerId, ctx, owner);
 			if (!isOwnerCurrent(owner)) return;
 			const coordinator = owner.coordinators.get(providerId);
-			if (result.status !== "error" && ctx.model?.api !== "pi-virtual" && ctx.model?.provider !== "idle-guard" && ctx.model?.provider !== "idle-guard-proxy")
+			if (result.status !== "error" && ctx.model?.api !== "pi-virtual")
 				publishRoutingProfile(owner, ctx, providerId, owner.selections[providerId] ?? null);
 			if (result.status === "error") owner.abortProviders.add(providerId);
 			if (
