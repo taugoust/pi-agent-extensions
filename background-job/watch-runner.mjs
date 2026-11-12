@@ -1,6 +1,7 @@
 import fs from 'node:fs';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
+const SCAN_BUDGET_BYTES=1024*1024;
 export const MAX_EVENTS = 128;
 export function readWatch(file) {
   const fd=fs.openSync(file,fs.constants.O_RDONLY|fs.constants.O_NOFOLLOW|fs.constants.O_NONBLOCK);
@@ -21,6 +22,7 @@ export function scanWatch(file, now=Date.now()) {
   if(w.deadline && now>=w.deadline){w.status='expired';emit('expired');saveWatch(file,w);return w;}
   if(w.nextPoll && now<w.nextPoll) return w;
   w.nextPoll=now+w.pollMs;
+  let backlog=false;
   try {
     const fd=openLog(w);
     if(fd!==undefined) try {
@@ -34,8 +36,13 @@ export function scanWatch(file, now=Date.now()) {
         start=position.start;
         if(w.offset<start){emit('dropped',{bytes:start-w.offset});w.offset=start;w.pending='';}
       } else if(s.dev!==w.device||s.ino!==w.inode||s.size<w.offset){emit(s.ino!==w.inode||s.dev!==w.device?'rotated':'truncated');w.offset=0;w.pending='';w.device=s.dev;w.inode=s.ino;}
-      const bytes=Buffer.alloc(Math.min(65536,Math.max(0,start+s.size-w.offset)));
-      const n=fs.readSync(fd,bytes,0,bytes.length,w.offset-start);w.offset+=n;
+      // Read the whole backlog in 64 KiB chunks, bounded per scan. A watch only completes once
+      // drained, so matches in a finished job's final output are not lost.
+      for(let budget=SCAN_BUDGET_BYTES;;){
+      const bytes=Buffer.alloc(Math.min(65536,budget,Math.max(0,start+s.size-w.offset)));
+      if(bytes.length===0){backlog=start+s.size>w.offset;break;}
+      const n=fs.readSync(fd,bytes,0,bytes.length,w.offset-start);w.offset+=n;budget-=n;
+      if(n===0)break;
       const data=Buffer.concat([Buffer.from(w.pending||'','base64'),bytes.subarray(0,n)]);
       let begin=0;
       for(let i=0;i<data.length;i++)if(data[i]===10){
@@ -47,16 +54,17 @@ export function scanWatch(file, now=Date.now()) {
       const pending=data.subarray(begin);
       if(pending.length>4096){if(!w.longLine)emit('line-truncated',{offset:w.offset});w.longLine=true;w.pending=pending.subarray(pending.length-4096).toString('base64');}
       else{w.pending=pending.toString('base64');w.longLine=false;}
+      }
     } finally {fs.closeSync(fd);}
     if(w.lastError){emit('recovered');delete w.lastError;}
   } catch(error){
     const message=String(error.message).slice(0,256);
     if(w.lastError!==message){w.lastError=message;emit('read-error',{text:message});}
   }
-  return finish(w,file,emit);
+  return finish(w,file,emit,backlog);
 }
-function finish(w,file,emit){
-  if(w.resultPath && fs.existsSync(w.resultPath)) {
+function finish(w,file,emit,backlog=false){
+  if(!backlog && w.resultPath && fs.existsSync(w.resultPath)) {
     try{const r=readWatch(w.resultPath);if(['completed','failed','cancelled','lost'].includes(r.status)){emit('terminal',{status:r.status,exit_code:r.exitCode??null});w.status='completed';}}catch{}
   }
   saveWatch(file,w);return w;
