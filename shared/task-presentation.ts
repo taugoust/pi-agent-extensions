@@ -36,12 +36,12 @@ export function watchResultText(action: string, data: any): string {
     if (!data.watches?.length) return "No watches for this task/session.";
     return data.watches.map((w:any) => `${w.status === 'running' ? 'Watching' : uiText(w.status)} · ${uiText(w.label || w.log_path, 100)}\n  ${w.watch_id}`).join("\n");
   }
-  if (action === "watch") return `Watching ${uiText(data.log_path, 160)}\nStage/match and completion alerts will reach the parent automatically.\n${data.watch_id}`;
+  if (action === "watch") return `Watching ${uiText(data.log_path ?? data.label, 160)}\nStage/match and completion alerts will reach the parent automatically.\n${data.watch_id}`;
   if (action === "ack") return `Alerts acknowledged through #${data.acknowledged_through}. Newer alerts remain unread.\n${data.watch_id}`;
   if (action === "unwatch") return `Stop watching requested. The build has NOT been cancelled.\n${data.watch_id}`;
   const rows = (data.events ?? []).map((e:any) => `#${e.sequence} · ${uiText(e.time, 32)} · ${uiText(e.rule || e.kind, 80)}\n${uiText(e.text ?? e.status ?? "", 512)}`);
   return [
-    `Alerts · ${uiText(data.log_path, 140)}`,
+    `Alerts · ${uiText(data.log_path ?? data.label, 140)}`,
     ...(data.overflow ? ["Some older alerts expired from the retained journal. Inspect the log before assuming full coverage."] : []),
     rows.length ? rows.join("\n\n") : "No unread alerts.",
     ...(rows.length ? [`Acknowledge the displayed events through #${data.next_sequence} after reviewing them.`] : []),

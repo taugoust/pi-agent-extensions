@@ -196,6 +196,12 @@ try {
   await assertReject(reloaded.wait(first.metadata.id, 43_200_001), /Wait timeout/);
   const finished = await reloaded.wait(first.metadata.id, 43_200_000);
   assert(!finished.timedOut && finished.record.status === "completed" && finished.record.result?.exitCode === 0, "reloaded manager did not recover completed job");
+  // The runner records when output arrived: the first lines a second before "done".
+  const timing = finished.record.result?.output;
+  const printed = `cwd=${root}\nenv=exact value with spaces\ndone\n`;
+  assert(timing && timing.bytes === Buffer.byteLength(printed), `output byte count was not recorded: ${JSON.stringify(timing)}`);
+  assert(timing.durationMs >= 1000 && timing.finalSecondBytes >= 5 && timing.finalSecondBytes < timing.bytes,
+    `output timing did not separate early and final output: ${JSON.stringify(timing)}`);
   const notifiedPath = store.path(first.metadata.id, "notified");
   fs.rmSync(notifiedPath, { force: true });
   const metadataBefore = fs.readFileSync(store.path(first.metadata.id, "metadata.json"), "utf8");

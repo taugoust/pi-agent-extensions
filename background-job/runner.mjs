@@ -78,6 +78,23 @@ let dirty = false;
 let flushTimer;
 let sequence = 0;
 let loggerFailed = false;
+// When output arrives, to tell the parent if it only showed up at exit (as with | tail).
+let commandStartedAt;
+let recentOutput = [];
+
+function recordOutputTime(length) {
+  const now = Date.now();
+  recentOutput.push([now, length]);
+  while (recentOutput.length && recentOutput[0][0] < now - 1000) recentOutput.shift();
+}
+
+function outputTiming() {
+  const finishedAt = Date.now();
+  const finalSecondBytes = recentOutput
+    .filter(([time]) => time >= finishedAt - 1000)
+    .reduce((sum, [, length]) => sum + length, 0);
+  return { bytes: outputBytes, finalSecondBytes, durationMs: finishedAt - (commandStartedAt ?? finishedAt) };
+}
 
 function flush() {
   if (!dirty) return;
@@ -120,6 +137,7 @@ function capture(chunk, descriptor) {
   const data = Buffer.from(chunk);
   try { writeSync(descriptor, data); } catch {}
   outputBytes += data.length;
+  recordOutputTime(data.length);
   tail = tail.length === 0 ? data : Buffer.concat([tail, data]);
   if (tail.length > maximum) tail = tail.subarray(tail.length - maximum);
   let stream = descriptor === 1 ? stdoutTail : stderrTail;
@@ -192,6 +210,7 @@ try {
     stdio: ["inherit", "pipe", "pipe", "pipe"],
   });
   if (!child.pid) throw new Error("command process has no PID");
+  commandStartedAt = Date.now();
   childClosed = new Promise(resolve => child.once("close", resolve));
   child.on("error", error => capture(Buffer.from(`background-job spawn failed: ${error.message}\\n`), 2));
   child.stdout.on("data", (chunk) => capture(chunk, 1));
@@ -219,6 +238,7 @@ try {
       exitCode: effectiveCode,
       ...(signal || requestedSignal ? { signal: signal || requestedSignal } : {}),
       finishedAt: new Date().toISOString(),
+      output: outputTiming(),
       ...(loggerFailed ? { reason: "bounded output logger failed" } : {}),
     });
     process.exit(status === "completed" ? 0 : effectiveCode ?? 128);

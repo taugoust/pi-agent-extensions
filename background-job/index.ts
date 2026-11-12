@@ -3,7 +3,8 @@ import { homedir } from "node:os";
 import { ancestryStateRoot as nativeTuiStateRoot, readJobAncestry, ownsJob, privateEvidenceDirectory as privateDirectory } from "../shared/readonly-job-ancestry.ts";
 import { pinRuntimePath } from "./runtime-path.ts";
 import { isAbsolute, join, dirname, resolve } from "node:path";
-import { realpathSync } from "node:fs";
+import { readFileSync, realpathSync, statSync } from "node:fs";
+import { completionMessage, quietRunningHint, selectLines } from "./output-hints.ts";
 import { readNativeVerificationManifest } from "../shared/verification-worker.ts";
 import { Type } from "@sinclair/typebox";
 import type { ExtensionAPI, ExtensionContext } from "@mariozechner/pi-coding-agent";
@@ -150,14 +151,28 @@ function assertOwned(record: JobRecord, ownerSessionId: string, childId?: string
   }
 }
 
-function takeLines(text: string, lines: number | undefined): string {
-  if (lines === undefined) return text;
-  return text.split("\n").slice(-lines).join("\n");
+function outputText(
+  snapshot: Awaited<ReturnType<BackgroundJobManager["output"]>>,
+  options: { lines?: number; from?: "start" | "end"; match?: string },
+): string {
+  const selected = selectLines(snapshot.text, options);
+  const text = selected.text || (options.match === undefined ? "(no output)" : "(no matching lines)");
+  const matched = selected.matched === undefined ? "" : `[${selected.matched} matching lines]\n`;
+  return `${matched}${text}${snapshot.truncated ? "\n[output truncated to the last 50 KiB / 2000 lines]" : ""}`;
 }
 
-function outputText(snapshot: Awaited<ReturnType<BackgroundJobManager["output"]>>, lines?: number): string {
-  const text = takeLines(snapshot.text, lines) || "(no output)";
-  return `${text}${snapshot.truncated ? "\n[output truncated to the last 50 KiB / 2000 lines]" : ""}`;
+/** A note when a running job of ours has been silent for a while. */
+function quietNote(store: JobStore, record: JobRecord): string | undefined {
+  if (record.status !== "running" || !record.launch || record.metadata.observed || record.metadata.pane) return undefined;
+  try {
+    const lastOutputAt = statSync(store.path(record.metadata.id, "output.log")).mtimeMs;
+    return quietRunningHint(Date.parse(record.metadata.createdAt), lastOutputAt);
+  } catch { return undefined; }
+}
+
+function recordTextWithNotes(store: JobStore, record: JobRecord): string {
+  const note = quietNote(store, record);
+  return note ? `${recordText(record)}\n${note}` : recordText(record);
 }
 
 function toolResult(text: string, details: Record<string, unknown>, isError = false) {
@@ -224,7 +239,10 @@ export default function backgroundJob(pi: ExtensionAPI) {
     const id=record.metadata.id;
     if(!record.result||record.metadata.infrastructure||record.metadata.sessionId!==sessionId(ctx)||sessionContext!==ctx)return;
     if(await service.store.isNotified(id))return;
-    if(sessionContext===ctx)quietState.enqueue(ctx,{kind:'job',id,state:record.status,completion:true});
+    let output='';
+    try{output=sanitizeOutput(readFileSync(service.store.path(id,'output.log'),'utf8'));}catch{/* No log is reported as no output. */}
+    const message=completionMessage(record.result,output);
+    if(sessionContext===ctx)quietState.enqueue(ctx,{kind:'job',id,state:record.status,completion:true,message});
   };
 
   const poll = async () => {
@@ -500,7 +518,7 @@ export default function backgroundJob(pi: ExtensionAPI) {
   const jobTool = {
     name: "background_job",
     label: "Background Job",
-    description: "Run durable shell jobs in tmux. Use job_id to inspect status/output, yield, signal, cancel, or reap. yield returns an immediate status snapshot and never retrieves output. Status, list, and notifications do not count as retrieving output. For terminal native jobs, output starts/resets a five-minute auto-reap timer; unread, active, and adopted jobs are excluded. Adopt existing panes without restarting them; pid + log_path provides observation only. Jobs survive Pi exit; re-adopt panes after restarting Pi. cancel stops execution; reap removes the owned pane and retained output. Log monitoring uses watch, events, ack, and unwatch. Output is bounded to 50 KiB/2000 lines.",
+    description: "Run durable shell jobs in tmux. Use job_id to inspect status/output, yield, signal, cancel, or reap. yield returns an immediate status snapshot and never retrieves output. Status, list, and notifications do not count as retrieving output. For terminal native jobs, output starts/resets a five-minute auto-reap timer; unread, active, and adopted jobs are excluded. Adopt existing panes without restarting them; pid + log_path provides observation only. Jobs survive Pi exit; re-adopt panes after restarting Pi. cancel stops execution; reap removes the owned pane and retained output. Log monitoring uses watch, events, ack, and unwatch. stdout and stderr are captured in full: run commands unfiltered (no | tail, | grep or | sort) and read them with action=output, using lines, from (start|end) and match to narrow it. Output is bounded to 50 KiB/2000 lines.",
     promptSnippet: "Run and manage background shell jobs.",
     promptGuidelines: [
       "Use background_job for long-running commands; use bash for short foreground work.",
@@ -580,7 +598,7 @@ export default function backgroundJob(pi: ExtensionAPI) {
           reapedJobNames.set(record.metadata.id, record.metadata.name ? preview(record.metadata.name, 80) : preview(record.metadata.command, 80));
           if (record.result) await service.store.markNotified(record.metadata.id);
           const streams = await service.streamOutput(record.metadata.id);
-          response = toolResult(recordText(record), { action: params.action, ...publicDetails(record, streams) }, Boolean(record.result && record.status === 'failed'));
+          response = toolResult(recordTextWithNotes(service.store, record), { action: params.action, ...publicDetails(record, streams) }, Boolean(record.result && record.status === 'failed'));
           break;
         }
         case "output": {
@@ -593,7 +611,7 @@ export default function backgroundJob(pi: ExtensionAPI) {
           const finalRecord = await service.get(id);
           if (finalRecord.result) await service.store.markNotified(id);
           const streams = await service.streamOutput(finalRecord.metadata.id);
-          response = toolResult(`${recordLine(finalRecord)}\n${outputText(snapshot, params.lines)}`, { action: params.action, ...publicDetails(finalRecord, streams), source: snapshot.source, truncated: snapshot.truncated }, Boolean(finalRecord.result && finalRecord.status === 'failed'));
+          response = toolResult(`${recordLine(finalRecord)}\n${outputText(snapshot, params)}`, { action: params.action, ...publicDetails(finalRecord, streams), source: snapshot.source, truncated: snapshot.truncated }, Boolean(finalRecord.result && finalRecord.status === 'failed'));
           break;
         }
         case "yield": {
@@ -603,7 +621,7 @@ export default function backgroundJob(pi: ExtensionAPI) {
           for (const record of records) owned(record);
           response = { ...toolResult([
             "Yielded the current run; conversation remains available. Work is not suspended or cancelled. Completion notifications arrive independently.",
-            records.length ? records.map(recordText).join("\n\n") : "No background jobs for this Pi session.",
+            records.length ? records.map(record => recordTextWithNotes(service.store, record)).join("\n\n") : "No background jobs for this Pi session.",
           ].join("\n"), { action: params.action, jobs: records.map(publicDetails) }), terminate: true };
           break;
         }
@@ -734,7 +752,7 @@ export default function backgroundJob(pi: ExtensionAPI) {
       const action = await taskChoice(ctx, labels[labels.indexOf(selected)], actions);
       if (action === "Show output") {
         const snapshot = await service.output(record.metadata.id);
-        await show(`${preview(record.metadata.name??record.metadata.command,100)} — output`, outputText(snapshot));
+        await show(`${preview(record.metadata.name??record.metadata.command,100)} — output`, outputText(snapshot, {}));
       } else if (action === "Show status") {
         await show('Job details', `${recordText(await service.get(record.metadata.id))}${record.metadata.observed||record.metadata.pane?'':`\nattach: ${service.backend.attachCommand(record.launch)}`}`);
       } else if (action === "Show attach command") {
