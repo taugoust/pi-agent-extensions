@@ -413,6 +413,21 @@ in
         mkdir -p "$srcdir" "$outdir"
 
         cp -r ${self}/slow-mode "$srcdir/"
+        # Slow mode reads its defaults through the shared settings helper.
+        mkdir -p "$srcdir/shared"
+        cp ${self}/shared/extension-defaults.ts ${self}/shared/extension-config-manifest.json \
+          "$srcdir/shared/"
+        substituteInPlace "$srcdir/shared/extension-defaults.ts" \
+          --replace-fail 'from "./extension-config-manifest.json";' \
+          'from "./extension-config-manifest.json" with { type: "json" };'
+        printf '%s\n' '{ "type": "module" }' > "$srcdir/package.json"
+        cp "$srcdir/package.json" "$outdir/package.json"
+
+        mkdir -p "$outdir/node_modules/@earendil-works/pi-coding-agent"
+        printf '%s\n' '{ "name": "@earendil-works/pi-coding-agent", "type": "module", "main": "./index.js" }' \
+          > "$outdir/node_modules/@earendil-works/pi-coding-agent/package.json"
+        printf '%s\n' 'export const getAgentDir = () => process.env.TMPDIR + "/slow-mode-agent";' \
+          > "$outdir/node_modules/@earendil-works/pi-coding-agent/index.js"
 
         mkdir -p "$outdir/node_modules/@mariozechner/pi-tui"
         cat > "$outdir/node_modules/@mariozechner/pi-tui/package.json" <<'EOF'
@@ -449,6 +464,7 @@ in
           --module nodenext \
           --moduleResolution nodenext \
           --target es2022 \
+          --resolveJsonModule \
           --rootDir "$srcdir" \
           --outDir "$outdir" \
           "$srcdir/slow-mode/index.ts"

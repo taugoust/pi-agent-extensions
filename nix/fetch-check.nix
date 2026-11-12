@@ -1,5 +1,10 @@
 { self, pkgs }:
-
+let
+  inherit (import ./module-test-harness.nix { inherit self pkgs; }) evaluate;
+  # The module installs the fetch extension when it is enabled.
+  installed = (evaluate { extensions.fetch.enable = true; }).home.file ? ".pi/agent/extensions/fetch";
+in
+assert installed;
 pkgs.runCommand "fetch-extension-check"
   {
     nativeBuildInputs = [
@@ -146,6 +151,5 @@ pkgs.runCommand "fetch-extension-check"
     node "$workdir/test.mjs" "$workdir/out"
 
     grep -F 'selectFetchBackend(agentSHAPI(), agentSHStartup)' ${self}/fetch/index.ts >/dev/null
-    grep -F '"''${extDir}/fetch".source = "''${self}/fetch";' ${self}/nix/module.nix >/dev/null
     touch "$out"
   ''
