@@ -239,11 +239,20 @@ export function sessionRoutingEnvironment(ctx: RoutingContext, env: Environment 
   return { [SESSION_ROUTING_FILE_ENV]: registration.file, [SESSION_ROUTING_OWNER_ENV]: profile.ownerSessionId };
 }
 
+/** The provider of the session's selected physical model, if it has one. */
+export function physicalSessionProvider(ctx: RoutingContext): string | undefined {
+  const model = ctx.model;
+  const physical = model && model.api !== "pi-virtual" && !virtualProviders.has(model.provider);
+  return physical ? model.provider : undefined;
+}
+
 export function resolveSessionProvider(ctx: RoutingContext, fallbackProvider?: string): string {
+  // The selected model decides the provider. The routing profile only picks an
+  // account and can describe another provider after a model change.
+  const physical = physicalSessionProvider(ctx);
+  if (physical) return physical;
   const profile = getSessionRoutingProfile(ctx);
   if (registry.owners.has(ctx.sessionManager) && !profile) throw new Error("Session routing is unavailable; refusing provider fallback");
-  if (isInheritedSessionRouting(ctx) && profile) return profile.providerId;
-  if (ctx.model && ctx.model.api !== "pi-virtual" && !virtualProviders.has(ctx.model.provider)) return ctx.model.provider;
   if (profile) return profile.providerId;
   if (fallbackProvider && !virtualProviders.has(fallbackProvider)) return fallbackProvider;
   throw new Error("No effective physical session provider; select a provider/model before starting helper work");
@@ -264,7 +273,10 @@ export function getConfiguredSessionModelReference(ctx: RoutingContext): { provi
 export function resolveSessionPhysicalModelReference(ctx: RoutingContext, snapshot?: RoutingProfile): { provider: string; id: string } {
   const reference = getConfiguredSessionModelReference(ctx);
   if (!reference) throw new Error("The selected virtual model has no physical session role; refusing helper fallback");
-  return { provider: snapshot ? validateRoutingProfile(snapshot).providerId : resolveSessionProvider(ctx, reference.provider), id: reference.id };
+  const provider = physicalSessionProvider(ctx) ?? (snapshot
+    ? validateRoutingProfile(snapshot).providerId
+    : resolveSessionProvider(ctx, reference.provider));
+  return { provider, id: reference.id };
 }
 
 export function resolveSessionModelSelector(ctx: RoutingContext, selector: string, snapshot?: RoutingProfile): string {
@@ -273,7 +285,10 @@ export function resolveSessionModelSelector(ctx: RoutingContext, selector: strin
   const legacyProvider = slash > 0 ? selector.slice(0, slash) : undefined;
   const model = slash > 0 ? selector.slice(slash + 1) : selector;
   if (!model) throw new Error("Helper model ID is required");
-  return `${snapshot ? validateRoutingProfile(snapshot).providerId : resolveSessionProvider(ctx, legacyProvider)}/${model}`;
+  const provider = physicalSessionProvider(ctx) ?? (snapshot
+    ? validateRoutingProfile(snapshot).providerId
+    : resolveSessionProvider(ctx, legacyProvider));
+  return `${provider}/${model}`;
 }
 
 export function onSessionRoutingChanged(ctx: RoutingContext, callback: () => void): () => void {
