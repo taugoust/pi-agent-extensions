@@ -14,7 +14,7 @@ import { TuiNativeManager } from "./tui-native.ts";
 import { nativeTuiStateRoot } from "./state-root.ts";
 import { HeadlessForegroundManager } from "./headless-foreground.ts";
 import { installGuidance } from "./guidance-extension.ts";
-import { guidanceLaunchEnvironment, guidanceTarget } from "./guidance.ts";
+import { guidanceHandle, guidanceLaunchEnvironment, guidanceTarget } from "./guidance.ts";
 import { FOREGROUND_TASKS_KEY } from "../shared/foreground-tasks.ts";
 import { TUI_WORKER_MANIFEST_ENV } from "../shared/tui-worker-protocol.ts";
 import { TuiWorkerStore } from "./tui-worker-store.ts";
@@ -1766,7 +1766,7 @@ export default function (pi: ExtensionAPI) {
     const {expectedRevision: _revision, ...identity} = guidanceTarget(record);
     const prompt = record.input.kind === 'guidance' ? record.input.prompt : 'Human questionnaire pending';
     return {kind:'notification',id:record.requestId,child_id:record.childId,guidance:identity,requires_guidance:true,
-      message:`${record.input.kind}: ${Array.from(prompt).slice(0,120).join('')}. Use guidance list for the exact target, then reply/escalate or human. A notification is not an answer or permission.`};
+      message:`${record.input.kind}: ${Array.from(prompt).slice(0,120).join('')}. Answer with guidance reply, escalate or human using handle ${guidanceHandle(record)}. A notification is not an answer or permission.`};
   };
   const guidanceNotifications = installGuidance(pi, path.join(getAgentDir(), "state", "coordinator-guidance-v1"), (ctx, record) => {
     if(!quietState.enqueue(ctx,guidanceUpdate(record)))throw new Error('Notification not queued; waiter retained for automatic reconciliation. Inspect /harness-state status.');

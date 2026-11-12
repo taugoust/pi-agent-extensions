@@ -151,6 +151,11 @@ pkgs.runCommand "subagent-check"
     const optional = Symbol.for("TypeBox.Optional");
     export const Type = {
       String: (options = {}) => ({ type: "string", ...options }),
+      Integer: (options = {}) => ({ type: "integer", ...options }),
+      Boolean: (options = {}) => ({ type: "boolean", ...options }),
+      Literal: (value, options = {}) => ({ const: value, ...options }),
+      Union: (anyOf, options = {}) => ({ anyOf, ...options }),
+      Array: (items, options = {}) => ({ type: "array", items, ...options }),
       Optional: schema => ({ ...schema, [optional]: "Optional" }),
       Object: (properties, options = {}) => {
         const required = Object.keys(properties).filter(key => properties[key][optional] !== "Optional");
@@ -253,6 +258,7 @@ pkgs.runCommand "subagent-check"
     node --experimental-transform-types --test --test-concurrency=1 \
       "$workdir/tui-runtime/shared/tool-result-text.test.ts" \
       "$workdir/tui-runtime/subagent/guidance.test.ts" \
+      "$workdir/tui-runtime/subagent/guidance-handle.test.ts" \
       "$workdir/tui-runtime/subagent/acceptance.test.ts" \
       "$workdir/tui-runtime/subagent/acceptance-adversarial.test.ts" \
       "$workdir/tui-runtime/subagent/acceptance-manager.test.ts" \

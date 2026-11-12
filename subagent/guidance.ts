@@ -14,7 +14,7 @@ export const GUIDANCE_HUMAN_KEY = "__paeGuidanceHumanV1";
 export type GuidanceScope = { ownerSessionId: string; ownerRuntimeEpoch: string; taskId: string; childId: string; attempt: number; workerEpoch: string; goalId?: string };
 export type GuidanceInput = { kind: "guidance"; prompt: string; context?: string } | { kind: "human"; questionnaire: TaskInteractionInput };
 export type GuidanceRecord = GuidanceScope & { version: 1; requestId: string; workerRuntimeEpoch: string; revision: number; createdAt: string; input: GuidanceInput;
-  status: "pending" | "answered" | "cancelled" | "unavailable"; reason?: string; forwarded?: { requestId: string; scope?: GuidanceScope }; receipt?: { replyId: string; fingerprint: string; answer: GuidanceAnswer; at: string } };
+  status: "pending" | "answered" | "cancelled" | "unavailable"; reason?: string; forwarded?: { requestId: string; scope?: GuidanceScope }; receipt?: { replyId: string; fingerprint: string; answer: GuidanceAnswer; revision?: number; at: string } };
 export type GuidanceAnswer = { kind: "guidance"; guidance: string } | { kind: "human"; answer: TaskInteractionAnswer };
 export type GuidanceTarget = GuidanceScope & { requestId: string; workerRuntimeEpoch: string; expectedRevision: number };
 export type GuidanceBinding = { socket: string; token: string; scope: GuidanceScope };
@@ -37,6 +37,20 @@ export function validateGuidanceInput(input: GuidanceInput): void {
 }
 export function guidanceTarget(record: GuidanceRecord): GuidanceTarget {
   return { ...Object.fromEntries(scopeKeys.filter(key => record[key] !== undefined).map(key => [key, record[key]])), requestId: record.requestId, workerRuntimeEpoch: record.workerRuntimeEpoch, expectedRevision: record.revision } as GuidanceTarget;
+}
+/**
+ * Opaque handle for one request. It is derived from the request's authenticated identity, so a
+ * replaced, re-attempted or foreign request never matches an old handle, and it only resolves
+ * against the owning broker's own records. The broker still fences revisions on use.
+ */
+export function guidanceHandle(record: GuidanceRecord): string {
+  const { expectedRevision: _revision, ...request } = guidanceTarget(record);
+  return `guidance-${createHash("sha256").update(JSON.stringify(request)).digest("hex").slice(0, 24)}`;
+}
+/** The target a handle resolves to: the answered revision for a settled request, so an exact
+ * retry of the same reply stays idempotent, and the current revision otherwise. */
+export function handleTarget(record: GuidanceRecord): GuidanceTarget {
+  return { ...guidanceTarget(record), expectedRevision: record.receipt?.revision ?? record.revision };
 }
 const owners = new Map<string, GuidanceBroker>();
 export function pendingGuidance(owner: string, childIds: string[]): boolean {
@@ -221,7 +235,7 @@ export class GuidanceBroker {
       throw new Error("Conflicting or duplicate guidance answer");
     }
     if (record.revision !== target.expectedRevision || record.status !== "pending" || !this.waiters.has(record.requestId)) throw new Error("Stale revision or unavailable guidance waiter");
-    record.status = answer.kind === "human" && answer.answer.cancelled ? "cancelled" : "answered"; record.revision++; record.receipt = { replyId, fingerprint: digest, answer: structuredClone(answer), at: new Date().toISOString() };
+    record.status = answer.kind === "human" && answer.answer.cancelled ? "cancelled" : "answered"; record.revision++; record.receipt = { replyId, fingerprint: digest, answer: structuredClone(answer), revision: target.expectedRevision, at: new Date().toISOString() };
     try { this.persist(); } catch (error) {
       // A rename may have committed even if fsync failed. Do not roll back and
       // accept a different answer, or claim the lost waiter consumed a receipt.
