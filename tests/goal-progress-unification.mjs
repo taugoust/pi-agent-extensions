@@ -108,15 +108,15 @@ test("create atomically allocates goal and tasks and authorizes default continua
   assert.ok(f.messages.some(([m, opts]) => m.customType === "goal-continuation" && opts.triggerTurn));
   assert.deepEqual(reconstructProgress(f.entries), result.steps);
 });
-test("registered update_progress and goal_manage creation share durable identities and reject standalone writes", async () => {
+test("registered update_progress creates the current goal, goal_manage create refers to it, and standalone writes are rejected", async () => {
   const f = fixture(); progressWidget(f.pi, { loadSettings: async () => ({ kind: "loaded", settings: DEFAULT_PROGRESS_SETTINGS }) });
   for (const handler of f.handlers.get("session_start")) await handler({}, f.ctx);
   const tool = f.tools.get("update_progress");
   const input = { action: "create", request_id: "shared", objective: "Shared outcome", start: false, steps: [{ text: "Verify", status: "pending" }] };
   const result = await tool.execute("create", tool.prepareArguments(input), undefined, undefined, f.ctx);
   assert.ok(result.details.steps[0].id); assert.equal(result.details.goalId, f.runtime.activeGoal.id);
-  const alias = await f.tools.get("goal_manage").execute("alias", input, undefined, undefined, f.ctx);
-  assert.equal(alias.details.goalId, result.details.goalId); assert.equal(f.entries.length, 1);
+  await assert.rejects(() => f.tools.get("goal_manage").execute("alias", input, undefined, undefined, f.ctx), /update_progress action:create/);
+  assert.equal(f.runtime.activeGoal.id, result.details.goalId); assert.equal(f.entries.length, 1);
   await assert.rejects(() => tool.execute("old", { steps: [] }, undefined, undefined, f.ctx), /request_id/);
   for (const handler of f.handlers.get("session_shutdown")) await handler({}, f.ctx);
 });

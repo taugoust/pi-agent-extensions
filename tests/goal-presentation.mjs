@@ -184,3 +184,19 @@ test('required task IDs and full control contract remain machine-facing only', a
   assert.equal(text(f.tool.renderResult(result, { expanded: true }, theme, context({ action: 'status' }))), 'Objective: A concise outcome.');
   assert.deepEqual(result, snapshot);
 });
+
+test('current-goal lifecycle actions reject request_id with a scope-specific message and accept the documented shape', async () => {
+  const f = fixture();
+  try {
+    f.create({ objective: 'Request id contract.', request_id: 'create', start: false });
+    const goal = f.runtime.activeGoal;
+    const shape = { action: 'resume', goal_id: goal.id, activation_id: goal.activationId, expected_revision: goal.revision, user_authorized: true };
+    await assert.rejects(f.execute({ ...shape, request_id: 'retry-1' }), /Omit request_id for current-goal lifecycle actions; it is used only with scope:saved/);
+    assert.equal(f.runtime.activeGoal.revision, goal.revision, 'rejected call changed nothing');
+    await assert.rejects(f.execute({ ...shape, start: true }), /start is create-only/);
+    await f.execute(shape);
+    assert.equal(f.runtime.activeGoal.status, 'active');
+    // A retry of the same call fails safely on the revision fence instead of applying twice.
+    await assert.rejects(f.execute(shape), /revision changed/);
+  } finally { f.runtime.releaseWorkflow(); }
+});

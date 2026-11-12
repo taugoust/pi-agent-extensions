@@ -44,7 +44,7 @@ export function registerGoalManagement(pi: ExtensionAPI, runtime: GoalRuntime) {
       activation_id: Type.Optional(Type.String({ minLength: 1, maxLength: 128 })),
       expected_revision: Type.Optional(Type.Integer({ minimum: 1 })),
       expected_registry_revision: Type.Optional(Type.Integer({ minimum: 0 })),
-      request_id: Type.Optional(Type.String({ minLength: 1, maxLength: 128 })),
+      request_id: Type.Optional(Type.String({ minLength: 1, maxLength: 128, description: "scope:saved only (required there for create, start, resume, pause, clear, complete and update). Omit for the current goal, where expected_revision guards retries." })),
       objective: Type.Optional(Type.String({ minLength: 1, maxLength: 320 })),
       steps: Type.Optional(ProgressParameters.properties.steps),
       start: Type.Optional(Type.Boolean()),
@@ -75,7 +75,9 @@ export function registerGoalManagement(pi: ExtensionAPI, runtime: GoalRuntime) {
         if (!previous || params.goal_id !== previous.id || params.activation_id !== (previous.activationId ?? previous.id) || params.expected_revision !== previous.revision)
           throw new Error("Goal identity, activation or revision changed; inspect status");
         if (params.user_authorized !== true) throw new Error("This lifecycle/scope change requires fresh explicit user authorization");
-        if (params.steps !== undefined || params.start !== undefined || params.request_id !== undefined) throw new Error("Use update_progress for task mutations; start and request_id here are create-only");
+        if (params.request_id !== undefined)
+          throw new Error("Omit request_id for current-goal lifecycle actions; it is used only with scope:saved. expected_revision already makes a retry fail safely once the change has applied");
+        if (params.steps !== undefined || params.start !== undefined) throw new Error("Use update_progress for task mutations; start is create-only");
         if (params.action !== "update" && (params.objective !== undefined || params.token_budget !== undefined || params.remove_task_ids !== undefined)) throw new Error("Objective, budget and task removal are update-only");
         if (params.action === "complete") {
           if (previous.status !== "paused") throw new Error("Explicit completion requires a paused goal; active autonomous completion uses goal_complete");
