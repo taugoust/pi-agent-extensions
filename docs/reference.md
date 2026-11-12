@@ -162,6 +162,28 @@ Published supervisor state includes its concrete `protocol`; `active=true`
 means a usable client has completed its initial attachment (or is reconnecting
 an already attached client), not merely that AgentSH was configured or attempted.
 
+## Model tiers
+
+A model tier names a cost level instead of a model ID. Wherever a model is
+configured (subagent defaults, profiles, btw, idle compaction), `cheap`,
+`expensive` or `superintelligence`, optionally with `:thinking`, resolves to that
+tier's model on the session's current provider.
+
+| Provider | `cheap` | `expensive` | `superintelligence` |
+| --- | --- | --- | --- |
+| `openai-codex` | `gpt-6-luna` | `gpt-6.1-sol` | `gpt-6-astra` |
+| `claude-bridge` | `claude-haiku-5-5` | `claude-opus-5-5` | `claude-fable-5-1` |
+
+Override or extend the table with `programs.pi.modelTiers` (written to
+`defaults/model-tiers.json`) or `model-tiers.json` in the agent directory:
+
+```nix
+programs.pi.modelTiers.claude-bridge.cheap = "claude-sonnet-5-5";
+```
+
+A tier on a provider without an entry fails and names the option to set. There is
+no fallback to another provider.
+
 ## ✨ Extensions
 
 ### idle-context-warning
@@ -176,7 +198,7 @@ Thresholds and optional cheap compaction are configurable in `~/.pi/agent/extens
 {
   "idleMinutes": 30,
   "contextPercent": 20,
-  "cheapCompactionModel": "gpt-6-luna:low",
+  "cheapCompactionModel": "cheap",
   "guardedModels": {
     "astra": "openai/gpt-6-astra"
   }
@@ -191,9 +213,9 @@ Cold requests stop locally. Recovery uses native cheap compaction after the run 
 
 Alias names are remembered in additive files under `~/.pi/agent/idle-guard-aliases.json.d/` so removing a mapping leaves a closed alias rather than silently restoring the last physical model. Keep this runtime state and the extension installed while restoring guarded sessions; disabling/removing the extension itself is outside the guard's protection.
 
-`cheapCompactionModel` defaults to `null` (normal Pi compaction). When configured, manual `/compact`, RPC/extension compaction, and automatic threshold/overflow compaction use this model **at or above `idleMinutes`**, regardless of context percentage or UI availability. Below that idle threshold, unguarded selections compact normally with their selected conversation model. Guarded selections preserve the same warm policy: native automatic/manual compaction uses their exact underlying physical conversation model and selected thinking level, without routing through the alias. Cold compaction and explicit guard recovery use `cheapCompactionModel`. A warm summary that crosses the idle deadline during authentication or payload preparation cancels locally rather than sending cold history; the gate stays closed until explicit recovery succeeds. The 20% `contextPercent` gate applies only to the prompt warning. For unguarded selections, this setting alone does not trigger compaction merely because a session is idle and does not automatically choose an action in the warning. Explicit **Compact** requires a configured cheap model and never falls back to the conversation model. Guarded selections start recovery when a cold request reaches their dispatch gate.
+`cheapCompactionModel` defaults to `cheap`, the cheap [model tier](#model-tiers) on the session's provider. Set it to `null` for normal Pi compaction. When configured, manual `/compact`, RPC/extension compaction, and automatic threshold/overflow compaction use this model **at or above `idleMinutes`**, regardless of context percentage or UI availability. Below that idle threshold, unguarded selections compact normally with their selected conversation model. Guarded selections preserve the same warm policy: native automatic/manual compaction uses their exact underlying physical conversation model and selected thinking level, without routing through the alias. Cold compaction and explicit guard recovery use `cheapCompactionModel`. A warm summary that crosses the idle deadline during authentication or payload preparation cancels locally rather than sending cold history; the gate stays closed until explicit recovery succeeds. The 20% `contextPercent` gate applies only to the prompt warning. For unguarded selections, this setting alone does not trigger compaction merely because a session is idle and does not automatically choose an action in the warning. Explicit **Compact** requires a configured cheap model and never falls back to the conversation model. Guarded selections start recovery when a cold request reaches their dispatch gate.
 
-The selector supplies the role `model[:thinking]`; provider and selected account follow the owning session's effective physical provider, including when the main selection is an idle-guard alias. Legacy qualified `provider/model[:thinking]` preferences remain readable but cannot pin another provider. Thinking defaults to `low`; supported suffixes are `off`, `minimal`, `low`, `medium`, `high`, `xhigh`, and `max`. The resolved model must be a direct physical model with sufficient context capacity. Missing models/authentication fail explicitly, without switching provider/account, inferring prices, or truncating the prepared conversation to fit. Nix derives the role model from the subagent default without coupling the runtimes.
+The selector is a tier or a model ID, optionally with `:thinking`; provider and selected account follow the owning session's effective physical provider, including when the main selection is an idle-guard alias. Legacy qualified `provider/model[:thinking]` preferences remain readable but cannot pin another provider. Thinking defaults to `low`; supported suffixes are `off`, `minimal`, `low`, `medium`, `high`, `xhigh`, and `max`. The resolved model must be a direct physical model with sufficient context capacity. Missing models/authentication fail explicitly, without switching provider/account, inferring prices, or truncating the prepared conversation to fit.
 
 The conversation model and thinking level remain unchanged. Cheap compaction reuses Pi's native algorithm and the event's prepared token budgets, retained-message boundary, previous summary, custom instructions, split-turn handling, file tracking, and usage accounting. Credentials and provider headers are resolved through Pi's model registry. Cumulative native file lists survive subsequent cheap or normal compactions while the extension is enabled. Idle time always comes from the latest non-error, non-aborted model response on the active persisted branch, including restored sessions; failed routing/provider requests, user/tool activity, cache warming, and compaction itself do not reset it.
 
@@ -204,7 +226,7 @@ Home Manager installs the extension's helpers and generates the JSON selector:
 ```nix
 programs.pi.extensions.idle-context-warning = {
   enable = true;
-  cheapCompactionModel = "gpt-6-luna:low"; # nullable role selector; default null
+  cheapCompactionModel = "cheap"; # tier or model ID, nullable; default "cheap"
   guardedModels.astra = "openai/gpt-6-astra"; # attrs of exact model IDs; default {}
 };
 ```
@@ -965,17 +987,19 @@ New subagents read `subagent.json` in Pi's agent directory (`~/.pi/agent`, or
 
 ```json
 {
-  "defaultProvider": "openai",
-  "defaultModel": "gpt-6-luna",
+  "defaultModel": "cheap",
   "defaultThinkingLevel": "low"
 }
 ```
 
-Home Manager exposes the same three fields under
+Home Manager exposes the same two fields under
 `programs.pi.extensions.subagent`. They apply to single, parallel, and chain
 launches on both backends, including nested children. An explicit task `model`
 takes precedence; append `:medium`, `:high`, etc. to override thinking as well.
-Unconfigured fields default to OpenAI/Luna/low; there is no automatic Codex fallback. Invalid configuration
+A [tier](#model-tiers) or bare model ID runs on the owning session's provider and
+account. An explicit `provider/model` runs on that provider with its own default
+account, so a Claude session can start Codex workers and the other way round.
+Profiles name tiers too: the coordinator uses `expensive`. Invalid configuration
 is reported rather than silently ignored. Restart Pi or `/reload` after changes;
 existing/resumed children retain their recorded model.
 

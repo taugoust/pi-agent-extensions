@@ -45,6 +45,7 @@ test("real native Pi keyboard rename updates canonical metadata and owned tmux a
   const prior = process.env.PI_CODING_AGENT_DIR;
   const tmux = async (...args: string[]) => (await exec("tmux", ["-S", socket, ...args], { timeout: 5000 })).stdout.trim();
   await mkdir(config, { mode: 0o700 });
+  await writeFile(join(config, "model-tiers.json"), JSON.stringify({ "harness-test": { cheap: "mock", expensive: "gpt-6.1-sol" } }));
   await writeFile(join(config, "settings.json"), JSON.stringify({ extensions: [
     fileURLToPath(new URL("./tui-worker-test-provider.ts", import.meta.url)),
     fileURLToPath(new URL("./tui-worker-test-empty-jobs.ts", import.meta.url)),

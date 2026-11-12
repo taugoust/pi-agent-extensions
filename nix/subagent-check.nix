@@ -47,6 +47,8 @@ pkgs.runCommand "subagent-check"
     cp ${self}/shared/session-routing.ts "$workdir/src/shared/session-routing.ts"
     cp ${self}/shared/session-routing.test.ts "$workdir/src/shared/session-routing.test.ts"
     cp ${self}/shared/extension-defaults.ts "$workdir/src/shared/extension-defaults.ts"
+    cp ${self}/shared/model-tiers.ts "$workdir/src/shared/model-tiers.ts"
+    cp ${self}/shared/model-tiers.test.ts "$workdir/src/shared/model-tiers.test.ts"
     cp ${self}/shared/extension-config-manifest.json "$workdir/src/shared/extension-config-manifest.json"
     substituteInPlace "$workdir/src/shared/extension-defaults.ts" \
       --replace-fail 'from "./extension-config-manifest.json";' 'from "./extension-config-manifest.json" with { type: "json" };'
@@ -100,6 +102,7 @@ pkgs.runCommand "subagent-check"
       "$workdir/src/subagent/pi-invocation.test.ts" \
       "$workdir/src/subagent/profiles.test.ts" \
       "$workdir/src/shared/session-routing.test.ts" \
+      "$workdir/src/shared/model-tiers.test.ts" \
       "$workdir/src/subagent/outcome.test.ts" \
       "$workdir/src/subagent/resume.ts" \
       "$workdir/src/subagent/resume.test.ts" \
@@ -204,6 +207,7 @@ pkgs.runCommand "subagent-check"
     cp -R ${self}/subagent/agents "$workdir/out/subagent/agents"
     node --test "$workdir/out/subagent/profiles.test.js"
     node --test "$workdir/out/shared/session-routing.test.js"
+    node --test "$workdir/out/shared/model-tiers.test.js"
     node "$workdir/out/subagent/outcome.test.js"
     node "$workdir/out/subagent/resume.test.js"
     node "$workdir/out/subagent/dashboard.test.js"

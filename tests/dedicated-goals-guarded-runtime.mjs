@@ -149,6 +149,7 @@ try {
   packagePath=execFileSync("nix",["store","add-path","--name","pi-guarded-goals-fixture",source],{env:importEnv,encoding:"utf8",timeout:60000}).trim();
   assert(packagePath.startsWith("/nix/store/"));assert.equal(await realpath(join(packagePath,"subagent","goal-worker.ts")),join(packagePath,"subagent","goal-worker.ts"));
   await writeFile(join(agent,"settings.json"),JSON.stringify({defaultProvider:"harness-test",defaultModel:"gpt-6.1-sol",compaction:{enabled:false},retry:{enabled:false}}));await writeFile(join(agent,"auth.json"),"{}");
+  await writeFile(join(agent, "model-tiers.json"), JSON.stringify({ "harness-test": { cheap: "mock", expensive: "gpt-6.1-sol" } }));
   await writeFile(join(cwd,"denied-read.txt"),"DENIED_NATIVE_READ_SECRET");await writeFile(join(cwd,"denied-write.txt"),"UNTOUCHED");await writeFile(join(cwd,"ordinary-denied-write.txt"),"UNTOUCHED");await writeFile(join(cwd,"allowed-read.txt"),"ALLOWED_READ");
   // Whitelist only. No inherited routing/gate/session/topology/Paseo/tmux variables.
   const env={PATH:join(root,"bin")+":"+process.env.PATH,HOME:home,LANG:"C.UTF-8",TMPDIR:root,XDG_RUNTIME_DIR:join(root,"runtime"),XDG_STATE_HOME:join(root,"state"),XDG_CONFIG_HOME:join(root,"config"),XDG_CACHE_HOME:join(root,"cache"),PASEO_HOME:join(root,"paseo"),TMUX_TMPDIR:join(root,"tmux"),PI_CODING_AGENT_DIR:agent,PI_TUI_WORKER_LAUNCHER:raw,PI_PASEO_BRIDGE_NO_IMPORT:"1",TEST_SOCKET:socketPath,TEST_CALLS:join(root,"calls.jsonl"),TEST_FILES:cwd,TEST_RELEASE:join(root,"release-model")};

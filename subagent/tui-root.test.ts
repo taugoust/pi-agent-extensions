@@ -23,6 +23,7 @@ test("actual root subagent tool: guarded/native launch, crash hydration, group c
   const extensions = [fileURLToPath(new URL("../background-job/index.ts", import.meta.url)), fileURLToPath(new URL("../questionnaire/index.ts", import.meta.url)), fileURLToPath(new URL("./tui-worker-test-provider.ts", import.meta.url)), fileURLToPath(new URL("./tui-root-test-extension.ts", import.meta.url))];
   if (mode === "guard-only") extensions.unshift(fileURLToPath(new URL("../permission-gate/index.ts", import.meta.url)));
   await writeFile(join(config, "settings.json"), JSON.stringify({ extensions, defaultProvider: "harness-test", defaultModel: "mock", defaultProjectTrust: "no", quietStartup: true }));
+  await writeFile(join(config, "model-tiers.json"), JSON.stringify({ "harness-test": { cheap: "mock", expensive: "gpt-6.1-sol" } }));
   // The guarded launcher writes state before Pi starts. Nix supplies an
   // unwritable HOME; isolate both launcher and descendant state in this fixture.
   const home = join(root, "home"), stateHome = join(root, "xdg-state");

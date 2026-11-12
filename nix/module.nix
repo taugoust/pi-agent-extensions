@@ -39,7 +39,7 @@ let
     name: builtins.elem name registry.sharedRuntimeExtensionNames
   ) selectedExtensions;
   modelDefaults = {
-    inherit (cfg.extensions.subagent) defaultProvider defaultModel defaultThinkingLevel;
+    inherit (cfg.extensions.subagent) defaultModel defaultThinkingLevel;
   };
   namedSettings = {
     # The legacy typed model selects only the separate Paseo conversation.
@@ -136,7 +136,6 @@ let
   );
   subagentSettings = extensionSettings "subagent";
   subagentKeys = [
-    "defaultProvider"
     "defaultModel"
     "defaultThinkingLevel"
   ];
@@ -193,6 +192,23 @@ in
       type = lib.types.strMatching "[^/].*";
       default = ".pi/agent";
       description = "Agent directory relative to home. Sets PI_CODING_AGENT_DIR; must not contain parent traversal.";
+    };
+    modelTiers = lib.mkOption {
+      type = lib.types.attrsOf (
+        lib.types.submodule {
+          options = lib.genAttrs [ "cheap" "expensive" "superintelligence" ] (
+            tier:
+            lib.mkOption {
+              type = lib.types.nullOr (lib.types.strMatching "[^[:space:]/:][^[:space:]]*");
+              default = null;
+              description = "Model ID for the ${tier} tier on this provider. Null keeps the built-in.";
+            }
+          );
+        }
+      );
+      default = { };
+      example = lib.literalExpression ''{ claude-bridge.cheap = "claude-sonnet-5-5"; }'';
+      description = "Per-provider model tiers, merged over the built-in openai-codex and claude-bridge tables. A tier name (cheap, expensive, superintelligence) used as a model resolves to that tier's model on the session's provider.";
     };
     quietState.enable = lib.mkOption {
       type = lib.types.bool;
@@ -290,7 +306,7 @@ in
               description = "Default ${name} limit for Goals; null is unlimited. Per-goal overrides and mutable user settings take precedence.";
             }
           );
-          btw.model = stringOption cfg.extensions.subagent.defaultModel "BTW role model ID; provider and account follow the owning session. Legacy qualified preferences cannot override the session provider. Unavailable models fail without fallback.";
+          btw.model = stringOption "cheap" "Model for Paseo side conversations: a tier (cheap, expensive, superintelligence) or a model ID, always on the session's provider. Unavailable models fail without fallback.";
           stamp.visibleByDefault = boolOption false "Show native transcript stamps at session start.";
           cache-hit-monitor.visibleByDefault = boolOption false "Show the native cache widget at session start.";
           slow-mode.enabledByDefault = boolOption false "Start each session with slow-mode active.";
@@ -312,13 +328,12 @@ in
             };
             cheapCompactionModel = lib.mkOption {
               type = lib.types.nullOr lib.types.str;
-              default = null;
-              description = "Role model[:thinking] for idle recovery; provider/account follow the owning session. Legacy qualified selectors remain readable. Null uses normal Pi compaction; no provider fallback.";
+              default = "cheap";
+              description = "Model[:thinking] for idle recovery: a tier (cheap, expensive, superintelligence) or a model ID, on the session's provider. Null uses normal Pi compaction; no provider fallback.";
             };
           };
           subagent = {
-            defaultProvider = stringOption "openai" "Legacy standalone compatibility fallback; active subagents always use their owning session's provider/account.";
-            defaultModel = stringOption "gpt-6-luna" "Default model ID for new subagents.";
+            defaultModel = stringOption "cheap" "Default model for new subagents: a tier (cheap, expensive, superintelligence) or a model ID on the session's provider, or an explicit provider/model.";
             defaultThinkingLevel = lib.mkOption {
               type = thinkingType;
               default = "low";
@@ -339,7 +354,7 @@ in
       }
       {
         assertion = subagentSettingsValid;
-        message = "programs.pi.extensions.subagent.settings accepts only defaultProvider/defaultModel/defaultThinkingLevel; effective model defaults must be nonempty strings without whitespace and thinking must be off|minimal|low|medium|high|xhigh|max. Launcher policy cannot be overridden.";
+        message = "programs.pi.extensions.subagent.settings accepts only defaultModel/defaultThinkingLevel; effective model defaults must be nonempty strings without whitespace and thinking must be off|minimal|low|medium|high|xhigh|max. Launcher policy cannot be overridden.";
       }
       {
         assertion = fastModeSettingsValid;
@@ -420,6 +435,11 @@ in
         "${cfg.agentDir}/defaults/quiet-state.json".text = builtins.toJSON {
           enabled = cfg.quietState.enable;
         };
+      }
+      // lib.optionalAttrs (cfg.modelTiers != { }) {
+        "${cfg.agentDir}/defaults/model-tiers.json".text = builtins.toJSON (
+          lib.mapAttrs (_: lib.filterAttrs (_: model: model != null)) cfg.modelTiers
+        );
       }
       // lib.mapAttrs' (
         name: value:

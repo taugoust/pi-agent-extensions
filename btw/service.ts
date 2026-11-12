@@ -1,7 +1,8 @@
 import { randomUUID } from "node:crypto";
 import type { ExtensionContext } from "@earendil-works/pi-coding-agent";
 import { buildConversationContext } from "./conversation-context";
-import { bindSessionModelRequest, prepareSessionRoutingRequest, resolveSessionModelSelector } from "../shared/session-routing";
+import { bindSessionModelRequest, prepareSessionRoutingRequest } from "../shared/session-routing";
+import { resolveSessionTierSelector as resolveSessionModelSelector } from "../shared/model-tiers";
 import {
 	completeSideThreadTurn,
 	createSideThread,
@@ -46,7 +47,7 @@ const uuid =
 /** In-memory, parent-session-owned side conversations. No main prompt/editor mutations. */
 export function createBtwService(
 	ctx: ExtensionContext,
-	defaultModel = "openai/gpt-6-luna",
+	defaultModel = "cheap",
 ) {
 	const sessionId = ctx.sessionManager.getSessionId(),
 		serviceEpoch = randomUUID();
@@ -114,7 +115,9 @@ export function createBtwService(
 			const selector = resolveSessionModelSelector(ctx, t.model, routingProfile);
 			const split = selector.indexOf("/");
 			const foundModel = ctx.modelRegistry.find(selector.slice(0, split), selector.slice(split + 1));
-			const model = foundModel && routingProfile ? bindSessionModelRequest(foundModel, routingProfile) : foundModel;
+			// The account profile only applies to requests on the provider it routes.
+			const model = foundModel && routingProfile?.providerId === foundModel.provider
+				? bindSessionModelRequest(foundModel, routingProfile) : foundModel;
 			if (
 				!model ||
 				model.provider === "idle-guard" ||

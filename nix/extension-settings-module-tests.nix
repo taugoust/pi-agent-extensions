@@ -38,6 +38,7 @@ let
   idle = builtins.fromJSON precedence.home.file.".pi/agent/defaults/idle-context-warning.json".text;
   subagent = builtins.fromJSON precedence.home.file.".pi/agent/defaults/subagent.json".text;
   sandbox = evaluate { extensions.sandbox.enable = true; };
+  tiers = evaluate { modelTiers.claude-bridge.cheap = "claude-sonnet-5-5"; };
   withPackages = evaluate {
     settings.packages = [ "npm:fixture" ];
     packages = [
@@ -47,7 +48,8 @@ let
   };
   packagesJSON = builtins.fromJSON withPackages.home.file.".pi/agent/settings.json".text;
   badSubagent = [
-    { defaultProvider = ""; }
+    { defaultProvider = "openai"; }
+    { defaultModel = ""; }
     { defaultModel = "contains whitespace"; }
     { defaultModel = false; }
     { defaultThinkingLevel = "ultra"; }
@@ -124,7 +126,16 @@ assert
     retained = "fixture/retained";
     override = "fixture/raw";
   };
-assert subagent.defaultModel == "raw-model" && subagent.defaultProvider == "openai";
+assert subagent == {
+  defaultModel = "raw-model";
+  defaultThinkingLevel = "low";
+};
+assert idle.cheapCompactionModel == "cheap";
+assert !(precedence.home.file ? ".pi/agent/defaults/model-tiers.json");
+assert
+  builtins.fromJSON tiers.home.file.".pi/agent/defaults/model-tiers.json".text == {
+    claude-bridge.cheap = "claude-sonnet-5-5";
+  };
 assert lib.all (name: sandbox.home.file ? ${".pi/agent/extensions/${name}"}) [
   "sandbox"
   "subagent"

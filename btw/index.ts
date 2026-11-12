@@ -24,7 +24,7 @@ export default function btw(pi: ExtensionAPI) {
 	}
 	function start(ctx: ExtensionContext) {
 		dispose();
-		let model = "openai/gpt-6-luna";
+		let model = "cheap";
 		try {
 			const defaults = readExtensionDefaults("btw").paseo;
 			if (defaults !== undefined && (!defaults || typeof defaults !== "object" || Array.isArray(defaults))) {

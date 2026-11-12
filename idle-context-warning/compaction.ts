@@ -1,5 +1,6 @@
 import { compact, type ExtensionAPI, type ExtensionContext, type SessionBeforeCompactEvent, type SessionBeforeCompactResult } from "@earendil-works/pi-coding-agent";
 import { isIdle, lastModelActivity, type Config } from "./policy.ts";
+import { isModelTier, readModelTiers, tierModel } from "../shared/model-tiers.ts";
 import { bindSessionModelRequest, prepareSessionRoutingRequest, resolveSessionModelSelector, resolveSessionProvider, type RoutingProfile } from "../shared/session-routing.ts";
 
 type Thinking = NonNullable<Parameters<typeof compact>[6]>;
@@ -7,8 +8,15 @@ const thinkingSuffix = /:(off|minimal|low|medium|high|xhigh|max)$/;
 const DETAILS_VERSION = "idleContextNativeCompaction";
 export const FORCE_CHEAP_COMPACTION_KEY = "__piIdleContextForceCheapV1";
 function resolveCompactionSelector(ctx: ExtensionContext, selected: { provider: string; id: string }, profile?: RoutingProfile): string {
-  if (profile) return resolveSessionModelSelector(ctx, `${selected.provider || "_"}/${selected.id}`, profile);
-  return selected.provider ? resolveSessionModelSelector(ctx, `${selected.provider}/${selected.id}`) : `${resolveSessionProvider(ctx)}/${selected.id}`;
+  const resolved = profile
+    ? resolveSessionModelSelector(ctx, `${selected.provider || "_"}/${selected.id}`, profile)
+    : selected.provider
+      ? resolveSessionModelSelector(ctx, `${selected.provider}/${selected.id}`)
+      : `${resolveSessionProvider(ctx)}/${selected.id}`;
+  // A tier such as `cheap` names that tier's model on the session's provider.
+  if (selected.provider || !isModelTier(selected.id)) return resolved;
+  const provider = resolved.slice(0, resolved.indexOf("/"));
+  return `${provider}/${tierModel(readModelTiers(), provider, selected.id)}`;
 }
 function sameRoutingProfile(a?: RoutingProfile, b?: RoutingProfile): boolean {
   return a === undefined ? b === undefined : b !== undefined && a.ownerSessionId === b.ownerSessionId && a.providerId === b.providerId && a.accountId === b.accountId && a.revision === b.revision;
@@ -56,7 +64,9 @@ export async function beforeCompact(event: SessionBeforeCompactEvent, ctx: Exten
     const model = ctx.modelRegistry.find(provider, parts.join("/"));
     if (!model) throw new Error(`Unknown compaction model: ${effectiveSelector}`);
     if (model.api === "pi-virtual") throw new Error("Compaction requires a direct physical model");
-    const requestModel = requestProfile ? bindSessionModelRequest(model, requestProfile) : model;
+    // The account profile only applies to requests on the provider it routes.
+    const requestModel = requestProfile && requestProfile.providerId === model.provider
+      ? bindSessionModelRequest(model, requestProfile) : model;
     const stream: NonNullable<Parameters<typeof compact>[7]> = async (_target, context, options) => {
       const assertCurrent = async () => {
         event.signal.throwIfAborted();

@@ -38,7 +38,8 @@ The source settings modules are the authoritative accepted-value reference.
 | `extensions.btw.settings.terminal` | `pi-btw.json` | `model`, `thinkingLevel`, `rememberThinkingLevelChanges`, `fullscreenCopyOnSelect`, `layout`, `sidePaneRatio`, `keybindings`; [schema](../btw/candidate/settings.ts) |
 | `extensions.btw.model` / `extensions.btw.settings.paseo` | `btw.json` | Paseo side-chat `model` only. It never changes the terminal side-chat's default model |
 | `extensions.idle-context-warning` named options / `.settings` | `idle-context-warning.json` | `idleMinutes`, `contextPercent`, `cheapCompactionModel`, `guardedModels`; [reader](../idle-context-warning/index.ts) |
-| `extensions.subagent` model options / `.settings` | `subagent.json` | `defaultProvider`, `defaultModel`, `defaultThinkingLevel` only; [reader](../subagent/config.ts) |
+| `extensions.subagent` model options / `.settings` | `subagent.json` | `defaultModel`, `defaultThinkingLevel` only; [reader](../subagent/config.ts) |
+| `modelTiers` | `model-tiers.json` | Per-provider `cheap`, `expensive`, `superintelligence` model IDs over the built-ins; [reader](../shared/model-tiers.ts) |
 | `extensions.slow-mode.enabledByDefault` / `.settings` | `slow-mode.json` | Startup review visibility; `/slow-mode` controls the session; [reader](../slow-mode/index.ts) |
 | `extensions.cache-hit-monitor.visibleByDefault` | `cache-hit-monitor-display.json` | Startup widget visibility; `/cache-hit-monitor` controls the session; collection is independent |
 | `extensions.permission-gate.settings` | `permission-gate.json` | `timeoutMs` only; socket ownership and authorization are not preferences |
