@@ -18,7 +18,8 @@ import { validateAcceptance, validateTaskOutcome } from "./outcome.ts";
 import { validateVerification, currentVerification, verificationSummary, verificationContract, workspaceIdentity, type VerificationGate } from "./acceptance.ts";
 import { TaskNameStore } from "./task-name-store.ts";
 import { subagentTmuxName, validateSubagentName, canonicalSubagentName, subagentTmuxAlias } from "./tui-names.ts";
-import { TuiWorkerTmux, tuiWorkerLaunchContract, processIdentity, verificationBudget } from "./tui-worker-tmux.ts";
+import { TuiWorkerTmux, tuiWorkerLaunchContract, processIdentity, processIsAlive, verificationBudget } from "./tui-worker-tmux.ts";
+import { deliverMode, type ModeDelivery, type ModeTarget } from "./operator-mode.ts";
 import { TuiWorkerStore, privateDirectory, atomicPrivateJson, readPrivateJson } from "./tui-worker-store.ts";
 import { physicalPath } from "./physical-path.ts";
 import { callTuiWorker, awaitTuiWorkerVerification, applyTuiWorkerOperatorMode } from "./tui-worker-client.ts";
@@ -953,19 +954,23 @@ export class TuiNativeManager {
     for (const key of ids) await this.promote(owner, key);
     return ids.length;
   }
-  async operatorMode(owner: string, enabled: boolean): Promise<void> {
+  async operatorMode(owner: string, enabled: boolean): Promise<ModeDelivery | undefined> {
     if (this.disposition() !== "guard-only") return;
     if (this.liveOperatorMode(owner) !== enabled) return; // stale or forged bus event
     // Mode changes must not wait behind slow child launches or model work.
     // A separate serialized capability queue also orders initial inheritance.
-    const sends: Promise<void>[] = [];
+    const targets: ModeTarget[] = [];
     for (const g of this.groups.values()) if (g.owner === owner && g.launchMode === "guard-only") {
       g.operatorEnabled = enabled; this.save(g);
       for (const c of g.children) {
-        const m = this.manifest(c); if (m && !c.reaped) sends.push(this.sendMode(g, c, m));
+        const m = this.manifest(c);
+        if (!m || c.reaped) continue;
+        targets.push({ childId: c.childId, send: () => this.sendMode(g, c, m),
+          // Only the pane process's own identity proves a worker gone; a retained "lost" state alone does not.
+          stopped: async () => !!m.panePid && !!m.paneProcessToken && !(await processIsAlive(m.panePid, m.paneProcessToken)) });
       }
     }
-    await Promise.all(sends);
+    return await deliverMode(targets);
   }
   taskRecord(owner: string, taskId: string): any | undefined {
     const found = this.byChild(owner, taskId); if (!found) return;

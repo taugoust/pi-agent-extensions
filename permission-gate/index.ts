@@ -1305,7 +1305,7 @@ export default function permissionGate(pi: ExtensionAPI) {
         }
         gateStatus(ctx, failure ? "error" : "ready");
         ctx.ui.notify(
-          `AgentSH permission prompts ${promptsEnabled() ? "on" : "off"} for parent and all children; authorization remains mandatory.`
+          `AgentSH permission prompts ${promptsEnabled() ? "on" : "off"} for this session; child workers are updated next and reported separately. Authorization remains mandatory.`
             + (failure ? ` Failed closed: ${boundedError(failure)}` : ""),
           failure ? "error" : "info",
         );

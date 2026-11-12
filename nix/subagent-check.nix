@@ -266,6 +266,7 @@ pkgs.runCommand "subagent-check"
       "$workdir/tui-runtime/subagent/group-wait.test.ts" \
       "$workdir/tui-runtime/subagent/tui-native-observe.test.ts" \
       "$workdir/tui-runtime/subagent/tui-descendants.test.ts" \
+      "$workdir/tui-runtime/subagent/operator-mode.test.ts" \
       "$workdir/tui-runtime/subagent/task-inventory.test.ts" \
       "$workdir/tui-runtime/subagent/prompt-group.test.ts" \
       "$workdir/tui-runtime/subagent/completion.test.ts" \
