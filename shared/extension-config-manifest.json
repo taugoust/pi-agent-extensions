@@ -11,7 +11,8 @@
     "sandbox",
     "permission-gate",
     "quiet-state",
-    "openai-fast-mode"
+    "openai-fast-mode",
+    "model-tiers"
   ],
   "preferences": [
     "pi-stamp.json",
@@ -28,6 +29,7 @@
     "cache-hit-monitor-display.json",
     "sandbox.json",
     "permission-gate.json",
-    "extensions/pi-openai-fast-mode/config.json"
+    "extensions/pi-openai-fast-mode/config.json",
+    "model-tiers.json"
   ]
 }

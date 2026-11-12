@@ -19,7 +19,7 @@ export function readConfig(path = configPath(), strict = false): Config {
     const parsed = mergeExtensionSettings(readExtensionDefaults("idle-context-warning"), readPreferenceDocument(path));
     if (!parsed || typeof parsed !== "object" || Array.isArray(parsed)) throw new Error("Configuration must be an object");
     const valid = (value: unknown, fallback: number, max: number) => typeof value === "number" && Number.isFinite(value) && value >= 1 && value <= max ? value : fallback;
-    return { idleMinutes: valid(parsed.idleMinutes, 30, 1440), contextPercent: valid(parsed.contextPercent, 20, 100), cheapCompactionModel: parsed.cheapCompactionModel, guardedModels: parsed.guardedModels };
+    return { idleMinutes: valid(parsed.idleMinutes, 30, 1440), contextPercent: valid(parsed.contextPercent, 20, 100), cheapCompactionModel: "cheapCompactionModel" in parsed ? parsed.cheapCompactionModel : "cheap", guardedModels: parsed.guardedModels };
   } catch (error) { if (strict) throw new Error(`Cannot read idle-context-warning.json: ${String(error)}`); return DEFAULTS; }
 }
 function isWorker(): boolean { return !!process.env.PI_SUBAGENT_ID || !!process.env.AGENTSH_SUBAGENT_ID; }

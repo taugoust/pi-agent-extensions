@@ -22,10 +22,10 @@ import type { Message } from "@mariozechner/pi-ai";
 import type { AgentToolResult, ExtensionAPI } from "@mariozechner/pi-coding-agent";
 import { copyExtensionDefaults } from "../shared/extension-defaults.js";
 import { getAgentDir, getMarkdownTheme, SessionManager } from "@mariozechner/pi-coding-agent";
-import { readSubagentModelSettings, resolveSubagentModel } from "./config.ts";
+import { readSubagentModelSettings, resolveSubagentModel, selectorProvider } from "./config.ts";
 import { discoverAgentProfiles, resolveAgentProfileLaunch, type AgentProfileScope } from "./profiles.ts";
 import { resolveCoordinatorRole } from "./coordinator-role.ts";
-import { prepareSessionRoutingRequest, readInheritedSessionRoutingProfile, readSessionRoutingProfile, registerSessionRouting, sessionRoutingEnvironment } from "../shared/session-routing.ts";
+import { getSessionRoutingProfile, prepareSessionRoutingRequest, readInheritedSessionRoutingProfile, readSessionRoutingProfile, registerSessionRouting, sessionRoutingEnvironment } from "../shared/session-routing.ts";
 import { applyAutomaticWorktreePolicy } from "../shared/worker-worktree-context.ts";
 import { ownedWorktrees } from "../shared/subagent-worktrees.ts";
 
@@ -99,7 +99,22 @@ const MAX_CONCURRENCY = 4;
 const COLLAPSED_ITEM_COUNT = 10;
 const MAX_TEXT_PREVIEW_BYTES = 50 * 1024;
 const subagentModelSettings = readSubagentModelSettings(getAgentDir());
-const defaultSubagentModel = `${subagentModelSettings.defaultModel}:${subagentModelSettings.defaultThinkingLevel} on the owning session's provider/account`;
+const defaultSubagentModel = `${subagentModelSettings.defaultModel}:${subagentModelSettings.defaultThinkingLevel} on the owning session's provider`;
+
+/**
+ * Account routing only applies to children on the routed provider. A child on
+ * another provider uses that provider's own default login.
+ */
+function childRoutingEnvironment(ctx: any, model: string | undefined): Record<string, string> {
+  const provider = selectorProvider(model);
+  if (provider) {
+    // An unready or broken profile still fails closed in sessionRoutingEnvironment.
+    let routed: string | undefined;
+    try { routed = getSessionRoutingProfile(ctx)?.providerId; } catch { routed = undefined; }
+    if (routed !== undefined && routed !== provider) return {};
+  }
+  return sessionRoutingEnvironment(ctx);
+}
 const CONFIG_FILES = ["settings.json", "subagent.json", "models.json", "auth.json", "oauth.json", "AGENTS.md"];
 // Resolve once before the model can mutate replaceable Home Manager symlinks.
 const LOADED_SUBAGENT_MODULE_PATH = fs.realpathSync(fileURLToPath(import.meta.url));
@@ -1691,7 +1706,7 @@ const SubagentItem = Type.Object({
   acceptance: Type.Array(Type.String({minLength:1, maxLength:500}), {minItems:1, maxItems:16, description:"Required for each new task: explicit task-specific, verifiable completion criteria. Preserved verbatim; never inferred from the prompt."}),
   task: Type.String({ description: "Task to delegate to this dynamic subagent" }),
   systemPrompt: Type.Optional(Type.String({ description: "Optional additional system prompt for this subagent" })),
-  model: Type.Optional(Type.String({ description: `Explicit override of the profile/default role model, optionally model:thinking. Legacy provider/id prefixes cannot override the owning session's provider/account. Default: ${defaultSubagentModel}.` })),
+  model: Type.Optional(Type.String({ description: `Explicit override of the profile/default role model, optionally with :thinking. A tier (cheap, expensive, superintelligence) or bare model ID uses the owning session's provider. provider/model runs on that provider with its default account. Default: ${defaultSubagentModel}.` })),
   tools: Type.Optional(Type.Array(Type.String(), { description: "Optional tool allowlist. With agent, only read/bash/edit/write are supported and overrides may narrow, never widen the profile." })),
   cwd: Type.Optional(Type.String({ description: "Optional working directory for this subagent process" })),
   worktree: SubagentWorktree,
@@ -1732,7 +1747,7 @@ function subagentParams() {
   child: Type.Optional(Type.Integer({ minimum: 1, maximum: 8, description: "Result only, with job_id: one-based child report number (default 1); do not combine with child_id." })),
   task: Type.Optional(Type.String({ description: "Launch only: task to delegate (single mode). For resume continuation instructions use message instead." })),
   systemPrompt: Type.Optional(Type.String({ description: "Launch only: optional additional system prompt (single mode). Resume preserves the saved configuration." })),
-  model: Type.Optional(Type.String({ description: `Launch only: explicit override of the profile/default role model (single mode), optionally model:thinking. Provider/account follow the owning session even with a legacy provider/id prefix. Default: ${defaultSubagentModel}. Resume retains the role model, not a pinned provider/account.` })),
+  model: Type.Optional(Type.String({ description: `Launch only: explicit override of the profile/default role model (single mode), optionally with :thinking. A tier (cheap, expensive, superintelligence) or bare model ID uses the owning session's provider. provider/model runs on that provider with its default account. Default: ${defaultSubagentModel}. Resume retains the role model.` })),
   tools: Type.Optional(Type.Array(Type.String(), { description: "Launch only: optional tool allowlist (single mode). With agent, only read/bash/edit/write are supported and overrides can only narrow the profile. Not accepted by resume." })),
   cwd: Type.Optional(Type.String({ description: "Launch only: optional working directory (single mode). Not accepted by resume." })),
   worktree: SubagentWorktree,
@@ -1787,7 +1802,7 @@ export default function (pi: ExtensionAPI) {
       headlessForeground = new HeadlessForegroundManager(nativeTuiStateRoot(process.env, os.homedir()), nativeDisposition,
         () => { try { return nativeDisposition() === "native" || currentSubagentPermissionAuthority()?.active === true; } catch { return false; } }, MAX_BACKGROUND_SUBAGENTS,
         update => lifecycleClosing ? false : quietState.enqueue(ctx, update),
-        () => sessionRoutingEnvironment(ctx),
+        model => childRoutingEnvironment(ctx, model),
         model => resolveSubagentModel(model, subagentModelSettings, ctx, readInheritedSessionRoutingProfile(ctx)));
       headlessForeground.activate(stableSessionId(ctx));
       (globalThis as any)[FOREGROUND_TASKS_KEY] = headlessForeground.service();
@@ -1802,7 +1817,7 @@ export default function (pi: ExtensionAPI) {
         () => {
           try { return nativeDisposition() === "native" || currentSubagentPermissionAuthority()?.active === true; }
           catch { return false; }
-        }, MAX_BACKGROUND_SUBAGENTS, () => sessionRoutingEnvironment(ctx),
+        }, MAX_BACKGROUND_SUBAGENTS, model => childRoutingEnvironment(ctx, model),
         model => resolveSubagentModel(model, subagentModelSettings, ctx, readInheritedSessionRoutingProfile(ctx)));
       tuiNative.activate(stableSessionId(ctx), (update) => {
         if (lifecycleClosing) return false;
@@ -3211,7 +3226,7 @@ export default function (pi: ExtensionAPI) {
               }
             : undefined;
 
-          const result = await runSingleSubagent(ctx.cwd, stepSpec, identity, i + 1, signal, chainUpdate, makeDetails("chain"), permissionAuthority, executionSessionId, { agentDir: getAgentDir(), routingEnvironment: sessionRoutingEnvironment(ctx) });
+          const result = await runSingleSubagent(ctx.cwd, stepSpec, identity, i + 1, signal, chainUpdate, makeDetails("chain"), permissionAuthority, executionSessionId, { agentDir: getAgentDir(), routingEnvironment: childRoutingEnvironment(ctx, stepSpec.model) });
           results.push(result);
           onUpdate?.({
             content: [{ type: "text", text: `Chain: ${results.length}/${params.chain.length} steps finished.` }],
@@ -3282,7 +3297,7 @@ export default function (pi: ExtensionAPI) {
             makeDetails("parallel"),
             permissionAuthority,
             executionSessionId,
-            { agentDir: getAgentDir(), routingEnvironment: sessionRoutingEnvironment(ctx) },
+            { agentDir: getAgentDir(), routingEnvironment: childRoutingEnvironment(ctx, spec.model) },
           );
           allResults[index] = result;
           emitParallelUpdate();
@@ -3302,7 +3317,10 @@ export default function (pi: ExtensionAPI) {
         };
       }
 
-      const result = await runSingleSubagent(ctx.cwd, specFromParams(params), executionChildren[0], undefined, signal, onUpdate, makeDetails("single"), permissionAuthority, executionSessionId, { agentDir: getAgentDir(), routingEnvironment: sessionRoutingEnvironment(ctx) });
+      const singleSpec = specFromParams(params);
+      const result = await runSingleSubagent(ctx.cwd, singleSpec, executionChildren[0], undefined, signal, onUpdate,
+        makeDetails("single"), permissionAuthority, executionSessionId,
+        { agentDir: getAgentDir(), routingEnvironment: childRoutingEnvironment(ctx, singleSpec.model) });
       if (isFailure(result)) {
         return {
           content: [{ type: "text", text: `Subagent ${result.stopReason || "failed"}: ${truncateByBytes(resultErrorText(result))}` }],

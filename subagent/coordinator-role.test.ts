@@ -6,16 +6,16 @@ import { join } from "node:path";
 import { discoverAgentProfiles, resolveAgentProfileLaunch } from "./profiles.ts";
 import { resolveCoordinatorRole } from "./coordinator-role.ts";
 
-test("new dedicated coordinator uses the real named Sol profile; explicit selection wins", async () => {
+test("new dedicated coordinator uses the expensive tier; explicit selection wins", async () => {
   const root = await mkdtemp(join(tmpdir(), "coordinator-role-"));
   try {
     const profiles = await discoverAgentProfiles({ cwd: root, agentDir: root, projectTrusted: false });
-    const discover = async (input: { agent: "coordinator" }) => resolveAgentProfileLaunch(input, profiles, { defaultModel: "gpt-6-luna" });
+    const discover = async (input: { agent: "coordinator" }) => resolveAgentProfileLaunch(input, profiles, { defaultModel: "cheap" });
     const role = await resolveCoordinatorRole(undefined, discover);
-    assert.equal(role.model, "gpt-6.1-sol:high");
+    assert.equal(role.model, "expensive:high");
     assert.match(role.systemPrompt!, /single-coordinator execution controls/);
-    assert.equal(resolveAgentProfileLaunch({ agent: "coordinator", model: "gpt-6-astra:low" }, profiles, { defaultModel: "gpt-6-luna" }).model, "gpt-6-astra:low");
-    assert.equal(resolveAgentProfileLaunch({ agent: "worker" }, profiles, { defaultModel: "gpt-6-luna" }).model, "gpt-6-luna:high");
+    assert.equal(resolveAgentProfileLaunch({ agent: "coordinator", model: "gpt-6-astra:low" }, profiles, { defaultModel: "cheap" }).model, "gpt-6-astra:low");
+    assert.equal(resolveAgentProfileLaunch({ agent: "worker" }, profiles, { defaultModel: "cheap" }).model, "cheap:high");
   } finally { await rm(root, { recursive: true, force: true }); }
 });
 

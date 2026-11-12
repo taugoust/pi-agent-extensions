@@ -79,7 +79,7 @@ Use the [Nix API reference](../nix/README.md) for native settings/models, packag
 
 ```nix
 programs.pi = {
-  settings = { defaultProvider = "openai-codex"; defaultModel = "gpt-6-luna"; };
+  settings = { defaultProvider = "openai-codex"; defaultModel = "gpt-6.1-sol"; };
   extensions = {
     stamp = { enable = true; visibleByDefault = false; settings.showSeconds = true; };
     workflows = { enable = true; settings.goal.continuationLimits.automaticTurns = null; };

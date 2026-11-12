@@ -34,7 +34,7 @@ with tempfile.TemporaryDirectory(prefix="pi-completion-reload-") as tmp:
     old_names.write_text(old_names.read_text().replace(
         "export function validateSubagentDisplayName(", "function validateSubagentDisplayName("))
     old_config = root / "old/subagent/config.ts"
-    old_config.write_text(old_config.read_text().replace('defaultModel: "gpt-6-luna"', 'defaultModel: "legacy-default"'))
+    old_config.write_text(old_config.read_text().replace('defaultModel: "cheap"', 'defaultModel: "legacy-default"'))
     old_outcome = root / "old/subagent/outcome.ts"
     old_outcome.write_text(old_outcome.read_text().replace(
         "export function requireAcceptance(", "function priorRequireAcceptance("))
@@ -134,7 +134,7 @@ export default function(pi) {{
         command("idleprobe", "IDLE-FORWARD-OK")
         command("acceptance", "OLD-ACCEPTANCE")
         command("nameprobe", "OLD-NAMES")
-        command("modelprobe", "legacy-default:low on the owning session's provider/account")
+        command("modelprobe", "legacy-default:low on the owning session's provider")
         for folder in folders:
             link = live / folder
             link.unlink()
@@ -143,7 +143,7 @@ export default function(pi) {{
         command("probe", "WAKE")
         command("acceptance", "NEW-ACCEPTANCE")
         command("nameprobe", "NEW-NAMES")
-        command("modelprobe", "gpt-6-luna:low on the owning session's provider/account")
+        command("modelprobe", "cheap:low on the owning session's provider")
         assert process.pid == pid and process.poll() is None
         print("PASS: same-process subagent reload refreshed completion wake behavior")
     finally:

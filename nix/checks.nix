@@ -2327,7 +2327,12 @@ in
         node "$outdir/sandbox/subagent-stream.test.js"
         node "$outdir/sandbox/subagent-terminal.test.js"
         node "$outdir/sandbox/workspace-paths.test.js"
+        # The background wait fixture runs on its own provider, so give it a cheap tier.
+        export PI_TEST_AGENT_DIR="$TMPDIR/background-wait-agent"
+        mkdir -p "$PI_TEST_AGENT_DIR"
+        printf '%s\n' '{"fixture-provider":{"cheap":"gpt-6-luna"}}' > "$PI_TEST_AGENT_DIR/model-tiers.json"
         node "$outdir/subagent/background-wait.test.js"
+        unset PI_TEST_AGENT_DIR
 
         cat > "$workdir/test.mjs" <<'EOF'
         import fs from "node:fs";
@@ -2442,8 +2447,12 @@ in
             hasUI,
             model,
             modelRegistry: {
-              getAll: () => [model?.id, "configured-default", "gpt-6-luna", "gemini-pro", "claude-sonnet", "model"].filter(Boolean).map(id => ({ provider: model.provider, id, api: "fixture" })),
-              find: (provider, id) => provider === model.provider ? { provider, id, api: "fixture" } : undefined,
+              getAll: () => [
+                ...[model?.id, "configured-default", "gpt-6-luna", "gemini-pro", "claude-sonnet", "model"].filter(Boolean).map(id => ({ provider: model.provider, id, api: "fixture" })),
+                { provider: "google", id: "gemini-pro", api: "fixture" },
+                { provider: "anthropic", id: "claude-sonnet", api: "fixture" },
+              ],
+              find: (provider, id) => [model.provider, "google", "anthropic"].includes(provider) ? { provider, id, api: "fixture" } : undefined,
             },
             statuses,
             notifications,
@@ -2731,6 +2740,9 @@ in
             defaultProvider: "fixture-provider",
             defaultModel: "configured-default",
             defaultThinkingLevel: "medium",
+          }));
+          fs.writeFileSync(path.join(agentConfigDir, "model-tiers.json"), JSON.stringify({
+            "fixture-provider": { cheap: "configured-default" },
           }));
           process.env.PI_TEST_AGENT_DIR = agentConfigDir;
           process.once("exit", () => fs.rmSync(agentConfigDir, { recursive: true, force: true }));
@@ -3864,9 +3876,9 @@ in
             const spawnRequests = supervisor.requests.filter((request) => request.method === "POST" && request.url.endsWith("/tools/spawn_subagent"));
             assert(spawnRequests.length === 8, "unexpected subagent request count");
             assert(spawnRequests[0].body.model === "openai-codex/configured-default:medium", "single child did not inherit active provider with configured role model");
-            assert(spawnRequests[1].body.model === "openai-codex/gemini-pro:medium", "explicit role model bypassed owning provider");
+            assert(spawnRequests[1].body.model === "google/gemini-pro:medium", "explicit provider/model was not kept");
             assert(spawnRequests[2].body.tasks[0].model === "openai-codex/configured-default:medium", "parallel child did not inherit provider");
-            assert(spawnRequests[2].body.tasks[1].model === "openai-codex/claude-sonnet:medium", "parallel explicit role model bypassed owning provider");
+            assert(spawnRequests[2].body.tasks[1].model === "anthropic/claude-sonnet:medium", "parallel explicit provider/model was not kept");
             assert(spawnRequests[3].body.cwd === "/workspace/project/rtl/package", "single relative cwd was not resolved from the parent Pi cwd");
             assert(spawnRequests[4].body.cwd === "/workspace/project", "parallel request omitted the parent Pi cwd");
             assert(spawnRequests[4].body.tasks[0].cwd === undefined, "parallel child without cwd was rewritten unnecessarily");

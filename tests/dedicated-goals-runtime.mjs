@@ -194,6 +194,7 @@ export default async function(pi) {
 }
 `);
   await writeFile(join(agent,"settings.json"),JSON.stringify({defaultProvider:"harness-test",defaultModel:"gpt-6.1-sol",compaction:{enabled:false},retry:{enabled:false}}));
+  await writeFile(join(agent, "model-tiers.json"), JSON.stringify({ "harness-test": { cheap: "mock", expensive: "gpt-6.1-sol" } }));
   await writeFile(join(agent,"auth.json"),"{}");
   await writeFile(join(agent,"pi-goal.json"),JSON.stringify({rpc:{enabled:false},continuationLimits:{automaticTurns:7,noProgressTurns:5}}));
   const env={PATH:process.env.PATH,HOME:home,LANG:"C.UTF-8",TMPDIR:root,PI_CODING_AGENT_DIR:agent,

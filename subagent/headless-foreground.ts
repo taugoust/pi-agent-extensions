@@ -125,9 +125,9 @@ export class HeadlessForegroundManager {
   private ready: () => boolean;
   private groupLimit: number;
   private notify?: (update: QuietUpdate) => boolean;
-  private routingEnvironment: () => Record<string, string>;
+  private routingEnvironment: (model?: string) => Record<string, string>;
   private resolveRoleModel: (model: string | undefined) => string | undefined;
-  constructor(root: string, disposition: () => Disposition, ready: () => boolean, groupLimit = 16, notify?: (update: QuietUpdate) => boolean, routingEnvironment: () => Record<string, string> = () => ({}), resolveRoleModel: (model: string | undefined) => string | undefined = model => model) {
+  constructor(root: string, disposition: () => Disposition, ready: () => boolean, groupLimit = 16, notify?: (update: QuietUpdate) => boolean, routingEnvironment: (model?: string) => Record<string, string> = () => ({}), resolveRoleModel: (model: string | undefined) => string | undefined = model => model) {
     this.routingEnvironment = routingEnvironment;
     this.resolveRoleModel = resolveRoleModel;
     this.disposition = disposition;
@@ -307,7 +307,7 @@ export class HeadlessForegroundManager {
       ...guidanceLaunchEnvironment({ ownerSessionId: group.owner, taskId: child.taskId, childId: child.childId, attempt: child.attempt, workerEpoch }),
       // Headless workers share the caller's selected config/defaults root.
       PI_CODING_AGENT_DIR: getAgentDir(),
-      ...this.routingEnvironment(),
+      ...this.routingEnvironment(roleModel),
       [TUI_WORKER_MANIFEST_ENV]: manifestPath, PI_TUI_WORKER_LAUNCH_MODE: contract.launchMode,
       PI_TUI_WORKER_LAUNCHER: launcher, PI_SUBAGENT_ID: child.childId,
       PI_SUBAGENT_CANONICAL_NAMES: "1",

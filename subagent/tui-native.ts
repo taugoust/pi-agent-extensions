@@ -87,9 +87,9 @@ export class TuiNativeManager {
     catch { return undefined; }
   }
   private groupLimit: number;
-  private routingEnvironment: () => Record<string, string>;
+  private routingEnvironment: (model?: string) => Record<string, string>;
   private resolveRoleModel: (model: string | undefined) => string | undefined;
-  constructor(root: string, privateDisposition: () => Disposition, ready: () => boolean, groupLimit: number, routingEnvironment: () => Record<string, string> = () => ({}), resolveRoleModel: (model: string | undefined) => string | undefined = model => model) {
+  constructor(root: string, privateDisposition: () => Disposition, ready: () => boolean, groupLimit: number, routingEnvironment: (model?: string) => Record<string, string> = () => ({}), resolveRoleModel: (model: string | undefined) => string | undefined = model => model) {
     this.routingEnvironment = routingEnvironment;
     this.resolveRoleModel = resolveRoleModel;
     if (!Number.isSafeInteger(groupLimit) || groupLimit < 1) throw new Error("Invalid shared subagent group limit");
@@ -717,6 +717,7 @@ export class TuiNativeManager {
               const contract = tuiWorkerLaunchContract(this.disposition());
               if (contract.launchMode !== g.launchMode) throw new Error("Current launcher does not match retained group authority");
               g.launcher = contract.launcher; // disk executable paths never authorize new launches
+              const roleModel = this.resolveRoleModel(c.spec.model);
               const manifest = await this.tmux.launch({ directory: c.directory, ownerSessionId: owner, taskId: c.taskId,
                 groupId: g.id, childId: c.childId, attempt: c.attempt ?? 1, caller: g.caller, cwd: c.spec.cwd,
                 activityCwd: c.spec.worktreeInfo?.path ?? c.spec.cwd, worktreeRoot: c.spec.worktreeInfo?.path,
@@ -726,7 +727,7 @@ export class TuiNativeManager {
                 displayName: c.spec.displayName ?? canonicalSubagentName(c.spec.task, undefined, c.spec.name),
                 nameWindow: g.renameWindowWithFirstChild === true && c === g.children[0],
                 parentDisposition: this.disposition(), launcher: g.launcher, launchMode: g.launchMode,
-                model: this.resolveRoleModel(c.spec.model), routingEnvironment: this.routingEnvironment(), tools: c.spec.tools, systemPrompt: c.spec.systemPrompt, acceptance: c.spec.acceptance, verification: c.spec.verification, cleanupWorktreesOnReap: c.spec.cleanupWorktreesOnReap === true,
+                model: roleModel, routingEnvironment: this.routingEnvironment(roleModel), tools: c.spec.tools, systemPrompt: c.spec.systemPrompt, acceptance: c.spec.acceptance, verification: c.spec.verification, cleanupWorktreesOnReap: c.spec.cleanupWorktreesOnReap === true,
                 automaticWorktrees: c.spec.automaticWorktrees === true, worktreeIdentity: c.spec.worktreeInfo?.identity, resumeSessionFile: c.resumeSessionFile,
                 operatorCapabilityHash: createHash("sha256").update(c.operatorCapability).digest("hex"), assignedGoal: c.spec.assignedGoal });
               if (!manifest.activityCwd) throw new Error("Worker launch-time checkout identity unavailable");

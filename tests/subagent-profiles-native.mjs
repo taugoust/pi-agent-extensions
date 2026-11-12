@@ -16,7 +16,7 @@ if (!binaryPath) throw new Error("Pass the immutable Pi runtime binary or set PI
 const binary = resolve(binaryPath);
 const extension = resolve(extensionArg ?? join(here, "../subagent/index.ts"));
 const fixture = resolve(fixtureArg ?? join(here, "subagent-profiles-native-fixture.ts"));
-const profile = (model = "legacy-profile-provider/scout-v1", thinking = "high", body = "PROFILE_SCOUT_INSTRUCTION_V1") =>
+const profile = (model = "scout-v1", thinking = "high", body = "PROFILE_SCOUT_INSTRUCTION_V1") =>
   `---\nname: fixture-scout\ndescription: Offline named profile acceptance fixture\nmodel: ${model}\nthinking: ${thinking}\ntools: read, bash\n---\n${body}\n`;
 
 const executeFile = promisify(execFile);
@@ -37,6 +37,9 @@ async function startParent(root, scenario, { projectTrust = false, agentSH = fal
     await writeFile(join(agentDir, "pi-worktree.json"), JSON.stringify({ worktreeRoot: join(root, "worktrees") }));
   }
   await writeFile(join(agentDir, "settings.json"), JSON.stringify({ defaultModel: "gpt-6-astra", defaultProvider: "offline-profile-fixture", retry: { enabled: false }, compaction: { enabled: false }, defaultProjectTrust: "never", extensions: [fixture] }));
+  await writeFile(join(agentDir, "model-tiers.json"), JSON.stringify({
+    "offline-profile-fixture": { cheap: "gpt-6-luna", expensive: "gpt-6.1-sol" },
+  }));
   await writeFile(join(agentDir, "agents", "fixture-scout.md"), profile());
   const log = join(root, "dispatch.jsonl"), stateRoot = join(root, "worker-state");
   const launcher = process.env.PI_TUI_WORKER_LAUNCHER;
@@ -247,7 +250,7 @@ try {
     ["default-implementer", {}, "gpt-6-luna", "low"],
     ["named-implementer", { agent: "worker" }, "gpt-6-luna", "high"],
     ["named-coordinator", { agent: "coordinator" }, "gpt-6.1-sol", "high"],
-    ["explicit-role-override", { agent: "coordinator", model: "legacy-provider/gpt-6-astra:low" }, "gpt-6-astra", "low"],
+    ["explicit-role-override", { agent: "coordinator", model: "gpt-6-astra:low" }, "gpt-6-astra", "low"],
   ]) {
     const instance = await startParent(join(root, label), { params: { task: "offline role dispatch", acceptance: ["record selected role"], ...params } });
     try {

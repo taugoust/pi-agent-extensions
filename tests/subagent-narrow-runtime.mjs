@@ -47,6 +47,7 @@ export default function(pi) {
 `;
   await writeFile(join(root,"fixture.ts"),fixture);
   await writeFile(join(agent,"settings.json"),JSON.stringify({defaultProvider:"harness-test",defaultModel:"gpt-6.1-sol"}));
+  await writeFile(join(agent, "model-tiers.json"), JSON.stringify({ "harness-test": { cheap: "mock", expensive: "gpt-6.1-sol" } }));
   const env={PATH:process.env.PATH,HOME:home,LANG:"C.UTF-8",TMPDIR:root,PI_CODING_AGENT_DIR:agent,PI_TUI_WORKER_LAUNCHER:raw,PI_PASEO_BRIDGE_NO_IMPORT:"1",PASEO_HOME:join(root,"paseo"),TMUX_TMPDIR:join(root,"tmux"),TEST_RESULT:join(root,"result.json")};
   child=spawn(raw,["--mode","rpc","--no-extensions","--extension",join(bundle,"subagent","index.ts"),"--extension",join(root,"fixture.ts"),"--provider","harness-test","--model","gpt-6.1-sol","--session",join(root,"session.jsonl"),"--tools","read,bash,edit,write,goal_manage,goal_complete,goal_blocked,goal_wait,update_progress"],{cwd:root,env,stdio:["pipe","pipe","pipe"]});
   child.stdin.on("error",()=>{});child.stdout.on("data",c=>{if(c.toString().includes('"success":false'))output+=c.toString();});child.stderr.on("data",c=>{output+=c.toString();});

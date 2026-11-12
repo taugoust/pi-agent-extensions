@@ -1,7 +1,7 @@
 ---
 name: coordinator
 description: Coordinates an assigned goal and reviews delegated work
-model: gpt-6.1-sol
+model: expensive
 thinking: high
 cleanupWorktreesOnReap: true
 automaticWorktrees: true
