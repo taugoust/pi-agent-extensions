@@ -16,6 +16,7 @@ import { TUI_WORKER_DISCOVERY_ENV, TUI_WORKER_MANIFEST_ENV, type HeadlessWorkerM
 import { extractRetainedToolPresentation, extractToolPresentationArguments } from "../shared/tool-presentation.ts";
 import { FOREGROUND_TASKS_PROTOCOL, type ForegroundTask, type ForegroundTaskRequest, type ForegroundTaskResponse, type ForegroundTasksService, type TaskMessage, type TaskTarget, type TaskView } from "../shared/foreground-tasks.ts";
 import { processIdentity, processIsAlive, tuiWorkerLaunchContract, verificationBudget } from "./tui-worker-tmux.ts";
+import { deliverMode, type ModeDelivery, type ModeTarget } from "./operator-mode.ts";
 import { TuiWorkerStore, atomicPrivateJson, privateDirectory, readPrivateJson } from "./tui-worker-store.ts";
 import { physicalPath } from "./physical-path.ts";
 import { callTuiWorker, awaitTuiWorkerVerification, applyTuiWorkerOperatorMode } from "./tui-worker-client.ts";
@@ -773,16 +774,22 @@ export class HeadlessForegroundManager {
     }
     this.persist(group);
   }
-  async operatorMode(owner: string, enabled: boolean): Promise<void> {
+  async operatorMode(owner: string, enabled: boolean): Promise<ModeDelivery | undefined> {
     if (this.owner !== owner || this.disposition() !== "guard-only" || this.liveOperatorMode(owner) !== enabled) return;
-    const operations: Promise<unknown>[] = [];
+    const targets: ModeTarget[] = [];
     for (const group of this.groups.values()) if (group.owner === owner && group.launchMode === "guard-only") {
       for (const child of group.children) {
         const manifest = this.manifest(child);
-        if (manifest) operations.push(applyTuiWorkerOperatorMode(manifest, child.operatorCapability, enabled));
+        if (!manifest) continue;
+        targets.push({ childId: child.childId,
+          send: async () => {
+            const applied = await applyTuiWorkerOperatorMode(manifest, child.operatorCapability, enabled);
+            if (!applied.ok) throw new Error(`Child operator mode rejected: ${applied.code}`);
+          },
+          stopped: async () => (await this.runtimeState(manifest)) === "dead" });
       }
     }
-    await Promise.all(operations);
+    return await deliverMode(targets);
   }
   async shutdown(cancelForeground: boolean): Promise<void> {
     this.closed = true;

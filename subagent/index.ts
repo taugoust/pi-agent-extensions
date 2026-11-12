@@ -130,6 +130,7 @@ import { guardedPiInvocation, trustedNixStoreFile } from "./pi-invocation.ts";
 import { setDedicatedGoalEnvironment } from "./goal-environment.ts";
 import { dedicatedGoalPolicy, sameGoalLimits } from "./goal-policy.ts";
 import { MANAGED_GOAL_ACCEPTANCE } from "./managed-goal.ts";
+import { mergeModeDeliveries, modeDeliveryNotice } from "./operator-mode.ts";
 import type { DelegatedGoalEntry, DelegatedGoalChild } from "../workflows/delegated-goals.ts";
 
 type Mode = "single" | "parallel" | "chain";
@@ -1828,9 +1829,13 @@ export default function (pi: ExtensionAPI) {
   };
   const releaseOperator = pi.events?.on?.("permission-gate:mode-changed", (event: any) => {
     if (typeof event?.enabled !== "boolean" || event.sessionId !== activeSessionId) return;
-    void Promise.all([tuiNative?.operatorMode(event.sessionId, event.enabled), headlessForeground?.operatorMode(event.sessionId, event.enabled)]).catch(error => {
-      if (sessionContext?.hasUI) sessionContext.ui.notify(`Child permission mode propagation failed: ${String(error)}`, "error");
-    });
+    void Promise.all([tuiNative?.operatorMode(event.sessionId, event.enabled), headlessForeground?.operatorMode(event.sessionId, event.enabled)])
+      .then(deliveries => {
+        const notice = modeDeliveryNotice(mergeModeDeliveries(deliveries));
+        if (notice && sessionContext?.hasUI) sessionContext.ui.notify(notice.text, notice.level);
+      }, error => {
+        if (sessionContext?.hasUI) sessionContext.ui.notify(`Child permission mode propagation failed: ${String(error)}`, "error");
+      });
   });
   let sessionContext: any;
   let activeSessionId: string | undefined;
