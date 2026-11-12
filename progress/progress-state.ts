@@ -70,6 +70,7 @@ export const ProgressParameters = Type.Object(
     request_id: Type.String({ minLength: 1, maxLength: 128, description: "Unique mutation ID. Reuse exactly the same request on retries." }),
     objective: Type.Optional(Type.String({ minLength: 1, maxLength: 320, description: "Create only: concise verifiable outcome." })),
     start: Type.Optional(Type.Boolean({ description: "Create only. Defaults to true: creation authorizes autonomous continuation with configured limits. False creates a paused draft." })),
+    token_budget: Type.Optional(Type.Integer({ minimum: 1, maximum: 1_000_000, description: "Create only: optional token cap for the goal. Omit for none." })),
     goal_id: Type.Optional(Type.String({ minLength: 1, maxLength: 128, description: "Required for update: exact stable goal ID from goal_manage status. Never null." })),
     expected_revision: Type.Optional(Type.Integer({ minimum: 1, description: "Required for update: current shared goal revision from status or the last result." })),
     remove_task_ids: Type.Optional(Type.Array(Type.String({ minLength: 1, maxLength: 128 }), { maxItems: MAX_PROGRESS_STEPS, description: "Update only: explicit task IDs to remove after a user scope change. Omitted tasks are otherwise preserved." })),
@@ -92,7 +93,7 @@ export const ProgressParameters = Type.Object(
 );
 
 export type ProgressMutation =
-  | { action: "create"; request_id: string; objective: string; steps: ProgressStep[]; start?: boolean }
+  | { action: "create"; request_id: string; objective: string; steps: ProgressStep[]; start?: boolean; token_budget?: number }
   | { action: "update"; request_id: string; goal_id: string; expected_revision: number; steps: ProgressStep[]; remove_task_ids?: string[] };
 
 export function validateProgressMutation(value: unknown): ProgressMutation {
@@ -100,11 +101,12 @@ export function validateProgressMutation(value: unknown): ProgressMutation {
   if (typeof value.request_id !== "string" || !value.request_id.trim() || value.request_id.length > 128) rejectProgress("request_id is required (1–128 characters).");
   const steps = prepareProgressArguments({ steps: value.steps }).steps;
   if (value.action === "create") {
-    if (!hasOnlyKeys(value, ["action", "request_id", "objective", "steps", "start"])) rejectProgress("create accepts only objective, steps, request_id and optional start.");
+    if (!hasOnlyKeys(value, ["action", "request_id", "objective", "steps", "start", "token_budget"])) rejectProgress("create accepts only objective, steps, request_id and optional start and token_budget.");
+    if (value.token_budget !== undefined && (!Number.isSafeInteger(value.token_budget) || (value.token_budget as number) < 1 || (value.token_budget as number) > 1_000_000)) rejectProgress("token_budget must be an integer from 1 to 1000000.");
     if (typeof value.objective !== "string" || !value.objective.trim() || value.objective.length > 320) rejectProgress("create requires a concise objective (1–320 characters).");
     if (value.start !== undefined && typeof value.start !== "boolean") rejectProgress("start must be boolean.");
     if (steps.some(step => step.id !== undefined)) rejectProgress("create allocates task IDs; omit supplied IDs.");
-    return { action: "create", request_id: value.request_id, objective: value.objective.trim(), steps, start: value.start !== false };
+    return { action: "create", request_id: value.request_id, objective: value.objective.trim(), steps, start: value.start !== false, ...(value.token_budget !== undefined ? { token_budget: value.token_budget as number } : {}) };
   }
   if (value.action !== "update" || !hasOnlyKeys(value, ["action", "request_id", "goal_id", "expected_revision", "steps", "remove_task_ids"])) rejectProgress("action must be create or update with its documented fields.");
   if (typeof value.goal_id !== "string" || !value.goal_id.trim() || value.goal_id.length > 128) rejectProgress("update requires an explicit non-null goal_id; standalone writes are not supported.");

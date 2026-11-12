@@ -9,7 +9,7 @@ export const command = 'cd /home/theo/.worktrees/paseo/web-plugin-surface-focus 
 export const raw = 'job-2083c71f9e35e537555f2506  Running  0s  Ready repaired Accounts repeat proof\ncwd: /home/theo\ncommand: '+command+'\nStarted in a new tmux pane.';
 export const typed = { content: [{type:'text',text:raw}], details: {job_id:'job-2083c71f9e35e537555f2506',name:'Ready repaired Accounts repeat proof',status:'running',action:'start',command,cwd:'/home/theo', capability:'PRIVATE',socketPath:'/private/socket'} };
 test('complete known native families, exact search leaf aliases and strict argument validation',()=>{
- for (const name of ['fetch','notify_parent','goal_complete','sandbox_allow_path','sandbox_allow_read_path','sandbox_allow_domain','sandbox_allow_unix_socket']) {
+ for (const name of ['fetch','notify_parent','goal_complete']) {
   const result={content:[{type:'text',text:'first'},{type:'text',text:'second'}],isError:true,details:{token:'PRIVATE'}};
   assert.deepEqual(extract(name,result)?.result,{content:result.content,isError:true,details:{}});
   assert.equal(extract(name,JSON.stringify(result)),undefined);

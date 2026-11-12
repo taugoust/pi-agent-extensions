@@ -3480,36 +3480,4 @@ export default function sandbox(pi: ExtensionAPI) {
       return { isError: true };
     }
   });
-
-  pi.registerTool({
-    name: "sandbox_allow_path",
-    label: "Request AgentSH write approval",
-    description: "Request write access guidance. AgentSH owns enforcement; retry the blocked operation to trigger an approval prompt.",
-    parameters: Type.Object({ path: Type.String({ description: "The filesystem path to allow write access to" }), reason: Type.String({ description: "Why write access is needed" }) }),
-    async execute(_id, params) { return { content: [{ type: "text", text: grantGuidance("write", params.path, params.reason, state) }], details: undefined }; },
-  });
-
-  pi.registerTool({
-    name: "sandbox_allow_read_path",
-    label: "Request AgentSH read approval",
-    description: "Request read access guidance. AgentSH owns enforcement; retry the blocked operation to trigger an approval prompt.",
-    parameters: Type.Object({ path: Type.String({ description: "The filesystem path to allow read access to" }), reason: Type.String({ description: "Why read access is needed" }) }),
-    async execute(_id, params) { return { content: [{ type: "text", text: grantGuidance("read", params.path, params.reason, state) }], details: undefined }; },
-  });
-
-  pi.registerTool({
-    name: "sandbox_allow_domain",
-    label: "Request AgentSH network approval",
-    description: "Request network access guidance. AgentSH owns enforcement; retry the blocked operation to trigger an approval prompt.",
-    parameters: Type.Object({ domain: Type.String({ description: "The domain to allow" }), reason: Type.String({ description: "Why network access is needed" }) }),
-    async execute(_id, params) { return { content: [{ type: "text", text: grantGuidance("network", params.domain, params.reason, state) }], details: undefined }; },
-  });
-
-  pi.registerTool({
-    name: "sandbox_allow_unix_socket",
-    label: "Request AgentSH Unix socket approval",
-    description: "Request Unix socket access guidance. AgentSH owns enforcement; retry the blocked operation to trigger an approval prompt.",
-    parameters: Type.Object({ path: Type.String({ description: "The unix socket path to allow" }), reason: Type.String({ description: "Why socket access is needed" }) }),
-    async execute(_id, params) { return { content: [{ type: "text", text: grantGuidance("unix socket", params.path, params.reason, state) }], details: undefined }; },
-  });
 }

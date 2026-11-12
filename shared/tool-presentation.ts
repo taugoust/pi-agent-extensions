@@ -17,7 +17,7 @@ const schemas = {
   goal_blocked: { reason: s, evidence: s },
   update_progress: { steps: [{ text: s, status: s }] },
   questionnaire: { questions: [{ id: s, prompt: s }], answers: [{ id: s, label: s }] },
-  fetch: {}, notify_parent: {}, goal_complete: {}, sandbox_allow_path: {}, sandbox_allow_read_path: {}, sandbox_allow_domain: {}, sandbox_allow_unix_socket: {},
+  fetch: {}, notify_parent: {}, goal_complete: {},
   edit: { diff: s },
   grep: {}, find: {}, ls: {}, read: {}, write: {}, bash: { exitCode: n },
   web_search: {}, websearch: {}, web_search_exa: {}, brave_web_search: {}, tavily_search: {}, web: {}, "web.run": {},
@@ -162,7 +162,7 @@ const paseoArguments = {
   filePaths:[s],modifiers:[s],values:[s],
 } as const;
 const argumentSchemas = {
-  fetch: { url: s, method: s }, notify_parent: { message: s }, goal_complete: {}, sandbox_allow_path: {}, sandbox_allow_read_path: {}, sandbox_allow_domain: {}, sandbox_allow_unix_socket: {},
+  fetch: { url: s, method: s }, notify_parent: { message: s }, goal_complete: {},
   background_job: { action: s, name: s, command: s, cwd: s, job_id: s, signal: s, pane_id: s },
   subagent: { _paseoWorkAgent: b, action: s, operation: s, name: s, task: s, agent: s, background: b, task_id: s, tasks: [{ agent: s, task: s, name: s }], chain: [{ agent: s, task: s, name: s }], message: s, choice: s, ...pagination },
   task_outcome: outcome,

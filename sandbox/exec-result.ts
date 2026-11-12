@@ -134,7 +134,7 @@ export function execFailureText(failure: NormalizedExecFailure, exitCode: number
     case "command_timeout": return failure.commandStarted === false
       ? `Command was not executed: its deadline expired before start. ${message}`
       : `Command timed out after it started. ${message}`;
-    case "policy_or_approval_denial": return `Command was not executed: AgentSH policy or approval denied it. ${message}`;
+    case "policy_or_approval_denial": return `Command was not executed: AgentSH policy or approval denied it. ${message} Retrying the command asks the user for approval when policy allows it.`;
     case "pre_exec_enforcement": return failure.commandStarted === true
       ? `Command started, but AgentSH enforcement cleanup failed; side effects may have occurred and the command must not be replayed automatically. ${message}`
       : `Command was not executed: AgentSH pre-execution/helper enforcement failed. ${message}`;

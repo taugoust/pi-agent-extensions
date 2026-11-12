@@ -18,7 +18,7 @@ const jiti = createJiti(import.meta.url, { alias: {
 const { registerGoalManagement } = await jiti.import(join(sourceRoot, 'workflows/goal/model-control.ts'));
 const { GoalRuntime, formatFooterStatus } = await jiti.import(join(sourceRoot, 'workflows/goal/runtime.ts'));
 const { bindGoalMutations } = await jiti.import(join(sourceRoot, 'workflows/goal/mutations.ts'));
-const { writeProgress } = await jiti.import(join(sourceRoot, 'shared/goal-progress.ts'));
+const { writeProgress, mutateProgress } = await jiti.import(join(sourceRoot, 'shared/goal-progress.ts'));
 const { normalizeGoalManageDisplay } = await jiti.import(join(sourceRoot, 'workflows/goal/presentation.ts'));
 const theme = { fg: (_color, text) => text, bold: text => text };
 function fixture() {
@@ -39,7 +39,9 @@ function fixture() {
   runtime.bindWorkflowSession(ctx.sessionManager);
   bindGoalMutations(pi, ctx, runtime, { child: false, busy: () => false });
   registerGoalManagement(pi, runtime);
-  return { pi, runtime, tool, ctx, execute: params => tool.execute('test', params, undefined, undefined, ctx) };
+  // The current goal is created through update_progress; goal_manage create is saved-scope only.
+  const create = params => mutateProgress(pi, ctx, { action: 'create', steps: [], ...params });
+  return { pi, runtime, tool, ctx, create, execute: params => tool.execute('test', params, undefined, undefined, ctx) };
 }
 test('registered goal_manage exposes saved list/start schema and dispatches through the owner service, not the current Goal',async()=>{
  const f=fixture();const calls=[];
@@ -78,7 +80,9 @@ for (const objective of ['Validate this outcome.', 'Quotes: "yes"; path \\tmp; e
   test(`registered renderers preserve contract, objective punctuation: ${JSON.stringify(objective)}`, async () => {
     const f = fixture();
     try {
-      for (const action of ['create', 'status', 'update', 'resume', 'pause', 'clear']) {
+      await assert.rejects(f.execute({ action: 'create', objective, request_id: 'create', start: false }), /update_progress action:create/);
+      f.create({ objective, request_id: 'create', start: false });
+      for (const action of ['status', 'update', 'resume', 'pause', 'clear']) {
         const previous = f.runtime.activeGoal;
         const args = { action, ...(previous ? { goal_id: previous.id, activation_id: previous.activationId, expected_revision: previous.revision } : {}),
           ...(action === 'create' ? { request_id: 'create', start: false } : {}),
@@ -123,7 +127,7 @@ for (const objective of ['Validate this outcome.', 'Quotes: "yes"; path \\tmp; e
 test('paused completion presentation preserves verification evidence without exposing machine controls', async () => {
   const f = fixture();
   const objective = 'Verified paused outcome.';
-  await f.execute({ action: 'create', objective, request_id: 'create', start: false, steps: [{ text: 'Verify', status: 'completed' }] });
+  f.create({ objective, request_id: 'create', start: false, steps: [{ text: 'Verify', status: 'completed' }] });
   const previous = f.runtime.activeGoal;
   const args = { action: 'complete', goal_id: previous.id, activation_id: previous.activationId, expected_revision: previous.revision,
     user_authorized: true, summary: 'Verified all requirements with passing tests.' };
@@ -170,7 +174,7 @@ test('errors override structured objective; missing objective is never fabricate
 
 test('required task IDs and full control contract remain machine-facing only', async () => {
   const f = fixture();
-  await f.execute({ action: 'create', objective: 'A concise outcome.', request_id: 'create', start: false });
+  f.create({ objective: 'A concise outcome.', request_id: 'create', start: false });
   const progress = writeProgress(f.pi, f.ctx, [{ text: 'Verify the outcome', status: 'pending' }], f.runtime.activeGoal.id, false, false);
   const result = await f.execute({ action: 'status' });
   assert.deepEqual(result.details.goal.tasks, progress.steps);

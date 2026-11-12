@@ -279,7 +279,7 @@ const failureTextCases: Array<{
   {
     name: "policy denial",
     failure: { source: "top-level", failureKind: "policy_or_approval_denial", code: "E_POLICY_DENIED" },
-    expected: "Command was not executed: AgentSH policy or approval denied it. E_POLICY_DENIED",
+    expected: "Command was not executed: AgentSH policy or approval denied it. E_POLICY_DENIED Retrying the command asks the user for approval when policy allows it.",
   },
   {
     name: "pre-exec refusal",
