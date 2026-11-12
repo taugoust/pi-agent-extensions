@@ -193,3 +193,35 @@ test("native passing check permits only delivered claim; backend missing and epo
     assert.equal((await worker.handle(request)).ok, false);
   } finally { await worker.close(); rmSync(directory, { recursive: true, force: true }); rmSync(cwd, { recursive: true, force: true }); }
 });
+
+test("a committed verification scope fingerprints declared inputs only and fails closed when malformed", () => {
+  const cwd = temp(), scope = (value: unknown) => writeFileSync(join(cwd, ".pi", "verification-scope.json"), JSON.stringify(value));
+  try {
+    mkdirSync(join(cwd, ".git")); mkdirSync(join(cwd, ".pi")); mkdirSync(join(cwd, "src", "generated"), { recursive: true });
+    mkdirSync(join(cwd, "node_modules"));
+    writeFileSync(join(cwd, "src", "a.ts"), "one"); writeFileSync(join(cwd, "src", "generated", "out.js"), "built");
+    writeFileSync(join(cwd, "node_modules", "dep.js"), "dep");
+    // A Nix build-result link outside the declared inputs.
+    symlinkSync(tmpdir(), join(cwd, "result"));
+    assert.throws(() => workspaceIdentity(cwd), /unsupported entry: \/result/, "without a scope every entry counts");
+    scope({ version: 1, inputs: ["src"], outputs: ["src/generated"] });
+    const before = workspaceIdentity(cwd);
+    writeFileSync(join(cwd, "src", "generated", "out.js"), "rebuilt");
+    writeFileSync(join(cwd, "node_modules", "dep.js"), "changed dependency");
+    assert.equal(workspaceIdentity(cwd), before, "declared outputs and undeclared paths do not change identity");
+    writeFileSync(join(cwd, "src", "a.ts"), "two");
+    assert.notEqual(workspaceIdentity(cwd), before, "a declared input change revokes acceptance");
+    const current = workspaceIdentity(cwd);
+    scope({ version: 1, inputs: ["src", "node_modules"], outputs: ["src/generated"] });
+    assert.notEqual(workspaceIdentity(cwd), current, "editing the scope itself changes identity");
+    symlinkSync("a.ts", join(cwd, "src", "link"));
+    assert.throws(() => workspaceIdentity(cwd), /unsupported entry: \/src\/link/, "symlinks inside inputs still fail closed");
+    rmSync(join(cwd, "src", "link"));
+    for (const bad of [{ version: 1, inputs: [] }, { version: 1, inputs: ["../outside"] }, { version: 1, inputs: ["/abs"] },
+      { version: 1, inputs: ["src"], extra: true }, { version: 2, inputs: ["src"] }, { version: 1, inputs: [".git"] }]) {
+      scope(bad); assert.throws(() => workspaceIdentity(cwd), /verification-scope\.json/, JSON.stringify(bad));
+    }
+    writeFileSync(join(cwd, ".pi", "verification-scope.json"), "{not json");
+    assert.throws(() => workspaceIdentity(cwd));
+  } finally { rmSync(cwd, { recursive: true, force: true }); }
+});
