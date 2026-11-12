@@ -21,6 +21,8 @@ import { classifyAgentSHStartup } from "../shared/agentsh-mode.js";
 import type { AgentSHPiAPI } from "../sandbox/api.js";
 import { executeAgentSHFetch, selectFetchBackend } from "./backend.js";
 import { executeNativeFetch } from "./native.js";
+import { tmpdir } from "node:os";
+import { truncationNotes } from "./response.js";
 // Lazy-loaded: gracefully degrades if not installed (bun install)
 let Readability: typeof import("@mozilla/readability").Readability | null = null;
 let JSDOM: typeof import("jsdom").JSDOM | null = null;
@@ -53,7 +55,14 @@ interface FetchDetails {
   readabilityMethod?: "mozilla" | "simple" | "failed";
   readabilityWarning?: string;
   effectiveUrl?: string;
+  /** The download stopped at maxBodyBytes, so the response is incomplete. */
+  downloadTruncated?: boolean;
+  /** The returned text is shorter than what was downloaded. */
+  presentationTruncated?: boolean;
+  /** Private copy of the downloaded bytes, kept when the returned text is shortened. */
+  fullResponsePath?: string;
 }
+
 
 /** Escape a string for safe use inside single quotes in shell. */
 function shellQuote(s: string): string {
@@ -301,7 +310,9 @@ export default function fetchExtension(pi: ExtensionAPI) {
           description:
             "Save response body to this file path instead of returning it. " +
             "Useful for binary downloads (images, archives, etc.). " +
-            "Parent directories are created automatically.",
+            "Parent directories are created automatically. " +
+            `Without AgentSH the path must be under ${tmpdir()}; ` +
+            "with AgentSH, its write policy decides.",
         }),
       ),
       textOnly: Type.Optional(
@@ -421,6 +432,10 @@ export default function fetchExtension(pi: ExtensionAPI) {
       const textTruncated = bodyText.length > DEFAULT_MAX_RESPONSE_TEXT;
       if (textTruncated) bodyText = bodyText.slice(0, DEFAULT_MAX_RESPONSE_TEXT);
       const truncated = transport.truncated || textTruncated;
+      const header = [`HTTP ${transport.status} ${transport.statusText}`, ""];
+      for (const [key, value] of Object.entries(transport.headers)) header.push(`${key}: ${value}`);
+      const presentationTruncated =
+        textTruncated || truncateResultText([...header, "", bodyText].join("\n")).truncated;
       const details: FetchDetails = {
         backend: transport.backend,
         url,
@@ -436,13 +451,20 @@ export default function fetchExtension(pi: ExtensionAPI) {
         readability: readabilityUsed,
         readabilityMethod,
         readabilityWarning,
+        downloadTruncated: transport.truncated,
+        presentationTruncated,
       };
-      const lines = [`HTTP ${transport.status} ${transport.statusText}`, ""];
-      for (const [key, value] of Object.entries(transport.headers)) lines.push(`${key}: ${value}`);
-      lines.push("");
+      const { notes, fullResponsePath } = await truncationNotes(
+        transport.body,
+        transport.truncated,
+        presentationTruncated,
+        maxBody,
+      );
+      if (fullResponsePath) details.fullResponsePath = fullResponsePath;
+      const lines = [...header, ""];
       if (readabilityUsed && articleTitle) lines.push(`Article: ${articleTitle}`, "");
       if (readabilityWarning) lines.push(`⚠️  ${readabilityWarning}`, "");
-      if (truncated) lines.push(`[Response truncated. Use outputPath with an appropriate maxBodyBytes value to save a bounded complete response.]`);
+      lines.push(...notes);
       lines.push(bodyText);
       const rendered = truncateResultText(lines.join("\n"));
       if (rendered.truncated) details.truncated = true;
