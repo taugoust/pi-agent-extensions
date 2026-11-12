@@ -1,6 +1,6 @@
 import { randomBytes, createHash } from 'node:crypto';
 import { mkdir, realpath, stat, readdir, writeFile, readFile } from 'node:fs/promises';
-import { join, relative, isAbsolute, basename } from 'node:path';
+import { join, relative, isAbsolute, basename, dirname } from 'node:path';
 import { pinRuntimePath } from './runtime-path.ts';
 import { JobStore } from './store.ts';
 import { BackgroundJobManager, resolveExecutable } from './manager.ts';
@@ -64,7 +64,12 @@ export class WatchManager {
       return this.summary(w);
     });
   }
-  private summary(w:any){return {watch_id:w.id,status:w.status,log_path:w.path,label:basename(w.path),sequence:w.sequence,dropped_through:w.droppedThrough,child_id:w.childId};}
+  private summary(w:any){
+    // An owned job's own log is internal; name the job instead of its log file.
+    const job=w.jobOutput&&w.resultPath?basename(dirname(w.resultPath)):undefined;
+    return {watch_id:w.id,status:w.status,...(job?{job_id:job}:{log_path:w.path}),label:job??basename(w.path),
+      sequence:w.sequence,dropped_through:w.droppedThrough,child_id:w.childId};
+  }
   private async ensureRunner(){
     let previous;
     try{const id=(await readFile(join(this.root,'service'),'utf8')).trim();previous=await this.jobs.get(id);}catch{}

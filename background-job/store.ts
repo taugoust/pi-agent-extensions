@@ -146,7 +146,7 @@ export function parseProcess(value: unknown): JobProcess {
 
 export function parseResult(value: unknown): JobResult {
   const data = object(value, "job result");
-  exactKeys(data, ["schemaVersion", "status", "exitCode", "finishedAt"], ["signal", "reason"]);
+  exactKeys(data, ["schemaVersion", "status", "exitCode", "finishedAt"], ["signal", "reason", "output"]);
   if (data.schemaVersion !== JOB_SCHEMA_VERSION) throw new Error("unsupported job result schema");
   if (!["completed", "failed", "cancelled", "lost"].includes(String(data.status))) {
     throw new Error("invalid job result status");
@@ -159,6 +159,17 @@ export function parseResult(value: unknown): JobResult {
     finishedAt: iso(data.finishedAt, "finish time"),
     ...(data.signal === undefined ? {} : { signal: string(data.signal, "signal", 32) }),
     ...(data.reason === undefined ? {} : { reason: string(data.reason, "reason", 1024, true) }),
+    ...(data.output === undefined ? {} : { output: parseOutputTiming(data.output) }),
+  };
+}
+
+function parseOutputTiming(value: unknown): NonNullable<JobResult["output"]> {
+  const data = object(value, "job output timing");
+  exactKeys(data, ["bytes", "finalSecondBytes", "durationMs"], []);
+  return {
+    bytes: integer(data.bytes, "output bytes", 0),
+    finalSecondBytes: integer(data.finalSecondBytes, "final-second output bytes", 0),
+    durationMs: integer(data.durationMs, "job duration", 0),
   };
 }
 

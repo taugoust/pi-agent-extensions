@@ -60,6 +60,8 @@ export type JobResult = {
   signal?: string;
   finishedAt: string;
   reason?: string;
+  /** Total output and how much of it arrived in the last second before exit. */
+  output?: { bytes: number; finalSecondBytes: number; durationMs: number };
 };
 
 export type JobRecord = {
