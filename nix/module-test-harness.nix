@@ -1,6 +1,11 @@
 # A module-unit scaffold only. Real Home Manager integration is checked by the
 # consumer's host contracts; this does not fake any Pi settings implementation.
-{ self, pkgs }:
+{
+  self,
+  pkgs,
+  # Checks that need extra flake inputs pass the wired module instead.
+  module ? import ./module.nix { inherit self; },
+}:
 let
   inherit (pkgs) lib;
   evaluate =
@@ -8,7 +13,7 @@ let
     (lib.evalModules {
       specialArgs = { inherit pkgs; };
       modules = [
-        (import ./module.nix { inherit self; })
+        module
         {
           options = {
             assertions = lib.mkOption {

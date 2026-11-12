@@ -15,41 +15,16 @@ let
   };
   defaultBundle = self.packages.${pkgs.stdenv.hostPlatform.system}.extensions;
   pi = self.packages.${pkgs.stdenv.hostPlatform.system}.pi;
-  module = self.homeManagerModules.default;
-  modulePrelude = { lib, ... }: {
-    options.home.packages = lib.mkOption {
-      type = lib.types.listOf lib.types.package;
-      default = [ ];
-    };
-    options.home.file = lib.mkOption {
-      type = lib.types.attrsOf lib.types.anything;
-      default = { };
-    };
-  };
-  hmBase = pkgs.lib.evalModules {
-    modules = [
-      modulePrelude
-      module
-      {
-        programs.pi.enable = true;
-        programs.pi.package = null;
-      }
-    ];
-    specialArgs = { inherit pkgs; };
-  };
-  hmEnabled = pkgs.lib.evalModules {
-    modules = [
-      modulePrelude
-      module
-      {
-        programs.pi.enable = true;
-        programs.pi.package = null;
-        programs.pi.extensions.openai-fast-mode.enable = true;
-      }
-    ];
-    specialArgs = { inherit pkgs; };
-  };
-  hmFiles = hmEnabled.config.home.file;
+  inherit
+    (import ./module-test-harness.nix {
+      inherit self pkgs;
+      module = self.homeManagerModules.default;
+    })
+    evaluate
+    ;
+  hmBase = evaluate { };
+  hmEnabled = evaluate { extensions.openai-fast-mode.enable = true; };
+  hmFiles = hmEnabled.home.file;
 in
 pkgs.runCommand "openai-fast-mode-check"
   {
@@ -65,10 +40,11 @@ pkgs.runCommand "openai-fast-mode-check"
     test "$(jq -r .version ${pi-openai-fast-mode}/package.json)" = 0.3.0
     test "$(jq -r '.pi.extensions | length' ${pi-openai-fast-mode}/package.json)" = 1
     test "$(jq -r '.pi.extensions[0]' ${pi-openai-fast-mode}/package.json)" = ./src/index.ts
-    test "$(jq '[.pi.extensions[] | select(. == "node_modules/pi-openai-fast-mode")] | length' ${bundle}/package.json)" = 1
-    test "$(jq '[.pi.extensions[] | select(. == "node_modules/pi-openai-fast-mode")] | length' ${defaultBundle}/package.json)" = 1
-    test ${if hmBase.config.programs.pi.extensions.openai-fast-mode.enable then "1" else "0"} = 0
-    test ${toString (builtins.length (builtins.attrNames hmFiles))} = 6
+    test "$(jq '[.pi.extensions[] | select(. == "node_modules/pi-openai-fast-mode/src/index.ts")] | length' ${bundle}/package.json)" = 1
+    test "$(jq '[.pi.extensions[] | select(. == "node_modules/pi-openai-fast-mode/src/index.ts")] | length' ${defaultBundle}/package.json)" = 1
+    test ${if hmBase.programs.pi.extensions.openai-fast-mode.enable then "1" else "0"} = 0
+    # The extension directory plus its defaults and the quiet-state default.
+    test ${toString (builtins.length (builtins.attrNames hmFiles))} = 3
 
     work="$TMPDIR/fast-mode"
     agent="$work/agent"
@@ -141,11 +117,25 @@ pkgs.runCommand "openai-fast-mode-check"
 
     hm_home="$work/hm-home"
     hm_agent="$hm_home/.pi/agent"
-    mkdir -p "$hm_agent/extensions/pi-openai-fast-mode"
-    ${pkgs.lib.concatMapStringsSep "\n" (name: ''
-      mkdir -p "$hm_home/$(dirname ${pkgs.lib.escapeShellArg name})"
-      ln -s ${hmFiles.${name}.source} "$hm_home/${name}"
-    '') (builtins.attrNames hmFiles)}
+    ${pkgs.lib.concatMapStringsSep "\n" (
+      name:
+      let
+        file = hmFiles.${name};
+        source = file.source or (pkgs.writeText "hm-file" file.text);
+      in
+      # Like Home Manager, recursive entries link each file into a writable directory.
+      if file.recursive or false then
+        ''
+          mkdir -p "$hm_home/${name}"
+          cp -rs ${source}/. "$hm_home/${name}"
+          chmod -R u+w "$hm_home/${name}"
+        ''
+      else
+        ''
+          mkdir -p "$hm_home/$(dirname ${pkgs.lib.escapeShellArg name})"
+          ln -s ${source} "$hm_home/${name}"
+        ''
+    ) (builtins.attrNames hmFiles)}
     python3 "$work/test.py" ${pi}/bin/pi "$hm_agent/extensions/pi-openai-fast-mode/index.ts" "$hm_agent"
 
     mkdir -p "$out"
