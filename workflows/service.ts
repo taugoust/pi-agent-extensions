@@ -1,15 +1,21 @@
 import { randomUUID } from "node:crypto";
 import { homedir } from "node:os";
-import { ancestryStateRoot, readJobAncestry, type JobAncestry } from "../shared/readonly-job-ancestry.ts";
+import {
+	ancestryStateRoot, readJobAncestry, type JobAncestry,
+} from "../shared/readonly-job-ancestry.ts";
 import { worktreeGoalProvenance } from "./worktree-goal-provenance.ts";
-import { DelegatedGoalRegistry, type DelegatedGoalExecutor } from "./delegated-goals.ts";
+import {
+	DelegatedGoalRegistry, type DelegatedGoalEntry, type DelegatedGoalExecutor,
+} from "./delegated-goals.ts";
 import { registerGoalReview, previewGoalReview } from "./goal-review.ts";
 import { resolveGoalLimits } from "../shared/delegated-goal-policy.ts";
 import { delegatedGoalStore } from "./delegated-goal-store.ts";
 import { validateSavedGoalControl, type SavedGoalControl } from "./saved-goal-control.ts";
 import { basename, isAbsolute, relative, sep } from "node:path";
 import { workspaceRepositories } from "./worktree/repositories.js";
-import { ownedWorktrees, recordedWorktreeOwner, worktreeGit, type OwnedWorktree } from "../shared/subagent-worktrees.ts";
+import {
+	ownedWorktrees, recordedWorktreeOwner, worktreeGit, type OwnedWorktree,
+} from "../shared/subagent-worktrees.ts";
 import { withinDiscoveryBudget, yieldDiscovery } from "./worktree/discovery-budget.ts";
 import { harnessReadOnlyRegistry } from "../shared/harness-readonly.ts";
 import { readGoalTasks, addGoalTask } from "../shared/goal-progress.ts";
@@ -59,8 +65,16 @@ type Operation = {
 	reply?: (value: unknown) => void;
 	reject?: (error: Error) => void;
 };
+/** Delegated-goal actions that only edit metadata and never start or stop a child. */
+const METADATA_GOAL_ACTIONS = [
+	"goals.edit", "goals.limits", "goals.add_task", "goals.tasks", "goals.clear",
+	"goals.complete", "goals.answer", "goals.reference", "goals.dependencies",
+	"goals.blocker.add", "goals.blocker.clear",
+];
 const actions = [
-	"goals.create", "goals.start", "goals.pause", "goals.resume", "goals.edit", "goals.limits", "goals.clear", "goals.complete", "goals.add_task", "goals.tasks", "goals.answer", "goals.reference", "goals.dependencies", "goals.blocker.add", "goals.blocker.clear",
+	"goals.create", "goals.start", "goals.pause", "goals.resume", "goals.edit", "goals.limits",
+	"goals.clear", "goals.complete", "goals.add_task", "goals.tasks", "goals.answer",
+	"goals.reference", "goals.dependencies", "goals.blocker.add", "goals.blocker.clear",
 	"worktree.add",
 	"worktree.remove",
 	"worktree.prune",
@@ -78,6 +92,55 @@ const actions = [
 ];
 const uuid =
 	/^[a-f0-9]{8}-[a-f0-9]{4}-4[a-f0-9]{3}-[89ab][a-f0-9]{3}-[a-f0-9]{12}$/i;
+const REVIEW_FIELDS = [
+	"operation", "sessionId", "serviceEpoch", "expectedGoalId", "expectedEntryRevision",
+	"referenceId", "question",
+];
+const GOAL_LIMIT_FIELDS = [
+	"operation", "sessionId", "serviceEpoch", "requestId", "action", "expectedGoalId",
+	"expectedActivationId", "expectedPolicyRevision", "tokenBudget", "continuationLimits",
+];
+const SAVED_GOAL_PAGE_SIZE = 50;
+const MAX_REQUESTS = 2048;
+const WORKTREE_CACHE_MS = 5000;
+const EXECUTION_UNAVAILABLE = "Dedicated goal execution is unavailable: "
+	+ "required child goal/progress tools or execution policy are not enabled. "
+	+ "Paused metadata remains available.";
+const EXECUTOR_UNAVAILABLE = "Dedicated goal child execution is unavailable for this session; "
+	+ "paused goal metadata remains available.";
+
+/** Confirmation text for starting or resuming a dedicated goal child. */
+function dedicatedLaunchMessage(
+	entry: DelegatedGoalEntry, workspace: string, limits: ReturnType<typeof resolveGoalLimits>,
+) {
+	return [
+		entry.text,
+		"",
+		`Workspace: ${workspace}`,
+		"Role: coordinator (default gpt-6.1-sol; Resume retains the recorded model)",
+		"Execution: independent dedicated child; the parent never executes this goal.",
+		"It may edit this workspace and make paid model calls.",
+		`Dedicated automatic limit: ${limits.automaticTurns ?? "unlimited"} responses.`,
+		`Dedicated no-progress limit: ${limits.noProgressTurns ?? "unlimited"} repeated runs.`,
+		"Unset limits inherit the configured defaults; this execution uses the values shown above.",
+		`Token budget: ${entry.tokenBudget ?? "unlimited"}; the final request can exceed it.`,
+	].join("\n");
+}
+
+/** Owned worktree tasks are completed or cleaned up by task ID only. */
+function validateWorktreeCompletionRequest(r: any) {
+	const ownedTaskId = typeof r.taskId === "string" && /^subagent-task-[a-f0-9]{24}$/.test(r.taskId);
+	if (!ownedTaskId || r.path !== undefined) {
+		throw new Error("Completion/cleanup requires an owned task ID, not a path");
+	}
+	const validReason = typeof r.reason === "string" && r.reason.trim() && r.reason.length <= 2000;
+	if (r.action === "worktree.complete" && !validReason) {
+		throw new Error("Completion rationale required (1–2000 characters)");
+	}
+	if (r.action === "worktree.cleanup" && r.reason !== undefined) {
+		throw new Error("Cleanup cannot replace completion rationale");
+	}
+}
 
 export function createWorkflowService(
 	pi: ExtensionAPI,
@@ -107,26 +170,35 @@ export function createWorkflowService(
 		try {
 			const executor = childExecutor();
 			if (executor.executionAvailable?.() !== true)
-				return executor.executionUnavailableReason?.()?.slice(0, 1000) || "Dedicated goal execution is unavailable: required child goal/progress tools or execution policy are not enabled. Paused metadata remains available.";
+				return executor.executionUnavailableReason?.()?.slice(0, 1000) || EXECUTION_UNAVAILABLE;
 			return delegated.blockedReason();
-		} catch { return "Dedicated goal child execution is unavailable for this session; paused goal metadata remains available."; }
+		} catch {
+			return EXECUTOR_UNAVAILABLE;
+		}
+	}
+	/** The entry with its limits resolved against the configured defaults. */
+	function withResolvedLimits(entry: Readonly<DelegatedGoalEntry>) {
+		const limits = resolveGoalLimits(entry.continuationLimits, runtime.settings.continuationLimits);
+		return { ...entry, continuationLimits: limits };
 	}
 	const delegatedStore = delegatedGoalStore(sessionId);
 	const delegated = new DelegatedGoalRegistry(sessionId, {
 		executionAvailable: () => executionUnavailableReason() === null,
 		executionUnavailableReason,
-		start: entry => childExecutor().start({ ...entry, continuationLimits: resolveGoalLimits(entry.continuationLimits, runtime.settings.continuationLimits) }),
-		resume: entry => childExecutor().resume({ ...entry, continuationLimits: resolveGoalLimits(entry.continuationLimits, runtime.settings.continuationLimits) }),
+		start: entry => childExecutor().start(withResolvedLimits(entry)),
+		resume: entry => childExecutor().resume(withResolvedLimits(entry)),
 		pause: entry => childExecutor().pause(entry),
-    registerReview: async (entry, title, target, role) => {
-      const executor = childExecutor();
-      if (!executor.reviewRoot) throw new Error("Goal review requires a newer runtime");
-      return registerGoalReview(await executor.reviewRoot(entry), entry, title, target, role);
-    },
+		registerReview: async (entry, title, target, role) => {
+			const executor = childExecutor();
+			if (!executor.reviewRoot) throw new Error("Goal review requires a newer runtime");
+			return registerGoalReview(await executor.reviewRoot(entry), entry, title, target, role);
+		},
 		updateLimits: entry => {
 			const executor = childExecutor();
-			if (!executor.updateLimits) throw new Error("Worker does not support limit editing; reload required");
-			return executor.updateLimits({ ...entry, continuationLimits: resolveGoalLimits(entry.continuationLimits, runtime.settings.continuationLimits) });
+			if (!executor.updateLimits) {
+				throw new Error("Worker does not support limit editing; reload required");
+			}
+			return executor.updateLimits(withResolvedLimits(entry));
 		},
 		answer: (entry, reply, requestId) => {
 			const executor = childExecutor();
@@ -139,8 +211,12 @@ export function createWorkflowService(
 			return executor.verifyStopped(entry);
 		},
 		observe: entry => {
-			try { const executor = childExecutor(); return executor.observe?.(entry) ?? Promise.resolve(null); }
-			catch { return Promise.resolve(null); }
+			try {
+				const executor = childExecutor();
+				return executor.observe?.(entry) ?? Promise.resolve(null);
+			} catch {
+				return Promise.resolve(null);
+			}
 		},
 	}, state => { current(); delegatedStore.save(state); }, delegatedStore.load(), {
 		initial: delegatedStore.loadIntent(),
@@ -273,7 +349,9 @@ export function createWorkflowService(
 		const mine = await ownedWorktrees(sessionId);
 		const tracked = await allSessionCreatedRecords();
 		const owned = mine.find((record) => pathsEqual(record.path, path));
-		if (tracked.some((record) => record.ownerSessionId === sessionId && pathsEqual(record.path, path)) && !owned) {
+		const trackedHere = tracked.some((record) =>
+			record.ownerSessionId === sessionId && pathsEqual(record.path, path));
+		if (trackedHere && !owned) {
 			const found = await locateTrackedWorktree(path, tracked, signal);
 			if (found) return found;
 		}
@@ -302,20 +380,46 @@ export function createWorkflowService(
 	function sessionCreatedRecords() {
 		const entries = ctx.sessionManager.getEntries?.() ?? ctx.sessionManager.getBranch?.() ?? [];
 		return (entries as any[]).flatMap((entry) => {
-			const data = entry?.type === "custom" && entry.customType === "workflow-worktree-created" ? entry.data : undefined;
-			return data?.version === 1 && data.ownerSessionId === sessionId && [data.path, data.commonDir, data.gitDir].every((value: unknown) => typeof value === "string") && validPhysicalIdentity(data.identity) ? [data] : [];
+			const created = entry?.type === "custom" && entry.customType === "workflow-worktree-created";
+			const data = created ? entry.data : undefined;
+			const ours = data?.version === 1 && data.ownerSessionId === sessionId;
+			const valid = ours
+				&& [data.path, data.commonDir, data.gitDir].every((value: unknown) => typeof value === "string")
+				&& validPhysicalIdentity(data.identity);
+			return valid ? [data] : [];
 		});
 	}
 	function validPhysicalIdentity(value: any) {
-		return value && typeof value.dev === "string" && typeof value.ino === "string" && typeof value.birthtimeMs === "string";
+		return value
+			&& typeof value.dev === "string"
+			&& typeof value.ino === "string"
+			&& typeof value.birthtimeMs === "string";
 	}
 	function samePhysicalIdentity(actual: any, expected: any) {
-		return validPhysicalIdentity(expected) && actual.dev === expected.dev && actual.ino === expected.ino && actual.birthtimeMs === expected.birthtimeMs;
+		return validPhysicalIdentity(expected)
+			&& actual.dev === expected.dev
+			&& actual.ino === expected.ino
+			&& actual.birthtimeMs === expected.birthtimeMs;
 	}
 	async function allSessionCreatedRecords(signal?: AbortSignal) {
 		const manual = sessionCreatedRecords();
-		const owned = (await ownedWorktrees(sessionId, signal)).filter(record => record.ownerSessionId === sessionId && validPhysicalIdentity(record.physicalIdentity));
-		return [...manual, ...owned.map(record => ({ ownerSessionId: record.ownerSessionId, path: record.path, commonDir: record.commonDir, identity: record.physicalIdentity }))];
+		const owned = (await ownedWorktrees(sessionId, signal)).filter(record =>
+			record.ownerSessionId === sessionId && validPhysicalIdentity(record.physicalIdentity));
+		const recorded = owned.map(record => ({
+			ownerSessionId: record.ownerSessionId,
+			path: record.path,
+			commonDir: record.commonDir,
+			identity: record.physicalIdentity,
+		}));
+		return [...manual, ...recorded];
+	}
+	/** Absolute common and per-worktree Git directories of a checkout. */
+	async function gitDirectories(path: string, signal: AbortSignal) {
+		const [commonDir, gitDir] = await Promise.all([
+			runGit(pi, ["rev-parse", "--path-format=absolute", "--git-common-dir"], path, signal),
+			runGit(pi, ["rev-parse", "--path-format=absolute", "--git-dir"], path, signal),
+		]);
+		return { commonDir: commonDir.stdout.trim(), gitDir: gitDir.stdout.trim() };
 	}
 	async function locateTrackedWorktree(path: string, tracked: any[], signal: AbortSignal) {
 		for (const item of tracked) {
@@ -328,7 +432,7 @@ export function createWorkflowService(
 		return undefined;
 	}
 	function scheduleWorktrees() {
-		if (closed || scheduled || reading || (worktreeCache && Date.now() - worktreeCache.at < 5000)) return;
+		if (closed || scheduled || reading || worktreeCacheFresh()) return;
 		// Serve the foreground reply before any cold filesystem/Git work starts.
 		scheduled = setImmediate(() => {
 			scheduled = undefined;
@@ -336,34 +440,47 @@ export function createWorkflowService(
 		});
 		scheduled.unref();
 	}
+	function worktreeCacheFresh() {
+		return worktreeCache && Date.now() - worktreeCache.at < WORKTREE_CACHE_MS;
+	}
 	async function refreshWorktrees() {
 		if (reading) return reading;
-		if (closed || (worktreeCache && Date.now() - worktreeCache.at < 5000)) return;
+		if (closed || worktreeCacheFresh()) return;
 		const cwd = ctx.cwd, generation = inventoryGeneration;
 		const controller = new AbortController();
 		inventoryController = controller;
-		const inventorySignal = AbortSignal.any([lifetime.signal, controller.signal, AbortSignal.timeout(2000)]);
+		const inventorySignal = AbortSignal.any([
+			lifetime.signal, controller.signal, AbortSignal.timeout(2000),
+		]);
 		const valid = () => !closed && generation === inventoryGeneration && ctx.cwd === cwd;
 		const read = <T>(fn: () => Promise<T>) => withinDiscoveryBudget(inventorySignal, fn);
 		const rows: any[] = [];
 		const timedOut = () => {
 			if (!valid()) return;
-			const message = "Worktree discovery timed out; cached or partial data is shown. Open a repository directly for a narrower view.";
+			const message = "Worktree discovery timed out; cached or partial data is shown. "
+				+ "Open a repository directly for a narrower view.";
 			completionInventory = { records: completionInventory?.records ?? [], error: message };
-			worktreeCache = { at: Date.now(), rows: rows.length ? [...rows] : worktreeCache?.rows ?? [], error: message };
+			const partialRows = rows.length ? [...rows] : worktreeCache?.rows ?? [];
+			worktreeCache = { at: Date.now(), rows: partialRows, error: message };
 		};
 		inventorySignal.addEventListener("abort", timedOut, { once: true });
 		reading = (async () => {
 			try {
 				const ownership = await read(() => ownedWorktrees(undefined, inventorySignal));
-				if (valid() && !inventorySignal.aborted) completionInventory = { records: ownership.filter(record => record.ownerSessionId === sessionId), error: null };
+				if (valid() && !inventorySignal.aborted) {
+					const records = ownership.filter(record => record.ownerSessionId === sessionId);
+					completionInventory = { records, error: null };
+				}
 				const mine = ownership.filter(
 					(record) => record.ownerSessionId === sessionId,
 				);
 				let ancestry: JobAncestry | undefined;
-				try { ancestry = readJobAncestry(ancestryStateRoot(process.env, homedir()), sessionId); } catch {}
+				try {
+					ancestry = readJobAncestry(ancestryStateRoot(process.env, homedir()), sessionId);
+				} catch {}
 				const provenance = worktreeGoalProvenance(sessionId, delegated.snapshot().entries, ancestry);
-				const presentationOwned = ownership.filter(record => provenance(record).goalScopeSessionId === sessionId);
+				const presentationOwned = ownership.filter(record =>
+					provenance(record).goalScopeSessionId === sessionId);
 				const createdRecords = await read(() => allSessionCreatedRecords(inventorySignal));
 				// Discovery only: descendant records do not enter completion/removal ownership.
 				const roots = new Set([...mine, ...presentationOwned].map((record) => record.commonDir));
@@ -372,10 +489,15 @@ export function createWorkflowService(
 				const active = discovered.active;
 				for (const root of discovered.roots) roots.add(root);
 				const warnings = [...discovered.warnings];
-				if (!ancestry || ancestry.unavailable) warnings.push("Some Goal worktree ancestry is unavailable; only verified associations are shown.");
+				if (!ancestry || ancestry.unavailable) {
+					warnings.push(
+						"Some Goal worktree ancestry is unavailable; only verified associations are shown.",
+					);
+				}
 				if (discovered.limited || roots.size > 64)
 					warnings.push(
-						"Repository discovery is limited to two directory levels and 64 repository roots; open a repository directly to inspect more.",
+						"Repository discovery is limited to two directory levels and 64 repository roots; "
+							+ "open a repository directly to inspect more.",
 					);
 				const repositoryPaths = new Set<string>();
 				const service = harnessReadOnlyRegistry()?.subagents;
@@ -455,23 +577,30 @@ export function createWorkflowService(
 						const candidates = sessionCreated.get(pathIdentity(record.path));
 						if (candidates?.length) {
 							try {
-								const [commonDir, gitDir] = await Promise.all([
-									runGit(pi, ["rev-parse", "--path-format=absolute", "--git-common-dir"], record.path, inventorySignal),
-									runGit(pi, ["rev-parse", "--path-format=absolute", "--git-dir"], record.path, inventorySignal),
-								]);
-								const identity = await filesystemIdentity(gitDir.stdout.trim());
-								createdInSession = candidates.some(created => created.ownerSessionId === sessionId && pathIdentity(commonDir.stdout.trim()) === pathIdentity(created.commonDir) && (!created.gitDir || pathIdentity(gitDir.stdout.trim()) === pathIdentity(created.gitDir)) && samePhysicalIdentity(identity, created.identity));
+								const dirs = await gitDirectories(record.path, inventorySignal);
+								const identity = await filesystemIdentity(dirs.gitDir);
+								createdInSession = candidates.some(created => created.ownerSessionId === sessionId
+									&& pathIdentity(dirs.commonDir) === pathIdentity(created.commonDir)
+									&& (!created.gitDir || pathIdentity(dirs.gitDir) === pathIdentity(created.gitDir))
+									&& samePhysicalIdentity(identity, created.identity));
 							} catch {}
 						}
 						// Path/branch matches preserve legacy fields, but are not proof of ownership.
 						let recordedOwner;
 						if (owned && validPhysicalIdentity(owned.physicalIdentity)) {
+							// shared/subagent-worktrees-metadata.test.mjs runs this block on its own
+							// as plain JavaScript: no local helpers and no type annotations.
 							try {
+								const commonDirArgs = ["rev-parse", "--path-format=absolute", "--git-common-dir"];
+								const gitDirArgs = ["rev-parse", "--path-format=absolute", "--git-dir"];
 								const [commonDir, gitDir] = await Promise.all([
-									runGit(pi, ["rev-parse", "--path-format=absolute", "--git-common-dir"], record.path, inventorySignal),
-									runGit(pi, ["rev-parse", "--path-format=absolute", "--git-dir"], record.path, inventorySignal),
+									runGit(pi, commonDirArgs, record.path, inventorySignal),
+									runGit(pi, gitDirArgs, record.path, inventorySignal),
 								]);
-								if (pathIdentity(commonDir.stdout.trim()) === pathIdentity(owned.commonDir) && samePhysicalIdentity(await filesystemIdentity(gitDir.stdout.trim()), owned.physicalIdentity))
+								const sameRepository =
+									pathIdentity(commonDir.stdout.trim()) === pathIdentity(owned.commonDir);
+								const gitDirIdentity = await filesystemIdentity(gitDir.stdout.trim());
+								if (sameRepository && samePhysicalIdentity(gitDirIdentity, owned.physicalIdentity))
 									recordedOwner = recordedWorktreeOwner(owned);
 							} catch {}
 						}
@@ -540,9 +669,11 @@ export function createWorkflowService(
 			} catch (error) {
 				if (inventorySignal.aborted) timedOut();
 				else if (valid()) {
-					const message = stripTerminalControls(error instanceof Error ? error.message : "Git unavailable").slice(0, 2000);
+					const reason = error instanceof Error ? error.message : "Git unavailable";
+					const message = stripTerminalControls(reason).slice(0, 2000);
 					completionInventory = { records: completionInventory?.records ?? [], error: message };
-					worktreeCache = { at: Date.now(), rows: rows.length ? rows : worktreeCache?.rows ?? [], error: message };
+					const partialRows = rows.length ? rows : worktreeCache?.rows ?? [];
+					worktreeCache = { at: Date.now(), rows: partialRows, error: message };
 				}
 			}
 		})().finally(() => {
@@ -552,12 +683,21 @@ export function createWorkflowService(
 		});
 		return reading;
 	}
+	function worktreeCompletionView(record: OwnedWorktree) {
+		if (!record.completion) return [];
+		const retained = record.retain === true || record.state === "failed" || !!record.error;
+		return [{ ...record.completion, path: record.path, branch: record.branch, retained }];
+	}
 	function goalReviewAvailable(): boolean {
     try { return typeof childExecutor().reviewRoot === "function"; } catch { return false; }
   }
   async function snapshot() {
 		current();
-		try { await delegated.refresh(); } catch { /* Child unavailability must not hide durable metadata. */ }
+		try {
+			await delegated.refresh();
+		} catch {
+			// Child unavailability must not hide durable metadata.
+		}
 		current();
 		scheduleWorktrees();
 		// Presentation cache only: destructive actions retain their fresh checks.
@@ -568,7 +708,15 @@ export function createWorkflowService(
 			terminal = runtime.snapshotSettingsApplicationState().terminalDetails;
 		return {
 			protocol: 1,
-			capabilities: { goalPlanning: true, goalReview: goalReviewAvailable(), goalLimitEditing: true, ownedWorktreeCompletion: true, createPausedGoal: false, delegatedGoals: true, delegatedGoalExecution: executionUnavailableReason() === null },
+			capabilities: {
+				goalPlanning: true,
+				goalReview: goalReviewAvailable(),
+				goalLimitEditing: true,
+				ownedWorktreeCompletion: true,
+				createPausedGoal: false,
+				delegatedGoals: true,
+				delegatedGoalExecution: executionUnavailableReason() === null,
+			},
 			delegatedGoals: delegated.snapshot(),
 			sessionId,
 			serviceEpoch,
@@ -581,7 +729,7 @@ export function createWorkflowService(
 			operationAction: operation?.action ?? null,
 			protectedPaths: operation?.protectedPaths ?? [],
 			dialog: operation?.dialog ?? null,
-			worktreeCompletions: completionRecords.flatMap(record => record.completion ? [{ ...record.completion, path: record.path, branch: record.branch, retained: record.retain === true || record.state === "failed" || !!record.error }] : []),
+			worktreeCompletions: completionRecords.flatMap(worktreeCompletionView),
 			worktreeCompletionError,
 			worktrees: worktreeCache?.rows ?? [],
 			worktreeError: worktreeCache?.error ?? null,
@@ -692,6 +840,60 @@ export function createWorkflowService(
 			},
 		}) as unknown as ExtensionCommandContext;
 	}
+	type CommandContext = ReturnType<typeof context>;
+	/** Dedicated-goal actions. Start and Resume ask the user to confirm first. */
+	async function runDelegatedGoalAction(op: Operation, r: any, commandCtx: CommandContext) {
+		const entry = delegated.snapshot().entries.find(e => e.id === r.expectedGoalId);
+		if (r.action === "goals.pause") childExecutor();
+		if (["goals.start", "goals.resume"].includes(r.action)) {
+			const unavailable = executionUnavailableReason();
+			if (unavailable) throw new Error(unavailable);
+			if (!entry || entry.revision !== r.expectedEntryRevision) throw new Error("Goal changed");
+			const workspace = ctx.cwd;
+			const resolvedLimits = () =>
+				resolveGoalLimits(entry.continuationLimits, runtime.settings.continuationLimits);
+			const limits = resolvedLimits();
+			const approvedLimits = JSON.stringify(limits);
+			op.policyCheck = () =>
+				ctx.cwd === workspace && JSON.stringify(resolvedLimits()) === approvedLimits;
+			const title = r.action === "goals.start"
+				? "Start dedicated Goal child?"
+				: "Resume dedicated Goal child?";
+			const message = dedicatedLaunchMessage(entry, workspace, limits);
+			if (!(await commandCtx.ui.confirm(title, message))) return;
+			current(op);
+			const changedAvailability = executionUnavailableReason();
+			if (changedAvailability) throw new Error(changedAvailability);
+		}
+		await delegated.mutate(sessionId, r);
+	}
+	async function runWorktreeCompletion(op: Operation, r: any, commandCtx: CommandContext) {
+		current(op);
+		const idle = () =>
+			ctx.isIdle() && !ctx.hasPendingMessages() && runtime.activeGoal?.status !== "active";
+		if (!idle()) throw new Error("Wait until Pi is idle before worktree completion/cleanup");
+		op.policyCheck = () => ctx.sessionManager.getSessionId() === sessionId && idle();
+		const { completionFlow } = await import("./worktree/completion.ts");
+		const mode = r.action === "worktree.complete" ? "complete" : "cleanup";
+		await completionFlow(commandCtx, mode, r.taskId, r.reason, () => {
+			current(op);
+			if (!op.policyCheck?.()) {
+				throw new Error("Worktree completion/cleanup context became active or changed");
+			}
+		});
+	}
+	/** Confirmation text for the read-only legacy parent goal flow. */
+	function legacyGoalLaunchMessage(r: any) {
+		const objective = r.objective ?? runtime.activeGoal?.text ?? "";
+		const model = ctx.model ? `${ctx.model.provider}/${ctx.model.id}` : "the current Pi model";
+		const automatic = runtime.settings.continuationLimits.automaticTurns ?? "unlimited";
+		const budget = r.tokenBudget ?? runtime.activeGoal?.tokenBudget ?? "unlimited";
+		return `${objective}\n\nWorkspace: ${ctx.cwd}\n`
+			+ `Uses ${model} with ${ctx.thinkingLevel ?? "current"} thinking and its active tools. `
+			+ "It may edit this workspace and make paid model calls. "
+			+ `Automatic limit: ${automatic} responses. `
+			+ `Token budget: ${budget}; the final request can exceed it.`;
+	}
 	async function run(op: Operation, r: any) {
 		const commandCtx = context(op);
 		const gitPi = new Proxy(pi, {
@@ -746,32 +948,9 @@ export function createWorkflowService(
 		try {
 			current(op);
 			if (r.action.startsWith("goals.")) {
-				const entry = delegated.snapshot().entries.find(e => e.id === r.expectedGoalId);
-				if (r.action === "goals.pause") childExecutor();
-				if (["goals.start", "goals.resume"].includes(r.action)) {
-					const unavailable = executionUnavailableReason();
-					if (unavailable) throw new Error(unavailable);
-					if (!entry || entry.revision !== r.expectedEntryRevision) throw new Error("Goal changed");
-					const workspace = ctx.cwd;
-					const limits = resolveGoalLimits(entry.continuationLimits, runtime.settings.continuationLimits);
-					const approvedLimits = JSON.stringify(limits);
-					op.policyCheck = () => ctx.cwd === workspace && JSON.stringify(resolveGoalLimits(entry.continuationLimits, runtime.settings.continuationLimits)) === approvedLimits;
-					if (!(await commandCtx.ui.confirm(r.action === "goals.start" ? "Start dedicated Goal child?" : "Resume dedicated Goal child?",
-						`${entry.text}\n\nWorkspace: ${workspace}\nRole: coordinator (default gpt-6.1-sol; Resume retains the recorded model)\nExecution: independent dedicated child; the parent never executes this goal.\nIt may edit this workspace and make paid model calls.\nDedicated automatic limit: ${limits.automaticTurns ?? "unlimited"} responses.\nDedicated no-progress limit: ${limits.noProgressTurns ?? "unlimited"} repeated runs.\nUnset limits inherit the configured defaults; this execution uses the values shown above.\nToken budget: ${entry.tokenBudget ?? "unlimited"}; the final request can exceed it.`))) return;
-					current(op);
-					const changedAvailability = executionUnavailableReason();
-					if (changedAvailability) throw new Error(changedAvailability);
-				}
-				await delegated.mutate(sessionId, r);
+				await runDelegatedGoalAction(op, r, commandCtx);
 			} else if (["worktree.complete", "worktree.cleanup"].includes(r.action)) {
-				current(op);
-				if (!ctx.isIdle() || ctx.hasPendingMessages() || runtime.activeGoal?.status === "active") throw new Error("Wait until Pi is idle before worktree completion/cleanup");
-				op.policyCheck = () => ctx.sessionManager.getSessionId() === sessionId && ctx.isIdle() && !ctx.hasPendingMessages() && runtime.activeGoal?.status !== "active";
-				const { completionFlow } = await import("./worktree/completion.ts");
-				await completionFlow(commandCtx, r.action === "worktree.complete" ? "complete" : "cleanup", r.taskId, r.reason, () => {
-					current(op);
-					if (!op.policyCheck?.()) throw new Error("Worktree completion/cleanup context became active or changed");
-				});
+				await runWorktreeCompletion(op, r, commandCtx);
 			} else if (r.action.startsWith("worktree.")) {
 				if (
 					!ctx.isIdle() ||
@@ -877,7 +1056,7 @@ export function createWorkflowService(
 								: r.action === "goal.edit"
 									? "Update Goal?"
 									: "Start Goal?",
-							`${r.objective ?? runtime.activeGoal?.text ?? ""}\n\nWorkspace: ${ctx.cwd}\nUses ${ctx.model ? `${ctx.model.provider}/${ctx.model.id}` : "the current Pi model"} with ${ctx.thinkingLevel ?? "current"} thinking and its active tools. It may edit this workspace and make paid model calls. Automatic limit: ${runtime.settings.continuationLimits.automaticTurns ?? "unlimited"} responses. Token budget: ${r.tokenBudget ?? runtime.activeGoal?.tokenBudget ?? "unlimited"}; the final request can exceed it.`,
+							legacyGoalLaunchMessage(r),
 						))
 					)
 						return;
@@ -925,6 +1104,46 @@ export function createWorkflowService(
 			worktreeCache = undefined;
 		}
 	}
+	function findDelegatedEntry(id: unknown) {
+		return delegated.snapshot().entries.find(entry => entry.id === id);
+	}
+	function activeActivationId() {
+		return runtime.activeGoal?.activationId ?? runtime.activeGoal?.id;
+	}
+	/** Read-only preview of one review reference of a delegated goal. */
+	async function reviewPreview(r: any) {
+		if (Object.keys(r).some(key => !REVIEW_FIELDS.includes(key))) {
+			throw new Error("Unknown review fields");
+		}
+		const entry = findDelegatedEntry(r.expectedGoalId);
+		const sameRevision = entry && entry.revision === r.expectedEntryRevision;
+		if (!sameRevision || typeof r.referenceId !== "string") {
+			throw new Error("Goal review changed; refresh");
+		}
+		const executor = childExecutor();
+		if (!executor.reviewRoot) throw new Error("Goal review requires a newer runtime");
+		const root = await executor.reviewRoot(entry);
+		const preview = await previewGoalReview(root, entry, r.referenceId, r.question);
+		current();
+		if (findDelegatedEntry(entry.id)?.revision !== entry.revision) {
+			throw new Error("Goal review changed; refresh");
+		}
+		return { sessionId, serviceEpoch, preview };
+	}
+	/** Edits the legacy parent goal's limits. Returns the new snapshot. */
+	function updateParentGoalLimits(r: any, fingerprint: string) {
+		const validRequest = Object.keys(r).every(key => GOAL_LIMIT_FIELDS.includes(key))
+			&& typeof r.expectedGoalId === "string"
+			&& Number.isSafeInteger(r.expectedPolicyRevision);
+		if (!validRequest) throw new Error("Invalid goal limit request");
+		if (r.expectedActivationId !== activeActivationId()) throw new Error("Goal activation changed");
+		runtime.updateGoalLimits(
+			ctx, r.expectedGoalId, r.expectedPolicyRevision, r.tokenBudget, r.continuationLimits,
+		);
+		requests.set(r.requestId, fingerprint);
+		notice = null;
+		return snapshot();
+	}
 	async function handle(input: unknown): Promise<any> {
 		current();
 		if (!input || typeof input !== "object" || Array.isArray(input))
@@ -932,17 +1151,7 @@ export function createWorkflowService(
 		const r = input as any;
 		if (r.sessionId !== sessionId || r.serviceEpoch !== serviceEpoch)
 			throw new Error("Stale workflow identity");
-    if (r.operation === "review") {
-      if (Object.keys(r).some(key => !["operation", "sessionId", "serviceEpoch", "expectedGoalId", "expectedEntryRevision", "referenceId", "question"].includes(key))) throw new Error("Unknown review fields");
-      const entry = delegated.snapshot().entries.find(entry => entry.id === r.expectedGoalId);
-      if (!entry || entry.revision !== r.expectedEntryRevision || typeof r.referenceId !== "string") throw new Error("Goal review changed; refresh");
-      const executor = childExecutor();
-      if (!executor.reviewRoot) throw new Error("Goal review requires a newer runtime");
-      const preview = await previewGoalReview(await executor.reviewRoot(entry), entry, r.referenceId, r.question);
-      current();
-      if (delegated.snapshot().entries.find(item => item.id === entry.id)?.revision !== entry.revision) throw new Error("Goal review changed; refresh");
-      return { sessionId, serviceEpoch, preview };
-    }
+		if (r.operation === "review") return reviewPreview(r);
 		const allowed =
 			r.operation === "snapshot"
 				? ["operation", "sessionId", "serviceEpoch"]
@@ -966,8 +1175,9 @@ export function createWorkflowService(
 						"questionRevision",
 						"workerEpoch",
 						"answer",
-            "summary", "user_authorized", "taskEvidence", "taskEdits", "removeTaskIds",
-            "reviewTitle", "reviewTarget", "reviewRole", "waitsFor", "blockerReason", "blockerEvidence", "blockerTaskId", "blockerId",
+						"summary", "user_authorized", "taskEvidence", "taskEdits", "removeTaskIds",
+						"reviewTitle", "reviewTarget", "reviewRole", "waitsFor", "blockerReason",
+						"blockerEvidence", "blockerTaskId", "blockerId",
 						"operationId",
 						"dialogId",
 						"value",
@@ -993,15 +1203,15 @@ export function createWorkflowService(
 				throw new Error("Request ID conflict");
 			return snapshot();
 		}
-		if (requests.size >= 2048)
+		if (requests.size >= MAX_REQUESTS)
 			throw new Error("Workflow request limit reached; reload Pi");
 		if (r.operation === "cancel") {
 			if (!operation || r.operationId !== operation.id)
 				throw new Error("Operation changed");
 			requests.set(r.requestId, fingerprint);
 			cancel();
-			notice =
-				"Operation cancelled. Refresh and inspect the current state before retrying; an applied change is retained.";
+			notice = "Operation cancelled. Refresh and inspect the current state before retrying; "
+				+ "an applied change is retained.";
 			return snapshot();
 		}
 		if (r.operation === "send") {
@@ -1032,27 +1242,24 @@ export function createWorkflowService(
 			reply(r.value);
 			return snapshot();
 		}
-		if (operation || toolMutation || (!r.action?.startsWith("goals.") && r.action !== "goal.limits" && externalBusy()) || !actions.includes(r.action))
+		// Delegated-goal actions and limit edits stay available while other work is busy.
+		const blockedByOutsideWork = !r.action?.startsWith("goals.") && r.action !== "goal.limits"
+			&& externalBusy();
+		if (operation || toolMutation || blockedByOutsideWork || !actions.includes(r.action))
 			throw new Error("Workflow busy or invalid action");
 		if (["goal.start", "goal.create_paused", "goal.resume", "goal.edit"].includes(r.action))
 			throw new Error("Use dedicated delegated goals; legacy parent goal execution is read-only");
 		if (["worktree.complete", "worktree.cleanup"].includes(r.action)) {
-			if (typeof r.taskId !== "string" || !/^subagent-task-[a-f0-9]{24}$/.test(r.taskId) || r.path !== undefined) throw new Error("Completion/cleanup requires an owned task ID, not a path");
-			if (r.action === "worktree.complete" && (typeof r.reason !== "string" || !r.reason.trim() || r.reason.length > 2000)) throw new Error("Completion rationale required (1–2000 characters)");
-			if (r.action === "worktree.cleanup" && r.reason !== undefined) throw new Error("Cleanup cannot replace completion rationale");
+			validateWorktreeCompletionRequest(r);
 		}
-		if (r.action === "goal.limits") {
-			const fields = ["operation", "sessionId", "serviceEpoch", "requestId", "action", "expectedGoalId", "expectedActivationId", "expectedPolicyRevision", "tokenBudget", "continuationLimits"];
-			if (Object.keys(r).some(key => !fields.includes(key)) || typeof r.expectedGoalId !== "string" || !Number.isSafeInteger(r.expectedPolicyRevision))
-				throw new Error("Invalid goal limit request");
-			if (r.expectedActivationId !== (runtime.activeGoal?.activationId ?? runtime.activeGoal?.id)) throw new Error("Goal activation changed");
-			runtime.updateGoalLimits(ctx, r.expectedGoalId, r.expectedPolicyRevision, r.tokenBudget, r.continuationLimits);
-			requests.set(r.requestId, fingerprint);
-			notice = null;
-			return snapshot();
-		}
+		if (r.action === "goal.limits") return updateParentGoalLimits(r, fingerprint);
 		if (r.action.startsWith("goal.")) {
-			if ((runtime.activeGoal?.id ?? null) !== r.expectedGoalId || (runtime.activeGoal && (r.expectedActivationId !== (runtime.activeGoal.activationId ?? runtime.activeGoal.id) || r.expectedGoalRevision !== runtime.activeGoal.revision)))
+			const goal = runtime.activeGoal;
+			const sameGoal = (goal?.id ?? null) === r.expectedGoalId;
+			const sameActivation = !goal
+				|| (r.expectedActivationId === activeActivationId()
+					&& r.expectedGoalRevision === goal.revision);
+			if (!sameGoal || !sameActivation)
 				throw new Error("Goal identity, activation or revision changed");
 			if (r.action === "goal.create_paused") {
 				if (runtime.activeGoal)
@@ -1110,10 +1317,13 @@ export function createWorkflowService(
 				notice = null;
 				return snapshot();
 			}
-			const expectedRevision = r.action === "goals.limits" ? r.expectedPolicyRevision : r.expectedEntryRevision;
-			if (typeof r.expectedGoalId !== "string" || !uuid.test(r.expectedGoalId) || !Number.isSafeInteger(expectedRevision) || expectedRevision < 1)
-				throw new Error("Expected delegated goal identity and revision");
-			if (["goals.edit", "goals.limits", "goals.add_task", "goals.tasks", "goals.clear", "goals.complete", "goals.answer", "goals.reference", "goals.dependencies", "goals.blocker.add", "goals.blocker.clear"].includes(r.action)) {
+			const expectedRevision = r.action === "goals.limits"
+				? r.expectedPolicyRevision
+				: r.expectedEntryRevision;
+			const validIdentity = typeof r.expectedGoalId === "string" && uuid.test(r.expectedGoalId)
+				&& Number.isSafeInteger(expectedRevision) && expectedRevision >= 1;
+			if (!validIdentity) throw new Error("Expected delegated goal identity and revision");
+			if (METADATA_GOAL_ACTIONS.includes(r.action)) {
 				// Definitive metadata result: rejected edits retain the caller's draft.
 				// Cache at service level only AFTER success; failed retries must reach
 				// the registry's retained rejection instead of looking applied.
@@ -1187,74 +1397,147 @@ export function createWorkflowService(
 		void run(op, r);
 		return snapshot();
 	}
-	function savedGoalView(entry: ReturnType<typeof delegated.snapshot>["entries"][number], tasks = true) {
-		return { id: entry.id, objective: tasks ? entry.text : entry.text.slice(0, 320), status: entry.status,
-			revision: entry.revision, policyRevision: entry.policyRevision, child: entry.child,
-			taskCount: entry.tasks.length, completedTasks: entry.tasks.filter(task => task.status === "completed").length,
-			...(tasks ? { tasks: entry.tasks, waiting: entry.waiting, summary: entry.summary,
-				continuationLimits: entry.continuationLimits, tokenBudget: entry.tokenBudget, tokensUsed: entry.tokensUsed,
-				observation: entry.observation, planning: entry.planning } : {}) };
+	type SavedEntry = ReturnType<typeof delegated.snapshot>["entries"][number];
+	function savedGoalView(entry: SavedEntry, tasks = true) {
+		const brief = {
+			id: entry.id,
+			objective: tasks ? entry.text : entry.text.slice(0, 320),
+			status: entry.status,
+			revision: entry.revision,
+			policyRevision: entry.policyRevision,
+			child: entry.child,
+			taskCount: entry.tasks.length,
+			completedTasks: entry.tasks.filter(task => task.status === "completed").length,
+		};
+		if (!tasks) return brief;
+		return {
+			...brief,
+			tasks: entry.tasks,
+			waiting: entry.waiting,
+			summary: entry.summary,
+			continuationLimits: entry.continuationLimits,
+			tokenBudget: entry.tokenBudget,
+			tokensUsed: entry.tokensUsed,
+			observation: entry.observation,
+			planning: entry.planning,
+		};
 	}
 	// The saved-goal revisions the model last saw. A mutation is rejected when
 	// its goal changed since then; the rejection shows the new state.
 	const seenSavedRevisions = new Map<string, number>();
-	const seenSaved = (view: { id: string; revision: number }) => { seenSavedRevisions.set(view.id, view.revision); return view; };
-	async function manageSavedGoal(params: SavedGoalControl, caller: ExtensionContext, signal?: AbortSignal) {
-		current(); signal?.throwIfAborted(); validateSavedGoalControl(params);
-		if (caller.sessionManager.getSessionId() !== sessionId || caller.cwd !== ctx.cwd) throw new Error("Saved-Goal owner session/workspace changed");
-		const read = params.action === "list" || params.action === "status";
-		if (read) {
-			await delegated.refresh(); current(); signal?.throwIfAborted();
-			const entries = delegated.snapshot().entries;
-			if (params.action === "list") {
-				const offset = params.offset ?? 0;
-				return { scope: "saved", goals: entries.slice(offset, offset + 50).map(entry => seenSaved(savedGoalView(entry, false))),
-					next_offset: offset + 50 < entries.length ? offset + 50 : null };
-			}
-			const entry = entries.find(entry => entry.id === params.goal_id);
-			if (!entry) throw new Error("Saved Goal not found in this owner session");
-			return { scope: "saved", goal: seenSaved(savedGoalView(entry)) };
-		}
-		if (runtime.agentRunOrigin === "automatic") throw new Error("Saved-Goal controls require a new user instruction, not automatic continuation");
-		if (operation || toolMutation || externalBusy()) throw new Error("Finish pending workflow/permission operations before saved-Goal mutations");
-		const create = params.action === "create";
-		const entry = create ? undefined : delegated.snapshot().entries.find(entry => entry.id === params.goal_id);
-		if (!create && !entry) throw new Error("Saved Goal not found in this owner session");
+	const seenSaved = (view: { id: string; revision: number }) => {
+		seenSavedRevisions.set(view.id, view.revision);
+		return view;
+	};
+	function rejectIfChangedSinceSeen(action: string, entry: SavedEntry | undefined) {
 		const seen = entry && seenSavedRevisions.get(entry.id);
-		if (entry && seen !== undefined && seen !== entry.revision) {
-			const view = seenSaved(savedGoalView(entry, false));
-			throw new Error(`Saved goal ${params.action} rejected: the goal changed since you last saw it (now: ${JSON.stringify(view)}); check it still applies and call again`);
+		if (!entry || seen === undefined || seen === entry.revision) return;
+		const view = seenSaved(savedGoalView(entry, false));
+		throw new Error(`Saved goal ${action} rejected: the goal changed since you last saw it `
+			+ `(now: ${JSON.stringify(view)}); check it still applies and call again`);
+	}
+	async function manageSavedGoal(
+		params: SavedGoalControl, caller: ExtensionContext, signal?: AbortSignal,
+	) {
+		current();
+		signal?.throwIfAborted();
+		validateSavedGoalControl(params);
+		const sameOwner = caller.sessionManager.getSessionId() === sessionId && caller.cwd === ctx.cwd;
+		if (!sameOwner) throw new Error("Saved-Goal owner session/workspace changed");
+		if (params.action === "list" || params.action === "status") return readSavedGoals(params, signal);
+		return mutateSavedGoal(params, caller, signal);
+	}
+	async function readSavedGoals(params: SavedGoalControl, signal?: AbortSignal) {
+		await delegated.refresh();
+		current();
+		signal?.throwIfAborted();
+		const entries = delegated.snapshot().entries;
+		if (params.action === "list") {
+			const offset = params.offset ?? 0;
+			const end = offset + SAVED_GOAL_PAGE_SIZE;
+			const goals = entries.slice(offset, end).map(entry => seenSaved(savedGoalView(entry, false)));
+			return { scope: "saved", goals, next_offset: end < entries.length ? end : null };
 		}
-		const cwd = ctx.cwd, limits = JSON.stringify(resolveGoalLimits(entry?.continuationLimits, runtime.settings.continuationLimits));
+		const entry = entries.find(entry => entry.id === params.goal_id);
+		if (!entry) throw new Error("Saved Goal not found in this owner session");
+		return { scope: "saved", goal: seenSaved(savedGoalView(entry)) };
+	}
+	async function mutateSavedGoal(
+		params: SavedGoalControl, caller: ExtensionContext, signal?: AbortSignal,
+	) {
+		if (runtime.agentRunOrigin === "automatic") {
+			throw new Error("Saved-Goal controls require a new user instruction, "
+				+ "not automatic continuation");
+		}
+		if (operation || toolMutation || externalBusy()) {
+			throw new Error("Finish pending workflow/permission operations before saved-Goal mutations");
+		}
+		const create = params.action === "create";
+		const entry = create ? undefined : findDelegatedEntry(params.goal_id);
+		if (!create && !entry) throw new Error("Saved Goal not found in this owner session");
+		rejectIfChangedSinceSeen(params.action, entry);
+		const cwd = ctx.cwd;
+		const resolvedLimits = () => JSON.stringify(
+			resolveGoalLimits(entry?.continuationLimits, runtime.settings.continuationLimits),
+		);
+		const limits = resolvedLimits();
 		const launch = params.action === "start" || params.action === "resume";
-		const fence = { check() {
-			signal?.throwIfAborted();
-			if (caller.sessionManager.getSessionId() !== sessionId || ctx.cwd !== cwd ||
-				(launch && limits !== JSON.stringify(resolveGoalLimits(entry?.continuationLimits, runtime.settings.continuationLimits))))
-				throw new Error("Saved-Goal launch context or limits changed");
-		} };
+		const fence = {
+			check() {
+				signal?.throwIfAborted();
+				const sameContext = caller.sessionManager.getSessionId() === sessionId && ctx.cwd === cwd;
+				if (!sameContext || (launch && limits !== resolvedLimits())) {
+					throw new Error("Saved-Goal launch context or limits changed");
+				}
+			},
+		};
 		toolMutation = fence;
 		try {
 			current();
-			if (launch) { const unavailable = executionUnavailableReason(); if (unavailable) throw new Error(unavailable); }
+			if (launch) {
+				const unavailable = executionUnavailableReason();
+				if (unavailable) throw new Error(unavailable);
+			}
 			// Fresh authorization was supplied through the registered model tool,
 			// not a fabricated UI-dialog response. All registry/executor fences,
 			// durable intent, exact child identity and stop proofs are shared.
-			const result = await delegated.mutate(sessionId, { action: params.action === "update" ? "goals.tasks" : `goals.${params.action}` as any, requestId: params.request_id!,
-				...(create ? { expectedGoalId: null, objective: params.objective!, initialTasks: (params.steps ?? []).map(step => step.text),
-					...(params.token_budget === undefined ? {} : { tokenBudget: params.token_budget }),
-					expectedRegistryRevision: delegated.snapshot().revision }
-					: { expectedGoalId: params.goal_id!, expectedEntryRevision: entry!.revision }),
-				...(params.action === "update" ? {
-					...(params.task_edits === undefined ? {} : { taskEdits: params.task_edits }),
-					...(params.remove_task_ids === undefined ? {} : { removeTaskIds: params.remove_task_ids }),
-				} : {}),
-				...(params.action === "complete" ? { user_authorized: true, summary: params.summary,
-					...(params.task_evidence === undefined ? {} : { taskEvidence: params.task_evidence.map(item => ({ taskId: item.task_id, evidence: item.evidence })) }) } : {}) });
+			const result = await delegated.mutate(sessionId, savedGoalRequest(params, entry));
 			current();
 			const id = create ? result.entries.at(-1)!.id : params.goal_id!;
-			return { scope: "saved", goal: seenSaved(savedGoalView(delegated.snapshot().entries.find(entry => entry.id === id)!)) };
-		} finally { if (toolMutation === fence) toolMutation = undefined; }
+			return { scope: "saved", goal: seenSaved(savedGoalView(findDelegatedEntry(id)!)) };
+		} finally {
+			if (toolMutation === fence) toolMutation = undefined;
+		}
+	}
+	function savedGoalCompletion(params: SavedGoalControl) {
+		const evidence = params.task_evidence;
+		const taskEvidence = evidence === undefined
+			? {}
+			: { taskEvidence: evidence.map(item => ({ taskId: item.task_id, evidence: item.evidence })) };
+		return { user_authorized: true, summary: params.summary, ...taskEvidence };
+	}
+	/** The registry request for a saved-goal mutation. */
+	function savedGoalRequest(params: SavedGoalControl, entry: SavedEntry | undefined) {
+		const action = params.action === "update" ? "goals.tasks" : `goals.${params.action}`;
+		const target = params.action === "create"
+			? {
+				expectedGoalId: null,
+				objective: params.objective!,
+				initialTasks: (params.steps ?? []).map(step => step.text),
+				...(params.token_budget === undefined ? {} : { tokenBudget: params.token_budget }),
+				expectedRegistryRevision: delegated.snapshot().revision,
+			}
+			: { expectedGoalId: params.goal_id!, expectedEntryRevision: entry!.revision };
+		const taskChanges = params.action === "update"
+			? {
+				...(params.task_edits === undefined ? {} : { taskEdits: params.task_edits }),
+				...(params.remove_task_ids === undefined ? {} : { removeTaskIds: params.remove_task_ids }),
+			}
+			: {};
+		const completion = params.action === "complete" ? savedGoalCompletion(params) : {};
+		return {
+			action: action as any, requestId: params.request_id!, ...target, ...taskChanges, ...completion,
+		};
 	}
 	return {
 		protocol: 1,

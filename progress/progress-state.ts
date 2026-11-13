@@ -1,7 +1,12 @@
 import { StringEnum } from "@earendil-works/pi-ai";
-import { buildSessionContext, type ContextEvent, type SessionEntry } from "@earendil-works/pi-coding-agent";
+import {
+  buildSessionContext, type ContextEvent, type SessionEntry,
+} from "@earendil-works/pi-coding-agent";
 import { Type } from "typebox";
-import { MAX_PROGRESS_STEPS, MAX_PROGRESS_TEXT_LENGTH, PROGRESS_STATUSES, hasMaxGraphemeLength, validateProgressArguments as validateGoalChecklistArguments, type ProgressStep } from "../shared/goal-checklist.ts";
+import {
+  MAX_PROGRESS_STEPS, MAX_PROGRESS_TEXT_LENGTH, PROGRESS_STATUSES, hasMaxGraphemeLength,
+  validateProgressArguments as validateGoalChecklistArguments, type ProgressStep,
+} from "../shared/goal-checklist.ts";
 export { MAX_PROGRESS_STEPS, MAX_PROGRESS_TEXT_LENGTH } from "../shared/goal-checklist.ts";
 export type { ProgressStep } from "../shared/goal-checklist.ts";
 
@@ -25,6 +30,9 @@ const PREVIOUS_TODO_DETAILS_VERSION = 2;
 const LEGACY_TODO_DETAILS_VERSION = 1;
 const NON_BLOCKED_STATUSES = ["pending", "in_progress", "completed"] as const;
 const RESUBMIT_GUIDANCE = "Fix the input and retry with the current goal identity and revision.";
+const MAX_OBJECTIVE_LENGTH = 320;
+const MAX_TOKEN_BUDGET = 1_000_000;
+const MAX_ID_LENGTH = 128;
 
 type ProgressStatus = (typeof PROGRESS_STATUSES)[number];
 type PreviousTodoStatus = (typeof NON_BLOCKED_STATUSES)[number];
@@ -67,14 +75,37 @@ const progressTextSchema = Type.String({
 export const ProgressParameters = Type.Object(
   {
     action: StringEnum(["create", "update"] as const),
-    objective: Type.Optional(Type.String({ minLength: 1, maxLength: 320, description: "Create only: concise verifiable outcome." })),
-    start: Type.Optional(Type.Boolean({ description: "Create only. Defaults to true: creation authorizes autonomous continuation with configured limits. False creates a paused draft." })),
-    token_budget: Type.Optional(Type.Integer({ minimum: 1, maximum: 1_000_000, description: "Create only: optional token cap for the goal. Omit for none." })),
-    remove_task_ids: Type.Optional(Type.Array(Type.String({ minLength: 1, maxLength: 128 }), { maxItems: MAX_PROGRESS_STEPS, description: "Update only: explicit task IDs to remove after a user scope change. Omitted tasks are otherwise preserved." })),
+    objective: Type.Optional(Type.String({
+      minLength: 1,
+      maxLength: MAX_OBJECTIVE_LENGTH,
+      description: "Create only: concise verifiable outcome.",
+    })),
+    start: Type.Optional(Type.Boolean({
+      description: "Create only. Defaults to true: creation authorizes autonomous continuation "
+        + "with configured limits. False creates a paused draft.",
+    })),
+    token_budget: Type.Optional(Type.Integer({
+      minimum: 1,
+      maximum: MAX_TOKEN_BUDGET,
+      description: "Create only: optional token cap for the goal. Omit for none.",
+    })),
+    remove_task_ids: Type.Optional(Type.Array(
+      Type.String({ minLength: 1, maxLength: MAX_ID_LENGTH }),
+      {
+        maxItems: MAX_PROGRESS_STEPS,
+        description: "Update only: explicit task IDs to remove after a user scope change. "
+          + "Omitted tasks are otherwise preserved.",
+      },
+    )),
     steps: Type.Array(
       Type.Object(
         {
-          id: Type.Optional(Type.String({ minLength: 1, maxLength: 128, description: "Existing task ID belonging to this goal. Retain when refining wording; omit to create a new task." })),
+          id: Type.Optional(Type.String({
+            minLength: 1,
+            maxLength: MAX_ID_LENGTH,
+            description: "Existing task ID belonging to this goal. "
+              + "Retain when refining wording; omit to create a new task.",
+          })),
           text: progressTextSchema,
           status: StringEnum(PROGRESS_STATUSES, { description: "The step's current status" }),
         },
@@ -82,7 +113,8 @@ export const ProgressParameters = Type.Object(
       ),
       {
         maxItems: MAX_PROGRESS_STEPS,
-        description: "Tasks to create or update. Omitted existing tasks remain unchanged; an empty array does not clear the checklist.",
+        description: "Tasks to create or update. Omitted existing tasks remain unchanged; "
+          + "an empty array does not clear the checklist.",
       },
     ),
   },
@@ -90,35 +122,96 @@ export const ProgressParameters = Type.Object(
 );
 
 export type ProgressMutation =
-  | { action: "create"; request_id: string; objective: string; steps: ProgressStep[]; start?: boolean; token_budget?: number }
+  | {
+    action: "create"; request_id: string; objective: string; steps: ProgressStep[];
+    start?: boolean; token_budget?: number;
+  }
   | { action: "update"; request_id: string; steps: ProgressStep[]; remove_task_ids?: string[] };
+type ProgressArguments = { steps: ProgressStep[]; goal_id?: string | null };
+
+const CREATE_KEYS = ["action", "request_id", "objective", "steps", "start", "token_budget"];
+const UPDATE_KEYS = ["action", "request_id", "steps", "remove_task_ids"];
 
 /** Normalizes model input; the tool adds request_id when it executes. */
 export function prepareProgressInput(value: unknown) {
-  const { request_id: _requestId, ...input } = validateProgressMutation(isRecord(value) ? { ...value, request_id: "prepare" } : value);
+  const withRequestId = isRecord(value) ? { ...value, request_id: "prepare" } : value;
+  const { request_id: _requestId, ...input } = validateProgressMutation(withRequestId);
   return input;
 }
 
 /** `request_id` is not a model field: the tool supplies its tool call ID. */
 export function validateProgressMutation(value: unknown): ProgressMutation {
   if (!isRecord(value)) rejectProgress("input must be an object.");
-  if (typeof value.request_id !== "string" || !value.request_id.trim() || value.request_id.length > 128) rejectProgress("request_id (the tool call ID) is required.");
-  const steps = prepareProgressArguments({ steps: value.steps }).steps;
-  if (value.action === "create") {
-    if (!hasOnlyKeys(value, ["action", "request_id", "objective", "steps", "start", "token_budget"])) rejectProgress("create accepts only objective, steps, request_id and optional start and token_budget.");
-    if (value.token_budget !== undefined && (!Number.isSafeInteger(value.token_budget) || (value.token_budget as number) < 1 || (value.token_budget as number) > 1_000_000)) rejectProgress("token_budget must be an integer from 1 to 1000000.");
-    if (typeof value.objective !== "string" || !value.objective.trim() || value.objective.length > 320) rejectProgress("create requires a concise objective (1–320 characters).");
-    if (value.start !== undefined && typeof value.start !== "boolean") rejectProgress("start must be boolean.");
-    if (steps.some(step => step.id !== undefined)) rejectProgress("create allocates task IDs; omit supplied IDs.");
-    return { action: "create", request_id: value.request_id, objective: value.objective.trim(), steps, start: value.start !== false, ...(value.token_budget !== undefined ? { token_budget: value.token_budget as number } : {}) };
+  const requestId = value.request_id;
+  if (typeof requestId !== "string" || !requestId.trim() || requestId.length > MAX_ID_LENGTH) {
+    rejectProgress("request_id (the tool call ID) is required.");
   }
-  if (value.action !== "update" || !hasOnlyKeys(value, ["action", "request_id", "steps", "remove_task_ids"])) rejectProgress("action must be create or update with its documented fields.");
-  if (value.remove_task_ids !== undefined && (!Array.isArray(value.remove_task_ids) || value.remove_task_ids.length > MAX_PROGRESS_STEPS || value.remove_task_ids.some(id => typeof id !== "string" || !id.trim() || id.length > 128))) rejectProgress("remove_task_ids must contain explicit task IDs.");
-  return { action: "update", request_id: value.request_id, steps, ...(value.remove_task_ids !== undefined ? { remove_task_ids: value.remove_task_ids as string[] } : {}) };
+  const steps = prepareProgressArguments({ steps: value.steps }).steps;
+  if (value.action === "create") return validateCreate(value, requestId, steps);
+  return validateUpdate(value, requestId, steps);
+}
+
+function validateCreate(
+  value: Record<string, unknown>, requestId: string, steps: ProgressStep[],
+): ProgressMutation {
+  if (!hasOnlyKeys(value, CREATE_KEYS)) {
+    rejectProgress(
+      "create accepts only objective, steps, request_id and optional start and token_budget.",
+    );
+  }
+  const budget = value.token_budget;
+  const validBudget = Number.isSafeInteger(budget)
+    && (budget as number) >= 1 && (budget as number) <= MAX_TOKEN_BUDGET;
+  if (budget !== undefined && !validBudget) {
+    rejectProgress("token_budget must be an integer from 1 to 1000000.");
+  }
+  const objective = value.objective;
+  const validObjective = typeof objective === "string" && objective.trim()
+    && objective.length <= MAX_OBJECTIVE_LENGTH;
+  if (!validObjective) {
+    rejectProgress("create requires a concise objective (1–320 characters).");
+  }
+  if (value.start !== undefined && typeof value.start !== "boolean") {
+    rejectProgress("start must be boolean.");
+  }
+  if (steps.some(step => step.id !== undefined)) {
+    rejectProgress("create allocates task IDs; omit supplied IDs.");
+  }
+  return {
+    action: "create",
+    request_id: requestId,
+    objective: objective.trim(),
+    steps,
+    start: value.start !== false,
+    ...(budget !== undefined ? { token_budget: budget as number } : {}),
+  };
+}
+
+function validateUpdate(
+  value: Record<string, unknown>, requestId: string, steps: ProgressStep[],
+): ProgressMutation {
+  if (value.action !== "update" || !hasOnlyKeys(value, UPDATE_KEYS)) {
+    rejectProgress("action must be create or update with its documented fields.");
+  }
+  const removals = value.remove_task_ids;
+  const isTaskId = (id: unknown) =>
+    typeof id === "string" && id.trim() && id.length <= MAX_ID_LENGTH;
+  const validRemovals = Array.isArray(removals)
+    && removals.length <= MAX_PROGRESS_STEPS
+    && removals.every(isTaskId);
+  if (removals !== undefined && !validRemovals) {
+    rejectProgress("remove_task_ids must contain explicit task IDs.");
+  }
+  return {
+    action: "update",
+    request_id: requestId,
+    steps,
+    ...(removals !== undefined ? { remove_task_ids: removals as string[] } : {}),
+  };
 }
 
 /** Legacy step decoder, also used by migration. Not the mutation API validator. */
-export function prepareProgressArguments(value: unknown): { steps: ProgressStep[]; goal_id?: string | null } {
+export function prepareProgressArguments(value: unknown): ProgressArguments {
   if (typeof value !== "object" || value === null || Array.isArray(value)) {
     return validateProgressArguments(value);
   }
@@ -131,17 +224,20 @@ export function prepareProgressArguments(value: unknown): { steps: ProgressStep[
       if (typeof entry !== "object" || entry === null || Array.isArray(entry)) return entry;
       const step = entry as Record<string, unknown>;
       const status = step.status;
-      const isNonBlockedStatus = status === "pending" || status === "in_progress" || status === "completed";
-      if ((!isNonBlockedStatus && status !== "blocked") || !Object.hasOwn(step, "reason")) return entry;
+      const isNonBlockedStatus = status === "pending" || status === "in_progress"
+        || status === "completed";
+      const knownStatus = isNonBlockedStatus || status === "blocked";
+      if (!knownStatus || !Object.hasOwn(step, "reason")) return entry;
       if (status === "blocked" && !isProgressV4Steps([step])) {
         rejectProgress(
-          "legacy blocked input must have valid text (up to 300 characters) and a non-whitespace reason (up to 200 characters), with no unsupported fields.",
+          "legacy blocked input must have valid text (up to 300 characters) "
+            + "and a non-whitespace reason (up to 200 characters), with no unsupported fields.",
         );
       }
-      const withoutReason: Record<string, unknown> = {
-        ...step,
-        ...(status === "blocked" ? { text: mergeBlockedText(step.text as string, step.reason as string) } : {}),
-      };
+      const blockedText = status === "blocked"
+        ? { text: mergeBlockedText(step.text as string, step.reason as string) }
+        : {};
+      const withoutReason: Record<string, unknown> = { ...step, ...blockedText };
       delete withoutReason.reason;
       return withoutReason;
     }),
@@ -149,27 +245,33 @@ export function prepareProgressArguments(value: unknown): { steps: ProgressStep[
   return validateProgressArguments(normalized);
 }
 
-export function validateProgressArguments(value: unknown): { steps: ProgressStep[]; goal_id?: string | null } {
+export function validateProgressArguments(value: unknown): ProgressArguments {
   return validateGoalChecklistArguments(value);
 }
 
-export function currentProgressGoal(entries: readonly SessionEntry[]): { id: string; key: string; status: string } | undefined {
+export function currentProgressGoal(
+  entries: readonly SessionEntry[],
+): { id: string; key: string; status: string } | undefined {
   for (let index = entries.length - 1; index >= 0; index--) {
     const entry = entries[index];
     if (entry.type !== "custom" || entry.customType !== "goal-state") continue;
     const goal = (entry.data as any)?.goal;
     if (!goal || goal.status === "complete" || typeof goal.id !== "string") return;
-    return { id: goal.id, key: typeof goal.progressId === "string" ? goal.progressId : goal.id, status: goal.status };
+    const key = typeof goal.progressId === "string" ? goal.progressId : goal.id;
+    return { id: goal.id, key, status: goal.status };
   }
 }
 
-export function readScopedProgress(entries: readonly SessionEntry[], goalKey: string | null): ProgressStep[] {
+export function readScopedProgress(
+  entries: readonly SessionEntry[], goalKey: string | null,
+): ProgressStep[] {
   let restored: ProgressStep[] = [];
   let authoritative = false;
   for (const entry of entries) {
     if (goalKey !== null && entry.type === "custom" && entry.customType === "goal-state") {
       const goal = (entry.data as any)?.goal;
-      if (goal && (goal.id === goalKey || goal.progressId === goalKey) && Array.isArray(goal.tasks)) {
+      const ofThisGoal = goal && (goal.id === goalKey || goal.progressId === goalKey);
+      if (ofThisGoal && Array.isArray(goal.tasks)) {
         restored = validateProgressArguments({ steps: goal.tasks }).steps;
         authoritative = true;
       }
@@ -177,12 +279,15 @@ export function readScopedProgress(entries: readonly SessionEntry[], goalKey: st
     }
     if (entry.type === "custom" && entry.customType === GOAL_PROGRESS_ENTRY_TYPE) {
       const data = entry.data as any;
-      if (!authoritative && data?.version === 1 && data.goalKey === goalKey) restored = validateProgressArguments({ steps: data.steps }).steps;
+      if (!authoritative && data?.version === 1 && data.goalKey === goalKey) {
+        restored = validateProgressArguments({ steps: data.steps }).steps;
+      }
       continue;
     }
     if (goalKey !== null || entry.type !== "message") continue;
     const message = entry.message;
-    if (message.role !== "toolResult" || message.isError || (message.details as any)?.goalId) continue;
+    const ownedByGoal = (message.details as any)?.goalId;
+    if (message.role !== "toolResult" || message.isError || ownedByGoal) continue;
     const result = decodePersistedResult(message.toolName, message.details);
     if (result !== undefined) restored = result.steps;
   }
@@ -190,7 +295,9 @@ export function readScopedProgress(entries: readonly SessionEntry[], goalKey: st
 }
 
 export function cloneProgressSteps(steps: readonly ProgressStep[]): ProgressStep[] {
-  return steps.map((step) => ({ text: step.text, status: step.status, ...(step.id ? { id: step.id } : {}) }));
+  return steps.map((step) => ({
+    text: step.text, status: step.status, ...(step.id ? { id: step.id } : {}),
+  }));
 }
 
 export function allProgressCompleted(steps: readonly ProgressStep[]): boolean {
@@ -282,7 +389,8 @@ export function progressBoundaryContent(messages: ContextEvent["messages"]): str
 export function leadingSummaryEpoch(messages: ContextEvent["messages"]): string | undefined {
   const summaryStart = messages[0]?.role === "system" ? 1 : 0;
   const boundary = leadingSummaryBoundary(messages);
-  return boundary === summaryStart ? undefined : JSON.stringify(messages.slice(summaryStart, boundary));
+  if (boundary === summaryStart) return undefined;
+  return JSON.stringify(messages.slice(summaryStart, boundary));
 }
 
 function rejectProgress(message: string): never {
@@ -294,7 +402,8 @@ function progressContextContent(steps: readonly ProgressStep[]): string {
 }
 
 function progressContextPrefix(): string {
-  return `[PI PROGRESS STATUS v${PROGRESS_CONTEXT_VERSION}]\nCurrent progress steps as JSON data:\n`;
+  return `[PI PROGRESS STATUS v${PROGRESS_CONTEXT_VERSION}]\n`
+    + "Current progress steps as JSON data:\n";
 }
 
 function todoContextPrefix(version: 1 | 2 | 3): string {
@@ -318,14 +427,21 @@ function legacyTodoContextContent(items: readonly LegacyTodoItem[]): string {
 function contextDescriptor(
   content: string,
 ):
-  | { customType: typeof PROGRESS_CONTEXT_MESSAGE_TYPE | typeof LEGACY_TODO_CONTEXT_MESSAGE_TYPE; version: number }
+  | {
+    customType: typeof PROGRESS_CONTEXT_MESSAGE_TYPE | typeof LEGACY_TODO_CONTEXT_MESSAGE_TYPE;
+    version: number;
+  }
   | undefined {
   const progressPrefix = progressContextPrefix();
   if (content.startsWith(progressPrefix)) {
     try {
       const value: unknown = JSON.parse(content.slice(progressPrefix.length));
-      if (!isRecord(value) || !hasOnlyKeys(value, ["steps"]) || !isProgressSteps(value.steps)) return undefined;
-      if (value.steps.length === 0 || progressContextContent(value.steps) !== content) return undefined;
+      if (!isRecord(value) || !hasOnlyKeys(value, ["steps"]) || !isProgressSteps(value.steps)) {
+        return undefined;
+      }
+      if (value.steps.length === 0 || progressContextContent(value.steps) !== content) {
+        return undefined;
+      }
       return { customType: PROGRESS_CONTEXT_MESSAGE_TYPE, version: PROGRESS_CONTEXT_VERSION };
     } catch {
       return undefined;
@@ -336,14 +452,16 @@ function contextDescriptor(
   if (content.startsWith(oldProgressPrefix)) {
     try {
       const value: unknown = JSON.parse(content.slice(oldProgressPrefix.length));
-      if (!isRecord(value) || !hasOnlyKeys(value, ["steps"]) || !isProgressV4Steps(value.steps)) return undefined;
+      if (!isRecord(value) || !hasOnlyKeys(value, ["steps"]) || !isProgressV4Steps(value.steps)) {
+        return undefined;
+      }
       const canonical = value.steps.map((step) =>
         step.status === "blocked"
           ? { text: step.text, status: step.status, reason: step.reason }
           : { text: step.text, status: step.status },
       );
-      if (canonical.length === 0 || `${oldProgressPrefix}${JSON.stringify({ steps: canonical })}` !== content)
-        return undefined;
+      const expected = `${oldProgressPrefix}${JSON.stringify({ steps: canonical })}`;
+      if (canonical.length === 0 || expected !== content) return undefined;
       return { customType: PROGRESS_CONTEXT_MESSAGE_TYPE, version: 4 };
     } catch {
       return undefined;
@@ -356,15 +474,22 @@ function contextDescriptor(
     try {
       const value: unknown = JSON.parse(content.slice(prefix.length));
       if (version === 3) {
-        if (!isRecord(value) || !hasOnlyKeys(value, ["todos"]) || !isTodoV3Array(value.todos)) return undefined;
-        if (value.todos.length === 0 || todoV3ContextContent(value.todos) !== content) return undefined;
-      } else if (version === 2) {
-        if (!isRecord(value) || !hasOnlyKeys(value, ["todos"]) || !isPreviousTodos(value.todos)) return undefined;
-        if (value.todos.length === 0 || previousTodoContextContent(value.todos) !== content) return undefined;
-      } else {
-        if (!isLegacyTodoItems(value) || value.length === 0 || legacyTodoContextContent(value) !== content) {
+        if (!isRecord(value) || !hasOnlyKeys(value, ["todos"]) || !isTodoV3Array(value.todos)) {
           return undefined;
         }
+        if (value.todos.length === 0 || todoV3ContextContent(value.todos) !== content) {
+          return undefined;
+        }
+      } else if (version === 2) {
+        if (!isRecord(value) || !hasOnlyKeys(value, ["todos"]) || !isPreviousTodos(value.todos)) {
+          return undefined;
+        }
+        if (value.todos.length === 0 || previousTodoContextContent(value.todos) !== content) {
+          return undefined;
+        }
+      } else {
+        if (!isLegacyTodoItems(value) || value.length === 0) return undefined;
+        if (legacyTodoContextContent(value) !== content) return undefined;
       }
       return { customType: LEGACY_TODO_CONTEXT_MESSAGE_TYPE, version };
     } catch {
@@ -374,8 +499,11 @@ function contextDescriptor(
   return undefined;
 }
 
-function hasModelVisibleProgressState(messages: ContextEvent["messages"], steps: readonly ProgressStep[]): boolean {
-  const currentResults = new Map<string, { toolName: string; version: SupportedStateVersion; steps: ProgressStep[] }>();
+function hasModelVisibleProgressState(
+  messages: ContextEvent["messages"], steps: readonly ProgressStep[],
+): boolean {
+  type CurrentResult = { toolName: string; version: SupportedStateVersion; steps: ProgressStep[] };
+  const currentResults = new Map<string, CurrentResult>();
   for (const message of messages) {
     if (message.role !== "toolResult" || message.isError) continue;
     const result = decodePersistedResult(message.toolName, message.details);
@@ -392,7 +520,8 @@ function hasModelVisibleProgressState(messages: ContextEvent["messages"], steps:
         if (content.type !== "toolCall") return false;
         const result = currentResults.get(content.id);
         if (result === undefined || content.name !== result.toolName) return false;
-        const argumentSteps = decodeToolArguments(result.toolName, result.version, content.arguments);
+        const argumentSteps =
+          decodeToolArguments(result.toolName, result.version, content.arguments);
         return argumentSteps !== undefined && progressStepsEqual(argumentSteps, steps);
       }),
   );
@@ -404,11 +533,14 @@ function decodePersistedResult(
 ): { version: SupportedStateVersion; steps: ProgressStep[] } | undefined {
   if (!isRecord(value) || typeof value.version !== "number") return undefined;
   if (toolName === TOOL_NAME && value.version === PROGRESS_DETAILS_VERSION) {
-    if (!hasOnlyKeys(value, ["version", "steps", "goalId", "revision", "activationId"]) || !isProgressSteps(value.steps)) return undefined;
+    const keys = ["version", "steps", "goalId", "revision", "activationId"];
+    if (!hasOnlyKeys(value, keys) || !isProgressSteps(value.steps)) return undefined;
     return { version: 5, steps: cloneProgressSteps(value.steps) };
   }
   if (toolName === TOOL_NAME && value.version === 4) {
-    if (!hasOnlyKeys(value, ["version", "steps"]) || !isProgressV4Steps(value.steps)) return undefined;
+    if (!hasOnlyKeys(value, ["version", "steps"]) || !isProgressV4Steps(value.steps)) {
+      return undefined;
+    }
     return { version: 4, steps: migrateProgressV4(value.steps) };
   }
   if (toolName === UPDATE_TODO_TOOL_NAME && value.version === TODO_DETAILS_VERSION) {
@@ -419,14 +551,18 @@ function decodePersistedResult(
     (toolName === UPDATE_TODO_TOOL_NAME || toolName === TODO_WIDGET_TOOL_NAME) &&
     value.version === PREVIOUS_TODO_DETAILS_VERSION
   ) {
-    if (!hasOnlyKeys(value, ["version", "todos"]) || !isPreviousTodos(value.todos)) return undefined;
+    if (!hasOnlyKeys(value, ["version", "todos"]) || !isPreviousTodos(value.todos)) {
+      return undefined;
+    }
     return { version: 2, steps: migratePreviousTodos(value.todos) };
   }
   if (
     (toolName === UPDATE_TODO_TOOL_NAME || toolName === TODO_WIDGET_TOOL_NAME) &&
     value.version === LEGACY_TODO_DETAILS_VERSION
   ) {
-    if (!hasOnlyKeys(value, ["version", "items"]) || !isLegacyTodoItems(value.items)) return undefined;
+    if (!hasOnlyKeys(value, ["version", "items"]) || !isLegacyTodoItems(value.items)) {
+      return undefined;
+    }
     return { version: 1, steps: migrateLegacyItems(value.items) };
   }
   return undefined;
@@ -443,7 +579,8 @@ function decodeToolArguments(
     // normalization as execution without loosening persisted-result validation.
     try {
       // Only the steps matter here, so calls from older tool versions decode too.
-      return prepareProgressArguments(Object.hasOwn(value, "action") ? { steps: value.steps } : value).steps;
+      const input = Object.hasOwn(value, "action") ? { steps: value.steps } : value;
+      return prepareProgressArguments(input).steps;
     } catch {
       return undefined;
     }
@@ -451,7 +588,9 @@ function decodeToolArguments(
   if (toolName === TOOL_NAME && version === 4) {
     if (!hasOnlyKeys(value, ["steps"]) || !Array.isArray(value.steps)) return undefined;
     const normalized = value.steps.map((step: unknown) => {
-      if (!isRecord(step) || !NON_BLOCKED_STATUSES.includes(step.status as PreviousTodoStatus)) return step;
+      const nonBlocked = isRecord(step)
+        && NON_BLOCKED_STATUSES.includes(step.status as PreviousTodoStatus);
+      if (!nonBlocked) return step;
       const withoutReason = { ...step };
       delete withoutReason.reason;
       return withoutReason;
@@ -459,7 +598,9 @@ function decodeToolArguments(
     return isProgressV4Steps(normalized) ? migrateProgressV4(normalized) : undefined;
   }
   if (toolName === UPDATE_TODO_TOOL_NAME && version === 3) {
-    return hasOnlyKeys(value, ["todos"]) && isTodoV3Array(value.todos) ? migrateTodoV3(value.todos) : undefined;
+    return hasOnlyKeys(value, ["todos"]) && isTodoV3Array(value.todos)
+      ? migrateTodoV3(value.todos)
+      : undefined;
   }
   if ((toolName === UPDATE_TODO_TOOL_NAME || toolName === TODO_WIDGET_TOOL_NAME) && version === 2) {
     return hasOnlyKeys(value, ["todos"]) && isPreviousTodos(value.todos)
@@ -602,11 +743,12 @@ function cloneTodoV3(todos: readonly TodoV3[]): TodoV3[] {
   );
 }
 
-function progressStepsEqual(left: readonly ProgressStep[], right: readonly ProgressStep[]): boolean {
-  return (
-    left.length === right.length &&
-    left.every((step, index) => step.text === right[index]?.text && step.status === right[index]?.status)
-  );
+function progressStepsEqual(
+  left: readonly ProgressStep[], right: readonly ProgressStep[],
+): boolean {
+  const sameStep = (step: ProgressStep, index: number) =>
+    step.text === right[index]?.text && step.status === right[index]?.status;
+  return left.length === right.length && left.every(sameStep);
 }
 
 type OwnedContextMessage = Extract<ContextEvent["messages"][number], { role: "custom" }> & {
@@ -614,10 +756,13 @@ type OwnedContextMessage = Extract<ContextEvent["messages"][number], { role: "cu
   customType: typeof PROGRESS_CONTEXT_MESSAGE_TYPE | typeof LEGACY_TODO_CONTEXT_MESSAGE_TYPE;
 };
 
-function isOwnedContextMessage(message: ContextEvent["messages"][number] | undefined): message is OwnedContextMessage {
+function isOwnedContextMessage(
+  message: ContextEvent["messages"][number] | undefined,
+): message is OwnedContextMessage {
   return (
     message?.role === "custom" &&
-    (message.customType === PROGRESS_CONTEXT_MESSAGE_TYPE || message.customType === LEGACY_TODO_CONTEXT_MESSAGE_TYPE) &&
+    (message.customType === PROGRESS_CONTEXT_MESSAGE_TYPE
+      || message.customType === LEGACY_TODO_CONTEXT_MESSAGE_TYPE) &&
     typeof message.content === "string"
   );
 }
@@ -655,7 +800,8 @@ function hasLeadingSummary(messages: ContextEvent["messages"], boundary: number)
 }
 
 function hasOnlyKeys(record: Record<string, unknown>, allowed: readonly string[]): boolean {
-  return Object.keys(record).every((key) => allowed.includes(key)) && allowed.some((key) => Object.hasOwn(record, key));
+  const onlyAllowed = Object.keys(record).every((key) => allowed.includes(key));
+  return onlyAllowed && allowed.some((key) => Object.hasOwn(record, key));
 }
 
 function isRecord(value: unknown): value is Record<string, unknown> {

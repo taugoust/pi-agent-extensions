@@ -1,9 +1,18 @@
 import { createHash, randomUUID } from "node:crypto";
 import type { ExtensionAPI, ExtensionContext } from "@earendil-works/pi-coding-agent";
-import { checkpointGoalActiveTime, formatDuration, formatTokenCount, updateGoalUsage } from "./accounting.js";
-import { createGoalRecord, goalControlFingerprint, isGoalExecutionStopped as goalStatusIsTerminal, transitionGoalRecord } from "../../shared/goal-model.ts";
-import { resolveGoalLimits, validateGoalLimitOverrides, type GoalContinuationLimits } from "../../shared/delegated-goal-policy.ts";
-import { formatError, isStaleContextError, notifyTerminal, safeGoalMenuText, truncateNotification } from "./errors.js";
+import {
+  checkpointGoalActiveTime, formatDuration, formatTokenCount, updateGoalUsage,
+} from "./accounting.js";
+import {
+  createGoalRecord, goalControlFingerprint, isGoalExecutionStopped as goalStatusIsTerminal,
+  transitionGoalRecord,
+} from "../../shared/goal-model.ts";
+import {
+  resolveGoalLimits, validateGoalLimitOverrides, type GoalContinuationLimits,
+} from "../../shared/delegated-goal-policy.ts";
+import {
+  formatError, isStaleContextError, notifyTerminal, safeGoalMenuText, truncateNotification,
+} from "./errors.js";
 import {
   createGoalContextContract,
   createInactiveGoalContextContract,
@@ -12,7 +21,9 @@ import {
   hasGoalContractPublication,
   hasInactiveGoalContextContract,
 } from "./goal-contract.js";
-import { appendGoalPromptMarker, extractContinuationMarker, extractGoalPromptMarker } from "./markers.js";
+import {
+  appendGoalPromptMarker, extractContinuationMarker, extractGoalPromptMarker,
+} from "./markers.js";
 import {
   type ActiveGoal,
   clearLegacyPersistedGoal,
@@ -26,7 +37,9 @@ import { nextToolFreeRepeatState, resetGoalSafetyEpoch } from "./safety.js";
 
 export { queueGoalSafetyReset, resetGoalSafetyEpoch } from "./safety.js";
 
-import { DEFAULT_GOAL_SETTINGS, type GoalSettings, type GoalSettingsLoadIssue } from "./settings.js";
+import {
+  DEFAULT_GOAL_SETTINGS, type GoalSettings, type GoalSettingsLoadIssue,
+} from "./settings.js";
 import { assertGoalToolsAvailable, goalToolsAvailable } from "./tool-policy.js";
 import { type GoalWait, type GoalWake, GoalWaitTimer } from "./wait.js";
 import { WorkflowMutex, type WorkflowMutexOwner } from "./workflow-mutex.js";
@@ -90,7 +103,13 @@ export type GoalStopRequest =
       abortTurn: boolean;
       recordUsage: boolean;
     }
-  | { kind: "blocker_report"; expectedGoalId: string; reason: string; evidence?: string; repeatedTurns?: number }
+  | {
+      kind: "blocker_report";
+      expectedGoalId: string;
+      reason: string;
+      evidence?: string;
+      repeatedTurns?: number;
+    }
   | {
       kind: "agent_interruption";
       expectedGoalId: string;
@@ -144,7 +163,9 @@ function buildGoalStateSnapshot(
   summary: string | undefined,
   reason: string | undefined,
 ): GoalStateSnapshot {
-  const snapshot: GoalStateSnapshot = { goalId: goal.id, activationId: goal.activationId ?? goal.id, status: goal.status };
+  const snapshot: GoalStateSnapshot = {
+    goalId: goal.id, activationId: goal.activationId ?? goal.id, status: goal.status,
+  };
   if (goal.status === "complete" && summary) snapshot.summary = summary;
   else if (goal.status !== "complete" && isTerminalGoalStatus(goal.status) && reason) {
     snapshot.reason = reason;
@@ -198,11 +219,22 @@ interface PendingNonGoalInput {
 
 const MAX_CANCELLED_CONTINUATION_PROMPTS = 20;
 const MAX_PENDING_GOAL_PROMPTS = 20;
+const MAX_TOKEN_BUDGET = 1_000_000;
+type GoalStateEntry = { type?: string; customType?: string; data?: { goal?: ActiveGoal | null } };
+type GoalStateBranch = { getBranch?: () => GoalStateEntry[] };
 const MAX_PENDING_NON_GOAL_INPUTS = 20;
 const BUDGET_WRAP_UP_MESSAGE_TYPE = "goal-budget-wrap-up";
 export const GOAL_CONTINUATION_MESSAGE_TYPE = "goal-continuation";
-const BUDGET_WRAP_UP_PROMPT =
-  "The active /goal token budget is exhausted. Stop substantive work and do not call substantive tools. Summarize progress, verified results, remaining work, and blockers concisely. Treat completion as unproven. Do not call goal_complete unless authoritative, requirement-by-requirement evidence already proves every requirement is complete. Weak, indirect, or missing evidence is not enough. Budget exhaustion is not completion.";
+const BUDGET_WRAP_UP_PROMPT = [
+  "The active /goal token budget is exhausted.",
+  "Stop substantive work and do not call substantive tools.",
+  "Summarize progress, verified results, remaining work, and blockers concisely.",
+  "Treat completion as unproven.",
+  "Do not call goal_complete unless authoritative, requirement-by-requirement evidence",
+  "already proves every requirement is complete.",
+  "Weak, indirect, or missing evidence is not enough.",
+  "Budget exhaustion is not completion.",
+].join(" ");
 export { isContradictoryCompletionSummary } from './completion-summary.ts';
 // One instance belongs to one extension factory. It owns all mutable session state
 // and the cross-cutting invariants used by command and lifecycle orchestration.
@@ -224,7 +256,9 @@ export class GoalRuntime {
       // and captured timer before exposing a different activation.
       this.clearGoalWaitTimer();
       this.cancelContinuationWork();
-      for (const [marker, pending] of this.pendingGoalPromptMarkers) this.rememberCancelledGoalPromptMarker(marker, pending.prompt);
+      for (const [marker, pending] of this.pendingGoalPromptMarkers) {
+        this.rememberCancelledGoalPromptMarker(marker, pending.prompt);
+      }
       this.pendingGoalPromptMarkers.clear();
       this.claimedGoalPromptMarkers.clear();
       this.claimedContinuationMarkers.clear();
@@ -321,7 +355,9 @@ export class GoalRuntime {
   }
 
   ownsWorkflow(goal: ActiveGoal | undefined = this.activeGoal) {
-    return goal?.status === "active" && sameGoalActivation(goal, this.activeGoal) && this.workflowMutex.isOwner(this.workflowOwner);
+    return goal?.status === "active"
+      && sameGoalActivation(goal, this.activeGoal)
+      && this.workflowMutex.isOwner(this.workflowOwner);
   }
 
   releaseWorkflow() {
@@ -360,7 +396,8 @@ export class GoalRuntime {
   canRecordGoalUsage(goalId?: string) {
     return (
       this.agentRunGoalId !== null &&
-      (this.agentRunActivationId === undefined || this.agentRunActivationId === (this.activeGoal?.activationId ?? this.activeGoal?.id)) &&
+      (this.agentRunActivationId === undefined
+        || this.agentRunActivationId === activationIdOf(this.activeGoal)) &&
       (goalId === undefined || this.agentRunGoalId === undefined || this.agentRunGoalId === goalId)
     );
   }
@@ -375,12 +412,17 @@ export class GoalRuntime {
   }
 
   hasActiveGoalRecovery() {
-    return Boolean(this.activeGoal && this.goalRecovery?.goalId === this.activeGoal.id && this.goalRecovery.activationId === (this.activeGoal.activationId ?? this.activeGoal.id));
+    return Boolean(
+      this.activeGoal
+        && this.goalRecovery?.goalId === this.activeGoal.id
+        && this.goalRecovery.activationId === activationIdOf(this.activeGoal),
+    );
   }
 
   beginAgentRun(goalId: string | null | undefined, origin: GoalRunOrigin | undefined) {
     this.agentRunGoalId = goalId;
-    this.agentRunActivationId = goalId && goalId === this.activeGoal?.id ? (this.activeGoal.activationId ?? this.activeGoal.id) : undefined;
+    const ownsActiveGoal = goalId && goalId === this.activeGoal?.id;
+    this.agentRunActivationId = ownsActiveGoal ? activationIdOf(this.activeGoal) : undefined;
     this.agentRunOrigin = origin;
     this.agentRunToolAttempted = false;
   }
@@ -388,7 +430,10 @@ export class GoalRuntime {
   beginRecoveryRunIfNeeded() {
     if (this.agentRunGoalId !== undefined || !this.activeGoal) return;
     const recovery = this.goalRecovery;
-    if (!recovery || recovery.goalId !== this.activeGoal.id || recovery.activationId !== (this.activeGoal.activationId ?? this.activeGoal.id)) return;
+    const recoversActiveGoal = recovery
+      && recovery.goalId === this.activeGoal.id
+      && recovery.activationId === activationIdOf(this.activeGoal);
+    if (!recoversActiveGoal) return;
     this.beginAgentRun(recovery.goalId, recovery.automaticOwner ? "automatic" : "manual");
   }
 
@@ -490,7 +535,10 @@ export class GoalRuntime {
       if (this.continuationDelivery?.marker === intent.marker) {
         this.continuationDelivery = undefined;
       }
-      if (this.activeGoal?.id === intent.goalId && (this.activeGoal.activationId ?? this.activeGoal.id) === intent.activationId && this.activeGoal.status === "active") {
+      const intentStillActive = this.activeGoal?.id === intent.goalId
+        && activationIdOf(this.activeGoal) === intent.activationId
+        && this.activeGoal.status === "active";
+      if (intentStillActive) {
         this.continuationIntent = intent;
       }
       notifyWhenSessionAlive(ctx, `Goal prompt failed: ${formatError(error)}`, "error");
@@ -499,12 +547,15 @@ export class GoalRuntime {
   }
 
   hasContinuationWorkForGoal(goalId: string) {
-    return this.continuationIntent?.goalId === goalId || this.continuationDelivery?.goalId === goalId;
+    return this.continuationIntent?.goalId === goalId
+      || this.continuationDelivery?.goalId === goalId;
   }
 
   enterGoalWait(ctx: StatusContext, goalId: string, waiting: GoalWait) {
     const goal = this.activeGoal;
-    if (!goal || goal.id !== goalId || goal.status !== "active" || !this.ownsWorkflow(goal)) return undefined;
+    if (!goal || goal.id !== goalId || goal.status !== "active" || !this.ownsWorkflow(goal)) {
+      return undefined;
+    }
     if (goal.waiting?.reason === waiting.reason && goal.waiting?.resumeAt === waiting.resumeAt) {
       // A repeat must neither postpone the deadline nor re-arm an exhausted retry.
       this.cancelContinuationWork();
@@ -526,15 +577,20 @@ export class GoalRuntime {
     return this.activeGoal;
   }
 
-  clearGoalWait(ctx: StatusContext, goalId: string, wake: Omit<GoalWake, "at"> = { reason: "explicit_resume" }) {
+  clearGoalWait(
+    ctx: StatusContext, goalId: string, wake: Omit<GoalWake, "at"> = { reason: "explicit_resume" },
+  ) {
     const goal = this.activeGoal;
-    if (!goal || goal.id !== goalId || goal.status !== "active" || !this.ownsWorkflow(goal) || !goal.waiting) return false;
+    const waitingActiveGoal = goal && goal.id === goalId && goal.status === "active"
+      && this.ownsWorkflow(goal) && goal.waiting;
+    if (!waitingActiveGoal) return false;
     this.clearGoalWaitTimer();
     const { waiting: _waiting, ...nextGoal } = goal;
     const now = Date.now();
     checkpointGoalActiveTime(nextGoal, now, true);
     nextGoal.updatedAt = now;
-    nextGoal.lastWake = { at: now, reason: wake.reason, ...(wake.customType ? { customType: wake.customType.slice(0, 128) } : {}) };
+    const customType = wake.customType ? { customType: wake.customType.slice(0, 128) } : {};
+    nextGoal.lastWake = { at: now, reason: wake.reason, ...customType };
     this.activeGoal = nextGoal;
     this.persistGoal(this.activeGoal);
     this.updateStatus(ctx, this.activeGoal);
@@ -558,7 +614,8 @@ export class GoalRuntime {
     const resumeAt = waiting?.resumeAt;
     if (!goal || !waiting || resumeAt === undefined) return false;
     const retry = this.goalWaitDeadlineRetry;
-    const matchingRetry = retry?.goalId === goal.id && retry.resumeAt === resumeAt ? retry : undefined;
+    const retryMatches = retry?.goalId === goal.id && retry.resumeAt === resumeAt;
+    const matchingRetry = retryMatches ? retry : undefined;
     if (matchingRetry?.exhausted) return false;
     const wakeAt = matchingRetry?.retryAt ?? resumeAt;
     if (Date.now() < wakeAt) return false;
@@ -567,7 +624,9 @@ export class GoalRuntime {
     if (retryAttempt) this.goalWaitDeadlineRetry = undefined;
     if (!this.clearGoalWait(ctx, goal.id, { reason: "deadline" })) return false;
     const resumedGoal = this.activeGoal;
-    if (!resumedGoal || !sameGoalActivation(resumedGoal, goal) || resumedGoal.status !== "active") return false;
+    const resumed = resumedGoal && sameGoalActivation(resumedGoal, goal)
+      && resumedGoal.status === "active";
+    if (!resumed) return false;
     this.requestContinuation(resumedGoal);
     const dispatched = this.dispatchContinuationIfSettled(ctx);
     if (dispatched) return true;
@@ -589,9 +648,7 @@ export class GoalRuntime {
   private scheduleGoalWaitTimer(ctx: StatusContext, goalId: string, wakeAt: number) {
     const generation = this.menuGeneration, activation = this.activeGoal;
     this.goalWaitTimer.schedule(wakeAt, () => {
-      if (generation !== this.menuGeneration || !sameGoalActivation(activation, this.activeGoal) || this.activeGoal?.id !== goalId || !this.ownsWorkflow(this.activeGoal)) {
-        return;
-      }
+      if (!this.timerStillCurrent(generation, activation, goalId)) return;
       try {
         this.dispatchDueGoalWait(ctx);
       } catch (error) {
@@ -636,7 +693,18 @@ export class GoalRuntime {
 
   updateStatus(ctx: StatusContext, goal: ActiveGoal) {
     this.clearCompletionStatusTimer();
-    ctx.ui.setStatus(STATUS_KEY, formatFooterStatus(goal, this.continuationLimits.automaticTurns, ctx.ui.theme));
+    const footer = formatFooterStatus(goal, this.continuationLimits.automaticTurns, ctx.ui.theme);
+    ctx.ui.setStatus(STATUS_KEY, footer);
+  }
+
+  /** A timer armed for `goalId` still applies: same menu session, activation and owner. */
+  private timerStillCurrent(
+    generation: number, activation: ActiveGoal | undefined, goalId: string,
+  ) {
+    return generation === this.menuGeneration
+      && sameGoalActivation(activation, this.activeGoal)
+      && this.activeGoal?.id === goalId
+      && this.ownsWorkflow(this.activeGoal);
   }
 
   stopActiveGoal(ctx: StatusContext, request: GoalStopRequest) {
@@ -709,7 +777,13 @@ export class GoalRuntime {
         status = "blocked";
         terminalReason = request.reason;
         if (request.evidence !== undefined && request.repeatedTurns !== undefined) {
-          goal = { ...goal, lastBlocker: { at: Date.now(), reason: request.reason.slice(0, 1_000), evidence: request.evidence.slice(0, 4_000), repeatedTurns: request.repeatedTurns } };
+          const lastBlocker = {
+            at: Date.now(),
+            reason: request.reason.slice(0, 1_000),
+            evidence: request.evidence.slice(0, 4_000),
+            repeatedTurns: request.repeatedTurns,
+          };
+          goal = { ...goal, lastBlocker };
         }
         break;
       case "agent_interruption":
@@ -797,9 +871,11 @@ export class GoalRuntime {
 
   queueBudgetWrapUp(ctx: StatusContext, goal: ActiveGoal) {
     if (!this.ownsWorkflow(goal)) return false;
-    if (!this.budgetWrapUp || this.budgetWrapUp.goalId !== goal.id || this.budgetWrapUp.activationId !== (goal.activationId ?? goal.id)) {
-      this.budgetWrapUp = { goalId: goal.id, activationId: goal.activationId ?? goal.id, delivered: false };
-    }
+    const activationId = activationIdOf(goal)!;
+    const wrapUpForGoal = this.budgetWrapUp
+      && this.budgetWrapUp.goalId === goal.id
+      && this.budgetWrapUp.activationId === activationId;
+    if (!wrapUpForGoal) this.budgetWrapUp = { goalId: goal.id, activationId, delivered: false };
     if (this.budgetWrapUp.delivered) return true;
     this.budgetWrapUp.delivered = true;
     try {
@@ -824,9 +900,10 @@ export class GoalRuntime {
     const goal = this.activeGoal;
     // A live edit is enforced after the entire tool turn, not between parallel tools.
     if (goal && this.pendingLimitBoundary === goal.id) return false;
-    if (goal?.status !== "active" || goal.tokenBudget === undefined || goal.tokensUsed < goal.tokenBudget) {
-      return false;
-    }
+    const overBudget = goal?.status === "active"
+      && goal.tokenBudget !== undefined
+      && goal.tokensUsed >= goal.tokenBudget;
+    if (!overBudget) return false;
 
     const stoppedGoal = this.stopActiveGoal(ctx, {
       kind: "budget_limit",
@@ -854,7 +931,9 @@ export class GoalRuntime {
     return this.enforceAutomaticTurnLimit(ctx, true);
   }
 
-  recordAutomaticRunProgress(ctx: StatusContext, goalId: string, messages: readonly unknown[], toolAttempted: boolean) {
+  recordAutomaticRunProgress(
+    ctx: StatusContext, goalId: string, messages: readonly unknown[], toolAttempted: boolean,
+  ) {
     const goal = this.activeGoal;
     if (goal?.id !== goalId || goal.status !== "active") return false;
     const next = nextToolFreeRepeatState(goal, messages, toolAttempted);
@@ -889,9 +968,10 @@ export class GoalRuntime {
     const goal = this.activeGoal;
     if (goal?.status !== "active") return false;
     const automaticLimit = this.continuationLimits.automaticTurns;
+    const responses = `${goal.automaticModelTurns} of ${automaticLimit ?? "Unlimited"}`;
     const count =
       cause === "continuation_limit"
-        ? `${goal.automaticModelTurns} of ${automaticLimit ?? "Unlimited"} automatic model responses`
+        ? `${responses} automatic model responses`
         : `no progress across ${goal.toolFreeRepeatCount} automatic runs`;
     const stoppedGoal = this.stopActiveGoal(ctx, {
       kind: "safety_pause",
@@ -901,13 +981,13 @@ export class GoalRuntime {
       reason: `${cause} (${count}; ${formatTokenCount(goal.tokensUsed)} tokens)`,
     });
     if (!stoppedGoal) return false;
-    notifyTerminal(
-      ctx.ui,
-      cause === "continuation_limit"
-        ? `Automatic-work limit reached: ${stoppedGoal.automaticModelTurns} of ${automaticLimit} responses. Goal progress is saved with ${formatTokenCount(stoppedGoal.tokensUsed)} cumulative tokens. Open /goal to review and continue.`
-        : `Goal paused: ${count}; ${formatTokenCount(stoppedGoal.tokensUsed)} cumulative tokens. Open /goal to review and continue.`,
-      "warning",
-    );
+    const tokens = formatTokenCount(stoppedGoal.tokensUsed);
+    const reviewHint = "Open /goal to review and continue.";
+    const limitReached = `Automatic-work limit reached: ${stoppedGoal.automaticModelTurns} of `
+      + `${automaticLimit} responses. Goal progress is saved with ${tokens} cumulative tokens. `
+      + reviewHint;
+    const paused = `Goal paused: ${count}; ${tokens} cumulative tokens. ${reviewHint}`;
+    notifyTerminal(ctx.ui, cause === "continuation_limit" ? limitReached : paused, "warning");
     return true;
   }
 
@@ -926,9 +1006,11 @@ export class GoalRuntime {
     if (!recovery) return false;
     this.goalRecovery = undefined;
     const goal = this.activeGoal;
-    if (goal?.id !== recovery.goalId || (goal.activationId ?? goal.id) !== recovery.activationId || goal.status !== "active" || !this.ownsWorkflow(goal)) {
-      return false;
-    }
+    const recoversGoal = goal?.id === recovery.goalId
+      && activationIdOf(goal) === recovery.activationId
+      && goal.status === "active"
+      && this.ownsWorkflow(goal);
+    if (!recoversGoal) return false;
     const details = recovery.errorMessage ? `: ${truncateNotification(recovery.errorMessage)}` : "";
     if (recovery.kind === "provider_retry") {
       const waitingGoal = this.enterGoalWait(ctx, goal.id, {
@@ -937,7 +1019,8 @@ export class GoalRuntime {
       if (!waitingGoal) return false;
       notifyTerminal(
         ctx.ui,
-        `Goal waiting after provider retries were exhausted${details}. Run /goal resume to retry; user input interrupts the wait.`,
+        `Goal waiting after provider retries were exhausted${details}. `
+          + "Run /goal resume to retry; user input interrupts the wait.",
         "warning",
       );
       return true;
@@ -950,7 +1033,8 @@ export class GoalRuntime {
     if (!stoppedGoal) return false;
     notifyTerminal(
       ctx.ui,
-      `Goal blocked after agent error retries were exhausted${details}. Resolve the blocker or run /goal resume to retry.`,
+      `Goal blocked after agent error retries were exhausted${details}. `
+        + "Resolve the blocker or run /goal resume to retry.",
       "warning",
     );
     return true;
@@ -1006,11 +1090,14 @@ export class GoalRuntime {
     const previous = this.pendingGoalContract;
     const pending = { content: contract.content, publicationId: randomUUID() };
     this.pendingGoalContract = pending;
-    const message = { ...contract, details: { ...contract.details, publicationId: pending.publicationId } };
+    const message = {
+      ...contract, details: { ...contract.details, publicationId: pending.publicationId },
+    };
     try {
       // Reserve before sending: a synchronous listener can re-enter publication. Pi does not
       // forward deferred custom-message events to extensions, so retire from saved entries.
-      this.pi.sendMessage({ ...message, details: { ...message.details, sentAt: Date.now() } }, { triggerTurn: false });
+      const sent = { ...message, details: { ...message.details, sentAt: Date.now() } };
+      this.pi.sendMessage(sent, { triggerTurn: false });
     } catch (error) {
       if (this.pendingGoalContract === pending) this.pendingGoalContract = previous;
       throw error;
@@ -1029,15 +1116,19 @@ export class GoalRuntime {
     }
     const expected = goal ? createGoalContextContract(goal) : createInactiveGoalContextContract();
     // The queued tail supersedes saved history: saved A -> queued inactive -> A needs a new A.
-    if (this.pendingGoalContract) return this.pendingGoalContract.content === expected.content ? undefined : expected;
+    if (this.pendingGoalContract) {
+      return this.pendingGoalContract.content === expected.content ? undefined : expected;
+    }
     if (goal) return hasGoalContextContract(contextEntries, goal) ? undefined : expected;
-    const hasHistory = hasGoalContextContractHistory(contextEntries) || hasGoalContextContractHistory(historyEntries);
+    const hasHistory = hasGoalContextContractHistory(contextEntries)
+      || hasGoalContextContractHistory(historyEntries);
     return !hasHistory || hasInactiveGoalContextContract(contextEntries) ? undefined : expected;
   }
 
   hasGoalContextContractHistory(ctx: StatusContext) {
     const { contextEntries, historyEntries } = goalContractEntries(ctx);
-    return hasGoalContextContractHistory(contextEntries) || hasGoalContextContractHistory(historyEntries);
+    return hasGoalContextContractHistory(contextEntries)
+      || hasGoalContextContractHistory(historyEntries);
   }
 
   async sendOwnedGoalPrompt(
@@ -1050,7 +1141,8 @@ export class GoalRuntime {
     if (this.activeGoal?.id !== goalId || !this.ownsWorkflow(this.activeGoal)) return false;
     const activation = this.activeGoal;
     const pending = this.rememberPendingGoalPrompt(goalId, prompt, resetSafetyEpoch);
-    const current = () => sameGoalActivation(activation, this.activeGoal) && (isCurrent?.() ?? true);
+    const current = () =>
+      sameGoalActivation(activation, this.activeGoal) && (isCurrent?.() ?? true);
     const sent = await sendPrompt(this.pi, ctx, pending.prompt, current);
     if (!sent || !current() || !this.ownsWorkflow(this.activeGoal)) {
       this.pendingGoalPromptMarkers.delete(pending.marker);
@@ -1076,9 +1168,7 @@ export class GoalRuntime {
     const generation = this.menuGeneration, activation = this.activeGoal;
     this.continuationDispatchTimer = setTimeout(() => {
       this.continuationDispatchTimer = undefined;
-      if (generation !== this.menuGeneration || !sameGoalActivation(activation, this.activeGoal) || this.activeGoal?.id !== goalId || !this.ownsWorkflow(this.activeGoal)) {
-        return;
-      }
+      if (!this.timerStillCurrent(generation, activation, goalId)) return;
       this.dispatchContinuationIfSettled(ctx);
     }, 0);
   }
@@ -1217,7 +1307,8 @@ export class GoalRuntime {
     // Skills, templates, and later input handlers can transform the raw text after
     // pi-goal records it. Fall back to Pi's delivery priority as a bounded marker:
     // steers drain before follow-ups, and settlement clears stale entries.
-    const fallbackSteerIndex = this.pendingNonGoalInputs.findIndex((pending) => pending.behavior === "steer");
+    const fallbackSteerIndex =
+      this.pendingNonGoalInputs.findIndex((pending) => pending.behavior === "steer");
     const fallbackIndex =
       fallbackSteerIndex >= 0
         ? fallbackSteerIndex
@@ -1238,7 +1329,7 @@ export class GoalRuntime {
 
   markContinuationStarted(prompt: string) {
     const marker = extractContinuationMarker(prompt);
-    if (marker && marker.split(":")[1] !== (this.activeGoal?.activationId ?? this.activeGoal?.id)) return undefined;
+    if (marker && marker.split(":")[1] !== activationIdOf(this.activeGoal)) return undefined;
     if (!marker) {
       // A user, retry, or another extension started newer work. Cancel both an
       // unsent intent and a delivery that may have lost the non-atomic idle race;
@@ -1271,23 +1362,45 @@ export class GoalRuntime {
   private policyVersion = 0;
   /** Service-epoch scoped revision; accounting updates do not stale a limit editor. */
   get policyRevision() {
-    const goal = this.activeGoal;
-    const signature = JSON.stringify([goal?.id, goal?.activationId, goal?.tokenBudget, goal?.continuationLimits, this.settings.continuationLimits]);
-    if (signature !== this.policySignature) { this.policySignature = signature; this.policyVersion++; }
+    this.trackPolicySignature(this.activeGoal);
     return this.policyVersion;
+  }
+  /** Bumps the policy version when the goal's limits or identity changed. */
+  private trackPolicySignature(goal: ActiveGoal | undefined) {
+    const signature = JSON.stringify([
+      goal?.id, goal?.activationId, goal?.tokenBudget, goal?.continuationLimits,
+      this.settings.continuationLimits,
+    ]);
+    if (signature === this.policySignature) return;
+    this.policySignature = signature;
+    this.policyVersion++;
   }
   get continuationLimits(): GoalContinuationLimits {
     return resolveGoalLimits(this.activeGoal?.continuationLimits, this.settings.continuationLimits);
   }
-  updateGoalLimits(ctx: ExtensionContext, goalId: string, revision: number, tokenBudget: number | null, continuationLimits: Partial<GoalContinuationLimits>) {
+  updateGoalLimits(
+    ctx: ExtensionContext,
+    goalId: string,
+    revision: number,
+    tokenBudget: number | null,
+    continuationLimits: Partial<GoalContinuationLimits>,
+  ) {
     const goal = this.activeGoal;
-    if (!goal || goal.id !== goalId || goal.status === "complete" || this.policyRevision !== revision)
+    const sameGoal = goal && goal.id === goalId && goal.status !== "complete";
+    if (!sameGoal || this.policyRevision !== revision) {
       throw new Error("Goal identity or policy revision changed");
-    if (tokenBudget !== null && (!Number.isSafeInteger(tokenBudget) || tokenBudget < 1 || tokenBudget > 1_000_000)) throw new Error("Invalid token budget");
+    }
+    const validBudget = Number.isSafeInteger(tokenBudget)
+      && tokenBudget! >= 1 && tokenBudget! <= MAX_TOKEN_BUDGET;
+    if (tokenBudget !== null && !validBudget) throw new Error("Invalid token budget");
     if (continuationLimits === undefined) throw new Error("Explicit continuation limits required");
     validateGoalLimitOverrides(continuationLimits);
-    const next = { ...goal, tokenBudget: tokenBudget ?? undefined, tokenBudgetExplicit: tokenBudget !== null,
-      continuationLimits: structuredClone(continuationLimits) };
+    const next = {
+      ...goal,
+      tokenBudget: tokenBudget ?? undefined,
+      tokenBudgetExplicit: tokenBudget !== null,
+      continuationLimits: structuredClone(continuationLimits),
+    };
     this.persistGoal(next);
     this.activeGoal = next;
     this.pendingLimitBoundary = next.id;
@@ -1299,11 +1412,15 @@ export class GoalRuntime {
   enforceGoalLimitsAtBoundary(ctx: StatusContext) {
     if (!this.activeGoal || this.pendingLimitBoundary !== this.activeGoal.id) return false;
     this.pendingLimitBoundary = undefined;
-    return this.limitActiveGoalForBudget(ctx, false) || this.enforceAutomaticTurnLimit(ctx, true) || this.enforceNoProgressLimit(ctx, true);
+    return this.limitActiveGoalForBudget(ctx, false)
+      || this.enforceAutomaticTurnLimit(ctx, true)
+      || this.enforceNoProgressLimit(ctx, true);
   }
 
   markGoalSeen(goal: ActiveGoal | undefined = this.activeGoal) {
-    this.modelSeenGoal = goal ? { id: goal.id, activationId: goal.activationId ?? goal.id, revision: goal.revision ?? 0 } : undefined;
+    this.modelSeenGoal = goal
+      ? { id: goal.id, activationId: activationIdOf(goal)!, revision: goal.revision ?? 0 }
+      : undefined;
   }
 
   /** Why a model call must not act on `goal`, or undefined. A rejection shows
@@ -1313,11 +1430,13 @@ export class GoalRuntime {
     const seen = this.modelSeenGoal;
     if (!seen) return undefined;
     const reason = seen.id !== goal.id ? "the goal was replaced"
-      : seen.activationId !== (goal.activationId ?? goal.id) ? "the goal was resumed or its objective changed"
+      : seen.activationId !== activationIdOf(goal)
+        ? "the goal was resumed or its objective changed"
       : seen.revision !== (goal.revision ?? 0) ? "the goal changed" : undefined;
     if (!reason) return undefined;
     this.markGoalSeen(goal);
-    return `${reason} since you last saw it (now: ${goal.status}, objective "${goal.text}", revision ${goal.revision ?? 0}); check it still applies and call again`;
+    const now = `now: ${goal.status}, objective "${goal.text}", revision ${goal.revision ?? 0}`;
+    return `${reason} since you last saw it (${now}); check it still applies and call again`;
   }
 
   persistGoal(goal: ActiveGoal) {
@@ -1327,20 +1446,28 @@ export class GoalRuntime {
     // Compare against the immutable persisted record, not activeGoal: accounting
     // and some lifecycle paths mutate that object in place. SDK message_end usage
     // and earlier sibling tool checkpoints must not stale a model's task revision.
-    const session = this.workflowSession as { getBranch?: () => Array<{ type?: string; customType?: string; data?: { goal?: ActiveGoal | null } }> } | undefined;
-    const previous = session?.getBranch?.().findLast(entry => entry.type === "custom" && entry.customType === GOAL_STATE_ENTRY_TYPE)?.data?.goal;
-    if (goal.tasks?.length && previous?.id !== goal.id) goal.lastTaskUpdateAt = Date.now();
-    else if (previous?.id === goal.id && Array.isArray(previous.tasks) && JSON.stringify(previous.tasks.map(task => [task.id, task.text, task.status])) !== JSON.stringify(goal.tasks?.map(task => [task.id, task.text, task.status]))) goal.lastTaskUpdateAt = Date.now();
+    const session = this.workflowSession as GoalStateBranch | undefined;
+    const previous = session?.getBranch?.()
+      .findLast(entry => entry.type === "custom" && entry.customType === GOAL_STATE_ENTRY_TYPE)
+      ?.data?.goal;
+    const sameGoal = previous?.id === goal.id;
+    const tasksChanged = sameGoal && Array.isArray(previous.tasks)
+      && taskFingerprint(previous.tasks) !== taskFingerprint(goal.tasks);
+    const firstTasks = goal.tasks?.length && !sameGoal;
+    if (firstTasks || tasksChanged) goal.lastTaskUpdateAt = Date.now();
     const changed = !previous || goalControlFingerprint(previous) !== goalControlFingerprint(goal);
-    const revision = Math.max(goal.revision ?? 0, previous?.id === goal.id ? (previous.revision ?? 0) : 0,
-      this.activeGoal?.id === goal.id ? (this.activeGoal.revision ?? 0) : 0);
+    const revision = Math.max(
+      goal.revision ?? 0,
+      sameGoal ? (previous.revision ?? 0) : 0,
+      this.activeGoal?.id === goal.id ? (this.activeGoal.revision ?? 0) : 0,
+    );
     goal.revision = Math.max(1, revision + (changed ? 1 : 0));
     this.pi.appendEntry(GOAL_STATE_ENTRY_TYPE, serializeGoalState(goal));
     this.activeGoal = goal;
-    const signature = JSON.stringify([goal.id, goal.activationId, goal.tokenBudget, goal.continuationLimits, this.settings.continuationLimits]);
-    if (signature !== this.policySignature) { this.policySignature = signature; this.policyVersion++; }
+    this.trackPolicySignature(goal);
     this.pi.events.emit("pi:goal-progress", {});
-    this.publishGoalState(buildGoalStateSnapshot(goal, this.terminalDetails?.summary, this.terminalDetails?.reason));
+    const terminal = this.terminalDetails;
+    this.publishGoalState(buildGoalStateSnapshot(goal, terminal?.summary, terminal?.reason));
   }
 
   clearPersistedGoal(cwd: string, clearedGoal?: ActiveGoal, reason = "goal cleared") {
@@ -1401,8 +1528,8 @@ export class GoalRuntime {
       activeGoal: this.activeGoal ? structuredClone(this.activeGoal) : undefined,
       legacyQueueState: this.legacyQueueState ? structuredClone(this.legacyQueueState) : undefined,
       legacyExperimentalGoalsSetting: this.legacyExperimentalGoalsSetting,
-      continuationIntent: this.continuationIntent ? structuredClone(this.continuationIntent) : undefined,
-      continuationDelivery: this.continuationDelivery ? structuredClone(this.continuationDelivery) : undefined,
+      continuationIntent: cloneIfSet(this.continuationIntent),
+      continuationDelivery: cloneIfSet(this.continuationDelivery),
       goalRecovery: this.goalRecovery ? structuredClone(this.goalRecovery) : undefined,
       budgetWrapUp: this.budgetWrapUp ? structuredClone(this.budgetWrapUp) : undefined,
       guardAbortGoalId: this.guardAbortGoalId,
@@ -1418,9 +1545,9 @@ export class GoalRuntime {
     }
     this.settings = structuredClone(snapshot.settings);
     this.activeGoal = snapshot.activeGoal ? structuredClone(snapshot.activeGoal) : undefined;
-    this.legacyQueueState = snapshot.legacyQueueState ? structuredClone(snapshot.legacyQueueState) : undefined;
+    this.legacyQueueState = cloneIfSet(snapshot.legacyQueueState);
     this.legacyExperimentalGoalsSetting = snapshot.legacyExperimentalGoalsSetting;
-    this.continuationIntent = snapshot.continuationIntent ? structuredClone(snapshot.continuationIntent) : undefined;
+    this.continuationIntent = cloneIfSet(snapshot.continuationIntent);
     this.continuationDelivery = snapshot.continuationDelivery
       ? structuredClone(snapshot.continuationDelivery)
       : undefined;
@@ -1429,7 +1556,7 @@ export class GoalRuntime {
     this.guardAbortGoalId = snapshot.guardAbortGoalId;
     this.staleGoalToolCallsBlocked = snapshot.staleGoalToolCallsBlocked;
     this.cancelledContinuationMarkers = new Map(snapshot.cancelledContinuationMarkers);
-    this.terminalDetails = snapshot.terminalDetails ? structuredClone(snapshot.terminalDetails) : undefined;
+    this.terminalDetails = cloneIfSet(snapshot.terminalDetails);
   }
 
   pauseGoalForUnavailableTools(ctx: StatusContext, abortTurn = true, recordUsage = true) {
@@ -1444,7 +1571,8 @@ export class GoalRuntime {
     if (!stoppedGoal) return false;
     notifyTerminal(
       ctx.ui,
-      "Goal tools are unavailable, so the active goal was paused. Restore the tools and run /goal resume.",
+      "Goal tools are unavailable, so the active goal was paused. "
+        + "Restore the tools and run /goal resume.",
       "warning",
     );
     return true;
@@ -1482,9 +1610,10 @@ export class GoalRuntime {
     const marker = extractGoalPromptMarker(prompt);
     if (!marker) return undefined;
     const pending = this.pendingGoalPromptMarkers.get(marker);
-    if (!pending || pending.activationId !== (this.activeGoal?.activationId ?? this.activeGoal?.id) || !preservesOwnedPromptAtTerminalBoundary(prompt, pending.prompt)) {
-      return undefined;
-    }
+    const claimable = pending
+      && pending.activationId === activationIdOf(this.activeGoal)
+      && preservesOwnedPromptAtTerminalBoundary(prompt, pending.prompt);
+    if (!claimable) return undefined;
     this.pendingGoalPromptMarkers.delete(marker);
     this.rememberClaimedGoalPromptMarker(marker, inputFingerprint(prompt));
     return pending;
@@ -1523,16 +1652,38 @@ export class GoalRuntime {
   }
 }
 
-export function createGoal(text: string, tokenBudget: number | undefined, baselineTokens: number, status: "active" | "paused" = "active"): ActiveGoal {
-  return createGoalRecord({ text, tokenBudget, baselineTokens, now: Date.now(), status }) as ActiveGoal;
+export function createGoal(
+  text: string,
+  tokenBudget: number | undefined,
+  baselineTokens: number,
+  status: "active" | "paused" = "active",
+): ActiveGoal {
+  const record = createGoalRecord({ text, tokenBudget, baselineTokens, now: Date.now(), status });
+  return record as ActiveGoal;
 }
 
 export function transitionGoal(goal: ActiveGoal, requestedStatus: GoalStatus): ActiveGoal {
   return transitionGoalRecord(goal, requestedStatus, Date.now());
 }
 
-export function sameGoalActivation(left: ActiveGoal | undefined, right: ActiveGoal | undefined): boolean {
-  return !!left && !!right && left.id === right.id && (left.activationId ?? left.id) === (right.activationId ?? right.id);
+export function sameGoalActivation(
+  left: ActiveGoal | undefined, right: ActiveGoal | undefined,
+): boolean {
+  return !!left && !!right && left.id === right.id
+    && activationIdOf(left) === activationIdOf(right);
+}
+
+/** Goals created before activation IDs use their goal ID as the activation. */
+function activationIdOf(goal: ActiveGoal | undefined): string | undefined {
+  return goal?.activationId ?? goal?.id;
+}
+
+function taskFingerprint(tasks: ActiveGoal["tasks"]) {
+  return JSON.stringify(tasks?.map(task => [task.id, task.text, task.status]));
+}
+
+function cloneIfSet<T>(value: T | undefined): T | undefined {
+  return value ? structuredClone(value) : undefined;
 }
 
 export function nextGoalInstance(goal: ActiveGoal): ActiveGoal {
@@ -1548,7 +1699,9 @@ export function incrementGoal(goal: ActiveGoal): ActiveGoal {
   return { ...goal, iteration: goal.iteration + 1, updatedAt: Date.now() };
 }
 
-export function formatFooterStatus(goal: ActiveGoal | undefined, limit: number | null, theme?: StatusContext["ui"]["theme"]) {
+export function formatFooterStatus(
+  goal: ActiveGoal | undefined, limit: number | null, theme?: StatusContext["ui"]["theme"],
+) {
   const text = formatStatus(goal, limit);
   if (!goal || text === undefined) return undefined;
   const tone = goal.status === "active" ? "success" : "warning";
@@ -1589,12 +1742,16 @@ export function goalSummary(
       ? `Automatic work: ${goal.automaticModelTurns} responses · Unlimited`
       : `Automatic work: ${goal.automaticModelTurns} of ${automaticTurnLimit} responses`,
     `Active elapsed: ${formatDuration(goal.timeUsedSeconds)}`,
-    `Tokens: ${goal.tokenBudget === undefined ? formatTokenCount(goal.tokensUsed) : formatBudget(goal)}`,
+    `Tokens: ${
+      goal.tokenBudget === undefined ? formatTokenCount(goal.tokensUsed) : formatBudget(goal)
+    }`,
   ];
   if (goal.safetyPauseCause) {
     summary.push(
       goal.safetyPauseCause === "continuation_limit"
-        ? `Safety pause: automatic-work limit reached (${goal.automaticModelTurns} of ${automaticTurnLimit ?? "Unlimited"} responses). Progress is saved; open /goal to review and continue.`
+        ? `Safety pause: automatic-work limit reached (${goal.automaticModelTurns} of `
+          + `${automaticTurnLimit ?? "Unlimited"} responses). `
+          + "Progress is saved; open /goal to review and continue."
         : "Safety pause: no progress. Progress is saved; open /goal to review and continue.",
     );
   }
@@ -1615,7 +1772,8 @@ export function abortCurrentTurn(ctx: StatusContext) {
 }
 
 export function blocksStaleGoalToolCalls(status: GoalStatus) {
-  return status === "paused" || status === "blocked" || status === "usage_limited" || status === "budget_limited";
+  return status === "paused" || status === "blocked"
+    || status === "usage_limited" || status === "budget_limited";
 }
 
 export function isResumableGoalStatus(status: GoalStatus) {
@@ -1652,13 +1810,16 @@ function goalContractEntries(ctx: StatusContext) {
     | undefined;
   const historyEntries = sessionManager?.getBranch?.() ?? sessionManager?.getEntries?.() ?? [];
   return {
-    contextEntries:
-      sessionManager?.buildSessionContext?.().messages ?? sessionManager?.buildContextEntries?.() ?? historyEntries,
+    contextEntries: sessionManager?.buildSessionContext?.().messages
+      ?? sessionManager?.buildContextEntries?.()
+      ?? historyEntries,
     historyEntries,
   };
 }
 
-async function sendPrompt(pi: ExtensionAPI, ctx: StatusContext, prompt: string, isCurrent?: () => boolean) {
+async function sendPrompt(
+  pi: ExtensionAPI, ctx: StatusContext, prompt: string, isCurrent?: () => boolean,
+) {
   try {
     await pi.sendUserMessage(prompt, { deliverAs: "followUp" });
     return true;
@@ -1674,7 +1835,9 @@ async function sendPrompt(pi: ExtensionAPI, ctx: StatusContext, prompt: string, 
 // throws a stale-context error from every ctx getter, so reporting through the
 // dead session's UI must not turn into another throw inside a timer or a catch
 // block.
-function notifyWhenSessionAlive(ctx: StatusContext, message: string, level?: "info" | "warning" | "error") {
+function notifyWhenSessionAlive(
+  ctx: StatusContext, message: string, level?: "info" | "warning" | "error",
+) {
   try {
     notifyTerminal(ctx.ui, message, level);
   } catch (error) {
