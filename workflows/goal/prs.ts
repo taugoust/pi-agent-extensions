@@ -14,6 +14,15 @@ export interface GoalPr {
   checkedAt: number;
 }
 
+/** One run of the merge gate for one PR, as shown to the user. */
+export interface GoalCheck {
+  command: string;
+  verdict: PrCheck["verdict"];
+  /** Why it didn't pass, for example "CI failed". */
+  detail?: string;
+  at: number;
+}
+
 export interface PrCheck {
   verdict: "ok" | "pending" | "failed" | "closed";
   pr: string;
@@ -48,10 +57,33 @@ export function parsePrRef(input: string): { repo: string; number: number; ref: 
   return { repo, number, ref: `${repo}#${number}` };
 }
 
+/** The exact command line the merge gate runs for a PR. */
+export function checkCommand(ref: string, requireGreenCi = true): string[] {
+  const { repo, number } = parsePrRef(ref);
+  return ["forge-pr", "-R", repo, "check", String(number), ...(requireGreenCi ? ["--ci-green"] : [])];
+}
+
+export function gateResult(ref: string, check: PrCheck): GoalCheck {
+  const detail = check.verdict === "closed" ? "Closed without merging"
+    : check.verdict === "failed" ? "CI failed"
+    : check.verdict === "pending" ? (check.ci === "pending" ? "CI running" : "Not merged yet")
+    : undefined;
+  return { command: checkCommand(ref).join(" "), verdict: check.verdict, ...(detail ? { detail } : {}), at: Date.now() };
+}
+
+/** Validate stored gate results. Bad entries are dropped. */
+export function normalizeGoalChecks(value: unknown): GoalCheck[] | undefined {
+  if (!Array.isArray(value)) return undefined;
+  return value.filter((check): check is GoalCheck => !!check && typeof check === "object"
+    && typeof check.command === "string" && check.command.length <= 1024
+    && ["ok", "pending", "failed", "closed"].includes(check.verdict)
+    && (check.detail === undefined || typeof check.detail === "string")
+    && Number.isFinite(check.at)).slice(0, MAX_GOAL_PRS);
+}
+
 /** Run `forge-pr check` once. Fails if forge-pr is missing or prints no verdict. */
 export function checkPr(ref: string, requireGreenCi: boolean, signal?: AbortSignal): Promise<PrCheck> {
-  const { repo, number } = parsePrRef(ref);
-  const args = ["-R", repo, "check", String(number), ...(requireGreenCi ? ["--ci-green"] : [])];
+  const args = checkCommand(ref, requireGreenCi).slice(1);
   return new Promise((resolve, reject) => {
     execFile(forgePrBin(), args, { timeout: CHECK_TIMEOUT_MS, signal, maxBuffer: 1 << 20 }, (error, stdout, stderr) => {
       if (error && !stdout.trim()) {

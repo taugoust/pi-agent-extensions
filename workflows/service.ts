@@ -1421,6 +1421,7 @@ export function createWorkflowService(
 			observation: entry.observation,
 			planning: entry.planning,
 			prs: entry.prs ?? [],
+			checks: entry.checks ?? [],
 		};
 	}
 	// The saved-goal revisions the model last saw. A mutation is rejected when

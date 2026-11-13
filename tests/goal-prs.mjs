@@ -109,6 +109,9 @@ test("goal_complete waits for every PR to merge with green CI", async () => {
   result = await f.call("goal_complete", { summary: "Verified the change and its tests" });
   assert.match(result.content[0].text, /closed without merging; report the goal blocked/);
 
+  assert.deepEqual(f.runtime.activeGoal.checks.map(check => [check.command, check.verdict, check.detail]),
+    [["forge-pr -R github.com/o/r check 2 --ci-green", "closed", "Closed without merging"]], "the gate records what it ran");
+
   forge(2, { verdict: "ok", state: "merged", ci: "green" });
   result = await f.call("goal_complete", { summary: "Verified the change and its tests" });
   assert.match(result.content[0].text, /^Goal complete:/);

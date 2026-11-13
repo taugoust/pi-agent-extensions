@@ -1,6 +1,6 @@
 import { defineTool, type ExtensionAPI } from "@earendil-works/pi-coding-agent";
 import { Type } from "typebox";
-import { checkPr, MAX_GOAL_PRS, parsePrRef, prFromCheck, type GoalPr, type PrCheck, type PrEvent } from "./prs.ts";
+import { checkPr, gateResult, MAX_GOAL_PRS, parsePrRef, prFromCheck, type GoalPr, type PrCheck, type PrEvent } from "./prs.ts";
 import type { GoalRuntime, StatusContext } from "./runtime.js";
 import { ownedWorktrees } from "../../shared/subagent-worktrees.ts";
 import { currentOwnerWorktreeSafety, ownedWorktreeCompletionHost, type CompletionContext } from "../../shared/worktree-completion-host.ts";
@@ -30,7 +30,8 @@ export async function unmergedPrs(runtime: GoalRuntime, ctx: StatusContext | und
   // Keep what the check saw, so the goal and the UI show current state.
   const current = runtime.activeGoal;
   if (current?.id === goal.id) {
-    runtime.activeGoal = { ...current, prs: results.map(result => result.pr) };
+    const checks = results.map(result => gateResult(result.pr.ref, result.check));
+    runtime.activeGoal = { ...current, prs: results.map(result => result.pr), checks };
     runtime.persistGoal(runtime.activeGoal);
   }
   for (const { pr } of results) if (pr.state === "merged") await completeMergedWorktree(ctx, pr);
@@ -107,7 +108,8 @@ export function registerGoalPrTool(pi: ExtensionAPI, runtime: GoalRuntime) {
       const prs = goal.prs ?? [];
       if (params.remove) {
         if (!prs.some(pr => pr.ref === ref)) throw new Error(`${ref} is not recorded on this goal`);
-        runtime.activeGoal = { ...goal, prs: prs.filter(pr => pr.ref !== ref) };
+        const command = gateResult(ref, { verdict: "pending", pr: "", state: "open" }).command;
+        runtime.activeGoal = { ...goal, prs: prs.filter(pr => pr.ref !== ref), checks: goal.checks?.filter(check => check.command !== command) };
         runtime.persistGoal(runtime.activeGoal);
         return { content: [{ type: "text", text: `Removed ${ref} from the goal.` }], details: { prs: runtime.activeGoal.prs } };
       }
