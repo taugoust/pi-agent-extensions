@@ -36,7 +36,7 @@ Paseo's Activity → Response stamps view shows the latest 50 stamp records with
 
 ## Progress
 
-`update_progress` creates or updates a goal-backed checklist with up to 50 `{id?, text, status}` tasks. `action:create` requires `objective`, `steps`, and `request_id` and starts autonomous continuation by default; `start:false` saves a paused draft. `action:update` requires explicit non-null `goal_id`, `expected_revision`, `request_id`, and `steps`. Omitted tasks remain; missing IDs create tasks, existing IDs update only their owning goal's tasks, and removal is explicit through `remove_task_ids`. Retries reuse the exact request ID and payload. Standalone historical checklists are read-only. See [the goal API and migration notes](workflows/README.md#required-tasks).
+`update_progress` creates the current goal or updates its checklist with up to 50 `{id?, text, status}` tasks. `action:create` takes `objective` and `steps` and starts autonomous continuation by default; `start:false` saves a paused draft. `action:update` takes `steps` and applies to the current goal; it is rejected if the goal changed since the model last saw it. Omitted tasks remain; missing IDs create tasks, existing IDs update only their owning goal's tasks, and removal is explicit through `remove_task_ids`. Standalone historical checklists are read-only. See [the goal API and migration notes](workflows/README.md#required-tasks).
 
 Status is `pending`, `in_progress`, `completed`, or `blocked`; at most one task may be in progress across the merged checklist. Task updates do not resume or complete the goal. Model guidance recommends meaningful updates and avoids redundant reporting.
 

@@ -63,8 +63,7 @@ export default function provider(pi) {
           ["parent_bash",{command:"sudo sh -c 'printf DENIED > "+base+"/denied-write.txt'"}],
           ["parent_bash",{command:"cat "+base+"/allowed-read.txt"}],
           ["parent_bash",{command:"printf ALLOWED > "+base+"/allowed-write.txt"}],
-          ["goal_complete",{goal_id:"stale-foreign-goal-id",activation_id:goal.activationId,summary:"Verified actual guarded fixture allow and deny outcomes"}],
-          ["goal_complete",{goal_id:goal.id,activation_id:goal.activationId,summary:"Verified actual guarded fixture allow and deny outcomes"}],
+          ["goal_complete",{summary:"Verified actual guarded fixture allow and deny outcomes"}],
         ];
         if(sequence[calls-1])[name,args]=sequence[calls-1];
       } else {
@@ -183,7 +182,6 @@ try {
   assert.equal(await readFile(join(cwd,"denied-write.txt"),"utf8"),"UNTOUCHED");assert.equal(await readFile(join(cwd,"allowed-write.txt"),"utf8"),"ALLOWED");
   assert.equal(last.results.filter(r=>r.toolName==="parent_bash"&&JSON.stringify(r).includes("Blocked by parent AgentSH Permission Gate")).length,2,"both real read/write deny receipts must reach executed proxy");
   assert(last.results.some(r=>r.toolName==="parent_bash"&&JSON.stringify(r).includes("ALLOWED_READ")));
-  assert(last.results.some(r=>r.toolName==="goal_complete"&&JSON.stringify(r).includes("Goal completion rejected")),"stale child contract cannot authorize completion");
   const audit=await readFile(join(root,"gate-audit.jsonl"),"utf8");assert.match(audit,/deny/);assert.match(audit,/allow/);assert.match(audit,/sudo cat/);assert.match(audit,/printf ALLOWED/);
   await request({fixture:"tools",tools:["read","bash",...controls]});
   const ordinary=await request({fixture:"ordinary"});assert.equal(ordinary.exitCode,0,JSON.stringify(ordinary));

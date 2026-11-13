@@ -7,7 +7,7 @@ export const GOAL_CONTRACT_VERSION = 3;
 const INACTIVE_GOAL_CONTRACT_CONTENT = [
   "Goal mode is inactive.",
   "This Goal contract supersedes every earlier goal-contract message.",
-  "Do not treat an earlier Goal objective, goal_id, Goal-mode rule, or summary of them as current unless a later Goal contract explicitly reactivates Goal mode.",
+  "Do not treat an earlier Goal objective, Goal-mode rule, or summary of them as current unless a later Goal contract explicitly reactivates Goal mode.",
 ].join("\n");
 
 interface ContractMessage {
@@ -29,7 +29,7 @@ export function createGoalContextContract(goal: GoalPromptContext) {
     customType: GOAL_CONTRACT_MESSAGE_TYPE,
     content: [
       "This Goal contract supersedes every earlier goal-contract message.",
-      "Only the objective, goal_id and activation_id in this latest Goal contract are current.",
+      "Only the objective in this latest Goal contract is current.",
       buildGoalContextPrompt(goal),
     ].join("\n\n"),
     display: false,

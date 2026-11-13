@@ -76,10 +76,11 @@ async function fixture(directory, script, manager) {
     async dispose() { await session.abort(); await owner.dispose(); engine.clearCompletionStatusTimer(); assert.deepEqual(errors, []); },
   };
 }
-const identity = engine => ({ goal_id: engine.activeGoal.id, activation_id: engine.activeGoal.activationId });
-const waitArgs = engine => ({ ...identity(engine), reason: "Only the arranged fixture result remains" });
+const waitArgs = () => ({ reason: "Only the arranged fixture result remains" });
+// Pretend the model last saw `goal`, so the next call is judged against it.
+const sawGoal = (engine, goal) => { engine.modelSeenGoal = { id: goal.id, activationId: goal.activationId ?? goal.id, revision: goal.revision }; };
 function startScript({ calls, engine }) {
-  if (calls === 1) return [call("update_progress", { action: "create", request_id: "create", objective: "Verify controlled external work", steps: [{ text: "Verify external result", status: "pending" }] })];
+  if (calls === 1) return [call("update_progress", { action: "create", objective: "Verify controlled external work", steps: [{ text: "Verify external result", status: "pending" }] })];
   if (calls === 2) return [call("external_start", {})];
   return [call("goal_wait", waitArgs(engine))];
 }
@@ -111,7 +112,8 @@ test("real Pi create/tasks/external work/wait; idempotent repeats preserve deadl
     assert.ok(updated.details.waiting.resume_at > deadline); assert.equal(updated.details.deadline, "replaced");
     assert.equal(updated.details.wake_semantics.subscription, "none");
     const snapshot = structuredClone(f.engine.activeGoal);
-    const stale = await f.invoke("goal_wait", { ...args, activation_id: "stale" });
+    sawGoal(f.engine, { ...snapshot, activationId: "stale" });
+    const stale = await f.invoke("goal_wait", args);
     assert.match(text(stale), /rejected/); assert.deepEqual(f.engine.activeGoal, snapshot);
     const status = await f.invoke("goal_manage", { action: "status" });
     assert.deepEqual(status.details.goal.waiting, snapshot.waiting); assert.equal(status.details.goal.tasks.length, 1);
@@ -119,7 +121,7 @@ test("real Pi create/tasks/external work/wait; idempotent repeats preserve deadl
     assert.equal(f.engine.dispatchContinuationIfSettled(f.ctx), false);
     await delay(30); assert.equal(f.calls, 3, "no automatic continuation/polling after wait or status reads");
     assert.match(f.contexts.at(-1).systemPrompt ?? JSON.stringify(f.contexts.at(-1)), /only delegated results|only delegated results or external work/i);
-    await f.invoke("goal_manage", { action: "resume", ...identity(f.engine), expected_revision: f.engine.activeGoal.revision, user_authorized: true });
+    await f.invoke("goal_manage", { action: "resume" });
     assert.equal(f.engine.activeGoal.waiting, undefined); assert.equal(f.engine.activeGoal.lastWake.reason, "explicit_resume");
     assert.equal(f.engine.dispatchDueGoalWait(f.ctx), false);
   } finally { await f.dispose(); }
@@ -127,9 +129,9 @@ test("real Pi create/tasks/external work/wait; idempotent repeats preserve deadl
 
 test("arranged external work does not suppress useful independent parent work", { timeout: 15000 }, () => isolated(async directory => {
   const f = await fixture(directory, ({ calls, engine }) => {
-    if (calls === 1) return [call("update_progress", { action: "create", request_id: "create", objective: "Verify parent and external work", steps: [{ text: "Independent parent verification", status: "pending" }, { text: "External result", status: "pending" }] })];
+    if (calls === 1) return [call("update_progress", { action: "create", objective: "Verify parent and external work", steps: [{ text: "Independent parent verification", status: "pending" }, { text: "External result", status: "pending" }] })];
     if (calls === 2) return [call("external_start", {})];
-    if (calls === 3) return [call("update_progress", { action: "update", goal_id: engine.activeGoal.id, expected_revision: engine.activeGoal.revision, request_id: "independent", steps: [{ ...engine.activeGoal.tasks[0], status: "completed" }] })];
+    if (calls === 3) return [call("update_progress", { action: "update", steps: [{ ...engine.activeGoal.tasks[0], status: "completed" }] })];
     return [call("goal_wait", waitArgs(engine))];
   });
   try {
@@ -169,8 +171,8 @@ test("user interruption clears waiting before provider; paused goals stay paused
     }
     if (mode === "rewait") return [call("goal_wait", waitArgs(info.engine))];
     if (mode === "paused") { assert.equal(info.engine.activeGoal.status, "paused"); return [{ type: "text", text: "Ordinary user answer; no goal work." }]; }
-    if (mode === "finish-task") { mode = "finish"; const g = info.engine.activeGoal; return [call("update_progress", { action: "update", goal_id: g.id, expected_revision: g.revision, request_id: "verified", steps: [{ ...g.tasks[0], status: "completed" }] })]; }
-    return [call("goal_complete", { ...identity(info.engine), summary: "Verified controlled external output and all required tasks" })];
+    if (mode === "finish-task") { mode = "finish"; const g = info.engine.activeGoal; return [call("update_progress", { action: "update", steps: [{ ...g.tasks[0], status: "completed" }] })]; }
+    return [call("goal_complete", { summary: "Verified controlled external output and all required tasks" })];
   });
   try {
     await f.session.prompt("Create and wait."); await f.session.waitForIdle();
@@ -178,15 +180,16 @@ test("user interruption clears waiting before provider; paused goals stay paused
     mode = "user"; await f.session.prompt("Recheck the condition, then wait again."); await f.session.waitForIdle();
     assert.equal(f.calls, 5); assert.equal(f.engine.activeGoal.waiting.resumeAt, undefined, "old deadline was cleared, not inherited by a fresh wait");
     const g = f.engine.activeGoal;
-    await f.invoke("goal_manage", { action: "pause", ...identity(f.engine), expected_revision: g.revision, user_authorized: true });
+    await f.invoke("goal_manage", { action: "pause" });
     assert.equal(f.engine.activeGoal.waiting, undefined);
     mode = "paused"; await f.session.prompt("Answer an unrelated question without resuming."); await f.session.waitForIdle();
     assert.equal(f.engine.activeGoal.status, "paused"); assert.equal(f.calls, 6);
     assert.equal(f.engine.dispatchDueGoalWait(f.ctx), false);
     const paused = f.engine.activeGoal;
-    await f.invoke("goal_manage", { action: "resume", ...identity(f.engine), expected_revision: paused.revision, user_authorized: true });
+    await f.invoke("goal_manage", { action: "resume" });
     assert.notEqual(f.engine.activeGoal.activationId, g.activationId);
-    const stale = await f.invoke("goal_wait", { goal_id: g.id, activation_id: g.activationId, reason: "stale" }); assert.match(text(stale), /rejected/);
+    sawGoal(f.engine, g);
+    const stale = await f.invoke("goal_wait", { reason: "stale" }); assert.match(text(stale), /rejected/);
     mode = "finish-task"; await f.session.prompt("Verify the external result and complete."); await f.session.waitForIdle();
     assert.equal(f.engine.activeGoal, undefined); assert.equal(f.calls, 8);
   } finally { await f.dispose(); }
@@ -224,7 +227,8 @@ test("failed deadline sends have one retry; identical wait replay cannot re-arm 
       // Advance only the runtime's bounded retry due time, not global clocks.
       f.engine.goalWaitDeadlineRetry.retryAt = Date.now() - 1;
       assert.equal(f.engine.dispatchDueGoalWait(f.ctx), false); assert.equal(sends, 2);
-      const replay = await f.invoke("goal_wait", { ...identity(f.engine), reason: "deadline delivery" });
+      sawGoal(f.engine, f.engine.activeGoal);
+      const replay = await f.invoke("goal_wait", { reason: "deadline delivery" });
       assert.equal(replay.details.changed, false);
       assert.equal(f.engine.dispatchDueGoalWait(f.ctx), false); assert.equal(sends, 2);
       assert.equal(f.calls, 3); assert.ok(f.engine.activeGoal.waiting);
@@ -255,7 +259,7 @@ test("status projects only owner-validated public execution IDs and records bloc
     assert.equal(activity.jobs.state, "unavailable");
     assert.deepEqual(activity.subagents.items, [{ taskId, childId, jobId, status: "running", stale: false, reaped: false, needsAttention: true, pendingGuidance: true }]);
     assert.doesNotMatch(JSON.stringify(result), /PRIVATE/);
-    const blocked = await f.invoke("goal_blocked", { ...identity(f.engine), reason: "External fixture denied access", evidence: "Three recorded fixture attempts returned denied", repeated_turns: 3 });
+    const blocked = await f.invoke("goal_blocked", { reason: "External fixture denied access", evidence: "Three recorded fixture attempts returned denied", repeated_turns: 3 });
     assert.match(text(blocked), /Goal blocked:/);
     const status = await f.invoke("goal_manage", { action: "status" });
     assert.equal(status.details.goal.status, "blocked");
@@ -299,7 +303,8 @@ test("branch navigation revokes the old wait, rotates activation and does not re
     assert.notEqual(f.engine.activeGoal.activationId, prior.activationId);
     assert.equal(f.engine.dispatchDueGoalWait(f.ctx), false);
     await delay(20); assert.equal(f.calls, 3);
-    const stale = await f.invoke("goal_wait", { goal_id: prior.id, activation_id: prior.activationId, reason: "stale branch" });
+    sawGoal(f.engine, prior);
+    const stale = await f.invoke("goal_wait", { reason: "stale branch" });
     assert.match(text(stale), /rejected/);
   } finally { await f.dispose(); }
 }));

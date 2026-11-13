@@ -19,6 +19,7 @@ import {
   ProgressParameters,
   type ProgressStep,
   validateProgressMutation,
+  prepareProgressInput,
   progressBoundaryContent,
   reconcileProgressContext,
   reconstructProgress,
@@ -156,7 +157,7 @@ export default function progressWidgetExtension(pi: ExtensionAPI, dependencies: 
     label: "Progress",
     executionMode: "sequential",
     description:
-      "Create or update the conversation's goal-backed checklist. create requires objective, steps and request_id; it authorizes and starts autonomous continuation by DEFAULT with configured limits. start:false creates a paused draft. Never replaces an existing goal. update requires explicit non-null goal_id, expected_revision and request_id. Supplied IDs must belong to that goal; omitted IDs create tasks; omitted tasks remain. Removal requires explicit remove_task_ids after a user scope change. Reuse the identical request_id and payload on retries. No standalone writes; inspect goal_manage status for current identity/revision. Task updates never resume or complete a goal.",
+      "Create the current goal or update its tasks. create starts work right away unless start is false. In an update, a step with an id changes that task and a step without one adds a task. Other tasks stay as they are. remove_task_ids removes tasks, only after the user changes the scope.",
     promptSnippet: "Show users what has been done, what is happening now, and what is planned next",
     promptGuidelines: [
       "Use update_progress for multi-step work when meaningful progress changes; skip simple tasks and avoid redundant updates.",
@@ -165,7 +166,7 @@ export default function progressWidgetExtension(pi: ExtensionAPI, dependencies: 
       "Maintain required tasks and mark completed only with evidence. Keep existing task IDs when refining wording or blockers; omit IDs for new tasks. Omitted tasks remain unchanged. goal_complete verifies completion separately. Historical standalone checklists are read-only.",
     ],
     parameters: ProgressParameters,
-    prepareArguments: validateProgressMutation,
+    prepareArguments: prepareProgressInput,
     renderCall(args, theme) {
       const summary = Array.isArray(args.steps)
         ? (args.steps as unknown[]).filter(
@@ -194,12 +195,12 @@ export default function progressWidgetExtension(pi: ExtensionAPI, dependencies: 
       if (isPartial) return new Text(theme.fg("warning", "Updating progress…"), 0, 0);
       return new Text("", 0, 0);
     },
-    async execute(_toolCallId, params, signal, _onUpdate, ctx) {
+    async execute(toolCallId, params, signal, _onUpdate, ctx) {
       signal?.throwIfAborted();
       if (!ownsSession(ctx)) {
         throw new Error("Cannot update progress because the session changed.");
       }
-      const validated = validateProgressMutation(params);
+      const validated = validateProgressMutation({ ...params, request_id: toolCallId });
       const wasComplete = allProgressCompleted(steps);
       const scoped = mutateProgress(pi, ctx, validated, validated.action === "create" ? validated.token_budget : undefined);
       // A durable retry returns its original receipt, not a rollback of the live UI.
@@ -211,6 +212,8 @@ export default function progressWidgetExtension(pi: ExtensionAPI, dependencies: 
       if (becameComplete) publishCompletionSummary(ctx);
       else publish(ctx);
 
+      // The model needs only the goal's status and tasks; IDs stay in details for the UI.
+      const modelView = JSON.stringify({ status: scoped.status, steps: scoped.steps });
       const details: ProgressDetails = {
         version: PROGRESS_DETAILS_VERSION,
         steps: cloneProgressSteps(scoped.steps),
@@ -220,7 +223,7 @@ export default function progressWidgetExtension(pi: ExtensionAPI, dependencies: 
       };
       if (steps.length === 0) {
         return {
-          content: [{ type: "text", text: JSON.stringify(scoped) }],
+          content: [{ type: "text", text: modelView }],
           details,
         };
       }
@@ -232,7 +235,7 @@ export default function progressWidgetExtension(pi: ExtensionAPI, dependencies: 
       if (blocked > 0) counts.push(`⊘ ${blocked} blocked`);
       if (pending > 0) counts.push(`… ${pending} remaining`);
       return {
-        content: [{ type: "text", text: `update_progress: ${counts.join("; ")}\n${JSON.stringify(scoped)}` }],
+        content: [{ type: "text", text: `update_progress: ${counts.join("; ")}\n${modelView}` }],
         details,
       };
     },

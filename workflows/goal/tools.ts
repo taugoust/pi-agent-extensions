@@ -8,7 +8,9 @@ import {
 } from "@earendil-works/pi-coding-agent";
 import { Markdown } from "@earendil-works/pi-tui";
 import { Type } from "typebox";
-import { completeVerifiedGoal, completionSummaryRejection, MAX_COMPLETION_SUMMARY_LENGTH } from "./completion.js";
+import {
+  completeVerifiedGoal, completionSummaryRejection, MAX_COMPLETION_SUMMARY_LENGTH,
+} from "./completion.js";
 import { registerGoalManagement } from "./model-control.js";
 import { notifyTerminal, safeTerminalText } from "./errors.js";
 import {
@@ -16,7 +18,6 @@ import {
   GOAL_COMPLETE_TOOL,
   GOAL_WAIT_TOOL,
   type GoalRuntime,
-  goalIdRejectionReason,
   MAX_GOAL_ID_LENGTH,
   truncateNotification,
 } from "./runtime.js";
@@ -62,21 +63,20 @@ export function registerGoalTools(pi: ExtensionAPI, runtime: GoalRuntime) {
     name: GOAL_COMPLETE_TOOL,
     label: "Goal Complete",
     executionMode: "sequential",
-    description:
-      "Mark an active /goal complete only when the latest effective Goal contract explicitly says Goal mode is active, supplies the matching current goal_id, and every requirement is verified. Tool visibility alone does not activate Goal mode. Never call for ordinary work, partial progress, blockers, failures, or unverified work.",
+    description: [
+      "Mark the current active goal complete only when the latest Goal contract says Goal mode",
+      "is active and every requirement is verified.",
+      "Tool visibility alone does not activate Goal mode.",
+      "Never call for ordinary work, partial progress, blockers, failures, or unverified work.",
+    ].join(" "),
     parameters: Type.Object({
-      goal_id: Type.String({
-        minLength: 1,
-        maxLength: MAX_GOAL_ID_LENGTH,
-        description:
-          "The stable goal_id shown in the current active /goal prompt. Also supply activation_id to reject calls from older activations.",
-      }),
-      activation_id: Type.String({ minLength: 1, maxLength: MAX_GOAL_ID_LENGTH, description: "Exact activation_id in the latest Goal contract; changes on resume." }),
       summary: Type.String({
         minLength: 1,
         maxLength: MAX_COMPLETION_SUMMARY_LENGTH,
-        description:
-          "State what was completed and what evidence verified it. Do not use this tool to report partial progress, blockers, failures, or remaining work.",
+        description: [
+          "State what was completed and what evidence verified it.",
+          "Do not use this tool to report partial progress, blockers, failures, or remaining work.",
+        ].join(" "),
       }),
     }),
     renderResult(result) {
@@ -85,7 +85,7 @@ export function registerGoalTools(pi: ExtensionAPI, runtime: GoalRuntime) {
     async execute(_toolCallId, params, _signal, _onUpdate, ctx) {
       const completedGoal = runtime.activeGoal;
       const goal = completedGoal?.text ?? "unknown goal";
-      const requestedGoalId = typeof params.goal_id === "string" ? params.goal_id.trim() : "";
+      const requestedGoalId = completedGoal?.id ?? "";
       const summary = typeof params.summary === "string" ? params.summary.trim() : "";
 
       if (!completedGoal) {
@@ -114,7 +114,7 @@ export function registerGoalTools(pi: ExtensionAPI, runtime: GoalRuntime) {
           details: completionDetails(goal, requestedGoalId, summary),
         };
       }
-      const staleGoalRejection = goalIdRejectionReason(completedGoal, requestedGoalId, params.activation_id);
+      const staleGoalRejection = runtime.staleGoalReason(completedGoal);
       if (staleGoalRejection) {
         const rejection = `Goal completion rejected: ${staleGoalRejection}.`;
         notifyTerminal(ctx.ui, rejection, "warning");
@@ -163,15 +163,14 @@ export function registerGoalTools(pi: ExtensionAPI, runtime: GoalRuntime) {
   const goalBlockedTool = defineTool({
     name: GOAL_BLOCKED_TOOL,
     label: "Goal Blocked",
-    description:
-      "Stop an active /goal only when the latest effective Goal contract explicitly says Goal mode is active, supplies the matching current goal_id, and the same evidenced external blocker recurred for at least three consecutive Goal turns. Tool visibility alone does not activate Goal mode. Never call for ordinary clarification, uncertainty, incomplete work, or recoverable failures.",
+    description: [
+      "Stop the current active goal only when the latest Goal contract says Goal mode is active",
+      "and the same evidenced external blocker recurred for at least three consecutive Goal turns.",
+      "Tool visibility alone does not activate Goal mode.",
+      "Never call for ordinary clarification, uncertainty, incomplete work,",
+      "or recoverable failures.",
+    ].join(" "),
     parameters: Type.Object({
-      goal_id: Type.String({
-        minLength: 1,
-        maxLength: MAX_GOAL_ID_LENGTH,
-        description: "The exact goal_id shown in the current active /goal prompt.",
-      }),
-      activation_id: Type.String({ minLength: 1, maxLength: MAX_GOAL_ID_LENGTH, description: "Exact activation_id in the latest Goal contract; changes on resume." }),
       reason: Type.String({
         minLength: 1,
         maxLength: MAX_BLOCKER_REASON_LENGTH,
@@ -190,10 +189,12 @@ export function registerGoalTools(pi: ExtensionAPI, runtime: GoalRuntime) {
     async execute(_toolCallId, params, _signal, _onUpdate, ctx) {
       const blockedGoal = runtime.activeGoal;
       const goal = blockedGoal?.text ?? "unknown goal";
-      const requestedGoalId = typeof params.goal_id === "string" ? params.goal_id.trim() : "";
+      const requestedGoalId = blockedGoal?.id ?? "";
       const reason = typeof params.reason === "string" ? params.reason.trim() : "";
       const evidence = typeof params.evidence === "string" ? params.evidence.trim() : "";
-      const repeatedTurns = typeof params.repeated_turns === "number" ? params.repeated_turns : Number.NaN;
+      const repeatedTurns = typeof params.repeated_turns === "number"
+        ? params.repeated_turns
+        : Number.NaN;
       const reject = (rejectionReason: string, terminate = false) => {
         const rejection = `goal_blocked rejected: ${rejectionReason}.`;
         notifyTerminal(ctx.ui, rejection, "warning");
@@ -208,12 +209,14 @@ export function registerGoalTools(pi: ExtensionAPI, runtime: GoalRuntime) {
       if (!runtime.canRecordGoalUsage()) {
         return reject("current run does not own the active goal");
       }
-      const staleGoalRejection = goalIdRejectionReason(blockedGoal, requestedGoalId, params.activation_id);
+      const staleGoalRejection = runtime.staleGoalReason(blockedGoal);
       if (staleGoalRejection) return reject(staleGoalRejection);
       if (blockedGoal.status !== "active") {
         return reject(`goal is ${blockedGoal.status}, not active`);
       }
-      if (!runtime.ownsWorkflow(blockedGoal)) return reject("active Goal no longer owns its workflow");
+      if (!runtime.ownsWorkflow(blockedGoal)) {
+        return reject("active Goal no longer owns its workflow");
+      }
       if (!reason) return reject("reason is empty");
       if (reason.length > MAX_BLOCKER_REASON_LENGTH) return reject("reason is too long");
       if (!evidence) return reject("evidence is empty");
@@ -229,6 +232,7 @@ export function registerGoalTools(pi: ExtensionAPI, runtime: GoalRuntime) {
         repeatedTurns,
       });
       if (!stoppedGoal) return reject("active goal changed before blocker transition");
+      runtime.markGoalSeen();
       notifyTerminal(ctx.ui, `Goal blocked: ${truncateNotification(reason)}`, "warning");
 
       return {
@@ -243,14 +247,20 @@ export function registerGoalTools(pi: ExtensionAPI, runtime: GoalRuntime) {
     name: GOAL_WAIT_TOOL,
     label: "Goal Wait",
     executionMode: "sequential",
-    description: `Keep an active /goal quiet only when the latest effective Goal contract explicitly says Goal mode is active, supplies the matching current goal_id, and progress depends on an arranged external wake event or one safety deadline. Tool visibility alone does not activate Goal mode. Call goal_wait alone. Repeated calls succeed; omitting resume_after_ms preserves an existing absolute deadline, while supplying it replaces the deadline from now. Reason text does not create a subscription. Delivered non-Goal custom messages, user input, explicit resume or the optional deadline clear the wait; routine progress does not wake the model. Requests below ${MIN_GOAL_WAIT_DELAY_MS}ms are clamped to ${MIN_GOAL_WAIT_DELAY_MS}ms. Never call for ordinary unfinished work.`,
+    description: [
+      "Keep the current active goal quiet only when the latest Goal contract says Goal mode is",
+      "active and progress depends on an arranged external wake event or one safety deadline.",
+      "Tool visibility alone does not activate Goal mode.",
+      "Call goal_wait alone.",
+      "Repeated calls succeed; omitting resume_after_ms preserves an existing absolute deadline,",
+      "while supplying it replaces the deadline from now.",
+      "Reason text does not create a subscription.",
+      "Delivered non-Goal custom messages, user input, explicit resume or the optional deadline",
+      "clear the wait; routine progress does not wake the model.",
+      `Requests below ${MIN_GOAL_WAIT_DELAY_MS}ms are clamped to ${MIN_GOAL_WAIT_DELAY_MS}ms.`,
+      "Never call for ordinary unfinished work.",
+    ].join(" "),
     parameters: Type.Object({
-      goal_id: Type.String({
-        minLength: 1,
-        maxLength: MAX_GOAL_ID_LENGTH,
-        description: "The exact goal_id shown in the current active /goal prompt.",
-      }),
-      activation_id: Type.String({ minLength: 1, maxLength: MAX_GOAL_ID_LENGTH, description: "Exact activation_id in the latest Goal contract; changes on resume." }),
       reason: Type.String({
         minLength: 1,
         maxLength: MAX_GOAL_WAIT_REASON_LENGTH,
@@ -260,16 +270,23 @@ export function registerGoalTools(pi: ExtensionAPI, runtime: GoalRuntime) {
         Type.Integer({
           minimum: 1,
           maximum: MAX_GOAL_WAIT_DELAY_MS,
-          description: `Optional safety deadline in milliseconds that requests one continuation if no wake message arrives. Values below ${MIN_GOAL_WAIT_DELAY_MS} are accepted but clamped to ${MIN_GOAL_WAIT_DELAY_MS}.`,
+          description: [
+            "Optional safety deadline in milliseconds that requests one continuation",
+            "if no wake message arrives.",
+            `Values below ${MIN_GOAL_WAIT_DELAY_MS} are accepted`,
+            `but clamped to ${MIN_GOAL_WAIT_DELAY_MS}.`,
+          ].join(" "),
         }),
       ),
     }),
     async execute(_toolCallId, params, _signal, _onUpdate, ctx) {
       const activeGoal = runtime.activeGoal;
       const goal = activeGoal?.text ?? "unknown goal";
-      const requestedGoalId = typeof params.goal_id === "string" ? params.goal_id.trim() : "";
+      const requestedGoalId = activeGoal?.id ?? "";
       const reason = typeof params.reason === "string" ? params.reason.trim() : "";
-      const resumeAfterMs = typeof params.resume_after_ms === "number" ? params.resume_after_ms : undefined;
+      const resumeAfterMs = typeof params.resume_after_ms === "number"
+        ? params.resume_after_ms
+        : undefined;
       const reject = (rejectionReason: string) => {
         const rejection = `goal_wait rejected: ${rejectionReason}.`;
         notifyTerminal(ctx.ui, rejection, "warning");
@@ -283,18 +300,19 @@ export function registerGoalTools(pi: ExtensionAPI, runtime: GoalRuntime) {
       if (!runtime.canRecordGoalUsage()) {
         return reject("current run does not own the active goal");
       }
-      const staleGoalRejection = goalIdRejectionReason(activeGoal, requestedGoalId, params.activation_id);
+      const staleGoalRejection = runtime.staleGoalReason(activeGoal);
       if (staleGoalRejection) return reject(staleGoalRejection);
       if (activeGoal.status !== "active") {
         return reject(`goal is ${activeGoal.status}, not active`);
       }
-      if (!runtime.ownsWorkflow(activeGoal)) return reject("active Goal no longer owns its workflow");
+      if (!runtime.ownsWorkflow(activeGoal)) {
+        return reject("active Goal no longer owns its workflow");
+      }
       if (!reason) return reject("reason is empty");
       if (reason.length > MAX_GOAL_WAIT_REASON_LENGTH) return reject("reason is too long");
-      if (
-        resumeAfterMs !== undefined &&
-        (!Number.isInteger(resumeAfterMs) || resumeAfterMs < 1 || resumeAfterMs > MAX_GOAL_WAIT_DELAY_MS)
-      ) {
+      const validDelay = Number.isInteger(resumeAfterMs)
+        && resumeAfterMs! >= 1 && resumeAfterMs! <= MAX_GOAL_WAIT_DELAY_MS;
+      if (resumeAfterMs !== undefined && !validDelay) {
         return reject(`resume_after_ms must be a whole number from 1 to ${MAX_GOAL_WAIT_DELAY_MS}`);
       }
 
@@ -303,18 +321,23 @@ export function registerGoalTools(pi: ExtensionAPI, runtime: GoalRuntime) {
       const waiting = previous && resumeAfterMs === undefined
         ? { ...previous, reason }
         : createGoalWait(reason, resumeAfterMs);
-      const changed = !previous || previous.reason !== waiting.reason || previous.resumeAt !== waiting.resumeAt;
+      const changed = !previous
+        || previous.reason !== waiting.reason
+        || previous.resumeAt !== waiting.resumeAt;
       const waitingGoal = runtime.enterGoalWait(ctx, activeGoal.id, waiting);
       if (!waitingGoal) return reject("active goal changed before waiting transition");
+      runtime.markGoalSeen(waitingGoal);
       const clamped = requestedMs !== undefined && effectiveMs !== requestedMs;
       if (changed) notifyTerminal(ctx.ui, `Goal waiting: ${truncateNotification(reason)}`, "info");
+      const clampedFrom = clamped ? requestedMs : undefined;
+      const deadline = resumeAfterMs !== undefined ? "replaced" : previous ? "preserved" : "none";
       const details = {
-        ...waitDetails(goal, requestedGoalId, reason, effectiveMs, waiting.resumeAt, clamped ? requestedMs : undefined),
+        ...waitDetails(goal, requestedGoalId, reason, effectiveMs, waiting.resumeAt, clampedFrom),
         activation_id: waitingGoal.activationId ?? waitingGoal.id,
         status: "waiting" as const,
         waiting: { reason: waiting.reason, resume_at: waiting.resumeAt ?? null },
         changed,
-        deadline: previous && resumeAfterMs === undefined ? "preserved" : resumeAfterMs === undefined ? "none" : "replaced",
+        deadline,
         wake_semantics: GOAL_WAIT_WAKE_SEMANTICS,
         last_wake: waitingGoal.lastWake ?? null,
       };
@@ -347,7 +370,8 @@ export function goalCompletionMarkdown(result: GoalCompletionRenderResult) {
 
   const details = result.details;
   const summary =
-    details && typeof details === "object" && "summary" in details && typeof details.summary === "string"
+    details && typeof details === "object" && "summary" in details
+      && typeof details.summary === "string"
       ? details.summary
       : content.slice(completionPrefix.length);
   const safeSummary = safeTerminalText(summary);
@@ -406,7 +430,9 @@ function waitDetails(
     goal: goal.slice(0, MAX_GOAL_TEXT_LENGTH),
     goal_id: goalId.slice(0, MAX_GOAL_ID_LENGTH),
     reason: reason.slice(0, MAX_GOAL_WAIT_REASON_LENGTH),
-    ...(requestedResumeAfterMs === undefined ? {} : { requested_resume_after_ms: requestedResumeAfterMs }),
+    ...(requestedResumeAfterMs === undefined
+      ? {}
+      : { requested_resume_after_ms: requestedResumeAfterMs }),
     ...(resumeAfterMs === undefined ? {} : { resume_after_ms: resumeAfterMs }),
     ...(resumeAt === undefined ? {} : { resume_at: resumeAt }),
   };
