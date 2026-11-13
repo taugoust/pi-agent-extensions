@@ -212,6 +212,8 @@ export default function progressWidgetExtension(pi: ExtensionAPI, dependencies: 
       if (becameComplete) publishCompletionSummary(ctx);
       else publish(ctx);
 
+      // The model needs only the goal's status and tasks; IDs stay in details for the UI.
+      const modelView = JSON.stringify({ status: scoped.status, steps: scoped.steps });
       const details: ProgressDetails = {
         version: PROGRESS_DETAILS_VERSION,
         steps: cloneProgressSteps(scoped.steps),
@@ -221,7 +223,7 @@ export default function progressWidgetExtension(pi: ExtensionAPI, dependencies: 
       };
       if (steps.length === 0) {
         return {
-          content: [{ type: "text", text: JSON.stringify(scoped) }],
+          content: [{ type: "text", text: modelView }],
           details,
         };
       }
@@ -233,7 +235,7 @@ export default function progressWidgetExtension(pi: ExtensionAPI, dependencies: 
       if (blocked > 0) counts.push(`⊘ ${blocked} blocked`);
       if (pending > 0) counts.push(`… ${pending} remaining`);
       return {
-        content: [{ type: "text", text: `update_progress: ${counts.join("; ")}\n${JSON.stringify(scoped)}` }],
+        content: [{ type: "text", text: `update_progress: ${counts.join("; ")}\n${modelView}` }],
         details,
       };
     },
