@@ -115,11 +115,15 @@ export function registerGoalPrTool(pi: ExtensionAPI, runtime: GoalRuntime) {
       }
       if (prs.length >= MAX_GOAL_PRS && !prs.some(pr => pr.ref === ref)) throw new Error(`A goal can record at most ${MAX_GOAL_PRS} PRs`);
       const previous = prs.find(pr => pr.ref === ref);
-      const pr = prFromCheck(ref, await checkPr(ref, false, signal), previous);
+      // Run the merge gate right away, so its condition shows before completion is tried.
+      const check = await checkPr(ref, true, signal);
+      const pr = prFromCheck(ref, check, previous);
       const current = runtime.activeGoal;
       if (current?.id !== goal.id) throw new Error("The goal changed while the PR was being checked");
       const next = previous ? prs.map(candidate => candidate.ref === ref ? pr : candidate) : [...prs, pr];
-      runtime.activeGoal = { ...current, prs: next };
+      const gate = gateResult(ref, check);
+      const checks = [...(current.checks ?? []).filter(item => item.command !== gate.command), gate];
+      runtime.activeGoal = { ...current, prs: next, checks };
       runtime.persistGoal(runtime.activeGoal);
       return {
         content: [{ type: "text", text: `Recorded ${describe(pr)} (${pr.state}). The goal completes once its PRs are merged with green CI.` }],

@@ -87,9 +87,11 @@ test("goal_pr records a PR on the goal and survives reload", async () => {
   const result = await f.call("goal_pr", { pr: "github.com/o/r#1" });
   assert.match(result.content[0].text, /Recorded "PR 1"/);
   assert.deepEqual(f.runtime.activeGoal.prs.map(pr => [pr.ref, pr.state, pr.branch]), [["github.com/o/r#1", "open", "b1"]]);
+  assert.deepEqual(f.runtime.activeGoal.checks.map(check => [check.command, check.verdict]), [["forge-pr -R github.com/o/r check 1 --ci-green", "pending"]], "recording a PR runs its merge gate");
   assert.equal(loadGoalStateFromSession(f.ctx).goal.prs[0].ref, "github.com/o/r#1");
   await f.call("goal_pr", { pr: "https://github.com/o/r/pull/1", remove: true });
   assert.deepEqual(f.runtime.activeGoal.prs, []);
+  assert.deepEqual(f.runtime.activeGoal.checks, [], "removing a PR removes its condition");
   f.dispose();
 });
 

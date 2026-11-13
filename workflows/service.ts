@@ -748,6 +748,8 @@ export function createWorkflowService(
 						text: goal.text,
 						status: goal.status,
 						tasks: readGoalTasks(ctx, goal),
+						prs: goal.prs ?? [],
+						checks: goal.checks ?? [],
 						waiting: goal.waiting?.reason ?? null,
             waitDeadline: goal.waiting?.resumeAt ?? null,
             lastWake: goal.lastWake ?? null,
