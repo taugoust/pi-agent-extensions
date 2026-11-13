@@ -154,6 +154,15 @@ Omitted tasks remain unchanged, including completed tasks. Missing task IDs crea
 
 Goal IDs stay stable across pause/resume and objective changes. A separate activation token fences terminal tools, run ownership, queued prompts and callbacks inside the runtime; `goal_complete`, `goal_wait` and `goal_blocked` take no IDs and are rejected when the goal, its activation or revision changed since the model last saw it. Checklist updates alone never complete a goal; explicit completion still requires verified outcome evidence and no unfinished tasks. UI task additions remain paused/idle-only.
 
+### Pull requests
+
+A goal records the pull or merge requests it produced with `goal_pr({ pr: "host/owner/repo#12" })` (or the PR URL; `remove: true` drops one). It uses `forge-pr` from the `git-forge` package.
+
+- **Merge gate:** `goal_complete` runs `forge-pr check --ci-green` for every recorded PR and refuses to complete until all are merged with green CI. A PR closed without merging is reported as a reason to call `goal_blocked`. Without `forge-pr`, a goal with PRs cannot complete.
+- **Waiting:** while the goal waits, the runtime runs one `forge-pr watch` per open PR. Reviews, comments, pushes, CI results, merges and closes wake the goal with a `goal-pr-event` message and update the stored PR state. Watchers stop when the wait ends and restart after a reload.
+- **Worktrees:** when a PR merges, the coordinator's worktree for its branch is completed with the reason `PR merged: <url>` and cleaned up with the usual safeguards.
+- **Parent and Paseo:** a coordinator reports its PRs to the parent's saved goal (`prs`), which the Work → Goals tab shows. PR state changes don't change the goal's revision.
+
 ### Migration and compatibility
 
 - Existing goal-linked scoped progress is copied losslessly into the goal record using only its explicit legacy `progressId`/ID association. Existing task IDs, text, statuses and completion are retained; missing legacy IDs receive deterministic IDs. No tasks are associated by matching text or timestamps.

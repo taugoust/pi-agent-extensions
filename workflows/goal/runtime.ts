@@ -43,6 +43,7 @@ import {
 import { assertGoalToolsAvailable, goalToolsAvailable } from "./tool-policy.js";
 import { type GoalWait, type GoalWake, GoalWaitTimer } from "./wait.js";
 import { WorkflowMutex, type WorkflowMutexOwner } from "./workflow-mutex.js";
+import { applyPrEvent, isWakeEvent, openPrRefs, PrWatchers, type GoalPr, type PrEvent } from "./prs.ts";
 
 export {
   GOAL_BLOCKED_TOOL,
@@ -301,6 +302,11 @@ export class GoalRuntime {
   guardAbortGoalId?: string;
   staleGoalToolCallsBlocked = false;
   private readonly workflowMutex: WorkflowMutex;
+  /** Watches the open PRs of a waiting goal. */
+  readonly prWatchers = new PrWatchers((ref, event) => this.handlePrEvent(ref, event));
+  /** Told about PR events worth waking the goal for. Set by the goal_pr tool module. */
+  onPrEvent?: (ctx: StatusContext | undefined, pr: GoalPr, event: PrEvent) => void;
+  private prContext?: StatusContext;
   private workflowOwner?: WorkflowMutexOwner;
   private workflowSession?: object;
   private pendingGoalContract?: PendingGoalContract;
@@ -552,6 +558,7 @@ export class GoalRuntime {
   }
 
   enterGoalWait(ctx: StatusContext, goalId: string, waiting: GoalWait) {
+    this.prContext = ctx;
     const goal = this.activeGoal;
     if (!goal || goal.id !== goalId || goal.status !== "active" || !this.ownsWorkflow(goal)) {
       return undefined;
@@ -598,6 +605,8 @@ export class GoalRuntime {
   }
 
   restoreGoalWaitTimer(ctx: StatusContext) {
+    this.prContext = ctx;
+    this.syncPrWatchers();
     this.clearGoalWaitTimer();
     const goal = this.activeGoal;
     if (!this.ownsWorkflow(goal)) return false;
@@ -638,6 +647,25 @@ export class GoalRuntime {
       this.restoreGoalWaitAfterDeadlineFailure(ctx, goal.id, waiting, !retryAttempt, goal.lastWake);
     }
     return false;
+  }
+
+  /** Watch the open PRs of the goal while it waits, and nothing otherwise. */
+  syncPrWatchers() {
+    const goal = this.activeGoal;
+    const waiting = goal?.status === "active" && !!goal.waiting && this.ownsWorkflow(goal);
+    this.prWatchers.sync(waiting ? openPrRefs(goal.prs) : []);
+  }
+
+  private handlePrEvent(ref: string, event: PrEvent) {
+    const goal = this.activeGoal;
+    const pr = goal?.prs?.find(candidate => candidate.ref === ref);
+    if (!goal || !pr) return;
+    const next = applyPrEvent(pr, event);
+    if (next) {
+      this.activeGoal = { ...goal, prs: goal.prs!.map(candidate => candidate.ref === ref ? next : candidate) };
+      this.persistGoal(this.activeGoal);
+    }
+    if (isWakeEvent(event)) this.onPrEvent?.(this.prContext, next ?? pr, event);
   }
 
   clearGoalWaitTimer() {
@@ -1466,6 +1494,7 @@ export class GoalRuntime {
     this.activeGoal = goal;
     this.trackPolicySignature(goal);
     this.pi.events.emit("pi:goal-progress", {});
+    this.syncPrWatchers();
     const terminal = this.terminalDetails;
     this.publishGoalState(buildGoalStateSnapshot(goal, terminal?.summary, terminal?.reason));
   }
@@ -1520,6 +1549,7 @@ export class GoalRuntime {
     this.clearPersistedGoal(ctx.cwd, clearedGoal, reason);
     ctx.ui.setStatus(STATUS_KEY, undefined);
     if (releaseWorkflow) this.releaseWorkflow();
+    this.syncPrWatchers();
   }
 
   snapshotSettingsApplicationState(): GoalSettingsRuntimeSnapshot {

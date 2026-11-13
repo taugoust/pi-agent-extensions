@@ -1,6 +1,6 @@
 # Explicit owner-coordinator worktree completion
 
-Completion is an explicit owner/coordinator judgment, not PR/CI detection. Neither worker exit, reaping, release nor a clean checkout marks work complete. A coordinator is a role using the existing parent/child relationship, not an additional security hierarchy.
+Completion is an explicit owner/coordinator judgment, not PR/CI detection. The one exception is a PR recorded on a goal with `goal_pr`: when it merges, the goal runtime marks the coordinator's worktree for that PR's branch complete with the reason `PR merged: <url>` and runs the normal guarded cleanup. All cleanup safeguards below still apply. Neither worker exit, reaping, release nor a clean checkout marks work complete. A coordinator is a role using the existing parent/child relationship, not an additional security hierarchy.
 
 ## Existing command and service surfaces
 

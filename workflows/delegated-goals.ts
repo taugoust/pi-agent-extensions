@@ -1,3 +1,4 @@
+import { normalizeGoalPrs, type GoalPr } from "./goal/prs.ts";
 import {
   createGoalRecord, goalControlFingerprint, isFinalGoalStatus, mergeGoalChecklist,
   resolveGoalTransitionStatus, type GoalStatus,
@@ -39,6 +40,8 @@ export type DelegatedGoalEntry = {
   reviewTruncated?: boolean;
   diagnostics?: GoalDiagnostics;
   planning?: GoalPlanning;
+  /** Pull or merge requests the goal produced, as its coordinator last saw them. */
+  prs?: GoalPr[];
   /** Projection only: not a lifecycle transition or authority to execute. */
   observation?: { state: "current" | "unavailable"; at?: number; reason?: string };
 };
@@ -69,7 +72,7 @@ export type DelegatedGoalRequest = {
 /** Child execution is deliberately injected: this registry never runs a parent goal. */
 export type DelegatedGoalObservation = Partial<Pick<DelegatedGoalEntry,
   | "status" | "tasks" | "tokensUsed" | "automaticTurns" | "noProgressTurns"
-  | "summary" | "waiting" | "story" | "diagnostics" | "review">>;
+  | "summary" | "waiting" | "story" | "diagnostics" | "review" | "prs">>;
 type ReadonlyEntry = Readonly<DelegatedGoalEntry>;
 export interface DelegatedGoalExecutor {
   /** Live preflight; object presence alone does not authorize executable tools. */
@@ -119,7 +122,7 @@ const FINAL_GOAL_ACTIONS = ["goals.reference", "goals.blocker.clear"];
 /** Fields a child observation overwrites on its registry entry. */
 const OBSERVED_FIELDS = [
   "status", "tasks", "tokensUsed", "automaticTurns", "noProgressTurns",
-  "summary", "waiting", "diagnostics",
+  "summary", "waiting", "diagnostics", "prs",
 ] as const;
 type ObservedField = typeof OBSERVED_FIELDS[number];
 /** Pause decides the status itself. */
@@ -255,6 +258,7 @@ function validateEntry(e: DelegatedGoalEntry, ids: Set<string>, childTasks: Set<
   if (e.status === "active" && !e.child) {
     throw new Error("Active delegated goal requires child linkage");
   }
+  if (e.prs !== undefined && normalizeGoalPrs(e.prs)?.length !== e.prs.length) throw new Error("Invalid goal PRs");
   const details = [[e.summary, MAX_SUMMARY_LENGTH], [e.waiting, MAX_WAITING_LENGTH]] as const;
   for (const [value, max] of details) {
     if (value !== null && (typeof value !== "string" || value.length > max)) {

@@ -2109,7 +2109,7 @@ export default function (pi: ExtensionAPI) {
             const goalTools = dedicatedGoalTools(allowed);
             // Use ordinary inherited task capabilities, not the old filesystem-only
             // Goal worker subset that prevented coordinators from delegating.
-            let tools = allowed.filter(tool => !["goal_manage", "goal_complete", "goal_blocked", "goal_wait", "update_progress", "questionnaire", "goal_reference"].includes(tool));
+            let tools = allowed.filter(tool => !["goal_manage", "goal_complete", "goal_blocked", "goal_wait", "update_progress", "questionnaire", "goal_reference", "goal_pr"].includes(tool));
             const taskStore = new NativeTaskStore(path.join(getAgentDir(), "state", "native-tasks-v1"));
             const manager = nativeTui(ctx);
             if (!manager || !allowed.includes("subagent")) throw new Error("Ordinary subagent delegation unavailable");
