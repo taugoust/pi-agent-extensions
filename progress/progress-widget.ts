@@ -157,7 +157,7 @@ export default function progressWidgetExtension(pi: ExtensionAPI, dependencies: 
     label: "Progress",
     executionMode: "sequential",
     description:
-      "Create the current goal or update its checklist. create takes an objective and steps and starts autonomous work with the configured limits; start:false creates a paused draft. It never replaces an existing goal. update applies to the current goal: steps with an id change that task, steps without one add a task, and omitted tasks stay as they are. Only remove_task_ids removes tasks, and only after the user changed the scope. An update is rejected if the goal changed since you last saw it; the error shows the new state. Task updates never resume or complete a goal.",
+      "Create the current goal or update its tasks. create starts work right away unless start is false. In an update, a step with an id changes that task and a step without one adds a task. Other tasks stay as they are. remove_task_ids removes tasks, only after the user changes the scope.",
     promptSnippet: "Show users what has been done, what is happening now, and what is planned next",
     promptGuidelines: [
       "Use update_progress for multi-step work when meaningful progress changes; skip simple tasks and avoid redundant updates.",

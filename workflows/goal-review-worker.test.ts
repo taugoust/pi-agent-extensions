@@ -9,15 +9,16 @@ import {previewGoalReview,mergeGoalReview} from "./goal-review.ts";
 import {emptyGoalStory} from "./goal-story.ts";
 import {registerGoalReferenceTool} from "./goal-reference-tool.ts";
 const entryId="11111111-1111-4111-8111-111111111111",child={taskId:"task",childId:"child",jobId:"job",attempt:1};
-const request={goal_id:"goal",activation_id:"activation",expected_revision:1,request_id:"reference",title:"Spec",target:"spec.md",role:"source" as const};
+const request={request_id:"reference",title:"Spec",target:"spec.md",role:"source" as const};
 async function fixture(){const root=await mkdtemp(join(tmpdir(),"goal-worker-review-"));await writeFile(join(root,"spec.md"),"Explicit spec evidence");const branch:any[]=[];const state={entryId,childGoalId:"goal",childActivationId:"activation",revision:1,goal:{status:"active"}};let allowed=true;const options={entryId,child,workerEpoch:"epoch",root,branch,persist:(data:unknown)=>branch.push({type:"custom",customType:GOAL_REVIEW_ENTRY,data}),current:()=>state,readEnabled:()=>allowed};return{root,branch,state,options,review:createWorkerGoalReview(options),setAllowed:(value:boolean)=>allowed=value,close:()=>rm(root,{recursive:true,force:true})};}
-test("explicit worker registration uses inherited read authorization, exact goal activation/revision and durable idempotent receipts",async()=>{
+test("explicit worker registration uses inherited read authorization, the active goal and durable idempotent receipts",async()=>{
  const f=await fixture();try{let reads=0;
  await assert.rejects(f.review.register(request,async()=>{reads++;return{isError:true};}),/authorized/);assert.equal(f.review.snapshot().length,0);assert.equal(f.branch.length,0);
  const ref=await f.review.register(request,async path=>{assert.equal(path,join(f.root,"spec.md"));reads++;return{};});assert.equal(ref.workerEpoch,"epoch");assert.equal(f.branch.at(-1).data.receipts[0][0],request.request_id);
  assert.deepEqual(await f.review.register(request,async()=>{throw Error("replay must not read");}),ref);assert.equal(reads,2);
  f.state.revision=2;assert.deepEqual(await f.review.register(request,async()=>{throw Error("retained receipt survives unrelated task revisions");}),ref);f.state.revision=1;
  await assert.rejects(f.review.register({...request,title:"Changed"},async()=>({})),/conflict/);
+ f.state.goal.status="paused";await assert.rejects(f.review.register(request,async()=>({})),/goal or activation changed/);f.state.goal.status="active";
  for(const changed of [{goal_id:"foreign"},{activation_id:"old"},{expected_revision:0},{target:"../secret",request_id:"escape"},{target:"/etc/passwd",request_id:"absolute"},{approve:true,request_id:"approval"}])await assert.rejects(f.review.register({...request,...changed} as any,async()=>{throw Error("invalid input reached read");}));
  const restored=createWorkerGoalReview(f.options);assert.deepEqual(await restored.register(request,async()=>{throw Error("no replayed read");}),ref);restored.dispose();f.setAllowed(false);await assert.rejects(f.review.register({...request,request_id:"denied"},async()=>({})),/capability/);
  }finally{f.review.dispose();await f.close();}
