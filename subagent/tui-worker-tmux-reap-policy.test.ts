@@ -63,3 +63,51 @@ test("force does not bypass required cleanup callback or the post-cleanup activi
     assert.equal(f.calls.includes("kill-pane"), false);
   } finally { await rm(f.root, { recursive: true, force: true }); }
 });
+
+/** A worker that died before it could seal itself: no cleanup receipt. */
+async function crashedWorker() {
+  const f = await fixture();
+  const state = f.store.readState();
+  state.sealed = false; delete state.reapReservation; delete state.jobCleanup;
+  f.store.writeState(state);
+  const { writeFile, mkdir } = await import("node:fs/promises");
+  await writeFile(f.manifest.sessionFile, JSON.stringify({ type: "session", id: "worker-session" }) + "\n");
+  const agentDir = join(f.root, "agent"), jobs = join(agentDir, "state", "background-jobs-v1", "jobs");
+  process.env.PI_CODING_AGENT_DIR = agentDir;
+  const job = async (id: string, finished: boolean) => {
+    await mkdir(join(jobs, id), { recursive: true });
+    await writeFile(join(jobs, id, "metadata.json"), JSON.stringify({ id, sessionId: "worker-session" }));
+    if (finished) await writeFile(join(jobs, id, "result.json"), "{}");
+  };
+  return { ...f, job };
+}
+
+test("a crashed worker is only reaped with force, and never while it still owns running jobs", async () => {
+  const f = await crashedWorker();
+  try {
+    await assert.rejects(f.tmux.reap(f.manifest), /exited without verified child-local job cleanup/);
+    await f.job(`job-${"1".repeat(24)}`, true);
+    await f.job(`job-${"2".repeat(24)}`, false);
+    await assert.rejects(f.tmux.reap(f.manifest, undefined, { force: true, reason: "audit" }), /still owns running jobs \(job-2+\)/);
+    assert.equal(f.calls.includes("kill-pane"), false);
+    const { writeFile } = await import("node:fs/promises");
+    await writeFile(join(f.root, "agent", "state", "background-jobs-v1", "jobs", `job-${"2".repeat(24)}`, "result.json"), "{}");
+    await f.tmux.reap(f.manifest, undefined, { force: true, reason: "audit" });
+    assert.ok(f.calls.includes("kill-pane"));
+  } finally { delete process.env.PI_CODING_AGENT_DIR; await rm(f.root, { recursive: true, force: true }); }
+});
+
+test("a crashed worker whose pane was closed by hand reports the real error, and force finishes it", async () => {
+  const f = await crashedWorker();
+  try {
+    (f.tmux as any).inspect = async () => { throw new Error("can't find pane: %1"); };
+    (f.tmux as any).epoch = async () => "1:2";
+    (f.tmux as any).run = async (_socket: string, args: string[]) => args[0] === "list-panes" ? "%2\n%3" : "";
+    await assert.rejects(f.tmux.reap(f.manifest), /can't find pane/, "not ENOENT reap-intent.json");
+    await f.tmux.reap(f.manifest, undefined, { force: true, reason: "pane closed by hand" });
+    const { readFile } = await import("node:fs/promises");
+    const tombstone = JSON.parse(await readFile(f.store.path("reaped.json"), "utf8"));
+    assert.equal(tombstone.forced, true); assert.equal(tombstone.reason, "pane closed by hand");
+    await f.tmux.reap(f.manifest);
+  } finally { delete process.env.PI_CODING_AGENT_DIR; await rm(f.root, { recursive: true, force: true }); }
+});

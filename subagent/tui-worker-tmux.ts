@@ -1,7 +1,7 @@
 import { getAgentDir } from "@earendil-works/pi-coding-agent";
 import { execFile } from "node:child_process";
 import { promisify } from "node:util";
-import { access, readFile, realpath, writeFile, copyFile, chmod } from "node:fs/promises";
+import { access, readFile, readdir, realpath, writeFile, copyFile, chmod } from "node:fs/promises";
 import { constants } from "node:fs";
 import { dirname, isAbsolute, join, relative, resolve, sep } from "node:path";
 import { fileURLToPath } from "node:url";
@@ -29,6 +29,25 @@ const aliasGlobals = globalThis as unknown as Record<symbol, Map<string, Promise
 const aliasQueues = aliasGlobals[aliasQueueKey] ??= new Map<string, Promise<void>>();
 
 /** Best-effort presentation: coalesce edits, retry unchanged desired aliases, stop on reload. */
+/** Running background jobs a worker session started. Workers share the parent's
+ * agent directory, so its job store holds them. Used only for a forced reap of a
+ * worker that died before it could clean up and seal itself. */
+async function runningWorkerJobs(sessionFile: string): Promise<string[]> {
+  const header = JSON.parse((await readFile(sessionFile, "utf8")).split("\n", 1)[0]);
+  if (header?.type !== "session" || typeof header.id !== "string") throw new Error("Worker session identity unavailable; refusing forced reap");
+  const jobs = join(getAgentDir(), "state", "background-jobs-v1", "jobs");
+  let ids: string[];
+  try { ids = await readdir(jobs); } catch (error) { if ((error as NodeJS.ErrnoException).code === "ENOENT") return []; throw error; }
+  const running: string[] = [];
+  for (const id of ids.filter(name => /^job-[0-9a-f]{24}$/.test(name))) {
+    let metadata: { sessionId?: string };
+    try { metadata = JSON.parse(await readFile(join(jobs, id, "metadata.json"), "utf8")); } catch { continue; }
+    if (metadata.sessionId !== header.id) continue;
+    try { await access(join(jobs, id, "result.json")); } catch { running.push(id); }
+  }
+  return running;
+}
+
 export class WorkerAliasProjection {
   private desired?: string;
   private applied?: string;
@@ -460,12 +479,37 @@ export class TuiWorkerTmux {
       if (cleanup.workerEpoch !== manifest.workerEpoch) throw new Error("Child job cleanup receipt identity mismatch; refusing reap");
       if (!cleanup.report?.subagents) throw new Error("Worker lacks verified recursive subagent cleanup; recover its controller before reap");
     };
+    /** A worker that died before sealing has no cleanup receipt. Only an explicit,
+     * audited force may remove it, and only when it has no running jobs left. */
+    const verifyCleanupOrForce = async () => {
+      try { verifyCleanup(); }
+      catch (error) {
+        if (!options.force) throw error;
+        const running = await runningWorkerJobs(manifest.sessionFile);
+        if (running.length) throw new Error(`Worker still owns running jobs (${running.join(", ")}); cancel them before a forced reap`);
+      }
+    };
     let info;
     try { info = await this.inspect(manifest); }
     catch (error) {
       // Crash after verified kill-pane but before tombstone publication: only
       // reconcile an exact durable intent on the same still-live server.
-      const intent = readPrivateJson(store.path("reap-intent.json")) as { workerEpoch?: string; paneId?: string };
+      let intent: { workerEpoch?: string; paneId?: string };
+      try { intent = readPrivateJson(store.path("reap-intent.json")) as typeof intent; }
+      catch (missing) {
+        if ((missing as NodeJS.ErrnoException).code !== "ENOENT") throw missing;
+        // No reap was started: the pane is gone for another reason, such as being
+        // closed by hand after the worker died. Only an explicit force may finish it.
+        const placement = requiredPlacement(manifest);
+        if (!options.force || await this.epoch(placement.socketPath) !== placement.serverEpoch) throw error;
+        const panes = (await this.run(placement.socketPath, ["list-panes", "-a", "-F", "#{pane_id}"])).split("\n");
+        if (panes.includes(placement.paneId)) throw error;
+        await verifyCleanupOrForce();
+        await options.beforeRemove?.();
+        atomicPrivateJson(store.path("reaped.json"), { workerEpoch: manifest.workerEpoch, paneId: placement.paneId,
+          reapedAt: new Date().toISOString(), forced: true, reason: options.reason });
+        return;
+      }
       if (intent.workerEpoch !== manifest.workerEpoch || intent.paneId !== requiredPlacement(manifest).paneId
         || await this.epoch(requiredPlacement(manifest).socketPath) !== requiredPlacement(manifest).serverEpoch) throw error;
       const panes = (await this.run(requiredPlacement(manifest).socketPath, ["list-panes", "-a", "-F", "#{pane_id}"])).split("\n");
@@ -489,8 +533,9 @@ export class TuiWorkerTmux {
     }
     // A dead worker cannot delegate cleanup. Never infer an empty job inventory
     // from death (or inspect another session's job store using parent authority).
-    // Only a child-written seal + cleanup receipt proves pre-reap verification.
-    verifyCleanup();
+    // Only a child-written seal + cleanup receipt proves pre-reap verification,
+    // unless an audited force finds the dead worker has no running jobs.
+    if (info.dead) await verifyCleanupOrForce(); else verifyCleanup();
     // Guarded worktree reconciliation must finish (or audit a forced bypass)
     // while the retained coordinator pane is still available on failure.
     await options.beforeRemove?.();

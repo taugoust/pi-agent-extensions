@@ -19,6 +19,13 @@ import { validateTaskOutcome } from "./outcome.ts";
 import { ModelInactivityWatch } from "./model-inactivity.ts";
 import type { LocalJobController } from "../shared/background-job.ts";
 
+/** Whether a tool result is an accepted goal completion. A refused completion
+ * (for example, PRs not merged yet) is an ordinary result, not an error, and must
+ * not be treated as a completion to prove: that would fail the worker closed. */
+export function isAcceptedGoalCompletion(event: { toolName?: string; isError?: boolean; details?: unknown }): boolean {
+  return event.toolName === "goal_complete" && !event.isError && (event.details as { accepted?: unknown } | undefined)?.accepted === true;
+}
+
 /** Explicit -e entry point, loaded inside the one interactive child Pi process. */
 export default async function tuiWorkerExtension(pi: ExtensionAPI): Promise<void> {
   const manifestPath = process.env[TUI_WORKER_MANIFEST_ENV];
@@ -79,7 +86,7 @@ export default async function tuiWorkerExtension(pi: ExtensionAPI): Promise<void
   };
   let pendingGoalCompletion = false;
   pi.on("tool_result", (event) => {
-    if (launchManifest?.assignedGoal && event.toolName === "goal_complete" && !event.isError) pendingGoalCompletion = true;
+    if (launchManifest?.assignedGoal && isAcceptedGoalCompletion(event)) pendingGoalCompletion = true;
   });
   let lastAssistant: unknown;
   let liveAssistantText = "";
