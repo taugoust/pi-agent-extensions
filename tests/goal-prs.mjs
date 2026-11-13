@@ -105,6 +105,7 @@ test("goal_complete waits for every PR to merge with green CI", async () => {
   forge(2, { verdict: "pending", state: "open", ci: "pending" });
   let result = await f.call("goal_complete", { summary: "Verified the change and its tests" });
   assert.match(result.content[0].text, /not merged with green CI yet: "PR 2" .*: open, CI pending/);
+  assert.equal(result.details.accepted, undefined, "a refused completion is not marked accepted");
   assert.equal(f.runtime.activeGoal.status, "active");
 
   forge(2, { verdict: "closed", state: "closed" });
@@ -117,6 +118,7 @@ test("goal_complete waits for every PR to merge with green CI", async () => {
   forge(2, { verdict: "ok", state: "merged", ci: "green" });
   result = await f.call("goal_complete", { summary: "Verified the change and its tests" });
   assert.match(result.content[0].text, /^Goal complete:/);
+  assert.equal(result.details.accepted, true, "workers rely on this to prove a completion");
   f.runtime.clearCompletionStatusTimer();
   f.dispose();
 });

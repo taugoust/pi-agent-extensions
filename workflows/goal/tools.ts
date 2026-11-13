@@ -167,7 +167,8 @@ export function registerGoalTools(pi: ExtensionAPI, runtime: GoalRuntime) {
 
       return {
         content: toolContent(`Goal complete: ${summary}`),
-        details: completionDetails(goal, requestedGoalId, summary),
+        // Rejections are ordinary results too; only this marks an accepted completion.
+        details: { ...completionDetails(goal, requestedGoalId, summary), accepted: true },
         terminate: true,
       };
     },

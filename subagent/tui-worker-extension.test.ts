@@ -4,7 +4,7 @@ import { mkdtemp, readFile, rm, mkdir, writeFile } from "node:fs/promises";
 import { ProjectTrustStore } from "@earendil-works/pi-coding-agent";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import workerExtension from "./tui-worker-extension.ts";
+import workerExtension, { isAcceptedGoalCompletion } from "./tui-worker-extension.ts";
 import { TuiWorkerStore } from "./tui-worker-store.ts";
 import { processIdentity } from "./tui-worker-tmux.ts";
 import { callTuiWorker, awaitTuiWorkerVerification } from "./tui-worker-client.ts";
@@ -410,4 +410,12 @@ test("worker extension with missing selected guard authority never dispatches pr
     if (previous === undefined) delete process.env.PI_TUI_WORKER_MANIFEST; else process.env.PI_TUI_WORKER_MANIFEST = previous;
     await rm(root, { recursive: true, force: true });
   }
+});
+
+test("only an accepted goal_complete counts as a completion to prove", () => {
+  const refusal = { toolName: "goal_complete", isError: false, details: { goal_id: "goal", summary: "too early" } };
+  assert.equal(isAcceptedGoalCompletion(refusal), false, "a refused completion is an ordinary result, not a completion");
+  assert.equal(isAcceptedGoalCompletion({ ...refusal, details: { ...refusal.details, accepted: true } }), true);
+  assert.equal(isAcceptedGoalCompletion({ toolName: "goal_complete", isError: true, details: { accepted: true } }), false);
+  assert.equal(isAcceptedGoalCompletion({ toolName: "goal_wait", details: { accepted: true } }), false);
 });
