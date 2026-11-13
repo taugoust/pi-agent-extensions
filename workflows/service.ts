@@ -748,6 +748,8 @@ export function createWorkflowService(
 						text: goal.text,
 						status: goal.status,
 						tasks: readGoalTasks(ctx, goal),
+						prs: goal.prs ?? [],
+						checks: goal.checks ?? [],
 						waiting: goal.waiting?.reason ?? null,
             waitDeadline: goal.waiting?.resumeAt ?? null,
             lastWake: goal.lastWake ?? null,
@@ -1420,6 +1422,8 @@ export function createWorkflowService(
 			tokensUsed: entry.tokensUsed,
 			observation: entry.observation,
 			planning: entry.planning,
+			prs: entry.prs ?? [],
+			checks: entry.checks ?? [],
 		};
 	}
 	// The saved-goal revisions the model last saw. A mutation is rejected when

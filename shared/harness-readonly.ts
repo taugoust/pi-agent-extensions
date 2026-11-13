@@ -69,8 +69,18 @@ export type ReadonlySubagentTask = {
   summary?: string;
   kind?: "foreground" | "subagent";
   needsAttention?: boolean;
+  /** Commands the harness runs to verify this worker's delivery, with their last result. */
+  checks?: ReadonlyTaskCheck[];
   lastUpdated: string | null;
   stale: boolean;
+};
+
+export type ReadonlyTaskCheck = {
+  command: string;
+  /** Last result, or "not-run" before verification first runs. */
+  status: "not-run" | "checking" | "passed" | "failed" | "unavailable" | "interrupted" | "cancelled" | "timed-out" | "stale";
+  exitCode: number | null;
+  finishedAt: string | null;
 };
 
 export type ReadonlyTaskReport = {

@@ -61,6 +61,19 @@ const messageText = (message: any) => typeof message?.content === "string" ? mes
 const response = (text: string, data: Record<string, unknown> = {}) => ({ content: [{ type: "text" as const, text: Buffer.from(text).subarray(0, 48 * 1024).toString("utf8") }], details: { tui_subagent: true, backend: "native", ...data } });
 
 /** Native-only durable adapter. Legacy AgentSH execution never enters here. */
+/** A worker's gates with their last in-memory result. Never runs or observes anything. */
+function taskChecks(gates: VerificationGate[], record?: { runs?: Array<{ status?: string; exitCode?: number | null; finishedAt?: string }> }) {
+  return gates.map((gate, index) => {
+    const run = record?.runs?.[index];
+    return {
+      command: gate.command.slice(0, 8192),
+      status: run?.status ?? "not-run",
+      exitCode: run?.exitCode ?? null,
+      finishedAt: run?.finishedAt ?? null,
+    };
+  });
+}
+
 export class TuiNativeManager {
   readonly root: string;
   readonly tmux = new TuiWorkerTmux();
@@ -990,6 +1003,7 @@ export class TuiNativeManager {
       return { taskId: c.taskId, childId: c.childId, groupId: g.id, runtimeId: manifest?.runtimeId ?? null,
         attempt: c.attempt ?? 1, status: c.state, reaped: !!c.reaped, title: this.canonicalTitle(c),
         kind: "subagent", needsAttention: active(c) && c.needsAttention === true,
+        ...(c.spec.verification?.length ? { checks: taskChecks(c.spec.verification, c.verification as any) } : {}),
         summary: typeof (c.lastOutcome as any)?.summary === "string" ? (c.lastOutcome as any).summary.slice(0, 2000) : undefined,
         lastUpdated: null, stale: true };
     }));

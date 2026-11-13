@@ -152,7 +152,7 @@ export default async function goalWorker(pi: ExtensionAPI) {
     return {
       goalId: snapshot.childGoalId, activationId: snapshot.childActivationId, revision: snapshot.revision, status: goal.status,
       executionStopped: ctx.isIdle() && !ctx.hasPendingMessages(), waiting: goal.waiting,
-      tasks: goal.tasks, tokensUsed: goal.tokensUsed, automaticTurns: goal.automaticTurns, noProgressTurns: goal.noProgressTurns,
+      tasks: goal.tasks, prs: goal.prs, checks: goal.checks, tokensUsed: goal.tokensUsed, automaticTurns: goal.automaticTurns, noProgressTurns: goal.noProgressTurns,
       policyRevision: snapshot.policyRevision, tokenBudget: snapshot.tokenBudget, limitsEditable: true,
       ...(reviews ? { review: reviews.snapshot() } : {}),
       summary: goal.summary, diagnostics: goal.diagnostics, story, limits: snapshot.limits,

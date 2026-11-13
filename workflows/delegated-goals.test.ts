@@ -386,3 +386,19 @@ test("linked paused edits are metadata-only and stale paused observations cannot
   await f.act(entry, "goals.resume");
   assert.equal(resumed!.text, "revised"); assert.equal(resumed!.tasks.length, 1); assert.equal(resumed!.tokenBudget, 77);
 });
+
+test('a coordinator observation carries its goal PRs into the entry without bumping the revision', async () => {
+  const f = fixture();
+  await f.create('Ship the change');
+  await f.act(f.registry.snapshot().entries[0], 'goals.start');
+  const started = f.registry.snapshot().entries[0];
+  const pr = { ref: 'github.com/o/r#5', url: 'https://github.com/o/r/pull/5', title: 'Change', branch: 'b5', state: 'open' as const, ci: 'pending' as const, checkedAt: 1 };
+  f.executor.observe = async () => ({ status: 'active', tasks: started.tasks, prs: [pr] });
+  await f.registry.refresh();
+  const observed = f.registry.snapshot().entries[0];
+  assert.deepEqual(observed.prs, [pr]);
+  assert.equal(observed.revision, started.revision, 'PR state is a projection, not a control change');
+  f.executor.observe = async () => ({ status: 'active', tasks: started.tasks, prs: [{ ...pr, state: 'merged' as const }] });
+  await f.registry.refresh();
+  assert.equal(f.registry.snapshot().entries[0].prs![0].state, 'merged');
+});

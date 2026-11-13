@@ -16,7 +16,7 @@ export type ManagedGoalAssignment = {
 };
 export function validateManagedGoalAssignment(value: ManagedGoalAssignment): ManagedGoalAssignment {
   if (!value || Object.keys(value).some(key => !["entryId", "policy", "goalTools", "questionnaireEnabled", "reviewEnabled"].includes(key)) || !/^[a-f0-9-]{36}$/i.test(value.entryId)
-    || !Array.isArray(value.goalTools) || new Set(value.goalTools).size !== value.goalTools.length || value.goalTools.some(tool => !["goal_manage", "goal_complete", "goal_blocked", "goal_wait", "update_progress", "questionnaire", "goal_reference"].includes(tool))
+    || !Array.isArray(value.goalTools) || new Set(value.goalTools).size !== value.goalTools.length || value.goalTools.some(tool => !["goal_manage", "goal_complete", "goal_blocked", "goal_wait", "update_progress", "questionnaire", "goal_reference", "goal_pr"].includes(tool))
     || [value.questionnaireEnabled, value.reviewEnabled].some(flag => flag !== undefined && typeof flag !== "boolean")) throw new Error("Invalid managed Goal assignment");
   if (["goal_complete", "goal_blocked", "goal_wait", "update_progress"].some(tool => !value.goalTools.includes(tool))
     || value.questionnaireEnabled === true && !value.goalTools.includes("questionnaire")

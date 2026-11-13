@@ -8,6 +8,8 @@ export type ChildGoalSnapshot = {
   noProgressTurns?: number; summary?: string | null;
   story?: DelegatedGoalEntry["story"];
   review?: DelegatedGoalEntry["review"];
+  prs?: DelegatedGoalEntry["prs"];
+  checks?: DelegatedGoalEntry["checks"];
   diagnostics?: DelegatedGoalEntry["diagnostics"];
   limitsEditable?: boolean; policyRevision?: number; tokenBudget?: number | null;
   limits?: DelegatedGoalEntry["continuationLimits"];

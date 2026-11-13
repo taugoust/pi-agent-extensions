@@ -5,6 +5,7 @@ import type { GoalStatus } from "./prompts.js";
 import { createHash } from "node:crypto";
 import { readScopedProgress, validateProgressArguments } from "../../progress/progress-state.js";
 import { type GoalWait, type GoalWake, normalizeGoalWait, normalizeGoalWake } from "./wait.js";
+import { normalizeGoalChecks, normalizeGoalPrs, type GoalCheck, type GoalPr } from "./prs.ts";
 
 const GOAL_STATE_ENTRY_TYPE = "goal-state";
 const LEGACY_GOALS_STATE_ENTRY_TYPE = "goals-state";
@@ -18,6 +19,10 @@ export type ActiveGoal = GoalRecord & {
   continuationLimits?: Partial<GoalContinuationLimits>;
   waiting?: GoalWait;
   lastWake?: GoalWake;
+  /** Pull or merge requests the goal produced. It completes once they are merged. */
+  prs?: GoalPr[];
+  /** The last merge-gate run for each PR. */
+  checks?: GoalCheck[];
 };
 
 interface LegacyStoredGoal extends Omit<ActiveGoal, "status"> {
@@ -184,8 +189,12 @@ export function normalizeLoadedGoal(goal: ActiveGoal): ActiveGoal {
     wasLegacyImplicitBudget && goal.status === "budget_limited"
       ? "paused"
       : goal.status;
+  const prs = normalizeGoalPrs(goal.prs);
+  const checks = normalizeGoalChecks(goal.checks);
   return {
     ...goal,
+    prs,
+    checks,
     status,
     activationId: goal.activationId ?? goal.id,
     revision: goal.revision ?? 0,

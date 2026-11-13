@@ -99,6 +99,8 @@ export function createDelegatedChildGoalService(
       noProgressTurns: goal.toolFreeRepeatCount,
       summary: completed?.summary ?? terminalSummary,
       waiting: goal.waiting?.reason ?? null,
+      prs: goal.prs ?? [],
+      checks: goal.checks ?? [],
       diagnostics: {
         waitDeadline: goal.waiting?.resumeAt ?? null,
         lastTaskUpdateAt: goal.lastTaskUpdateAt ?? null,

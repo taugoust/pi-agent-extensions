@@ -220,6 +220,7 @@ export function registerGoalLifecycle(
     runController.unbindSession();
     runtime.closeMenuSession();
     runtime.clearGoalWaitTimer();
+    runtime.prWatchers.stopAll();
     if (runtime.activeGoal) {
       if (runtime.activeGoal.status === "active") {
         runtime.recordGoalUsage(runtime.activeGoal, ctx, false);

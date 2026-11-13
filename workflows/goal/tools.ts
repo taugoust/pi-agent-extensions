@@ -12,6 +12,7 @@ import {
   completeVerifiedGoal, completionSummaryRejection, MAX_COMPLETION_SUMMARY_LENGTH,
 } from "./completion.js";
 import { registerGoalManagement } from "./model-control.js";
+import { registerGoalPrTool, unmergedPrs } from "./pr-tool.ts";
 import { notifyTerminal, safeTerminalText } from "./errors.js";
 import {
   GOAL_BLOCKED_TOOL,
@@ -59,6 +60,7 @@ const MAX_BLOCKER_EVIDENCE_LENGTH = 4_000;
 
 export function registerGoalTools(pi: ExtensionAPI, runtime: GoalRuntime) {
   registerGoalManagement(pi, runtime);
+  registerGoalPrTool(pi, runtime);
   const goalCompleteTool = defineTool({
     name: GOAL_COMPLETE_TOOL,
     label: "Goal Complete",
@@ -82,7 +84,7 @@ export function registerGoalTools(pi: ExtensionAPI, runtime: GoalRuntime) {
     renderResult(result) {
       return renderGoalCompletion(result);
     },
-    async execute(_toolCallId, params, _signal, _onUpdate, ctx) {
+    async execute(_toolCallId, params, signal, _onUpdate, ctx) {
       const completedGoal = runtime.activeGoal;
       const goal = completedGoal?.text ?? "unknown goal";
       const requestedGoalId = completedGoal?.id ?? "";
@@ -150,7 +152,18 @@ export function registerGoalTools(pi: ExtensionAPI, runtime: GoalRuntime) {
         };
       }
 
-      completeVerifiedGoal(runtime, ctx, completedGoal, summary);
+      // The merge gate: every PR the goal recorded is merged with green CI.
+      const unmerged = await unmergedPrs(runtime, ctx, signal)
+        .catch(error => `its PRs could not be checked (${error instanceof Error ? error.message : String(error)})`);
+      const finalGoal = runtime.activeGoal;
+      const prRejection = unmerged ?? (finalGoal?.id === completedGoal.id ? undefined : "the goal changed while its PRs were checked");
+      if (prRejection) {
+        const rejection = `Goal completion rejected: ${prRejection}.`;
+        notifyTerminal(ctx.ui, rejection, "warning");
+        return { content: toolContent(rejection), details: completionDetails(goal, requestedGoalId, summary) };
+      }
+
+      completeVerifiedGoal(runtime, ctx, finalGoal!, summary);
 
       return {
         content: toolContent(`Goal complete: ${summary}`),
