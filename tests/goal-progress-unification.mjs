@@ -67,7 +67,7 @@ function fixture(options = {}) {
   registerGoalTools(pi, runtime);
   const mutate = input => mutateProgress(pi, ctx, input);
   const create = (extra = {}) => mutate({ action: "create", request_id: "create", objective: "Verified offline outcome", steps: [{ text: "verify", status: "pending" }], ...extra });
-  const update = (extra = {}) => mutate({ action: "update", request_id: "update", goal_id: runtime.activeGoal.id, expected_revision: runtime.activeGoal.revision, steps: [], ...extra });
+  const update = (extra = {}) => mutate({ action: "update", request_id: "update", steps: [], ...extra });
   return { pi, ctx, runtime, entries, tools, messages, handlers, dispose, mutate, create, update, idle: value => idle = value, busy: value => busy = value };
 }
 test("coordinators can create, update and restore multiple concurrent tasks", () => {
@@ -117,7 +117,7 @@ test("registered update_progress creates the current goal, goal_manage create re
   assert.ok(result.details.steps[0].id); assert.equal(result.details.goalId, f.runtime.activeGoal.id);
   await assert.rejects(() => f.tools.get("goal_manage").execute("alias", input, undefined, undefined, f.ctx), /update_progress action:create/);
   assert.equal(f.runtime.activeGoal.id, result.details.goalId); assert.equal(f.entries.length, 1);
-  await assert.rejects(() => tool.execute("old", { steps: [] }, undefined, undefined, f.ctx), /request_id/);
+  await assert.rejects(() => tool.execute("old", { steps: [] }, undefined, undefined, f.ctx), /action must be create or update/);
   for (const handler of f.handlers.get("session_shutdown")) await handler({}, f.ctx);
 });
 test("default creation reaches the real settled lifecycle dispatcher without a second start", async () => {
@@ -164,10 +164,10 @@ test("updates preserve omitted tasks, allocate missing IDs, and remove only expl
   const removed = f.update({ request_id: "remove", remove_task_ids: [added.steps[1].id] });
   assert.deepEqual(removed.steps, [changed.steps[0]]);
 });
-test("missing/null goal, missing revision, unknown/foreign and duplicate task IDs fail closed", () => {
+test("missing goal, removed ID fields, unknown/foreign and duplicate task IDs fail closed", () => {
+  assert.throws(() => fixture().update(), /No current goal/);
   const f = fixture(), created = f.create({ start: false });
-  for (const goal_id of [null, undefined, "foreign"]) assert.throws(() => f.update({ goal_id }), /goal|Goal/);
-  assert.throws(() => f.update({ expected_revision: undefined }), /expected_revision/);
+  for (const extra of [{ goal_id: created.goalId }, { expected_revision: created.revision }]) assert.throws(() => f.update(extra), /documented fields/);
   assert.throws(() => f.update({ steps: [{ id: "foreign", text: "x", status: "pending" }] }), /Unknown or foreign/);
   assert.throws(() => f.update({ steps: [created.steps[0], created.steps[0]] }), /Duplicate/);
   assert.throws(() => f.update({ remove_task_ids: ["foreign"] }), /Unknown or foreign/);
@@ -176,7 +176,7 @@ test("missing/null goal, missing revision, unknown/foreign and duplicate task ID
 test("durable retry receipts survive reload, revisions, completion/clear and reject payload reuse", () => {
   const f = fixture(), created = f.create({ start: false });
   assert.deepEqual(f.create({ start: false }), created); assert.equal(f.entries.length, 1);
-  const request = { action: "update", request_id: "append", goal_id: created.goalId, expected_revision: created.revision, steps: [{ text: "new", status: "pending" }] };
+  const request = { action: "update", request_id: "append", steps: [{ text: "new", status: "pending" }] };
   const result = f.mutate(request);
   f.update({ request_id: "later-mutation" });
   assert.equal(Object.keys(f.runtime.activeGoal.requests).length, 1, "checkpoints do not copy an unbounded receipt ledger");
@@ -220,31 +220,31 @@ test("legacy migration preserves exact linked tasks and IDs without associating 
 });
 test("stable goal identity rotates only activation and rejects stale completion/wait/block calls", async () => {
   const f = fixture(), created = f.create();
+  const seen = structuredClone(f.runtime.modelSeenGoal);
   const old = f.runtime.activeGoal; f.runtime.requestContinuation(old); const oldPrompt = f.runtime.continuationIntent.prompt;
   f.runtime.activeGoal = nextGoalInstance(transitionGoal(old, "active")); f.runtime.persistGoal(f.runtime.activeGoal);
   assert.equal(f.runtime.activeGoal.id, created.goalId); assert.notEqual(f.runtime.activeGoal.activationId, created.activationId);
   assert.equal(f.runtime.continuationIntent, undefined); assert.equal(f.runtime.markContinuationStarted(oldPrompt), undefined);
   f.runtime.beginAgentRun(created.goalId, "manual");
   for (const [name, args] of [["goal_complete", { summary: "verified" }], ["goal_wait", { reason: "external event" }], ["goal_blocked", { reason: "external", evidence: "verified blocker", repeated_turns: 3 }]]) {
-    const result = await f.tools.get(name).execute("old", { goal_id: created.goalId, activation_id: created.activationId, ...args }, undefined, undefined, f.ctx);
-    assert.match(result.content[0].text, /activation_id/); assert.equal(f.runtime.activeGoal.status, "active");
+    f.runtime.modelSeenGoal = { ...seen };
+    const result = await f.tools.get(name).execute("old", args, undefined, undefined, f.ctx);
+    assert.match(result.content[0].text, /resumed or its objective changed since you last saw it/); assert.equal(f.runtime.activeGoal.status, "active");
   }
 });
 test("goal_manage status is authoritative and completion still rejects unfinished tasks", async () => {
   const f = fixture(), created = f.create();
   const status = await f.tools.get("goal_manage").execute("status", { action: "status" }, undefined, undefined, f.ctx);
   assert.deepEqual(status.details.goal.tasks, created.steps); assert.equal(status.details.goal.revision, f.runtime.activeGoal.revision);
-  await assert.rejects(() => f.tools.get("goal_complete").execute("complete", { goal_id: created.goalId, activation_id: created.activationId, summary: "Verified result" }, undefined, undefined, f.ctx), /required tasks/);
+  await assert.rejects(() => f.tools.get("goal_complete").execute("complete", { summary: "Verified result" }, undefined, undefined, f.ctx), /required tasks/);
   f.update({ steps: [{ ...created.steps[0], status: "completed" }] });
   assert.equal(f.runtime.activeGoal.status, "active");
-  const result = await f.tools.get("goal_complete").execute("complete2", { goal_id: created.goalId, activation_id: created.activationId, summary: "Verified result" }, undefined, undefined, f.ctx);
+  const result = await f.tools.get("goal_complete").execute("complete2", { summary: "Verified result" }, undefined, undefined, f.ctx);
   assert.equal(result.terminate, true); assert.equal(f.runtime.activeGoal, undefined);
   f.runtime.clearCompletionStatusTimer();
 });
 function completionRequest(f, extra = {}) {
-  const goal = f.runtime.activeGoal;
-  return { action: "complete", goal_id: goal.id, activation_id: goal.activationId, expected_revision: goal.revision,
-    user_authorized: true, summary: "Verified the outcome with passing offline regression tests.", ...extra };
+  return { action: "complete", summary: "Verified the outcome with passing offline regression tests.", ...extra };
 }
 function manage(f, args) {
   return f.tools.get("goal_manage").execute("manage", args, undefined, undefined, f.ctx);
@@ -309,11 +309,11 @@ for (const draft of [true, false]) test(`explicit paused completion preserves ve
     }
     assert.equal(f.runtime.dispatchContinuationIfSettled(f.ctx), false);
     const count = f.entries.length;
-    await assert.rejects(manage(f, args), /identity/);
+    await assert.rejects(manage(f, args), /No current goal/);
     assert.equal(f.entries.length, count, "completion cannot replay against an absent goal");
   } finally { f.runtime.clearCompletionStatusTimer(); }
 });
-test("paused completion fails closed on unfinished tasks, authorization, stale identity and automatic origin", async () => {
+test("paused completion fails closed on unfinished tasks, a goal changed since last seen, and automatic origin", async () => {
   const f = fixture(), created = f.create({ start: false });
   const rejectUnchanged = async (extra, pattern) => {
     const before = structuredClone(f.runtime.activeGoal), entries = structuredClone(f.entries), messages = structuredClone(f.messages);
@@ -325,9 +325,9 @@ test("paused completion fails closed on unfinished tasks, authorization, stale i
     await rejectUnchanged({}, /required tasks/);
   }
   f.update({ steps: [{ ...created.steps[0], status: "completed" }] });
-  for (const user_authorized of [undefined, false]) await rejectUnchanged({ user_authorized }, /fresh explicit user authorization/);
-  for (const extra of [{ goal_id: undefined }, { goal_id: "foreign" }, { activation_id: undefined }, { activation_id: "stale" },
-    { expected_revision: undefined }, { expected_revision: f.runtime.activeGoal.revision - 1 }]) await rejectUnchanged(extra, /identity, activation or revision changed/);
+  f.runtime.modelSeenGoal = { ...f.runtime.modelSeenGoal, revision: f.runtime.activeGoal.revision - 1 };
+  await rejectUnchanged({}, /changed since you last saw it/);
+  await rejectUnchanged({ goal_id: "foreign" }, /require scope:saved/);
   for (const summary of [undefined, "", "   ", "x".repeat(4001), "The goal is not complete."]) await rejectUnchanged({ summary }, /summary/);
   f.runtime.beginAgentRun(f.runtime.activeGoal.id, "automatic");
   await rejectUnchanged({}, /automatic continuation/);
@@ -342,7 +342,7 @@ test("autonomous goal_complete still rejects paused goals without execution auth
   for (const ownedRun of [false, true]) {
     f.runtime.beginAgentRun(ownedRun ? created.goalId : null, "manual");
     const before = structuredClone(f.runtime.activeGoal), count = f.entries.length;
-    const result = await f.tools.get("goal_complete").execute("autonomous", { goal_id: created.goalId, activation_id: created.activationId, summary: "Verified outcome" }, undefined, undefined, f.ctx);
+    const result = await f.tools.get("goal_complete").execute("autonomous", { summary: "Verified outcome" }, undefined, undefined, f.ctx);
     assert.match(result.content[0].text, /rejected/); assert.notEqual(result.terminate, true);
     assert.deepEqual(f.runtime.activeGoal, before); assert.equal(f.entries.length, count);
   }
@@ -361,7 +361,7 @@ test("branch navigation pauses selected goal, preserves branch tasks/counters, a
   assert.equal(f.runtime.activeGoal.status, "paused"); assert.equal(f.runtime.activeGoal.tokensUsed, 17); assert.equal(f.runtime.activeGoal.automaticModelTurns, 2);
   assert.ok(f.runtime.activeGoal.revision > oldRevision); assert.equal(f.runtime.ownsWorkflow(), false);
   assert.equal(f.runtime.continuationIntent, undefined); assert.equal(f.runtime.markContinuationStarted(stalePrompt), undefined);
-  assert.throws(() => f.update({ expected_revision: oldRevision, request_id: "stale-callback", steps: [{ text: "must not attach", status: "pending" }] }), /revision changed/);
+  assert.throws(() => f.update({ request_id: "stale-callback", steps: [{ text: "must not attach", status: "pending" }] }), /changed since you last saw it/);
   const status = await f.tools.get("goal_manage").execute("status", { action: "status" }, undefined, undefined, f.ctx);
   assert.deepEqual(status.details.goal.tasks, created.steps); assert.deepEqual(reconstructProgress(f.entries), created.steps);
   assert.deepEqual(f.entries.slice(0, selectedBranch.length), selectedBranch, "navigation never rewrites historical entries");
@@ -374,12 +374,13 @@ test("control and policy revisions ignore accounting while live limits survive t
   f.runtime.activeGoal.automaticModelTurns = 5;
   f.runtime.updateGoalLimits(f.ctx, f.runtime.activeGoal.id, f.runtime.policyRevision, null, { automaticTurns: 12, noProgressTurns: 6 });
   const policy = f.runtime.policyRevision, revision = f.runtime.activeGoal.revision;
+  f.runtime.markGoalSeen();
   Object.assign(f.runtime.activeGoal, { tokensUsed: 19, timeUsedSeconds: 12, baselineTokens: 1,
     activeStartedAt: Date.now(), updatedAt: Date.now(), iteration: 2, toolFreeRepeatCount: 1,
     lastToolFreeOutputFingerprint: "a".repeat(64) });
   f.runtime.persistGoal(f.runtime.activeGoal);
   assert.equal(f.runtime.policyRevision, policy); assert.equal(f.runtime.activeGoal.revision, revision);
-  const patched = f.update({ expected_revision: revision, steps: [{ text: "extra", status: "pending" }] });
+  const patched = f.update({ steps: [{ text: "extra", status: "pending" }] });
   assert.equal(patched.revision, revision + 1);
   assert.deepEqual(f.runtime.continuationLimits, { automaticTurns: 12, noProgressTurns: 6 });
   assert.equal(f.runtime.activeGoal.automaticModelTurns, 5);
@@ -395,10 +396,11 @@ test("task, scope, lifecycle, activation and policy changes still invalidate con
     goal => { goal.continuationLimits = { automaticTurns: 12, noProgressTurns: 6 }; },
   ]) {
     const revision = f.runtime.activeGoal.revision;
+    f.runtime.markGoalSeen();
     change(f.runtime.activeGoal);
     f.runtime.persistGoal(f.runtime.activeGoal);
     assert.equal(f.runtime.activeGoal.revision, revision + 1);
-    assert.throws(() => f.update({ expected_revision: revision, request_id: `stale-${revision}` }), /revision changed/);
+    assert.throws(() => f.update({ request_id: `stale-${revision}` }), /changed since you last saw it/);
     f.runtime.activeGoal.automaticModelTurns++; f.runtime.persistGoal(f.runtime.activeGoal);
     assert.equal(f.runtime.activeGoal.revision, revision + 1, "counter checkpoint preserves mutation fence");
   }
@@ -413,13 +415,13 @@ test("task, scope, lifecycle, activation and policy changes still invalidate con
 });
 test("no-op task mutations commit their receipt revision once and retry durably", () => {
   const f = fixture(), created = f.create({ start: false });
-  const request = { action: "update", goal_id: created.goalId, expected_revision: created.revision, request_id: "no-op", steps: [] };
+  const request = { action: "update", request_id: "no-op", steps: [] };
   const result = f.mutate(request);
   assert.equal(result.revision, created.revision + 1);
   assert.equal(result.revision, f.runtime.activeGoal.revision);
   assert.equal(result.revision, f.entries.at(-1).data.goal.requests[request.request_id].result.revision);
   f.runtime.activeGoal.tokensUsed++; f.runtime.persistGoal(f.runtime.activeGoal);
   assert.deepEqual(f.mutate(request), result);
-  const next = f.update({ request_id: "another-no-op", expected_revision: result.revision });
+  const next = f.update({ request_id: "another-no-op" });
   assert.equal(next.revision, result.revision + 1);
 });

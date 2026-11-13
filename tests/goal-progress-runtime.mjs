@@ -64,13 +64,13 @@ test("actual Pi preserves generated task/status revisions through message_end an
           calls++;
           assert.ok(calls <= 5, "bounded fixture must not retry or dispatch another model turn");
           let content;
-          if (calls === 1) content = [call("update_progress", { action: "create", objective: "Verify the offline fixture", request_id: "create", steps: [{ text: "Verify fixture-local state", status: "pending" }] }, "create")];
+          if (calls === 1) content = [call("update_progress", { action: "create", objective: "Verify the offline fixture", steps: [{ text: "Verify fixture-local state", status: "pending" }] }, "create")];
           else {
             const current = currentGoal(context);
-            trace.push({ kind: "context", calls, revision: current.revision, activation: current.activation_id, status: current.status });
+            trace.push({ kind: "context", calls, revision: current.revision, activation: engine.activeGoal.activationId, status: current.status });
             assert.equal(current.status, "active", "default create starts the goal without a second activation");
             assert.equal(current.revision, engine.activeGoal.revision);
-            if (calls === 2) content = [call("revision_probe", {}, "probe-before-progress"), call("update_progress", { action: "update", goal_id: current.goal_id, expected_revision: current.revision, request_id: "finish-task", steps: [{ ...current.tasks[0], status: "completed" }] }, "progress")];
+            if (calls === 2) content = [call("revision_probe", {}, "probe-before-progress"), call("update_progress", { action: "update", steps: [{ ...current.tasks[0], status: "completed" }] }, "progress")];
             else if (calls === 3) {
               const update = context.messages.findLast(message => message.role === "toolResult" && message.toolName === "update_progress");
               assert.equal(update.isError ?? false, false, text(update));
@@ -79,13 +79,13 @@ test("actual Pi preserves generated task/status revisions through message_end an
               const status = context.messages.findLast(message => message.role === "toolResult" && message.toolName === "goal_manage");
               const observed = JSON.parse(text(status));
               assert.equal(observed.revision, current.revision, "status revision remains usable in the next model response");
-              content = [call("revision_probe", {}, "probe-before-control"), call("goal_manage", { action: "update", goal_id: observed.id, activation_id: observed.activationId, expected_revision: observed.revision, user_authorized: true, objective: "Verify the renamed offline fixture" }, "scope")];
+              content = [call("revision_probe", {}, "probe-before-control"), call("goal_manage", { action: "update", objective: "Verify the renamed offline fixture" }, "scope")];
             } else {
               const updated = context.messages.findLast(message => message.role === "toolResult" && message.toolName === "goal_manage");
               assert.equal(updated.isError ?? false, false, text(updated));
               assert.equal(current.tasks[0].status, "completed");
               assert.equal(probes, 2);
-              content = [call("goal_complete", { goal_id: current.goal_id, activation_id: current.activation_id, summary: "Verified both fixture-local probes and the completed required task" }, "complete")];
+              content = [call("goal_complete", { summary: "Verified both fixture-local probes and the completed required task" }, "complete")];
             }
           }
           const message = { role: "assistant", provider: "goal-revision-test", model: "offline", api: "openai-completions", timestamp: Date.now(), stopReason: "toolUse", content,

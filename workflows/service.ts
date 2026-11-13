@@ -1195,6 +1195,10 @@ export function createWorkflowService(
 				continuationLimits: entry.continuationLimits, tokenBudget: entry.tokenBudget, tokensUsed: entry.tokensUsed,
 				observation: entry.observation, planning: entry.planning } : {}) };
 	}
+	// The saved-goal revisions the model last saw. A mutation is rejected when
+	// its goal changed since then; the rejection shows the new state.
+	const seenSavedRevisions = new Map<string, number>();
+	const seenSaved = (view: { id: string; revision: number }) => { seenSavedRevisions.set(view.id, view.revision); return view; };
 	async function manageSavedGoal(params: SavedGoalControl, caller: ExtensionContext, signal?: AbortSignal) {
 		current(); signal?.throwIfAborted(); validateSavedGoalControl(params);
 		if (caller.sessionManager.getSessionId() !== sessionId || caller.cwd !== ctx.cwd) throw new Error("Saved-Goal owner session/workspace changed");
@@ -1204,18 +1208,23 @@ export function createWorkflowService(
 			const entries = delegated.snapshot().entries;
 			if (params.action === "list") {
 				const offset = params.offset ?? 0;
-				return { scope: "saved", registry_revision: delegated.snapshot().revision, goals: entries.slice(offset, offset + 50).map(entry => savedGoalView(entry, false)),
+				return { scope: "saved", goals: entries.slice(offset, offset + 50).map(entry => seenSaved(savedGoalView(entry, false))),
 					next_offset: offset + 50 < entries.length ? offset + 50 : null };
 			}
 			const entry = entries.find(entry => entry.id === params.goal_id);
 			if (!entry) throw new Error("Saved Goal not found in this owner session");
-			return { scope: "saved", goal: savedGoalView(entry) };
+			return { scope: "saved", goal: seenSaved(savedGoalView(entry)) };
 		}
 		if (runtime.agentRunOrigin === "automatic") throw new Error("Saved-Goal controls require a new user instruction, not automatic continuation");
 		if (operation || toolMutation || externalBusy()) throw new Error("Finish pending workflow/permission operations before saved-Goal mutations");
 		const create = params.action === "create";
 		const entry = create ? undefined : delegated.snapshot().entries.find(entry => entry.id === params.goal_id);
 		if (!create && !entry) throw new Error("Saved Goal not found in this owner session");
+		const seen = entry && seenSavedRevisions.get(entry.id);
+		if (entry && seen !== undefined && seen !== entry.revision) {
+			const view = seenSaved(savedGoalView(entry, false));
+			throw new Error(`Saved goal ${params.action} rejected: the goal changed since you last saw it (now: ${JSON.stringify(view)}); check it still applies and call again`);
+		}
 		const cwd = ctx.cwd, limits = JSON.stringify(resolveGoalLimits(entry?.continuationLimits, runtime.settings.continuationLimits));
 		const launch = params.action === "start" || params.action === "resume";
 		const fence = { check() {
@@ -1234,8 +1243,8 @@ export function createWorkflowService(
 			const result = await delegated.mutate(sessionId, { action: params.action === "update" ? "goals.tasks" : `goals.${params.action}` as any, requestId: params.request_id!,
 				...(create ? { expectedGoalId: null, objective: params.objective!, initialTasks: (params.steps ?? []).map(step => step.text),
 					...(params.token_budget === undefined ? {} : { tokenBudget: params.token_budget }),
-					...(params.expected_registry_revision === undefined ? {} : { expectedRegistryRevision: params.expected_registry_revision }) }
-					: { expectedGoalId: params.goal_id!, expectedEntryRevision: params.expected_revision! }),
+					expectedRegistryRevision: delegated.snapshot().revision }
+					: { expectedGoalId: params.goal_id!, expectedEntryRevision: entry!.revision }),
 				...(params.action === "update" ? {
 					...(params.task_edits === undefined ? {} : { taskEdits: params.task_edits }),
 					...(params.remove_task_ids === undefined ? {} : { removeTaskIds: params.remove_task_ids }),
@@ -1244,7 +1253,7 @@ export function createWorkflowService(
 					...(params.task_evidence === undefined ? {} : { taskEvidence: params.task_evidence.map(item => ({ taskId: item.task_id, evidence: item.evidence })) }) } : {}) });
 			current();
 			const id = create ? result.entries.at(-1)!.id : params.goal_id!;
-			return { scope: "saved", registry_revision: result.revision, goal: savedGoalView(delegated.snapshot().entries.find(entry => entry.id === id)!) };
+			return { scope: "saved", goal: seenSaved(savedGoalView(delegated.snapshot().entries.find(entry => entry.id === id)!)) };
 		} finally { if (toolMutation === fence) toolMutation = undefined; }
 	}
 	return {

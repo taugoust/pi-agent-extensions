@@ -157,8 +157,6 @@ async function fixture(mode = "text", existing) {
 							id: randomUUID(),
 							name: "goal_complete",
 							arguments: {
-								goal_id: goal.id,
-								activation_id: goal.activationId,
 								summary:
 									"Verified the requested deterministic fixture outcome.",
 							},
@@ -167,7 +165,7 @@ async function fixture(mode = "text", existing) {
 				}
 				if (mode === "wait") {
 					response.stopReason = "toolUse";
-					response.content = [{ type: "toolCall", id: randomUUID(), name: "goal_wait", arguments: { goal_id: goal.id, activation_id: goal.activationId, reason: "Waiting for explicit test wake" } }];
+					response.content = [{ type: "toolCall", id: randomUUID(), name: "goal_wait", arguments: { reason: "Waiting for explicit test wake" } }];
 				}
 				if (calls.length > 8) {
 					response.stopReason = "error";

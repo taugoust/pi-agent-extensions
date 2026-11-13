@@ -20,15 +20,13 @@ export function registerGoalManagement(pi: ExtensionAPI, runtime: GoalRuntime) {
     name: "goal_manage",
     label: "Goal manage",
     executionMode: "sequential",
-    description: "Inspect/manage the current goal (default scope:current) or saved independent Goals (explicit scope:saved). Saved controls: list (pages of 50; use offset/next_offset and registry_revision), status by goal_id, create with objective, optional pending steps and token_budget, unique request_id and fresh user_authorized:true (always a paused draft; start:true rejects; required expected_registry_revision from list fences the catalog and reloaded retries), start/resume/pause/clear/complete with exact goal_id, expected_revision, unique request_id and fresh user_authorized:true. Saved start launches a separate paid coordinator through the existing Goal executor; resume retains its child task. It never activates/replaces the parent's current Goal. Saved update edits an inactive nonterminal checklist only: task_edits [{id?,text?,before_task_id?:string|null}] edits/moves existing IDs or inserts pending tasks with generated IDs; omitted tasks/statuses remain unchanged. Omit before_task_id to keep position (new tasks append), supply an existing retained task ID to insert/move before it, or null for the end. Removal requires explicit remove_task_ids after a user scope change. Use exact goal_id, expected_revision, request_id and fresh user_authorized:true; never starts/resumes a coordinator. Saved complete requires summary and evidence for every unfinished existing task (task_evidence). Do not use activation_id or update_progress for saved records; steps is saved create-only. Saved create allocates IDs and its pending checklist atomically; explicitly start it in a separate call. Current scope: Inspect or manage the current goal and its authoritative checklist. status is read-only and returns stable id, activationId, revision, tasks and effective limits. Create the current goal with update_progress create, not here. Existing lifecycle/objective changes require exact goal_id, activation_id, expected_revision and fresh user_authorized:true; they cannot originate in automatic continuation. complete is paused-only: on explicit user request, supply a nonempty verification summary after all required tasks are completed; it archives completion without resuming or starting a turn. Active autonomous completion still uses goal_complete. Task-only updates use update_progress and never resume or complete a goal. token_budget is update-only here: omit it to preserve the current cap. Removal is explicit by task ID after a user scope change.",
-    promptSnippet: "Manage the current Goal or list/status/start/resume saved Goals directly with explicit scope:saved; preserve their IDs and lifecycle.",
+    description: "Inspect or manage the current goal (default scope:current) or the saved goals of this session (scope:saved). The harness tracks which goal and revision you last saw: current-goal actions take no IDs, saved-goal actions take only goal_id. A call is rejected if the goal changed since you last saw it; the error shows the new state, so check it and call again if still appropriate. Lifecycle changes need a new user instruction, never an automatic continuation.\n\nCurrent goal: status; pause, resume, clear; update (objective, token_budget, remove_task_ids); complete (paused goals only, with summary; active goals use goal_complete). Create the current goal and change its tasks with update_progress.\n\nSaved goals: list (offset for paging), status, create (objective, optional pending steps and token_budget; always a paused draft), start and resume (launch the goal's own coordinator; they never touch the current goal), pause, clear, update (task_edits and remove_task_ids on an inactive goal), complete (summary, plus task_evidence for every unfinished task).\n\ntask_edits: [{id?, text?, before_task_id?}] edits or moves an existing task by id, or inserts a pending task without id. before_task_id places it before that task, null places it last, omitted keeps its position (new tasks go last). Only remove_task_ids removes tasks, and only after the user changed the scope.",
+    promptSnippet: "Inspect or manage the current goal, or list, start and manage saved goals with scope:saved.",
     promptGuidelines: [
-      "Use goal_manage scope:saved action:list/status to inspect saved Goals, and create to save a paused draft and checklist atomically. Use action:update with task_edits for identity/status-preserving inactive checklist edits, insertions and moves; only explicit remove_task_ids removes tasks. Use start/resume separately to launch their own coordinators. Require exact saved IDs/revisions and fresh user authorization; never create replacements or activate the parent's Goal as a substitute.",
-      "Use a concise outcome-only objective (at most 320 characters); put implementation and verification steps in update_progress.",
-      "update_progress create authorizes autonomous continuation with configured limits unless start:false. Creation is not permission to bypass an existing goal, pending approvals, or another workflow.",
-      "After pause, blocker or safety limit, wait for fresh user authorization to resume. Task updates do not resume. Complete only after verifying every required task and the outcome.",
-      "Read status for the current stable goal_id, activation_id and revision, waiting/wake evidence and bounded session-owned execution activity. Session activity is not proof of goal assignment. Never reuse an old activation token after resume or objective changes.",
-      "When the user explicitly asks to complete a verified paused goal, use goal_manage action:complete with summary and fresh user_authorized:true. Do not resume it or create an active Goal contract merely to complete it. All required tasks must already be completed.",
+      "Keep the goal objective a short outcome (at most 320 characters); put steps in update_progress.",
+      "update_progress create starts autonomous work with the configured limits unless start:false. It is not permission to bypass an existing goal, pending approvals or another workflow.",
+      "After a pause, blocker or safety limit, wait for the user to resume. Task updates never resume a goal. Complete only after verifying every required task and the outcome.",
+      "To complete a verified paused goal at the user's request, use goal_manage action:complete with a summary; don't resume it first.",
     ],
     parameters: Type.Object({
       action: Type.Union(["status", "list", "start", "create", "update", "pause", "resume", "clear", "complete"].map(value => Type.Literal(value))),
@@ -40,16 +38,11 @@ export function registerGoalManagement(pi: ExtensionAPI, runtime: GoalRuntime) {
         text: Type.Optional(Type.String({ minLength: 1, description: "At most 503 grapheme clusters, validated by the canonical checklist policy." })),
         before_task_id: Type.Optional(Type.Union([Type.String({ minLength: 1, maxLength: 128 }), Type.Null()])),
       }, { additionalProperties: false }), { maxItems: 50, description: "Saved update only: ordered edits/moves by existing id, or insert pending tasks without id. Existing statuses are immutable. before_task_id targets an existing retained task; null appends; omission keeps position (new tasks append)." })),
-      goal_id: Type.Optional(Type.String({ minLength: 1, maxLength: 128 })),
-      activation_id: Type.Optional(Type.String({ minLength: 1, maxLength: 128 })),
-      expected_revision: Type.Optional(Type.Integer({ minimum: 1 })),
-      expected_registry_revision: Type.Optional(Type.Integer({ minimum: 0 })),
-      request_id: Type.Optional(Type.String({ minLength: 1, maxLength: 128, description: "scope:saved only (required there for create, start, resume, pause, clear, complete and update). Omit for the current goal, where expected_revision guards retries." })),
+      goal_id: Type.Optional(Type.String({ minLength: 1, maxLength: 128, description: "scope:saved only: the saved goal to act on." })),
       objective: Type.Optional(Type.String({ minLength: 1, maxLength: 320 })),
       steps: Type.Optional(ProgressParameters.properties.steps),
       start: Type.Optional(Type.Boolean()),
       token_budget: Type.Optional(Type.Integer({ minimum: 1, maximum: 1_000_000 })),
-      user_authorized: Type.Optional(Type.Boolean()),
       summary: Type.Optional(Type.String({ minLength: 1, maxLength: MAX_COMPLETION_SUMMARY_LENGTH, description: "complete-only: what was completed and the evidence verifying the outcome and every required task." })),
       remove_task_ids: Type.Optional(Type.Array(Type.String({ minLength: 1, maxLength: 128 }), { maxItems: 50 })),
     }, { additionalProperties: false }),
@@ -58,25 +51,23 @@ export function registerGoalManagement(pi: ExtensionAPI, runtime: GoalRuntime) {
       const display = normalizeGoalManageDisplay(result, context.isError);
       return new Text(theme.fg(display.isError ? "error" : "toolOutput", display.text), 0, 0);
     },
-    async execute(_id, params, signal, _update, ctx) {
+    async execute(toolCallId, params, signal, _update, ctx) {
       signal?.throwIfAborted();
       if (params.scope === "saved") {
-        const result = await manageSavedGoal(params, ctx, signal);
+        const result = await manageSavedGoal({ ...params, request_id: toolCallId }, ctx, signal);
         return { content: [{ type: "text", text: JSON.stringify(result) }], details: { scope: "saved", savedGoals: result, presentation: goalManagePresentation(params.action) } };
       }
-      if (params.action === "list" || params.action === "start" || params.offset !== undefined || params.task_evidence !== undefined || params.task_edits !== undefined || params.expected_registry_revision !== undefined)
-        throw new Error("list/start, offset, task_evidence, task_edits and expected_registry_revision require explicit scope:saved");
+      if (params.action === "list" || params.action === "start" || params.offset !== undefined || params.task_evidence !== undefined || params.task_edits !== undefined || params.goal_id !== undefined)
+        throw new Error("list/start, goal_id, offset, task_evidence and task_edits require scope:saved");
       const previous = runtime.activeGoal;
       if (params.action !== "complete" && params.summary !== undefined) throw new Error("Summary is complete-only");
       if (params.action === "create")
         throw new Error("Create the current goal with update_progress action:create; goal_manage create is for scope:saved only");
       if (params.action !== "status") {
         if (runtime.agentRunOrigin === "automatic") throw new Error("Goal controls require a new user instruction, not an automatic continuation");
-        if (!previous || params.goal_id !== previous.id || params.activation_id !== (previous.activationId ?? previous.id) || params.expected_revision !== previous.revision)
-          throw new Error("Goal identity, activation or revision changed; inspect status");
-        if (params.user_authorized !== true) throw new Error("This lifecycle/scope change requires fresh explicit user authorization");
-        if (params.request_id !== undefined)
-          throw new Error("Omit request_id for current-goal lifecycle actions; it is used only with scope:saved. expected_revision already makes a retry fail safely once the change has applied");
+        if (!previous) throw new Error("No current goal");
+        const stale = runtime.staleGoalReason(previous);
+        if (stale) throw new Error(`Goal ${params.action} rejected: ${stale}`);
         if (params.steps !== undefined || params.start !== undefined) throw new Error("Use update_progress for task mutations; start is create-only");
         if (params.action !== "update" && (params.objective !== undefined || params.token_budget !== undefined || params.remove_task_ids !== undefined)) throw new Error("Objective, budget and task removal are update-only");
         if (params.action === "complete") {
@@ -84,11 +75,13 @@ export function registerGoalManagement(pi: ExtensionAPI, runtime: GoalRuntime) {
           const summary = typeof params.summary === "string" ? params.summary.trim() : "";
           completeVerifiedGoal(runtime, ctx, previous, summary);
           runtime.ensureInactiveGoalContextContract(ctx);
+          runtime.markGoalSeen();
           return { content: [{ type: "text", text: `Goal complete: ${summary}` }], details: { goal_id: previous.id, summary, presentation: goalManagePresentation("complete", previous.text) }, terminate: true };
         }
         if (params.action === "pause" || params.action === "clear") {
           const commands = new GoalCommandController(runtime);
           if (params.action === "pause") commands.pauseGoal(ctx); else commands.clearGoal(ctx);
+          runtime.markGoalSeen();
           return { content: [{ type: "text", text: params.action === "pause" ? "Goal paused. Wait for explicit resume." : "Goal cleared and retained in history; not marked complete." }], details: { goalId: previous.id, presentation: goalManagePresentation(params.action, previous.text) }, terminate: params.action === "pause" };
         }
         let next = nextGoalInstance(previous);
@@ -122,14 +115,16 @@ export function registerGoalManagement(pi: ExtensionAPI, runtime: GoalRuntime) {
       }
       const sessionActivity = params.action === "status" ? await readGoalSessionActivity(ctx) : undefined;
       const goal = runtime.activeGoal;
-      const state = goal ? { id: goal.id, activationId: goal.activationId ?? goal.id, revision: goal.revision, policyRevision: runtime.policyRevision, objective: goal.text, status: goal.status, waiting: goal.waiting ?? null, lastTaskUpdateAt: goal.lastTaskUpdateAt ?? null, lastWake: goal.lastWake ?? null, lastBlocker: goal.lastBlocker ?? null, wakeSemantics: GOAL_WAIT_WAKE_SEMANTICS, ...(sessionActivity ? { sessionActivity } : {}), tokenBudget: goal.tokenBudget, continuationLimits: goal.continuationLimits, effectiveLimits: runtime.continuationLimits, tasks: readGoalTasks(ctx, goal) } : null;
+      runtime.markGoalSeen(goal);
+      const state = goal ? { id: goal.id, revision: goal.revision, policyRevision: runtime.policyRevision, objective: goal.text, status: goal.status, waiting: goal.waiting ?? null, lastTaskUpdateAt: goal.lastTaskUpdateAt ?? null, lastWake: goal.lastWake ?? null, lastBlocker: goal.lastBlocker ?? null, wakeSemantics: GOAL_WAIT_WAKE_SEMANTICS, ...(sessionActivity ? { sessionActivity } : {}), tokenBudget: goal.tokenBudget, continuationLimits: goal.continuationLimits, effectiveLimits: runtime.continuationLimits, tasks: readGoalTasks(ctx, goal) } : null;
       return { content: [{ type: "text", text: state ? JSON.stringify(state) : "No current goal." }], details: { presentation: goalManagePresentation(params.action, goal?.text), goal: state } };
     },
   }));
   pi.on("context", (event, ctx) => {
     const messages = event.messages.filter(message => !(message.role === "custom" && message.customType === "goal-task-context"));
     const goal = runtime.activeGoal;
-    if (goal) messages.push({ role: "custom", customType: "goal-task-context", content: `Current goal data: ${JSON.stringify({ goal_id: goal.id, activation_id: goal.activationId ?? goal.id, revision: goal.revision, status: goal.status, waiting: goal.waiting ?? null, lastTaskUpdateAt: goal.lastTaskUpdateAt ?? null, lastWake: goal.lastWake ?? null, lastBlocker: goal.lastBlocker ?? null, objective: goal.text, tasks: readGoalTasks(ctx, goal) })}\nUse update_progress action:update with this exact goal_id and expected_revision, a new request_id, and only changed/new steps. Omitted tasks remain. Task updates never resume or complete the goal. ${goal.status === "active" ? "Continue independent work toward the outcome; do not call goal_complete while any required task is unfinished. If only delegated results or external work remain, arrange completion/guidance delivery and call goal_wait alone instead of ending with a progress-only response (which causes automatic continuation). The presence of a child alone is not a reason to wait. Wait reasons are status data, not event subscriptions; routine progress receipts do not wake you." : "Autonomous continuation is disabled; resume requires fresh user authorization. If the user explicitly requests completion of a verified paused goal, use goal_manage action:complete with summary, exact goal_id/activation_id/expected_revision and user_authorized:true; do not resume merely to complete it."}`, display: false, timestamp: 0 });
+    runtime.markGoalSeen(goal);
+    if (goal) messages.push({ role: "custom", customType: "goal-task-context", content: `Current goal data: ${JSON.stringify({ revision: goal.revision, status: goal.status, waiting: goal.waiting ?? null, lastTaskUpdateAt: goal.lastTaskUpdateAt ?? null, lastWake: goal.lastWake ?? null, lastBlocker: goal.lastBlocker ?? null, objective: goal.text, tasks: readGoalTasks(ctx, goal) })}\nUse update_progress action:update with only changed/new steps. Omitted tasks remain. Task updates never resume or complete the goal. ${goal.status === "active" ? "Continue independent work toward the outcome; do not call goal_complete while any required task is unfinished. If only delegated results or external work remain, arrange completion/guidance delivery and call goal_wait alone instead of ending with a progress-only response (which causes automatic continuation). The presence of a child alone is not a reason to wait. Wait reasons are status data, not event subscriptions; routine progress receipts do not wake you." : "Autonomous continuation is disabled; resume requires fresh user authorization. If the user explicitly requests completion of a verified paused goal, use goal_manage action:complete with a summary; do not resume merely to complete it."}`, display: false, timestamp: 0 });
     return { messages };
   });
 }

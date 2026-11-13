@@ -72,8 +72,9 @@ export function bindGoalMutations(pi: ExtensionAPI, ctx: ExtensionContext, runti
       // Draft creation must also respect workflow ownership, but holds no lease.
       if (!runtime.acquireWorkflow(ctx.sessionManager)) throw new Error("Another workflow currently owns this session");
     } else {
-      if (!previous || previous.id !== mutation.goal_id || previous.status === "complete") throw new Error("Goal changed; inspect goal_manage status");
-      if (previous.revision !== mutation.expected_revision) throw new Error("Goal revision changed; inspect goal_manage status and retry with a new request_id");
+      if (!previous || previous.status === "complete") throw new Error("No current goal; create one with action:create");
+      const stale = runtime.staleGoalReason(previous);
+      if (stale) throw new Error(`Task update rejected: ${stale}`);
       if (options.child && mutation.remove_task_ids?.length) throw new Error("Dedicated child scope removal is owned by its authenticated parent");
       next = { ...previous, tasks: mergeGoalTasks(readGoalTasks(ctx, previous), mutation.steps, mutation.remove_task_ids) };
     }
@@ -92,6 +93,7 @@ export function bindGoalMutations(pi: ExtensionAPI, ctx: ExtensionContext, runti
       throw error;
     }
     runtime.activeGoal = next;
+    runtime.markGoalSeen(next);
     if (mutation.action === "create") {
       if (next.status === "active") {
         runtime.beginAgentRun(next.id, "manual");

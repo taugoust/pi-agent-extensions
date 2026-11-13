@@ -48,16 +48,16 @@ export default function fakeProvider(pi) {
         if (!goal?.id) throw new Error("Child model call lacks actual active Goal identity");
         if (goal.text.includes("Question workflow")) {
           response.stopReason="toolUse";
-          if(calls===1) response.content=[{type:"toolCall",id:"reference-"+process.pid,name:"goal_reference",arguments:{goal_id:goal.id,activation_id:goal.activationId,expected_revision:goal.revision,request_id:"reference-"+process.pid,title:"Registered fixture evidence",target:"artifact.txt",role:"source"}}];
+          if(calls===1) response.content=[{type:"toolCall",id:"reference-"+process.pid,name:"goal_reference",arguments:{title:"Registered fixture evidence",target:"artifact.txt",role:"source"}}];
           else if(calls===2) { const reference=ctx.sessionManager.getBranch().findLast(e=>e.type==="message"&&e.message?.role==="toolResult"&&e.message.toolName==="goal_reference"&&!e.message.isError)?.message.details?.reference_id;if(!reference)throw Error("Actual goal_reference tool did not register evidence");response.content=[{type:"toolCall",id:"question-"+process.pid,name:"questionnaire",arguments:{questions:[{id:"direction",prompt:"Use the tested design?",options:[{value:"yes",label:"Yes"},{value:"no",label:"No"}],allowOther:false,attachmentIds:[reference]}]}}]; }
           else if(calls===3) response.content=[{type:"toolCall",id:"activity-"+process.pid,name:"notify_parent",arguments:{message:"Explicit fixture activity after the user's answer"}}];
-          else response.content=[{type:"toolCall",id:"question-complete-"+process.pid,name:"goal_complete",arguments:{goal_id:goal.id,activation_id:goal.activationId,summary:"Verified authenticated goal question answer"}}];
+          else response.content=[{type:"toolCall",id:"question-complete-"+process.pid,name:"goal_complete",arguments:{summary:"Verified authenticated goal question answer"}}];
         } else if (goal.text.includes("pause-race") && calls === 1) {
-          response.stopReason="toolUse";response.content=[{type:"toolCall",id:"race-"+process.pid,name:"goal_complete",arguments:{goal_id:goal.id,activation_id:goal.activationId,summary:"Verified owned pause/completion race"}}];
-        } else if (goal.text.includes("independent") && calls <= 2) {
-          response.stopReason="toolUse"; response.content=[{type:"toolCall",id:"complete-"+process.pid+"-"+calls,name:"goal_complete",arguments:{goal_id:calls===1?"stale-foreign-goal-id":goal.id,activation_id:goal.activationId,summary:"Verified isolated deterministic child completion"}}];
+          response.stopReason="toolUse";response.content=[{type:"toolCall",id:"race-"+process.pid,name:"goal_complete",arguments:{summary:"Verified owned pause/completion race"}}];
+        } else if (goal.text.includes("independent") && calls === 1) {
+          response.stopReason="toolUse"; response.content=[{type:"toolCall",id:"complete-"+process.pid+"-"+calls,name:"goal_complete",arguments:{summary:"Verified isolated deterministic child completion"}}];
         } else if (!goal.text.includes("independent") && calls === 1) {
-          response.stopReason="toolUse"; response.content=[{type:"toolCall",id:"wait-"+process.pid,name:"goal_wait",arguments:{goal_id:goal.id,activation_id:goal.activationId,reason:"isolated test explicit wake"}}];
+          response.stopReason="toolUse"; response.content=[{type:"toolCall",id:"wait-"+process.pid,name:"goal_wait",arguments:{reason:"isolated test explicit wake"}}];
         }
         if(goal.text.includes("pause-race")&&calls===1)void(async()=>{while(!finished&&!existsSync(process.env.TEST_PAUSE_RELEASE))await new Promise(resolve=>setTimeout(resolve,5));if(!finished)finish(false);})();
         else queueMicrotask(() => finish(false));
@@ -324,7 +324,7 @@ export default async function(pi) {
   const earlyReplies=(await readFile(join(root,"receipts.jsonl"),"utf8")).trim().split("\n").map(JSON.parse);
   assert(earlyReplies.some(reply=>reply.operation==="bootstrap"&&reply.status==="complete"),"verified completion must precede actual Start RPC reply without losing child linkage");
   const secondHistory=await readFile(join(agent,"state","native-tasks-v1",second.child.taskId,"session.jsonl"),"utf8");
-  assert.match(secondHistory,/Goal completion rejected/);assert.match(secondHistory,/stale-foreign-goal-id/);
+  assert.doesNotMatch(secondHistory,/Goal completion rejected/);
   const completedTask=JSON.parse(await readFile(join(agent,"state","native-tasks-v1",second.child.taskId,"state.json"),"utf8"));
   assert.equal(completedTask.state,"idle");
   assert.match(completedTask.spec.model,/^harness-test\/gpt-6\.1-sol(?::[a-z]+)?$/,"retained model selector must stay on owning provider's explicit Sol model");

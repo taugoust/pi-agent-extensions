@@ -194,12 +194,12 @@ export default function rootTest(pi: ExtensionAPI) {
     throw new Error("Managed Goal lifecycle observation timed out");
   };
   register("tui-root-goal-start", async ctx => {
-    const list = await goalCall(ctx, { scope: "saved", action: "list" });
-    const created = await goalCall(ctx, { scope: "saved", action: "create", objective: "MANAGED_GOAL_FIXTURE", steps: [{ text: "Verify normal managed Goal lifecycle", status: "pending" }], expected_registry_revision: list.registry_revision, request_id: "managed-goal-create", user_authorized: true });
+    await goalCall(ctx, { scope: "saved", action: "list" });
+    const created = await goalCall(ctx, { scope: "saved", action: "create", objective: "MANAGED_GOAL_FIXTURE", steps: [{ text: "Verify normal managed Goal lifecycle", status: "pending" }] });
     assert.equal(created.goal.status, "paused"); assert.equal(created.goal.child, null);
     const parent = await goalTool.execute("root-goal-unaffected", { action: "status" }, undefined, undefined, ctx);
     assert.equal(parent.details.goal, null, "Saved creation must not activate the parent's current Goal");
-    const started = await goalCall(ctx, { scope: "saved", action: "start", goal_id: created.goal.id, expected_revision: created.goal.revision, request_id: "managed-goal-start", user_authorized: true });
+    const started = await goalCall(ctx, { scope: "saved", action: "start", goal_id: created.goal.id });
     const group = await execute(ctx, { operation: "status", job_id: started.goal.child.jobId });
     assert.equal(group.details.group.children[0].task_id, started.goal.child.taskId);
     assert.equal(group.details.group.children[0].runtime.execution, "tmux");
@@ -221,9 +221,9 @@ export default function rootTest(pi: ExtensionAPI) {
     const deadline = Date.now() + 30_000;
     while (!(await readFile(manifest.sessionFile, "utf8")).includes("MANAGED_STEER_ACK")) { assert.ok(Date.now() < deadline, "Normal agent steering was not delivered"); await sleep(100); }
     state = await goalState(ctx, saved.id, goal => !!goal.waiting);
-    const paused = await goalCall(ctx, { scope: "saved", action: "pause", goal_id: saved.id, expected_revision: state.revision, request_id: "managed-goal-pause", user_authorized: true });
+    const paused = await goalCall(ctx, { scope: "saved", action: "pause", goal_id: saved.id });
     assert.equal(paused.goal.status, "paused");
-    const resumed = await goalCall(ctx, { scope: "saved", action: "resume", goal_id: saved.id, expected_revision: paused.goal.revision, request_id: "managed-goal-resume", user_authorized: true });
+    const resumed = await goalCall(ctx, { scope: "saved", action: "resume", goal_id: saved.id });
     assert.equal(resumed.goal.child.taskId, saved.child.taskId);
     await goalState(ctx, saved.id, goal => goal.status === "active" && !!goal.waiting);
     await execute(ctx, { operation: "prompt", child_id: resumed.goal.child.childId, message: "FINISH_MANAGED_GOAL" });

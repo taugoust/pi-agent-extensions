@@ -116,7 +116,7 @@ test("verified completion before bootstrap/resume dispatch returns preserves acc
       const goal = runtime.activeGoal, summary = "Verified fast fixture completion", callId = `complete-${goal.id}`;
       assert(entries.some(e => e.customType === "delegated-goal-child-binding-v1" && e.data.progressId === (goal.progressId ?? goal.id)), "binding is persisted before dispatch/completion");
       entries.push({ type: "custom_message", customType: "goal-contract", details: { state: "active", goalId: goal.id, activationId: goal.activationId } });
-      entries.push({ type: "message", message: { role: "assistant", content: [{ type: "toolCall", id: callId, name: "goal_complete", arguments: { goal_id: goal.id, activation_id: goal.activationId, summary } }] } });
+      entries.push({ type: "message", message: { role: "assistant", content: [{ type: "toolCall", id: callId, name: "goal_complete", arguments: { summary } }] } });
       runtime.persistGoal({ ...goal, status: "complete" });
       entries.push({ type: "custom", customType: "goal-history", data: { version: 1, id: goal.id, progressId: goal.progressId ?? goal.id, status: "completed", summary } });
       runtime.activeGoal = undefined; runtime.persistGoal(undefined);

@@ -67,12 +67,9 @@ const progressTextSchema = Type.String({
 export const ProgressParameters = Type.Object(
   {
     action: StringEnum(["create", "update"] as const),
-    request_id: Type.String({ minLength: 1, maxLength: 128, description: "Unique mutation ID. Reuse exactly the same request on retries." }),
     objective: Type.Optional(Type.String({ minLength: 1, maxLength: 320, description: "Create only: concise verifiable outcome." })),
     start: Type.Optional(Type.Boolean({ description: "Create only. Defaults to true: creation authorizes autonomous continuation with configured limits. False creates a paused draft." })),
     token_budget: Type.Optional(Type.Integer({ minimum: 1, maximum: 1_000_000, description: "Create only: optional token cap for the goal. Omit for none." })),
-    goal_id: Type.Optional(Type.String({ minLength: 1, maxLength: 128, description: "Required for update: exact stable goal ID from goal_manage status. Never null." })),
-    expected_revision: Type.Optional(Type.Integer({ minimum: 1, description: "Required for update: current shared goal revision from status or the last result." })),
     remove_task_ids: Type.Optional(Type.Array(Type.String({ minLength: 1, maxLength: 128 }), { maxItems: MAX_PROGRESS_STEPS, description: "Update only: explicit task IDs to remove after a user scope change. Omitted tasks are otherwise preserved." })),
     steps: Type.Array(
       Type.Object(
@@ -94,11 +91,18 @@ export const ProgressParameters = Type.Object(
 
 export type ProgressMutation =
   | { action: "create"; request_id: string; objective: string; steps: ProgressStep[]; start?: boolean; token_budget?: number }
-  | { action: "update"; request_id: string; goal_id: string; expected_revision: number; steps: ProgressStep[]; remove_task_ids?: string[] };
+  | { action: "update"; request_id: string; steps: ProgressStep[]; remove_task_ids?: string[] };
 
+/** Normalizes model input; the tool adds request_id when it executes. */
+export function prepareProgressInput(value: unknown) {
+  const { request_id: _requestId, ...input } = validateProgressMutation(isRecord(value) ? { ...value, request_id: "prepare" } : value);
+  return input;
+}
+
+/** `request_id` is not a model field: the tool supplies its tool call ID. */
 export function validateProgressMutation(value: unknown): ProgressMutation {
   if (!isRecord(value)) rejectProgress("input must be an object.");
-  if (typeof value.request_id !== "string" || !value.request_id.trim() || value.request_id.length > 128) rejectProgress("request_id is required (1–128 characters).");
+  if (typeof value.request_id !== "string" || !value.request_id.trim() || value.request_id.length > 128) rejectProgress("request_id (the tool call ID) is required.");
   const steps = prepareProgressArguments({ steps: value.steps }).steps;
   if (value.action === "create") {
     if (!hasOnlyKeys(value, ["action", "request_id", "objective", "steps", "start", "token_budget"])) rejectProgress("create accepts only objective, steps, request_id and optional start and token_budget.");
@@ -108,11 +112,9 @@ export function validateProgressMutation(value: unknown): ProgressMutation {
     if (steps.some(step => step.id !== undefined)) rejectProgress("create allocates task IDs; omit supplied IDs.");
     return { action: "create", request_id: value.request_id, objective: value.objective.trim(), steps, start: value.start !== false, ...(value.token_budget !== undefined ? { token_budget: value.token_budget as number } : {}) };
   }
-  if (value.action !== "update" || !hasOnlyKeys(value, ["action", "request_id", "goal_id", "expected_revision", "steps", "remove_task_ids"])) rejectProgress("action must be create or update with its documented fields.");
-  if (typeof value.goal_id !== "string" || !value.goal_id.trim() || value.goal_id.length > 128) rejectProgress("update requires an explicit non-null goal_id; standalone writes are not supported.");
-  if (!Number.isSafeInteger(value.expected_revision) || (value.expected_revision as number) < 1) rejectProgress("update requires expected_revision from goal_manage status.");
+  if (value.action !== "update" || !hasOnlyKeys(value, ["action", "request_id", "steps", "remove_task_ids"])) rejectProgress("action must be create or update with its documented fields.");
   if (value.remove_task_ids !== undefined && (!Array.isArray(value.remove_task_ids) || value.remove_task_ids.length > MAX_PROGRESS_STEPS || value.remove_task_ids.some(id => typeof id !== "string" || !id.trim() || id.length > 128))) rejectProgress("remove_task_ids must contain explicit task IDs.");
-  return { action: "update", request_id: value.request_id, goal_id: value.goal_id, expected_revision: value.expected_revision as number, steps, ...(value.remove_task_ids !== undefined ? { remove_task_ids: value.remove_task_ids as string[] } : {}) };
+  return { action: "update", request_id: value.request_id, steps, ...(value.remove_task_ids !== undefined ? { remove_task_ids: value.remove_task_ids as string[] } : {}) };
 }
 
 /** Legacy step decoder, also used by migration. Not the mutation API validator. */
@@ -440,7 +442,8 @@ function decodeToolArguments(
     // Pi retains raw calls but stores prepared results. Match the same narrow input
     // normalization as execution without loosening persisted-result validation.
     try {
-      return (Object.hasOwn(value, "action") ? validateProgressMutation(value) : prepareProgressArguments(value)).steps;
+      // Only the steps matter here, so calls from older tool versions decode too.
+      return prepareProgressArguments(Object.hasOwn(value, "action") ? { steps: value.steps } : value).steps;
     } catch {
       return undefined;
     }

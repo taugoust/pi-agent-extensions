@@ -25,6 +25,8 @@ export function createWorkerGoalReview(options: {
   function save(next: GoalReviewReference[], nextReceipts=receipts){validateGoalReview(next,options.entryId);try{options.persist({entryId:options.entryId,workerEpoch:options.workerEpoch,refs:structuredClone(next),receipts:[...nextReceipts]});}catch(error){uncertain=true;throw error;}refs=next;if(nextReceipts!==receipts){receipts.clear();for(const [id,receipt]of nextReceipts)receipts.set(id,receipt);}}
   return {
     snapshot:()=>structuredClone(refs),
+    /** The worker's current goal identity, so the model-facing tool needs no IDs. */
+    identity(){const state=current();return {goal_id:state.childGoalId as string,activation_id:state.childActivationId as string,expected_revision:state.revision as number};},
     register(request:GoalReferenceRequest,read:(path:string,signal?:AbortSignal)=>Promise<{isError?:boolean}>,signal?:AbortSignal):Promise<GoalReviewReference>{
       const next=lane.then(async()=>{
         if(!request||typeof request.goal_id!=="string"||!request.goal_id||request.goal_id.length>128||typeof request.activation_id!=="string"||!request.activation_id||request.activation_id.length>128||Object.keys(request).some(key=>!["goal_id","activation_id","expected_revision","request_id","title","target","role"].includes(key))||typeof request.request_id!=="string"||!request.request_id||request.request_id.length>128||!Number.isSafeInteger(request.expected_revision)||request.expected_revision<0||typeof request.title!=="string"||!request.title.trim()||request.title.trim().length>160||typeof request.target!=="string"||!request.target||request.target.length>4096||!["source","deliverable"].includes(request.role))throw Error("Invalid explicit goal reference request");

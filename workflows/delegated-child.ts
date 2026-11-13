@@ -182,8 +182,7 @@ export function retainedGoalCompletion(branch: any[], binding?: string, boundPro
       if (!accepted) continue;
       const call = prior.findLast(e => e.type === "message" && e.message?.role === "assistant"
         && e.message.content?.some((part: any) => part.type === "toolCall" && part.name === "goal_complete"
-          && part.id === accepted.message.toolCallId && part.arguments?.goal_id === history.id && part.arguments?.summary === history.summary
-          && (state.activationId === undefined || part.arguments?.activation_id === state.activationId)));
+          && part.id === accepted.message.toolCallId && part.arguments?.summary === history.summary));
       if (call) return { state, summary: history.summary, endedAt: history.endedAt };
     }
     return undefined;

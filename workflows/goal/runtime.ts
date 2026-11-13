@@ -260,6 +260,10 @@ export class GoalRuntime {
   agentRunActivationId?: string;
   agentRunOrigin?: GoalRunOrigin;
   agentRunToolAttempted = false;
+  /** The goal state the model last saw, from the per-turn goal context or its
+   * own successful calls. Tools act on the current goal without IDs and reject
+   * a call when the goal changed since then. */
+  modelSeenGoal?: { id: string; activationId: string; revision: number };
   guardAbortGoalId?: string;
   staleGoalToolCallsBlocked = false;
   private readonly workflowMutex: WorkflowMutex;
@@ -1298,6 +1302,24 @@ export class GoalRuntime {
     return this.limitActiveGoalForBudget(ctx, false) || this.enforceAutomaticTurnLimit(ctx, true) || this.enforceNoProgressLimit(ctx, true);
   }
 
+  markGoalSeen(goal: ActiveGoal | undefined = this.activeGoal) {
+    this.modelSeenGoal = goal ? { id: goal.id, activationId: goal.activationId ?? goal.id, revision: goal.revision ?? 0 } : undefined;
+  }
+
+  /** Why a model call must not act on `goal`, or undefined. A rejection shows
+   * the model the current state, so it counts as seen and a deliberate retry
+   * goes through. */
+  staleGoalReason(goal: ActiveGoal): string | undefined {
+    const seen = this.modelSeenGoal;
+    if (!seen) return undefined;
+    const reason = seen.id !== goal.id ? "the goal was replaced"
+      : seen.activationId !== (goal.activationId ?? goal.id) ? "the goal was resumed or its objective changed"
+      : seen.revision !== (goal.revision ?? 0) ? "the goal changed" : undefined;
+    if (!reason) return undefined;
+    this.markGoalSeen(goal);
+    return `${reason} since you last saw it (now: ${goal.status}, objective "${goal.text}", revision ${goal.revision ?? 0}); check it still applies and call again`;
+  }
+
   persistGoal(goal: ActiveGoal) {
     if (!isTerminalGoalStatus(goal.status) || this.terminalDetails?.goalId !== goal.id) {
       this.clearTerminalDetails();
@@ -1604,14 +1626,6 @@ export function stoppedStatusLabel(status: GoalStatus) {
   if (status === "usage_limited") return "usage-limited";
   if (status === "budget_limited") return "budget-limited";
   return status;
-}
-
-export function goalIdRejectionReason(goal: ActiveGoal, requestedGoalId: string, activationId?: string) {
-  if (!requestedGoalId) return "missing goal_id";
-  if (requestedGoalId.length > MAX_GOAL_ID_LENGTH) return "goal_id is too long";
-  if (requestedGoalId !== goal.id) return "goal_id does not match the active goal";
-  if (activationId !== (goal.activationId ?? goal.id)) return "activation_id does not match the current activation";
-  return undefined;
 }
 
 function preservesOwnedPromptAtTerminalBoundary(prompt: string, ownedPrompt: string) {

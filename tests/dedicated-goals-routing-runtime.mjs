@@ -31,7 +31,7 @@ selectedAccount:options.apiKey===process.env.TEST_ALPHA_KEY,
 wrongDefault:wrongKeys.includes(options.apiKey),
 model:model.id,provider:model.provider,goalId:goal?.id})+"\n");
 if(!goal?.id)throw new Error("Unexpected parent model execution");
-const message={role:"assistant",api:"openai-codex-responses",provider:model.provider,model:model.id,timestamp:Date.now(),stopReason:"toolUse",content:[{type:"toolCall",id:"complete-"+process.pid,name:"goal_complete",arguments:{goal_id:goal.id,activation_id:goal.activationId,summary:"Verified inherited selected named account offline"}}],usage:{input:1,output:1,cacheRead:0,cacheWrite:0,totalTokens:2,cost:{input:0,output:0,cacheRead:0,cacheWrite:0,total:0}}};
+const message={role:"assistant",api:"openai-codex-responses",provider:model.provider,model:model.id,timestamp:Date.now(),stopReason:"toolUse",content:[{type:"toolCall",id:"complete-"+process.pid,name:"goal_complete",arguments:{summary:"Verified inherited selected named account offline"}}],usage:{input:1,output:1,cacheRead:0,cacheWrite:0,totalTokens:2,cost:{input:0,output:0,cacheRead:0,cacheWrite:0,total:0}}};
 const stream=createAssistantMessageEventStream();queueMicrotask(()=>{stream.push({type:"start",partial:message});stream.push({type:"done",reason:"toolUse",message});stream.end(message);});return stream;}});}
 `;
 const parent=String.raw`

@@ -39,7 +39,7 @@ test("tool wrapper invokes actual nested read hook and rejects absent read/runti
  const f=await fixture();const prior=(globalThis as any)[GOAL_REVIEW_WORKER_KEY];try{
  let tool:any,reads=0;const active=["read","goal_reference"];
  registerGoalReferenceTool({registerTool:(value:any)=>tool=value,getActiveTools:()=>active} as any);
- (globalThis as any)[GOAL_REVIEW_WORKER_KEY]={protocol:1,sessionId:"worker-session",register:f.review.register};
+ (globalThis as any)[GOAL_REVIEW_WORKER_KEY]={protocol:1,sessionId:"worker-session",register:f.review.register,identity:f.review.identity};
  const ctx={sessionManager:{getSessionId:()=>"worker-session"},executeTool:async(name:string,args:any)=>{assert.equal(name,"read");assert.equal(args.path,join(f.root,"spec.md"));reads++;return{};}};
  const result=await tool.execute("call",request,undefined,undefined,ctx);assert.equal(result.details.reference_id,f.review.snapshot()[0].id);assert.equal(reads,1);
  await assert.rejects(tool.execute("foreign",request,undefined,undefined,{...ctx,sessionManager:{getSessionId:()=>"other"}}),/exact dedicated/);

@@ -49,7 +49,7 @@ test('registered goal_manage exposes saved list/start schema and dispatches thro
  globalThis.__paeWorkflowsV1={protocol:1,sessionId:'offline',async manageSavedGoal(params,ctx){calls.push({params,ctx});return {scope:'saved',goals:[{id:'saved-id',status:'paused',revision:9}]};}};
  try{
   const list=await f.execute({scope:'saved',action:'list'});assert.equal(JSON.parse(plain(list)).goals[0].id,'saved-id');assert.equal(f.runtime.activeGoal,undefined);assert.equal(calls[0].ctx,f.ctx);
-  const params={scope:'saved',action:'start',goal_id:'saved-id',expected_revision:9,request_id:'explicit-start',user_authorized:true};await f.execute(params);assert.deepEqual(calls[1].params,params);assert.equal(f.runtime.activeGoal,undefined);
+  const params={scope:'saved',action:'start',goal_id:'saved-id'};await f.execute(params);assert.deepEqual(calls[1].params,{...params,request_id:'test'},'the tool call ID is the request ID');assert.equal(f.runtime.activeGoal,undefined);
   assert.equal(text(f.tool.renderCall(params,theme)),'Goal manage saved start');
   await assert.rejects(f.execute({action:'start',goal_id:'saved-id'}),/scope:saved/);
   globalThis.__paeWorkflowsV1.sessionId='foreign';await assert.rejects(f.execute({scope:'saved',action:'list'}),/unavailable/);
@@ -84,11 +84,7 @@ for (const objective of ['Validate this outcome.', 'Quotes: "yes"; path \\tmp; e
       f.create({ objective, request_id: 'create', start: false });
       for (const action of ['status', 'update', 'resume', 'pause', 'clear']) {
         const previous = f.runtime.activeGoal;
-        const args = { action, ...(previous ? { goal_id: previous.id, activation_id: previous.activationId, expected_revision: previous.revision } : {}),
-          ...(action === 'create' ? { request_id: 'create', start: false } : {}),
-          ...(['update', 'resume', 'pause', 'clear'].includes(action) ? { user_authorized: true } : {}),
-          ...(['create', 'update'].includes(action) ? { objective } : {}),
-        };
+        const args = { action, ...(action === 'update' ? { objective } : {}) };
         assert.equal(text(f.tool.renderCall(args, theme, context(args))), `Goal manage ${action}`);
         const result = await f.execute(args);
         const goal = f.runtime.activeGoal;
@@ -98,7 +94,6 @@ for (const objective of ['Validate this outcome.', 'Quotes: "yes"; path \\tmp; e
           assert.equal(result.terminate, action === 'pause');
         } else {
           const payload = JSON.parse(plain(result));
-          assert.equal(payload.activationId, goal.activationId);
           assert.equal(payload.revision, goal.revision);
           if (action === 'create') assert.equal(payload.goalId, goal.id);
           else {
@@ -129,8 +124,7 @@ test('paused completion presentation preserves verification evidence without exp
   const objective = 'Verified paused outcome.';
   f.create({ objective, request_id: 'create', start: false, steps: [{ text: 'Verify', status: 'completed' }] });
   const previous = f.runtime.activeGoal;
-  const args = { action: 'complete', goal_id: previous.id, activation_id: previous.activationId, expected_revision: previous.revision,
-    user_authorized: true, summary: 'Verified all requirements with passing tests.' };
+  const args = { action: 'complete', summary: 'Verified all requirements with passing tests.' };
   try {
     assert.ok(f.tool.parameters.properties.action.anyOf.some(action => action.const === 'complete'));
     assert.equal(f.tool.parameters.properties.summary.maxLength, 4000);
@@ -149,8 +143,8 @@ test('paused completion presentation preserves verification evidence without exp
 
 test('errors override structured objective; missing objective is never fabricated from arguments', async () => {
   const f = fixture();
-  const args = { action: 'resume', goal_id: 'stale-id', objective: 'Do not display me', user_authorized: true };
-  await assert.rejects(f.execute(args), /Goal identity/);
+  const args = { action: 'resume', goal_id: 'stale-id', objective: 'Do not display me' };
+  await assert.rejects(f.execute(args), /require scope:saved/);
   const result = { content: [{ type: 'text', text: 'Goal changed; get status and use the current goal_id' }],
     details: { goal: { objective: 'Not success' }, presentation: { version: 1, tool: 'goal_manage', action: 'resume', objective: 'Not success' } } };
   for (const errorSource of ['context', 'result']) {
@@ -185,18 +179,18 @@ test('required task IDs and full control contract remain machine-facing only', a
   assert.deepEqual(result, snapshot);
 });
 
-test('current-goal lifecycle actions reject request_id with a scope-specific message and accept the documented shape', async () => {
+test('current-goal lifecycle actions take no IDs and reject a call when the goal changed since last seen', async () => {
   const f = fixture();
   try {
-    f.create({ objective: 'Request id contract.', request_id: 'create', start: false });
-    const goal = f.runtime.activeGoal;
-    const shape = { action: 'resume', goal_id: goal.id, activation_id: goal.activationId, expected_revision: goal.revision, user_authorized: true };
-    await assert.rejects(f.execute({ ...shape, request_id: 'retry-1' }), /Omit request_id for current-goal lifecycle actions; it is used only with scope:saved/);
-    assert.equal(f.runtime.activeGoal.revision, goal.revision, 'rejected call changed nothing');
+    f.create({ objective: 'No ID contract.', request_id: 'create', start: false });
+    const goal = f.runtime.activeGoal, shape = { action: 'resume' };
     await assert.rejects(f.execute({ ...shape, start: true }), /start is create-only/);
+    f.runtime.modelSeenGoal = { ...f.runtime.modelSeenGoal, revision: goal.revision - 1 };
+    await assert.rejects(f.execute(shape), /changed since you last saw it/);
+    assert.equal(f.runtime.activeGoal.revision, goal.revision, 'rejected call changed nothing');
+    // The rejection showed the current state, so a deliberate retry goes through.
     await f.execute(shape);
     assert.equal(f.runtime.activeGoal.status, 'active');
-    // A retry of the same call fails safely on the revision fence instead of applying twice.
-    await assert.rejects(f.execute(shape), /revision changed/);
+    await assert.rejects(f.execute(shape), /already active/);
   } finally { f.runtime.releaseWorkflow(); }
 });

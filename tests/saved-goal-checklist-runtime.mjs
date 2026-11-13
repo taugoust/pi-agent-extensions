@@ -45,7 +45,7 @@ test('actual Pi saved update edits, inserts and reorders without starting a Goal
           entry = snapshot.delegatedGoals.entries[0];
         }
         original = structuredClone(entry);
-        mutation = { scope: 'saved', action: 'update', goal_id: entry.id, expected_revision: entry.revision, request_id: 'actual-tool-update', user_authorized: true, task_edits: [
+        mutation = { scope: 'saved', action: 'update', goal_id: entry.id, task_edits: [
           { id: entry.tasks[0].id, text: 'Implement and verify editing' },
           { text: 'Create isolated worktrees before editing', before_task_id: entry.tasks[0].id },
           { id: entry.tasks[2].id, before_task_id: entry.tasks[1].id },
@@ -60,12 +60,10 @@ test('actual Pi saved update edits, inserts and reorders without starting a Goal
           const results = session.sessionManager.getBranch().filter(e => e.type === 'message' && e.message.role === 'toolResult').map(e => e.message);
           let args, content;
           if (calls === 1 || calls === 2) args = mutation;
-          if (calls === 2 || calls === 3) {
-            const result = results.at(-1); assert.equal(result.isError ?? false, false, text(result));
-            const value = JSON.parse(text(result)).goal;
-            if (calls === 2) updated = value; else assert.deepEqual(value, updated);
-          }
-          if (calls === 3) args = { scope: 'saved', action: 'update', goal_id: original.id, expected_revision: updated.revision, request_id: 'schema-reject', user_authorized: true, task_edits: [{ id: original.tasks[0].id, status: 'completed' }] };
+          if (calls === 2) { const result = results.at(-1); assert.equal(result.isError ?? false, false, text(result)); updated = JSON.parse(text(result)).goal; }
+          // Repeating the call is a new request: its duplicate insertions reject the whole batch.
+          if (calls === 3) assert.equal(results.at(-1).isError, true, 'the repeated edit is not applied twice');
+          if (calls === 3) args = { scope: 'saved', action: 'update', goal_id: original.id, task_edits: [{ id: original.tasks[0].id, status: 'completed' }] };
           if (calls === 4) { assert.equal(results.at(-1).isError, true); args = { scope: 'saved', action: 'status', goal_id: original.id }; }
           if (calls === 5) {
             assert.deepEqual(JSON.parse(text(results.at(-1))).goal, updated);
