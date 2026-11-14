@@ -202,9 +202,9 @@ test('discovery deadline reports partial state; late ignored-cancellation result
  globalThis.__testRepositoryDiscovery=(_pi,_cwd,signal)=>{entered.resolve(signal);return gate.promise;};
  await f.snapshot();const signal=await bounded(entered.promise);
  await new Promise((resolve,reject)=>{const timer=setTimeout(()=>reject(Error('No discovery deadline')),3000);signal.addEventListener('abort',()=>{clearTimeout(timer);resolve();},{once:true});});
- const s=await f.snapshot();assert.equal(s.worktreeLoading,false);assert.match(s.worktreeError,/timed out/);
+ const s=await f.snapshot();assert.equal(s.worktreeLoading,false);assert.match(s.worktreeError,/Still loading some worktrees/);
  gate.resolve({roots:['/unverified-late-result'],active:null,warnings:[],limited:false});await turn();
- assert.deepEqual((await f.snapshot()).worktrees,[]);assert.match((await f.snapshot()).worktreeError,/timed out/);
+ assert.deepEqual((await f.snapshot()).worktrees,[]);assert.match((await f.snapshot()).worktreeError,/Still loading some worktrees/);
 });
 
 test('context changes abort old discovery and cannot publish old cache into the new workspace',async t=>{
