@@ -66,6 +66,9 @@ export type DelegatedGoalRequest = {
   answer?: GoalQuestionReply["answer"];
   continuationLimits?: Partial<GoalContinuationLimits>;
   user_authorized?: boolean; summary?: string;
+  /** Set only by the Work tab service: the user marks the goal complete as an
+   * override, regardless of open tasks, blockers, questions or PRs. */
+  userOverride?: boolean;
   /** Explicit parent verification for existing tasks; never an implicit blanket completion. */
   taskEvidence?: Array<{ taskId: string; evidence: string }>;
   taskEdits?: Array<{ id?: string; text?: string; before_task_id?: string | null }>;
@@ -142,7 +145,7 @@ const ACTION_REQUEST_FIELDS = new Map<string, string[]>([
   ["goals.limits", ["tokenBudget", "continuationLimits"]],
   ["goals.add_task", ["text"]],
   ["goals.tasks", ["taskEdits", "removeTaskIds"]],
-  ["goals.complete", ["user_authorized", "summary", "taskEvidence"]],
+  ["goals.complete", ["user_authorized", "summary", "taskEvidence", "userOverride"]],
   ["goals.reference", ["reviewTitle", "reviewTarget", "reviewRole"]],
   ["goals.answer", ["questionId", "questionRevision", "workerEpoch", "answer"]],
 ]);
@@ -846,14 +849,20 @@ export class DelegatedGoalRegistry {
   }
 
   private async complete(entry: DelegatedGoalEntry, r: DelegatedGoalRequest): Promise<void> {
-    if (entry.status !== 'paused') throw new Error('Parent completion requires a paused goal');
+    // The user's override works from any stopped state; the model's path needs a paused goal.
+    if (r.userOverride === true ? entry.status === 'active' : entry.status !== 'paused') {
+      throw new Error(r.userOverride === true ? 'Pause the goal before marking it complete' : 'Parent completion requires a paused goal');
+    }
     if (r.user_authorized !== true) {
       throw new Error('Parent completion requires fresh explicit user authorization');
     }
     const summary = typeof r.summary === 'string' ? r.summary.trim() : '';
     const rejection = completionSummaryRejection(summary);
     if (rejection) throw new Error(`Goal completion rejected: ${rejection}`);
-    const verified = verifiedTaskEvidence(entry, r);
+    // The override skips every completion condition and marks the remaining tasks done.
+    const verified = r.userOverride === true
+      ? new Map(entry.tasks.filter(task => task.status !== 'completed').map(task => [task.id, 'Marked complete by the user.'] as const))
+      : verifiedTaskEvidence(entry, r);
     if (entry.child) {
       if (!this.executor.verifyStopped) {
         throw new Error('Cannot complete until exact owned child stop is verified');
@@ -864,7 +873,7 @@ export class DelegatedGoalRegistry {
       if (!verified.has(task.id)) continue;
       task.status = 'completed';
       const story = entry.story ??= emptyGoalStory();
-      const text = `Parent verified: ${verified.get(task.id)}`;
+      const text = r.userOverride === true ? verified.get(task.id)! : `Parent verified: ${verified.get(task.id)}`;
       recordGoalEvent(story, 'task', text, task.id, Date.now(), 'completed');
     }
     entry.status = nextStatus(entry, "complete");

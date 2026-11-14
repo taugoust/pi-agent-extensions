@@ -216,6 +216,24 @@ test('context changes abort old discovery and cannot publish old cache into the 
  await f.snapshot();await turn();await turn();const s=await f.snapshot();assert.equal(s.cwd,join(f.root,'new-workspace'));assert.deepEqual(s.worktrees,[]);
 });
 
+test('Work tab Mark complete is the user override: open tasks need no evidence, and clients cannot forge it',async()=>{
+ const root=mkdtempSync(join(tmpdir(),'delegated-user-complete-')),previous=process.env.PI_DELEGATED_GOALS_STATE_ROOT;process.env.PI_DELEGATED_GOALS_STATE_ROOT=root;let service;
+ try{
+  const sessionId=randomUUID(),runtime={activeGoal:undefined,snapshotSettingsApplicationState:()=>({}),settings:{continuationLimits:{automaticTurns:null,noProgressTurns:null}}};
+  const ctx={cwd:root,isIdle:()=>true,hasPendingMessages:()=>false,sessionManager:{getSessionId:()=>sessionId,getLeafId:()=> 'leaf',getBranch:()=>[],getEntries:()=>[]},ui:{setStatus(){}},model:null};
+  globalThis.__paeDelegatedGoalExecutorV1={protocol:1,sessionId,executionAvailable:()=>false,start(){throw Error('No child execution');},resume(){throw Error('No child execution');},pause(){throw Error('No child execution');}};
+  service=createWorkflowService({appendEntry(){}},ctx,runtime,{}, {get:()=>({})},()=>false);
+  const identity={sessionId,serviceEpoch:service.serviceEpoch},send=r=>service.handle({...identity,operation:'start',requestId:randomUUID(),...r});
+  let s=await send({action:'goals.create',expectedGoalId:null,objective:'Ship it'});let e=s.delegatedGoals.entries[0];
+  for(const text of ['First open task','Second open task']){s=await send({action:'goals.add_task',expectedGoalId:e.id,expectedEntryRevision:e.revision,text});e=s.delegatedGoals.entries[0];}
+  // The override flag is set by the service only; a client sending it is rejected.
+  await assert.rejects(send({action:'goals.complete',expectedGoalId:e.id,expectedEntryRevision:e.revision,summary:'Done by hand.',userOverride:true}));
+  s=await send({action:'goals.complete',expectedGoalId:e.id,expectedEntryRevision:e.revision,summary:'Done by hand.'});e=s.delegatedGoals.entries[0];
+  assert.equal(e.status,'complete');assert.equal(e.summary,'Done by hand.');
+  assert.deepEqual(e.tasks.map(task=>task.status),['completed','completed'],'open tasks are marked done by the override');
+ }finally{service?.dispose();delete globalThis.__paeDelegatedGoalExecutorV1;if(previous===undefined)delete process.env.PI_DELEGATED_GOALS_STATE_ROOT;else process.env.PI_DELEGATED_GOALS_STATE_ROOT=previous;rmSync(root,{recursive:true,force:true});}
+});
+
 test('authenticated parent completion is a metadata-only service action while parent work remains untouched',async()=>{
  const root=mkdtempSync(join(tmpdir(),'delegated-parent-complete-')),previous=process.env.PI_DELEGATED_GOALS_STATE_ROOT;process.env.PI_DELEGATED_GOALS_STATE_ROOT=root;let service;
  try{

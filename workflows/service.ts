@@ -89,6 +89,7 @@ const actions = [
 	"goal.pause",
 	"goal.resume",
 	"goal.clear",
+	"goal.complete",
 	"goal.add_task",
 ];
 const uuid =
@@ -1109,6 +1110,22 @@ export function createWorkflowService(
 				else if (r.action === "goal.pause") commands.pauseGoal(commandCtx);
 				else if (r.action === "goal.resume")
 					await commands.resumeGoal(commandCtx);
+				else if (r.action === "goal.complete") {
+					// The user's override: completes with open tasks or PRs.
+					if (
+						await commandCtx.ui.confirm(
+							"Mark Goal complete?",
+							"Mark this goal complete now, even if tasks or completion conditions are still open?",
+						)
+					) {
+						checkGoal();
+						const { completeVerifiedGoal } = await import("./goal/completion.ts");
+						if (runtime.activeGoal!.status === "active") commands.pauseGoal(commandCtx);
+						completeVerifiedGoal(runtime, ctx, runtime.activeGoal!, r.summary.trim(), true);
+						runtime.ensureInactiveGoalContextContract(ctx);
+						runtime.markGoalSeen();
+					}
+				}
 				else if (r.action === "goal.clear") {
 					if (
 						await commandCtx.ui.confirm(
@@ -1175,7 +1192,7 @@ export function createWorkflowService(
 		current();
 		if (!input || typeof input !== "object" || Array.isArray(input))
 			throw new Error("Invalid workflow request");
-		const r = input as any;
+		let r = input as any;
 		if (r.sessionId !== sessionId || r.serviceEpoch !== serviceEpoch)
 			throw new Error("Stale workflow identity");
 		if (r.operation === "review") return reviewPreview(r);
@@ -1327,6 +1344,8 @@ export function createWorkflowService(
 				)
 					throw new Error("Provide a task of at most 503 characters");
 			}
+			if (r.action === "goal.complete" && (typeof r.summary !== "string" || !r.summary.trim() || r.summary.length > 2000))
+				throw new Error("Describe in a short summary why the goal is complete");
 			if (
 				["goal.start", "goal.edit"].includes(r.action) &&
 				(typeof r.objective !== "string" ||
@@ -1352,6 +1371,12 @@ export function createWorkflowService(
 			const validIdentity = typeof r.expectedGoalId === "string" && uuid.test(r.expectedGoalId)
 				&& Number.isSafeInteger(expectedRevision) && expectedRevision >= 1;
 			if (!validIdentity) throw new Error("Expected delegated goal identity and revision");
+			if (r.action === "goals.complete") {
+				// The Work tab's Mark complete is the user's own override: no task
+				// evidence, blockers, questions or PR conditions are required.
+				const { taskEvidence: _evidence, user_authorized: _authorized, ...request } = r;
+				r = { ...request, user_authorized: true, userOverride: true };
+			}
 			if (METADATA_GOAL_ACTIONS.includes(r.action)) {
 				// Definitive metadata result: rejected edits retain the caller's draft.
 				// Cache at service level only AFTER success; failed retries must reach
