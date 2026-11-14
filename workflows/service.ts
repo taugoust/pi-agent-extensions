@@ -11,7 +11,7 @@ import { registerGoalReview, previewGoalReview } from "./goal-review.ts";
 import { resolveGoalLimits } from "../shared/delegated-goal-policy.ts";
 import { delegatedGoalStore } from "./delegated-goal-store.ts";
 import { validateSavedGoalControl, type SavedGoalControl } from "./saved-goal-control.ts";
-import { basename, isAbsolute, relative, sep } from "node:path";
+import { basename, isAbsolute, join, relative, sep } from "node:path";
 import { workspaceRepositories } from "./worktree/repositories.js";
 import {
 	ownedWorktrees, recordedWorktreeOwner, worktreeGit, type OwnedWorktree,
@@ -26,6 +26,7 @@ import type {
 	ExtensionCommandContext,
 } from "@earendil-works/pi-coding-agent";
 import { addFlow, removeFlow, pruneFlow } from "./worktree/command.js";
+import { statSync } from "node:fs";
 import { stat } from "node:fs/promises";
 import {
 	currentWorktreePath,
@@ -103,6 +104,16 @@ const GOAL_LIMIT_FIELDS = [
 const SAVED_GOAL_PAGE_SIZE = 50;
 const MAX_REQUESTS = 2048;
 const WORKTREE_CACHE_MS = 5000;
+// Repository search and git get this budget. Reading Pi's own state comes first
+// and has only a generous safety deadline, so many retained subagents on a busy
+// host can no longer use up the discovery time.
+const WORKTREE_DISCOVERY_MS = 2000;
+const WORKTREE_STATE_READ_MS = 30_000;
+// Subagent ancestry reads every retained worker. Reuse it across the frequent
+// worktree refreshes; it only affects which goal a worktree is shown under.
+const ANCESTRY_CACHE_MS = 30_000;
+const WORKTREE_TIMEOUT_MESSAGE = "Still loading some worktrees; showing what was found so far. "
+	+ "Open a repository directly for a narrower view.";
 const EXECUTION_UNAVAILABLE = "Dedicated goal execution is unavailable: "
 	+ "required child goal/progress tools or execution policy are not enabled. "
 	+ "Paused metadata remains available.";
@@ -440,6 +451,20 @@ export function createWorkflowService(
 		});
 		scheduled.unref();
 	}
+	let ancestryCache: { at: number; key: string; value: JobAncestry | undefined } | undefined;
+	// Same session and same state directories: reuse the last result for a while.
+	function cachedAncestry(): JobAncestry | undefined {
+		const root = ancestryStateRoot(process.env, homedir());
+		const key = JSON.stringify([sessionId, ...["groups", "headless-groups", "workers"].map(name => {
+			try { return statSync(join(root, name)).mtimeMs; } catch { return null; }
+		})]);
+		if (ancestryCache && ancestryCache.key === key && Date.now() - ancestryCache.at < ANCESTRY_CACHE_MS)
+			return ancestryCache.value;
+		let value: JobAncestry | undefined;
+		try { value = readJobAncestry(root, sessionId); } catch {}
+		ancestryCache = { at: Date.now(), key, value };
+		return value;
+	}
 	function worktreeCacheFresh() {
 		return worktreeCache && Date.now() - worktreeCache.at < WORKTREE_CACHE_MS;
 	}
@@ -449,16 +474,16 @@ export function createWorkflowService(
 		const cwd = ctx.cwd, generation = inventoryGeneration;
 		const controller = new AbortController();
 		inventoryController = controller;
-		const inventorySignal = AbortSignal.any([
-			lifetime.signal, controller.signal, AbortSignal.timeout(2000),
-		]);
+		const baseSignal = AbortSignal.any([lifetime.signal, controller.signal]);
+		// Reading Pi's state first: only the safety deadline applies. The discovery
+		// budget starts once the repository search begins.
+		let inventorySignal = AbortSignal.any([baseSignal, AbortSignal.timeout(WORKTREE_STATE_READ_MS)]);
 		const valid = () => !closed && generation === inventoryGeneration && ctx.cwd === cwd;
 		const read = <T>(fn: () => Promise<T>) => withinDiscoveryBudget(inventorySignal, fn);
 		const rows: any[] = [];
 		const timedOut = () => {
 			if (!valid()) return;
-			const message = "Worktree discovery timed out; cached or partial data is shown. "
-				+ "Open a repository directly for a narrower view.";
+			const message = WORKTREE_TIMEOUT_MESSAGE;
 			completionInventory = { records: completionInventory?.records ?? [], error: message };
 			const partialRows = rows.length ? [...rows] : worktreeCache?.rows ?? [];
 			worktreeCache = { at: Date.now(), rows: partialRows, error: message };
@@ -474,10 +499,7 @@ export function createWorkflowService(
 				const mine = ownership.filter(
 					(record) => record.ownerSessionId === sessionId,
 				);
-				let ancestry: JobAncestry | undefined;
-				try {
-					ancestry = readJobAncestry(ancestryStateRoot(process.env, homedir()), sessionId);
-				} catch {}
+				const ancestry = cachedAncestry();
 				const provenance = worktreeGoalProvenance(sessionId, delegated.snapshot().entries, ancestry);
 				const presentationOwned = ownership.filter(record =>
 					provenance(record).goalScopeSessionId === sessionId);
@@ -485,6 +507,9 @@ export function createWorkflowService(
 				// Discovery only: descendant records do not enter completion/removal ownership.
 				const roots = new Set([...mine, ...presentationOwned].map((record) => record.commonDir));
 				for (const item of createdRecords) roots.add(item.commonDir);
+				inventorySignal.removeEventListener("abort", timedOut);
+				inventorySignal = AbortSignal.any([baseSignal, AbortSignal.timeout(WORKTREE_DISCOVERY_MS)]);
+				inventorySignal.addEventListener("abort", timedOut, { once: true });
 				const discovered = await read(() => repositories(inventorySignal));
 				const active = discovered.active;
 				for (const root of discovered.roots) roots.add(root);
@@ -517,7 +542,7 @@ export function createWorkflowService(
 					if (inventorySignal.aborted) {
 						lifetime.signal.throwIfAborted();
 						warnings.push(
-							"Worktree inventory timed out; open a repository directly for a narrower view.",
+							WORKTREE_TIMEOUT_MESSAGE,
 						);
 						break;
 					}
@@ -640,11 +665,11 @@ export function createWorkflowService(
 				if (
 					inventorySignal.aborted &&
 					!warnings.some((warning) =>
-						warning.startsWith("Worktree inventory timed out"),
+						warning === WORKTREE_TIMEOUT_MESSAGE,
 					)
 				)
 					warnings.push(
-						"Worktree inventory timed out; open a repository directly for a narrower view.",
+						WORKTREE_TIMEOUT_MESSAGE,
 					);
 				if (rows.length >= 100)
 					warnings.push(
