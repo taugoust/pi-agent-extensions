@@ -111,6 +111,11 @@ test("real Pi create/tasks/external work/wait; idempotent repeats preserve deadl
     const updated = await f.invoke("goal_wait", { ...args, resume_after_ms: 60000 });
     assert.ok(updated.details.waiting.resume_at > deadline); assert.equal(updated.details.deadline, "replaced");
     assert.equal(updated.details.wake_semantics.subscription, "none");
+    // The text is short and readable; the structured state stays in details.
+    assert.match(text(first), /^Waiting\. No deadline/); assert.equal(text(first).includes("{"), false);
+    assert.match(text(timed), /^Waiting\. Continues by itself at \d\d:\d\d UTC \(deadline set\).*Requested 1 ms; clamped to 10 s\.$/);
+    assert.match(text(repeated), /\(earlier deadline kept\)/);
+    assert.ok(text(updated).length < 200, text(updated));
     const snapshot = structuredClone(f.engine.activeGoal);
     sawGoal(f.engine, { ...snapshot, activationId: "stale" });
     const stale = await f.invoke("goal_wait", args);
