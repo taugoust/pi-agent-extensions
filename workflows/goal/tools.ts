@@ -356,7 +356,8 @@ export function registerGoalTools(pi: ExtensionAPI, runtime: GoalRuntime) {
         last_wake: waitingGoal.lastWake ?? null,
       };
       return {
-        content: toolContent(`Goal waiting: ${reason}\n${JSON.stringify(details)}`),
+        // The model and Paseo read this text. The structured state stays in details.
+        content: toolContent(goalWaitText(waiting.resumeAt, deadline, requestedMs, clampedFrom === undefined ? undefined : effectiveMs)),
         details,
         terminate: true,
       };
@@ -430,6 +431,22 @@ function blockerDetails(
     evidence: evidence.slice(0, MAX_BLOCKER_EVIDENCE_LENGTH),
     repeated_turns: Number.isFinite(repeatedTurns) ? repeatedTurns : 0,
   };
+}
+
+/** A short, readable result for goal_wait: when the goal continues on its own. */
+export function goalWaitText(
+  resumeAt: number | undefined,
+  deadline: "replaced" | "preserved" | "none",
+  requestedMs?: number,
+  clampedMs?: number,
+): string {
+  const hours = (ms: number) => ms >= 3_600_000 ? `${+(ms / 3_600_000).toFixed(1)} h`
+    : ms >= 60_000 ? `${Math.round(ms / 60_000)} min` : ms >= 1000 ? `${Math.round(ms / 1000)} s` : `${ms} ms`;
+  if (resumeAt === undefined) return "Waiting. No deadline: only a wake event, user input or resume continues the goal.";
+  const at = new Date(resumeAt).toISOString().slice(11, 16);
+  const kept = deadline === "preserved" ? "earlier deadline kept" : "deadline set";
+  const clamp = requestedMs !== undefined && clampedMs !== undefined ? ` Requested ${hours(requestedMs)}; clamped to ${hours(clampedMs)}.` : "";
+  return `Waiting. Continues by itself at ${at} UTC (${kept}) if nothing wakes it sooner.${clamp}`;
 }
 
 function waitDetails(
