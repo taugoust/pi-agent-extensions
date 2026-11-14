@@ -122,7 +122,9 @@ export function readJobAncestry(root: string, owner: string, maxBytes = MAX_READ
         let descendant: string;
         try {
           const stat = fstatSync(fd);
-          if (!stat.isFile() || stat.nlink !== 1 || (stat.mode & 0o077) || (process.getuid && stat.uid !== process.getuid())) throw new Error("Unsafe descendant session header");
+          // Only writability by others matters: the worker directory is private, and
+          // workers before late October saved readable (0644) transcripts.
+          if (!stat.isFile() || stat.nlink !== 1 || (stat.mode & 0o022) || (process.getuid && stat.uid !== process.getuid())) throw new Error("Unsafe descendant session header");
           const bytes = Buffer.alloc(Math.min(8192, budget.remaining + 1)), n = readSync(fd, bytes, 0, bytes.length, 0), newline = bytes.indexOf(10, 0);
           consume(budget, n);
           if (newline < 0 || newline >= n) throw new Error("Missing bounded descendant session header");
