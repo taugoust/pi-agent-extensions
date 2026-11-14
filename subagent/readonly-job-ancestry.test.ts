@@ -152,11 +152,17 @@ test("non-regular evidence cannot block read-only discovery", () => {
     assert.equal(readJobAncestry(f.root, "session-0").unavailable, true);
   } finally { f.close(); }
 });
-test("symlinked worker/session paths and public files grant no ownership", () => {
+test("symlinked worker/session paths and writable session files grant no ownership", () => {
   const f = fixture(); try {
+    // Older workers saved readable transcripts inside their private directory.
     chmodSync(f.manifests[0].sessionFile, 0o644);
-    assert.equal(readJobAncestry(f.root, "session-0").unavailable, true);
-    assert.equal(ownsJob(readJobAncestry(f.root, "session-0").owners, { sessionId: "session-1" }), false);
+    assert.equal(readJobAncestry(f.root, "session-0").unavailable, undefined);
+    assert.equal(ownsJob(readJobAncestry(f.root, "session-0").owners, { sessionId: "session-1" }), true);
+    for (const mode of [0o664, 0o646]) {
+      chmodSync(f.manifests[0].sessionFile, mode);
+      assert.equal(readJobAncestry(f.root, "session-0").unavailable, true, mode.toString(8));
+      assert.equal(ownsJob(readJobAncestry(f.root, "session-0").owners, { sessionId: "session-1" }), false);
+    }
     chmodSync(f.manifests[0].sessionFile, 0o600);
     rmSync(f.manifests[0].sessionFile);
     symlinkSync(f.manifests[1].sessionFile, f.manifests[0].sessionFile);
