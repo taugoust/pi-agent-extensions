@@ -1249,7 +1249,9 @@ export function createWorkflowService(
 			&& externalBusy();
 		if (operation || toolMutation || blockedByOutsideWork || !actions.includes(r.action))
 			throw new Error("Workflow busy or invalid action");
-		if (["goal.start", "goal.create_paused", "goal.resume", "goal.edit"].includes(r.action))
+		// This chat's goal can be paused, resumed, edited or cleared from the UI. Pi
+		// asks for confirmation in the chat. New goals start as delegated goals.
+		if (["goal.start", "goal.create_paused"].includes(r.action))
 			throw new Error("Use dedicated delegated goals; legacy parent goal execution is read-only");
 		if (["worktree.complete", "worktree.cleanup"].includes(r.action)) {
 			validateWorktreeCompletionRequest(r);
