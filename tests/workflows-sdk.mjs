@@ -27,6 +27,8 @@ const { createJiti } = createRequire(
 	import.meta.resolve("@earendil-works/pi-coding-agent"),
 )("jiti");
 const sdk = await import("@earendil-works/pi-coding-agent");
+// Goal notifications render with Pi's theme.
+sdk.initTheme("dark", false);
 const { createAssistantMessageEventStream } = await import(
 	"@earendil-works/pi-ai"
 );
@@ -714,6 +716,40 @@ test("Goal token budget stops without a summary request; Pause aborts its curren
 		assert.equal(f.calls.length, 1);
 	} finally {
 		f.release();
+		await f.dispose();
+	}
+});
+// The chat goal identity the Work tab sends with every chat-goal action.
+const chatGoal = (s) => ({
+	expectedActivationId: s.goal.activationId ?? s.goal.id,
+	expectedGoalRevision: s.goal.revision,
+});
+test("resuming a paused Goal while Pi is busy queues its prompt after the current turn", async () => {
+	const f = await fixture("hold");
+	let running;
+	try {
+		// The Work tab cannot start this chat's goal; /goal does.
+		const goalRun = f.session.prompt("/goal Resume while busy");
+		await until(f.snapshot, (s) => s.goal?.status === "active", "goal started");
+		await f.start("goal.pause", chatGoal(await f.snapshot()));
+		await until(f.snapshot, (s) => s.goal?.status === "paused" && !s.busy, "paused");
+		await goalRun.catch(() => {});
+		await f.session.waitForIdle();
+		// An unrelated model turn keeps Pi busy.
+		const before = f.calls.length;
+		running = f.session.prompt("Hold this unrelated model request.");
+		await until(f.snapshot, (s) => f.calls.length === before + 1 && !s.idle, "unrelated turn running");
+		await f.start("goal.resume", chatGoal(await f.snapshot()));
+		await f.answer(true);
+		const resumed = await until(f.snapshot, (s) => !s.busy, "resume accepted while busy");
+		assert.equal(resumed.goal.status, "active", resumed.notice ?? "");
+		assert.equal(f.calls.length, before + 1, "the goal waits for the current turn");
+		f.release();
+		await until(f.snapshot, () => f.calls.length === before + 2, "goal prompt after the turn");
+	} finally {
+		await f.session.abort();
+		f.release();
+		await running?.catch(() => {});
 		await f.dispose();
 	}
 });
