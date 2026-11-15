@@ -3,6 +3,7 @@ import backgroundJob from './index.js';
 import { BackgroundJobManager } from './manager.js';
 import { JobStore } from './store.js';
 import { WatchManager } from './watch.js';
+import { WATCH_ALERT_PREFIX } from '../shared/quiet-state.js';
 
 // Exercise the actual producer and tool consumption path without starting processes.
 const pause = (ms = 30) => new Promise(resolve => setTimeout(resolve, ms));
@@ -62,12 +63,15 @@ try {
   assert.equal(h.messages.length,1);
   assert.deepEqual(h.messages[0].options,{deliverAs:'followUp',triggerTurn:true});
   // The fixture watch has one unread event, so its alert joins the first batch.
-  assert.deepEqual(h.messages[0].message.details.updates.filter(u=>u.kind==='watch').map(u=>[u.id,u.through_sequence]),[['watch-fixture',1]]);
-  assert.match(h.messages[0].message.content,/^Watch alert\./);
-  assert.deepEqual(h.messages[0].message.details.updates.filter(u=>u.kind==='job').map(u=>u.state),['completed','failed','cancelled','lost']);
+  const firstUpdates = h.messages[0].message.details.updates;
+  const watchAlerts = firstUpdates.filter(u => u.kind === 'watch');
+  assert.deepEqual(watchAlerts.map(u => [u.id, u.through_sequence]), [['watch-fixture', 1]]);
+  assert.ok(h.messages[0].message.content.startsWith(WATCH_ALERT_PREFIX));
+  const jobStates = firstUpdates.filter(u => u.kind === 'job').map(u => u.state);
+  assert.deepEqual(jobStates, ['completed', 'failed', 'cancelled', 'lost']);
   assert.match(h.messages[0].message.content,/output/i);
   assert.match(h.messages[0].message.content,/reap/i);
-  assert.ok(h.messages[0].message.details.updates.every(u=>u.kind==='job'||u.kind==='watch'));
+  assert.ok(firstUpdates.every(u => u.kind === 'job' || u.kind === 'watch'));
   poll(); await pause(1150); assert.equal(h.messages.length,1,'repeated polling replayed completion');
   idle=false; records.push(record()); poll(); await pause(1150);
   assert.equal(h.messages.length,1,'busy parent received an obsolete-prone completion steer');

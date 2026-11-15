@@ -166,13 +166,14 @@ function completionSuperseded(h: Hub, data: QuietUpdate): boolean {
           r.update.through_sequence! >= data.through_sequence!)),
   );
 }
-const WATCH_PREFIX =
+/** Opening line of every wake message that contains watch alerts. */
+export const WATCH_ALERT_PREFIX =
   'Watch alert. Read the new events with background_job events, then ack them.\n';
 function completionPrefix(updates: QuietUpdate[]): string {
   const watches = updates.some(isWatchAlert);
   const finished = updates.filter((u) => !isWatchAlert(u));
-  if (!finished.length) return WATCH_PREFIX;
-  return (watches ? WATCH_PREFIX : '') + finishedPrefix(finished);
+  if (!finished.length) return WATCH_ALERT_PREFIX;
+  return (watches ? WATCH_ALERT_PREFIX : '') + finishedPrefix(finished);
 }
 function finishedPrefix(updates: QuietUpdate[]): string {
   const children = updates.some((u) => u.kind === 'subagent'),
