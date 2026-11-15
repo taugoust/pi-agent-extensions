@@ -1062,10 +1062,11 @@ export function createWorkflowService(
 						throw new Error(
 							"Select a configured Pi model before starting Goal",
 						);
-					if (!ctx.isIdle() || ctx.hasPendingMessages())
-						throw new Error(
-							"Wait until Pi is idle before starting, editing or resuming Goal",
-						);
+					// Only Start waits for idle. Resume and Edit work while Pi is busy:
+					// the goal prompt is queued and runs after the current turn.
+					const needsIdle = r.action === "goal.start";
+					if (needsIdle && (!ctx.isIdle() || ctx.hasPendingMessages()))
+						throw new Error("Wait until Pi is idle before starting Goal");
 					const policy = () =>
 						JSON.stringify([
 							ctx.cwd,
@@ -1093,7 +1094,7 @@ export function createWorkflowService(
 						throw new Error(
 							"The model, thinking, tools or limits changed. Review the goal again.",
 						);
-					if (!ctx.isIdle() || ctx.hasPendingMessages())
+					if (needsIdle && (!ctx.isIdle() || ctx.hasPendingMessages()))
 						throw new Error("Pi became busy; review again when idle");
 				}
 				if (r.action === "goal.start")
