@@ -1238,9 +1238,11 @@ monitor service handles all watches for the parent session. Cursors and a bounde
 read errors, and associated job termination are events. `events` reads up to 32
 events after `after_sequence`; `ack` with `through_sequence` acknowledges consumed
 events; `unwatch` stops observation, never the build. Event IDs are monotonic and
-old-journal overflow is explicit. New event availability is included in the same
-private durable state deltas, without log text, user notifications, or model
-wake-ups. Use job snapshots and watch event reads for supervision.
+old-journal overflow is explicit. New events wake the parent the same way a
+finished job does: once it is idle, with one alert per watch that names the
+watch and the sequence to read through. The alert carries no log text. Reading
+the events, acknowledging them or unwatching clears a pending alert, and only
+events after the last alert wake the parent again.
 State deltas are deduplicated across reload; unread journal entries remain
 available until acknowledged. Watches default to
 starting at the current end of the file; `from:"start"` opts into existing output.

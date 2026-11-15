@@ -44,6 +44,10 @@ const JOB_COMPLETION_PREFIX='Background job finished. Inspect its output, then r
 const isCompletion=(data:QuietUpdate)=>(data.kind==='subagent'||data.kind==='job')&&data.completion===true;
 const completionIdentity=(data:QuietUpdate)=>JSON.stringify([data.kind,data.job_id??data.id,data.child_id??data.id]);
 const hasSequence=(data:QuietUpdate)=>Number.isSafeInteger(data.through_sequence)&&data.through_sequence!>=0;
+/** New events on one of this session's watches. Delivered like completions:
+ * idle-only, coalesced per watch, and consumed by events/ack/unwatch. */
+const isWatchAlert=(data:QuietUpdate)=>data.kind==='watch'&&data.requires_guidance!==true&&hasSequence(data);
+const wakes=(data:QuietUpdate)=>isCompletion(data)||isWatchAlert(data);
 function completionSuperseded(h:Hub,data:QuietUpdate):boolean{
   if(!isCompletion(data)||!hasSequence(data))return false;
   const identity=completionIdentity(data);
@@ -54,7 +58,14 @@ function completionSuperseded(h:Hub,data:QuietUpdate):boolean{
     &&(r.update.activity===true&&r.state==='recorded'&&r.update.through_sequence!>data.through_sequence!
       ||isCompletion(r.update)&&(r.state==='consumed'||r.state==='delivered')&&r.update.through_sequence!>=data.through_sequence!));
 }
+const WATCH_PREFIX='Watch alert. Read the new events with background_job events, then ack them.\n';
 function completionPrefix(updates:QuietUpdate[]):string{
+  const watches=updates.some(isWatchAlert);
+  const finished=updates.filter(u=>!isWatchAlert(u));
+  if(!finished.length)return WATCH_PREFIX;
+  return (watches?WATCH_PREFIX:'')+finishedPrefix(finished);
+}
+function finishedPrefix(updates:QuietUpdate[]):string{
   const children=updates.some(u=>u.kind==='subagent'),jobs=updates.some(u=>u.kind==='job');
   if(children&&jobs)return 'Background work finished. Read each job’s output or subagent’s result, then reap it when no longer needed.\n';
   return children?COMPLETION_PREFIX:JOB_COMPLETION_PREFIX;
@@ -91,6 +102,7 @@ function revokeConsumedWake(h:Hub):void{if(h.wakeAdmission&&h.wakeItems&&![...h.
  * identity-bound idle-decision controls use automatic compaction admission. */
 function trustedAutonomousUpdate(data:QuietUpdate):boolean{
   if(isCompletion(data)||controlUpdate(data))return true;
+  if(isWatchAlert(data))return /^watch-[0-9a-f]{24}$/.test(data.id);
   if(data.requires_guidance!==true)return false;
   const validChild=typeof data.child_id==='string'&&/^subagent-child-[0-9a-f]{24}$/.test(data.child_id);
   const validJob=typeof (data.job_id??data.id)==='string'&&/^(?:job|subagent-job)-[0-9a-f]{24}$/.test(String(data.job_id??data.id));
@@ -189,7 +201,7 @@ function restore(h:Hub,ctx:any){
       // restart without treating uncertainty as a delivered receipt.
       if((r.state==='delivered'||r.state==='dispatching')&&r.at>=h.lastGuidanceAt){h.lastGuidanceAt=Math.min(Date.now(),r.at);h.lastGuidanceChild=guidanceGroup(r.update);}
     }
-    if((r.state==='queued'||r.state==='dispatching')&&(r.update.requires_guidance===true||isCompletion(r.update)))h.pending.set(r.key,toItem(r.update,r.at));
+    if((r.state==='queued'||r.state==='dispatching')&&(r.update.requires_guidance===true||wakes(r.update)))h.pending.set(r.key,toItem(r.update,r.at));
   }
   // Report sequence, not receipt time, orders child turns. Consuming an older
   // result later must not suppress a newer unseen completion after reload.
@@ -326,14 +338,14 @@ function batchBytes(updates:QuietUpdate[]):number{return bytes(GUIDANCE_PREFIX+J
 function selectBatch(h:Hub){const out:Item[]=[];const controls=controlPending(h);for(const item of fair([...h.pending.values()].filter(i=>i.data.requires_guidance&&!isCompletion(i.data)&&latestReceipt(h,i.key)?.state!=='dispatching'&&(controls?controlUpdate(i.data):!h.wakeAdmission)).sort((a,b)=>a.queuedAt-b.queuedAt),i=>guidanceGroup(i.data),h.lastGuidanceChild)){if(out.length>=MAX_BATCH_ITEMS)break;const next=[...out,item];if(batchBytes(next.map(i=>i.data))>MAX_BATCH_BYTES){if(!out.length)reportFailure(h,'Oversized guidance payload; inspect exact request and dismiss or answer it',[item.key]);continue;}out.push(item);}return out;}
 function scheduleCompletions(h:Hub,delayMs:number){
   if(h.completionTimer||h.wakeAdmission||h.ui||h.compacting||!h.pi||!h.ctx||disabled(h))return;
-  if(![...h.pending.values()].some(i=>isCompletion(i.data)))return;
+  if(![...h.pending.values()].some(i=>wakes(i.data)))return;
   h.completionTimer=setTimeout(async()=>{
     h.completionTimer=undefined;
     if(h.ui||h.compacting||!h.pi||!h.ctx||disabled(h))return;
     // Let existing queued messages drain; never abort or interrupt active tools.
     if(h.ctx.hasPendingMessages?.()||!h.ctx.isIdle()){scheduleCompletions(h,Math.max(delayMs,1000));return;}
     const latest=new Map<string,Item>();
-    for(const [key,item]of h.pending)if(isCompletion(item.data)){
+    for(const [key,item]of h.pending)if(wakes(item.data)){
       if(completionSuperseded(h,item.data)){h.pending.delete(key);continue;}
       const identity=completionIdentity(item.data);
       // Hold even a later completion for this worker until its invalidation is
@@ -356,7 +368,7 @@ function scheduleCompletions(h:Hub,delayMs:number){
     // Safe idle-only dispatch means no historical completion steers an active
     // long tool run; sent messages cannot be retracted.
     for(const [key,item] of h.pending){
-      if(!isCompletion(item.data))continue;
+      if(!wakes(item.data))continue;
       const current=latest.get(completionIdentity(item.data));
       if(current&&current.revision!==item.revision&&appendReceipt(h,item,'consumed'))h.pending.delete(key);
     }
@@ -436,7 +448,7 @@ function schedule(h:Hub,delayMs:number){
   },wait);h.timer.unref?.();
 }
 
-/** Routine updates are receipts only; explicit guidance and background terminal completion may wake the model. */
+/** Routine updates are receipts only; explicit guidance, background terminal completion and new watch events may wake the model. */
 export function installQuietState(pi:ExtensionAPI,delayMs=1000){
   const writer=Symbol('quiet-harness-writer');
   let source:Hub['guidanceSource'];
@@ -485,12 +497,12 @@ export function installQuietState(pi:ExtensionAPI,delayMs=1000){
       }
       if(controlResolved(h,data)){h.stats.duplicate++;return true;}
       if(disabled(h)){h.stats.disabled++;return false;}
-      const item=toItem(data);if(item.bytes>MAX_UPDATE_BYTES||(isCompletion(data)&&bytes(completionPrefix([data])+JSON.stringify([data]))+bytes(JSON.stringify({updates:[data]}))>MAX_BATCH_BYTES))throw new Error('Quiet state update exceeds its metadata budget');
+      const item=toItem(data);if(item.bytes>MAX_UPDATE_BYTES||(wakes(data)&&bytes(completionPrefix([data])+JSON.stringify([data]))+bytes(JSON.stringify({updates:[data]}))>MAX_BATCH_BYTES))throw new Error('Quiet state update exceeds its metadata budget');
       const superseded=completionSuperseded(h,data);
       if(superseded||isDone(h,item.key,item.revision)||(isCompletion(data)&&['recorded','delivered','consumed'].includes(latestReceipt(h,item.key)?.state??''))||(data.guidance?h.pending.has(item.key):h.pending.get(item.key)?.revision===item.revision)){h.stats.duplicate++;return true;}
       if(h.pending.size>=MAX_PENDING&&!h.pending.has(item.key)){h.stats.dropped++;reportFailure(h,'Notification queue full; producer must retain and retry',[item.key]);schedule(h,delayMs);return false;}
       h.stats.accepted++;
-      if(data.requires_guidance===true||isCompletion(data)){if(!appendReceipt(h,item,'queued')){schedule(h,delayMs);return false;}h.pending.set(item.key,item);schedule(h,delayMs);return true;}
+      if(data.requires_guidance===true||wakes(data)){if(!appendReceipt(h,item,'queued')){schedule(h,delayMs);return false;}h.pending.set(item.key,item);schedule(h,delayMs);return true;}
       h.pending.delete(item.key);if(!appendReceipt(h,item,'recorded'))return false;h.stats.routineRecorded++;refreshStatus(h);return true;
     },
     consumeCompletion(ctx:ExtensionContext,jobId:string,childId?:string,terminalId?:string,throughSequence?:number){

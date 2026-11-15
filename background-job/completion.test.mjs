@@ -61,10 +61,13 @@ try {
   poll(); await pause(1150);
   assert.equal(h.messages.length,1);
   assert.deepEqual(h.messages[0].options,{deliverAs:'followUp',triggerTurn:true});
-  assert.deepEqual(h.messages[0].message.details.updates.map(u=>u.state),['completed','failed','cancelled','lost']);
+  // The fixture watch has one unread event, so its alert joins the first batch.
+  assert.deepEqual(h.messages[0].message.details.updates.filter(u=>u.kind==='watch').map(u=>[u.id,u.through_sequence]),[['watch-fixture',1]]);
+  assert.match(h.messages[0].message.content,/^Watch alert\./);
+  assert.deepEqual(h.messages[0].message.details.updates.filter(u=>u.kind==='job').map(u=>u.state),['completed','failed','cancelled','lost']);
   assert.match(h.messages[0].message.content,/output/i);
   assert.match(h.messages[0].message.content,/reap/i);
-  assert.ok(h.messages[0].message.details.updates.every(u=>u.kind==='job'));
+  assert.ok(h.messages[0].message.details.updates.every(u=>u.kind==='job'||u.kind==='watch'));
   poll(); await pause(1150); assert.equal(h.messages.length,1,'repeated polling replayed completion');
   idle=false; records.push(record()); poll(); await pause(1150);
   assert.equal(h.messages.length,1,'busy parent received an obsolete-prone completion steer');
