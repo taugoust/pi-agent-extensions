@@ -1231,19 +1231,27 @@ Persistent monitoring uses `background_job` rather than an LLM polling loop:
 {"action":"watch","job_id":"job-...","patterns":[{"name":"stage","match":"Starting route"},{"name":"failure","match":"ERROR:"}],"from":"end","poll_ms":2000}
 ```
 
-Alternatively specify an existing `log_path` within the delegated cwd. Rules are
-bounded literal substrings, not executable expressions or regexes. One durable
-monitor service handles all watches for the parent session. Cursors and a bounded
-128-event journal survive reload/restart; rotation, detectable truncation,
-read errors, and associated job termination are events. `events` reads up to 32
-events after `after_sequence`; `ack` with `through_sequence` acknowledges consumed
-events; `unwatch` stops observation, never the build. Event IDs are monotonic and
-old-journal overflow is explicit. New event availability is included in the same
-private durable state deltas, without log text, user notifications, or model
-wake-ups. Use job snapshots and watch event reads for supervision.
-State deltas are deduplicated across reload; unread journal entries remain
-available until acknowledged. Watches default to
-starting at the current end of the file; `from:"start"` opts into existing output.
+Instead of a job ID you can give the path of an existing log file inside the
+working directory. Each pattern is plain text that a log line has to contain,
+so regular expressions and code are not supported. A single background service
+watches all logs for the session, and it keeps its place in each log and its
+last 128 events across reloads and restarts. Besides pattern matches, it also
+records an event when a log is rotated, cut short or can't be read, and when
+the watched job ends.
+
+A watch starts at the current end of the log unless you pass `from:"start"`,
+which also includes the output that is already there. Use `events` to read up
+to 32 events after a given sequence number, `ack` to mark events as handled up
+to a sequence number, and `unwatch` to stop watching, which never stops the
+build itself. Event numbers only go up, and if old events had to be dropped to
+make room, `events` says so.
+
+New events wake the agent in the same way a finished job does. The agent gets
+one alert per watch once it is idle, and the alert names the watch and the
+sequence number to read up to, without any log text. Reading the events,
+acknowledging them or unwatching clears the alert, and only events that arrive
+after that wake the agent again. Events stay readable until they are
+acknowledged, and a reload does not send the same alert twice.
 
 Task delivery is separate from execution status. Native children receive a
 `task_outcome` reporting tool with `delivered`, `partial`, `blocked`, and

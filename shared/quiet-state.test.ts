@@ -1,5 +1,10 @@
 import assert from 'node:assert/strict';
-import { installQuietState, notifyParent, QUIET_STATE_RECEIPT_CUSTOM_TYPE } from './quiet-state.js';
+import {
+  installQuietState,
+  notifyParent,
+  QUIET_STATE_RECEIPT_CUSTOM_TYPE,
+  WATCH_ALERT_PREFIX,
+} from './quiet-state.js';
 
 const pause=(ms=30)=>new Promise(resolve=>setTimeout(resolve,ms));
 let entries:any[]=[];let idle=false;let pending=false;let sessionName=`quiet-test-${process.pid}`;
@@ -328,6 +333,108 @@ assert.match(shell.messages[3].message.content,/output/i);
 assert.match(shell.messages[3].message.content,/result/i);
 assert.match(shell.messages[3].message.content,/reap/i);
 await shell.emit('session_shutdown',{reason:'quit'});
+// Watch alerts, using the update shape the background-job producer sends.
+{
+  const watchA = 'watch-' + 'a'.repeat(24);
+  const watchB = 'watch-' + 'b'.repeat(24);
+  const watchC = 'watch-' + 'c'.repeat(24);
+  const alert = (id: string, through: number) =>
+    ({ kind: 'watch', id, state: 'running', through_sequence: through, count: 1 }) as const;
+  // Each delivered message as a list of [watch id, sequence] pairs.
+  const delivered = (messages: any[]) =>
+    messages.map((m) =>
+      m.message.details.updates
+        .filter((u: any) => u.kind === 'watch')
+        .map((u: any) => [u.id, u.through_sequence]),
+    );
+  const waitUntilIdle = async () => {
+    idle = true;
+    await pause(1100);
+  };
+
+  entries = [];
+  idle = false;
+  pending = false;
+  sessionName = `quiet-watch-${process.pid}`;
+  const fx = fixture();
+  const quiet = installQuietState(fx.pi, 5);
+  await fx.emit('session_start');
+
+  // Alerts wait for an idle parent and keep only the newest sequence.
+  quiet.enqueue(ctx, alert(watchA, 3));
+  quiet.enqueue(ctx, alert(watchA, 5));
+  await pause(40);
+  assert.equal(fx.messages.length, 0, 'watch alert interrupted a busy parent');
+  await waitUntilIdle();
+  assert.deepEqual(delivered(fx.messages), [[[watchA, 5]]]);
+  assert.deepEqual(fx.messages[0].options, { deliverAs: 'followUp', triggerTurn: true });
+  assert.ok(fx.messages[0].message.content.startsWith(WATCH_ALERT_PREFIX));
+
+  // The same sequence is not delivered twice. Newer events wake again.
+  quiet.enqueue(ctx, alert(watchA, 5));
+  await pause(40);
+  assert.equal(fx.messages.length, 1, 'same watch sequence woke twice');
+  quiet.enqueue(ctx, alert(watchA, 9));
+  await pause(40);
+  assert.deepEqual(delivered(fx.messages).at(-1), [[watchA, 9]]);
+
+  // Reading or acking clears a pending alert. A partial ack does not.
+  idle = false;
+  quiet.enqueue(ctx, alert(watchB, 4));
+  quiet.consume(ctx, 'watch', watchB, 4);
+  quiet.enqueue(ctx, alert(watchC, 6));
+  quiet.consume(ctx, 'watch', watchC, 2);
+  await waitUntilIdle();
+  assert.deepEqual(delivered(fx.messages).at(-1), [[watchC, 6]]);
+
+  // Unwatch clears a pending alert.
+  const before = fx.messages.length;
+  idle = false;
+  quiet.enqueue(ctx, alert(watchB, 7));
+  quiet.consume(ctx, 'watch', watchB);
+  await waitUntilIdle();
+  assert.equal(fx.messages.length, before, 'unwatched alert woke the parent');
+
+  // A watch alert and a finished job share one message.
+  idle = false;
+  quiet.enqueue(ctx, alert(watchA, 12));
+  quiet.enqueue(ctx, { kind: 'job', id: 'watch-mixed-job', state: 'completed', completion: true });
+  await waitUntilIdle();
+  const mixed = fx.messages.at(-1).message;
+  assert.deepEqual(mixed.details.updates.map((u: any) => u.kind).sort(), ['job', 'watch']);
+  assert.ok(mixed.content.startsWith(WATCH_ALERT_PREFIX));
+
+  // An alert queued while busy survives a reload. Delivered alerts are not replayed.
+  idle = false;
+  quiet.enqueue(ctx, alert(watchC, 10));
+  await fx.emit('session_shutdown', { reason: 'reload' });
+  const reloaded = fixture();
+  installQuietState(reloaded.pi, 5);
+  idle = true;
+  await reloaded.emit('session_start', { reason: 'reload' });
+  await pause(80);
+  assert.deepEqual(delivered(reloaded.messages), [[[watchC, 10]]]);
+  await reloaded.emit('session_shutdown', { reason: 'quit' });
+
+  // Watch receipts recorded by older versions are history, not new alerts.
+  const legacyReceipt = {
+    v: 1,
+    key: `watch:${watchA}`,
+    revision: '0'.repeat(64),
+    state: 'recorded',
+    at: 1,
+    update: alert(watchA, 20),
+  };
+  entries = [{ type: 'custom', customType: QUIET_STATE_RECEIPT_CUSTOM_TYPE, data: legacyReceipt }];
+  sessionName = `quiet-watch-legacy-${process.pid}`;
+  const legacy = fixture();
+  installQuietState(legacy.pi, 5);
+  await legacy.emit('session_start');
+  await pause(80);
+  assert.equal(legacy.messages.length, 0, 'recorded legacy watch receipt replayed as an alert');
+  await legacy.emit('session_shutdown', { reason: 'quit' });
+}
+
 // Activity invalidates only earlier completions of the same worker attempt,
 // including while delivery is disabled; a later completion remains eligible.
 entries=[];idle=true;pending=false;sessionName=`quiet-activity-${process.pid}`;
