@@ -51,6 +51,7 @@ Extensions are **opt-in**. [Build a selective bundle or install without Nix →]
 | [Modal editor](modal-editor) | Edit longer input in a terminal dialog. |
 | [direnv](direnv) | Refresh the project's environment. |
 | [System theme](mac-system-theme) | Follow macOS appearance. |
+| [Reload on deploy](reload-on-deploy) | Reload Pi when idle after a deploy changes its config. |
 
 ### Accounts, visibility and control
 
