@@ -459,6 +459,29 @@ export class TuiWorkerTmux {
     }
     return promoted;
   }
+  /** True only with proof that the worker's pane can't exist anymore: the
+   * recorded tmux server is still running and lists no such pane, or that
+   * server has exited (a restart) and the worker's Pi process is gone too. */
+  private async paneIsGone(manifest: TuiWorkerManifest): Promise<boolean> {
+    const placement = requiredPlacement(manifest);
+    let current: string | undefined;
+    try { current = await this.epoch(placement.socketPath); }
+    catch { current = undefined; } // no server answers on the socket
+    if (current === placement.serverEpoch) {
+      const panes = (await this.run(placement.socketPath, ["list-panes", "-a", "-F", "#{pane_id}"])).split("\n");
+      return !panes.includes(placement.paneId);
+    }
+    // A different server, or none. The recorded one must be gone, and since a
+    // pane's process can outlive its server, so must the worker's Pi.
+    if (await this.processAlive(placement.serverEpoch)) return false;
+    if (!manifest.paneProcessToken) return false;
+    return !(await this.processAlive(manifest.paneProcessToken));
+  }
+  private async processAlive(identity: string): Promise<boolean> {
+    const pid = Number(identity.split(":")[0]);
+    if (!Number.isSafeInteger(pid) || pid < 1) return true; // unknown: assume live
+    return await processIsAlive(pid, identity);
+  }
   async reap(manifest: TuiWorkerManifest, timeoutMs = verificationBudget(manifest), options: { force?: true; reason?: string; beforeRemove?: () => Promise<void> } = {}): Promise<void> {
     const store = new TuiWorkerStore(dirname(manifest.sessionFile));
     // A prior verified deletion is idempotent. No other pane is sought by name.
@@ -500,13 +523,10 @@ export class TuiWorkerTmux {
         if ((missing as NodeJS.ErrnoException).code !== "ENOENT") throw missing;
         // No reap was started: the pane is gone for another reason, such as being
         // closed by hand after the worker died. Only an explicit force may finish it.
-        const placement = requiredPlacement(manifest);
-        if (!options.force || await this.epoch(placement.socketPath) !== placement.serverEpoch) throw error;
-        const panes = (await this.run(placement.socketPath, ["list-panes", "-a", "-F", "#{pane_id}"])).split("\n");
-        if (panes.includes(placement.paneId)) throw error;
+        if (!options.force || !(await this.paneIsGone(manifest))) throw error;
         await verifyCleanupOrForce();
         await options.beforeRemove?.();
-        atomicPrivateJson(store.path("reaped.json"), { workerEpoch: manifest.workerEpoch, paneId: placement.paneId,
+        atomicPrivateJson(store.path("reaped.json"), { workerEpoch: manifest.workerEpoch, paneId: requiredPlacement(manifest).paneId,
           reapedAt: new Date().toISOString(), forced: true, reason: options.reason });
         return;
       }
