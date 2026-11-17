@@ -111,3 +111,51 @@ test("a crashed worker whose pane was closed by hand reports the real error, and
     await f.tmux.reap(f.manifest);
   } finally { delete process.env.PI_CODING_AGENT_DIR; await rm(f.root, { recursive: true, force: true }); }
 });
+
+/** The tmux server restarted after the worker crashed. The old server's
+ * processes are faked as gone or alive by identity. */
+async function afterTmuxRestart(alive: string[]) {
+  const f = await crashedWorker();
+  f.manifest.panePid = 123; f.manifest.paneProcessToken = "123:fixture";
+  (f.tmux as any).inspect = async () => { throw new Error("Tmux server identity changed"); };
+  (f.tmux as any).epoch = async () => "9:9";
+  (f.tmux as any).run = async (_socket: string, args: string[]) => args[0] === "list-panes" ? "%1" : "";
+  (f.tmux as any).processAlive = async (identity: string) => alive.includes(identity);
+  return f;
+}
+
+test("force reaps a worker from before a tmux restart once its server and Pi are gone", async () => {
+  const f = await afterTmuxRestart([]);
+  try {
+    await assert.rejects(f.tmux.reap(f.manifest), /Tmux server identity changed/);
+    await f.tmux.reap(f.manifest, undefined, { force: true, reason: "tmux restarted" });
+    assert.equal(f.calls.includes("kill-pane"), false, "a pane ID on the new server is never touched");
+    const { readFile } = await import("node:fs/promises");
+    assert.equal(JSON.parse(await readFile(f.store.path("reaped.json"), "utf8")).forced, true);
+  } finally { delete process.env.PI_CODING_AGENT_DIR; await rm(f.root, { recursive: true, force: true }); }
+});
+
+test("force still refuses when the old server or the worker's Pi is alive", async () => {
+  for (const alive of [["1:2"], ["123:fixture"]]) {
+    const f = await afterTmuxRestart(alive);
+    try {
+      await assert.rejects(f.tmux.reap(f.manifest, undefined, { force: true, reason: "tmux restarted" }), /Tmux server identity changed/);
+    } finally { delete process.env.PI_CODING_AGENT_DIR; await rm(f.root, { recursive: true, force: true }); }
+  }
+});
+
+test("force refuses a worker from before a tmux restart without a recorded Pi identity", async () => {
+  const f = await afterTmuxRestart([]);
+  try {
+    delete f.manifest.panePid; delete f.manifest.paneProcessToken;
+    await assert.rejects(f.tmux.reap(f.manifest, undefined, { force: true, reason: "tmux restarted" }), /Tmux server identity changed/);
+  } finally { delete process.env.PI_CODING_AGENT_DIR; await rm(f.root, { recursive: true, force: true }); }
+});
+
+test("force reaps when no tmux server answers on the socket anymore", async () => {
+  const f = await afterTmuxRestart([]);
+  try {
+    (f.tmux as any).epoch = async () => { throw new Error("no server running"); };
+    await f.tmux.reap(f.manifest, undefined, { force: true, reason: "tmux gone" });
+  } finally { delete process.env.PI_CODING_AGENT_DIR; await rm(f.root, { recursive: true, force: true }); }
+});
