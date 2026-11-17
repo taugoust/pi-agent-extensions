@@ -38,6 +38,7 @@
       "openai-usage",
       "pdf",
       "mac-system-theme",
+      "reload-on-deploy",
       "modal-editor",
       "questionnaire",
       "ssh",

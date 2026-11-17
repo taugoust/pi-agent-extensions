@@ -2050,6 +2050,7 @@ in
       '';
 
   pdf = import ./pdf-check.nix { inherit self pkgs; };
+  reload-on-deploy = import ./reload-on-deploy-check.nix { inherit self pkgs; };
 
   sandbox =
     pkgs.runCommand "sandbox-check"
