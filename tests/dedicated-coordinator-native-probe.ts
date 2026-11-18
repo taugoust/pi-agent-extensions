@@ -59,7 +59,8 @@ export function registerDedicatedCoordinatorProbe(pi: any, append: (row: any) =>
       const first = await retainedManagedChild(firstChild, owner);
       const routing = (globalThis as any).__paeSubagentRoutingV1;
       const selected = await routing.getSnapshot({ sessionId: owner });
-      assert.equal(first.spec.model, `${selected.selection?.providerId ?? "offline-profile-fixture"}/gpt-6.1-sol:high`);
+      const provider = selected.selection?.providerId ?? "offline-profile-fixture";
+      assert.equal(first.spec.model, `${provider}/gpt-6.1-sol:high`);
       assert.equal(first.spec.cleanupWorktreesOnReap, true);
       await executor.pause(entry);
       await executor.verifyStopped(entry);
@@ -70,7 +71,14 @@ export function registerDedicatedCoordinatorProbe(pi: any, append: (row: any) =>
       // This edit must affect NEW launches, never this retained coordinator.
       await writeFile(join(getAgentDir(), "agents", "coordinator.md"), "---\nname: coordinator\ndescription: Changed offline fixture\nmodel: gpt-6-astra\nthinking: low\n---\nCHANGED_COORDINATOR_MUST_NOT_REPLACE_RETAINED\n");
       // A setting change must not move this retained coordinator either.
-      if (selected.selection) await routing.set({ expectedSessionId: owner, expectedServiceEpoch: selected.serviceEpoch, expectedRevision: selected.revision, selection: null });
+      if (selected.selection) {
+        await routing.set({
+          expectedSessionId: owner,
+          expectedServiceEpoch: selected.serviceEpoch,
+          expectedRevision: selected.revision,
+          selection: null,
+        });
+      }
       entry.child = await executor.resume(entry);
       // The ordinary managed Goal path retains its stopped, live worker. Goal
       // activation changes; task/child/attempt/worker authority must NOT change.
