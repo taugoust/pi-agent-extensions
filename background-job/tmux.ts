@@ -272,6 +272,14 @@ export class TmuxBackend implements JobProcessBackend {
       return { exists: false };
     }
     const [tag, deadRaw, pidRaw, token, session, window, server, startToken] = result.stdout.trim().split("|");
+    // Some tmux versions answer a missing pane with success and only the
+    // server fields filled. Confirm the pane is really absent from the server
+    // before the ownership check, which would otherwise refuse forever.
+    if (!tag && !deadRaw && !pidRaw && !token && !startToken) {
+      const panes = await this.run(["list-panes", "-a", "-F", "#{pane_id}"], true, socket);
+      if (panes.code !== 0) throw new Error('Cannot verify missing tmux pane');
+      if (!panes.stdout.split("\n").includes(launch.paneId)) return { exists: false };
+    }
     // A foreground group is promoted with move-window. Its server-global window
     // and pane identities remain unchanged; sessionId is launch history only.
     if (launch.ownershipToken && (token !== launch.ownershipToken || startToken !== launch.paneStartToken || !/^\$[0-9]+$/.test(session ?? '') || window !== launch.windowId || Number(server) !== launch.serverPid)) throw new Error('Saved tmux pane ownership/placement changed; refusing replacement work');

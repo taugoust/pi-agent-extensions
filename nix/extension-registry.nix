@@ -20,6 +20,7 @@ let
     "progress"
     "cache-hit-monitor"
     "mac-system-theme"
+    "reload-on-deploy"
     "modal-editor"
     "pdf"
     "permission-gate"

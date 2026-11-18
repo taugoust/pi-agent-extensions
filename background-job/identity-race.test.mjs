@@ -44,4 +44,18 @@ for(const method of ['paneState','inspect']) {
  server.backend.identityToken=async pid=>{if(pid===100)return ++calls===1?'server':'replacement';throw Object.assign(new Error('gone'),{code:'ENOENT'});};
  await assert.rejects(server.backend[method]('job',launch),/server identity changed/);
 }
+// tmux 3.6 answers a missing pane with exit 0 and empty pane fields.
+const emptyPane={code:0,stdout:'||||||100|',stderr:''};
+for(const method of ['paneState','inspect']) {
+ const gone=fixture(emptyPane);
+ const listed=[];
+ const run=gone.backend.run;
+ gone.backend.run=async(args,...rest)=>args[0]==='list-panes'?(listed.push(1),{code:0,stdout:'%2\n%3',stderr:''}):run(args,...rest);
+ assert.deepEqual(await gone.backend[method]('job',launch),{exists:false});
+ assert.equal(listed.length,1,'absence is confirmed against the pane list');
+ const stillListed=fixture(emptyPane);
+ const run2=stillListed.backend.run;
+ stillListed.backend.run=async(args,...rest)=>args[0]==='list-panes'?{code:0,stdout:'%1',stderr:''}:run2(args,...rest);
+ await assert.rejects(stillListed.backend[method]('job',launch),/ownership\/placement changed/);
+}
 console.log('tmux identity exit race: dead/missing accepted; PID/server/ownership replacement and unverifiable live state refused');

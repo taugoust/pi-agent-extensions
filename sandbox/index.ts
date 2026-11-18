@@ -8,7 +8,11 @@
  */
 
 import { sandboxSetting } from "./settings.js";
-import { publishAgentSHRoutingBinding, releaseAgentSHRoutingBinding, sessionRoutingEnvironment } from "../shared/session-routing.ts";
+import {
+  publishAgentSHRoutingBinding,
+  releaseAgentSHRoutingBinding,
+} from "../shared/session-routing.ts";
+import { subagentRequestRoutingEnvironment } from "../shared/subagent-routing.ts";
 import { spawn } from "node:child_process";
 import { randomUUID } from "node:crypto";
 import { accessSync, closeSync, constants as fsConstants, fstatSync, lstatSync, openSync, readSync, realpathSync, statSync } from "node:fs";
@@ -3310,7 +3314,14 @@ export default function sandbox(pi: ExtensionAPI) {
         onUpdate?.({ content: latest ? [{ type: "text", text: latest }] : [], details: streamDetails() });
       };
       const resultArtifactThresholdBytes = hasSingle ? 4 * 1024 : 2 * 1024;
-      const routingEnvironment = sessionRoutingEnvironment(ctx);
+      // A draft disposition launches nothing, so it needs no child routing.
+      const launchedSpecs = hasDisposition ? []
+        : hasTasks ? effectiveParams.tasks
+        : hasChain ? effectiveParams.chain
+        : [effectiveParams];
+      const launchedModels = launchedSpecs.map((spec: any) => spec.model);
+      const routingEnvironment =
+        subagentRequestRoutingEnvironment(ctx, launchedModels, getAgentDir());
       const requestRouting = Object.keys(routingEnvironment).length ? { agentDir: getAgentDir(), environment: routingEnvironment } : undefined;
       let result: unknown;
       try {

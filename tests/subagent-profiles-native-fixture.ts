@@ -91,7 +91,7 @@ export default async function profileFixture(pi: any) {
     };
   }
 
-  pi.registerProvider(providerId, {
+  const provider = {
     api: "offline-profile-fixture", apiKey: "synthetic-not-a-credential", baseUrl: "http://127.0.0.1:1",
     models,
     streamSimple(model: any, context: any, options: any = {}) {
@@ -139,5 +139,7 @@ export default async function profileFixture(pi: any) {
       });
       return stream;
     },
-  });
+  };
+  pi.registerProvider(providerId, provider);
+  pi.registerProvider("offline-routing-fixture", provider);
 }

@@ -134,7 +134,7 @@ export default function(pi) {{
         command("idleprobe", "IDLE-FORWARD-OK")
         command("acceptance", "OLD-ACCEPTANCE")
         command("nameprobe", "OLD-NAMES")
-        command("modelprobe", "legacy-default:low on the owning session's provider")
+        command("modelprobe", "legacy-default:low")
         for folder in folders:
             link = live / folder
             link.unlink()
@@ -143,7 +143,7 @@ export default function(pi) {{
         command("probe", "WAKE")
         command("acceptance", "NEW-ACCEPTANCE")
         command("nameprobe", "NEW-NAMES")
-        command("modelprobe", "cheap:low on the owning session's provider")
+        command("modelprobe", "cheap:low")
         assert process.pid == pid and process.poll() is None
         print("PASS: same-process subagent reload refreshed completion wake behavior")
     finally:

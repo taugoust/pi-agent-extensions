@@ -24,7 +24,9 @@ async function fixtureGit(cwd, ...args) {
   return executeFile("git", ["-c", "core.hooksPath=/dev/null", ...args], { cwd, timeout: 10000,
     env: { PATH: process.env.PATH, HOME: cwd, GIT_CONFIG_NOSYSTEM: "1", GIT_CONFIG_GLOBAL: "/dev/null", GIT_TERMINAL_PROMPT: "0" } });
 }
-async function startParent(root, scenario, { projectTrust = false, agentSH = false, startupDefault = false, gitRepo = false } = {}) {
+async function startParent(root, scenario, {
+  projectTrust = false, agentSH = false, startupDefault = false, gitRepo = false, persist = false,
+} = {}) {
   const home = join(root, "home"), agentDir = join(home, "agent"), cwd = join(root, "workspace");
   await mkdir(join(agentDir, "agents"), { recursive: true });
   await mkdir(join(agentDir, "extensions"), { recursive: true });
@@ -39,6 +41,7 @@ async function startParent(root, scenario, { projectTrust = false, agentSH = fal
   await writeFile(join(agentDir, "settings.json"), JSON.stringify({ defaultModel: "gpt-6-astra", defaultProvider: "offline-profile-fixture", retry: { enabled: false }, compaction: { enabled: false }, defaultProjectTrust: "never", extensions: [fixture] }));
   await writeFile(join(agentDir, "model-tiers.json"), JSON.stringify({
     "offline-profile-fixture": { cheap: "gpt-6-luna", expensive: "gpt-6.1-sol" },
+    "offline-routing-fixture": { cheap: "gpt-6-luna", expensive: "gpt-6.1-sol" },
   }));
   await writeFile(join(agentDir, "agents", "fixture-scout.md"), profile());
   const extendedProfile = [
@@ -71,7 +74,8 @@ async function startParent(root, scenario, { projectTrust = false, agentSH = fal
     await writeFile(join(cwd, ".pi", "settings.json"), JSON.stringify({ retry: { enabled: false } }));
     await writeFile(join(cwd, ".pi", "agents", "fixture-project.md"), `---\nname: fixture-project\ndescription: Project trust fixture\n---\nPROJECT_PROFILE_INSTRUCTION\n`);
   }
-  const args = ["--mode", "rpc", "--offline", "--no-session", "--no-skills",
+  const session = persist ? ["--session", join(root, "session.jsonl")] : ["--no-session"];
+  const args = ["--mode", "rpc", "--offline", ...session, "--no-skills",
     "--extension", fixture, "--extension", extension,
     ...(startupDefault ? [] : ["--provider", "offline-profile-fixture", "--model", "parent"])];
   const child = spawn(binary, args, { cwd, env, stdio: ["pipe", "pipe", "pipe"] });
@@ -171,9 +175,13 @@ try {
   // Exercise the actual dedicated-goal launch/resume path, not just profile
   // overlays and executor unit seams. Its child Goal engines and state are
   // disposable, with this fixture's deterministic in-process provider only.
-  {
-    const instance = await startParent(join(root, "dedicated-coordinator"), { dedicated: true });
+  // Run once following the session and once with the subagent provider set.
+  for (const provider of ["offline-profile-fixture", "offline-routing-fixture"]) {
+    const routed = provider === "offline-routing-fixture";
+    const dir = join(root, routed ? "goal-set" : "goal-own");
+    const instance = await startParent(dir, { dedicated: true });
     try {
+      if (routed) await instance.rpc("prompt", { message: `/subagent-provider ${provider}` });
       await instance.promptAndWait("run dedicated coordinator probe", 60_000);
       const rows = await assertOffline(instance.log);
       const proof = rows.find(row => row.event === "dedicated_probe");
@@ -187,13 +195,57 @@ try {
       for (const sample of [proof.first, proof.resumed]) {
         const request = rows.filter(row => row.role === "child" && row.childId === sample.child.childId)[sample.dispatchIndex];
         assert(request, `missing actual dedicated request for ${sample.child.childId} at ${sample.dispatchIndex}`);
-        assert.equal(request.provider, "offline-profile-fixture");
+        assert.equal(request.provider, provider);
         assert.equal(request.model, "gpt-6.1-sol");
         assert.equal(request.reasoning, "high");
         assert.match(JSON.stringify(request), /single-coordinator execution controls/);
         assert.doesNotMatch(JSON.stringify(request), /CHANGED_COORDINATOR_MUST_NOT_REPLACE_RETAINED/);
       }
       console.log("PASS actual dedicated coordinator: Sol:high launch + retained managed-worker Resume after profile edit; distinct Goal activation; exact task/child/attempt fencing; both activations verified stopped");
+    } finally { await cleanup(instance); }
+  }
+
+  // Session controls route new workers without moving the parent. Changing the
+  // choice while a completed headless worker remains alive must not reroute it.
+  {
+    const dir = join(root, "subagent-provider");
+    const params = { task: "route worker tier", acceptance: ["report completion"], model: "cheap" };
+    const instance = await startParent(dir, { params }, { persist: true });
+    const childRows = async () => {
+      const rows = await assertOffline(instance.log);
+      return rows.filter(row => row.role === "child");
+    };
+    try {
+      await instance.rpc("prompt", { message: "/subagent-provider offline-routing-fixture" });
+      await instance.promptAndWait("launch routed tier");
+
+      const sessionText = await readFile(join(dir, "session.jsonl"), "utf8");
+      const saved = sessionText.trim().split("\n").map(JSON.parse);
+      const setting = saved.findLast(entry => entry.customType === "pi-subagent-routing-v1");
+      const expected = { providerId: "offline-routing-fixture", accountId: null };
+      assert.deepEqual(setting.data.selection, expected);
+
+      const rows = await assertOffline(instance.log);
+      const parentRows = rows.filter(row => row.role === "parent");
+      assert(parentRows.every(row => row.provider === "offline-profile-fixture"));
+      const child = rows.find(row => row.role === "child");
+      assert.equal(child.provider, "offline-routing-fixture");
+      assert.equal(child.model, "gpt-6-luna");
+      const record = (await taskRecords(instance.stateRoot))[0];
+      await instance.rpc("prompt", { message: "/subagent-provider clear" });
+      await instance.promptAndWait(`resume-task: ${record.taskId}`);
+      const resumed = await childRows();
+      assert.equal(resumed.length, 2);
+      for (const row of resumed) {
+        assert.equal(row.provider, "offline-routing-fixture");
+        assert.equal(row.model, "gpt-6-luna");
+      }
+
+      await instance.promptAndWait("launch after clearing provider");
+      const latest = (await childRows()).at(-1);
+      assert.equal(latest.provider, "offline-profile-fixture");
+      assert.equal(latest.model, "gpt-6-luna");
+      console.log("PASS subagent provider setting routes new workers and keeps running ones");
     } finally { await cleanup(instance); }
   }
 
