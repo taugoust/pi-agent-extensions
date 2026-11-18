@@ -9,6 +9,7 @@ import { TuiWorkerStore } from "./tui-worker-store.ts";
 import { processIdentity } from "./tui-worker-tmux.ts";
 import { callTuiWorker, awaitTuiWorkerVerification } from "./tui-worker-client.ts";
 import type { TuiWorkerManifest } from "../shared/tui-worker-protocol.ts";
+import { resolveAgentProfileLaunch } from "./profiles.ts";
 
 test("worker trust skips only unresolved asks without persisting trust or loading project policy", async () => {
   const root = await mkdtemp(join(tmpdir(), "worker-trust-policy-"));
@@ -316,6 +317,47 @@ test("Pi's exact too-small compaction error is an explicit idempotent no-op only
   }
 });
 
+test("resolved profile tools activate extensions without bypassing headless restrictions", async () => {
+  const profile = { name: "extended", description: "Extension tools", systemPrompt: "Inspect", source: "user" as const,
+    filePath: "/extended.md", tools: ["read", "background_job", "fetch", "subagent"] };
+  for (const execution of [undefined, "rpc-headless"] as const) {
+    const root = await mkdtemp(join(tmpdir(), "pi-profile-tools-")), store = new TuiWorkerStore(root);
+    const selected = resolveAgentProfileLaunch({ agent: "extended" }, [profile], { defaultModel: "m" });
+    const manifest: TuiWorkerManifest = {
+      protocol: 1, ownerSessionId: "parent", taskId: "task", runtimeId: "runtime", groupId: `subagent-job-${"a".repeat(24)}`,
+      childId: `subagent-child-${"b".repeat(24)}`, attempt: 1, workerEpoch: "c".repeat(32), controlToken: "d".repeat(64),
+      controlSocket: join(root, "control.sock"), sessionFile: join(root, "session.jsonl"), launchMode: "none", tools: selected.tools,
+      ...(execution ? { execution, presentation: "headless-foreground", processPid: process.pid + 1, processToken: `${process.pid + 1}:1`,
+        fifoPath: join(root, "stdin.fifo"), foregroundOwner: { pid: process.pid, token: await processIdentity(process.pid) } }
+        : { presentation: "background", placement: { socketPath: "/tmp/tmux", serverEpoch: "1:2", sessionId: "$1", windowId: "@1", paneId: "%1", ownershipNonce: "e".repeat(64) } }),
+    };
+    store.writeManifest(manifest);
+    const previous = process.env.PI_TUI_WORKER_MANIFEST;
+    process.env.PI_TUI_WORKER_MANIFEST = store.path("manifest.json");
+    const handlers = new Map<string, Function>();
+    let activeTools = ["read", "bash", "edit", "write", "fetch", "background_job", "subagent"];
+    const ctx = { mode: execution ? "rpc" : "tui", hasUI: false, isIdle: () => true, hasPendingMessages: () => false,
+      abort() {}, shutdown() {}, sessionManager: { getSessionFile: () => manifest.sessionFile, getSessionId: () => "profile-child" } };
+    try {
+      await workerExtension({ registerTool() {}, on: (name: string, handler: Function) => handlers.set(name, handler),
+        getActiveTools: () => activeTools, setActiveTools: (names: string[]) => { activeTools = names; } } as any);
+      await handlers.get("session_start")!({}, ctx);
+      assert.equal((await callTuiWorker(manifest, { operation: "status" })).data?.readyForPrompts, true);
+      const businessTools = activeTools.filter(name => !["notify_parent", "task_outcome", "verify", "request_guidance", "guidance"].includes(name));
+      assert.deepEqual(businessTools, execution ? ["read", "fetch"] : profile.tools);
+      for (const tool of ["notify_parent", "task_outcome", "verify", "request_guidance"]) assert.ok(activeTools.includes(tool));
+      assert.equal(handlers.get("tool_call")!({ toolName: "fetch" }, ctx), undefined);
+      for (const toolName of ["background_job", "subagent"]) {
+        assert.equal(handlers.get("tool_call")!({ toolName }, ctx)?.block, execution ? true : undefined);
+      }
+    } finally {
+      await handlers.get("session_shutdown")?.({}, ctx);
+      if (previous === undefined) delete process.env.PI_TUI_WORKER_MANIFEST; else process.env.PI_TUI_WORKER_MANIFEST = previous;
+      await rm(root, { recursive: true, force: true });
+    }
+  }
+});
+
 test("headless RPC workers require child-local AgentSH authority before prompts or delegation", async () => {
   const root = await mkdtemp(join(tmpdir(), "pi-headless-guard-"));
   const store = new TuiWorkerStore(root);
@@ -368,7 +410,7 @@ test("worker extension with missing selected guard authority never dispatches pr
   const manifest: TuiWorkerManifest = {
     protocol: 1, ownerSessionId: "parent", taskId: "task", runtimeId: "runtime", groupId: `subagent-job-${"a".repeat(24)}`,
     childId: `subagent-child-${"b".repeat(24)}`, attempt: 1, workerEpoch: "c".repeat(32), controlToken: "d".repeat(64),
-    controlSocket: join(root, "control.sock"), sessionFile: join(root, "session.jsonl"), launchMode: "guard-only",
+    controlSocket: join(root, "control.sock"), sessionFile: join(root, "session.jsonl"), launchMode: "guard-only", tools: ["read", "fetch", "background_job"],
     presentation: "background", placement: { socketPath: "/tmp/tmux", serverEpoch: "1:2", sessionId: "$1", windowId: "@1", paneId: "%1", ownershipNonce: "e".repeat(64) },
   };
   store.writeManifest(manifest);
@@ -394,7 +436,7 @@ test("worker extension with missing selected guard authority never dispatches pr
     assert.equal(store.readState().active, false, "rejected prompt left a phantom running worker");
     assert.equal(store.readState().phase, "ready");
     assert.equal(Object.keys(store.readState().receipts).length, 0, "known rejection created an ambiguous dispatch intent");
-    assert.equal(handlers.get("tool_call")!({}, ctx).block, true);
+    for (const toolName of ["read", "fetch", "background_job"]) assert.equal(handlers.get("tool_call")!({ toolName }, ctx).block, true);
     handlers.get("message_end")!({ message: { role: "assistant", stopReason: "toolUse", content: [] } }, ctx);
     handlers.get("agent_settled")!({}, ctx);
     const reportPath = store.readState().lastReport;

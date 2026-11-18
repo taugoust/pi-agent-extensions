@@ -1708,7 +1708,7 @@ const SubagentItem = Type.Object({
   task: Type.String({ description: "Task to delegate to this dynamic subagent" }),
   systemPrompt: Type.Optional(Type.String({ description: "Optional additional system prompt for this subagent" })),
   model: Type.Optional(Type.String({ description: `Explicit override of the profile/default role model, optionally with :thinking. A tier (cheap, expensive, superintelligence) or bare model ID uses the owning session's provider. provider/model runs on that provider with its default account. Default: ${defaultSubagentModel}.` })),
-  tools: Type.Optional(Type.Array(Type.String(), { description: "Optional tool allowlist. With agent, only read/bash/edit/write are supported and overrides may narrow, never widen the profile." })),
+  tools: Type.Optional(Type.Array(Type.String(), { description: "Optional tool allowlist. Core and loaded extension tool names are accepted, subject to runtime restrictions. With agent, overrides may narrow, never widen the profile." })),
   cwd: Type.Optional(Type.String({ description: "Optional working directory for this subagent process" })),
   worktree: SubagentWorktree,
 });
@@ -1749,7 +1749,7 @@ function subagentParams() {
   task: Type.Optional(Type.String({ description: "Launch only: task to delegate (single mode). For resume continuation instructions use message instead." })),
   systemPrompt: Type.Optional(Type.String({ description: "Launch only: optional additional system prompt (single mode). Resume preserves the saved configuration." })),
   model: Type.Optional(Type.String({ description: `Launch only: explicit override of the profile/default role model (single mode), optionally with :thinking. A tier (cheap, expensive, superintelligence) or bare model ID uses the owning session's provider. provider/model runs on that provider with its default account. Default: ${defaultSubagentModel}. Resume retains the role model.` })),
-  tools: Type.Optional(Type.Array(Type.String(), { description: "Launch only: optional tool allowlist (single mode). With agent, only read/bash/edit/write are supported and overrides can only narrow the profile. Not accepted by resume." })),
+  tools: Type.Optional(Type.Array(Type.String(), { description: "Launch only: optional tool allowlist (single mode). Core and loaded extension tool names are accepted, subject to runtime restrictions. With agent, overrides can only narrow the profile. Not accepted by resume." })),
   cwd: Type.Optional(Type.String({ description: "Launch only: optional working directory (single mode). Not accepted by resume." })),
   worktree: SubagentWorktree,
   tasks: Type.Optional(Type.Array(SubagentItem, { maxItems: MAX_PARALLEL_TASKS, description: "Launch only: parallel subagent tasks; each item requires acceptance criteria. Max 8, up to 4 run concurrently." })),
@@ -2561,7 +2561,18 @@ export default function (pi: ExtensionAPI) {
         const namedProfile = !internalManagedExecution && [params, ...(params.tasks ?? []), ...(params.chain ?? [])].some(item => item?.agent !== undefined);
         // Managed foreground/background recursion carries the already-resolved
         // trusted spec under an unforgeable in-process Symbol, never JSON input.
-        if (!internalManagedExecution) params = await resolveSubagentProfiles(params, ctx);
+        if (!internalManagedExecution) {
+          const profileDefaults = (params.tasks ?? params.chain ?? [params]).map((item: any) => item.agent !== undefined && item.tools === undefined);
+          params = await resolveSubagentProfiles(params, ctx);
+          // Inherited profile defaults are best-effort on headless workers.
+          // Explicit tools still reach the manager's unavailable-tool rejection.
+          if (process.platform === "linux" && params.background !== true && !params.action && params.mode !== "draft"
+            && selectSubagentBackend(agentSHBridge(), agentSHStartup).kind === "native") {
+            (params.tasks ?? params.chain ?? [params]).forEach((spec: any, index: number) => {
+              if (profileDefaults[index] && spec.tools !== undefined) spec.tools = spec.tools.filter((tool: string) => tool !== "background_job" && tool !== "subagent");
+            });
+          }
+        }
         // AgentSH's legacy protocol omits --tools for an empty list, which
         // would turn an explicit zero-tool profile into backend defaults.
         if (namedProfile && selectSubagentBackend(agentSHBridge(), agentSHStartup).kind === "agentsh") {

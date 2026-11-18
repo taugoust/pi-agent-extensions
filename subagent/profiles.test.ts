@@ -146,14 +146,21 @@ describe("agent profile discovery", () => {
     await assert.rejects(discover(root), /must be true or false/);
   });
 
-  it("ships coordinator and four adapted builtins with guarded native tool names", async () => {
+  it("ships worker job support while keeping non-editing builtins narrow", async () => {
     const root = await temp();
     const profiles = await discoverAgentProfiles({ cwd: root, agentDir: path.join(root, "home"), projectTrusted: false });
     assert.deepEqual(profiles.map(({ name }) => name), ["coordinator", "oracle", "reviewer", "scout", "worker"]);
     assert.deepEqual(profiles.find(({ name }) => name === "scout")?.tools, ["read", "bash"]);
     assert.deepEqual(profiles.find(({ name }) => name === "reviewer")?.tools, ["read", "bash"]);
     assert.deepEqual(profiles.find(({ name }) => name === "oracle")?.tools, ["read", "bash"]);
-    assert.deepEqual(profiles.find(({ name }) => name === "worker")?.tools, ["read", "bash", "edit", "write"]);
+    assert.deepEqual(profiles.find(({ name }) => name === "worker")?.tools, ["read", "bash", "edit", "write", "background_job"]);
+    for (const name of ["scout", "reviewer", "oracle"]) {
+      const selected = resolveAgentProfileLaunch({ agent: name }, profiles, { defaultModel: "m" });
+      for (const tool of ["edit", "write", "fetch", "background_job", "subagent"]) {
+        assert.ok(!selected.tools?.includes(tool));
+        assert.throws(() => resolveAgentProfileLaunch({ agent: name, tools: [tool] }, profiles, { defaultModel: "m" }));
+      }
+    }
     assert.equal(profiles.find(({ name }) => name === "coordinator")?.cleanupWorktreesOnReap, true);
     assert.equal(profiles.find(({ name }) => name === "coordinator")?.automaticWorktrees, true);
     for (const item of profiles.filter(({ name }) => name !== "coordinator")) assert.notEqual(item.automaticWorktrees, true);
@@ -198,15 +205,20 @@ describe("agent profile launch resolution", () => {
     assert.deepEqual(resolveAgentProfileLaunch({ agent: "reviewer" }, [{ ...base, tools: [] }], { defaultModel: "m" }).tools, []);
     assert.throws(() => resolveAgentProfileLaunch({ agent: "reviewer", tools: ["write"] }, [base], { defaultModel: "m" }), /cannot widen profile/);
   });
-  it("rejects unsupported names declared by a selected profile or explicit override", async () => {
+  it("resolves extension tools from profiles and only permits narrowing overrides", async () => {
     const root = await temp();
-    await profile(path.join(root, "builtins", "legacy.md"), "name: legacy\ndescription: Legacy\ntools: read, grep");
-    const [legacy] = await discover(root);
-    assert.deepEqual(legacy?.tools, ["read", "grep"]);
-    assert.throws(() => resolveAgentProfileLaunch({ agent: "legacy" }, [legacy!], { defaultModel: "m" }), /unsupported native tools: grep/);
+    await profile(path.join(root, "builtins", "extended.md"), "name: extended\ndescription: Extension tools\ntools: read, background_job, fetch, custom_tool, fetch");
+    const profiles = await discover(root);
+    const resolve = (tools?: string[]) => resolveAgentProfileLaunch({ agent: "extended", ...(tools !== undefined ? { tools } : {}) }, profiles, { defaultModel: "m" });
+    assert.deepEqual(resolve().tools, ["read", "background_job", "fetch", "custom_tool"]);
+    assert.deepEqual(resolve(["fetch", "background_job", "fetch"]).tools, ["fetch", "background_job"]);
+    assert.deepEqual(resolve([]).tools, []);
+    for (const tools of [["write"], ["subagent"], ["fetch", "another_tool"]]) assert.throws(() => resolve(tools));
     const noTools = { ...base, tools: undefined };
-    assert.throws(() => resolveAgentProfileLaunch({ agent: "reviewer", tools: ["find"] }, [noTools], { defaultModel: "m" }), /unsupported native tools: find/);
-    assert.throws(() => resolveAgentProfileLaunch({ agent: "reviewer", tools: ["read", "ls"] }, [base], { defaultModel: "m" }), /unsupported native tools: ls/);
+    assert.deepEqual(resolveAgentProfileLaunch({ agent: "reviewer", tools: ["fetch", "background_job"] }, [noTools], { defaultModel: "m" }).tools, ["fetch", "background_job"]);
+    for (const tools of [["not a tool"], [""], [42], "fetch"]) {
+      assert.throws(() => resolveAgentProfileLaunch({ agent: "reviewer", tools } as any, [noTools], { defaultModel: "m" }));
+    }
   });
   it("does not require profile lookup when no agent is selected, defaults policy off, rejects direct policy input, and errors on unknown profile", () => {
     assert.deepEqual(resolveAgentProfileLaunch({ agentScope: "user", task: "x" }, [], { defaultModel: "m" }), { task: "x", cleanupWorktreesOnReap: false, automaticWorktrees: false });

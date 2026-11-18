@@ -41,6 +41,7 @@ async function startParent(root, scenario, { projectTrust = false, agentSH = fal
     "offline-profile-fixture": { cheap: "gpt-6-luna", expensive: "gpt-6.1-sol" },
   }));
   await writeFile(join(agentDir, "agents", "fixture-scout.md"), profile());
+  await writeFile(join(agentDir, "agents", "fixture-extended.md"), `---\nname: fixture-extended\ndescription: Loaded extension tools\ntools: read, fetch, background_job, subagent\n---\nInspect with extension tools.\n`);
   const log = join(root, "dispatch.jsonl"), stateRoot = join(root, "worker-state");
   const launcher = process.env.PI_TUI_WORKER_LAUNCHER;
   if (!launcher) throw new Error("Set PI_TUI_WORKER_LAUNCHER to the immutable Nix pi-tui-worker executable for native acceptance tests");
@@ -86,11 +87,16 @@ async function startParent(root, scenario, { projectTrust = false, agentSH = fal
     return response.data;
   };
   await rpc("get_state");
-  let settledCount = events.filter((event) => event.type === "agent_settled").length;
   const promptAndWait = async (message, timeoutMs = 20_000) => {
-    await rpc("prompt", { message });
-    await wait(() => events.filter((event) => event.type === "agent_settled").length > settledCount, "agent_settled", timeoutMs);
-    settledCount = events.filter((event) => event.type === "agent_settled").length;
+    const start = events.length;
+    // Completion notifications can start another parent turn between prompts.
+    // Queue safely and await this user message's settlement, not an earlier turn.
+    await rpc("prompt", { message, streamingBehavior: "followUp" });
+    await wait(() => {
+      const user = events.findIndex((event, index) => index >= start && event.type === "message_end" && event.message?.role === "user"
+        && event.message.content?.some(part => part.type === "text" && part.text === message));
+      return user >= 0 && events.slice(user + 1).some(event => event.type === "agent_settled");
+    }, "prompt settlement", timeoutMs);
   };
   const close = async () => {
     if (!exited) child.kill("SIGTERM");
@@ -244,6 +250,26 @@ try {
     } finally { await cleanup(instance); }
   }
 
+  // Loaded extension tools survive profile resolution and actual worker
+  // activation, while headless-only prohibitions still override that ceiling.
+  for (const [label, tools, expected] of [
+    ["extension-defaults", undefined, ["read", "fetch"]],
+    ["extension-narrowed", ["fetch"], ["fetch"]],
+  ]) {
+    const instance = await startParent(join(root, label), { params: {
+      task: "inspect extension tools", acceptance: ["record active extension tools"], agent: "fixture-extended",
+      ...(tools ? { tools } : {}),
+    } });
+    try {
+      await instance.promptAndWait(`launch ${label}`);
+      const actual = (await assertOffline(instance.log)).filter(row => row.role === "child");
+      assert.equal(actual.length, 1);
+      assert.deepEqual(activeTools(actual[0]), [...expected, "notify_parent", "request_guidance", "task_outcome"].sort());
+      const [retained] = await taskRecords(instance.stateRoot);
+      assert.deepEqual(retained.spec.tools, expected);
+    } finally { await cleanup(instance); }
+  }
+
   // Actual bundled role defaults travel through native dispatch, without
   // changing the owning synthetic provider/account. Explicit models win.
   for (const [label, params, model, thinking] of [
@@ -262,6 +288,11 @@ try {
       assert.equal(actual[0].reasoning, thinking);
       const [retained] = await taskRecords(instance.stateRoot);
       assert.equal(retained.spec.cleanupWorktreesOnReap, params.agent === "coordinator");
+      if (params.agent === "worker") {
+        assert.deepEqual(retained.spec.tools, ["read", "bash", "edit", "write"]);
+        assert.ok(!activeTools(actual[0]).includes("background_job"));
+        assert.ok(!activeTools(actual[0]).includes("subagent"));
+      }
     } finally { await cleanup(instance); }
   }
 
@@ -329,6 +360,9 @@ try {
     { name: "unavailable-model", params: { task: "must not launch", acceptance: ["no fallback"], agent: "coordinator", model: "nonexistent-role-model" }, reason: /not found|unavailable|Unknown model/i },
     { name: "unknown", params: { task: "must not launch", acceptance: ["required"], agent: "missing-profile" }, reason: /Unknown agent profile 'missing-profile'/ },
     { name: "widen", params: { task: "must not launch", acceptance: ["required"], agent: "fixture-scout", tools: ["write"] }, reason: /cannot widen profile 'fixture-scout' allowlist/ },
+    { name: "explicit-job", params: { task: "must not launch", acceptance: ["no headless jobs"], agent: "worker", tools: ["background_job"] } },
+    { name: "explicit-delegation", params: { task: "must not launch", acceptance: ["no headless delegation"], agent: "fixture-extended", tools: ["subagent"] } },
+    { name: "plain-explicit-job", params: { task: "must not launch", acceptance: ["no headless jobs"], tools: ["background_job"] } },
     { name: "malformed", params: { task: "must not launch", acceptance: ["required"], agent: "fixture-scout" }, malformed: true, reason: /unsupported field 'unsupported'/ },
     { name: "missing-acceptance", params: { task: "must not launch", agent: "fixture-scout" }, reason: /New delegation requires acceptance: supply 1–16 explicit, task-specific, verifiable completion criteria\. No worker was launched\./ },
     { name: "agentsh-empty-tools", agentSH: true, params: { task: "must not inherit defaults", acceptance: ["no dispatch"], agent: "fixture-scout", tools: [] }, reason: /AgentSH cannot enforce an empty profile tool allowlist; no work was started/ },
@@ -357,7 +391,7 @@ try {
       const toolText = Array.isArray(toolResult.message.content)
         ? toolResult.message.content.map((part) => typeof part?.text === "string" ? part.text : "").join("\n")
         : String(toolResult.message.content);
-      assert.match(toolText, scenario.reason, `${scenario.name} rejected for an unexpected reason; call=${JSON.stringify(callRow)}`);
+      if (scenario.reason) assert.match(toolText, scenario.reason, `${scenario.name} rejected for an unexpected reason; call=${JSON.stringify(callRow)}`);
     } finally { await cleanup(instance); }
   }
 
