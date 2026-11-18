@@ -376,15 +376,15 @@ test("root discovers multilevel orphan, blocks active ancestor reap, reconciles 
     assert.ok(leaf, "descendant job identity remains structured, not a human-facing alias");
     assert.equal(leaf.children[0].child_id, f.manifests[2].childId);
     assert.equal(leaf.children[0].task_id, f.manifests[2].taskId);
-    assert.match(
-      listing.content[0].text,
-      /Descendant: single running \(background\)\n1\. fixture running/,
-    );
-    assert.doesNotMatch(
-      listing.content[0].text,
-      /subagent-job-[0-9a-f]{24}/,
-      "readable status uses names, while exact IDs stay in details",
-    );
+    // The model only sees the text, so it must carry the IDs needed to steer.
+    const descendant = listing.content[0].text
+      .split("\n")
+      .findIndex((line: string) => line.startsWith("Descendant: single running (background)"));
+    const lines = listing.content[0].text.split("\n");
+    assert.ok(descendant >= 0);
+    assert.ok(lines[descendant].includes(`job_id=${f.groups[2].id}`));
+    assert.ok(lines[descendant + 1].startsWith("1. fixture running"));
+    assert.ok(lines[descendant + 1].includes(`child_id=${f.manifests[2].childId}`));
     await assert.rejects(
       f.manager.operation({ operation: "reap", job_id: f.groups[0].id }, "session-0"),
       /Active descendants/,

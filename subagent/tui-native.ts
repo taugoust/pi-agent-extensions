@@ -1056,11 +1056,22 @@ export class TuiNativeManager {
       }),
     };
   }
+  /**
+   * The model-facing summary. It names the job and each child, so the caller
+   * can check, steer or reap them without waiting for a notification.
+   */
   private text(g: Group, output = false): string {
     const snapshot = this.publicGroup(g);
-    let text = `${g.mode} ${snapshot.status} (${g.background ? "background" : "foreground staged"})`;
+    const placement = g.background ? "background" : "foreground staged";
+    let text = `${g.mode} ${snapshot.status} (${placement}) job_id=${g.id}`;
     for (const [i, c] of g.children.entries()) {
-      text += `\n${i + 1}. ${this.canonicalTitle(c)} ${c.state}${c.reaped ? " [reaped]" : ""}${c.error ? `: ${c.error}` : ""}${c.observationError ? ` (observation unavailable: ${c.observationError})` : ""}`;
+      const reaped = c.reaped ? " [reaped]" : "";
+      const error = c.error ? `: ${c.error}` : "";
+      const observation = c.observationError
+        ? ` (observation unavailable: ${c.observationError})`
+        : "";
+      const state = `${c.state}${reaped} child_id=${c.childId}`;
+      text += `\n${i + 1}. ${this.canonicalTitle(c)} ${state}${error}${observation}`;
       if (c.spec.verification?.length)
         text += ` checks=${(c.verification as any)?.status ?? "unavailable"} accepted_delivery=${c.acceptedDelivery === true}`;
       if (output && c.report) {
