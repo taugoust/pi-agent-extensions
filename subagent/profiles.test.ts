@@ -146,22 +146,22 @@ describe("agent profile discovery", () => {
     await assert.rejects(discover(root), /must be true or false/);
   });
 
-  it("ships worker job support while keeping non-editing builtins narrow", async () => {
+  it("gives every builtin jobs and fetch, and only the worker edits", async () => {
     const root = await temp();
     const profiles = await discoverAgentProfiles({ cwd: root, agentDir: path.join(root, "home"), projectTrusted: false });
     assert.deepEqual(profiles.map(({ name }) => name), ["coordinator", "oracle", "reviewer", "scout", "worker"]);
-    assert.deepEqual(profiles.find(({ name }) => name === "scout")?.tools, ["read", "bash"]);
-    assert.deepEqual(profiles.find(({ name }) => name === "reviewer")?.tools, ["read", "bash"]);
-    assert.deepEqual(profiles.find(({ name }) => name === "oracle")?.tools, ["read", "bash"]);
-    const worker = profiles.find(({ name }) => name === "worker");
-    assert.deepEqual(worker?.tools, ["read", "bash", "edit", "write", "background_job"]);
+    const toolsOf = (name: string) => profiles.find((profile) => profile.name === name)?.tools;
+    for (const name of ["scout", "reviewer", "oracle"]) {
+      assert.deepEqual(toolsOf(name), ["read", "bash", "background_job", "fetch"]);
+    }
+    assert.deepEqual(toolsOf("worker"), ["read", "bash", "edit", "write", "background_job", "fetch"]);
 
-    // Non-editing profiles can't get write or extension tools, not even by asking.
+    // Non-editing profiles can't get edit, write or delegation, not even by asking.
     const options = { defaultModel: "m" };
     const launch = (agent: string, tools?: string[]) =>
       resolveAgentProfileLaunch({ agent, ...(tools ? { tools } : {}) }, profiles, options);
     for (const name of ["scout", "reviewer", "oracle"]) {
-      for (const tool of ["edit", "write", "fetch", "background_job", "subagent"]) {
+      for (const tool of ["edit", "write", "subagent"]) {
         assert.ok(!launch(name).tools?.includes(tool));
         assert.throws(() => launch(name, [tool]));
       }

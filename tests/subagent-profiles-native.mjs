@@ -357,7 +357,7 @@ try {
       const [retained] = await taskRecords(instance.stateRoot);
       assert.equal(retained.spec.cleanupWorktreesOnReap, params.agent === "coordinator");
       if (params.agent === "worker") {
-        assert.deepEqual(retained.spec.tools, ["read", "bash", "edit", "write"]);
+        assert.deepEqual(retained.spec.tools, ["read", "bash", "edit", "write", "fetch"]);
         assert.ok(!activeTools(actual[0]).includes("background_job"));
         assert.ok(!activeTools(actual[0]).includes("subagent"));
       }

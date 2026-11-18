@@ -17,14 +17,14 @@ Profiles select reusable instructions, a role model/thinking level, and an optio
 | Builtin | Purpose | Business tools | Thinking |
 |---|---|---|---|
 | `coordinator` | Coordinates a goal and reviews delegated work (model `gpt-6.1-sol`) | runtime defaults | high |
-| `scout` | Focused codebase reconnaissance, no edits | read, bash | low |
-| `worker` | Narrow implementation and validation | read, bash, edit, write, background_job | high |
-| `reviewer` | Independent review, no edits | read, bash | high |
-| `oracle` | Advisory challenge of decisions and assumptions, no edits | read, bash | high |
+| `scout` | Focused codebase reconnaissance, no edits | read, bash, background_job, fetch | low |
+| `worker` | Narrow implementation and validation | read, bash, edit, write, background_job, fetch | high |
+| `reviewer` | Independent review, no edits | read, bash, background_job, fetch | high |
+| `oracle` | Advisory challenge of decisions and assumptions, no edits | read, bash, background_job, fetch | high |
 
-Scout, reviewer and oracle keep their non-editing tool lists. They don't get
-`fetch`, because it can send writes and download files as well as read. Custom
-profiles can add it where that fits.
+Every builtin can run background jobs and fetch pages. Only the worker gets
+`edit` and `write`. Leaving those out is a signal of intent, not a sandbox,
+since `bash` can already change files.
 
 Implementers keep the existing subagent role default (the `cheap` tier, plain launches use low thinking and `worker` uses high). The named `coordinator` defaults to `expensive:high`, including dedicated Work → Goals launches through the existing single-child executor. Dedicated Resume retains the recorded model, instructions and tool ceiling instead of rediscovering the profile. Custom coordinator definitions can override the role default; they grant no extra authority. The top-level startup model belongs to Pi settings, not this extension. Explicit model selections and resumed sessions take precedence over startup defaults. Their instructions are adapted from `nicobailon/pi-subagents` at `3ce6185a`; see `THIRD_PARTY.md` and `subagent/agents/LICENSE`.
 
