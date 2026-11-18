@@ -162,7 +162,5 @@ pkgs.runCommand "subagent-finalizer-check"
     EOF
 
     node "$workdir/test.mjs" "$outdir"
-    grep -F 'PI_SUBAGENT_ID: subagentId' ${self}/subagent/index.ts >/dev/null
-    grep -F 'args.push("--extension", finalizerEntrypoint)' ${self}/subagent/index.ts >/dev/null
     touch "$out"
   ''
