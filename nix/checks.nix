@@ -17,6 +17,7 @@ in
 {
   package = package;
 
+  format = import ./format-check.nix { inherit self pkgs; };
   fetch = import ./fetch-check.nix { inherit self pkgs; };
   http-transport = import ./http-transport-check.nix { inherit self pkgs; };
   session-routing = import ./session-routing-check.nix { inherit self pkgs; };
