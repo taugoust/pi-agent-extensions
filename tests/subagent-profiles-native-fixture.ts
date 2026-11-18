@@ -24,8 +24,15 @@ export default async function profileFixture(pi: any) {
   globalThis.fetch = (async () => { throw new Error("HTTP_FORBIDDEN_PROFILE_FIXTURE"); }) as any;
   // A loaded extension tool with no network access lets actual child requests
   // prove profile activation without making HTTP calls.
-  pi.registerTool({ name: "fetch", label: "Offline fetch", description: "Offline profile tool fixture", parameters: { type: "object", properties: {} },
-    async execute() { return { content: [{ type: "text", text: "Offline fetch fixture" }], details: {} }; } });
+  pi.registerTool({
+    name: "fetch",
+    label: "Offline fetch",
+    description: "Offline profile tool fixture",
+    parameters: { type: "object", properties: {} },
+    async execute() {
+      return { content: [{ type: "text", text: "Offline fetch fixture" }], details: {} };
+    },
+  });
   let handledUserCount = 0;
   let toolCallId = 0;
   const log = process.env.PROFILE_FIXTURE_LOG;

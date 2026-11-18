@@ -153,12 +153,17 @@ describe("agent profile discovery", () => {
     assert.deepEqual(profiles.find(({ name }) => name === "scout")?.tools, ["read", "bash"]);
     assert.deepEqual(profiles.find(({ name }) => name === "reviewer")?.tools, ["read", "bash"]);
     assert.deepEqual(profiles.find(({ name }) => name === "oracle")?.tools, ["read", "bash"]);
-    assert.deepEqual(profiles.find(({ name }) => name === "worker")?.tools, ["read", "bash", "edit", "write", "background_job"]);
+    const worker = profiles.find(({ name }) => name === "worker");
+    assert.deepEqual(worker?.tools, ["read", "bash", "edit", "write", "background_job"]);
+
+    // Non-editing profiles can't get write or extension tools, not even by asking.
+    const options = { defaultModel: "m" };
+    const launch = (agent: string, tools?: string[]) =>
+      resolveAgentProfileLaunch({ agent, ...(tools ? { tools } : {}) }, profiles, options);
     for (const name of ["scout", "reviewer", "oracle"]) {
-      const selected = resolveAgentProfileLaunch({ agent: name }, profiles, { defaultModel: "m" });
       for (const tool of ["edit", "write", "fetch", "background_job", "subagent"]) {
-        assert.ok(!selected.tools?.includes(tool));
-        assert.throws(() => resolveAgentProfileLaunch({ agent: name, tools: [tool] }, profiles, { defaultModel: "m" }));
+        assert.ok(!launch(name).tools?.includes(tool));
+        assert.throws(() => launch(name, [tool]));
       }
     }
     assert.equal(profiles.find(({ name }) => name === "coordinator")?.cleanupWorktreesOnReap, true);
@@ -207,17 +212,36 @@ describe("agent profile launch resolution", () => {
   });
   it("resolves extension tools from profiles and only permits narrowing overrides", async () => {
     const root = await temp();
-    await profile(path.join(root, "builtins", "extended.md"), "name: extended\ndescription: Extension tools\ntools: read, background_job, fetch, custom_tool, fetch");
+    const header = [
+      "name: extended",
+      "description: Extension tools",
+      "tools: read, background_job, fetch, custom_tool, fetch",
+    ].join("\n");
+    await profile(path.join(root, "builtins", "extended.md"), header);
     const profiles = await discover(root);
-    const resolve = (tools?: string[]) => resolveAgentProfileLaunch({ agent: "extended", ...(tools !== undefined ? { tools } : {}) }, profiles, { defaultModel: "m" });
+    const resolve = (tools?: string[]) => {
+      const params = { agent: "extended", ...(tools !== undefined ? { tools } : {}) };
+      return resolveAgentProfileLaunch(params, profiles, { defaultModel: "m" });
+    };
+
+    // Duplicates are dropped and overrides can only narrow.
     assert.deepEqual(resolve().tools, ["read", "background_job", "fetch", "custom_tool"]);
-    assert.deepEqual(resolve(["fetch", "background_job", "fetch"]).tools, ["fetch", "background_job"]);
+    const narrowed = resolve(["fetch", "background_job", "fetch"]).tools;
+    assert.deepEqual(narrowed, ["fetch", "background_job"]);
     assert.deepEqual(resolve([]).tools, []);
-    for (const tools of [["write"], ["subagent"], ["fetch", "another_tool"]]) assert.throws(() => resolve(tools));
+    for (const tools of [["write"], ["subagent"], ["fetch", "another_tool"]]) {
+      assert.throws(() => resolve(tools));
+    }
+
+    // A profile without a tool list accepts any valid tool names.
     const noTools = { ...base, tools: undefined };
-    assert.deepEqual(resolveAgentProfileLaunch({ agent: "reviewer", tools: ["fetch", "background_job"] }, [noTools], { defaultModel: "m" }).tools, ["fetch", "background_job"]);
+    const reviewer = (tools: unknown) => {
+      const params = { agent: "reviewer", tools } as any;
+      return resolveAgentProfileLaunch(params, [noTools], { defaultModel: "m" });
+    };
+    assert.deepEqual(reviewer(["fetch", "background_job"]).tools, ["fetch", "background_job"]);
     for (const tools of [["not a tool"], [""], [42], "fetch"]) {
-      assert.throws(() => resolveAgentProfileLaunch({ agent: "reviewer", tools } as any, [noTools], { defaultModel: "m" }));
+      assert.throws(() => reviewer(tools));
     }
   });
   it("does not require profile lookup when no agent is selected, defaults policy off, rejects direct policy input, and errors on unknown profile", () => {
