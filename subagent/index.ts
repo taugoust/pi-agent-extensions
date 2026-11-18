@@ -1708,6 +1708,11 @@ const SubagentVerification = Type.Optional(Type.Array(Type.Object({
   verdict: Type.Optional(Type.Object({ path: Type.Array(Type.String({ maxLength: 256 }), { maxItems: 16 }), equals: Type.Union([Type.String(), Type.Number(), Type.Boolean(), Type.Null()]) }, { additionalProperties: false })),
 }, { additionalProperties: false }), { minItems: 1, maxItems: 8, description: "Launch only: explicit runtime command gates, separate from worker-reported acceptance. Run in actual worker cwd through supervised jobs and live permissions; configured unavailable/failed/stale gates block accepted delivery. No authority expansion; unsupported backends fail closed. Retained on resume." }));
 
+const TOOLS_DESCRIPTION = [
+  "Optional tool allowlist. Core and loaded extension tool names are accepted,",
+  "subject to runtime restrictions. With agent, overrides may narrow the profile,",
+  "never widen it.",
+].join(" ");
 const SubagentItem = Type.Object({
   displayName: SubagentDisplayName,
   name: SubagentName,
@@ -1718,7 +1723,7 @@ const SubagentItem = Type.Object({
   task: Type.String({ description: "Task to delegate to this dynamic subagent" }),
   systemPrompt: Type.Optional(Type.String({ description: "Optional additional system prompt for this subagent" })),
   model: Type.Optional(Type.String({ description: `${MODEL_DESCRIPTION}.` })),
-  tools: Type.Optional(Type.Array(Type.String(), { description: "Optional tool allowlist. With agent, only read/bash/edit/write are supported and overrides may narrow, never widen the profile." })),
+  tools: Type.Optional(Type.Array(Type.String(), { description: TOOLS_DESCRIPTION })),
   cwd: Type.Optional(Type.String({ description: "Optional working directory for this subagent process" })),
   worktree: SubagentWorktree,
 });
@@ -1761,7 +1766,9 @@ function subagentParams() {
   model: Type.Optional(Type.String({
     description: `Launch only (single mode). ${MODEL_DESCRIPTION}. Resume retains the role model.`,
   })),
-  tools: Type.Optional(Type.Array(Type.String(), { description: "Launch only: optional tool allowlist (single mode). With agent, only read/bash/edit/write are supported and overrides can only narrow the profile. Not accepted by resume." })),
+  tools: Type.Optional(Type.Array(Type.String(), {
+    description: `Launch only (single mode). ${TOOLS_DESCRIPTION} Not accepted by resume.`,
+  })),
   cwd: Type.Optional(Type.String({ description: "Launch only: optional working directory (single mode). Not accepted by resume." })),
   worktree: SubagentWorktree,
   tasks: Type.Optional(Type.Array(SubagentItem, { maxItems: MAX_PARALLEL_TASKS, description: "Launch only: parallel subagent tasks; each item requires acceptance criteria. Max 8, up to 4 run concurrently." })),
@@ -1770,6 +1777,29 @@ function subagentParams() {
       timeout_ms: Type.Optional(Type.Number({ minimum: 1, description: "Launch only: optional shorter AgentSH execution timeout in milliseconds." })),
     } : {}),
   });
+}
+
+/** The child specs of a launch, whatever its mode. */
+function launchSpecs(params: any): any[] {
+  return params.tasks ?? params.chain ?? [params];
+}
+
+/** A named profile without a tools override takes its tool list from the profile. */
+function usesProfileTools(spec: any): boolean {
+  return spec.agent !== undefined && spec.tools === undefined;
+}
+
+/** Tools a headless worker can't use, because it has no tmux pane. */
+const HEADLESS_UNAVAILABLE_TOOLS = new Set(["background_job", "subagent"]);
+
+/**
+ * Profile tools are used where available, so a headless worker just drops the
+ * ones it can't run. Tools the caller lists explicitly are left in place and
+ * still get rejected by the headless manager.
+ */
+function dropHeadlessTools(spec: any): void {
+  if (spec.tools === undefined) return;
+  spec.tools = spec.tools.filter((tool: string) => !HEADLESS_UNAVAILABLE_TOOLS.has(tool));
 }
 
 export default function (pi: ExtensionAPI) {
@@ -2574,7 +2604,22 @@ export default function (pi: ExtensionAPI) {
         const namedProfile = !internalManagedExecution && [params, ...(params.tasks ?? []), ...(params.chain ?? [])].some(item => item?.agent !== undefined);
         // Managed foreground/background recursion carries the already-resolved
         // trusted spec under an unforgeable in-process Symbol, never JSON input.
-        if (!internalManagedExecution) params = await resolveSubagentProfiles(params, ctx);
+        // Foreground launches on the native Linux backend run headless.
+        const runsHeadless = (launch: any) =>
+          process.platform === "linux"
+          && launch.background !== true
+          && !launch.action
+          && launch.mode !== "draft"
+          && selectSubagentBackend(agentSHBridge(), agentSHStartup).kind === "native";
+        if (!internalManagedExecution) {
+          const toolsFromProfile = launchSpecs(params).map(usesProfileTools);
+          params = await resolveSubagentProfiles(params, ctx);
+          if (runsHeadless(params)) {
+            launchSpecs(params).forEach((spec: any, index: number) => {
+              if (toolsFromProfile[index]) dropHeadlessTools(spec);
+            });
+          }
+        }
         // AgentSH's legacy protocol omits --tools for an empty list, which
         // would turn an explicit zero-tool profile into backend defaults.
         if (namedProfile && selectSubagentBackend(agentSHBridge(), agentSHStartup).kind === "agentsh") {

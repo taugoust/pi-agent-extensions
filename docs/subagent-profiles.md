@@ -18,9 +18,13 @@ Profiles select reusable instructions, a role model/thinking level, and an optio
 |---|---|---|---|
 | `coordinator` | Coordinates a goal and reviews delegated work (model `gpt-6.1-sol`) | runtime defaults | high |
 | `scout` | Focused codebase reconnaissance, no edits | read, bash | low |
-| `worker` | Narrow implementation and validation | read, bash, edit, write | high |
+| `worker` | Narrow implementation and validation | read, bash, edit, write, background_job | high |
 | `reviewer` | Independent review, no edits | read, bash | high |
 | `oracle` | Advisory challenge of decisions and assumptions, no edits | read, bash | high |
+
+Scout, reviewer and oracle keep their non-editing tool lists. They don't get
+`fetch`, because it can send writes and download files as well as read. Custom
+profiles can add it where that fits.
 
 Implementers keep the existing subagent role default (the `cheap` tier, plain launches use low thinking and `worker` uses high). The named `coordinator` defaults to `expensive:high`, including dedicated Work → Goals launches through the existing single-child executor. Dedicated Resume retains the recorded model, instructions and tool ceiling instead of rediscovering the profile. Custom coordinator definitions can override the role default; they grant no extra authority. The top-level startup model belongs to Pi settings, not this extension. Explicit model selections and resumed sessions take precedence over startup defaults. Their instructions are adapted from `nicobailon/pi-subagents` at `3ce6185a`; see `THIRD_PARTY.md` and `subagent/agents/LICENSE`.
 
@@ -61,7 +65,15 @@ Definitions are read on new launches and catalogue requests. Plain launches with
 - Explicit launch `model` overrides the profile's model. Otherwise the profile model wins over the existing subagent role default. A `:thinking` suffix wins over profile `thinking`; profile thinking applies when the chosen selector lacks a suffix. Existing configured thinking applies when neither supplies one.
 - Provider-qualified legacy selectors remain readable, but provider and selected account always follow the owning session. Profiles cannot switch auth providers, select a different account, route through an unavailable model or silently fall back.
 - Explicit `systemPrompt` is appended after the profile's instructions, subject to the existing 64 KiB bound. Runtime authorization/worker policy remains in force.
-- Explicit launch `tools` can narrow a profile allowlist, never widen it. This version explicitly selects only the portable native core names `read`, `bash`, `edit`, and `write`; unsupported tools fail before dispatch. It does not load extension or MCP providers. Mandatory internal reporting/control tools remain runtime-owned.
+- Explicit launch `tools` can narrow a profile allowlist, never widen it.
+- Profiles can list core and extension tools, such as `background_job` and
+  `fetch`. The tool must already be loaded in the worker. Listing it doesn't load
+  its extension or MCP provider. Internal reporting tools are always added.
+- Headless foreground workers have no tmux pane. They drop `background_job` and
+  `subagent` when those come from the profile, and refuse the launch when the
+  call asks for them explicitly.
+- The guarded native proxy still only accepts its own core tools and the
+  supervised job proxy, not arbitrary extension tools.
 - Resolved model/thinking, instructions, tools, cwd, acceptance, and the trusted `cleanupWorktreesOnReap`/`automaticWorktrees` policies flow through the existing backend contract and retained-task storage. Editing a profile affects new launches, not running tasks or resume. The policy remains pinned on resume/reload; retained tasks/manifests predating it default to false. Resume accepts only `task_id`, optional `message` and `compact`, not a new `agent` or other launch override.
 
 **A profile is not an OS sandbox or an approval grant.** In particular, Bash remains a shell tool: non-editing roles rely on their instructions plus existing authorization/containment, not on a read-only shell implementation. AgentSH, guarded native limits, and project trust stay authoritative. Profiles do not add skill/extension inheritance, external CLI runners, persistent agent memory, profile management commands or scripted workflows.

@@ -31,9 +31,6 @@ const MAX_PROFILE_TOTAL_BYTES = 2 * 1024 * 1024;
 const MAX_PROMPT_BYTES = 64 * 1024;
 const THINKING_LEVELS = new Set(["off", "minimal", "low", "medium", "high", "xhigh", "max"]);
 const TOOL_NAME = /^[a-z][a-z0-9_-]{0,63}$/;
-/** Portable native core tools accepted by profile selection; runtime guards remain authoritative. */
-export const PROFILE_SUPPORTED_TOOLS = ["read", "bash", "edit", "write"] as const;
-const PROFILE_SUPPORTED_TOOL_SET: ReadonlySet<string> = new Set(PROFILE_SUPPORTED_TOOLS);
 const VALID_FIELDS = new Set(["name", "description", "model", "thinking", "tools", "cleanupWorktreesOnReap", "automaticWorktrees"]);
 const BUILTIN_DIR = path.join(path.dirname(fileURLToPath(import.meta.url)), "agents");
 
@@ -320,11 +317,6 @@ export function resolveAgentProfileLaunch<T extends AgentProfileLaunchInput>(
   if (tools !== undefined) {
     if (!Array.isArray(tools) || tools.some((tool) => typeof tool !== "string" || !TOOL_NAME.test(tool))) throw new Error("Launch 'tools' must be an array of valid tool names");
     tools = [...new Set(tools)];
-  }
-  const selectedTools = [...(profileTools ?? []), ...(tools ?? [])];
-  const unsupportedTools = [...new Set(selectedTools.filter((tool) => !PROFILE_SUPPORTED_TOOL_SET.has(tool)))];
-  if (unsupportedTools.length) {
-    throw new Error(`Agent profile '${profile.name}' selects unsupported native tools: ${unsupportedTools.join(", ")}`);
   }
   if (profileTools !== undefined) {
     if (tools !== undefined) {
