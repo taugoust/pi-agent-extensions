@@ -6,7 +6,9 @@ export function validateRuntimePath(path: string, label: string, mode = constant
     accessSync(path, mode);
     if (!statSync(path).isFile()) throw new Error("not a regular file");
   } catch (error) {
-    throw new Error(`${label} is unavailable at ${path}; reload Pi after updating its extensions/runtime. ${error instanceof Error ? error.message : String(error)}`);
+    throw new Error(
+      `${label} is unavailable at ${path}; reload Pi after updating its extensions/runtime. ${error instanceof Error ? error.message : String(error)}`,
+    );
   }
 }
 
@@ -18,9 +20,16 @@ export function pinRuntimePath(url: URL, label: string): () => string {
   const original = fileURLToPath(url);
   let pinned: string | undefined;
   let failure: unknown;
-  try { pinned = realpathSync(original); } catch (error) { failure = error; }
+  try {
+    pinned = realpathSync(original);
+  } catch (error) {
+    failure = error;
+  }
   return () => {
-    if (!pinned) throw new Error(`${label} could not be resolved at extension load from ${original}; reload Pi after updating its extensions/runtime. ${failure instanceof Error ? failure.message : String(failure)}`);
+    if (!pinned)
+      throw new Error(
+        `${label} could not be resolved at extension load from ${original}; reload Pi after updating its extensions/runtime. ${failure instanceof Error ? failure.message : String(failure)}`,
+      );
     validateRuntimePath(pinned, label);
     return pinned;
   };

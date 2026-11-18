@@ -8,5 +8,5 @@ export async function resolveCoordinatorRole<T extends AgentProfileLaunchInput>(
   retained: T | undefined,
   discover: (input: { agent: "coordinator" }) => Promise<T>,
 ): Promise<T> {
-  return retained ?? await discover({ agent: "coordinator" });
+  return retained ?? (await discover({ agent: "coordinator" }));
 }

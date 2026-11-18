@@ -1,7 +1,7 @@
 import { constants } from "node:fs";
 import { randomBytes } from "node:crypto";
 import { processStartToken } from "./tmux.ts";
-import { validatePaneIdentity } from './external-pane.ts';
+import { validatePaneIdentity } from "./external-pane.ts";
 import {
   access,
   link,
@@ -74,9 +74,23 @@ function iso(value: unknown, label: string): string {
 
 export function parseMetadata(value: unknown): JobMetadata {
   const data = object(value, "job metadata");
-  exactKeys(data, ["schemaVersion", "id", "command", "cwd", "shell", "createdAt", "ownerPid"], ["name", "sessionId", "childId", "observed", "infrastructure", "verification", "pane", "ownerToken"]);
+  exactKeys(
+    data,
+    ["schemaVersion", "id", "command", "cwd", "shell", "createdAt", "ownerPid"],
+    [
+      "name",
+      "sessionId",
+      "childId",
+      "observed",
+      "infrastructure",
+      "verification",
+      "pane",
+      "ownerToken",
+    ],
+  );
   if (data.schemaVersion !== JOB_SCHEMA_VERSION) throw new Error("unsupported job metadata schema");
-  if (data.verification !== undefined && data.verification !== true) throw new Error("invalid verification job marker");
+  if (data.verification !== undefined && data.verification !== true)
+    throw new Error("invalid verification job marker");
   const id = string(data.id, "job id", 64);
   if (!JOB_ID_PATTERN.test(id)) throw new Error("invalid job id");
   return {
@@ -88,9 +102,13 @@ export function parseMetadata(value: unknown): JobMetadata {
     shell: string(data.shell, "job shell", 4096),
     createdAt: iso(data.createdAt, "job creation time"),
     ownerPid: integer(data.ownerPid, "owner pid", 1),
-    ...(data.ownerToken === undefined ? {} : {ownerToken:string(data.ownerToken,'owner token',256)}),
-    ...(data.pane === undefined ? {} : {pane:validatePaneIdentity(data.pane)}),
-    ...(data.sessionId === undefined ? {} : { sessionId: string(data.sessionId, "session id", 512) }),
+    ...(data.ownerToken === undefined
+      ? {}
+      : { ownerToken: string(data.ownerToken, "owner token", 256) }),
+    ...(data.pane === undefined ? {} : { pane: validatePaneIdentity(data.pane) }),
+    ...(data.sessionId === undefined
+      ? {}
+      : { sessionId: string(data.sessionId, "session id", 512) }),
     ...(data.childId === undefined ? {} : { childId: string(data.childId, "child id", 128) }),
     ...(data.observed === undefined ? {} : { observed: parseObserved(data.observed) }),
     ...(data.infrastructure === true ? { infrastructure: true } : {}),
@@ -101,26 +119,52 @@ export function parseMetadata(value: unknown): JobMetadata {
 function parseObserved(value: unknown): NonNullable<JobMetadata["observed"]> {
   const data = object(value, "observed job");
   exactKeys(data, ["pid", "startToken", "logPath", "logDevice", "logInode"]);
-  return { pid: integer(data.pid, "pid", 1), startToken: string(data.startToken, "start token", 256),
-    logPath: string(data.logPath, "log path", 4096), logDevice: integer(data.logDevice, "log device"), logInode: integer(data.logInode, "log inode") };
+  return {
+    pid: integer(data.pid, "pid", 1),
+    startToken: string(data.startToken, "start token", 256),
+    logPath: string(data.logPath, "log path", 4096),
+    logDevice: integer(data.logDevice, "log device"),
+    logInode: integer(data.logInode, "log inode"),
+  };
 }
 
 export function parseLaunch(value: unknown): JobLaunch {
   const data = object(value, "job launch");
-  exactKeys(data, ["schemaVersion", "windowId", "paneId", "panePid", "paneStartToken", "launchedAt"], ["socketPath", "sessionId", "serverPid", "serverStartToken", "ownershipToken"]);
-  if (data.socketPath === undefined && ['sessionId','serverPid','serverStartToken','ownershipToken'].some(key => data[key] !== undefined)) throw new Error('Incomplete saved tmux placement');
-  const placement = data.socketPath === undefined ? {} : {
-    socketPath: string(data.socketPath, "socket path", 4096),
-    sessionId: string(data.sessionId, "tmux session id", 64),
-    serverPid: integer(data.serverPid, "tmux server pid", 1),
-    serverStartToken: string(data.serverStartToken, "server start token", 256),
-    ownershipToken: string(data.ownershipToken, "ownership token", 64),
-  };
-  if (data.socketPath !== undefined && (!String(data.socketPath).startsWith('/') || String(data.socketPath).includes('\0') || !/^\$[0-9]+$/.test(String(data.sessionId)) || !/^[a-f0-9]{32}$/.test(String(data.ownershipToken)))) throw new Error('Invalid saved tmux placement');
+  exactKeys(
+    data,
+    ["schemaVersion", "windowId", "paneId", "panePid", "paneStartToken", "launchedAt"],
+    ["socketPath", "sessionId", "serverPid", "serverStartToken", "ownershipToken"],
+  );
+  if (
+    data.socketPath === undefined &&
+    ["sessionId", "serverPid", "serverStartToken", "ownershipToken"].some(
+      (key) => data[key] !== undefined,
+    )
+  )
+    throw new Error("Incomplete saved tmux placement");
+  const placement =
+    data.socketPath === undefined
+      ? {}
+      : {
+          socketPath: string(data.socketPath, "socket path", 4096),
+          sessionId: string(data.sessionId, "tmux session id", 64),
+          serverPid: integer(data.serverPid, "tmux server pid", 1),
+          serverStartToken: string(data.serverStartToken, "server start token", 256),
+          ownershipToken: string(data.ownershipToken, "ownership token", 64),
+        };
+  if (
+    data.socketPath !== undefined &&
+    (!String(data.socketPath).startsWith("/") ||
+      String(data.socketPath).includes("\0") ||
+      !/^\$[0-9]+$/.test(String(data.sessionId)) ||
+      !/^[a-f0-9]{32}$/.test(String(data.ownershipToken)))
+  )
+    throw new Error("Invalid saved tmux placement");
   if (data.schemaVersion !== JOB_SCHEMA_VERSION) throw new Error("unsupported job launch schema");
   const windowId = string(data.windowId, "window id", 64);
   const paneId = string(data.paneId, "pane id", 64);
-  if (!/^@[0-9]+$/.test(windowId) || !/^%[0-9]+$/.test(paneId)) throw new Error("invalid tmux identity");
+  if (!/^@[0-9]+$/.test(windowId) || !/^%[0-9]+$/.test(paneId))
+    throw new Error("invalid tmux identity");
   return {
     schemaVersion: JOB_SCHEMA_VERSION,
     ...placement,
@@ -146,7 +190,11 @@ export function parseProcess(value: unknown): JobProcess {
 
 export function parseResult(value: unknown): JobResult {
   const data = object(value, "job result");
-  exactKeys(data, ["schemaVersion", "status", "exitCode", "finishedAt"], ["signal", "reason", "output"]);
+  exactKeys(
+    data,
+    ["schemaVersion", "status", "exitCode", "finishedAt"],
+    ["signal", "reason", "output"],
+  );
   if (data.schemaVersion !== JOB_SCHEMA_VERSION) throw new Error("unsupported job result schema");
   if (!["completed", "failed", "cancelled", "lost"].includes(String(data.status))) {
     throw new Error("invalid job result status");
@@ -177,13 +225,16 @@ async function readJson(path: string): Promise<unknown> {
   const file = await open(path, constants.O_RDONLY | constants.O_NOFOLLOW | constants.O_NONBLOCK);
   try {
     const info = await file.stat();
-    if (!info.isFile() || (info.mode & 0o077) || (process.getuid && info.uid !== process.getuid())) throw new Error(`${path} is not a private regular file`);
+    if (!info.isFile() || info.mode & 0o077 || (process.getuid && info.uid !== process.getuid()))
+      throw new Error(`${path} is not a private regular file`);
     if (info.size > MAX_JSON_BYTES) throw new Error(`${path} is oversized`);
     const bytes = Buffer.alloc(MAX_JSON_BYTES + 1);
     const { bytesRead } = await file.read(bytes, 0, bytes.length, 0);
     if (bytesRead > MAX_JSON_BYTES) throw new Error(`${path} is oversized`);
     return JSON.parse(bytes.subarray(0, bytesRead).toString("utf8")) as unknown;
-  } finally { await file.close(); }
+  } finally {
+    await file.close();
+  }
 }
 
 async function writeAtomic(path: string, value: unknown): Promise<void> {
@@ -196,35 +247,70 @@ async function writeAtomic(path: string, value: unknown): Promise<void> {
 export class JobStore {
   readonly runtimeRoot: string;
 
-  constructor(readonly root: string, runtimeRoot?: string) {
+  constructor(
+    readonly root: string,
+    runtimeRoot?: string,
+  ) {
     this.runtimeRoot = runtimeRoot ?? join(root, "runtime");
   }
 
-  get jobsRoot(): string { return join(this.root, "jobs"); }
-  get socketPath(): string { return join(this.runtimeRoot, "tmux.sock"); }
-  get tmuxConfigPath(): string { return join(this.runtimeRoot, "tmux.conf"); }
+  get jobsRoot(): string {
+    return join(this.root, "jobs");
+  }
+  get socketPath(): string {
+    return join(this.runtimeRoot, "tmux.sock");
+  }
+  get tmuxConfigPath(): string {
+    return join(this.runtimeRoot, "tmux.conf");
+  }
 
   jobDir(id: string): string {
     if (!JOB_ID_PATTERN.test(id)) throw new Error(`Invalid background job ID: ${id}`);
     return join(this.jobsRoot, id);
   }
 
-  path(id: string, name: "metadata.json" | "launch.json" | "process.json" | "result.json" | "result.lock" | "command" | "environment" | "output.log" | "output-position.json" | "stdout.log" | "stderr.log" | "notified" | "retrieved-at"): string {
+  path(
+    id: string,
+    name:
+      | "metadata.json"
+      | "launch.json"
+      | "process.json"
+      | "result.json"
+      | "result.lock"
+      | "command"
+      | "environment"
+      | "output.log"
+      | "output-position.json"
+      | "stdout.log"
+      | "stderr.log"
+      | "notified"
+      | "retrieved-at",
+  ): string {
     return join(this.jobDir(id), name);
   }
 
   async initialize(): Promise<void> {
     await mkdir(this.jobsRoot, { recursive: true, mode: 0o700 });
     await mkdir(this.runtimeRoot, { recursive: true, mode: 0o700 });
-    await writeFile(this.tmuxConfigPath, "set-option -g @pi_background_server v1\nset-option -g remain-on-exit on\nset-option -g remain-on-exit-format ''\nset-option -g history-limit 2000\nset-option -g status off\n", { mode: 0o600 });
-    await Promise.all([this.assertPrivateDirectory(this.root), this.assertPrivateDirectory(this.jobsRoot), this.assertPrivateDirectory(this.runtimeRoot)]);
+    await writeFile(
+      this.tmuxConfigPath,
+      "set-option -g @pi_background_server v1\nset-option -g remain-on-exit on\nset-option -g remain-on-exit-format ''\nset-option -g history-limit 2000\nset-option -g status off\n",
+      { mode: 0o600 },
+    );
+    await Promise.all([
+      this.assertPrivateDirectory(this.root),
+      this.assertPrivateDirectory(this.jobsRoot),
+      this.assertPrivateDirectory(this.runtimeRoot),
+    ]);
   }
 
   private async assertPrivateDirectory(path: string): Promise<void> {
     const info = await lstat(path);
     if (!info.isDirectory() || info.isSymbolicLink()) throw new Error(`${path} is not a directory`);
-    if (process.getuid && info.uid !== process.getuid()) throw new Error(`${path} is owned by another user`);
-    if ((info.mode & 0o077) !== 0) throw new Error(`${path} must not be accessible by group or other users`);
+    if (process.getuid && info.uid !== process.getuid())
+      throw new Error(`${path} is owned by another user`);
+    if ((info.mode & 0o077) !== 0)
+      throw new Error(`${path} must not be accessible by group or other users`);
   }
 
   async create(metadata: JobMetadata, command: string, environment: Buffer): Promise<void> {
@@ -232,7 +318,10 @@ export class JobStore {
     await mkdir(dir, { mode: 0o700 });
     try {
       await writeFile(this.path(metadata.id, "command"), command, { mode: 0o600, flag: "wx" });
-      await writeFile(this.path(metadata.id, "environment"), environment, { mode: 0o600, flag: "wx" });
+      await writeFile(this.path(metadata.id, "environment"), environment, {
+        mode: 0o600,
+        flag: "wx",
+      });
       await writeAtomic(this.path(metadata.id, "metadata.json"), metadata);
     } catch (error) {
       await rm(dir, { recursive: true, force: true });
@@ -249,18 +338,30 @@ export class JobStore {
   }
 
   async readLaunch(id: string): Promise<JobLaunch | undefined> {
-    try { return parseLaunch(await readJson(this.path(id, "launch.json"))); }
-    catch (error) { if ((error as NodeJS.ErrnoException).code === "ENOENT") return undefined; throw error; }
+    try {
+      return parseLaunch(await readJson(this.path(id, "launch.json")));
+    } catch (error) {
+      if ((error as NodeJS.ErrnoException).code === "ENOENT") return undefined;
+      throw error;
+    }
   }
 
   async readProcess(id: string): Promise<JobProcess | undefined> {
-    try { return parseProcess(await readJson(this.path(id, "process.json"))); }
-    catch (error) { if ((error as NodeJS.ErrnoException).code === "ENOENT") return undefined; throw error; }
+    try {
+      return parseProcess(await readJson(this.path(id, "process.json")));
+    } catch (error) {
+      if ((error as NodeJS.ErrnoException).code === "ENOENT") return undefined;
+      throw error;
+    }
   }
 
   async readResult(id: string): Promise<JobResult | undefined> {
-    try { return parseResult(await readJson(this.path(id, "result.json"))); }
-    catch (error) { if ((error as NodeJS.ErrnoException).code === "ENOENT") return undefined; throw error; }
+    try {
+      return parseResult(await readJson(this.path(id, "result.json")));
+    } catch (error) {
+      if ((error as NodeJS.ErrnoException).code === "ENOENT") return undefined;
+      throw error;
+    }
   }
 
   async publishResult(id: string, result: JobResult): Promise<boolean> {
@@ -284,7 +385,10 @@ export class JobStore {
       const value = Number(raw.trim());
       if (!Number.isSafeInteger(value) || value < 0) throw new Error("Invalid retrieval timestamp");
       return value;
-    } catch (error) { if ((error as NodeJS.ErrnoException).code === "ENOENT") return undefined; throw error; }
+    } catch (error) {
+      if ((error as NodeJS.ErrnoException).code === "ENOENT") return undefined;
+      throw error;
+    }
   }
 
   /** Caller must hold withRetentionLock from snapshot through this write. */
@@ -303,24 +407,34 @@ export class JobStore {
     const deadline = Date.now() + LOCK_WAIT_MS;
     await mkdir(candidate, { mode: 0o700 });
     try {
-      await writeFile(join(candidate, ownerFile), await processStartToken(process.pid), { mode: 0o600, flag: "wx" });
+      await writeFile(join(candidate, ownerFile), await processStartToken(process.pid), {
+        mode: 0o600,
+        flag: "wx",
+      });
       for (;;) {
-        try { await rename(candidate, lock); break; }
-        catch (error) {
-          if (!["EEXIST", "ENOTEMPTY"].includes((error as NodeJS.ErrnoException).code ?? "")) throw error;
+        try {
+          await rename(candidate, lock);
+          break;
+        } catch (error) {
+          if (!["EEXIST", "ENOTEMPTY"].includes((error as NodeJS.ErrnoException).code ?? ""))
+            throw error;
           await this.releaseDeadRetentionOwner(lock);
-          if (Date.now() >= deadline) throw new Error("Timed out acquiring background-job retention lock");
-          await new Promise(resolve => setTimeout(resolve, 25));
+          if (Date.now() >= deadline)
+            throw new Error("Timed out acquiring background-job retention lock");
+          await new Promise((resolve) => setTimeout(resolve, 25));
         }
       }
-      try { return await operation(); }
-      finally {
+      try {
+        return await operation();
+      } finally {
         // Remove only our unique owner file. Concurrent dead-owner recovery
         // cannot remove a successor: its atomically published dir is nonempty.
         await rm(join(lock, ownerFile), { force: true });
         await rmdir(lock).catch(() => undefined);
       }
-    } finally { await rm(candidate, { recursive: true, force: true }); }
+    } finally {
+      await rm(candidate, { recursive: true, force: true });
+    }
   }
 
   private async releaseDeadRetentionOwner(lock: string): Promise<void> {
@@ -332,15 +446,21 @@ export class JobStore {
       const pid = Number(match[1]);
       const savedToken = await readFile(join(lock, owners[0]), "utf8");
       let dead = false;
-      try { dead = await processStartToken(pid) !== savedToken; }
-      catch {
-        try { process.kill(pid, 0); }
-        catch (error) { dead = (error as NodeJS.ErrnoException).code === "ESRCH"; }
+      try {
+        dead = (await processStartToken(pid)) !== savedToken;
+      } catch {
+        try {
+          process.kill(pid, 0);
+        } catch (error) {
+          dead = (error as NodeJS.ErrnoException).code === "ESRCH";
+        }
       }
       if (!dead) return;
       await rm(join(lock, owners[0]), { force: true });
       await rmdir(lock).catch(() => undefined);
-    } catch { /* Unknown ownership retains the lock; callers time out safely. */ }
+    } catch {
+      /* Unknown ownership retains the lock; callers time out safely. */
+    }
   }
 
   async isNotified(id: string): Promise<boolean> {
@@ -361,13 +481,20 @@ export class JobStore {
   async listIds(): Promise<string[]> {
     await this.initialize();
     const entries = await readdir(this.jobsRoot, { withFileTypes: true });
-    return entries.filter((entry) => entry.isDirectory() && JOB_ID_PATTERN.test(entry.name)).map((entry) => entry.name);
+    return entries
+      .filter((entry) => entry.isDirectory() && JOB_ID_PATTERN.test(entry.name))
+      .map((entry) => entry.name);
   }
 
   /** Enumerate already-initialized retained jobs without creating/changing state. */
   async listIdsReadOnly(): Promise<string[]> {
     const entries = await readdir(this.jobsRoot, { withFileTypes: true });
-    return entries.filter((entry) => entry.isDirectory() && !entry.isSymbolicLink() && JOB_ID_PATTERN.test(entry.name)).map((entry) => entry.name);
+    return entries
+      .filter(
+        (entry) =>
+          entry.isDirectory() && !entry.isSymbolicLink() && JOB_ID_PATTERN.test(entry.name),
+      )
+      .map((entry) => entry.name);
   }
 
   async remove(id: string): Promise<void> {
@@ -379,7 +506,7 @@ export class JobStore {
 
   async replaceMetadata(metadata: JobMetadata): Promise<void> {
     const valid = parseMetadata(metadata);
-    await writeAtomic(this.path(valid.id, 'metadata.json'), valid);
+    await writeAtomic(this.path(valid.id, "metadata.json"), valid);
   }
 
   async withLock<T>(operation: () => Promise<T>): Promise<T> {
@@ -403,17 +530,21 @@ export class JobStore {
             continue;
           }
         } catch {}
-        if (Date.now() >= deadline) throw new Error("Timed out acquiring the background-job state lock");
+        if (Date.now() >= deadline)
+          throw new Error("Timed out acquiring the background-job state lock");
         await new Promise((resolve) => setTimeout(resolve, 25));
       }
     }
     const heartbeat = setInterval(() => {
       const now = new Date();
-      void import("node:fs/promises").then(({ utimes }) => utimes(lock, now, now)).catch(() => undefined);
+      void import("node:fs/promises")
+        .then(({ utimes }) => utimes(lock, now, now))
+        .catch(() => undefined);
     }, 5000);
     heartbeat.unref();
-    try { return await operation(); }
-    finally {
+    try {
+      return await operation();
+    } finally {
       clearInterval(heartbeat);
       try {
         if ((await readFile(join(lock, "owner"), "utf8")) === token) {
@@ -426,6 +557,11 @@ export class JobStore {
   }
 
   async exists(path: string): Promise<boolean> {
-    try { await access(path, constants.F_OK); return true; } catch { return false; }
+    try {
+      await access(path, constants.F_OK);
+      return true;
+    } catch {
+      return false;
+    }
   }
 }

@@ -84,7 +84,10 @@ export type StorageLockResult<T> = {
 
 export interface AccountStorageBackend {
   read<T>(reader: (current: string | undefined) => T): T;
-  readAsync<T>(reader: (current: string | undefined) => Promise<T>, signal?: AbortSignal): Promise<T>;
+  readAsync<T>(
+    reader: (current: string | undefined) => Promise<T>,
+    signal?: AbortSignal,
+  ): Promise<T>;
   withLock<T>(mutator: (current: string | undefined) => StorageLockResult<T>): T;
   withLockAsync<T>(
     mutator: (current: string | undefined) => Promise<StorageLockResult<T>>,
@@ -109,7 +112,10 @@ export class FileAccountStorageBackend implements AccountStorageBackend {
     }
   }
 
-  async readAsync<T>(reader: (current: string | undefined) => Promise<T>, signal?: AbortSignal): Promise<T> {
+  async readAsync<T>(
+    reader: (current: string | undefined) => Promise<T>,
+    signal?: AbortSignal,
+  ): Promise<T> {
     signal?.throwIfAborted();
     if (!this.fileOrLockExistsForRead()) {
       const result = await reader(undefined);
@@ -295,7 +301,10 @@ export class InMemoryAccountStorageBackend implements AccountStorageBackend {
     return reader(this.value);
   }
 
-  async readAsync<T>(reader: (current: string | undefined) => Promise<T>, signal?: AbortSignal): Promise<T> {
+  async readAsync<T>(
+    reader: (current: string | undefined) => Promise<T>,
+    signal?: AbortSignal,
+  ): Promise<T> {
     signal?.throwIfAborted();
     const result = await reader(this.value);
     signal?.throwIfAborted();
@@ -331,7 +340,9 @@ function abortableDelay(delayMs: number, signal?: AbortSignal): Promise<void> {
     const abort = () => {
       clearTimeout(timer);
       reject(
-        signal.reason instanceof Error ? signal.reason : new DOMException("The operation was aborted", "AbortError"),
+        signal.reason instanceof Error
+          ? signal.reason
+          : new DOMException("The operation was aborted", "AbortError"),
       );
     };
     signal.addEventListener("abort", abort, { once: true });

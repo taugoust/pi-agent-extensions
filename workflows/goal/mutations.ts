@@ -2,10 +2,16 @@ import { randomUUID, createHash } from "node:crypto";
 import { mergeGoalChecklist } from "../../shared/goal-model.ts";
 import type { ExtensionAPI, ExtensionContext } from "@earendil-works/pi-coding-agent";
 import {
-  GOAL_MUTATION_EVENT, readGoalTasks, type GoalMutationRequest, type ProgressMutationResult,
+  GOAL_MUTATION_EVENT,
+  readGoalTasks,
+  type GoalMutationRequest,
+  type ProgressMutationResult,
 } from "../../shared/goal-progress.ts";
 import {
-  cloneProgressSteps, validateProgressArguments, validateProgressMutation, type ProgressStep,
+  cloneProgressSteps,
+  validateProgressArguments,
+  validateProgressMutation,
+  type ProgressStep,
 } from "../../progress/progress-state.js";
 import { currentTokenTotal } from "./accounting.js";
 import { createGoal, type GoalRuntime } from "./runtime.js";
@@ -33,13 +39,19 @@ function snapshot(goal: ActiveGoal): ProgressMutationResult {
 
 /** One synchronous, session-owned commit boundary for tool, UI and native-parent task writes. */
 export function bindGoalMutations(
-  pi: ExtensionAPI, ctx: ExtensionContext, runtime: GoalRuntime,
+  pi: ExtensionAPI,
+  ctx: ExtensionContext,
+  runtime: GoalRuntime,
   options: { child: boolean; busy(): boolean },
 ) {
   const dispose = pi.events.on(GOAL_MUTATION_EVENT, (payload: unknown) => {
     const request = payload as GoalMutationRequest;
     if (!request || request.ctx?.sessionManager !== ctx.sessionManager) return;
-    try { request.result = apply(request); } catch (error) { request.error = error; }
+    try {
+      request.result = apply(request);
+    } catch (error) {
+      request.error = error;
+    }
   });
   function apply(request: GoalMutationRequest): ProgressMutationResult {
     const input = request.mutation;
@@ -50,11 +62,11 @@ export function bindGoalMutations(
       }
       const previous = readGoalTasks(ctx, goal);
       const steps = validateProgressArguments({ steps: input.steps }).steps;
-      const known = new Set(previous.map(step => step.id));
-      const unknownTask = steps.some(step => step.id && !known.has(step.id));
+      const known = new Set(previous.map((step) => step.id));
+      const unknownTask = steps.some((step) => step.id && !known.has(step.id));
       if (!input.initialize && unknownTask) throw new Error("Unknown goal task ID");
-      const tasks = steps.map(step => ({ ...step, id: step.id ?? randomUUID() }));
-      if (new Set(tasks.map(step => step.id)).size !== tasks.length) {
+      const tasks = steps.map((step) => ({ ...step, id: step.id ?? randomUUID() }));
+      if (new Set(tasks.map((step) => step.id)).size !== tasks.length) {
         throw new Error("Duplicate task ID");
       }
       const next = { ...goal, tasks };
@@ -64,8 +76,11 @@ export function bindGoalMutations(
     }
     const mutation = validateProgressMutation(input);
     const budget = request.initialTokenBudget;
-    const validBudget = mutation.action === "create"
-      && Number.isSafeInteger(budget) && budget! >= 1 && budget! <= MAX_TOKEN_BUDGET;
+    const validBudget =
+      mutation.action === "create" &&
+      Number.isSafeInteger(budget) &&
+      budget! >= 1 &&
+      budget! <= MAX_TOKEN_BUDGET;
     if (budget !== undefined && !validBudget) throw new Error("Invalid initial token budget");
     const fingerprint = createHash("sha256")
       .update(JSON.stringify([mutation, budget ?? null]))

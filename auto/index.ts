@@ -30,7 +30,8 @@ function draftIdentity(): DraftIdentity {
   const authorization = env("PI_AUTO_ACTION_TOKEN");
   if (!sessionId) throw new Error("Draft session identity is unavailable");
   if (!requestPath || !authorization) throw new Error("Draft action control is unavailable");
-  if (!/^[0-9a-f]{64}$/.test(authorization)) throw new Error("Draft action authorization is malformed");
+  if (!/^[0-9a-f]{64}$/.test(authorization))
+    throw new Error("Draft action authorization is malformed");
 
   const state = globalThis.__AGENTSH_PI__?.getSupervisorState();
   const metadata = globalThis.__AGENTSH_PI__?.getSupervisorMetadata() ?? state?.metadata;
@@ -45,24 +46,38 @@ function draftIdentity(): DraftIdentity {
     // A Git-backed MicroVM Draft is shadowed by the outer trusted wrapper, but
     // its authenticated guest supervisor intentionally operates directly on
     // the private volume mounted at /workspace.
-    if (!(env("PI_AUTO_RUNTIME_PROFILE") === "pi-linux-qemu-v2" && metadata.workspace_mode === "direct")) {
+    if (
+      !(
+        env("PI_AUTO_RUNTIME_PROFILE") === "pi-linux-qemu-v2" &&
+        metadata.workspace_mode === "direct"
+      )
+    ) {
       throw new Error("Live AgentSH workspace is not a Draft workspace");
     }
   }
-  return { sessionId, requestPath, authorization, status: state?.status ?? "unavailable", metadata };
+  return {
+    sessionId,
+    requestPath,
+    authorization,
+    status: state?.status ?? "unavailable",
+    metadata,
+  };
 }
 
 function displayProject(identity: DraftIdentity) {
-  return identity.metadata?.real_workspace
-    ?? identity.metadata?.workspace_roots?.[0]?.real
-    ?? env("PI_AUTO_REAL_DIR")
-    ?? "current project";
+  return (
+    identity.metadata?.real_workspace ??
+    identity.metadata?.workspace_roots?.[0]?.real ??
+    env("PI_AUTO_REAL_DIR") ??
+    "current project"
+  );
 }
 
 function statusText(identity: DraftIdentity, pending?: AutoAction) {
   if (pending) return `auto · ${pending} requested`;
   if (identity.status === "connected" || identity.status === "pending") return "auto · Draft ready";
-  if (identity.status === "connecting" || identity.status === "starting") return "auto · reconnecting";
+  if (identity.status === "connecting" || identity.status === "starting")
+    return "auto · reconnecting";
   return "auto · Draft safe · connection degraded";
 }
 
@@ -71,7 +86,10 @@ function setStatus(ctx: ExtensionContext, pending?: AutoAction) {
   try {
     const identity = draftIdentity();
     const warning = pending || !(identity.status === "connected" || identity.status === "pending");
-    ctx.ui.setStatus("auto", ctx.ui.theme.fg(warning ? "warning" : "success", statusText(identity, pending)));
+    ctx.ui.setStatus(
+      "auto",
+      ctx.ui.theme.fg(warning ? "warning" : "success", statusText(identity, pending)),
+    );
   } catch {
     ctx.ui.setStatus("auto", ctx.ui.theme.fg("error", "auto · unavailable"));
   }
@@ -100,7 +118,8 @@ export default function autoExtension(pi: ExtensionAPI) {
         return;
       }
       if (ctx.mode !== "tui" || !ctx.hasUI || env("AGENTSH_SUBAGENT_ID")) {
-        if (ctx.hasUI) ctx.ui.notify("/auto is available only in top-level interactive Pi Auto", "error");
+        if (ctx.hasUI)
+          ctx.ui.notify("/auto is available only in top-level interactive Pi Auto", "error");
         return;
       }
       if (committed) {
@@ -121,19 +140,26 @@ export default function autoExtension(pi: ExtensionAPI) {
             `Connection: ${identity.status}`,
             "Your project is unchanged until you Apply.",
           ].join("\n"),
-          ["Review", "Apply and exit", "Apply, push, and exit", "Discard and exit", "Pause and exit"],
+          [
+            "Review",
+            "Apply and exit",
+            "Apply, push, and exit",
+            "Discard and exit",
+            "Pause and exit",
+          ],
         );
         if (!selection) return;
 
-        const action: AutoAction = selection === "Review"
-          ? "review"
-          : selection === "Apply and exit"
-            ? "apply"
-            : selection === "Apply, push, and exit"
-              ? "publish"
-              : selection === "Discard and exit"
-                ? "discard"
-                : "pause";
+        const action: AutoAction =
+          selection === "Review"
+            ? "review"
+            : selection === "Apply and exit"
+              ? "apply"
+              : selection === "Apply, push, and exit"
+                ? "publish"
+                : selection === "Discard and exit"
+                  ? "discard"
+                  : "pause";
 
         if (action === "apply" || action === "publish") {
           const confirmed = await ctx.ui.confirm(
@@ -153,7 +179,9 @@ export default function autoExtension(pi: ExtensionAPI) {
 
         await ctx.waitForIdle();
         if (!ctx.isIdle() || ctx.hasPendingMessages()) {
-          throw new Error("Pi still has pending work; wait for it to settle before finalizing the Draft");
+          throw new Error(
+            "Pi still has pending work; wait for it to settle before finalizing the Draft",
+          );
         }
         const finalIdentity = draftIdentity();
         writeAutoActionRequest(

@@ -10,7 +10,10 @@ import { type Component, type Focusable, Key, matchesKey } from "@earendil-works
 import { showBtwCustomPreservingEditor } from "./menu.js";
 import { sanitizeSingleLine } from "./text.js";
 
-export type MainEntryPickResult = { kind: "selected"; entryId: string } | { kind: "back" } | { kind: "closed" };
+export type MainEntryPickResult =
+  | { kind: "selected"; entryId: string }
+  | { kind: "back" }
+  | { kind: "closed" };
 
 export interface MainThreadTreeSelector extends Component, Focusable {
   onCopy?: (text: string | undefined) => void;
@@ -104,80 +107,83 @@ export async function pickMainEntry(
       controller.abort(new Error("The main-thread tree picker closed"));
     }
   };
-  const result = await showBtwCustomPreservingEditor<MainEntryPickResult>(ctx, (tui, _theme, _keybindings, done) => {
-    let settled = false;
-    let selector: MainThreadTreeSelector | undefined;
-    const finish = (value: MainEntryPickResult) => {
-      if (settled) return;
-      settled = true;
-      abortCopies();
-      done(value);
-    };
-    const onCopy = (entryId: string | undefined, displayText: string | undefined) => {
-      if (settled) return;
-      const text = entryId ? rawCopyText.get(entryId) : displayText;
-      if (!text) {
-        notifySafely(ctx, "Selected entry has no text to copy", "warning");
-        return;
-      }
-      const controller = new AbortController();
-      copyControllers.add(controller);
-      let operation: Promise<void>;
-      try {
-        operation = copy(text, controller.signal);
-      } catch (error: unknown) {
-        operation = Promise.reject(error);
-      }
-      let task!: Promise<void>;
-      task = operation
-        .then(() => {
-          if (!settled) notifySafely(ctx, "Copied selected message", "info");
-        })
-        .catch((error: unknown) => {
-          if (!settled && !controller.signal.aborted) {
-            notifySafely(ctx, `Could not copy selected message: ${formatError(error)}`, "error");
-          }
-        })
-        .finally(() => {
-          copyControllers.delete(controller);
-          copyTasks.delete(task);
-        });
-      copyTasks.add(task);
-    };
-    const restoreLabel = (entryId: string) => {
-      const previous = savedLabels.get(entryId);
-      selector?.setViewLabel?.(entryId, previous?.label, previous?.labelTimestamp);
-      tui.requestRender();
-    };
-    const onLabelChange = (entryId: string, label: string | undefined) => {
-      if (settled) return;
-      try {
-        if (!ctx.sessionManager.getEntry(entryId)) {
-          restoreLabel(entryId);
-          notifySafely(ctx, "The selected main-thread entry is no longer available", "warning");
+  const result = await showBtwCustomPreservingEditor<MainEntryPickResult>(
+    ctx,
+    (tui, _theme, _keybindings, done) => {
+      let settled = false;
+      let selector: MainThreadTreeSelector | undefined;
+      const finish = (value: MainEntryPickResult) => {
+        if (settled) return;
+        settled = true;
+        abortCopies();
+        done(value);
+      };
+      const onCopy = (entryId: string | undefined, displayText: string | undefined) => {
+        if (settled) return;
+        const text = entryId ? rawCopyText.get(entryId) : displayText;
+        if (!text) {
+          notifySafely(ctx, "Selected entry has no text to copy", "warning");
           return;
         }
-        const persistedLabel = label === undefined ? undefined : sanitizeSingleLine(label);
-        pi.setLabel(entryId, persistedLabel);
-        savedLabels.set(entryId, { label: persistedLabel });
-        selector?.setViewLabel?.(entryId, persistedLabel);
+        const controller = new AbortController();
+        copyControllers.add(controller);
+        let operation: Promise<void>;
+        try {
+          operation = copy(text, controller.signal);
+        } catch (error: unknown) {
+          operation = Promise.reject(error);
+        }
+        let task!: Promise<void>;
+        task = operation
+          .then(() => {
+            if (!settled) notifySafely(ctx, "Copied selected message", "info");
+          })
+          .catch((error: unknown) => {
+            if (!settled && !controller.signal.aborted) {
+              notifySafely(ctx, `Could not copy selected message: ${formatError(error)}`, "error");
+            }
+          })
+          .finally(() => {
+            copyControllers.delete(controller);
+            copyTasks.delete(task);
+          });
+        copyTasks.add(task);
+      };
+      const restoreLabel = (entryId: string) => {
+        const previous = savedLabels.get(entryId);
+        selector?.setViewLabel?.(entryId, previous?.label, previous?.labelTimestamp);
         tui.requestRender();
-      } catch (error: unknown) {
-        restoreLabel(entryId);
-        notifySafely(ctx, `Could not update tree label: ${formatError(error)}`, "error");
-      }
-    };
-    selector = createSelector({
-      tree,
-      currentLeafId,
-      terminalRows: tui.terminal.rows,
-      onSelect: (entryId) => finish({ kind: "selected", entryId }),
-      onCancel: () => finish({ kind: "back" }),
-      onCopy,
-      onLabelChange,
-    });
-    return new MainThreadTreePickerComponent(selector, () => finish({ kind: "closed" }));
-  });
+      };
+      const onLabelChange = (entryId: string, label: string | undefined) => {
+        if (settled) return;
+        try {
+          if (!ctx.sessionManager.getEntry(entryId)) {
+            restoreLabel(entryId);
+            notifySafely(ctx, "The selected main-thread entry is no longer available", "warning");
+            return;
+          }
+          const persistedLabel = label === undefined ? undefined : sanitizeSingleLine(label);
+          pi.setLabel(entryId, persistedLabel);
+          savedLabels.set(entryId, { label: persistedLabel });
+          selector?.setViewLabel?.(entryId, persistedLabel);
+          tui.requestRender();
+        } catch (error: unknown) {
+          restoreLabel(entryId);
+          notifySafely(ctx, `Could not update tree label: ${formatError(error)}`, "error");
+        }
+      };
+      selector = createSelector({
+        tree,
+        currentLeafId,
+        terminalRows: tui.terminal.rows,
+        onSelect: (entryId) => finish({ kind: "selected", entryId }),
+        onCancel: () => finish({ kind: "back" }),
+        onCopy,
+        onLabelChange,
+      });
+      return new MainThreadTreePickerComponent(selector, () => finish({ kind: "closed" }));
+    },
+  );
   abortCopies();
   await Promise.allSettled([...copyTasks]);
 
@@ -193,7 +199,8 @@ function createNativeTreeSelector(options: MainThreadTreeSelectorOptions): MainT
     options.onCancel,
     options.onLabelChange,
   );
-  selector.onCopy = (displayText) => options.onCopy(selector.getTreeList().getSelectedNode()?.entry.id, displayText);
+  selector.onCopy = (displayText) =>
+    options.onCopy(selector.getTreeList().getSelectedNode()?.entry.id, displayText);
   const result = selector as MainThreadTreeSelector;
   result.setViewLabel = (entryId, label, labelTimestamp) =>
     selector.getTreeList().updateNodeLabel(entryId, label, labelTimestamp);
@@ -218,7 +225,8 @@ function sanitizeEntryForDisplay(entry: SessionEntry): SessionEntry {
   switch (entry.type) {
     case "message": {
       const message = { ...entry.message } as Record<string, unknown>;
-      if ("content" in entry.message) message.content = sanitizeDisplayContent(entry.message.content);
+      if ("content" in entry.message)
+        message.content = sanitizeDisplayContent(entry.message.content);
       for (const key of ["role", "errorMessage", "command", "toolName"] as const) {
         const value = message[key];
         if (typeof value === "string") message[key] = sanitizeSingleLine(value);
@@ -359,7 +367,8 @@ function collectSavedLabels(tree: readonly SessionTreeNode[]): Map<string, Saved
     for (const node of nodes) {
       result.set(node.entry.id, {
         label: node.label === undefined ? undefined : sanitizeSingleLine(node.label),
-        labelTimestamp: node.labelTimestamp === undefined ? undefined : sanitizeSingleLine(node.labelTimestamp),
+        labelTimestamp:
+          node.labelTimestamp === undefined ? undefined : sanitizeSingleLine(node.labelTimestamp),
       });
       visit(node.children);
     }

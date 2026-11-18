@@ -1,6 +1,6 @@
 export function stripSubagentTerminalControls(value: string): string {
   let visible = "";
-  for (let index = 0; index < value.length;) {
+  for (let index = 0; index < value.length; ) {
     const code = value.charCodeAt(index);
     if (code === 0x1b) {
       index = skipSubagentEscapeSequence(value, index);

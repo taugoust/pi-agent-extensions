@@ -1,10 +1,29 @@
 import assert from "node:assert/strict";
-import { access, mkdir, mkdtemp, readdir, readFile, rm, symlink, writeFile } from "node:fs/promises";
+import {
+  access,
+  mkdir,
+  mkdtemp,
+  readdir,
+  readFile,
+  rm,
+  symlink,
+  writeFile,
+} from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { test as bunTest } from "bun:test";
-function test(name: string, body: (ctx: { onTestFinished(fn: () => Promise<void>): void }) => unknown) {
-  bunTest(name, async () => { const cleanup: (() => Promise<void>)[] = []; try { await body({onTestFinished: fn => cleanup.push(fn)}); } finally { for (const fn of cleanup.reverse()) await fn(); } });
+function test(
+  name: string,
+  body: (ctx: { onTestFinished(fn: () => Promise<void>): void }) => unknown,
+) {
+  bunTest(name, async () => {
+    const cleanup: (() => Promise<void>)[] = [];
+    try {
+      await body({ onTestFinished: (fn) => cleanup.push(fn) });
+    } finally {
+      for (const fn of cleanup.reverse()) await fn();
+    }
+  });
 }
 import {
   DEFAULT_PROGRESS_SETTINGS,
@@ -61,15 +80,24 @@ test("retains nested canonical settings with field-level top-level precedence", 
     displayMode: "expanded",
     maxVisibleItems: 7,
   });
-  assert.deepEqual(normalizeProgressSettings({ widget: nested, enabled: true, maxVisibleItems: null }), {
-    ...DEFAULT_PROGRESS_SETTINGS,
-    displayMode: "expanded",
-  });
-  assert.equal(normalizeProgressSettings({ widget: { enabled: "invalid" }, enabled: true })?.enabled, true);
+  assert.deepEqual(
+    normalizeProgressSettings({ widget: nested, enabled: true, maxVisibleItems: null }),
+    {
+      ...DEFAULT_PROGRESS_SETTINGS,
+      displayMode: "expanded",
+    },
+  );
+  assert.equal(
+    normalizeProgressSettings({ widget: { enabled: "invalid" }, enabled: true })?.enabled,
+    true,
+  );
   for (const widget of [null, true, [], { enabled: "yes" }, { displayMode: "compact" }]) {
     assert.equal(normalizeProgressSettings({ widget }), undefined);
   }
-  assert.equal(normalizeProgressSettings({ widget: { enabled: false }, enabled: "invalid" }), undefined);
+  assert.equal(
+    normalizeProgressSettings({ widget: { enabled: false }, enabled: "invalid" }),
+    undefined,
+  );
 });
 
 test("loads flat canonical settings without changing either settings file", async (t) => {
@@ -152,7 +180,10 @@ test("missing settings are side-effect free", async (t) => {
 test("loads canonical UTF-8 BOM settings without rewriting bytes", async (t) => {
   const directory = await temporaryDirectory(t);
   const canonical = join(directory, "pi-progress.json");
-  const document = Buffer.concat([Buffer.from([0xef, 0xbb, 0xbf]), Buffer.from('{"showProgress":false}', "utf8")]);
+  const document = Buffer.concat([
+    Buffer.from([0xef, 0xbb, 0xbf]),
+    Buffer.from('{"showProgress":false}', "utf8"),
+  ]);
   await writeFile(canonical, document);
   assert.deepEqual(await loadProgressSettings(canonical), {
     kind: "loaded",
@@ -221,13 +252,25 @@ async function isolatedDefaults(t: { onTestFinished(callback: () => Promise<void
     else process.env.PI_CODING_AGENT_DIR = previous;
   });
   await mkdir(join(directory, "defaults"));
-  return { directory, defaults: join(directory, "defaults", "progress.json"), canonical: join(directory, "pi-progress.json") };
+  return {
+    directory,
+    defaults: join(directory, "defaults", "progress.json"),
+    canonical: join(directory, "pi-progress.json"),
+  };
 }
 
 test("normalization is pure and independent of even malformed declarative defaults", async (t) => {
   const paths = await isolatedDefaults(t);
-  const input = Object.freeze({ widget: Object.freeze({ enabled: false, maxVisibleItems: 3 }), showCompleted: false });
-  const expected = { ...DEFAULT_PROGRESS_SETTINGS, enabled: false, maxVisibleItems: 3, showCompleted: false };
+  const input = Object.freeze({
+    widget: Object.freeze({ enabled: false, maxVisibleItems: 3 }),
+    showCompleted: false,
+  });
+  const expected = {
+    ...DEFAULT_PROGRESS_SETTINGS,
+    enabled: false,
+    maxVisibleItems: 3,
+    showCompleted: false,
+  };
   await writeFile(paths.defaults, "{malformed");
   assert.deepEqual(normalizeProgressSettings(input), expected);
   await writeFile(paths.defaults, '{"displayMode":"expanded","showProgress":false}');
@@ -238,18 +281,33 @@ test("normalization is pure and independent of even malformed declarative defaul
 
 test("effective loading applies builtins then declarative defaults then explicit nested and flat preferences", async (t) => {
   const paths = await isolatedDefaults(t);
-  const declarative = '{"enabled":false,"displayMode":"expanded","showCompleted":false,"maxVisibleItems":8}';
+  const declarative =
+    '{"enabled":false,"displayMode":"expanded","showCompleted":false,"maxVisibleItems":8}';
   await writeFile(paths.defaults, declarative);
   assert.deepEqual(await loadProgressSettings(), {
-    kind: "missing", path: paths.canonical,
-    settings: { enabled: false, displayMode: "expanded", showCompleted: false, maxVisibleItems: 8, showProgress: true },
+    kind: "missing",
+    path: paths.canonical,
+    settings: {
+      enabled: false,
+      displayMode: "expanded",
+      showCompleted: false,
+      maxVisibleItems: 8,
+      showProgress: true,
+    },
   });
   await assert.rejects(access(paths.canonical));
-  const preferences = '{"widget":{"enabled":true,"displayMode":"collapsed","maxVisibleItems":2},"maxVisibleItems":5}';
+  const preferences =
+    '{"widget":{"enabled":true,"displayMode":"collapsed","maxVisibleItems":2},"maxVisibleItems":5}';
   await writeFile(paths.canonical, preferences);
   const result = await loadProgressSettings();
   assert.equal(result.kind, "loaded");
-  assert.deepEqual(result.settings, { enabled: true, displayMode: "collapsed", showCompleted: false, maxVisibleItems: 5, showProgress: true });
+  assert.deepEqual(result.settings, {
+    enabled: true,
+    displayMode: "collapsed",
+    showCompleted: false,
+    maxVisibleItems: 5,
+    showProgress: true,
+  });
   assert.equal(await readFile(paths.defaults, "utf8"), declarative);
   assert.equal(await readFile(paths.canonical, "utf8"), preferences);
 });
@@ -259,7 +317,13 @@ test("saving writes only explicit preferences, never resolved declarative or bui
   const declarative = '{"enabled":false,"displayMode":"expanded","maxVisibleItems":8}';
   await writeFile(paths.defaults, declarative);
   const effective = await saveProgressSettings({ showCompleted: false });
-  assert.deepEqual(effective, { enabled: false, displayMode: "expanded", maxVisibleItems: 8, showCompleted: false, showProgress: true });
+  assert.deepEqual(effective, {
+    enabled: false,
+    displayMode: "expanded",
+    maxVisibleItems: 8,
+    showCompleted: false,
+    showProgress: true,
+  });
   assert.deepEqual(JSON.parse(await readFile(paths.canonical, "utf8")), { showCompleted: false });
   assert.equal(await readFile(paths.defaults, "utf8"), declarative);
   assert.deepEqual((await readdir(paths.directory)).sort(), ["defaults", "pi-progress.json"]);
@@ -267,7 +331,9 @@ test("saving writes only explicit preferences, never resolved declarative or bui
   await writeFile(paths.canonical, '{"widget":{"enabled":true},"future":{"preserve":1}}');
   await saveProgressSettings({ showCompleted: false });
   assert.deepEqual(JSON.parse(await readFile(paths.canonical, "utf8")), {
-    widget: { enabled: true }, future: { preserve: 1 }, showCompleted: false,
+    widget: { enabled: true },
+    future: { preserve: 1 },
+    showCompleted: false,
   });
 });
 
@@ -276,9 +342,16 @@ test("changed declarative defaults continue affecting only unoverridden fields a
   await writeFile(paths.defaults, '{"displayMode":"expanded","enabled":false,"maxVisibleItems":8}');
   await saveProgressSettings({ displayMode: "collapsed" });
   const preferences = await readFile(paths.canonical, "utf8");
-  await writeFile(paths.defaults, '{"displayMode":"adaptive","enabled":true,"maxVisibleItems":2,"showProgress":false}');
+  await writeFile(
+    paths.defaults,
+    '{"displayMode":"adaptive","enabled":true,"maxVisibleItems":2,"showProgress":false}',
+  );
   assert.deepEqual((await loadProgressSettings()).settings, {
-    enabled: true, displayMode: "collapsed", maxVisibleItems: 2, showCompleted: true, showProgress: false,
+    enabled: true,
+    displayMode: "collapsed",
+    maxVisibleItems: 2,
+    showCompleted: true,
+    showProgress: false,
   });
   assert.equal(await readFile(paths.canonical, "utf8"), preferences);
 });
@@ -310,8 +383,15 @@ test("malformed preferences report invalid and refuse saves without materializin
     await writeFile(paths.canonical, preferences);
     const result = await loadProgressSettings();
     assert.equal(result.kind, "invalid");
-    assert.deepEqual(result.settings, { ...DEFAULT_PROGRESS_SETTINGS, enabled: false, maxVisibleItems: 4 });
-    await assert.rejects(saveProgressSettings({ showCompleted: true }), /Cannot save invalid settings/);
+    assert.deepEqual(result.settings, {
+      ...DEFAULT_PROGRESS_SETTINGS,
+      enabled: false,
+      maxVisibleItems: 4,
+    });
+    await assert.rejects(
+      saveProgressSettings({ showCompleted: true }),
+      /Cannot save invalid settings/,
+    );
     assert.equal(await readFile(paths.canonical, "utf8"), preferences);
     assert.equal(await readFile(paths.defaults, "utf8"), declarative);
     assert.deepEqual((await readdir(paths.directory)).sort(), ["defaults", "pi-progress.json"]);

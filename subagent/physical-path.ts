@@ -12,8 +12,12 @@ export function physicalPath(path: string): { path: string; exists: boolean } {
     } catch (error: any) {
       if (error?.code !== "ENOENT") throw error;
       let missingEntry = false;
-      try { lstatSync(candidate); }
-      catch (statError: any) { if (statError?.code === "ENOENT") missingEntry = true; else throw statError; }
+      try {
+        lstatSync(candidate);
+      } catch (statError: any) {
+        if (statError?.code === "ENOENT") missingEntry = true;
+        else throw statError;
+      }
       if (!missingEntry) throw error; // An existing but unresolved entry (for example a broken symlink) is unknown.
       const parent = dirname(candidate);
       if (parent === candidate) throw error;

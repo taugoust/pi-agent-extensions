@@ -21,7 +21,11 @@ export type SubagentControlResult = {
 
 export type NativeSubagentControlHandle = {
   isActive(): boolean;
-  acceptPrompt?(mode: SubagentControlMode, message: string, signal?: AbortSignal): Promise<SubagentControlResult>;
+  acceptPrompt?(
+    mode: SubagentControlMode,
+    message: string,
+    signal?: AbortSignal,
+  ): Promise<SubagentControlResult>;
   control(
     mode: SubagentControlMode,
     message: string,
@@ -81,7 +85,14 @@ function pruneTerminalRecords(state: ChildControlRegistry): void {
 
 export class SubagentControlError extends Error {
   constructor(
-    readonly code: "unknown" | "ownership" | "capability" | "inactive" | "busy" | "handled" | "timeout",
+    readonly code:
+      | "unknown"
+      | "ownership"
+      | "capability"
+      | "inactive"
+      | "busy"
+      | "handled"
+      | "timeout",
     message: string,
     readonly backend?: SubagentChildBackend,
   ) {
@@ -137,14 +148,19 @@ export function bindNativeSubagentControl(
   if (!record || record.sessionId !== sessionId || record.backend !== "native") {
     throw new Error(`cannot bind unreserved native subagent child: ${childId}`);
   }
-  if (record.state === "terminal") throw new Error(`cannot bind terminal native subagent child: ${childId}`);
-  if (record.handle && record.handle !== handle) throw new Error(`native subagent child already has a control owner: ${childId}`);
+  if (record.state === "terminal")
+    throw new Error(`cannot bind terminal native subagent child: ${childId}`);
+  if (record.handle && record.handle !== handle)
+    throw new Error(`native subagent child already has a control owner: ${childId}`);
   record.handle = handle;
   record.state = "active";
   record.updatedAt = Date.now();
 }
 
-export function completeSubagentChildren(sessionIdValue: string, children: readonly SubagentChildIdentity[]): void {
+export function completeSubagentChildren(
+  sessionIdValue: string,
+  children: readonly SubagentChildIdentity[],
+): void {
   const sessionId = requiredSessionId(sessionIdValue);
   const state = registry();
   const now = Date.now();
@@ -177,7 +193,10 @@ export async function controlSubagentChild(
   const record = state.records.get(childId);
   if (!record) throw new SubagentControlError("unknown", `Unknown subagent child: ${childId}`);
   if (record.sessionId !== sessionId) {
-    throw new SubagentControlError("ownership", `Subagent child ${childId} belongs to a different Pi session`);
+    throw new SubagentControlError(
+      "ownership",
+      `Subagent child ${childId} belongs to a different Pi session`,
+    );
   }
   if (record.backend !== "native") {
     throw new SubagentControlError(
@@ -203,7 +222,11 @@ export async function controlSubagentChild(
   }
   if (!waitForResponse) {
     if (!handle.acceptPrompt) {
-      throw new SubagentControlError("capability", "This child was launched with an older control implementation. Non-blocking prompts are unavailable; wait_for_response=true retains the old blocking behavior. Do not relaunch its work.", "native");
+      throw new SubagentControlError(
+        "capability",
+        "This child was launched with an older control implementation. Non-blocking prompts are unavailable; wait_for_response=true retains the old blocking behavior. Do not relaunch its work.",
+        "native",
+      );
     }
     return await handle.acceptPrompt(mode, message, signal);
   }

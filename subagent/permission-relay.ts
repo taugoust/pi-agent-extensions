@@ -33,8 +33,11 @@ function truncateUTF8(value: string, maximum: number): string {
   if (bytes.length <= maximum) return value;
   let end = maximum;
   while (end > 0) {
-    try { return new TextDecoder("utf-8", { fatal: true }).decode(bytes.subarray(0, end)); }
-    catch { end -= 1; }
+    try {
+      return new TextDecoder("utf-8", { fatal: true }).decode(bytes.subarray(0, end));
+    } catch {
+      end -= 1;
+    }
   }
   return "";
 }
@@ -47,8 +50,12 @@ function boundedReason(error: unknown): string {
 }
 
 function requiredString(value: unknown, name: string, maximum: number, allowEmpty = false): string {
-  if (typeof value !== "string" || (!allowEmpty && value.length === 0)) throw new Error(`invalid ${name}`);
-  if (Buffer.from(value, "utf8").toString("utf8") !== value || Buffer.byteLength(value, "utf8") > maximum) {
+  if (typeof value !== "string" || (!allowEmpty && value.length === 0))
+    throw new Error(`invalid ${name}`);
+  if (
+    Buffer.from(value, "utf8").toString("utf8") !== value ||
+    Buffer.byteLength(value, "utf8") > maximum
+  ) {
     throw new Error(`invalid ${name}`);
   }
   return value;
@@ -56,20 +63,25 @@ function requiredString(value: unknown, name: string, maximum: number, allowEmpt
 
 function exactKeys(value: JsonObject, required: readonly string[]): void {
   const allowed = new Set(required);
-  for (const key of Object.keys(value)) if (!allowed.has(key)) throw new Error(`unexpected field ${key}`);
-  for (const key of required) if (!Object.prototype.hasOwnProperty.call(value, key)) throw new Error(`missing field ${key}`);
+  for (const key of Object.keys(value))
+    if (!allowed.has(key)) throw new Error(`unexpected field ${key}`);
+  for (const key of required)
+    if (!Object.prototype.hasOwnProperty.call(value, key)) throw new Error(`missing field ${key}`);
 }
 
 function parseFrame(frame: Buffer): JsonObject {
-  if (frame.length === 0 || frame.length > SUBAGENT_PERMISSION_MAX_FRAME_BYTES) throw new Error("invalid relay frame size");
+  if (frame.length === 0 || frame.length > SUBAGENT_PERMISSION_MAX_FRAME_BYTES)
+    throw new Error("invalid relay frame size");
   const text = new TextDecoder("utf-8", { fatal: true }).decode(frame);
   const value = JSON.parse(text) as unknown;
-  if (!value || typeof value !== "object" || Array.isArray(value)) throw new Error("relay frame is not an object");
+  if (!value || typeof value !== "object" || Array.isArray(value))
+    throw new Error("relay frame is not an object");
   return value as JsonObject;
 }
 
 function processStartToken(pid: number): string {
-  if (process.platform !== "linux") throw new Error("guarded native subagents currently require Linux process identity support");
+  if (process.platform !== "linux")
+    throw new Error("guarded native subagents currently require Linux process identity support");
   const stat = fs.readFileSync(`/proc/${pid}/stat`, "utf8");
   const close = stat.lastIndexOf(")");
   if (close < 0) throw new Error("could not parse child process identity");
@@ -84,7 +96,12 @@ function secureRuntimeRoot(): string {
   const root = fs.mkdtempSync(path.join(base, "pi-subagent-permission-"));
   fs.chmodSync(root, 0o700);
   const info = fs.lstatSync(root);
-  if (!info.isDirectory() || info.isSymbolicLink() || (process.getuid && info.uid !== process.getuid()) || (info.mode & 0o077) !== 0) {
+  if (
+    !info.isDirectory() ||
+    info.isSymbolicLink() ||
+    (process.getuid && info.uid !== process.getuid()) ||
+    (info.mode & 0o077) !== 0
+  ) {
     fs.rmSync(root, { recursive: true, force: true });
     throw new Error("could not create a private subagent permission relay directory");
   }
@@ -143,13 +160,33 @@ export class NativeSubagentPermissionRelay {
     this.socketPath = path.join(options.root, "relay.sock");
     this.token = randomBytes(32);
     this.authority = options.authority;
-    this.subagentId = requiredString(options.subagentId, "subagent id", SUBAGENT_PERMISSION_MAX_ID_BYTES);
+    this.subagentId = requiredString(
+      options.subagentId,
+      "subagent id",
+      SUBAGENT_PERMISSION_MAX_ID_BYTES,
+    );
     this.label = requiredString(options.label, "subagent label", SUBAGENT_PERMISSION_MAX_ID_BYTES);
-    this.task = truncateUTF8(requiredString(options.task, "subagent task", SUBAGENT_PERMISSION_MAX_FRAME_BYTES), 2048);
-    this.expectedCwd = requiredString(options.cwd, "subagent cwd", SUBAGENT_PERMISSION_MAX_CWD_BYTES, true);
-    if (!Array.isArray(options.tools) || options.tools.length > SUBAGENT_PERMISSION_MAX_TOOLS
-      || new Set(options.tools).size !== options.tools.length
-      || options.tools.some((tool) => !SUBAGENT_PERMISSION_NATIVE_TOOLS.includes(tool as typeof SUBAGENT_PERMISSION_NATIVE_TOOLS[number]))) {
+    this.task = truncateUTF8(
+      requiredString(options.task, "subagent task", SUBAGENT_PERMISSION_MAX_FRAME_BYTES),
+      2048,
+    );
+    this.expectedCwd = requiredString(
+      options.cwd,
+      "subagent cwd",
+      SUBAGENT_PERMISSION_MAX_CWD_BYTES,
+      true,
+    );
+    if (
+      !Array.isArray(options.tools) ||
+      options.tools.length > SUBAGENT_PERMISSION_MAX_TOOLS ||
+      new Set(options.tools).size !== options.tools.length ||
+      options.tools.some(
+        (tool) =>
+          !SUBAGENT_PERMISSION_NATIVE_TOOLS.includes(
+            tool as (typeof SUBAGENT_PERMISSION_NATIVE_TOOLS)[number],
+          ),
+      )
+    ) {
       throw new Error("invalid guarded native subagent tool set");
     }
     this.tools = [...options.tools];
@@ -174,15 +211,24 @@ export class NativeSubagentPermissionRelay {
     // caller reaches its own await of the attestation promise.
     void this.ready.catch(() => undefined);
     this.server = net.createServer((socket) => this.accept(socket));
-    this.server.on("error", (error) => this.close(new Error(`subagent permission relay server failed: ${error.message}`)));
-    this.authorityRevoked = () => this.close(asError(
-      this.authority.revoked.reason ?? new Error("parent AgentSH Permission Gate authority was revoked"),
-    ));
+    this.server.on("error", (error) =>
+      this.close(new Error(`subagent permission relay server failed: ${error.message}`)),
+    );
+    this.authorityRevoked = () =>
+      this.close(
+        asError(
+          this.authority.revoked.reason ??
+            new Error("parent AgentSH Permission Gate authority was revoked"),
+        ),
+      );
     if (this.authority.revoked.aborted) this.authorityRevoked();
     else this.authority.revoked.addEventListener("abort", this.authorityRevoked, { once: true });
     if (options.signal) {
       this.parentSignal = options.signal;
-      this.parentAbort = () => this.close(asError(options.signal!.reason ?? new Error("parent subagent execution was aborted")));
+      this.parentAbort = () =>
+        this.close(
+          asError(options.signal!.reason ?? new Error("parent subagent execution was aborted")),
+        );
       if (options.signal.aborted) this.parentAbort();
       else options.signal.addEventListener("abort", this.parentAbort, { once: true });
     }
@@ -197,7 +243,8 @@ export class NativeSubagentPermissionRelay {
     tools: string[];
     signal?: AbortSignal;
   }): Promise<NativeSubagentPermissionRelay> {
-    if (options.signal?.aborted) throw asError(options.signal.reason ?? new Error("parent subagent execution was aborted"));
+    if (options.signal?.aborted)
+      throw asError(options.signal.reason ?? new Error("parent subagent execution was aborted"));
     if (options.authority.authorityAbi !== SUBAGENT_PERMISSION_AUTHORITY_ABI) {
       throw new Error("parent AgentSH Permission Gate authority is incompatible");
     }
@@ -210,7 +257,9 @@ export class NativeSubagentPermissionRelay {
     try {
       relay = new NativeSubagentPermissionRelay({ ...options, root });
     } catch (error) {
-      try { fs.rmSync(root, { recursive: true, force: true }); } catch {}
+      try {
+        fs.rmSync(root, { recursive: true, force: true });
+      } catch {}
       throw error;
     }
     try {
@@ -227,7 +276,10 @@ export class NativeSubagentPermissionRelay {
           }
         });
       });
-      relay.handshakeTimer = setTimeout(() => relay.close(new Error("native subagent permission proxy did not connect in time")), HANDSHAKE_TIMEOUT_MS);
+      relay.handshakeTimer = setTimeout(
+        () => relay.close(new Error("native subagent permission proxy did not connect in time")),
+        HANDSHAKE_TIMEOUT_MS,
+      );
       relay.handshakeTimer.unref?.();
       return relay;
     } catch (error) {
@@ -256,7 +308,13 @@ export class NativeSubagentPermissionRelay {
       await Promise.race([
         this.gracefulShutdown,
         new Promise<never>((_resolve, reject) => {
-          timer = setTimeout(() => reject(new Error("native subagent permission proxy exited without authenticated goodbye")), timeoutMs);
+          timer = setTimeout(
+            () =>
+              reject(
+                new Error("native subagent permission proxy exited without authenticated goodbye"),
+              ),
+            timeoutMs,
+          );
         }),
       ]);
     } finally {
@@ -264,21 +322,33 @@ export class NativeSubagentPermissionRelay {
     }
   }
 
-  close(reason: Error = new Error("native subagent permission relay closed"), reportFailure = true): void {
+  close(
+    reason: Error = new Error("native subagent permission relay closed"),
+    reportFailure = true,
+  ): void {
     if (this.closed) return;
     this.closed = true;
     if (this.handshakeTimer) clearTimeout(this.handshakeTimer);
     this.handshakeTimer = undefined;
-    if (this.parentSignal && this.parentAbort) this.parentSignal.removeEventListener("abort", this.parentAbort);
+    if (this.parentSignal && this.parentAbort)
+      this.parentSignal.removeEventListener("abort", this.parentAbort);
     this.authority.revoked.removeEventListener("abort", this.authorityRevoked);
     this.parentSignal = undefined;
     this.parentAbort = undefined;
     for (const pending of this.pending.values()) pending.controller.abort(reason);
     this.pending.clear();
-    try { this.socket?.destroy(); } catch {}
-    try { this.server.close(); } catch {}
-    try { fs.unlinkSync(this.socketPath); } catch {}
-    try { fs.rmSync(this.root, { recursive: true, force: true }); } catch {}
+    try {
+      this.socket?.destroy();
+    } catch {}
+    try {
+      this.server.close();
+    } catch {}
+    try {
+      fs.unlinkSync(this.socketPath);
+    } catch {}
+    try {
+      fs.rmSync(this.root, { recursive: true, force: true });
+    } catch {}
     if (!this.readySettled) {
       this.readySettled = true;
       this.rejectReady(reason);
@@ -305,7 +375,9 @@ export class NativeSubagentPermissionRelay {
     this.socket = socket;
     socket.setNoDelay?.(true);
     socket.on("data", (chunk: Buffer) => this.receive(Buffer.from(chunk)));
-    socket.on("error", (error) => this.close(new Error(`native subagent permission relay transport failed: ${error.message}`)));
+    socket.on("error", (error) =>
+      this.close(new Error(`native subagent permission relay transport failed: ${error.message}`)),
+    );
     socket.on("close", () => {
       if (!this.closed) this.close(new Error("native subagent permission proxy disconnected"));
     });
@@ -321,7 +393,8 @@ export class NativeSubagentPermissionRelay {
     for (;;) {
       const newline = this.buffer.indexOf(0x0a);
       if (newline < 0) {
-        if (this.buffer.length > SUBAGENT_PERMISSION_MAX_FRAME_BYTES) this.close(new Error("native subagent permission relay frame is oversized"));
+        if (this.buffer.length > SUBAGENT_PERMISSION_MAX_FRAME_BYTES)
+          this.close(new Error("native subagent permission relay frame is oversized"));
         return;
       }
       const frame = this.buffer.subarray(0, newline);
@@ -329,7 +402,9 @@ export class NativeSubagentPermissionRelay {
       try {
         this.handleFrame(parseFrame(frame));
       } catch (error) {
-        this.close(new Error(`native subagent permission relay protocol violation: ${boundedReason(error)}`));
+        this.close(
+          new Error(`native subagent permission relay protocol violation: ${boundedReason(error)}`),
+        );
         return;
       }
       if (this.closed) return;
@@ -337,25 +412,43 @@ export class NativeSubagentPermissionRelay {
   }
 
   private handleFrame(frame: JsonObject): void {
-    if (frame.v !== SUBAGENT_PERMISSION_PROTOCOL_VERSION || typeof frame.type !== "string") throw new Error("invalid envelope");
+    if (frame.v !== SUBAGENT_PERMISSION_PROTOCOL_VERSION || typeof frame.type !== "string")
+      throw new Error("invalid envelope");
     if (!this.hello) {
       exactKeys(frame, ["v", "type", "token", "subagent_id", "pid"]);
       if (frame.type !== "hello") throw new Error("first frame is not hello");
       const token = requiredString(frame.token, "token", 64);
-      if (!/^[0-9a-f]{64}$/.test(token) || !timingSafeEqual(Buffer.from(token, "hex"), this.token)) throw new Error("authentication failed");
-      const subagentId = requiredString(frame.subagent_id, "subagent id", SUBAGENT_PERMISSION_MAX_ID_BYTES);
+      if (!/^[0-9a-f]{64}$/.test(token) || !timingSafeEqual(Buffer.from(token, "hex"), this.token))
+        throw new Error("authentication failed");
+      const subagentId = requiredString(
+        frame.subagent_id,
+        "subagent id",
+        SUBAGENT_PERMISSION_MAX_ID_BYTES,
+      );
       if (subagentId !== this.subagentId) throw new Error("subagent identity does not match");
-      if (!Number.isSafeInteger(frame.pid) || (frame.pid as number) < 1 || frame.pid !== this.expectedPid) throw new Error("child PID does not match");
+      if (
+        !Number.isSafeInteger(frame.pid) ||
+        (frame.pid as number) < 1 ||
+        frame.pid !== this.expectedPid
+      )
+        throw new Error("child PID does not match");
       this.verifyChildIdentity();
       this.hello = true;
       this.retireListener();
-      void this.send({ v: 1, type: "hello", service: "pi-subagent-permission-relay", tools: this.tools }).then(() => {
-        if (this.closed || this.readySettled) return;
-        this.readySettled = true;
-        if (this.handshakeTimer) clearTimeout(this.handshakeTimer);
-        this.handshakeTimer = undefined;
-        this.resolveReady();
-      }).catch((error) => this.close(asError(error)));
+      void this.send({
+        v: 1,
+        type: "hello",
+        service: "pi-subagent-permission-relay",
+        tools: this.tools,
+      })
+        .then(() => {
+          if (this.closed || this.readySettled) return;
+          this.readySettled = true;
+          if (this.handshakeTimer) clearTimeout(this.handshakeTimer);
+          this.handshakeTimer = undefined;
+          this.resolveReady();
+        })
+        .catch((error) => this.close(asError(error)));
       return;
     }
 
@@ -385,23 +478,38 @@ export class NativeSubagentPermissionRelay {
       pending.responded = true;
       pending.controller.abort(new Error("native subagent tool call was aborted"));
       this.pending.delete(id);
-      void this.send({ v: 1, type: "decision", id, allowed: false, reason: "native subagent tool call was aborted", fatal: false })
-        .catch((error) => this.close(asError(error)));
+      void this.send({
+        v: 1,
+        type: "decision",
+        id,
+        allowed: false,
+        reason: "native subagent tool call was aborted",
+        fatal: false,
+      }).catch((error) => this.close(asError(error)));
       return;
     }
 
     exactKeys(frame, ["v", "type", "id", "kind", "command", "cwd", "tool_call_id"]);
     if (frame.type !== "authorize" || frame.kind !== "bash") throw new Error("unsupported request");
-    if (this.seen.size >= SUBAGENT_PERMISSION_MAX_REQUESTS) throw new Error("request limit exceeded");
+    if (this.seen.size >= SUBAGENT_PERMISSION_MAX_REQUESTS)
+      throw new Error("request limit exceeded");
     if (this.pending.size > 0) throw new Error("concurrent authorization request");
     const id = requiredString(frame.id, "request id", SUBAGENT_PERMISSION_MAX_ID_BYTES);
     if (this.seen.has(id)) throw new Error("duplicate request id");
     const command = requiredString(frame.command, "command", SUBAGENT_PERMISSION_MAX_COMMAND_BYTES);
     const cwd = requiredString(frame.cwd, "cwd", SUBAGENT_PERMISSION_MAX_CWD_BYTES, true);
-    if (cwd !== this.expectedCwd) throw new Error("child working directory does not match launch cwd");
-    const childToolCallId = requiredString(frame.tool_call_id, "tool call id", SUBAGENT_PERMISSION_MAX_ID_BYTES);
+    if (cwd !== this.expectedCwd)
+      throw new Error("child working directory does not match launch cwd");
+    const childToolCallId = requiredString(
+      frame.tool_call_id,
+      "tool call id",
+      SUBAGENT_PERMISSION_MAX_ID_BYTES,
+    );
     const toolCallId = `subagent-${createHash("sha256")
-      .update(this.subagentId).update("\0").update(childToolCallId).digest("hex")}`;
+      .update(this.subagentId)
+      .update("\0")
+      .update(childToolCallId)
+      .digest("hex")}`;
     this.verifyChildIdentity();
     this.seen.add(id);
     const pending: PendingRequest = { controller: new AbortController(), responded: false };
@@ -438,7 +546,9 @@ export class NativeSubagentPermissionRelay {
       const committed = this.authority.commit(prepared.ticket, exactRequest);
       prepared = undefined;
       if (committed.allowed !== allowed || committed.reason !== reason) {
-        throw new Error("parent AgentSH Permission Gate changed its prepared authorization during commit");
+        throw new Error(
+          "parent AgentSH Permission Gate changed its prepared authorization during commit",
+        );
       }
       pending.responded = true;
       this.pending.delete(id);
@@ -477,19 +587,28 @@ export class NativeSubagentPermissionRelay {
   }
 
   private verifyChildIdentity(): void {
-    if (!this.expectedPid || !this.expectedStartToken) throw new Error("child process identity is not bound");
-    if (processStartToken(this.expectedPid) !== this.expectedStartToken) throw new Error("child process identity changed");
+    if (!this.expectedPid || !this.expectedStartToken)
+      throw new Error("child process identity is not bound");
+    if (processStartToken(this.expectedPid) !== this.expectedStartToken)
+      throw new Error("child process identity changed");
   }
 
   private retireListener(): void {
-    try { this.server.close(); } catch {}
-    try { fs.unlinkSync(this.socketPath); } catch {}
-    try { fs.rmdirSync(this.root); } catch {}
+    try {
+      this.server.close();
+    } catch {}
+    try {
+      fs.unlinkSync(this.socketPath);
+    } catch {}
+    try {
+      fs.rmdirSync(this.root);
+    } catch {}
   }
 
   private encode(message: JsonObject): Buffer {
     const frame = Buffer.from(`${JSON.stringify(message)}\n`, "utf8");
-    if (frame.length - 1 > SUBAGENT_PERMISSION_MAX_FRAME_BYTES) throw new Error("native subagent permission relay response is oversized");
+    if (frame.length - 1 > SUBAGENT_PERMISSION_MAX_FRAME_BYTES)
+      throw new Error("native subagent permission relay response is oversized");
     return frame;
   }
 
@@ -503,7 +622,7 @@ export class NativeSubagentPermissionRelay {
     }
     return new Promise<void>((resolve, reject) => {
       try {
-        this.socket!.write(frame, (error?: Error | null) => error ? reject(error) : resolve());
+        this.socket!.write(frame, (error?: Error | null) => (error ? reject(error) : resolve()));
       } catch (error) {
         reject(error);
       }

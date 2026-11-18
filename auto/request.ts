@@ -13,11 +13,18 @@ function assertPrivateOwner(path: string, label: string) {
   return stat;
 }
 
-export function writeAutoActionRequest(path: string, sessionId: string, action: AutoAction, authorization: string) {
+export function writeAutoActionRequest(
+  path: string,
+  sessionId: string,
+  action: AutoAction,
+  authorization: string,
+) {
   if (!isAbsolute(path) || /[\0\r\n]/.test(path)) {
     throw new Error("Draft action request path must be an absolute single-line path");
   }
-  if (!/^session-[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/.test(sessionId)) {
+  if (
+    !/^session-[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/.test(sessionId)
+  ) {
     throw new Error("Draft session identity is malformed");
   }
   if (!/^[0-9a-f]{64}$/.test(authorization)) {

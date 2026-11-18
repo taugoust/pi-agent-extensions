@@ -96,9 +96,23 @@ const QuestionSchema = Type.Object({
     }),
   ),
   prompt: Type.String({ description: "The full question text to display" }),
-  background: Type.Optional(Type.String({ maxLength: 2000, description: "Brief authored context for this question" })),
-  recommendation: Type.Optional(Type.String({ maxLength: 256, description: "Suggested option value for review only; never selected or submitted automatically" })),
-  attachmentIds: Type.Optional(Type.Array(Type.String({minLength:36,maxLength:36}),{maxItems:8,description:"Explicit goal_reference IDs from this goal worker; no paths or approval authority"})),
+  background: Type.Optional(
+    Type.String({ maxLength: 2000, description: "Brief authored context for this question" }),
+  ),
+  recommendation: Type.Optional(
+    Type.String({
+      maxLength: 256,
+      description:
+        "Suggested option value for review only; never selected or submitted automatically",
+    }),
+  ),
+  attachmentIds: Type.Optional(
+    Type.Array(Type.String({ minLength: 36, maxLength: 36 }), {
+      maxItems: 8,
+      description:
+        "Explicit goal_reference IDs from this goal worker; no paths or approval authority",
+    }),
+  ),
   options: Type.Array(QuestionOptionSchema, {
     description: "Available options to choose from",
   }),
@@ -122,12 +136,22 @@ function errorResult(
 ): { content: { type: "text"; text: string }[]; details: QuestionnaireResult; isError: boolean } {
   return {
     content: [{ type: "text", text: message }],
-    details: { questions, answers: [], cancelled: true, ...(cancelledByHuman ? { cancelledByHuman: true as const } : { failure: { code: "interaction_unavailable" as const } }) },
+    details: {
+      questions,
+      answers: [],
+      cancelled: true,
+      ...(cancelledByHuman
+        ? { cancelledByHuman: true as const }
+        : { failure: { code: "interaction_unavailable" as const } }),
+    },
     isError: !cancelledByHuman,
   };
 }
 
-function timeoutResult(questions: Question[]): { content: { type: "text"; text: string }[]; details: QuestionnaireResult } {
+function timeoutResult(questions: Question[]): {
+  content: { type: "text"; text: string }[];
+  details: QuestionnaireResult;
+} {
   return {
     content: [{ type: "text", text: "Questionnaire timed out." }],
     details: { questions, answers: [], cancelled: false, timedOut: true },
@@ -160,7 +184,12 @@ function normalizeExternalAnswer(
       index: typeof a.index === "number" ? a.index : undefined,
     }));
   if (!candidate.cancelled && answers.length === 0) return undefined;
-  return { questions, answers, cancelled: Boolean(candidate.cancelled), ...(candidate.cancelled ? { cancelledByHuman: true as const } : {}) };
+  return {
+    questions,
+    answers,
+    cancelled: Boolean(candidate.cancelled),
+    ...(candidate.cancelled ? { cancelledByHuman: true as const } : {}),
+  };
 }
 
 async function pollExternalAnswer(
@@ -193,7 +222,10 @@ async function publishQuestionnaireEvent(
   }
 }
 
-export default function questionnaire(pi: ExtensionAPI, options: { assignedGoalBootstrap?: boolean } = {}) {
+export default function questionnaire(
+  pi: ExtensionAPI,
+  options: { assignedGoalBootstrap?: boolean } = {},
+) {
   if (process.env.PI_DEDICATED_GOAL_CHILD === "1" && !options.assignedGoalBootstrap) return;
   pi.registerTool({
     name: "questionnaire",
@@ -221,500 +253,612 @@ export default function questionnaire(pi: ExtensionAPI, options: { assignedGoalB
         allowOther: q.allowOther !== false,
       }));
       let humanCancellation: QuestionnaireResult | undefined;
-      return withQuestionnaireTimeout(signal, async (signal) => {
-      const recorder = (globalThis as any)[GOAL_QUESTION_RECORDER_KEY];
-      const goalRecorder = recorder?.protocol === 1 && recorder.sessionId === ctx.sessionManager.getSessionId() && typeof recorder.request === "function" ? recorder : undefined;
-      if (questions.some(question=>question.attachmentIds?.length) && !goalRecorder) return errorResult("Error: Question attachments require the exact dedicated goal recorder",questions);
-      const interactions = workerInteractionsService("questionnaire");
-      if (interactions) {
-        if (signal?.aborted) return errorResult("Error: Questionnaire aborted", questions);
-        try {
-          const input = {
-            kind: "questionnaire" as const,
-            questions: questions.map(({ id, label, prompt, options, allowOther, background, recommendation, attachmentIds }) => ({ id, label, prompt, options, allowOther, ...(background === undefined ? {} : { background }), ...(recommendation === undefined ? {} : { recommendation }), ...(attachmentIds === undefined ? {} : {attachmentIds}) })),
-          };
-          const answer = goalRecorder
-            ? await goalRecorder.request(input,signal,interactions)
-            : await interactions.request(input,signal);
-          if (signal?.aborted) return errorResult("Error: Questionnaire aborted", questions);
-          if (!answer || answer.kind !== "questionnaire" || typeof answer.cancelled !== "boolean") {
-            return errorResult("Error: Headless questionnaire returned an invalid response", questions);
-          }
-          if (answer.cancelled) return errorResult("User cancelled the questionnaire", questions, true);
-          const byId = new Map(questions.map((question) => [question.id, question]));
-          if (!Array.isArray(answer.answers) || answer.answers.length !== questions.length) {
-            return errorResult("Error: Headless questionnaire returned incomplete answers", questions);
-          }
-          const answers: Answer[] = [];
-          const seen = new Set<string>();
-          for (const item of answer.answers) {
-            const question = item && byId.get(item.id);
-            if (!question || seen.has(item.id) || typeof item.value !== "string" || typeof item.wasCustom !== "boolean") {
-              return errorResult("Error: Headless questionnaire returned an invalid answer", questions);
-            }
-            seen.add(item.id);
-            const optionIndex = question.options.findIndex((option) => option.value === item.value);
-            if (item.wasCustom && question.allowOther && item.value.trim()) {
-              answers.push({ id: item.id, value: item.value, label: item.value, wasCustom: true });
-            } else if (!item.wasCustom && optionIndex >= 0) {
-              answers.push({ id: item.id, value: item.value, label: question.options[optionIndex].label, wasCustom: false, index: optionIndex + 1 });
-            } else {
-              return errorResult("Error: Headless questionnaire returned an unknown choice", questions);
-            }
-          }
-          const result = { questions, answers, cancelled: false };
-          return { content: [{ type: "text", text: answers.map((a) => `${a.id}: ${a.wasCustom ? `user wrote: ${a.label}` : `user selected: ${a.index}. ${a.label}`}`).join("\n") }], details: result };
-        } catch (error) {
-          return errorResult(`Error: Headless questionnaire interaction failed: ${String(error)}`, questions);
-        }
-      }
-      if (ctx.mode === "rpc") return errorResult("Error: Headless questionnaire interaction service unavailable", questions);
-      if (!ctx.hasUI) {
-        return errorResult(
-          "Error: UI not available (running in non-interactive mode)",
-        );
-      }
-      // Normalize questions with defaults
-
-      const isMulti = questions.length > 1;
-      const totalTabs = questions.length + 1; // questions + Submit
-      const questionnaireId = `questionnaire-${Date.now()}-${Math.random().toString(36).slice(2, 10)}`;
-
-      await publishQuestionnaireEvent(
-        "agent.question.pending",
-        questions.length === 1 ? "Pi has a question" : `Pi has ${questions.length} questions`,
-        summarizeQuestions(questions),
-        {
-          questionnaire_id: questionnaireId,
-          question_count: questions.length,
-          questions: questions.map((q) => ({
-            id: q.id,
-            label: q.label,
-            prompt: q.prompt,
-            options: q.options.map((option) => ({
-              value: option.value,
-              label: option.label,
-              description: option.description,
-            })),
-            allow_other: q.allowOther,
-          })),
-          cwd: ctx.cwd,
-        },
-      );
-
-      if (signal.aborted) return errorResult("Error: Questionnaire aborted", questions);
-      let completed = false;
-      let completeFromExternal: ((answer: QuestionnaireResult) => void) | undefined;
-      const remoteController = new AbortController();
-      const abortRemote = () => {
-        remoteController.abort();
-        completeFromExternal?.(signal.reason === QUESTIONNAIRE_TIMEOUT_REASON
-          ? timeoutResult(questions).details
-          : errorResult("Error: Questionnaire aborted", questions).details);
-      };
-      if (signal) {
-        if (signal.aborted) remoteController.abort();
-        else signal.addEventListener("abort", abortRemote, { once: true });
-      }
-      const paseoResult = answerQuestionnaireInPaseo(questions, remoteController.signal, _toolCallId);
-
-      const uiResult = ctx.ui.custom<QuestionnaireResult>(
-        (tui, theme, _kb, done) => {
-          // State
-          let currentTab = 0;
-          let optionIndex = 0;
-          let inputMode = false;
-          let inputQuestionId: string | null = null;
-          let cachedLines: string[] | undefined;
-          const answers = new Map<string, Answer>();
-
-          // Editor for "Type something" option
-          const editorTheme: EditorTheme = {
-            borderColor: (s) => theme.fg("accent", s),
-            selectList: {
-              selectedPrefix: (t) => theme.fg("accent", t),
-              selectedText: (t) => theme.fg("accent", t),
-              description: (t) => theme.fg("muted", t),
-              scrollInfo: (t) => theme.fg("dim", t),
-              noMatch: (t) => theme.fg("warning", t),
-            },
-          };
-          const editor = new Editor(tui, editorTheme);
-
-          // Helpers
-          function refresh() {
-            cachedLines = undefined;
-            tui.requestRender();
-          }
-
-          function finish(result: QuestionnaireResult, abort = false) {
-            if (completed) return;
-            completed = true;
-            if (abort) {
-              humanCancellation = result;
-              ctx.abort();
-            }
-            done(result);
-          }
-
-          completeFromExternal = (answer) => finish(answer);
-
-          function submit(cancelled: boolean) {
-            finish(
-              {
-                questions,
-                answers: Array.from(answers.values()),
-                cancelled,
-                ...(cancelled ? { cancelledByHuman: true as const } : {}),
-              },
-              cancelled,
+      return withQuestionnaireTimeout(
+        signal,
+        async (signal) => {
+          const recorder = (globalThis as any)[GOAL_QUESTION_RECORDER_KEY];
+          const goalRecorder =
+            recorder?.protocol === 1 &&
+            recorder.sessionId === ctx.sessionManager.getSessionId() &&
+            typeof recorder.request === "function"
+              ? recorder
+              : undefined;
+          if (questions.some((question) => question.attachmentIds?.length) && !goalRecorder)
+            return errorResult(
+              "Error: Question attachments require the exact dedicated goal recorder",
+              questions,
             );
-          }
-
-          function currentQuestion(): Question | undefined {
-            return questions[currentTab];
-          }
-
-          function currentOptions(): RenderOption[] {
-            const q = currentQuestion();
-            if (!q) return [];
-            const opts: RenderOption[] = [...q.options];
-            if (q.allowOther) {
-              opts.push({
-                value: "__other__",
-                label: "Type something.",
-                isOther: true,
-              });
-            }
-            return opts;
-          }
-
-          function allAnswered(): boolean {
-            return questions.every((q) => answers.has(q.id));
-          }
-
-          function advanceAfterAnswer() {
-            if (!isMulti) {
-              submit(false);
-              return;
-            }
-            if (currentTab < questions.length - 1) {
-              currentTab++;
-            } else {
-              currentTab = questions.length; // Submit tab
-            }
-            optionIndex = 0;
-            refresh();
-          }
-
-          function saveAnswer(
-            questionId: string,
-            value: string,
-            label: string,
-            wasCustom: boolean,
-            index?: number,
-          ) {
-            answers.set(questionId, {
-              id: questionId,
-              value,
-              label,
-              wasCustom,
-              index,
-            });
-          }
-
-          // Editor submit callback
-          editor.onSubmit = (value) => {
-            if (!inputQuestionId) return;
-            const trimmed = value.trim() || "(no response)";
-            saveAnswer(inputQuestionId, trimmed, trimmed, true);
-            inputMode = false;
-            inputQuestionId = null;
-            editor.setText("");
-            advanceAfterAnswer();
-          };
-
-          function handleInput(data: string) {
-            // Input mode: route to editor
-            if (inputMode) {
-              if (matchesKey(data, Key.escape)) {
-                inputMode = false;
-                inputQuestionId = null;
-                editor.setText("");
-                refresh();
-                return;
-              }
-              editor.handleInput(data);
-              refresh();
-              return;
-            }
-
-            const q = currentQuestion();
-            const opts = currentOptions();
-
-            // Tab navigation (multi-question only)
-            if (isMulti) {
-              if (matchesKey(data, Key.tab) || matchesKey(data, Key.right)) {
-                currentTab = (currentTab + 1) % totalTabs;
-                optionIndex = 0;
-                refresh();
-                return;
-              }
+          const interactions = workerInteractionsService("questionnaire");
+          if (interactions) {
+            if (signal?.aborted) return errorResult("Error: Questionnaire aborted", questions);
+            try {
+              const input = {
+                kind: "questionnaire" as const,
+                questions: questions.map(
+                  ({
+                    id,
+                    label,
+                    prompt,
+                    options,
+                    allowOther,
+                    background,
+                    recommendation,
+                    attachmentIds,
+                  }) => ({
+                    id,
+                    label,
+                    prompt,
+                    options,
+                    allowOther,
+                    ...(background === undefined ? {} : { background }),
+                    ...(recommendation === undefined ? {} : { recommendation }),
+                    ...(attachmentIds === undefined ? {} : { attachmentIds }),
+                  }),
+                ),
+              };
+              const answer = goalRecorder
+                ? await goalRecorder.request(input, signal, interactions)
+                : await interactions.request(input, signal);
+              if (signal?.aborted) return errorResult("Error: Questionnaire aborted", questions);
               if (
-                matchesKey(data, Key.shift("tab")) || matchesKey(data, Key.left)
+                !answer ||
+                answer.kind !== "questionnaire" ||
+                typeof answer.cancelled !== "boolean"
               ) {
-                currentTab = (currentTab - 1 + totalTabs) % totalTabs;
-                optionIndex = 0;
-                refresh();
-                return;
+                return errorResult(
+                  "Error: Headless questionnaire returned an invalid response",
+                  questions,
+                );
               }
-            }
-
-            // Submit tab
-            if (currentTab === questions.length) {
-              if (matchesKey(data, Key.enter) && allAnswered()) {
-                submit(false);
-              } else if (matchesKey(data, Key.escape)) {
-                submit(true);
+              if (answer.cancelled)
+                return errorResult("User cancelled the questionnaire", questions, true);
+              const byId = new Map(questions.map((question) => [question.id, question]));
+              if (!Array.isArray(answer.answers) || answer.answers.length !== questions.length) {
+                return errorResult(
+                  "Error: Headless questionnaire returned incomplete answers",
+                  questions,
+                );
               }
-              return;
-            }
-
-            // Option navigation (arrow keys or vi-style j/k)
-            if (matchesKey(data, Key.up) || data === "k") {
-              optionIndex = Math.max(0, optionIndex - 1);
-              refresh();
-              return;
-            }
-            if (matchesKey(data, Key.down) || data === "j") {
-              optionIndex = Math.min(opts.length - 1, optionIndex + 1);
-              refresh();
-              return;
-            }
-
-            // Select option
-            if (matchesKey(data, Key.enter) && q) {
-              const opt = opts[optionIndex];
-              if (opt.isOther) {
-                inputMode = true;
-                inputQuestionId = q.id;
-                editor.setText("");
-                refresh();
-                return;
-              }
-              saveAnswer(q.id, opt.value, opt.label, false, optionIndex + 1);
-              advanceAfterAnswer();
-              return;
-            }
-
-            // Cancel
-            if (matchesKey(data, Key.escape)) {
-              submit(true);
-            }
-          }
-
-          function render(width: number): string[] {
-            if (cachedLines) return cachedLines;
-
-            const lines: string[] = [];
-            const q = currentQuestion();
-            const opts = currentOptions();
-
-            // Helper to add truncated line
-            const add = (s: string) => lines.push(truncateToWidth(s, width));
-
-            add(theme.fg("accent", "─".repeat(width)));
-
-            // Tab bar (multi-question only)
-            if (isMulti) {
-              const tabs: string[] = ["← "];
-              for (let i = 0; i < questions.length; i++) {
-                const isActive = i === currentTab;
-                const isAnswered = answers.has(questions[i].id);
-                const lbl = questions[i].label;
-                const box = isAnswered ? "■" : "□";
-                const color = isAnswered ? "success" : "muted";
-                const text = ` ${box} ${lbl} `;
-                const styled = isActive
-                  ? theme.bg("selectedBg", theme.fg("text", text))
-                  : theme.fg(color, text);
-                tabs.push(`${styled} `);
-              }
-              const canSubmit = allAnswered();
-              const isSubmitTab = currentTab === questions.length;
-              const submitText = " ✓ Submit ";
-              const submitStyled = isSubmitTab
-                ? theme.bg("selectedBg", theme.fg("text", submitText))
-                : theme.fg(canSubmit ? "success" : "dim", submitText);
-              tabs.push(`${submitStyled} →`);
-              add(` ${tabs.join("")}`);
-              lines.push("");
-            }
-
-            // Helper to render options list
-            function renderOptions() {
-              for (let i = 0; i < opts.length; i++) {
-                const opt = opts[i];
-                const selected = i === optionIndex;
-                const isOther = opt.isOther === true;
-                const prefix = selected ? theme.fg("accent", "> ") : "  ";
-                const color = selected ? "accent" : "text";
-                // Mark "Type something" differently when in input mode
-                if (isOther && inputMode) {
-                  add(prefix + theme.fg("accent", `${i + 1}. ${opt.label} ✎`));
+              const answers: Answer[] = [];
+              const seen = new Set<string>();
+              for (const item of answer.answers) {
+                const question = item && byId.get(item.id);
+                if (
+                  !question ||
+                  seen.has(item.id) ||
+                  typeof item.value !== "string" ||
+                  typeof item.wasCustom !== "boolean"
+                ) {
+                  return errorResult(
+                    "Error: Headless questionnaire returned an invalid answer",
+                    questions,
+                  );
+                }
+                seen.add(item.id);
+                const optionIndex = question.options.findIndex(
+                  (option) => option.value === item.value,
+                );
+                if (item.wasCustom && question.allowOther && item.value.trim()) {
+                  answers.push({
+                    id: item.id,
+                    value: item.value,
+                    label: item.value,
+                    wasCustom: true,
+                  });
+                } else if (!item.wasCustom && optionIndex >= 0) {
+                  answers.push({
+                    id: item.id,
+                    value: item.value,
+                    label: question.options[optionIndex].label,
+                    wasCustom: false,
+                    index: optionIndex + 1,
+                  });
                 } else {
-                  add(prefix + theme.fg(color, `${i + 1}. ${opt.label}`));
-                }
-                if (opt.description) {
-                  add(`     ${theme.fg("muted", opt.description)}`);
-                }
-              }
-            }
-
-            // Content
-            if (inputMode && q) {
-              add(theme.fg("text", ` ${q.prompt}`));
-              lines.push("");
-              // Show options for reference
-              renderOptions();
-              lines.push("");
-              add(theme.fg("muted", " Your answer:"));
-              for (const line of editor.render(width - 2)) {
-                add(` ${line}`);
-              }
-              lines.push("");
-              add(theme.fg("dim", " Enter to submit • Esc to cancel"));
-            } else if (currentTab === questions.length) {
-              add(theme.fg("accent", theme.bold(" Ready to submit")));
-              lines.push("");
-              for (const question of questions) {
-                const answer = answers.get(question.id);
-                if (answer) {
-                  const prefix = answer.wasCustom ? "(wrote) " : "";
-                  add(
-                    `${theme.fg("muted", ` ${question.label}: `)}${
-                      theme.fg("text", prefix + answer.label)
-                    }`,
+                  return errorResult(
+                    "Error: Headless questionnaire returned an unknown choice",
+                    questions,
                   );
                 }
               }
-              lines.push("");
-              if (allAnswered()) {
-                add(theme.fg("success", " Press Enter to submit"));
-              } else {
-                const missing = questions
-                  .filter((q) => !answers.has(q.id))
-                  .map((q) => q.label)
-                  .join(", ");
-                add(theme.fg("warning", ` Unanswered: ${missing}`));
-              }
-            } else if (q) {
-              add(theme.fg("text", ` ${q.prompt}`));
-              lines.push("");
-              renderOptions();
+              const result = { questions, answers, cancelled: false };
+              return {
+                content: [
+                  {
+                    type: "text",
+                    text: answers
+                      .map(
+                        (a) =>
+                          `${a.id}: ${a.wasCustom ? `user wrote: ${a.label}` : `user selected: ${a.index}. ${a.label}`}`,
+                      )
+                      .join("\n"),
+                  },
+                ],
+                details: result,
+              };
+            } catch (error) {
+              return errorResult(
+                `Error: Headless questionnaire interaction failed: ${String(error)}`,
+                questions,
+              );
             }
-
-            lines.push("");
-            if (!inputMode) {
-              const help = isMulti
-                ? " Tab/←→ navigate • ↑↓/jk select • Enter confirm • Esc cancel"
-                : " ↑↓/jk navigate • Enter select • Esc cancel";
-              add(theme.fg("dim", help));
-            }
-            add(theme.fg("accent", "─".repeat(width)));
-
-            cachedLines = lines;
-            return lines;
           }
+          if (ctx.mode === "rpc")
+            return errorResult(
+              "Error: Headless questionnaire interaction service unavailable",
+              questions,
+            );
+          if (!ctx.hasUI) {
+            return errorResult("Error: UI not available (running in non-interactive mode)");
+          }
+          // Normalize questions with defaults
+
+          const isMulti = questions.length > 1;
+          const totalTabs = questions.length + 1; // questions + Submit
+          const questionnaireId = `questionnaire-${Date.now()}-${Math.random().toString(36).slice(2, 10)}`;
+
+          await publishQuestionnaireEvent(
+            "agent.question.pending",
+            questions.length === 1 ? "Pi has a question" : `Pi has ${questions.length} questions`,
+            summarizeQuestions(questions),
+            {
+              questionnaire_id: questionnaireId,
+              question_count: questions.length,
+              questions: questions.map((q) => ({
+                id: q.id,
+                label: q.label,
+                prompt: q.prompt,
+                options: q.options.map((option) => ({
+                  value: option.value,
+                  label: option.label,
+                  description: option.description,
+                })),
+                allow_other: q.allowOther,
+              })),
+              cwd: ctx.cwd,
+            },
+          );
+
+          if (signal.aborted) return errorResult("Error: Questionnaire aborted", questions);
+          let completed = false;
+          let completeFromExternal: ((answer: QuestionnaireResult) => void) | undefined;
+          const remoteController = new AbortController();
+          const abortRemote = () => {
+            remoteController.abort();
+            completeFromExternal?.(
+              signal.reason === QUESTIONNAIRE_TIMEOUT_REASON
+                ? timeoutResult(questions).details
+                : errorResult("Error: Questionnaire aborted", questions).details,
+            );
+          };
+          if (signal) {
+            if (signal.aborted) remoteController.abort();
+            else signal.addEventListener("abort", abortRemote, { once: true });
+          }
+          const paseoResult = answerQuestionnaireInPaseo(
+            questions,
+            remoteController.signal,
+            _toolCallId,
+          );
+
+          const uiResult = ctx.ui.custom<QuestionnaireResult>((tui, theme, _kb, done) => {
+            // State
+            let currentTab = 0;
+            let optionIndex = 0;
+            let inputMode = false;
+            let inputQuestionId: string | null = null;
+            let cachedLines: string[] | undefined;
+            const answers = new Map<string, Answer>();
+
+            // Editor for "Type something" option
+            const editorTheme: EditorTheme = {
+              borderColor: (s) => theme.fg("accent", s),
+              selectList: {
+                selectedPrefix: (t) => theme.fg("accent", t),
+                selectedText: (t) => theme.fg("accent", t),
+                description: (t) => theme.fg("muted", t),
+                scrollInfo: (t) => theme.fg("dim", t),
+                noMatch: (t) => theme.fg("warning", t),
+              },
+            };
+            const editor = new Editor(tui, editorTheme);
+
+            // Helpers
+            function refresh() {
+              cachedLines = undefined;
+              tui.requestRender();
+            }
+
+            function finish(result: QuestionnaireResult, abort = false) {
+              if (completed) return;
+              completed = true;
+              if (abort) {
+                humanCancellation = result;
+                ctx.abort();
+              }
+              done(result);
+            }
+
+            completeFromExternal = (answer) => finish(answer);
+
+            function submit(cancelled: boolean) {
+              finish(
+                {
+                  questions,
+                  answers: Array.from(answers.values()),
+                  cancelled,
+                  ...(cancelled ? { cancelledByHuman: true as const } : {}),
+                },
+                cancelled,
+              );
+            }
+
+            function currentQuestion(): Question | undefined {
+              return questions[currentTab];
+            }
+
+            function currentOptions(): RenderOption[] {
+              const q = currentQuestion();
+              if (!q) return [];
+              const opts: RenderOption[] = [...q.options];
+              if (q.allowOther) {
+                opts.push({
+                  value: "__other__",
+                  label: "Type something.",
+                  isOther: true,
+                });
+              }
+              return opts;
+            }
+
+            function allAnswered(): boolean {
+              return questions.every((q) => answers.has(q.id));
+            }
+
+            function advanceAfterAnswer() {
+              if (!isMulti) {
+                submit(false);
+                return;
+              }
+              if (currentTab < questions.length - 1) {
+                currentTab++;
+              } else {
+                currentTab = questions.length; // Submit tab
+              }
+              optionIndex = 0;
+              refresh();
+            }
+
+            function saveAnswer(
+              questionId: string,
+              value: string,
+              label: string,
+              wasCustom: boolean,
+              index?: number,
+            ) {
+              answers.set(questionId, {
+                id: questionId,
+                value,
+                label,
+                wasCustom,
+                index,
+              });
+            }
+
+            // Editor submit callback
+            editor.onSubmit = (value) => {
+              if (!inputQuestionId) return;
+              const trimmed = value.trim() || "(no response)";
+              saveAnswer(inputQuestionId, trimmed, trimmed, true);
+              inputMode = false;
+              inputQuestionId = null;
+              editor.setText("");
+              advanceAfterAnswer();
+            };
+
+            function handleInput(data: string) {
+              // Input mode: route to editor
+              if (inputMode) {
+                if (matchesKey(data, Key.escape)) {
+                  inputMode = false;
+                  inputQuestionId = null;
+                  editor.setText("");
+                  refresh();
+                  return;
+                }
+                editor.handleInput(data);
+                refresh();
+                return;
+              }
+
+              const q = currentQuestion();
+              const opts = currentOptions();
+
+              // Tab navigation (multi-question only)
+              if (isMulti) {
+                if (matchesKey(data, Key.tab) || matchesKey(data, Key.right)) {
+                  currentTab = (currentTab + 1) % totalTabs;
+                  optionIndex = 0;
+                  refresh();
+                  return;
+                }
+                if (matchesKey(data, Key.shift("tab")) || matchesKey(data, Key.left)) {
+                  currentTab = (currentTab - 1 + totalTabs) % totalTabs;
+                  optionIndex = 0;
+                  refresh();
+                  return;
+                }
+              }
+
+              // Submit tab
+              if (currentTab === questions.length) {
+                if (matchesKey(data, Key.enter) && allAnswered()) {
+                  submit(false);
+                } else if (matchesKey(data, Key.escape)) {
+                  submit(true);
+                }
+                return;
+              }
+
+              // Option navigation (arrow keys or vi-style j/k)
+              if (matchesKey(data, Key.up) || data === "k") {
+                optionIndex = Math.max(0, optionIndex - 1);
+                refresh();
+                return;
+              }
+              if (matchesKey(data, Key.down) || data === "j") {
+                optionIndex = Math.min(opts.length - 1, optionIndex + 1);
+                refresh();
+                return;
+              }
+
+              // Select option
+              if (matchesKey(data, Key.enter) && q) {
+                const opt = opts[optionIndex];
+                if (opt.isOther) {
+                  inputMode = true;
+                  inputQuestionId = q.id;
+                  editor.setText("");
+                  refresh();
+                  return;
+                }
+                saveAnswer(q.id, opt.value, opt.label, false, optionIndex + 1);
+                advanceAfterAnswer();
+                return;
+              }
+
+              // Cancel
+              if (matchesKey(data, Key.escape)) {
+                submit(true);
+              }
+            }
+
+            function render(width: number): string[] {
+              if (cachedLines) return cachedLines;
+
+              const lines: string[] = [];
+              const q = currentQuestion();
+              const opts = currentOptions();
+
+              // Helper to add truncated line
+              const add = (s: string) => lines.push(truncateToWidth(s, width));
+
+              add(theme.fg("accent", "─".repeat(width)));
+
+              // Tab bar (multi-question only)
+              if (isMulti) {
+                const tabs: string[] = ["← "];
+                for (let i = 0; i < questions.length; i++) {
+                  const isActive = i === currentTab;
+                  const isAnswered = answers.has(questions[i].id);
+                  const lbl = questions[i].label;
+                  const box = isAnswered ? "■" : "□";
+                  const color = isAnswered ? "success" : "muted";
+                  const text = ` ${box} ${lbl} `;
+                  const styled = isActive
+                    ? theme.bg("selectedBg", theme.fg("text", text))
+                    : theme.fg(color, text);
+                  tabs.push(`${styled} `);
+                }
+                const canSubmit = allAnswered();
+                const isSubmitTab = currentTab === questions.length;
+                const submitText = " ✓ Submit ";
+                const submitStyled = isSubmitTab
+                  ? theme.bg("selectedBg", theme.fg("text", submitText))
+                  : theme.fg(canSubmit ? "success" : "dim", submitText);
+                tabs.push(`${submitStyled} →`);
+                add(` ${tabs.join("")}`);
+                lines.push("");
+              }
+
+              // Helper to render options list
+              function renderOptions() {
+                for (let i = 0; i < opts.length; i++) {
+                  const opt = opts[i];
+                  const selected = i === optionIndex;
+                  const isOther = opt.isOther === true;
+                  const prefix = selected ? theme.fg("accent", "> ") : "  ";
+                  const color = selected ? "accent" : "text";
+                  // Mark "Type something" differently when in input mode
+                  if (isOther && inputMode) {
+                    add(prefix + theme.fg("accent", `${i + 1}. ${opt.label} ✎`));
+                  } else {
+                    add(prefix + theme.fg(color, `${i + 1}. ${opt.label}`));
+                  }
+                  if (opt.description) {
+                    add(`     ${theme.fg("muted", opt.description)}`);
+                  }
+                }
+              }
+
+              // Content
+              if (inputMode && q) {
+                add(theme.fg("text", ` ${q.prompt}`));
+                lines.push("");
+                // Show options for reference
+                renderOptions();
+                lines.push("");
+                add(theme.fg("muted", " Your answer:"));
+                for (const line of editor.render(width - 2)) {
+                  add(` ${line}`);
+                }
+                lines.push("");
+                add(theme.fg("dim", " Enter to submit • Esc to cancel"));
+              } else if (currentTab === questions.length) {
+                add(theme.fg("accent", theme.bold(" Ready to submit")));
+                lines.push("");
+                for (const question of questions) {
+                  const answer = answers.get(question.id);
+                  if (answer) {
+                    const prefix = answer.wasCustom ? "(wrote) " : "";
+                    add(
+                      `${theme.fg("muted", ` ${question.label}: `)}${theme.fg(
+                        "text",
+                        prefix + answer.label,
+                      )}`,
+                    );
+                  }
+                }
+                lines.push("");
+                if (allAnswered()) {
+                  add(theme.fg("success", " Press Enter to submit"));
+                } else {
+                  const missing = questions
+                    .filter((q) => !answers.has(q.id))
+                    .map((q) => q.label)
+                    .join(", ");
+                  add(theme.fg("warning", ` Unanswered: ${missing}`));
+                }
+              } else if (q) {
+                add(theme.fg("text", ` ${q.prompt}`));
+                lines.push("");
+                renderOptions();
+              }
+
+              lines.push("");
+              if (!inputMode) {
+                const help = isMulti
+                  ? " Tab/←→ navigate • ↑↓/jk select • Enter confirm • Esc cancel"
+                  : " ↑↓/jk navigate • Enter select • Esc cancel";
+                add(theme.fg("dim", help));
+              }
+              add(theme.fg("accent", "─".repeat(width)));
+
+              cachedLines = lines;
+              return lines;
+            }
+
+            return {
+              render,
+              invalidate: () => {
+                cachedLines = undefined;
+              },
+              handleInput,
+            };
+          });
+
+          void pollExternalAnswer(questionnaireId, questions, () => completed).then((answer) => {
+            if (answer && completeFromExternal) {
+              completeFromExternal(answer);
+            }
+          });
+
+          const winner = await Promise.race([
+            uiResult.then((result) => ({ source: "terminal" as const, result })),
+            paseoResult.then((outcome) =>
+              outcome === null
+                ? new Promise<never>(() => {})
+                : { source: "paseo" as const, outcome },
+            ),
+          ]);
+          let result: QuestionnaireResult;
+          if (winner.source === "terminal") {
+            remoteController.abort();
+            result = winner.result;
+          } else if (winner.outcome.kind === "terminal") {
+            result = await uiResult;
+          } else {
+            result = {
+              questions,
+              answers: winner.outcome.kind === "answered" ? winner.outcome.answers : [],
+              cancelled: winner.outcome.kind === "cancelled",
+              ...(winner.outcome.kind === "cancelled"
+                ? winner.outcome.byUser
+                  ? { cancelledByHuman: true as const }
+                  : { failure: { code: "interaction_unavailable" as const } }
+                : {}),
+            };
+            if (result.cancelledByHuman) {
+              humanCancellation = result;
+              ctx.abort();
+            }
+            completeFromExternal?.(result);
+          }
+          signal?.removeEventListener("abort", abortRemote);
+          completed = true;
+          if (result.failure)
+            return {
+              content: [
+                {
+                  type: "text",
+                  text: "Questionnaire interaction unavailable; no human answer or cancellation recorded",
+                },
+              ],
+              details: result,
+              isError: true,
+            };
+
+          await publishQuestionnaireEvent(
+            "agent.question.answered",
+            result.timedOut
+              ? "Questionnaire timed out"
+              : result.cancelled
+                ? "Questionnaire cancelled"
+                : "Questionnaire answered",
+            result.timedOut
+              ? "Questionnaire timed out."
+              : result.cancelled
+                ? "The questionnaire was cancelled."
+                : "The questionnaire was answered in Pi.",
+            {
+              questionnaire_id: questionnaireId,
+              cancelled: result.cancelled,
+              ...(result.timedOut ? { timed_out: true } : {}),
+              question_count: questions.length,
+              answer_count: result.answers.length,
+              cwd: ctx.cwd,
+            },
+          );
+
+          if (result.timedOut) return timeoutResult(questions);
+          if (result.cancelled) {
+            return {
+              content: [{ type: "text", text: "User cancelled the questionnaire" }],
+              details: result,
+            };
+          }
+
+          const answerLines = result.answers.map((a) => {
+            const qLabel = questions.find((q) => q.id === a.id)?.label || a.id;
+            if (a.wasCustom) {
+              return `${qLabel}: user wrote: ${a.label}`;
+            }
+            return `${qLabel}: user selected: ${a.index}. ${a.label}`;
+          });
 
           return {
-            render,
-            invalidate: () => {
-              cachedLines = undefined;
-            },
-            handleInput,
+            content: [{ type: "text", text: answerLines.join("\n") }],
+            details: result,
           };
         },
+        () => timeoutResult(questions),
+        () =>
+          humanCancellation
+            ? {
+                content: [{ type: "text" as const, text: "User cancelled the questionnaire" }],
+                details: humanCancellation,
+              }
+            : errorResult("Error: Questionnaire aborted", questions),
       );
-
-      void pollExternalAnswer(questionnaireId, questions, () => completed).then(
-        (answer) => {
-          if (answer && completeFromExternal) {
-            completeFromExternal(answer);
-          }
-        },
-      );
-
-      const winner = await Promise.race([
-        uiResult.then((result) => ({ source: "terminal" as const, result })),
-        paseoResult.then((outcome) =>
-          outcome === null
-            ? new Promise<never>(() => {})
-            : { source: "paseo" as const, outcome }
-        ),
-      ]);
-      let result: QuestionnaireResult;
-      if (winner.source === "terminal") {
-        remoteController.abort();
-        result = winner.result;
-      } else if (winner.outcome.kind === "terminal") {
-        result = await uiResult;
-      } else {
-        result = {
-          questions,
-          answers: winner.outcome.kind === "answered" ? winner.outcome.answers : [],
-          cancelled: winner.outcome.kind === "cancelled",
-          ...(winner.outcome.kind === "cancelled" ? (winner.outcome.byUser ? { cancelledByHuman: true as const } : { failure: { code: "interaction_unavailable" as const } }) : {}),
-        };
-        if (result.cancelledByHuman) {
-          humanCancellation = result;
-          ctx.abort();
-        }
-        completeFromExternal?.(result);
-      }
-      signal?.removeEventListener("abort", abortRemote);
-      completed = true;
-      if (result.failure) return { content: [{ type: "text", text: "Questionnaire interaction unavailable; no human answer or cancellation recorded" }], details: result, isError: true };
-
-      await publishQuestionnaireEvent(
-        "agent.question.answered",
-        result.timedOut ? "Questionnaire timed out" : result.cancelled ? "Questionnaire cancelled" : "Questionnaire answered",
-        result.timedOut ? "Questionnaire timed out."
-          : result.cancelled ? "The questionnaire was cancelled."
-          : "The questionnaire was answered in Pi.",
-        {
-          questionnaire_id: questionnaireId,
-          cancelled: result.cancelled,
-          ...(result.timedOut ? { timed_out: true } : {}),
-          question_count: questions.length,
-          answer_count: result.answers.length,
-          cwd: ctx.cwd,
-        },
-      );
-
-      if (result.timedOut) return timeoutResult(questions);
-      if (result.cancelled) {
-        return {
-          content: [{ type: "text", text: "User cancelled the questionnaire" }],
-          details: result,
-        };
-      }
-
-      const answerLines = result.answers.map((a) => {
-        const qLabel = questions.find((q) => q.id === a.id)?.label || a.id;
-        if (a.wasCustom) {
-          return `${qLabel}: user wrote: ${a.label}`;
-        }
-        return `${qLabel}: user selected: ${a.index}. ${a.label}`;
-      });
-
-      return {
-        content: [{ type: "text", text: answerLines.join("\n") }],
-        details: result,
-      };
-      }, () => timeoutResult(questions), () => humanCancellation
-        ? { content: [{ type: "text" as const, text: "User cancelled the questionnaire" }], details: humanCancellation }
-        : errorResult("Error: Questionnaire aborted", questions));
     },
 
     renderCall(args, theme) {
@@ -742,14 +886,13 @@ export default function questionnaire(pi: ExtensionAPI, options: { assignedGoalB
       }
       const lines = details.answers.map((a) => {
         if (a.wasCustom) {
-          return `${theme.fg("success", "✓ ")}${theme.fg("accent", a.id)}: ${
-            theme.fg("muted", "(wrote) ")
-          }${a.label}`;
+          return `${theme.fg("success", "✓ ")}${theme.fg("accent", a.id)}: ${theme.fg(
+            "muted",
+            "(wrote) ",
+          )}${a.label}`;
         }
         const display = a.index ? `${a.index}. ${a.label}` : a.label;
-        return `${theme.fg("success", "✓ ")}${
-          theme.fg("accent", a.id)
-        }: ${display}`;
+        return `${theme.fg("success", "✓ ")}${theme.fg("accent", a.id)}: ${display}`;
       });
       return new Text(lines.join("\n"), 0, 0);
     },

@@ -33,7 +33,12 @@ export function createGoalContextContract(goal: GoalPromptContext) {
       buildGoalContextPrompt(goal),
     ].join("\n\n"),
     display: false,
-    details: { version: GOAL_CONTRACT_VERSION, state: "active", goalId: goal.id, activationId: goal.activationId ?? goal.id },
+    details: {
+      version: GOAL_CONTRACT_VERSION,
+      state: "active",
+      goalId: goal.id,
+      activationId: goal.activationId ?? goal.id,
+    },
     timestamp: 0,
   };
 }
@@ -71,7 +76,8 @@ export function hasGoalContextContractHistory(entries: unknown[]) {
 
 export function hasGoalContractPublication(entries: unknown[], publicationId: string) {
   return entries.some(
-    (entry) => isGoalContextContract(entry) && unwrapMessage(entry).details?.publicationId === publicationId,
+    (entry) =>
+      isGoalContextContract(entry) && unwrapMessage(entry).details?.publicationId === publicationId,
   );
 }
 
@@ -115,7 +121,12 @@ function placeDeferredContracts(messages: unknown[]) {
     // Carry the send time so timestamps stay ordered: Pi's context estimate ignores the usage of an
     // assistant message older than a message placed before it.
     const contract = { ...(placed[index] as object), timestamp: sentAt };
-    placed = [...placed.slice(0, boundary), contract, ...placed.slice(boundary, index), ...placed.slice(index + 1)];
+    placed = [
+      ...placed.slice(0, boundary),
+      contract,
+      ...placed.slice(boundary, index),
+      ...placed.slice(index + 1),
+    ];
   }
   return placed;
 }
@@ -124,7 +135,12 @@ function turnBoundaryAfter(messages: readonly unknown[], contractIndex: number, 
   let boundary: number | undefined;
   for (let index = contractIndex - 1; index >= 0; index -= 1) {
     const message = unwrapMessage(messages[index]);
-    if (isGoalContextContract(message) || typeof message.timestamp !== "number" || message.timestamp <= sentAt) break;
+    if (
+      isGoalContextContract(message) ||
+      typeof message.timestamp !== "number" ||
+      message.timestamp <= sentAt
+    )
+      break;
     if (message.role === "assistant") boundary = index;
   }
   return boundary;

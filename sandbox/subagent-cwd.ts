@@ -7,7 +7,11 @@ function cleanPosix(value: string) {
   return normalized === "." ? "" : normalized;
 }
 
-function requestedCwd(cwd: unknown, parentCwd: string, toVirtual: (absolute: string) => string | undefined) {
+function requestedCwd(
+  cwd: unknown,
+  parentCwd: string,
+  toVirtual: (absolute: string) => string | undefined,
+) {
   if (typeof cwd !== "string" || !cwd.trim()) return undefined;
   const requested = cleanPosix(cwd.trim());
   if (requested.startsWith("/") || /^[A-Za-z]:\//.test(requested)) {

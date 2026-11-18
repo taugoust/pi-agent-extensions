@@ -4,7 +4,11 @@ import { constants } from "node:fs";
 import { mkdir, open, rename, rm, writeFile } from "node:fs/promises";
 import { basename, dirname, join } from "node:path";
 import { getAgentDir } from "@earendil-works/pi-coding-agent";
-import { BTW_SHORTCUT_ACTIONS, type BtwKeybindingOverrides, normalizeBtwKey } from "./keybindings.js";
+import {
+  BTW_SHORTCUT_ACTIONS,
+  type BtwKeybindingOverrides,
+  normalizeBtwKey,
+} from "./keybindings.js";
 import { BTW_THINKING_LEVELS, type BtwThinkingLevel } from "./side-thread.js";
 
 export const BTW_SETTINGS_FILE = "pi-btw.json";
@@ -107,7 +111,9 @@ export function normalizeBtwSettings(value: unknown): BtwSettings | undefined {
   return settings;
 }
 
-export function parseBtwModelReference(reference: string): { provider: string; modelId: string } | undefined {
+export function parseBtwModelReference(
+  reference: string,
+): { provider: string; modelId: string } | undefined {
   if (/[\s\p{Cc}]/u.test(reference)) return undefined;
   const separator = reference.indexOf("/");
   if (separator <= 0 || separator === reference.length - 1) return undefined;
@@ -127,10 +133,14 @@ export function effectiveRememberThinkingLevelChanges(settings: BtwSettings): bo
 }
 
 export function effectiveBtwSidePaneRatio(settings: BtwSettings): number {
-  return isBtwSidePaneRatio(settings.sidePaneRatio) ? settings.sidePaneRatio : DEFAULT_BTW_SIDE_PANE_RATIO;
+  return isBtwSidePaneRatio(settings.sidePaneRatio)
+    ? settings.sidePaneRatio
+    : DEFAULT_BTW_SIDE_PANE_RATIO;
 }
 
-export async function readBtwSettings(settingsPath = btwSettingsPath()): Promise<BtwSettingsLoadResult> {
+export async function readBtwSettings(
+  settingsPath = btwSettingsPath(),
+): Promise<BtwSettingsLoadResult> {
   await awaitBtwSettingsWrites(settingsPath);
   return readBtwSettingsUncoordinated(settingsPath);
 }
@@ -144,7 +154,9 @@ export function updateBtwSettings(
     options.signal?.throwIfAborted();
     const current = await readSettingsDocumentForUpdate(settingsPath);
     options.signal?.throwIfAborted();
-    options.validateCurrent?.(normalizeBtwSettings(withExtensionDefaults("btw", current, "terminal")) ?? {});
+    options.validateCurrent?.(
+      normalizeBtwSettings(withExtensionDefaults("btw", current, "terminal")) ?? {},
+    );
     const updated = applyBtwSettingsPatch(current, patch);
     const settings = normalizeBtwSettings(withExtensionDefaults("btw", updated, "terminal"));
     if (!settings) throw invalidSettingsError(settingsPath, "invalid settings shape");
@@ -181,13 +193,17 @@ async function readBtwSettingsUncoordinated(settingsPath: string): Promise<BtwSe
         const settings = normalizeBtwSettings(withExtensionDefaults("btw", {}, "terminal"));
         if (!settings) return { kind: "invalid", reason: "Invalid defaults/btw.json settings" };
         return Object.keys(settings).length ? { kind: "loaded", settings } : { kind: "missing" };
-      } catch (error) { return { kind: "invalid", reason: `defaults/btw.json: ${formatError(error)}` }; }
+      } catch (error) {
+        return { kind: "invalid", reason: `defaults/btw.json: ${formatError(error)}` };
+      }
     }
     return { kind: "invalid", reason: `${settingsPath}: ${formatError(error)}` };
   }
 
   try {
-    const settings = normalizeBtwSettings(withExtensionDefaults("btw", JSON.parse(contents) as unknown, "terminal"));
+    const settings = normalizeBtwSettings(
+      withExtensionDefaults("btw", JSON.parse(contents) as unknown, "terminal"),
+    );
     return settings
       ? { kind: "loaded", settings }
       : { kind: "invalid", reason: `${settingsPath}: invalid settings shape` };
@@ -238,7 +254,9 @@ async function readSettingsContents(settingsPath: string): Promise<string> {
       throw new Error(`settings file exceeds ${MAX_SETTINGS_BYTES} bytes`);
     }
     try {
-      return new TextDecoder("utf-8", { fatal: true, ignoreBOM: true }).decode(buffer.subarray(0, offset));
+      return new TextDecoder("utf-8", { fatal: true, ignoreBOM: true }).decode(
+        buffer.subarray(0, offset),
+      );
     } catch {
       throw new Error("settings file is not valid UTF-8");
     }
@@ -261,7 +279,10 @@ async function publishSettings(
   const directory = dirname(settingsPath);
   await mkdir(directory, { recursive: true });
   signal?.throwIfAborted();
-  const temporaryPath = join(directory, `.${basename(settingsPath)}.${process.pid}.${randomUUID()}.tmp`);
+  const temporaryPath = join(
+    directory,
+    `.${basename(settingsPath)}.${process.pid}.${randomUUID()}.tmp`,
+  );
   try {
     await writeFile(temporaryPath, contents, {
       encoding: "utf8",
@@ -278,7 +299,10 @@ async function publishSettings(
   }
 }
 
-function applyBtwSettingsPatch(current: SettingsDocument, patch: BtwSettingsPatch): SettingsDocument {
+function applyBtwSettingsPatch(
+  current: SettingsDocument,
+  patch: BtwSettingsPatch,
+): SettingsDocument {
   const updated: SettingsDocument = { ...current };
   if (patch.keybindings) {
     const keys = isSettingsDocument(current.keybindings) ? { ...current.keybindings } : {};

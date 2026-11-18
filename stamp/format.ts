@@ -1,4 +1,8 @@
-import { formatElapsedSeconds, isReportedTokenCount, type StampAssistantMetadataMode } from "./metadata.js";
+import {
+  formatElapsedSeconds,
+  isReportedTokenCount,
+  type StampAssistantMetadataMode,
+} from "./metadata.js";
 
 export type { StampAssistantMetadataMode } from "./metadata.js";
 export { ASSISTANT_METADATA_MODES } from "./metadata.js";
@@ -117,7 +121,8 @@ export function resolveStampFormatEnvironment(
   environment: Readonly<StampFormatEnvironment> = EMPTY_FORMAT_ENVIRONMENT,
 ): Readonly<StampFormatEnvironment> {
   const needsSystemLocale = settings.locale === "system" && environment.systemLocale === undefined;
-  const needsLocalTimeZone = settings.timeZone === "local" && environment.localTimeZone === undefined;
+  const needsLocalTimeZone =
+    settings.timeZone === "local" && environment.localTimeZone === undefined;
   if (!needsSystemLocale && !needsLocalTimeZone) return environment;
 
   const defaults = resolveDefaultFormatEnvironment();
@@ -137,12 +142,14 @@ export function formatStampLabel(
   if (!isValidTimestamp(timestamp)) return undefined;
   try {
     const resolvedEnvironment = resolveStampFormatEnvironment(settings, environment);
-    const timeZone = settings.timeZone === "local" ? resolvedEnvironment.localTimeZone : settings.timeZone;
+    const timeZone =
+      settings.timeZone === "local" ? resolvedEnvironment.localTimeZone : settings.timeZone;
     const showDate = shouldShowDate(timestamp, previousTimestamp, settings.dateContext, timeZone);
     if (settings.locale === "invariant") {
       return formatInvariant(timestamp, showDate, settings, timeZone);
     }
-    const locale = settings.locale === "system" ? resolvedEnvironment.systemLocale : settings.locale;
+    const locale =
+      settings.locale === "system" ? resolvedEnvironment.systemLocale : settings.locale;
     return formatLocalized(timestamp, showDate, settings, locale, timeZone);
   } catch {
     return undefined;
@@ -167,7 +174,9 @@ export function formatMessageStampLabel(
     .join(" · ");
 }
 
-export function formatOutputThroughput(input: Readonly<MessageStampFormatInput>): string | undefined {
+export function formatOutputThroughput(
+  input: Readonly<MessageStampFormatInput>,
+): string | undefined {
   if (
     !isReportedTokenCount(input.outputTokens) ||
     !isValidTimestamp(input.timestamp) ||
@@ -191,7 +200,8 @@ function formatResponseTimingLabel(
   if (!isValidTimestamp(input.completedAt) || input.completedAt < input.timestamp) return label;
   const total = formatResponseElapsed(input.completedAt - input.timestamp);
   if (!total) return label;
-  if (settings.responseTiming === "duration") return `${label} · ${labelResponse ? "response " : ""}${total}`;
+  if (settings.responseTiming === "duration")
+    return `${label} · ${labelResponse ? "response " : ""}${total}`;
   const first =
     isValidTimestamp(input.firstContentAt) &&
     input.firstContentAt >= input.timestamp &&
@@ -205,7 +215,9 @@ export function formatTimeSinceUser(elapsedMilliseconds: number): string | undef
   if (!Number.isFinite(elapsedMilliseconds) || elapsedMilliseconds < 0) return undefined;
   if (elapsedMilliseconds < 60_000) {
     // Carry rounded seconds into minutes without changing truncation for longer durations.
-    return Math.round(elapsedMilliseconds / 100) === 600 ? "1m 0s" : formatElapsedSeconds(elapsedMilliseconds);
+    return Math.round(elapsedMilliseconds / 100) === 600
+      ? "1m 0s"
+      : formatElapsedSeconds(elapsedMilliseconds);
   }
   const seconds = Math.floor(elapsedMilliseconds / 1_000);
   const minutes = Math.floor(seconds / 60);
@@ -217,7 +229,10 @@ export function formatResponseElapsed(elapsedMilliseconds: number): string | und
   return formatElapsedSeconds(elapsedMilliseconds);
 }
 
-export function formatExactTimelineLine(boundary: StampTimelineBoundary, timestamp: number): string | undefined {
+export function formatExactTimelineLine(
+  boundary: StampTimelineBoundary,
+  timestamp: number,
+): string | undefined {
   if (!TIMELINE_BOUNDARIES.includes(boundary) || !isValidTimestamp(timestamp)) return undefined;
   return `timeline · ${boundary} ${new Date(timestamp).toISOString()} · unix-ms ${timestamp}`;
 }
@@ -229,7 +244,10 @@ function formatInvariant(
   timeZone: string | undefined,
 ): string {
   const parts = zonedParts(timestamp, timeZone);
-  const hour = settings.hourCycle === "24h" ? String(parts.hour).padStart(2, "0") : String(parts.hour % 12 || 12);
+  const hour =
+    settings.hourCycle === "24h"
+      ? String(parts.hour).padStart(2, "0")
+      : String(parts.hour % 12 || 12);
   const seconds = settings.showSeconds ? `:${parts.second}` : "";
   const period = settings.hourCycle === "12h" ? (parts.hour < 12 ? " AM" : " PM") : "";
   const time = `${hour}:${parts.minute}${seconds}${period}`;
@@ -305,7 +323,9 @@ function zonedParts(timestamp: number, timeZone: string | undefined): ZonedParts
         hourCycle: "h23",
       }),
   );
-  const values = new Map(formatter.formatToParts(new Date(timestamp)).map((part) => [part.type, part.value]));
+  const values = new Map(
+    formatter.formatToParts(new Date(timestamp)).map((part) => [part.type, part.value]),
+  );
   const year = values.get("year");
   const month = values.get("month");
   const day = values.get("day");
@@ -324,7 +344,9 @@ function resolveDefaultFormatEnvironment(): CachedDefaultFormatEnvironment {
   const lcAll = process.env.LC_ALL;
   const lcTime = process.env.LC_TIME;
   const lang = process.env.LANG;
-  const elapsed = cachedDefaultFormatEnvironment ? now - cachedDefaultFormatEnvironment.checkedAt : undefined;
+  const elapsed = cachedDefaultFormatEnvironment
+    ? now - cachedDefaultFormatEnvironment.checkedAt
+    : undefined;
   if (
     cachedDefaultFormatEnvironment &&
     elapsed !== undefined &&
@@ -351,7 +373,11 @@ function resolveDefaultFormatEnvironment(): CachedDefaultFormatEnvironment {
   return cachedDefaultFormatEnvironment;
 }
 
-function cachedFormatter(slot: FormatterSlot, key: string, create: () => Intl.DateTimeFormat): Intl.DateTimeFormat {
+function cachedFormatter(
+  slot: FormatterSlot,
+  key: string,
+  create: () => Intl.DateTimeFormat,
+): Intl.DateTimeFormat {
   const cached = formatterCache[slot];
   if (cached?.key === key) return cached.formatter;
   const formatter = create();
@@ -360,5 +386,7 @@ function cachedFormatter(slot: FormatterSlot, key: string, create: () => Intl.Da
 }
 
 function isValidTimestamp(value: number | undefined): value is number {
-  return typeof value === "number" && Number.isFinite(value) && !Number.isNaN(new Date(value).getTime());
+  return (
+    typeof value === "number" && Number.isFinite(value) && !Number.isNaN(new Date(value).getTime())
+  );
 }

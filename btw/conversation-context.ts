@@ -33,7 +33,9 @@ export function buildConversationContext(entries: readonly BtwSessionEntry[]): s
 
     const label = role === "user" ? "User" : "Assistant";
     const status =
-      entry.message.stopReason && entry.message.stopReason !== "stop" ? ` (${entry.message.stopReason})` : "";
+      entry.message.stopReason && entry.message.stopReason !== "stop"
+        ? ` (${entry.message.stopReason})`
+        : "";
     sections.push(`${label}${status}: ${contentLines.join("\n")}`);
   }
 

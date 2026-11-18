@@ -63,7 +63,6 @@ interface FetchDetails {
   fullResponsePath?: string;
 }
 
-
 /** Escape a string for safe use inside single quotes in shell. */
 function shellQuote(s: string): string {
   return "'" + s.replace(/'/g, "'\\''") + "'";
@@ -115,7 +114,7 @@ function toCurl(params: {
  */
 function extractMainContentSimple(html: string): string {
   let processed = html;
-  
+
   // Remove common UI elements that aren't part of the main content
   processed = processed
     // Remove navigation sections
@@ -123,35 +122,46 @@ function extractMainContentSimple(html: string): string {
     // Remove sidebars
     .replace(/<aside[\s\S]*?<\/aside>/gi, "")
     // Remove page headers (but keep article headers)
-    .replace(/<header[^>]*class="[^"]*(?:site|page|navbar|top|global)[^"]*"[\s\S]*?<\/header>/gi, "")
+    .replace(
+      /<header[^>]*class="[^"]*(?:site|page|navbar|top|global)[^"]*"[\s\S]*?<\/header>/gi,
+      "",
+    )
     .replace(/<header[^>]*id="[^"]*(?:site|page|navbar|top|global)[^"]*"[\s\S]*?<\/header>/gi, "")
     // Remove page footers
     .replace(/<footer[\s\S]*?<\/footer>/gi, "")
     // Remove common sidebar/navigation class patterns
-    .replace(/<div[^>]*class="[^"]*(?:sidebar|nav-|navigation|menu|drawer|toc|breadcrumb|td-sidebar)[^"]*"[\s\S]*?<\/div>/gi, "")
+    .replace(
+      /<div[^>]*class="[^"]*(?:sidebar|nav-|navigation|menu|drawer|toc|breadcrumb|td-sidebar)[^"]*"[\s\S]*?<\/div>/gi,
+      "",
+    )
     // Remove common id patterns for navigation
-    .replace(/<div[^>]*id="[^"]*(?:sidebar|navigation|nav-|menu|toc|td-sidebar)[^"]*"[\s\S]*?<\/div>/gi, "")
+    .replace(
+      /<div[^>]*id="[^"]*(?:sidebar|navigation|nav-|menu|toc|td-sidebar)[^"]*"[\s\S]*?<\/div>/gi,
+      "",
+    )
     // Remove forms (usually search, login, etc.)
     .replace(/<form[\s\S]*?<\/form>/gi, "");
-  
+
   // Try to extract the main content area if it exists
   // Look for <main>, <article>, or common content wrappers
   const mainMatch = processed.match(/<main[\s\S]*?>([\s\S]*?)<\/main>/i);
   if (mainMatch) {
     return mainMatch[1];
   }
-  
+
   const articleMatch = processed.match(/<article[\s\S]*?>([\s\S]*?)<\/article>/i);
   if (articleMatch) {
     return articleMatch[1];
   }
-  
+
   // Look for common content div patterns
-  const contentMatch = processed.match(/<div[^>]*(?:class|id)="[^"]*(?:content|main|article|post|entry|td-content)[^"]*"[\s\S]*?>([\s\S]*?)<\/div>/i);
+  const contentMatch = processed.match(
+    /<div[^>]*(?:class|id)="[^"]*(?:content|main|article|post|entry|td-content)[^"]*"[\s\S]*?>([\s\S]*?)<\/div>/i,
+  );
   if (contentMatch) {
     return contentMatch[1];
   }
-  
+
   // If no main content area found, return the processed HTML with UI elements removed
   return processed;
 }
@@ -161,9 +171,12 @@ function extractMainContentSimple(html: string): string {
  * This is the same algorithm used in Firefox Reader Mode.
  * Returns { content: string, method: string, title?: string } or null on failure.
  */
-function extractWithMozillaReadability(html: string, url: string): { 
-  content: string; 
-  method: "mozilla"; 
+function extractWithMozillaReadability(
+  html: string,
+  url: string,
+): {
+  content: string;
+  method: "mozilla";
   title?: string;
 } | null {
   try {
@@ -171,8 +184,12 @@ function extractWithMozillaReadability(html: string, url: string): {
     const dom = new JSDOM(html, { url });
     const reader = new Readability(dom.window.document);
     const article = reader.parse();
-    
-    if (article && article.textContent && article.textContent.length > MIN_READABILITY_CONTENT_LENGTH) {
+
+    if (
+      article &&
+      article.textContent &&
+      article.textContent.length > MIN_READABILITY_CONTENT_LENGTH
+    ) {
       return {
         content: article.textContent,
         method: "mozilla",
@@ -200,7 +217,10 @@ function stripHtml(html: string): string {
       // Remove HTML comments
       .replace(/<!--[\s\S]*?-->/g, "")
       // Block elements → newlines (before stripping tags)
-      .replace(/<\/?(p|div|br|hr|h[1-6]|li|tr|blockquote|pre|section|article|header|footer|nav|main|aside|details|summary|figcaption|figure|dl|dt|dd)[\s>][^>]*>/gi, "\n")
+      .replace(
+        /<\/?(p|div|br|hr|h[1-6]|li|tr|blockquote|pre|section|article|header|footer|nav|main|aside|details|summary|figcaption|figure|dl|dt|dd)[\s>][^>]*>/gi,
+        "\n",
+      )
       // Strip remaining tags
       .replace(/<[^>]+>/g, "")
       // Decode common HTML entities
@@ -210,9 +230,7 @@ function stripHtml(html: string): string {
       .replace(/&gt;/gi, ">")
       .replace(/&quot;/gi, '"')
       .replace(/&#0?39;/gi, "'")
-      .replace(/&#(\d+);/gi, (_m, code) =>
-        String.fromCharCode(Number(code)),
-      )
+      .replace(/&#(\d+);/gi, (_m, code) => String.fromCharCode(Number(code)))
       // Collapse whitespace within lines
       .replace(/[ \t]+/g, " ")
       // Collapse multiple blank lines into one
@@ -232,17 +250,27 @@ function validatedPositiveInteger(value: unknown, fallback: number, name: string
 }
 
 function validatedHttpUrl(value: string): URL {
-  if (Buffer.byteLength(value, "utf8") > 16 * 1024 || /[\0\r\n]/.test(value)) throw new Error("fetch URL exceeds 16 KiB or contains control bytes");
+  if (Buffer.byteLength(value, "utf8") > 16 * 1024 || /[\0\r\n]/.test(value))
+    throw new Error("fetch URL exceeds 16 KiB or contains control bytes");
   const url = new URL(value);
-  if (url.protocol !== "http:" && url.protocol !== "https:") throw new Error("fetch supports only HTTP and HTTPS URLs");
+  if (url.protocol !== "http:" && url.protocol !== "https:")
+    throw new Error("fetch supports only HTTP and HTTPS URLs");
   return url;
 }
 
-function validateRequestData(headers: Record<string, string> | undefined, body: string | undefined) {
-  if (body !== undefined && Buffer.byteLength(body, "utf8") > 1024 * 1024) throw new Error("fetch request body must not exceed 1 MiB");
+function validateRequestData(
+  headers: Record<string, string> | undefined,
+  body: string | undefined,
+) {
+  if (body !== undefined && Buffer.byteLength(body, "utf8") > 1024 * 1024)
+    throw new Error("fetch request body must not exceed 1 MiB");
   const entries = Object.entries(headers || {});
   if (entries.length > 100) throw new Error("fetch accepts at most 100 request headers");
-  const bytes = entries.reduce((total, [name, value]) => total + Buffer.byteLength(name, "utf8") + Buffer.byteLength(value, "utf8"), 0);
+  const bytes = entries.reduce(
+    (total, [name, value]) =>
+      total + Buffer.byteLength(name, "utf8") + Buffer.byteLength(value, "utf8"),
+    0,
+  );
   if (bytes > 64 * 1024) throw new Error("fetch request headers must not exceed 64 KiB");
 }
 
@@ -251,9 +279,16 @@ function truncateResultText(text: string): { text: string; truncated: boolean } 
   const lineTruncated = lines.length > 2000;
   let bounded = lines.slice(0, 2000).join("\n");
   const byteTruncated = Buffer.byteLength(bounded, "utf8") > 50 * 1024;
-  if (byteTruncated) bounded = Buffer.from(bounded, "utf8").subarray(0, 50 * 1024 - 64).toString("utf8").replace(/\uFFFD+$/g, "");
+  if (byteTruncated)
+    bounded = Buffer.from(bounded, "utf8")
+      .subarray(0, 50 * 1024 - 64)
+      .toString("utf8")
+      .replace(/\uFFFD+$/g, "");
   const truncated = lineTruncated || byteTruncated;
-  return { text: truncated ? `${bounded}\n[Result truncated to Pi's 50 KiB/2000-line limit]` : bounded, truncated };
+  return {
+    text: truncated ? `${bounded}\n[Result truncated to Pi's 50 KiB/2000-line limit]` : bounded,
+    truncated,
+  };
 }
 
 function agentSHAPI(): AgentSHPiAPI | undefined {
@@ -340,35 +375,40 @@ export default function fetchExtension(pi: ExtensionAPI) {
       const timeout = validatedPositiveInteger(params.timeoutMs, DEFAULT_TIMEOUT_MS, "timeoutMs");
       if (timeout > 2_147_483_647) throw new Error("timeoutMs exceeds the supported timer range");
       validateRequestData(params.headers, params.body);
-      const maxBody = validatedPositiveInteger(params.maxBodyBytes, DEFAULT_MAX_BODY_BYTES, "maxBodyBytes");
+      const maxBody = validatedPositiveInteger(
+        params.maxBodyBytes,
+        DEFAULT_MAX_BODY_BYTES,
+        "maxBodyBytes",
+      );
       if (maxBody > 64 * 1024 * 1024) throw new Error("maxBodyBytes must not exceed 64 MiB");
       const url = validatedHttpUrl(params.url).toString();
       const selection = selectFetchBackend(agentSHAPI(), agentSHStartup);
       if (selection.kind === "unavailable") throw new Error(selection.message);
 
-      const transport = selection.kind === "agentsh"
-        ? await executeAgentSHFetch(selection.api, {
-            url,
-            method,
-            headers: params.headers,
-            body: params.body,
-            timeoutMs: timeout,
-            maxBodyBytes: maxBody,
-            outputPath: params.outputPath,
-            toolCallId,
-            signal,
-          })
-        : await executeNativeFetch({
-            url,
-            method,
-            headers: params.headers,
-            body: params.body,
-            timeoutMs: timeout,
-            maxBodyBytes: maxBody,
-            outputPath: params.outputPath,
-            cwd: ctx.cwd,
-            signal,
-          });
+      const transport =
+        selection.kind === "agentsh"
+          ? await executeAgentSHFetch(selection.api, {
+              url,
+              method,
+              headers: params.headers,
+              body: params.body,
+              timeoutMs: timeout,
+              maxBodyBytes: maxBody,
+              outputPath: params.outputPath,
+              toolCallId,
+              signal,
+            })
+          : await executeNativeFetch({
+              url,
+              method,
+              headers: params.headers,
+              body: params.body,
+              timeoutMs: timeout,
+              maxBodyBytes: maxBody,
+              outputPath: params.outputPath,
+              cwd: ctx.cwd,
+              signal,
+            });
 
       if (transport.status < 200 || transport.status >= 300) {
         throw new Error(`✗ ${transport.status} ${transport.statusText}: ${url}`);
@@ -397,7 +437,12 @@ export default function fetchExtension(pi: ExtensionAPI) {
           outputPath: transport.outputPath,
         };
         return {
-          content: [{ type: "text", text: `HTTP ${transport.status} ${transport.statusText}\nSaved ${transport.bodyLength} bytes to ${transport.outputPath}` }],
+          content: [
+            {
+              type: "text",
+              text: `HTTP ${transport.status} ${transport.statusText}\nSaved ${transport.bodyLength} bytes to ${transport.outputPath}`,
+            },
+          ],
           details,
         };
       }
@@ -412,7 +457,10 @@ export default function fetchExtension(pi: ExtensionAPI) {
 
       if (params.readability && isHtml) {
         readabilityUsed = true;
-        const mozillaResult = extractWithMozillaReadability(bodyText, transport.effectiveUrl || url);
+        const mozillaResult = extractWithMozillaReadability(
+          bodyText,
+          transport.effectiveUrl || url,
+        );
         if (mozillaResult) {
           bodyText = mozillaResult.content;
           readabilityMethod = "mozilla";
@@ -447,7 +495,8 @@ export default function fetchExtension(pi: ExtensionAPI) {
         bodyLength: transport.bodyLength,
         truncated,
         curlCommand,
-        textOnly: !readabilityUsed && (params.textOnly === true || (params.textOnly !== false && isHtml)),
+        textOnly:
+          !readabilityUsed && (params.textOnly === true || (params.textOnly !== false && isHtml)),
         readability: readabilityUsed,
         readabilityMethod,
         readabilityWarning,
@@ -493,11 +542,7 @@ export default function fetchExtension(pi: ExtensionAPI) {
       const details = result.details as FetchDetails | undefined;
       if (!details || details.status === undefined) {
         const first = result.content[0];
-        return new Text(
-          first?.type === "text" ? first.text : "",
-          0,
-          0,
-        );
+        return new Text(first?.type === "text" ? first.text : "", 0, 0);
       }
 
       // Collapsed: one-line summary
@@ -517,9 +562,7 @@ export default function fetchExtension(pi: ExtensionAPI) {
         text += theme.fg("muted", details.statusText);
         text += theme.fg("dim", ` · ${sizeStr}`);
         if (details.outputPath) {
-          text +=
-            theme.fg("dim", " → ") +
-            theme.fg(statusColor, details.outputPath);
+          text += theme.fg("dim", " → ") + theme.fg(statusColor, details.outputPath);
         } else if (details.truncated) {
           text += theme.fg("warning", " (truncated)");
         }

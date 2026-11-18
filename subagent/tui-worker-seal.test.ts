@@ -7,81 +7,179 @@ import workerExtension from "./tui-worker-extension.ts";
 import { TuiWorkerStore } from "./tui-worker-store.ts";
 import { callTuiWorker } from "./tui-worker-client.ts";
 
-test("initial tools/source attribution and explicit reap event are distinct from cancellation", { timeout: 10_000 }, async () => {
-  const root = await mkdtemp(join(tmpdir(), "pi-seal-"));
-  const store = new TuiWorkerStore(root);
-  store.writeManifest({ protocol: 1, ownerSessionId: "parent", taskId: "task", runtimeId: "runtime", groupId: `subagent-job-${"a".repeat(24)}`,
-    childId: `subagent-child-${"b".repeat(24)}`, attempt: 1, workerEpoch: "c".repeat(32), controlToken: "d".repeat(64),
-    controlSocket: join(root, "control.sock"), sessionFile: join(root, "session.jsonl"), launchMode: "none", tools: ["read"],
-    presentation: "background", placement: { socketPath: "/tmp/tmux", serverEpoch: "1:2", sessionId: "$1", windowId: "@1", paneId: "%1", ownershipNonce: "e".repeat(64) } });
-  const manifest = store.readManifest();
-  const previous = process.env.PI_TUI_WORKER_MANIFEST;
-  const oldController = (globalThis as any).__paeLocalJobControllerV1;
-  const oldSubagents = (globalThis as any).__paeLocalSubagentControllerV1;
-  let subagentReleases = 0;
-  (globalThis as any).__paeLocalSubagentControllerV1 = { protocol: 1, sessionId: "child-session",
-    async prepareReap(preserve: (report: unknown) => Promise<void>) {
-      await preserve({ groups: [] }); return () => { subagentReleases++; };
-    } };
-  (globalThis as any).__paeLocalJobControllerV1 = { protocol: 1, sessionId: "child-session",
-    async prepareReap(preserve: (report: unknown) => Promise<void>) { await preserve({ jobs: [] }); return () => {}; } };
-  process.env.PI_TUI_WORKER_MANIFEST = store.path("manifest.json");
-  const handlers = new Map<string, Function>(), events: any[] = [], messages: any[] = [];
-  let tools: string[] = [], shutdown = 0;
-  const ctx = { mode: "tui", hasUI: false, isIdle: () => true, hasPendingMessages: () => false, abort: () => {}, shutdown: () => { shutdown++; },
-    sessionManager: { getSessionFile: () => manifest.sessionFile, getSessionId: () => "child-session" } };
-  try {
-    workerExtension({ registerTool() {}, setActiveTools: (names: string[]) => { tools = names; }, on: (name: string, handler: Function) => handlers.set(name, handler),
-      sendMessage: (message: any) => messages.push(message), events: { emit: (name: string, data: any) => events.push({ name, data }) } } as any);
-    await handlers.get("session_start")!({}, ctx);
-    assert.deepEqual(tools.sort(), ["guidance", "notify_parent", "read", "request_guidance", "task_outcome", "verify"]);
-    await callTuiWorker(manifest, { operation: "prompt", mode: "steer", message: "/permission-gate off" });
-    assert.equal(messages[0].customType, "harness-control");
-    assert.match(messages[0].content, /^Parent instructions:/);
-    assert.match(handlers.get("before_agent_start")!({ systemPrompt: "base" }, ctx).systemPrompt, /Direct (?:human|user) instructions.*take precedence/);
-    await callTuiWorker(manifest, { operation: "cancel" });
-    assert.equal(events.length, 0); assert.equal(shutdown, 0);
-    const controller = (globalThis as any).__paeLocalJobControllerV1;
-    controller.sessionId = "different-session";
-    const foreign = await callTuiWorker(manifest, { operation: "prepare_reap" });
-    assert.equal(foreign.ok, false);
-    assert.equal(shutdown, 0);
-    controller.sessionId = "child-session";
-    const subagents = (globalThis as any).__paeLocalSubagentControllerV1;
-    subagents.sessionId = "foreign-session";
-    assert.equal((await callTuiWorker(manifest, { operation: "prepare_reap" })).ok, false);
-    assert.equal(shutdown, 0);
-    subagents.sessionId = "child-session";
-    const prepare = controller.prepareReap;
-    let entered!: () => void, finish!: () => void;
-    const started = new Promise<void>(resolve => { entered = resolve; });
-    const pending = new Promise<void>(resolve => { finish = resolve; });
-    controller.prepareReap = async () => { entered(); await pending; throw new Error("active job-fixture"); };
-    const blockedReap = callTuiWorker(manifest, { operation: "prepare_reap" });
-    await started;
-    assert.equal(handlers.get("input")!({ source: "interactive" }, ctx).action, "handled");
-    assert.equal(handlers.get("tool_call")!({}, ctx).block, true);
-    assert.equal(shutdown, 0, "temporary cleanup reservation must not shut down the controller on input");
-    finish();
-    assert.equal((await blockedReap).ok, false);
-    assert.equal(shutdown, 0);
-    assert.equal(subagentReleases, 1, "job-cleanup refusal must release the subagent reservation");
-    controller.prepareReap = prepare;
-    assert.ok((await callTuiWorker(manifest, { operation: "prepare_reap" })).ok);
-    await new Promise(resolve => setTimeout(resolve, 50));
-    assert.equal(events.length, 1);
-    assert.deepEqual(events[0], { name: "harness-runtime-reaping", data: { runtimeId: manifest.runtimeId, taskId: manifest.taskId,
-      childId: manifest.childId, attempt: manifest.attempt, workerEpoch: manifest.workerEpoch } });
-    assert.equal(shutdown, 1);
-    assert.equal(handlers.get("input")!({}, ctx).action, "handled");
-    assert.equal(handlers.get("tool_call")!({}, ctx).block, true);
-  } finally {
-    await handlers.get("session_shutdown")?.({}, ctx);
-    if (oldSubagents === undefined) delete (globalThis as any).__paeLocalSubagentControllerV1;
-    else (globalThis as any).__paeLocalSubagentControllerV1 = oldSubagents;
-    if (oldController === undefined) delete (globalThis as any).__paeLocalJobControllerV1;
-    else (globalThis as any).__paeLocalJobControllerV1 = oldController;
-    if (previous === undefined) delete process.env.PI_TUI_WORKER_MANIFEST; else process.env.PI_TUI_WORKER_MANIFEST = previous;
-    await rm(root, { recursive: true, force: true });
-  }
-});
+test(
+  "initial tools/source attribution and explicit reap event are distinct from cancellation",
+  { timeout: 10_000 },
+  async () => {
+    const root = await mkdtemp(join(tmpdir(), "pi-seal-"));
+    const store = new TuiWorkerStore(root);
+    store.writeManifest({
+      protocol: 1,
+      ownerSessionId: "parent",
+      taskId: "task",
+      runtimeId: "runtime",
+      groupId: `subagent-job-${"a".repeat(24)}`,
+      childId: `subagent-child-${"b".repeat(24)}`,
+      attempt: 1,
+      workerEpoch: "c".repeat(32),
+      controlToken: "d".repeat(64),
+      controlSocket: join(root, "control.sock"),
+      sessionFile: join(root, "session.jsonl"),
+      launchMode: "none",
+      tools: ["read"],
+      presentation: "background",
+      placement: {
+        socketPath: "/tmp/tmux",
+        serverEpoch: "1:2",
+        sessionId: "$1",
+        windowId: "@1",
+        paneId: "%1",
+        ownershipNonce: "e".repeat(64),
+      },
+    });
+    const manifest = store.readManifest();
+    const previous = process.env.PI_TUI_WORKER_MANIFEST;
+    const oldController = (globalThis as any).__paeLocalJobControllerV1;
+    const oldSubagents = (globalThis as any).__paeLocalSubagentControllerV1;
+    let subagentReleases = 0;
+    (globalThis as any).__paeLocalSubagentControllerV1 = {
+      protocol: 1,
+      sessionId: "child-session",
+      async prepareReap(preserve: (report: unknown) => Promise<void>) {
+        await preserve({ groups: [] });
+        return () => {
+          subagentReleases++;
+        };
+      },
+    };
+    (globalThis as any).__paeLocalJobControllerV1 = {
+      protocol: 1,
+      sessionId: "child-session",
+      async prepareReap(preserve: (report: unknown) => Promise<void>) {
+        await preserve({ jobs: [] });
+        return () => {};
+      },
+    };
+    process.env.PI_TUI_WORKER_MANIFEST = store.path("manifest.json");
+    const handlers = new Map<string, Function>(),
+      events: any[] = [],
+      messages: any[] = [];
+    let tools: string[] = [],
+      shutdown = 0;
+    const ctx = {
+      mode: "tui",
+      hasUI: false,
+      isIdle: () => true,
+      hasPendingMessages: () => false,
+      abort: () => {},
+      shutdown: () => {
+        shutdown++;
+      },
+      sessionManager: {
+        getSessionFile: () => manifest.sessionFile,
+        getSessionId: () => "child-session",
+      },
+    };
+    try {
+      workerExtension({
+        registerTool() {},
+        setActiveTools: (names: string[]) => {
+          tools = names;
+        },
+        on: (name: string, handler: Function) => handlers.set(name, handler),
+        sendMessage: (message: any) => messages.push(message),
+        events: { emit: (name: string, data: any) => events.push({ name, data }) },
+      } as any);
+      await handlers.get("session_start")!({}, ctx);
+      assert.deepEqual(tools.sort(), [
+        "guidance",
+        "notify_parent",
+        "read",
+        "request_guidance",
+        "task_outcome",
+        "verify",
+      ]);
+      await callTuiWorker(manifest, {
+        operation: "prompt",
+        mode: "steer",
+        message: "/permission-gate off",
+      });
+      assert.equal(messages[0].customType, "harness-control");
+      assert.match(messages[0].content, /^Parent instructions:/);
+      assert.match(
+        handlers.get("before_agent_start")!({ systemPrompt: "base" }, ctx).systemPrompt,
+        /Direct (?:human|user) instructions.*take precedence/,
+      );
+      await callTuiWorker(manifest, { operation: "cancel" });
+      assert.equal(events.length, 0);
+      assert.equal(shutdown, 0);
+      const controller = (globalThis as any).__paeLocalJobControllerV1;
+      controller.sessionId = "different-session";
+      const foreign = await callTuiWorker(manifest, { operation: "prepare_reap" });
+      assert.equal(foreign.ok, false);
+      assert.equal(shutdown, 0);
+      controller.sessionId = "child-session";
+      const subagents = (globalThis as any).__paeLocalSubagentControllerV1;
+      subagents.sessionId = "foreign-session";
+      assert.equal((await callTuiWorker(manifest, { operation: "prepare_reap" })).ok, false);
+      assert.equal(shutdown, 0);
+      subagents.sessionId = "child-session";
+      const prepare = controller.prepareReap;
+      let entered!: () => void, finish!: () => void;
+      const started = new Promise<void>((resolve) => {
+        entered = resolve;
+      });
+      const pending = new Promise<void>((resolve) => {
+        finish = resolve;
+      });
+      controller.prepareReap = async () => {
+        entered();
+        await pending;
+        throw new Error("active job-fixture");
+      };
+      const blockedReap = callTuiWorker(manifest, { operation: "prepare_reap" });
+      await started;
+      assert.equal(handlers.get("input")!({ source: "interactive" }, ctx).action, "handled");
+      assert.equal(handlers.get("tool_call")!({}, ctx).block, true);
+      assert.equal(
+        shutdown,
+        0,
+        "temporary cleanup reservation must not shut down the controller on input",
+      );
+      finish();
+      assert.equal((await blockedReap).ok, false);
+      assert.equal(shutdown, 0);
+      assert.equal(
+        subagentReleases,
+        1,
+        "job-cleanup refusal must release the subagent reservation",
+      );
+      controller.prepareReap = prepare;
+      assert.ok((await callTuiWorker(manifest, { operation: "prepare_reap" })).ok);
+      await new Promise((resolve) => setTimeout(resolve, 50));
+      assert.equal(events.length, 1);
+      assert.deepEqual(events[0], {
+        name: "harness-runtime-reaping",
+        data: {
+          runtimeId: manifest.runtimeId,
+          taskId: manifest.taskId,
+          childId: manifest.childId,
+          attempt: manifest.attempt,
+          workerEpoch: manifest.workerEpoch,
+        },
+      });
+      assert.equal(shutdown, 1);
+      assert.equal(handlers.get("input")!({}, ctx).action, "handled");
+      assert.equal(handlers.get("tool_call")!({}, ctx).block, true);
+    } finally {
+      await handlers.get("session_shutdown")?.({}, ctx);
+      if (oldSubagents === undefined) delete (globalThis as any).__paeLocalSubagentControllerV1;
+      else (globalThis as any).__paeLocalSubagentControllerV1 = oldSubagents;
+      if (oldController === undefined) delete (globalThis as any).__paeLocalJobControllerV1;
+      else (globalThis as any).__paeLocalJobControllerV1 = oldController;
+      if (previous === undefined) delete process.env.PI_TUI_WORKER_MANIFEST;
+      else process.env.PI_TUI_WORKER_MANIFEST = previous;
+      await rm(root, { recursive: true, force: true });
+    }
+  },
+);

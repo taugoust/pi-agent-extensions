@@ -76,7 +76,11 @@ export function absoluteToVirtual(metadata: WorkspacePathMetadata | undefined, p
   if (isUnderPath(abs, vroot)) return abs;
 
   const roots = metadata?.workspace_roots || [];
-  const singleFlatRoot = roots.length === 1 && roots[0].work && metadata?.worktree && cleanPosix(roots[0].work) === cleanPosix(metadata.worktree);
+  const singleFlatRoot =
+    roots.length === 1 &&
+    roots[0].work &&
+    metadata?.worktree &&
+    cleanPosix(roots[0].work) === cleanPosix(metadata.worktree);
   if (singleFlatRoot) {
     const root = roots[0];
     for (const candidate of [root.work, root.real]) {
@@ -107,7 +111,11 @@ function firstPathComponent(path: string) {
   return cleanPosix(path).split("/").find(Boolean) || "";
 }
 
-export function restFileRequest(metadata: WorkspacePathMetadata | undefined, path: string, cwd: string): RestFileRequest {
+export function restFileRequest(
+  metadata: WorkspacePathMetadata | undefined,
+  path: string,
+  cwd: string,
+): RestFileRequest {
   const directVirtual = absoluteToVirtual(metadata, toSlashPath(path));
   if (directVirtual) return { path: directVirtual };
 
@@ -123,9 +131,14 @@ export function restFileRequest(metadata: WorkspacePathMetadata | undefined, pat
   return { path };
 }
 
-export function supervisorAbsolutePath(metadata: WorkspacePathMetadata | undefined, path: string, cwd: string) {
+export function supervisorAbsolutePath(
+  metadata: WorkspacePathMetadata | undefined,
+  path: string,
+  cwd: string,
+) {
   const file = restFileRequest(metadata, path, cwd);
   if (posixPath.isAbsolute(file.path)) return cleanPosix(file.path);
-  const virtualCwd = file.cwd || absoluteToVirtual(metadata, toSlashPath(cwd)) || metadataVirtualRoot(metadata);
+  const virtualCwd =
+    file.cwd || absoluteToVirtual(metadata, toSlashPath(cwd)) || metadataVirtualRoot(metadata);
   return cleanPosix(posixPath.resolve(virtualCwd, file.path));
 }

@@ -11,7 +11,15 @@ import type {
   UserMessage,
 } from "@earendil-works/pi-ai";
 
-export const BTW_THINKING_LEVELS = ["off", "minimal", "low", "medium", "high", "xhigh", "max"] as const;
+export const BTW_THINKING_LEVELS = [
+  "off",
+  "minimal",
+  "low",
+  "medium",
+  "high",
+  "xhigh",
+  "max",
+] as const;
 
 export type BtwThinkingLevel = (typeof BTW_THINKING_LEVELS)[number];
 
@@ -70,7 +78,10 @@ export function buildSideThreadMessages(thread: SideThread, question: string): M
   }
 
   const [first, ...rest] = answeredTurns;
-  messages.push(createUserMessage(buildUserPrompt(first.question, thread.conversationContext)), first.response);
+  messages.push(
+    createUserMessage(buildUserPrompt(first.question, thread.conversationContext)),
+    first.response,
+  );
   for (const turn of rest) {
     messages.push(createUserMessage(buildFollowUpPrompt(turn.question)), turn.response);
   }
@@ -176,7 +187,10 @@ export function extractAssistantText(response: AssistantMessage): string {
   return response.content
     .filter(
       (content): content is { type: "text"; text: string } =>
-        content !== null && typeof content === "object" && content.type === "text" && typeof content.text === "string",
+        content !== null &&
+        typeof content === "object" &&
+        content.type === "text" &&
+        typeof content.text === "string",
     )
     .map((content) => content.text)
     .join("\n")
@@ -186,7 +200,11 @@ export function extractAssistantText(response: AssistantMessage): string {
 function isAssistantMessage(value: unknown): value is AssistantMessage {
   if (value === null || typeof value !== "object") return false;
   const candidate = value as Partial<AssistantMessage>;
-  return candidate.role === "assistant" && Array.isArray(candidate.content) && typeof candidate.stopReason === "string";
+  return (
+    candidate.role === "assistant" &&
+    Array.isArray(candidate.content) &&
+    typeof candidate.stopReason === "string"
+  );
 }
 
 export function buildUserPrompt(question: string, conversationContext: string): string {
@@ -204,7 +222,13 @@ export function buildUserPrompt(question: string, conversationContext: string): 
 }
 
 export function buildFollowUpPrompt(question: string): string {
-  return ["Continue the same side conversation.", "", "<side_question>", question, "</side_question>"].join("\n");
+  return [
+    "Continue the same side conversation.",
+    "",
+    "<side_question>",
+    question,
+    "</side_question>",
+  ].join("\n");
 }
 
 function createUserMessage(text: string): UserMessage {
@@ -226,7 +250,8 @@ function getOpencodeSessionHeaders(
   model: Pick<Model<Api>, "provider">,
   sessionId?: string,
 ): ProviderHeaders | undefined {
-  if (!sessionId || (model.provider !== "opencode" && model.provider !== "opencode-go")) return undefined;
+  if (!sessionId || (model.provider !== "opencode" && model.provider !== "opencode-go"))
+    return undefined;
   return { "x-opencode-session": sessionId, "x-opencode-client": "pi" };
 }
 
@@ -257,7 +282,9 @@ function buildStreamOptions(
   const sessionHeaders = model ? getOpencodeSessionHeaders(model, sessionId) : undefined;
   const options: ModelsSimpleStreamOptions = {
     apiKey: auth?.apiKey,
-    headers: applyRequestHeaderTransforms ? auth?.headers : mergeSessionHeaders(auth?.headers, sessionHeaders),
+    headers: applyRequestHeaderTransforms
+      ? auth?.headers
+      : mergeSessionHeaders(auth?.headers, sessionHeaders),
     env: auth?.env,
     signal,
     // Pi documents sessionId as optional, but providers use it for request routing and

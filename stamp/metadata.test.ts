@@ -161,16 +161,21 @@ test("assistant cost-since-user formatting works with or without full metadata",
   const metadata = captureAssistantMetadata(COMPLETE_MESSAGE);
   assert.ok(metadata);
   const costSinceUserData = { estimatedCost: 0.018, costSinceUser: 0.039 };
-  assert.deepEqual(formatAssistantMetadataLines(metadata, "compact", false, undefined, true, costSinceUserData), [
-    "requested-model → actual-model · 1,234 tok · est $0.018 · since user $0.039",
-  ]);
-  assert.deepEqual(formatAssistantMetadataLines(metadata, "expanded", false, undefined, true, costSinceUserData), [
-    "api anthropic-messages · provider anthropic · requested requested-model · response actual-model · stop toolUse",
-    "tokens in 100 · out 200 · reasoning 50 · cache read 300 · cache write 400 · total 1,234 · est cost $0.018 · since user $0.039",
-  ]);
-  assert.deepEqual(formatAssistantMetadataLines(undefined, "off", false, undefined, true, costSinceUserData), [
-    "est $0.018 · since user $0.039",
-  ]);
+  assert.deepEqual(
+    formatAssistantMetadataLines(metadata, "compact", false, undefined, true, costSinceUserData),
+    ["requested-model → actual-model · 1,234 tok · est $0.018 · since user $0.039"],
+  );
+  assert.deepEqual(
+    formatAssistantMetadataLines(metadata, "expanded", false, undefined, true, costSinceUserData),
+    [
+      "api anthropic-messages · provider anthropic · requested requested-model · response actual-model · stop toolUse",
+      "tokens in 100 · out 200 · reasoning 50 · cache read 300 · cache write 400 · total 1,234 · est cost $0.018 · since user $0.039",
+    ],
+  );
+  assert.deepEqual(
+    formatAssistantMetadataLines(undefined, "off", false, undefined, true, costSinceUserData),
+    ["est $0.018 · since user $0.039"],
+  );
   assert.deepEqual(
     formatAssistantMetadataLines(undefined, "off", false, undefined, true, {
       costSinceUser: 0.03,
@@ -187,7 +192,15 @@ test("assistant cost-since-user formatting works with or without full metadata",
 });
 
 test("assistant metadata formats effective Thinking level and only abnormal compact outcomes", () => {
-  for (const thinkingLevel of ["off", "minimal", "low", "medium", "high", "xhigh", "max"] as const) {
+  for (const thinkingLevel of [
+    "off",
+    "minimal",
+    "low",
+    "medium",
+    "high",
+    "xhigh",
+    "max",
+  ] as const) {
     assert.equal(isStampThinkingLevel(thinkingLevel), true);
     const metadata = captureAssistantMetadata({
       ...COMPLETE_MESSAGE,
@@ -213,13 +226,18 @@ test("assistant metadata formats effective Thinking level and only abnormal comp
   for (const stopReason of ["stop", "toolUse"] as const) {
     const metadata = captureAssistantMetadata({ ...COMPLETE_MESSAGE, stopReason });
     assert.ok(metadata);
-    assert.equal(formatAssistantMetadataLines(metadata, "compact", false, "high")[0]?.includes("stop "), false);
+    assert.equal(
+      formatAssistantMetadataLines(metadata, "compact", false, "high")[0]?.includes("stop "),
+      false,
+    );
   }
 
   const expanded = captureAssistantMetadata({ ...COMPLETE_MESSAGE, stopReason: "error" });
   assert.ok(expanded);
   assert.equal(
-    formatAssistantMetadataLines(expanded, "compact", false, "high", false)[0]?.includes("stop error"),
+    formatAssistantMetadataLines(expanded, "compact", false, "high", false)[0]?.includes(
+      "stop error",
+    ),
     false,
   );
   assert.match(
@@ -273,7 +291,10 @@ test("assistant metadata bounds diagnostic summaries while retaining the reporte
   assert.ok(metadata);
   assert.equal(metadata.diagnosticCount, 7);
   assert.equal(metadata.diagnostics?.length, 5);
-  assert.match(formatAssistantMetadataLines(metadata, "compact", true)[2] ?? "", /7 \(showing 5\)/u);
+  assert.match(
+    formatAssistantMetadataLines(metadata, "compact", true)[2] ?? "",
+    /7 \(showing 5\)/u,
+  );
 });
 
 test("assistant metadata capture bounds work across malformed diagnostic collections", () => {
@@ -303,7 +324,13 @@ test("assistant metadata validator rejects unknown, malformed, and oversized per
     { ...metadata, usage: { ...metadata.usage, totalTokens: -1 } },
     {
       ...metadata,
-      diagnostics: [...(metadata.diagnostics ?? []), { type: "x" }, { type: "y" }, { type: "z" }, { type: "overflow" }],
+      diagnostics: [
+        ...(metadata.diagnostics ?? []),
+        { type: "x" },
+        { type: "y" },
+        { type: "z" },
+        { type: "overflow" },
+      ],
     },
     { ...metadata, diagnosticCount: 1 },
     { ...metadata, responseId: "x".repeat(161) },
@@ -314,7 +341,10 @@ test("assistant metadata validator rejects unknown, malformed, and oversized per
 
 test("tool stamp formatting labels only valid reported duration and outcome", () => {
   assert.equal(formatToolStampLabel("read", 1_250, "success"), "tool read · 1.3s · success");
-  assert.equal(formatToolStampLabel("bash\u001b[31m", 1, "error"), "tool bash [31m · <0.1s · error");
+  assert.equal(
+    formatToolStampLabel("bash\u001b[31m", 1, "error"),
+    "tool bash [31m · <0.1s · error",
+  );
   assert.equal(formatToolStampLabel("", 100, "success"), undefined);
   assert.equal(formatToolStampLabel("read", -1, "success"), undefined);
   assert.equal(formatToolStampLabel("read", 100, "cancelled" as never), undefined);

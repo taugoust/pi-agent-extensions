@@ -1,6 +1,15 @@
 import { withExtensionDefaults } from "../shared/extension-defaults.js";
 import { constants } from "node:fs";
-import { chmod, type FileHandle, mkdir, mkdtemp, open, rename, rm, writeFile } from "node:fs/promises";
+import {
+  chmod,
+  type FileHandle,
+  mkdir,
+  mkdtemp,
+  open,
+  rename,
+  rm,
+  writeFile,
+} from "node:fs/promises";
 import { dirname, join } from "node:path";
 import { getAgentDir, withFileMutationQueue } from "@earendil-works/pi-coding-agent";
 
@@ -43,9 +52,18 @@ export function normalizeProgressSettings(value: unknown): ProgressSettings | un
   const settings = { ...widgetValue, ...value };
 
   const enabled = booleanSetting(settings, "enabled", DEFAULT_PROGRESS_SETTINGS.enabled);
-  const showCompleted = booleanSetting(settings, "showCompleted", DEFAULT_PROGRESS_SETTINGS.showCompleted);
-  const showProgress = booleanSetting(settings, "showProgress", DEFAULT_PROGRESS_SETTINGS.showProgress);
-  if (enabled === undefined || showCompleted === undefined || showProgress === undefined) return undefined;
+  const showCompleted = booleanSetting(
+    settings,
+    "showCompleted",
+    DEFAULT_PROGRESS_SETTINGS.showCompleted,
+  );
+  const showProgress = booleanSetting(
+    settings,
+    "showProgress",
+    DEFAULT_PROGRESS_SETTINGS.showProgress,
+  );
+  if (enabled === undefined || showCompleted === undefined || showProgress === undefined)
+    return undefined;
 
   const displayMode = Object.hasOwn(settings, "displayMode")
     ? settings.displayMode
@@ -111,7 +129,8 @@ export async function saveProgressSettings(
     const settings = loadEffectiveProgressSettings(nextDocument);
     if (!settings) throw new Error("Invalid settings update");
     const text = `${JSON.stringify(nextDocument, null, 2)}\n`;
-    if (Buffer.byteLength(text) > MAX_PROGRESS_SETTINGS_BYTES) throw new Error("Settings update exceeds size limit");
+    if (Buffer.byteLength(text) > MAX_PROGRESS_SETTINGS_BYTES)
+      throw new Error("Settings update exceeds size limit");
 
     const parent = dirname(path);
     await mkdir(parent, { recursive: true });
@@ -142,7 +161,10 @@ async function loadSettingsFile(
   throwIfAborted(signal);
   let handle: FileHandle;
   try {
-    handle = await open(path, constants.O_RDONLY | (constants.O_NONBLOCK ?? 0) | (constants.O_NOFOLLOW ?? 0));
+    handle = await open(
+      path,
+      constants.O_RDONLY | (constants.O_NONBLOCK ?? 0) | (constants.O_NOFOLLOW ?? 0),
+    );
   } catch (error) {
     throwIfAborted(signal);
     if (isNodeError(error) && error.code === "ENOENT") {
@@ -186,7 +208,8 @@ async function loadSettingsFile(
       return invalidResult(path, "invalid JSON");
     }
     const settings = loadEffectiveProgressSettings(parsed);
-    if (!settings || !isRecord(parsed)) return invalidResult(path, "invalid settings shape or values");
+    if (!settings || !isRecord(parsed))
+      return invalidResult(path, "invalid settings shape or values");
     onDocument?.(parsed, stats.mode);
     return { kind: "loaded", path, settings };
   } catch (error) {
@@ -197,7 +220,11 @@ async function loadSettingsFile(
   }
 }
 
-function booleanSetting(record: Record<string, unknown>, key: string, fallback: boolean): boolean | undefined {
+function booleanSetting(
+  record: Record<string, unknown>,
+  key: string,
+  fallback: boolean,
+): boolean | undefined {
   const value = Object.hasOwn(record, key) ? record[key] : fallback;
   return typeof value === "boolean" ? value : undefined;
 }

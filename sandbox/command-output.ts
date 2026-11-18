@@ -50,11 +50,15 @@ export class StringOutputAccumulator {
       maxLines: DEFAULT_MAX_LINES,
       maxBytes: DEFAULT_MAX_BYTES,
     });
-    const truncated = this.totalLines > DEFAULT_MAX_LINES || this.totalDecodedBytes > DEFAULT_MAX_BYTES;
+    const truncated =
+      this.totalLines > DEFAULT_MAX_LINES || this.totalDecodedBytes > DEFAULT_MAX_BYTES;
     const truncation: TruncationResult = {
       ...tailTruncation,
       truncated,
-      truncatedBy: truncated ? (tailTruncation.truncatedBy ?? (this.totalDecodedBytes > DEFAULT_MAX_BYTES ? "bytes" : "lines")) : null,
+      truncatedBy: truncated
+        ? (tailTruncation.truncatedBy ??
+          (this.totalDecodedBytes > DEFAULT_MAX_BYTES ? "bytes" : "lines"))
+        : null,
       totalLines: this.totalLines,
       totalBytes: this.totalDecodedBytes,
       maxLines: DEFAULT_MAX_LINES,
@@ -115,7 +119,8 @@ export class StringOutputAccumulator {
     let start = buffer.length - maxRollingBytes;
     while (start < buffer.length && (buffer[start] & 0xc0) === 0x80) start++;
 
-    this.tailStartsAtLineBoundary = start === 0 ? this.tailStartsAtLineBoundary : buffer[start - 1] === 0x0a;
+    this.tailStartsAtLineBoundary =
+      start === 0 ? this.tailStartsAtLineBoundary : buffer[start - 1] === 0x0a;
     this.tailText = buffer.subarray(start).toString("utf-8");
     this.tailBytes = byteLength(this.tailText);
   }
@@ -125,7 +130,6 @@ export class StringOutputAccumulator {
     const firstNewline = this.tailText.indexOf("\n");
     return firstNewline === -1 ? this.tailText : this.tailText.slice(firstNewline + 1);
   }
-
 }
 
 function execResultBoolean(result: ExecResult | undefined, key: string) {
@@ -149,16 +153,39 @@ export type RemoteOutputArtifact = {
   error?: string;
 };
 
-export function remoteOutputArtifact(result: ExecResult | undefined): RemoteOutputArtifact | undefined {
+export function remoteOutputArtifact(
+  result: ExecResult | undefined,
+): RemoteOutputArtifact | undefined {
   if (!result) return undefined;
-  const nested = result.output_artifact && typeof result.output_artifact === "object" ? result.output_artifact as JsonObject : undefined;
-  const path = typeof result.full_output_path === "string" ? result.full_output_path : typeof nested?.path === "string" ? nested.path : undefined;
+  const nested =
+    result.output_artifact && typeof result.output_artifact === "object"
+      ? (result.output_artifact as JsonObject)
+      : undefined;
+  const path =
+    typeof result.full_output_path === "string"
+      ? result.full_output_path
+      : typeof nested?.path === "string"
+        ? nested.path
+        : undefined;
   const bytes = execResultNumber(result, "artifact_bytes") ?? numericField(nested?.bytes);
-  const totalBytes = execResultNumber(result, "artifact_total_bytes") ?? numericField(nested?.total_bytes);
-  const completeValue = typeof result.artifact_complete === "boolean" ? result.artifact_complete : nested?.complete;
-  const error = typeof result.artifact_error === "string" ? result.artifact_error : typeof nested?.error === "string" ? nested.error : undefined;
+  const totalBytes =
+    execResultNumber(result, "artifact_total_bytes") ?? numericField(nested?.total_bytes);
+  const completeValue =
+    typeof result.artifact_complete === "boolean" ? result.artifact_complete : nested?.complete;
+  const error =
+    typeof result.artifact_error === "string"
+      ? result.artifact_error
+      : typeof nested?.error === "string"
+        ? nested.error
+        : undefined;
   if (!path && !error && bytes === undefined && totalBytes === undefined) return undefined;
-  return { path, bytes, totalBytes, complete: typeof completeValue === "boolean" ? completeValue : undefined, error };
+  return {
+    path,
+    bytes,
+    totalBytes,
+    complete: typeof completeValue === "boolean" ? completeValue : undefined,
+    error,
+  };
 }
 
 function agentSHOutputWarnings(result: ExecResult | undefined, artifact?: RemoteOutputArtifact) {
@@ -170,15 +197,23 @@ function agentSHOutputWarnings(result: ExecResult | undefined, artifact?: Remote
     const total = execResultNumber(result, `${stream}_total_bytes`);
     const totalText = total === undefined ? "" : ` at ${formatSize(total)}`;
     let hint = "";
-    if (artifact?.path && artifact.complete) hint = " Complete output is available in the remote artifact.";
-    else if (artifact?.path) hint = " The remote artifact is also bounded; its byte counts are shown above.";
-    else if (sessionID && commandID) hint = ` The retained AgentSH prefix can be paged with: agentsh output ${sessionID} ${commandID} --stream ${stream}`;
+    if (artifact?.path && artifact.complete)
+      hint = " Complete output is available in the remote artifact.";
+    else if (artifact?.path)
+      hint = " The remote artifact is also bounded; its byte counts are shown above.";
+    else if (sessionID && commandID)
+      hint = ` The retained AgentSH prefix can be paged with: agentsh output ${sessionID} ${commandID} --stream ${stream}`;
     warnings.push(`AgentSH response truncated ${stream}${totalText}.${hint}`);
   }
   return warnings;
 }
 
-export function formatAccumulatedOutput(snapshot: OutputSnapshot, output: StringOutputAccumulator, result?: ExecResult, emptyText = "(no output)") {
+export function formatAccumulatedOutput(
+  snapshot: OutputSnapshot,
+  output: StringOutputAccumulator,
+  result?: ExecResult,
+  emptyText = "(no output)",
+) {
   const truncation = snapshot.truncation;
   let text = snapshot.content || emptyText;
   const artifact = remoteOutputArtifact(result);
@@ -196,9 +231,10 @@ export function formatAccumulatedOutput(snapshot: OutputSnapshot, output: String
       shown = `Showing lines ${startLine}-${endLine} of ${truncation.totalLines} (${formatSize(DEFAULT_MAX_BYTES)} limit).`;
     }
     if (artifact?.path) {
-      const retained = artifact.complete === false
-        ? ` Retained remote output: ${artifact.path} (${formatSize(artifact.bytes ?? 0)} of ${formatSize(artifact.totalBytes ?? 0)}).`
-        : ` Full output: ${artifact.path}`;
+      const retained =
+        artifact.complete === false
+          ? ` Retained remote output: ${artifact.path} (${formatSize(artifact.bytes ?? 0)} of ${formatSize(artifact.totalBytes ?? 0)}).`
+          : ` Full output: ${artifact.path}`;
       shown += retained;
     } else if (artifact?.error) {
       shown += ` Remote output artifact unavailable: ${artifact.error}`;

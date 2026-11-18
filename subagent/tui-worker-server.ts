@@ -1,14 +1,34 @@
-import { extractToolPresentation, extractToolPresentationArguments } from "../shared/tool-presentation.ts";
+import {
+  extractToolPresentation,
+  extractToolPresentationArguments,
+} from "../shared/tool-presentation.ts";
 import net from "node:net";
 import { validInteractionInput, validInteractionAnswer } from "../shared/task-interactions.ts";
 import { boundedToolResult } from "../shared/tool-result-text.ts";
 import { chmodSync, lstatSync, openSync, closeSync, unlinkSync, writeFileSync } from "node:fs";
 import { createHash, randomBytes, timingSafeEqual } from "node:crypto";
-import { decodeTuiWorkerRequest, TUI_WORKER_MAX_FRAME_BYTES } from "../shared/tui-worker-protocol.ts";
-import type { TuiWorkerEvent, TuiWorkerManifest, TuiWorkerRequest, TuiWorkerResponse } from "../shared/tui-worker-protocol.ts";
+import {
+  decodeTuiWorkerRequest,
+  TUI_WORKER_MAX_FRAME_BYTES,
+} from "../shared/tui-worker-protocol.ts";
+import type {
+  TuiWorkerEvent,
+  TuiWorkerManifest,
+  TuiWorkerRequest,
+  TuiWorkerResponse,
+} from "../shared/tui-worker-protocol.ts";
 import { TuiWorkerStore, readPrivateJson } from "./tui-worker-store.ts";
 import { readTaskOutcome, validateTaskOutcome } from "./outcome.ts";
-import { validateVerification, initialVerification, currentVerification, runVerification, recoverVerification, verificationSummary, type VerificationIdentity, type VerificationJobs } from "./acceptance.ts";
+import {
+  validateVerification,
+  initialVerification,
+  currentVerification,
+  runVerification,
+  recoverVerification,
+  verificationSummary,
+  type VerificationIdentity,
+  type VerificationJobs,
+} from "./acceptance.ts";
 import type { WorkerState } from "./tui-worker-store.ts";
 
 export type TuiWorkerAdapter = {
@@ -23,18 +43,37 @@ export type TuiWorkerAdapter = {
   abort(): void | Promise<void>;
   /** Gracefully exit this idle Pi, retaining its tmux pane. */
   shutdown(): void;
-  compact?(): Promise<void | { compaction: "not-needed"; reason: "nothing-to-compact" | "already-compacted" }>;
+  compact?(): Promise<void | {
+    compaction: "not-needed";
+    reason: "nothing-to-compact" | "already-compacted";
+  }>;
   /** Reserve job creation, preserve terminal results, clean only owned terminal jobs.
    * Return a release callback; failures must release the local reservation. */
-  prepareJobReap?(preserve: (report: unknown) => Promise<void>, options?: { force?: true; reason?: string }): Promise<() => void>;
+  prepareJobReap?(
+    preserve: (report: unknown) => Promise<void>,
+    options?: { force?: true; reason?: string },
+  ): Promise<() => void>;
   /** Trusted profile policy cleanup, after job/descendant reservation and before sealing. */
   prepareWorktreeReap?(options: { force?: true; reason?: string }): Promise<unknown>;
   /** Adapter includes session-bound recursive subagent cleanup, not only jobs. */
   recursiveCleanup?: boolean;
-  jobs?(params: import("../shared/tui-worker-protocol.ts").TuiWorkerJobParams, requestId: string): Promise<unknown>;
+  jobs?(
+    params: import("../shared/tui-worker-protocol.ts").TuiWorkerJobParams,
+    requestId: string,
+  ): Promise<unknown>;
   applyOperatorMode?(enabled: boolean): unknown | Promise<unknown>;
 };
-const MUTATIONS = new Set(["prompt", "user_prompt", "cancel", "compact", "verify", "prepare_reap", "promote", "respond_interaction", "idle_decision"]);
+const MUTATIONS = new Set([
+  "prompt",
+  "user_prompt",
+  "cancel",
+  "compact",
+  "verify",
+  "prepare_reap",
+  "promote",
+  "respond_interaction",
+  "idle_decision",
+]);
 
 /** Runs inside the actual TUI process. Observers own no lifetime-critical fd. */
 export class TuiWorkerServer {
@@ -54,9 +93,21 @@ export class TuiWorkerServer {
   private reapInterrupted = false;
   readonly store: TuiWorkerStore;
   private adapter: TuiWorkerAdapter;
-  private interactionWaiters = new Map<string, { resolve(answer: import("../shared/foreground-tasks.ts").TaskInteractionAnswer): void; reject(error: Error): void }>();
-  private idleDecisions = new Map<string, { resolve(choice: "ignore" | "compact" | "cancel"): void; reject(error: Error): void }>();
-  private idleDecisionHistory = new Map<string, { model: string; idleMinutes: number; contextPercent: number }>();
+  private interactionWaiters = new Map<
+    string,
+    {
+      resolve(answer: import("../shared/foreground-tasks.ts").TaskInteractionAnswer): void;
+      reject(error: Error): void;
+    }
+  >();
+  private idleDecisions = new Map<
+    string,
+    { resolve(choice: "ignore" | "compact" | "cancel"): void; reject(error: Error): void }
+  >();
+  private idleDecisionHistory = new Map<
+    string,
+    { model: string; idleMinutes: number; contextPercent: number }
+  >();
   private currentLiveText = "";
   private interruptTimeoutMs: number;
   private verificationAbort?: AbortController;
@@ -71,20 +122,39 @@ export class TuiWorkerServer {
     this.state = store.readState(true);
     if (this.manifest.verification?.length) {
       const prior = this.state.verification;
-      this.state.verification = currentVerification(prior, this.verificationIdentity(), this.manifest.verification);
-      if (prior && (!this.state.verification.runs.length && prior.runs.length)) {
-        this.state.verificationQuarantine = this.store.report(this.state.sequence + 1, { untrustedRuntimeVerification: prior,
-          error: "Verification identity/contract changed; retained for inspection only, never authorizes command replay or job cleanup" });
+      this.state.verification = currentVerification(
+        prior,
+        this.verificationIdentity(),
+        this.manifest.verification,
+      );
+      if (prior && !this.state.verification.runs.length && prior.runs.length) {
+        this.state.verificationQuarantine = this.store.report(this.state.sequence + 1, {
+          untrustedRuntimeVerification: prior,
+          error:
+            "Verification identity/contract changed; retained for inspection only, never authorizes command replay or job cleanup",
+        });
       }
       // Restart never replays a command. Existing owned jobs remain visible to ordinary cleanup.
       if (this.state.verification.status !== "checking") {
         this.state.active = false;
-        if (this.state.verificationReport && !this.state.lastReport) { this.state.lastReport = this.state.verificationReport; this.state.phase = "settled"; }
+        if (this.state.verificationReport && !this.state.lastReport) {
+          this.state.lastReport = this.state.verificationReport;
+          this.state.phase = "settled";
+        }
       }
       for (const receipt of Object.values(this.state.receipts)) {
-        if (receipt.response?.receipt === "accepted" && (receipt.response.data as any)?.operation === "verify") {
-          receipt.response = { ...receipt.response, ok: false, code: "unavailable", receipt: "failed",
-            message: "Verification was interrupted by worker reload; inspect status and explicitly retry" } as TuiWorkerResponse;
+        if (
+          receipt.response?.receipt === "accepted" &&
+          (receipt.response.data as any)?.operation === "verify"
+        ) {
+          receipt.response = {
+            ...receipt.response,
+            ok: false,
+            code: "unavailable",
+            receipt: "failed",
+            message:
+              "Verification was interrupted by worker reload; inspect status and explicitly retry",
+          } as TuiWorkerResponse;
         }
       }
       this.persist();
@@ -92,26 +162,56 @@ export class TuiWorkerServer {
   }
   private verificationIdentity(): VerificationIdentity {
     const m = this.manifest;
-    return { ownerSessionId: m.ownerSessionId, taskId: m.taskId, childId: m.childId, attempt: m.attempt,
-      workerEpoch: m.workerEpoch, runtimeId: m.runtimeId, cwd: this.adapter.verificationCwd?.() ?? process.cwd() };
+    return {
+      ownerSessionId: m.ownerSessionId,
+      taskId: m.taskId,
+      childId: m.childId,
+      attempt: m.attempt,
+      workerEpoch: m.workerEpoch,
+      runtimeId: m.runtimeId,
+      cwd: this.adapter.verificationCwd?.() ?? process.cwd(),
+    };
   }
-  getVerificationSummary() { return this.verificationSnapshot(); }
+  getVerificationSummary() {
+    return this.verificationSnapshot();
+  }
   private verificationSnapshot() {
     const gates = validateVerification(this.manifest.verification);
-    const record = this.verificationFlight && this.state.verification ? this.state.verification : currentVerification(this.state.verification, this.verificationIdentity(), gates);
+    const record =
+      this.verificationFlight && this.state.verification
+        ? this.state.verification
+        : currentVerification(this.state.verification, this.verificationIdentity(), gates);
     return verificationSummary(record);
   }
-  get sealed(): boolean { return this.state.sealed || this.closing || this.failed; }
+  get sealed(): boolean {
+    return this.state.sealed || this.closing || this.failed;
+  }
   private persist(): void {
-    try { this.store.writeState(this.state); }
-    catch (error) { this.failed = true; void this.adapter.abort(); throw error; }
+    try {
+      this.store.writeState(this.state);
+    } catch (error) {
+      this.failed = true;
+      void this.adapter.abort();
+      throw error;
+    }
   }
   private event(kind: TuiWorkerEvent["kind"], data?: unknown): void {
-    const event: TuiWorkerEvent = { protocol: 1, workerEpoch: this.manifest.workerEpoch, sequence: ++this.state.sequence,
-      timestamp: new Date().toISOString(), kind, ...(data === undefined ? {} : { data }) };
+    const event: TuiWorkerEvent = {
+      protocol: 1,
+      workerEpoch: this.manifest.workerEpoch,
+      sequence: ++this.state.sequence,
+      timestamp: new Date().toISOString(),
+      kind,
+      ...(data === undefined ? {} : { data }),
+    };
     if (this.manifest.execution === "rpc-headless") {
-      try { this.store.appendTimeline(event); }
-      catch (error) { this.failed = true; void this.adapter.abort(); throw error; }
+      try {
+        this.store.appendTimeline(event);
+      } catch (error) {
+        this.failed = true;
+        void this.adapter.abort();
+        throw error;
+      }
     }
     this.state.events.push(event);
     this.state.events = this.state.events.slice(-256);
@@ -119,11 +219,22 @@ export class TuiWorkerServer {
   }
   /** Call synchronously from input/before_agent_start, before awaiting anything. */
   running(newTurn = false): boolean {
-    if (this.preparingReap) { this.reapInterrupted = true; void this.adapter.abort(); return false; }
-    if (this.sealed) { void this.adapter.abort(); return false; }
+    if (this.preparingReap) {
+      this.reapInterrupted = true;
+      void this.adapter.abort();
+      return false;
+    }
+    if (this.sealed) {
+      void this.adapter.abort();
+      return false;
+    }
     this.verificationAbort?.abort();
     this.verificationGeneration++;
-    if (this.manifest.verification?.length && !this.verificationFlight) this.state.verification = initialVerification(this.verificationIdentity(), this.manifest.verification);
+    if (this.manifest.verification?.length && !this.verificationFlight)
+      this.state.verification = initialVerification(
+        this.verificationIdentity(),
+        this.manifest.verification,
+      );
     this.activityGeneration++;
     this.runningGeneration++;
     for (const check of this.idleWaiters) check();
@@ -138,17 +249,31 @@ export class TuiWorkerServer {
     return true;
   }
   settled(report: unknown): void {
-    if (this.closing || this.failed || this.preparingReap || !this.adapter.isIdle()
-      || this.state.phase === "settled" && !this.state.active) return;
+    if (
+      this.closing ||
+      this.failed ||
+      this.preparingReap ||
+      !this.adapter.isIdle() ||
+      (this.state.phase === "settled" && !this.state.active)
+    )
+      return;
     if (this.verificationFlight) {
       const generation = this.verificationGeneration;
-      void this.verificationFlight.then(() => { if (generation === this.verificationGeneration) this.settled(report); });
+      void this.verificationFlight.then(() => {
+        if (generation === this.verificationGeneration) this.settled(report);
+      });
       return;
     }
     this.activityGeneration++;
-    const reportData = this.manifest.verification?.length && this.deliveredClaim()
-      ? { ...(report && typeof report === "object" && !Array.isArray(report) ? report as object : { report }), runtimeVerification: this.state.verification }
-      : report;
+    const reportData =
+      this.manifest.verification?.length && this.deliveredClaim()
+        ? {
+            ...(report && typeof report === "object" && !Array.isArray(report)
+              ? (report as object)
+              : { report }),
+            runtimeVerification: this.state.verification,
+          }
+        : report;
     this.state.lastReport = this.store.report(this.state.sequence + 1, reportData);
     this.state.active = false;
     this.state.phase = "settled";
@@ -158,46 +283,100 @@ export class TuiWorkerServer {
   private interruptBlocker(generation: number): string | undefined {
     if (this.sealed) return "Worker closed during interrupt";
     try {
-      if (this.adapter.canRun?.() === false) return "Worker command authority unavailable after interrupt";
-    } catch { return "Worker command authority unavailable after interrupt"; }
-    if (generation !== this.runningGeneration) return "New worker activity started during interrupt";
+      if (this.adapter.canRun?.() === false)
+        return "Worker command authority unavailable after interrupt";
+    } catch {
+      return "Worker command authority unavailable after interrupt";
+    }
+    if (generation !== this.runningGeneration)
+      return "New worker activity started during interrupt";
   }
   /** ExtensionContext.abort() requests cancellation but returns void. Install
    * the waiter first; only live idle (and any asynchronous adapter ack) permits
    * replacement. New local input, authority loss, or shutdown wins the race. */
   private abortAndIdle(): Promise<string | undefined> {
     const generation = this.runningGeneration;
-    return new Promise(resolve => {
-      let done = false, acknowledged = false;
+    return new Promise((resolve) => {
+      let done = false,
+        acknowledged = false;
       const finish = (reason?: string) => {
         if (done) return;
-        done = true; clearTimeout(timer); this.idleWaiters.delete(check); resolve(reason);
+        done = true;
+        clearTimeout(timer);
+        this.idleWaiters.delete(check);
+        resolve(reason);
       };
       const check = () => {
         const blocker = this.interruptBlocker(generation);
         if (blocker) finish(blocker);
         else if (acknowledged && this.adapter.isIdle()) finish();
       };
-      const timer = setTimeout(() => finish("Abort did not reach confirmed idle before the interrupt timeout"), this.interruptTimeoutMs);
+      const timer = setTimeout(
+        () => finish("Abort did not reach confirmed idle before the interrupt timeout"),
+        this.interruptTimeoutMs,
+      );
       this.idleWaiters.add(check);
       try {
-        Promise.resolve(this.adapter.abort()).then(() => { acknowledged = true; check(); },
-          () => finish("Abort request failed; cancellation may have occurred"));
-      } catch { finish("Abort request failed; cancellation may have occurred"); }
+        Promise.resolve(this.adapter.abort()).then(
+          () => {
+            acknowledged = true;
+            check();
+          },
+          () => finish("Abort request failed; cancellation may have occurred"),
+        );
+      } catch {
+        finish("Abort request failed; cancellation may have occurred");
+      }
     });
   }
-  conversationTool(kind: "start" | "end", value: { toolCallId: string; name: string; arguments?: unknown; result?: unknown; failed?: boolean }): void {
-    if (!/^[a-zA-Z0-9._:|\-]{1,128}$/.test(value.toolCallId) || typeof value.name !== "string" || !value.name || value.name.length > 128) return;
+  conversationTool(
+    kind: "start" | "end",
+    value: {
+      toolCallId: string;
+      name: string;
+      arguments?: unknown;
+      result?: unknown;
+      failed?: boolean;
+    },
+  ): void {
+    if (
+      !/^[a-zA-Z0-9._:|\-]{1,128}$/.test(value.toolCallId) ||
+      typeof value.name !== "string" ||
+      !value.name ||
+      value.name.length > 128
+    )
+      return;
     const bounded = (input: unknown, max: number) => {
       let text: string;
-      try { text = typeof input === "string" ? input : JSON.stringify(input ?? {}); } catch { text = "[unavailable]"; }
+      try {
+        text = typeof input === "string" ? input : JSON.stringify(input ?? {});
+      } catch {
+        text = "[unavailable]";
+      }
       const bytes = Buffer.from(text);
-      if (bytes.length <= max) { try { return JSON.parse(text); } catch { return text; } }
+      if (bytes.length <= max) {
+        try {
+          return JSON.parse(text);
+        } catch {
+          return text;
+        }
+      }
       return { truncated: true, preview: bytes.subarray(0, max - 64).toString("utf8") };
     };
     this.event(kind === "start" ? "conversation_tool_start" : "conversation_tool_end", {
-      toolCallId: value.toolCallId, name: value.name,
-      ...(kind === "start" ? { arguments: bounded(value.arguments, 2048), toolArguments: extractToolPresentationArguments(value.name, value.arguments) } : { toolPresentation: extractToolPresentation(value.name, value.result), result: boundedToolResult(value.result, 2048), resultFormat: "text", status: value.failed ? "failed" : "completed" }),
+      toolCallId: value.toolCallId,
+      name: value.name,
+      ...(kind === "start"
+        ? {
+            arguments: bounded(value.arguments, 2048),
+            toolArguments: extractToolPresentationArguments(value.name, value.arguments),
+          }
+        : {
+            toolPresentation: extractToolPresentation(value.name, value.result),
+            result: boundedToolResult(value.result, 2048),
+            resultFormat: "text",
+            status: value.failed ? "failed" : "completed",
+          }),
     });
   }
   liveText(value: string): void {
@@ -215,7 +394,8 @@ export class TuiWorkerServer {
     return `${this.manifest.groupId}:${this.manifest.childId}:${this.state.sequence}`;
   }
   async outcome(data: unknown, signal?: AbortSignal): Promise<void> {
-    if (signal?.aborted) throw new Error("Outcome tool cancelled before recording; worker state is unchanged");
+    if (signal?.aborted)
+      throw new Error("Outcome tool cancelled before recording; worker state is unchanged");
     const artifact = this.store.artifact("outcome", this.state.sequence + 1, data);
     this.state.lastOutcome = artifact;
     const outcome = validateTaskOutcome(data, this.manifest.acceptance ?? []);
@@ -226,7 +406,12 @@ export class TuiWorkerServer {
     }
     this.event("outcome", { artifact });
   }
-  private ensureVerificationFlight(): { generation: number; flight: Promise<void>; record: any; owned: boolean } {
+  private ensureVerificationFlight(): {
+    generation: number;
+    flight: Promise<void>;
+    record: any;
+    owned: boolean;
+  } {
     const gates = validateVerification(this.manifest.verification);
     if (!gates.length) throw new Error("No verification gates are configured");
     const existing = this.verificationFlight;
@@ -235,143 +420,283 @@ export class TuiWorkerServer {
     const flight = this.verificationFlight;
     const record = this.state.verification;
     if (!flight || !record) throw new Error("Verification could not be started");
-    return { generation: this.verificationGeneration, flight, record, owned: !existing && this.verificationGeneration !== priorGeneration };
+    return {
+      generation: this.verificationGeneration,
+      flight,
+      record,
+      owned: !existing && this.verificationGeneration !== priorGeneration,
+    };
   }
   private cancelVerification(generation: number): boolean {
-    if (generation !== this.verificationGeneration || !this.verificationFlight || !this.verificationAbort) return false;
+    if (
+      generation !== this.verificationGeneration ||
+      !this.verificationFlight ||
+      !this.verificationAbort
+    )
+      return false;
     this.verificationAbort.abort(new Error("Verification tool cancelled"));
     return true;
   }
-  private async awaitVerification(lease: { generation: number; flight: Promise<void>; record: any; owned: boolean }, signal?: AbortSignal) {
+  private async awaitVerification(
+    lease: { generation: number; flight: Promise<void>; record: any; owned: boolean },
+    signal?: AbortSignal,
+  ) {
     let cancelWaiting!: () => void;
-    const cancelled = new Promise<void>(resolve => { cancelWaiting = resolve; });
+    const cancelled = new Promise<void>((resolve) => {
+      cancelWaiting = resolve;
+    });
     const onAbort = () => {
       if (lease.owned) this.cancelVerification(lease.generation);
       else cancelWaiting();
     };
-    if (signal?.aborted) onAbort(); else signal?.addEventListener("abort", onAbort, { once: true });
+    if (signal?.aborted) onAbort();
+    else signal?.addEventListener("abort", onAbort, { once: true });
     try {
       if (lease.owned || !signal) await lease.flight;
-      else await Promise.race([lease.flight, cancelled.then(() => { throw new Error("Verification wait cancelled; shared check continues"); })]);
-    } finally { signal?.removeEventListener("abort", onAbort); }
+      else
+        await Promise.race([
+          lease.flight,
+          cancelled.then(() => {
+            throw new Error("Verification wait cancelled; shared check continues");
+          }),
+        ]);
+    } finally {
+      signal?.removeEventListener("abort", onAbort);
+    }
     return verificationSummary(lease.record);
   }
   private async startVerification(): Promise<void> {
     const gates = validateVerification(this.manifest.verification);
     if (!gates.length) return;
     if (this.verificationFlight) return this.verificationFlight;
-    const record = this.state.verification = initialVerification(this.verificationIdentity(), gates);
+    const record = (this.state.verification = initialVerification(
+      this.verificationIdentity(),
+      gates,
+    ));
     record.status = "checking";
     const generation = ++this.verificationGeneration;
     const controller = new AbortController();
     this.verificationAbort = controller;
     this.persist();
-    const flight = new Promise<void>(resolve => setImmediate(resolve))
+    const flight = new Promise<void>((resolve) => setImmediate(resolve))
       .then(() => {
-        if (generation !== this.verificationGeneration || controller.signal.aborted || this.closing || this.failed) {
+        if (
+          generation !== this.verificationGeneration ||
+          controller.signal.aborted ||
+          this.closing ||
+          this.failed
+        ) {
           if (record === this.state.verification && record.status === "checking") {
             record.status = controller.signal.aborted || this.closing ? "cancelled" : "unavailable";
             this.persist();
           }
           return;
         }
-        return runVerification(record, gates, this.adapter.verificationJobs?.(), () => this.persist(), controller.signal);
+        return runVerification(
+          record,
+          gates,
+          this.adapter.verificationJobs?.(),
+          () => this.persist(),
+          controller.signal,
+        );
       })
-      .catch(error => { record.status = controller.signal.aborted ? "cancelled" : "unavailable"; if (record.runs.at(-1)) record.runs.at(-1)!.error = String(error); this.persist(); })
+      .catch((error) => {
+        record.status = controller.signal.aborted ? "cancelled" : "unavailable";
+        if (record.runs.at(-1)) record.runs.at(-1)!.error = String(error);
+        this.persist();
+      })
       .then(() => {
         if (generation !== this.verificationGeneration || this.closing || this.failed) return;
         this.event("verification_settled", { verification: record.status });
         const artifact = this.state.lastOutcome;
         if (artifact) this.event("outcome", { artifact, verification: record.status });
-      }).finally(() => { if (this.verificationFlight === flight) this.verificationFlight = undefined; });
+      })
+      .finally(() => {
+        if (this.verificationFlight === flight) this.verificationFlight = undefined;
+      });
     this.verificationFlight = flight;
     return flight;
   }
   beginVerification(): ReturnType<typeof verificationSummary> {
-    if (!this.manifest.verification?.length) throw new Error("No verification gates are configured");
+    if (!this.manifest.verification?.length)
+      throw new Error("No verification gates are configured");
     this.ensureVerificationFlight();
     return this.verificationSnapshot();
   }
   async verify(signal?: AbortSignal): Promise<ReturnType<typeof verificationSummary>> {
-    if (!this.manifest.verification?.length) throw new Error("No verification gates are configured");
+    if (!this.manifest.verification?.length)
+      throw new Error("No verification gates are configured");
     return await this.awaitVerification(this.ensureVerificationFlight(), signal);
   }
   /** An external intervention closes this assignment's automatic-continuation window. */
   inhibitAutoContinuation(): void {
-    this.state.autoContinuation = { used: this.state.autoContinuation?.used ?? false, inhibited: true };
+    this.state.autoContinuation = {
+      used: this.state.autoContinuation?.used ?? false,
+      inhibited: true,
+    };
     this.persist();
   }
   /** Synchronous reservation before Pi's final actionable boundary. No replay after
    * a crash between durable reservation and Pi accepting the continuation. */
   claimAutoContinuation(): string | undefined {
-    if (this.sealed || this.preparingReap || this.state.phase !== "running"
-      || this.state.autoContinuation?.used || this.state.autoContinuation?.inhibited
-      || this.adapter.canRun?.() === false || !this.state.lastOutcome) return;
+    if (
+      this.sealed ||
+      this.preparingReap ||
+      this.state.phase !== "running" ||
+      this.state.autoContinuation?.used ||
+      this.state.autoContinuation?.inhibited ||
+      this.adapter.canRun?.() === false ||
+      !this.state.lastOutcome
+    )
+      return;
     const outcome = readTaskOutcome(this.state.lastOutcome, this.manifest.acceptance ?? []);
     if (outcome?.state !== "partial" || outcome.continuation !== "routine") return;
     this.state.autoContinuation = { used: true, inhibited: false };
     this.state.lastOutcome = undefined;
     this.state.lastReport = undefined;
     this.persist();
-    return "One automatic continuation of the same assignment. Continue only the routine remaining work already authorized by the original task and acceptance criteria. No additional authority is granted. Stop and report blocked if external input, permissions, safety decisions or scope changes are needed. This budget is now exhausted; report an updated task_outcome before returning. Recorded next action (model-reported): " + outcome.next_action;
+    return (
+      "One automatic continuation of the same assignment. Continue only the routine remaining work already authorized by the original task and acceptance criteria. No additional authority is granted. Stop and report blocked if external input, permissions, safety decisions or scope changes are needed. This budget is now exhausted; report an updated task_outcome before returning. Recorded next action (model-reported): " +
+      outcome.next_action
+    );
   }
   private successfulSettlement(): boolean {
     try {
       if (!this.state.lastReport) return false;
       const report = readPrivateJson(this.state.lastReport) as any;
-      return !!report && !report.error && !["error", "aborted"].includes(report.assistant?.stopReason);
-    } catch { return false; }
+      return (
+        !!report && !report.error && !["error", "aborted"].includes(report.assistant?.stopReason)
+      );
+    } catch {
+      return false;
+    }
   }
   private deliveredClaim(): boolean {
-    try { return !!this.state.lastOutcome && readTaskOutcome(this.state.lastOutcome, this.manifest.acceptance ?? [])?.state === "delivered"; }
-    catch { return false; }
+    try {
+      return (
+        !!this.state.lastOutcome &&
+        readTaskOutcome(this.state.lastOutcome, this.manifest.acceptance ?? [])?.state ===
+          "delivered"
+      );
+    } catch {
+      return false;
+    }
   }
   private snapshot() {
     const verification = this.verificationSnapshot();
-    return { ownerSessionId: this.manifest.ownerSessionId, taskId: this.manifest.taskId, runtimeId: this.manifest.runtimeId,
-      groupId: this.manifest.groupId, childId: this.manifest.childId, attempt: this.manifest.attempt,
-      workerEpoch: this.manifest.workerEpoch, active: this.state.active || !this.adapter.isIdle() || this.idleDecisions.size > 0 || !!this.verificationFlight, sealed: this.sealed, phase: this.state.phase,
-      lastReport: this.state.lastReport, lastOutcome: this.state.lastOutcome, sequence: this.state.sequence, pid: process.pid,
-      sessionFile: this.manifest.sessionFile, presentation: this.manifest.presentation,
+    return {
+      ownerSessionId: this.manifest.ownerSessionId,
+      taskId: this.manifest.taskId,
+      runtimeId: this.manifest.runtimeId,
+      groupId: this.manifest.groupId,
+      childId: this.manifest.childId,
+      attempt: this.manifest.attempt,
+      workerEpoch: this.manifest.workerEpoch,
+      active:
+        this.state.active ||
+        !this.adapter.isIdle() ||
+        this.idleDecisions.size > 0 ||
+        !!this.verificationFlight,
+      sealed: this.sealed,
+      phase: this.state.phase,
+      lastReport: this.state.lastReport,
+      lastOutcome: this.state.lastOutcome,
+      sequence: this.state.sequence,
+      pid: process.pid,
+      sessionFile: this.manifest.sessionFile,
+      presentation: this.manifest.presentation,
       ...(this.manifest.assignedGoal ? { assignedGoal: this.adapter.goalState?.() } : {}),
-      interactions: (this.state.interactions ?? []).filter(item => !item.answer && !item.cancelledAt).slice(-2)
-        .map(({ id, workerEpoch, createdAt, request }) => ({ id, workerEpoch, createdAt, request })),
-      idleDecision: [...this.idleDecisions.keys()].map(requestId => {
-        const pending = this.state.events.findLast(event => event.kind === "idle_decision_pending" && (event.data as any)?.requestId === requestId);
-        return { ...this.idleDecisionHistory.get(requestId), ...pending?.data as object, requestId, workerEpoch: this.manifest.workerEpoch };
-      }).at(-1), liveText: this.currentLiveText,
-      worker_finished: this.adapter.isIdle(), worker_reported_acceptance: this.state.lastOutcome,
-      verification, verification_quarantine: this.state.verificationQuarantine,
+      interactions: (this.state.interactions ?? [])
+        .filter((item) => !item.answer && !item.cancelledAt)
+        .slice(-2)
+        .map(({ id, workerEpoch, createdAt, request }) => ({
+          id,
+          workerEpoch,
+          createdAt,
+          request,
+        })),
+      idleDecision: [...this.idleDecisions.keys()]
+        .map((requestId) => {
+          const pending = this.state.events.findLast(
+            (event) =>
+              event.kind === "idle_decision_pending" &&
+              (event.data as any)?.requestId === requestId,
+          );
+          return {
+            ...this.idleDecisionHistory.get(requestId),
+            ...(pending?.data as object),
+            requestId,
+            workerEpoch: this.manifest.workerEpoch,
+          };
+        })
+        .at(-1),
+      liveText: this.currentLiveText,
+      worker_finished: this.adapter.isIdle(),
+      worker_reported_acceptance: this.state.lastOutcome,
+      verification,
+      verification_quarantine: this.state.verificationQuarantine,
       verification_bypasses: structuredClone(this.state.verificationBypasses ?? []),
-      accepted_delivery: this.state.phase === "settled" && !this.state.active && (!this.manifest.verification?.length || verification?.status === "passed")
-        && this.successfulSettlement() && this.deliveredClaim(),
+      accepted_delivery:
+        this.state.phase === "settled" &&
+        !this.state.active &&
+        (!this.manifest.verification?.length || verification?.status === "passed") &&
+        this.successfulSettlement() &&
+        this.deliveredClaim(),
       review: "not-configured",
       recursiveCleanup: this.adapter.recursiveCleanup === true,
-      readyForPrompts: !this.verificationFlight && !this.sealed && !this.preparingReap && this.idleDecisions.size === 0 && (this.adapter.canRun?.() ?? true), permissionPromptsEnabled: this.adapter.permissionMode?.() };
+      readyForPrompts:
+        !this.verificationFlight &&
+        !this.sealed &&
+        !this.preparingReap &&
+        this.idleDecisions.size === 0 &&
+        (this.adapter.canRun?.() ?? true),
+      permissionPromptsEnabled: this.adapter.permissionMode?.(),
+    };
   }
   private authenticated(r: TuiWorkerRequest): boolean {
     const expected = Buffer.from(this.manifest.controlToken);
     const actual = Buffer.from(r.token);
     if (expected.length !== actual.length || !timingSafeEqual(expected, actual)) return false;
-    return (["ownerSessionId", "taskId", "runtimeId", "groupId", "childId", "attempt", "workerEpoch"] as const)
-      .every(key => r[key] === this.manifest[key]);
+    return (
+      [
+        "ownerSessionId",
+        "taskId",
+        "runtimeId",
+        "groupId",
+        "childId",
+        "attempt",
+        "workerEpoch",
+      ] as const
+    ).every((key) => r[key] === this.manifest[key]);
   }
   private response(r: TuiWorkerRequest, extra: Record<string, unknown>): TuiWorkerResponse {
-    return { protocol: 1, requestId: r.requestId, workerEpoch: r.workerEpoch, ...extra } as TuiWorkerResponse;
+    return {
+      protocol: 1,
+      requestId: r.requestId,
+      workerEpoch: r.workerEpoch,
+      ...extra,
+    } as TuiWorkerResponse;
   }
   async handle(r: TuiWorkerRequest): Promise<TuiWorkerResponse> {
     // Status/events always bypass mutation serialization. Cancellation also
     // bypasses while checks/reap are pending, including the interval before a
     // reap-triggered verification flight is installed.
-    if (["status", "events"].includes(r.operation)
-      || r.operation === "cancel" && (this.verificationFlight !== undefined || this.pendingNormalReapRequests > 0))
+    if (
+      ["status", "events"].includes(r.operation) ||
+      (r.operation === "cancel" &&
+        (this.verificationFlight !== undefined || this.pendingNormalReapRequests > 0))
+    )
       return await this.dispatch(r);
-    const pendingNormalReap = r.operation === "prepare_reap" && r.force !== true && !!this.manifest.verification?.length;
+    const pendingNormalReap =
+      r.operation === "prepare_reap" && r.force !== true && !!this.manifest.verification?.length;
     if (pendingNormalReap) this.pendingNormalReapRequests++;
     const work = this.queue.catch(() => undefined).then(() => this.dispatch(r));
     this.queue = work;
-    try { return await work; }
-    finally { if (pendingNormalReap) this.pendingNormalReapRequests--; }
+    try {
+      return await work;
+    } finally {
+      if (pendingNormalReap) this.pendingNormalReapRequests--;
+    }
   }
   private async dispatch(r: TuiWorkerRequest): Promise<TuiWorkerResponse> {
     const fail = (code: string, message: string) => this.response(r, { ok: false, code, message });
@@ -379,18 +704,33 @@ export class TuiWorkerServer {
     if (this.closing || this.failed) return fail("unavailable", "Worker control unavailable");
     const { token: _secret, ...publicRequest } = r;
     const digest = createHash("sha256").update(JSON.stringify(publicRequest)).digest("hex");
-    const mutation = MUTATIONS.has(r.operation) || (r.operation === "jobs" && ["cancel", "reap", "ack", "unwatch"].includes(r.params.action));
+    const mutation =
+      MUTATIONS.has(r.operation) ||
+      (r.operation === "jobs" && ["cancel", "reap", "ack", "unwatch"].includes(r.params.action));
     if (r.requestId.startsWith("operator:")) return fail("invalid", "Reserved request namespace");
     const receiptKey = `model:${r.requestId}`;
-    const prior = Object.hasOwn(this.state.receipts, receiptKey) ? this.state.receipts[receiptKey] : undefined;
+    const prior = Object.hasOwn(this.state.receipts, receiptKey)
+      ? this.state.receipts[receiptKey]
+      : undefined;
     if (prior) {
-      if (prior.digest !== digest) return fail("invalid", "Request ID reused with different payload");
-      if (r.operation === "prepare_reap" && prior.response?.ok) setTimeout(() => this.adapter.shutdown(), 25);
-      return prior.response ?? fail("ambiguous", "Prior dispatch has no confirmed receipt; do not replay automatically");
+      if (prior.digest !== digest)
+        return fail("invalid", "Request ID reused with different payload");
+      if (r.operation === "prepare_reap" && prior.response?.ok)
+        setTimeout(() => this.adapter.shutdown(), 25);
+      return (
+        prior.response ??
+        fail("ambiguous", "Prior dispatch has no confirmed receipt; do not replay automatically")
+      );
     }
-    if (r.operation === "status") return this.response(r, { ok: true, receipt: "applied", sequence: this.state.sequence, data: this.snapshot() });
+    if (r.operation === "status")
+      return this.response(r, {
+        ok: true,
+        receipt: "applied",
+        sequence: this.state.sequence,
+        data: this.snapshot(),
+      });
     if (r.operation === "events") {
-      const events = this.state.events.filter(event => event.sequence > r.afterSequence);
+      const events = this.state.events.filter((event) => event.sequence > r.afterSequence);
       // Bound response bytes even if event producers attach large data.
       const selected: TuiWorkerEvent[] = [];
       const oldestSequence = this.state.events[0]?.sequence ?? this.state.sequence;
@@ -400,57 +740,144 @@ export class TuiWorkerServer {
         if (Buffer.byteLength(JSON.stringify(page)) > 96 * 1024) break;
         selected.push(event);
       }
-      return this.response(r, { ok: true, receipt: "applied", sequence: this.state.sequence,
-        data: { events: selected, oldestSequence,
-          nextSequence: selected.at(-1)?.sequence ?? r.afterSequence } });
+      return this.response(r, {
+        ok: true,
+        receipt: "applied",
+        sequence: this.state.sequence,
+        data: {
+          events: selected,
+          oldestSequence,
+          nextSequence: selected.at(-1)?.sequence ?? r.afterSequence,
+        },
+      });
     }
-    if (r.operation === "jobs" && !this.adapter.jobs) return fail("unavailable", "Child-local job controller unavailable");
-    if (this.state.sealed && r.operation !== "prepare_reap") return fail("sealed", "Worker is reserved for explicit reap");
+    if (r.operation === "jobs" && !this.adapter.jobs)
+      return fail("unavailable", "Child-local job controller unavailable");
+    if (this.state.sealed && r.operation !== "prepare_reap")
+      return fail("sealed", "Worker is reserved for explicit reap");
     if (r.operation === "jobs" && !mutation) {
-      try { return this.response(r, { ok: true, receipt: "applied", sequence: this.state.sequence, data: await this.adapter.jobs!(r.params, r.requestId) }); }
-      catch (error) { return fail("unavailable", error instanceof Error ? error.message : "Local job query failed"); }
+      try {
+        return this.response(r, {
+          ok: true,
+          receipt: "applied",
+          sequence: this.state.sequence,
+          data: await this.adapter.jobs!(r.params, r.requestId),
+        });
+      } catch (error) {
+        return fail(
+          "unavailable",
+          error instanceof Error ? error.message : "Local job query failed",
+        );
+      }
     }
     // Known authority loss is a refusal, not an uncertain dispatch. Check it
     // before reserving activity/intent, otherwise an unsent prompt looks live.
-    if ((r.operation === "prompt" || r.operation === "user_prompt") && this.adapter.canRun?.() === false) return fail("unavailable", "Worker command authority unavailable");
-    if (r.operation === "compact" && (!this.adapter.compact || this.state.active || !this.adapter.isIdle())) return fail("busy", "Compaction requires an idle capable worker");
-    if (r.operation === "prepare_reap" && (this.state.active || this.idleDecisions.size > 0 || !this.adapter.isIdle())) return fail("busy", "Worker is active or awaiting a parent idle decision; reap never cancels work");
+    if (
+      (r.operation === "prompt" || r.operation === "user_prompt") &&
+      this.adapter.canRun?.() === false
+    )
+      return fail("unavailable", "Worker command authority unavailable");
+    if (
+      r.operation === "compact" &&
+      (!this.adapter.compact || this.state.active || !this.adapter.isIdle())
+    )
+      return fail("busy", "Compaction requires an idle capable worker");
+    if (
+      r.operation === "prepare_reap" &&
+      (this.state.active || this.idleDecisions.size > 0 || !this.adapter.isIdle())
+    )
+      return fail(
+        "busy",
+        "Worker is active or awaiting a parent idle decision; reap never cancels work",
+      );
     if (r.operation === "promote") {
-      if (this.manifest.execution === "rpc-headless" || !this.manifest.placement) return fail("invalid", "Headless worker promotion is unsupported");
-      const old = this.manifest.placement, next = r.placement;
-      if (old.socketPath !== next.socketPath || old.serverEpoch !== next.serverEpoch || old.paneId !== next.paneId
-        || old.ownershipNonce !== next.ownershipNonce) return fail("invalid", "Promotion must preserve server and owned pane");
+      if (this.manifest.execution === "rpc-headless" || !this.manifest.placement)
+        return fail("invalid", "Headless worker promotion is unsupported");
+      const old = this.manifest.placement,
+        next = r.placement;
+      if (
+        old.socketPath !== next.socketPath ||
+        old.serverEpoch !== next.serverEpoch ||
+        old.paneId !== next.paneId ||
+        old.ownershipNonce !== next.ownershipNonce
+      )
+        return fail("invalid", "Promotion must preserve server and owned pane");
     }
-    if (mutation && Object.keys(this.state.receipts).length >= 4096) return fail("unavailable", "Worker receipt capacity exhausted");
+    if (mutation && Object.keys(this.state.receipts).length >= 4096)
+      return fail("unavailable", "Worker receipt capacity exhausted");
     if (r.operation === "verify") {
-      if (!this.manifest.verification?.length) return fail("invalid", "No verification gates are configured");
+      if (!this.manifest.verification?.length)
+        return fail("invalid", "No verification gates are configured");
       this.state.receipts[receiptKey] = { digest };
-      const accepted = this.response(r, { ok: true, receipt: "accepted", sequence: this.state.sequence,
-        data: { operation: "verify", verification: this.beginVerification() } });
+      const accepted = this.response(r, {
+        ok: true,
+        receipt: "accepted",
+        sequence: this.state.sequence,
+        data: { operation: "verify", verification: this.beginVerification() },
+      });
       this.state.receipts[receiptKey].response = accepted;
       this.persist();
       const flight = this.verificationFlight;
-      if (flight) void flight.then(() => {
-        const receipt = this.state.receipts[receiptKey];
-        if (receipt?.digest !== digest) return;
-        receipt.response = this.response(r, { ok: true, receipt: "applied", sequence: this.state.sequence,
-          data: { operation: "verify", verification: this.verificationSnapshot() } });
-        this.persist();
-      }, () => undefined);
+      if (flight)
+        void flight.then(
+          () => {
+            const receipt = this.state.receipts[receiptKey];
+            if (receipt?.digest !== digest) return;
+            receipt.response = this.response(r, {
+              ok: true,
+              receipt: "applied",
+              sequence: this.state.sequence,
+              data: { operation: "verify", verification: this.verificationSnapshot() },
+            });
+            this.persist();
+          },
+          () => undefined,
+        );
       return accepted;
     }
-    if (r.operation === "prepare_reap" && this.state.verification?.runs.some(run => !["cleaned", "not-dispatched"].includes(run.dispatchState ?? "") && (run.jobId || run.dispatchId)))
-      return fail("verification_cleanup_incomplete", "Unresolved verification dispatch/evidence blocks recursive reap; recover the supervised job output before removing its worker");
+    if (
+      r.operation === "prepare_reap" &&
+      this.state.verification?.runs.some(
+        (run) =>
+          !["cleaned", "not-dispatched"].includes(run.dispatchState ?? "") &&
+          (run.jobId || run.dispatchId),
+      )
+    )
+      return fail(
+        "verification_cleanup_incomplete",
+        "Unresolved verification dispatch/evidence blocks recursive reap; recover the supervised job output before removing its worker",
+      );
     if (r.operation === "prepare_reap" && r.force !== true && this.manifest.verification?.length) {
-      const current = currentVerification(this.state.verification, this.verificationIdentity(), this.manifest.verification);
+      const current = currentVerification(
+        this.state.verification,
+        this.verificationIdentity(),
+        this.manifest.verification,
+      );
       if (current.status !== "passed") {
         if (this.verificationFlight) await this.verificationFlight;
-        const fresh = currentVerification(this.state.verification, this.verificationIdentity(), this.manifest.verification);
+        const fresh = currentVerification(
+          this.state.verification,
+          this.verificationIdentity(),
+          this.manifest.verification,
+        );
         if (fresh.status !== "passed") {
-          try { await this.verify(); } catch { /* Fail closed below; preserve controller and evidence. */ }
+          try {
+            await this.verify();
+          } catch {
+            /* Fail closed below; preserve controller and evidence. */
+          }
         }
-        if (currentVerification(this.state.verification, this.verificationIdentity(), this.manifest.verification).status !== "passed")
-          return fail("unavailable", "Current configured verification has not passed; worker retained");
+        if (
+          currentVerification(
+            this.state.verification,
+            this.verificationIdentity(),
+            this.manifest.verification,
+          ).status !== "passed"
+        )
+          return fail(
+            "unavailable",
+            "Current configured verification has not passed; worker retained",
+          );
       }
     }
     if (r.operation === "prepare_reap") return await this.prepareReap(r, receiptKey, digest);
@@ -464,7 +891,8 @@ export class TuiWorkerServer {
         break;
       case "user_prompt":
       case "prompt":
-        if (r.operation === "user_prompt" || this.state.phase !== "ready") this.inhibitAutoContinuation();
+        if (r.operation === "user_prompt" || this.state.phase !== "ready")
+          this.inhibitAutoContinuation();
         this.state.active = true;
         this.state.phase = "running";
         this.persist();
@@ -472,14 +900,28 @@ export class TuiWorkerServer {
           const generation = this.runningGeneration;
           const reason = await this.abortAndIdle();
           // Recheck after awaiting: settlement does not preserve command authority.
-          const incomplete = reason ?? this.interruptBlocker(generation)
-            ?? (!this.adapter.isIdle() ? "Worker activity changed during interrupt" : undefined);
+          const incomplete =
+            reason ??
+            this.interruptBlocker(generation) ??
+            (!this.adapter.isIdle() ? "Worker activity changed during interrupt" : undefined);
           if (incomplete) {
-            this.state.active = generation !== this.runningGeneration ? this.state.active || !this.adapter.isIdle() : !this.adapter.isIdle();
-            this.state.phase = this.state.active ? "running" : this.state.lastReport ? "settled" : "ready";
-            const response = this.response(r, { ok: false, code: "interrupt_incomplete", receipt: "failed", sequence: this.state.sequence,
+            this.state.active =
+              generation !== this.runningGeneration
+                ? this.state.active || !this.adapter.isIdle()
+                : !this.adapter.isIdle();
+            this.state.phase = this.state.active
+              ? "running"
+              : this.state.lastReport
+                ? "settled"
+                : "ready";
+            const response = this.response(r, {
+              ok: false,
+              code: "interrupt_incomplete",
+              receipt: "failed",
+              sequence: this.state.sequence,
               message: `${incomplete}. Cancellation was requested; replacement was not dispatched. Same request ID returns this receipt without retrying. Inspect worker state, then use a new request ID to explicitly retry.`,
-              data: { abortRequested: true, replacementDispatched: false } });
+              data: { abortRequested: true, replacementDispatched: false },
+            });
             this.state.receipts[receiptKey].response = response;
             this.persist();
             return response;
@@ -490,19 +932,29 @@ export class TuiWorkerServer {
         // checkpoint immediately before sending, after interrupt/authority checks
         // so a known refusal preserves the old terminal report and outcome.
         this.running(true);
-        this.adapter.send(r.message, r.operation === "user_prompt" ? "steer" : r.mode === "follow_up" ? "follow_up" : "steer",
-          r.operation === "user_prompt" ? "user" : "parent");
+        this.adapter.send(
+          r.message,
+          r.operation === "user_prompt" ? "steer" : r.mode === "follow_up" ? "follow_up" : "steer",
+          r.operation === "user_prompt" ? "user" : "parent",
+        );
         break;
       case "compact": {
         const activityGeneration = this.activityGeneration;
-        this.state.active = true; this.state.phase = "running"; this.persist();
+        this.state.active = true;
+        this.state.phase = "running";
+        this.persist();
         const reconcileActivity = () => {
           const idle = this.adapter.isIdle();
           const activityChanged = activityGeneration !== this.activityGeneration;
           this.state.active = activityChanged ? this.state.active || !idle : !idle;
           // When a real activity event intervened, its phase/report are more
           // authoritative than the temporary compact reservation.
-          if (!activityChanged || this.state.active) this.state.phase = this.state.active ? "running" : this.state.lastReport ? "settled" : "ready";
+          if (!activityChanged || this.state.active)
+            this.state.phase = this.state.active
+              ? "running"
+              : this.state.lastReport
+                ? "settled"
+                : "ready";
         };
         try {
           const compactResult = await this.adapter.compact!();
@@ -517,10 +969,20 @@ export class TuiWorkerServer {
           const explanation = `Compaction failed: ${detail}`;
           const bytes = Buffer.from(explanation);
           const suffix = " [truncated]";
-          let end = Math.min(bytes.length, bytes.length > 2048 ? 2048 - Buffer.byteLength(suffix) : 2048);
+          let end = Math.min(
+            bytes.length,
+            bytes.length > 2048 ? 2048 - Buffer.byteLength(suffix) : 2048,
+          );
           while (end > 0 && end < bytes.length && (bytes[end]! & 0xc0) === 0x80) end--;
-          const message = bytes.subarray(0, end).toString("utf8") + (end < bytes.length ? suffix : "");
-          const response = this.response(r, { ok: false, code: "compact_failed", receipt: "failed", sequence: this.state.sequence, message });
+          const message =
+            bytes.subarray(0, end).toString("utf8") + (end < bytes.length ? suffix : "");
+          const response = this.response(r, {
+            ok: false,
+            code: "compact_failed",
+            receipt: "failed",
+            sequence: this.state.sequence,
+            message,
+          });
           this.state.receipts[receiptKey].response = response;
           this.persist();
           return response;
@@ -541,7 +1003,8 @@ export class TuiWorkerServer {
         data = { ...this.snapshot(), verificationCancellationPending };
         break;
       case "promote":
-        if (!this.manifest.placement) return fail("invalid", "Headless worker promotion is unsupported");
+        if (!this.manifest.placement)
+          return fail("invalid", "Headless worker promotion is unsupported");
         this.manifest.placement = r.placement;
         this.manifest.presentation = "background";
         this.store.writeManifest(this.manifest);
@@ -557,19 +1020,28 @@ export class TuiWorkerServer {
         break;
       }
       case "respond_interaction": {
-        const interaction = (this.state.interactions ?? []).find(item => item.id === r.interactionId);
+        const interaction = (this.state.interactions ?? []).find(
+          (item) => item.id === r.interactionId,
+        );
         if (!interaction) return fail("stale", "Interaction is no longer pending");
         const waiter = this.interactionWaiters.get(r.interactionId);
         if (!waiter) return fail("stale", "Interaction has no live waiter");
-        if (!this.validAnswer(interaction.request, r.answer)) return fail("invalid", "Answer does not match interaction schema");
+        if (!this.validAnswer(interaction.request, r.answer))
+          return fail("invalid", "Answer does not match interaction schema");
         interaction.resolvedAt = new Date().toISOString();
         interaction.answer = structuredClone(r.answer);
         try {
-          this.event("interaction_resolved", { id: r.interactionId, kind: r.answer.kind, cancelled: r.answer.cancelled });
+          this.event("interaction_resolved", {
+            id: r.interactionId,
+            kind: r.answer.kind,
+            cancelled: r.answer.cancelled,
+          });
           this.persist();
         } catch (error) {
           this.interactionWaiters.delete(r.interactionId);
-          waiter.reject(error instanceof Error ? error : new Error("Interaction resolution persistence failed"));
+          waiter.reject(
+            error instanceof Error ? error : new Error("Interaction resolution persistence failed"),
+          );
           throw error;
         }
         this.interactionWaiters.delete(r.interactionId);
@@ -578,7 +1050,12 @@ export class TuiWorkerServer {
         break;
       }
     }
-    const response = this.response(r, { ok: true, receipt: r.operation === "prompt" || r.operation === "user_prompt" ? "accepted" : "applied", sequence: this.state.sequence, ...(data === undefined ? {} : { data }) });
+    const response = this.response(r, {
+      ok: true,
+      receipt: r.operation === "prompt" || r.operation === "user_prompt" ? "accepted" : "applied",
+      sequence: this.state.sequence,
+      ...(data === undefined ? {} : { data }),
+    });
     this.state.receipts[receiptKey].response = response;
     this.persist();
     return response;
@@ -587,66 +1064,137 @@ export class TuiWorkerServer {
     for (const [id, waiter] of this.idleDecisions) {
       this.idleDecisions.delete(id);
       this.idleDecisionHistory.delete(id);
-      try { this.event("idle_decision_cancelled", { requestId: id }); } catch { /* Cancellation must still reject the waiter. */ }
+      try {
+        this.event("idle_decision_cancelled", { requestId: id });
+      } catch {
+        /* Cancellation must still reject the waiter. */
+      }
       waiter.reject(reason);
     }
   }
-  async requestIdleDecision(details: { model: string; idleMinutes: number; contextPercent: number }, signal?: AbortSignal): Promise<"ignore" | "compact" | "cancel"> {
-    if (this.sealed || !/^.{1,256}$/.test(details.model)
-      || !Number.isFinite(details.idleMinutes) || details.idleMinutes < 0 || !Number.isFinite(details.contextPercent) || details.contextPercent < 0 || details.contextPercent > 10_000)
+  async requestIdleDecision(
+    details: { model: string; idleMinutes: number; contextPercent: number },
+    signal?: AbortSignal,
+  ): Promise<"ignore" | "compact" | "cancel"> {
+    if (
+      this.sealed ||
+      !/^.{1,256}$/.test(details.model) ||
+      !Number.isFinite(details.idleMinutes) ||
+      details.idleMinutes < 0 ||
+      !Number.isFinite(details.contextPercent) ||
+      details.contextPercent < 0 ||
+      details.contextPercent > 10_000
+    )
       throw new Error("Parent idle-decision service unavailable or malformed");
     if (this.idleDecisions.size) throw new Error("An idle-decision request is already pending");
-    if (signal?.aborted) throw signal.reason instanceof Error ? signal.reason : new Error("Idle decision aborted");
+    if (signal?.aborted)
+      throw signal.reason instanceof Error ? signal.reason : new Error("Idle decision aborted");
     const requestId = `idle:${randomBytes(16).toString("hex")}`;
-    const promise = new Promise<"ignore" | "compact" | "cancel">((resolve, reject) => this.idleDecisions.set(requestId, { resolve, reject }));
+    const promise = new Promise<"ignore" | "compact" | "cancel">((resolve, reject) =>
+      this.idleDecisions.set(requestId, { resolve, reject }),
+    );
     this.idleDecisionHistory.set(requestId, details);
-    try { this.event("idle_decision_pending", { requestId, ...details }); }
-    catch (error) { this.idleDecisions.delete(requestId); this.idleDecisionHistory.delete(requestId); throw error; }
+    try {
+      this.event("idle_decision_pending", { requestId, ...details });
+    } catch (error) {
+      this.idleDecisions.delete(requestId);
+      this.idleDecisionHistory.delete(requestId);
+      throw error;
+    }
     const abort = () => {
       const waiter = this.idleDecisions.get(requestId);
       if (!waiter) return;
       this.idleDecisions.delete(requestId);
       this.idleDecisionHistory.delete(requestId);
-      try { this.event("idle_decision_cancelled", { requestId }); } catch { /* Abort remains fail-closed. */ }
-      waiter.reject(signal?.reason instanceof Error ? signal.reason : new Error("Idle decision aborted"));
+      try {
+        this.event("idle_decision_cancelled", { requestId });
+      } catch {
+        /* Abort remains fail-closed. */
+      }
+      waiter.reject(
+        signal?.reason instanceof Error ? signal.reason : new Error("Idle decision aborted"),
+      );
     };
     signal?.addEventListener("abort", abort, { once: true });
-    try { return await promise; } finally { signal?.removeEventListener("abort", abort); }
+    try {
+      return await promise;
+    } finally {
+      signal?.removeEventListener("abort", abort);
+    }
   }
-  private validInput(input: any): boolean { return validInteractionInput(input); }
-  private validAnswer(input: any, answer: any): boolean { return validInteractionAnswer(input, answer); }
-  async requestInteraction(input: import("../shared/foreground-tasks.ts").TaskInteractionInput, signal?: AbortSignal): Promise<import("../shared/foreground-tasks.ts").TaskInteractionAnswer> {
-    if (this.sealed || this.manifest.execution !== "rpc-headless" || !this.validInput(input)) throw new Error("Headless worker interaction service unavailable or malformed");
-    if ((this.state.interactions ?? []).filter(item => !item.answer && !item.cancelledAt).length >= 4) throw new Error("Headless worker pending interaction capacity reached");
+  private validInput(input: any): boolean {
+    return validInteractionInput(input);
+  }
+  private validAnswer(input: any, answer: any): boolean {
+    return validInteractionAnswer(input, answer);
+  }
+  async requestInteraction(
+    input: import("../shared/foreground-tasks.ts").TaskInteractionInput,
+    signal?: AbortSignal,
+  ): Promise<import("../shared/foreground-tasks.ts").TaskInteractionAnswer> {
+    if (this.sealed || this.manifest.execution !== "rpc-headless" || !this.validInput(input))
+      throw new Error("Headless worker interaction service unavailable or malformed");
+    if (
+      (this.state.interactions ?? []).filter((item) => !item.answer && !item.cancelledAt).length >=
+      4
+    )
+      throw new Error("Headless worker pending interaction capacity reached");
     const id = `interaction:${randomBytes(16).toString("hex")}`;
-    const interaction = { id, workerEpoch: this.manifest.workerEpoch, createdAt: new Date().toISOString(), request: structuredClone(input) };
-    const promise = new Promise<import("../shared/foreground-tasks.ts").TaskInteractionAnswer>((resolve, reject) => this.interactionWaiters.set(id, { resolve, reject }));
+    const interaction = {
+      id,
+      workerEpoch: this.manifest.workerEpoch,
+      createdAt: new Date().toISOString(),
+      request: structuredClone(input),
+    };
+    const promise = new Promise<import("../shared/foreground-tasks.ts").TaskInteractionAnswer>(
+      (resolve, reject) => this.interactionWaiters.set(id, { resolve, reject }),
+    );
     this.state.interactions ??= [];
     while (this.state.interactions.length >= 64) {
-      const oldestResolved = this.state.interactions.findIndex(item => item.answer !== undefined || item.cancelledAt !== undefined);
-      if (oldestResolved < 0) throw new Error("Headless worker interaction history capacity reached");
+      const oldestResolved = this.state.interactions.findIndex(
+        (item) => item.answer !== undefined || item.cancelledAt !== undefined,
+      );
+      if (oldestResolved < 0)
+        throw new Error("Headless worker interaction history capacity reached");
       this.state.interactions.splice(oldestResolved, 1);
     }
     this.state.interactions.push(interaction);
-    try { this.event("interaction_pending", { id, kind: input.kind }); }
-    catch (error) { this.interactionWaiters.delete(id); throw error; }
+    try {
+      this.event("interaction_pending", { id, kind: input.kind });
+    } catch (error) {
+      this.interactionWaiters.delete(id);
+      throw error;
+    }
     const abort = () => {
       const waiter = this.interactionWaiters.get(id);
       if (!waiter) return;
       this.interactionWaiters.delete(id);
       try {
-        const stored = this.state.interactions?.find(item => item.id === id);
+        const stored = this.state.interactions?.find((item) => item.id === id);
         if (stored) stored.cancelledAt = new Date().toISOString();
         this.event("interaction_cancelled", { id, kind: input.kind });
         this.persist();
-      } catch { /* Cancellation stays fail closed even if persistence is unavailable. */ }
-      finally { waiter.reject(signal?.reason instanceof Error ? signal.reason : new Error("Interaction cancelled")); }
+      } catch {
+        /* Cancellation stays fail closed even if persistence is unavailable. */
+      } finally {
+        waiter.reject(
+          signal?.reason instanceof Error ? signal.reason : new Error("Interaction cancelled"),
+        );
+      }
     };
     signal?.addEventListener("abort", abort, { once: true });
     if (signal?.aborted) abort();
-    try { return await promise; } finally { signal?.removeEventListener("abort", abort); }
+    try {
+      return await promise;
+    } finally {
+      signal?.removeEventListener("abort", abort);
+    }
   }
-  private async prepareReap(r: TuiWorkerRequest, receiptKey: string, digest: string): Promise<TuiWorkerResponse> {
+  private async prepareReap(
+    r: TuiWorkerRequest,
+    receiptKey: string,
+    digest: string,
+  ): Promise<TuiWorkerResponse> {
     // Temporary reservation is synchronous with the idle check in dispatch.
     // Unlike the durable seal it must not cause input handlers to shut Pi down.
     this.preparingReap = true;
@@ -655,36 +1203,73 @@ export class TuiWorkerServer {
     let artifact: string | undefined;
     let worktreeCleanupStarted = false;
     try {
-      if (!this.adapter.prepareJobReap) throw new Error("Child-local job cleanup controller unavailable; keep worker alive and reload/recover its controller");
-      release = await this.adapter.prepareJobReap(async report => {
-        artifact = this.store.artifact("job-cleanup", this.state.sequence + 1, {
-          workerEpoch: this.manifest.workerEpoch, retainedAt: new Date().toISOString(), report,
-        });
-      }, r.force === true ? { force: true, reason: r.reason! } : {});
-      if (!artifact) throw new Error("Child-local job cleanup did not preserve a verification report");
-      if (this.reapInterrupted || this.state.active || !this.adapter.isIdle() || this.closing || this.failed) {
+      if (!this.adapter.prepareJobReap)
+        throw new Error(
+          "Child-local job cleanup controller unavailable; keep worker alive and reload/recover its controller",
+        );
+      release = await this.adapter.prepareJobReap(
+        async (report) => {
+          artifact = this.store.artifact("job-cleanup", this.state.sequence + 1, {
+            workerEpoch: this.manifest.workerEpoch,
+            retainedAt: new Date().toISOString(),
+            report,
+          });
+        },
+        r.force === true ? { force: true, reason: r.reason! } : {},
+      );
+      if (!artifact)
+        throw new Error("Child-local job cleanup did not preserve a verification report");
+      if (
+        this.reapInterrupted ||
+        this.state.active ||
+        !this.adapter.isIdle() ||
+        this.closing ||
+        this.failed
+      ) {
         throw new Error("Worker activity changed during job cleanup; refusing reap");
       }
       if (this.manifest.cleanupWorktreesOnReap === true) {
-        if (!this.adapter.prepareWorktreeReap) throw new Error("Policy requires guarded worktree cleanup; recover the child controller before reaping");
+        if (!this.adapter.prepareWorktreeReap)
+          throw new Error(
+            "Policy requires guarded worktree cleanup; recover the child controller before reaping",
+          );
         worktreeCleanupStarted = true;
-        const worktrees = await this.adapter.prepareWorktreeReap(r.force === true ? { force: true, reason: r.reason! } : {});
+        const worktrees = await this.adapter.prepareWorktreeReap(
+          r.force === true ? { force: true, reason: r.reason! } : {},
+        );
         artifact = this.store.artifact("job-cleanup", this.state.sequence + 1, {
-          workerEpoch: this.manifest.workerEpoch, retainedAt: new Date().toISOString(),
+          workerEpoch: this.manifest.workerEpoch,
+          retainedAt: new Date().toISOString(),
           report: { ...(readPrivateJson(artifact) as any).report, worktrees },
         });
-        if (this.reapInterrupted || this.state.active || !this.adapter.isIdle() || this.closing || this.failed)
+        if (
+          this.reapInterrupted ||
+          this.state.active ||
+          !this.adapter.isIdle() ||
+          this.closing ||
+          this.failed
+        )
           throw new Error("Worker activity changed during worktree cleanup; refusing reap");
       }
       if (r.force === true && this.manifest.verification?.length) {
         this.state.verificationBypasses ??= [];
-        this.state.verificationBypasses.push({ workerEpoch: this.manifest.workerEpoch, attempt: this.manifest.attempt, reason: r.reason!, at: new Date().toISOString(), requestId: r.requestId });
+        this.state.verificationBypasses.push({
+          workerEpoch: this.manifest.workerEpoch,
+          attempt: this.manifest.attempt,
+          reason: r.reason!,
+          at: new Date().toISOString(),
+          requestId: r.requestId,
+        });
       }
       this.state.sealed = true;
       this.state.reapReservation ??= randomBytes(16).toString("hex");
       this.state.jobCleanup = { workerEpoch: this.manifest.workerEpoch, artifact };
-      const response = this.response(r, { ok: true, receipt: "applied", sequence: this.state.sequence,
-        data: { reservation: this.state.reapReservation, jobCleanup: artifact } });
+      const response = this.response(r, {
+        ok: true,
+        receipt: "applied",
+        sequence: this.state.sequence,
+        data: { reservation: this.state.reapReservation, jobCleanup: artifact },
+      });
       this.state.receipts[receiptKey] = { digest, response };
       this.persist();
       // Leave job creation reserved until process shutdown. The parent only
@@ -703,16 +1288,23 @@ export class TuiWorkerServer {
       if (worktreeCleanupStarted) {
         try {
           failureArtifact = this.store.retainWorktreeReapFailure(error);
-        } catch { /* Persistence failure never permits sealing or deletion. */ }
+        } catch {
+          /* Persistence failure never permits sealing or deletion. */
+        }
       }
       const message = `Worker reap refused: ${error instanceof Error ? error.message : String(error)}`;
       const bytes = Buffer.from(message);
       let end = Math.min(bytes.length, 8192);
       while (end < bytes.length && end > 0 && (bytes[end] & 0xc0) === 0x80) end--;
-      return this.response(r, { ok: false, code: "cleanup_failed",
-        message: bytes.subarray(0, end).toString("utf8") + (end < bytes.length ? " [truncated; inspect retained cleanup report/inventory]" : "")
-          + (failureArtifact ? ` Full worktree cleanup failure report: ${failureArtifact}` : ""),
-        ...(failureArtifact ? { data: { worktreeCleanupFailure: failureArtifact } } : {}) });
+      return this.response(r, {
+        ok: false,
+        code: "cleanup_failed",
+        message:
+          bytes.subarray(0, end).toString("utf8") +
+          (end < bytes.length ? " [truncated; inspect retained cleanup report/inventory]" : "") +
+          (failureArtifact ? ` Full worktree cleanup failure report: ${failureArtifact}` : ""),
+        ...(failureArtifact ? { data: { worktreeCleanupFailure: failureArtifact } } : {}),
+      });
     } finally {
       release?.();
       this.preparingReap = false;
@@ -721,28 +1313,68 @@ export class TuiWorkerServer {
   /** Distinct capability, namespace and handler: never accepts model control token. */
   private async operator(value: unknown): Promise<TuiWorkerResponse> {
     const r = value as Record<string, unknown>;
-    const response = (extra: Record<string, unknown>) => ({ protocol: 1, requestId: r.requestId,
-      workerEpoch: r.workerEpoch, ...extra }) as TuiWorkerResponse;
-    if (!r || Object.keys(r).sort().join(",") !== ["operatorProtocol", "requestId", "workerEpoch", "ownerSessionId", "runtimeId", "operatorCapability", "enabled"].sort().join(",")
-      || r.operatorProtocol !== 1 || typeof r.requestId !== "string" || !/^[a-zA-Z0-9._:-]{1,128}$/.test(r.requestId)
-      || typeof r.operatorCapability !== "string" || !/^[a-f0-9]{64}$/.test(r.operatorCapability) || typeof r.enabled !== "boolean") {
+    const response = (extra: Record<string, unknown>) =>
+      ({
+        protocol: 1,
+        requestId: r.requestId,
+        workerEpoch: r.workerEpoch,
+        ...extra,
+      }) as TuiWorkerResponse;
+    if (
+      !r ||
+      Object.keys(r).sort().join(",") !==
+        [
+          "operatorProtocol",
+          "requestId",
+          "workerEpoch",
+          "ownerSessionId",
+          "runtimeId",
+          "operatorCapability",
+          "enabled",
+        ]
+          .sort()
+          .join(",") ||
+      r.operatorProtocol !== 1 ||
+      typeof r.requestId !== "string" ||
+      !/^[a-zA-Z0-9._:-]{1,128}$/.test(r.requestId) ||
+      typeof r.operatorCapability !== "string" ||
+      !/^[a-f0-9]{64}$/.test(r.operatorCapability) ||
+      typeof r.enabled !== "boolean"
+    ) {
       return response({ ok: false, code: "invalid", message: "Invalid operator request" });
     }
     const expected = this.manifest.operatorCapabilityHash;
     const hash = createHash("sha256").update(r.operatorCapability).digest("hex");
-    if (!expected || !timingSafeEqual(Buffer.from(expected), Buffer.from(hash))
-      || r.ownerSessionId !== this.manifest.ownerSessionId || r.runtimeId !== this.manifest.runtimeId || r.workerEpoch !== this.manifest.workerEpoch) {
-      return response({ ok: false, code: "unauthorized", message: "Operator authentication failed" });
+    if (
+      !expected ||
+      !timingSafeEqual(Buffer.from(expected), Buffer.from(hash)) ||
+      r.ownerSessionId !== this.manifest.ownerSessionId ||
+      r.runtimeId !== this.manifest.runtimeId ||
+      r.workerEpoch !== this.manifest.workerEpoch
+    ) {
+      return response({
+        ok: false,
+        code: "unauthorized",
+        message: "Operator authentication failed",
+      });
     }
-    if (this.sealed || !this.adapter.applyOperatorMode) return response({ ok: false, code: "unavailable", message: "Operator service unavailable" });
+    if (this.sealed || !this.adapter.applyOperatorMode)
+      return response({ ok: false, code: "unavailable", message: "Operator service unavailable" });
     const id = `operator:${r.requestId}`;
-    const digest = createHash("sha256").update(JSON.stringify({ enabled: r.enabled, epoch: r.workerEpoch })).digest("hex");
+    const digest = createHash("sha256")
+      .update(JSON.stringify({ enabled: r.enabled, epoch: r.workerEpoch }))
+      .digest("hex");
     const prior = Object.hasOwn(this.state.receipts, id) ? this.state.receipts[id] : undefined;
     if (prior) {
-      if (prior.digest !== digest) return response({ ok: false, code: "invalid", message: "Operator request ID reused" });
-      return prior.response ?? response({ ok: false, code: "ambiguous", message: "Prior operator dispatch uncertain" });
+      if (prior.digest !== digest)
+        return response({ ok: false, code: "invalid", message: "Operator request ID reused" });
+      return (
+        prior.response ??
+        response({ ok: false, code: "ambiguous", message: "Prior operator dispatch uncertain" })
+      );
     }
-    if (Object.keys(this.state.receipts).length >= 4096) return response({ ok: false, code: "unavailable", message: "Receipt capacity exhausted" });
+    if (Object.keys(this.state.receipts).length >= 4096)
+      return response({ ok: false, code: "unavailable", message: "Receipt capacity exhausted" });
     this.state.receipts[id] = { digest };
     this.persist();
     // Ignore service return values: a service must throw on failure and must not
@@ -759,74 +1391,142 @@ export class TuiWorkerServer {
     // Exclusive lock: do not guess stale socket ownership. Worker-crash recovery
     // is explicit; parent crash never affects this lock or the child process.
     const fd = openSync(this.store.path("worker.lock"), "wx", 0o600);
-    try { writeFileSync(fd, JSON.stringify({ pid: process.pid, epoch: this.manifest.workerEpoch })); }
-    finally { closeSync(fd); }
+    try {
+      writeFileSync(fd, JSON.stringify({ pid: process.pid, epoch: this.manifest.workerEpoch }));
+    } finally {
+      closeSync(fd);
+    }
     this.lockHeld = true;
     if (this.state.verification) {
       try {
-        await recoverVerification(this.state.verification, this.adapter.verificationJobs?.(), () => this.persist());
+        await recoverVerification(this.state.verification, this.adapter.verificationJobs?.(), () =>
+          this.persist(),
+        );
         const pending = this.state.verificationReport;
         if (pending) {
           const prefix = `${this.store.directory}/`;
-          if (!pending.startsWith(prefix) || !/^report-[0-9]+-[a-f0-9]{16}\.json$/.test(pending.slice(prefix.length))) throw new Error("Invalid retained verification report path");
+          if (
+            !pending.startsWith(prefix) ||
+            !/^report-[0-9]+-[a-f0-9]{16}\.json$/.test(pending.slice(prefix.length))
+          )
+            throw new Error("Invalid retained verification report path");
           const original = readPrivateJson(pending) as object;
-          if (this.state.lastReport && (!this.state.lastReport.startsWith(prefix) || !/^report-[0-9]+-[a-f0-9]{16}\.json$/.test(this.state.lastReport.slice(prefix.length)))) throw new Error("Invalid prior verification report path");
-          const prior = this.state.lastReport ? readPrivateJson(this.state.lastReport) as any : undefined;
-          if (JSON.stringify(prior?.runtimeVerification) !== JSON.stringify(this.state.verification)) {
-            this.state.lastReport = this.store.report(this.state.sequence + 1, { ...original, runtimeVerification: this.state.verification });
+          if (
+            this.state.lastReport &&
+            (!this.state.lastReport.startsWith(prefix) ||
+              !/^report-[0-9]+-[a-f0-9]{16}\.json$/.test(
+                this.state.lastReport.slice(prefix.length),
+              ))
+          )
+            throw new Error("Invalid prior verification report path");
+          const prior = this.state.lastReport
+            ? (readPrivateJson(this.state.lastReport) as any)
+            : undefined;
+          if (
+            JSON.stringify(prior?.runtimeVerification) !== JSON.stringify(this.state.verification)
+          ) {
+            this.state.lastReport = this.store.report(this.state.sequence + 1, {
+              ...original,
+              runtimeVerification: this.state.verification,
+            });
             this.persist();
           }
         }
+      } catch {
+        this.state.verification.status = "unavailable";
+        this.persist();
       }
-      catch { this.state.verification.status = "unavailable"; this.persist(); }
     }
-    this.server = net.createServer(socket => {
-      if (this.sockets.size >= 32 || this.closing) { socket.destroy(); return; }
+    this.server = net.createServer((socket) => {
+      if (this.sockets.size >= 32 || this.closing) {
+        socket.destroy();
+        return;
+      }
       this.sockets.add(socket);
       socket.setTimeout(35_000, () => socket.destroy());
       socket.on("error", () => undefined);
       socket.on("close", () => this.sockets.delete(socket));
-      let bytes = Buffer.alloc(0), received = false;
-      socket.on("data", chunk => {
-        if (received || typeof chunk === "string") { socket.destroy(); return; }
+      let bytes = Buffer.alloc(0),
+        received = false;
+      socket.on("data", (chunk) => {
+        if (received || typeof chunk === "string") {
+          socket.destroy();
+          return;
+        }
         bytes = Buffer.concat([bytes, chunk]);
-        if (bytes.length > TUI_WORKER_MAX_FRAME_BYTES) { socket.destroy(); return; }
+        if (bytes.length > TUI_WORKER_MAX_FRAME_BYTES) {
+          socket.destroy();
+          return;
+        }
         const newline = bytes.indexOf(10);
         if (newline < 0) return;
         received = true;
-        if (newline !== bytes.length - 1) { socket.destroy(); return; }
+        if (newline !== bytes.length - 1) {
+          socket.destroy();
+          return;
+        }
         let request: TuiWorkerRequest;
         try {
-          const raw = JSON.parse(new TextDecoder("utf-8", { fatal: true }).decode(bytes.subarray(0, newline)));
+          const raw = JSON.parse(
+            new TextDecoder("utf-8", { fatal: true }).decode(bytes.subarray(0, newline)),
+          );
           if (raw?.operatorProtocol !== undefined) {
             const work = this.queue.catch(() => undefined).then(() => this.operator(raw));
             this.queue = work;
-            void work.then(response => { if (!socket.destroyed) socket.end(`${JSON.stringify(response)}\n`); }, () => socket.destroy());
+            void work.then(
+              (response) => {
+                if (!socket.destroyed) socket.end(`${JSON.stringify(response)}\n`);
+              },
+              () => socket.destroy(),
+            );
             return;
           }
           request = decodeTuiWorkerRequest(bytes.subarray(0, newline));
+        } catch {
+          socket.end(
+            `${JSON.stringify({ protocol: 1, ok: false, code: "invalid", message: "Invalid worker frame" })}\n`,
+          );
+          return;
         }
-        catch { socket.end(`${JSON.stringify({ protocol: 1, ok: false, code: "invalid", message: "Invalid worker frame" })}\n`); return; }
-        void this.handle(request).then(response => {
-          if (!socket.destroyed) socket.end(`${JSON.stringify(response)}\n`);
-        }, () => {
-          if (!socket.destroyed) socket.end(`${JSON.stringify(this.response(request, { ok: false, code: "ambiguous", message: "Worker dispatch failed; inspect retained state before retrying" }))}\n`);
-        });
+        void this.handle(request).then(
+          (response) => {
+            if (!socket.destroyed) socket.end(`${JSON.stringify(response)}\n`);
+          },
+          () => {
+            if (!socket.destroyed)
+              socket.end(
+                `${JSON.stringify(this.response(request, { ok: false, code: "ambiguous", message: "Worker dispatch failed; inspect retained state before retrying" }))}\n`,
+              );
+          },
+        );
       });
     });
     try {
       await new Promise<void>((resolve, reject) => {
         this.server!.once("error", reject);
-        this.server!.listen(this.manifest.controlSocket, () => { this.server!.removeListener("error", reject); resolve(); });
+        this.server!.listen(this.manifest.controlSocket, () => {
+          this.server!.removeListener("error", reject);
+          resolve();
+        });
       });
       chmodSync(this.manifest.controlSocket, 0o600);
       this.socketInode = lstatSync(this.manifest.controlSocket).ino;
-      this.server.on("error", () => { this.failed = true; void this.adapter.abort(); });
+      this.server.on("error", () => {
+        this.failed = true;
+        void this.adapter.abort();
+      });
       this.state.active = !this.adapter.isIdle();
-      this.state.phase = this.state.active ? "running" : this.state.lastReport ? "settled" : "ready";
+      this.state.phase = this.state.active
+        ? "running"
+        : this.state.lastReport
+          ? "settled"
+          : "ready";
       this.event("ready", { pid: process.pid, sealed: this.state.sealed });
       if (this.state.sealed) setTimeout(() => this.adapter.shutdown(), 25);
-    } catch (error) { await this.close(); throw error; }
+    } catch (error) {
+      await this.close();
+      throw error;
+    }
   }
   async close(): Promise<void> {
     if (this.closing) return;
@@ -836,7 +1536,11 @@ export class TuiWorkerServer {
     for (const check of this.idleWaiters) check();
     for (const [id, waiter] of this.idleDecisions) {
       this.idleDecisionHistory.delete(id);
-      try { this.event("idle_decision_cancelled", { requestId: id }); } catch { /* Shutdown still rejects the waiter. */ }
+      try {
+        this.event("idle_decision_cancelled", { requestId: id });
+      } catch {
+        /* Shutdown still rejects the waiter. */
+      }
       waiter.reject(new Error("Worker is shutting down"));
     }
     this.idleDecisions.clear();
@@ -844,23 +1548,45 @@ export class TuiWorkerServer {
     if (this.interactionWaiters.size) {
       const error = new Error("Headless worker is shutting down");
       for (const [id, waiter] of this.interactionWaiters) {
-        const stored = this.state.interactions?.find(item => item.id === id);
+        const stored = this.state.interactions?.find((item) => item.id === id);
         if (stored) stored.cancelledAt = new Date().toISOString();
         waiter.reject(error);
       }
       this.interactionWaiters.clear();
-      try { this.persist(); } catch { /* Close still releases authenticated transport. */ }
+      try {
+        this.persist();
+      } catch {
+        /* Close still releases authenticated transport. */
+      }
     }
     // Drain in-flight dispatch before releasing the exclusive writer lock. A
     // replacement extension must never race writes from its old instance.
     await this.queue.catch(() => undefined);
     if (!this.failed && this.lockHeld) {
       this.state.phase = "closing";
-      try { this.event("closing"); } catch { /* Cleanup still releases the socket on storage failure. */ }
+      try {
+        this.event("closing");
+      } catch {
+        /* Cleanup still releases the socket on storage failure. */
+      }
     }
     for (const socket of this.sockets) socket.destroy();
-    await new Promise<void>(resolve => { if (this.server?.listening) this.server.close(() => resolve()); else resolve(); });
-    try { if (this.socketInode !== undefined && lstatSync(this.manifest.controlSocket).ino === this.socketInode) unlinkSync(this.manifest.controlSocket); } catch {}
-    if (this.lockHeld) { try { unlinkSync(this.store.path("worker.lock")); } catch {} this.lockHeld = false; }
+    await new Promise<void>((resolve) => {
+      if (this.server?.listening) this.server.close(() => resolve());
+      else resolve();
+    });
+    try {
+      if (
+        this.socketInode !== undefined &&
+        lstatSync(this.manifest.controlSocket).ino === this.socketInode
+      )
+        unlinkSync(this.manifest.controlSocket);
+    } catch {}
+    if (this.lockHeld) {
+      try {
+        unlinkSync(this.store.path("worker.lock"));
+      } catch {}
+      this.lockHeld = false;
+    }
   }
 }

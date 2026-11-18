@@ -20,11 +20,16 @@ function waitForLine(child, expected) {
     let output = "";
     const onData = (chunk) => {
       output += chunk.toString();
-      if (output.includes(expected)) { child.stdout.off("data", onData); resolve(); }
+      if (output.includes(expected)) {
+        child.stdout.off("data", onData);
+        resolve();
+      }
     };
     child.stdout.on("data", onData);
     child.once("error", reject);
-    child.once("exit", (code) => { if (code !== 0) reject(new Error(`lock worker exited ${code}: ${output}`)); });
+    child.once("exit", (code) => {
+      if (code !== 0) reject(new Error(`lock worker exited ${code}: ${output}`));
+    });
   });
 }
 
@@ -42,7 +47,11 @@ function lockWorker(filePath, value, holdMs) {
       return { result: null, next: process.argv[2] };
     });
   `;
-  return spawn(process.execPath, ["--input-type=module", "-e", code, filePath, value, String(holdMs)], { stdio: ["ignore", "pipe", "pipe"] });
+  return spawn(
+    process.execPath,
+    ["--input-type=module", "-e", code, filePath, value, String(holdMs)],
+    { stdio: ["ignore", "pipe", "pipe"] },
+  );
 }
 
 test("account updates preserve inert provider sections and publish private atomic files", async () => {
@@ -50,12 +59,26 @@ test("account updates preserve inert provider sections and publish private atomi
   const file = join(root, "pi-accounts.json");
   try {
     const store = new AccountStore(new FileAccountStorageBackend(file));
-    await store.writeRawForTest(JSON.stringify({ version: 1, future: { keep: true }, providers: {
-      openai: { accounts: {} },
-      "openai-codex": { active: "legacy", accounts: { legacy: { type: "oauth", access: "opaque", refresh: "opaque-refresh", expires: 1 } } },
-      anthropic: { active: "work", accounts: { work: { future: [1, 2, 3] } } },
-    } }));
-    await store.updateProvider("openai", (state) => ({ ...state, accounts: { named: { type: "api_key", key: "local-fixture" } } }));
+    await store.writeRawForTest(
+      JSON.stringify({
+        version: 1,
+        future: { keep: true },
+        providers: {
+          openai: { accounts: {} },
+          "openai-codex": {
+            active: "legacy",
+            accounts: {
+              legacy: { type: "oauth", access: "opaque", refresh: "opaque-refresh", expires: 1 },
+            },
+          },
+          anthropic: { active: "work", accounts: { work: { future: [1, 2, 3] } } },
+        },
+      }),
+    );
+    await store.updateProvider("openai", (state) => ({
+      ...state,
+      accounts: { named: { type: "api_key", key: "local-fixture" } },
+    }));
     const data = await store.readAsync();
     assert.equal(data.future.keep, true);
     assert.equal(data.providers["openai-codex"].active, "legacy");
@@ -63,15 +86,32 @@ test("account updates preserve inert provider sections and publish private atomi
     assert.equal(data.providers.anthropic.accounts.work.future.length, 3);
     assert.equal((await stat(file)).mode & 0o777, 0o600);
     assert.equal((await stat(root)).mode & 0o777, 0o700);
-  } finally { await rm(root, { recursive: true, force: true }); }
+  } finally {
+    await rm(root, { recursive: true, force: true });
+  }
 });
 
 test("native providers keep same-named synthetic credentials and defaults independent", async () => {
   const root = await mkdtemp(join(tmpdir(), "pae-account-providers-"));
   try {
     const store = new AccountStore(new FileAccountStorageBackend(join(root, "pi-accounts.json")));
-    await store.updateProvider("openai", (state) => ({ ...state, active: "personal", accounts: { personal: { type: "api_key", key: "fixture-openai" } } }));
-    await store.updateProvider("openai-codex", (state) => ({ ...state, active: "personal", accounts: { personal: { type: "oauth", access: "fixture-codex-access", refresh: "fixture-codex-refresh", expires: 4_000_000_000_000 } } }));
+    await store.updateProvider("openai", (state) => ({
+      ...state,
+      active: "personal",
+      accounts: { personal: { type: "api_key", key: "fixture-openai" } },
+    }));
+    await store.updateProvider("openai-codex", (state) => ({
+      ...state,
+      active: "personal",
+      accounts: {
+        personal: {
+          type: "oauth",
+          access: "fixture-codex-access",
+          refresh: "fixture-codex-refresh",
+          expires: 4_000_000_000_000,
+        },
+      },
+    }));
     const data = await store.readAsync();
     assert.equal(data.providers.openai.active, "personal");
     assert.equal(data.providers["openai-codex"].active, "personal");
@@ -81,7 +121,9 @@ test("native providers keep same-named synthetic credentials and defaults indepe
     const restored = await store.readAsync();
     assert.equal(restored.providers.openai.active, undefined);
     assert.equal(restored.providers["openai-codex"].active, "personal");
-  } finally { await rm(root, { recursive: true, force: true }); }
+  } finally {
+    await rm(root, { recursive: true, force: true });
+  }
 });
 
 test("vendored proper-lockfile serializes independent processes on the same credential file", async () => {
@@ -95,14 +137,18 @@ test("vendored proper-lockfile serializes independent processes on the same cred
     second = lockWorker(file, "second-writer", 0);
     const firstExit = new Promise((resolve, reject) => {
       first.once("error", reject);
-      first.once("exit", (code) => code === 0 ? resolve() : reject(new Error(`first writer exited ${code}`)));
+      first.once("exit", (code) =>
+        code === 0 ? resolve() : reject(new Error(`first writer exited ${code}`)),
+      );
     });
     const secondAcquired = waitForLine(second, "ACQUIRED");
     await firstExit;
     await secondAcquired;
     const secondExit = new Promise((resolve, reject) => {
       second.once("error", reject);
-      second.once("exit", (code) => code === 0 ? resolve() : reject(new Error(`second writer exited ${code}`)));
+      second.once("exit", (code) =>
+        code === 0 ? resolve() : reject(new Error(`second writer exited ${code}`)),
+      );
     });
     await secondExit;
     assert.equal(await readFile(file, "utf8"), "second-writer");

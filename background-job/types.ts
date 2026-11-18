@@ -1,4 +1,4 @@
-import type { PaneIdentity } from './external-pane.ts';
+import type { PaneIdentity } from "./external-pane.ts";
 
 export const JOB_SCHEMA_VERSION = 1 as const;
 export const JOB_ID_PATTERN = /^job-[0-9a-f]{24}$/;
@@ -28,7 +28,13 @@ export type JobMetadata = {
   infrastructure?: boolean;
   /** Supervisor-only verification evidence: never expire on ordinary output retrieval. */
   verification?: true;
-  observed?: { pid: number; startToken: string; logPath: string; logDevice: number; logInode: number };
+  observed?: {
+    pid: number;
+    startToken: string;
+    logPath: string;
+    logDevice: number;
+    logInode: number;
+  };
 };
 
 export type JobLaunch = {

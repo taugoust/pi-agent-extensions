@@ -41,8 +41,17 @@ export function formatParallelResultContent(
   if (sections.length === 0) return header;
 
   const labels = sections.map((section) => `[${section.label}] ${section.status}:\n`);
-  const fixedBytes = byteLength(header) + byteLength("\n\n") * sections.length + labels.reduce((sum, label) => sum + byteLength(label), 0);
-  const perChildBudget = Math.max(256, Math.floor(Math.max(0, maxBytes - fixedBytes) / sections.length));
-  const rendered = sections.map((section, index) => `${labels[index]}${truncateUTF8(section.output || "(no output)", perChildBudget)}`);
+  const fixedBytes =
+    byteLength(header) +
+    byteLength("\n\n") * sections.length +
+    labels.reduce((sum, label) => sum + byteLength(label), 0);
+  const perChildBudget = Math.max(
+    256,
+    Math.floor(Math.max(0, maxBytes - fixedBytes) / sections.length),
+  );
+  const rendered = sections.map(
+    (section, index) =>
+      `${labels[index]}${truncateUTF8(section.output || "(no output)", perChildBudget)}`,
+  );
   return truncateUTF8(`${header}\n\n${rendered.join("\n\n")}`, maxBytes);
 }

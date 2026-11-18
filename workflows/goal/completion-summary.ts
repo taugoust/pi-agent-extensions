@@ -5,10 +5,14 @@ const CONTRADICTORY_COMPLETION_PATTERNS = [
   /\btests?\s+(?:still\s+)?fail(?:ing)?\b/i,
 ] as const;
 export function isContradictoryCompletionSummary(summary: string) {
-  return CONTRADICTORY_COMPLETION_PATTERNS.some(pattern => pattern.test(summary));
+  return CONTRADICTORY_COMPLETION_PATTERNS.some((pattern) => pattern.test(summary));
 }
 export function completionSummaryRejection(summary: string): string | undefined {
-  return !summary ? 'summary is empty' : summary.length > MAX_COMPLETION_SUMMARY_LENGTH
-    ? 'summary is too long' : isContradictoryCompletionSummary(summary)
-      ? 'summary says the goal is not complete' : undefined;
+  return !summary
+    ? "summary is empty"
+    : summary.length > MAX_COMPLETION_SUMMARY_LENGTH
+      ? "summary is too long"
+      : isContradictoryCompletionSummary(summary)
+        ? "summary says the goal is not complete"
+        : undefined;
 }

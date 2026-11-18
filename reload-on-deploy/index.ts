@@ -89,7 +89,8 @@ export default function reloadOnDeploy(pi: ExtensionAPI) {
         await current.reload();
       } catch (error) {
         requested = false;
-        if (current.hasUI) current.ui.notify(`Reload after deploy failed: ${String(error)}`, "error");
+        if (current.hasUI)
+          current.ui.notify(`Reload after deploy failed: ${String(error)}`, "error");
       }
     },
   });

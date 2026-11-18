@@ -1,5 +1,9 @@
 import { resultPage } from "./result-page.ts";
-import { managedGoalBinding, validateManagedGoalAssignment, type ManagedGoalAssignment } from "./managed-goal.ts";
+import {
+  managedGoalBinding,
+  validateManagedGoalAssignment,
+  type ManagedGoalAssignment,
+} from "./managed-goal.ts";
 import { requestGoalWorker } from "./goal-rpc.ts";
 import type { ChildGoalSnapshot } from "./goal-executor.ts";
 import type { DelegatedGoalChild } from "../workflows/delegated-goals.ts";
@@ -7,62 +11,221 @@ import { HeadlessForegroundManager } from "./headless-foreground.ts";
 import { reapOwnedWorktrees, type ReapReport } from "../shared/worktree-reap.ts";
 import { pendingGuidance } from "./guidance.ts";
 import { nativeResultReport } from "./result-report.ts";
-import { validateToolPresentation, validateToolPresentationArguments } from "../shared/tool-presentation.ts";
+import {
+  validateToolPresentation,
+  validateToolPresentationArguments,
+} from "../shared/tool-presentation.ts";
 import { randomBytes, createHash } from "node:crypto";
 import { workerWorktreeContext, type WorktreeIdentity } from "../shared/worker-worktree-context.ts";
-import { provisionWorktrees, releaseWorktree, worktreeOption, type WorktreeOption, type WorktreeInfo } from "../shared/subagent-worktrees.ts";
+import {
+  provisionWorktrees,
+  releaseWorktree,
+  worktreeOption,
+  type WorktreeOption,
+  type WorktreeInfo,
+} from "../shared/subagent-worktrees.ts";
 import { waitForGroupSnapshot } from "./group-wait.ts";
-import { readdirSync, existsSync, readFileSync, writeFileSync, unlinkSync, openSync, closeSync, readSync, constants, lstatSync, realpathSync } from "node:fs";
+import {
+  readdirSync,
+  existsSync,
+  readFileSync,
+  writeFileSync,
+  unlinkSync,
+  openSync,
+  closeSync,
+  readSync,
+  constants,
+  lstatSync,
+  realpathSync,
+} from "node:fs";
 import { join, resolve, basename, relative, sep, isAbsolute } from "node:path";
 import { validateAcceptance, validateTaskOutcome } from "./outcome.ts";
-import { validateVerification, currentVerification, verificationSummary, verificationContract, workspaceIdentity, type VerificationGate } from "./acceptance.ts";
+import {
+  validateVerification,
+  currentVerification,
+  verificationSummary,
+  verificationContract,
+  workspaceIdentity,
+  type VerificationGate,
+} from "./acceptance.ts";
 import { TaskNameStore } from "./task-name-store.ts";
-import { subagentTmuxName, validateSubagentName, canonicalSubagentName, subagentTmuxAlias } from "./tui-names.ts";
-import { TuiWorkerTmux, tuiWorkerLaunchContract, processIdentity, processIsAlive, verificationBudget } from "./tui-worker-tmux.ts";
+import {
+  subagentTmuxName,
+  validateSubagentName,
+  canonicalSubagentName,
+  subagentTmuxAlias,
+} from "./tui-names.ts";
+import {
+  TuiWorkerTmux,
+  tuiWorkerLaunchContract,
+  processIdentity,
+  processIsAlive,
+  verificationBudget,
+} from "./tui-worker-tmux.ts";
 import { deliverMode, type ModeDelivery, type ModeTarget } from "./operator-mode.ts";
-import { TuiWorkerStore, privateDirectory, atomicPrivateJson, readPrivateJson } from "./tui-worker-store.ts";
+import {
+  TuiWorkerStore,
+  privateDirectory,
+  atomicPrivateJson,
+  readPrivateJson,
+} from "./tui-worker-store.ts";
 import { physicalPath } from "./physical-path.ts";
-import { callTuiWorker, awaitTuiWorkerVerification, applyTuiWorkerOperatorMode } from "./tui-worker-client.ts";
+import {
+  callTuiWorker,
+  awaitTuiWorkerVerification,
+  applyTuiWorkerOperatorMode,
+} from "./tui-worker-client.ts";
 import { publicTuiWorkerManifest, parseTuiWorkerJobParams } from "../shared/tui-worker-protocol.ts";
 import { truncateUtf8 } from "../shared/harness-readonly.ts";
-import { readRetainedConversation, readRetainedSessionCwd, validateRetainedConversationFile } from "./retained-conversation.ts";
+import {
+  readRetainedConversation,
+  readRetainedSessionCwd,
+  validateRetainedConversationFile,
+} from "./retained-conversation.ts";
 import { validateLiveEvents, validateLiveStatus } from "./live-conversation.ts";
 import type { QuietUpdate } from "../shared/quiet-state.ts";
 import type { TuiWorkerManifest, TuiWorkerPlacement } from "../shared/tui-worker-protocol.ts";
 
 const id = (prefix: string) => `${prefix}-${randomBytes(12).toString("hex")}`;
-const pause = (ms: number) => new Promise(resolve => setTimeout(resolve, ms));
-type Spec = { assignedGoal?: ManagedGoalAssignment; name?: string; displayName?: string; tmuxAlias?: string; task: string; cwd: string; model?: string; tools?: string[]; systemPrompt?: string; acceptance?: string[]; verification?: VerificationGate[]; cleanupWorktreesOnReap?: boolean; automaticWorktrees?: boolean; worktree?: WorktreeOption; worktreeInfo?: WorktreeInfo };
-type Child = { childId: string; taskId: string; attempt: number; directory: string; activityCwd?: string; spec: Spec;
-  resumeSessionFile?: string; resumeMessage?: string; compactBeforePrompt?: boolean;
-  state: "pending" | "launching" | "running" | "waiting" | "completed" | "failed" | "cancelled" | "lost" | "skipped";
-  operatorCapability: string; started: boolean; reaped?: boolean; cleanupWorktreeRequested?: boolean; worktreeCleanup?: ReapReport; error?: string; observationError?: string; report?: string;
-  verification?: unknown; historicalVerification?: unknown; acceptedDelivery?: boolean;
-  verificationBypasses?: Array<{ workerEpoch: string; attempt: number; reason: string; at: string }>;
-  notifiedSequence: number; needsAttention?: boolean; idleDecisionNotified?: string; runSequence?: number; pendingActivitySequence?: number; terminalNotification?: string; lastOutcome?: unknown; requiresCompaction?: boolean; };
-type Group = { windowName?: string; renameWindowWithFirstChild?: boolean; version: 1; id: string; owner: string; createdAt: string; mode: "single" | "parallel" | "chain";
-  background: boolean; guidanceYielded?: boolean; cancelled: boolean; children: Child[]; caller: TuiWorkerPlacement;
+const pause = (ms: number) => new Promise((resolve) => setTimeout(resolve, ms));
+type Spec = {
+  assignedGoal?: ManagedGoalAssignment;
+  name?: string;
+  displayName?: string;
+  tmuxAlias?: string;
+  task: string;
+  cwd: string;
+  model?: string;
+  tools?: string[];
+  systemPrompt?: string;
+  acceptance?: string[];
+  verification?: VerificationGate[];
+  cleanupWorktreesOnReap?: boolean;
+  automaticWorktrees?: boolean;
+  worktree?: WorktreeOption;
+  worktreeInfo?: WorktreeInfo;
+};
+type Child = {
+  childId: string;
+  taskId: string;
+  attempt: number;
+  directory: string;
+  activityCwd?: string;
+  spec: Spec;
+  resumeSessionFile?: string;
+  resumeMessage?: string;
+  compactBeforePrompt?: boolean;
+  state:
+    | "pending"
+    | "launching"
+    | "running"
+    | "waiting"
+    | "completed"
+    | "failed"
+    | "cancelled"
+    | "lost"
+    | "skipped";
+  operatorCapability: string;
+  started: boolean;
+  reaped?: boolean;
+  cleanupWorktreeRequested?: boolean;
+  worktreeCleanup?: ReapReport;
+  error?: string;
+  observationError?: string;
+  report?: string;
+  verification?: unknown;
+  historicalVerification?: unknown;
+  acceptedDelivery?: boolean;
+  verificationBypasses?: Array<{
+    workerEpoch: string;
+    attempt: number;
+    reason: string;
+    at: string;
+  }>;
+  notifiedSequence: number;
+  needsAttention?: boolean;
+  idleDecisionNotified?: string;
+  runSequence?: number;
+  pendingActivitySequence?: number;
+  terminalNotification?: string;
+  lastOutcome?: unknown;
+  requiresCompaction?: boolean;
+};
+type Group = {
+  windowName?: string;
+  renameWindowWithFirstChild?: boolean;
+  version: 1;
+  id: string;
+  owner: string;
+  createdAt: string;
+  mode: "single" | "parallel" | "chain";
+  background: boolean;
+  guidanceYielded?: boolean;
+  cancelled: boolean;
+  children: Child[];
+  caller: TuiWorkerPlacement;
   parentOwnerToken: string;
-  operatorEnabled: boolean; launcher: string; launchMode: "none" | "guard-only"; promotionPending?: boolean; reaping?: boolean; };
+  operatorEnabled: boolean;
+  launcher: string;
+  launchMode: "none" | "guard-only";
+  promotionPending?: boolean;
+  reaping?: boolean;
+};
 type Disposition = "native" | "guard-only" | "full" | "unavailable";
-const active = (child: Child) => ["pending", "launching", "running", "waiting"].includes(child.state);
-const pathWithin = (root: string, path: string) => { const part = relative(root, path); return !part || (!isAbsolute(part) && part !== ".." && !part.startsWith(`..${sep}`)); };
+const active = (child: Child) =>
+  ["pending", "launching", "running", "waiting"].includes(child.state);
+const pathWithin = (root: string, path: string) => {
+  const part = relative(root, path);
+  return !part || (!isAbsolute(part) && part !== ".." && !part.startsWith(`..${sep}`));
+};
 const outcomeState = (child: Child) => (child.lastOutcome as any)?.state;
 const hasDeliveredClaim = (child: Child) => outcomeState(child) === "delivered";
-const verificationFailedForDelivery = (child: Child) => !!child.spec?.verification?.length && hasDeliveredClaim(child)
-  && !["passed", "checking"].includes((child.verification as any)?.status);
-const unfinishedAssignment = (child: Child) => !!child.spec?.verification?.length && outcomeState(child) !== "delivered";
-const terminalToken = (child: Child) => `${child.report ?? `terminal:${child.attempt ?? 1}:${child.runSequence ?? 0}`}${child.spec?.verification?.length ? `:verification:${(child.verification as any)?.status ?? "unavailable"}` : ""}`;
+const verificationFailedForDelivery = (child: Child) =>
+  !!child.spec?.verification?.length &&
+  hasDeliveredClaim(child) &&
+  !["passed", "checking"].includes((child.verification as any)?.status);
+const unfinishedAssignment = (child: Child) =>
+  !!child.spec?.verification?.length && outcomeState(child) !== "delivered";
+const terminalToken = (child: Child) =>
+  `${child.report ?? `terminal:${child.attempt ?? 1}:${child.runSequence ?? 0}`}${child.spec?.verification?.length ? `:verification:${(child.verification as any)?.status ?? "unavailable"}` : ""}`;
 const taskOutcome = (value: unknown, criteria: string[]) => {
-  try { return validateTaskOutcome(value, criteria); } catch { return undefined; }
+  try {
+    return validateTaskOutcome(value, criteria);
+  } catch {
+    return undefined;
+  }
 };
-const reportText = (child: Child, report: any) => messageText(report.assistant).trim() || (child.lastOutcome as any)?.summary || (child.state === "waiting" ? "Worker turn is idle; task completion has not been reported. Await descendants or send an explicit followup." : "");
-const messageText = (message: any) => typeof message?.content === "string" ? message.content : (message?.content ?? []).filter((p: any) => p.type === "text").map((p: any) => p.text).join("\n");
-const response = (text: string, data: Record<string, unknown> = {}) => ({ content: [{ type: "text" as const, text: Buffer.from(text).subarray(0, 48 * 1024).toString("utf8") }], details: { tui_subagent: true, backend: "native", ...data } });
+const reportText = (child: Child, report: any) =>
+  messageText(report.assistant).trim() ||
+  (child.lastOutcome as any)?.summary ||
+  (child.state === "waiting"
+    ? "Worker turn is idle; task completion has not been reported. Await descendants or send an explicit followup."
+    : "");
+const messageText = (message: any) =>
+  typeof message?.content === "string"
+    ? message.content
+    : (message?.content ?? [])
+        .filter((p: any) => p.type === "text")
+        .map((p: any) => p.text)
+        .join("\n");
+const response = (text: string, data: Record<string, unknown> = {}) => ({
+  content: [
+    {
+      type: "text" as const,
+      text: Buffer.from(text)
+        .subarray(0, 48 * 1024)
+        .toString("utf8"),
+    },
+  ],
+  details: { tui_subagent: true, backend: "native", ...data },
+});
 
 /** Native-only durable adapter. Legacy AgentSH execution never enters here. */
 /** A worker's gates with their last in-memory result. Never runs or observes anything. */
-function taskChecks(gates: VerificationGate[], record?: { runs?: Array<{ status?: string; exitCode?: number | null; finishedAt?: string }> }) {
+function taskChecks(
+  gates: VerificationGate[],
+  record?: { runs?: Array<{ status?: string; exitCode?: number | null; finishedAt?: string }> },
+) {
   return gates.map((gate, index) => {
     const run = record?.runs?.[index];
     return {
@@ -84,7 +247,10 @@ export class TuiNativeManager {
   private queue: Promise<unknown> = Promise.resolve();
   private refreshFlight?: Promise<void>;
   private reapFlights = new Set<Promise<void>>();
-  private verificationObservations = new WeakMap<Child, { digest: string; manifest: string; contract: string; accepted: boolean }>();
+  private verificationObservations = new WeakMap<
+    Child,
+    { digest: string; manifest: string; contract: string; accepted: boolean }
+  >();
   private verificationObservationTurns = new WeakMap<Child, number>();
   private modeQueue: Promise<unknown> = Promise.resolve();
   private timer?: ReturnType<typeof setInterval>;
@@ -97,16 +263,28 @@ export class TuiNativeManager {
   private ownerLock?: string;
   private resuming = new Set<string>();
   private processToken(pid: number): string | undefined {
-    try { const stat = readFileSync(`/proc/${pid}/stat`, "utf8"); return `${pid}:${stat.slice(stat.lastIndexOf(")") + 2).split(" ")[19]}`; }
-    catch { return undefined; }
+    try {
+      const stat = readFileSync(`/proc/${pid}/stat`, "utf8");
+      return `${pid}:${stat.slice(stat.lastIndexOf(")") + 2).split(" ")[19]}`;
+    } catch {
+      return undefined;
+    }
   }
   private groupLimit: number;
   private routingEnvironment: (model?: string) => Record<string, string>;
   private resolveRoleModel: (model: string | undefined) => string | undefined;
-  constructor(root: string, privateDisposition: () => Disposition, ready: () => boolean, groupLimit: number, routingEnvironment: (model?: string) => Record<string, string> = () => ({}), resolveRoleModel: (model: string | undefined) => string | undefined = model => model) {
+  constructor(
+    root: string,
+    privateDisposition: () => Disposition,
+    ready: () => boolean,
+    groupLimit: number,
+    routingEnvironment: (model?: string) => Record<string, string> = () => ({}),
+    resolveRoleModel: (model: string | undefined) => string | undefined = (model) => model,
+  ) {
     this.routingEnvironment = routingEnvironment;
     this.resolveRoleModel = resolveRoleModel;
-    if (!Number.isSafeInteger(groupLimit) || groupLimit < 1) throw new Error("Invalid shared subagent group limit");
+    if (!Number.isSafeInteger(groupLimit) || groupLimit < 1)
+      throw new Error("Invalid shared subagent group limit");
     this.groupLimit = groupLimit;
     this.root = privateDirectory(root, true);
     privateDirectory(join(this.root, "groups"), true);
@@ -118,30 +296,63 @@ export class TuiNativeManager {
       try {
         const g = readPrivateJson(join(this.root, "groups", name)) as Group;
         const persistedGroup = JSON.stringify(g);
-        if (g.version !== 1 || `${g.id}.json` !== name || typeof g.owner !== "string" || !Array.isArray(g.children) || g.children.length > 8) throw new Error("Invalid retained group");
-        if (g.children.some(c => !/^subagent-child-[a-f0-9]{24}$/.test(c.childId) || !/^subagent-task-[a-f0-9]{24}$/.test(c.taskId)
-          || c.spec?.cleanupWorktreesOnReap !== undefined && typeof c.spec.cleanupWorktreesOnReap !== "boolean"
-          || c.spec?.automaticWorktrees !== undefined && typeof c.spec.automaticWorktrees !== "boolean"
-          || !/^[a-f0-9]{64}$/.test(c.operatorCapability) || typeof c.directory !== "string"
-          || c.activityCwd !== undefined && (typeof c.activityCwd !== "string" || !isAbsolute(c.activityCwd))
-          || !/^[a-f0-9]{24}$/.test(basename(c.directory)) || c.directory !== join(this.root, "workers", basename(c.directory)))) throw new Error("Invalid retained child");
+        if (
+          g.version !== 1 ||
+          `${g.id}.json` !== name ||
+          typeof g.owner !== "string" ||
+          !Array.isArray(g.children) ||
+          g.children.length > 8
+        )
+          throw new Error("Invalid retained group");
+        if (
+          g.children.some(
+            (c) =>
+              !/^subagent-child-[a-f0-9]{24}$/.test(c.childId) ||
+              !/^subagent-task-[a-f0-9]{24}$/.test(c.taskId) ||
+              (c.spec?.cleanupWorktreesOnReap !== undefined &&
+                typeof c.spec.cleanupWorktreesOnReap !== "boolean") ||
+              (c.spec?.automaticWorktrees !== undefined &&
+                typeof c.spec.automaticWorktrees !== "boolean") ||
+              !/^[a-f0-9]{64}$/.test(c.operatorCapability) ||
+              typeof c.directory !== "string" ||
+              (c.activityCwd !== undefined &&
+                (typeof c.activityCwd !== "string" || !isAbsolute(c.activityCwd))) ||
+              !/^[a-f0-9]{24}$/.test(basename(c.directory)) ||
+              c.directory !== join(this.root, "workers", basename(c.directory)),
+          )
+        )
+          throw new Error("Invalid retained child");
         // Old already-terminal records were previously observed without wakes.
         // Baseline them instead of replaying historical completions on upgrade.
         delete g.reaping; // Parent restart interrupts only the in-memory reap flight; workers remain safely retained.
         for (const c of g.children) {
           c.spec.cleanupWorktreesOnReap ??= false;
           c.spec.automaticWorktrees ??= false;
-          if (c.terminalNotification === undefined) c.terminalNotification = active(c) ? '' : terminalToken(c);
+          if (c.terminalNotification === undefined)
+            c.terminalNotification = active(c) ? "" : terminalToken(c);
           if (c.spec.verification?.length) {
-            if (c.historicalVerification) c.historicalVerification = { ...(c.historicalVerification as object), provenance: "retained-unverified", last_observed_status: undefined };
-            this.invalidateVerification(c, "interrupted", "Manager restored from disk; fresh worker observation required");
+            if (c.historicalVerification)
+              c.historicalVerification = {
+                ...(c.historicalVerification as object),
+                provenance: "retained-unverified",
+                last_observed_status: undefined,
+              };
+            this.invalidateVerification(
+              c,
+              "interrupted",
+              "Manager restored from disk; fresh worker observation required",
+            );
           }
         }
         this.groups.set(g.id, g);
         // Seed the persistence baseline from disk so constructor normalization is
         // durable only when it actually changed the record.
         this.savedGroups.set(g.id, persistedGroup);
-      } catch { this.inventoryErrors.push(name); /* Invalid records never authorize launch/control/deletion. */ }
+      } catch {
+        this.inventoryErrors.push(
+          name,
+        ); /* Invalid records never authorize launch/control/deletion. */
+      }
     }
   }
   private disposition: () => Disposition;
@@ -154,63 +365,103 @@ export class TuiNativeManager {
     this.savedGroups.set(g.id, text);
   }
   private serial<T>(run: () => Promise<T>): Promise<T> {
-    const next = this.queue.catch(() => undefined).then(run); this.queue = next; return next;
+    const next = this.queue.catch(() => undefined).then(run);
+    this.queue = next;
+    return next;
   }
   activate(owner: string, notify?: (update: QuietUpdate) => boolean): void {
-    const lock = join(this.root, `owner-${createHash("sha256").update(owner).digest("hex").slice(0, 32)}.lock`);
+    const lock = join(
+      this.root,
+      `owner-${createHash("sha256").update(owner).digest("hex").slice(0, 32)}.lock`,
+    );
     for (let retry = 0; ; retry++) {
-      try { writeFileSync(lock, JSON.stringify({ pid: process.pid, token: this.processToken(process.pid) }), { flag: "wx", mode: 0o600 }); break; }
-      catch (error) {
+      try {
+        writeFileSync(
+          lock,
+          JSON.stringify({ pid: process.pid, token: this.processToken(process.pid) }),
+          { flag: "wx", mode: 0o600 },
+        );
+        break;
+      } catch (error) {
         if ((error as NodeJS.ErrnoException).code !== "EEXIST" || retry >= 2) throw error;
         const prior = readPrivateJson(lock) as any;
-        if (!Number.isSafeInteger(prior.pid) || typeof prior.token !== "string" || this.processToken(prior.pid) === prior.token) {
-          this.closed = true; throw new Error("Another live parent owns this session's TUI scheduler; refusing concurrent writers");
+        if (
+          !Number.isSafeInteger(prior.pid) ||
+          typeof prior.token !== "string" ||
+          this.processToken(prior.pid) === prior.token
+        ) {
+          this.closed = true;
+          throw new Error(
+            "Another live parent owns this session's TUI scheduler; refusing concurrent writers",
+          );
         }
         unlinkSync(lock);
       }
     }
     this.ownerLock = lock;
-    this.owner = owner; this.notify = notify;
+    this.owner = owner;
+    this.notify = notify;
     // Restore fail-closed suppression synchronously, before quiet-state timers
     // can dispatch an older receipt after a parent restart/reload.
-    for (const g of this.groups.values()) if (g.owner === owner) for (const c of g.children) {
-      if (Number.isSafeInteger(c.pendingActivitySequence) && c.pendingActivitySequence! >= 0) this.notifyActivity(g, c, c.pendingActivitySequence!);
-    }
+    for (const g of this.groups.values())
+      if (g.owner === owner)
+        for (const c of g.children) {
+          if (Number.isSafeInteger(c.pendingActivitySequence) && c.pendingActivitySequence! >= 0)
+            this.notifyActivity(g, c, c.pendingActivitySequence!);
+        }
     if (this.timer) clearInterval(this.timer);
-    this.timer = setInterval(() => { void this.refresh(owner).catch(() => undefined); }, 1000);
+    this.timer = setInterval(() => {
+      void this.refresh(owner).catch(() => undefined);
+    }, 1000);
     this.timer.unref?.();
     void this.refresh(owner).catch(() => undefined);
   }
   private liveOperatorMode(owner: string): boolean {
     const service = (globalThis as any).__PAE_PERMISSION_GATE_OPERATOR_V1__;
-    if (service?.version !== 1 || typeof service.status !== "function") throw new Error("Live parent operator authority unavailable");
+    if (service?.version !== 1 || typeof service.status !== "function")
+      throw new Error("Live parent operator authority unavailable");
     const status = service.status(owner);
-    if (status?.sessionId !== owner || typeof status.enabled !== "boolean") throw new Error("Invalid live parent operator mode");
+    if (status?.sessionId !== owner || typeof status.enabled !== "boolean")
+      throw new Error("Invalid live parent operator mode");
     return status.enabled;
   }
   private sendMode(g: Group, c: Child, m: TuiWorkerManifest, requestId?: string): Promise<void> {
-    const next = this.modeQueue.catch(() => undefined).then(async () => {
-      // Disk state is observational only: especially after restart it cannot
-      // authorize prompts-off for a new/pending child or a resumed attempt.
-      const enabled = this.liveOperatorMode(g.owner);
-      g.operatorEnabled = enabled; this.save(g);
-      const applied = await applyTuiWorkerOperatorMode(m, c.operatorCapability, enabled, requestId);
-      if (!applied.ok) throw new Error(`Child operator mode rejected: ${applied.code}`);
-    });
+    const next = this.modeQueue
+      .catch(() => undefined)
+      .then(async () => {
+        // Disk state is observational only: especially after restart it cannot
+        // authorize prompts-off for a new/pending child or a resumed attempt.
+        const enabled = this.liveOperatorMode(g.owner);
+        g.operatorEnabled = enabled;
+        this.save(g);
+        const applied = await applyTuiWorkerOperatorMode(
+          m,
+          c.operatorCapability,
+          enabled,
+          requestId,
+        );
+        if (!applied.ok) throw new Error(`Child operator mode rejected: ${applied.code}`);
+      });
     this.modeQueue = next;
     return next;
   }
   async shutdown(cancelForeground: boolean): Promise<void> {
-    this.closed = true; this.generation++;
+    this.closed = true;
+    this.generation++;
     if (this.timer) clearInterval(this.timer);
     await this.queue.catch(() => undefined);
     while (this.reapFlights.size) await Promise.allSettled([...this.reapFlights]);
     await this.modeQueue.catch(() => undefined);
     if (cancelForeground && this.owner) {
-      for (const g of this.groups.values()) if (g.owner === this.owner && !g.background) await this.cancelGroup(g);
+      for (const g of this.groups.values())
+        if (g.owner === this.owner && !g.background) await this.cancelGroup(g);
     }
     if (this.ownerLock) {
-      try { const lock = readPrivateJson(this.ownerLock) as any; if (lock.pid === process.pid && lock.token === this.processToken(process.pid)) unlinkSync(this.ownerLock); } catch {}
+      try {
+        const lock = readPrivateJson(this.ownerLock) as any;
+        if (lock.pid === process.pid && lock.token === this.processToken(process.pid))
+          unlinkSync(this.ownerLock);
+      } catch {}
       this.ownerLock = undefined;
     }
   }
@@ -221,21 +472,35 @@ export class TuiNativeManager {
         const record = new TaskNameStore(c.directory, manifest).read(false);
         if (record) return record.displayName;
       }
-    } catch { /* Invalid metadata cannot authorize a title or navigation. */ }
-    return c.spec?.displayName ?? canonicalSubagentName(c.spec?.task ?? "Worker", undefined, c.spec?.name);
+    } catch {
+      /* Invalid metadata cannot authorize a title or navigation. */
+    }
+    return (
+      c.spec?.displayName ??
+      canonicalSubagentName(c.spec?.task ?? "Worker", undefined, c.spec?.name)
+    );
   }
   private manifest(c: Child): TuiWorkerManifest | undefined {
     try {
       const m = new TuiWorkerStore(c.directory).readManifest();
-      if (m.childId !== c.childId || m.taskId !== c.taskId) throw new Error("Worker identity mismatch");
-      if (c.activityCwd !== undefined && m.activityCwd !== c.activityCwd) throw new Error("Worker launch-time checkout identity mismatch");
-      if ((m.cleanupWorktreesOnReap === true) !== (c.spec.cleanupWorktreesOnReap === true)) throw new Error("Worker trusted reap policy mismatch");
-      if ((m.automaticWorktrees === true) !== (c.spec.automaticWorktrees === true)) throw new Error("Worker trusted automatic worktree policy mismatch");
+      if (m.childId !== c.childId || m.taskId !== c.taskId)
+        throw new Error("Worker identity mismatch");
+      if (c.activityCwd !== undefined && m.activityCwd !== c.activityCwd)
+        throw new Error("Worker launch-time checkout identity mismatch");
+      if ((m.cleanupWorktreesOnReap === true) !== (c.spec.cleanupWorktreesOnReap === true))
+        throw new Error("Worker trusted reap policy mismatch");
+      if ((m.automaticWorktrees === true) !== (c.spec.automaticWorktrees === true))
+        throw new Error("Worker trusted automatic worktree policy mismatch");
       return m;
-    } catch (error) { if ((error as NodeJS.ErrnoException).code === "ENOENT") return; throw error; }
+    } catch (error) {
+      if ((error as NodeJS.ErrnoException).code === "ENOENT") return;
+      throw error;
+    }
   }
   private owned(owner: string, job: string): Group | undefined {
-    const g = this.groups.get(job); if (g && g.owner !== owner) throw new Error("Subagent belongs to a different Pi session"); return g;
+    const g = this.groups.get(job);
+    if (g && g.owner !== owner) throw new Error("Subagent belongs to a different Pi session");
+    return g;
   }
   private byChild(owner: string, childId: string): { group: Group; child: Child } | undefined {
     let latest: { group: Group; child: Child } | undefined;
@@ -247,74 +512,125 @@ export class TuiNativeManager {
         if (child.childId !== childId && child.taskId !== childId) continue;
         if (g.owner !== owner) throw new Error("Subagent belongs to a different Pi session");
         if (child.childId === childId) return { group: g, child };
-        if (!latest || (child.attempt ?? 1) > (latest.child.attempt ?? 1)) latest = { group: g, child };
+        if (!latest || (child.attempt ?? 1) > (latest.child.attempt ?? 1))
+          latest = { group: g, child };
       }
     }
     return latest;
   }
   /** Derive reachability only from validated worker identity and its exact retained
    * session header. Pane names, cwd and model-supplied owner IDs confer no authority. */
-  private descendantGroups(owner: string, roots?: Group[], verifiedOwners?: Set<string>, strictWorktrees = false): Group[] {
+  private descendantGroups(
+    owner: string,
+    roots?: Group[],
+    verifiedOwners?: Set<string>,
+    strictWorktrees = false,
+  ): Group[] {
     const disk = new TuiNativeManager(this.root, this.disposition, () => false, this.groupLimit);
     const result: Group[] = [];
     const seen = new Set<string>([owner]);
     const visit = (groups: Group[], depth: number) => {
       if (depth > 32) throw new Error("Subagent ancestry depth exceeds cleanup safety limit");
-      for (const g of groups) for (const c of g.children) {
-        const m = this.manifest(c);
-        if (!m) {
-          if (strictWorktrees && c.started) throw new Error(`Worktree ancestry manifest unavailable: ${g.id}/${c.childId}`);
-          continue;
-        }
-        if (m.ownerSessionId !== g.owner || m.groupId !== g.id || m.attempt !== (c.attempt ?? 1)
-          || m.sessionFile !== join(c.directory, "session.jsonl")) throw new Error("Subagent ancestry identity mismatch");
-        let sessionId: string;
-        let fd: number;
-        try { fd = openSync(m.sessionFile, constants.O_RDONLY | constants.O_NOFOLLOW); }
-        catch (error) {
-          if ((error as NodeJS.ErrnoException).code === "ENOENT" && !strictWorktrees) continue;
-          throw new Error(`Worktree ancestry session header unavailable: ${g.id}/${c.childId}: ${String(error)}`);
-        }
-        try {
-          const bytes = Buffer.alloc(8192); const n = readSync(fd, bytes, 0, bytes.length, 0);
-          const end = bytes.subarray(0, n).indexOf(10);
-          if (end < 0) {
-            if (n === bytes.length) throw new Error(`Worktree ancestry session header exceeds safe read limit: ${g.id}/${c.childId}`);
-            if (strictWorktrees) throw new Error(`Worktree ancestry session header unavailable (publication incomplete): ${g.id}/${c.childId}; wait for worker startup before cleanup`);
-            continue; // No published identity, hence no ancestry/ownership grant.
+      for (const g of groups)
+        for (const c of g.children) {
+          const m = this.manifest(c);
+          if (!m) {
+            if (strictWorktrees && c.started)
+              throw new Error(`Worktree ancestry manifest unavailable: ${g.id}/${c.childId}`);
+            continue;
           }
-          let header: any;
-          try { header = JSON.parse(bytes.subarray(0, end).toString("utf8")); }
-          catch { throw new Error(`Invalid descendant session header: ${g.id}/${c.childId}`); }
-          if (!header || header.type !== "session" || typeof header.id !== "string" || !header.id || header.id.length > 512) throw new Error("Invalid descendant session header");
-          sessionId = header.id;
-        } finally { closeSync(fd); }
-        if (seen.has(sessionId)) continue;
-        seen.add(sessionId);
-        verifiedOwners?.add(sessionId);
-        const nested = [...disk.groups.values()].filter(candidate => candidate.owner === sessionId);
-        result.push(...nested); visit(nested, depth + 1);
-      }
+          if (
+            m.ownerSessionId !== g.owner ||
+            m.groupId !== g.id ||
+            m.attempt !== (c.attempt ?? 1) ||
+            m.sessionFile !== join(c.directory, "session.jsonl")
+          )
+            throw new Error("Subagent ancestry identity mismatch");
+          let sessionId: string;
+          let fd: number;
+          try {
+            fd = openSync(m.sessionFile, constants.O_RDONLY | constants.O_NOFOLLOW);
+          } catch (error) {
+            if ((error as NodeJS.ErrnoException).code === "ENOENT" && !strictWorktrees) continue;
+            throw new Error(
+              `Worktree ancestry session header unavailable: ${g.id}/${c.childId}: ${String(error)}`,
+            );
+          }
+          try {
+            const bytes = Buffer.alloc(8192);
+            const n = readSync(fd, bytes, 0, bytes.length, 0);
+            const end = bytes.subarray(0, n).indexOf(10);
+            if (end < 0) {
+              if (n === bytes.length)
+                throw new Error(
+                  `Worktree ancestry session header exceeds safe read limit: ${g.id}/${c.childId}`,
+                );
+              if (strictWorktrees)
+                throw new Error(
+                  `Worktree ancestry session header unavailable (publication incomplete): ${g.id}/${c.childId}; wait for worker startup before cleanup`,
+                );
+              continue; // No published identity, hence no ancestry/ownership grant.
+            }
+            let header: any;
+            try {
+              header = JSON.parse(bytes.subarray(0, end).toString("utf8"));
+            } catch {
+              throw new Error(`Invalid descendant session header: ${g.id}/${c.childId}`);
+            }
+            if (
+              !header ||
+              header.type !== "session" ||
+              typeof header.id !== "string" ||
+              !header.id ||
+              header.id.length > 512
+            )
+              throw new Error("Invalid descendant session header");
+            sessionId = header.id;
+          } finally {
+            closeSync(fd);
+          }
+          if (seen.has(sessionId)) continue;
+          seen.add(sessionId);
+          verifiedOwners?.add(sessionId);
+          const nested = [...disk.groups.values()].filter(
+            (candidate) => candidate.owner === sessionId,
+          );
+          result.push(...nested);
+          visit(nested, depth + 1);
+        }
     };
-    visit(roots ?? [...this.groups.values()].filter(g => g.owner === owner), 0);
+    visit(roots ?? [...this.groups.values()].filter((g) => g.owner === owner), 0);
     return result;
   }
   /** Never overwrite a live parent's scheduler state. A stopped parent's groups
    * can be reconciled under the same PID/start-token lock, without activating a scheduler. */
   private observerLease(owner: string): (() => void) | undefined {
-    const lock = join(this.root, `owner-${createHash("sha256").update(owner).digest("hex").slice(0, 32)}.lock`);
+    const lock = join(
+      this.root,
+      `owner-${createHash("sha256").update(owner).digest("hex").slice(0, 32)}.lock`,
+    );
     for (let retry = 0; retry < 2; retry++) {
       try {
-        writeFileSync(lock, JSON.stringify({ pid: process.pid, token: this.processToken(process.pid) }), { flag: "wx", mode: 0o600 });
+        writeFileSync(
+          lock,
+          JSON.stringify({ pid: process.pid, token: this.processToken(process.pid) }),
+          { flag: "wx", mode: 0o600 },
+        );
         return () => {
           const current = readPrivateJson(lock) as any;
-          if (current.pid !== process.pid || current.token !== this.processToken(process.pid)) throw new Error("Descendant observer lease changed");
+          if (current.pid !== process.pid || current.token !== this.processToken(process.pid))
+            throw new Error("Descendant observer lease changed");
           unlinkSync(lock);
         };
       } catch (error) {
         if ((error as NodeJS.ErrnoException).code !== "EEXIST") throw error;
         const prior = readPrivateJson(lock) as any;
-        if (!Number.isSafeInteger(prior.pid) || typeof prior.token !== "string" || this.processToken(prior.pid) === prior.token) return;
+        if (
+          !Number.isSafeInteger(prior.pid) ||
+          typeof prior.token !== "string" ||
+          this.processToken(prior.pid) === prior.token
+        )
+          return;
         unlinkSync(lock);
       }
     }
@@ -322,39 +638,59 @@ export class TuiNativeManager {
   }
   private async observeDescendants(owner: string): Promise<Group[]> {
     const groups = this.descendantGroups(owner);
-    for (const session of new Set(groups.map(g => g.owner))) {
+    for (const session of new Set(groups.map((g) => g.owner))) {
       const release = this.observerLease(session);
       try {
-        const fresh = release ? new TuiNativeManager(this.root, this.disposition, () => false, this.groupLimit) : undefined;
+        const fresh = release
+          ? new TuiNativeManager(this.root, this.disposition, () => false, this.groupLimit)
+          : undefined;
         for (let index = 0; index < groups.length; index++) {
           if (groups[index].owner !== session) continue;
           // Re-read after acquiring the lock: the prior owner may have
           // committed a final snapshot between ancestry discovery and leasing.
           const g = fresh ? fresh.groups.get(groups[index].id) : groups[index];
-          if (!g || g.owner !== session) throw new Error("Descendant ownership changed during reconciliation");
+          if (!g || g.owner !== session)
+            throw new Error("Descendant ownership changed during reconciliation");
           if (release) this.savedGroups.set(g.id, JSON.stringify(g));
           groups[index] = g;
           for (const c of g.children) await this.observe(g, c, true);
           if (release) this.save(g);
         }
-      } finally { release?.(); }
+      } finally {
+        release?.();
+      }
     }
     return groups;
   }
-  private async reapChild(g: Group, c: Child, options: { force?: true; reason?: string; cleanupWorktree?: boolean } = {}): Promise<void> {
+  private async reapChild(
+    g: Group,
+    c: Child,
+    options: { force?: true; reason?: string; cleanupWorktree?: boolean } = {},
+  ): Promise<void> {
     if (active(c)) throw new Error(`Active child blocks reap: ${g.id}/${c.childId}`);
-    if (options.cleanupWorktree && !c.cleanupWorktreeRequested) { c.cleanupWorktreeRequested = true; this.save(g); }
+    if (options.cleanupWorktree && !c.cleanupWorktreeRequested) {
+      c.cleanupWorktreeRequested = true;
+      this.save(g);
+    }
     const cleanup = c.spec.cleanupWorktreesOnReap === true || c.cleanupWorktreeRequested === true;
     if (!c.reaped) {
       const manifest = this.manifest(c);
-      if (manifest) await this.tmux.reap(manifest, undefined, { ...options,
-        ...(cleanup ? { beforeRemove: () => this.reconcileWorktrees(g, c, options) } : {}) });
+      if (manifest)
+        await this.tmux.reap(manifest, undefined, {
+          ...options,
+          ...(cleanup ? { beforeRemove: () => this.reconcileWorktrees(g, c, options) } : {}),
+        });
       else if (c.started) throw new Error(`Descendant manifest unavailable: ${g.id}/${c.childId}`);
       else if (cleanup) await this.reconcileWorktrees(g, c, options);
       // Audit only after all worker cleanup and ownership checks have succeeded.
       if (options.force && c.spec.verification?.length) {
         c.verificationBypasses ??= [];
-        c.verificationBypasses.push({ workerEpoch: manifest?.workerEpoch ?? "unavailable", attempt: c.attempt ?? 1, reason: options.reason!, at: new Date().toISOString() });
+        c.verificationBypasses.push({
+          workerEpoch: manifest?.workerEpoch ?? "unavailable",
+          attempt: c.attempt ?? 1,
+          reason: options.reason!,
+          at: new Date().toISOString(),
+        });
       }
       // Terminal children cancelled/skipped before launch have no pane to reap.
       c.reaped = true;
@@ -370,107 +706,249 @@ export class TuiNativeManager {
   private async reconcileWorktrees(g: Group, c: Child, options: { force?: true; reason?: string }) {
     const owners = new Set<string>();
     const nested = this.descendantGroups(g.owner, [{ ...g, children: [c] }], owners, true);
-    const foreground = new HeadlessForegroundManager(this.root, this.disposition, () => false, this.groupLimit);
+    const foreground = new HeadlessForegroundManager(
+      this.root,
+      this.disposition,
+      () => false,
+      this.groupLimit,
+    );
     const leases: (() => void)[] = [];
     try {
       // The worker is verified dead at this boundary. Reuse scheduler leases
       // to exclude a recovered/live owner creating new work during cleanup.
       for (const owner of [...owners].sort()) {
         const release = this.observerLease(owner);
-        if (!release) throw new Error(`Live descendant owner blocks worktree reap: ${owner}; recover/reap through its current controller`);
+        if (!release)
+          throw new Error(
+            `Live descendant owner blocks worktree reap: ${owner}; recover/reap through its current controller`,
+          );
         leases.push(release);
       }
-      const report = await reapOwnedWorktrees({ actorSessionId: g.owner, cleanupBorrowedRoot: c.cleanupWorktreeRequested === true,
+      const report = await reapOwnedWorktrees({
+        actorSessionId: g.owner,
+        cleanupBorrowedRoot: c.cleanupWorktreeRequested === true,
         root: { ownerSessionId: g.owner, taskId: c.taskId, childId: c.childId },
-        descendants: [...this.worktreeTargets(nested), ...foreground.retainedWorktreeReapTargets([...owners])],
+        descendants: [
+          ...this.worktreeTargets(nested),
+          ...foreground.retainedWorktreeReapTargets([...owners]),
+        ],
         ownedSessionIds: [...owners],
-        context: { cwd: process.cwd(), isIdle: () => !active(c), hasPendingMessages: () => false,
-          managedWorktreeActivity: async path => {
-            const justReaped = { ownerSessionId: g.owner, taskId: c.taskId, childId: c.childId, attempt: c.attempt };
+        context: {
+          cwd: process.cwd(),
+          isIdle: () => !active(c),
+          hasPendingMessages: () => false,
+          managedWorktreeActivity: async (path) => {
+            const justReaped = {
+              ownerSessionId: g.owner,
+              taskId: c.taskId,
+              childId: c.childId,
+              attempt: c.attempt,
+            };
             if (await this.worktreeReapActivity(g.owner, path, justReaped)) return true;
             return foreground.worktreeReapActivity(g.owner, path, justReaped);
-          } }, ...options });
-      c.worktreeCleanup = report; this.save(g);
+          },
+        },
+        ...options,
+      });
+      c.worktreeCleanup = report;
+      this.save(g);
       return report;
     } catch (error) {
       try {
         const artifact = new TuiWorkerStore(c.directory).retainWorktreeReapFailure(error);
-        if (error instanceof Error) error.message += ` Full worktree cleanup failure report: ${artifact}`;
-      } catch { /* Retain the original refusal even when evidence storage fails. */ }
+        if (error instanceof Error)
+          error.message += ` Full worktree cleanup failure report: ${artifact}`;
+      } catch {
+        /* Retain the original refusal even when evidence storage fails. */
+      }
       throw error;
-    } finally { for (const release of leases.reverse()) release(); }
+    } finally {
+      for (const release of leases.reverse()) release();
+    }
   }
-  private async reapStoppedDescendants(groups: Group[], options: { force?: true; reason?: string } = {}): Promise<void> {
+  private async reapStoppedDescendants(
+    groups: Group[],
+    options: { force?: true; reason?: string } = {},
+  ): Promise<void> {
     for (let nested of [...groups].reverse()) {
       const release = this.observerLease(nested.owner);
       if (!release) continue; // Live parents recurse through their own cleanup boundary.
       try {
-        const fresh = new TuiNativeManager(this.root, this.disposition, () => false, this.groupLimit).groups.get(nested.id);
-        if (!fresh || fresh.owner !== nested.owner) throw new Error("Descendant ownership changed before reap");
+        const fresh = new TuiNativeManager(
+          this.root,
+          this.disposition,
+          () => false,
+          this.groupLimit,
+        ).groups.get(nested.id);
+        if (!fresh || fresh.owner !== nested.owner)
+          throw new Error("Descendant ownership changed before reap");
         nested = fresh;
         for (const c of nested.children) {
           await this.observe(nested, c, true);
-          if (active(c)) throw new Error(`Active descendant blocks reap: ${nested.id}/${c.childId}`);
+          if (active(c))
+            throw new Error(`Active descendant blocks reap: ${nested.id}/${c.childId}`);
           if (c.report) this.retainedArtifact(c, c.report, "report");
           await this.reapChild(nested, c, options);
         }
-      } finally { release(); }
+      } finally {
+        release();
+      }
     }
   }
-  private invalidateVerification(c: Child, status: "unavailable" | "interrupted" | "stale", reason: string) {
+  private invalidateVerification(
+    c: Child,
+    status: "unavailable" | "interrupted" | "stale",
+    reason: string,
+  ) {
     if (!c.spec.verification?.length) return;
     const previous = c.verification as any;
     if (previous?.status === "passed") {
       const observed = this.verificationObservations.get(c);
-      const fromLiveObservation = observed?.digest === createHash("sha256").update(JSON.stringify(previous)).digest("hex");
-      c.historicalVerification = { historical: true, provenance: fromLiveObservation ? "live-worker-observation" : "retained-unverified",
-        recorded_status: "passed", ...(fromLiveObservation ? { last_observed_status: "passed" } : {}), evidence: structuredClone(previous) };
+      const fromLiveObservation =
+        observed?.digest === createHash("sha256").update(JSON.stringify(previous)).digest("hex");
+      c.historicalVerification = {
+        historical: true,
+        provenance: fromLiveObservation ? "live-worker-observation" : "retained-unverified",
+        recorded_status: "passed",
+        ...(fromLiveObservation ? { last_observed_status: "passed" } : {}),
+        evidence: structuredClone(previous),
+      };
     }
     this.verificationObservations.delete(c);
     this.verificationObservationTurns.set(c, (this.verificationObservationTurns.get(c) ?? 0) + 1);
-    c.verification = { ...(previous ?? {}), status, reason,
-      ...(Array.isArray(previous?.runs) ? { runs: previous.runs.map((run: any) => ({ ...run, historical_status: run.historical_status ?? run.status, status })) } : {}) };
+    c.verification = {
+      ...(previous ?? {}),
+      status,
+      reason,
+      ...(Array.isArray(previous?.runs)
+        ? {
+            runs: previous.runs.map((run: any) => ({
+              ...run,
+              historical_status: run.historical_status ?? run.status,
+              status,
+            })),
+          }
+        : {}),
+    };
     c.acceptedDelivery = false;
   }
   private verificationManifestIdentity(m: TuiWorkerManifest) {
-    return JSON.stringify([m.ownerSessionId, m.groupId, m.taskId, m.childId, m.attempt, m.runtimeId, m.workerEpoch, m.sessionFile, m.controlSocket, m.controlToken]);
+    return JSON.stringify([
+      m.ownerSessionId,
+      m.groupId,
+      m.taskId,
+      m.childId,
+      m.attempt,
+      m.runtimeId,
+      m.workerEpoch,
+      m.sessionFile,
+      m.controlSocket,
+      m.controlToken,
+    ]);
   }
-  private observeVerification(g: Group, c: Child, m: TuiWorkerManifest, state: any, observationTurn?: number) {
-    if (c.spec.verification?.length && observationTurn !== undefined && this.verificationObservationTurns.get(c) !== observationTurn) return;
-    c.verification = state.verification ?? { status: c.spec.verification?.length ? "unavailable" : "not-configured" };
+  private observeVerification(
+    g: Group,
+    c: Child,
+    m: TuiWorkerManifest,
+    state: any,
+    observationTurn?: number,
+  ) {
+    if (
+      c.spec.verification?.length &&
+      observationTurn !== undefined &&
+      this.verificationObservationTurns.get(c) !== observationTurn
+    )
+      return;
+    c.verification = state.verification ?? {
+      status: c.spec.verification?.length ? "unavailable" : "not-configured",
+    };
     c.acceptedDelivery = state.accepted_delivery === true;
     if (!c.spec.verification?.length) return;
     const v = c.verification as any;
     if (v.status !== "passed") {
       c.acceptedDelivery = false;
-      if (["unavailable", "interrupted", "stale"].includes(v.status)) this.invalidateVerification(c, v.status, v.reason ?? "Current verification is not live; command evidence is historical");
+      if (["unavailable", "interrupted", "stale"].includes(v.status))
+        this.invalidateVerification(
+          c,
+          v.status,
+          v.reason ?? "Current verification is not live; command evidence is historical",
+        );
       return;
     }
     try {
-      if (m.ownerSessionId !== g.owner || m.groupId !== g.id || m.taskId !== c.taskId || m.childId !== c.childId || m.attempt !== (c.attempt ?? 1)
-        || v.contract !== verificationContract(c.spec.verification) || !v.identity
-        || !["ownerSessionId", "taskId", "childId", "attempt", "runtimeId", "workerEpoch"].every(key => v.identity[key] === (m as any)[key])
-        || realpathSync(v.identity.cwd) !== realpathSync(c.spec.cwd)) throw new Error("Verification observation identity/contract mismatch");
-      this.verificationObservations.set(c, { digest: createHash("sha256").update(JSON.stringify(v)).digest("hex"),
-        manifest: this.verificationManifestIdentity(m), contract: JSON.stringify(c.spec.verification), accepted: state.accepted_delivery === true && state.active === false && state.phase === "settled" });
-    } catch { this.invalidateVerification(c, "unavailable", "Fresh verification observation identity/contract unavailable"); }
+      if (
+        m.ownerSessionId !== g.owner ||
+        m.groupId !== g.id ||
+        m.taskId !== c.taskId ||
+        m.childId !== c.childId ||
+        m.attempt !== (c.attempt ?? 1) ||
+        v.contract !== verificationContract(c.spec.verification) ||
+        !v.identity ||
+        !["ownerSessionId", "taskId", "childId", "attempt", "runtimeId", "workerEpoch"].every(
+          (key) => v.identity[key] === (m as any)[key],
+        ) ||
+        realpathSync(v.identity.cwd) !== realpathSync(c.spec.cwd)
+      )
+        throw new Error("Verification observation identity/contract mismatch");
+      this.verificationObservations.set(c, {
+        digest: createHash("sha256").update(JSON.stringify(v)).digest("hex"),
+        manifest: this.verificationManifestIdentity(m),
+        contract: JSON.stringify(c.spec.verification),
+        accepted:
+          state.accepted_delivery === true && state.active === false && state.phase === "settled",
+      });
+    } catch {
+      this.invalidateVerification(
+        c,
+        "unavailable",
+        "Fresh verification observation identity/contract unavailable",
+      );
+    }
   }
   private currentVerification(c: Child, manifest?: TuiWorkerManifest) {
     if (!c.spec.verification?.length) return;
     const v = c.verification as any;
-    if (v?.status !== "passed") { c.acceptedDelivery = false; return; }
+    if (v?.status !== "passed") {
+      c.acceptedDelivery = false;
+      return;
+    }
     const observed = this.verificationObservations.get(c);
-    if (!manifest || !observed || observed.manifest !== this.verificationManifestIdentity(manifest)
-      || observed.contract !== JSON.stringify(c.spec.verification) || observed.digest !== createHash("sha256").update(JSON.stringify(v)).digest("hex")) {
-      this.invalidateVerification(c, "interrupted", "No fresh process-local worker observation for current verification"); return;
+    if (
+      !manifest ||
+      !observed ||
+      observed.manifest !== this.verificationManifestIdentity(manifest) ||
+      observed.contract !== JSON.stringify(c.spec.verification) ||
+      observed.digest !== createHash("sha256").update(JSON.stringify(v)).digest("hex")
+    ) {
+      this.invalidateVerification(
+        c,
+        "interrupted",
+        "No fresh process-local worker observation for current verification",
+      );
+      return;
     }
     try {
       const current = workspaceIdentity(c.spec.cwd);
-      if (!Array.isArray(v.runs) || v.runs.length !== c.spec.verification.length || v.runs.some((run: any) => run.status !== "passed" || run.workspaceAfter !== current)) {
-        this.invalidateVerification(c, "stale", "Workspace changed since the live verification observation"); return;
+      if (
+        !Array.isArray(v.runs) ||
+        v.runs.length !== c.spec.verification.length ||
+        v.runs.some((run: any) => run.status !== "passed" || run.workspaceAfter !== current)
+      ) {
+        this.invalidateVerification(
+          c,
+          "stale",
+          "Workspace changed since the live verification observation",
+        );
+        return;
       }
       c.acceptedDelivery = observed.accepted && c.state === "completed";
-    } catch { this.invalidateVerification(c, "unavailable", "Current checked workspace identity unavailable"); }
+    } catch {
+      this.invalidateVerification(
+        c,
+        "unavailable",
+        "Current checked workspace identity unavailable",
+      );
+    }
   }
   private retainedVerification(g: Group, c: Child) {
     if (!c.spec.verification?.length) return { status: "not-configured" };
@@ -478,70 +956,166 @@ export class TuiNativeManager {
       const m = this.manifest(c);
       if (!m) return { status: "unavailable" };
       const record = new TuiWorkerStore(c.directory).readState().verification;
-      return verificationSummary(currentVerification(record, { ownerSessionId: g.owner, taskId: c.taskId, childId: c.childId,
-        attempt: c.attempt, workerEpoch: m.workerEpoch, runtimeId: m.runtimeId, cwd: realpathSync(c.spec.cwd) }, c.spec.verification));
-    } catch { return { status: "unavailable" }; }
+      return verificationSummary(
+        currentVerification(
+          record,
+          {
+            ownerSessionId: g.owner,
+            taskId: c.taskId,
+            childId: c.childId,
+            attempt: c.attempt,
+            workerEpoch: m.workerEpoch,
+            runtimeId: m.runtimeId,
+            cwd: realpathSync(c.spec.cwd),
+          },
+          c.spec.verification,
+        ),
+      );
+    } catch {
+      return { status: "unavailable" };
+    }
   }
   private publicGroup(g: Group) {
-    return { job_id: g.id, mode: g.mode, background: g.background, created_at: g.createdAt,
-      status: g.children.some(c => active(c) && c.state !== "waiting") ? "running" : g.children.some(c => c.state === "waiting") ? "waiting" : g.cancelled || g.children.some(c => c.state === "cancelled") ? "cancelled" : g.children.some(c => ["failed", "lost"].includes(c.state)) ? "failed" : "completed",
+    return {
+      job_id: g.id,
+      mode: g.mode,
+      background: g.background,
+      created_at: g.createdAt,
+      status: g.children.some((c) => active(c) && c.state !== "waiting")
+        ? "running"
+        : g.children.some((c) => c.state === "waiting")
+          ? "waiting"
+          : g.cancelled || g.children.some((c) => c.state === "cancelled")
+            ? "cancelled"
+            : g.children.some((c) => ["failed", "lost"].includes(c.state))
+              ? "failed"
+              : "completed",
       reaping: g.reaping === true,
       children: g.children.map((c, i) => {
         let manifest: TuiWorkerManifest | undefined;
-        try { manifest = this.manifest(c); }
-        catch { this.invalidateVerification(c, "unavailable", "Worker manifest unavailable"); }
-        if (c.reaped) this.invalidateVerification(c, "interrupted", "Worker reaped; retained evidence is historical only");
+        try {
+          manifest = this.manifest(c);
+        } catch {
+          this.invalidateVerification(c, "unavailable", "Worker manifest unavailable");
+        }
+        if (c.reaped)
+          this.invalidateVerification(
+            c,
+            "interrupted",
+            "Worker reaped; retained evidence is historical only",
+          );
         this.currentVerification(c, manifest);
         let idleDecision: unknown;
-        if (manifest) { try {
-          const events = new TuiWorkerStore(c.directory).readState().events.filter(e => e.workerEpoch === manifest.workerEpoch);
-          const pending = events.filter(e => e.kind === "idle_decision_pending").at(-1);
-          if (pending && !events.some(e => (e.kind === "idle_decision_cancelled" || e.kind === "idle_decision_resolved") && (e.data as any)?.requestId === (pending.data as any)?.requestId))
-            idleDecision = { ...(pending.data as object), workerEpoch: manifest.workerEpoch };
-        } catch {} }
-        return { child: i + 1, child_id: c.childId, task_id: c.taskId,
-          status: c.state, attempt: c.attempt ?? 1, reaped: !!c.reaped, displayName: this.canonicalTitle(c), task: c.spec.task.slice(0, 500), error: c.error, observation_error: c.observationError,
-          cwd: c.spec.cwd, ...(c.spec.worktreeInfo ? { worktree: c.spec.worktreeInfo } : {}),
-          worktree_reap_policy: { enabled: c.spec.cleanupWorktreesOnReap === true, scope: "registered-harness-worktrees-only",
-            limitation: "External/unregistered worktrees are not inventoried or removed" },
-          report: c.report, task_outcome: c.lastOutcome, historical_verification: c.historicalVerification, verification: c.verification ?? { status: c.spec.verification?.length ? "interrupted" : "not-configured" }, accepted_delivery: c.acceptedDelivery === true, verification_bypasses: c.verificationBypasses ?? [], review: "not-configured", ...(idleDecision ? { idle_decision: idleDecision } : {}),
-          ...(manifest ? { runtime: publicTuiWorkerManifest(manifest) } : {}) };
-      }) };
+        if (manifest) {
+          try {
+            const events = new TuiWorkerStore(c.directory)
+              .readState()
+              .events.filter((e) => e.workerEpoch === manifest.workerEpoch);
+            const pending = events.filter((e) => e.kind === "idle_decision_pending").at(-1);
+            if (
+              pending &&
+              !events.some(
+                (e) =>
+                  (e.kind === "idle_decision_cancelled" || e.kind === "idle_decision_resolved") &&
+                  (e.data as any)?.requestId === (pending.data as any)?.requestId,
+              )
+            )
+              idleDecision = { ...(pending.data as object), workerEpoch: manifest.workerEpoch };
+          } catch {}
+        }
+        return {
+          child: i + 1,
+          child_id: c.childId,
+          task_id: c.taskId,
+          status: c.state,
+          attempt: c.attempt ?? 1,
+          reaped: !!c.reaped,
+          displayName: this.canonicalTitle(c),
+          task: c.spec.task.slice(0, 500),
+          error: c.error,
+          observation_error: c.observationError,
+          cwd: c.spec.cwd,
+          ...(c.spec.worktreeInfo ? { worktree: c.spec.worktreeInfo } : {}),
+          worktree_reap_policy: {
+            enabled: c.spec.cleanupWorktreesOnReap === true,
+            scope: "registered-harness-worktrees-only",
+            limitation: "External/unregistered worktrees are not inventoried or removed",
+          },
+          report: c.report,
+          task_outcome: c.lastOutcome,
+          historical_verification: c.historicalVerification,
+          verification: c.verification ?? {
+            status: c.spec.verification?.length ? "interrupted" : "not-configured",
+          },
+          accepted_delivery: c.acceptedDelivery === true,
+          verification_bypasses: c.verificationBypasses ?? [],
+          review: "not-configured",
+          ...(idleDecision ? { idle_decision: idleDecision } : {}),
+          ...(manifest ? { runtime: publicTuiWorkerManifest(manifest) } : {}),
+        };
+      }),
+    };
   }
   private text(g: Group, output = false): string {
     const snapshot = this.publicGroup(g);
     let text = `${g.mode} ${snapshot.status} (${g.background ? "background" : "foreground staged"})`;
     for (const [i, c] of g.children.entries()) {
       text += `\n${i + 1}. ${this.canonicalTitle(c)} ${c.state}${c.reaped ? " [reaped]" : ""}${c.error ? `: ${c.error}` : ""}${c.observationError ? ` (observation unavailable: ${c.observationError})` : ""}`;
-      if (c.spec.verification?.length) text += ` checks=${(c.verification as any)?.status ?? "unavailable"} accepted_delivery=${c.acceptedDelivery === true}`;
-      if (output && c.report) { try { text += `\n${reportText(c, readPrivateJson(c.report))}`; } catch {} }
+      if (c.spec.verification?.length)
+        text += ` checks=${(c.verification as any)?.status ?? "unavailable"} accepted_delivery=${c.acceptedDelivery === true}`;
+      if (output && c.report) {
+        try {
+          text += `\n${reportText(c, readPrivateJson(c.report))}`;
+        } catch {}
+      }
     }
     return text;
   }
   private retainedArtifact(c: Child, path: unknown, kind: "report" | "outcome"): any {
-    if (typeof path !== "string" || path !== join(c.directory, basename(path))
-      || !new RegExp(`^${kind}-[0-9]+-[a-f0-9]{16}\\.json$`).test(basename(path))) throw new Error("Worker artifact identity mismatch");
+    if (
+      typeof path !== "string" ||
+      path !== join(c.directory, basename(path)) ||
+      !new RegExp(`^${kind}-[0-9]+-[a-f0-9]{16}\\.json$`).test(basename(path))
+    )
+      throw new Error("Worker artifact identity mismatch");
     return readPrivateJson(path);
   }
   private async observe(g: Group, c: Child, observationOnly = false): Promise<void> {
     // Revoke cached acceptance BEFORE awaiting any observation. A disconnect,
     // non-ok response or missing manifest must never leave a prior pass current.
-    this.invalidateVerification(c, c.reaped ? "interrupted" : "unavailable", c.reaped ? "Worker reaped; evidence is historical" : "Fresh worker verification observation pending/unavailable");
+    this.invalidateVerification(
+      c,
+      c.reaped ? "interrupted" : "unavailable",
+      c.reaped
+        ? "Worker reaped; evidence is historical"
+        : "Fresh worker verification observation pending/unavailable",
+    );
     const observationTurn = this.verificationObservationTurns.get(c);
     // Retry even if the worker settled, died, or was reaped since observation.
-    if (!observationOnly && c.pendingActivitySequence !== undefined) this.notifyActivity(g, c, c.pendingActivitySequence);
+    if (!observationOnly && c.pendingActivitySequence !== undefined)
+      this.notifyActivity(g, c, c.pendingActivitySequence);
     if (c.reaped || c.state === "pending") return;
     let m: TuiWorkerManifest | undefined;
-    try { m = this.manifest(c); }
-    catch { this.invalidateVerification(c, "unavailable", "Worker manifest unavailable"); return; }
+    try {
+      m = this.manifest(c);
+    } catch {
+      this.invalidateVerification(c, "unavailable", "Worker manifest unavailable");
+      return;
+    }
     if (!m) {
-      if (c.state === "launching") { c.state = "failed"; c.error = "Interrupted uncommitted launch; no automatic replay"; }
+      if (c.state === "launching") {
+        c.state = "failed";
+        c.error = "Interrupted uncommitted launch; no automatic replay";
+      }
       return;
     }
     try {
       try {
-        const tombstone = readPrivateJson(new TuiWorkerStore(c.directory).path("reaped.json")) as any;
-        if (tombstone.workerEpoch !== m.workerEpoch || tombstone.paneId !== m.placement?.paneId) throw new Error("Reap tombstone identity mismatch");
+        const tombstone = readPrivateJson(
+          new TuiWorkerStore(c.directory).path("reaped.json"),
+        ) as any;
+        if (tombstone.workerEpoch !== m.workerEpoch || tombstone.paneId !== m.placement?.paneId)
+          throw new Error("Reap tombstone identity mismatch");
         c.reaped = true;
         // The report remains independently retained after pane cleanup.
         if (active(c)) {
@@ -550,78 +1124,170 @@ export class TuiNativeManager {
             const report = this.retainedArtifact(c, state.lastReport, "report");
             c.report = state.lastReport;
             c.error = typeof report.error === "string" ? report.error.slice(0, 2000) : undefined;
-            c.lastOutcome = state.lastOutcome ? this.retainedArtifact(c, state.lastOutcome, "outcome") : undefined;
+            c.lastOutcome = state.lastOutcome
+              ? this.retainedArtifact(c, state.lastOutcome, "outcome")
+              : undefined;
             if (c.spec.verification?.length) {
               c.verification = this.retainedVerification(g, c);
-              if (verificationFailedForDelivery(c)) c.error = `Runtime verification ${(c.verification as any)?.status}; accepted delivery blocked`;
+              if (verificationFailedForDelivery(c))
+                c.error = `Runtime verification ${(c.verification as any)?.status}; accepted delivery blocked`;
             }
-            c.state = c.error || report.assistant?.stopReason === "error" ? "failed"
-              : report.assistant?.stopReason === "aborted" || g.cancelled ? "cancelled"
-              : unfinishedAssignment(c) || c.spec.verification?.length && (c.verification as any)?.status === "checking" ? "waiting" : "completed";
+            c.state =
+              c.error || report.assistant?.stopReason === "error"
+                ? "failed"
+                : report.assistant?.stopReason === "aborted" || g.cancelled
+                  ? "cancelled"
+                  : unfinishedAssignment(c) ||
+                      (c.spec.verification?.length &&
+                        (c.verification as any)?.status === "checking")
+                    ? "waiting"
+                    : "completed";
+          } else {
+            c.state = "lost";
+            c.error = "Reaped worker has no retained settlement";
           }
-          else { c.state = "lost"; c.error = "Reaped worker has no retained settlement"; }
         }
         return;
-      } catch (error) { if ((error as NodeJS.ErrnoException).code !== "ENOENT") throw error; }
+      } catch (error) {
+        if ((error as NodeJS.ErrnoException).code !== "ENOENT") throw error;
+      }
       const result = await callTuiWorker(m, { operation: "status" }, { timeoutMs: 1000 });
-      if (!result.ok) { c.observationError = result.code; return; }
+      if (!result.ok) {
+        c.observationError = result.code;
+        return;
+      }
       c.observationError = undefined;
       c.error = undefined;
       const state = result.data as any;
-      if (state.workerEpoch !== m.workerEpoch || state.childId !== c.childId || state.taskId !== c.taskId
-        || state.attempt !== (c.attempt ?? 1)) throw new Error("Worker status identity mismatch");
-      c.lastOutcome = state.lastOutcome ? taskOutcome(this.retainedArtifact(c, state.lastOutcome, "outcome"), c.spec.acceptance ?? []) : undefined;
+      if (
+        state.workerEpoch !== m.workerEpoch ||
+        state.childId !== c.childId ||
+        state.taskId !== c.taskId ||
+        state.attempt !== (c.attempt ?? 1)
+      )
+        throw new Error("Worker status identity mismatch");
+      c.lastOutcome = state.lastOutcome
+        ? taskOutcome(
+            this.retainedArtifact(c, state.lastOutcome, "outcome"),
+            c.spec.acceptance ?? [],
+          )
+        : undefined;
       // Use this authenticated snapshot's current verdict before deciding
       // whether a delivered claim failed; a prior cached status may be stale.
       this.observeVerification(g, c, m, state, observationTurn);
-      c.needsAttention = !!(state.idleDecision?.workerEpoch === m.workerEpoch
-        || state.interactions?.some((interaction: any) => interaction.workerEpoch === m.workerEpoch));
-      if (!observationOnly && state.idleDecision?.requestId && state.idleDecision.workerEpoch === m.workerEpoch && state.idleDecision.model
-        && c.idleDecisionNotified !== state.idleDecision.requestId) {
+      c.needsAttention = !!(
+        state.idleDecision?.workerEpoch === m.workerEpoch ||
+        state.interactions?.some((interaction: any) => interaction.workerEpoch === m.workerEpoch)
+      );
+      if (
+        !observationOnly &&
+        state.idleDecision?.requestId &&
+        state.idleDecision.workerEpoch === m.workerEpoch &&
+        state.idleDecision.model &&
+        c.idleDecisionNotified !== state.idleDecision.requestId
+      ) {
         const data = state.idleDecision;
-        const update: QuietUpdate = { kind: "notification", id: `${g.id}:${c.childId}:idle:${data.requestId}`,
-          child_id: c.childId, displayName: this.canonicalTitle(c), admission_control: { kind: "idle-decision", request_id: data.requestId, worker_epoch: m.workerEpoch }, message: `Idle context warning for ${data.model}: idle ${data.idleMinutes}m, context ${data.contextPercent}%. Resolve with subagent operation=idle_decision child_id=${c.childId} request_id=${data.requestId} worker_epoch=${m.workerEpoch} choice=ignore|compact|cancel.`, requires_guidance: true, through_sequence: state.sequence };
+        const update: QuietUpdate = {
+          kind: "notification",
+          id: `${g.id}:${c.childId}:idle:${data.requestId}`,
+          child_id: c.childId,
+          displayName: this.canonicalTitle(c),
+          admission_control: {
+            kind: "idle-decision",
+            request_id: data.requestId,
+            worker_epoch: m.workerEpoch,
+          },
+          message: `Idle context warning for ${data.model}: idle ${data.idleMinutes}m, context ${data.contextPercent}%. Resolve with subagent operation=idle_decision child_id=${c.childId} request_id=${data.requestId} worker_epoch=${m.workerEpoch} choice=ignore|compact|cancel.`,
+          requires_guidance: true,
+          through_sequence: state.sequence,
+        };
         if (this.notify?.(update)) c.idleDecisionNotified = data.requestId;
       }
-      if (state.active) { c.state = "running"; c.runSequence = state.sequence; }
-      else if (state.lastReport) {
+      if (state.active) {
+        c.state = "running";
+        c.runSequence = state.sequence;
+      } else if (state.lastReport) {
         const report = this.retainedArtifact(c, state.lastReport, "report");
         c.report = state.lastReport;
-        c.requiresCompaction = Number.isFinite(report.contextTokens) && Number.isFinite(report.contextWindow) && report.contextTokens >= report.contextWindow * 0.8;
+        c.requiresCompaction =
+          Number.isFinite(report.contextTokens) &&
+          Number.isFinite(report.contextWindow) &&
+          report.contextTokens >= report.contextWindow * 0.8;
         // Pi settlement is an idle turn boundary, not necessarily task completion.
         // Tool-only outcomes are legitimate, but an unreported yield/wait must
         // not advance a chain, wake the parent as complete, or claim activity.
-        c.error = typeof report.error === "string" ? report.error.slice(0, 2000)
-          : report.assistant?.stopReason === "toolUse" && state.readyForPrompts === false
-            ? "Worker command authority unavailable" : undefined;
-        if (verificationFailedForDelivery(c)) c.error = `Runtime verification ${state.verification?.status ?? "unavailable"}; delivered claim is not accepted`;
-        c.state = c.error || report.assistant?.stopReason === "error" ? "failed"
-          : report.assistant?.stopReason === "aborted" || g.cancelled ? "cancelled"
-          : unfinishedAssignment(c) || c.spec.verification?.length && state.verification?.status === "checking"
-            || report.assistant?.stopReason === "toolUse" && !c.lastOutcome ? "waiting" : "completed";
+        c.error =
+          typeof report.error === "string"
+            ? report.error.slice(0, 2000)
+            : report.assistant?.stopReason === "toolUse" && state.readyForPrompts === false
+              ? "Worker command authority unavailable"
+              : undefined;
+        if (verificationFailedForDelivery(c))
+          c.error = `Runtime verification ${state.verification?.status ?? "unavailable"}; delivered claim is not accepted`;
+        c.state =
+          c.error || report.assistant?.stopReason === "error"
+            ? "failed"
+            : report.assistant?.stopReason === "aborted" || g.cancelled
+              ? "cancelled"
+              : unfinishedAssignment(c) ||
+                  (c.spec.verification?.length && state.verification?.status === "checking") ||
+                  (report.assistant?.stopReason === "toolUse" && !c.lastOutcome)
+                ? "waiting"
+                : "completed";
         // Settlement is reported through the replay cursor below, never a text injection.
       }
       if (!state.active && !g.cancelled && m.assignedGoal) {
-        if (state.assignedGoal?.entryId != null && state.assignedGoal.entryId !== m.assignedGoal.entryId) throw new Error("Managed Goal observation changed assignment");
+        if (
+          state.assignedGoal?.entryId != null &&
+          state.assignedGoal.entryId !== m.assignedGoal.entryId
+        )
+          throw new Error("Managed Goal observation changed assignment");
         if (state.assignedGoal?.status !== "complete") c.state = "waiting";
       }
       // Current-turn state is authoritative even after a replay gap. Only
       // newer events may supersede this snapshot (a human can act mid-poll).
-      if (!state.lastReport) { c.report = undefined; c.requiresCompaction = false; }
+      if (!state.lastReport) {
+        c.report = undefined;
+        c.requiresCompaction = false;
+      }
       if (observationOnly) return; // Ancestor observation never consumes/reroutes notifications or dispatches work.
       if (state.active) this.notifyActivity(g, c, state.sequence);
-      const events = await callTuiWorker(m, { operation: "events", afterSequence: c.notifiedSequence }, { timeoutMs: 1000 });
+      const events = await callTuiWorker(
+        m,
+        { operation: "events", afterSequence: c.notifiedSequence },
+        { timeoutMs: 1000 },
+      );
       if (events.ok) {
         for (const event of (events.data as any)?.events ?? []) {
           if (event.workerEpoch !== m.workerEpoch) continue;
           if (event.kind === "idle_decision_cancelled" || event.kind === "idle_decision_resolved") {
-            const update: QuietUpdate = { kind: "notification", id: `${g.id}:${c.childId}:idle-resolved:${event.data?.requestId}`,
-              child_id: c.childId, displayName: this.canonicalTitle(c), admission_control: { kind: "idle-decision-resolved", request_id: event.data?.requestId, worker_epoch: m.workerEpoch }, message: `Idle context decision request ${event.data?.requestId} ${event.kind === "idle_decision_resolved" ? "was resolved" : "was cancelled or expired"}.`, requires_guidance: false, through_sequence: event.sequence };
+            const update: QuietUpdate = {
+              kind: "notification",
+              id: `${g.id}:${c.childId}:idle-resolved:${event.data?.requestId}`,
+              child_id: c.childId,
+              displayName: this.canonicalTitle(c),
+              admission_control: {
+                kind: "idle-decision-resolved",
+                request_id: event.data?.requestId,
+                worker_epoch: m.workerEpoch,
+              },
+              message: `Idle context decision request ${event.data?.requestId} ${event.kind === "idle_decision_resolved" ? "was resolved" : "was cancelled or expired"}.`,
+              requires_guidance: false,
+              through_sequence: event.sequence,
+            };
             this.notify?.(update);
           }
           if (event.kind === "running" && event.sequence > state.sequence) {
-            c.state = "running"; c.runSequence = event.sequence; c.lastOutcome = undefined; c.report = undefined; c.requiresCompaction = false;
-            this.invalidateVerification(c, "interrupted", "New worker activity superseded verification observation");
+            c.state = "running";
+            c.runSequence = event.sequence;
+            c.lastOutcome = undefined;
+            c.report = undefined;
+            c.requiresCompaction = false;
+            this.invalidateVerification(
+              c,
+              "interrupted",
+              "New worker activity superseded verification observation",
+            );
             this.notifyActivity(g, c, event.sequence);
           }
           if (event.kind === "notification" || event.kind === "outcome") {
@@ -630,14 +1296,43 @@ export class TuiNativeManager {
               const data = readPrivateJson(artifact) as any;
               if (event.kind === "outcome" && event.sequence > state.sequence) {
                 c.lastOutcome = taskOutcome(data, c.spec.acceptance ?? []);
-                this.invalidateVerification(c, "interrupted", "New worker report superseded verification observation");
+                this.invalidateVerification(
+                  c,
+                  "interrupted",
+                  "New worker report superseded verification observation",
+                );
               }
-              if (event.kind === "outcome" && c.spec.verification?.length) { c.notifiedSequence = Math.max(c.notifiedSequence, event.sequence); continue; }
-              const update: QuietUpdate = event.kind === "outcome"
-                ? { kind: "subagent", id: `${g.id}:${c.childId}:${event.sequence}`, child_id: c.childId, displayName: this.canonicalTitle(c), state: data.state,
-                    outcomes: [{ child: g.children.indexOf(c) + 1, task_id: c.taskId, attempt: c.attempt ?? 1, state: data.state }], through_sequence: event.sequence }
-                : { kind: "notification", id: `${g.id}:${c.childId}:${event.sequence}`, child_id: c.childId,
-                    displayName: this.canonicalTitle(c), message: String(data.message ?? "").slice(0, 1000), requires_guidance: data.requires_guidance === true, through_sequence: event.sequence };
+              if (event.kind === "outcome" && c.spec.verification?.length) {
+                c.notifiedSequence = Math.max(c.notifiedSequence, event.sequence);
+                continue;
+              }
+              const update: QuietUpdate =
+                event.kind === "outcome"
+                  ? {
+                      kind: "subagent",
+                      id: `${g.id}:${c.childId}:${event.sequence}`,
+                      child_id: c.childId,
+                      displayName: this.canonicalTitle(c),
+                      state: data.state,
+                      outcomes: [
+                        {
+                          child: g.children.indexOf(c) + 1,
+                          task_id: c.taskId,
+                          attempt: c.attempt ?? 1,
+                          state: data.state,
+                        },
+                      ],
+                      through_sequence: event.sequence,
+                    }
+                  : {
+                      kind: "notification",
+                      id: `${g.id}:${c.childId}:${event.sequence}`,
+                      child_id: c.childId,
+                      displayName: this.canonicalTitle(c),
+                      message: String(data.message ?? "").slice(0, 1000),
+                      requires_guidance: data.requires_guidance === true,
+                      through_sequence: event.sequence,
+                    };
               if (this.notify && !this.notify(update)) break;
             }
           }
@@ -649,19 +1344,34 @@ export class TuiNativeManager {
       // Recover committed launch after parent death before the initial receipt.
       if (!c.started && state.readyForPrompts && !g.cancelled) await this.startPrompt(g, c, m);
     } catch (error) {
-      this.invalidateVerification(c, "unavailable", "Fresh worker verification observation failed; retained evidence is historical");
+      this.invalidateVerification(
+        c,
+        "unavailable",
+        "Fresh worker verification observation failed; retained evidence is historical",
+      );
       c.observationError = `Worker unavailable: ${String(error).slice(0, 300)}`;
       try {
-        if ((await this.tmux.inspect(m)).dead && active(c)) { c.state = "lost"; c.error = "Pi exited before reporting settlement"; }
-      } catch { /* Retain the causal error and the separate observation failure. */ }
+        if ((await this.tmux.inspect(m)).dead && active(c)) {
+          c.state = "lost";
+          c.error = "Pi exited before reporting settlement";
+        }
+      } catch {
+        /* Retain the causal error and the separate observation failure. */
+      }
       // Parent/observer failure alone never marks a live TUI lost.
     }
   }
   private notifyActivity(g: Group, c: Child, sequence: number): void {
     // group/child IDs identify this worker attempt; task IDs may span attempts.
     sequence = Math.max(sequence, c.pendingActivitySequence ?? 0);
-    const accepted = this.notify?.({ kind: "subagent", id: `${g.id}:${c.childId}:activity`, job_id: g.id,
-      child_id: c.childId, activity: true, through_sequence: sequence });
+    const accepted = this.notify?.({
+      kind: "subagent",
+      id: `${g.id}:${c.childId}:activity`,
+      job_id: g.id,
+      child_id: c.childId,
+      activity: true,
+      through_sequence: sequence,
+    });
     if (!accepted) {
       // Quiet-state holds volatile suppression immediately. Keep a second,
       // durable retry obligation so a process restart cannot lose it.
@@ -673,28 +1383,57 @@ export class TuiNativeManager {
     }
   }
   private async startPrompt(g: Group, c: Child, m: TuiWorkerManifest): Promise<void> {
-    if (this.closed || this.reapReserved || g.cancelled || !this.ready() || (g.launchMode === "guard-only" ? this.disposition() !== "guard-only" : this.disposition() !== "native")) return;
+    if (
+      this.closed ||
+      this.reapReserved ||
+      g.cancelled ||
+      !this.ready() ||
+      (g.launchMode === "guard-only"
+        ? this.disposition() !== "guard-only"
+        : this.disposition() !== "native")
+    )
+      return;
     if (g.launchMode === "guard-only") {
       await this.sendMode(g, c, m);
     }
     if (c.spec.assignedGoal) {
       // The same managed worker owns the task. Its authenticated Goal engine,
       // not an additional generic task prompt, performs the initial dispatch.
-      c.started = true; c.state = "waiting"; this.save(g); return;
+      c.started = true;
+      c.state = "waiting";
+      this.save(g);
+      return;
     }
     const index = g.children.indexOf(c);
-    const previous = index > 0 && g.children[index - 1].report ? messageText((readPrivateJson(g.children[index - 1].report!) as any).assistant) : "";
+    const previous =
+      index > 0 && g.children[index - 1].report
+        ? messageText((readPrivateJson(g.children[index - 1].report!) as any).assistant)
+        : "";
     if (c.compactBeforePrompt) {
-      const compacted = await callTuiWorker(m, { operation: "compact" }, { requestId: `resume-compact:${c.childId}`, timeoutMs: 300_000 });
-      if (!compacted.ok) throw new Error(`Resume compaction not confirmed: ${compacted.code}: ${compacted.message}`);
+      const compacted = await callTuiWorker(
+        m,
+        { operation: "compact" },
+        { requestId: `resume-compact:${c.childId}`, timeoutMs: 300_000 },
+      );
+      if (!compacted.ok)
+        throw new Error(`Resume compaction not confirmed: ${compacted.code}: ${compacted.message}`);
     }
-    const task = c.resumeSessionFile ? `Continue the retained session, not a new assignment. Latest parent instruction: ${c.resumeMessage ?? "Continue from the saved checkpoint."}`
-      : g.mode === "chain" ? c.spec.task.replaceAll("{previous}", previous) : c.spec.task;
+    const task = c.resumeSessionFile
+      ? `Continue the retained session, not a new assignment. Latest parent instruction: ${c.resumeMessage ?? "Continue from the saved checkpoint."}`
+      : g.mode === "chain"
+        ? c.spec.task.replaceAll("{previous}", previous)
+        : c.spec.task;
     const prompt = `Task: ${task}\n\nAcceptance criteria: ${JSON.stringify(c.spec.acceptance ?? [])}\nReport useful findings with notify_parent and your outcome with task_outcome. A delivered outcome runs configured verification before completion; failures are reported back for correction. You may call verify to start configured checks explicitly; it does not itself claim delivery. The parent handles pane cleanup.`;
-    const accepted = await callTuiWorker(m, { operation: "prompt", mode: "steer", message: prompt }, { requestId: `initial:${c.childId}` });
+    const accepted = await callTuiWorker(
+      m,
+      { operation: "prompt", mode: "steer", message: prompt },
+      { requestId: `initial:${c.childId}` },
+    );
     if (!accepted.ok) throw new Error(`Initial prompt not confirmed: ${accepted.code}`);
     this.notifyActivity(g, c, accepted.sequence);
-    c.started = true; c.state = "running"; this.save(g);
+    c.started = true;
+    c.state = "running";
+    this.save(g);
   }
   async refresh(owner: string): Promise<void> {
     // A timer tick (or an impatient caller) joins the in-flight pass instead of
@@ -705,14 +1444,28 @@ export class TuiNativeManager {
       for (const g of this.groups.values()) {
         if (g.owner !== owner) continue;
         if (g.reaping) continue; // Read-only surfaces use the retained in-flight snapshot; do not race worker cleanup.
-        if (!g.background && g.parentOwnerToken !== this.processToken(process.pid) && !g.cancelled) await this.cancelGroup(g);
-        if (!this.reapReserved && g.children.some(c => c.state === "pending") && !g.cancelled) {
+        if (!g.background && g.parentOwnerToken !== this.processToken(process.pid) && !g.cancelled)
+          await this.cancelGroup(g);
+        if (!this.reapReserved && g.children.some((c) => c.state === "pending") && !g.cancelled) {
           const caller = await this.tmux.resolveCaller();
-          if (caller.socketPath === g.caller.socketPath && caller.serverEpoch === g.caller.serverEpoch) g.caller = caller;
+          if (
+            caller.socketPath === g.caller.socketPath &&
+            caller.serverEpoch === g.caller.serverEpoch
+          )
+            g.caller = caller;
         }
         for (const c of g.children) await this.observe(g, c);
-        if (!this.reapReserved && !g.cancelled && this.ready() && (g.launchMode === "guard-only" ? this.disposition() === "guard-only" : this.disposition() === "native")) {
-          let running = g.children.filter(c => c.state === "running" || c.state === "launching" || c.state === "waiting").length;
+        if (
+          !this.reapReserved &&
+          !g.cancelled &&
+          this.ready() &&
+          (g.launchMode === "guard-only"
+            ? this.disposition() === "guard-only"
+            : this.disposition() === "native")
+        ) {
+          let running = g.children.filter(
+            (c) => c.state === "running" || c.state === "launching" || c.state === "waiting",
+          ).length;
           for (const [index, c] of g.children.entries()) {
             if (this.closed || this.reapReserved || c.state !== "pending" || running >= 4) continue;
             if (g.mode === "chain" && index > 0) {
@@ -720,36 +1473,84 @@ export class TuiNativeManager {
               if (active(prior)) break;
               if (prior.spec.verification?.length) {
                 let priorManifest: TuiWorkerManifest | undefined;
-                try { priorManifest = this.manifest(prior); } catch { this.invalidateVerification(prior, "unavailable", "Prior worker manifest unavailable"); }
+                try {
+                  priorManifest = this.manifest(prior);
+                } catch {
+                  this.invalidateVerification(
+                    prior,
+                    "unavailable",
+                    "Prior worker manifest unavailable",
+                  );
+                }
                 this.currentVerification(prior, priorManifest);
               }
-              if (prior.state !== "completed" || prior.spec.verification?.length && (prior.verification as any)?.status !== "passed") { c.state = "skipped"; continue; }
+              if (
+                prior.state !== "completed" ||
+                (prior.spec.verification?.length &&
+                  (prior.verification as any)?.status !== "passed")
+              ) {
+                c.state = "skipped";
+                continue;
+              }
             }
-            c.state = "launching"; this.save(g);
+            c.state = "launching";
+            this.save(g);
             try {
-              const existing = g.children.map(child => this.manifest(child)).find(Boolean);
+              const existing = g.children.map((child) => this.manifest(child)).find(Boolean);
               const contract = tuiWorkerLaunchContract(this.disposition());
-              if (contract.launchMode !== g.launchMode) throw new Error("Current launcher does not match retained group authority");
+              if (contract.launchMode !== g.launchMode)
+                throw new Error("Current launcher does not match retained group authority");
               g.launcher = contract.launcher; // disk executable paths never authorize new launches
               const roleModel = this.resolveRoleModel(c.spec.model);
-              const manifest = await this.tmux.launch({ directory: c.directory, ownerSessionId: owner, taskId: c.taskId,
-                groupId: g.id, childId: c.childId, attempt: c.attempt ?? 1, caller: g.caller, cwd: c.spec.cwd,
-                activityCwd: c.spec.worktreeInfo?.path ?? c.spec.cwd, worktreeRoot: c.spec.worktreeInfo?.path,
-                foreground: !g.background, groupWindowId: existing?.placement?.windowId,
-                windowName: g.windowName ?? subagentTmuxName(g.children[0].spec.task, g.children[0].spec.name),
+              const manifest = await this.tmux.launch({
+                directory: c.directory,
+                ownerSessionId: owner,
+                taskId: c.taskId,
+                groupId: g.id,
+                childId: c.childId,
+                attempt: c.attempt ?? 1,
+                caller: g.caller,
+                cwd: c.spec.cwd,
+                activityCwd: c.spec.worktreeInfo?.path ?? c.spec.cwd,
+                worktreeRoot: c.spec.worktreeInfo?.path,
+                foreground: !g.background,
+                groupWindowId: existing?.placement?.windowId,
+                windowName:
+                  g.windowName ??
+                  subagentTmuxName(g.children[0].spec.task, g.children[0].spec.name),
                 paneTitle: c.spec.tmuxAlias ?? subagentTmuxName(c.spec.task, c.spec.name),
-                displayName: c.spec.displayName ?? canonicalSubagentName(c.spec.task, undefined, c.spec.name),
+                displayName:
+                  c.spec.displayName ?? canonicalSubagentName(c.spec.task, undefined, c.spec.name),
                 nameWindow: g.renameWindowWithFirstChild === true && c === g.children[0],
-                parentDisposition: this.disposition(), launcher: g.launcher, launchMode: g.launchMode,
-                model: roleModel, routingEnvironment: this.routingEnvironment(roleModel), tools: c.spec.tools, systemPrompt: c.spec.systemPrompt, acceptance: c.spec.acceptance, verification: c.spec.verification, cleanupWorktreesOnReap: c.spec.cleanupWorktreesOnReap === true,
-                automaticWorktrees: c.spec.automaticWorktrees === true, worktreeIdentity: c.spec.worktreeInfo?.identity, resumeSessionFile: c.resumeSessionFile,
-                operatorCapabilityHash: createHash("sha256").update(c.operatorCapability).digest("hex"), assignedGoal: c.spec.assignedGoal });
-              if (!manifest.activityCwd) throw new Error("Worker launch-time checkout identity unavailable");
-              c.activityCwd = manifest.activityCwd; this.save(g);
+                parentDisposition: this.disposition(),
+                launcher: g.launcher,
+                launchMode: g.launchMode,
+                model: roleModel,
+                routingEnvironment: this.routingEnvironment(roleModel),
+                tools: c.spec.tools,
+                systemPrompt: c.spec.systemPrompt,
+                acceptance: c.spec.acceptance,
+                verification: c.spec.verification,
+                cleanupWorktreesOnReap: c.spec.cleanupWorktreesOnReap === true,
+                automaticWorktrees: c.spec.automaticWorktrees === true,
+                worktreeIdentity: c.spec.worktreeInfo?.identity,
+                resumeSessionFile: c.resumeSessionFile,
+                operatorCapabilityHash: createHash("sha256")
+                  .update(c.operatorCapability)
+                  .digest("hex"),
+                assignedGoal: c.spec.assignedGoal,
+              });
+              if (!manifest.activityCwd)
+                throw new Error("Worker launch-time checkout identity unavailable");
+              c.activityCwd = manifest.activityCwd;
+              this.save(g);
               await this.tmux.waitReady(manifest);
               await this.startPrompt(g, c, manifest);
               running++;
-            } catch (error) { c.state = "failed"; c.error = String(error).slice(0, 1000); }
+            } catch (error) {
+              c.state = "failed";
+              c.error = String(error).slice(0, 1000);
+            }
             this.save(g);
             if (g.mode === "chain") break;
           }
@@ -760,13 +1561,25 @@ export class TuiNativeManager {
       await this.observeDescendants(owner);
     });
     this.refreshFlight = flight;
-    try { await flight; } finally { if (this.refreshFlight === flight) this.refreshFlight = undefined; }
+    try {
+      await flight;
+    } finally {
+      if (this.refreshFlight === flight) this.refreshFlight = undefined;
+    }
   }
   private notifyTerminal(g: Group, c: Child): void {
     if (active(c) || c.reaped) return;
     if (c.spec?.verification?.length) {
       let manifest: TuiWorkerManifest | undefined;
-      try { manifest = this.manifest(c); } catch { this.invalidateVerification(c, "unavailable", "Worker manifest unavailable at terminal notification"); }
+      try {
+        manifest = this.manifest(c);
+      } catch {
+        this.invalidateVerification(
+          c,
+          "unavailable",
+          "Worker manifest unavailable at terminal notification",
+        );
+      }
       this.currentVerification(c, manifest);
     }
     const notificationState = verificationFailedForDelivery(c) ? "failed" : c.state;
@@ -775,105 +1588,314 @@ export class TuiNativeManager {
     // Foreground callers normally receive their result directly. A guidance
     // yield returned early, so notify completion without changing pane/lifetime
     // ownership or pretending this was an explicit background promotion.
-    if (!g.background && !g.guidanceYielded) { c.terminalNotification = token; return; }
+    if (!g.background && !g.guidanceYielded) {
+      c.terminalNotification = token;
+      return;
+    }
     const identity = createHash("sha256").update(token).digest("hex").slice(0, 24);
-    if (this.notify?.({ kind: "subagent", id: `${g.id}:${c.childId}:terminal:${identity}`,
-      job_id: g.id, child_id: c.childId, displayName: this.canonicalTitle(c), state: notificationState, completion: true,
-      through_sequence: Number(c.report?.match(/report-(\d+)-[a-f0-9]{16}\.json$/)?.[1]) || c.runSequence || 0 })) c.terminalNotification = token;
+    if (
+      this.notify?.({
+        kind: "subagent",
+        id: `${g.id}:${c.childId}:terminal:${identity}`,
+        job_id: g.id,
+        child_id: c.childId,
+        displayName: this.canonicalTitle(c),
+        state: notificationState,
+        completion: true,
+        through_sequence:
+          Number(c.report?.match(/report-(\d+)-[a-f0-9]{16}\.json$/)?.[1]) || c.runSequence || 0,
+      })
+    )
+      c.terminalNotification = token;
   }
-  async launch(params: any, owner: string, cwd: string, signal?: AbortSignal, update?: (value: any) => void,
-    resume?: { child: Child; sessionFile: string; compact: boolean; message?: string }, assignedGoal?: ManagedGoalAssignment) {
+  async launch(
+    params: any,
+    owner: string,
+    cwd: string,
+    signal?: AbortSignal,
+    update?: (value: any) => void,
+    resume?: { child: Child; sessionFile: string; compact: boolean; message?: string },
+    assignedGoal?: ManagedGoalAssignment,
+  ) {
     if (assignedGoal) validateManagedGoalAssignment(assignedGoal);
-    const forms = [typeof params.task === "string" && params.task.trim(), Array.isArray(params.tasks) && params.tasks.length, Array.isArray(params.chain) && params.chain.length].filter(Boolean);
+    const forms = [
+      typeof params.task === "string" && params.task.trim(),
+      Array.isArray(params.tasks) && params.tasks.length,
+      Array.isArray(params.chain) && params.chain.length,
+    ].filter(Boolean);
     if (forms.length !== 1) throw new Error("Provide exactly one task/tasks/chain form");
     const specs: Spec[] = (params.tasks ?? params.chain ?? [params]).map((s: any) => {
-      if (typeof s.task !== "string" || !s.task.trim() || Buffer.byteLength(s.task) > 48 * 1024) throw new Error("Invalid bounded subagent task");
-      if (s.systemPrompt !== undefined && (typeof s.systemPrompt !== "string" || Buffer.byteLength(s.systemPrompt) > 64 * 1024)) throw new Error("Invalid system prompt");
-      if (s.model !== undefined && (typeof s.model !== "string" || Buffer.byteLength(s.model) > 512)) throw new Error("Invalid model");
-      if (s.tools !== undefined && (!Array.isArray(s.tools) || s.tools.length > 64 || s.tools.some((tool: any) => typeof tool !== "string" || !/^[a-zA-Z0-9_-]{1,128}$/.test(tool)))) throw new Error("Invalid tool selection");
-      return { ...(assignedGoal ? { assignedGoal } : {}), name: validateSubagentName(s.name), displayName: canonicalSubagentName(s.task, s.displayName, s.name), task: s.task, cwd: resolve(s.cwd ?? cwd), model: s.model, tools: s.tools, systemPrompt: s.systemPrompt, acceptance: validateAcceptance(s.acceptance), ...(s.verification !== undefined ? { verification: validateVerification(s.verification) } : {}), cleanupWorktreesOnReap: s.cleanupWorktreesOnReap === true, automaticWorktrees: s.automaticWorktrees === true,
-        worktree: worktreeOption(s.worktree), ...(resume?.child.spec.worktreeInfo ? { worktreeInfo: resume.child.spec.worktreeInfo } : {}) };
+      if (typeof s.task !== "string" || !s.task.trim() || Buffer.byteLength(s.task) > 48 * 1024)
+        throw new Error("Invalid bounded subagent task");
+      if (
+        s.systemPrompt !== undefined &&
+        (typeof s.systemPrompt !== "string" || Buffer.byteLength(s.systemPrompt) > 64 * 1024)
+      )
+        throw new Error("Invalid system prompt");
+      if (
+        s.model !== undefined &&
+        (typeof s.model !== "string" || Buffer.byteLength(s.model) > 512)
+      )
+        throw new Error("Invalid model");
+      if (
+        s.tools !== undefined &&
+        (!Array.isArray(s.tools) ||
+          s.tools.length > 64 ||
+          s.tools.some(
+            (tool: any) => typeof tool !== "string" || !/^[a-zA-Z0-9_-]{1,128}$/.test(tool),
+          ))
+      )
+        throw new Error("Invalid tool selection");
+      return {
+        ...(assignedGoal ? { assignedGoal } : {}),
+        name: validateSubagentName(s.name),
+        displayName: canonicalSubagentName(s.task, s.displayName, s.name),
+        task: s.task,
+        cwd: resolve(s.cwd ?? cwd),
+        model: s.model,
+        tools: s.tools,
+        systemPrompt: s.systemPrompt,
+        acceptance: validateAcceptance(s.acceptance),
+        ...(s.verification !== undefined
+          ? { verification: validateVerification(s.verification) }
+          : {}),
+        cleanupWorktreesOnReap: s.cleanupWorktreesOnReap === true,
+        automaticWorktrees: s.automaticWorktrees === true,
+        worktree: worktreeOption(s.worktree),
+        ...(resume?.child.spec.worktreeInfo
+          ? { worktreeInfo: resume.child.spec.worktreeInfo }
+          : {}),
+      };
     });
     if (specs.length > 8) throw new Error("At most eight subagent children are allowed");
-    if (signal?.aborted || this.closed || this.reapReserved) throw new Error("Subagent launch cancelled or cleanup reserved");
-    if (!this.ready()) throw new Error("Parent authority is not active; refusing native TUI launch");
+    if (signal?.aborted || this.closed || this.reapReserved)
+      throw new Error("Subagent launch cancelled or cleanup reserved");
+    if (!this.ready())
+      throw new Error("Parent authority is not active; refusing native TUI launch");
     const contract = tuiWorkerLaunchContract(this.disposition());
     const enabled = contract.launchMode === "guard-only" ? this.liveOperatorMode(owner) : true;
     if (typeof enabled !== "boolean") throw new Error("Parent operator authority unavailable");
     const groupId = id("subagent-job");
-    const g: Group = { renameWindowWithFirstChild: specs.length === 1 || params.name === undefined && params.displayName === undefined,
-      windowName: subagentTmuxName(specs[0].task, validateSubagentName(params.name) ?? specs[0].name), version: 1, id: groupId, owner, createdAt: new Date().toISOString(), mode: params.chain ? "chain" : params.tasks ? "parallel" : "single",
-      background: params.background === true, cancelled: false, parentOwnerToken: this.processToken(process.pid)!, operatorEnabled: enabled, ...contract,
-      caller: await this.tmux.resolveCaller(), children: specs.map(spec => ({ childId: id("subagent-child"), taskId: resume?.child.taskId ?? id("subagent-task"), attempt: resume ? (resume.child.attempt ?? 1) + 1 : 1,
-        ...(resume ? { resumeSessionFile: resume.sessionFile, compactBeforePrompt: resume.compact, resumeMessage: resume.message } : {}),
-        directory: join(this.root, "workers", randomBytes(12).toString("hex")), spec, state: "pending", operatorCapability: randomBytes(32).toString("hex"), started: false, notifiedSequence: 0, terminalNotification: '' })) };
+    const g: Group = {
+      renameWindowWithFirstChild:
+        specs.length === 1 || (params.name === undefined && params.displayName === undefined),
+      windowName: subagentTmuxName(
+        specs[0].task,
+        validateSubagentName(params.name) ?? specs[0].name,
+      ),
+      version: 1,
+      id: groupId,
+      owner,
+      createdAt: new Date().toISOString(),
+      mode: params.chain ? "chain" : params.tasks ? "parallel" : "single",
+      background: params.background === true,
+      cancelled: false,
+      parentOwnerToken: this.processToken(process.pid)!,
+      operatorEnabled: enabled,
+      ...contract,
+      caller: await this.tmux.resolveCaller(),
+      children: specs.map((spec) => ({
+        childId: id("subagent-child"),
+        taskId: resume?.child.taskId ?? id("subagent-task"),
+        attempt: resume ? (resume.child.attempt ?? 1) + 1 : 1,
+        ...(resume
+          ? {
+              resumeSessionFile: resume.sessionFile,
+              compactBeforePrompt: resume.compact,
+              resumeMessage: resume.message,
+            }
+          : {}),
+        directory: join(this.root, "workers", randomBytes(12).toString("hex")),
+        spec,
+        state: "pending",
+        operatorCapability: randomBytes(32).toString("hex"),
+        started: false,
+        notifiedSequence: 0,
+        terminalNotification: "",
+      })),
+    };
     await this.serial(async () => {
-      if (signal?.aborted || this.closed || this.reapReserved) throw new Error("Launch cancelled before commit");
-      if ([...this.groups.values()].filter(group => group.owner === owner && group.children.some(active)).length >= this.groupLimit) throw new Error(`Subagent concurrency limit reached (${this.groupLimit})`);
-      const occupiedAliases = [...this.groups.values()].flatMap(group => group.children.map(child => child.spec.tmuxAlias).filter((alias): alias is string => !!alias));
+      if (signal?.aborted || this.closed || this.reapReserved)
+        throw new Error("Launch cancelled before commit");
+      if (
+        [...this.groups.values()].filter(
+          (group) => group.owner === owner && group.children.some(active),
+        ).length >= this.groupLimit
+      )
+        throw new Error(`Subagent concurrency limit reached (${this.groupLimit})`);
+      const occupiedAliases = [...this.groups.values()].flatMap((group) =>
+        group.children
+          .map((child) => child.spec.tmuxAlias)
+          .filter((alias): alias is string => !!alias),
+      );
       for (const child of g.children) {
         child.spec.tmuxAlias = subagentTmuxAlias(child.spec.displayName!, occupiedAliases);
         occupiedAliases.push(child.spec.tmuxAlias);
       }
-      const groupName = params.displayName !== undefined || params.name !== undefined
-        ? canonicalSubagentName(specs[0].task, params.displayName, params.name) : specs[0].displayName!;
-      g.windowName = groupName === specs[0].displayName ? specs[0].tmuxAlias
-        : subagentTmuxAlias(groupName, [...this.groups.values()].map(group => group.windowName).filter((name): name is string => !!name));
+      const groupName =
+        params.displayName !== undefined || params.name !== undefined
+          ? canonicalSubagentName(specs[0].task, params.displayName, params.name)
+          : specs[0].displayName!;
+      g.windowName =
+        groupName === specs[0].displayName
+          ? specs[0].tmuxAlias
+          : subagentTmuxAlias(
+              groupName,
+              [...this.groups.values()]
+                .map((group) => group.windowName)
+                .filter((name): name is string => !!name),
+            );
       try {
-        await provisionWorktrees(g.children, owner, signal, () => this.owner === owner && !this.closed && !this.reapReserved && this.ready(), !!resume, workerWorktreeContext(owner), resume?.child.childId, async (path, supervisors) => {
-          if (await this.worktreeReuseActivity(path, supervisors)) return true;
-          return new HeadlessForegroundManager(this.root, this.disposition, () => false, this.groupLimit).worktreeReuseActivity(path, supervisors);
-        });
-        if (signal?.aborted || this.closed || this.reapReserved || this.owner !== owner) throw new Error("Worktree launch context changed");
-        this.groups.set(g.id, g); this.save(g);
+        await provisionWorktrees(
+          g.children,
+          owner,
+          signal,
+          () => this.owner === owner && !this.closed && !this.reapReserved && this.ready(),
+          !!resume,
+          workerWorktreeContext(owner),
+          resume?.child.childId,
+          async (path, supervisors) => {
+            if (await this.worktreeReuseActivity(path, supervisors)) return true;
+            return new HeadlessForegroundManager(
+              this.root,
+              this.disposition,
+              () => false,
+              this.groupLimit,
+            ).worktreeReuseActivity(path, supervisors);
+          },
+        );
+        if (signal?.aborted || this.closed || this.reapReserved || this.owner !== owner)
+          throw new Error("Worktree launch context changed");
+        this.groups.set(g.id, g);
+        this.save(g);
       } catch (error) {
         this.groups.delete(g.id);
-        for (const child of g.children) if (child.spec.worktree) await releaseWorktree(owner, child.taskId, child.childId);
+        for (const child of g.children)
+          if (child.spec.worktree) await releaseWorktree(owner, child.taskId, child.childId);
         throw error;
       }
     });
     void this.refresh(owner).catch(() => undefined);
-    if (g.background) return response(this.text(g), { operation: "start", group: this.publicGroup(g), job_id: g.id });
+    if (g.background)
+      return response(this.text(g), {
+        operation: "start",
+        group: this.publicGroup(g),
+        job_id: g.id,
+      });
     this.foregroundWaits.add(g.id);
-    const abortForeground = () => { if (!g.background && !this.closed) { g.cancelled = true; this.save(g); void this.serial(() => this.cancelGroup(g)).catch(() => undefined); } };
+    const abortForeground = () => {
+      if (!g.background && !this.closed) {
+        g.cancelled = true;
+        this.save(g);
+        void this.serial(() => this.cancelGroup(g)).catch(() => undefined);
+      }
+    };
     signal?.addEventListener("abort", abortForeground, { once: true });
     if (signal?.aborted) abortForeground();
     try {
       while (!g.background && g.children.some(active)) {
-        if (pendingGuidance(owner, g.children.map(child => child.childId))) {
-          g.guidanceYielded = true; this.save(g);
-          return response(`${this.text(g)}\nCoordinator guidance is waiting; use guidance list. Workers remain live.`, { operation: "start", job_id: g.id, group: this.publicGroup(g), guidance_waiting: true });
+        if (
+          pendingGuidance(
+            owner,
+            g.children.map((child) => child.childId),
+          )
+        ) {
+          g.guidanceYielded = true;
+          this.save(g);
+          return response(
+            `${this.text(g)}\nCoordinator guidance is waiting; use guidance list. Workers remain live.`,
+            {
+              operation: "start",
+              job_id: g.id,
+              group: this.publicGroup(g),
+              guidance_waiting: true,
+            },
+          );
         }
         if (this.closed) throw new Error("Foreground subagent controller closed");
-        if (signal?.aborted) { await this.serial(() => this.cancelGroup(g)); throw new Error("Foreground subagent cancelled"); }
-        try { update?.(response(this.text(g), { group: this.publicGroup(g), job_id: g.id })); } catch { /* Rendering cannot abandon a live foreground execution. */ }
+        if (signal?.aborted) {
+          await this.serial(() => this.cancelGroup(g));
+          throw new Error("Foreground subagent cancelled");
+        }
+        try {
+          update?.(response(this.text(g), { group: this.publicGroup(g), job_id: g.id }));
+        } catch {
+          /* Rendering cannot abandon a live foreground execution. */
+        }
         await pause(200);
       }
-      return response(this.text(g, !g.background), { operation: g.background ? "start" : "result", job_id: g.id, group: this.publicGroup(g),
-        failed: !g.background && g.children.some(child => ["failed", "lost"].includes(child.state) || verificationFailedForDelivery(child)) });
-    } finally { signal?.removeEventListener("abort", abortForeground); this.foregroundWaits.delete(g.id); }
+      return response(this.text(g, !g.background), {
+        operation: g.background ? "start" : "result",
+        job_id: g.id,
+        group: this.publicGroup(g),
+        failed:
+          !g.background &&
+          g.children.some(
+            (child) =>
+              ["failed", "lost"].includes(child.state) || verificationFailedForDelivery(child),
+          ),
+      });
+    } finally {
+      signal?.removeEventListener("abort", abortForeground);
+      this.foregroundWaits.delete(g.id);
+    }
   }
-  ownsGoalGroup(owner: string, child: DelegatedGoalChild) { return !!this.owned(owner, child.jobId); }
+  ownsGoalGroup(owner: string, child: DelegatedGoalChild) {
+    return !!this.owned(owner, child.jobId);
+  }
   goalDetails(owner: string, child: DelegatedGoalChild, entryId: string) {
     const { c, m } = this.goalManifest(owner, child, entryId, true);
-    return { spec: structuredClone(c.spec), sessionFile: m.sessionFile, ownerSessionId: owner, taskId: c.taskId, childId: c.childId, attempt: c.attempt, reaped: c.reaped === true };
+    return {
+      spec: structuredClone(c.spec),
+      sessionFile: m.sessionFile,
+      ownerSessionId: owner,
+      taskId: c.taskId,
+      childId: c.childId,
+      attempt: c.attempt,
+      reaped: c.reaped === true,
+    };
   }
-  private goalManifest(owner: string, child: DelegatedGoalChild, entryId: string, retained = false) {
+  private goalManifest(
+    owner: string,
+    child: DelegatedGoalChild,
+    entryId: string,
+    retained = false,
+  ) {
     if (this.closed || this.owner !== owner) throw new Error("Managed Goal owner context changed");
-    const g = this.owned(owner, child.jobId), c = g?.children.find(c => c.childId === child.childId);
-    if (!g || !c || c.taskId !== child.taskId || c.attempt !== child.attempt || c.reaped && !retained) throw new Error("Managed Goal task/attempt changed");
-    if (this.byChild(owner, child.taskId)?.child !== c) throw new Error("Managed Goal has a successor attempt");
+    const g = this.owned(owner, child.jobId),
+      c = g?.children.find((c) => c.childId === child.childId);
+    if (
+      !g ||
+      !c ||
+      c.taskId !== child.taskId ||
+      c.attempt !== child.attempt ||
+      (c.reaped && !retained)
+    )
+      throw new Error("Managed Goal task/attempt changed");
+    if (this.byChild(owner, child.taskId)?.child !== c)
+      throw new Error("Managed Goal has a successor attempt");
     const m = this.manifest(c);
-    if (!m?.assignedGoal || m.assignedGoal.entryId !== entryId) throw new Error("Managed Goal assignment changed");
+    if (!m?.assignedGoal || m.assignedGoal.entryId !== entryId)
+      throw new Error("Managed Goal assignment changed");
     return { g, c, m };
   }
   async goalIsLive(owner: string, child: DelegatedGoalChild, entryId: string) {
     const { c, m } = this.goalManifest(owner, child, entryId, true);
     return !c.reaped && !(await this.tmux.inspect(m)).dead;
   }
-  async goalRequest(owner: string, child: DelegatedGoalChild, entryId: string, request: Record<string, unknown>): Promise<ChildGoalSnapshot> {
-    const { m } = this.goalManifest(owner, child, entryId), binding = managedGoalBinding(m);
-    return await requestGoalWorker(binding.path, { token: binding.token, identity: binding.identity, request }) as ChildGoalSnapshot;
+  async goalRequest(
+    owner: string,
+    child: DelegatedGoalChild,
+    entryId: string,
+    request: Record<string, unknown>,
+  ): Promise<ChildGoalSnapshot> {
+    const { m } = this.goalManifest(owner, child, entryId),
+      binding = managedGoalBinding(m);
+    return (await requestGoalWorker(binding.path, {
+      token: binding.token,
+      identity: binding.identity,
+      request,
+    })) as ChildGoalSnapshot;
   }
   goalIdentity(owner: string, child: DelegatedGoalChild, entryId: string) {
     return managedGoalBinding(this.goalManifest(owner, child, entryId).m).identity;
@@ -882,26 +1904,48 @@ export class TuiNativeManager {
     const { c, m } = this.goalManifest(owner, child, entryId, true);
     if (c.reaped) {
       const tombstone = readPrivateJson(new TuiWorkerStore(c.directory).path("reaped.json")) as any;
-      if (tombstone.workerEpoch !== m.workerEpoch || tombstone.paneId !== m.placement?.paneId) throw new Error("Managed Goal stop proof changed");
+      if (tombstone.workerEpoch !== m.workerEpoch || tombstone.paneId !== m.placement?.paneId)
+        throw new Error("Managed Goal stop proof changed");
       return;
     }
     if ((await this.tmux.inspect(m)).dead) return;
-    const [status, goal] = await Promise.all([callTuiWorker(m, { operation: "status" }), this.goalRequest(owner, child, entryId, { operation: "observe" })]);
-    if (!status.ok || (status.data as any)?.active !== false || goal.status === "active" || goal.executionStopped !== true) throw new Error("Managed Goal execution is not authoritatively stopped");
+    const [status, goal] = await Promise.all([
+      callTuiWorker(m, { operation: "status" }),
+      this.goalRequest(owner, child, entryId, { operation: "observe" }),
+    ]);
+    if (
+      !status.ok ||
+      (status.data as any)?.active !== false ||
+      goal.status === "active" ||
+      goal.executionStopped !== true
+    )
+      throw new Error("Managed Goal execution is not authoritatively stopped");
   }
   async stopGoal(owner: string, child: DelegatedGoalChild, entryId: string) {
     const { g, c, m } = this.goalManifest(owner, child, entryId, true);
-    if (c.reaped || (await this.tmux.inspect(m)).dead) { await this.verifyGoalStopped(owner, child, entryId); return; }
+    if (c.reaped || (await this.tmux.inspect(m)).dead) {
+      await this.verifyGoalStopped(owner, child, entryId);
+      return;
+    }
     const cancelled = await callTuiWorker(m, { operation: "cancel" });
     if (!cancelled.ok) throw new Error("Managed Goal cancellation was not confirmed");
     await this.verifyGoalStopped(owner, child, entryId);
     const goal = await this.goalRequest(owner, child, entryId, { operation: "observe" });
-    c.state = goal.status === "complete" ? "completed" : "cancelled"; g.cancelled = goal.status !== "complete"; this.save(g);
+    c.state = goal.status === "complete" ? "completed" : "cancelled";
+    g.cancelled = goal.status !== "complete";
+    this.save(g);
   }
-  async launchGoal(owner: string, cwd: string, spec: Omit<Spec, "cwd">, assignment: ManagedGoalAssignment,
-    previous?: DelegatedGoalChild, legacySession?: string): Promise<DelegatedGoalChild> {
+  async launchGoal(
+    owner: string,
+    cwd: string,
+    spec: Omit<Spec, "cwd">,
+    assignment: ManagedGoalAssignment,
+    previous?: DelegatedGoalChild,
+    legacySession?: string,
+  ): Promise<DelegatedGoalChild> {
     validateManagedGoalAssignment(assignment);
-    if (!this.ready() || !["native", "guard-only"].includes(this.disposition())) throw new Error("Ordinary delegation authority unavailable");
+    if (!this.ready() || !["native", "guard-only"].includes(this.disposition()))
+      throw new Error("Ordinary delegation authority unavailable");
     if (previous) {
       const existing = this.owned(owner, previous.jobId);
       if (existing) {
@@ -909,61 +1953,114 @@ export class TuiNativeManager {
         await this.verifyGoalStopped(owner, previous, assignment.entryId);
         if (!c.reaped && !(await this.tmux.inspect(m)).dead) {
           if (g.launchMode === "guard-only") await this.sendMode(g, c, m);
-          g.cancelled = false; c.state = "waiting"; this.save(g);
+          g.cancelled = false;
+          c.state = "waiting";
+          this.save(g);
           return previous;
         }
         legacySession = m.sessionFile;
       }
-      if (!legacySession || !existing && this.byChild(owner, previous.taskId)) throw new Error("Legacy Goal resume requires exact stopped retained-session proof");
+      if (!legacySession || (!existing && this.byChild(owner, previous.taskId)))
+        throw new Error("Legacy Goal resume requires exact stopped retained-session proof");
     }
-    const resumed = previous ? { child: { taskId: previous.taskId, attempt: previous.attempt, spec: { ...spec, cwd } } as Child,
-      sessionFile: legacySession!, compact: false } : undefined;
-    const result = await this.launch({ ...spec, background: true }, owner, cwd, undefined, undefined, resumed, assignment);
+    const resumed = previous
+      ? {
+          child: {
+            taskId: previous.taskId,
+            attempt: previous.attempt,
+            spec: { ...spec, cwd },
+          } as Child,
+          sessionFile: legacySession!,
+          compact: false,
+        }
+      : undefined;
+    const result = await this.launch(
+      { ...spec, background: true },
+      owner,
+      cwd,
+      undefined,
+      undefined,
+      resumed,
+      assignment,
+    );
     const jobId = (result.details as any).job_id;
     await this.refresh(owner);
-    const g = this.owned(owner, jobId), c = g?.children[0];
-    if (!g || !c || c.state === "failed" || c.state === "lost") throw new Error(c?.error ?? "Managed Goal launch unavailable");
+    const g = this.owned(owner, jobId),
+      c = g?.children[0];
+    if (!g || !c || c.state === "failed" || c.state === "lost")
+      throw new Error(c?.error ?? "Managed Goal launch unavailable");
     const m = this.manifest(c);
     if (!m) throw new Error("Managed Goal worker did not become ready");
     await this.tmux.waitReady(m);
-    return { taskId: c.taskId, childId: c.childId, jobId: g.id, attempt: c.attempt, model: c.spec.model };
+    return {
+      taskId: c.taskId,
+      childId: c.childId,
+      jobId: g.id,
+      attempt: c.attempt,
+      model: c.spec.model,
+    };
   }
   private async cancelGroup(g: Group) {
     g.cancelled = true;
     for (const c of g.children) {
-      if (c.state === "pending") { c.state = "cancelled"; continue; }
+      if (c.state === "pending") {
+        c.state = "cancelled";
+        continue;
+      }
       const m = this.manifest(c);
       if (m && !c.reaped) {
         try {
           let goal: ChildGoalSnapshot | undefined;
           const ref = { taskId: c.taskId, childId: c.childId, jobId: g.id, attempt: c.attempt };
           if (c.spec.assignedGoal) {
-            goal = await this.goalRequest(g.owner, ref, c.spec.assignedGoal.entryId, { operation: "observe" });
-            if (goal.status === "active") await this.goalRequest(g.owner, ref, c.spec.assignedGoal.entryId, { operation: "pause", expectedGoalId: goal.goalId, expectedActivationId: goal.activationId });
+            goal = await this.goalRequest(g.owner, ref, c.spec.assignedGoal.entryId, {
+              operation: "observe",
+            });
+            if (goal.status === "active")
+              await this.goalRequest(g.owner, ref, c.spec.assignedGoal.entryId, {
+                operation: "pause",
+                expectedGoalId: goal.goalId,
+                expectedActivationId: goal.activationId,
+              });
           }
           const stopped = await callTuiWorker(m, { operation: "cancel" });
           if (!stopped.ok) throw new Error("Worker cancellation unconfirmed");
-          if (goal) await this.goalRequest(g.owner, ref, c.spec.assignedGoal!.entryId, { operation: "settle", expectedGoalId: goal.goalId, expectedActivationId: goal.activationId });
+          if (goal)
+            await this.goalRequest(g.owner, ref, c.spec.assignedGoal!.entryId, {
+              operation: "settle",
+              expectedGoalId: goal.goalId,
+              expectedActivationId: goal.activationId,
+            });
           c.state = "cancelled";
-        } catch (error) { if (c.spec.assignedGoal) throw error; }
+        } catch (error) {
+          if (c.spec.assignedGoal) throw error;
+        }
       }
     }
     this.save(g);
   }
   async promote(owner: string, jobId: string): Promise<void> {
     await this.serial(async () => {
-      const g = this.owned(owner, jobId); if (!g) throw new Error("Unknown TUI subagent");
+      const g = this.owned(owner, jobId);
+      if (!g) throw new Error("Unknown TUI subagent");
       const caller = await this.tmux.resolveCaller();
-      if (caller.socketPath !== g.caller.socketPath || caller.serverEpoch !== g.caller.serverEpoch) throw new Error("Promotion requires the original tmux server");
+      if (caller.socketPath !== g.caller.socketPath || caller.serverEpoch !== g.caller.serverEpoch)
+        throw new Error("Promotion requires the original tmux server");
       g.caller = caller;
-      const manifests = g.children.filter(c => !c.reaped).map(c => this.manifest(c)).filter(Boolean) as TuiWorkerManifest[];
-      g.background = true; g.promotionPending = true; this.save(g);
+      const manifests = g.children
+        .filter((c) => !c.reaped)
+        .map((c) => this.manifest(c))
+        .filter(Boolean) as TuiWorkerManifest[];
+      g.background = true;
+      g.promotionPending = true;
+      this.save(g);
       if (manifests.length) await this.tmux.promote(manifests, g.caller);
-      g.promotionPending = false; this.save(g);
+      g.promotionPending = false;
+      this.save(g);
     });
   }
   async promoteForeground(owner: string): Promise<number> {
-    const ids = [...this.foregroundWaits].filter(key => this.groups.get(key)?.owner === owner);
+    const ids = [...this.foregroundWaits].filter((key) => this.groups.get(key)?.owner === owner);
     for (const key of ids) await this.promote(owner, key);
     return ids.length;
   }
@@ -973,40 +2070,89 @@ export class TuiNativeManager {
     // Mode changes must not wait behind slow child launches or model work.
     // A separate serialized capability queue also orders initial inheritance.
     const targets: ModeTarget[] = [];
-    for (const g of this.groups.values()) if (g.owner === owner && g.launchMode === "guard-only") {
-      g.operatorEnabled = enabled; this.save(g);
-      for (const c of g.children) {
-        const m = this.manifest(c);
-        if (!m || c.reaped) continue;
-        targets.push({ childId: c.childId, send: () => this.sendMode(g, c, m),
-          // Only the pane process's own identity proves a worker gone; a retained "lost" state alone does not.
-          stopped: async () => !!m.panePid && !!m.paneProcessToken && !(await processIsAlive(m.panePid, m.paneProcessToken)) });
+    for (const g of this.groups.values())
+      if (g.owner === owner && g.launchMode === "guard-only") {
+        g.operatorEnabled = enabled;
+        this.save(g);
+        for (const c of g.children) {
+          const m = this.manifest(c);
+          if (!m || c.reaped) continue;
+          targets.push({
+            childId: c.childId,
+            send: () => this.sendMode(g, c, m),
+            // Only the pane process's own identity proves a worker gone; a retained "lost" state alone does not.
+            stopped: async () =>
+              !!m.panePid &&
+              !!m.paneProcessToken &&
+              !(await processIsAlive(m.panePid, m.paneProcessToken)),
+          });
+        }
       }
-    }
     return await deliverMode(targets);
   }
   taskRecord(owner: string, taskId: string): any | undefined {
-    const found = this.byChild(owner, taskId); if (!found) return;
+    const found = this.byChild(owner, taskId);
+    if (!found) return;
     const { group: g, child: c } = found;
-    return { taskId: c.taskId, ownerSessionId: owner, childId: c.childId, attempt: c.attempt ?? 1,
-      spec: c.spec, state: active(c) && c.state !== "waiting" ? "running" : "idle", createdAt: g.createdAt, updatedAt: g.createdAt,
-      checkpointed: (c.lastOutcome as any)?.state === "checkpointed", requiresCompaction: c.requiresCompaction,
-      nextAction: (c.lastOutcome as any)?.next_action, latestSummary: (c.lastOutcome as any)?.summary,
-      history: [...this.groups.values()].filter(group => group.owner === owner).flatMap(group => group.children.filter(child => child.taskId === taskId)
-        .map(child => ({ attempt: child.attempt ?? 1, childId: child.childId, finishedAt: group.createdAt, outcome: (child.lastOutcome as any)?.state, execution: child.state }))) };
+    return {
+      taskId: c.taskId,
+      ownerSessionId: owner,
+      childId: c.childId,
+      attempt: c.attempt ?? 1,
+      spec: c.spec,
+      state: active(c) && c.state !== "waiting" ? "running" : "idle",
+      createdAt: g.createdAt,
+      updatedAt: g.createdAt,
+      checkpointed: (c.lastOutcome as any)?.state === "checkpointed",
+      requiresCompaction: c.requiresCompaction,
+      nextAction: (c.lastOutcome as any)?.next_action,
+      latestSummary: (c.lastOutcome as any)?.summary,
+      history: [...this.groups.values()]
+        .filter((group) => group.owner === owner)
+        .flatMap((group) =>
+          group.children
+            .filter((child) => child.taskId === taskId)
+            .map((child) => ({
+              attempt: child.attempt ?? 1,
+              childId: child.childId,
+              finishedAt: group.createdAt,
+              outcome: (child.lastOutcome as any)?.state,
+              execution: child.state,
+            })),
+        ),
+    };
   }
   /** Return only retained in-memory native task snapshots; never refresh/observe or write. */
   readonlyTaskList(owner: string): any[] {
     if (this.owner !== owner) throw new Error("Native task snapshots belong to another Pi session");
-    return [...this.groups.values()].filter(g => g.owner === owner).flatMap(g => g.children.map(c => {
-      const manifest = this.manifest(c);
-      return { taskId: c.taskId, childId: c.childId, groupId: g.id, runtimeId: manifest?.runtimeId ?? null,
-        attempt: c.attempt ?? 1, status: c.state, reaped: !!c.reaped, title: this.canonicalTitle(c),
-        kind: "subagent", needsAttention: active(c) && c.needsAttention === true,
-        ...(c.spec.verification?.length ? { checks: taskChecks(c.spec.verification, c.verification as any) } : {}),
-        summary: typeof (c.lastOutcome as any)?.summary === "string" ? (c.lastOutcome as any).summary.slice(0, 2000) : undefined,
-        lastUpdated: null, stale: true };
-    }));
+    return [...this.groups.values()]
+      .filter((g) => g.owner === owner)
+      .flatMap((g) =>
+        g.children.map((c) => {
+          const manifest = this.manifest(c);
+          return {
+            taskId: c.taskId,
+            childId: c.childId,
+            groupId: g.id,
+            runtimeId: manifest?.runtimeId ?? null,
+            attempt: c.attempt ?? 1,
+            status: c.state,
+            reaped: !!c.reaped,
+            title: this.canonicalTitle(c),
+            kind: "subagent",
+            needsAttention: active(c) && c.needsAttention === true,
+            ...(c.spec.verification?.length
+              ? { checks: taskChecks(c.spec.verification, c.verification as any) }
+              : {}),
+            summary:
+              typeof (c.lastOutcome as any)?.summary === "string"
+                ? (c.lastOutcome as any).summary.slice(0, 2000)
+                : undefined,
+            lastUpdated: null,
+            stale: true,
+          };
+        }),
+      );
   }
   /** Verify only the requested inventory page. Retention snapshots remain stale;
    * authenticated live status is the sole freshness authority. Never refresh,
@@ -1015,83 +2161,222 @@ export class TuiNativeManager {
     if (this.owner !== owner || this.closed) throw new Error("Native inventory owner unavailable");
     if (rows.length > 50) throw new Error("Native inventory page exceeds read budget");
     const generation = this.generation;
-    return await Promise.all(rows.map(async row => {
-      row = { ...row, stale: true, lastUpdated: null }; // Never inherit caller/cached freshness.
-      const found = this.byChild(owner, row.childId);
-      if (!found || found.child.reaped) return row;
-      const { child, group } = found;
-      try {
-        const pinned = this.manifest(child);
-        if (!pinned || pinned.ownerSessionId !== owner || pinned.groupId !== group.id
-          || pinned.taskId !== row.taskId || pinned.childId !== row.childId || pinned.attempt !== row.attempt
-          || pinned.runtimeId !== row.runtimeId || pinned.sessionFile !== join(child.directory, "session.jsonl")) return row;
-        const status = validateLiveStatus(await callTuiWorker(pinned, { operation: "status" }, { timeoutMs: 200 }), pinned);
-        if (!status || status.phase === "closing") return row;
-        const current = this.byChild(owner, row.childId), after = this.manifest(child);
-        if (this.owner !== owner || this.closed || this.generation !== generation || current?.child !== child
-          || current?.group !== group || child.reaped || !after || JSON.stringify(after) !== JSON.stringify(pinned)) return row;
-        // Do not bless a retained execution snapshot that disagrees with live state.
-        if (status.active !== (active(child) && child.state !== "waiting") || row.status !== child.state) return row;
-        if (status.active ? child.state !== "running" || status.phase !== "running"
-          : !["completed", "failed", "cancelled", "waiting"].includes(child.state) || status.phase !== "settled"
-            || !child.report || status.lastReport !== child.report) return row;
-        return { ...row, stale: false, lastUpdated: new Date().toISOString() };
-      } catch { return row; } // Missing, legacy, timed-out and rotated sources stay stale.
-    }));
+    return await Promise.all(
+      rows.map(async (row) => {
+        row = { ...row, stale: true, lastUpdated: null }; // Never inherit caller/cached freshness.
+        const found = this.byChild(owner, row.childId);
+        if (!found || found.child.reaped) return row;
+        const { child, group } = found;
+        try {
+          const pinned = this.manifest(child);
+          if (
+            !pinned ||
+            pinned.ownerSessionId !== owner ||
+            pinned.groupId !== group.id ||
+            pinned.taskId !== row.taskId ||
+            pinned.childId !== row.childId ||
+            pinned.attempt !== row.attempt ||
+            pinned.runtimeId !== row.runtimeId ||
+            pinned.sessionFile !== join(child.directory, "session.jsonl")
+          )
+            return row;
+          const status = validateLiveStatus(
+            await callTuiWorker(pinned, { operation: "status" }, { timeoutMs: 200 }),
+            pinned,
+          );
+          if (!status || status.phase === "closing") return row;
+          const current = this.byChild(owner, row.childId),
+            after = this.manifest(child);
+          if (
+            this.owner !== owner ||
+            this.closed ||
+            this.generation !== generation ||
+            current?.child !== child ||
+            current?.group !== group ||
+            child.reaped ||
+            !after ||
+            JSON.stringify(after) !== JSON.stringify(pinned)
+          )
+            return row;
+          // Do not bless a retained execution snapshot that disagrees with live state.
+          if (
+            status.active !== (active(child) && child.state !== "waiting") ||
+            row.status !== child.state
+          )
+            return row;
+          if (
+            status.active
+              ? child.state !== "running" || status.phase !== "running"
+              : !["completed", "failed", "cancelled", "waiting"].includes(child.state) ||
+                status.phase !== "settled" ||
+                !child.report ||
+                status.lastReport !== child.report
+          )
+            return row;
+          return { ...row, stale: false, lastUpdated: new Date().toISOString() };
+        } catch {
+          return row;
+        } // Missing, legacy, timed-out and rotated sources stay stale.
+      }),
+    );
   }
-  readonlyIndependentSource(owner: string, input: { taskId: string; childId: string; attempt: number; runtimeId: string | null }): any {
+  readonlyIndependentSource(
+    owner: string,
+    input: { taskId: string; childId: string; attempt: number; runtimeId: string | null },
+  ): any {
     if (this.owner !== owner) throw new Error("Independent source belongs to another session");
     const found = this.byChild(owner, input.childId);
-    if (!found || found.child.childId !== input.childId || found.child.taskId !== input.taskId
-      || (found.child.attempt ?? 1) !== input.attempt) throw new Error("Source worker identity changed");
-    const c = found.child, manifest = this.manifest(c);
-    if ((manifest?.runtimeId ?? null) !== input.runtimeId) throw new Error("Source identity changed");
+    if (
+      !found ||
+      found.child.childId !== input.childId ||
+      found.child.taskId !== input.taskId ||
+      (found.child.attempt ?? 1) !== input.attempt
+    )
+      throw new Error("Source worker identity changed");
+    const c = found.child,
+      manifest = this.manifest(c);
+    if ((manifest?.runtimeId ?? null) !== input.runtimeId)
+      throw new Error("Source identity changed");
     // Opening copies a stable checkpoint; it neither controls nor resumes this worker.
     // Validate the same owner/attempt/runtime manifest used by live session reads.
     if (active(c) || !c.report) this.readonlyTaskSessionSource(owner, input);
-    const report = c.report && !active(c) ? this.retainedArtifact(c, c.report, "report") as any : undefined;
+    const report =
+      c.report && !active(c) ? (this.retainedArtifact(c, c.report, "report") as any) : undefined;
     const file = join(c.directory, "session.jsonl");
-    if ((report && report.sessionFile !== file) || (manifest && manifest.sessionFile !== file)) throw new Error("Source session identity changed");
+    if ((report && report.sessionFile !== file) || (manifest && manifest.sessionFile !== file))
+      throw new Error("Source session identity changed");
     const stat = lstatSync(file);
-    if (!stat.isFile() || stat.isSymbolicLink() || stat.nlink !== 1 || stat.uid !== process.getuid?.() || (stat.mode & 0o022) || stat.size > 32 * 1024 * 1024) throw new Error("Source file unavailable");
-    return { taskId: c.taskId, childId: c.childId, attempt: c.attempt ?? 1, runtimeId: manifest?.runtimeId ?? null,
-      file, title: this.canonicalTitle(c), cwd: c.spec.cwd,
+    if (
+      !stat.isFile() ||
+      stat.isSymbolicLink() ||
+      stat.nlink !== 1 ||
+      stat.uid !== process.getuid?.() ||
+      stat.mode & 0o022 ||
+      stat.size > 32 * 1024 * 1024
+    )
+      throw new Error("Source file unavailable");
+    return {
+      taskId: c.taskId,
+      childId: c.childId,
+      attempt: c.attempt ?? 1,
+      runtimeId: manifest?.runtimeId ?? null,
+      file,
+      title: this.canonicalTitle(c),
+      cwd: c.spec.cwd,
       leafId: typeof report?.leafId === "string" ? report.leafId : null,
-      assistantDigest: report?.assistant ? createHash("sha256").update(JSON.stringify(report.assistant)).digest("hex") : null,
-      report: report ? c.report : null, dev: stat.dev, ino: stat.ino, size: stat.size, mtimeMs: stat.mtimeMs };
+      assistantDigest: report?.assistant
+        ? createHash("sha256").update(JSON.stringify(report.assistant)).digest("hex")
+        : null,
+      report: report ? c.report : null,
+      dev: stat.dev,
+      ino: stat.ino,
+      size: stat.size,
+      mtimeMs: stat.mtimeMs,
+    };
   }
-  readonlyHasTask(owner: string, input: { taskId: string; childId: string; attempt: number }): boolean {
-    return this.owner === owner && [...this.groups.values()].some(group => group.owner === owner && group.children.some(child =>
-      child.taskId === input.taskId && child.childId === input.childId && (child.attempt ?? 1) === input.attempt));
+  readonlyHasTask(
+    owner: string,
+    input: { taskId: string; childId: string; attempt: number },
+  ): boolean {
+    return (
+      this.owner === owner &&
+      [...this.groups.values()].some(
+        (group) =>
+          group.owner === owner &&
+          group.children.some(
+            (child) =>
+              child.taskId === input.taskId &&
+              child.childId === input.childId &&
+              (child.attempt ?? 1) === input.attempt,
+          ),
+      )
+    );
   }
-  readonlyTaskSessionSource(owner: string, input: { taskId: string; childId: string; attempt: number; runtimeId?: string | null }): any {
+  readonlyTaskSessionSource(
+    owner: string,
+    input: { taskId: string; childId: string; attempt: number; runtimeId?: string | null },
+  ): any {
     if (this.owner !== owner) throw new Error("Session source belongs to another Pi session");
     const found = this.byChild(owner, input.childId);
-    if (!found || found.child.taskId !== input.taskId || (found.child.attempt ?? 1) !== input.attempt) throw new Error("Session source identity changed");
-    const { group, child } = found, manifest = this.manifest(child);
-    if (!manifest || manifest.ownerSessionId !== owner || manifest.groupId !== group.id || manifest.taskId !== child.taskId
-      || manifest.childId !== child.childId || manifest.attempt !== (child.attempt ?? 1)
-      || (input.runtimeId !== undefined && manifest.runtimeId !== input.runtimeId)) throw new Error("Session source manifest identity changed");
+    if (
+      !found ||
+      found.child.taskId !== input.taskId ||
+      (found.child.attempt ?? 1) !== input.attempt
+    )
+      throw new Error("Session source identity changed");
+    const { group, child } = found,
+      manifest = this.manifest(child);
+    if (
+      !manifest ||
+      manifest.ownerSessionId !== owner ||
+      manifest.groupId !== group.id ||
+      manifest.taskId !== child.taskId ||
+      manifest.childId !== child.childId ||
+      manifest.attempt !== (child.attempt ?? 1) ||
+      (input.runtimeId !== undefined && manifest.runtimeId !== input.runtimeId)
+    )
+      throw new Error("Session source manifest identity changed");
     const path = join(child.directory, "session.jsonl");
     if (manifest.sessionFile !== path) throw new Error("Invalid session source path");
     let retainedSessionFile: string | undefined;
-    try { validateRetainedConversationFile(path); retainedSessionFile = path; } catch { /* Status identity remains useful without a trusted transcript. */ }
+    try {
+      validateRetainedConversationFile(path);
+      retainedSessionFile = path;
+    } catch {
+      /* Status identity remains useful without a trusted transcript. */
+    }
     const state = new TuiWorkerStore(child.directory).readState(false);
-    if (state.active !== active(child) && !["pending", "launching"].includes(child.state)) throw new Error("Active session state identity is inconsistent");
-    const status = active(child) ? "running" : child.state === "failed" ? "failed"
-      : child.state === "cancelled" ? "cancelled" : child.state === "lost" ? "lost"
-      : child.state === "completed" ? "completed" : group.cancelled ? "cancelled" : "lost";
-    return { taskId: child.taskId, childId: child.childId, groupId: group.id, attempt: child.attempt ?? 1,
-      runtimeId: manifest.runtimeId, reaped: child.reaped === true, ...(retainedSessionFile ? { sessionFile: retainedSessionFile } : {}), status, title: this.canonicalTitle(child), cwd: child.spec.cwd };
+    if (state.active !== active(child) && !["pending", "launching"].includes(child.state))
+      throw new Error("Active session state identity is inconsistent");
+    const status = active(child)
+      ? "running"
+      : child.state === "failed"
+        ? "failed"
+        : child.state === "cancelled"
+          ? "cancelled"
+          : child.state === "lost"
+            ? "lost"
+            : child.state === "completed"
+              ? "completed"
+              : group.cancelled
+                ? "cancelled"
+                : "lost";
+    return {
+      taskId: child.taskId,
+      childId: child.childId,
+      groupId: group.id,
+      attempt: child.attempt ?? 1,
+      runtimeId: manifest.runtimeId,
+      reaped: child.reaped === true,
+      ...(retainedSessionFile ? { sessionFile: retainedSessionFile } : {}),
+      status,
+      title: this.canonicalTitle(child),
+      cwd: child.spec.cwd,
+    };
   }
-  async readonlyTaskConversation(owner: string, input: { taskId: string; childId: string; attempt: number; runtimeId: string | null; cursor?: number }): Promise<any> {
+  async readonlyTaskConversation(
+    owner: string,
+    input: {
+      taskId: string;
+      childId: string;
+      attempt: number;
+      runtimeId: string | null;
+      cursor?: number;
+    },
+  ): Promise<any> {
     if (this.owner !== owner) throw new Error("Conversation belongs to another Pi session");
     const found = this.byChild(owner, input.childId);
-    if (!found || found.child.childId !== input.childId || found.child.taskId !== input.taskId
-      || (found.child.attempt ?? 1) !== input.attempt) throw new Error("Conversation identity changed");
+    if (
+      !found ||
+      found.child.childId !== input.childId ||
+      found.child.taskId !== input.taskId ||
+      (found.child.attempt ?? 1) !== input.attempt
+    )
+      throw new Error("Conversation identity changed");
     const { child: c, group: g } = found;
     const manifest = this.manifest(c);
-    if ((manifest?.runtimeId ?? null) !== input.runtimeId) throw new Error("Conversation runtime changed");
+    if ((manifest?.runtimeId ?? null) !== input.runtimeId)
+      throw new Error("Conversation runtime changed");
     const path = join(c.directory, "session.jsonl");
     if (manifest && manifest.sessionFile !== path) throw new Error("Invalid conversation path");
     validateRetainedConversationFile(path);
@@ -1100,35 +2385,111 @@ export class TuiNativeManager {
     if (manifest && !c.reaped) {
       const pinned = structuredClone(manifest);
       try {
-        const statusReply = await callTuiWorker(pinned, { operation: "status" }, { timeoutMs: 1500 });
+        const statusReply = await callTuiWorker(
+          pinned,
+          { operation: "status" },
+          { timeoutMs: 1500 },
+        );
         const state = validateLiveStatus(statusReply, pinned);
         if (state) {
           const afterSequence = Math.max(0, state.sequence - 24);
-          const eventReply = await callTuiWorker(pinned, { operation: "events", afterSequence }, { timeoutMs: 1500 });
+          const eventReply = await callTuiWorker(
+            pinned,
+            { operation: "events", afterSequence },
+            { timeoutMs: 1500 },
+          );
           const events = validateLiveEvents(eventReply, pinned, afterSequence);
           const current = this.manifest(c);
-          if (!current || current.ownerSessionId !== pinned.ownerSessionId || current.taskId !== pinned.taskId
-            || current.runtimeId !== pinned.runtimeId || current.groupId !== pinned.groupId || current.childId !== pinned.childId
-            || current.attempt !== pinned.attempt || current.workerEpoch !== pinned.workerEpoch
-            || current.sessionFile !== pinned.sessionFile || current.controlSocket !== pinned.controlSocket) throw new Error("Live worker manifest changed");
+          if (
+            !current ||
+            current.ownerSessionId !== pinned.ownerSessionId ||
+            current.taskId !== pinned.taskId ||
+            current.runtimeId !== pinned.runtimeId ||
+            current.groupId !== pinned.groupId ||
+            current.childId !== pinned.childId ||
+            current.attempt !== pinned.attempt ||
+            current.workerEpoch !== pinned.workerEpoch ||
+            current.sessionFile !== pinned.sessionFile ||
+            current.controlSocket !== pinned.controlSocket
+          )
+            throw new Error("Live worker manifest changed");
           const running = state.active === true && state.phase === "running" && !state.idleDecision;
-          live = { stale: false, liveSequence: state.sequence,
+          live = {
+            stale: false,
+            liveSequence: state.sequence,
             ...(running ? { execution: "running", liveText: state.liveText } : {}),
-            liveEvents: events.filter((event: any) => ["conversation_tool_start", "conversation_tool_end"].includes(event.kind)).map((event: any) => ({
-              sequence: event.sequence, kind: event.kind === "conversation_tool_start" ? "tool_start" : "tool_end",
-              toolCallId: event.data.toolCallId, name: event.data.name,
-              ...(event.kind === "conversation_tool_start" ? { status: "running", arguments: event.data.arguments, toolArguments: validateToolPresentationArguments(event.data.name, event.data.toolArguments) } : { toolPresentation: (event.data.toolPresentation?.toolName === event.data.name ? validateToolPresentation(event.data.toolPresentation) : undefined), status: event.data.status, result: truncateUtf8(typeof event.data.result === "string" ? event.data.result : event.data.resultFormat === "text" && event.data.result?.normalized === true && typeof event.data.result.preview === "string" ? event.data.result.preview + "\n[truncated]" : JSON.stringify(event.data.result), 2048).text, ...(event.data.resultFormat === "text" ? { resultFormat: "text" } : {}) }),
-            })).slice(-12) };
+            liveEvents: events
+              .filter((event: any) =>
+                ["conversation_tool_start", "conversation_tool_end"].includes(event.kind),
+              )
+              .map((event: any) => ({
+                sequence: event.sequence,
+                kind: event.kind === "conversation_tool_start" ? "tool_start" : "tool_end",
+                toolCallId: event.data.toolCallId,
+                name: event.data.name,
+                ...(event.kind === "conversation_tool_start"
+                  ? {
+                      status: "running",
+                      arguments: event.data.arguments,
+                      toolArguments: validateToolPresentationArguments(
+                        event.data.name,
+                        event.data.toolArguments,
+                      ),
+                    }
+                  : {
+                      toolPresentation:
+                        event.data.toolPresentation?.toolName === event.data.name
+                          ? validateToolPresentation(event.data.toolPresentation)
+                          : undefined,
+                      status: event.data.status,
+                      result: truncateUtf8(
+                        typeof event.data.result === "string"
+                          ? event.data.result
+                          : event.data.resultFormat === "text" &&
+                              event.data.result?.normalized === true &&
+                              typeof event.data.result.preview === "string"
+                            ? event.data.result.preview + "\n[truncated]"
+                            : JSON.stringify(event.data.result),
+                        2048,
+                      ).text,
+                      ...(event.data.resultFormat === "text" ? { resultFormat: "text" } : {}),
+                    }),
+              }))
+              .slice(-12),
+          };
         }
-      } catch { live = {}; } // Invalid, stale or old worker replies never become live UI state.
+      } catch {
+        live = {};
+      } // Invalid, stale or old worker replies never become live UI state.
     }
-    const execution = live.execution === "running" ? "running" : c.state === "completed" ? "completed" : c.state === "failed" ? "failed" : c.state === "cancelled" ? "cancelled" : c.state === "lost" ? "lost" : undefined;
-    return { taskId: c.taskId, childId: c.childId, groupId: g.id, attempt: c.attempt ?? 1,
-      runtimeId: manifest?.runtimeId ?? null, ...retained, ...live, stale: live.stale !== false, ...(execution ? { execution } : {}) };
+    const execution =
+      live.execution === "running"
+        ? "running"
+        : c.state === "completed"
+          ? "completed"
+          : c.state === "failed"
+            ? "failed"
+            : c.state === "cancelled"
+              ? "cancelled"
+              : c.state === "lost"
+                ? "lost"
+                : undefined;
+    return {
+      taskId: c.taskId,
+      childId: c.childId,
+      groupId: g.id,
+      attempt: c.attempt ?? 1,
+      runtimeId: manifest?.runtimeId ?? null,
+      ...retained,
+      ...live,
+      stale: live.stale !== false,
+      ...(execution ? { execution } : {}),
+    };
   }
   readonlyTaskReport(owner: string, taskId: string, maxBytes = 48 * 1024): any {
     if (this.owner !== owner) throw new Error("Native task snapshots belong to another Pi session");
-    if (!Number.isSafeInteger(maxBytes) || maxBytes < 1 || maxBytes > 48 * 1024) throw new Error("Invalid report byte limit");
+    if (!Number.isSafeInteger(maxBytes) || maxBytes < 1 || maxBytes > 48 * 1024)
+      throw new Error("Invalid report byte limit");
     const found = this.byChild(owner, taskId);
     if (!found) return undefined;
     const { group: g, child: c } = found;
@@ -1137,190 +2498,401 @@ export class TuiNativeManager {
     if (c.report) {
       try {
         const reportPath = resolve(c.report);
-        if (!reportPath.startsWith(`${resolve(c.directory)}/`) || !/^report-[0-9]+-[a-f0-9]{16}\.json$/.test(reportPath.slice(reportPath.lastIndexOf("/") + 1))) throw new Error("Invalid retained report identity");
+        if (
+          !reportPath.startsWith(`${resolve(c.directory)}/`) ||
+          !/^report-[0-9]+-[a-f0-9]{16}\.json$/.test(
+            reportPath.slice(reportPath.lastIndexOf("/") + 1),
+          )
+        )
+          throw new Error("Invalid retained report identity");
         const artifact = readPrivateJson(reportPath) as any;
         // Report artifact shape is { sessionFile, assistant, contextTokens, contextWindow, timestamp }.
         // Return text content only: no session path, model metadata, tool calls, or diagnostics.
-        if (typeof artifact?.timestamp === "string" && Number.isFinite(Date.parse(artifact.timestamp))) lastUpdated = artifact.timestamp;
+        if (
+          typeof artifact?.timestamp === "string" &&
+          Number.isFinite(Date.parse(artifact.timestamp))
+        )
+          lastUpdated = artifact.timestamp;
         const assistant = artifact?.assistant;
-        text = typeof assistant?.content === "string" ? assistant.content
-          : Array.isArray(assistant?.content) ? assistant.content.filter((part: any) => part?.type === "text" && typeof part.text === "string").map((part: any) => part.text).join("\n") : "";
+        text =
+          typeof assistant?.content === "string"
+            ? assistant.content
+            : Array.isArray(assistant?.content)
+              ? assistant.content
+                  .filter((part: any) => part?.type === "text" && typeof part.text === "string")
+                  .map((part: any) => part.text)
+                  .join("\n")
+              : "";
       } catch {}
     }
     if (!text.trim() && c.state === "completed") text = (c.lastOutcome as any)?.summary ?? "";
-    text = text.replace(/\x1b\][\s\S]*?(?:\x07|\x1b\\)/g, "").replace(/(?:\x1b\[|\x9b)[0-?]*[ -/]*[@-~]/g, "").replace(/[\x00-\x08\x0b-\x1f\x7f-\x9f]/g, "");
+    text = text
+      .replace(/\x1b\][\s\S]*?(?:\x07|\x1b\\)/g, "")
+      .replace(/(?:\x1b\[|\x9b)[0-?]*[ -/]*[@-~]/g, "")
+      .replace(/[\x00-\x08\x0b-\x1f\x7f-\x9f]/g, "");
     const bounded = truncateUtf8(text, maxBytes);
     text = bounded.text;
     const truncated = bounded.truncated;
     const manifest = this.manifest(c);
-    return { taskId: c.taskId, childId: c.childId, groupId: g.id, runtimeId: manifest?.runtimeId ?? null,
-      attempt: c.attempt ?? 1, text, truncated, lastUpdated, stale: true };
+    return {
+      taskId: c.taskId,
+      childId: c.childId,
+      groupId: g.id,
+      runtimeId: manifest?.runtimeId ?? null,
+      attempt: c.attempt ?? 1,
+      text,
+      truncated,
+      lastUpdated,
+      stale: true,
+    };
   }
   taskList(owner: string): any[] {
     const tasks = new Map<string, any>();
     // Load order is group-ID order, not chronology: keep each task's highest attempt, as byChild() does.
-    for (const g of this.groups.values()) if (g.owner === owner) for (const c of g.children) {
-      if ((tasks.get(c.taskId)?.attempt ?? 0) > (c.attempt ?? 1)) continue;
-      tasks.set(c.taskId, { task_id: c.taskId, child_id: c.childId, attempt: c.attempt ?? 1, state: active(c) && c.state !== "waiting" ? "running" : "idle", title: this.canonicalTitle(c),
-        outcome: (c.lastOutcome as any)?.state, execution: c.state, can_resume: !active(c), checkpointed: (c.lastOutcome as any)?.state === "checkpointed",
-        requires_compaction: c.requiresCompaction, summary: (c.lastOutcome as any)?.summary, next_action: (c.lastOutcome as any)?.next_action, updated_at: g.createdAt });
-    }
+    for (const g of this.groups.values())
+      if (g.owner === owner)
+        for (const c of g.children) {
+          if ((tasks.get(c.taskId)?.attempt ?? 0) > (c.attempt ?? 1)) continue;
+          tasks.set(c.taskId, {
+            task_id: c.taskId,
+            child_id: c.childId,
+            attempt: c.attempt ?? 1,
+            state: active(c) && c.state !== "waiting" ? "running" : "idle",
+            title: this.canonicalTitle(c),
+            outcome: (c.lastOutcome as any)?.state,
+            execution: c.state,
+            can_resume: !active(c),
+            checkpointed: (c.lastOutcome as any)?.state === "checkpointed",
+            requires_compaction: c.requiresCompaction,
+            summary: (c.lastOutcome as any)?.summary,
+            next_action: (c.lastOutcome as any)?.next_action,
+            updated_at: g.createdAt,
+          });
+        }
     return [...tasks.values()].reverse().slice(0, 50);
   }
   async jobs(owner: string, taskId: string, params: unknown): Promise<any> {
     if (this.closed) throw new Error("Native TUI controller is closing");
     const found = this.byChild(owner, taskId);
     if (!found) throw new Error("Task does not belong to this parent session");
-    if (found.child.reaped) throw new Error("Child TUI was reaped. Its independent jobs are not implicitly cancelled; re-adopt their panes in a live Pi to manage them.");
+    if (found.child.reaped)
+      throw new Error(
+        "Child TUI was reaped. Its independent jobs are not implicitly cancelled; re-adopt their panes in a live Pi to manage them.",
+      );
     const manifest = this.manifest(found.child);
-    if (!manifest) throw new Error("Child TUI has not launched; no local job controller is available.");
+    if (!manifest)
+      throw new Error("Child TUI has not launched; no local job controller is available.");
     const request = parseTuiWorkerJobParams(params);
     let result;
-    try { result = await callTuiWorker(manifest, { operation: "jobs", params: request }, { timeoutMs: 5000 }); }
-    catch { throw new Error("Child-local job control is unavailable. Jobs remain independent; reconnect the worker or re-adopt their panes in a live Pi."); }
+    try {
+      result = await callTuiWorker(
+        manifest,
+        { operation: "jobs", params: request },
+        { timeoutMs: 5000 },
+      );
+    } catch {
+      throw new Error(
+        "Child-local job control is unavailable. Jobs remain independent; reconnect the worker or re-adopt their panes in a live Pi.",
+      );
+    }
     if (!result.ok) throw new Error(`Child-local job control ${result.code}: ${result.message}`);
     return result.data;
   }
   /** Reserve delegation until the enclosing worker either seals or releases cleanup.
    * Every child reap uses its own authenticated cleanup boundary recursively. */
-  async prepareReap(owner: string, preserve: (report: unknown) => Promise<void>, options: { force?: true; reason?: string } = {}): Promise<() => void> {
-    if (this.owner !== owner || this.closed || this.reapReserved) throw new Error("Subagent cleanup authority unavailable");
+  async prepareReap(
+    owner: string,
+    preserve: (report: unknown) => Promise<void>,
+    options: { force?: true; reason?: string } = {},
+  ): Promise<() => void> {
+    if (this.owner !== owner || this.closed || this.reapReserved)
+      throw new Error("Subagent cleanup authority unavailable");
     this.reapReserved = true;
     try {
       await this.serial(async () => {
-        const inventory = new TuiNativeManager(this.root, this.disposition, () => false, this.groupLimit);
-        if (inventory.inventoryErrors.length) throw new Error(`Subagent inventory is unverifiable: ${inventory.inventoryErrors.slice(0, 16).join(", ")}`);
-        const groups = [...this.groups.values()].filter(g => g.owner === owner);
+        const inventory = new TuiNativeManager(
+          this.root,
+          this.disposition,
+          () => false,
+          this.groupLimit,
+        );
+        if (inventory.inventoryErrors.length)
+          throw new Error(
+            `Subagent inventory is unverifiable: ${inventory.inventoryErrors.slice(0, 16).join(", ")}`,
+          );
+        const groups = [...this.groups.values()].filter((g) => g.owner === owner);
         for (const g of groups) {
           for (const c of g.children) await this.observe(g, c);
           this.save(g);
         }
-        const blockers = groups.flatMap(g => g.children.filter(active).map(c => `${g.id}/${c.childId} ${c.state}`));
-        if (blockers.length) throw new Error(`Active descendant subagents block reap: ${blockers.slice(0, 32).join(", ")}`);
+        const blockers = groups.flatMap((g) =>
+          g.children.filter(active).map((c) => `${g.id}/${c.childId} ${c.state}`),
+        );
+        if (blockers.length)
+          throw new Error(
+            `Active descendant subagents block reap: ${blockers.slice(0, 32).join(", ")}`,
+          );
         // Reports are retained before any pane is removed. Never treat a model
         // task_outcome as execution settlement; observe() checks live activity.
-        await preserve({ groups: groups.map(g => this.publicGroup(g)), results: groups.flatMap(g => g.children.map(c => ({
-          job_id: g.id, child_id: c.childId, report: c.report ? readPrivateJson(c.report) : undefined,
-        }))) });
-        for (const g of groups) for (const c of g.children) {
-          await this.reapChild(g, c, options);
-        }
+        await preserve({
+          groups: groups.map((g) => this.publicGroup(g)),
+          results: groups.flatMap((g) =>
+            g.children.map((c) => ({
+              job_id: g.id,
+              child_id: c.childId,
+              report: c.report ? readPrivateJson(c.report) : undefined,
+            })),
+          ),
+        });
+        for (const g of groups)
+          for (const c of g.children) {
+            await this.reapChild(g, c, options);
+          }
       });
-      return () => { this.reapReserved = false; };
-    } catch (error) { this.reapReserved = false; throw error; }
+      return () => {
+        this.reapReserved = false;
+      };
+    } catch (error) {
+      this.reapReserved = false;
+      throw error;
+    }
   }
   worktreeReapOwners(owner: string): string[] {
-    if (this.owner !== owner || !this.reapReserved) throw new Error("Worktree cleanup requires the owning subagent reservation");
+    if (this.owner !== owner || !this.reapReserved)
+      throw new Error("Worktree cleanup requires the owning subagent reservation");
     const owners = new Set<string>([owner]);
     this.descendantGroups(owner, undefined, owners, true);
     return [...owners];
   }
   /** Available only under child-local cleanup reservation. Reuse authenticated ancestry. */
   worktreeReapTargets(owner: string) {
-    if (this.owner !== owner || !this.reapReserved) throw new Error("Worktree cleanup requires the owning subagent reservation");
-    const groups = [...this.groups.values()].filter(g => g.owner === owner);
+    if (this.owner !== owner || !this.reapReserved)
+      throw new Error("Worktree cleanup requires the owning subagent reservation");
+    const groups = [...this.groups.values()].filter((g) => g.owner === owner);
     const all = [...groups, ...this.descendantGroups(owner, groups, undefined, true)];
     return this.worktreeTargets(all);
   }
   /** Observe any known managed task whose effective checkout is the path being reaped. */
-  async worktreeReapActivity(owner: string, path: string, justReaped?: { ownerSessionId: string; taskId: string; childId: string; attempt: number }): Promise<boolean> {
-    if ((!justReaped && this.owner !== owner) || (!this.reapReserved && !justReaped)) throw new Error("Worktree cleanup requires the owning subagent reservation");
-    if (!isAbsolute(path) || this.inventoryErrors.length) throw new Error("Managed subagent activity inventory is unavailable");
+  async worktreeReapActivity(
+    owner: string,
+    path: string,
+    justReaped?: { ownerSessionId: string; taskId: string; childId: string; attempt: number },
+  ): Promise<boolean> {
+    if ((!justReaped && this.owner !== owner) || (!this.reapReserved && !justReaped))
+      throw new Error("Worktree cleanup requires the owning subagent reservation");
+    if (!isAbsolute(path) || this.inventoryErrors.length)
+      throw new Error("Managed subagent activity inventory is unavailable");
     let targetPath: string;
-    try { targetPath = physicalPath(path).path; }
-    catch { throw new Error("Managed subagent target physical identity is unavailable"); }
-    if (justReaped && ![...this.groups.values()].some(group => group.owner === justReaped.ownerSessionId
-      && group.children.some(child => child.taskId === justReaped.taskId && child.childId === justReaped.childId && child.attempt === justReaped.attempt)))
+    try {
+      targetPath = physicalPath(path).path;
+    } catch {
+      throw new Error("Managed subagent target physical identity is unavailable");
+    }
+    if (
+      justReaped &&
+      ![...this.groups.values()].some(
+        (group) =>
+          group.owner === justReaped.ownerSessionId &&
+          group.children.some(
+            (child) =>
+              child.taskId === justReaped.taskId &&
+              child.childId === justReaped.childId &&
+              child.attempt === justReaped.attempt,
+          ),
+      )
+    )
       throw new Error("Recently reaped managed worker identity is unavailable");
     return this.inspectWorktreeActivity(targetPath, justReaped ? [justReaped] : []);
   }
   /** Read-only activity gate for provisioning; exemptions are authenticated supervisor attachments. */
   async worktreeReuseActivity(path: string, supervisors: WorktreeIdentity[]): Promise<boolean> {
     const fresh = new TuiNativeManager(this.root, this.disposition, () => false, this.groupLimit);
-    if (fresh.inventoryErrors.length) throw new Error("Managed subagent activity inventory is unavailable");
+    if (fresh.inventoryErrors.length)
+      throw new Error("Managed subagent activity inventory is unavailable");
     return fresh.inspectWorktreeActivity(physicalPath(path).path, supervisors);
   }
-  private async inspectWorktreeActivity(targetPath: string, supervisors: (WorktreeIdentity & { attempt?: number })[]): Promise<boolean> {
-    for (const group of this.groups.values()) for (const child of group.children) {
-      if (supervisors.some(self => group.owner === self.ownerSessionId && child.taskId === self.taskId && child.childId === self.childId && (self.attempt === undefined || child.attempt === self.attempt))) continue;
-      if (child.reaped === true && !active(child)) continue;
-      let manifest: TuiWorkerManifest | undefined;
-      try { manifest = this.manifest(child); }
-      catch { throw new Error(`Managed worker launch identity is unavailable for ${group.owner}/${group.id}/${child.childId}`); }
-      if (manifest && (manifest.ownerSessionId !== group.owner || manifest.groupId !== group.id || manifest.taskId !== child.taskId
-        || manifest.childId !== child.childId || manifest.attempt !== (child.attempt ?? 1)))
-        throw new Error(`Managed worker launch identity is unavailable for ${group.owner}/${group.id}/${child.childId}`);
-      if (child.activityCwd !== undefined && manifest && manifest.activityCwd !== child.activityCwd)
-        throw new Error(`Managed worker launch-time checkout identity changed for ${group.owner}/${group.id}/${child.childId}`);
-      let activityCwd = child.activityCwd ?? manifest?.activityCwd;
-      // Pre-activityCwd initial launches still have Pi's original physical cwd
-      // in their private session header. Never reinterpret a lexical symlink,
-      // resumed session, arbitrary file, or missing header as launch evidence.
-      if (!activityCwd && manifest && child.attempt === 1 && !child.resumeSessionFile
-        && manifest.sessionFile === join(child.directory, "session.jsonl")) {
+  private async inspectWorktreeActivity(
+    targetPath: string,
+    supervisors: (WorktreeIdentity & { attempt?: number })[],
+  ): Promise<boolean> {
+    for (const group of this.groups.values())
+      for (const child of group.children) {
+        if (
+          supervisors.some(
+            (self) =>
+              group.owner === self.ownerSessionId &&
+              child.taskId === self.taskId &&
+              child.childId === self.childId &&
+              (self.attempt === undefined || child.attempt === self.attempt),
+          )
+        )
+          continue;
+        if (child.reaped === true && !active(child)) continue;
+        let manifest: TuiWorkerManifest | undefined;
         try {
-          const originalCwd = readRetainedSessionCwd(manifest.sessionFile);
-          if (originalCwd === resolve(child.spec.cwd)) activityCwd = originalCwd;
-        } catch { /* Missing/invalid legacy evidence remains fail-closed below. */ }
+          manifest = this.manifest(child);
+        } catch {
+          throw new Error(
+            `Managed worker launch identity is unavailable for ${group.owner}/${group.id}/${child.childId}`,
+          );
+        }
+        if (
+          manifest &&
+          (manifest.ownerSessionId !== group.owner ||
+            manifest.groupId !== group.id ||
+            manifest.taskId !== child.taskId ||
+            manifest.childId !== child.childId ||
+            manifest.attempt !== (child.attempt ?? 1))
+        )
+          throw new Error(
+            `Managed worker launch identity is unavailable for ${group.owner}/${group.id}/${child.childId}`,
+          );
+        if (
+          child.activityCwd !== undefined &&
+          manifest &&
+          manifest.activityCwd !== child.activityCwd
+        )
+          throw new Error(
+            `Managed worker launch-time checkout identity changed for ${group.owner}/${group.id}/${child.childId}`,
+          );
+        let activityCwd = child.activityCwd ?? manifest?.activityCwd;
+        // Pre-activityCwd initial launches still have Pi's original physical cwd
+        // in their private session header. Never reinterpret a lexical symlink,
+        // resumed session, arbitrary file, or missing header as launch evidence.
+        if (
+          !activityCwd &&
+          manifest &&
+          child.attempt === 1 &&
+          !child.resumeSessionFile &&
+          manifest.sessionFile === join(child.directory, "session.jsonl")
+        ) {
+          try {
+            const originalCwd = readRetainedSessionCwd(manifest.sessionFile);
+            if (originalCwd === resolve(child.spec.cwd)) activityCwd = originalCwd;
+          } catch {
+            /* Missing/invalid legacy evidence remains fail-closed below. */
+          }
+        }
+        if (!activityCwd || !isAbsolute(activityCwd))
+          throw new Error(
+            `Managed worker launch-time checkout identity unavailable for ${group.owner}/${group.id}/${child.childId}`,
+          );
+        if (child.activityCwd === undefined && manifest?.activityCwd) {
+          child.activityCwd = activityCwd;
+          this.save(group);
+        }
+        // Attribute by recorded launch identity before touching a possibly
+        // removed, unrelated historical checkout.
+        if (!pathWithin(targetPath, activityCwd)) continue;
+        let physicalCwd: { path: string; exists: boolean };
+        try {
+          physicalCwd = physicalPath(activityCwd);
+        } catch {
+          throw new Error(
+            `Managed worker physical checkout identity is unavailable for ${group.owner}/${group.id}/${child.childId}`,
+          );
+        }
+        if (!physicalCwd.exists || physicalCwd.path !== activityCwd)
+          throw new Error(
+            `Managed worker physical checkout identity is unavailable for ${group.owner}/${group.id}/${child.childId}`,
+          );
+        await this.observe(group, child, true);
+        if (child.observationError)
+          throw new Error(
+            `Managed worker activity is unavailable for ${group.owner}/${group.id}/${child.childId}: ${child.observationError}`,
+          );
+        if (child.reaped !== true || active(child)) return true;
       }
-      if (!activityCwd || !isAbsolute(activityCwd))
-        throw new Error(`Managed worker launch-time checkout identity unavailable for ${group.owner}/${group.id}/${child.childId}`);
-      if (child.activityCwd === undefined && manifest?.activityCwd) { child.activityCwd = activityCwd; this.save(group); }
-      // Attribute by recorded launch identity before touching a possibly
-      // removed, unrelated historical checkout.
-      if (!pathWithin(targetPath, activityCwd)) continue;
-      let physicalCwd: { path: string; exists: boolean };
-      try { physicalCwd = physicalPath(activityCwd); }
-      catch { throw new Error(`Managed worker physical checkout identity is unavailable for ${group.owner}/${group.id}/${child.childId}`); }
-      if (!physicalCwd.exists || physicalCwd.path !== activityCwd)
-        throw new Error(`Managed worker physical checkout identity is unavailable for ${group.owner}/${group.id}/${child.childId}`);
-      await this.observe(group, child, true);
-      if (child.observationError) throw new Error(`Managed worker activity is unavailable for ${group.owner}/${group.id}/${child.childId}: ${child.observationError}`);
-      if (child.reaped !== true || active(child)) return true;
-    }
     return false;
   }
   private worktreeTargets(all: Group[]) {
-    const latest = new Map<string, { ownerSessionId: string; taskId: string; childId: string; reaped: boolean; attempt: number }>();
-    for (const g of all) for (const c of g.children) {
-      const key = `${g.owner}\0${c.taskId}`, prior = latest.get(key);
-      if (!prior || prior.attempt < (c.attempt ?? 1)) latest.set(key, { ownerSessionId: g.owner, taskId: c.taskId,
-        childId: c.childId, reaped: c.reaped === true && !active(c), attempt: c.attempt ?? 1 });
-    }
+    const latest = new Map<
+      string,
+      { ownerSessionId: string; taskId: string; childId: string; reaped: boolean; attempt: number }
+    >();
+    for (const g of all)
+      for (const c of g.children) {
+        const key = `${g.owner}\0${c.taskId}`,
+          prior = latest.get(key);
+        if (!prior || prior.attempt < (c.attempt ?? 1))
+          latest.set(key, {
+            ownerSessionId: g.owner,
+            taskId: c.taskId,
+            childId: c.childId,
+            reaped: c.reaped === true && !active(c),
+            attempt: c.attempt ?? 1,
+          });
+      }
     return [...latest.values()];
   }
-  hasOwnedGroups(owner: string): boolean { return [...this.groups.values()].some(g => g.owner === owner); }
-  private async reapGroup(g: Group, owner: string, descendants: Group[], params: any): Promise<void> {
+  hasOwnedGroups(owner: string): boolean {
+    return [...this.groups.values()].some((g) => g.owner === owner);
+  }
+  private async reapGroup(
+    g: Group,
+    owner: string,
+    descendants: Group[],
+    params: any,
+  ): Promise<void> {
     let ownsReapFlight = false;
     try {
       await this.serial(async () => {
         if (g.reaping) throw new Error("Group reap is already in progress");
-        if (g.children.some(c => c.state === "running" || c.state === "waiting")) throw new Error("Group is busy; reap never cancels active or waiting work");
-        if (g.children.some(c => c.state === "pending" || c.state === "launching")) throw new Error("Pending group work must finish or be explicitly cancelled before reap");
-        const nestedIds = new Set(this.descendantGroups(owner, [g]).map(group => group.id));
-        const blockers = descendants.filter(group => nestedIds.has(group.id)).flatMap(group => group.children.filter(active).map(c => `${group.id}/${c.childId} ${c.state}`));
-        if (blockers.length) throw new Error(`Active descendants block ancestor reap: ${blockers.slice(0, 32).join(", ")}`);
-        g.reaping = true; ownsReapFlight = true;
-        for (const c of g.children) if (c.spec.verification?.length && (c.verification as any)?.status !== "passed") {
-          c.verification = { status: "checking", runs: [] }; c.acceptedDelivery = false;
-        }
+        if (g.children.some((c) => c.state === "running" || c.state === "waiting"))
+          throw new Error("Group is busy; reap never cancels active or waiting work");
+        if (g.children.some((c) => c.state === "pending" || c.state === "launching"))
+          throw new Error("Pending group work must finish or be explicitly cancelled before reap");
+        const nestedIds = new Set(this.descendantGroups(owner, [g]).map((group) => group.id));
+        const blockers = descendants
+          .filter((group) => nestedIds.has(group.id))
+          .flatMap((group) =>
+            group.children.filter(active).map((c) => `${group.id}/${c.childId} ${c.state}`),
+          );
+        if (blockers.length)
+          throw new Error(
+            `Active descendants block ancestor reap: ${blockers.slice(0, 32).join(", ")}`,
+          );
+        g.reaping = true;
+        ownsReapFlight = true;
+        for (const c of g.children)
+          if (c.spec.verification?.length && (c.verification as any)?.status !== "passed") {
+            c.verification = { status: "checking", runs: [] };
+            c.acceptedDelivery = false;
+          }
         this.save(g);
       });
       // Do not keep the manager's mutation queue held while the child runs its
       // potentially long verification/cleanup flight. Status and cancellation
       // can proceed; g.reaping prevents prompts, launches and duplicate reap.
-      const nestedIds = new Set(this.descendantGroups(owner, [g]).map(group => group.id));
+      const nestedIds = new Set(this.descendantGroups(owner, [g]).map((group) => group.id));
       // Stopped/reaped intermediate parents no longer run a scheduler. Recover
       // only their proven descendants, deepest first; live parents perform
       // their own recursive cleanup through prepare_reap instead.
-      await this.reapStoppedDescendants(descendants.filter(group => nestedIds.has(group.id)), params.force === true ? { force: true, reason: params.reason } : {});
-      for (const c of g.children) await this.reapChild(g, c, { ...(params.force === true ? { force: true, reason: params.reason } : {}), ...(params.cleanup_worktree === true ? { cleanupWorktree: true } : {}) });
-      await this.serial(async () => { delete g.reaping; this.save(g); });
+      await this.reapStoppedDescendants(
+        descendants.filter((group) => nestedIds.has(group.id)),
+        params.force === true ? { force: true, reason: params.reason } : {},
+      );
+      for (const c of g.children)
+        await this.reapChild(g, c, {
+          ...(params.force === true ? { force: true, reason: params.reason } : {}),
+          ...(params.cleanup_worktree === true ? { cleanupWorktree: true } : {}),
+        });
+      await this.serial(async () => {
+        delete g.reaping;
+        this.save(g);
+      });
       ownsReapFlight = false;
     } catch (error) {
       if (ownsReapFlight) {
-        await this.serial(async () => { delete g.reaping; this.save(g); });
-        try { await this.refresh(owner); } catch { /* Preserve the reap failure; status remains fail-closed. */ }
+        await this.serial(async () => {
+          delete g.reaping;
+          this.save(g);
+        });
+        try {
+          await this.refresh(owner);
+        } catch {
+          /* Preserve the reap failure; status remains fail-closed. */
+        }
       }
       throw error;
     }
@@ -1330,69 +2902,158 @@ export class TuiNativeManager {
     if (!op) return;
     if (params.force !== undefined && (op !== "reap" || typeof params.force !== "boolean"))
       throw new Error("force is a boolean option supported only for reap");
-    if (op === "reap" && params.force === true && (typeof params.reason !== "string" || !params.reason.trim() || Buffer.byteLength(params.reason) > 1000))
+    if (
+      op === "reap" &&
+      params.force === true &&
+      (typeof params.reason !== "string" ||
+        !params.reason.trim() ||
+        Buffer.byteLength(params.reason) > 1000)
+    )
       throw new Error("Forced reap requires a non-empty reason (max 1000 bytes)");
-    if (op === "reap" && params.reason !== undefined && params.force !== true) throw new Error("reap reason requires force:true");
-    if (params.cleanup_worktree !== undefined && (op !== "reap" || typeof params.cleanup_worktree !== "boolean")) throw new Error("cleanup_worktree is a boolean reap-only option");
-    if (this.closed || this.reapReserved) throw new Error("Native TUI controller is closing or cleanup reserved");
+    if (op === "reap" && params.reason !== undefined && params.force !== true)
+      throw new Error("reap reason requires force:true");
+    if (
+      params.cleanup_worktree !== undefined &&
+      (op !== "reap" || typeof params.cleanup_worktree !== "boolean")
+    )
+      throw new Error("cleanup_worktree is a boolean reap-only option");
+    if (this.closed || this.reapReserved)
+      throw new Error("Native TUI controller is closing or cleanup reserved");
     if (op === "reap") {
-      const inventory = new TuiNativeManager(this.root, this.disposition, () => false, this.groupLimit);
-      if (inventory.inventoryErrors.length) throw new Error(`Subagent inventory is unverifiable: ${inventory.inventoryErrors.slice(0, 16).join(", ")}`);
+      const inventory = new TuiNativeManager(
+        this.root,
+        this.disposition,
+        () => false,
+        this.groupLimit,
+      );
+      if (inventory.inventoryErrors.length)
+        throw new Error(
+          `Subagent inventory is unverifiable: ${inventory.inventoryErrors.slice(0, 16).join(", ")}`,
+        );
     }
-    const ownedGroups = [...this.groups.values()].filter(g => g.owner === owner);
-    const directTarget = ownedGroups.some(g => params.job_id ? g.id === params.job_id
-      : g.children.some(c => c.childId === params.child_id || c.taskId === params.task_id));
-    const descendantRead = ["list", "tasks", "reap"].includes(op) || !directTarget && ["status", "output", "result"].includes(op);
+    const ownedGroups = [...this.groups.values()].filter((g) => g.owner === owner);
+    const directTarget = ownedGroups.some((g) =>
+      params.job_id
+        ? g.id === params.job_id
+        : g.children.some((c) => c.childId === params.child_id || c.taskId === params.task_id),
+    );
+    const descendantRead =
+      ["list", "tasks", "reap"].includes(op) ||
+      (!directTarget && ["status", "output", "result"].includes(op));
     const descendants = descendantRead ? await this.observeDescendants(owner) : [];
-    let descendant = descendants.find(g => params.job_id ? g.id === params.job_id
-      : g.children.some(c => c.childId === params.child_id || c.taskId === params.task_id));
+    let descendant = descendants.find((g) =>
+      params.job_id
+        ? g.id === params.job_id
+        : g.children.some((c) => c.childId === params.child_id || c.taskId === params.task_id),
+    );
     if (descendant) {
-      if (op === "idle_decision") throw new Error("Idle decisions cannot target descendant workers; ask the owning parent agent");
-      if (params.child_id && !descendant.children.some(c => c.childId === params.child_id)
-        || params.task_id && !descendant.children.some(c => c.taskId === params.task_id)) throw new Error("Descendant target identity mismatch");
+      if (op === "idle_decision")
+        throw new Error(
+          "Idle decisions cannot target descendant workers; ask the owning parent agent",
+        );
+      if (
+        (params.child_id && !descendant.children.some((c) => c.childId === params.child_id)) ||
+        (params.task_id && !descendant.children.some((c) => c.taskId === params.task_id))
+      )
+        throw new Error("Descendant target identity mismatch");
       if (op === "reap") {
-        const nestedIds = new Set(this.descendantGroups(descendant.owner, [descendant]).map(group => group.id));
-        const nested = descendants.filter(group => nestedIds.has(group.id));
-        const blockers = [descendant, ...nested].flatMap(group => group.children.filter(active).map(c => `${group.id}/${c.childId} ${c.state}`));
-        if (blockers.length) throw new Error(`Active descendants block ancestor reap: ${blockers.slice(0, 32).join(", ")}`);
+        const nestedIds = new Set(
+          this.descendantGroups(descendant.owner, [descendant]).map((group) => group.id),
+        );
+        const nested = descendants.filter((group) => nestedIds.has(group.id));
+        const blockers = [descendant, ...nested].flatMap((group) =>
+          group.children.filter(active).map((c) => `${group.id}/${c.childId} ${c.state}`),
+        );
+        if (blockers.length)
+          throw new Error(
+            `Active descendants block ancestor reap: ${blockers.slice(0, 32).join(", ")}`,
+          );
         const release = this.observerLease(descendant.owner);
-        if (!release) throw new Error(`Descendant owner is live; ask its parent to reap ${descendant.id}`);
+        if (!release)
+          throw new Error(`Descendant owner is live; ask its parent to reap ${descendant.id}`);
         try {
-          const fresh = new TuiNativeManager(this.root, this.disposition, () => false, this.groupLimit).groups.get(descendant.id);
-          if (!fresh || fresh.owner !== descendant.owner) throw new Error("Descendant ownership changed before reap");
+          const fresh = new TuiNativeManager(
+            this.root,
+            this.disposition,
+            () => false,
+            this.groupLimit,
+          ).groups.get(descendant.id);
+          if (!fresh || fresh.owner !== descendant.owner)
+            throw new Error("Descendant ownership changed before reap");
           descendant = fresh;
           for (const c of descendant.children) await this.observe(descendant, c, true);
-          if (descendant.children.some(active)) throw new Error(`Active descendant blocks reap: ${descendant.id}`);
-          await this.reapStoppedDescendants(nested, params.force === true ? { force: true, reason: params.reason } : {});
+          if (descendant.children.some(active))
+            throw new Error(`Active descendant blocks reap: ${descendant.id}`);
+          await this.reapStoppedDescendants(
+            nested,
+            params.force === true ? { force: true, reason: params.reason } : {},
+          );
           for (const c of descendant.children) {
             if (c.report) readPrivateJson(c.report); // Require readable retained results before deletion.
-            await this.reapChild(descendant, c, params.force === true ? { force: true, reason: params.reason } : {});
+            await this.reapChild(
+              descendant,
+              c,
+              params.force === true ? { force: true, reason: params.reason } : {},
+            );
           }
-        } finally { release(); }
+        } finally {
+          release();
+        }
       }
-      if (op === "idle_decision") throw new Error("Idle decisions cannot target descendant workers; ask the owning parent agent");
-      const c = descendant.children.find(c => c.childId === params.child_id || c.taskId === params.task_id)
-        ?? descendant.children[(params.child ?? 1) - 1];
+      if (op === "idle_decision")
+        throw new Error(
+          "Idle decisions cannot target descendant workers; ask the owning parent agent",
+        );
+      const c =
+        descendant.children.find(
+          (c) => c.childId === params.child_id || c.taskId === params.task_id,
+        ) ?? descendant.children[(params.child ?? 1) - 1];
       if (op === "result") {
-        if (!c || active(c) || !c.report) return response("Descendant result not ready.", { operation: op, job_id: descendant.id });
+        if (!c || active(c) || !c.report)
+          return response("Descendant result not ready.", { operation: op, job_id: descendant.id });
         const bytes = Buffer.from(reportText(c, readPrivateJson(c.report)));
-        const offset = params.offset ?? 0, limit = params.limit ?? 48 * 1024;
+        const offset = params.offset ?? 0,
+          limit = params.limit ?? 48 * 1024;
         let manifest: TuiWorkerManifest | undefined;
-        try { manifest = this.manifest(c); } catch { this.invalidateVerification(c, "unavailable", "Descendant worker manifest unavailable"); }
+        try {
+          manifest = this.manifest(c);
+        } catch {
+          this.invalidateVerification(c, "unavailable", "Descendant worker manifest unavailable");
+        }
         this.currentVerification(c, manifest);
-        return response(bytes.subarray(offset, offset + limit).toString("utf8"), { operation: op, job_id: descendant.id, child_id: c.childId,
-          verification: c.verification ?? { status: c.spec.verification?.length ? "unavailable" : "not-configured" }, historical_verification: c.historicalVerification,
-          accepted_delivery: c.acceptedDelivery === true, failed: c.state === "failed" || verificationFailedForDelivery(c),
-          descendant: true, artifact: c.report, offset, next_offset: Math.min(bytes.length, offset + limit), complete: offset + limit >= bytes.length });
+        return response(bytes.subarray(offset, offset + limit).toString("utf8"), {
+          operation: op,
+          job_id: descendant.id,
+          child_id: c.childId,
+          verification: c.verification ?? {
+            status: c.spec.verification?.length ? "unavailable" : "not-configured",
+          },
+          historical_verification: c.historicalVerification,
+          accepted_delivery: c.acceptedDelivery === true,
+          failed: c.state === "failed" || verificationFailedForDelivery(c),
+          descendant: true,
+          artifact: c.report,
+          offset,
+          next_offset: Math.min(bytes.length, offset + limit),
+          complete: offset + limit >= bytes.length,
+        });
       }
-      return response(this.text(descendant, op === "output"), { operation: op, job_id: descendant.id, descendant: true, group: this.publicGroup(descendant) });
+      return response(this.text(descendant, op === "output"), {
+        operation: op,
+        job_id: descendant.id,
+        descendant: true,
+        group: this.publicGroup(descendant),
+      });
     }
     let selected: Group | undefined;
     let child: Child | undefined;
     if (params.child_id || params.task_id) {
-      const found = this.byChild(owner, params.child_id ?? params.task_id); selected = found?.group; child = found?.child;
+      const found = this.byChild(owner, params.child_id ?? params.task_id);
+      selected = found?.group;
+      child = found?.child;
     } else if (params.job_id) selected = this.owned(owner, params.job_id);
-    if (selected && params.job_id && selected.id !== params.job_id) throw new Error("Child does not belong to the requested group");
+    if (selected && params.job_id && selected.id !== params.job_id)
+      throw new Error("Child does not belong to the requested group");
     const globalOp = ["list", "tasks", "wait_any", "wait_all"].includes(op);
     if (!selected && (!globalOp || !ownedGroups.length)) return;
     let retainedResult = false;
@@ -1401,175 +3062,436 @@ export class TuiNativeManager {
     if (op === "result" && selected) {
       child ??= selected.children[(params.child ?? 1) - 1];
       if (!child) return response("Unknown child result.", { operation: op, job_id: selected.id });
-      this.invalidateVerification(child, child.reaped ? "interrupted" : "unavailable", "Fresh result verification observation required; cached evidence is historical");
+      this.invalidateVerification(
+        child,
+        child.reaped ? "interrupted" : "unavailable",
+        "Fresh result verification observation required; cached evidence is historical",
+      );
       if (signal?.aborted) throw new Error("Result observation cancelled");
       // Observe a bounded selected-child status without mutating shared state
       // or waiting for the manager refresh queue. Never return an old report
       // while the worker reports an active turn.
       if (!child.reaped) {
         let manifest: TuiWorkerManifest | undefined;
-        try { manifest = this.manifest(child); } catch { this.invalidateVerification(child, "unavailable", "Result worker manifest unavailable"); }
+        try {
+          manifest = this.manifest(child);
+        } catch {
+          this.invalidateVerification(child, "unavailable", "Result worker manifest unavailable");
+        }
         let status;
         if (manifest) {
-          try { status = await callTuiWorker(manifest, { operation: "status" }, { timeoutMs: 1000, signal }); }
-          catch (error) { if (signal?.aborted) throw error; }
+          try {
+            status = await callTuiWorker(
+              manifest,
+              { operation: "status" },
+              { timeoutMs: 1000, signal },
+            );
+          } catch (error) {
+            if (signal?.aborted) throw error;
+          }
         }
         if (signal?.aborted) throw new Error("Result observation cancelled");
         if (!status?.ok) {
-          if (!child.report) return response("Worker status unavailable; no retained result.", { operation: op, job_id: selected.id, unavailable: true });
+          if (!child.report)
+            return response("Worker status unavailable; no retained result.", {
+              operation: op,
+              job_id: selected.id,
+              unavailable: true,
+            });
           retainedResult = true;
         } else {
           const snapshot = status.data as any;
           if (snapshot.active) this.notifyActivity(selected, child, snapshot.sequence);
-          if (snapshot.active || !snapshot.lastReport) return response("Result not ready. Use wait.", { operation: op, job_id: selected.id });
+          if (snapshot.active || !snapshot.lastReport)
+            return response("Result not ready. Use wait.", { operation: op, job_id: selected.id });
           const reportPath = snapshot.lastReport;
-          const artifactPath = (path: unknown, kind: string): path is string => typeof path === "string"
-            && resolve(path).startsWith(`${resolve(child!.directory)}/`)
-            && new RegExp(`^${kind}-[0-9]+-[a-f0-9]{16}\\.json$`).test(resolve(path).slice(resolve(child!.directory).length + 1));
-          if (!artifactPath(reportPath, "report")) return response("Worker returned an invalid report; retained result not substituted.", { operation: op, job_id: selected.id, unavailable: true });
+          const artifactPath = (path: unknown, kind: string): path is string =>
+            typeof path === "string" &&
+            resolve(path).startsWith(`${resolve(child!.directory)}/`) &&
+            new RegExp(`^${kind}-[0-9]+-[a-f0-9]{16}\\.json$`).test(
+              resolve(path).slice(resolve(child!.directory).length + 1),
+            );
+          if (!artifactPath(reportPath, "report"))
+            return response("Worker returned an invalid report; retained result not substituted.", {
+              operation: op,
+              job_id: selected.id,
+              unavailable: true,
+            });
           // Work on a private snapshot: concurrent scheduler observations retain
           // ownership of manager state and event cursors.
-          child = { ...child, report: reportPath, error: undefined, lastOutcome: undefined, runSequence: snapshot.sequence };
-          if (artifactPath(snapshot.lastOutcome, "outcome")) child.lastOutcome = taskOutcome(readPrivateJson(snapshot.lastOutcome), child.spec.acceptance ?? []);
+          child = {
+            ...child,
+            report: reportPath,
+            error: undefined,
+            lastOutcome: undefined,
+            runSequence: snapshot.sequence,
+          };
+          if (artifactPath(snapshot.lastOutcome, "outcome"))
+            child.lastOutcome = taskOutcome(
+              readPrivateJson(snapshot.lastOutcome),
+              child.spec.acceptance ?? [],
+            );
           const artifact = readPrivateJson(reportPath) as any;
-          child.error = typeof artifact.error === "string" ? artifact.error.slice(0, 2000)
-            : artifact.assistant?.stopReason === "toolUse" && snapshot.readyForPrompts === false ? "Worker command authority unavailable"
-            : artifact.assistant?.stopReason === "error" ? "Worker reported an error" : undefined;
-          child.state = child.error ? "failed" : artifact.assistant?.stopReason === "aborted" ? "cancelled"
-            : artifact.assistant?.stopReason === "toolUse" && !child.lastOutcome ? "waiting" : "completed";
+          child.error =
+            typeof artifact.error === "string"
+              ? artifact.error.slice(0, 2000)
+              : artifact.assistant?.stopReason === "toolUse" && snapshot.readyForPrompts === false
+                ? "Worker command authority unavailable"
+                : artifact.assistant?.stopReason === "error"
+                  ? "Worker reported an error"
+                  : undefined;
+          child.state = child.error
+            ? "failed"
+            : artifact.assistant?.stopReason === "aborted"
+              ? "cancelled"
+              : artifact.assistant?.stopReason === "toolUse" && !child.lastOutcome
+                ? "waiting"
+                : "completed";
           this.observeVerification(selected, child, manifest!, snapshot);
           this.currentVerification(child, manifest);
         }
       }
     } else await this.refresh(owner);
-    if (op === "list" || op === "tasks") return response([
-      ...ownedGroups.slice(-(params.limit ?? 20)).map(g => this.text(g)),
-      ...descendants.filter(g => g.children.some(c => !c.reaped)).map(g => `Descendant: ${this.text(g)}`),
-    ].join("\n\n"), { operation: op, groups: ownedGroups.map(g => this.publicGroup(g)),
-      descendants: descendants.map(g => this.publicGroup(g)), ...(op === "tasks" ? { tasks: this.taskList(owner) } : {}) });
+    if (op === "list" || op === "tasks")
+      return response(
+        [
+          ...ownedGroups.slice(-(params.limit ?? 20)).map((g) => this.text(g)),
+          ...descendants
+            .filter((g) => g.children.some((c) => !c.reaped))
+            .map((g) => `Descendant: ${this.text(g)}`),
+        ].join("\n\n"),
+        {
+          operation: op,
+          groups: ownedGroups.map((g) => this.publicGroup(g)),
+          descendants: descendants.map((g) => this.publicGroup(g)),
+          ...(op === "tasks" ? { tasks: this.taskList(owner) } : {}),
+        },
+      );
     if (op === "wait_any" || op === "wait_all") {
-      const waited = await waitForGroupSnapshot(async () => {
-        await this.refresh(owner);
-        return ownedGroups.map(g => this.publicGroup(g));
-      }, op, params.wait_ms ?? 1000, signal);
-      return response(waited.groups.map(g => `${g.job_id} ${g.status}`).join("\n") || "No running TUI groups", { operation: op, ...waited });
+      const waited = await waitForGroupSnapshot(
+        async () => {
+          await this.refresh(owner);
+          return ownedGroups.map((g) => this.publicGroup(g));
+        },
+        op,
+        params.wait_ms ?? 1000,
+        signal,
+      );
+      return response(
+        waited.groups.map((g) => `${g.job_id} ${g.status}`).join("\n") || "No running TUI groups",
+        { operation: op, ...waited },
+      );
     }
     const g = selected!;
     if (g.reaping && !["status", "output", "result", "cancel"].includes(op))
-      throw new Error(op === "reap" ? "Group reap is already in progress" : "Worker control is unavailable while group reap is in progress");
+      throw new Error(
+        op === "reap"
+          ? "Group reap is already in progress"
+          : "Worker control is unavailable while group reap is in progress",
+      );
     if (op === "verify") {
-      const targets = child ? [child] : g.children.filter(target => target.spec.verification?.length);
+      const targets = child
+        ? [child]
+        : g.children.filter((target) => target.spec.verification?.length);
       const results = [];
       for (const target of targets) {
         const manifest = this.manifest(target);
-        if (!manifest || target.reaped) throw new Error(`Verification unavailable for closed worker ${target.childId}`);
+        if (!manifest || target.reaped)
+          throw new Error(`Verification unavailable for closed worker ${target.childId}`);
         const requestId = `parent-verify:${manifest.workerEpoch}:${randomBytes(12).toString("hex")}`;
-        const checked = await awaitTuiWorkerVerification(manifest, requestId, verificationBudget(manifest), signal);
-        if (!checked.response.ok) throw new Error(`Worker verification failed: ${checked.response.code}: ${checked.response.message}`);
+        const checked = await awaitTuiWorkerVerification(
+          manifest,
+          requestId,
+          verificationBudget(manifest),
+          signal,
+        );
+        if (!checked.response.ok)
+          throw new Error(
+            `Worker verification failed: ${checked.response.code}: ${checked.response.message}`,
+          );
         const receiptVerification = (checked.response.data as any)?.verification;
         await this.observe(g, target);
         let currentManifest: TuiWorkerManifest | undefined;
-        try { currentManifest = this.manifest(target); } catch { /* Fresh verification below fails closed without the current manifest. */ }
+        try {
+          currentManifest = this.manifest(target);
+        } catch {
+          /* Fresh verification below fails closed without the current manifest. */
+        }
         this.currentVerification(target, currentManifest);
         const verification = target.verification as any;
-        if (!verification?.status) throw new Error("Fresh worker verification observation returned no structured status");
-        results.push({ child_id: target.childId, verification, receipt_verification: receiptVerification,
-          accepted_delivery: target.acceptedDelivery === true, ...(checked.timedOut ? { timed_out: true } : {}) });
+        if (!verification?.status)
+          throw new Error("Fresh worker verification observation returned no structured status");
+        results.push({
+          child_id: target.childId,
+          verification,
+          receipt_verification: receiptVerification,
+          accepted_delivery: target.acceptedDelivery === true,
+          ...(checked.timedOut ? { timed_out: true } : {}),
+        });
       }
-      if (!results.length) throw new Error("No verification gates are configured for this worker group");
-      const pending = results.some(result => result.verification?.status === "checking");
-      const timedOut = results.some(result => result.timed_out === true);
-      const failed = results.some(result => !["passed", "checking"].includes(result.verification?.status));
-      const rendered = response(results.map(result => `${result.child_id}: ${result.verification?.status ?? "unavailable"}${result.timed_out ? " (verification wait timed out)" : ""}`).join("\n"), { operation: op, job_id: g.id, results, pending, timed_out: timedOut, failed });
+      if (!results.length)
+        throw new Error("No verification gates are configured for this worker group");
+      const pending = results.some((result) => result.verification?.status === "checking");
+      const timedOut = results.some((result) => result.timed_out === true);
+      const failed = results.some(
+        (result) => !["passed", "checking"].includes(result.verification?.status),
+      );
+      const rendered = response(
+        results
+          .map(
+            (result) =>
+              `${result.child_id}: ${result.verification?.status ?? "unavailable"}${result.timed_out ? " (verification wait timed out)" : ""}`,
+          )
+          .join("\n"),
+        { operation: op, job_id: g.id, results, pending, timed_out: timedOut, failed },
+      );
       return { ...rendered, isError: failed || timedOut };
     }
     if (op === "idle_decision") {
       const m = this.manifest(child!);
-      if (!m || child!.childId !== params.child_id || m.workerEpoch !== params.worker_epoch) throw new Error("Idle decision target is stale");
+      if (!m || child!.childId !== params.child_id || m.workerEpoch !== params.worker_epoch)
+        throw new Error("Idle decision target is stale");
       const status = await callTuiWorker(m, { operation: "status" }, { timeoutMs: 2000 });
-      if (!status.ok || status.data?.idleDecision?.requestId !== params.request_id || status.data?.idleDecision?.workerEpoch !== m.workerEpoch)
+      if (
+        !status.ok ||
+        status.data?.idleDecision?.requestId !== params.request_id ||
+        status.data?.idleDecision?.workerEpoch !== m.workerEpoch
+      )
         throw new Error("Idle decision request is stale or no longer pending");
-      const result = await callTuiWorker(m, { operation: "idle_decision", decisionRequestId: params.request_id, choice: params.choice },
-        { requestId: `idle:${createHash("sha256").update(String(params.request_id) + String(params.choice)).digest("hex").slice(0, 48)}` });
+      const result = await callTuiWorker(
+        m,
+        { operation: "idle_decision", decisionRequestId: params.request_id, choice: params.choice },
+        {
+          requestId: `idle:${createHash("sha256")
+            .update(String(params.request_id) + String(params.choice))
+            .digest("hex")
+            .slice(0, 48)}`,
+        },
+      );
       if (!result.ok) throw new Error(`Idle decision rejected: ${result.code}`);
-      return response(`Resolved idle decision ${params.request_id} for ${child!.childId}: ${params.choice}.`, { operation: op, child_id: child!.childId, request_id: params.request_id });
+      return response(
+        `Resolved idle decision ${params.request_id} for ${child!.childId}: ${params.choice}.`,
+        { operation: op, child_id: child!.childId, request_id: params.request_id },
+      );
     }
     if (op === "prompt" || op === "resume") {
-      if (child?.spec.assignedGoal && op === "resume") throw new Error("Resume the linked Goal with goal_manage scope:saved; ordinary prompt steering remains available while active");
-      if (this.disposition() !== (g.launchMode === "guard-only" ? "guard-only" : "native") || !this.ready()) throw new Error("Current authority does not permit native child prompts");
-      const c = child!; const m = this.manifest(c);
+      if (child?.spec.assignedGoal && op === "resume")
+        throw new Error(
+          "Resume the linked Goal with goal_manage scope:saved; ordinary prompt steering remains available while active",
+        );
+      if (
+        this.disposition() !== (g.launchMode === "guard-only" ? "guard-only" : "native") ||
+        !this.ready()
+      )
+        throw new Error("Current authority does not permit native child prompts");
+      const c = child!;
+      const m = this.manifest(c);
       if (c.spec.assignedGoal) {
-        const goal = await this.goalRequest(owner, { taskId: c.taskId, childId: c.childId, jobId: g.id, attempt: c.attempt }, c.spec.assignedGoal.entryId, { operation: "observe" });
-        if (goal.status !== "active") throw new Error("Goal execution is paused or final; use explicit saved-Goal lifecycle controls before new work");
+        const goal = await this.goalRequest(
+          owner,
+          { taskId: c.taskId, childId: c.childId, jobId: g.id, attempt: c.attempt },
+          c.spec.assignedGoal.entryId,
+          { operation: "observe" },
+        );
+        if (goal.status !== "active")
+          throw new Error(
+            "Goal execution is paused or final; use explicit saved-Goal lifecycle controls before new work",
+          );
       }
       // A model checkpoint records progress, not measured context pressure.
       const requiresCompaction = c.requiresCompaction === true;
-      if (op === "resume" && requiresCompaction && params.compact === false) throw new Error("High-context continuation requires compaction");
+      if (op === "resume" && requiresCompaction && params.compact === false)
+        throw new Error("High-context continuation requires compaction");
       const dead = !m || c.reaped || (await this.tmux.inspect(m)).dead;
       if (dead) {
-        if (op !== "resume" || !m) throw new Error("Worker is closed; use explicit operation=resume with task_id");
-        if (await callTuiWorker(m, { operation: "status" }, { timeoutMs: 500 }).then(() => true, () => false)) throw new Error("Prior worker endpoint is still live; new attempt refused");
-        if (m.panePid && m.paneProcessToken && await processIdentity(m.panePid).then(token => token === m.paneProcessToken, () => false)) throw new Error("Prior worker process is still live; new attempt refused");
+        if (op !== "resume" || !m)
+          throw new Error("Worker is closed; use explicit operation=resume with task_id");
+        if (
+          await callTuiWorker(m, { operation: "status" }, { timeoutMs: 500 }).then(
+            () => true,
+            () => false,
+          )
+        )
+          throw new Error("Prior worker endpoint is still live; new attempt refused");
+        if (
+          m.panePid &&
+          m.paneProcessToken &&
+          (await processIdentity(m.panePid).then(
+            (token) => token === m.paneProcessToken,
+            () => false,
+          ))
+        )
+          throw new Error("Prior worker process is still live; new attempt refused");
         if (c.reaped) {
-          const tombstone = readPrivateJson(new TuiWorkerStore(c.directory).path("reaped.json")) as any;
-          if (tombstone.workerEpoch !== m.workerEpoch) throw new Error("Old worker death is not verified");
+          const tombstone = readPrivateJson(
+            new TuiWorkerStore(c.directory).path("reaped.json"),
+          ) as any;
+          if (tombstone.workerEpoch !== m.workerEpoch)
+            throw new Error("Old worker death is not verified");
         }
-        if (this.resuming.has(c.taskId) || this.byChild(owner, c.taskId)?.child !== c) throw new Error("Task already has a successor attempt");
+        if (this.resuming.has(c.taskId) || this.byChild(owner, c.taskId)?.child !== c)
+          throw new Error("Task already has a successor attempt");
         this.resuming.add(c.taskId);
         try {
-          return await this.launch({ ...c.spec, displayName: this.canonicalTitle(c), background: true }, owner, c.spec.cwd, signal, undefined,
-            { child: c, sessionFile: m.sessionFile, compact: params.compact ?? requiresCompaction, message: params.message });
-        } finally { this.resuming.delete(c.taskId); }
+          return await this.launch(
+            { ...c.spec, displayName: this.canonicalTitle(c), background: true },
+            owner,
+            c.spec.cwd,
+            signal,
+            undefined,
+            {
+              child: c,
+              sessionFile: m.sessionFile,
+              compact: params.compact ?? requiresCompaction,
+              message: params.message,
+            },
+          );
+        } finally {
+          this.resuming.delete(c.taskId);
+        }
       }
       if (op === "resume" && (params.compact === true || requiresCompaction)) {
-        const compacted = await callTuiWorker(m!, { operation: "compact" }, { timeoutMs: 300_000, signal });
-        if (!compacted.ok) throw new Error(`Resume compaction failed: ${compacted.code}: ${compacted.message}`);
+        const compacted = await callTuiWorker(
+          m!,
+          { operation: "compact" },
+          { timeoutMs: 300_000, signal },
+        );
+        if (!compacted.ok)
+          throw new Error(`Resume compaction failed: ${compacted.code}: ${compacted.message}`);
       }
-      const result = await callTuiWorker(m!, { operation: "prompt", mode: params.control_mode ?? "steer", message: params.message ?? "Continue from the saved task context." });
+      const result = await callTuiWorker(m!, {
+        operation: "prompt",
+        mode: params.control_mode ?? "steer",
+        message: params.message ?? "Continue from the saved task context.",
+      });
       if (!result.ok) throw new Error(`Worker prompt failed: ${result.code}: ${result.message}`);
       this.notifyActivity(g, c, result.sequence);
-      c.state = "running"; g.cancelled = false; this.save(g);
+      c.state = "running";
+      g.cancelled = false;
+      this.save(g);
       if (params.wait_for_response) {
-        while (active(c)) { if (signal?.aborted) throw new Error("Prompt observation cancelled; child continues"); await pause(200); await this.refresh(owner); }
+        while (active(c)) {
+          if (signal?.aborted) throw new Error("Prompt observation cancelled; child continues");
+          await pause(200);
+          await this.refresh(owner);
+        }
       }
-      return response(this.text(g, params.wait_for_response === true), { operation: op, group: this.publicGroup(g), job_id: g.id, child_id: c.childId });
+      return response(this.text(g, params.wait_for_response === true), {
+        operation: op,
+        group: this.publicGroup(g),
+        job_id: g.id,
+        child_id: c.childId,
+      });
     }
     if (op === "cancel") await this.serial(() => this.cancelGroup(g));
     if (op === "promote") await this.promote(owner, g.id);
     if (op === "reap") {
       const flight = this.reapGroup(g, owner, descendants, params);
       this.reapFlights.add(flight);
-      try { await flight; } finally { this.reapFlights.delete(flight); }
-      const cleanup = g.children.filter(c => c.worktreeCleanup).map(c => ({ child_id: c.childId, ...c.worktreeCleanup! }));
-      const retained = cleanup.flatMap(report => report.retainedParentWorktrees ?? []);
-      return response(this.text(g) + (retained.length ? `\nRetained parent-owned worktrees (borrower detached; original owner remains responsible): ${retained.map(row => row.path).join(", ")}` : ""),
-        { operation: op, job_id: g.id, group: this.publicGroup(g), ...(cleanup.length ? { worktree_cleanup: cleanup } : {}) });
+      try {
+        await flight;
+      } finally {
+        this.reapFlights.delete(flight);
+      }
+      const cleanup = g.children
+        .filter((c) => c.worktreeCleanup)
+        .map((c) => ({ child_id: c.childId, ...c.worktreeCleanup! }));
+      const retained = cleanup.flatMap((report) => report.retainedParentWorktrees ?? []);
+      return response(
+        this.text(g) +
+          (retained.length
+            ? `\nRetained parent-owned worktrees (borrower detached; original owner remains responsible): ${retained.map((row) => row.path).join(", ")}`
+            : ""),
+        {
+          operation: op,
+          job_id: g.id,
+          group: this.publicGroup(g),
+          ...(cleanup.length ? { worktree_cleanup: cleanup } : {}),
+        },
+      );
     }
     if (op === "wait" || op === "wait_group") {
       const deadline = Date.now() + (params.wait_ms ?? 1000);
-      while (g.children.some(active) && Date.now() < deadline) { if (signal?.aborted) throw new Error("Wait cancelled; worker continues"); await pause(100); await this.refresh(owner); }
+      while (g.children.some(active) && Date.now() < deadline) {
+        if (signal?.aborted) throw new Error("Wait cancelled; worker continues");
+        await pause(100);
+        await this.refresh(owner);
+      }
     }
     if (op === "result") {
       const c = child ?? g.children[(params.child ?? 1) - 1];
-      if (!c?.report) return response(c?.error ? `Worker failed: ${c.error}` : "Result not ready. Use wait.", { operation: op, job_id: g.id });
+      if (!c?.report)
+        return response(c?.error ? `Worker failed: ${c.error}` : "Result not ready. Use wait.", {
+          operation: op,
+          job_id: g.id,
+        });
       const raw = readPrivateJson(c.report) as any;
-      if (retainedResult || c.reaped) this.invalidateVerification(c, c.reaped ? "interrupted" : "unavailable", "Fresh result observation unavailable; retained evidence is historical only");
+      if (retainedResult || c.reaped)
+        this.invalidateVerification(
+          c,
+          c.reaped ? "interrupted" : "unavailable",
+          "Fresh result observation unavailable; retained evidence is historical only",
+        );
       let manifest: TuiWorkerManifest | undefined;
-      try { manifest = this.manifest(c); } catch { this.invalidateVerification(c, "unavailable", "Result worker manifest unavailable"); }
+      try {
+        manifest = this.manifest(c);
+      } catch {
+        this.invalidateVerification(c, "unavailable", "Result worker manifest unavailable");
+      }
       this.currentVerification(c, manifest);
-      const text = nativeResultReport(raw, { reportText: reportText(c, raw), diagnostics: params.diagnostics === true,
-        jobId: g.id, childId: c.childId, taskId: c.taskId, attempt: c.attempt, state: c.state,
-        retained: retainedResult, error: c.error, verification: c.verification, acceptedDelivery: c.acceptedDelivery,
+      const text = nativeResultReport(raw, {
+        reportText: reportText(c, raw),
+        diagnostics: params.diagnostics === true,
+        jobId: g.id,
+        childId: c.childId,
+        taskId: c.taskId,
+        attempt: c.attempt,
+        state: c.state,
+        retained: retainedResult,
+        error: c.error,
+        verification: c.verification,
+        acceptedDelivery: c.acceptedDelivery,
         verificationWarning: verificationFailedForDelivery(c)
           ? `Current runtime verification ${(c.verification as any)?.status ?? "unavailable"}; retained command evidence is historical, delivered claim is not accepted, accepted_delivery=false.`
-          : c.spec.verification?.length && hasDeliveredClaim(c) && (c.verification as any)?.status === "checking"
-            ? "Runtime verification is checking; accepted_delivery=false." : undefined });
+          : c.spec.verification?.length &&
+              hasDeliveredClaim(c) &&
+              (c.verification as any)?.status === "checking"
+            ? "Runtime verification is checking; accepted_delivery=false."
+            : undefined,
+      });
       const page = resultPage(text, params.offset, params.limit);
-      return response(page.text, { operation: op, job_id: g.id, child_id: c.childId, task_id: c.taskId, attempt: c.attempt,
-        artifact: c.report, retained: retainedResult, failed: c.state === "failed" || verificationFailedForDelivery(c), ...(!active(c) ? { terminal_id: createHash("sha256").update(terminalToken(c)).digest("hex").slice(0, 24) } : {}),
-        report_sequence: Number(c.report.match(/report-(\d+)-[a-f0-9]{16}\.json$/)?.[1]) || c.runSequence || 0,
-        offset: page.offset, next_offset: page.nextOffset, complete: page.complete, task_outcome: c.lastOutcome, historical_verification: c.historicalVerification, verification: c.verification ?? { status: c.spec.verification?.length ? "unavailable" : "not-configured" }, accepted_delivery: c.acceptedDelivery === true, review: "not-configured" });
+      return response(page.text, {
+        operation: op,
+        job_id: g.id,
+        child_id: c.childId,
+        task_id: c.taskId,
+        attempt: c.attempt,
+        artifact: c.report,
+        retained: retainedResult,
+        failed: c.state === "failed" || verificationFailedForDelivery(c),
+        ...(!active(c)
+          ? {
+              terminal_id: createHash("sha256").update(terminalToken(c)).digest("hex").slice(0, 24),
+            }
+          : {}),
+        report_sequence:
+          Number(c.report.match(/report-(\d+)-[a-f0-9]{16}\.json$/)?.[1]) || c.runSequence || 0,
+        offset: page.offset,
+        next_offset: page.nextOffset,
+        complete: page.complete,
+        task_outcome: c.lastOutcome,
+        historical_verification: c.historicalVerification,
+        verification: c.verification ?? {
+          status: c.spec.verification?.length ? "unavailable" : "not-configured",
+        },
+        accepted_delivery: c.acceptedDelivery === true,
+        review: "not-configured",
+      });
     }
-    return response(this.text(g, op === "output"), { operation: op, job_id: g.id, group: this.publicGroup(g) });
+    return response(this.text(g, op === "output"), {
+      operation: op,
+      job_id: g.id,
+      group: this.publicGroup(g),
+    });
   }
 }

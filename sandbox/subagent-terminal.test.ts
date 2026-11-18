@@ -32,27 +32,44 @@ import { normalizeSubagentTerminal, subagentTerminalFailed } from "./subagent-te
 }
 
 {
-  const terminal = normalizeSubagentTerminal(undefined, { exitCode: 130, stopReason: "cancelled", error: "parent stopped" });
+  const terminal = normalizeSubagentTerminal(undefined, {
+    exitCode: 130,
+    stopReason: "cancelled",
+    error: "parent stopped",
+  });
   assert.equal(terminal?.state, "cancelled");
   assert.equal(terminal?.cancellationCause, "parent_cancelled");
 }
 
 {
-  const terminal = normalizeSubagentTerminal({ state: "failed", failure_kind: "auth", retryable: false, message: "authorization=secret-value Bearer abc.def" });
+  const terminal = normalizeSubagentTerminal({
+    state: "failed",
+    failure_kind: "auth",
+    retryable: false,
+    message: "authorization=secret-value Bearer abc.def",
+  });
   assert.equal(terminal?.failureKind, "auth");
   assert.equal(JSON.stringify(terminal).includes("secret-value"), false);
   assert.equal(JSON.stringify(terminal).includes("abc.def"), false);
 }
 
 {
-  const terminal = normalizeSubagentTerminal({ state: "failed", failure_kind: "protocol", retryable: true, message: "\u001bP$q q\u001b\\visible\u001b[6 q" });
+  const terminal = normalizeSubagentTerminal({
+    state: "failed",
+    failure_kind: "protocol",
+    retryable: true,
+    message: "\u001bP$q q\u001b\\visible\u001b[6 q",
+  });
   assert.equal(terminal?.message, "visible");
   assert.equal(JSON.stringify(terminal).includes("\u001b"), false);
 }
 
 {
   assert.equal(normalizeSubagentTerminal({ state: "invented" }), undefined);
-  assert.equal(normalizeSubagentTerminal(undefined, { exitCode: -1, stopReason: "running" }), undefined);
+  assert.equal(
+    normalizeSubagentTerminal(undefined, { exitCode: -1, stopReason: "running" }),
+    undefined,
+  );
 }
 
 console.log("sandbox subagent terminal checks passed");

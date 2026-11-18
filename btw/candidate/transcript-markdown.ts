@@ -39,7 +39,8 @@ export async function prepareBtwTranscriptMarkdown(
     const preparation = prepareMermaidMarkdownRenderer(document);
     if (preparation) preparations.add(preparation);
   }
-  if (preparations.size > 0 && !(await settleUnlessAborted(Promise.all(preparations), signal))) return undefined;
+  if (preparations.size > 0 && !(await settleUnlessAborted(Promise.all(preparations), signal)))
+    return undefined;
   if (signal?.aborted) return undefined;
 
   return (theme) => {
@@ -48,7 +49,10 @@ export async function prepareBtwTranscriptMarkdown(
   };
 }
 
-async function settleUnlessAborted<T>(operation: Promise<T>, signal?: AbortSignal): Promise<T | undefined> {
+async function settleUnlessAborted<T>(
+  operation: Promise<T>,
+  signal?: AbortSignal,
+): Promise<T | undefined> {
   if (!signal) return operation;
   let onAbort: (() => void) | undefined;
   const aborted = new Promise<undefined>((resolve) => {

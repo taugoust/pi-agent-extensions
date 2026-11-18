@@ -22,12 +22,20 @@ function line(event: unknown): string {
   const bytes = Buffer.from(events.map((event) => JSON.stringify(event)).join("\n"), "utf8");
   const emojiOffset = bytes.indexOf(Buffer.from("🌍", "utf8"));
   const observed = [];
-  for (const chunk of [bytes.subarray(0, 7), bytes.subarray(7, emojiOffset + 1), bytes.subarray(emojiOffset + 1, emojiOffset + 3), bytes.subarray(emojiOffset + 3)]) {
+  for (const chunk of [
+    bytes.subarray(0, 7),
+    bytes.subarray(7, emojiOffset + 1),
+    bytes.subarray(emojiOffset + 1, emojiOffset + 3),
+    bytes.subarray(emojiOffset + 3),
+  ]) {
     observed.push(...appendSubagentProtocolChunk(state, chunk));
   }
   const finished = finishSubagentProtocolStream(state);
   observed.push(...finished.events);
-  assert.deepEqual(observed.map((event) => event.event), ["subagent_child_start", "stdout", "subagent_result", "done"]);
+  assert.deepEqual(
+    observed.map((event) => event.event),
+    ["subagent_child_start", "stdout", "subagent_result", "done"],
+  );
   assert.equal((observed[1] as any).data, "answer 🌍");
   assert.equal(finished.finalResponse?.ok, true);
   assert.equal((finished.finalResponse?.result as any).final, "answer 🌍");
@@ -36,7 +44,10 @@ function line(event: unknown): string {
 
 {
   const state = createSubagentProtocolState();
-  const observed = appendSubagentProtocolChunk(state, line({ event: "stdout", label: "child", data: "partial progress" }));
+  const observed = appendSubagentProtocolChunk(
+    state,
+    line({ event: "stdout", label: "child", data: "partial progress" }),
+  );
   const finished = finishSubagentProtocolStream(state);
   assert.equal(observed.length, 1);
   assert.equal(finished.finalResponse, undefined);
@@ -47,22 +58,48 @@ function line(event: unknown): string {
 {
   const state = createSubagentProtocolState();
   const first = { event: "done", ok: true, result: { final: "first" } };
-  const duplicate = { event: "done", ok: false, result: { final: "second" }, error: "must not win" };
-  const observed = appendSubagentProtocolChunk(state, line(first) + line(duplicate) + line({ event: "stdout", data: "after done" }));
+  const duplicate = {
+    event: "done",
+    ok: false,
+    result: { final: "second" },
+    error: "must not win",
+  };
+  const observed = appendSubagentProtocolChunk(
+    state,
+    line(first) + line(duplicate) + line({ event: "stdout", data: "after done" }),
+  );
   const finished = finishSubagentProtocolStream(state);
-  assert.deepEqual(observed.map((event) => event.event), ["done"]);
+  assert.deepEqual(
+    observed.map((event) => event.event),
+    ["done"],
+  );
   assert.equal((finished.finalResponse?.result as any).final, "first");
   const snapshot = subagentProtocolSnapshot(state);
   assert.equal(snapshot.doneCount, 2);
   assert.equal(snapshot.ignoredAfterDone, 1);
-  assert.deepEqual(snapshot.diagnostics.map((diagnostic) => diagnostic.kind), ["duplicate_done", "event_after_done"]);
+  assert.deepEqual(
+    snapshot.diagnostics.map((diagnostic) => diagnostic.kind),
+    ["duplicate_done", "event_after_done"],
+  );
 }
 
 {
   const state = createSubagentProtocolState();
-  const observed = appendSubagentProtocolChunk(state, "not-json\n" + line({ nope: "missing event" }) + line({ event: "stdout", data: "recovered" }) + line({ event: "done", ok: true }));
-  assert.deepEqual(observed.map((event) => event.event), ["stdout", "done"]);
-  assert.deepEqual(subagentProtocolSnapshot(state).diagnostics.map((diagnostic) => diagnostic.kind), ["malformed_line", "invalid_event"]);
+  const observed = appendSubagentProtocolChunk(
+    state,
+    "not-json\n" +
+      line({ nope: "missing event" }) +
+      line({ event: "stdout", data: "recovered" }) +
+      line({ event: "done", ok: true }),
+  );
+  assert.deepEqual(
+    observed.map((event) => event.event),
+    ["stdout", "done"],
+  );
+  assert.deepEqual(
+    subagentProtocolSnapshot(state).diagnostics.map((diagnostic) => diagnostic.kind),
+    ["malformed_line", "invalid_event"],
+  );
   assert.equal(JSON.stringify(subagentProtocolSnapshot(state)).includes("not-json"), false);
 }
 
@@ -77,9 +114,15 @@ for (const fixture of [
   ],
 ]) {
   const state = createSubagentProtocolState();
-  const observed = appendSubagentProtocolChunk(state, fixture.map(line).join("") + line({ event: "done", ok: true, result: { mode: "single" } }));
+  const observed = appendSubagentProtocolChunk(
+    state,
+    fixture.map(line).join("") + line({ event: "done", ok: true, result: { mode: "single" } }),
+  );
   finishSubagentProtocolStream(state);
-  assert.deepEqual(observed.map((event) => event.event), [...fixture.map((event) => event.event), "done"]);
+  assert.deepEqual(
+    observed.map((event) => event.event),
+    [...fixture.map((event) => event.event), "done"],
+  );
 }
 
 {
@@ -95,17 +138,28 @@ for (const fixture of [
   ];
   const observed = appendSubagentProtocolChunk(state, events.map(line).join(""));
   finishSubagentProtocolStream(state);
-  assert.deepEqual(observed.map((event) => (event as any).label).filter(Boolean), ["task 1", "task 2", "task 2", "task 1", "task 1", "task 2"]);
+  assert.deepEqual(observed.map((event) => (event as any).label).filter(Boolean), [
+    "task 1",
+    "task 2",
+    "task 2",
+    "task 1",
+    "task 1",
+    "task 2",
+  ]);
 }
 
 {
   const state = createSubagentProtocolState();
-  const observed = appendSubagentProtocolChunk(state,
+  const observed = appendSubagentProtocolChunk(
+    state,
     line({ event: "subagent_result", label: "step 1", step: 1, result: { final: "kept" } }) +
-    line({ event: "subagent_child_start", label: "step 2", step: 2 }),
+      line({ event: "subagent_child_start", label: "step 2", step: 2 }),
   );
   const aborted = abortSubagentProtocolStream(state, "user_cancelled");
-  assert.deepEqual(observed.map((event) => event.event), ["subagent_result", "subagent_child_start"]);
+  assert.deepEqual(
+    observed.map((event) => event.event),
+    ["subagent_result", "subagent_child_start"],
+  );
   assert.equal(aborted.error, "stream aborted: user_cancelled");
   assert.equal(subagentProtocolSnapshot(state).eventCount, 2);
   assert.equal(subagentProtocolSnapshot(state).diagnostics.at(-1)?.kind, "aborted");

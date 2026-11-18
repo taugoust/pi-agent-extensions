@@ -67,17 +67,24 @@ export default async function fixture(pi: any) {
         snapshotMissing: () => service().getSnapshot({ sessionId }),
         switchOpenAI: () => service().switchAccount(switchRequest(before, "openai")),
         switchMissing: () => service().switchAccount(switchRequest(before)),
-        manageOpenAI: () => service().manageAccount(
-          { operation: "default", accountId: "Work", sessionId, providerId: "openai" },
-        ),
-        manageMissing: () => service().manageAccount(
-          { operation: "default", accountId: "Work", sessionId },
-        ),
+        manageOpenAI: () =>
+          service().manageAccount({
+            operation: "default",
+            accountId: "Work",
+            sessionId,
+            providerId: "openai",
+          }),
+        manageMissing: () =>
+          service().manageAccount({ operation: "default", accountId: "Work", sessionId }),
       };
       const outcomes: Record<string, string> = {};
       for (const [name, attempt] of Object.entries(attempts)) {
-        try { await attempt(); outcomes[name] = "accepted"; }
-        catch (error) { outcomes[name] = error instanceof Error ? error.message : String(error); }
+        try {
+          await attempt();
+          outcomes[name] = "accepted";
+        } catch (error) {
+          outcomes[name] = error instanceof Error ? error.message : String(error);
+        }
       }
       const after = await service().getSnapshot({ sessionId, providerId: CODEX });
       await write({ role: "unsupported", outcomes, before, after });
@@ -88,9 +95,12 @@ export default async function fixture(pi: any) {
     handler: async (args: string, ctx: any) => {
       const sessionId = ctx.sessionManager.getSessionId();
       const accountId = args.trim();
-      const result = await service().manageAccount(
-        { operation: "default", accountId, sessionId, providerId: CODEX },
-      );
+      const result = await service().manageAccount({
+        operation: "default",
+        accountId,
+        sessionId,
+        providerId: CODEX,
+      });
       await write({ role: "manage", result });
       ctx.ui.notify("manage:done");
     },
@@ -118,7 +128,11 @@ function switchRequest(snapshot: any, providerId?: string) {
 
 const zeroCost = { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 };
 const usage = (tokens: number) => ({
-  input: tokens, output: tokens, cacheRead: 0, cacheWrite: 0, totalTokens: tokens * 2,
+  input: tokens,
+  output: tokens,
+  cacheRead: 0,
+  cacheWrite: 0,
+  totalTokens: tokens * 2,
   cost: { ...zeroCost, total: 0 },
 });
 
@@ -128,8 +142,13 @@ function provider(id: string, log: string) {
     api: openai ? "openai-responses" : "openai-codex-responses",
     baseUrl: openai ? "https://api.openai.com/v1" : "https://chatgpt.com/backend-api",
     models: ["main-fixture", "small-fixture"].map((model) => ({
-      id: model, name: model, reasoning: true, input: ["text"],
-      contextWindow: 128000, maxTokens: 4096, cost: zeroCost,
+      id: model,
+      name: model,
+      reasoning: true,
+      input: ["text"],
+      contextWindow: 128000,
+      maxTokens: 4096,
+      cost: zeroCost,
     })),
     streamSimple(model: any, _context: any, options: any = {}) {
       const stream = createAssistantMessageEventStream();
@@ -137,20 +156,32 @@ function provider(id: string, log: string) {
       queueMicrotask(async () => {
         try {
           await options.onPayload?.({ fixture: true }, model);
-          await appendFile(log, JSON.stringify({
-            role: process.env.ROUTING_FIXTURE_ROLE, provider: id, model: model.id,
-            key: options.apiKey,
-          }) + "\n");
+          await appendFile(
+            log,
+            JSON.stringify({
+              role: process.env.ROUTING_FIXTURE_ROLE,
+              provider: id,
+              model: model.id,
+              key: options.apiKey,
+            }) + "\n",
+          );
           const message = {
-            ...base, content: [{ type: "text", text: "offline" }], stopReason: "stop",
-            timestamp: Date.now(), usage: usage(1),
+            ...base,
+            content: [{ type: "text", text: "offline" }],
+            stopReason: "stop",
+            timestamp: Date.now(),
+            usage: usage(1),
           };
           stream.push({ type: "done", reason: "stop", message } as any);
           stream.end();
         } catch (error) {
           const message = {
-            ...base, content: [], stopReason: "error", errorMessage: String(error),
-            timestamp: Date.now(), usage: usage(0),
+            ...base,
+            content: [],
+            stopReason: "error",
+            errorMessage: String(error),
+            timestamp: Date.now(),
+            usage: usage(0),
           };
           stream.push({ type: "error", reason: "error", error: message } as any);
           stream.end();

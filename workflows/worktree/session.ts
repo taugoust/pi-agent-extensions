@@ -15,7 +15,10 @@ export async function switchToWorktree(
     sessionPath = createTargetSession(ctx, targetPath);
     const result = await ctx.switchSession(sessionPath, {
       withSession: async (replacementCtx) => {
-        replacementCtx.ui.notify(stripTerminalControls(`Switched Pi workspace to ${targetPath}.`), "info");
+        replacementCtx.ui.notify(
+          stripTerminalControls(`Switched Pi workspace to ${targetPath}.`),
+          "info",
+        );
       },
     });
     if (result.cancelled) {
@@ -62,7 +65,12 @@ export function createTargetSession(ctx: ExtensionCommandContext, targetPath: st
   }
 
   if (ctx.sessionManager.getEntries().length > 0) {
-    return writeTargetSession(targetPath, ctx.sessionManager.getBranch(), undefined, ctx.sessionManager.getLeafId());
+    return writeTargetSession(
+      targetPath,
+      ctx.sessionManager.getBranch(),
+      undefined,
+      ctx.sessionManager.getLeafId(),
+    );
   }
 
   return writeTargetSession(targetPath, [], undefined, null);

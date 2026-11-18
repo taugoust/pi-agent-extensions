@@ -34,7 +34,20 @@ function newState(label = "child"): SubagentStreamState {
 
 {
   const state = newState("success");
-  const success = line({ type: "message_end", message: assistant("done", { model: "test/model", usage: { input: 3, output: 4, cacheRead: 1, cacheWrite: 2, cost: { total: 0.01 }, totalTokens: 7 } }) });
+  const success = line({
+    type: "message_end",
+    message: assistant("done", {
+      model: "test/model",
+      usage: {
+        input: 3,
+        output: 4,
+        cacheRead: 1,
+        cacheWrite: 2,
+        cost: { total: 0.01 },
+        totalTokens: 7,
+      },
+    }),
+  });
   appendSubagentStdoutChunk(state, success);
   appendSubagentStdoutChunk(state, line({ type: "agent_settled" }));
   assert.equal(state.liveText, "done");
@@ -66,12 +79,19 @@ function newState(label = "child"): SubagentStreamState {
 
 {
   // The same byte-safe line helper is used by the production REST NDJSON client.
-  const encoded = Buffer.from(`${JSON.stringify({ event: "stdout", data: "outer 🌍" })}\n${JSON.stringify({ event: "done", ok: true })}`, "utf8");
+  const encoded = Buffer.from(
+    `${JSON.stringify({ event: "stdout", data: "outer 🌍" })}\n${JSON.stringify({ event: "done", ok: true })}`,
+    "utf8",
+  );
   const emojiOffset = encoded.indexOf(Buffer.from("🌍", "utf8"));
   let buffer = "";
   let decoder: TextDecoder | undefined;
   const lines: string[] = [];
-  for (const chunk of [encoded.subarray(0, emojiOffset + 1), encoded.subarray(emojiOffset + 1, emojiOffset + 3), encoded.subarray(emojiOffset + 3)]) {
+  for (const chunk of [
+    encoded.subarray(0, emojiOffset + 1),
+    encoded.subarray(emojiOffset + 1, emojiOffset + 3),
+    encoded.subarray(emojiOffset + 3),
+  ]) {
     const decoded = appendUtf8LineChunk(buffer, decoder, chunk);
     buffer = decoded.buffer;
     decoder = decoded.decoder;
@@ -85,7 +105,12 @@ function newState(label = "child"): SubagentStreamState {
 
 {
   const state = newState("multi");
-  appendSubagentStdoutChunk(state, line({ type: "message_start", message: assistant("draft") }) + line({ type: "message_update", message: assistant("updated") }) + line({ type: "message_end", message: assistant("final") }));
+  appendSubagentStdoutChunk(
+    state,
+    line({ type: "message_start", message: assistant("draft") }) +
+      line({ type: "message_update", message: assistant("updated") }) +
+      line({ type: "message_end", message: assistant("final") }),
+  );
   assert.equal(state.messages.length, 1);
   assert.equal(state.messages[0].content[0].text, "final");
   assert.equal(state.liveText, "final");
@@ -103,7 +128,10 @@ function newState(label = "child"): SubagentStreamState {
   assert.equal(state.liveText, "valid");
 
   const hiddenPayload = "unknown-event-payload-must-not-be-retained";
-  appendSubagentStdoutChunk(state, line({ type: "provider_private_event", payload: hiddenPayload }));
+  appendSubagentStdoutChunk(
+    state,
+    line({ type: "provider_private_event", payload: hiddenPayload }),
+  );
   assert.equal(JSON.stringify(state).includes(hiddenPayload), false);
   assert.match(state.rawText, /unrecognized child event: provider_private_event/);
 }
@@ -122,63 +150,122 @@ function newState(label = "child"): SubagentStreamState {
   const state = newState("tool-success");
   const secret = "live-command-secret-sentinel";
   const command = `echo visible-summary API_KEY=${secret}`;
-  appendSubagentStdoutChunk(state, line({ type: "tool_execution_start", toolName: "bash", args: { command } }));
-  assert.deepEqual(state.lastToolCall, { name: "bash", args: { command: "echo visible-summary API_KEY=[redacted]" } });
+  appendSubagentStdoutChunk(
+    state,
+    line({ type: "tool_execution_start", toolName: "bash", args: { command } }),
+  );
+  assert.deepEqual(state.lastToolCall, {
+    name: "bash",
+    args: { command: "echo visible-summary API_KEY=[redacted]" },
+  });
   assert.equal(state.toolStatus, "[running bash]");
-  assert.match(subagentLiveToolStatus(state) ?? "", /^\[running bash\] \$ echo visible-summary API_KEY=\[redacted\]$/);
+  assert.match(
+    subagentLiveToolStatus(state) ?? "",
+    /^\[running bash\] \$ echo visible-summary API_KEY=\[redacted\]$/,
+  );
   assert.equal((subagentLiveToolStatus(state) ?? "").includes(secret), false);
   assert.equal(JSON.stringify(state).includes(secret), false);
   assert.equal(JSON.stringify(subagentStreamResult(state)).includes(secret), false);
   assert.equal(JSON.stringify(subagentStreamResult(state)).includes("echo visible-summary"), true);
-  appendSubagentStdoutChunk(state, line({ type: "tool_execution_update", partialResult: { content: [{ type: "text", text: "o" }] } }));
+  appendSubagentStdoutChunk(
+    state,
+    line({
+      type: "tool_execution_update",
+      partialResult: { content: [{ type: "text", text: "o" }] },
+    }),
+  );
   assert.equal(state.lastToolResult, "o");
   assert.match(subagentLiveToolStatus(state) ?? "", /echo visible-summary/);
-  appendSubagentStdoutChunk(state, line({ type: "tool_execution_end", toolName: "bash", result: { content: [{ type: "text", text: "ok" }] } }));
+  appendSubagentStdoutChunk(
+    state,
+    line({
+      type: "tool_execution_end",
+      toolName: "bash",
+      result: { content: [{ type: "text", text: "ok" }] },
+    }),
+  );
   assert.equal(state.toolStatus, undefined);
-  assert.match(subagentLiveToolStatus(state) ?? "", /^\[completed bash\] \$ echo visible-summary API_KEY=\[redacted\]$/);
+  assert.match(
+    subagentLiveToolStatus(state) ?? "",
+    /^\[completed bash\] \$ echo visible-summary API_KEY=\[redacted\]$/,
+  );
   assert.equal((subagentLiveToolStatus(state) ?? "").includes(secret), false);
-  assert.deepEqual(state.completedTools.at(-1)?.args, { command: "echo visible-summary API_KEY=[redacted]" });
+  assert.deepEqual(state.completedTools.at(-1)?.args, {
+    command: "echo visible-summary API_KEY=[redacted]",
+  });
   assert.equal(JSON.stringify(state.completedTools).includes(secret), false);
   assert.equal(state.lastToolResult, "ok");
-  appendSubagentStdoutChunk(state, line({ type: "message_update", message: assistant("visible follow-up") }));
+  appendSubagentStdoutChunk(
+    state,
+    line({ type: "message_update", message: assistant("visible follow-up") }),
+  );
   assert.equal(subagentLiveToolStatus(state), undefined);
 }
 
 {
   const state = newState("known-read-only-tools");
   const droppedSecret = "unknown-argument-secret-sentinel";
-  appendSubagentStdoutChunk(state, line({
-    type: "tool_execution_start",
-    toolName: "ls",
-    args: { path: "/workspace/\u001b[31msrc\u001b[0m", limit: 500, ignored: droppedSecret },
-  }));
-  assert.deepEqual(state.lastToolCall, { name: "ls", args: { path: "/workspace/src", limit: 500 } });
+  appendSubagentStdoutChunk(
+    state,
+    line({
+      type: "tool_execution_start",
+      toolName: "ls",
+      args: { path: "/workspace/\u001b[31msrc\u001b[0m", limit: 500, ignored: droppedSecret },
+    }),
+  );
+  assert.deepEqual(state.lastToolCall, {
+    name: "ls",
+    args: { path: "/workspace/src", limit: 500 },
+  });
   assert.equal(subagentLiveToolStatus(state), "[running ls] ls /workspace/src");
-  appendSubagentStdoutChunk(state, line({ type: "tool_execution_end", toolName: "ls", result: { content: [{ type: "text", text: "listed" }] } }));
+  appendSubagentStdoutChunk(
+    state,
+    line({
+      type: "tool_execution_end",
+      toolName: "ls",
+      result: { content: [{ type: "text", text: "listed" }] },
+    }),
+  );
 
-  appendSubagentStdoutChunk(state, line({
-    type: "tool_execution_start",
-    toolName: "find",
-    args: { pattern: "**/*.ts", path: "/workspace", limit: 1000, ignored: droppedSecret },
-  }));
-  assert.deepEqual(state.lastToolCall, { name: "find", args: { pattern: "**/*.ts", path: "/workspace", limit: 1000 } });
+  appendSubagentStdoutChunk(
+    state,
+    line({
+      type: "tool_execution_start",
+      toolName: "find",
+      args: { pattern: "**/*.ts", path: "/workspace", limit: 1000, ignored: droppedSecret },
+    }),
+  );
+  assert.deepEqual(state.lastToolCall, {
+    name: "find",
+    args: { pattern: "**/*.ts", path: "/workspace", limit: 1000 },
+  });
   assert.equal(subagentLiveToolStatus(state), "[running find] find **/*.ts in /workspace");
-  appendSubagentStdoutChunk(state, line({ type: "tool_execution_end", toolName: "find", result: { content: [{ type: "text", text: "found" }] } }));
+  appendSubagentStdoutChunk(
+    state,
+    line({
+      type: "tool_execution_end",
+      toolName: "find",
+      result: { content: [{ type: "text", text: "found" }] },
+    }),
+  );
 
-  appendSubagentStdoutChunk(state, line({
-    type: "tool_execution_start",
-    toolName: "grep",
-    args: {
-      pattern: "password=credential-sentinel",
-      path: "/workspace",
-      glob: "*.ts",
-      ignoreCase: true,
-      literal: false,
-      context: 2,
-      limit: 100,
-      authorization: droppedSecret,
-    },
-  }));
+  appendSubagentStdoutChunk(
+    state,
+    line({
+      type: "tool_execution_start",
+      toolName: "grep",
+      args: {
+        pattern: "password=credential-sentinel",
+        path: "/workspace",
+        glob: "*.ts",
+        ignoreCase: true,
+        literal: false,
+        context: 2,
+        limit: 100,
+        authorization: droppedSecret,
+      },
+    }),
+  );
   assert.deepEqual(state.lastToolCall, {
     name: "grep",
     args: {
@@ -191,25 +278,38 @@ function newState(label = "child"): SubagentStreamState {
       limit: 100,
     },
   });
-  assert.equal(subagentLiveToolStatus(state), "[running grep] grep /password=[redacted]/ in /workspace");
-  appendSubagentStdoutChunk(state, line({ type: "tool_execution_end", toolName: "grep", result: { content: [{ type: "text", text: "matched" }] } }));
+  assert.equal(
+    subagentLiveToolStatus(state),
+    "[running grep] grep /password=[redacted]/ in /workspace",
+  );
+  appendSubagentStdoutChunk(
+    state,
+    line({
+      type: "tool_execution_end",
+      toolName: "grep",
+      result: { content: [{ type: "text", text: "matched" }] },
+    }),
+  );
 
-  assert.deepEqual(state.completedTools.map((tool) => ({ name: tool.name, args: tool.args })), [
-    { name: "ls", args: { path: "/workspace/src", limit: 500 } },
-    { name: "find", args: { pattern: "**/*.ts", path: "/workspace", limit: 1000 } },
-    {
-      name: "grep",
-      args: {
-        pattern: "password=[redacted]",
-        path: "/workspace",
-        glob: "*.ts",
-        ignoreCase: true,
-        literal: false,
-        context: 2,
-        limit: 100,
+  assert.deepEqual(
+    state.completedTools.map((tool) => ({ name: tool.name, args: tool.args })),
+    [
+      { name: "ls", args: { path: "/workspace/src", limit: 500 } },
+      { name: "find", args: { pattern: "**/*.ts", path: "/workspace", limit: 1000 } },
+      {
+        name: "grep",
+        args: {
+          pattern: "password=[redacted]",
+          path: "/workspace",
+          glob: "*.ts",
+          ignoreCase: true,
+          literal: false,
+          context: 2,
+          limit: 100,
+        },
       },
-    },
-  ]);
+    ],
+  );
   assert.equal(JSON.stringify(state).includes(droppedSecret), false);
   assert.equal(JSON.stringify(state).includes("credential-sentinel"), false);
   assert.equal(JSON.stringify(state).includes("\u001b"), false);
@@ -218,7 +318,14 @@ function newState(label = "child"): SubagentStreamState {
 {
   const state = newState("unknown-tool-args");
   const secret = "unknown-tool-secret-sentinel";
-  appendSubagentStdoutChunk(state, line({ type: "tool_execution_start", toolName: "custom", args: { path: "/workspace", password: secret } }));
+  appendSubagentStdoutChunk(
+    state,
+    line({
+      type: "tool_execution_start",
+      toolName: "custom",
+      args: { path: "/workspace", password: secret },
+    }),
+  );
   assert.deepEqual(state.lastToolCall, { name: "custom", args: {} });
   assert.equal(subagentLiveToolStatus(state), "[running custom] custom");
   assert.equal(JSON.stringify(state).includes(secret), false);
@@ -226,24 +333,62 @@ function newState(label = "child"): SubagentStreamState {
 
 {
   const state = newState("tool-failure-recovery");
-  appendSubagentStdoutChunk(state, line({ type: "tool_execution_start", toolName: "read", args: { path: "/missing", ignored: "not-parent-facing" } }));
+  appendSubagentStdoutChunk(
+    state,
+    line({
+      type: "tool_execution_start",
+      toolName: "read",
+      args: { path: "/missing", ignored: "not-parent-facing" },
+    }),
+  );
   assert.deepEqual(state.lastToolCall, { name: "read", args: { path: "/missing" } });
   assert.equal(state.toolStatus, "[running read]");
   assert.equal(subagentLiveToolStatus(state), "[running read] read /missing");
-  appendSubagentStdoutChunk(state, line({ type: "tool_execution_end", toolName: "read", isError: true, result: { content: [{ type: "text", text: "ENOENT" }] } }));
+  appendSubagentStdoutChunk(
+    state,
+    line({
+      type: "tool_execution_end",
+      toolName: "read",
+      isError: true,
+      result: { content: [{ type: "text", text: "ENOENT" }] },
+    }),
+  );
   assert.equal(state.toolStatus, undefined);
   assert.equal(subagentLiveToolStatus(state), undefined);
   assert.match(state.prefix, /\[tool failed: read\] ENOENT/);
-  appendSubagentStdoutChunk(state, line({ type: "message_end", message: assistant("Recovered and final.", { stopReason: "completed" }) }));
+  appendSubagentStdoutChunk(
+    state,
+    line({
+      type: "message_end",
+      message: assistant("Recovered and final.", { stopReason: "completed" }),
+    }),
+  );
   assert.equal(state.liveText, "Recovered and final.");
   assert.equal(state.stopReason, "completed");
-  assert.equal(subagentStreamResult(state).messages.at(-1)?.content[0].text, "Recovered and final.");
+  assert.equal(
+    subagentStreamResult(state).messages.at(-1)?.content[0].text,
+    "Recovered and final.",
+  );
 }
 
 {
   const state = newState("tool-failure-model-failure");
-  appendSubagentStdoutChunk(state, line({ type: "tool_execution_end", toolName: "bash", isError: true, result: { content: [{ type: "text", text: "exit 1" }] } }));
-  appendSubagentStdoutChunk(state, line({ type: "message_end", message: assistant("", { stopReason: "error", errorMessage: "provider failed" }) }));
+  appendSubagentStdoutChunk(
+    state,
+    line({
+      type: "tool_execution_end",
+      toolName: "bash",
+      isError: true,
+      result: { content: [{ type: "text", text: "exit 1" }] },
+    }),
+  );
+  appendSubagentStdoutChunk(
+    state,
+    line({
+      type: "message_end",
+      message: assistant("", { stopReason: "error", errorMessage: "provider failed" }),
+    }),
+  );
   assert.equal(state.stopReason, "error");
   assert.equal(state.errorMessage, "provider failed");
   assert.match(state.prefix, /tool failed/);
@@ -251,7 +396,10 @@ function newState(label = "child"): SubagentStreamState {
 
 {
   const state = newState("flush");
-  const incomplete = JSON.stringify({ type: "message_end", message: assistant("no trailing newline") });
+  const incomplete = JSON.stringify({
+    type: "message_end",
+    message: assistant("no trailing newline"),
+  });
   appendSubagentStdoutChunk(state, incomplete);
   assert.equal(state.messages.length, 0);
   assert.equal(state.stdoutBuffer, incomplete);
@@ -264,18 +412,21 @@ function newState(label = "child"): SubagentStreamState {
 {
   const state = newState("thinking");
   const hidden = "hidden-chain-sentinel";
-  appendSubagentStdoutChunk(state, line({
-    type: "message_end",
-    message: {
-      role: "assistant",
-      responseId: "private-provider-id",
-      content: [
-        { type: "thinking", thinking: hidden, text: hidden },
-        { type: "reasoning", text: hidden },
-        { type: "text", text: "visible answer" },
-      ],
-    },
-  }));
+  appendSubagentStdoutChunk(
+    state,
+    line({
+      type: "message_end",
+      message: {
+        role: "assistant",
+        responseId: "private-provider-id",
+        content: [
+          { type: "thinking", thinking: hidden, text: hidden },
+          { type: "reasoning", text: hidden },
+          { type: "text", text: "visible answer" },
+        ],
+      },
+    }),
+  );
   assert.equal(state.liveText, "visible answer");
   assert.deepEqual(state.messages[0].content, [{ type: "text", text: "visible answer" }]);
   assert.equal(JSON.stringify(state).includes(hidden), false);
@@ -290,19 +441,22 @@ function newState(label = "child"): SubagentStreamState {
   assert.equal(state.compaction?.reason, "threshold");
   assert.equal(state.compaction?.count, 1);
   assert.equal(state.lastEvent?.type, "compaction_start");
-  appendSubagentStdoutChunk(state, line({
-    type: "compaction_end",
-    reason: "threshold",
-    result: {
-      summary: "private compaction summary",
-      firstKeptEntryId: "private-entry-id",
-      details: { arbitrary: "private-details" },
-      tokensBefore: 100,
-      estimatedTokensAfter: 25,
-    },
-    aborted: false,
-    willRetry: true,
-  }));
+  appendSubagentStdoutChunk(
+    state,
+    line({
+      type: "compaction_end",
+      reason: "threshold",
+      result: {
+        summary: "private compaction summary",
+        firstKeptEntryId: "private-entry-id",
+        details: { arbitrary: "private-details" },
+        tokensBefore: 100,
+        estimatedTokensAfter: 25,
+      },
+      aborted: false,
+      willRetry: true,
+    }),
+  );
   assert.equal(state.compaction?.active, false);
   assert.deepEqual(state.compaction?.lastResult, { tokensBefore: 100, estimatedTokensAfter: 25 });
   assert.equal(state.compaction?.aborted, false);
@@ -319,7 +473,16 @@ function newState(label = "child"): SubagentStreamState {
   for (let index = 0; index < 20; index++) {
     appendSubagentStdoutChunk(state, line({ type: "compaction_start", reason: "overflow" }));
   }
-  appendSubagentStdoutChunk(state, line({ type: "compaction_end", reason: "overflow", aborted: true, willRetry: false, errorMessage: "authorization=secret-value failed" }));
+  appendSubagentStdoutChunk(
+    state,
+    line({
+      type: "compaction_end",
+      reason: "overflow",
+      aborted: true,
+      willRetry: false,
+      errorMessage: "authorization=secret-value failed",
+    }),
+  );
   assert.equal(state.compaction?.count, 20);
   assert.equal(state.compaction?.events.length, 16);
   assert.equal(state.compaction?.aborted, true);
@@ -332,7 +495,10 @@ function newState(label = "child"): SubagentStreamState {
   appendSubagentStdoutChunk(state, "x".repeat(MAX_SUBAGENT_LINE_BYTES + 1));
   assert.equal(state.stdoutBuffer, "");
   assert.equal(state.stdoutDiscardingOversizeLine, true);
-  appendSubagentStdoutChunk(state, `discarded tail\n${line({ type: "message_end", message: assistant("after oversized line") })}`);
+  appendSubagentStdoutChunk(
+    state,
+    `discarded tail\n${line({ type: "message_end", message: assistant("after oversized line") })}`,
+  );
   assert.equal(state.stdoutDiscardingOversizeLine, false);
   assert.equal(state.liveText, "after oversized line");
   assert.ok(Buffer.byteLength(state.rawText) < MAX_SUBAGENT_LINE_BYTES);
@@ -341,10 +507,19 @@ function newState(label = "child"): SubagentStreamState {
 {
   const state = newState("large-relevant-and-aggregate-events");
   const finalText = `final-${"v".repeat(MAX_SUBAGENT_LINE_BYTES + 1024)}`;
-  appendSubagentStdoutChunk(state, line({ type: "message_end", message: assistant(finalText, { stopReason: "stop" }) }));
+  appendSubagentStdoutChunk(
+    state,
+    line({ type: "message_end", message: assistant(finalText, { stopReason: "stop" }) }),
+  );
   assert.match(state.liveText, /^final-v+/);
-  assert.equal(state.protocolDiagnostics.some((diagnostic) => diagnostic.kind === "oversized_line"), false);
-  appendSubagentStdoutChunk(state, line({ type: "agent_end", messages: "a".repeat(MAX_SUBAGENT_LINE_BYTES + 1024) }));
+  assert.equal(
+    state.protocolDiagnostics.some((diagnostic) => diagnostic.kind === "oversized_line"),
+    false,
+  );
+  appendSubagentStdoutChunk(
+    state,
+    line({ type: "agent_end", messages: "a".repeat(MAX_SUBAGENT_LINE_BYTES + 1024) }),
+  );
   appendSubagentStdoutChunk(state, line({ type: "agent_settled" }));
   assert.equal(state.protocolSettled, true);
   assert.match(state.liveText, /^final-v+/);
@@ -353,8 +528,21 @@ function newState(label = "child"): SubagentStreamState {
 
 {
   const state = newState("tool-use-is-not-a-final-response");
-  appendSubagentStdoutChunk(state, line({ type: "message_end", message: assistant("stale answer", { stopReason: "stop" }) }));
-  appendSubagentStdoutChunk(state, line({ type: "message_end", message: { role: "assistant", content: [{ type: "toolCall", name: "read", arguments: { path: "/tmp/x" } }], stopReason: "toolUse" } }));
+  appendSubagentStdoutChunk(
+    state,
+    line({ type: "message_end", message: assistant("stale answer", { stopReason: "stop" }) }),
+  );
+  appendSubagentStdoutChunk(
+    state,
+    line({
+      type: "message_end",
+      message: {
+        role: "assistant",
+        content: [{ type: "toolCall", name: "read", arguments: { path: "/tmp/x" } }],
+        stopReason: "toolUse",
+      },
+    }),
+  );
   appendSubagentStdoutChunk(state, line({ type: "agent_settled" }));
   assert.equal(state.liveText, "");
   assert.equal(state.stopReason, "toolUse");
@@ -373,7 +561,10 @@ function newState(label = "child"): SubagentStreamState {
 }
 
 {
-  const parsed = parseSubagentPiJsonStdout(line({ type: "compaction_start", reason: "overflow" }) + line({ type: "message_end", message: assistant("after compact") }));
+  const parsed = parseSubagentPiJsonStdout(
+    line({ type: "compaction_start", reason: "overflow" }) +
+      line({ type: "message_end", message: assistant("after compact") }),
+  );
   assert.equal(parsed.compaction?.active, true);
   assert.equal(parsed.messages.at(-1)?.content[0].text, "after compact");
 }

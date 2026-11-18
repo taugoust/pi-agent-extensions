@@ -26,7 +26,12 @@ export type AccountActivationErrorCode =
 export type AccountActivationResult =
   | { status: "active"; providerId: string; accountName: string }
   | { status: "inactive"; providerId: string; accountName: null }
-  | { status: "error"; providerId: string; accountName: string | null; code: AccountActivationErrorCode };
+  | {
+      status: "error";
+      providerId: string;
+      accountName: string | null;
+      code: AccountActivationErrorCode;
+    };
 export type AccountsTopologyRequest = { reply(topology: AccountTopology): void };
 export type AccountsActivationRequest = {
   /** The exact ctx.sessionManager object of a started session. */
@@ -47,14 +52,18 @@ export function parseAccountsTopologyRequest(data: unknown): AccountsTopologyReq
     return;
   }
 }
-export function parseAccountsActivationRequest(data: unknown): AccountsActivationRequest | undefined {
+export function parseAccountsActivationRequest(
+  data: unknown,
+): AccountsActivationRequest | undefined {
   try {
     if (!data || typeof data !== "object" || Array.isArray(data)) return;
     const request = data as AccountsActivationRequest;
-    if (!request.session || typeof request.session !== "object" || Array.isArray(request.session)) return;
+    if (!request.session || typeof request.session !== "object" || Array.isArray(request.session))
+      return;
     if (typeof request.provider !== "string" || !request.provider) return;
     if (request.account !== null && typeof request.account !== "string") return;
-    if (request.model !== undefined && (typeof request.model !== "string" || !request.model)) return;
+    if (request.model !== undefined && (typeof request.model !== "string" || !request.model))
+      return;
     if (request.signal !== undefined && !(request.signal instanceof AbortSignal)) return;
     return typeof request.reply === "function" ? request : undefined;
   } catch {

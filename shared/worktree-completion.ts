@@ -50,47 +50,93 @@ function blocker(s: CompletionInspection, marker: WorktreeCompletion): string | 
   if (s.active || !s.released) return "An agent or user may still be using the worktree";
   if (s.identityChanged) return "Worktree or branch identity changed or is linked elsewhere";
   if (s.remainingFiles) return "Worktree contains remaining files or protected repository state";
-  if (s.branchOid && marker.branchIdentity && s.branchIdentity !== marker.branchIdentity) return "Branch reference history changed since completion";
-  if (s.branchOid !== marker.branchOid && !(marker.phase === "worktree-removed" && !s.branchOid)) return "Branch advanced, was replaced, or disappeared since completion";
-  if (marker.phase === "marked" && !s.worktreeExists) return "Worktree disappeared before cleanup began";
-  if (marker.phase === "worktree-removed" && s.worktreeExists) return "Worktree path was reused after removal";
+  if (s.branchOid && marker.branchIdentity && s.branchIdentity !== marker.branchIdentity)
+    return "Branch reference history changed since completion";
+  if (s.branchOid !== marker.branchOid && !(marker.phase === "worktree-removed" && !s.branchOid))
+    return "Branch advanced, was replaced, or disappeared since completion";
+  if (marker.phase === "marked" && !s.worktreeExists)
+    return "Worktree disappeared before cleanup began";
+  if (marker.phase === "worktree-removed" && s.worktreeExists)
+    return "Worktree path was reused after removal";
 }
-export function validateWorktreeCompletion(value: WorktreeCompletion, owner: string, task: string): void {
-  if (!value || value.version !== 1 || value.ownerSessionId !== owner || value.taskId !== task
-    || typeof value.decidedBySessionId !== "string" || !value.decidedBySessionId
-    || typeof value.reason !== "string" || !value.reason.trim() || value.reason.length > 2000
-    || typeof value.completedAt !== "string" || !Number.isFinite(Date.parse(value.completedAt))
-    || !/^[a-f0-9]{40,64}$/.test(value.branchOid)
-    || (value.branchIdentity !== undefined && !/^[a-f0-9]{64}$/.test(value.branchIdentity))
-    || !["marked", "removal-pending", "worktree-removed", "cleaned"].includes(value.phase)
-    || (value.blockedReason !== undefined && (typeof value.blockedReason !== "string" || value.blockedReason.length > 2000))) throw new Error("Invalid worktree completion record");
+export function validateWorktreeCompletion(
+  value: WorktreeCompletion,
+  owner: string,
+  task: string,
+): void {
+  if (
+    !value ||
+    value.version !== 1 ||
+    value.ownerSessionId !== owner ||
+    value.taskId !== task ||
+    typeof value.decidedBySessionId !== "string" ||
+    !value.decidedBySessionId ||
+    typeof value.reason !== "string" ||
+    !value.reason.trim() ||
+    value.reason.length > 2000 ||
+    typeof value.completedAt !== "string" ||
+    !Number.isFinite(Date.parse(value.completedAt)) ||
+    !/^[a-f0-9]{40,64}$/.test(value.branchOid) ||
+    (value.branchIdentity !== undefined && !/^[a-f0-9]{64}$/.test(value.branchIdentity)) ||
+    !["marked", "removal-pending", "worktree-removed", "cleaned"].includes(value.phase) ||
+    (value.blockedReason !== undefined &&
+      (typeof value.blockedReason !== "string" || value.blockedReason.length > 2000))
+  )
+    throw new Error("Invalid worktree completion record");
 }
-export async function markWorktreeComplete(host: CompletionHost, task: string, reason: string): Promise<WorktreeCompletion> {
-  if (!reason.trim() || reason.length > 2000) throw new Error("A completion rationale of 1–2000 characters is required");
+export async function markWorktreeComplete(
+  host: CompletionHost,
+  task: string,
+  reason: string,
+): Promise<WorktreeCompletion> {
+  if (!reason.trim() || reason.length > 2000)
+    throw new Error("A completion rationale of 1–2000 characters is required");
   const identity = await host.authorize(task);
   return host.exclusive(identity.ownerSessionId, task, async () => {
     const previous = await host.load(identity.ownerSessionId, task);
-    if (previous) { validateWorktreeCompletion(previous, identity.ownerSessionId, task); return previous; } // Repeated completion cannot move the deletion snapshot.
+    if (previous) {
+      validateWorktreeCompletion(previous, identity.ownerSessionId, task);
+      return previous;
+    } // Repeated completion cannot move the deletion snapshot.
     const state = await host.inspect(identity.ownerSessionId, task);
-    if (!state.owned || state.identityChanged || !state.worktreeExists || !state.branchOid) throw new Error("Harness worktree identity cannot be verified for completion");
-    const marker: WorktreeCompletion = { version: 1, taskId: task, ownerSessionId: identity.ownerSessionId,
-      decidedBySessionId: identity.actorSessionId, reason: reason.trim(), completedAt: new Date().toISOString(),
-      branchOid: state.branchOid, branchIdentity: state.branchIdentity, phase: "marked" };
+    if (!state.owned || state.identityChanged || !state.worktreeExists || !state.branchOid)
+      throw new Error("Harness worktree identity cannot be verified for completion");
+    const marker: WorktreeCompletion = {
+      version: 1,
+      taskId: task,
+      ownerSessionId: identity.ownerSessionId,
+      decidedBySessionId: identity.actorSessionId,
+      reason: reason.trim(),
+      completedAt: new Date().toISOString(),
+      branchOid: state.branchOid,
+      branchIdentity: state.branchIdentity,
+      phase: "marked",
+    };
     validateWorktreeCompletion(marker, identity.ownerSessionId, task);
     await host.save(marker);
     return marker;
   });
 }
-export async function cleanupCompletedWorktree(host: CompletionHost, task: string): Promise<WorktreeCompletion> {
+export async function cleanupCompletedWorktree(
+  host: CompletionHost,
+  task: string,
+): Promise<WorktreeCompletion> {
   const identity = await host.authorize(task);
   return host.exclusive(identity.ownerSessionId, task, async () => {
     let marker = await host.load(identity.ownerSessionId, task);
     if (!marker) throw new Error("Explicit completion is required before cleanup");
     validateWorktreeCompletion(marker, identity.ownerSessionId, task);
-    if (marker.ownerSessionId !== identity.ownerSessionId || marker.taskId !== task) throw new Error("Completion ownership mismatch");
+    if (marker.ownerSessionId !== identity.ownerSessionId || marker.taskId !== task)
+      throw new Error("Completion ownership mismatch");
     if (marker.phase === "cleaned") return marker;
     const persist = async (patch: Partial<WorktreeCompletion>) => {
-      marker = { ...marker!, ...patch, ...(patch.blockedReason ? { blockedReason: patch.blockedReason.slice(0, 2000) } : {}) }; await host.save(marker); return marker;
+      marker = {
+        ...marker!,
+        ...patch,
+        ...(patch.blockedReason ? { blockedReason: patch.blockedReason.slice(0, 2000) } : {}),
+      };
+      await host.save(marker);
+      return marker;
     };
     try {
       let state = await host.inspect(identity.ownerSessionId, task);
@@ -102,7 +148,8 @@ export async function cleanupCompletedWorktree(host: CompletionHost, task: strin
         state = await host.inspect(identity.ownerSessionId, task);
         blocked = blocker(state, marker);
         if (blocked) return await persist({ blockedReason: blocked });
-        if (state.worktreeExists) await host.removeWorktree(identity.ownerSessionId, task, marker.branchOid);
+        if (state.worktreeExists)
+          await host.removeWorktree(identity.ownerSessionId, task, marker.branchOid);
         await persist({ phase: "worktree-removed", blockedReason: undefined });
       }
       state = await host.inspect(identity.ownerSessionId, task);
@@ -111,7 +158,9 @@ export async function cleanupCompletedWorktree(host: CompletionHost, task: strin
       if (state.branchOid) await host.deleteBranch(identity.ownerSessionId, task, marker.branchOid);
       return await persist({ phase: "cleaned", blockedReason: undefined });
     } catch (error) {
-      return persist({ blockedReason: `Cleanup stopped: ${error instanceof Error ? error.message : String(error)}` });
+      return persist({
+        blockedReason: `Cleanup stopped: ${error instanceof Error ? error.message : String(error)}`,
+      });
     }
   });
 }

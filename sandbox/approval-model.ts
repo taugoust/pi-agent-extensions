@@ -58,7 +58,7 @@ export function approvalTitle(a: ApprovalRequest) {
 function approvalActor(a: ApprovalRequest): ApprovalRequest["actor"] {
   if (a.actor && typeof a.actor === "object") return a.actor;
   const nested = a.fields?.actor;
-  return nested && typeof nested === "object" ? nested as JsonObject : undefined;
+  return nested && typeof nested === "object" ? (nested as JsonObject) : undefined;
 }
 
 function formatActor(actor: ApprovalRequest["actor"]) {
@@ -72,29 +72,49 @@ function formatActor(actor: ApprovalRequest["actor"]) {
 }
 
 function approvalOperation(a: ApprovalRequest) {
-  return stringField(a.fields?.operation)?.trim() || stringField(a.fields?.scope_operation)?.trim() || "access";
+  return (
+    stringField(a.fields?.operation)?.trim() ||
+    stringField(a.fields?.scope_operation)?.trim() ||
+    "access"
+  );
 }
 
 function fileAction(operation: string) {
   switch (operation.toLowerCase()) {
     case "open":
-    case "read": return "Read";
+    case "read":
+      return "Read";
     case "stat":
-    case "access": return "Inspect metadata for";
-    case "list": return "List";
-    case "readlink": return "Inspect link target for";
-    case "write": return "Write to";
-    case "create": return "Create";
-    case "mkdir": return "Create directory at";
-    case "delete": return "Delete";
-    case "rmdir": return "Remove directory";
-    case "rename": return "Rename";
-    case "link": return "Create link to";
-    case "symlink": return "Create symlink at";
-    case "chmod": return "Change permissions on";
-    case "chown": return "Change ownership of";
-    case "mknod": return "Create device at";
-    default: return "Access";
+    case "access":
+      return "Inspect metadata for";
+    case "list":
+      return "List";
+    case "readlink":
+      return "Inspect link target for";
+    case "write":
+      return "Write to";
+    case "create":
+      return "Create";
+    case "mkdir":
+      return "Create directory at";
+    case "delete":
+      return "Delete";
+    case "rmdir":
+      return "Remove directory";
+    case "rename":
+      return "Rename";
+    case "link":
+      return "Create link to";
+    case "symlink":
+      return "Create symlink at";
+    case "chmod":
+      return "Change permissions on";
+    case "chown":
+      return "Change ownership of";
+    case "mknod":
+      return "Create device at";
+    default:
+      return "Access";
   }
 }
 
@@ -103,8 +123,10 @@ function fileApprovalSubject(rule: string) {
   if (normalized.includes("outside-workspace")) return "this path outside the opened workspace";
   if (normalized.includes("env-file")) return "this protected environment file";
   if (normalized.includes("nix-file")) return "this protected Nix file";
-  if (normalized.includes("ssh") && (normalized.includes("key") || normalized.includes("private"))) return "this SSH private material";
-  if (normalized.includes("credential") || normalized.includes("cloud")) return "this credential material";
+  if (normalized.includes("ssh") && (normalized.includes("key") || normalized.includes("private")))
+    return "this SSH private material";
+  if (normalized.includes("credential") || normalized.includes("cloud"))
+    return "this credential material";
   if (normalized.includes("proc-sensitive")) return "this sensitive process path";
   return "this file";
 }
@@ -120,10 +142,13 @@ function commandInvocation(a: ApprovalRequest) {
   if (visible) return visible;
   const command = stringField(a.fields?.command)?.trim();
   if (command) {
-    let args = Array.isArray(a.fields?.args) ? a.fields.args.filter((value): value is string => typeof value === "string") : [];
+    let args = Array.isArray(a.fields?.args)
+      ? a.fields.args.filter((value): value is string => typeof value === "string")
+      : [];
     const executable = displayExecutable(command);
     if (args[0] === posixPath.basename(command)) args = args.slice(1);
-    const quote = (value: string) => /^[A-Za-z0-9_@%+=:,./-]+$/.test(value) ? value : JSON.stringify(value);
+    const quote = (value: string) =>
+      /^[A-Za-z0-9_@%+=:,./-]+$/.test(value) ? value : JSON.stringify(value);
     return [executable, ...args].map(quote).join(" ");
   }
   const rawOptions = Array.isArray(a.fields?.scope_options) ? a.fields.scope_options : [];
@@ -149,7 +174,9 @@ function commandApprovalQuestion(a: ApprovalRequest) {
 }
 
 function stringList(value: unknown) {
-  return Array.isArray(value) ? value.filter((item): item is string => typeof item === "string" && item.trim() !== "") : [];
+  return Array.isArray(value)
+    ? value.filter((item): item is string => typeof item === "string" && item.trim() !== "")
+    : [];
 }
 
 function overlayRuleSummary(value: unknown) {
@@ -175,10 +202,12 @@ function overlayRuleSummary(value: unknown) {
 function networkApprovalTitle(a: ApprovalRequest, target: string) {
   const hint = `${a.rule || ""} ${a.message || ""}`.toLowerCase();
   const port = /^.*:(\d+)$/.exec(target)?.[1];
-  if (/private[-_ ]?(?:network|address)|rfc1918/.test(hint)) return "Connect to this private network address?";
+  if (/private[-_ ]?(?:network|address)|rfc1918/.test(hint))
+    return "Connect to this private network address?";
   if (/\bssh\b/.test(hint) || port === "22") return "Connect over SSH?";
   if (/\bhttps\b/.test(hint) || port === "443") return "Connect over HTTPS?";
-  if (/\bhttp\b/.test(hint) || port === "80") return /insecure/.test(hint) ? "Connect over insecure HTTP?" : "Connect over HTTP?";
+  if (/\bhttp\b/.test(hint) || port === "80")
+    return /insecure/.test(hint) ? "Connect over insecure HTTP?" : "Connect over HTTP?";
   return "Connect to this destination?";
 }
 
@@ -241,7 +270,10 @@ export function approvalPresentation(a: ApprovalRequest): ApprovalPresentation {
       const paths = stringList(fields.overlay_paths);
       const names = stringList(fields.overlay_names);
       const overlays = paths.length > 0 ? paths : names;
-      if (overlays.length > 0) details.push(`Overlays: ${overlays.slice(0, 4).join(", ")}${overlays.length > 4 ? ", …" : ""}`);
+      if (overlays.length > 0)
+        details.push(
+          `Overlays: ${overlays.slice(0, 4).join(", ")}${overlays.length > 4 ? ", …" : ""}`,
+        );
       const rules = overlayRuleSummary(fields.rule_counts);
       if (rules) details.push(rules);
       break;
@@ -249,7 +281,8 @@ export function approvalPresentation(a: ApprovalRequest): ApprovalPresentation {
     case "package":
       title = "Allow this package operation?";
       details.push(target || "unknown package operation");
-      if (Number.isSafeInteger(Number(fields.findings)) && Number(fields.findings) > 0) details.push(`Findings: ${Number(fields.findings)}`);
+      if (Number.isSafeInteger(Number(fields.findings)) && Number(fields.findings) > 0)
+        details.push(`Findings: ${Number(fields.findings)}`);
       break;
     case "skillcheck": {
       title = "Allow this flagged skill?";
@@ -285,7 +318,9 @@ function scopeFromObject(value: unknown): ApprovalResolution | undefined {
   return {
     decision: "approve",
     scope: commandLifetime ? "once" : "session",
-    reason: commandLifetime ? "approved for command invocation in parent Pi" : "approved for session in parent Pi",
+    reason: commandLifetime
+      ? "approved for command invocation in parent Pi"
+      : "approved for session in parent Pi",
     scope_kind: kind,
     scope_key: key,
     scope_label: typeof obj.scope_label === "string" ? obj.scope_label : undefined,
@@ -297,21 +332,32 @@ function scopeFromObject(value: unknown): ApprovalResolution | undefined {
 }
 
 function commandRunScope(option: ApprovalResolution) {
-  return option.scope === "once" && option.scope_kind === "command-run" && option.scope_key === "command-run:all-approvals";
+  return (
+    option.scope === "once" &&
+    option.scope_kind === "command-run" &&
+    option.scope_key === "command-run:all-approvals"
+  );
 }
 
 function commandScopeIsExact(option: ApprovalResolution) {
-  return option.scope_kind === "command" && (option.scope_key || "").startsWith("command-invocation:");
+  return (
+    option.scope_kind === "command" && (option.scope_key || "").startsWith("command-invocation:")
+  );
 }
 
 function sessionScopeOptions(approval: ApprovalRequest): ApprovalResolution[] {
   const fields = approval.fields || {};
   const rawOptions = Array.isArray(fields.scope_options) ? fields.scope_options : [];
-  const options = rawOptions.map(scopeFromObject).filter((value): value is ApprovalResolution => Boolean(value));
+  const options = rawOptions
+    .map(scopeFromObject)
+    .filter((value): value is ApprovalResolution => Boolean(value));
   const fallback = scopeFromObject(fields);
-  if (fallback && !options.some((option) => option.scope_key === fallback.scope_key)) options.unshift(fallback);
+  if (fallback && !options.some((option) => option.scope_key === fallback.scope_key))
+    options.unshift(fallback);
   return approval.kind?.trim().toLowerCase() === "command"
-    ? options.sort((left, right) => Number(commandScopeIsExact(right)) - Number(commandScopeIsExact(left)))
+    ? options.sort(
+        (left, right) => Number(commandScopeIsExact(right)) - Number(commandScopeIsExact(left)),
+      )
     : options;
 }
 
@@ -322,27 +368,38 @@ function scopePathLabel(path: string, recursive: boolean) {
 }
 
 function commandScopeExecutable(approval: ApprovalRequest, option: ApprovalResolution) {
-  const command = option.scope_path?.trim()
-    || stringField(approval.fields?.command)?.trim()
-    || (!commandScopeIsExact(option) ? option.scope_label?.trim() : "")
-    || approval.target
-    || "this executable";
+  const command =
+    option.scope_path?.trim() ||
+    stringField(approval.fields?.command)?.trim() ||
+    (!commandScopeIsExact(option) ? option.scope_label?.trim() : "") ||
+    approval.target ||
+    "this executable";
   return displayExecutable(command);
 }
 
-function sessionScopeLabel(approval: ApprovalRequest, option: ApprovalResolution, decision: "approve" | "deny") {
+function sessionScopeLabel(
+  approval: ApprovalRequest,
+  option: ApprovalResolution,
+  decision: "approve" | "deny",
+) {
   const verb = decision === "approve" ? "Allow" : "Deny";
   const path = option.scope_path?.trim() || "";
   switch (option.scope_kind) {
-    case "file": return `${verb} this file for session`;
-    case "file-dir": return `${verb} ${scopePathLabel(path, false)} for session (one level)`;
-    case "file-tree": return `${verb} ${scopePathLabel(path, true)} for session`;
-    case "directory": return `${verb} ${scopePathLabel(path, option.scope_prefix === true)} for session${option.scope_prefix ? "" : " (one level)"}`;
+    case "file":
+      return `${verb} this file for session`;
+    case "file-dir":
+      return `${verb} ${scopePathLabel(path, false)} for session (one level)`;
+    case "file-tree":
+      return `${verb} ${scopePathLabel(path, true)} for session`;
+    case "directory":
+      return `${verb} ${scopePathLabel(path, option.scope_prefix === true)} for session${option.scope_prefix ? "" : " (one level)"}`;
     case "command":
       if (commandScopeIsExact(option)) return `${verb} this exact invocation for session`;
       return `${verb} any ${commandScopeExecutable(approval, option)} invocation for session`;
-    case "network": return `${verb} this destination for session`;
-    default: return `${verb} for session${option.scope_label ? `: ${option.scope_label}` : ""}`;
+    case "network":
+      return `${verb} this destination for session`;
+    default:
+      return `${verb} for session${option.scope_label ? `: ${option.scope_label}` : ""}`;
   }
 }
 
@@ -357,8 +414,18 @@ function sessionDenyOptions(approval: ApprovalRequest, options: ApprovalResoluti
 }
 
 export function approvalChoices(approval: ApprovalRequest): ApprovalChoice[] {
-  const approveOnce: ApprovalChoice = { label: "Allow once", decision: "approve", scope: "once", reason: "approved in parent Pi" };
-  const denyOnce: ApprovalChoice = { label: "Deny once", decision: "deny", scope: "once", reason: "denied in parent Pi" };
+  const approveOnce: ApprovalChoice = {
+    label: "Allow once",
+    decision: "approve",
+    scope: "once",
+    reason: "approved in parent Pi",
+  };
+  const denyOnce: ApprovalChoice = {
+    label: "Deny once",
+    decision: "deny",
+    scope: "once",
+    reason: "denied in parent Pi",
+  };
   const options = sessionScopeOptions(approval);
   const commandRun = options.find(commandRunScope);
   const sessionOptions = options.filter((option) => option.scope === "session");
@@ -371,10 +438,7 @@ export function approvalChoices(approval: ApprovalRequest): ApprovalChoice[] {
       scope_key: "command-run:all-approvals",
       scope_label: "all accesses for this command",
     };
-    const choices: ApprovalChoice[] = [
-      { ...denyOnce, label: "Deny" },
-      approveOnce,
-    ];
+    const choices: ApprovalChoice[] = [{ ...denyOnce, label: "Deny" }, approveOnce];
     if (destination) {
       choices.push({
         ...destination,
@@ -405,16 +469,31 @@ export function approvalChoices(approval: ApprovalRequest): ApprovalChoice[] {
   }
   for (const option of sessionOptions) {
     const target = option.scope_label || option.scope_key || approvalTitle(approval);
-    choices.push({ ...option, decision: "approve", scope: "session", reason: `approved for session ${option.scope_kind || "scope"}: ${target} in parent Pi`, label: sessionScopeLabel(approval, option, "approve") });
+    choices.push({
+      ...option,
+      decision: "approve",
+      scope: "session",
+      reason: `approved for session ${option.scope_kind || "scope"}: ${target} in parent Pi`,
+      label: sessionScopeLabel(approval, option, "approve"),
+    });
   }
   for (const option of sessionDenyOptions(approval, sessionOptions)) {
     const target = option.scope_label || option.scope_key || approvalTitle(approval);
-    choices.push({ ...option, decision: "deny", scope: "session", reason: `denied for session ${option.scope_kind || "scope"}: ${target} in parent Pi`, label: sessionScopeLabel(approval, option, "deny") });
+    choices.push({
+      ...option,
+      decision: "deny",
+      scope: "session",
+      reason: `denied for session ${option.scope_kind || "scope"}: ${target} in parent Pi`,
+      label: sessionScopeLabel(approval, option, "deny"),
+    });
   }
   return choices;
 }
 
-export function resolveChoice(choices: ApprovalChoice[], choice: string | undefined): ApprovalResolution {
+export function resolveChoice(
+  choices: ApprovalChoice[],
+  choice: string | undefined,
+): ApprovalResolution {
   const selected = choices.find((candidate) => candidate.label === choice);
   return selected || { decision: "deny", scope: "once", reason: "denied in parent Pi" };
 }

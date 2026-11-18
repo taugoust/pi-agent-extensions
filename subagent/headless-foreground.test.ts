@@ -1,7 +1,20 @@
-import { extractToolPresentation, extractToolPresentationArguments } from "../shared/tool-presentation.ts";
+import {
+  extractToolPresentation,
+  extractToolPresentationArguments,
+} from "../shared/tool-presentation.ts";
 import assert from "node:assert/strict";
 import { test } from "node:test";
-import { mkdtemp, mkdir, writeFile, readFile, chmod, rm, lstat, symlink, unlink } from "node:fs/promises";
+import {
+  mkdtemp,
+  mkdir,
+  writeFile,
+  readFile,
+  chmod,
+  rm,
+  lstat,
+  symlink,
+  unlink,
+} from "node:fs/promises";
 import { spawn } from "node:child_process";
 import { once } from "node:events";
 import { tmpdir } from "node:os";
@@ -14,98 +27,251 @@ import { processIdentity, processIsAlive } from "./tui-worker-tmux.ts";
 import { pageHeadlessHistory } from "./headless-foreground.ts";
 import { parseTuiWorkerRequest, publicTuiWorkerManifest } from "../shared/tui-worker-protocol.ts";
 
-const identity = { protocol: 1, requestId: "request-1", token: "a".repeat(64), ownerSessionId: "owner-session", taskId: "subagent-task-" + "1".repeat(24),
-  runtimeId: "rpc-" + "2".repeat(24), groupId: "subagent-job-" + "3".repeat(24), childId: "subagent-child-" + "4".repeat(24), attempt: 1, workerEpoch: "5".repeat(32) };
+const identity = {
+  protocol: 1,
+  requestId: "request-1",
+  token: "a".repeat(64),
+  ownerSessionId: "owner-session",
+  taskId: "subagent-task-" + "1".repeat(24),
+  runtimeId: "rpc-" + "2".repeat(24),
+  groupId: "subagent-job-" + "3".repeat(24),
+  childId: "subagent-child-" + "4".repeat(24),
+  attempt: 1,
+  workerEpoch: "5".repeat(32),
+};
 
 test("foreground retained tool pairing preserves canonical typed metadata and raw text", async () => {
   const root = await mkdtemp(join(tmpdir(), "foreground-presentation-"));
-  const manager: any = new HeadlessForegroundManager(root, () => "native", () => true);
-  const command = "cd /home/theo/.worktrees/paseo/web-plugin-surface-focus && node .dev/verify-accounts.cjs > .dev/repaired-browser.log 2>&1";
-  const args = { action: "start", command, name: "Ready repaired Accounts repeat proof", token: "PRIVATE" };
-  const result = { content: [{ type: "text", text: "job-2083c71f9e35e537555f2506  Running  0s  Ready repaired Accounts repeat proof" }], details: { job_id: "job-2083c71f9e35e537555f2506", status: "running", action: "start", command, name: args.name, sessionFile: "/private/session" } };
+  const manager: any = new HeadlessForegroundManager(
+    root,
+    () => "native",
+    () => true,
+  );
+  const command =
+    "cd /home/theo/.worktrees/paseo/web-plugin-surface-focus && node .dev/verify-accounts.cjs > .dev/repaired-browser.log 2>&1";
+  const args = {
+    action: "start",
+    command,
+    name: "Ready repaired Accounts repeat proof",
+    token: "PRIVATE",
+  };
+  const result = {
+    content: [
+      {
+        type: "text",
+        text: "job-2083c71f9e35e537555f2506  Running  0s  Ready repaired Accounts repeat proof",
+      },
+    ],
+    details: {
+      job_id: "job-2083c71f9e35e537555f2506",
+      status: "running",
+      action: "start",
+      command,
+      name: args.name,
+      sessionFile: "/private/session",
+    },
+  };
   const child = { directory: root, updatedAt: "2026-01-01T00:00:00.000Z" };
   const rows = [
-    { id: "call", message: { role: "assistant", content: [{ type: "toolCall", id: "call-safe", name: "background_job", arguments: args }] } },
-    { id: "result", message: { role: "toolResult", toolCallId: "call-safe", toolName: "background_job", ...result } },
-    { id: "unpaired", message: { role: "toolResult", toolCallId: "different-id", toolName: "background_job", ...result, isError: true } },
-    { id: "unknown", message: { role: "toolResult", toolCallId: "unknown-id", toolName: "unknown", content: JSON.stringify(result) } },
+    {
+      id: "call",
+      message: {
+        role: "assistant",
+        content: [{ type: "toolCall", id: "call-safe", name: "background_job", arguments: args }],
+      },
+    },
+    {
+      id: "result",
+      message: {
+        role: "toolResult",
+        toolCallId: "call-safe",
+        toolName: "background_job",
+        ...result,
+      },
+    },
+    {
+      id: "unpaired",
+      message: {
+        role: "toolResult",
+        toolCallId: "different-id",
+        toolName: "background_job",
+        ...result,
+        isError: true,
+      },
+    },
+    {
+      id: "unknown",
+      message: {
+        role: "toolResult",
+        toolCallId: "unknown-id",
+        toolName: "unknown",
+        content: JSON.stringify(result),
+      },
+    },
   ];
   try {
     await chmod(root, 0o700);
-    await writeFile(join(root, "session.jsonl"), rows.map(row => JSON.stringify({ type: "message", ...row })).join("\n") + "\n", { mode: 0o600 });
+    await writeFile(
+      join(root, "session.jsonl"),
+      rows.map((row) => JSON.stringify({ type: "message", ...row })).join("\n") + "\n",
+      { mode: 0o600 },
+    );
     const history = manager.readHistory(child).messages;
-    assert.deepEqual(manager.readMessages(child, true), manager.readMessages(child, false), "foreground live/history projection differs");
+    assert.deepEqual(
+      manager.readMessages(child, true),
+      manager.readMessages(child, false),
+      "foreground live/history projection differs",
+    );
     const call = history.find((m: any) => m.toolPhase === "call");
     const completed = history.find((m: any) => m.id === "result");
-    assert.equal(call.status, "completed"); assert.equal(call.toolCallId, "call-safe");
+    assert.equal(call.status, "completed");
+    assert.equal(call.toolCallId, "call-safe");
     assert.deepEqual(call.arguments, extractToolPresentationArguments("background_job", args));
-    assert.deepEqual(completed.arguments, call.arguments); assert.equal(completed.toolPhase, "result");
+    assert.deepEqual(completed.arguments, call.arguments);
+    assert.equal(completed.toolPhase, "result");
     assert.deepEqual(completed.toolPresentation, extractToolPresentation("background_job", result));
-    assert.equal(completed.resultFormat, "text");assert.equal(completed.text, result.content[0].text);
+    assert.equal(completed.resultFormat, "text");
+    assert.equal(completed.text, result.content[0].text);
     assert.equal(history.find((m: any) => m.id === "unpaired").arguments, undefined);
     assert.equal(history.find((m: any) => m.id === "unpaired").status, "failed");
     assert.equal(history.find((m: any) => m.id === "unknown").toolPresentation, undefined);
     assert.equal(history.find((m: any) => m.id === "unknown").text, JSON.stringify(result));
     // The exact same call id in another child cannot inherit this child's arguments.
-    const other = join(root, "other");await mkdir(other, { mode: 0o700 });
-    await writeFile(join(other, "session.jsonl"), JSON.stringify({ type: "message", ...rows[1] }) + "\n", { mode: 0o600 });
-    assert.equal(manager.readHistory({ ...child, directory: other }).messages[0].arguments, undefined);
+    const other = join(root, "other");
+    await mkdir(other, { mode: 0o700 });
+    await writeFile(
+      join(other, "session.jsonl"),
+      JSON.stringify({ type: "message", ...rows[1] }) + "\n",
+      { mode: 0o600 },
+    );
+    assert.equal(
+      manager.readHistory({ ...child, directory: other }).messages[0].arguments,
+      undefined,
+    );
     // Old snapshots lack authoritative call IDs; no phase/status is guessed from prose.
-    await writeFile(join(root, "session.jsonl"), JSON.stringify({ type: "message", message: { role: "toolResult", toolName: "background_job", content: "running" } }) + "\n");
-    const old = manager.readHistory(child).messages[0];assert.equal(old.text, "running");assert.equal(old.toolPhase, undefined);assert.equal(old.status, undefined);assert.equal(old.resultFormat, undefined);assert.equal(old.toolPresentation, undefined);
-  } finally { await manager.shutdown(false); await rm(root, { recursive: true, force: true }); }
+    await writeFile(
+      join(root, "session.jsonl"),
+      JSON.stringify({
+        type: "message",
+        message: { role: "toolResult", toolName: "background_job", content: "running" },
+      }) + "\n",
+    );
+    const old = manager.readHistory(child).messages[0];
+    assert.equal(old.text, "running");
+    assert.equal(old.toolPhase, undefined);
+    assert.equal(old.status, undefined);
+    assert.equal(old.resultFormat, undefined);
+    assert.equal(old.toolPresentation, undefined);
+  } finally {
+    await manager.shutdown(false);
+    await rm(root, { recursive: true, force: true });
+  }
 });
 
 test("headless optional cleanup runs after verified job sealing and retains blocked workers for retry", async () => {
   const root = await mkdtemp(join(tmpdir(), "headless-optional-worktree-"));
-  const directory = join(root, "worker"); new TuiWorkerStore(directory, true);
-  const manager: any = new HeadlessForegroundManager(root, () => "native", () => true);
-  const child: any = { directory, spec: { task: "fixture", cwd: root }, status: "completed", reaped: false, cleanupWorktreeRequested: true, attempt: 1 };
-  const manifest: any = { ...identity, processPid: 123, processToken: "fixture:123", runtimePid: 124, runtimeProcessToken: "fixture:124" };
+  const directory = join(root, "worker");
+  new TuiWorkerStore(directory, true);
+  const manager: any = new HeadlessForegroundManager(
+    root,
+    () => "native",
+    () => true,
+  );
+  const child: any = {
+    directory,
+    spec: { task: "fixture", cwd: root },
+    status: "completed",
+    reaped: false,
+    cleanupWorktreeRequested: true,
+    attempt: 1,
+  };
+  const manifest: any = {
+    ...identity,
+    processPid: 123,
+    processToken: "fixture:123",
+    runtimePid: 124,
+    runtimeProcessToken: "fixture:124",
+  };
   const group: any = { owner: "fixture", children: [child] };
-  let sealed = false, blocked = true, cleanups = 0;
+  let sealed = false,
+    blocked = true,
+    cleanups = 0;
   manager.ensureRuntimeIdentity = async () => manifest;
   manager.runtimeState = async () => "dead";
-  manager.verifyCleanupProof = () => { sealed = true; };
-  manager.reconcileWorktrees = async () => { assert.equal(sealed, true); cleanups++; if (blocked) throw new Error("dirty shared evidence retained"); };
+  manager.verifyCleanupProof = () => {
+    sealed = true;
+  };
+  manager.reconcileWorktrees = async () => {
+    assert.equal(sealed, true);
+    cleanups++;
+    if (blocked) throw new Error("dirty shared evidence retained");
+  };
   manager.persist = () => {};
   try {
     await assert.rejects(manager.sealAndReap(group, child, manifest), /dirty shared evidence/);
-    assert.equal(child.reaped, false); await assert.rejects(readFile(join(directory, "reaped.json")), { code: "ENOENT" });
-    blocked = false; await manager.sealAndReap(group, child, manifest);
-    assert.equal(child.reaped, true); assert.equal(cleanups, 2);
+    assert.equal(child.reaped, false);
+    await assert.rejects(readFile(join(directory, "reaped.json")), { code: "ENOENT" });
+    blocked = false;
+    await manager.sealAndReap(group, child, manifest);
+    assert.equal(child.reaped, true);
+    assert.equal(cleanups, 2);
     await manager.sealAndReap(group, child, manifest);
     assert.equal(cleanups, 3, "closed records still reconcile retained cleanup intent on retry");
-  } finally { await manager.shutdown(false); await rm(root, { recursive: true, force: true }); }
+  } finally {
+    await manager.shutdown(false);
+    await rm(root, { recursive: true, force: true });
+  }
 });
 
 test("headless routing callbacks preserve trusted environment and rebind legacy role model", () => {
   const root = "/tmp/headless-routing-fixture";
-  const manager: any = new HeadlessForegroundManager(root, () => "native", () => true, 16, undefined,
-    () => ({ PI_SESSION_ROUTING_FILE: "/trusted/profile.json", PI_SESSION_ROUTING_OWNER_SESSION: "trusted-owner" }),
-    model => model ? `routed-provider/${model.split("/").at(-1)}` : undefined);
-  assert.deepEqual(manager.routingEnvironment(), { PI_SESSION_ROUTING_FILE: "/trusted/profile.json", PI_SESSION_ROUTING_OWNER_SESSION: "trusted-owner" });
+  const manager: any = new HeadlessForegroundManager(
+    root,
+    () => "native",
+    () => true,
+    16,
+    undefined,
+    () => ({
+      PI_SESSION_ROUTING_FILE: "/trusted/profile.json",
+      PI_SESSION_ROUTING_OWNER_SESSION: "trusted-owner",
+    }),
+    (model) => (model ? `routed-provider/${model.split("/").at(-1)}` : undefined),
+  );
+  assert.deepEqual(manager.routingEnvironment(), {
+    PI_SESSION_ROUTING_FILE: "/trusted/profile.json",
+    PI_SESSION_ROUTING_OWNER_SESSION: "trusted-owner",
+  });
   assert.equal(manager.resolveRoleModel("old-provider/role-model"), "routed-provider/role-model");
   assert.equal(manager.resolveRoleModel(undefined), undefined);
-  assert.deepEqual(Object.keys(manager.routingEnvironment()), ["PI_SESSION_ROUTING_FILE", "PI_SESSION_ROUTING_OWNER_SESSION"]);
+  assert.deepEqual(Object.keys(manager.routingEnvironment()), [
+    "PI_SESSION_ROUTING_FILE",
+    "PI_SESSION_ROUTING_OWNER_SESSION",
+  ]);
 });
 
 test("parallel launch failure preserves an authenticated settled sibling result", async () => {
   const root = await mkdtemp(join(tmpdir(), "headless-parallel-settlement-"));
-  const manager: any = new HeadlessForegroundManager(root, () => "native", () => true);
+  const manager: any = new HeadlessForegroundManager(
+    root,
+    () => "native",
+    () => true,
+  );
   const owner = "parallel-settlement-owner";
   let worker: TuiWorkerServer | undefined;
   try {
     // The fixture worker must have a runtime PID distinct from the committed
     // foreground-owner PID while remaining a real authenticated local server.
-    manager.processToken = (pid: number) => pid === process.pid ? `${pid}:owner-fixture` : undefined;
+    manager.processToken = (pid: number) =>
+      pid === process.pid ? `${pid}:owner-fixture` : undefined;
     manager.activate(owner);
     manager.sealAndReap = async (_group: any, child: any) => {
       child.status = "reaped";
       child.workerAlive = false;
     };
     let aSettled!: () => void;
-    const settled = new Promise<void>(resolve => { aSettled = resolve; });
+    const settled = new Promise<void>((resolve) => {
+      aSettled = resolve;
+    });
     let promptCount = 0;
     manager.launchWorker = async (group: any, child: any) => {
       if (child.spec.task === "already settled") {
@@ -114,29 +280,66 @@ test("parallel launch failure preserves an authenticated settled sibling result"
         const sessionFile = store.path("session.jsonl");
         await writeFile(sessionFile, "", { mode: 0o600 });
         const runtimeToken = await processIdentity(process.pid);
-        const manifest = { ...identity, ownerSessionId: group.owner, taskId: child.taskId, runtimeId: "rpc-settled-fixture",
-          groupId: group.id, childId: child.childId, attempt: child.attempt, workerEpoch: "a".repeat(32),
-          controlSocket: store.path("control.sock"), controlToken: "b".repeat(64), sessionFile,
-          execution: "rpc-headless", presentation: "headless-foreground", launchMode: "none", acceptance: child.spec.acceptance ?? [],
-          processPid: process.pid, processToken: runtimeToken, fifoPath: store.path("stdin.fifo"),
-          foregroundOwner: { pid: process.pid + 1, token: group.ownerToken } } as any;
+        const manifest = {
+          ...identity,
+          ownerSessionId: group.owner,
+          taskId: child.taskId,
+          runtimeId: "rpc-settled-fixture",
+          groupId: group.id,
+          childId: child.childId,
+          attempt: child.attempt,
+          workerEpoch: "a".repeat(32),
+          controlSocket: store.path("control.sock"),
+          controlToken: "b".repeat(64),
+          sessionFile,
+          execution: "rpc-headless",
+          presentation: "headless-foreground",
+          launchMode: "none",
+          acceptance: child.spec.acceptance ?? [],
+          processPid: process.pid,
+          processToken: runtimeToken,
+          fifoPath: store.path("stdin.fifo"),
+          foregroundOwner: { pid: process.pid + 1, token: group.ownerToken },
+        } as any;
         store.writeManifest(manifest);
         await writeFile(store.path("stdin.fifo"), "", { mode: 0o600 });
-        worker = new TuiWorkerServer(store, { isIdle: () => true,
+        worker = new TuiWorkerServer(store, {
+          isIdle: () => true,
           send() {
             promptCount++;
             setImmediate(async () => {
-              await worker!.outcome({ version: 1, state: "delivered", summary: "Completed before sibling startup failed.",
-                acceptance: (manifest.acceptance ?? []).map((criterion: string) => ({ criterion, status: "passed", evidence: "authenticated settled fixture" })),
-                artifacts: [], remaining: [] });
-              worker!.settled({ assistant: { role: "assistant", content: [{ type: "text", text: "settled fixture" }], stopReason: "stop" } });
+              await worker!.outcome({
+                version: 1,
+                state: "delivered",
+                summary: "Completed before sibling startup failed.",
+                acceptance: (manifest.acceptance ?? []).map((criterion: string) => ({
+                  criterion,
+                  status: "passed",
+                  evidence: "authenticated settled fixture",
+                })),
+                artifacts: [],
+                remaining: [],
+              });
+              worker!.settled({
+                assistant: {
+                  role: "assistant",
+                  content: [{ type: "text", text: "settled fixture" }],
+                  stopReason: "stop",
+                },
+              });
               aSettled();
             });
-          }, abort() {}, shutdown() {} });
+          },
+          abort() {},
+          shutdown() {},
+        });
         await worker.start();
         const readyManifest = await manager.waitReady(manifest, 1000);
-        const accepted = await callTuiWorker(readyManifest, { operation: "prompt", mode: "steer", message: "fixture initial prompt" },
-          { requestId: `initial:${child.childId}` });
+        const accepted = await callTuiWorker(
+          readyManifest,
+          { operation: "prompt", mode: "steer", message: "fixture initial prompt" },
+          { requestId: `initial:${child.childId}` },
+        );
         assert.equal(accepted.ok, true);
         child.started = true;
         child.workerAlive = true;
@@ -145,41 +348,88 @@ test("parallel launch failure preserves an authenticated settled sibling result"
       }
       await settled;
       const store = new TuiWorkerStore(child.directory, true);
-      const manifest = { ...identity, ownerSessionId: group.owner, taskId: child.taskId, runtimeId: "rpc-timeout-fixture",
-        groupId: group.id, childId: child.childId, attempt: child.attempt, workerEpoch: "c".repeat(32),
-        controlSocket: store.path("control.sock"), controlToken: "d".repeat(64), sessionFile: store.path("session.jsonl"),
-        execution: "rpc-headless", presentation: "headless-foreground", launchMode: "none",
-        processPid: process.pid + 1, processToken: `${process.pid + 1}:fixture`, fifoPath: store.path("stdin.fifo"),
-        foregroundOwner: { pid: process.pid + 2, token: group.ownerToken } } as any;
+      const manifest = {
+        ...identity,
+        ownerSessionId: group.owner,
+        taskId: child.taskId,
+        runtimeId: "rpc-timeout-fixture",
+        groupId: group.id,
+        childId: child.childId,
+        attempt: child.attempt,
+        workerEpoch: "c".repeat(32),
+        controlSocket: store.path("control.sock"),
+        controlToken: "d".repeat(64),
+        sessionFile: store.path("session.jsonl"),
+        execution: "rpc-headless",
+        presentation: "headless-foreground",
+        launchMode: "none",
+        processPid: process.pid + 1,
+        processToken: `${process.pid + 1}:fixture`,
+        fifoPath: store.path("stdin.fifo"),
+        foregroundOwner: { pid: process.pid + 2, token: group.ownerToken },
+      } as any;
       await manager.waitReady(manifest, 25);
       throw new Error("Fixture readiness unexpectedly succeeded");
     };
-    manager.result = (group: any) => ({ content: [{ type: "text", text: "fixture result" }], details: { job_id: group.id } });
+    manager.result = (group: any) => ({
+      content: [{ type: "text", text: "fixture result" }],
+      details: { job_id: group.id },
+    });
     const priorLauncher = process.env.PI_TUI_WORKER_LAUNCHER;
     const priorMode = process.env.PI_TUI_WORKER_LAUNCH_MODE;
     process.env.PI_TUI_WORKER_LAUNCHER = "/nix/store/headless-test-launcher";
     process.env.PI_TUI_WORKER_LAUNCH_MODE = "none";
     try {
-      await assert.rejects((manager as any).launchImpl({ tasks: [
-        { task: "already settled", acceptance: ["fixture"] }, { task: "startup timeout", acceptance: ["fixture"] },
-      ] }, owner, process.cwd()), /fixture result/);
+      await assert.rejects(
+        (manager as any).launchImpl(
+          {
+            tasks: [
+              { task: "already settled", acceptance: ["fixture"] },
+              { task: "startup timeout", acceptance: ["fixture"] },
+            ],
+          },
+          owner,
+          process.cwd(),
+        ),
+        /fixture result/,
+      );
     } finally {
-      if (priorLauncher === undefined) delete process.env.PI_TUI_WORKER_LAUNCHER; else process.env.PI_TUI_WORKER_LAUNCHER = priorLauncher;
-      if (priorMode === undefined) delete process.env.PI_TUI_WORKER_LAUNCH_MODE; else process.env.PI_TUI_WORKER_LAUNCH_MODE = priorMode;
+      if (priorLauncher === undefined) delete process.env.PI_TUI_WORKER_LAUNCHER;
+      else process.env.PI_TUI_WORKER_LAUNCHER = priorLauncher;
+      if (priorMode === undefined) delete process.env.PI_TUI_WORKER_LAUNCH_MODE;
+      else process.env.PI_TUI_WORKER_LAUNCH_MODE = priorMode;
     }
 
     const group = [...manager.groups.values()][0] as any;
     assert.equal(promptCount, 1, "authenticated initial prompt must dispatch exactly once");
-    assert.equal(group.children[0].status, "reaped", "cleanup must reach its mocked destructive boundary");
+    assert.equal(
+      group.children[0].status,
+      "reaped",
+      "cleanup must reach its mocked destructive boundary",
+    );
     assert.match(group.children[0].report, /report-\d+-[a-f0-9]{16}\.json$/);
     const retainedReport = JSON.parse(await readFile(group.children[0].report, "utf8"));
     assert.equal(retainedReport.assistant.content[0].text, "settled fixture");
     assert.equal(group.children[0].outcome.state, "delivered");
     assert.equal(group.children[0].error, undefined);
-    const readonlyA = manager.readonlyTaskList(owner).find((task: any) => task.childId === group.children[0].childId);
-    assert.equal(readonlyA?.status, "completed", "retained task list must project the authenticated settled report");
-    assert.doesNotMatch(group.children[0].error ?? "", /startup timed out/, "sibling timeout must not poison settled child");
-    assert.equal(group.children[1].status, "failed", "failing startup child should retain its error");
+    const readonlyA = manager
+      .readonlyTaskList(owner)
+      .find((task: any) => task.childId === group.children[0].childId);
+    assert.equal(
+      readonlyA?.status,
+      "completed",
+      "retained task list must project the authenticated settled report",
+    );
+    assert.doesNotMatch(
+      group.children[0].error ?? "",
+      /startup timed out/,
+      "sibling timeout must not poison settled child",
+    );
+    assert.equal(
+      group.children[1].status,
+      "failed",
+      "failing startup child should retain its error",
+    );
     assert.match(group.children[1].error, /startup timed out/);
     assert.equal(group.cancelled, true, "existing group cancellation fence remains active");
   } finally {
@@ -191,32 +441,55 @@ test("parallel launch failure preserves an authenticated settled sibling result"
 
 test("headless group waits honor validated durations above 60 seconds, early completion and observation cancellation", async (t) => {
   const root = await mkdtemp(join(tmpdir(), "headless-wait-"));
-  const manager:any = new HeadlessForegroundManager(root, () => "native", () => true);
+  const manager: any = new HeadlessForegroundManager(
+    root,
+    () => "native",
+    () => true,
+  );
   manager.owner = "wait-owner";
-  const child:any = { status: "running" }, group:any = { id: "wait-group", owner: "wait-owner", children: [child] };
+  const child: any = { status: "running" },
+    group: any = { id: "wait-group", owner: "wait-owner", children: [child] };
   manager.groups.set(group.id, group);
   manager.manifest = () => undefined;
   manager.result = () => ({ status: child.status });
-  let now = 0, observations = 0;
+  let now = 0,
+    observations = 0;
   t.mock.method(Date, "now", () => now);
-  const wait = (wait_ms: number, signal?: AbortSignal) => manager.operation({ operation: "wait_group", job_id: group.id, wait_ms }, group.owner, signal);
+  const wait = (wait_ms: number, signal?: AbortSignal) =>
+    manager.operation({ operation: "wait_group", job_id: group.id, wait_ms }, group.owner, signal);
   try {
     // Accelerate only the clock, not the manager's completion/cancel predicates.
-    manager.observe = async () => { observations++; now += 61_000; };
+    manager.observe = async () => {
+      observations++;
+      now += 61_000;
+    };
     assert.equal((await wait(120_000)).status, "running");
     assert.equal(observations, 2, "requested duration was silently capped at 60 seconds");
-    now = 0; observations = 0;
-    manager.observe = async () => { now += 61_000; if (++observations === 2) child.status = "completed"; };
+    now = 0;
+    observations = 0;
+    manager.observe = async () => {
+      now += 61_000;
+      if (++observations === 2) child.status = "completed";
+    };
     assert.equal((await wait(86_400_000)).status, "completed");
     assert.equal(observations, 2, "24h wait failed to return on early completion");
-    child.status = "running"; observations = 0;
-    await wait(0); assert.equal(observations, 0);
-    for (const value of [-1, 86_400_001, 1.5, NaN, Infinity]) await assert.rejects(wait(value), /Invalid wait_ms/);
+    child.status = "running";
+    observations = 0;
+    await wait(0);
+    assert.equal(observations, 0);
+    for (const value of [-1, 86_400_001, 1.5, NaN, Infinity])
+      await assert.rejects(wait(value), /Invalid wait_ms/);
     const cancel = new AbortController();
-    manager.observe = async () => { cancel.abort(); };
+    manager.observe = async () => {
+      cancel.abort();
+    };
     await assert.rejects(wait(86_400_000, cancel.signal), /Wait cancelled; worker continues/);
     assert.equal(child.status, "running", "cancelling observation stopped work");
-  } finally { t.mock.restoreAll(); await manager.shutdown(false); await rm(root, { recursive: true, force: true }); }
+  } finally {
+    t.mock.restoreAll();
+    await manager.shutdown(false);
+    await rm(root, { recursive: true, force: true });
+  }
 });
 
 test("headless manifest is placement-free and public discovery omits FIFO path", async () => {
@@ -224,20 +497,43 @@ test("headless manifest is placement-free and public discovery omits FIFO path",
   try {
     await chmod(root, 0o700);
     const store = new TuiWorkerStore(root, true);
-    const manifest = { ...identity, controlSocket: store.path("control.sock"), controlToken: identity.token, sessionFile: store.path("session.jsonl"),
-      execution: "rpc-headless", presentation: "headless-foreground", processPid: process.pid, processToken: `${process.pid}:start`, fifoPath: store.path("stdin.fifo"), foregroundOwner: { pid: process.pid + 1, token: `${process.pid + 1}:start` }, launchMode: "none" } as any;
+    const manifest = {
+      ...identity,
+      controlSocket: store.path("control.sock"),
+      controlToken: identity.token,
+      sessionFile: store.path("session.jsonl"),
+      execution: "rpc-headless",
+      presentation: "headless-foreground",
+      processPid: process.pid,
+      processToken: `${process.pid}:start`,
+      fifoPath: store.path("stdin.fifo"),
+      foregroundOwner: { pid: process.pid + 1, token: `${process.pid + 1}:start` },
+      launchMode: "none",
+    } as any;
     assert.equal(validateWorkerManifest(manifest).placement, undefined);
     const exposed = publicTuiWorkerManifest(manifest);
     assert.equal((exposed as any).placement, undefined);
     assert.equal((exposed as any).fifoPath, undefined);
-    await assert.rejects(async () => validateWorkerManifest({ ...manifest, placement: { paneId: "%1" } }), /placement|invalid/i);
-    await assert.rejects(async () => validateWorkerManifest({ ...manifest, fifoPath: join(root, "..", "escape") }), /identity|headless/i);
-  } finally { await rm(root, { recursive: true, force: true }); }
+    await assert.rejects(
+      async () => validateWorkerManifest({ ...manifest, placement: { paneId: "%1" } }),
+      /placement|invalid/i,
+    );
+    await assert.rejects(
+      async () => validateWorkerManifest({ ...manifest, fifoPath: join(root, "..", "escape") }),
+      /identity|headless/i,
+    );
+  } finally {
+    await rm(root, { recursive: true, force: true });
+  }
 });
 
 test("history pages default to newest, use stable entry cursors and report expiration/truncation", () => {
-  const history = Array.from({ length: 101 }, (_, index) => ({ id: `entry-${index}`, role: "assistant" as const,
-    text: `message-${index}`, timestamp: new Date(1_000 + index).toISOString() }));
+  const history = Array.from({ length: 101 }, (_, index) => ({
+    id: `entry-${index}`,
+    role: "assistant" as const,
+    text: `message-${index}`,
+    timestamp: new Date(1_000 + index).toISOString(),
+  }));
   const latest = pageHeadlessHistory(history.slice(-100), "epoch-1");
   assert.equal(latest.messages.length, 50);
   assert.equal(latest.messages[0]!.id, "entry-51");
@@ -247,43 +543,120 @@ test("history pages default to newest, use stable entry cursors and report expir
   assert.equal(older.messages.length, 50);
   assert.equal(older.messages[0]!.id, "entry-1");
   assert.equal(older.nextCursor, undefined);
-  assert.throws(() => pageHeadlessHistory(history.slice(-49), "epoch-1", latest.nextCursor), /expired/);
-  assert.throws(() => pageHeadlessHistory(history, "epoch-2", latest.nextCursor), /Invalid history cursor/);
-  assert.equal(pageHeadlessHistory([{ ...history[0]!, truncated: true }], "epoch-1").truncated, true);
+  assert.throws(
+    () => pageHeadlessHistory(history.slice(-49), "epoch-1", latest.nextCursor),
+    /expired/,
+  );
+  assert.throws(
+    () => pageHeadlessHistory(history, "epoch-2", latest.nextCursor),
+    /Invalid history cursor/,
+  );
+  assert.equal(
+    pageHeadlessHistory([{ ...history[0]!, truncated: true }], "epoch-1").truncated,
+    true,
+  );
 });
 
 test("idle decision request is identity-bound, visible in status, one-shot, and abortable", async () => {
   const root = await mkdtemp(join(tmpdir(), "idle-decision-worker-"));
   const store = new TuiWorkerStore(root, true);
-  const manifest = { ...identity, controlSocket: store.path("control.sock"), controlToken: identity.token, sessionFile: store.path("session.jsonl"),
-    execution: "rpc-headless", presentation: "headless-foreground", processPid: process.pid, processToken: `${process.pid}:start`, fifoPath: store.path("stdin.fifo"), foregroundOwner: { pid: process.pid + 1, token: `${process.pid + 1}:start` } } as any;
+  const manifest = {
+    ...identity,
+    controlSocket: store.path("control.sock"),
+    controlToken: identity.token,
+    sessionFile: store.path("session.jsonl"),
+    execution: "rpc-headless",
+    presentation: "headless-foreground",
+    processPid: process.pid,
+    processToken: `${process.pid}:start`,
+    fifoPath: store.path("stdin.fifo"),
+    foregroundOwner: { pid: process.pid + 1, token: `${process.pid + 1}:start` },
+  } as any;
   store.writeManifest(manifest);
   const { TuiWorkerServer } = await import("./tui-worker-server.ts");
-  const server = new TuiWorkerServer(store, { isIdle: () => true, send() {}, abort() {}, shutdown() {} });
+  const server = new TuiWorkerServer(store, {
+    isIdle: () => true,
+    send() {},
+    abort() {},
+    shutdown() {},
+  });
   const controller = new AbortController();
   try {
-    const pending = server.requestIdleDecision({ model: "provider/model", idleMinutes: 31, contextPercent: 186 }, controller.signal);
+    const pending = server.requestIdleDecision(
+      { model: "provider/model", idleMinutes: 31, contextPercent: 186 },
+      controller.signal,
+    );
     const status = await server.handle(parseTuiWorkerRequest({ ...identity, operation: "status" }));
-    assert.deepEqual((status as any).data.idleDecision, { requestId: (server as any).idleDecisions.keys().next().value,
-      workerEpoch: identity.workerEpoch, model: "provider/model", idleMinutes: 31, contextPercent: 186 });
+    assert.deepEqual((status as any).data.idleDecision, {
+      requestId: (server as any).idleDecisions.keys().next().value,
+      workerEpoch: identity.workerEpoch,
+      model: "provider/model",
+      idleMinutes: 31,
+      contextPercent: 186,
+    });
     const requestId = (status as any).data.idleDecision.requestId;
-    const decision = await server.handle(parseTuiWorkerRequest({ ...identity, requestId: "parent-response", operation: "idle_decision", decisionRequestId: requestId, choice: "ignore" }));
+    const decision = await server.handle(
+      parseTuiWorkerRequest({
+        ...identity,
+        requestId: "parent-response",
+        operation: "idle_decision",
+        decisionRequestId: requestId,
+        choice: "ignore",
+      }),
+    );
     assert.equal(decision.ok, true);
     assert.equal(await pending, "ignore");
-    const stale = await server.handle(parseTuiWorkerRequest({ ...identity, requestId: "duplicate", operation: "idle_decision", decisionRequestId: requestId, choice: "cancel" }));
+    const stale = await server.handle(
+      parseTuiWorkerRequest({
+        ...identity,
+        requestId: "duplicate",
+        operation: "idle_decision",
+        decisionRequestId: requestId,
+        choice: "cancel",
+      }),
+    );
     assert.equal((stale as any).code, "stale");
-    const aborted = server.requestIdleDecision({ model: "provider/model", idleMinutes: 31, contextPercent: 86 }, controller.signal);
+    const aborted = server.requestIdleDecision(
+      { model: "provider/model", idleMinutes: 31, contextPercent: 86 },
+      controller.signal,
+    );
     controller.abort(new Error("test cancellation"));
     await assert.rejects(aborted, /test cancellation/);
-  } finally { await server.close(); await rm(root, { recursive: true, force: true }); }
+  } finally {
+    await server.close();
+    await rm(root, { recursive: true, force: true });
+  }
 });
 
 test("interaction socket DTOs are epoch-bound and reject malformed/oversized input", () => {
-  const answer = { ...identity, operation: "respond_interaction", interactionId: "interaction:abc",
-    answer: { kind: "questionnaire", cancelled: false, answers: [{ id: "q1", value: "yes", wasCustom: false }] } };
+  const answer = {
+    ...identity,
+    operation: "respond_interaction",
+    interactionId: "interaction:abc",
+    answer: {
+      kind: "questionnaire",
+      cancelled: false,
+      answers: [{ id: "q1", value: "yes", wasCustom: false }],
+    },
+  };
   assert.equal(parseTuiWorkerRequest(answer as any).operation, "respond_interaction");
-  assert.throws(() => parseTuiWorkerRequest({ ...identity, operation: "pending_interaction", interaction: {} } as any), /Unknown worker operation/);
-  assert.throws(() => parseTuiWorkerRequest({ ...identity, operation: "respond_interaction", interactionId: "../../state", answer: { kind: "permission", cancelled: false, value: "allow" } } as any));
+  assert.throws(
+    () =>
+      parseTuiWorkerRequest({
+        ...identity,
+        operation: "pending_interaction",
+        interaction: {},
+      } as any),
+    /Unknown worker operation/,
+  );
+  assert.throws(() =>
+    parseTuiWorkerRequest({
+      ...identity,
+      operation: "respond_interaction",
+      interactionId: "../../state",
+      answer: { kind: "permission", cancelled: false, value: "allow" },
+    } as any),
+  );
 });
 
 test("durable timeline ignores a torn final frame and repairs before appending", async () => {
@@ -291,16 +664,46 @@ test("durable timeline ignores a torn final frame and repairs before appending",
   try {
     await chmod(root, 0o700);
     const store = new TuiWorkerStore(root, true);
-    const manifest = { ...identity, controlSocket: store.path("control.sock"), controlToken: identity.token, sessionFile: store.path("session.jsonl"),
-      execution: "rpc-headless", presentation: "headless-foreground", processPid: 100, processToken: "100:1", fifoPath: store.path("stdin.fifo"),
-      foregroundOwner: { pid: 101, token: "101:1" }, launchMode: "none" } as any;
+    const manifest = {
+      ...identity,
+      controlSocket: store.path("control.sock"),
+      controlToken: identity.token,
+      sessionFile: store.path("session.jsonl"),
+      execution: "rpc-headless",
+      presentation: "headless-foreground",
+      processPid: 100,
+      processToken: "100:1",
+      fifoPath: store.path("stdin.fifo"),
+      foregroundOwner: { pid: 101, token: "101:1" },
+      launchMode: "none",
+    } as any;
     store.writeManifest(manifest);
-    store.appendTimeline({ protocol: 1, workerEpoch: identity.workerEpoch, sequence: 1, timestamp: new Date().toISOString(), kind: "ready" });
+    store.appendTimeline({
+      protocol: 1,
+      workerEpoch: identity.workerEpoch,
+      sequence: 1,
+      timestamp: new Date().toISOString(),
+      kind: "ready",
+    });
     await writeFile(store.path("timeline.jsonl"), "{incomplete", { flag: "a" });
-    assert.deepEqual(store.readTimeline().map(event => event.sequence), [1]);
-    store.appendTimeline({ protocol: 1, workerEpoch: identity.workerEpoch, sequence: 2, timestamp: new Date().toISOString(), kind: "running" });
-    assert.deepEqual(store.readTimeline().map(event => event.sequence), [1, 2]);
-  } finally { await rm(root, { recursive: true, force: true }); }
+    assert.deepEqual(
+      store.readTimeline().map((event) => event.sequence),
+      [1],
+    );
+    store.appendTimeline({
+      protocol: 1,
+      workerEpoch: identity.workerEpoch,
+      sequence: 2,
+      timestamp: new Date().toISOString(),
+      kind: "running",
+    });
+    assert.deepEqual(
+      store.readTimeline().map((event) => event.sequence),
+      [1, 2],
+    );
+  } finally {
+    await rm(root, { recursive: true, force: true });
+  }
 });
 
 test("RPC stdout/stderr are retained in private byte-bounded files", async () => {
@@ -315,12 +718,18 @@ test("RPC stdout/stderr are retained in private byte-bounded files", async () =>
     const err = await lstat(store.path("rpc.stderr.log"));
     assert.equal(out.size, 4096);
     assert.ok((out.mode & 0o077) === 0 && (err.mode & 0o077) === 0);
-  } finally { await rm(root, { recursive: true, force: true }); }
+  } finally {
+    await rm(root, { recursive: true, force: true });
+  }
 });
 
 test("dead launcher identity cannot authorize resume or reap while authenticated Pi identity is still alive", async () => {
   const root = await mkdtemp(join(tmpdir(), "headless-wrapper-death-"));
-  const manager = new HeadlessForegroundManager(root, () => "native", () => true);
+  const manager = new HeadlessForegroundManager(
+    root,
+    () => "native",
+    () => true,
+  );
   const owner = "owner-runtime-identity";
   const ownerToken = await processIdentity(process.pid);
   let runtime: ReturnType<typeof spawn> | undefined;
@@ -333,7 +742,9 @@ test("dead launcher identity cannot authorize resume or reap while authenticated
     runtime.unref();
     assert.ok(runtime.pid);
     runtimeToken = await processIdentity(runtime.pid!);
-    wrapper = spawn(process.execPath, ["-e", "setTimeout(() => process.exit(0), 100)"], { stdio: "ignore" });
+    wrapper = spawn(process.execPath, ["-e", "setTimeout(() => process.exit(0), 100)"], {
+      stdio: "ignore",
+    });
     assert.ok(wrapper.pid);
     const wrapperExit = once(wrapper, "exit");
     const wrapperToken = await processIdentity(wrapper.pid!);
@@ -341,36 +752,95 @@ test("dead launcher identity cannot authorize resume or reap while authenticated
     assert.equal(await processIsAlive(wrapper.pid!, wrapperToken), false);
     assert.equal(await processIsAlive(runtime.pid!, runtimeToken), true);
 
-    const groupId = `subagent-job-${"6".repeat(24)}`, taskId = `subagent-task-${"7".repeat(24)}`, childId = `subagent-child-${"8".repeat(24)}`;
+    const groupId = `subagent-job-${"6".repeat(24)}`,
+      taskId = `subagent-task-${"7".repeat(24)}`,
+      childId = `subagent-child-${"8".repeat(24)}`;
     const directory = join(root, "workers", "5".repeat(24));
     await mkdir(directory, { mode: 0o700 });
     const store = new TuiWorkerStore(directory);
     await writeFile(store.path("session.jsonl"), "", { mode: 0o600 });
-    const manifest = { protocol: 1, ownerSessionId: owner, taskId, runtimeId: "rpc-runtime-death",
-      groupId, childId, attempt: 1, workerEpoch: "9".repeat(32), controlSocket: store.path("control.sock"),
-      controlToken: "a".repeat(64), sessionFile: store.path("session.jsonl"), execution: "rpc-headless",
-      presentation: "headless-foreground", launchMode: "none", processPid: wrapper.pid, processToken: wrapperToken,
-      runtimePid: runtime.pid, runtimeProcessToken: runtimeToken, fifoPath: store.path("stdin.fifo"),
-      foregroundOwner: { pid: process.pid, token: ownerToken } };
+    const manifest = {
+      protocol: 1,
+      ownerSessionId: owner,
+      taskId,
+      runtimeId: "rpc-runtime-death",
+      groupId,
+      childId,
+      attempt: 1,
+      workerEpoch: "9".repeat(32),
+      controlSocket: store.path("control.sock"),
+      controlToken: "a".repeat(64),
+      sessionFile: store.path("session.jsonl"),
+      execution: "rpc-headless",
+      presentation: "headless-foreground",
+      launchMode: "none",
+      processPid: wrapper.pid,
+      processToken: wrapperToken,
+      runtimePid: runtime.pid,
+      runtimeProcessToken: runtimeToken,
+      fifoPath: store.path("stdin.fifo"),
+      foregroundOwner: { pid: process.pid, token: ownerToken },
+    };
     store.writeManifest(manifest as any);
     const createdAt = new Date().toISOString();
-    atomicPrivateJson(join(root, "headless-groups", `${groupId}.json`), { version: 1, id: groupId, owner, ownerToken,
-      createdAt, mode: "single", cancelled: false, launchMode: "none", launcher: "/nix/store/not-used",
-      children: [{ taskId, childId, attempt: 1, directory, spec: { task: "retained", cwd: process.cwd() }, status: "completed",
-        createdAt, updatedAt: createdAt, started: true, ownerToken, operatorCapability: "b".repeat(64), workerAlive: true }] });
+    atomicPrivateJson(join(root, "headless-groups", `${groupId}.json`), {
+      version: 1,
+      id: groupId,
+      owner,
+      ownerToken,
+      createdAt,
+      mode: "single",
+      cancelled: false,
+      launchMode: "none",
+      launcher: "/nix/store/not-used",
+      children: [
+        {
+          taskId,
+          childId,
+          attempt: 1,
+          directory,
+          spec: { task: "retained", cwd: process.cwd() },
+          status: "completed",
+          createdAt,
+          updatedAt: createdAt,
+          started: true,
+          ownerToken,
+          operatorCapability: "b".repeat(64),
+          workerAlive: true,
+        },
+      ],
+    });
     // Reconstruct a new parent manager, as after reload. The wrapper is dead,
     // the authenticated runtime PID is alive, and its socket is unavailable.
     await manager.shutdown(false);
-    recovered = new HeadlessForegroundManager(root, () => "native", () => true);
+    recovered = new HeadlessForegroundManager(
+      root,
+      () => "native",
+      () => true,
+    );
     recovered.activate(owner);
-    await assert.rejects(recovered.operation({ operation: "resume", task_id: taskId }, owner), /connect|runtime identity|still live/i);
-    await assert.rejects(recovered.operation({ operation: "reap", job_id: groupId }, owner), /connect|socket|control/i);
+    await assert.rejects(
+      recovered.operation({ operation: "resume", task_id: taskId }, owner),
+      /connect|runtime identity|still live/i,
+    );
+    await assert.rejects(
+      recovered.operation({ operation: "reap", job_id: groupId }, owner),
+      /connect|socket|control/i,
+    );
     await assert.rejects(readFile(store.path("reaped.json")), { code: "ENOENT" });
     await recovered.shutdown(false);
   } finally {
     if (recovered) await recovered.shutdown(false).catch(() => undefined);
-    if (runtime?.pid && runtimeToken && await processIsAlive(runtime.pid, runtimeToken)) { try { process.kill(runtime.pid, "SIGKILL"); } catch {} }
-    if (wrapper?.pid) { try { process.kill(wrapper.pid, "SIGKILL"); } catch {} }
+    if (runtime?.pid && runtimeToken && (await processIsAlive(runtime.pid, runtimeToken))) {
+      try {
+        process.kill(runtime.pid, "SIGKILL");
+      } catch {}
+    }
+    if (wrapper?.pid) {
+      try {
+        process.kill(wrapper.pid, "SIGKILL");
+      } catch {}
+    }
     await manager.shutdown(false).catch(() => undefined);
     await rm(root, { recursive: true, force: true });
   }
@@ -378,58 +848,183 @@ test("dead launcher identity cannot authorize resume or reap while authenticated
 
 test("managed foreground reap resolves physical checkout aliases and skips only fully reaped records", async () => {
   const root = await mkdtemp(join(tmpdir(), "headless-managed-activity-"));
-  const manager: any = new HeadlessForegroundManager(root, () => "native", () => true);
-  const checkout = join(root, "checkout"), alias = join(root, "checkout-alias"), retarget = join(root, "retargeted");
-  const unrelated = join(root, "unrelated"), loop = join(root, "loop");
-  await mkdir(checkout); await mkdir(retarget); await mkdir(unrelated); await symlink(checkout, alias); await symlink(loop, loop);
-  const owner = "managed-activity-owner", groupId = `subagent-job-${"1".repeat(24)}`;
-  const child: any = { taskId: `subagent-task-${"2".repeat(24)}`, childId: `subagent-child-${"3".repeat(24)}`, attempt: 1,
-    directory: join(root, "workers", "4".repeat(24)), activityCwd: checkout,
-    spec: { task: "managed fixture", cwd: alias, worktreeInfo: { path: checkout, branch: "pi/worker", baseCommit: "a".repeat(40), includedChanges: false } }, status: "running",
-    createdAt: new Date().toISOString(), updatedAt: new Date().toISOString(), started: true, reaped: false,
-    ownerToken: "owner-token", operatorCapability: "5".repeat(64), workerAlive: true };
-  const group: any = { version: 1, id: groupId, owner, ownerToken: "owner-token", createdAt: new Date().toISOString(),
-    mode: "single", cancelled: false, launchMode: "none", launcher: "fixture", children: [child] };
-  manager.owner = "activity-caller"; manager.reapReserved = true;
+  const manager: any = new HeadlessForegroundManager(
+    root,
+    () => "native",
+    () => true,
+  );
+  const checkout = join(root, "checkout"),
+    alias = join(root, "checkout-alias"),
+    retarget = join(root, "retargeted");
+  const unrelated = join(root, "unrelated"),
+    loop = join(root, "loop");
+  await mkdir(checkout);
+  await mkdir(retarget);
+  await mkdir(unrelated);
+  await symlink(checkout, alias);
+  await symlink(loop, loop);
+  const owner = "managed-activity-owner",
+    groupId = `subagent-job-${"1".repeat(24)}`;
+  const child: any = {
+    taskId: `subagent-task-${"2".repeat(24)}`,
+    childId: `subagent-child-${"3".repeat(24)}`,
+    attempt: 1,
+    directory: join(root, "workers", "4".repeat(24)),
+    activityCwd: checkout,
+    spec: {
+      task: "managed fixture",
+      cwd: alias,
+      worktreeInfo: {
+        path: checkout,
+        branch: "pi/worker",
+        baseCommit: "a".repeat(40),
+        includedChanges: false,
+      },
+    },
+    status: "running",
+    createdAt: new Date().toISOString(),
+    updatedAt: new Date().toISOString(),
+    started: true,
+    reaped: false,
+    ownerToken: "owner-token",
+    operatorCapability: "5".repeat(64),
+    workerAlive: true,
+  };
+  const group: any = {
+    version: 1,
+    id: groupId,
+    owner,
+    ownerToken: "owner-token",
+    createdAt: new Date().toISOString(),
+    mode: "single",
+    cancelled: false,
+    launchMode: "none",
+    launcher: "fixture",
+    children: [child],
+  };
+  manager.owner = "activity-caller";
+  manager.reapReserved = true;
   const prototype = HeadlessForegroundManager.prototype as any;
-  const originalObserve = prototype.observe, originalManifest = prototype.manifest, originalRuntimeState = prototype.runtimeState;
-  let legacyManifest = false, legacyRuntime = "unknown";
+  const originalObserve = prototype.observe,
+    originalManifest = prototype.manifest,
+    originalRuntimeState = prototype.runtimeState;
+  let legacyManifest = false,
+    legacyRuntime = "unknown";
   prototype.runtimeState = async () => legacyRuntime;
   prototype.observe = async () => {};
-  prototype.manifest = function(observed: any) {
-    const found = [...this.groups.values()].find((candidate: any) => candidate.children.includes(observed));
+  prototype.manifest = function (observed: any) {
+    const found = [...this.groups.values()].find((candidate: any) =>
+      candidate.children.includes(observed),
+    );
     if (legacyManifest) return { tools: ["read", "bash"] };
-    return observed.activityCwd ? { execution: "rpc-headless", ownerSessionId: found.owner, groupId: found.id,
-      taskId: observed.taskId, childId: observed.childId, attempt: observed.attempt, activityCwd: observed.activityCwd } : undefined;
+    return observed.activityCwd
+      ? {
+          execution: "rpc-headless",
+          ownerSessionId: found.owner,
+          groupId: found.id,
+          taskId: observed.taskId,
+          childId: observed.childId,
+          attempt: observed.attempt,
+          activityCwd: observed.activityCwd,
+        }
+      : undefined;
   };
   try {
     manager.persist(group);
-    assert.equal(await manager.worktreeReapActivity("activity-caller", checkout), true, "stable symlink alias blocks cleanup");
-    await unlink(alias); await symlink(retarget, alias);
-    assert.equal(await manager.worktreeReapActivity("activity-caller", checkout), true, "retargeting cannot hide launch-time checkout activity");
-    assert.equal(await manager.worktreeReapActivity("activity-caller", retarget), false, "retargeting does not move the authenticated worker identity");
-    child.activityCwd = loop; manager.persist(group);
-    await assert.rejects(manager.worktreeReapActivity("activity-caller", checkout), /physical checkout identity is unavailable/);
-    child.activityCwd = undefined; manager.persist(group);
-    await assert.rejects(manager.worktreeReapActivity("activity-caller", checkout), /launch-time checkout identity unavailable/);
-    child.activityCwd = unrelated; child.spec.cwd = unrelated; manager.persist(group);
-    assert.equal(await manager.worktreeReapActivity("activity-caller", checkout), false, "unrelated active inventory permits cleanup");
-    child.spec.cwd = join(root, "removed-worktree"); child.status = "reaped"; child.reaped = true; child.workerAlive = false; manager.persist(group);
-    assert.equal(await manager.worktreeReapActivity("activity-caller", checkout), false, "fully reaped removed-worktree records do not block cleanup");
-    delete child.reaped; delete child.activityCwd; manager.persist(group);
-    assert.equal(await manager.worktreeReapActivity("activity-caller", checkout), false, "legacy terminal reaped/dead record needs neither redundant flag nor launch identity");
-    child.workerAlive = undefined; manager.persist(group);
-    await assert.rejects(manager.worktreeReapActivity("activity-caller", checkout), /launch-time checkout identity unavailable/, "unknown worker liveness still fails closed");
-    child.workerAlive = true; manager.persist(group);
-    await assert.rejects(manager.worktreeReapActivity("activity-caller", checkout), /launch-time checkout identity unavailable/, "live worker cannot use legacy terminal exemption");
-    child.status = "cancelled"; child.workerAlive = false; manager.persist(group); legacyManifest = true;
-    await assert.rejects(manager.worktreeReapActivity("activity-caller", checkout), /launch-time checkout identity unavailable/, "unknown actual runtime cannot use cached death");
+    assert.equal(
+      await manager.worktreeReapActivity("activity-caller", checkout),
+      true,
+      "stable symlink alias blocks cleanup",
+    );
+    await unlink(alias);
+    await symlink(retarget, alias);
+    assert.equal(
+      await manager.worktreeReapActivity("activity-caller", checkout),
+      true,
+      "retargeting cannot hide launch-time checkout activity",
+    );
+    assert.equal(
+      await manager.worktreeReapActivity("activity-caller", retarget),
+      false,
+      "retargeting does not move the authenticated worker identity",
+    );
+    child.activityCwd = loop;
+    manager.persist(group);
+    await assert.rejects(
+      manager.worktreeReapActivity("activity-caller", checkout),
+      /physical checkout identity is unavailable/,
+    );
+    child.activityCwd = undefined;
+    manager.persist(group);
+    await assert.rejects(
+      manager.worktreeReapActivity("activity-caller", checkout),
+      /launch-time checkout identity unavailable/,
+    );
+    child.activityCwd = unrelated;
+    child.spec.cwd = unrelated;
+    manager.persist(group);
+    assert.equal(
+      await manager.worktreeReapActivity("activity-caller", checkout),
+      false,
+      "unrelated active inventory permits cleanup",
+    );
+    child.spec.cwd = join(root, "removed-worktree");
+    child.status = "reaped";
+    child.reaped = true;
+    child.workerAlive = false;
+    manager.persist(group);
+    assert.equal(
+      await manager.worktreeReapActivity("activity-caller", checkout),
+      false,
+      "fully reaped removed-worktree records do not block cleanup",
+    );
+    delete child.reaped;
+    delete child.activityCwd;
+    manager.persist(group);
+    assert.equal(
+      await manager.worktreeReapActivity("activity-caller", checkout),
+      false,
+      "legacy terminal reaped/dead record needs neither redundant flag nor launch identity",
+    );
+    child.workerAlive = undefined;
+    manager.persist(group);
+    await assert.rejects(
+      manager.worktreeReapActivity("activity-caller", checkout),
+      /launch-time checkout identity unavailable/,
+      "unknown worker liveness still fails closed",
+    );
+    child.workerAlive = true;
+    manager.persist(group);
+    await assert.rejects(
+      manager.worktreeReapActivity("activity-caller", checkout),
+      /launch-time checkout identity unavailable/,
+      "live worker cannot use legacy terminal exemption",
+    );
+    child.status = "cancelled";
+    child.workerAlive = false;
+    manager.persist(group);
+    legacyManifest = true;
+    await assert.rejects(
+      manager.worktreeReapActivity("activity-caller", checkout),
+      /launch-time checkout identity unavailable/,
+      "unknown actual runtime cannot use cached death",
+    );
     legacyRuntime = "alive";
-    await assert.rejects(manager.worktreeReapActivity("activity-caller", checkout), /launch-time checkout identity unavailable/, "live actual runtime cannot use cached death");
+    await assert.rejects(
+      manager.worktreeReapActivity("activity-caller", checkout),
+      /launch-time checkout identity unavailable/,
+      "live actual runtime cannot use cached death",
+    );
     legacyRuntime = "dead";
-    assert.equal(await manager.worktreeReapActivity("activity-caller", checkout), false, "confirmed dead legacy flat helper does not block unrelated cleanup");
+    assert.equal(
+      await manager.worktreeReapActivity("activity-caller", checkout),
+      false,
+      "confirmed dead legacy flat helper does not block unrelated cleanup",
+    );
   } finally {
-    prototype.observe = originalObserve; prototype.manifest = originalManifest; prototype.runtimeState = originalRuntimeState;
+    prototype.observe = originalObserve;
+    prototype.manifest = originalManifest;
+    prototype.runtimeState = originalRuntimeState;
     manager.reapReserved = false;
     await manager.shutdown(false);
     await rm(root, { recursive: true, force: true });
@@ -441,9 +1036,29 @@ test("headless launch contract cannot authorize a tmux placement or implicit pro
   try {
     await mkdir(join(root, "state"), { mode: 0o700 });
     const store = new TuiWorkerStore(join(root, "state"), true);
-    const headless = { ...identity, controlSocket: store.path("control.sock"), controlToken: identity.token, sessionFile: store.path("session.jsonl"),
-      execution: "rpc-headless", presentation: "headless-foreground", processPid: 100, processToken: "100:1", fifoPath: store.path("stdin.fifo"), foregroundOwner: { pid: 101, token: "101:1" }, launchMode: "none" };
+    const headless = {
+      ...identity,
+      controlSocket: store.path("control.sock"),
+      controlToken: identity.token,
+      sessionFile: store.path("session.jsonl"),
+      execution: "rpc-headless",
+      presentation: "headless-foreground",
+      processPid: 100,
+      processToken: "100:1",
+      fifoPath: store.path("stdin.fifo"),
+      foregroundOwner: { pid: 101, token: "101:1" },
+      launchMode: "none",
+    };
     assert.doesNotThrow(() => validateWorkerManifest(headless as any));
-    assert.throws(() => validateWorkerManifest({ ...headless, execution: "rpc-headless", presentation: "background", placement: { paneId: "%1" } } as any));
-  } finally { await rm(root, { recursive: true, force: true }); }
+    assert.throws(() =>
+      validateWorkerManifest({
+        ...headless,
+        execution: "rpc-headless",
+        presentation: "background",
+        placement: { paneId: "%1" },
+      } as any),
+    );
+  } finally {
+    await rm(root, { recursive: true, force: true });
+  }
 });
