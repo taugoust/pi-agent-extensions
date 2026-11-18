@@ -27,78 +27,300 @@ import {
 const jobId = "subagent-job-0123456789abcdef01234567";
 const childId = "subagent-child-0123456789abcdef01234567";
 const taskId = "subagent-task-0123456789abcdef01234567";
-assert.doesNotThrow(() => validateBackgroundOperation({operation:"resume",task_id:taskId,message:"continue"}));
-assert.throws(() => validateBackgroundOperation({operation:"resume",task_id:taskId,cwd:"/other"}), /accepts only/);
-assert.throws(() => validateBackgroundOperation({operation:"resume",task_id:taskId,compact:"false"}), /boolean/);
-assert.throws(() => validateBackgroundOperation({operation:"resume",task_id:"../session"}), /valid task_id/);
-assert.doesNotThrow(() => validateBackgroundOperation({operation:"tasks",limit:20}));
+assert.doesNotThrow(() =>
+  validateBackgroundOperation({ operation: "resume", task_id: taskId, message: "continue" }),
+);
+assert.throws(
+  () => validateBackgroundOperation({ operation: "resume", task_id: taskId, cwd: "/other" }),
+  /accepts only/,
+);
+assert.throws(
+  () => validateBackgroundOperation({ operation: "resume", task_id: taskId, compact: "false" }),
+  /boolean/,
+);
+assert.throws(
+  () => validateBackgroundOperation({ operation: "resume", task_id: "../session" }),
+  /valid task_id/,
+);
+assert.doesNotThrow(() => validateBackgroundOperation({ operation: "tasks", limit: 20 }));
 assert.doesNotThrow(() => validateBackgroundOperation({ operation: "verify", job_id: jobId }));
 assert.doesNotThrow(() => validateBackgroundOperation({ operation: "verify", child_id: childId }));
-assert.throws(() => validateBackgroundOperation({ operation: "verify" }), /requires job_id or child_id/);
-assert.doesNotThrow(() => validateBackgroundOperation({ operation: "reap", job_id: jobId, force: true, reason: "retain failed checks" }));
-assert.doesNotThrow(() => validateBackgroundOperation({ operation: "reap", job_id: jobId, force: false }));
-assert.doesNotThrow(() => validateBackgroundOperation({ operation: "reap", job_id: jobId, cleanup_worktree: true }));
-assert.doesNotThrow(() => validateBackgroundOperation({ operation: "reap", job_id: jobId, cleanup_worktree: false, force: true, reason: "preserve" }));
-assert.throws(() => validateBackgroundOperation({ operation: "reap", job_id: jobId, cleanup_worktree: "true" }), /boolean/);
-assert.throws(() => validateBackgroundOperation({ task: "not reap", cleanup_worktree: true }), /only with reap/);
-assert.throws(() => validateBackgroundOperation({ operation: "reap", job_id: jobId, force: "false" }), /boolean/);
-assert.throws(() => validateBackgroundOperation({ operation: "reap", job_id: jobId, force: true }), /requires a non-empty reason/);
-assert.throws(() => validateBackgroundOperation({ operation: "reap", job_id: jobId, force: false, reason: "no" }), /force:true/);
-assert.throws(() => validateBackgroundOperation({ operation: "status", job_id: jobId, force: true, reason: "no" }), /only for reap/);
-assert.doesNotThrow(() => validateBackgroundOperation({operation:"profiles",agentScope:"user"}));
-assert.throws(() => validateBackgroundOperation({operation:"profiles",task:"unexpected"}), /profiles accepts only/);
-assert.throws(() => validateBackgroundOperation({operation:"profiles",agentScope:"untrusted"}), /profiles accepts only/);
-assert.throws(() => validateBackgroundOperation({operation:"list",agent:"scout"}), /cannot include launch/);
-assert.throws(() => validateBackgroundOperation({ operation: "wait_everything" }), /Unknown background subagent operation/);
-assert.doesNotThrow(() => validateBackgroundOperation({ operation: "prompt", child_id: childId, message: "continue" }));
-assert.doesNotThrow(() => validateBackgroundOperation({ operation: "prompt", child_id: childId, message: "continue", control_mode: "interrupt" }));
-assert.doesNotThrow(() => validateBackgroundOperation({ operation: "prompt", child_id: childId, message: "continue", job_id: jobId }));
-assert.throws(() => validateBackgroundOperation({ operation: "prompt", child_id: childId, message: "continue", job_id: "../group" }), /valid group ID/);
-assert.throws(() => validateBackgroundOperation({ operation: "prompt", child_id: childId, message: "continue", task: "replacement" }), /cannot include/);
-assert.throws(() => validateBackgroundOperation({ operation: "prompt", child_id: childId, message: "continue", unexpected: true }), /unsupported fields: unexpected/);
+assert.throws(
+  () => validateBackgroundOperation({ operation: "verify" }),
+  /requires job_id or child_id/,
+);
+assert.doesNotThrow(() =>
+  validateBackgroundOperation({
+    operation: "reap",
+    job_id: jobId,
+    force: true,
+    reason: "retain failed checks",
+  }),
+);
+assert.doesNotThrow(() =>
+  validateBackgroundOperation({ operation: "reap", job_id: jobId, force: false }),
+);
+assert.doesNotThrow(() =>
+  validateBackgroundOperation({ operation: "reap", job_id: jobId, cleanup_worktree: true }),
+);
+assert.doesNotThrow(() =>
+  validateBackgroundOperation({
+    operation: "reap",
+    job_id: jobId,
+    cleanup_worktree: false,
+    force: true,
+    reason: "preserve",
+  }),
+);
+assert.throws(
+  () => validateBackgroundOperation({ operation: "reap", job_id: jobId, cleanup_worktree: "true" }),
+  /boolean/,
+);
+assert.throws(
+  () => validateBackgroundOperation({ task: "not reap", cleanup_worktree: true }),
+  /only with reap/,
+);
+assert.throws(
+  () => validateBackgroundOperation({ operation: "reap", job_id: jobId, force: "false" }),
+  /boolean/,
+);
+assert.throws(
+  () => validateBackgroundOperation({ operation: "reap", job_id: jobId, force: true }),
+  /requires a non-empty reason/,
+);
+assert.throws(
+  () =>
+    validateBackgroundOperation({ operation: "reap", job_id: jobId, force: false, reason: "no" }),
+  /force:true/,
+);
+assert.throws(
+  () =>
+    validateBackgroundOperation({ operation: "status", job_id: jobId, force: true, reason: "no" }),
+  /only for reap/,
+);
+assert.doesNotThrow(() =>
+  validateBackgroundOperation({ operation: "profiles", agentScope: "user" }),
+);
+assert.throws(
+  () => validateBackgroundOperation({ operation: "profiles", task: "unexpected" }),
+  /profiles accepts only/,
+);
+assert.throws(
+  () => validateBackgroundOperation({ operation: "profiles", agentScope: "untrusted" }),
+  /profiles accepts only/,
+);
+assert.throws(
+  () => validateBackgroundOperation({ operation: "list", agent: "scout" }),
+  /cannot include launch/,
+);
+assert.throws(
+  () => validateBackgroundOperation({ operation: "wait_everything" }),
+  /Unknown background subagent operation/,
+);
+assert.doesNotThrow(() =>
+  validateBackgroundOperation({ operation: "prompt", child_id: childId, message: "continue" }),
+);
+assert.doesNotThrow(() =>
+  validateBackgroundOperation({
+    operation: "prompt",
+    child_id: childId,
+    message: "continue",
+    control_mode: "interrupt",
+  }),
+);
+assert.doesNotThrow(() =>
+  validateBackgroundOperation({
+    operation: "prompt",
+    child_id: childId,
+    message: "continue",
+    job_id: jobId,
+  }),
+);
+assert.throws(
+  () =>
+    validateBackgroundOperation({
+      operation: "prompt",
+      child_id: childId,
+      message: "continue",
+      job_id: "../group",
+    }),
+  /valid group ID/,
+);
+assert.throws(
+  () =>
+    validateBackgroundOperation({
+      operation: "prompt",
+      child_id: childId,
+      message: "continue",
+      task: "replacement",
+    }),
+  /cannot include/,
+);
+assert.throws(
+  () =>
+    validateBackgroundOperation({
+      operation: "prompt",
+      child_id: childId,
+      message: "continue",
+      unexpected: true,
+    }),
+  /unsupported fields: unexpected/,
+);
 // Exact reported resume misuse: consequential launch fields must not be ignored
 // or interpreted as a fresh launch. The advertised correction is message.
-const resumeMisuse = { operation: "resume", task_id: taskId, model: "provider/model:high", background: true, task: "Continue validation" };
-assert.throws(() => validateBackgroundOperation(resumeMisuse), /unsupported fields: model, background, task.*Use message \(not task\).*No work was started/);
-for (const override of [{ agent: "scout" }, { agentScope: "user" }, { model: "provider/model:high" }, { background: false }, { task: "continue" }, { job_id: jobId }, { wait_for_response: true }]) {
-  assert.throws(() => validateBackgroundOperation({ operation: "resume", task_id: taskId, ...override }), /accepts only/);
+const resumeMisuse = {
+  operation: "resume",
+  task_id: taskId,
+  model: "provider/model:high",
+  background: true,
+  task: "Continue validation",
+};
+assert.throws(
+  () => validateBackgroundOperation(resumeMisuse),
+  /unsupported fields: model, background, task.*Use message \(not task\).*No work was started/,
+);
+for (const override of [
+  { agent: "scout" },
+  { agentScope: "user" },
+  { model: "provider/model:high" },
+  { background: false },
+  { task: "continue" },
+  { job_id: jobId },
+  { wait_for_response: true },
+]) {
+  assert.throws(
+    () => validateBackgroundOperation({ operation: "resume", task_id: taskId, ...override }),
+    /accepts only/,
+  );
 }
 assert.doesNotThrow(() => validateBackgroundOperation({ operation: "resume", task_id: taskId }));
-assert.doesNotThrow(() => validateBackgroundOperation({ operation: "resume", task_id: taskId, message: "Continue validation", compact: false }));
-assert.throws(() => validateBackgroundOperation({ operation: "prompt", child_id: childId, message: "" }), /message must be non-empty/);
-assert.throws(() => validateBackgroundOperation({ operation: "prompt", child_id: childId, message: "continue", control_mode: "later" }), /control_mode/);
-assert.doesNotThrow(() => validateBackgroundOperation({ operation: "result", job_id: jobId, child_id: childId }));
-assert.throws(() => validateBackgroundOperation({ operation: "result", job_id: jobId, child: 1, child_id: childId }), /either child or child_id/);
-assert.throws(() => validateBackgroundOperation({ operation: "prompt", child_id: childId, message: "continue", wait_for_response: "false" }), /wait_for_response/);
-assert.throws(() => validateBackgroundOperation({ operation: "status", job_id: jobId, wait_for_response: false }), /prompt-control fields/);
-assert.throws(() => validateBackgroundOperation({ operation: 42 }), /operation must be a non-empty string/);
-assert.throws(() => validateBackgroundOperation({ operation: "prompt", child_id: childId, message: "continue", control_mode: 1 }), /control_mode/);
+assert.doesNotThrow(() =>
+  validateBackgroundOperation({
+    operation: "resume",
+    task_id: taskId,
+    message: "Continue validation",
+    compact: false,
+  }),
+);
+assert.throws(
+  () => validateBackgroundOperation({ operation: "prompt", child_id: childId, message: "" }),
+  /message must be non-empty/,
+);
+assert.throws(
+  () =>
+    validateBackgroundOperation({
+      operation: "prompt",
+      child_id: childId,
+      message: "continue",
+      control_mode: "later",
+    }),
+  /control_mode/,
+);
+assert.doesNotThrow(() =>
+  validateBackgroundOperation({ operation: "result", job_id: jobId, child_id: childId }),
+);
+assert.throws(
+  () =>
+    validateBackgroundOperation({
+      operation: "result",
+      job_id: jobId,
+      child: 1,
+      child_id: childId,
+    }),
+  /either child or child_id/,
+);
+assert.throws(
+  () =>
+    validateBackgroundOperation({
+      operation: "prompt",
+      child_id: childId,
+      message: "continue",
+      wait_for_response: "false",
+    }),
+  /wait_for_response/,
+);
+assert.throws(
+  () =>
+    validateBackgroundOperation({ operation: "status", job_id: jobId, wait_for_response: false }),
+  /prompt-control fields/,
+);
+assert.throws(
+  () => validateBackgroundOperation({ operation: 42 }),
+  /operation must be a non-empty string/,
+);
+assert.throws(
+  () =>
+    validateBackgroundOperation({
+      operation: "prompt",
+      child_id: childId,
+      message: "continue",
+      control_mode: 1,
+    }),
+  /control_mode/,
+);
 assert.doesNotThrow(() => validateBackgroundOperation({ operation: "list", limit: 50 }));
 for (const limit of [0, 51, 1.5, "5", Number.NaN]) {
   assert.throws(() => validateBackgroundOperation({ operation: "list", limit }), /list limit/);
 }
-assert.doesNotThrow(() => validateBackgroundOperation({ operation: "result", job_id: jobId, child: 8, offset: Number.MAX_SAFE_INTEGER, limit: 48 * 1024 }));
+assert.doesNotThrow(() =>
+  validateBackgroundOperation({
+    operation: "result",
+    job_id: jobId,
+    child: 8,
+    offset: Number.MAX_SAFE_INTEGER,
+    limit: 48 * 1024,
+  }),
+);
 for (const child of [0, 9, 1.5, "1"]) {
-  assert.throws(() => validateBackgroundOperation({ operation: "result", job_id: jobId, child }), /result child/);
+  assert.throws(
+    () => validateBackgroundOperation({ operation: "result", job_id: jobId, child }),
+    /result child/,
+  );
 }
 for (const offset of [-1, 1.5, "0", Number.POSITIVE_INFINITY]) {
-  assert.throws(() => validateBackgroundOperation({ operation: "result", job_id: jobId, offset }), /result offset/);
+  assert.throws(
+    () => validateBackgroundOperation({ operation: "result", job_id: jobId, offset }),
+    /result offset/,
+  );
 }
 for (const limit of [3, 48 * 1024 + 1, 4.5, "4"]) {
-  assert.throws(() => validateBackgroundOperation({ operation: "result", job_id: jobId, limit }), /result limit/);
+  assert.throws(
+    () => validateBackgroundOperation({ operation: "result", job_id: jobId, limit }),
+    /result limit/,
+  );
 }
 
 assert.doesNotThrow(() => validateBackgroundOperation({ operation: "yield" }));
 assert.doesNotThrow(() => validateBackgroundOperation({ operation: "yield", job_id: jobId }));
-assert.throws(() => validateBackgroundOperation({ operation: "yield", job_id: "../group" }), /valid optional job_id/);
+assert.throws(
+  () => validateBackgroundOperation({ operation: "yield", job_id: "../group" }),
+  /valid optional job_id/,
+);
 for (const operation of ["wait", "wait_group", "wait_any", "wait_all"]) {
-  assert.throws(() => validateBackgroundOperation({ operation }), /Unknown background subagent operation/);
+  assert.throws(
+    () => validateBackgroundOperation({ operation }),
+    /Unknown background subagent operation/,
+  );
 }
-assert.throws(() => validateBackgroundOperation({ operation: "yield", wait_ms: 10 }), /yield accepts only/);
+assert.throws(
+  () => validateBackgroundOperation({ operation: "yield", wait_ms: 10 }),
+  /yield accepts only/,
+);
 
-assert.equal(getFinalOutput([
-  { role: "assistant", content: [{ type: "text", text: "first " }, { type: "thinking", thinking: "hidden" }, { type: "text", text: "second" }] } as any,
-]), "first second", "final assistant output dropped a later text block");
+assert.equal(
+  getFinalOutput([
+    {
+      role: "assistant",
+      content: [
+        { type: "text", text: "first " },
+        { type: "thinking", thinking: "hidden" },
+        { type: "text", text: "second" },
+      ],
+    } as any,
+  ]),
+  "first second",
+  "final assistant output dropped a later text block",
+);
 
 const partial: any = { role: "assistant", content: [] };
 for (const delta of [
@@ -114,50 +336,115 @@ for (const delta of [
   assert(partial.content.every((part: any) => part && typeof part.type === "string"));
 }
 assert.equal(getFinalOutput([partial]), "hello world");
-assert.equal(getFinalOutput([{ role: "assistant", content: [undefined, null, { type: "text", text: "retained" }] } as any]), "retained");
+assert.equal(
+  getFinalOutput([
+    { role: "assistant", content: [undefined, null, { type: "text", text: "retained" }] } as any,
+  ]),
+  "retained",
+);
 for (const contentIndex of [-1, 1.5, 1000000000]) {
-  assert.throws(() => applyNativeAssistantDelta(partial, { type: "text_delta", contentIndex }), /invalid content index/);
+  assert.throws(
+    () => applyNativeAssistantDelta(partial, { type: "text_delta", contentIndex }),
+    /invalid content index/,
+  );
 }
 
 assert.equal(backgroundChildStatus({ exitCode: -1, backgroundState: "pending" }), "pending");
 assert.equal(backgroundChildStatus({ exitCode: -1, backgroundState: "running" }), "running");
-assert.equal(backgroundChildStatus({ exitCode: -1, stopReason: "aborted", backgroundState: "running" }), "running");
-assert.equal(backgroundChildStatus({ terminal: { state: "failed" }, exitCode: 0, stopReason: "completed" }), "failed");
-assert.equal(backgroundChildStatus({ terminal: { state: "completed" }, exitCode: 1, stopReason: "error" }), "completed");
+assert.equal(
+  backgroundChildStatus({ exitCode: -1, stopReason: "aborted", backgroundState: "running" }),
+  "running",
+);
+assert.equal(
+  backgroundChildStatus({ terminal: { state: "failed" }, exitCode: 0, stopReason: "completed" }),
+  "failed",
+);
+assert.equal(
+  backgroundChildStatus({ terminal: { state: "completed" }, exitCode: 1, stopReason: "error" }),
+  "completed",
+);
 assert.equal(backgroundChildStatus({ exitCode: 130, stopReason: "aborted" }), "cancelled");
 assert.equal(backgroundChildStatus({ exitCode: 0, stopReason: "completed" }), "completed");
 assert.equal(backgroundChildStatus({ exitCode: 1, stopReason: "error" }), "failed");
 assert.deepEqual(
   backgroundChildProgress(
-    { results: [{ label: "task 2", exitCode: 0 }, { label: "task 1", exitCode: -1 }] },
+    {
+      results: [
+        { label: "task 2", exitCode: 0 },
+        { label: "task 1", exitCode: -1 },
+      ],
+    },
     [{ label: "task 1" }, { label: "task 2" }],
   ).map((child) => [child.child, child.label, child.status]),
-  [[2, "task 2", "completed"], [1, "task 1", "running"]],
+  [
+    [2, "task 2", "completed"],
+    [1, "task 1", "running"],
+  ],
 );
 const preIdentityProgress = backgroundChildProgress(
   { results: [{ child: 1, label: "subagent", exitCode: -1 }] },
   [{ label: "subagent" }],
 );
-assert.equal(Object.hasOwn(preIdentityProgress[0], "childId"), false, "pre-identity progress fabricated a child identity");
+assert.equal(
+  Object.hasOwn(preIdentityProgress[0], "childId"),
+  false,
+  "pre-identity progress fabricated a child identity",
+);
 
 const ordinalChildren = [
   { child: 1, childId: "subagent-child-111111111111111111111111", label: "worker", task: "same" },
   { child: 2, childId: "subagent-child-222222222222222222222222", label: "worker", task: "same" },
 ];
-const ordinalDetails: any = decorateChildResultIdentities({
-  results: [{ index: 1, label: "worker", task: "same" }, { index: 0, label: "worker", task: "same" }],
-}, ordinalChildren);
-assert.deepEqual(ordinalDetails.results.map((result: any) => [result.child, result.child_id]), [
-  [2, ordinalChildren[1].childId], [1, ordinalChildren[0].childId],
-]);
-assert.throws(() => decorateChildResultIdentities({
-  results: [{ label: "worker", task: "same" }, { label: "worker", task: "same" }],
-}, ordinalChildren, true), /unambiguous launch ordinal/);
-assert.throws(() => decorateChildResultIdentities({ results: [{ child: 1 }, { child: 1 }] }, ordinalChildren, true), /duplicate launch ordinal/);
-assert.throws(() => decorateChildResultIdentities({ results: [{ index: null }] }, ordinalChildren, true), /invalid launch ordinal/);
-assert.throws(() => decorateChildResultIdentities({
-  results: [{ child: 2, child_id: ordinalChildren[0].childId }],
-}, ordinalChildren, true), /identity and launch ordinal disagree/);
+const ordinalDetails: any = decorateChildResultIdentities(
+  {
+    results: [
+      { index: 1, label: "worker", task: "same" },
+      { index: 0, label: "worker", task: "same" },
+    ],
+  },
+  ordinalChildren,
+);
+assert.deepEqual(
+  ordinalDetails.results.map((result: any) => [result.child, result.child_id]),
+  [
+    [2, ordinalChildren[1].childId],
+    [1, ordinalChildren[0].childId],
+  ],
+);
+assert.throws(
+  () =>
+    decorateChildResultIdentities(
+      {
+        results: [
+          { label: "worker", task: "same" },
+          { label: "worker", task: "same" },
+        ],
+      },
+      ordinalChildren,
+      true,
+    ),
+  /unambiguous launch ordinal/,
+);
+assert.throws(
+  () =>
+    decorateChildResultIdentities({ results: [{ child: 1 }, { child: 1 }] }, ordinalChildren, true),
+  /duplicate launch ordinal/,
+);
+assert.throws(
+  () => decorateChildResultIdentities({ results: [{ index: null }] }, ordinalChildren, true),
+  /invalid launch ordinal/,
+);
+assert.throws(
+  () =>
+    decorateChildResultIdentities(
+      {
+        results: [{ child: 2, child_id: ordinalChildren[0].childId }],
+      },
+      ordinalChildren,
+      true,
+    ),
+  /identity and launch ordinal disagree/,
+);
 
 function createPi() {
   const handlers = new Map<string, Array<(event: any, ctx: any) => any>>();
@@ -174,9 +461,13 @@ function createPi() {
       registered.push(handler);
       handlers.set(event, registered);
     },
-    registerTool(tool: any) { tools.set(tool.name, tool); },
+    registerTool(tool: any) {
+      tools.set(tool.name, tool);
+    },
     registerCommand() {},
-    sendMessage(message: any) { messages.push(message); },
+    sendMessage(message: any) {
+      messages.push(message);
+    },
     appendEntry(customType: string, data: unknown) {
       entries.push({ type: "custom", customType, data, timestamp: Date.now() });
     },
@@ -192,12 +483,29 @@ async function profileContractCheck() {
   try {
     const agents = path.join(root, "agents");
     await mkdir(agents);
-    await writeFile(path.join(agents, "fixture.md"), "---\nname: fixture\ndescription: Contract fixture\nmodel: fixture-model\nthinking: high\ntools: read, bash\ncleanupWorktreesOnReap: true\n---\nPROFILE_INSTRUCTIONS\n");
+    await writeFile(
+      path.join(agents, "fixture.md"),
+      "---\nname: fixture\ndescription: Contract fixture\nmodel: fixture-model\nthinking: high\ntools: read, bash\ncleanupWorktreesOnReap: true\n---\nPROFILE_INSTRUCTIONS\n",
+    );
     const ctx = { cwd: root, isProjectTrusted: () => false };
-    const task = { agent: "fixture", task: "Inspect", acceptance: ["Concrete acceptance"], systemPrompt: "EXPLICIT_EXTRA", tools: ["read"] };
+    const task = {
+      agent: "fixture",
+      task: "Inspect",
+      acceptance: ["Concrete acceptance"],
+      systemPrompt: "EXPLICIT_EXTRA",
+      tools: ["read"],
+    };
     for (const kind of ["tasks", "chain"]) {
-      const resolved = await resolveSubagentProfiles({ [kind]: [task], agentScope: "user", background: true }, ctx, root);
-      assert.equal("agentScope" in resolved, false, "profile scope must not leak to backend adapters");
+      const resolved = await resolveSubagentProfiles(
+        { [kind]: [task], agentScope: "user", background: true },
+        ctx,
+        root,
+      );
+      assert.equal(
+        "agentScope" in resolved,
+        false,
+        "profile scope must not leak to backend adapters",
+      );
       const item = resolved[kind][0];
       assert.equal("agent" in item, false);
       assert.equal("agentScope" in item, false);
@@ -205,17 +513,52 @@ async function profileContractCheck() {
       assert.match(item.systemPrompt, /PROFILE_INSTRUCTIONS[\s\S]*EXPLICIT_EXTRA/);
       assert.deepEqual(item.tools, ["read"]);
       assert.equal(item.cleanupWorktreesOnReap, true);
-      assert.deepEqual(item.acceptance, task.acceptance, "profiles do not supply or replace acceptance");
+      assert.deepEqual(
+        item.acceptance,
+        task.acceptance,
+        "profiles do not supply or replace acceptance",
+      );
     }
-    await assert.rejects(resolveSubagentProfiles({ tasks: [task], agent: "fixture" }, ctx, root), /each task/);
-    await assert.rejects(resolveSubagentProfiles({ task: "Plain", agentScope: "user" }, ctx, root), /requires an agent/);
-    await assert.rejects(resolveSubagentProfiles({ ...task, agentScope: "project" }, ctx, root), /project trust/);
-    await assert.rejects(resolveSubagentProfiles({ action: "review", agent: "fixture" }, ctx, root), /Draft disposition/);
-    assert.equal((await resolveSubagentProfiles({ task: "Plain" }, ctx, root)).cleanupWorktreesOnReap, false);
-    assert.equal((await resolveSubagentProfiles({ agent: "coordinator", task: "Coordinate" }, ctx, root)).cleanupWorktreesOnReap, true);
-    await assert.rejects(resolveSubagentProfiles({ task: "forged", cleanupWorktreesOnReap: true }, ctx, root), /trusted profile metadata/);
-    await assert.rejects(resolveSubagentProfiles({ tasks: [{ task: "forged", cleanupWorktreesOnReap: true }] }, ctx, root), /trusted profile metadata/);
-  } finally { await rm(root, { recursive: true, force: true }); }
+    await assert.rejects(
+      resolveSubagentProfiles({ tasks: [task], agent: "fixture" }, ctx, root),
+      /each task/,
+    );
+    await assert.rejects(
+      resolveSubagentProfiles({ task: "Plain", agentScope: "user" }, ctx, root),
+      /requires an agent/,
+    );
+    await assert.rejects(
+      resolveSubagentProfiles({ ...task, agentScope: "project" }, ctx, root),
+      /project trust/,
+    );
+    await assert.rejects(
+      resolveSubagentProfiles({ action: "review", agent: "fixture" }, ctx, root),
+      /Draft disposition/,
+    );
+    assert.equal(
+      (await resolveSubagentProfiles({ task: "Plain" }, ctx, root)).cleanupWorktreesOnReap,
+      false,
+    );
+    assert.equal(
+      (await resolveSubagentProfiles({ agent: "coordinator", task: "Coordinate" }, ctx, root))
+        .cleanupWorktreesOnReap,
+      true,
+    );
+    await assert.rejects(
+      resolveSubagentProfiles({ task: "forged", cleanupWorktreesOnReap: true }, ctx, root),
+      /trusted profile metadata/,
+    );
+    await assert.rejects(
+      resolveSubagentProfiles(
+        { tasks: [{ task: "forged", cleanupWorktreesOnReap: true }] },
+        ctx,
+        root,
+      ),
+      /trusted profile metadata/,
+    );
+  } finally {
+    await rm(root, { recursive: true, force: true });
+  }
 }
 await profileContractCheck();
 
@@ -248,27 +591,67 @@ async function operationCheck() {
   assert.match(tool.parameters.properties.operation.pattern, /prompt/);
   assert.match(tool.parameters.properties.child_id.pattern, /subagent-child/);
   assert.match(tool.parameters.properties.control_mode.pattern, /follow_up/);
-  assert.equal(Object.hasOwn(tool.parameters.properties, "wait_ms"), false, "tool schema still exposes wait_ms");
+  assert.equal(
+    Object.hasOwn(tool.parameters.properties, "wait_ms"),
+    false,
+    "tool schema still exposes wait_ms",
+  );
   assert.match(tool.description, /Resume shape:.*task_id,message\?,compact\?/);
-  assert.match(tool.parameters.properties.operation.description, /resume \{task_id, message\?, compact\?\}/);
-  assert.match(tool.parameters.properties.operation.description, /prompt \{child_id, message, job_id\?/);
-  for (const field of ["task", "model", "background", "cwd", "tools", "systemPrompt", "name", "acceptance", "tasks", "chain"]) {
-    assert.match(tool.parameters.properties[field].description, /Launch only/i, `${field} must not advertise a resume override`);
+  assert.match(
+    tool.parameters.properties.operation.description,
+    /resume \{task_id, message\?, compact\?\}/,
+  );
+  assert.match(
+    tool.parameters.properties.operation.description,
+    /prompt \{child_id, message, job_id\?/,
+  );
+  for (const field of [
+    "task",
+    "model",
+    "background",
+    "cwd",
+    "tools",
+    "systemPrompt",
+    "name",
+    "acceptance",
+    "tasks",
+    "chain",
+  ]) {
+    assert.match(
+      tool.parameters.properties[field].description,
+      /Launch only/i,
+      `${field} must not advertise a resume override`,
+    );
   }
   assert.match(tool.parameters.properties.message.description, /resume/);
-  assert.match(tool.parameters.properties.job_id.description, /Optional for yield.*mismatch rejects before delivery/);
+  assert.match(
+    tool.parameters.properties.job_id.description,
+    /Optional for yield.*mismatch rejects before delivery/,
+  );
   // Validation must run before looking up or launching the retained task.
-  await assert.rejects(tool.execute("resume-misuse", resumeMisuse, undefined, undefined, ctx), /unsupported fields: model, background, task/);
+  await assert.rejects(
+    tool.execute("resume-misuse", resumeMisuse, undefined, undefined, ctx),
+    /unsupported fields: model, background, task/,
+  );
 
   const unsupportedIdentity = {
-    childId: createSubagentChildId(), child: 1, label: "subagent", task: "AgentSH-owned work",
+    childId: createSubagentChildId(),
+    child: 1,
+    label: "subagent",
+    task: "AgentSH-owned work",
   };
   reserveSubagentChildren(sessionId, "agentsh", [unsupportedIdentity]);
-  const unsupportedControl = await tool.execute("agentsh-control", {
-    operation: "prompt",
-    child_id: unsupportedIdentity.childId,
-    message: "continue",
-  }, undefined, undefined, ctx);
+  const unsupportedControl = await tool.execute(
+    "agentsh-control",
+    {
+      operation: "prompt",
+      child_id: unsupportedIdentity.childId,
+      message: "continue",
+    },
+    undefined,
+    undefined,
+    ctx,
+  );
   assert.equal(unsupportedControl.isError, true);
   assert.equal(unsupportedControl.details.failed, true);
   assert.equal(unsupportedControl.details.backend, "agentsh");
@@ -277,13 +660,19 @@ async function operationCheck() {
   completeSubagentChildren(sessionId, [unsupportedIdentity]);
 
   const nativeIdentity = {
-    childId: createSubagentChildId(), child: 1, label: "subagent", task: "native work",
+    childId: createSubagentChildId(),
+    child: 1,
+    label: "subagent",
+    task: "native work",
   };
   const nativeCalls: unknown[][] = [];
   reserveSubagentChildren(sessionId, "native", [nativeIdentity]);
   bindNativeSubagentControl(sessionId, nativeIdentity.childId, {
     isActive: () => true,
-    async acceptPrompt(mode, message) { nativeCalls.push(["accepted", mode, message]); return { accepted: true, text: "accepted without waiting" }; },
+    async acceptPrompt(mode, message) {
+      nativeCalls.push(["accepted", mode, message]);
+      return { accepted: true, text: "accepted without waiting" };
+    },
     async control(mode, message, _signal, update) {
       nativeCalls.push([mode, message]);
       update?.("native partial");
@@ -291,32 +680,75 @@ async function operationCheck() {
     },
   });
   const nativeUpdates: any[] = [];
-  const nativeControl = await tool.execute("native-control", {
-    operation: "prompt",
-    child_id: nativeIdentity.childId,
-    message: "continue natively",
-    control_mode: "follow_up",
-    wait_for_response: true,
-  }, undefined, (update: any) => nativeUpdates.push(update), ctx);
+  const nativeControl = await tool.execute(
+    "native-control",
+    {
+      operation: "prompt",
+      child_id: nativeIdentity.childId,
+      message: "continue natively",
+      control_mode: "follow_up",
+      wait_for_response: true,
+    },
+    undefined,
+    (update: any) => nativeUpdates.push(update),
+    ctx,
+  );
   assert.equal(nativeControl.isError, undefined);
   assert.equal(nativeControl.details.failed, false);
   assert.equal(nativeControl.details.backend, "native");
   assert.equal(nativeControl.content[0].text, "native complete");
   assert.deepEqual(nativeCalls, [["follow_up", "continue natively"]]);
   assert.equal(nativeUpdates[0].content[0].text, "native partial");
-  const acceptedControl = await tool.execute("native-accepted", { operation: "prompt", child_id: nativeIdentity.childId, message: "keep working" }, undefined, undefined, ctx);
+  const acceptedControl = await tool.execute(
+    "native-accepted",
+    { operation: "prompt", child_id: nativeIdentity.childId, message: "keep working" },
+    undefined,
+    undefined,
+    ctx,
+  );
   assert.equal(acceptedControl.details.accepted, true);
   assert.equal(acceptedControl.content[0].text, "accepted without waiting");
   assert.deepEqual(nativeCalls.at(-1), ["accepted", "steer", "keep working"]);
   const managerRoot = path.join(agentDir, "state", "background-subagents-v1");
   const manager = sharedBackgroundSubagentManager(managerRoot);
-  const descriptor = { childId: nativeIdentity.childId, label: nativeIdentity.label, task: nativeIdentity.task };
-  const controlGroup = await manager.start({ sessionId, backend: "native", mode: "single", summary: "control fixture", children: [descriptor] },
-    async () => ({ text: "fixture", failed: false }));
-  const foreignControlGroup = await manager.start({ sessionId: "foreign", backend: "native", mode: "single", summary: "foreign fixture", children: [descriptor] },
-    async () => ({ text: "fixture", failed: false }));
-  const groupedPrompt = { operation: "prompt", child_id: nativeIdentity.childId, job_id: controlGroup.id, message: "same group" };
-  const groupedControl = await tool.execute("grouped-prompt", groupedPrompt, undefined, undefined, ctx);
+  const descriptor = {
+    childId: nativeIdentity.childId,
+    label: nativeIdentity.label,
+    task: nativeIdentity.task,
+  };
+  const controlGroup = await manager.start(
+    {
+      sessionId,
+      backend: "native",
+      mode: "single",
+      summary: "control fixture",
+      children: [descriptor],
+    },
+    async () => ({ text: "fixture", failed: false }),
+  );
+  const foreignControlGroup = await manager.start(
+    {
+      sessionId: "foreign",
+      backend: "native",
+      mode: "single",
+      summary: "foreign fixture",
+      children: [descriptor],
+    },
+    async () => ({ text: "fixture", failed: false }),
+  );
+  const groupedPrompt = {
+    operation: "prompt",
+    child_id: nativeIdentity.childId,
+    job_id: controlGroup.id,
+    message: "same group",
+  };
+  const groupedControl = await tool.execute(
+    "grouped-prompt",
+    groupedPrompt,
+    undefined,
+    undefined,
+    ctx,
+  );
   assert.equal(groupedControl.details.accepted, true);
   assert.deepEqual(nativeCalls.at(-1), ["accepted", "steer", "same group"]);
   const callCount = nativeCalls.length;
@@ -335,7 +767,11 @@ async function operationCheck() {
   await manager.reapNative(foreignControlGroup.id, "foreign");
   completeSubagentChildren(sessionId, [nativeIdentity]);
   const reloadedBackground = await import("./background.js?background-wait-v4-reload");
-  assert.equal(reloadedBackground.sharedBackgroundSubagentManager(managerRoot), manager, "same-process reload replaced the V4 manager");
+  assert.equal(
+    reloadedBackground.sharedBackgroundSubagentManager(managerRoot),
+    manager,
+    "same-process reload replaced the V4 manager",
+  );
   const tracker = sharedBackgroundSubagentChildTracker();
 
   const legacyRoot = path.join(agentDir, "state", "legacy-v3-migration");
@@ -343,8 +779,14 @@ async function operationCheck() {
   let legacyAdoptions = 0;
   const legacyV3Manager = {
     root: legacyRoot,
-    async initialize() { unsafeLegacyCalls += 1; throw new Error("V3 initialize must not be reused"); },
-    async list() { unsafeLegacyCalls += 1; throw new Error("V3 list must not be reused"); },
+    async initialize() {
+      unsafeLegacyCalls += 1;
+      throw new Error("V3 initialize must not be reused");
+    },
+    async list() {
+      unsafeLegacyCalls += 1;
+      throw new Error("V3 list must not be reused");
+    },
     adoptReload(candidateSessionId: string) {
       assert.equal(candidateSessionId, sessionId);
       legacyAdoptions += 1;
@@ -352,9 +794,10 @@ async function operationCheck() {
     },
   };
   const globals = globalThis as any;
-  const legacyManagers = globals.__paeBackgroundSubagentManagersV3 instanceof Map
-    ? globals.__paeBackgroundSubagentManagersV3
-    : new Map();
+  const legacyManagers =
+    globals.__paeBackgroundSubagentManagersV3 instanceof Map
+      ? globals.__paeBackgroundSubagentManagersV3
+      : new Map();
   globals.__paeBackgroundSubagentManagersV3 = legacyManagers;
   legacyManagers.set(legacyRoot, legacyV3Manager);
   const migratedManager = sharedBackgroundSubagentManager(legacyRoot);
@@ -365,21 +808,36 @@ async function operationCheck() {
   assert.equal(legacyAdoptions, 1, "V4 migration did not disarm the V3 reload watchdog");
   legacyManagers.delete(legacyRoot);
   const persistedChildId = createSubagentChildId();
-  const identityGroup = await manager.start({
-    sessionId,
-    backend: "native",
-    mode: "single",
-    summary: "stable child identity",
-    children: [{ childId: persistedChildId, label: "subagent", task: "identity check" }],
-  }, async () => ({ text: "identity complete", failed: false }));
+  const identityGroup = await manager.start(
+    {
+      sessionId,
+      backend: "native",
+      mode: "single",
+      summary: "stable child identity",
+      children: [{ childId: persistedChildId, label: "subagent", task: "identity check" }],
+    },
+    async () => ({ text: "identity complete", failed: false }),
+  );
   const identityRecord = (await manager.wait(identityGroup.id, 500)).record;
   assert.equal(identityRecord.children?.[0]?.childId, persistedChildId);
-  const reloadedIdentityManager = new BackgroundSubagentManager(path.join(agentDir, "state", "background-subagents-v1"));
+  const reloadedIdentityManager = new BackgroundSubagentManager(
+    path.join(agentDir, "state", "background-subagents-v1"),
+  );
   await reloadedIdentityManager.initialize();
-  assert.equal((await reloadedIdentityManager.get(identityGroup.id)).children?.[0]?.childId, persistedChildId);
-  const identityStatus = await tool.execute("identity-status", {
-    operation: "status", job_id: identityGroup.id,
-  }, undefined, undefined, ctx);
+  assert.equal(
+    (await reloadedIdentityManager.get(identityGroup.id)).children?.[0]?.childId,
+    persistedChildId,
+  );
+  const identityStatus = await tool.execute(
+    "identity-status",
+    {
+      operation: "status",
+      job_id: identityGroup.id,
+    },
+    undefined,
+    undefined,
+    ctx,
+  );
   assert.equal(identityStatus.details.children[0].child_id, persistedChildId);
   assert.match(identityStatus.content[0].text, new RegExp(persistedChildId));
 
@@ -390,17 +848,22 @@ async function operationCheck() {
     label: `escaped child ${index + 1} "\\`,
     task: `\u0002"\\`.repeat(680),
   }));
-  const escapedGroup = await manager.start({
-    sessionId,
-    backend: "native",
-    mode: "parallel",
-    summary: `"\\`.repeat(1024),
-    children: escapedChildren,
-  }, async (_signal, update) => {
-    update(escapedText);
-    await new Promise<void>((resolve) => { releaseEscaped = resolve; });
-    return { text: escapedText, failed: false };
-  });
+  const escapedGroup = await manager.start(
+    {
+      sessionId,
+      backend: "native",
+      mode: "parallel",
+      summary: `"\\`.repeat(1024),
+      children: escapedChildren,
+    },
+    async (_signal, update) => {
+      update(escapedText);
+      await new Promise<void>((resolve) => {
+        releaseEscaped = resolve;
+      });
+      return { text: escapedText, failed: false };
+    },
+  );
   const escapedStatePath = path.join(managerRoot, "jobs", escapedGroup.id, "state.json");
   let escapedPersisted: any;
   const escapedDeadline = Date.now() + 2_000;
@@ -410,59 +873,129 @@ async function operationCheck() {
     if (Date.now() >= escapedDeadline) throw new Error("escaped progress was not persisted");
     await new Promise((resolve) => setTimeout(resolve, 25));
   } while (true);
-  assert((await stat(escapedStatePath)).size <= MAX_STATE_BYTES, "running state exceeded its hard serialized byte limit");
+  assert(
+    (await stat(escapedStatePath)).size <= MAX_STATE_BYTES,
+    "running state exceeded its hard serialized byte limit",
+  );
   assert.equal(escapedPersisted.status, "running");
   releaseEscaped();
   assert.equal((await manager.wait(escapedGroup.id, 1000)).record.status, "completed");
-  assert((await stat(escapedStatePath)).size <= MAX_STATE_BYTES, "terminal state exceeded its hard serialized byte limit");
+  assert(
+    (await stat(escapedStatePath)).size <= MAX_STATE_BYTES,
+    "terminal state exceeded its hard serialized byte limit",
+  );
   const escapedReload = new BackgroundSubagentManager(managerRoot);
   await escapedReload.initialize();
-  assert.equal((await escapedReload.get(escapedGroup.id)).status, "completed", "bounded escaped state disappeared on reload");
+  assert.equal(
+    (await escapedReload.get(escapedGroup.id)).status,
+    "completed",
+    "bounded escaped state disappeared on reload",
+  );
 
   let releaseYield!: () => void;
-  const yieldGroup = await manager.start({ sessionId, backend: "native", mode: "parallel", summary: "yield snapshot" }, async () => {
-    await new Promise<void>((resolve) => { releaseYield = resolve; });
-    return { text: "yield complete", failed: false };
-  });
+  const yieldGroup = await manager.start(
+    { sessionId, backend: "native", mode: "parallel", summary: "yield snapshot" },
+    async () => {
+      await new Promise<void>((resolve) => {
+        releaseYield = resolve;
+      });
+      return { text: "yield complete", failed: false };
+    },
+  );
   tracker.register(yieldGroup, [{ label: "task 1" }]);
   tracker.update(yieldGroup.id, [{ child: 1, label: "task 1", status: "running" }]);
-  const snapshot = await tool.execute("yield", { operation: "yield", job_id: yieldGroup.id }, undefined, undefined, ctx);
+  const snapshot = await tool.execute(
+    "yield",
+    { operation: "yield", job_id: yieldGroup.id },
+    undefined,
+    undefined,
+    ctx,
+  );
   assert.equal(snapshot.details.operation, "yield");
   assert.equal(snapshot.details.groups[0].job_id, yieldGroup.id);
   assert.equal(snapshot.terminate, true);
   assert.equal(JSON.stringify(snapshot.details).includes('"accepted_delivery":true'), false);
-  assert.equal((await manager.get(yieldGroup.id)).status, "running", "yield cancelled the running group");
+  assert.equal(
+    (await manager.get(yieldGroup.id)).status,
+    "running",
+    "yield cancelled the running group",
+  );
   releaseYield();
   assert.equal((await manager.wait(yieldGroup.id, 1000)).record.status, "completed");
-  await assert.rejects(tool.execute("yield-unknown", { operation: "yield", job_id: jobId }, undefined, undefined, ctx), /not found|unknown/i);
-
-  const foreign = await manager.start({ sessionId: "another-session", backend: "native", mode: "single", summary: "foreign" }, async (signal) => {
-    await new Promise<void>((_resolve, reject) => signal.addEventListener("abort", () => reject(signal.reason), { once: true }));
-    return { text: "unexpected", failed: false };
-  });
   await assert.rejects(
-    tool.execute("foreign-status", { operation: "status", job_id: foreign.id }, undefined, undefined, ctx),
+    tool.execute("yield-unknown", { operation: "yield", job_id: jobId }, undefined, undefined, ctx),
+    /not found|unknown/i,
+  );
+
+  const foreign = await manager.start(
+    { sessionId: "another-session", backend: "native", mode: "single", summary: "foreign" },
+    async (signal) => {
+      await new Promise<void>((_resolve, reject) =>
+        signal.addEventListener("abort", () => reject(signal.reason), { once: true }),
+      );
+      return { text: "unexpected", failed: false };
+    },
+  );
+  await assert.rejects(
+    tool.execute(
+      "foreign-status",
+      { operation: "status", job_id: foreign.id },
+      undefined,
+      undefined,
+      ctx,
+    ),
     /belongs to a different Pi session/,
   );
-  await assert.rejects(tool.execute("yield-foreign", { operation: "yield", job_id: foreign.id }, undefined, undefined, ctx), /Unknown or unowned/);
+  await assert.rejects(
+    tool.execute(
+      "yield-foreign",
+      { operation: "yield", job_id: foreign.id },
+      undefined,
+      undefined,
+      ctx,
+    ),
+    /Unknown or unowned/,
+  );
   await manager.cancel(foreign.id);
 
-  const notificationJob = await manager.start({ sessionId, backend: "native", mode: "single", summary: "visible report" }, async () => ({ text: "completed report body", failed: false }));
+  const notificationJob = await manager.start(
+    { sessionId, backend: "native", mode: "single", summary: "visible report" },
+    async () => ({ text: "completed report body", failed: false }),
+  );
   ctx.isIdle = () => true;
   await emit(pi, "agent_settled", {}, ctx);
   const notificationDeadline = Date.now() + 5000;
-  while (!pi.messages.some((message) => message.details?.updates?.some((update:any)=>update.id===notificationJob.id))) {
+  while (
+    !pi.messages.some((message) =>
+      message.details?.updates?.some((update: any) => update.id === notificationJob.id),
+    )
+  ) {
     assert(Date.now() < notificationDeadline, "completion notification was not delivered");
     await new Promise((resolve) => setTimeout(resolve, 20));
   }
-  const completion = pi.messages.find((message) => message.details?.updates?.some((update:any)=>update.id===notificationJob.id));
+  const completion = pi.messages.find((message) =>
+    message.details?.updates?.some((update: any) => update.id === notificationJob.id),
+  );
   assert.equal(completion.display, false, "routine completion leaked into the transcript");
   assert.doesNotMatch(completion.content, /completed report body/);
-  assert.equal(completion.customType, 'harness-state');
-  const completionReceiptDelivered = pi.entries.some((entry: any) => entry.customType === "harness-state-receipt"
-    && entry.data?.update?.id === notificationJob.id && entry.data?.state === "delivered");
-  assert.equal(completionReceiptDelivered, true, "completion delivery must persist its durable receipt");
-  assert.equal(pi.messages.filter((message) => message.details?.updates?.some((update:any)=>update.id===notificationJob.id)).length, 1);
+  assert.equal(completion.customType, "harness-state");
+  const completionReceiptDelivered = pi.entries.some(
+    (entry: any) =>
+      entry.customType === "harness-state-receipt" &&
+      entry.data?.update?.id === notificationJob.id &&
+      entry.data?.state === "delivered",
+  );
+  assert.equal(
+    completionReceiptDelivered,
+    true,
+    "completion delivery must persist its durable receipt",
+  );
+  assert.equal(
+    pi.messages.filter((message) =>
+      message.details?.updates?.some((update: any) => update.id === notificationJob.id),
+    ).length,
+    1,
+  );
 
   await emit(pi, "session_shutdown", { reason: "quit" }, ctx);
   await rm(root, { recursive: true, force: true });
@@ -485,17 +1018,30 @@ async function agentSHIdentityCheck() {
       getSessionFile: () => path.join(agentDir, "sessions", "session.jsonl"),
       getBranch: () => [],
     },
-    modelRegistry: { getAll: () => ["gpt-6-luna", "configured-default"].map(id => ({ provider: "fixture-provider", id, api: "fixture" })), find: (provider: string, id: string) => ({ provider, id, api: "fixture" }) },
+    modelRegistry: {
+      getAll: () =>
+        ["gpt-6-luna", "configured-default"].map((id) => ({
+          provider: "fixture-provider",
+          id,
+          api: "fixture",
+        })),
+      find: (provider: string, id: string) => ({ provider, id, api: "fixture" }),
+    },
   };
   let releaseAdapter!: () => void;
   let adapterStarted!: () => void;
-  const adapterReady = new Promise<void>(resolve => { adapterStarted = resolve; });
+  const adapterReady = new Promise<void>((resolve) => {
+    adapterStarted = resolve;
+  });
   const previousBridge = (globalThis as any).__AGENTSH_PI__;
   (globalThis as any).__AGENTSH_PI__ = {
     getSupervisorState: () => ({ configured: true, active: true }),
     subagentAdapter: {
       async execute(_toolCallId: string, params: any) {
-        await new Promise<void>((resolve) => { releaseAdapter = resolve; adapterStarted(); });
+        await new Promise<void>((resolve) => {
+          releaseAdapter = resolve;
+          adapterStarted();
+        });
         return {
           content: [{ type: "text", text: "parallel preview" }],
           details: {
@@ -503,8 +1049,20 @@ async function agentSHIdentityCheck() {
             // Deliberately duplicate labels and tasks and report in completion
             // order. Only the supervisor's launch ordinal may assign identity.
             results: [
-              { child: 2, label: "worker", task: params.tasks[1].task, final: "second child artifact", terminal: { state: "completed" } },
-              { child: 1, label: "worker", task: params.tasks[0].task, final: "first child artifact", terminal: { state: "completed" } },
+              {
+                child: 2,
+                label: "worker",
+                task: params.tasks[1].task,
+                final: "second child artifact",
+                terminal: { state: "completed" },
+              },
+              {
+                child: 1,
+                label: "worker",
+                task: params.tasks[0].task,
+                final: "first child artifact",
+                terminal: { state: "completed" },
+              },
             ],
           },
         };
@@ -519,48 +1077,123 @@ async function agentSHIdentityCheck() {
     backgroundSubagentExtension(pi as any);
     await emit(pi, "session_start", { reason: "startup" }, ctx);
     const tool = pi.tools.get("subagent");
-    const started = await tool.execute("identity-background", {
-      background: true,
-      tasks: [{ task: "duplicate source task", acceptance: ["First child result retains its identity"] }, { task: "duplicate source task", acceptance: ["Second child result retains its identity"] }],
-    }, undefined, undefined, ctx);
+    const started = await tool.execute(
+      "identity-background",
+      {
+        background: true,
+        tasks: [
+          {
+            task: "duplicate source task",
+            acceptance: ["First child result retains its identity"],
+          },
+          {
+            task: "duplicate source task",
+            acceptance: ["Second child result retains its identity"],
+          },
+        ],
+      },
+      undefined,
+      undefined,
+      ctx,
+    );
     assert.equal(started.details.backend, "agentsh");
-    assert.deepEqual(started.details.children.map((child: any) => child.child), [1, 2]);
-    const [firstChildId, secondChildId] = started.details.children.map((child: any) => child.child_id);
+    assert.deepEqual(
+      started.details.children.map((child: any) => child.child),
+      [1, 2],
+    );
+    const [firstChildId, secondChildId] = started.details.children.map(
+      (child: any) => child.child_id,
+    );
     assert.match(firstChildId, /^subagent-child-[0-9a-f]{24}$/);
     assert.match(secondChildId, /^subagent-child-[0-9a-f]{24}$/);
     assert.notEqual(firstChildId, secondChildId);
 
-    const yieldSnapshot = await tool.execute("identity-yield", { operation: "yield", job_id: started.details.job_id }, undefined, undefined, ctx);
+    const yieldSnapshot = await tool.execute(
+      "identity-yield",
+      { operation: "yield", job_id: started.details.job_id },
+      undefined,
+      undefined,
+      ctx,
+    );
     assert.equal(yieldSnapshot.details.operation, "yield");
     assert.equal(yieldSnapshot.terminate, true);
-    const terminalBeforeYieldResult = await tool.execute("identity-status", { operation: "status", job_id: started.details.job_id }, undefined, undefined, ctx);
-    assert.notEqual(terminalBeforeYieldResult.details.status, "failed", "yield incorrectly treated the child as accepted/rejected");
+    const terminalBeforeYieldResult = await tool.execute(
+      "identity-status",
+      { operation: "status", job_id: started.details.job_id },
+      undefined,
+      undefined,
+      ctx,
+    );
+    assert.notEqual(
+      terminalBeforeYieldResult.details.status,
+      "failed",
+      "yield incorrectly treated the child as accepted/rejected",
+    );
     let readyTimer: ReturnType<typeof setTimeout> | undefined;
-    try { await Promise.race([adapterReady, new Promise<void>((_, reject) => { readyTimer = setTimeout(() => reject(new Error("Background adapter never started")), 4000); })]); }
-    finally { if (readyTimer) clearTimeout(readyTimer); }
+    try {
+      await Promise.race([
+        adapterReady,
+        new Promise<void>((_, reject) => {
+          readyTimer = setTimeout(
+            () => reject(new Error("Background adapter never started")),
+            4000,
+          );
+        }),
+      ]);
+    } finally {
+      if (readyTimer) clearTimeout(readyTimer);
+    }
     releaseAdapter();
-    await sharedBackgroundSubagentManager(path.join(agentDir, "state", "background-subagents-v1")).wait(started.details.job_id, 5000);
+    await sharedBackgroundSubagentManager(
+      path.join(agentDir, "state", "background-subagents-v1"),
+    ).wait(started.details.job_id, 5000);
 
-    const firstByNumber = await tool.execute("identity-result-number", {
-      operation: "result", job_id: started.details.job_id, child: 1,
-    }, undefined, undefined, ctx);
+    const firstByNumber = await tool.execute(
+      "identity-result-number",
+      {
+        operation: "result",
+        job_id: started.details.job_id,
+        child: 1,
+      },
+      undefined,
+      undefined,
+      ctx,
+    );
     assert.match(firstByNumber.content[0].text, /first child artifact/);
     assert.equal(firstByNumber.details.child, 1);
     assert.equal(firstByNumber.details.child_id, firstChildId);
 
-    const secondById = await tool.execute("identity-result-id", {
-      operation: "result", job_id: started.details.job_id, child_id: secondChildId,
-    }, undefined, undefined, ctx);
+    const secondById = await tool.execute(
+      "identity-result-id",
+      {
+        operation: "result",
+        job_id: started.details.job_id,
+        child_id: secondChildId,
+      },
+      undefined,
+      undefined,
+      ctx,
+    );
     assert.match(secondById.content[0].text, /second child artifact/);
     assert.equal(secondById.details.child, 2);
     assert.equal(secondById.details.child_id, secondChildId);
 
-    const status = await tool.execute("identity-result-metadata", {
-      operation: "status", job_id: started.details.job_id,
-    }, undefined, undefined, ctx);
+    const status = await tool.execute(
+      "identity-result-metadata",
+      {
+        operation: "status",
+        job_id: started.details.job_id,
+      },
+      undefined,
+      undefined,
+      ctx,
+    );
     assert.deepEqual(
       status.details.result_children.map((child: any) => [child.child, child.child_id]),
-      [[1, firstChildId], [2, secondChildId]],
+      [
+        [1, firstChildId],
+        [2, secondChildId],
+      ],
       "retained artifacts lost their launch identities",
     );
     await emit(pi, "session_shutdown", { reason: "quit" }, ctx);

@@ -27,7 +27,8 @@ const USAGE_LIMIT_GOAL_ERROR_PATTERNS = [
   /insufficient[_\s-]*(?:quota|credits?)|out of credits|out of budget|available balance|payment required/i,
   /(?:credit|balance).{0,32}(?:low|exhausted|depleted)|billing/i,
 ] as const;
-const NON_RETRYABLE_GOAL_ERROR_RE = /multi-auth rotation failed|credentials tried|unauthori[sz]ed|invalid api key/i;
+const NON_RETRYABLE_GOAL_ERROR_RE =
+  /multi-auth rotation failed|credentials tried|unauthori[sz]ed|invalid api key/i;
 const RETRYABLE_GOAL_ERROR_PATTERNS = [
   /overloaded|rate.?limit|too many requests|\b(?:429|500|502|503|504)\b|service.?unavailable|server.?error|internal.?error/i,
   /provider.?returned.?error|you can retry your request|try your request again|please retry your request/i,
@@ -50,7 +51,9 @@ export function safeTerminalText(value: string) {
 export function safeGoalMenuText(value: string, maxCharacters = 120) {
   const sanitized = safeTerminalText(value).replace(/\s+/gu, " ").trim();
   const characters = [...sanitized];
-  return characters.length <= maxCharacters ? sanitized : `${characters.slice(0, maxCharacters).join("")}…`;
+  return characters.length <= maxCharacters
+    ? sanitized
+    : `${characters.slice(0, maxCharacters).join("")}…`;
 }
 
 export function notifyTerminal(
@@ -68,7 +71,8 @@ export function notifyTerminal(
  */
 export function isStaleContextError(error: unknown): boolean {
   return (
-    error instanceof Error && error.message.includes("This extension ctx is stale after session replacement or reload")
+    error instanceof Error &&
+    error.message.includes("This extension ctx is stale after session replacement or reload")
   );
 }
 
@@ -92,7 +96,10 @@ export function isUsageLimitedGoalInterruption(assistant: AssistantMessageLike) 
 
 export function isRetryableGoalInterruption(assistant: AssistantMessageLike) {
   if (assistant.stopReason !== "error" || !assistant.errorMessage) return false;
-  if (isUsageLimitedGoalInterruption(assistant) || NON_RETRYABLE_GOAL_ERROR_RE.test(assistant.errorMessage)) {
+  if (
+    isUsageLimitedGoalInterruption(assistant) ||
+    NON_RETRYABLE_GOAL_ERROR_RE.test(assistant.errorMessage)
+  ) {
     return false;
   }
   return (

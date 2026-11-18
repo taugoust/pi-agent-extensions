@@ -1,6 +1,11 @@
 import { createHash } from "node:crypto";
 import { homedir } from "node:os";
-import { ancestryStateRoot as nativeTuiStateRoot, readJobAncestry, ownsJob, privateEvidenceDirectory as privateDirectory } from "../shared/readonly-job-ancestry.ts";
+import {
+  ancestryStateRoot as nativeTuiStateRoot,
+  readJobAncestry,
+  ownsJob,
+  privateEvidenceDirectory as privateDirectory,
+} from "../shared/readonly-job-ancestry.ts";
 import { pinRuntimePath } from "./runtime-path.ts";
 import { isAbsolute, join, dirname, resolve } from "node:path";
 import { readFileSync, realpathSync, statSync } from "node:fs";
@@ -10,21 +15,55 @@ import { Type } from "@sinclair/typebox";
 import type { ExtensionAPI, ExtensionContext } from "@mariozechner/pi-coding-agent";
 import { getAgentDir } from "@mariozechner/pi-coding-agent";
 import { Text } from "@mariozechner/pi-tui";
-import { agentSHRuntimeDisposition, classifyAgentSHStartup, type AgentSHRuntimeState } from "../shared/agentsh-mode.ts";
-import { BackgroundJobManager, ReapReservation, resolveExecutable, sanitizeOutput } from "./manager.ts";
+import {
+  agentSHRuntimeDisposition,
+  classifyAgentSHStartup,
+  type AgentSHRuntimeState,
+} from "../shared/agentsh-mode.ts";
+import {
+  BackgroundJobManager,
+  ReapReservation,
+  resolveExecutable,
+  sanitizeOutput,
+} from "./manager.ts";
 import { reapExpiredRetrieved } from "./retention.ts";
 import { JobStore } from "./store.ts";
 import { WatchManager } from "./watch.ts";
-import { jobStatusLabel, watchResultText, watchDeliveryCursors, taskChoice, remoteTaskUiConnected, uiText } from "../shared/task-presentation.ts";
-import { watchMenu } from '../shared/watch-menu.ts';
-import { installQuietState } from '../shared/quiet-state.ts';
+import {
+  jobStatusLabel,
+  watchResultText,
+  watchDeliveryCursors,
+  taskChoice,
+  remoteTaskUiConnected,
+  uiText,
+} from "../shared/task-presentation.ts";
+import { watchMenu } from "../shared/watch-menu.ts";
+import { installQuietState } from "../shared/quiet-state.ts";
 import { TmuxBackend } from "./tmux.ts";
 import type { JobRecord } from "./types.ts";
-import { JOB_BROKER_KEY, LOCAL_JOB_CONTROLLER_KEY, JobParameters, validateJobParams, type JobParams, type JobPlacement, type ParentJobBroker, type LocalJobController } from "../shared/background-job.ts";
-import { HARNESS_READONLY_KEY, HARNESS_READONLY_PROTOCOL, truncateUtf8, type HarnessReadOnlyJobs, type HarnessReadOnlyRegistry } from "../shared/harness-readonly.ts";
+import {
+  JOB_BROKER_KEY,
+  LOCAL_JOB_CONTROLLER_KEY,
+  JobParameters,
+  validateJobParams,
+  type JobParams,
+  type JobPlacement,
+  type ParentJobBroker,
+  type LocalJobController,
+} from "../shared/background-job.ts";
+import {
+  HARNESS_READONLY_KEY,
+  HARNESS_READONLY_PROTOCOL,
+  truncateUtf8,
+  type HarnessReadOnlyJobs,
+  type HarnessReadOnlyRegistry,
+} from "../shared/harness-readonly.ts";
 const INTERNAL_JOB_CALL = Symbol("parent-job-call");
 const INTERNAL_VERIFICATION_START = Symbol("supervised-verification-start");
-const runnerPath = pinRuntimePath(new URL("./runner.mjs", import.meta.url), "background-job runner");
+const runnerPath = pinRuntimePath(
+  new URL("./runner.mjs", import.meta.url),
+  "background-job runner",
+);
 
 const JOB_PATTERN = "^job-[0-9a-f]{24}$";
 const POLL_MS = 2000;
@@ -34,7 +73,13 @@ type CommandAuthority = {
   protocol: 1;
   active: boolean;
   consume(toolCallId: string, command: string, cwd: string): boolean;
-  authorize?(toolCallId: string, command: string, cwd: string, ownerSessionId: string, signal?: AbortSignal): Promise<void>;
+  authorize?(
+    toolCallId: string,
+    command: string,
+    cwd: string,
+    ownerSessionId: string,
+    signal?: AbortSignal,
+  ): Promise<void>;
 };
 
 type Params = JobParams;
@@ -42,17 +87,24 @@ type Params = JobParams;
 function runtimeState(): AgentSHRuntimeState | undefined {
   const api = (globalThis as Record<string, any>).__AGENTSH_PI__;
   if (!api) return undefined;
-  try { return api.getSupervisorState?.() ?? { configured: true, active: false }; }
-  catch { return { configured: true, active: false }; }
+  try {
+    return api.getSupervisorState?.() ?? { configured: true, active: false };
+  } catch {
+    return { configured: true, active: false };
+  }
 }
 
 function requireNativeExecution(startup: ReturnType<typeof classifyAgentSHStartup>): void {
   const disposition = agentSHRuntimeDisposition(startup, runtimeState());
   if (disposition.kind === "full") {
-    throw new Error("background_job is not yet supported by the full AgentSH backend; refusing native execution");
+    throw new Error(
+      "background_job is not yet supported by the full AgentSH backend; refusing native execution",
+    );
   }
   if (disposition.kind === "unavailable") {
-    throw new Error("Full AgentSH mode is selected but unavailable; refusing native background execution");
+    throw new Error(
+      "Full AgentSH mode is selected but unavailable; refusing native background execution",
+    );
   }
 }
 
@@ -62,16 +114,21 @@ function requireStartAuthorization(
   command: string,
   cwd: string,
 ): void {
-  const authority = (globalThis as Record<string, unknown>)[COMMAND_AUTHORITY_KEY] as CommandAuthority | undefined;
+  const authority = (globalThis as Record<string, unknown>)[COMMAND_AUTHORITY_KEY] as
+    | CommandAuthority
+    | undefined;
   if (authority?.protocol === 1) {
-    if (!authority.active) throw new Error("Permission Gate command authority is inactive; refusing background start");
+    if (!authority.active)
+      throw new Error("Permission Gate command authority is inactive; refusing background start");
     if (!authority.consume(toolCallId, command, cwd)) {
       throw new Error("background_job start lacks an exact Permission Gate authorization receipt");
     }
     return;
   }
   if (startup.kind === "guard-only" || startup.kind === "conflict") {
-    throw new Error("AgentSH Permission Gate is selected but no active command authority is available");
+    throw new Error(
+      "AgentSH Permission Gate is selected but no active command authority is available",
+    );
   }
 }
 
@@ -101,7 +158,10 @@ function requireJobId(params: Params): string {
 }
 
 function age(record: JobRecord): string {
-  const seconds = Math.max(0, Math.floor((Date.now() - Date.parse(record.metadata.createdAt)) / 1000));
+  const seconds = Math.max(
+    0,
+    Math.floor((Date.now() - Date.parse(record.metadata.createdAt)) / 1000),
+  );
   if (seconds < 60) return `${seconds}s`;
   if (seconds < 3600) return `${Math.floor(seconds / 60)}m`;
   return `${Math.floor(seconds / 3600)}h`;
@@ -113,7 +173,10 @@ function preview(command: string, maximum = 100): string {
 }
 
 function recordLine(record: JobRecord): string {
-  const code = record.result?.exitCode === null || record.result?.exitCode === undefined ? "" : ` exit=${record.result.exitCode}`;
+  const code =
+    record.result?.exitCode === null || record.result?.exitCode === undefined
+      ? ""
+      : ` exit=${record.result.exitCode}`;
   return `${record.metadata.id}  ${jobStatusLabel(record.status, Boolean(record.metadata.observed && !record.metadata.pane))}${code}  ${age(record)}  ${record.metadata.name ? preview(record.metadata.name, 80) : preview(record.metadata.command)}`;
 }
 
@@ -127,9 +190,30 @@ function recordText(record: JobRecord): string {
   ].join("\n");
 }
 
-function publicDetails(record: JobRecord, streams?: { stdout: string; stderr: string; available: boolean; stdout_truncated?: true; stderr_truncated?: true }): Record<string, unknown> {
+function publicDetails(
+  record: JobRecord,
+  streams?: {
+    stdout: string;
+    stderr: string;
+    available: boolean;
+    stdout_truncated?: true;
+    stderr_truncated?: true;
+  },
+): Record<string, unknown> {
   return {
-    ...(streams ? { streams: streams.available ? { available: true, stdout: streams.stdout, stderr: streams.stderr, ...(streams.stdout_truncated ? { stdout_truncated: true } : {}), ...(streams.stderr_truncated ? { stderr_truncated: true } : {}) } : { available: false, reason: "legacy-or-adopted-job" } } : {}),
+    ...(streams
+      ? {
+          streams: streams.available
+            ? {
+                available: true,
+                stdout: streams.stdout,
+                stderr: streams.stderr,
+                ...(streams.stdout_truncated ? { stdout_truncated: true } : {}),
+                ...(streams.stderr_truncated ? { stderr_truncated: true } : {}),
+              }
+            : { available: false, reason: "legacy-or-adopted-job" },
+        }
+      : {}),
     job_id: record.metadata.id,
     status: record.status,
     exit_code: record.result?.exitCode,
@@ -137,16 +221,41 @@ function publicDetails(record: JobRecord, streams?: { stdout: string; stderr: st
     signal: record.result?.signal,
     child_id: record.metadata.childId,
     observation_only: Boolean(record.metadata.observed && !record.metadata.pane),
-    retention: record.launch && !record.metadata.observed && !record.metadata.pane && !record.metadata.infrastructure && !record.metadata.verification
-      ? 'five-minutes-after-output-retrieval' : 'until-explicit-reap',
-    ...(record.launch ? {pane_id:record.launch.paneId, tmux_socket:record.launch.socketPath, tmux_session:record.launch.sessionId, tmux_window:record.launch.windowId} : {}),
-    ...(record.metadata.pane ? {pane_id:record.metadata.pane.paneId,tmux_socket:record.metadata.pane.socket,tracking_kind:'tmux-pane',adopted:true} : {}),
-    name: record.metadata.name ? preview(record.metadata.name,80) : preview(record.metadata.command,80),
+    retention:
+      record.launch &&
+      !record.metadata.observed &&
+      !record.metadata.pane &&
+      !record.metadata.infrastructure &&
+      !record.metadata.verification
+        ? "five-minutes-after-output-retrieval"
+        : "until-explicit-reap",
+    ...(record.launch
+      ? {
+          pane_id: record.launch.paneId,
+          tmux_socket: record.launch.socketPath,
+          tmux_session: record.launch.sessionId,
+          tmux_window: record.launch.windowId,
+        }
+      : {}),
+    ...(record.metadata.pane
+      ? {
+          pane_id: record.metadata.pane.paneId,
+          tmux_socket: record.metadata.pane.socket,
+          tracking_kind: "tmux-pane",
+          adopted: true,
+        }
+      : {}),
+    name: record.metadata.name
+      ? preview(record.metadata.name, 80)
+      : preview(record.metadata.command, 80),
   };
 }
 
 function assertOwned(record: JobRecord, ownerSessionId: string, childId?: string): void {
-  if (record.metadata.sessionId !== ownerSessionId || (childId !== undefined && record.metadata.childId !== childId)) {
+  if (
+    record.metadata.sessionId !== ownerSessionId ||
+    (childId !== undefined && record.metadata.childId !== childId)
+  ) {
     throw new Error(`Background job ${record.metadata.id} belongs to a different Pi session`);
   }
 }
@@ -156,18 +265,27 @@ function outputText(
   options: { lines?: number; from?: "start" | "end"; match?: string },
 ): string {
   const selected = selectLines(snapshot.text, options);
-  const text = selected.text || (options.match === undefined ? "(no output)" : "(no matching lines)");
+  const text =
+    selected.text || (options.match === undefined ? "(no output)" : "(no matching lines)");
   const matched = selected.matched === undefined ? "" : `[${selected.matched} matching lines]\n`;
   return `${matched}${text}${snapshot.truncated ? "\n[output truncated to the last 50 KiB / 2000 lines]" : ""}`;
 }
 
 /** A note when a running job of ours has been silent for a while. */
 function quietNote(store: JobStore, record: JobRecord): string | undefined {
-  if (record.status !== "running" || !record.launch || record.metadata.observed || record.metadata.pane) return undefined;
+  if (
+    record.status !== "running" ||
+    !record.launch ||
+    record.metadata.observed ||
+    record.metadata.pane
+  )
+    return undefined;
   try {
     const lastOutputAt = statSync(store.path(record.metadata.id, "output.log")).mtimeMs;
     return quietRunningHint(Date.parse(record.metadata.createdAt), lastOutputAt);
-  } catch { return undefined; }
+  } catch {
+    return undefined;
+  }
 }
 
 function recordTextWithNotes(store: JobStore, record: JobRecord): string {
@@ -176,7 +294,11 @@ function recordTextWithNotes(store: JobStore, record: JobRecord): string {
 }
 
 function toolResult(text: string, details: Record<string, unknown>, isError = false) {
-  return { content: [{ type: "text" as const, text }], details, ...(isError ? { isError: true } : {}) };
+  return {
+    content: [{ type: "text" as const, text }],
+    details,
+    ...(isError ? { isError: true } : {}),
+  };
 }
 
 export default function backgroundJob(pi: ExtensionAPI) {
@@ -199,14 +321,18 @@ export default function backgroundJob(pi: ExtensionAPI) {
   const reapedJobNames = new Map<string, string>();
 
   const manager = () => {
-    if (!managerPromise) managerPromise = (async () => {
-      const stateRoot = join(getAgentDir(), "state", "background-jobs-v1");
-      const store = new JobStore(stateRoot, runtimeRoot(stateRoot));
-      await store.initialize();
-      const [tmux, node] = await Promise.all([resolveExecutable("tmux"), resolveExecutable("node")]);
-      const runner = runnerPath();
-      return new BackgroundJobManager(store, new TmuxBackend(store, tmux, node, runner));
-    })();
+    if (!managerPromise)
+      managerPromise = (async () => {
+        const stateRoot = join(getAgentDir(), "state", "background-jobs-v1");
+        const store = new JobStore(stateRoot, runtimeRoot(stateRoot));
+        await store.initialize();
+        const [tmux, node] = await Promise.all([
+          resolveExecutable("tmux"),
+          resolveExecutable("node"),
+        ]);
+        const runner = runnerPath();
+        return new BackgroundJobManager(store, new TmuxBackend(store, tmux, node, runner));
+      })();
     return managerPromise;
   };
 
@@ -224,8 +350,16 @@ export default function backgroundJob(pi: ExtensionAPI) {
     if (!ctx.hasUI) return;
     try {
       const ownerSessionId = sessionId(ctx);
-      const running = (await (await manager()).list()).filter((record) => record.metadata.sessionId === ownerSessionId && !record.metadata.infrastructure && (record.status === "running" || record.status === "starting")).length;
-      ctx.ui.setStatus("background-jobs", running > 0 ? ctx.ui.theme.fg("accent", `jobs ${running}`) : undefined);
+      const running = (await (await manager()).list()).filter(
+        (record) =>
+          record.metadata.sessionId === ownerSessionId &&
+          !record.metadata.infrastructure &&
+          (record.status === "running" || record.status === "starting"),
+      ).length;
+      ctx.ui.setStatus(
+        "background-jobs",
+        running > 0 ? ctx.ui.theme.fg("accent", `jobs ${running}`) : undefined,
+      );
     } catch {
       ctx.ui.setStatus("background-jobs", ctx.ui.theme.fg("error", "jobs ✗"));
     }
@@ -236,13 +370,24 @@ export default function backgroundJob(pi: ExtensionAPI) {
     service: BackgroundJobManager,
     record: JobRecord,
   ): Promise<void> => {
-    const id=record.metadata.id;
-    if(!record.result||record.metadata.infrastructure||record.metadata.sessionId!==sessionId(ctx)||sessionContext!==ctx)return;
-    if(await service.store.isNotified(id))return;
-    let output='';
-    try{output=sanitizeOutput(readFileSync(service.store.path(id,'output.log'),'utf8'));}catch{/* No log is reported as no output. */}
-    const message=completionMessage(record.result,output);
-    if(sessionContext===ctx)quietState.enqueue(ctx,{kind:'job',id,state:record.status,completion:true,message});
+    const id = record.metadata.id;
+    if (
+      !record.result ||
+      record.metadata.infrastructure ||
+      record.metadata.sessionId !== sessionId(ctx) ||
+      sessionContext !== ctx
+    )
+      return;
+    if (await service.store.isNotified(id)) return;
+    let output = "";
+    try {
+      output = sanitizeOutput(readFileSync(service.store.path(id, "output.log"), "utf8"));
+    } catch {
+      /* No log is reported as no output. */
+    }
+    const message = completionMessage(record.result, output);
+    if (sessionContext === ctx)
+      quietState.enqueue(ctx, { kind: "job", id, state: record.status, completion: true, message });
   };
 
   const poll = async () => {
@@ -257,17 +402,30 @@ export default function backgroundJob(pi: ExtensionAPI) {
       const ownerSessionId = sessionId(ctx);
       const service = await manager();
       await reapExpiredRetrieved(service, service.store);
-      const records = (await service.list(1000)).filter((record) => record.metadata.sessionId === ownerSessionId && !record.metadata.infrastructure);
+      const records = (await service.list(1000)).filter(
+        (record) => record.metadata.sessionId === ownerSessionId && !record.metadata.infrastructure,
+      );
       const watches = new WatchManager(service, ownerSessionId);
       await watches.recover();
       let delivered = 0;
       for (const watch of await watches.list()) {
         if (generation !== sessionGeneration || sessionContext !== ctx || delivered >= 8) break;
         let page = await watches.events(watch.watch_id, watchNotified.get(watch.watch_id));
-        if (page.acknowledged_through > (watchNotified.get(watch.watch_id) ?? 0)) page = await watches.events(watch.watch_id, page.acknowledged_through);
+        if (page.acknowledged_through > (watchNotified.get(watch.watch_id) ?? 0))
+          page = await watches.events(watch.watch_id, page.acknowledged_through);
         if (!page.events.length && !page.overflow) continue;
-        if(!quietState.enqueue(ctx,{kind:'watch',id:watch.watch_id,state:page.status,through_sequence:page.next_sequence,count:Math.max(0,page.sequence-page.acknowledged_through),overflow:page.overflow}))break;
-        watchNotified.set(watch.watch_id,page.next_sequence);
+        if (
+          !quietState.enqueue(ctx, {
+            kind: "watch",
+            id: watch.watch_id,
+            state: page.status,
+            through_sequence: page.next_sequence,
+            count: Math.max(0, page.sequence - page.acknowledged_through),
+            overflow: page.overflow,
+          })
+        )
+          break;
+        watchNotified.set(watch.watch_id, page.next_sequence);
         delivered++;
       }
       for (const record of records) {
@@ -277,7 +435,8 @@ export default function backgroundJob(pi: ExtensionAPI) {
       }
       if (generation === sessionGeneration && sessionContext === ctx) await updateStatus(ctx);
     } catch {
-      if (generation === sessionGeneration && sessionContext === ctx && ctx.hasUI) ctx.ui.setStatus("background-jobs", ctx.ui.theme.fg("error", "jobs ✗"));
+      if (generation === sessionGeneration && sessionContext === ctx && ctx.hasUI)
+        ctx.ui.setStatus("background-jobs", ctx.ui.theme.fg("error", "jobs ✗"));
     } finally {
       releasePoll?.();
       pollRunning = false;
@@ -288,55 +447,129 @@ export default function backgroundJob(pi: ExtensionAPI) {
     sessionGeneration += 1;
     sessionContext = ctx;
     watchNotified.clear();
-    for (const [id, sequence] of watchDeliveryCursors(ctx.sessionManager.getBranch?.() ?? [])) watchNotified.set(id, sequence);
+    for (const [id, sequence] of watchDeliveryCursors(ctx.sessionManager.getBranch?.() ?? []))
+      watchNotified.set(id, sequence);
     const owner = sessionId(ctx);
     const readonlyGeneration = sessionGeneration;
     let readonlyJobs!: HarnessReadOnlyJobs;
     const assertReadonlyOwner = () => {
-      if (sessionContext !== ctx || sessionId(ctx) !== owner || sessionGeneration !== readonlyGeneration
-        || (globalThis as any)[HARNESS_READONLY_KEY]?.jobs !== readonlyJobs) throw new Error("Read-only jobs service is stale or unavailable");
+      if (
+        sessionContext !== ctx ||
+        sessionId(ctx) !== owner ||
+        sessionGeneration !== readonlyGeneration ||
+        (globalThis as any)[HARNESS_READONLY_KEY]?.jobs !== readonlyJobs
+      )
+        throw new Error("Read-only jobs service is stale or unavailable");
     };
     readonlyJobs = {
-      protocol: HARNESS_READONLY_PROTOCOL, sessionId: owner,
+      protocol: HARNESS_READONLY_PROTOCOL,
+      sessionId: owner,
       async list(input) {
-        if (input.sessionId !== owner) throw new Error("Read-only jobs unavailable for this Pi session");
+        if (input.sessionId !== owner)
+          throw new Error("Read-only jobs unavailable for this Pi session");
         assertReadonlyOwner();
         const limit = input.limit ?? 50;
-        if (!Number.isSafeInteger(limit) || limit < 1 || limit > 50) throw new Error("Invalid read-only jobs page");
+        if (!Number.isSafeInteger(limit) || limit < 1 || limit > 50)
+          throw new Error("Invalid read-only jobs page");
         const service = await readonlyManager();
         assertReadonlyOwner();
         const ancestry = readJobAncestry(nativeTuiStateRoot(process.env, homedir()), owner);
         const all = await service.listReadOnlyOwners(ancestry.owners);
         assertReadonlyOwner();
-        if (readJobAncestry(nativeTuiStateRoot(process.env, homedir()), owner).fingerprint !== ancestry.fingerprint) throw new Error("Read-only job ancestry changed; retry");
-        const fingerprint = createHash("sha256").update(ancestry.fingerprint).update(JSON.stringify(all.map(record => [record.metadata.id, record.metadata.sessionId, record.metadata.childId, record.metadata.createdAt]))).digest("hex");
+        if (
+          readJobAncestry(nativeTuiStateRoot(process.env, homedir()), owner).fingerprint !==
+          ancestry.fingerprint
+        )
+          throw new Error("Read-only job ancestry changed; retry");
+        const fingerprint = createHash("sha256")
+          .update(ancestry.fingerprint)
+          .update(
+            JSON.stringify(
+              all.map((record) => [
+                record.metadata.id,
+                record.metadata.sessionId,
+                record.metadata.childId,
+                record.metadata.createdAt,
+              ]),
+            ),
+          )
+          .digest("hex");
         let offset = 0;
         if (input.cursor !== undefined) {
           if (input.cursor.length > 256) throw new Error("Invalid read-only jobs cursor");
           const page = JSON.parse(Buffer.from(input.cursor, "base64url").toString("utf8"));
-          if (page.fingerprint !== fingerprint || !Number.isSafeInteger(page.offset) || page.offset < 1 || page.offset >= all.length) throw new Error("Read-only jobs snapshot changed; retry");
+          if (
+            page.fingerprint !== fingerprint ||
+            !Number.isSafeInteger(page.offset) ||
+            page.offset < 1 ||
+            page.offset >= all.length
+          )
+            throw new Error("Read-only jobs snapshot changed; retry");
           offset = page.offset;
         }
         const records = all.slice(offset, offset + limit);
-        const nextCursor = offset + limit < all.length ? Buffer.from(JSON.stringify({ fingerprint, offset: offset + limit })).toString("base64url") : undefined;
-        const observedLiveState = records.some(record => record.status === "running" || record.status === "starting");
+        const nextCursor =
+          offset + limit < all.length
+            ? Buffer.from(JSON.stringify({ fingerprint, offset: offset + limit })).toString(
+                "base64url",
+              )
+            : undefined;
+        const observedLiveState = records.some(
+          (record) => record.status === "running" || record.status === "starting",
+        );
         const lastUpdated = observedLiveState ? new Date().toISOString() : null;
-        return { protocol: HARNESS_READONLY_PROTOCOL, state: "available" as const, sessionId: owner,
-          items: records.map(record => ({ jobId: record.metadata.id, status: record.status, name: record.metadata.name, createdAt: record.metadata.createdAt, updatedAt: record.result?.finishedAt ?? null, observationOnly: Boolean(record.metadata.observed && !record.metadata.pane), ...(record.metadata.sessionId !== owner || record.metadata.childId ? { fromSubagent: true as const } : {}) })),
-          nextCursor, ...(ancestry.unavailable ? { message: "Some subagent job history is unavailable because its retained ownership evidence could not be verified." } : {}), lastUpdated, stale: !observedLiveState || records.some(record => record.status === "unavailable") };
+        return {
+          protocol: HARNESS_READONLY_PROTOCOL,
+          state: "available" as const,
+          sessionId: owner,
+          items: records.map((record) => ({
+            jobId: record.metadata.id,
+            status: record.status,
+            name: record.metadata.name,
+            createdAt: record.metadata.createdAt,
+            updatedAt: record.result?.finishedAt ?? null,
+            observationOnly: Boolean(record.metadata.observed && !record.metadata.pane),
+            ...(record.metadata.sessionId !== owner || record.metadata.childId
+              ? { fromSubagent: true as const }
+              : {}),
+          })),
+          nextCursor,
+          ...(ancestry.unavailable
+            ? {
+                message:
+                  "Some subagent job history is unavailable because its retained ownership evidence could not be verified.",
+              }
+            : {}),
+          lastUpdated,
+          stale: !observedLiveState || records.some((record) => record.status === "unavailable"),
+        };
       },
       async output(input) {
-        if (input.sessionId !== owner) throw new Error("Read-only jobs unavailable for this Pi session");
+        if (input.sessionId !== owner)
+          throw new Error("Read-only jobs unavailable for this Pi session");
         assertReadonlyOwner();
-        if (!/^job-[0-9a-f]{24}$/.test(input.jobId) || (input.maxBytes !== undefined && (!Number.isSafeInteger(input.maxBytes) || input.maxBytes < 1 || input.maxBytes > 48 * 1024))) throw new Error("Invalid read-only job output request");
+        if (
+          !/^job-[0-9a-f]{24}$/.test(input.jobId) ||
+          (input.maxBytes !== undefined &&
+            (!Number.isSafeInteger(input.maxBytes) ||
+              input.maxBytes < 1 ||
+              input.maxBytes > 48 * 1024))
+        )
+          throw new Error("Invalid read-only job output request");
         const service = await readonlyManager();
         assertReadonlyOwner();
         const ancestry = readJobAncestry(nativeTuiStateRoot(process.env, homedir()), owner);
         privateDirectory(service.store.jobDir(input.jobId));
         const metadata = await service.store.readMetadata(input.jobId);
-        if (metadata.id !== input.jobId || !ownsJob(ancestry.owners, metadata)) throw new Error("Background job belongs to another owner");
+        if (metadata.id !== input.jobId || !ownsJob(ancestry.owners, metadata))
+          throw new Error("Background job belongs to another owner");
         const authorize = (current: typeof metadata) => {
-          if (current.id !== input.jobId || !ownsJob(ancestry.owners, current) || JSON.stringify(current) !== JSON.stringify(metadata)) throw new Error("Background job ownership changed before observation");
+          if (
+            current.id !== input.jobId ||
+            !ownsJob(ancestry.owners, current) ||
+            JSON.stringify(current) !== JSON.stringify(metadata)
+          )
+            throw new Error("Background job ownership changed before observation");
         };
         const record = await service.get(input.jobId, false, authorize);
         const snapshot = await service.outputReadOnly(input.jobId, authorize);
@@ -344,41 +577,105 @@ export default function backgroundJob(pi: ExtensionAPI) {
         const currentAncestry = readJobAncestry(nativeTuiStateRoot(process.env, homedir()), owner);
         privateDirectory(service.store.jobDir(input.jobId));
         const currentMetadata = await service.store.readMetadata(input.jobId);
-        if (currentAncestry.fingerprint !== ancestry.fingerprint || !ownsJob(currentAncestry.owners, currentMetadata)
-          || JSON.stringify(currentMetadata) !== JSON.stringify(metadata) || JSON.stringify(record.metadata) !== JSON.stringify(metadata)) throw new Error("Background job ownership changed; retry");
-        let text = snapshot.text, truncated = snapshot.truncated;
-        { const bounded = truncateUtf8(text, input.maxBytes ?? 48 * 1024, true); text = bounded.text; truncated ||= bounded.truncated; }
-        return { protocol: HARNESS_READONLY_PROTOCOL, state: "available" as const, sessionId: owner,
-          item: { jobId: input.jobId, text, truncated, source: snapshot.source, lastUpdated: record.result?.finishedAt ?? null, stale: !record.result },
-          lastUpdated: record.result?.finishedAt ?? null, stale: !record.result };
+        if (
+          currentAncestry.fingerprint !== ancestry.fingerprint ||
+          !ownsJob(currentAncestry.owners, currentMetadata) ||
+          JSON.stringify(currentMetadata) !== JSON.stringify(metadata) ||
+          JSON.stringify(record.metadata) !== JSON.stringify(metadata)
+        )
+          throw new Error("Background job ownership changed; retry");
+        let text = snapshot.text,
+          truncated = snapshot.truncated;
+        {
+          const bounded = truncateUtf8(text, input.maxBytes ?? 48 * 1024, true);
+          text = bounded.text;
+          truncated ||= bounded.truncated;
+        }
+        return {
+          protocol: HARNESS_READONLY_PROTOCOL,
+          state: "available" as const,
+          sessionId: owner,
+          item: {
+            jobId: input.jobId,
+            text,
+            truncated,
+            source: snapshot.source,
+            lastUpdated: record.result?.finishedAt ?? null,
+            stale: !record.result,
+          },
+          lastUpdated: record.result?.finishedAt ?? null,
+          stale: !record.result,
+        };
       },
     };
-    const registry = ((globalThis as any)[HARNESS_READONLY_KEY] ?? { protocol: HARNESS_READONLY_PROTOCOL }) as HarnessReadOnlyRegistry;
-    if (registry.protocol === HARNESS_READONLY_PROTOCOL) { readonlyJobsByContext.set(ctx as object, readonlyJobs); registry.jobs = readonlyJobs; (globalThis as any)[HARNESS_READONLY_KEY] = registry; }
-    broker = { protocol: 1, sessionId: owner, async execute(identity, callId, params, signal, authorize) {
-      if (sessionContext?.sessionManager.getSessionId() !== owner || identity.sessionId !== owner) throw new Error("Parent job authority is unavailable for this session");
-      if (!/^subagent-(?:child|task)-[0-9a-f]{24}$/.test(identity.childId)) throw new Error("Invalid delegated job owner");
-      const delegatedCallId = `child-job-${createHash("sha256").update(identity.childId + "\0" + callId).digest("hex")}`;
-      return await jobTool.execute(delegatedCallId, { ...params, [INTERNAL_JOB_CALL]: { childId: identity.childId, placement: identity.placement, authorize } }, signal, undefined,
-        { cwd: identity.cwd, hasUI: false, sessionManager: { getSessionId: () => owner } } as any);
-    } };
+    const registry = ((globalThis as any)[HARNESS_READONLY_KEY] ?? {
+      protocol: HARNESS_READONLY_PROTOCOL,
+    }) as HarnessReadOnlyRegistry;
+    if (registry.protocol === HARNESS_READONLY_PROTOCOL) {
+      readonlyJobsByContext.set(ctx as object, readonlyJobs);
+      registry.jobs = readonlyJobs;
+      (globalThis as any)[HARNESS_READONLY_KEY] = registry;
+    }
+    broker = {
+      protocol: 1,
+      sessionId: owner,
+      async execute(identity, callId, params, signal, authorize) {
+        if (sessionContext?.sessionManager.getSessionId() !== owner || identity.sessionId !== owner)
+          throw new Error("Parent job authority is unavailable for this session");
+        if (!/^subagent-(?:child|task)-[0-9a-f]{24}$/.test(identity.childId))
+          throw new Error("Invalid delegated job owner");
+        const delegatedCallId = `child-job-${createHash("sha256")
+          .update(identity.childId + "\0" + callId)
+          .digest("hex")}`;
+        return await jobTool.execute(
+          delegatedCallId,
+          {
+            ...params,
+            [INTERNAL_JOB_CALL]: {
+              childId: identity.childId,
+              placement: identity.placement,
+              authorize,
+            },
+          },
+          signal,
+          undefined,
+          { cwd: identity.cwd, hasUI: false, sessionManager: { getSessionId: () => owner } } as any,
+        );
+      },
+    };
     (globalThis as any)[JOB_BROKER_KEY] = broker;
-    const verificationDispatches = new Map<string, { command: string; cwd: string; launching: boolean }>();
+    const verificationDispatches = new Map<
+      string,
+      { command: string; cwd: string; launching: boolean }
+    >();
     const verificationManifest = (callId: string) => {
-      if (sessionContext !== ctx || ctx.sessionManager.getSessionId() !== owner) throw new Error("Verification supervisor session changed");
+      if (sessionContext !== ctx || ctx.sessionManager.getSessionId() !== owner)
+        throw new Error("Verification supervisor session changed");
       const path = process.env.PI_TUI_WORKER_MANIFEST;
       if (!path) throw new Error("Verification requires an authenticated native worker manifest");
       const m = readNativeVerificationManifest(path);
-      if (resolve(path) !== join(dirname(m.sessionFile), "manifest.json") || ctx.sessionManager.getSessionFile() !== m.sessionFile
-        || m.execution === "rpc-headless" || !new RegExp(`^verify:${m.workerEpoch}:[a-f0-9]{24}$`).test(callId)) throw new Error("Verification worker/dispatch identity mismatch");
+      if (
+        resolve(path) !== join(dirname(m.sessionFile), "manifest.json") ||
+        ctx.sessionManager.getSessionFile() !== m.sessionFile ||
+        m.execution === "rpc-headless" ||
+        !new RegExp(`^verify:${m.workerEpoch}:[a-f0-9]{24}$`).test(callId)
+      )
+        throw new Error("Verification worker/dispatch identity mismatch");
       return m;
     };
     const verificationRecord = async (callId: string, command: string, jobId?: string) => {
       verificationManifest(callId);
       const service = await manager();
-      const matches = (record: JobRecord) => record.metadata.sessionId === owner && record.metadata.name === callId
-        && record.metadata.command === command && realpathSync(record.metadata.cwd) === realpathSync(ctx.cwd)
-        && record.metadata.verification === true && !record.metadata.observed && !record.metadata.pane && !record.metadata.infrastructure && !!record.launch;
+      const matches = (record: JobRecord) =>
+        record.metadata.sessionId === owner &&
+        record.metadata.name === callId &&
+        record.metadata.command === command &&
+        realpathSync(record.metadata.cwd) === realpathSync(ctx.cwd) &&
+        record.metadata.verification === true &&
+        !record.metadata.observed &&
+        !record.metadata.pane &&
+        !record.metadata.infrastructure &&
+        !!record.launch;
       if (jobId) {
         const record = await service.get(jobId);
         if (!matches(record)) throw new Error("Verification job metadata/owner mismatch");
@@ -388,86 +685,162 @@ export default function backgroundJob(pi: ExtensionAPI) {
       if (candidates.length > 1) throw new Error("Ambiguous verification dispatch ownership");
       return candidates[0];
     };
-    localController = { protocol: 1, sessionId: owner,
+    localController = {
+      protocol: 1,
+      sessionId: owner,
       async resolveVerification(callId, command, jobId) {
         verificationManifest(callId);
         const dispatch = verificationDispatches.get(callId);
-        if (!jobId && dispatch && !dispatch.launching && dispatch.command === command && dispatch.cwd === ctx.cwd) return null;
+        if (
+          !jobId &&
+          dispatch &&
+          !dispatch.launching &&
+          dispatch.command === command &&
+          dispatch.cwd === ctx.cwd
+        )
+          return null;
         return (await verificationRecord(callId, command, jobId))?.metadata.id;
       },
       async attestVerification(run, identity) {
         if (!run.dispatchId || !run.jobId) return false;
         const m = verificationManifest(run.dispatchId);
-        if (!["ownerSessionId", "taskId", "childId", "attempt", "workerEpoch", "runtimeId"].every(key => (m as any)[key] === (identity as any)[key])
-          || realpathSync(identity.cwd) !== realpathSync(ctx.cwd)) return false;
+        if (
+          !["ownerSessionId", "taskId", "childId", "attempt", "workerEpoch", "runtimeId"].every(
+            (key) => (m as any)[key] === (identity as any)[key],
+          ) ||
+          realpathSync(identity.cwd) !== realpathSync(ctx.cwd)
+        )
+          return false;
         const record = await verificationRecord(run.dispatchId, run.gate.command, run.jobId);
         if (!record?.result) return false;
         const streams = await (await manager()).streamOutput(run.jobId);
-        return streams.available && record.result.exitCode === run.exitCode && record.result.signal === run.signal
-          && streams.stdout === run.stdout && streams.stderr === run.stderr
-          && !!(streams.stdout_truncated || streams.stderr_truncated) === run.truncated;
+        return (
+          streams.available &&
+          record.result.exitCode === run.exitCode &&
+          record.result.signal === run.signal &&
+          streams.stdout === run.stdout &&
+          streams.stderr === run.stderr &&
+          !!(streams.stdout_truncated || streams.stderr_truncated) === run.truncated
+        );
       },
       async startVerification(callId, command, signal) {
-        if (sessionContext !== ctx || ctx.sessionManager.getSessionId() !== owner) throw new Error("Verification job session unavailable");
+        if (sessionContext !== ctx || ctx.sessionManager.getSessionId() !== owner)
+          throw new Error("Verification job session unavailable");
         const dispatch = { command, cwd: ctx.cwd, launching: false };
         verificationDispatches.set(callId, dispatch);
-        if (verificationDispatches.size > 256) verificationDispatches.delete(verificationDispatches.keys().next().value!);
+        if (verificationDispatches.size > 256)
+          verificationDispatches.delete(verificationDispatches.keys().next().value!);
         const tools = pi.getActiveTools();
-        if (!tools.includes("bash")) throw new Error("Verification cannot expand the worker's command tool authority");
-        const authority = (globalThis as any)[COMMAND_AUTHORITY_KEY] as CommandAuthority | undefined;
-        if (authority?.protocol !== 1 || !authority.active || !authority.authorize) throw new Error("Live verification command permission authority unavailable");
+        if (!tools.includes("bash"))
+          throw new Error("Verification cannot expand the worker's command tool authority");
+        const authority = (globalThis as any)[COMMAND_AUTHORITY_KEY] as
+          | CommandAuthority
+          | undefined;
+        if (authority?.protocol !== 1 || !authority.active || !authority.authorize)
+          throw new Error("Live verification command permission authority unavailable");
         verificationManifest(callId);
         const id = `verification-job-${createHash("sha256").update(callId).digest("hex")}`;
         await authority.authorize(id, command, ctx.cwd, owner, signal);
-        if (sessionContext !== ctx || !pi.getActiveTools().includes("bash")) throw new Error("Verification authority changed during approval");
+        if (sessionContext !== ctx || !pi.getActiveTools().includes("bash"))
+          throw new Error("Verification authority changed during approval");
         // Ordinary tool path consumes exactly that command/cwd receipt and enforces AgentSH disposition.
         dispatch.launching = true;
-        return await jobTool.execute(id, { action: "start", command, name: callId.slice(0, 80), [INTERNAL_VERIFICATION_START]: true } as any, signal, undefined, ctx);
+        return await jobTool.execute(
+          id,
+          {
+            action: "start",
+            command,
+            name: callId.slice(0, 80),
+            [INTERNAL_VERIFICATION_START]: true,
+          } as any,
+          signal,
+          undefined,
+          ctx,
+        );
       },
       async prepareReap(preserve) {
         const deadline = performance.now() + 20_000;
         const assertSession = () => {
-          if (performance.now() >= deadline) throw new Error('Background job cleanup exceeded its 20 second deadline; retry cleanup');
-          if (sessionContext !== ctx || ctx.sessionManager.getSessionId() !== owner) throw new Error('Local job controller session is unavailable');
+          if (performance.now() >= deadline)
+            throw new Error(
+              "Background job cleanup exceeded its 20 second deadline; retry cleanup",
+            );
+          if (sessionContext !== ctx || ctx.sessionManager.getSessionId() !== owner)
+            throw new Error("Local job controller session is unavailable");
         };
         assertSession();
         return reapReservation.prepare(async () => {
           const service = await manager();
           assertSession();
           const watches = await new WatchManager(service, owner).list(undefined, true);
-          const active = watches.filter(watch => watch.status === 'running');
-          if (active.length) throw new Error(`Cannot prepare worker reap: active watches: ${active.map(watch => watch.watch_id).join(', ')}`);
-          await service.reapSession(owner, async records => {
-            assertSession();
-            await preserve(records);
-            assertSession();
-          }, assertSession);
+          const active = watches.filter((watch) => watch.status === "running");
+          if (active.length)
+            throw new Error(
+              `Cannot prepare worker reap: active watches: ${active.map((watch) => watch.watch_id).join(", ")}`,
+            );
+          await service.reapSession(
+            owner,
+            async (records) => {
+              assertSession();
+              await preserve(records);
+              assertSession();
+            },
+            assertSession,
+          );
           assertSession();
         });
       },
       async execute(callId, params, signal) {
-      if (sessionContext !== ctx || ctx.sessionManager.getSessionId() !== owner) throw new Error("Local job controller session is unavailable");
-      validateJobParams(params);
-      if (!["list", "status", "output", "yield", "cancel", "reap", "watches", "events", "ack", "unwatch"].includes(params.action)) throw new Error("Local controller only manages existing jobs and watches");
-      // Use exactly the ordinary local tool scope. No INTERNAL_JOB_CALL, foreign
-      // session override or command authorization callback enters this adapter.
-      return await jobTool.execute(`local-job-${createHash("sha256").update(callId).digest("hex")}`,
-        Object.fromEntries(Object.entries(params)), signal, undefined,
-        { cwd: ctx.cwd, hasUI: false, sessionManager: { getSessionId: () => owner } } as any);
-    } };
+        if (sessionContext !== ctx || ctx.sessionManager.getSessionId() !== owner)
+          throw new Error("Local job controller session is unavailable");
+        validateJobParams(params);
+        if (
+          ![
+            "list",
+            "status",
+            "output",
+            "yield",
+            "cancel",
+            "reap",
+            "watches",
+            "events",
+            "ack",
+            "unwatch",
+          ].includes(params.action)
+        )
+          throw new Error("Local controller only manages existing jobs and watches");
+        // Use exactly the ordinary local tool scope. No INTERNAL_JOB_CALL, foreign
+        // session override or command authorization callback enters this adapter.
+        return await jobTool.execute(
+          `local-job-${createHash("sha256").update(callId).digest("hex")}`,
+          Object.fromEntries(Object.entries(params)),
+          signal,
+          undefined,
+          { cwd: ctx.cwd, hasUI: false, sessionManager: { getSessionId: () => owner } } as any,
+        );
+      },
+    };
     (globalThis as any)[LOCAL_JOB_CONTROLLER_KEY] = localController;
     await updateStatus(ctx);
     if (pollTimer) clearInterval(pollTimer);
     pollTimer = setInterval(() => void poll(), POLL_MS);
     pollTimer.unref();
     void poll();
-    void manager().then(async service => {
-      const records = await service.list(1000);
-      if (sessionContext !== ctx || sessionGeneration !== readonlyGeneration) return;
-      for (const record of records) if (record.metadata.sessionId === owner && !record.metadata.infrastructure) {
-        reapedJobNames.set(record.metadata.id, record.metadata.name ? preview(record.metadata.name, 80) : preview(record.metadata.command, 80));
-      }
-    }).catch(() => {});
+    void manager()
+      .then(async (service) => {
+        const records = await service.list(1000);
+        if (sessionContext !== ctx || sessionGeneration !== readonlyGeneration) return;
+        for (const record of records)
+          if (record.metadata.sessionId === owner && !record.metadata.infrastructure) {
+            reapedJobNames.set(
+              record.metadata.id,
+              record.metadata.name
+                ? preview(record.metadata.name, 80)
+                : preview(record.metadata.command, 80),
+            );
+          }
+      })
+      .catch(() => {});
   });
 
   pi.on("before_agent_start", () => {
@@ -477,10 +850,16 @@ export default function backgroundJob(pi: ExtensionAPI) {
 
   pi.on("session_shutdown", (_event, ctx) => {
     if ((globalThis as any)[JOB_BROKER_KEY] === broker) delete (globalThis as any)[JOB_BROKER_KEY];
-    if ((globalThis as any)[LOCAL_JOB_CONTROLLER_KEY] === localController) delete (globalThis as any)[LOCAL_JOB_CONTROLLER_KEY];
-    const registry = (globalThis as any)[HARNESS_READONLY_KEY] as HarnessReadOnlyRegistry | undefined;
+    if ((globalThis as any)[LOCAL_JOB_CONTROLLER_KEY] === localController)
+      delete (globalThis as any)[LOCAL_JOB_CONTROLLER_KEY];
+    const registry = (globalThis as any)[HARNESS_READONLY_KEY] as
+      | HarnessReadOnlyRegistry
+      | undefined;
     const readonlyJobs = readonlyJobsByContext.get(ctx as object);
-    if (readonlyJobs && registry?.jobs === readonlyJobs) { delete registry.jobs; if (!registry.subagents) delete (globalThis as any)[HARNESS_READONLY_KEY]; }
+    if (readonlyJobs && registry?.jobs === readonlyJobs) {
+      delete registry.jobs;
+      if (!registry.subagents) delete (globalThis as any)[HARNESS_READONLY_KEY];
+    }
     readonlyJobsByContext.delete(ctx as object);
 
     sessionGeneration += 1;
@@ -502,23 +881,26 @@ export default function backgroundJob(pi: ExtensionAPI) {
       const service = await manager();
       if (remind) {
         const ownerSessionId = sessionId(ctx);
-        const records = (await service.list(1000)).filter((record) => record.metadata.sessionId === ownerSessionId);
-        for (const record of records) if (record.result) await deliverTerminal(ctx, service, record);
-
+        const records = (await service.list(1000)).filter(
+          (record) => record.metadata.sessionId === ownerSessionId,
+        );
+        for (const record of records)
+          if (record.result) await deliverTerminal(ctx, service, record);
       }
       for (const id of [...idleInFlight]) {
         await service.store.markNotified(id);
         idleInFlight.delete(id);
       }
     } catch (error) {
-      if (ctx.hasUI) ctx.ui.setStatus('background-jobs',ctx.ui.theme.fg('error','jobs ✗'));
+      if (ctx.hasUI) ctx.ui.setStatus("background-jobs", ctx.ui.theme.fg("error", "jobs ✗"));
     }
   });
 
   const jobTool = {
     name: "background_job",
     label: "Background Job",
-    description: "Run durable shell jobs in tmux. Use job_id to inspect status/output, yield, signal, cancel, or reap. yield returns an immediate status snapshot and never retrieves output. Status, list, and notifications do not count as retrieving output. For terminal native jobs, output starts/resets a five-minute auto-reap timer; unread, active, and adopted jobs are excluded. Adopt existing panes without restarting them; pid + log_path provides observation only. Jobs survive Pi exit; re-adopt panes after restarting Pi. cancel stops execution; reap removes the owned pane and retained output. Log monitoring uses watch, events, ack, and unwatch. stdout and stderr are captured in full: run commands unfiltered (no | tail, | grep or | sort) and read them with action=output, using lines, from (start|end) and match to narrow it. Output is bounded to 50 KiB/2000 lines.",
+    description:
+      "Run durable shell jobs in tmux. Use job_id to inspect status/output, yield, signal, cancel, or reap. yield returns an immediate status snapshot and never retrieves output. Status, list, and notifications do not count as retrieving output. For terminal native jobs, output starts/resets a five-minute auto-reap timer; unread, active, and adopted jobs are excluded. Adopt existing panes without restarting them; pid + log_path provides observation only. Jobs survive Pi exit; re-adopt panes after restarting Pi. cancel stops execution; reap removes the owned pane and retained output. Log monitoring uses watch, events, ack, and unwatch. stdout and stderr are captured in full: run commands unfiltered (no | tail, | grep or | sort) and read them with action=output, using lines, from (start|end) and match to narrow it. Output is bounded to 50 KiB/2000 lines.",
     promptSnippet: "Run and manage background shell jobs.",
     promptGuidelines: [
       "Use background_job for long-running commands; use bash for short foreground work.",
@@ -531,151 +913,324 @@ export default function backgroundJob(pi: ExtensionAPI) {
     async execute(toolCallId, rawParams, signal, _onUpdate, ctx) {
       const releaseOperation = reapReservation.enter();
       try {
-      const params = rawParams as Params;
-      validateJobParams(params);
-      requireNativeExecution(startup);
-      const internal = (rawParams as any)[INTERNAL_JOB_CALL] as { childId: string; placement?: JobPlacement; authorize?: (command: string, cwd: string) => Promise<void> } | undefined;
-      const ownerSessionId = sessionId(ctx);
-      if (params.action === "start" && internal && !internal.authorize) {
-        // Brokered calls have no parent tool_call event. Obtain a receipt from
-        // the same gate rather than treating delegation itself as approval.
-        const authority = (globalThis as Record<string, unknown>)[COMMAND_AUTHORITY_KEY] as CommandAuthority | undefined;
-        if (authority?.protocol === 1) {
-          if (!authority.active || !authority.authorize) throw new Error("Parent Permission Gate lacks active delegated job authorization; reload the parent");
-          await authority.authorize(toolCallId, params.command!, ctx.cwd, ownerSessionId, signal);
-        }
-      }
-      if (params.action === "start" && !internal?.authorize) requireStartAuthorization(startup, toolCallId, params.command!, ctx.cwd);
-      const service = await manager();
-      if (params.action === "start" && internal?.authorize) await internal.authorize(params.command!, ctx.cwd);
-      if (params.action === "start" && signal?.aborted) throw new Error("Background job start cancelled before launch");
-      const owned = (record: JobRecord) => assertOwned(record, ownerSessionId, internal?.childId);
-      let response;
-      let renderedJobName: string | undefined;
-      switch (params.action) {
-        case "watch": case "watches": case "events": case "ack": case "unwatch": {
-          const watches = new WatchManager(service, ownerSessionId);
-          let data: any;
-          if (params.action === "watch") data = await watches.create(ctx.cwd, params as any, internal?.childId);
-          else if (params.action === "watches") data = { watches: await watches.list(internal?.childId) };
-          else if (params.action === "events") data = await watches.events(params.watch_id!, params.after_sequence, internal?.childId);
-          else if (params.action === "ack") data = await watches.ack(params.watch_id!, params.through_sequence!, internal?.childId);
-          else data = await watches.stop(params.watch_id!, internal?.childId);
-          response = toolResult(watchResultText(params.action, data), { action: params.action, ...data });
-          break;
-        }
-        case "start": {
-          if (internal && !internal.placement) throw new Error('Delegated background start requires trusted caller tmux placement; reload the child bridge');
-          const record = await service.start({ command: params.command!, cwd: ctx.cwd, name: params.name, sessionId: ownerSessionId, childId: internal?.childId, placement: internal?.placement, ...((rawParams as any)[INTERNAL_VERIFICATION_START] === true ? { verification: true as const } : {}) }, signal);
-          runningReminderArmed = record.status === "running" || record.status === "starting";
-          reapedJobNames.set(record.metadata.id, record.metadata.name ? preview(record.metadata.name, 80) : preview(record.metadata.command, 80));
-          response = toolResult(`${recordText(record)}\nStarted in a new tmux pane.`, { action: params.action, ...publicDetails(record) });
-          break;
-        }
-        case "adopt": {
-          const record = params.pane_id
-            ? await service.adoptPane({paneId:params.pane_id,socket:params.tmux_socket,logPath:params.log_path,cwd:ctx.cwd,sessionId:ownerSessionId,childId:internal?.childId,name:params.name})
-            : await service.adopt({ pid: params.pid!, logPath: params.log_path!, cwd: ctx.cwd, sessionId: ownerSessionId, childId: internal?.childId, name: params.name });
-          reapedJobNames.set(record.metadata.id, record.metadata.name ? preview(record.metadata.name, 80) : preview(record.metadata.command, 80));
-          const guidance = record.metadata.pane
-            ? `Adopted the existing pane without restarting it. Tracks the pane’s root process, not individual commands inside an interactive shell.\nTo re-adopt after Pi restarts: pane_id=${record.metadata.pane.paneId}, tmux_socket=${record.metadata.pane.socket}.`
-            : "Observation only: no process control or exit-status guarantee.";
-          response = toolResult(`${recordText(record)}\n${guidance}`, { action: params.action, ...publicDetails(record) });
-          break;
-        }
-        case "list": {
-          const records = (await service.list(1000)).filter((record) => !record.metadata.infrastructure && record.metadata.sessionId === ownerSessionId && (!internal || record.metadata.childId === internal.childId)).slice(0, params.limit ?? 20);
-          for (const record of records) {
-            reapedJobNames.set(record.metadata.id, record.metadata.name ? preview(record.metadata.name, 80) : preview(record.metadata.command, 80));
-            if (record.result) await service.store.markNotified(record.metadata.id);
+        const params = rawParams as Params;
+        validateJobParams(params);
+        requireNativeExecution(startup);
+        const internal = (rawParams as any)[INTERNAL_JOB_CALL] as
+          | {
+              childId: string;
+              placement?: JobPlacement;
+              authorize?: (command: string, cwd: string) => Promise<void>;
+            }
+          | undefined;
+        const ownerSessionId = sessionId(ctx);
+        if (params.action === "start" && internal && !internal.authorize) {
+          // Brokered calls have no parent tool_call event. Obtain a receipt from
+          // the same gate rather than treating delegation itself as approval.
+          const authority = (globalThis as Record<string, unknown>)[COMMAND_AUTHORITY_KEY] as
+            | CommandAuthority
+            | undefined;
+          if (authority?.protocol === 1) {
+            if (!authority.active || !authority.authorize)
+              throw new Error(
+                "Parent Permission Gate lacks active delegated job authorization; reload the parent",
+              );
+            await authority.authorize(toolCallId, params.command!, ctx.cwd, ownerSessionId, signal);
           }
-          response = toolResult(records.length ? records.map(recordLine).join("\n") : "No background jobs for this Pi session.", { action: params.action, jobs: records.map(publicDetails) });
-          break;
         }
-        case "status": {
-          const record = await service.get(requireJobId(params));
-          owned(record);
-          reapedJobNames.set(record.metadata.id, record.metadata.name ? preview(record.metadata.name, 80) : preview(record.metadata.command, 80));
-          if (record.result) await service.store.markNotified(record.metadata.id);
-          const streams = await service.streamOutput(record.metadata.id);
-          response = toolResult(recordTextWithNotes(service.store, record), { action: params.action, ...publicDetails(record, streams) }, Boolean(record.result && record.status === 'failed'));
-          break;
+        if (params.action === "start" && !internal?.authorize)
+          requireStartAuthorization(startup, toolCallId, params.command!, ctx.cwd);
+        const service = await manager();
+        if (params.action === "start" && internal?.authorize)
+          await internal.authorize(params.command!, ctx.cwd);
+        if (params.action === "start" && signal?.aborted)
+          throw new Error("Background job start cancelled before launch");
+        const owned = (record: JobRecord) => assertOwned(record, ownerSessionId, internal?.childId);
+        let response;
+        let renderedJobName: string | undefined;
+        switch (params.action) {
+          case "watch":
+          case "watches":
+          case "events":
+          case "ack":
+          case "unwatch": {
+            const watches = new WatchManager(service, ownerSessionId);
+            let data: any;
+            if (params.action === "watch")
+              data = await watches.create(ctx.cwd, params as any, internal?.childId);
+            else if (params.action === "watches")
+              data = { watches: await watches.list(internal?.childId) };
+            else if (params.action === "events")
+              data = await watches.events(
+                params.watch_id!,
+                params.after_sequence,
+                internal?.childId,
+              );
+            else if (params.action === "ack")
+              data = await watches.ack(
+                params.watch_id!,
+                params.through_sequence!,
+                internal?.childId,
+              );
+            else data = await watches.stop(params.watch_id!, internal?.childId);
+            response = toolResult(watchResultText(params.action, data), {
+              action: params.action,
+              ...data,
+            });
+            break;
+          }
+          case "start": {
+            if (internal && !internal.placement)
+              throw new Error(
+                "Delegated background start requires trusted caller tmux placement; reload the child bridge",
+              );
+            const record = await service.start(
+              {
+                command: params.command!,
+                cwd: ctx.cwd,
+                name: params.name,
+                sessionId: ownerSessionId,
+                childId: internal?.childId,
+                placement: internal?.placement,
+                ...((rawParams as any)[INTERNAL_VERIFICATION_START] === true
+                  ? { verification: true as const }
+                  : {}),
+              },
+              signal,
+            );
+            runningReminderArmed = record.status === "running" || record.status === "starting";
+            reapedJobNames.set(
+              record.metadata.id,
+              record.metadata.name
+                ? preview(record.metadata.name, 80)
+                : preview(record.metadata.command, 80),
+            );
+            response = toolResult(`${recordText(record)}\nStarted in a new tmux pane.`, {
+              action: params.action,
+              ...publicDetails(record),
+            });
+            break;
+          }
+          case "adopt": {
+            const record = params.pane_id
+              ? await service.adoptPane({
+                  paneId: params.pane_id,
+                  socket: params.tmux_socket,
+                  logPath: params.log_path,
+                  cwd: ctx.cwd,
+                  sessionId: ownerSessionId,
+                  childId: internal?.childId,
+                  name: params.name,
+                })
+              : await service.adopt({
+                  pid: params.pid!,
+                  logPath: params.log_path!,
+                  cwd: ctx.cwd,
+                  sessionId: ownerSessionId,
+                  childId: internal?.childId,
+                  name: params.name,
+                });
+            reapedJobNames.set(
+              record.metadata.id,
+              record.metadata.name
+                ? preview(record.metadata.name, 80)
+                : preview(record.metadata.command, 80),
+            );
+            const guidance = record.metadata.pane
+              ? `Adopted the existing pane without restarting it. Tracks the pane’s root process, not individual commands inside an interactive shell.\nTo re-adopt after Pi restarts: pane_id=${record.metadata.pane.paneId}, tmux_socket=${record.metadata.pane.socket}.`
+              : "Observation only: no process control or exit-status guarantee.";
+            response = toolResult(`${recordText(record)}\n${guidance}`, {
+              action: params.action,
+              ...publicDetails(record),
+            });
+            break;
+          }
+          case "list": {
+            const records = (await service.list(1000))
+              .filter(
+                (record) =>
+                  !record.metadata.infrastructure &&
+                  record.metadata.sessionId === ownerSessionId &&
+                  (!internal || record.metadata.childId === internal.childId),
+              )
+              .slice(0, params.limit ?? 20);
+            for (const record of records) {
+              reapedJobNames.set(
+                record.metadata.id,
+                record.metadata.name
+                  ? preview(record.metadata.name, 80)
+                  : preview(record.metadata.command, 80),
+              );
+              if (record.result) await service.store.markNotified(record.metadata.id);
+            }
+            response = toolResult(
+              records.length
+                ? records.map(recordLine).join("\n")
+                : "No background jobs for this Pi session.",
+              { action: params.action, jobs: records.map(publicDetails) },
+            );
+            break;
+          }
+          case "status": {
+            const record = await service.get(requireJobId(params));
+            owned(record);
+            reapedJobNames.set(
+              record.metadata.id,
+              record.metadata.name
+                ? preview(record.metadata.name, 80)
+                : preview(record.metadata.command, 80),
+            );
+            if (record.result) await service.store.markNotified(record.metadata.id);
+            const streams = await service.streamOutput(record.metadata.id);
+            response = toolResult(
+              recordTextWithNotes(service.store, record),
+              { action: params.action, ...publicDetails(record, streams) },
+              Boolean(record.result && record.status === "failed"),
+            );
+            break;
+          }
+          case "output": {
+            const id = requireJobId(params);
+            const record = await service.get(id);
+            owned(record);
+            renderedJobName = record.metadata.name
+              ? preview(record.metadata.name, 80)
+              : preview(record.metadata.command, 80);
+            reapedJobNames.set(id, renderedJobName);
+            const snapshot = await service.output(id);
+            const finalRecord = await service.get(id);
+            if (finalRecord.result) await service.store.markNotified(id);
+            const streams = await service.streamOutput(finalRecord.metadata.id);
+            response = toolResult(
+              `${recordLine(finalRecord)}\n${outputText(snapshot, params)}`,
+              {
+                action: params.action,
+                ...publicDetails(finalRecord, streams),
+                source: snapshot.source,
+                truncated: snapshot.truncated,
+              },
+              Boolean(finalRecord.result && finalRecord.status === "failed"),
+            );
+            break;
+          }
+          case "yield": {
+            const records = params.job_id
+              ? [await service.get(params.job_id, false)]
+              : (await service.list(1000)).filter(
+                  (record) =>
+                    record.metadata.sessionId === ownerSessionId &&
+                    !record.metadata.infrastructure &&
+                    (!internal || record.metadata.childId === internal.childId),
+                );
+            for (const record of records) owned(record);
+            response = {
+              ...toolResult(
+                [
+                  "Yielded the current run; conversation remains available. Work is not suspended or cancelled. Completion notifications arrive independently.",
+                  records.length
+                    ? records
+                        .map((record) => recordTextWithNotes(service.store, record))
+                        .join("\n\n")
+                    : "No background jobs for this Pi session.",
+                ].join("\n"),
+                { action: params.action, jobs: records.map(publicDetails) },
+              ),
+              terminate: true,
+            };
+            break;
+          }
+          case "signal": {
+            const id = requireJobId(params);
+            owned(await service.get(id));
+            const record = await service.signal(id, params.signal!);
+            reapedJobNames.set(
+              id,
+              record.metadata.name
+                ? preview(record.metadata.name, 80)
+                : preview(record.metadata.command, 80),
+            );
+            response = toolResult(`Sent ${params.signal} to ${record.metadata.id}.`, {
+              action: params.action,
+              ...publicDetails(record),
+              signal: params.signal,
+            });
+            break;
+          }
+          case "reap": {
+            const id = requireJobId(params);
+            const record = await service.get(id);
+            owned(record);
+            renderedJobName = record.metadata.name
+              ? preview(record.metadata.name, 80)
+              : preview(record.metadata.command, 80);
+            reapedJobNames.set(id, renderedJobName);
+            await service.reap(id);
+            quietState.consume(ctx, "job", id);
+            response = toolResult("Job reaped", {
+              action: params.action,
+              job_id: id,
+              name: renderedJobName,
+              reaped: true,
+            });
+            break;
+          }
+          case "cancel": {
+            const id = requireJobId(params);
+            owned(await service.get(id));
+            const record = await service.cancel(id);
+            reapedJobNames.set(
+              id,
+              record.metadata.name
+                ? preview(record.metadata.name, 80)
+                : preview(record.metadata.command, 80),
+            );
+            if (record.result) await service.store.markNotified(id);
+            response = toolResult(recordText(record), {
+              action: params.action,
+              ...publicDetails(record),
+            });
+            break;
+          }
         }
-        case "output": {
-          const id = requireJobId(params);
-          const record = await service.get(id);
-          owned(record);
-          renderedJobName = record.metadata.name ? preview(record.metadata.name, 80) : preview(record.metadata.command, 80);
-          reapedJobNames.set(id, renderedJobName);
-          const snapshot = await service.output(id);
-          const finalRecord = await service.get(id);
-          if (finalRecord.result) await service.store.markNotified(id);
-          const streams = await service.streamOutput(finalRecord.metadata.id);
-          response = toolResult(`${recordLine(finalRecord)}\n${outputText(snapshot, params)}`, { action: params.action, ...publicDetails(finalRecord, streams), source: snapshot.source, truncated: snapshot.truncated }, Boolean(finalRecord.result && finalRecord.status === 'failed'));
-          break;
+        if (response?.details && params.action !== "yield") {
+          const detail = response.details as any;
+          if (detail.job_id && ["completed", "failed", "cancelled", "lost"].includes(detail.status))
+            quietState.consume(ctx, "job", detail.job_id);
+          for (const item of detail.jobs ?? [])
+            if (["completed", "failed", "cancelled", "lost"].includes(item.status))
+              quietState.consume(ctx, "job", item.job_id);
+          if (params.action === "events")
+            quietState.consume(ctx, "watch", params.watch_id!, detail.next_sequence);
+          if (params.action === "ack")
+            quietState.consume(ctx, "watch", params.watch_id!, params.through_sequence);
+          if (params.action === "unwatch") quietState.consume(ctx, "watch", params.watch_id!);
         }
-        case "yield": {
-          const records = params.job_id
-            ? [await service.get(params.job_id, false)]
-            : (await service.list(1000)).filter(record => record.metadata.sessionId === ownerSessionId && !record.metadata.infrastructure && (!internal || record.metadata.childId === internal.childId));
-          for (const record of records) owned(record);
-          response = { ...toolResult([
-            "Yielded the current run; conversation remains available. Work is not suspended or cancelled. Completion notifications arrive independently.",
-            records.length ? records.map(record => recordTextWithNotes(service.store, record)).join("\n\n") : "No background jobs for this Pi session.",
-          ].join("\n"), { action: params.action, jobs: records.map(publicDetails) }), terminate: true };
-          break;
-        }
-        case "signal": {
-          const id = requireJobId(params);
-          owned(await service.get(id));
-          const record = await service.signal(id, params.signal!);
-          reapedJobNames.set(id, record.metadata.name ? preview(record.metadata.name, 80) : preview(record.metadata.command, 80));
-          response = toolResult(`Sent ${params.signal} to ${record.metadata.id}.`, { action: params.action, ...publicDetails(record), signal: params.signal });
-          break;
-        }
-        case "reap": {
-          const id = requireJobId(params);
-          const record = await service.get(id);
-          owned(record);
-          renderedJobName = record.metadata.name ? preview(record.metadata.name, 80) : preview(record.metadata.command, 80);
-          reapedJobNames.set(id, renderedJobName);
-          await service.reap(id);
-          quietState.consume(ctx, 'job', id);
-          response = toolResult('Job reaped', {action: params.action, job_id: id, name: renderedJobName, reaped: true});
-          break;
-        }
-        case "cancel": {
-          const id = requireJobId(params);
-          owned(await service.get(id));
-          const record = await service.cancel(id);
-          reapedJobNames.set(id, record.metadata.name ? preview(record.metadata.name, 80) : preview(record.metadata.command, 80));
-          if (record.result) await service.store.markNotified(id);
-          response = toolResult(recordText(record), { action: params.action, ...publicDetails(record) });
-          break;
-        }
+        await updateStatus(ctx);
+        return response!;
+      } finally {
+        releaseOperation();
       }
-      if(response?.details && params.action !== 'yield'){
-        const detail=response.details as any;
-        if(detail.job_id && ['completed','failed','cancelled','lost'].includes(detail.status))quietState.consume(ctx,'job',detail.job_id);
-        for(const item of detail.jobs??[])if(['completed','failed','cancelled','lost'].includes(item.status))quietState.consume(ctx,'job',item.job_id);
-        if(params.action==='events')quietState.consume(ctx,'watch',params.watch_id!,detail.next_sequence);
-        if(params.action==='ack')quietState.consume(ctx,'watch',params.watch_id!,params.through_sequence);
-        if(params.action==='unwatch')quietState.consume(ctx,'watch',params.watch_id!);
-      }
-      await updateStatus(ctx);
-      return response!;
-      } finally { releaseOperation(); }
     },
     renderCall(args, theme, context) {
       const params = args as Params;
       const state = context?.state as { jobName?: string } | undefined;
-      const subject = params.action === "start" ? params.name ?? preview(params.command ?? "") : state?.jobName ?? (params.job_id ? reapedJobNames.get(params.job_id) : undefined) ?? params.job_id ?? "";
-      return new Text(`${theme.fg("toolTitle", theme.bold("background_job"))} ${theme.fg("muted", params.action)}${subject ? ` ${theme.fg("dim", subject)}` : ""}`, 0, 0);
+      const subject =
+        params.action === "start"
+          ? (params.name ?? preview(params.command ?? ""))
+          : (state?.jobName ??
+            (params.job_id ? reapedJobNames.get(params.job_id) : undefined) ??
+            params.job_id ??
+            "");
+      return new Text(
+        `${theme.fg("toolTitle", theme.bold("background_job"))} ${theme.fg("muted", params.action)}${subject ? ` ${theme.fg("dim", subject)}` : ""}`,
+        0,
+        0,
+      );
     },
     renderResult(result, { isPartial, expanded }, theme, context) {
       if (isPartial) return new Text(theme.fg("warning", "Working…"), 0, 0);
       const details = result.details as any;
-      if (details?.job_id && typeof details.name === 'string') {
+      if (details?.job_id && typeof details.name === "string") {
         reapedJobNames.set(details.job_id, details.name);
         if (context?.state) {
           const state = context.state as { jobName?: string };
@@ -687,44 +1242,79 @@ export default function backgroundJob(pi: ExtensionAPI) {
           }
         }
       }
-      for (const item of details?.jobs ?? []) if (item?.job_id && typeof item.name === 'string') reapedJobNames.set(item.job_id, item.name);
+      for (const item of details?.jobs ?? [])
+        if (item?.job_id && typeof item.name === "string")
+          reapedJobNames.set(item.job_id, item.name);
       let text = result.content.find((part: any) => part.type === "text")?.text ?? "";
-      if (details?.job_id && typeof details.name === 'string') {
-        const lines = text.split('\n');
+      if (details?.job_id && typeof details.name === "string") {
+        const lines = text.split("\n");
         // Replace only the tool-generated header, never IDs in command output.
         const header = lines[0].match(/^job-[0-9a-f]{24}  (.*?)  (\d+[smh])  /);
         if (header) lines[0] = `${details.name}  ${header[1]}  ${header[2]}`;
-        text = lines.join('\n');
+        text = lines.join("\n");
       }
       if (!expanded) {
         if (result.details?.jobs) {
           const jobs = result.details.jobs;
-          text = jobs.map((j:any)=>`${jobStatusLabel(j.status,j.observation_only)} · ${uiText(j.name,90)}`).join("\n") || "No background jobs.";
-          if (details.action === "yield") text = `Run yielded · ${jobs.length} ${jobs.length === 1 ? "job" : "jobs"}${jobs.length ? `\n${text}` : ""}`;
-        }
-        else if (result.details?.name && ["start","status","adopt"].includes(result.details.action)) text = `${jobStatusLabel(result.details.status,result.details.observation_only)} · ${uiText(result.details.name,100)}`;
-        const lines=text.split("\n");
-        if(lines.length>10)text=lines.slice(0,10).join("\n")+"\nExpand output for more.";
+          text =
+            jobs
+              .map(
+                (j: any) =>
+                  `${jobStatusLabel(j.status, j.observation_only)} · ${uiText(j.name, 90)}`,
+              )
+              .join("\n") || "No background jobs.";
+          if (details.action === "yield")
+            text = `Run yielded · ${jobs.length} ${jobs.length === 1 ? "job" : "jobs"}${jobs.length ? `\n${text}` : ""}`;
+        } else if (
+          result.details?.name &&
+          ["start", "status", "adopt"].includes(result.details.action)
+        )
+          text = `${jobStatusLabel(result.details.status, result.details.observation_only)} · ${uiText(result.details.name, 100)}`;
+        const lines = text.split("\n");
+        if (lines.length > 10) text = lines.slice(0, 10).join("\n") + "\nExpand output for more.";
       }
       return new Text(text, 0, 0);
     },
   };
   pi.registerTool(jobTool);
-  let watchUiOpen=false;
-  pi.registerCommand('watches',{
-    description:'Review and acknowledge build alerts, or stop watching without stopping builds',
-    handler:async(_args,ctx)=>{
-      if(!ctx.hasUI)return;
-      if(watchUiOpen){ctx.ui.notify('The watch manager is already open.','warning');return;}
-      watchUiOpen=true;
-      const show=async(title:string,body:string)=>{
-        if(ctx.mode==='tui'&&!remoteTaskUiConnected())await ctx.ui.editor(`${title} — view only; edits are not saved`,uiText(body,24000));
-        else pi.sendMessage({customType:'background-job-view',content:`${title}\n\n${uiText(body,24000)}`,display:true},{deliverAs:'steer',triggerTurn:false});
+  let watchUiOpen = false;
+  pi.registerCommand("watches", {
+    description: "Review and acknowledge build alerts, or stop watching without stopping builds",
+    handler: async (_args, ctx) => {
+      if (!ctx.hasUI) return;
+      if (watchUiOpen) {
+        ctx.ui.notify("The watch manager is already open.", "warning");
+        return;
+      }
+      watchUiOpen = true;
+      const show = async (title: string, body: string) => {
+        if (ctx.mode === "tui" && !remoteTaskUiConnected())
+          await ctx.ui.editor(`${title} — view only; edits are not saved`, uiText(body, 24000));
+        else
+          pi.sendMessage(
+            {
+              customType: "background-job-view",
+              content: `${title}\n\n${uiText(body, 24000)}`,
+              display: true,
+            },
+            { deliverAs: "steer", triggerTurn: false },
+          );
       };
-      try {await watchMenu(ctx,params=>jobTool.execute(`watch-ui-${Date.now()}`,params,undefined,undefined,ctx),show);}
-      catch(error){await show('Watch action unavailable',uiText(error instanceof Error?error.message:error,2000));}
-      finally{watchUiOpen=false;}
-    }
+      try {
+        await watchMenu(
+          ctx,
+          (params) => jobTool.execute(`watch-ui-${Date.now()}`, params, undefined, undefined, ctx),
+          show,
+        );
+      } catch (error) {
+        await show(
+          "Watch action unavailable",
+          uiText(error instanceof Error ? error.message : error, 2000),
+        );
+      } finally {
+        watchUiOpen = false;
+      }
+    },
   });
 
   pi.registerCommand("background-jobs", {
@@ -733,41 +1323,103 @@ export default function backgroundJob(pi: ExtensionAPI) {
       if (!ctx.hasUI) return;
       let releaseOperation: (() => void) | undefined;
       try {
-      releaseOperation = reapReservation.enter();
-      const service = await manager();
-      const records = (await service.list(1000)).filter(record=>!record.metadata.infrastructure && record.metadata.sessionId===sessionId(ctx)).slice(0,50);
-      const show = async (title:string, body:string) => {
-        if(ctx.mode==='tui'&&!remoteTaskUiConnected()) await ctx.ui.editor(`${title} — view only; edits are not saved`,body);
-        else pi.sendMessage({customType:'background-job-view',content:`${title}\n\n${uiText(body,24000)}`,display:true},{deliverAs:'steer',triggerTurn:false});
-      };
-      if (records.length === 0) { await show('Background jobs','No background jobs in this session.'); return; }
-      const labels = records.map((r,i)=>`${i+1}. ${jobStatusLabel(r.status,Boolean(r.metadata.observed && !r.metadata.pane))} · ${preview(r.metadata.name??r.metadata.command,90)}`);
-      const selected = await taskChoice(ctx, "Background jobs", labels);
-      if (!selected) return;
-      const record = records[labels.indexOf(selected)];
-      if (!record) return;
-      const actions = ["Show output", "Show status",
-        ...(record.status === 'running' && (!record.metadata.observed || record.metadata.pane) ? [...(record.metadata.pane ? [] : ['Show attach command']), 'Cancel job'] : []),
-        ...(record.result ? ['Reap job'] : [])];
-      const action = await taskChoice(ctx, labels[labels.indexOf(selected)], actions);
-      if (action === "Show output") {
-        const snapshot = await service.output(record.metadata.id);
-        await show(`${preview(record.metadata.name??record.metadata.command,100)} — output`, outputText(snapshot, {}));
-      } else if (action === "Show status") {
-        await show('Job details', `${recordText(await service.get(record.metadata.id))}${record.metadata.observed||record.metadata.pane?'':`\nattach: ${service.backend.attachCommand(record.launch)}`}`);
-      } else if (action === "Show attach command") {
-        await show('Attach to job terminals', service.backend.attachCommand(record.launch));
-      } else if (action === "Cancel job" && await taskChoice(ctx, record.metadata.pane ? `Cancel adopted pane ${record.metadata.pane.paneId}? Its terminal work will stop; pane and output remain until reap.` : `Cancel this job? ${preview(record.metadata.command,120)}`, ['Cancel job','Keep running']) === 'Cancel job') {
-        await service.cancel(record.metadata.id);
-        await show('Job cancelled', preview(record.metadata.name??record.metadata.command,120));
-      } else if (action === "Reap job" && await taskChoice(ctx, 'Close this finished job pane and delete retained output/runtime?', ['Reap job','Keep job']) === 'Reap job') {
-        await service.reap(record.metadata.id);
-        await show('Job reaped', 'Owned pane and retained job runtime removed; external source logs and sibling panes untouched.');
+        releaseOperation = reapReservation.enter();
+        const service = await manager();
+        const records = (await service.list(1000))
+          .filter(
+            (record) =>
+              !record.metadata.infrastructure && record.metadata.sessionId === sessionId(ctx),
+          )
+          .slice(0, 50);
+        const show = async (title: string, body: string) => {
+          if (ctx.mode === "tui" && !remoteTaskUiConnected())
+            await ctx.ui.editor(`${title} — view only; edits are not saved`, body);
+          else
+            pi.sendMessage(
+              {
+                customType: "background-job-view",
+                content: `${title}\n\n${uiText(body, 24000)}`,
+                display: true,
+              },
+              { deliverAs: "steer", triggerTurn: false },
+            );
+        };
+        if (records.length === 0) {
+          await show("Background jobs", "No background jobs in this session.");
+          return;
+        }
+        const labels = records.map(
+          (r, i) =>
+            `${i + 1}. ${jobStatusLabel(r.status, Boolean(r.metadata.observed && !r.metadata.pane))} · ${preview(r.metadata.name ?? r.metadata.command, 90)}`,
+        );
+        const selected = await taskChoice(ctx, "Background jobs", labels);
+        if (!selected) return;
+        const record = records[labels.indexOf(selected)];
+        if (!record) return;
+        const actions = [
+          "Show output",
+          "Show status",
+          ...(record.status === "running" && (!record.metadata.observed || record.metadata.pane)
+            ? [...(record.metadata.pane ? [] : ["Show attach command"]), "Cancel job"]
+            : []),
+          ...(record.result ? ["Reap job"] : []),
+        ];
+        const action = await taskChoice(ctx, labels[labels.indexOf(selected)], actions);
+        if (action === "Show output") {
+          const snapshot = await service.output(record.metadata.id);
+          await show(
+            `${preview(record.metadata.name ?? record.metadata.command, 100)} — output`,
+            outputText(snapshot, {}),
+          );
+        } else if (action === "Show status") {
+          await show(
+            "Job details",
+            `${recordText(await service.get(record.metadata.id))}${record.metadata.observed || record.metadata.pane ? "" : `\nattach: ${service.backend.attachCommand(record.launch)}`}`,
+          );
+        } else if (action === "Show attach command") {
+          await show("Attach to job terminals", service.backend.attachCommand(record.launch));
+        } else if (
+          action === "Cancel job" &&
+          (await taskChoice(
+            ctx,
+            record.metadata.pane
+              ? `Cancel adopted pane ${record.metadata.pane.paneId}? Its terminal work will stop; pane and output remain until reap.`
+              : `Cancel this job? ${preview(record.metadata.command, 120)}`,
+            ["Cancel job", "Keep running"],
+          )) === "Cancel job"
+        ) {
+          await service.cancel(record.metadata.id);
+          await show(
+            "Job cancelled",
+            preview(record.metadata.name ?? record.metadata.command, 120),
+          );
+        } else if (
+          action === "Reap job" &&
+          (await taskChoice(
+            ctx,
+            "Close this finished job pane and delete retained output/runtime?",
+            ["Reap job", "Keep job"],
+          )) === "Reap job"
+        ) {
+          await service.reap(record.metadata.id);
+          await show(
+            "Job reaped",
+            "Owned pane and retained job runtime removed; external source logs and sibling panes untouched.",
+          );
+        }
+        await updateStatus(ctx);
+      } catch (error) {
+        pi.sendMessage(
+          {
+            customType: "background-job-view",
+            content: `Job action unavailable: ${uiText(error instanceof Error ? error.message : error, 2000)}`,
+            display: true,
+          },
+          { deliverAs: "steer", triggerTurn: false },
+        );
+      } finally {
+        releaseOperation?.();
       }
-      await updateStatus(ctx);
-      } catch(error) {
-        pi.sendMessage({customType:'background-job-view',content:`Job action unavailable: ${uiText(error instanceof Error?error.message:error,2000)}`,display:true},{deliverAs:'steer',triggerTurn:false});
-      } finally { releaseOperation?.(); }
     },
   });
 }

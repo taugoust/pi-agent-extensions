@@ -79,7 +79,9 @@ export function parseWorktreePorcelain(output: string): WorktreeRecord[] {
       continue;
     }
     if (!current) {
-      throw new GitWorktreeError(`Worktree porcelain field ${JSON.stringify(key)} appears before worktree.`);
+      throw new GitWorktreeError(
+        `Worktree porcelain field ${JSON.stringify(key)} appears before worktree.`,
+      );
     }
 
     switch (key) {
@@ -88,7 +90,9 @@ export function parseWorktreePorcelain(output: string): WorktreeRecord[] {
         break;
       case "branch":
         current.branchRef = value;
-        current.branch = value.startsWith(LOCAL_BRANCH_PREFIX) ? value.slice(LOCAL_BRANCH_PREFIX.length) : undefined;
+        current.branch = value.startsWith(LOCAL_BRANCH_PREFIX)
+          ? value.slice(LOCAL_BRANCH_PREFIX.length)
+          : undefined;
         break;
       case "bare":
         current.bare = true;
@@ -108,12 +112,19 @@ export function parseWorktreePorcelain(output: string): WorktreeRecord[] {
   return records;
 }
 
-export function worktreeForBranch(records: readonly WorktreeRecord[], branch: string): WorktreeRecord | undefined {
+export function worktreeForBranch(
+  records: readonly WorktreeRecord[],
+  branch: string,
+): WorktreeRecord | undefined {
   const branchRef = `${LOCAL_BRANCH_PREFIX}${branch}`;
   return records.find((record) => record.branchRef === branchRef);
 }
 
-export function defaultWorktreePath(mainWorktreePath: string, branch: string, worktreeRoot: string): string {
+export function defaultWorktreePath(
+  mainWorktreePath: string,
+  branch: string,
+  worktreeRoot: string,
+): string {
   return resolve(worktreeRoot, basename(mainWorktreePath), branch.replaceAll("/", "-"));
 }
 
@@ -156,12 +167,16 @@ export function unresolvableSymlinkAncestor(path: string): string | undefined {
         if (isNodeError(error) && (error.code === "ENOENT" || error.code === "ELOOP")) {
           return current;
         }
-        throw new GitWorktreeError(`Cannot resolve filesystem ancestor ${current}: ${formatError(error)}`);
+        throw new GitWorktreeError(
+          `Cannot resolve filesystem ancestor ${current}: ${formatError(error)}`,
+        );
       }
     } catch (error) {
       if (!isNodeError(error) || error.code !== "ENOENT") {
         if (error instanceof GitWorktreeError) throw error;
-        throw new GitWorktreeError(`Cannot inspect filesystem ancestor ${current}: ${formatError(error)}`);
+        throw new GitWorktreeError(
+          `Cannot inspect filesystem ancestor ${current}: ${formatError(error)}`,
+        );
       }
       const parent = dirname(current);
       if (parent === current) return undefined;
@@ -210,7 +225,12 @@ export async function symbolicBranch(
   cwd: string,
   signal?: AbortSignal,
 ): Promise<string | undefined> {
-  const result = await runGitAllowFailure(pi, ["symbolic-ref", "--quiet", "--short", "HEAD"], cwd, signal);
+  const result = await runGitAllowFailure(
+    pi,
+    ["symbolic-ref", "--quiet", "--short", "HEAD"],
+    cwd,
+    signal,
+  );
   if (result.killed) throw killedError(["symbolic-ref", "--quiet", "--short", "HEAD"]);
   if (result.code !== 0) return undefined;
   return result.stdout.trim() || undefined;
@@ -252,7 +272,12 @@ export async function resolveCommit(
   startPoint: string,
   signal?: AbortSignal,
 ): Promise<string> {
-  const result = await runGit(pi, ["rev-parse", "--verify", "--end-of-options", `${startPoint}^{commit}`], cwd, signal);
+  const result = await runGit(
+    pi,
+    ["rev-parse", "--verify", "--end-of-options", `${startPoint}^{commit}`],
+    cwd,
+    signal,
+  );
   const oid = result.stdout.trim();
   if (!/^[0-9a-fA-F]{40,64}$/u.test(oid)) {
     throw new GitWorktreeError(`Git returned an invalid commit object for ${startPoint}.`);
@@ -322,7 +347,12 @@ export async function worktreeAdministrativeDirectory(
   cwd: string,
   signal?: AbortSignal,
 ): Promise<string> {
-  const result = await runGit(pi, ["rev-parse", "--path-format=absolute", "--git-dir"], cwd, signal);
+  const result = await runGit(
+    pi,
+    ["rev-parse", "--path-format=absolute", "--git-dir"],
+    cwd,
+    signal,
+  );
   const value = removeLineEnding(result.stdout);
   if (!value) throw new GitWorktreeError("Git did not return its worktree administrative path.");
   return resolve(cwd, value);
@@ -345,7 +375,14 @@ export async function administrativeHistoryOids(
   );
   values.push(...splitAdministrativeOids(refs.stdout, "per-worktree refs"));
 
-  for (const name of ["ORIG_HEAD", "MERGE_HEAD", "REBASE_HEAD", "CHERRY_PICK_HEAD", "REVERT_HEAD", "BISECT_HEAD"]) {
+  for (const name of [
+    "ORIG_HEAD",
+    "MERGE_HEAD",
+    "REBASE_HEAD",
+    "CHERRY_PICK_HEAD",
+    "REVERT_HEAD",
+    "BISECT_HEAD",
+  ]) {
     const contents = readAdministrativeFile(administrativePath, name);
     if (contents === undefined) continue;
     values.push(...splitAdministrativeOids(contents, name));
@@ -362,7 +399,12 @@ export async function administrativePruneCandidates(
   cwd: string,
   signal?: AbortSignal,
 ): Promise<AdministrativePruneCandidate[]> {
-  const commonResult = await runGit(pi, ["rev-parse", "--path-format=absolute", "--git-common-dir"], cwd, signal);
+  const commonResult = await runGit(
+    pi,
+    ["rev-parse", "--path-format=absolute", "--git-common-dir"],
+    cwd,
+    signal,
+  );
   const commonValue = removeLineEnding(commonResult.stdout);
   if (!commonValue) throw new GitWorktreeError("Git did not return its common directory.");
   const commonDirectory = resolve(cwd, commonValue);
@@ -373,7 +415,9 @@ export async function administrativePruneCandidates(
   for (const entry of readdirSync(administrativeRoot, { withFileTypes: true })) {
     const administrativePath = resolve(administrativeRoot, entry.name);
     if (!entry.isDirectory() || entry.isSymbolicLink()) {
-      throw new GitWorktreeError(`Unexpected Git worktree administrative entry: ${administrativePath}.`);
+      throw new GitWorktreeError(
+        `Unexpected Git worktree administrative entry: ${administrativePath}.`,
+      );
     }
     if (existsSync(resolve(administrativePath, "locked"))) continue;
 
@@ -398,13 +442,17 @@ export async function administrativePruneCandidates(
       headValue = removeLineEnding(readFileSync(headPath, "utf8"));
     } catch (error) {
       if (error instanceof GitWorktreeError) throw error;
-      throw new GitWorktreeError(`Cannot inspect Git worktree administrative HEAD ${headPath}: ${formatError(error)}`);
+      throw new GitWorktreeError(
+        `Cannot inspect Git worktree administrative HEAD ${headPath}: ${formatError(error)}`,
+      );
     }
     const indexDirty = await administrativeIndexIsDirty(pi, cwd, administrativePath, signal);
     if (headValue.startsWith("ref: ")) {
       const branchRef = headValue.slice("ref: ".length);
       if (!branchRef) {
-        throw new GitWorktreeError(`Git worktree administrative HEAD has an empty ref: ${headPath}.`);
+        throw new GitWorktreeError(
+          `Git worktree administrative HEAD has an empty ref: ${headPath}.`,
+        );
       }
       candidates.push({
         id: entry.name,
@@ -459,7 +507,12 @@ export async function durableRefExists(
   if (!ref.startsWith("refs/") || ref.includes("\0")) {
     throw new GitWorktreeError("Git worktree administrative HEAD contains an invalid ref.");
   }
-  const result = await runGitAllowFailure(pi, ["show-ref", "--verify", "--quiet", ref], cwd, signal);
+  const result = await runGitAllowFailure(
+    pi,
+    ["show-ref", "--verify", "--quiet", ref],
+    cwd,
+    signal,
+  );
   if (result.killed) throw killedError(["show-ref", "--verify", "--quiet"]);
   if (result.code === 0) return true;
   if (result.code === 1) return false;
@@ -477,14 +530,25 @@ export async function durableRefsContaining(
   }
   const result = await runGit(
     pi,
-    ["for-each-ref", "--format=%(refname)", `--contains=${head}`, "refs/heads", "refs/tags", "refs/remotes"],
+    [
+      "for-each-ref",
+      "--format=%(refname)",
+      `--contains=${head}`,
+      "refs/heads",
+      "refs/tags",
+      "refs/remotes",
+    ],
     cwd,
     signal,
   );
   return nonEmptyLines(result.stdout);
 }
 
-export async function prunePreview(pi: Pick<ExtensionAPI, "exec">, cwd: string, signal?: AbortSignal): Promise<string> {
+export async function prunePreview(
+  pi: Pick<ExtensionAPI, "exec">,
+  cwd: string,
+  signal?: AbortSignal,
+): Promise<string> {
   const result = await runGit(pi, ["worktree", "prune", "--dry-run", "--verbose"], cwd, signal);
   return combineOutput(result);
 }
@@ -494,7 +558,13 @@ export async function pruneWorktrees(
   cwd: string,
   signal?: AbortSignal,
 ): Promise<string> {
-  const result = await runGit(pi, ["worktree", "prune", "--verbose"], cwd, signal, GIT_MUTATION_TIMEOUT_MS);
+  const result = await runGit(
+    pi,
+    ["worktree", "prune", "--verbose"],
+    cwd,
+    signal,
+    GIT_MUTATION_TIMEOUT_MS,
+  );
   return combineOutput(result);
 }
 
@@ -504,7 +574,9 @@ export function formatWorktree(record: WorktreeRecord, currentPath?: string): st
     record.isMain ? "main" : undefined,
     record.bare ? "bare" : undefined,
     record.detached ? "detached" : record.branch,
-    record.lockedReason !== undefined ? `locked${record.lockedReason ? `: ${record.lockedReason}` : ""}` : undefined,
+    record.lockedReason !== undefined
+      ? `locked${record.lockedReason ? `: ${record.lockedReason}` : ""}`
+      : undefined,
     record.prunableReason !== undefined
       ? `prunable${record.prunableReason ? `: ${record.prunableReason}` : ""}`
       : undefined,
@@ -549,12 +621,17 @@ async function runGitAllowFailure(
     if (/\bENOENT\b|not found/i.test(message)) {
       throw new GitWorktreeError("Git executable was not found. Install Git and retry.", args);
     }
-    throw new GitWorktreeError(`Could not start git ${args.slice(0, 2).join(" ")}: ${message}`, args);
+    throw new GitWorktreeError(
+      `Could not start git ${args.slice(0, 2).join(" ")}: ${message}`,
+      args,
+    );
   }
 }
 
 function gitFailure(args: string[], result: ExecResult): GitWorktreeError {
-  const detail = stripTerminalControls([result.stderr.trim(), result.stdout.trim()].filter(Boolean).join("\n"));
+  const detail = stripTerminalControls(
+    [result.stderr.trim(), result.stdout.trim()].filter(Boolean).join("\n"),
+  );
   const hint = /not a git repository/i.test(detail)
     ? "The current Pi workspace is not inside a Git repository."
     : detail || `Git exited with code ${result.code}.`;
@@ -562,7 +639,10 @@ function gitFailure(args: string[], result: ExecResult): GitWorktreeError {
 }
 
 function killedError(args: string[]): GitWorktreeError {
-  return new GitWorktreeError(`git ${args.slice(0, 2).join(" ")} timed out or was cancelled.`, args);
+  return new GitWorktreeError(
+    `git ${args.slice(0, 2).join(" ")} timed out or was cancelled.`,
+    args,
+  );
 }
 
 function nonEmptyLines(value: string): string[] {
@@ -630,7 +710,12 @@ async function sparseManagedSkipWorktreePaths(
 
   const candidates = new Set(paths);
   const checkArgs = ["sparse-checkout", "check-rules", "-z"];
-  const checked = await runGitWithInputAllowFailure(checkArgs, cwd, `${[...candidates].join("\0")}\0`, signal);
+  const checked = await runGitWithInputAllowFailure(
+    checkArgs,
+    cwd,
+    `${[...candidates].join("\0")}\0`,
+    signal,
+  );
   if (checked.killed) throw killedError(checkArgs);
   // Older Git versions lack check-rules; retain every flag rather than guessing.
   if (checked.code !== 0) return new Set();
@@ -676,7 +761,10 @@ function runGitWithInputAllowFailure(
       reject(
         /\bENOENT\b|not found/i.test(message)
           ? new GitWorktreeError("Git executable was not found. Install Git and retry.", args)
-          : new GitWorktreeError(`Could not start git ${args.slice(0, 2).join(" ")}: ${message}`, args),
+          : new GitWorktreeError(
+              `Could not start git ${args.slice(0, 2).join(" ")}: ${message}`,
+              args,
+            ),
       );
     };
     const stop = () => {
@@ -725,7 +813,9 @@ function removeLineEnding(value: string): string {
 function splitAdministrativeOids(value: string, source: string): string[] {
   const normalized = value.endsWith("\n") ? value.slice(0, -1) : value;
   if (!normalized) return [];
-  const values = normalized.split("\n").map((line) => (line.endsWith("\r") ? line.slice(0, -1) : line));
+  const values = normalized
+    .split("\n")
+    .map((line) => (line.endsWith("\r") ? line.slice(0, -1) : line));
   if (values.some((oid) => !/^[0-9a-fA-F]{40,64}$/u.test(oid))) {
     throw new GitWorktreeError(`Git returned malformed object IDs for ${source}.`);
   }
@@ -751,15 +841,21 @@ function readAdministrativeFile(administrativePath: string, name: string): strin
     stat = lstatSync(path);
   } catch (error) {
     if (isNodeError(error) && error.code === "ENOENT") return undefined;
-    throw new GitWorktreeError(`Cannot inspect Git worktree administrative ${name}: ${formatError(error)}`);
+    throw new GitWorktreeError(
+      `Cannot inspect Git worktree administrative ${name}: ${formatError(error)}`,
+    );
   }
   if (stat.isSymbolicLink() || !stat.isFile()) {
-    throw new GitWorktreeError(`Git worktree administrative ${name} must be a regular file: ${path}.`);
+    throw new GitWorktreeError(
+      `Git worktree administrative ${name} must be a regular file: ${path}.`,
+    );
   }
   try {
     return readFileSync(path, "utf8");
   } catch (error) {
-    throw new GitWorktreeError(`Cannot inspect Git worktree administrative ${name}: ${formatError(error)}`);
+    throw new GitWorktreeError(
+      `Cannot inspect Git worktree administrative ${name}: ${formatError(error)}`,
+    );
   }
 }
 

@@ -8,8 +8,12 @@ import { getAgentDir } from "@earendil-works/pi-coding-agent";
 type Document = Record<string, unknown>;
 
 // Public defaults only: never enumerate/copy an agent directory or credentials.
-export const SUPPORTED_EXTENSION_DEFAULTS: readonly string[] = Object.freeze(configManifest.defaults);
-export const SUPPORTED_EXTENSION_PREFERENCES: readonly string[] = Object.freeze(configManifest.preferences);
+export const SUPPORTED_EXTENSION_DEFAULTS: readonly string[] = Object.freeze(
+  configManifest.defaults,
+);
+export const SUPPORTED_EXTENSION_PREFERENCES: readonly string[] = Object.freeze(
+  configManifest.preferences,
+);
 const isDocument = (value: unknown): value is Document =>
   value !== null && typeof value === "object" && !Array.isArray(value);
 
@@ -24,8 +28,8 @@ export function mergeExtensionSettings(base: Document, override: Document): Docu
   const merged: Document = { ...base };
   for (const [key, value] of Object.entries(override)) {
     if (key === "__proto__" || key === "constructor" || key === "prototype") continue;
-    merged[key] = isDocument(value) && isDocument(base[key])
-      ? mergeExtensionSettings(base[key], value) : value;
+    merged[key] =
+      isDocument(value) && isDocument(base[key]) ? mergeExtensionSettings(base[key], value) : value;
   }
   return merged;
 }
@@ -37,7 +41,10 @@ export function readExtensionDefaults(name: string, agentDir = getAgentDir()): D
 }
 
 /** Snapshot only supported public defaults into an isolated child's agent dir. */
-export async function copyExtensionDefaults(sourceAgentDir: string, childAgentDir: string): Promise<void> {
+export async function copyExtensionDefaults(
+  sourceAgentDir: string,
+  childAgentDir: string,
+): Promise<void> {
   const destination = join(childAgentDir, "defaults");
   for (const name of SUPPORTED_EXTENSION_DEFAULTS) {
     const document = readExtensionDefaults(name, sourceAgentDir);
@@ -50,15 +57,18 @@ export async function copyExtensionDefaults(sourceAgentDir: string, childAgentDi
     try {
       await writeFile(temporary, `${JSON.stringify(document)}\n`, { flag: "wx", mode: 0o600 });
       await rename(temporary, join(destination, `${name}.json`));
-    } finally { await rm(temporary, { force: true }); }
+    } finally {
+      await rm(temporary, { force: true });
+    }
   }
 }
 
 /** Only explicitly named public preference paths may be passed here. */
 export function readPreferenceDocument(path: string): Document {
   let descriptor: number;
-  try { descriptor = openSync(path, constants.O_RDONLY | (constants.O_NONBLOCK ?? 0)); }
-  catch (error) {
+  try {
+    descriptor = openSync(path, constants.O_RDONLY | (constants.O_NONBLOCK ?? 0));
+  } catch (error) {
     if ((error as NodeJS.ErrnoException).code === "ENOENT") return {};
     throw error;
   }
@@ -74,12 +84,16 @@ export function readPreferenceDocument(path: string): Document {
       offset += count;
     }
     if (offset > limit) throw new Error(`${path}: preferences file exceeds size limit`);
-    const value: unknown = JSON.parse(new TextDecoder("utf-8", { fatal: true }).decode(buffer.subarray(0, offset)));
+    const value: unknown = JSON.parse(
+      new TextDecoder("utf-8", { fatal: true }).decode(buffer.subarray(0, offset)),
+    );
     if (!isDocument(value)) throw new Error(`${path}: preferences must be an object`);
     return value;
   } catch (error) {
     throw new Error(`${path}: ${error instanceof Error ? error.message : String(error)}`);
-  } finally { closeSync(descriptor); }
+  } finally {
+    closeSync(descriptor);
+  }
 }
 
 export function withExtensionDefaults(name: string, value: unknown, section?: string): unknown {

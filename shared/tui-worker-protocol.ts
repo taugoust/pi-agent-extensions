@@ -59,34 +59,86 @@ type TuiWorkerManifestBase = {
   /** Private optional Goal binding on an otherwise ordinary managed worker. */
   assignedGoal?: import("../subagent/managed-goal.ts").ManagedGoalAssignment;
 };
-export type TuiWorkerManifest = TuiWorkerManifestBase & (
-  | { execution: "rpc-headless"; presentation: "headless-foreground"; placement?: never; processPid: number; processToken: string; runtimePid?: number; runtimeProcessToken?: string; fifoPath: string; panePid?: never; paneProcessToken?: never }
-  | { execution?: "tmux"; presentation: "foreground-staged" | "background"; placement: TuiWorkerPlacement; panePid?: number; paneProcessToken?: string; processPid?: never; processToken?: never; fifoPath?: never }
-);
+export type TuiWorkerManifest = TuiWorkerManifestBase &
+  (
+    | {
+        execution: "rpc-headless";
+        presentation: "headless-foreground";
+        placement?: never;
+        processPid: number;
+        processToken: string;
+        runtimePid?: number;
+        runtimeProcessToken?: string;
+        fifoPath: string;
+        panePid?: never;
+        paneProcessToken?: never;
+      }
+    | {
+        execution?: "tmux";
+        presentation: "foreground-staged" | "background";
+        placement: TuiWorkerPlacement;
+        panePid?: number;
+        paneProcessToken?: string;
+        processPid?: never;
+        processToken?: never;
+        fifoPath?: never;
+      }
+  );
 
 export type TuiPlacedWorkerManifest = Extract<TuiWorkerManifest, { placement: TuiWorkerPlacement }>;
 export type HeadlessWorkerManifest = Extract<TuiWorkerManifest, { execution: "rpc-headless" }>;
 
-export type TuiWorkerIdentity = Pick<TuiWorkerManifest,
-  "ownerSessionId" | "taskId" | "runtimeId" | "groupId" | "childId" | "attempt" | "workerEpoch">;
+export type TuiWorkerIdentity = Pick<
+  TuiWorkerManifest,
+  "ownerSessionId" | "taskId" | "runtimeId" | "groupId" | "childId" | "attempt" | "workerEpoch"
+>;
 
-export type TuiWorkerJobParams = { action: "list" | "status" | "output" | "yield" | "cancel" | "reap" | "watches" | "events" | "ack" | "unwatch";
-  job_id?: string; watch_id?: string; limit?: number; lines?: number; after_sequence?: number; through_sequence?: number };
+export type TuiWorkerJobParams = {
+  action:
+    | "list"
+    | "status"
+    | "output"
+    | "yield"
+    | "cancel"
+    | "reap"
+    | "watches"
+    | "events"
+    | "ack"
+    | "unwatch";
+  job_id?: string;
+  watch_id?: string;
+  limit?: number;
+  lines?: number;
+  after_sequence?: number;
+  through_sequence?: number;
+};
 /** Existing-job control only. No shell, start/adopt, foreign session, or scope override. */
 export function parseTuiWorkerJobParams(value: unknown): TuiWorkerJobParams {
   const data = object(value);
   const fields: Record<string, [string[], string[]]> = {
-    list: [[], ["limit"]], status: [["job_id"], []], output: [["job_id"], ["lines"]], yield: [[], ["job_id"]],
-    cancel: [["job_id"], []], reap: [["job_id"], []], watches: [[], []], events: [["watch_id"], ["after_sequence"]],
-    ack: [["watch_id", "through_sequence"], []], unwatch: [["watch_id"], []],
+    list: [[], ["limit"]],
+    status: [["job_id"], []],
+    output: [["job_id"], ["lines"]],
+    yield: [[], ["job_id"]],
+    cancel: [["job_id"], []],
+    reap: [["job_id"], []],
+    watches: [[], []],
+    events: [["watch_id"], ["after_sequence"]],
+    ack: [["watch_id", "through_sequence"], []],
+    unwatch: [["watch_id"], []],
   };
   const action = text(data.action, 32);
   if (!Object.hasOwn(fields, action)) throw new Error("Unsupported local job control action");
   const [required, optional] = fields[action];
-  exactKeys(data, ["action", ...required, ...optional.filter(key => Object.hasOwn(data, key))]);
+  exactKeys(data, ["action", ...required, ...optional.filter((key) => Object.hasOwn(data, key))]);
   if (data.job_id !== undefined) text(data.job_id, 64, /^job-[a-f0-9]{24}$/);
   if (data.watch_id !== undefined) text(data.watch_id, 64, /^watch-[a-f0-9]{24}$/);
-  for (const [key, min, max] of [["limit", 1, 50], ["lines", 1, 2000], ["after_sequence", 0, Number.MAX_SAFE_INTEGER], ["through_sequence", 0, Number.MAX_SAFE_INTEGER]] as const) {
+  for (const [key, min, max] of [
+    ["limit", 1, 50],
+    ["lines", 1, 2000],
+    ["after_sequence", 0, Number.MAX_SAFE_INTEGER],
+    ["through_sequence", 0, Number.MAX_SAFE_INTEGER],
+  ] as const) {
     if (data[key] !== undefined && integer(data[key], min) > max) throw new Error(`Invalid ${key}`);
   }
   return { ...data } as TuiWorkerJobParams;
@@ -107,14 +159,23 @@ export type TuiWorkerOperation =
   // verified pane. It must reject a busy child; cancel is never implicit.
   | { operation: "prepare_reap"; force?: boolean; reason?: string }
   | { operation: "promote"; placement: TuiWorkerPlacement }
-  | { operation: "respond_interaction"; interactionId: string; answer: import("./foreground-tasks.ts").TaskInteractionAnswer }
-  | { operation: "idle_decision"; decisionRequestId: string; choice: "ignore" | "compact" | "cancel" };
+  | {
+      operation: "respond_interaction";
+      interactionId: string;
+      answer: import("./foreground-tasks.ts").TaskInteractionAnswer;
+    }
+  | {
+      operation: "idle_decision";
+      decisionRequestId: string;
+      choice: "ignore" | "compact" | "cancel";
+    };
 
-export type TuiWorkerRequest = TuiWorkerIdentity & TuiWorkerOperation & {
-  protocol: typeof TUI_WORKER_PROTOCOL;
-  requestId: string;
-  token: string;
-};
+export type TuiWorkerRequest = TuiWorkerIdentity &
+  TuiWorkerOperation & {
+    protocol: typeof TUI_WORKER_PROTOCOL;
+    requestId: string;
+    token: string;
+  };
 
 export type TuiWorkerResponse = {
   protocol: typeof TUI_WORKER_PROTOCOL;
@@ -122,7 +183,26 @@ export type TuiWorkerResponse = {
   workerEpoch: string;
 } & (
   | { ok: true; receipt: "accepted" | "applied"; sequence: number; data?: unknown }
-  | { ok: false; code: "unauthorized" | "stale" | "invalid" | "busy" | "sealed" | "ambiguous" | "unavailable" | "compact_failed" | "interrupt_incomplete" | "cleanup_failed" | "verification_cleanup_incomplete"; message: string; receipt?: "failed"; data?: { abortRequested: true; replacementDispatched: false } | { worktreeCleanupFailure: string } }
+  | {
+      ok: false;
+      code:
+        | "unauthorized"
+        | "stale"
+        | "invalid"
+        | "busy"
+        | "sealed"
+        | "ambiguous"
+        | "unavailable"
+        | "compact_failed"
+        | "interrupt_incomplete"
+        | "cleanup_failed"
+        | "verification_cleanup_incomplete";
+      message: string;
+      receipt?: "failed";
+      data?:
+        | { abortRequested: true; replacementDispatched: false }
+        | { worktreeCleanupFailure: string };
+    }
 );
 
 export type TuiWorkerEvent = {
@@ -130,32 +210,66 @@ export type TuiWorkerEvent = {
   workerEpoch: string;
   sequence: number;
   timestamp: string;
-  kind: "ready" | "running" | "settled" | "verification_settled" | "notification" | "outcome" | "cancelled" | "closing" | "interaction_pending" | "interaction_resolved" | "interaction_cancelled" | "idle_decision_pending" | "idle_decision_resolved" | "idle_decision_cancelled" | "conversation_tool_start" | "conversation_tool_end";
+  kind:
+    | "ready"
+    | "running"
+    | "settled"
+    | "verification_settled"
+    | "notification"
+    | "outcome"
+    | "cancelled"
+    | "closing"
+    | "interaction_pending"
+    | "interaction_resolved"
+    | "interaction_cancelled"
+    | "idle_decision_pending"
+    | "idle_decision_resolved"
+    | "idle_decision_cancelled"
+    | "conversation_tool_start"
+    | "conversation_tool_end";
   data?: unknown;
 };
 
 function object(value: unknown): Record<string, unknown> {
-  if (!value || typeof value !== "object" || Array.isArray(value)) throw new Error("Expected protocol object");
+  if (!value || typeof value !== "object" || Array.isArray(value))
+    throw new Error("Expected protocol object");
   return value as Record<string, unknown>;
 }
 function exactKeys(value: Record<string, unknown>, keys: readonly string[]): void {
-  if (Object.keys(value).some(key => !keys.includes(key)) || keys.some(key => !Object.hasOwn(value, key))) {
+  if (
+    Object.keys(value).some((key) => !keys.includes(key)) ||
+    keys.some((key) => !Object.hasOwn(value, key))
+  ) {
     throw new Error("Unexpected or missing protocol field");
   }
 }
 function text(value: unknown, maximum: number, pattern?: RegExp): string {
-  if (typeof value !== "string" || !value || Buffer.byteLength(value, "utf8") > maximum
-    || value.includes("\0") || (pattern && !pattern.test(value))) throw new Error("Invalid protocol string");
+  if (
+    typeof value !== "string" ||
+    !value ||
+    Buffer.byteLength(value, "utf8") > maximum ||
+    value.includes("\0") ||
+    (pattern && !pattern.test(value))
+  )
+    throw new Error("Invalid protocol string");
   return value;
 }
 function integer(value: unknown, minimum: number): number {
-  if (!Number.isSafeInteger(value) || (value as number) < minimum) throw new Error("Invalid protocol integer");
+  if (!Number.isSafeInteger(value) || (value as number) < minimum)
+    throw new Error("Invalid protocol integer");
   return value as number;
 }
 
 export function parseTuiWorkerPlacement(value: unknown): TuiWorkerPlacement {
   const data = object(value);
-  exactKeys(data, ["socketPath", "serverEpoch", "sessionId", "windowId", "paneId", "ownershipNonce"]);
+  exactKeys(data, [
+    "socketPath",
+    "serverEpoch",
+    "sessionId",
+    "windowId",
+    "paneId",
+    "ownershipNonce",
+  ]);
   return {
     socketPath: text(data.socketPath, 4096, /^\//),
     serverEpoch: text(data.serverEpoch, 128, /^[a-zA-Z0-9:._-]+$/),
@@ -169,16 +283,44 @@ export function parseTuiWorkerPlacement(value: unknown): TuiWorkerPlacement {
 /** Validate only shape; caller must authenticate BEFORE disclosing worker state. */
 export function parseTuiWorkerRequest(value: unknown): TuiWorkerRequest {
   const data = object(value);
-  const base = ["protocol", "requestId", "token", "ownerSessionId", "taskId", "runtimeId", "groupId", "childId", "attempt", "workerEpoch", "operation"];
+  const base = [
+    "protocol",
+    "requestId",
+    "token",
+    "ownerSessionId",
+    "taskId",
+    "runtimeId",
+    "groupId",
+    "childId",
+    "attempt",
+    "workerEpoch",
+    "operation",
+  ];
   const fields: Record<string, string[]> = {
-    status: [], events: ["afterSequence"], prompt: ["mode", "message"], user_prompt: ["message"],
-    cancel: [], compact: [], verify: [], jobs: ["params"], prepare_reap: [], promote: ["placement"],
-    respond_interaction: ["interactionId", "answer"], idle_decision: ["decisionRequestId", "choice"],
+    status: [],
+    events: ["afterSequence"],
+    prompt: ["mode", "message"],
+    user_prompt: ["message"],
+    cancel: [],
+    compact: [],
+    verify: [],
+    jobs: ["params"],
+    prepare_reap: [],
+    promote: ["placement"],
+    respond_interaction: ["interactionId", "answer"],
+    idle_decision: ["decisionRequestId", "choice"],
   };
   const operation = text(data.operation, 32);
   if (!Object.hasOwn(fields, operation)) throw new Error("Unknown worker operation");
-  const optionalFields = operation === "prepare_reap" ? ["force", "reason"].filter(key => Object.hasOwn(data, key)) : [];
-  exactKeys(data, [...base, ...fields[operation].filter(key => !optionalFields.includes(key)), ...optionalFields]);
+  const optionalFields =
+    operation === "prepare_reap"
+      ? ["force", "reason"].filter((key) => Object.hasOwn(data, key))
+      : [];
+  exactKeys(data, [
+    ...base,
+    ...fields[operation].filter((key) => !optionalFields.includes(key)),
+    ...optionalFields,
+  ]);
   if (data.protocol !== TUI_WORKER_PROTOCOL) throw new Error("Unsupported worker protocol");
   const identity = {
     protocol: TUI_WORKER_PROTOCOL,
@@ -193,8 +335,10 @@ export function parseTuiWorkerRequest(value: unknown): TuiWorkerRequest {
     workerEpoch: text(data.workerEpoch, 64, /^[a-f0-9]{32}$/),
   };
   switch (operation) {
-    case "jobs": return { ...identity, operation, params: parseTuiWorkerJobParams(data.params) };
-    case "events": return { ...identity, operation, afterSequence: integer(data.afterSequence, 0) };
+    case "jobs":
+      return { ...identity, operation, params: parseTuiWorkerJobParams(data.params) };
+    case "events":
+      return { ...identity, operation, afterSequence: integer(data.afterSequence, 0) };
     case "user_prompt": {
       const message = text(data.message, TUI_WORKER_MAX_MESSAGE_BYTES);
       if (!message.trim()) throw new Error("Empty prompt");
@@ -202,34 +346,55 @@ export function parseTuiWorkerRequest(value: unknown): TuiWorkerRequest {
     }
     case "prompt": {
       const mode = data.mode;
-      if (mode !== "steer" && mode !== "follow_up" && mode !== "interrupt") throw new Error("Invalid prompt mode");
+      if (mode !== "steer" && mode !== "follow_up" && mode !== "interrupt")
+        throw new Error("Invalid prompt mode");
       const message = text(data.message, TUI_WORKER_MAX_MESSAGE_BYTES);
       if (!message.trim()) throw new Error("Empty prompt");
       return { ...identity, operation, mode, message };
     }
-    case "promote": return { ...identity, operation, placement: parseTuiWorkerPlacement(data.placement) };
+    case "promote":
+      return { ...identity, operation, placement: parseTuiWorkerPlacement(data.placement) };
     case "idle_decision": {
       const decisionRequestId = text(data.decisionRequestId, 128, /^idle:[a-f0-9]{32}$/);
       const choice = data.choice;
-      if (choice !== "ignore" && choice !== "compact" && choice !== "cancel") throw new Error("Invalid idle decision");
+      if (choice !== "ignore" && choice !== "compact" && choice !== "cancel")
+        throw new Error("Invalid idle decision");
       return { ...identity, operation, decisionRequestId, choice };
     }
     case "respond_interaction": {
       const interactionId = text(data.interactionId, 128, /^[a-zA-Z0-9._:-]+$/);
       const answer = data.answer as any;
-      if (!answer || !["permission", "questionnaire"].includes(answer.kind) || typeof answer.cancelled !== "boolean"
-        || Buffer.byteLength(JSON.stringify(answer)) > 24 * 1024) throw new Error("Invalid interaction answer");
+      if (
+        !answer ||
+        !["permission", "questionnaire"].includes(answer.kind) ||
+        typeof answer.cancelled !== "boolean" ||
+        Buffer.byteLength(JSON.stringify(answer)) > 24 * 1024
+      )
+        throw new Error("Invalid interaction answer");
       return { ...identity, operation, interactionId, answer };
     }
     case "prepare_reap": {
-      if (data.force !== undefined && typeof data.force !== "boolean") throw new Error("force must be boolean");
+      if (data.force !== undefined && typeof data.force !== "boolean")
+        throw new Error("force must be boolean");
       if (data.reason !== undefined) text(data.reason, 1000);
-      if (data.force === true && !String(data.reason ?? "").trim()) throw new Error("Forced reap requires a reason");
-      if (data.force !== true && data.reason !== undefined) throw new Error("reason requires force: true");
-      return { ...identity, operation, ...(data.force !== undefined ? { force: data.force } : {}), ...(data.force === true ? { reason: String(data.reason) } : {}) };
+      if (data.force === true && !String(data.reason ?? "").trim())
+        throw new Error("Forced reap requires a reason");
+      if (data.force !== true && data.reason !== undefined)
+        throw new Error("reason requires force: true");
+      return {
+        ...identity,
+        operation,
+        ...(data.force !== undefined ? { force: data.force } : {}),
+        ...(data.force === true ? { reason: String(data.reason) } : {}),
+      };
     }
-    case "status": case "cancel": case "compact": case "verify": return { ...identity, operation };
-    default: throw new Error("Unknown worker operation");
+    case "status":
+    case "cancel":
+    case "compact":
+    case "verify":
+      return { ...identity, operation };
+    default:
+      throw new Error("Unknown worker operation");
   }
 }
 
@@ -241,18 +406,38 @@ export function decodeTuiWorkerRequest(frame: Buffer): TuiWorkerRequest {
 }
 
 /** Public discovery view cannot accidentally serialize the bearer capability. */
-export function publicTuiWorkerManifest(manifest: TuiWorkerManifest): Omit<TuiWorkerManifest, "controlToken" | "operatorCapabilityHash"> {
+export function publicTuiWorkerManifest(
+  manifest: TuiWorkerManifest,
+): Omit<TuiWorkerManifest, "controlToken" | "operatorCapabilityHash"> {
   // Explicit allow-list: a future private capability field must not leak merely
   // because it was added to the manifest schema.
-  return structuredClone({ protocol: manifest.protocol, ownerSessionId: manifest.ownerSessionId,
-    taskId: manifest.taskId, runtimeId: manifest.runtimeId, groupId: manifest.groupId,
-    childId: manifest.childId, attempt: manifest.attempt, workerEpoch: manifest.workerEpoch,
-    controlSocket: manifest.controlSocket, sessionFile: manifest.sessionFile,
+  return structuredClone({
+    protocol: manifest.protocol,
+    ownerSessionId: manifest.ownerSessionId,
+    taskId: manifest.taskId,
+    runtimeId: manifest.runtimeId,
+    groupId: manifest.groupId,
+    childId: manifest.childId,
+    attempt: manifest.attempt,
+    workerEpoch: manifest.workerEpoch,
+    controlSocket: manifest.controlSocket,
+    sessionFile: manifest.sessionFile,
     ...(manifest.placement ? { placement: manifest.placement } : {}),
-    presentation: manifest.presentation, execution: manifest.execution, launchMode: manifest.launchMode,
-    ...(manifest.execution === "rpc-headless" ? { processPid: manifest.processPid, processToken: manifest.processToken,
-        ...(manifest.runtimePid !== undefined ? { runtimePid: manifest.runtimePid, runtimeProcessToken: manifest.runtimeProcessToken } : {}) } :
-      { panePid: manifest.panePid, paneProcessToken: manifest.paneProcessToken }), tools: manifest.tools,
-    cleanupWorktreesOnReap: manifest.cleanupWorktreesOnReap === true, automaticWorktrees: manifest.automaticWorktrees === true,
-    ...(manifest.worktreeIdentity ? { worktreeIdentity: manifest.worktreeIdentity } : {}) });
+    presentation: manifest.presentation,
+    execution: manifest.execution,
+    launchMode: manifest.launchMode,
+    ...(manifest.execution === "rpc-headless"
+      ? {
+          processPid: manifest.processPid,
+          processToken: manifest.processToken,
+          ...(manifest.runtimePid !== undefined
+            ? { runtimePid: manifest.runtimePid, runtimeProcessToken: manifest.runtimeProcessToken }
+            : {}),
+        }
+      : { panePid: manifest.panePid, paneProcessToken: manifest.paneProcessToken }),
+    tools: manifest.tools,
+    cleanupWorktreesOnReap: manifest.cleanupWorktreesOnReap === true,
+    automaticWorktrees: manifest.automaticWorktrees === true,
+    ...(manifest.worktreeIdentity ? { worktreeIdentity: manifest.worktreeIdentity } : {}),
+  });
 }

@@ -22,17 +22,32 @@ import type { LocalJobController } from "../shared/background-job.ts";
 /** Whether a tool result is an accepted goal completion. A refused completion
  * (for example, PRs not merged yet) is an ordinary result, not an error, and must
  * not be treated as a completion to prove: that would fail the worker closed. */
-export function isAcceptedGoalCompletion(event: { toolName?: string; isError?: boolean; details?: unknown }): boolean {
-  return event.toolName === "goal_complete" && !event.isError && (event.details as { accepted?: unknown } | undefined)?.accepted === true;
+export function isAcceptedGoalCompletion(event: {
+  toolName?: string;
+  isError?: boolean;
+  details?: unknown;
+}): boolean {
+  return (
+    event.toolName === "goal_complete" &&
+    !event.isError &&
+    (event.details as { accepted?: unknown } | undefined)?.accepted === true
+  );
 }
 
 /** Explicit -e entry point, loaded inside the one interactive child Pi process. */
 export default async function tuiWorkerExtension(pi: ExtensionAPI): Promise<void> {
   const manifestPath = process.env[TUI_WORKER_MANIFEST_ENV];
   if (!manifestPath) return;
-  const launchManifest = process.env.PI_DEDICATED_GOAL_CHILD === "1" ? new TuiWorkerStore(dirname(manifestPath)).readManifest() : undefined;
+  const launchManifest =
+    process.env.PI_DEDICATED_GOAL_CHILD === "1"
+      ? new TuiWorkerStore(dirname(manifestPath)).readManifest()
+      : undefined;
   if (launchManifest?.assignedGoal) {
-    if (launchManifest.childId !== process.env.PI_SUBAGENT_ID || process.env.PI_DEDICATED_GOAL_CHILD !== "1") throw new Error("Managed Goal launch identity changed");
+    if (
+      launchManifest.childId !== process.env.PI_SUBAGENT_ID ||
+      process.env.PI_DEDICATED_GOAL_CHILD !== "1"
+    )
+      throw new Error("Managed Goal launch identity changed");
     process.env.PI_DEDICATED_GOAL_BINDING = JSON.stringify(managedGoalBinding(launchManifest));
     await (await import("./goal-worker.ts")).default(pi as any);
   }
@@ -54,7 +69,10 @@ export default async function tuiWorkerExtension(pi: ExtensionAPI): Promise<void
     return { trusted: "no", remember: false };
   });
   let clearWorktreeContext: (() => void) | undefined;
-  pi.on("session_shutdown", () => { clearWorktreeContext?.(); clearWorktreeContext = undefined; });
+  pi.on("session_shutdown", () => {
+    clearWorktreeContext?.();
+    clearWorktreeContext = undefined;
+  });
   let worker: TuiWorkerServer | undefined;
   let context: ExtensionContext | undefined;
   let failed = false;
@@ -66,80 +84,161 @@ export default async function tuiWorkerExtension(pi: ExtensionAPI): Promise<void
   let aliasProjection: WorkerAliasProjection | undefined;
   const projectAlias = (alias: string) => {
     if (!worker || failed) return;
-    aliasProjection ??= new WorkerAliasProjection(async desired => {
-      if (!worker || failed || worker.sealed) throw new Error("Worker alias authority unavailable");
-      await new TuiWorkerTmux().rename(worker.manifest, desired, process.env.PI_SUBAGENT_NAME_WINDOW !== "0");
-    }, () => {
-      if (context?.hasUI) context.ui.notify("Name saved; tmux alias update unavailable. Retrying while this worker remains active.", "warning");
-    });
+    aliasProjection ??= new WorkerAliasProjection(
+      async (desired) => {
+        if (!worker || failed || worker.sealed)
+          throw new Error("Worker alias authority unavailable");
+        await new TuiWorkerTmux().rename(
+          worker.manifest,
+          desired,
+          process.env.PI_SUBAGENT_NAME_WINDOW !== "0",
+        );
+      },
+      () => {
+        if (context?.hasUI)
+          context.ui.notify(
+            "Name saved; tmux alias update unavailable. Retrying while this worker remains active.",
+            "warning",
+          );
+      },
+    );
     void aliasProjection.request(alias);
   };
-  const applyName = async (name: string, source: "pi" | "paseo", expectedRevision = nameRevision) => {
+  const applyName = async (
+    name: string,
+    source: "pi" | "paseo",
+    expectedRevision = nameRevision,
+  ) => {
     if (!nameStore || !context) throw new Error("Canonical naming unavailable");
     const record = await nameStore.rename(name, expectedRevision, source);
     nameRevision = record.revision;
     appliedName = record.displayName;
-    if (context.sessionManager.getSessionName() !== record.displayName) pi.setSessionName(record.displayName);
+    if (context.sessionManager.getSessionName() !== record.displayName)
+      pi.setSessionName(record.displayName);
     projectAlias(record.alias);
-    pi.events.emit("subagent-name-changed", { taskId: record.taskId, childId: record.childId, attempt: record.attempt, runtimeId: record.runtimeId, workerEpoch: record.workerEpoch, revision: record.revision, displayName: record.displayName });
+    pi.events.emit("subagent-name-changed", {
+      taskId: record.taskId,
+      childId: record.childId,
+      attempt: record.attempt,
+      runtimeId: record.runtimeId,
+      workerEpoch: record.workerEpoch,
+      revision: record.revision,
+      displayName: record.displayName,
+    });
     return record;
   };
   let pendingGoalCompletion = false;
   pi.on("tool_result", (event) => {
-    if (launchManifest?.assignedGoal && isAcceptedGoalCompletion(event)) pendingGoalCompletion = true;
+    if (launchManifest?.assignedGoal && isAcceptedGoalCompletion(event))
+      pendingGoalCompletion = true;
   });
   let lastAssistant: unknown;
   let liveAssistantText = "";
   let ownerWatch: ReturnType<typeof setInterval> | undefined;
   let rpcLogTrimTimer: ReturnType<typeof setInterval> | undefined;
-  let parentIdleCapability: { request: (details: { model: string; idleMinutes: number; contextPercent: number }, signal?: AbortSignal) => Promise<"ignore" | "compact" | "cancel"> } | undefined;
+  let parentIdleCapability:
+    | {
+        request: (
+          details: { model: string; idleMinutes: number; contextPercent: number },
+          signal?: AbortSignal,
+        ) => Promise<"ignore" | "compact" | "cancel">;
+      }
+    | undefined;
   let announcedReap = false;
   let notificationTimes: number[] = [];
   const clearModelInactivityStatus = () => {
-    try { if (context?.hasUI) context.ui.setStatus("subagent-model-inactivity", undefined); } catch { /* A stale TUI must not affect worker execution. */ }
-  };
-  const modelInactivity = new ModelInactivityWatch(() => {
-    if (!worker || worker.sealed) return;
-    const message = "No assistant stream progress for 5 minutes while awaiting the model. Work has not been cancelled; inspect the child and steer or cancel explicitly if needed.";
-    try { worker.notification({ message, requires_guidance: true }); } catch { /* Best-effort observability only. */ }
     try {
-      if (context?.hasUI) {
-        context.ui.setStatus("subagent-model-inactivity", context.ui.theme.fg("warning", "model stalled · awaiting progress"));
-        context.ui.notify(message, "warning");
+      if (context?.hasUI) context.ui.setStatus("subagent-model-inactivity", undefined);
+    } catch {
+      /* A stale TUI must not affect worker execution. */
+    }
+  };
+  const modelInactivity = new ModelInactivityWatch(
+    () => {
+      if (!worker || worker.sealed) return;
+      const message =
+        "No assistant stream progress for 5 minutes while awaiting the model. Work has not been cancelled; inspect the child and steer or cancel explicitly if needed.";
+      try {
+        worker.notification({ message, requires_guidance: true });
+      } catch {
+        /* Best-effort observability only. */
       }
-    } catch { /* A stale TUI must not affect worker execution. */ }
-  }, undefined, undefined, undefined, clearModelInactivityStatus);
+      try {
+        if (context?.hasUI) {
+          context.ui.setStatus(
+            "subagent-model-inactivity",
+            context.ui.theme.fg("warning", "model stalled · awaiting progress"),
+          );
+          context.ui.notify(message, "warning");
+        }
+      } catch {
+        /* A stale TUI must not affect worker execution. */
+      }
+    },
+    undefined,
+    undefined,
+    undefined,
+    clearModelInactivityStatus,
+  );
   const boundedSuffix = (text: string, maxBytes = 16 * 1024) => {
-    const bytes = Buffer.from(text); let start = Math.max(0, bytes.length - maxBytes);
+    const bytes = Buffer.from(text);
+    let start = Math.max(0, bytes.length - maxBytes);
     while (start < bytes.length && (bytes[start]! & 0xc0) === 0x80) start++;
     return bytes.subarray(start).toString("utf8");
   };
-  const allowed = () => Boolean(worker && !failed && !worker.sealed && !worker.preparingReap && (worker.manifest.launchMode !== "guard-only"
-    || currentSubagentPermissionAuthority()?.active === true));
+  const allowed = () =>
+    Boolean(
+      worker &&
+      !failed &&
+      !worker.sealed &&
+      !worker.preparingReap &&
+      (worker.manifest.launchMode !== "guard-only" ||
+        currentSubagentPermissionAuthority()?.active === true),
+    );
   const sendRpcCommand = async (type: "clear_queue" | "abort"): Promise<void> => {
     if (worker?.manifest.execution !== "rpc-headless") return;
-    const manifest = worker.manifest, requestId = `harness-${randomBytes(8).toString("hex")}`;
-    const fd = openSync(manifest.fifoPath, constants.O_WRONLY | constants.O_NONBLOCK | constants.O_NOFOLLOW);
-    try { writeSync(fd, Buffer.from(`${JSON.stringify({ type, id: requestId })}\n`)); }
-    finally { closeSync(fd); }
-    const store = worker.store, deadline = Date.now() + 5000;
+    const manifest = worker.manifest,
+      requestId = `harness-${randomBytes(8).toString("hex")}`;
+    const fd = openSync(
+      manifest.fifoPath,
+      constants.O_WRONLY | constants.O_NONBLOCK | constants.O_NOFOLLOW,
+    );
+    try {
+      writeSync(fd, Buffer.from(`${JSON.stringify({ type, id: requestId })}\n`));
+    } finally {
+      closeSync(fd);
+    }
+    const store = worker.store,
+      deadline = Date.now() + 5000;
     while (Date.now() < deadline) {
       const output = store.readRpcLogTail("stdout", 512 * 1024);
       for (const line of output.split("\n").reverse()) {
         try {
           const response = JSON.parse(line);
-          if (response?.id === requestId && response?.type === "response" && response.command === type) {
+          if (
+            response?.id === requestId &&
+            response?.type === "response" &&
+            response.command === type
+          ) {
             if (response.success !== true) throw new Error(`RPC ${type} was rejected`);
             return;
           }
-        } catch (error) { if (error instanceof Error && error.message.includes("was rejected")) throw error; }
+        } catch (error) {
+          if (error instanceof Error && error.message.includes("was rejected")) throw error;
+        }
       }
-      await new Promise(resolve => setTimeout(resolve, 20));
+      await new Promise((resolve) => setTimeout(resolve, 20));
     }
     throw new Error(`RPC ${type} acknowledgement timed out`);
   };
   const requestShutdown = (ctx: ExtensionContext, sealedReap = false) => {
-    if (ctx.mode === "rpc") void (async () => { try { await sendRpcCommand("clear_queue"); await sendRpcCommand("abort"); } catch {} })();
+    if (ctx.mode === "rpc")
+      void (async () => {
+        try {
+          await sendRpcCommand("clear_queue");
+          await sendRpcCommand("abort");
+        } catch {}
+      })();
     void ctx.abort();
     ctx.shutdown();
     // RPC shutdown is deferred until its next idle command boundary. This
@@ -148,19 +247,33 @@ export default async function tuiWorkerExtension(pi: ExtensionAPI): Promise<void
     // parent-owned writer or EOF side effect).
     if (ctx.mode === "rpc") {
       const timer = setTimeout(() => {
-        try { process.stdin.pause(); process.stdin.destroy(); } catch {}
-        try { closeSync(0); } catch {}
+        try {
+          process.stdin.pause();
+          process.stdin.destroy();
+        } catch {}
+        try {
+          closeSync(0);
+        } catch {}
       }, 500);
       timer.unref?.();
       if (sealedReap) {
-        const exitTimer = setTimeout(() => { void worker?.close().finally(() => { try { process.kill(process.pid, "SIGTERM"); } catch {} }); }, 1500);
+        const exitTimer = setTimeout(() => {
+          void worker?.close().finally(() => {
+            try {
+              process.kill(process.pid, "SIGTERM");
+            } catch {}
+          });
+        }, 1500);
         exitTimer.unref?.();
       }
     }
   };
   const stop = (ctx: ExtensionContext) => {
     // A cleanup refusal must leave the controller available for repair/retry.
-    if (worker?.preparingReap) { worker.running(); return; }
+    if (worker?.preparingReap) {
+      worker.running();
+      return;
+    }
     requestShutdown(ctx);
   };
   const fail = (ctx: ExtensionContext, error: unknown) => {
@@ -170,20 +283,39 @@ export default async function tuiWorkerExtension(pi: ExtensionAPI): Promise<void
       try {
         const store = new TuiWorkerStore(dirname(resolve(manifestPath)));
         let execution: string | undefined;
-        try { execution = store.readManifest().execution; } catch { /* still record a bounded startup diagnostic in the launch-owned file */ }
+        try {
+          execution = store.readManifest().execution;
+        } catch {
+          /* still record a bounded startup diagnostic in the launch-owned file */
+        }
         if (ctx.mode === "rpc" || execution === "rpc-headless") {
-          const fd = openSync(store.path("rpc.stderr.log"), constants.O_WRONLY | constants.O_APPEND | constants.O_NOFOLLOW);
+          const fd = openSync(
+            store.path("rpc.stderr.log"),
+            constants.O_WRONLY | constants.O_APPEND | constants.O_NOFOLLOW,
+          );
           try {
             const stat = fstatSync(fd);
-            if (stat.isFile() && (stat.mode & 0o077) === 0 && (!process.getuid || stat.uid === process.getuid())) {
-              const safe = message.replace(/[a-f0-9]{64}/gi, "[redacted]").replace(/(token|capability)[=: ]+[^\s,;]+/gi, "$1=[redacted]");
-              const bytes = Buffer.from(`${new Date().toISOString()} headless-worker-error ${boundedSuffix(safe, 2048)}\n`);
+            if (
+              stat.isFile() &&
+              (stat.mode & 0o077) === 0 &&
+              (!process.getuid || stat.uid === process.getuid())
+            ) {
+              const safe = message
+                .replace(/[a-f0-9]{64}/gi, "[redacted]")
+                .replace(/(token|capability)[=: ]+[^\s,;]+/gi, "$1=[redacted]");
+              const bytes = Buffer.from(
+                `${new Date().toISOString()} headless-worker-error ${boundedSuffix(safe, 2048)}\n`,
+              );
               writeSync(fd, bytes);
             }
-          } finally { closeSync(fd); }
+          } finally {
+            closeSync(fd);
+          }
           store.trimRpcLogs();
         }
-      } catch { /* Diagnostic logging must not weaken fail-closed shutdown. */ }
+      } catch {
+        /* Diagnostic logging must not weaken fail-closed shutdown. */
+      }
     } else if (ctx.hasUI) ctx.ui.notify(`TUI worker failed closed: ${message}`, "error");
     stop(ctx);
   };
@@ -193,25 +325,54 @@ export default async function tuiWorkerExtension(pi: ExtensionAPI): Promise<void
     if (nameWatch) clearInterval(nameWatch);
     nameWatch = undefined;
     context = ctx;
-    clearWorktreeContext?.(); clearWorktreeContext = undefined;
+    clearWorktreeContext?.();
+    clearWorktreeContext = undefined;
     try {
       const store = new TuiWorkerStore(dirname(resolve(manifestPath)));
-      if (store.path("manifest.json") !== resolve(manifestPath)) throw new Error("Invalid worker manifest filename");
+      if (store.path("manifest.json") !== resolve(manifestPath))
+        throw new Error("Invalid worker manifest filename");
       const manifest = store.readManifest();
-      if (manifest.execution === "rpc-headless" ? ctx.mode !== "rpc" : ctx.mode !== "tui") throw new Error("Worker execution mode does not match launch manifest");
+      if (manifest.execution === "rpc-headless" ? ctx.mode !== "rpc" : ctx.mode !== "tui")
+        throw new Error("Worker execution mode does not match launch manifest");
       // --tools limits builtins, not ordinary extension tools. Apply the parent
       // allowlist explicitly. Headless helpers must not advertise recursive
       // delegation or tmux-pane jobs even when no allowlist was supplied.
       if (manifest.execution === "rpc-headless") {
-        const configured = manifest.tools ?? (typeof (pi as any).getActiveTools === "function" ? (pi as any).getActiveTools() : []);
-        const headlessTools = configured.filter((name: string) => name !== "subagent" && name !== "background_job");
-        if (typeof (pi as any).setActiveTools === "function") pi.setActiveTools([...new Set([...headlessTools, "notify_parent", "task_outcome", "verify", "request_guidance"])]);
+        const configured =
+          manifest.tools ??
+          (typeof (pi as any).getActiveTools === "function" ? (pi as any).getActiveTools() : []);
+        const headlessTools = configured.filter(
+          (name: string) => name !== "subagent" && name !== "background_job",
+        );
+        if (typeof (pi as any).setActiveTools === "function")
+          pi.setActiveTools([
+            ...new Set([
+              ...headlessTools,
+              "notify_parent",
+              "task_outcome",
+              "verify",
+              "request_guidance",
+            ]),
+          ]);
       } else if (manifest.tools !== undefined && typeof (pi as any).setActiveTools === "function") {
-        pi.setActiveTools([...new Set([...manifest.tools, "notify_parent", "task_outcome", "verify", "request_guidance", "guidance"])]);
+        pi.setActiveTools([
+          ...new Set([
+            ...manifest.tools,
+            "notify_parent",
+            "task_outcome",
+            "verify",
+            "request_guidance",
+            "guidance",
+          ]),
+        ]);
       }
       const actualSession = ctx.sessionManager.getSessionFile();
-      if (!actualSession || resolve(actualSession) !== resolve(manifest.sessionFile)) throw new Error("Worker Pi session does not match launch manifest");
-      clearWorktreeContext = installWorkerWorktreeContext(ctx.sessionManager.getSessionId(), manifest);
+      if (!actualSession || resolve(actualSession) !== resolve(manifest.sessionFile))
+        throw new Error("Worker Pi session does not match launch manifest");
+      clearWorktreeContext = installWorkerWorktreeContext(
+        ctx.sessionManager.getSessionId(),
+        manifest,
+      );
       const displayName = process.env.PI_SUBAGENT_NAME?.trim().slice(0, 80);
       if (process.env.PI_SUBAGENT_CANONICAL_NAMES === "1") {
         nameStore = new TaskNameStore(store.directory, manifest);
@@ -219,135 +380,272 @@ export default async function tuiWorkerExtension(pi: ExtensionAPI): Promise<void
         if (!record) throw new Error("Canonical naming claim missing");
         nameRevision = record.revision;
         appliedName = record.displayName;
-        nameOperator = { protocol: 1, sessionId: ctx.sessionManager.getSessionId(),
+        nameOperator = {
+          protocol: 1,
+          sessionId: ctx.sessionManager.getSessionId(),
           get: () => nameStore!.read(false),
-          rename: (name: string, revision: number, source: "pi" | "paseo") => applyName(name, source, revision) };
+          rename: (name: string, revision: number, source: "pi" | "paseo") =>
+            applyName(name, source, revision),
+        };
         (globalThis as any).__paeCanonicalTaskNameV1 = nameOperator;
-        if (ctx.sessionManager.getSessionName() !== record.displayName) pi.setSessionName(record.displayName);
-      } else if (manifest.execution !== "rpc-headless" && displayName && !ctx.sessionManager.getSessionName()) {
+        if (ctx.sessionManager.getSessionName() !== record.displayName)
+          pi.setSessionName(record.displayName);
+      } else if (
+        manifest.execution !== "rpc-headless" &&
+        displayName &&
+        !ctx.sessionManager.getSessionName()
+      ) {
         pi.setSessionName(displayName);
       }
       worker = new TuiWorkerServer(store, {
         isIdle: () => context?.isIdle() === true && context?.hasPendingMessages() !== true,
-        goalState: () => { const snapshot = (globalThis as any).__paeDelegatedChildGoalV1?.snapshot(); return { entryId: snapshot?.entryId ?? null, status: snapshot?.goal?.status ?? null }; },
+        goalState: () => {
+          const snapshot = (globalThis as any).__paeDelegatedChildGoalV1?.snapshot();
+          return { entryId: snapshot?.entryId ?? null, status: snapshot?.goal?.status ?? null };
+        },
         canRun: () => allowed(),
         permissionMode: () => {
-          try { return (globalThis as any).__PAE_PERMISSION_GATE_OPERATOR_V1__?.status(ctx.sessionManager.getSessionId()).enabled; }
-          catch { return undefined; }
+          try {
+            return (globalThis as any).__PAE_PERMISSION_GATE_OPERATOR_V1__?.status(
+              ctx.sessionManager.getSessionId(),
+            ).enabled;
+          } catch {
+            return undefined;
+          }
         },
         verificationCwd: () => context?.cwd ?? ctx.cwd,
         verificationJobs: () => {
-          const controller = (globalThis as any).__paeLocalJobControllerV1 as LocalJobController | undefined;
-          if (!context || manifest.execution === "rpc-headless" || controller?.protocol !== 1
-            || controller.sessionId !== context.sessionManager.getSessionId() || !controller.startVerification
-            || manifest.tools && !manifest.tools.includes("bash")) return undefined;
-          return { start: (id, command, signal) => controller.startVerification!(id, command, signal),
+          const controller = (globalThis as any).__paeLocalJobControllerV1 as
+            | LocalJobController
+            | undefined;
+          if (
+            !context ||
+            manifest.execution === "rpc-headless" ||
+            controller?.protocol !== 1 ||
+            controller.sessionId !== context.sessionManager.getSessionId() ||
+            !controller.startVerification ||
+            (manifest.tools && !manifest.tools.includes("bash"))
+          )
+            return undefined;
+          return {
+            start: (id, command, signal) => controller.startVerification!(id, command, signal),
             execute: (id, params, signal) => controller.execute(id, params as any, signal),
-            resolve: (id, command, jobId) => controller.resolveVerification ? controller.resolveVerification(id, command, jobId) : Promise.reject(new Error("Supervisor dispatch resolution unavailable")),
-            attest: (run, identity) => controller.attestVerification ? controller.attestVerification(run, identity) : Promise.resolve(false) };
+            resolve: (id, command, jobId) =>
+              controller.resolveVerification
+                ? controller.resolveVerification(id, command, jobId)
+                : Promise.reject(new Error("Supervisor dispatch resolution unavailable")),
+            attest: (run, identity) =>
+              controller.attestVerification
+                ? controller.attestVerification(run, identity)
+                : Promise.resolve(false),
+          };
         },
         jobs: async (params, requestId) => {
           const controller = (globalThis as any).__paeLocalJobControllerV1;
-          if (!context || controller?.protocol !== 1 || controller.sessionId !== context.sessionManager.getSessionId()
-            || typeof controller.execute !== "function") throw new Error("Child-local job controller unavailable for this session");
-          return await controller.execute(`tui:${worker!.manifest.workerEpoch}:${requestId}`, params);
+          if (
+            !context ||
+            controller?.protocol !== 1 ||
+            controller.sessionId !== context.sessionManager.getSessionId() ||
+            typeof controller.execute !== "function"
+          )
+            throw new Error("Child-local job controller unavailable for this session");
+          return await controller.execute(
+            `tui:${worker!.manifest.workerEpoch}:${requestId}`,
+            params,
+          );
         },
         recursiveCleanup: true,
         prepareJobReap: async (preserve, options = {}) => {
           const session = context;
-          const controller = (globalThis as any).__paeLocalJobControllerV1 as LocalJobController | undefined;
-          if (!session || controller?.protocol !== 1 || controller.sessionId !== session.sessionManager.getSessionId() || !controller.prepareReap) throw new Error("Child-local job cleanup controller unavailable for this session; reload/recover the child before reaping");
+          const controller = (globalThis as any).__paeLocalJobControllerV1 as
+            | LocalJobController
+            | undefined;
+          if (
+            !session ||
+            controller?.protocol !== 1 ||
+            controller.sessionId !== session.sessionManager.getSessionId() ||
+            !controller.prepareReap
+          )
+            throw new Error(
+              "Child-local job cleanup controller unavailable for this session; reload/recover the child before reaping",
+            );
           // Flat RPC helpers enforce a subagent tool-call prohibition below and
           // never expose delegation. Their inventory is empty by construction,
           // not inferred from an absent controller or a dead parent.
-          if (manifest.execution === "rpc-headless") return await controller.prepareReap(async report => {
-            await preserve({ ...report as Record<string, unknown>, subagents: { groups: [], flatHeadless: true } });
-          });
+          if (manifest.execution === "rpc-headless")
+            return await controller.prepareReap(async (report) => {
+              await preserve({
+                ...(report as Record<string, unknown>),
+                subagents: { groups: [], flatHeadless: true },
+              });
+            });
           const subagents = (globalThis as any).__paeLocalSubagentControllerV1;
-          if (subagents?.protocol !== 1 || subagents.sessionId !== session.sessionManager.getSessionId() || typeof subagents.prepareReap !== "function") throw new Error(`Child-local subagent cleanup controller unavailable (${!subagents ? "missing" : subagents.sessionId !== session.sessionManager.getSessionId() ? "session changed" : "unsupported contract"}); reload/recover the child before reaping`);
+          if (
+            subagents?.protocol !== 1 ||
+            subagents.sessionId !== session.sessionManager.getSessionId() ||
+            typeof subagents.prepareReap !== "function"
+          )
+            throw new Error(
+              `Child-local subagent cleanup controller unavailable (${!subagents ? "missing" : subagents.sessionId !== session.sessionManager.getSessionId() ? "session changed" : "unsupported contract"}); reload/recover the child before reaping`,
+            );
           let subagentReport: unknown;
           const releaseSubagents = await subagents.prepareReap(async (report: unknown) => {
             subagentReport = report;
             await preserve({ subagents: report });
           }, options);
           try {
-            const releaseJobs = await controller.prepareReap(async report => { await preserve({ ...report as Record<string, unknown>, subagents: subagentReport }); });
-            return () => { releaseJobs(); releaseSubagents(); };
-          } catch (error) { releaseSubagents(); throw error; }
+            const releaseJobs = await controller.prepareReap(async (report) => {
+              await preserve({ ...(report as Record<string, unknown>), subagents: subagentReport });
+            });
+            return () => {
+              releaseJobs();
+              releaseSubagents();
+            };
+          } catch (error) {
+            releaseSubagents();
+            throw error;
+          }
         },
-        prepareWorktreeReap: async options => {
+        prepareWorktreeReap: async (options) => {
           const session = context;
-          if (!session || !worker?.preparingReap || session.sessionManager.getSessionFile() !== manifest.sessionFile)
+          if (
+            !session ||
+            !worker?.preparingReap ||
+            session.sessionManager.getSessionFile() !== manifest.sessionFile
+          )
             throw new Error("Worktree cleanup reservation/session identity changed");
           const actorSessionId = session.sessionManager.getSessionId();
           const subagents = (globalThis as any).__paeLocalSubagentControllerV1;
           // RPC-headless execution is runtime-forbidden from delegation; its
           // supervised jobs are separately required to settle in prepareReap.
           const headlessWithoutDelegation = manifest.execution === "rpc-headless";
-          if (!headlessWithoutDelegation && (subagents?.sessionId !== actorSessionId || typeof subagents.worktreeReapTargets !== "function" || typeof subagents.worktreeReapActivity !== "function"))
-            throw new Error("Authenticated managed-worker activity inventory unavailable; recover the child controller");
-          const descendants = manifest.execution === "rpc-headless" ? [] : subagents.worktreeReapTargets();
+          if (
+            !headlessWithoutDelegation &&
+            (subagents?.sessionId !== actorSessionId ||
+              typeof subagents.worktreeReapTargets !== "function" ||
+              typeof subagents.worktreeReapActivity !== "function")
+          )
+            throw new Error(
+              "Authenticated managed-worker activity inventory unavailable; recover the child controller",
+            );
+          const descendants =
+            manifest.execution === "rpc-headless" ? [] : subagents.worktreeReapTargets();
           const previousCwd = process.cwd();
           // Keep the sealed worker's own cwd in its private state directory while
           // its authenticated managed-worktree activity inventory is reconciled.
           if (!options.force) process.chdir(store.directory);
           try {
-            return await reapOwnedWorktrees({ actorSessionId,
-              root: { ownerSessionId: manifest.ownerSessionId, taskId: manifest.taskId, childId: manifest.childId },
-              descendants, ownedSessionIds: manifest.execution === "rpc-headless" ? [actorSessionId] : subagents.worktreeReapOwners(),
-              context: { cwd: process.cwd(), isIdle: () => session.isIdle(),
+            return await reapOwnedWorktrees({
+              actorSessionId,
+              root: {
+                ownerSessionId: manifest.ownerSessionId,
+                taskId: manifest.taskId,
+                childId: manifest.childId,
+              },
+              descendants,
+              ownedSessionIds:
+                manifest.execution === "rpc-headless"
+                  ? [actorSessionId]
+                  : subagents.worktreeReapOwners(),
+              context: {
+                cwd: process.cwd(),
+                isIdle: () => session.isIdle(),
                 hasPendingMessages: () => session.hasPendingMessages(),
-                managedWorktreeActivity: (path: string) => headlessWithoutDelegation ? Promise.resolve(false) : subagents.worktreeReapActivity(path,
-                  { ownerSessionId: manifest.ownerSessionId, taskId: manifest.taskId, childId: manifest.childId, attempt: manifest.attempt }) }, ...options });
+                managedWorktreeActivity: (path: string) =>
+                  headlessWithoutDelegation
+                    ? Promise.resolve(false)
+                    : subagents.worktreeReapActivity(path, {
+                        ownerSessionId: manifest.ownerSessionId,
+                        taskId: manifest.taskId,
+                        childId: manifest.childId,
+                        attempt: manifest.attempt,
+                      }),
+              },
+              ...options,
+            });
           } catch (error) {
             if (!options.force) {
-              try { process.chdir(previousCwd); } catch { /* Partial removal is durable; keep the live controller in its safe state directory. */ }
+              try {
+                process.chdir(previousCwd);
+              } catch {
+                /* Partial removal is durable; keep the live controller in its safe state directory. */
+              }
             }
             throw error;
           }
         },
         clearQueue: () => sendRpcCommand("clear_queue"),
         // TUI abort is void: the server waits for agent_settled/live idle.
-        abort: async () => { if (manifest.execution === "rpc-headless") await sendRpcCommand("abort"); context?.abort(); },
+        abort: async () => {
+          if (manifest.execution === "rpc-headless") await sendRpcCommand("abort");
+          context?.abort();
+        },
         shutdown: () => {
           if (worker?.state.sealed && !announcedReap) {
             announcedReap = true;
-            pi.events?.emit?.("harness-runtime-reaping", { runtimeId: worker.manifest.runtimeId,
-              taskId: worker.manifest.taskId, childId: worker.manifest.childId, attempt: worker.manifest.attempt,
-              workerEpoch: worker.manifest.workerEpoch });
+            pi.events?.emit?.("harness-runtime-reaping", {
+              runtimeId: worker.manifest.runtimeId,
+              taskId: worker.manifest.taskId,
+              childId: worker.manifest.childId,
+              attempt: worker.manifest.attempt,
+              workerEpoch: worker.manifest.workerEpoch,
+            });
           }
           if (context) requestShutdown(context, worker?.state.sealed === true);
         },
-        compact: () => new Promise<void | { compaction: "not-needed"; reason: "nothing-to-compact" | "already-compacted" }>((resolve, reject) => {
-          if (!context || !allowed()) { reject(new Error("Compaction authority unavailable")); return; }
-          const handleError = (error: unknown) => {
-            // Pi throws this exact error when the session has no compactable
-            // history. That is a successful no-op for the parent checkpoint
-            // request; all other errors remain explicit failures.
-            if (error instanceof Error && error.message === "Nothing to compact (session too small)") {
-              resolve({ compaction: "not-needed", reason: "nothing-to-compact" });
-            } else if (error instanceof Error && error.message === "Already compacted") {
-              // Pi emits this before dispatch when the current leaf is already
-              // a compaction entry. Reuse it; never drop or compact twice.
-              resolve({ compaction: "not-needed", reason: "already-compacted" });
-            } else reject(error);
-          };
-          try {
-            context.compact({ onComplete: () => resolve(), onError: handleError });
-          } catch (error) { handleError(error); }
-        }),
+        compact: () =>
+          new Promise<void | {
+            compaction: "not-needed";
+            reason: "nothing-to-compact" | "already-compacted";
+          }>((resolve, reject) => {
+            if (!context || !allowed()) {
+              reject(new Error("Compaction authority unavailable"));
+              return;
+            }
+            const handleError = (error: unknown) => {
+              // Pi throws this exact error when the session has no compactable
+              // history. That is a successful no-op for the parent checkpoint
+              // request; all other errors remain explicit failures.
+              if (
+                error instanceof Error &&
+                error.message === "Nothing to compact (session too small)"
+              ) {
+                resolve({ compaction: "not-needed", reason: "nothing-to-compact" });
+              } else if (error instanceof Error && error.message === "Already compacted") {
+                // Pi emits this before dispatch when the current leaf is already
+                // a compaction entry. Reuse it; never drop or compact twice.
+                resolve({ compaction: "not-needed", reason: "already-compacted" });
+              } else reject(error);
+            };
+            try {
+              context.compact({ onComplete: () => resolve(), onError: handleError });
+            } catch (error) {
+              handleError(error);
+            }
+          }),
         send: (message, mode, source = "parent") => {
           if (!allowed()) throw new Error("Worker or child-local command authority unavailable");
           // Neither source enters slash-command dispatch. Parent instructions and
           // trusted panel-user messages remain visibly distinct in session history.
           const user = source === "user";
-          pi.sendMessage({ customType: user ? "harness-user-control" : "harness-control",
-            content: user ? `Direct user instruction from Paseo (priority over parent guidance):\n${message}` : `Parent instructions:\n${message}`, display: true },
-            { triggerTurn: true, deliverAs: mode === "follow_up" ? "followUp" : "steer" });
+          pi.sendMessage(
+            {
+              customType: user ? "harness-user-control" : "harness-control",
+              content: user
+                ? `Direct user instruction from Paseo (priority over parent guidance):\n${message}`
+                : `Parent instructions:\n${message}`,
+              display: true,
+            },
+            { triggerTurn: true, deliverAs: mode === "follow_up" ? "followUp" : "steer" },
+          );
         },
-        applyOperatorMode: async enabled => {
+        applyOperatorMode: async (enabled) => {
           const service = (globalThis as Record<string, any>).__PAE_PERMISSION_GATE_OPERATOR_V1__;
-          if (worker?.manifest.launchMode !== "guard-only" || typeof service?.applyMode !== "function") throw new Error("Child operator authority unavailable");
+          if (
+            worker?.manifest.launchMode !== "guard-only" ||
+            typeof service?.applyMode !== "function"
+          )
+            throw new Error("Child operator authority unavailable");
           return await service.applyMode(ctx.sessionManager.getSessionId(), enabled);
         },
       });
@@ -364,21 +662,42 @@ export default async function tuiWorkerExtension(pi: ExtensionAPI): Promise<void
               pi.setSessionName(record.displayName);
             }
             projectAlias(record.alias); // Retry failed projections even when metadata is unchanged.
-          } catch { /* Metadata unavailable: preserve the last accepted presentation. */ }
+          } catch {
+            /* Metadata unavailable: preserve the last accepted presentation. */
+          }
         }, 1000);
         nameWatch.unref?.();
       }
       if (process.env.PI_SUBAGENT_ID) {
         const globals = globalThis as Record<string, any>;
-        parentIdleCapability = { request: (details: { model: string; idleMinutes: number; contextPercent: number }, decisionSignal?: AbortSignal) =>
-          !worker?.sealed ? worker.requestIdleDecision(details, decisionSignal) : Promise.reject(new Error("Parent idle-decision channel unavailable")) };
+        parentIdleCapability = {
+          request: (
+            details: { model: string; idleMinutes: number; contextPercent: number },
+            decisionSignal?: AbortSignal,
+          ) =>
+            !worker?.sealed
+              ? worker.requestIdleDecision(details, decisionSignal)
+              : Promise.reject(new Error("Parent idle-decision channel unavailable")),
+        };
         globals["__piIdleContextParentV1"] = parentIdleCapability;
         pi.events.emit("idle-context:decision-channel-ready", {});
       }
       if (manifest.execution === "rpc-headless") {
-        (globalThis as any)[WORKER_INTERACTIONS_KEY] = { protocol: 1, mode: "headless", workerEpoch: manifest.workerEpoch,
-          request: (input: any, interactionSignal?: AbortSignal) => worker?.requestInteraction(input, interactionSignal) ?? Promise.reject(new Error("Worker interaction service closed")) };
-        rpcLogTrimTimer = setInterval(() => { try { store.trimRpcLogs(); } catch (error) { fail(ctx, error); } }, 1000);
+        (globalThis as any)[WORKER_INTERACTIONS_KEY] = {
+          protocol: 1,
+          mode: "headless",
+          workerEpoch: manifest.workerEpoch,
+          request: (input: any, interactionSignal?: AbortSignal) =>
+            worker?.requestInteraction(input, interactionSignal) ??
+            Promise.reject(new Error("Worker interaction service closed")),
+        };
+        rpcLogTrimTimer = setInterval(() => {
+          try {
+            store.trimRpcLogs();
+          } catch (error) {
+            fail(ctx, error);
+          }
+        }, 1000);
         rpcLogTrimTimer.unref?.();
       }
       let watching = false;
@@ -387,76 +706,154 @@ export default async function tuiWorkerExtension(pi: ExtensionAPI): Promise<void
         watching = true;
         void (async () => {
           const current = store.readManifest();
-          if (!(current.presentation === "foreground-staged" || current.presentation === "headless-foreground") || !current.foregroundOwner) return;
+          if (
+            !(
+              current.presentation === "foreground-staged" ||
+              current.presentation === "headless-foreground"
+            ) ||
+            !current.foregroundOwner
+          )
+            return;
           const owner = current.foregroundOwner;
           const alive = await processIsAlive(owner.pid, owner.token);
           if (!alive) {
             await ctx.abort();
             if (!ctx.isIdle()) return;
-            const reap = await callTuiWorker(current, { operation: "prepare_reap" }, { requestId: `owner-loss:${current.workerEpoch}`, timeoutMs: 30_000 });
+            const reap = await callTuiWorker(
+              current,
+              { operation: "prepare_reap" },
+              { requestId: `owner-loss:${current.workerEpoch}`, timeoutMs: 30_000 },
+            );
             if (!reap.ok) return; // Keep the child controller alive; never orphan unknown local jobs.
           }
-        })().catch(error => fail(ctx, error)).finally(() => { watching = false; });
+        })()
+          .catch((error) => fail(ctx, error))
+          .finally(() => {
+            watching = false;
+          });
       }, 500);
       ownerWatch.unref?.();
-    } catch (error) { fail(ctx, error); }
+    } catch (error) {
+      fail(ctx, error);
+    }
   });
   pi.on("input", (_event, ctx) => {
     if (!allowed()) {
-      if (worker?.preparingReap && ctx.hasUI) ctx.ui.notify("Child job cleanup in progress; retry input after cleanup finishes", "warning");
+      if (worker?.preparingReap && ctx.hasUI)
+        ctx.ui.notify(
+          "Child job cleanup in progress; retry input after cleanup finishes",
+          "warning",
+        );
       else if (worker?.sealed || failed) stop(ctx);
       return { action: "handled" as const };
     }
     try {
       if (worker!.state.phase !== "ready") worker!.inhibitAutoContinuation();
       worker!.running();
-    } catch (error) { fail(ctx, error); return { action: "handled" as const }; }
+    } catch (error) {
+      fail(ctx, error);
+      return { action: "handled" as const };
+    }
     return { action: "continue" as const };
   });
   pi.on("before_agent_start", (event, ctx) => {
     lastAssistant = undefined;
     liveAssistantText = "";
     worker?.liveText("");
-    if (!allowed()) { stop(ctx); return; }
-    try { worker!.running(true); } catch (error) { fail(ctx, error); }
-    return { systemPrompt: event.systemPrompt + "\n\nDirect user instructions take precedence over parent instructions. Notify the parent of scope changes. Parent messages do not authorize slash commands." };
+    if (!allowed()) {
+      stop(ctx);
+      return;
+    }
+    try {
+      worker!.running(true);
+    } catch (error) {
+      fail(ctx, error);
+    }
+    return {
+      systemPrompt:
+        event.systemPrompt +
+        "\n\nDirect user instructions take precedence over parent instructions. Notify the parent of scope changes. Parent messages do not authorize slash commands.",
+    };
   });
   pi.on("agent_start", (_event, ctx) => {
     liveAssistantText = "";
     worker?.liveText("");
-    if (!allowed()) { stop(ctx); return; }
-    try { worker!.running(); } catch (error) { fail(ctx, error); }
+    if (!allowed()) {
+      stop(ctx);
+      return;
+    }
+    try {
+      worker!.running();
+    } catch (error) {
+      fail(ctx, error);
+    }
   });
   // Defence in depth if a built-in/other extension starts work while a graceful
   // shutdown is pending. Reap waits for actual endpoint/pane exit regardless.
   pi.on("tool_call", (event: any) => {
-    if (worker?.manifest.execution === "rpc-headless" && event.toolName === "subagent") return { block: true, reason: "Foreground helpers cannot delegate to further subagents" };
-    if (worker?.manifest.execution === "rpc-headless" && event.toolName === "background_job") return { block: true, reason: "This headless worker has no tmux pane; child-local background job operations are unavailable" };
-    return allowed() ? undefined : { block: true, reason: "Worker sealed or local authority unavailable", terminate: true };
+    if (worker?.manifest.execution === "rpc-headless" && event.toolName === "subagent")
+      return { block: true, reason: "Foreground helpers cannot delegate to further subagents" };
+    if (worker?.manifest.execution === "rpc-headless" && event.toolName === "background_job")
+      return {
+        block: true,
+        reason:
+          "This headless worker has no tmux pane; child-local background job operations are unavailable",
+      };
+    return allowed()
+      ? undefined
+      : { block: true, reason: "Worker sealed or local authority unavailable", terminate: true };
   });
   pi.on("user_bash", (_event, ctx) => {
     if (allowed()) return;
     stop(ctx);
-    return { result: { output: "Worker sealed or local authority unavailable", exitCode: 1, cancelled: true, truncated: false } };
+    return {
+      result: {
+        output: "Worker sealed or local authority unavailable",
+        exitCode: 1,
+        cancelled: true,
+        truncated: false,
+      },
+    };
   });
   pi.on("session_before_switch", () => ({ cancel: true }));
   pi.on("session_before_fork", () => ({ cancel: true }));
-  pi.on("turn_start", () => { modelInactivity.start(); });
-  pi.on("turn_end", () => { modelInactivity.end(); });
-  pi.on("tool_execution_start", () => { modelInactivity.end(); });
-  pi.on("agent_end", () => { modelInactivity.end(); });
+  pi.on("turn_start", () => {
+    modelInactivity.start();
+  });
+  pi.on("turn_end", () => {
+    modelInactivity.end();
+  });
+  pi.on("tool_execution_start", () => {
+    modelInactivity.end();
+  });
+  pi.on("agent_end", () => {
+    modelInactivity.end();
+  });
   pi.on("message_start", (event: any) => {
-    if (event.message?.role === "assistant") { liveAssistantText = ""; worker?.liveText(""); }
+    if (event.message?.role === "assistant") {
+      liveAssistantText = "";
+      worker?.liveText("");
+    }
   });
   pi.on("message_update", (event: any) => {
     if (event.message?.role === "assistant") modelInactivity.progress();
     if (!worker) return;
     if (event.message?.role === "assistant") {
-      const text = typeof event.message.content === "string" ? event.message.content : Array.isArray(event.message.content)
-        ? event.message.content.filter((part: any) => part?.type === "text").map((part: any) => part.text ?? "").join("") : "";
+      const text =
+        typeof event.message.content === "string"
+          ? event.message.content
+          : Array.isArray(event.message.content)
+            ? event.message.content
+                .filter((part: any) => part?.type === "text")
+                .map((part: any) => part.text ?? "")
+                .join("")
+            : "";
       liveAssistantText = boundedSuffix(text);
       worker.liveText(liveAssistantText);
-    } else if (event.assistantMessageEvent?.type === "text_delta" && typeof event.assistantMessageEvent.delta === "string") {
+    } else if (
+      event.assistantMessageEvent?.type === "text_delta" &&
+      typeof event.assistantMessageEvent.delta === "string"
+    ) {
       liveAssistantText = boundedSuffix(liveAssistantText + event.assistantMessageEvent.delta);
       worker.liveText(liveAssistantText);
     }
@@ -465,32 +862,66 @@ export default async function tuiWorkerExtension(pi: ExtensionAPI): Promise<void
     if (event.message.role === "assistant") {
       modelInactivity.end();
       lastAssistant = event.message;
-      const text = typeof event.message.content === "string" ? event.message.content : Array.isArray(event.message.content)
-        ? event.message.content.filter((part: any) => part?.type === "text").map((part: any) => part.text ?? "").join("") : "";
+      const text =
+        typeof event.message.content === "string"
+          ? event.message.content
+          : Array.isArray(event.message.content)
+            ? event.message.content
+                .filter((part: any) => part?.type === "text")
+                .map((part: any) => part.text ?? "")
+                .join("")
+            : "";
       liveAssistantText = boundedSuffix(text);
       worker?.liveText(liveAssistantText);
     }
   });
   pi.on("tool_execution_start", (event: any) => {
-    try { worker?.conversationTool("start", { toolCallId: String(event.toolCallId ?? ""), name: String(event.toolName ?? "tool"), arguments: event.args }); }
-    catch { /* Conversation observation must not interrupt tool execution. */ }
+    try {
+      worker?.conversationTool("start", {
+        toolCallId: String(event.toolCallId ?? ""),
+        name: String(event.toolName ?? "tool"),
+        arguments: event.args,
+      });
+    } catch {
+      /* Conversation observation must not interrupt tool execution. */
+    }
   });
   pi.on("tool_execution_end", (event: any) => {
-    try { worker?.conversationTool("end", { toolCallId: String(event.toolCallId ?? ""), name: String(event.toolName ?? "tool"), result: event.result, failed: event.isError === true }); }
-    catch { /* Conversation observation must not interrupt tool execution. */ }
+    try {
+      worker?.conversationTool("end", {
+        toolCallId: String(event.toolCallId ?? ""),
+        name: String(event.toolName ?? "tool"),
+        result: event.result,
+        failed: event.isError === true,
+      });
+    } catch {
+      /* Conversation observation must not interrupt tool execution. */
+    }
   });
   pi.on("tool_result", (event, ctx) => {
     if (event.isError) {
-      try { worker?.inhibitAutoContinuation(); } catch (error) { fail(ctx, error); }
+      try {
+        worker?.inhibitAutoContinuation();
+      } catch (error) {
+        fail(ctx, error);
+      }
     }
   });
   pi.on("ui_prompt_start", (_event, ctx) => {
-    try { worker?.inhibitAutoContinuation(); } catch (error) { fail(ctx, error); }
+    try {
+      worker?.inhibitAutoContinuation();
+    } catch (error) {
+      fail(ctx, error);
+    }
   });
   pi.on("agent_before_settle", (event, ctx) => {
     if (!worker || !allowed()) return;
     try {
-      if (event.outcome !== "completed" || event.context.pendingMessages.length || ctx.hasPendingMessages()) {
+      if (
+        event.outcome !== "completed" ||
+        event.context.pendingMessages.length ||
+        ctx.hasPendingMessages()
+      ) {
         worker.inhibitAutoContinuation();
         return;
       }
@@ -498,79 +929,227 @@ export default async function tuiWorkerExtension(pi: ExtensionAPI): Promise<void
       // is appended. Pi evaluates canContinue again after applying boundary drafts.
       if (event.continue) return;
       const message = worker.claimAutoContinuation();
-      if (message) return { continue: true, entries: [...event.entries, { type: "custom_message" as const,
-        customType: "harness-auto-continuation", content: message, display: true }] };
-    } catch (error) { fail(ctx, error); }
+      if (message)
+        return {
+          continue: true,
+          entries: [
+            ...event.entries,
+            {
+              type: "custom_message" as const,
+              customType: "harness-auto-continuation",
+              content: message,
+              display: true,
+            },
+          ],
+        };
+    } catch (error) {
+      fail(ctx, error);
+    }
   });
   pi.on("agent_settled", async (_event, ctx) => {
     modelInactivity.end();
     if (!worker || failed || worker.sealed) return;
-    try { worker.settled({ sessionFile: ctx.sessionManager.getSessionFile(), leafId: ctx.sessionManager.getLeafId(), assistant: lastAssistant ?? null,
-      ...(!allowed() ? { error: "Worker command authority unavailable at settlement" } : {}),
-      contextTokens: ctx.getContextUsage()?.tokens, contextWindow: ctx.model?.contextWindow, timestamp: new Date().toISOString() }); }
-    catch (error) { fail(ctx, error); }
+    try {
+      worker.settled({
+        sessionFile: ctx.sessionManager.getSessionFile(),
+        leafId: ctx.sessionManager.getLeafId(),
+        assistant: lastAssistant ?? null,
+        ...(!allowed() ? { error: "Worker command authority unavailable at settlement" } : {}),
+        contextTokens: ctx.getContextUsage()?.tokens,
+        contextWindow: ctx.model?.contextWindow,
+        timestamp: new Date().toISOString(),
+      });
+    } catch (error) {
+      fail(ctx, error);
+    }
     if (pendingGoalCompletion && worker && !worker.sealed && !failed) {
       pendingGoalCompletion = false;
       try {
-      const proof = (globalThis as any).__paeDelegatedChildGoalV1?.snapshot();
-      if (proof?.entryId !== launchManifest?.assignedGoal?.entryId || proof?.goal?.status !== "complete"
-        || !proof.goal.tasks?.every((task: any) => task.status === "completed")
-        || worker.manifest.acceptance?.length !== 1 || worker.manifest.acceptance[0] !== MANAGED_GOAL_ACCEPTANCE) throw new Error("Managed Goal completion proof unavailable");
-      const summary = boundedSuffix(String(proof.goal.summary ?? ""), 850);
-      await worker.outcome({ version: 1, state: "delivered", summary: summary || "Verified assigned Goal completion",
-        acceptance: [{ criterion: MANAGED_GOAL_ACCEPTANCE, status: "passed", evidence: boundedSuffix(`Accepted goal_complete receipt for ${proof.childGoalId}: ${summary}`, 1000) }],
-        artifacts: [{ path: worker.manifest.sessionFile }], remaining: [] });
-      } catch (error) { fail(ctx, error); }
+        const proof = (globalThis as any).__paeDelegatedChildGoalV1?.snapshot();
+        if (
+          proof?.entryId !== launchManifest?.assignedGoal?.entryId ||
+          proof?.goal?.status !== "complete" ||
+          !proof.goal.tasks?.every((task: any) => task.status === "completed") ||
+          worker.manifest.acceptance?.length !== 1 ||
+          worker.manifest.acceptance[0] !== MANAGED_GOAL_ACCEPTANCE
+        )
+          throw new Error("Managed Goal completion proof unavailable");
+        const summary = boundedSuffix(String(proof.goal.summary ?? ""), 850);
+        await worker.outcome({
+          version: 1,
+          state: "delivered",
+          summary: summary || "Verified assigned Goal completion",
+          acceptance: [
+            {
+              criterion: MANAGED_GOAL_ACCEPTANCE,
+              status: "passed",
+              evidence: boundedSuffix(
+                `Accepted goal_complete receipt for ${proof.childGoalId}: ${summary}`,
+                1000,
+              ),
+            },
+          ],
+          artifacts: [{ path: worker.manifest.sessionFile }],
+          remaining: [],
+        });
+      } catch (error) {
+        fail(ctx, error);
+      }
     }
   });
   // Ordinary local tools: no parent RPC connection is required to retain these.
-  pi.registerTool({ name: "notify_parent", label: "Notify parent", description: "Report a finding or blocker to the parent. Continue working unless you need its answer.",
-    parameters: { type: "object", properties: { message: { type: "string", minLength: 1, maxLength: 1000 }, requires_guidance: { type: "boolean" } }, required: ["message"], additionalProperties: false } as any,
+  pi.registerTool({
+    name: "notify_parent",
+    label: "Notify parent",
+    description:
+      "Report a finding or blocker to the parent. Continue working unless you need its answer.",
+    parameters: {
+      type: "object",
+      properties: {
+        message: { type: "string", minLength: 1, maxLength: 1000 },
+        requires_guidance: { type: "boolean" },
+      },
+      required: ["message"],
+      additionalProperties: false,
+    } as any,
     async execute(_id, params: any) {
-      if (!worker || worker.sealed || typeof params.message !== "string" || Buffer.byteLength(params.message) > 1000) throw new Error("Worker notification unavailable or invalid");
-      notificationTimes = notificationTimes.filter(time => time > Date.now() - 60_000);
-      if (notificationTimes.length >= 5) throw new Error("At most five findings per minute; batch updates or retain them for the final report");
+      if (
+        !worker ||
+        worker.sealed ||
+        typeof params.message !== "string" ||
+        Buffer.byteLength(params.message) > 1000
+      )
+        throw new Error("Worker notification unavailable or invalid");
+      notificationTimes = notificationTimes.filter((time) => time > Date.now() - 60_000);
+      if (notificationTimes.length >= 5)
+        throw new Error(
+          "At most five findings per minute; batch updates or retain them for the final report",
+        );
       notificationTimes.push(Date.now());
       const requires_guidance = params.requires_guidance === true;
       const notification_id = worker.notification({ message: params.message, requires_guidance });
       // Same receipt as the RPC path. Accepted means recorded, not delivered to or answered by the parent.
-      return { content: [{ type: "text", text: "Queued for the parent; no reply yet." }], details: { notification_id, accepted: true, requires_guidance } };
-    } });
-  pi.registerTool({ name: "verify", label: "Verify task", description: "Run and await the configured runtime verification gates. Aborting cancels only a verification flight this tool started; joining an existing check stops only this wait. Does not authorize or imply accepted delivery.", parameters: { type: "object", properties: {}, additionalProperties: false }, async execute(_id, _params, signal?: AbortSignal) {
-    if (!worker || worker.sealed) throw new Error("Worker verification unavailable");
-    const result = await worker.verify(signal);
-    const pending = result.status === "checking";
-    const failed = result.status !== "passed";
-    return { content: [{ type: "text", text: `Verification ${result.status}; this operation does not confer accepted delivery.` }], details: { verification: result, pending, failed, accepted_delivery: false }, isError: failed };
-  } });
-  pi.registerTool({ name: "task_outcome", label: "Report task outcome", description: "Report delivery with evidence. Delivered outcomes await configured runtime verification; abort cancels only a verification flight this tool started. Incomplete outcomes require remaining work and next_action. For partial only, continuation=routine explicitly attests that all remaining work is routine and already authorized, with no external dependency, failed check, safety decision or user input needed; permits at most one automatic continuation. Otherwise omit continuation or use needs_input; genuine blockers must use blocked. This is not new authority.",
-    parameters: { type: "object", properties: { version: { type: "integer", const: 1 }, state: { type: "string", enum: ["delivered", "partial", "blocked", "checkpointed"] }, summary: { type: "string", maxLength: 2000 },
-      acceptance: { type: "array", maxItems: 16, items: { type: "object", properties: { criterion: { type: "string" }, status: { type: "string", enum: ["passed", "failed", "not_run"] }, evidence: { type: "string" } }, required: ["criterion", "status"] } },
-      artifacts: { type: "array", maxItems: 16, items: { type: "object", properties: { path: { type: "string" }, sha256: { type: "string" } }, required: ["path"] } }, remaining: { type: "array", maxItems: 16, items: { type: "string" } }, next_action: { type: "string" }, continuation: { type: "string", enum: ["routine", "needs_input"] } },
-      required: ["version", "state", "summary", "acceptance", "artifacts", "remaining"], additionalProperties: false } as any,
+      return {
+        content: [{ type: "text", text: "Queued for the parent; no reply yet." }],
+        details: { notification_id, accepted: true, requires_guidance },
+      };
+    },
+  });
+  pi.registerTool({
+    name: "verify",
+    label: "Verify task",
+    description:
+      "Run and await the configured runtime verification gates. Aborting cancels only a verification flight this tool started; joining an existing check stops only this wait. Does not authorize or imply accepted delivery.",
+    parameters: { type: "object", properties: {}, additionalProperties: false },
+    async execute(_id, _params, signal?: AbortSignal) {
+      if (!worker || worker.sealed) throw new Error("Worker verification unavailable");
+      const result = await worker.verify(signal);
+      const pending = result.status === "checking";
+      const failed = result.status !== "passed";
+      return {
+        content: [
+          {
+            type: "text",
+            text: `Verification ${result.status}; this operation does not confer accepted delivery.`,
+          },
+        ],
+        details: { verification: result, pending, failed, accepted_delivery: false },
+        isError: failed,
+      };
+    },
+  });
+  pi.registerTool({
+    name: "task_outcome",
+    label: "Report task outcome",
+    description:
+      "Report delivery with evidence. Delivered outcomes await configured runtime verification; abort cancels only a verification flight this tool started. Incomplete outcomes require remaining work and next_action. For partial only, continuation=routine explicitly attests that all remaining work is routine and already authorized, with no external dependency, failed check, safety decision or user input needed; permits at most one automatic continuation. Otherwise omit continuation or use needs_input; genuine blockers must use blocked. This is not new authority.",
+    parameters: {
+      type: "object",
+      properties: {
+        version: { type: "integer", const: 1 },
+        state: { type: "string", enum: ["delivered", "partial", "blocked", "checkpointed"] },
+        summary: { type: "string", maxLength: 2000 },
+        acceptance: {
+          type: "array",
+          maxItems: 16,
+          items: {
+            type: "object",
+            properties: {
+              criterion: { type: "string" },
+              status: { type: "string", enum: ["passed", "failed", "not_run"] },
+              evidence: { type: "string" },
+            },
+            required: ["criterion", "status"],
+          },
+        },
+        artifacts: {
+          type: "array",
+          maxItems: 16,
+          items: {
+            type: "object",
+            properties: { path: { type: "string" }, sha256: { type: "string" } },
+            required: ["path"],
+          },
+        },
+        remaining: { type: "array", maxItems: 16, items: { type: "string" } },
+        next_action: { type: "string" },
+        continuation: { type: "string", enum: ["routine", "needs_input"] },
+      },
+      required: ["version", "state", "summary", "acceptance", "artifacts", "remaining"],
+      additionalProperties: false,
+    } as any,
     async execute(_id, params: any, signal?: AbortSignal) {
       if (!worker || worker.sealed) throw new Error("Worker outcome unavailable");
-      if (worker.manifest.assignedGoal && params.state === "delivered" && (globalThis as any).__paeDelegatedChildGoalV1?.snapshot()?.goal?.status !== "complete") throw new Error("Assigned Goal delivery requires its verified goal_complete receipt");
+      if (
+        worker.manifest.assignedGoal &&
+        params.state === "delivered" &&
+        (globalThis as any).__paeDelegatedChildGoalV1?.snapshot()?.goal?.status !== "complete"
+      )
+        throw new Error("Assigned Goal delivery requires its verified goal_complete receipt");
       const outcome = validateTaskOutcome(params, worker.manifest.acceptance ?? []);
       await worker.outcome(outcome, signal);
-      const verification = outcome.state === "delivered" && worker.manifest.verification?.length ? worker.getVerificationSummary() : undefined;
+      const verification =
+        outcome.state === "delivered" && worker.manifest.verification?.length
+          ? worker.getVerificationSummary()
+          : undefined;
       const failed = !!verification && verification.status !== "passed";
-      return { content: [{ type: "text", text: failed
-        ? `Recorded the delivered claim, but runtime verification ${verification!.status}; accepted_delivery=false. Correct the issue and report again.`
-        : `Recorded ${outcome.state}; execution completion and explicit reap remain separate${verification ? `; verification ${verification.status}` : ""}.` }],
-        details: { task_outcome: outcome, ...(verification ? { verification, accepted_delivery: false } : {}), failed }, isError: failed };
-    } });
+      return {
+        content: [
+          {
+            type: "text",
+            text: failed
+              ? `Recorded the delivered claim, but runtime verification ${verification!.status}; accepted_delivery=false. Correct the issue and report again.`
+              : `Recorded ${outcome.state}; execution completion and explicit reap remain separate${verification ? `; verification ${verification.status}` : ""}.`,
+          },
+        ],
+        details: {
+          task_outcome: outcome,
+          ...(verification ? { verification, accepted_delivery: false } : {}),
+          failed,
+        },
+        isError: failed,
+      };
+    },
+  });
   pi.on("session_info_changed", async (event: any, ctx) => {
-    if (!nameStore || event.name === appliedName || ctx.sessionManager.getSessionName() !== event.name) return;
-    try { await applyName(event.name, "pi"); }
-    catch (error) {
+    if (
+      !nameStore ||
+      event.name === appliedName ||
+      ctx.sessionManager.getSessionName() !== event.name
+    )
+      return;
+    try {
+      await applyName(event.name, "pi");
+    } catch (error) {
       // Reject invalid/stale writes visibly; never silently truncate a user's rename.
-      if (appliedName && ctx.sessionManager.getSessionName() !== appliedName) pi.setSessionName(appliedName);
+      if (appliedName && ctx.sessionManager.getSessionName() !== appliedName)
+        pi.setSessionName(appliedName);
       if (ctx.hasUI) ctx.ui.notify(`Name not changed: ${String(error)}`, "warning");
     }
   });
   pi.on("session_shutdown", async () => {
-    if ((globalThis as any).__paeCanonicalTaskNameV1 === nameOperator) delete (globalThis as any).__paeCanonicalTaskNameV1;
+    if ((globalThis as any).__paeCanonicalTaskNameV1 === nameOperator)
+      delete (globalThis as any).__paeCanonicalTaskNameV1;
     if (nameWatch) clearInterval(nameWatch);
     nameWatch = undefined;
     aliasProjection?.stop();
@@ -582,8 +1161,10 @@ export default async function tuiWorkerExtension(pi: ExtensionAPI): Promise<void
     if (rpcLogTrimTimer) clearInterval(rpcLogTrimTimer);
     context = undefined;
     const interactions = (globalThis as any)[WORKER_INTERACTIONS_KEY];
-    if (interactions?.workerEpoch === worker?.manifest.workerEpoch) delete (globalThis as any)[WORKER_INTERACTIONS_KEY];
-    if ((globalThis as any).__piIdleContextParentV1 === parentIdleCapability) delete (globalThis as any).__piIdleContextParentV1;
+    if (interactions?.workerEpoch === worker?.manifest.workerEpoch)
+      delete (globalThis as any)[WORKER_INTERACTIONS_KEY];
+    if ((globalThis as any).__piIdleContextParentV1 === parentIdleCapability)
+      delete (globalThis as any).__piIdleContextParentV1;
     parentIdleCapability = undefined;
     await worker?.close();
     worker = undefined;

@@ -1,7 +1,7 @@
-import { readExtensionDefaults } from './extension-defaults.js';
-import type { ExtensionAPI, ExtensionContext } from '@earendil-works/pi-coding-agent';
-import { createHash } from 'node:crypto';
-import { admitHarnessWake } from './idle-admission.js';
+import { readExtensionDefaults } from "./extension-defaults.js";
+import type { ExtensionAPI, ExtensionContext } from "@earendil-works/pi-coding-agent";
+import { createHash } from "node:crypto";
+import { admitHarnessWake } from "./idle-admission.js";
 
 // Quiet harness state.
 //
@@ -20,7 +20,7 @@ import { admitHarnessWake } from './idle-admission.js';
 // ---------------------------------------------------------------------------
 
 export type QuietUpdate = {
-  kind: 'job' | 'subagent' | 'watch' | 'notification';
+  kind: "job" | "subagent" | "watch" | "notification";
   id: string;
   state?: string;
   child_id?: string;
@@ -44,7 +44,7 @@ export type QuietUpdate = {
   completion?: boolean;
   /** Owning-controller generated idle-decision request only, never model input. */
   admission_control?: {
-    kind: 'idle-decision' | 'idle-decision-resolved';
+    kind: "idle-decision" | "idle-decision-resolved";
     request_id: string;
     worker_epoch: string;
   };
@@ -57,11 +57,11 @@ export type QuietUpdate = {
 };
 
 export type QuietStateReceiptState =
-  | 'recorded'
-  | 'queued'
-  | 'dispatching'
-  | 'delivered'
-  | 'consumed';
+  | "recorded"
+  | "queued"
+  | "dispatching"
+  | "delivered"
+  | "consumed";
 
 export type QuietStateReceipt = {
   v: 1;
@@ -96,7 +96,7 @@ type Diagnostic = {
     key: string;
     id: string;
     child_id?: string;
-    guidance?: QuietUpdate['guidance'];
+    guidance?: QuietUpdate["guidance"];
   }>;
   at: number;
   nextRetryAt: number;
@@ -144,14 +144,14 @@ type Hub = {
 // Constants
 // ---------------------------------------------------------------------------
 
-const KEY = '__paeQuietHarnessStateV2';
+const KEY = "__paeQuietHarnessStateV2";
 
 // Custom entry and message types.
-const MESSAGE_CUSTOM = 'harness-state';
-const NOTIFICATION_CUSTOM = 'harness-child-notification';
-const CONTROL_CUSTOM = 'harness-state-control';
-const DIAGNOSTIC_CUSTOM = 'harness-state-delivery-diagnostic';
-export const QUIET_STATE_RECEIPT_CUSTOM_TYPE = 'harness-state-receipt';
+const MESSAGE_CUSTOM = "harness-state";
+const NOTIFICATION_CUSTOM = "harness-child-notification";
+const CONTROL_CUSTOM = "harness-state-control";
+const DIAGNOSTIC_CUSTOM = "harness-state-delivery-diagnostic";
+export const QUIET_STATE_RECEIPT_CUSTOM_TYPE = "harness-state-receipt";
 
 // Size limits.
 const MAX_PENDING = 512;
@@ -173,28 +173,28 @@ const IDLE_REQUEST_ID_PATTERN = /^idle:[0-9a-f]{32}$/;
 const WORKER_EPOCH_PATTERN = /^[0-9a-f]{32}$/;
 
 /** Receipt states that mean an update needs no further delivery. */
-const SETTLED_STATES = ['delivered', 'consumed', 'recorded'];
+const SETTLED_STATES = ["delivered", "consumed", "recorded"];
 
 // Wake message openings.
 const COMPLETION_PREFIX =
-  'Background subagent finished. Read its result, then reap it when follow-up is complete.\n';
+  "Background subagent finished. Read its result, then reap it when follow-up is complete.\n";
 const JOB_COMPLETION_PREFIX =
-  'Background job finished. Inspect its output, then reap it when no longer needed.\n';
+  "Background job finished. Inspect its output, then reap it when no longer needed.\n";
 const MIXED_COMPLETION_PREFIX =
-  'Background work finished. Read each job’s output or subagent’s result, then reap it when no longer needed.\n';
+  "Background work finished. Read each job’s output or subagent’s result, then reap it when no longer needed.\n";
 /** Opening line of every wake message that contains watch alerts. */
 export const WATCH_ALERT_PREFIX =
-  'Watch alert. Read the new events with background_job events, then ack them.\n';
+  "Watch alert. Read the new events with background_job events, then ack them.\n";
 const GUIDANCE_PREFIX =
-  'Worker guidance is pending. For structured requests use guidance list and reply to the exact authenticated target; subagent operation=prompt with child_id is only for legacy notices, not an awaited guidance answer or permission.\n';
+  "Worker guidance is pending. For structured requests use guidance list and reply to the exact authenticated target; subagent operation=prompt with child_id is only for legacy notices, not an awaited guidance answer or permission.\n";
 
 // ---------------------------------------------------------------------------
 // Preferences: environment kill switch and declarative defaults
 // ---------------------------------------------------------------------------
 
-const quietStateDefaults = readExtensionDefaults('quiet-state');
-if (quietStateDefaults.enabled !== undefined && typeof quietStateDefaults.enabled !== 'boolean')
-  throw new Error('Invalid defaults/quiet-state.json enabled preference');
+const quietStateDefaults = readExtensionDefaults("quiet-state");
+if (quietStateDefaults.enabled !== undefined && typeof quietStateDefaults.enabled !== "boolean")
+  throw new Error("Invalid defaults/quiet-state.json enabled preference");
 
 // Explicit environment values (including 0/false) override declarative defaults;
 // a true kill switch still cannot be bypassed by session enable commands.
@@ -202,7 +202,7 @@ function quietStateEnvironment(): string | undefined {
   return process.env.PAE_QUIET_STATE_DISABLED ?? process.env.PI_QUIET_STATE_DISABLED;
 }
 function envDisabled(): boolean {
-  return /^(1|true|yes|on)$/i.test(quietStateEnvironment() ?? '');
+  return /^(1|true|yes|on)$/i.test(quietStateEnvironment() ?? "");
 }
 function defaultDisabled(): boolean {
   return quietStateEnvironment() === undefined && quietStateDefaults.enabled === false;
@@ -216,10 +216,10 @@ function disabled(hub?: Hub): boolean {
 // ---------------------------------------------------------------------------
 
 function revision(data: unknown): string {
-  return createHash('sha256').update(JSON.stringify(data)).digest('hex');
+  return createHash("sha256").update(JSON.stringify(data)).digest("hex");
 }
 function bytes(text: string): number {
-  return Buffer.byteLength(text, 'utf8');
+  return Buffer.byteLength(text, "utf8");
 }
 function clone<T>(value: T): T {
   return JSON.parse(JSON.stringify(value));
@@ -234,8 +234,8 @@ function keyOf(data: QuietUpdate): string {
 function validUpdate(data: any): data is QuietUpdate {
   return (
     data &&
-    ['job', 'subagent', 'watch', 'notification'].includes(data.kind) &&
-    typeof data.id === 'string'
+    ["job", "subagent", "watch", "notification"].includes(data.kind) &&
+    typeof data.id === "string"
   );
 }
 function toItem(data: QuietUpdate, queuedAt = Date.now()): Item {
@@ -249,7 +249,7 @@ function toItem(data: QuietUpdate, queuedAt = Date.now()): Item {
   };
 }
 function isCustomEntry(entry: any, customType: string): boolean {
-  return entry?.type === 'custom' && entry.customType === customType;
+  return entry?.type === "custom" && entry.customType === customType;
 }
 /** Interleave items by group so one busy group cannot starve the others. Starts with the
  * group after `after`, which is the group that was served last. */
@@ -281,7 +281,7 @@ function nextPollMs(delayMs: number): number {
 // ---------------------------------------------------------------------------
 
 function isCompletion(data: QuietUpdate): boolean {
-  return (data.kind === 'subagent' || data.kind === 'job') && data.completion === true;
+  return (data.kind === "subagent" || data.kind === "job") && data.completion === true;
 }
 /** Which worker a completion belongs to. Newer completions replace older ones. */
 function completionIdentity(data: QuietUpdate): string {
@@ -293,7 +293,7 @@ function hasSequence(data: QuietUpdate): boolean {
 /** New events on one of this session's watches. Delivered like completions:
  * idle-only, coalesced per watch, and consumed by events/ack/unwatch. */
 function isWatchAlert(data: QuietUpdate): boolean {
-  return data.kind === 'watch' && data.requires_guidance !== true && hasSequence(data);
+  return data.kind === "watch" && data.requires_guidance !== true && hasSequence(data);
 }
 /** Completions and watch alerts wake the model, but only when it is idle. */
 function isIdleWake(data: QuietUpdate): boolean {
@@ -305,7 +305,7 @@ function needsGuidance(data: QuietUpdate): boolean {
 }
 /** A guidance request owned by the guidance broker (current or legacy form). */
 function isBrokerGuidance(data: QuietUpdate): boolean {
-  return !!data.guidance || (data.kind === 'notification' && data.id.startsWith('guidance:'));
+  return !!data.guidance || (data.kind === "notification" && data.id.startsWith("guidance:"));
 }
 /** Guidance requests are paced and grouped per worker. */
 function guidanceGroup(data: QuietUpdate): string {
@@ -314,11 +314,11 @@ function guidanceGroup(data: QuietUpdate): string {
 /** An idle-decision request from a subagent child, with an exact identity. */
 function isControlRequest(data: QuietUpdate): boolean {
   return (
-    data.kind === 'notification' &&
+    data.kind === "notification" &&
     data.requires_guidance === true &&
     !!data.child_id &&
     CHILD_ID_PATTERN.test(data.child_id) &&
-    data.admission_control?.kind === 'idle-decision' &&
+    data.admission_control?.kind === "idle-decision" &&
     IDLE_REQUEST_ID_PATTERN.test(data.admission_control.request_id) &&
     WORKER_EPOCH_PATTERN.test(data.admission_control.worker_epoch)
   );
@@ -326,17 +326,17 @@ function isControlRequest(data: QuietUpdate): boolean {
 /** The parent's answer to an idle-decision request. */
 function isControlResolution(data: QuietUpdate): boolean {
   return (
-    data.kind === 'notification' &&
+    data.kind === "notification" &&
     !!data.child_id &&
-    data.admission_control?.kind === 'idle-decision-resolved'
+    data.admission_control?.kind === "idle-decision-resolved"
   );
 }
 /** True when `resolution` answers the pending control request `request`. */
 function resolvesControl(request: QuietUpdate, resolution: QuietUpdate): boolean {
   return (
-    resolution.kind === 'notification' &&
+    resolution.kind === "notification" &&
     resolution.child_id === request.child_id &&
-    resolution.admission_control?.kind === 'idle-decision-resolved' &&
+    resolution.admission_control?.kind === "idle-decision-resolved" &&
     resolution.admission_control.request_id === request.admission_control?.request_id &&
     resolution.admission_control.worker_epoch === request.admission_control?.worker_epoch
   );
@@ -348,13 +348,13 @@ function trustedAutonomousUpdate(data: QuietUpdate): boolean {
   if (isCompletion(data) || isControlRequest(data)) return true;
   if (isWatchAlert(data)) return WATCH_ID_PATTERN.test(data.id);
   if (data.requires_guidance !== true) return false;
-  const validChild = typeof data.child_id === 'string' && CHILD_ID_PATTERN.test(data.child_id);
+  const validChild = typeof data.child_id === "string" && CHILD_ID_PATTERN.test(data.child_id);
   const validJob =
-    typeof (data.job_id ?? data.id) === 'string' &&
+    typeof (data.job_id ?? data.id) === "string" &&
     JOB_ID_PATTERN.test(String(data.job_id ?? data.id));
-  if (data.kind === 'subagent') return validChild && validJob;
-  if (data.kind === 'job') return validJob;
-  return data.kind === 'notification' && validChild;
+  if (data.kind === "subagent") return validChild && validJob;
+  if (data.kind === "job") return validJob;
+  return data.kind === "notification" && validChild;
 }
 
 // ---------------------------------------------------------------------------
@@ -365,11 +365,11 @@ function completionPrefix(updates: QuietUpdate[]): string {
   const watches = updates.some(isWatchAlert);
   const finished = updates.filter((u) => !isWatchAlert(u));
   if (!finished.length) return WATCH_ALERT_PREFIX;
-  return (watches ? WATCH_ALERT_PREFIX : '') + finishedPrefix(finished);
+  return (watches ? WATCH_ALERT_PREFIX : "") + finishedPrefix(finished);
 }
 function finishedPrefix(updates: QuietUpdate[]): string {
-  const children = updates.some((u) => u.kind === 'subagent'),
-    jobs = updates.some((u) => u.kind === 'job');
+  const children = updates.some((u) => u.kind === "subagent"),
+    jobs = updates.some((u) => u.kind === "job");
   if (children && jobs) return MIXED_COMPLETION_PREFIX;
   return children ? COMPLETION_PREFIX : JOB_COMPLETION_PREFIX;
 }
@@ -465,15 +465,15 @@ function latestReceipt(hub: Hub, key: string) {
   return hub.receipts.get(key);
 }
 function hasSettledReceipt(hub: Hub, key: string): boolean {
-  return SETTLED_STATES.includes(latestReceipt(hub, key)?.state ?? '');
+  return SETTLED_STATES.includes(latestReceipt(hub, key)?.state ?? "");
 }
 /** This update needs no delivery. Guidance matches by key alone; others by revision. */
 function alreadyHandled(hub: Hub, key: string, rev: string) {
   const receipt = latestReceipt(hub, key);
   return (
     !!receipt &&
-    (key.startsWith('guidance:') || receipt.revision === rev) &&
-    (receipt.state === 'recorded' || receipt.state === 'delivered' || receipt.state === 'consumed')
+    (key.startsWith("guidance:") || receipt.revision === rev) &&
+    (receipt.state === "recorded" || receipt.state === "delivered" || receipt.state === "consumed")
   );
 }
 /** Parse a persisted receipt entry, or undefined if the entry is not a valid receipt. */
@@ -482,17 +482,17 @@ function receiptFrom(entry: any): QuietStateReceipt | undefined {
   const d = entry.data;
   if (
     d?.v !== 1 ||
-    typeof d.key !== 'string' ||
-    typeof d.revision !== 'string' ||
-    !['recorded', 'queued', 'dispatching', 'delivered', 'consumed'].includes(d.state) ||
-    typeof d.at !== 'number' ||
+    typeof d.key !== "string" ||
+    typeof d.revision !== "string" ||
+    !["recorded", "queued", "dispatching", "delivered", "consumed"].includes(d.state) ||
+    typeof d.at !== "number" ||
     !validUpdate(d.update)
   )
     return undefined;
   return d;
 }
 function deliveredReceipt(key: string, item: Item, at: number): QuietStateReceipt {
-  return { v: 1, key, revision: item.revision, state: 'delivered', at, update: item.data };
+  return { v: 1, key, revision: item.revision, state: "delivered", at, update: item.data };
 }
 /** Persist a receipt and remember it. Returns false (and reports) if the write fails. */
 function appendReceipt(hub: Hub, item: Item, state: QuietStateReceiptState): boolean {
@@ -509,10 +509,10 @@ function appendReceipt(hub: Hub, item: Item, state: QuietStateReceiptState): boo
   const failed = () => {
     hub.stats.receiptFailed++;
     if (item.data.activity !== true)
-      reportFailure(hub, 'Receipt persistence failed', [item.key], true, [item.data]);
+      reportFailure(hub, "Receipt persistence failed", [item.key], true, [item.data]);
     return false;
   };
-  if (bytes(JSON.stringify(receipt)) > MAX_ITEM_BYTES || typeof hub.pi?.appendEntry !== 'function')
+  if (bytes(JSON.stringify(receipt)) > MAX_ITEM_BYTES || typeof hub.pi?.appendEntry !== "function")
     return failed();
   try {
     hub.pi.appendEntry(QUIET_STATE_RECEIPT_CUSTOM_TYPE, receipt);
@@ -525,12 +525,12 @@ function appendReceipt(hub: Hub, item: Item, state: QuietStateReceiptState): boo
 /** Record delivery. If the receipt write fails, still remember it in memory: the
  * persisted message itself prevents a replay after restart. */
 function markDelivered(hub: Hub, item: Item, key = item.key): void {
-  if (!appendReceipt(hub, item, 'delivered'))
+  if (!appendReceipt(hub, item, "delivered"))
     hub.receipts.set(key, deliveredReceipt(key, item, Date.now()));
 }
 /** Return a not-yet-sent item to the queue, or remember it for a later retry. */
 function requeueUnsent(hub: Hub, item: Item): void {
-  if (appendReceipt(hub, item, 'queued')) hub.unsent?.delete(item.key);
+  if (appendReceipt(hub, item, "queued")) hub.unsent?.delete(item.key);
   else (hub.unsent ??= new Map()).set(item.key, item);
 }
 
@@ -562,10 +562,10 @@ function receiptSupersedes(receipt: QuietStateReceipt, identity: string, sequenc
   const update = receipt.update;
   if (completionIdentity(update) !== identity || !hasSequence(update)) return false;
   const newerActivity =
-    update.activity === true && receipt.state === 'recorded' && update.through_sequence! > sequence;
+    update.activity === true && receipt.state === "recorded" && update.through_sequence! > sequence;
   const handledCompletion =
     isCompletion(update) &&
-    (receipt.state === 'consumed' || receipt.state === 'delivered') &&
+    (receipt.state === "consumed" || receipt.state === "delivered") &&
     update.through_sequence! >= sequence;
   return newerActivity || handledCompletion;
 }
@@ -586,7 +586,7 @@ function dropSupersededCompletions(hub: Hub): void {
 }
 function retryActivity(hub: Hub): void {
   for (const [key, item] of hub.activityRetries ?? []) {
-    if (activityAlreadyRecorded(hub, key, item) || appendReceipt(hub, item, 'recorded'))
+    if (activityAlreadyRecorded(hub, key, item) || appendReceipt(hub, item, "recorded"))
       hub.activityRetries!.delete(key);
   }
 }
@@ -610,8 +610,8 @@ function branchEntries(ctx: any): any[] {
 }
 /** The updates carried by a harness-state wake message entry, if this is one. */
 function messageUpdates(entry: any): QuietUpdate[] | undefined {
-  const m = entry?.type === 'message' ? entry.message : entry;
-  return (entry?.type === 'custom_message' || m?.role === 'custom') &&
+  const m = entry?.type === "message" ? entry.message : entry;
+  return (entry?.type === "custom_message" || m?.role === "custom") &&
     m.customType === MESSAGE_CUSTOM &&
     Array.isArray(m.details?.updates)
     ? m.details.updates
@@ -619,8 +619,8 @@ function messageUpdates(entry: any): QuietUpdate[] | undefined {
 }
 function entryTimestamp(entry: any): number | undefined {
   const timestamp =
-    typeof entry.timestamp === 'string' ? Date.parse(entry.timestamp) : entry.timestamp;
-  return typeof timestamp === 'number' && Number.isFinite(timestamp) ? timestamp : undefined;
+    typeof entry.timestamp === "string" ? Date.parse(entry.timestamp) : entry.timestamp;
+  return typeof timestamp === "number" && Number.isFinite(timestamp) ? timestamp : undefined;
 }
 
 /** Rebuild the hub from the session log: receipts, controls, diagnostics and the queue. */
@@ -647,7 +647,7 @@ function restore(hub: Hub, ctx: any) {
   requeueRetainedGuidance(hub, entries);
   reportUncertainDispatch(
     hub,
-    'Uncertain guidance dispatch retained across restore; inspect actual message history',
+    "Uncertain guidance dispatch retained across restore; inspect actual message history",
     uncertainDispatchKeys(hub, false),
   );
 }
@@ -670,10 +670,10 @@ function restoreDiagnostic(hub: Hub, data: any): void {
 }
 /** Apply a persisted enable/disable/pause control. */
 function restoreControl(hub: Hub, data: any): void {
-  if (typeof data.disabled !== 'boolean') return;
+  if (typeof data.disabled !== "boolean") return;
   // Quota-only pauses are obsolete, not operator opt-outs. Preserve all other controls.
-  if (data.reason === 'guidance-quota') return;
-  if (data.reason === 'compaction-pause') {
+  if (data.reason === "guidance-quota") return;
+  if (data.reason === "compaction-pause") {
     hub.guidanceDisabled = data.disabled;
     return;
   }
@@ -691,7 +691,7 @@ function restoreLegacyMessage(hub: Hub, entry: any): void {
     // older message acknowledge a newer revision of a queued request.
     const priorStillOpen =
       !!prior &&
-      ['queued', 'dispatching'].includes(prior.state) &&
+      ["queued", "dispatching"].includes(prior.state) &&
       prior.revision === item.revision;
     if (prior && !priorStillOpen) continue;
     const at = entryTimestamp(entry) ?? prior?.at ?? 0;
@@ -701,13 +701,13 @@ function restoreLegacyMessage(hub: Hub, entry: any): void {
 /** Rebuild guidance stats and the pacing clock from guidance receipts. */
 function restoreGuidancePacing(hub: Hub, receipt: QuietStateReceipt): void {
   if (!needsGuidance(receipt.update)) return;
-  if (receipt.state === 'delivered') {
+  if (receipt.state === "delivered") {
     hub.stats.guidanceDelivered++;
     hub.stats.guidanceBytes += bytes(JSON.stringify(receipt.update));
   }
   // An unacknowledged intent may have dispatched. Preserve pacing on
   // restart without treating uncertainty as a delivered receipt.
-  const mayHaveSent = receipt.state === 'delivered' || receipt.state === 'dispatching';
+  const mayHaveSent = receipt.state === "delivered" || receipt.state === "dispatching";
   if (mayHaveSent && receipt.at >= hub.lastGuidanceAt) {
     hub.lastGuidanceAt = Math.min(Date.now(), receipt.at);
     hub.lastGuidanceChild = guidanceGroup(receipt.update);
@@ -715,7 +715,7 @@ function restoreGuidancePacing(hub: Hub, receipt: QuietStateReceipt): void {
 }
 /** Put a queued or dispatching wake back into the pending queue. */
 function requeueOpenReceipt(hub: Hub, receipt: QuietStateReceipt): void {
-  const open = receipt.state === 'queued' || receipt.state === 'dispatching';
+  const open = receipt.state === "queued" || receipt.state === "dispatching";
   const wakesModel = receipt.update.requires_guidance === true || isIdleWake(receipt.update);
   if (open && wakesModel) hub.pending.set(receipt.key, toItem(receipt.update, receipt.at));
 }
@@ -724,7 +724,7 @@ function requeueOpenReceipt(hub: Hub, receipt: QuietStateReceipt): void {
 function requeueRetainedGuidance(hub: Hub, entries: any[]): void {
   for (const entry of entries) {
     const data = isCustomEntry(entry, NOTIFICATION_CUSTOM) ? entry.data?.update : undefined;
-    if (!validUpdate(data) || data.kind !== 'notification') continue;
+    if (!validUpdate(data) || data.kind !== "notification") continue;
     const item = toItem(data, entry.data?.at ?? Date.now());
     if (
       alreadyHandled(hub, item.key, item.revision) ||
@@ -764,7 +764,7 @@ function reportFailure(
   retry = true,
   updates: QuietUpdate[] = [],
 ): void {
-  cause = cause.replace(/[\x00-\x1f\x7f]/g, ' ').slice(0, 500);
+  cause = cause.replace(/[\x00-\x1f\x7f]/g, " ").slice(0, 500);
   const attempt = (hub.diagnostic?.cause === cause ? hub.diagnostic.attempt : 0) + 1;
   hub.retryAt = retry ? Date.now() + retryBackoffMs(attempt) : 0;
   const affected = affectedUpdates(hub, keys, updates);
@@ -779,7 +779,7 @@ function reportFailure(
   try {
     hub.pi?.appendEntry(DIAGNOSTIC_CUSTOM, hub.diagnostic);
   } catch {
-    hub.diagnostic.cause = cause + '; diagnostic persistence failed';
+    hub.diagnostic.cause = cause + "; diagnostic persistence failed";
   }
   notifyFailure(hub, hub.diagnostic, retry);
   refreshStatus(hub);
@@ -787,12 +787,12 @@ function reportFailure(
 function notifyFailure(hub: Hub, diagnostic: Diagnostic, retry: boolean): void {
   if (!hub.ctx?.hasUI) return;
   const recovery = retry
-    ? 'Automatic bounded backoff.'
-    : 'Inspect guidance list and answer/dismiss, or retry-guidance with the exact key (may duplicate).';
+    ? "Automatic bounded backoff."
+    : "Inspect guidance list and answer/dismiss, or retry-guidance with the exact key (may duplicate).";
   try {
     hub.ctx.ui.notify(
       `Harness delivery: ${diagnostic.cause}; ${hub.pending.size} pending. Inspect /harness-state status. ${recovery} `,
-      'warning',
+      "warning",
     );
   } catch {}
 }
@@ -803,7 +803,7 @@ function clearFailure(hub: Hub): void {
   try {
     hub.pi?.appendEntry(DIAGNOSTIC_CUSTOM, { at: Date.now(), resolved: true });
   } catch {
-    reportFailure(hub, 'Recovery diagnostic persistence failed', []);
+    reportFailure(hub, "Recovery diagnostic persistence failed", []);
   }
 }
 /** The current diagnostic has keys, and every key passes `settled`. */
@@ -816,7 +816,7 @@ function uncertainDispatchKeys(hub: Hub, expiredOnly: boolean): string[] {
   return [...hub.pending.values()]
     .filter(
       (item) =>
-        latestReceipt(hub, item.key)?.state === 'dispatching' &&
+        latestReceipt(hub, item.key)?.state === "dispatching" &&
         !hub.unsent?.has(item.key) &&
         (!expiredOnly || Date.now() - latestReceipt(hub, item.key)!.at >= ACK_TIMEOUT_MS),
     )
@@ -826,15 +826,15 @@ function uncertainDispatchKeys(hub: Hub, expiredOnly: boolean): string[] {
 /** Report uncertain dispatches once; repeat only when the set of keys changes. */
 function reportUncertainDispatch(hub: Hub, cause: string, keys: string[]): void {
   const alreadyReported =
-    !!hub.diagnostic?.cause.startsWith('Uncertain guidance dispatch') &&
+    !!hub.diagnostic?.cause.startsWith("Uncertain guidance dispatch") &&
     JSON.stringify(hub.diagnostic.keys) === JSON.stringify(keys);
   if (keys.length && !alreadyReported) reportFailure(hub, cause, keys, false);
 }
 function statusBarText(hub: Hub): string | undefined {
   const guidance = [...hub.pending.values()].filter((item) => item.data.requires_guidance).length;
-  if (disabled(hub)) return 'quiet off';
-  if (hub.compacting) return 'quiet compacting';
-  if (hub.guidanceDisabled) return 'quiet guidance paused';
+  if (disabled(hub)) return "quiet off";
+  if (hub.compacting) return "quiet compacting";
+  if (hub.guidanceDisabled) return "quiet guidance paused";
   if (hub.diagnostic) return `quiet delivery error (${guidance} pending): ${hub.diagnostic.cause}`;
   if (guidance) return `quiet guidance ${guidance}`;
   return undefined;
@@ -844,7 +844,7 @@ function refreshStatus(hub: Hub) {
   if (!ctx?.hasUI) return;
   const text = statusBarText(hub);
   try {
-    ctx.ui.setStatus('quiet-state', text);
+    ctx.ui.setStatus("quiet-state", text);
   } catch {}
 }
 
@@ -882,10 +882,10 @@ async function admitBatch(hub: Hub, items: Item[]): Promise<boolean> {
       !hub.ctx ||
       session(hub.ctx) !== session(ctx);
     if (stale) return false;
-    if (decision === 'continue') return true;
+    if (decision === "continue") return true;
     // Explicit Cancel suppresses this exact wake revision, not retained history.
     for (const item of items)
-      if (isStillPending(hub, item) && appendReceipt(hub, item, 'consumed'))
+      if (isStillPending(hub, item) && appendReceipt(hub, item, "consumed"))
         hub.pending.delete(item.key);
     return false;
   } catch {
@@ -925,7 +925,7 @@ function acknowledgeGuidance(hub: Hub): void {
   if (atSafeBoundary && Date.now() >= (hub.retryAt ?? 0))
     reportUncertainDispatch(
       hub,
-      'Uncertain guidance dispatch: no persisted message acknowledgement',
+      "Uncertain guidance dispatch: no persisted message acknowledgement",
       uncertainDispatchKeys(hub, true),
     );
 }
@@ -938,7 +938,7 @@ function retryUnsent(hub: Hub): void {
 }
 function acknowledgeLoggedDispatches(hub: Hub): void {
   for (const [key, item] of hub.pending)
-    if (latestReceipt(hub, key)?.state === 'dispatching' && hasDeliveryMessage(hub, item)) {
+    if (latestReceipt(hub, key)?.state === "dispatching" && hasDeliveryMessage(hub, item)) {
       // The message journal is independent delivery evidence if the receipt write fails.
       markDelivered(hub, item, key);
       hub.pending.delete(key);
@@ -963,7 +963,7 @@ function reconcileGuidance(hub: Hub): void {
   retireStaleBrokerGuidance(hub, updates, live);
   queueNewBrokerRequests(hub, updates);
   const settledOrGone = (key: string) =>
-    hasSettledReceipt(hub, key) || (key.startsWith('guidance:') && !live.has(key));
+    hasSettledReceipt(hub, key) || (key.startsWith("guidance:") && !live.has(key));
   if (diagnosticKeysSettled(hub, settledOrGone)) clearFailure(hub);
   revokeConsumedWake(hub);
 }
@@ -982,7 +982,7 @@ function readBrokerSnapshot(hub: Hub): QuietUpdate[] | undefined {
     (u) => validUpdate(u) && u.guidance?.ownerSessionId === session(hub.ctx),
   );
   if (updates.length > 1024) {
-    reportFailure(hub, 'Broker snapshot exceeds bounded request inventory', []);
+    reportFailure(hub, "Broker snapshot exceeds bounded request inventory", []);
     return undefined;
   }
   return updates;
@@ -992,7 +992,7 @@ function retireStaleBrokerGuidance(hub: Hub, updates: QuietUpdate[], live: Set<s
   for (const [key, item] of hub.pending) {
     if (!isBrokerGuidance(item.data) || live.has(key)) continue;
     if (!upgradeLegacyRequest(hub, key, item, updates)) continue;
-    if (appendReceipt(hub, item, 'consumed')) hub.pending.delete(key);
+    if (appendReceipt(hub, item, "consumed")) hub.pending.delete(key);
   }
 }
 /** Move a legacy request-ID-only queue entry to its broker key. Returns false only when
@@ -1012,7 +1012,7 @@ function upgradeLegacyRequest(hub: Hub, key: string, item: Item, updates: QuietU
     hub.pending.has(replacement.key)
   )
     return true;
-  const state = latestReceipt(hub, key)?.state === 'dispatching' ? 'dispatching' : 'queued';
+  const state = latestReceipt(hub, key)?.state === "dispatching" ? "dispatching" : "queued";
   if (!appendReceipt(hub, replacement, state)) return false;
   hub.pending.set(replacement.key, replacement);
   return true;
@@ -1024,14 +1024,14 @@ function queueNewBrokerRequests(hub: Hub, updates: QuietUpdate[]): void {
     if (alreadyHandled(hub, item.key, item.revision) || hub.pending.has(item.key)) continue;
     if (adoptLegacyReceipt(hub, data, item)) continue;
     if (item.bytes > MAX_UPDATE_BYTES || guidanceBatchBytes([data]) > MAX_BATCH_BYTES) {
-      reportFailure(hub, 'Broker request exceeds notification payload bound', [item.key]);
+      reportFailure(hub, "Broker request exceeds notification payload bound", [item.key]);
       continue;
     }
     if (hub.pending.size >= MAX_PENDING) {
-      reportFailure(hub, 'Notification queue full; broker waiter retained', [item.key]);
+      reportFailure(hub, "Notification queue full; broker waiter retained", [item.key]);
       return;
     }
-    if (!appendReceipt(hub, item, 'queued')) return;
+    if (!appendReceipt(hub, item, "queued")) return;
     hub.pending.set(item.key, item);
   }
 }
@@ -1039,7 +1039,7 @@ function queueNewBrokerRequests(hub: Hub, updates: QuietUpdate[]): void {
 function adoptLegacyReceipt(hub: Hub, data: QuietUpdate, item: Item): boolean {
   const legacy = hub.receipts.get(`notification:${data.guidance!.requestId}`);
   const legacyHandled =
-    legacy?.update.child_id === data.child_id && ['delivered', 'consumed'].includes(legacy!.state);
+    legacy?.update.child_id === data.child_id && ["delivered", "consumed"].includes(legacy!.state);
   if (!legacyHandled) return false;
   appendReceipt(hub, item, legacy!.state);
   return true;
@@ -1053,7 +1053,7 @@ function adoptLegacyReceipt(hub: Hub, data: QuietUpdate, item: Item): boolean {
  * pending, only controls go out. */
 function readyForGuidanceBatch(hub: Hub, item: Item, controls: boolean): boolean {
   if (!item.data.requires_guidance || isCompletion(item.data)) return false;
-  if (latestReceipt(hub, item.key)?.state === 'dispatching') return false;
+  if (latestReceipt(hub, item.key)?.state === "dispatching") return false;
   return controls ? isControlRequest(item.data) : !hub.wakeAdmission;
 }
 /** Oldest-first, fair across workers, within the batch item and byte limits. */
@@ -1070,7 +1070,7 @@ function selectBatch(hub: Hub) {
       if (!out.length)
         reportFailure(
           hub,
-          'Oversized guidance payload; inspect exact request and dismiss or answer it',
+          "Oversized guidance payload; inspect exact request and dismiss or answer it",
           [item.key],
         );
       continue;
@@ -1170,7 +1170,7 @@ function dispatchGuidance(hub: Hub, items: Item[], delayMs: number): void {
     // Only the actual persisted custom message may acknowledge this intent.
     hub.pi!.sendMessage(
       { customType: MESSAGE_CUSTOM, display: false, content, details: { updates } },
-      { deliverAs: hub.ctx!.isIdle() ? 'followUp' : 'steer', triggerTurn: true },
+      { deliverAs: hub.ctx!.isIdle() ? "followUp" : "steer", triggerTurn: true },
     );
   } catch (error) {
     handleGuidanceSendError(hub, items, error);
@@ -1178,7 +1178,7 @@ function dispatchGuidance(hub: Hub, items: Item[], delayMs: number): void {
     hub.dispatching = false;
   }
   acknowledgeGuidance(hub);
-  if (items.some((item) => latestReceipt(hub, item.key)?.state === 'dispatching'))
+  if (items.some((item) => latestReceipt(hub, item.key)?.state === "dispatching"))
     startAckTimer(hub, items, delayMs);
   schedule(hub, delayMs);
 }
@@ -1187,7 +1187,7 @@ function dispatchGuidance(hub: Hub, items: Item[], delayMs: number): void {
 function markDispatching(hub: Hub, items: Item[]): boolean {
   const prepared: Item[] = [];
   for (const item of items) {
-    if (!appendReceipt(hub, item, 'dispatching')) {
+    if (!appendReceipt(hub, item, "dispatching")) {
       // No send has occurred. These intents can safely return to the queue.
       for (const prior of prepared) requeueUnsent(hub, prior);
       return false;
@@ -1204,7 +1204,7 @@ function handleGuidanceSendError(hub: Hub, items: Item[], error: unknown): void 
   if (safe) for (const item of items) requeueUnsent(hub, item);
   reportFailure(
     hub,
-    `${safe ? 'Transport rejected before acceptance' : 'Uncertain guidance dispatch'}: ${String(error)}`,
+    `${safe ? "Transport rejected before acceptance" : "Uncertain guidance dispatch"}: ${String(error)}`,
     items.map((item) => item.key),
     safe,
   );
@@ -1219,7 +1219,7 @@ function startAckTimer(hub: Hub, items: Item[], delayMs: number): void {
     if (uncertain.length)
       reportFailure(
         hub,
-        'Uncertain guidance dispatch: no persisted message acknowledgement',
+        "Uncertain guidance dispatch: no persisted message acknowledgement",
         uncertain.map((item) => item.key),
         false,
       );
@@ -1341,7 +1341,7 @@ function consumeOlderWakeRevisions(hub: Hub, latest: Map<string, Item>): void {
   for (const [key, item] of hub.pending) {
     if (!isIdleWake(item.data)) continue;
     const current = latest.get(completionIdentity(item.data));
-    if (current && current.revision !== item.revision && appendReceipt(hub, item, 'consumed'))
+    if (current && current.revision !== item.revision && appendReceipt(hub, item, "consumed"))
       hub.pending.delete(key);
   }
 }
@@ -1355,7 +1355,7 @@ function sendCompletions(hub: Hub, items: Item[], delayMs: number): void {
         content: completionPrefix(updates) + JSON.stringify(updates),
         details: { updates },
       },
-      { deliverAs: 'followUp', triggerTurn: true },
+      { deliverAs: "followUp", triggerTurn: true },
     );
   } catch {
     hub.deliveryFailures++;
@@ -1397,7 +1397,7 @@ function notificationEntries(ctx: any): QuietUpdate[] {
   const seen = new Set<string>(),
     out: QuietUpdate[] = [];
   for (const entry of branchEntries(ctx)) {
-    if (entry?.type !== 'custom') continue;
+    if (entry?.type !== "custom") continue;
     const update =
       entry.customType === NOTIFICATION_CUSTOM ||
       entry.customType === QUIET_STATE_RECEIPT_CUSTOM_TYPE
@@ -1405,8 +1405,8 @@ function notificationEntries(ctx: any): QuietUpdate[] {
         : undefined;
     if (
       !validUpdate(update) ||
-      update.kind !== 'notification' ||
-      typeof update.message !== 'string' ||
+      update.kind !== "notification" ||
+      typeof update.message !== "string" ||
       seen.has(update.id)
     )
       continue;
@@ -1418,28 +1418,28 @@ function notificationEntries(ctx: any): QuietUpdate[] {
 
 const commandApis: WeakSet<object> = new WeakSet();
 function installCommands(pi: any) {
-  if (typeof pi.registerCommand !== 'function' || commandApis.has(pi)) return;
+  if (typeof pi.registerCommand !== "function" || commandApis.has(pi)) return;
   commandApis.add(pi);
-  pi.registerCommand('harness-state', {
+  pi.registerCommand("harness-state", {
     description:
-      'Show quiet harness-state status/notifications or disable/enable quiet model wakeups',
+      "Show quiet harness-state status/notifications or disable/enable quiet model wakeups",
     handler: async (args: string, ctx: any) => {
       const hub = hubFor(ctx);
       restore(hub, ctx);
       if (Date.now() >= (hub.retryAt ?? 0)) reconcileGuidance(hub);
-      const parts = (args || 'status').trim().split(/\s+/);
+      const parts = (args || "status").trim().split(/\s+/);
       switch (parts[0]) {
-        case 'show':
+        case "show":
           return showNotifications(pi, ctx);
-        case 'dismiss-guidance':
+        case "dismiss-guidance":
           return dismissGuidance(hub, ctx, parts);
-        case 'disable':
-        case 'off':
+        case "disable":
+        case "off":
           return disableQuietState(pi, hub, ctx);
-        case 'retry-guidance':
+        case "retry-guidance":
           return retryGuidance(hub, ctx, parts);
-        case 'enable':
-        case 'on':
+        case "enable":
+        case "on":
           return enableQuietState(pi, hub, ctx);
         default:
           return showStatus(hub, ctx);
@@ -1453,40 +1453,40 @@ function showNotifications(pi: any, ctx: any): void {
     .slice(-25)
     .map(
       (u, i) =>
-        `${i + 1}. ${u.requires_guidance ? '[guidance]' : '[finding]'} ${u.displayName ?? 'Subagent'}: ${u.message ?? ''}`,
+        `${i + 1}. ${u.requires_guidance ? "[guidance]" : "[finding]"} ${u.displayName ?? "Subagent"}: ${u.message ?? ""}`,
     );
-  const content = notes.length ? notes.join('\n') : 'No retained child notifications.';
+  const content = notes.length ? notes.join("\n") : "No retained child notifications.";
   pi.sendMessage(
     {
-      customType: 'harness-state-view',
+      customType: "harness-state-view",
       display: true,
       content,
       details: { count: notes.length },
     },
-    { deliverAs: 'nextTurn', triggerTurn: false },
+    { deliverAs: "nextTurn", triggerTurn: false },
   );
 }
 /** `dismiss-guidance all|<child_id>`: consume pending guidance without answering it. */
 function dismissGuidance(hub: Hub, ctx: any, parts: string[]): void {
   const scope = parts[1];
-  const validScope = scope === 'all' || (!!scope && CHILD_ID_PATTERN.test(scope));
+  const validScope = scope === "all" || (!!scope && CHILD_ID_PATTERN.test(scope));
   if (parts.length !== 2 || !validScope) {
-    ctx.ui.notify('Usage: /harness-state dismiss-guidance all|<exact child_id>', 'warning');
+    ctx.ui.notify("Usage: /harness-state dismiss-guidance all|<exact child_id>", "warning");
     return;
   }
   const targets = [...hub.pending.values()].filter(
-    (item) => needsGuidance(item.data) && (scope === 'all' || item.data.child_id === scope),
+    (item) => needsGuidance(item.data) && (scope === "all" || item.data.child_id === scope),
   );
   let consumed = 0;
   for (const item of targets) {
-    if (appendReceipt(hub, item, 'consumed')) {
+    if (appendReceipt(hub, item, "consumed")) {
       hub.pending.delete(item.key);
       consumed++;
     }
   }
   ctx.ui.notify(
-    `Dismissed ${consumed} pending guidance request(s)${scope === 'all' ? '' : ' for ' + scope}; retained histories unchanged.`,
-    'info',
+    `Dismissed ${consumed} pending guidance request(s)${scope === "all" ? "" : " for " + scope}; retained histories unchanged.`,
+    "info",
   );
   refreshStatus(hub);
 }
@@ -1497,22 +1497,22 @@ function disableQuietState(pi: any, hub: Hub, ctx: any): void {
   clearTimers(hub);
   pi.appendEntry(CONTROL_CUSTOM, { v: 1, disabled: true, at: Date.now() });
   ctx.ui.notify(
-    'harness-state disabled for this session. Re-enable with /harness-state enable. Env kill switch: PAE_QUIET_STATE_DISABLED=1',
-    'warning',
+    "harness-state disabled for this session. Re-enable with /harness-state enable. Env kill switch: PAE_QUIET_STATE_DISABLED=1",
+    "warning",
   );
   refreshStatus(hub);
 }
 /** `retry-guidance <key>`: requeue one uncertain dispatch. May send it twice. */
 function retryGuidance(hub: Hub, ctx: any, parts: string[]): void {
   const item = hub.pending.get(parts[1]);
-  if (parts.length !== 2 || !item || latestReceipt(hub, item.key)?.state !== 'dispatching') {
+  if (parts.length !== 2 || !item || latestReceipt(hub, item.key)?.state !== "dispatching") {
     ctx.ui.notify(
-      'Usage: /harness-state retry-guidance <exact uncertain receipt key>; inspect status and message history first (may duplicate a wake).',
-      'warning',
+      "Usage: /harness-state retry-guidance <exact uncertain receipt key>; inspect status and message history first (may duplicate a wake).",
+      "warning",
     );
     return;
   }
-  if (appendReceipt(hub, item, 'queued')) {
+  if (appendReceipt(hub, item, "queued")) {
     clearFailure(hub);
     schedule(hub, 0);
   }
@@ -1524,34 +1524,34 @@ function enableQuietState(pi: any, hub: Hub, ctx: any): void {
   hub.lastGuidanceAt = 0;
   pi.appendEntry(CONTROL_CUSTOM, { v: 1, disabled: false, at: Date.now() });
   ctx.ui.notify(
-    'harness-state completion/guidance wakeups enabled for this session. Uncertain dispatches still require explicit recovery.',
-    'info',
+    "harness-state completion/guidance wakeups enabled for this session. Uncertain dispatches still require explicit recovery.",
+    "info",
   );
   refreshStatus(hub);
   schedule(hub, 0);
 }
 /** Default mode: one status line with state, reason and counters. */
 function showStatus(hub: Hub, ctx: any): void {
-  ctx.ui.notify(statusLine(hub), 'info');
+  ctx.ui.notify(statusLine(hub), "info");
 }
 function statusName(hub: Hub): string {
-  if (disabled(hub)) return 'disabled';
-  return hub.guidanceDisabled ? 'guidance-paused' : 'active';
+  if (disabled(hub)) return "disabled";
+  return hub.guidanceDisabled ? "guidance-paused" : "active";
 }
 function statusReason(hub: Hub): string {
-  if (envDisabled()) return 'environment kill switch';
-  if (hub.localDisabled) return 'quiet-state preference/operator disable';
+  if (envDisabled()) return "environment kill switch";
+  if (hub.localDisabled) return "quiet-state preference/operator disable";
   const pauseReason = hub.guidanceDisabled
-    ? 'persisted guidance pause'
+    ? "persisted guidance pause"
     : hub.compacting
-      ? 'compaction'
-      : 'none';
+      ? "compaction"
+      : "none";
   return hub.diagnostic?.cause ?? pauseReason;
 }
 function statusLine(hub: Hub): string {
   const pending = [...hub.pending.values()];
   const uncertain = pending
-    .filter((item) => latestReceipt(hub, item.key)?.state === 'dispatching')
+    .filter((item) => latestReceipt(hub, item.key)?.state === "dispatching")
     .map((item) => ({ key: item.key, identity: item.data.guidance ?? item.data.id }));
   const { stats } = hub;
   const fields = [
@@ -1559,8 +1559,8 @@ function statusLine(hub: Hub): string {
     `reason=${statusReason(hub)}`,
     `diagnostic=${JSON.stringify(hub.diagnostic ?? null)}`,
     `uncertain=${JSON.stringify(uncertain)}`,
-    'recovery=inspect-guidance-list/answer-or-dismiss;retry-guidance-exact-key-may-duplicate',
-    `pendingBroker=${hub.brokerPending ?? 'unavailable'}`,
+    "recovery=inspect-guidance-list/answer-or-dismiss;retry-guidance-exact-key-may-duplicate",
+    `pendingBroker=${hub.brokerPending ?? "unavailable"}`,
     `pendingCompletions=${pending.filter((item) => isCompletion(item.data)).length}`,
     `pendingGuidance=${pending.filter((item) => item.data.requires_guidance).length}`,
     `receipts=${hub.receipts.size}`,
@@ -1573,9 +1573,9 @@ function statusLine(hub: Hub): string {
     `receiptFailed=${stats.receiptFailed}`,
     `circuitBreaks=${stats.circuitBreaks}`,
     `disabled=${disabled(hub)}`,
-    'envKillSwitch=PAE_QUIET_STATE_DISABLED=1',
+    "envKillSwitch=PAE_QUIET_STATE_DISABLED=1",
   ];
-  return `harness-state: ${fields.join(' ')}`;
+  return `harness-state: ${fields.join(" ")}`;
 }
 
 // ---------------------------------------------------------------------------
@@ -1589,14 +1589,14 @@ function recordControlResolution(hub: Hub, data: QuietUpdate, delayMs: number): 
     if (
       isControlRequest(item.data) &&
       resolvesControl(item.data, data) &&
-      appendReceipt(hub, item, 'consumed')
+      appendReceipt(hub, item, "consumed")
     )
       hub.pending.delete(key);
   revokeConsumedWake(hub);
   const persisted = appendReceipt(
     hub,
     toItem({ ...data, requires_guidance: false, completion: false }),
-    'recorded',
+    "recorded",
   );
   if (persisted) hub.stats.routineRecorded++;
   schedule(hub, delayMs);
@@ -1605,8 +1605,8 @@ function recordControlResolution(hub: Hub, data: QuietUpdate, delayMs: number): 
 /** Activity invalidation must persist even while delivery is disabled, and
  * never move backwards when an older async observation arrives late. */
 function recordWorkerActivity(hub: Hub, data: QuietUpdate, delayMs: number): boolean {
-  if (data.kind !== 'subagent' || !data.job_id || !data.child_id || !hasSequence(data))
-    throw new Error('Invalid worker activity identity');
+  if (data.kind !== "subagent" || !data.job_id || !data.child_id || !hasSequence(data))
+    throw new Error("Invalid worker activity identity");
   let item = toItem({
     ...data,
     id: `${data.job_id}:${data.child_id}:activity`,
@@ -1622,7 +1622,7 @@ function recordWorkerActivity(hub: Hub, data: QuietUpdate, delayMs: number): boo
   }
   // Reserve suppression before attempting the durable write, not after.
   retries.set(item.key, item);
-  const persisted = appendReceipt(hub, item, 'recorded');
+  const persisted = appendReceipt(hub, item, "recorded");
   if (persisted) retries.delete(item.key);
   dropSupersededCompletions(hub);
   revokeConsumedWake(hub);
@@ -1655,20 +1655,20 @@ function enqueueUpdate(hub: Hub, data: QuietUpdate, delayMs: number): boolean {
   }
   const item = toItem(data);
   if (exceedsUpdateBudget(item, data))
-    throw new Error('Quiet state update exceeds its metadata budget');
+    throw new Error("Quiet state update exceeds its metadata budget");
   if (isDuplicateUpdate(hub, item, data)) {
     hub.stats.duplicate++;
     return true;
   }
   if (hub.pending.size >= MAX_PENDING && !hub.pending.has(item.key)) {
     hub.stats.dropped++;
-    reportFailure(hub, 'Notification queue full; producer must retain and retry', [item.key]);
+    reportFailure(hub, "Notification queue full; producer must retain and retry", [item.key]);
     schedule(hub, delayMs);
     return false;
   }
   hub.stats.accepted++;
   if (data.requires_guidance === true || isIdleWake(data)) {
-    if (!appendReceipt(hub, item, 'queued')) {
+    if (!appendReceipt(hub, item, "queued")) {
       schedule(hub, delayMs);
       return false;
     }
@@ -1677,7 +1677,7 @@ function enqueueUpdate(hub: Hub, data: QuietUpdate, delayMs: number): boolean {
     return true;
   }
   hub.pending.delete(item.key);
-  if (!appendReceipt(hub, item, 'recorded')) return false;
+  if (!appendReceipt(hub, item, "recorded")) return false;
   hub.stats.routineRecorded++;
   refreshStatus(hub);
   return true;
@@ -1689,8 +1689,8 @@ function enqueueUpdate(hub: Hub, data: QuietUpdate, delayMs: number): boolean {
 
 /** Routine updates are receipts only; explicit guidance, background terminal completion and new watch events may wake the model. */
 export function installQuietState(pi: ExtensionAPI, delayMs = 1000) {
-  const writer = Symbol('quiet-harness-writer');
-  let source: Hub['guidanceSource'];
+  const writer = Symbol("quiet-harness-writer");
+  let source: Hub["guidanceSource"];
   installCommands(pi);
   /** This instance's hub for the session, or undefined when another instance owns it. */
   const ownedHub = (ctx: any): Hub | undefined => {
@@ -1708,7 +1708,7 @@ export function installQuietState(pi: ExtensionAPI, delayMs = 1000) {
     restoreAndSchedule(hub, ctx);
   };
 
-  pi.on('session_start', async (_event, ctx) => {
+  pi.on("session_start", async (_event, ctx) => {
     const hub = hubFor(ctx);
     hub.wakeAdmission?.abort();
     hub.wakeAdmission = undefined;
@@ -1722,35 +1722,35 @@ export function installQuietState(pi: ExtensionAPI, delayMs = 1000) {
     hub.compacting = false;
     restoreAndSchedule(hub, ctx);
   });
-  pi.on('agent_settled', async (_event, ctx) => {
+  pi.on("agent_settled", async (_event, ctx) => {
     const hub = ownedHub(ctx);
     if (!hub) return;
     hub.ctx = ctx;
     restoreAndSchedule(hub, ctx);
   });
-  pi.on('session_before_compact', async (_event, ctx) => {
+  pi.on("session_before_compact", async (_event, ctx) => {
     const hub = ownedHub(ctx);
     if (!hub) return;
     hub.compacting = true;
     clearTimers(hub);
     refreshStatus(hub);
   });
-  pi.on('session_compact', endCompaction);
-  pi.on('session_compact_failed', endCompaction);
-  pi.on('ui_prompt_start', async (_event, ctx) => {
+  pi.on("session_compact", endCompaction);
+  pi.on("session_compact_failed", endCompaction);
+  pi.on("ui_prompt_start", async (_event, ctx) => {
     const hub = ownedHub(ctx);
     if (!hub) return;
     hub.ui = true;
     clearTimers(hub);
     refreshStatus(hub);
   });
-  pi.on('ui_prompt_end', async (_event, ctx) => {
+  pi.on("ui_prompt_end", async (_event, ctx) => {
     const hub = ownedHub(ctx);
     if (!hub) return;
     hub.ui = false;
     schedule(hub, delayMs);
   });
-  pi.on('session_shutdown', async (event, ctx) => {
+  pi.on("session_shutdown", async (event, ctx) => {
     const hub = ownedHub(ctx);
     if (!hub) return;
     hub.wakeAdmission?.abort();
@@ -1760,19 +1760,19 @@ export function installQuietState(pi: ExtensionAPI, delayMs = 1000) {
     hub.writer = undefined;
     hub.pi = undefined;
     hub.ctx = undefined;
-    if (event.reason !== 'reload') hubs().delete(session(ctx));
+    if (event.reason !== "reload") hubs().delete(session(ctx));
   });
-  pi.on('message_end', async (event: any, ctx) => {
+  pi.on("message_end", async (event: any, ctx) => {
     const hub = ownedHub(ctx);
     const isWakeMessage =
-      event.message?.role === 'custom' && event.message.customType === MESSAGE_CUSTOM;
+      event.message?.role === "custom" && event.message.customType === MESSAGE_CUSTOM;
     if (!hub || !isWakeMessage) return;
     acknowledgeGuidance(hub);
     if (!hub.dispatching) schedule(hub, delayMs);
   });
 
   return {
-    setGuidanceSource(value: NonNullable<Hub['guidanceSource']>) {
+    setGuidanceSource(value: NonNullable<Hub["guidanceSource"]>) {
       source = value;
     },
     reconcile(ctx: ExtensionContext) {
@@ -1785,7 +1785,7 @@ export function installQuietState(pi: ExtensionAPI, delayMs = 1000) {
       hub.pi = pi;
       hub.ctx = ctx;
       if (data.guidance && data.guidance.ownerSessionId !== session(ctx))
-        throw new Error('Foreign guidance notification owner');
+        throw new Error("Foreign guidance notification owner");
       if (isControlResolution(data)) return recordControlResolution(hub, data, delayMs);
       if (data.activity === true) return recordWorkerActivity(hub, data, delayMs);
       return enqueueUpdate(hub, data, delayMs);
@@ -1800,7 +1800,7 @@ export function installQuietState(pi: ExtensionAPI, delayMs = 1000) {
       const hub = hubFor(ctx);
       if (!childId || !terminalId) return;
       const data: QuietUpdate = {
-        kind: 'subagent',
+        kind: "subagent",
         id: `${jobId}:${childId}:terminal:${terminalId}`,
         job_id: jobId,
         child_id: childId,
@@ -1816,14 +1816,14 @@ export function installQuietState(pi: ExtensionAPI, delayMs = 1000) {
       });
       // Persist even when the direct result read wins the race with polling.
       // Unknown/legacy sequence numbers authorize consuming only this exact ID.
-      if (!appendReceipt(hub, target, 'consumed')) return;
+      if (!appendReceipt(hub, target, "consumed")) return;
       for (const [pendingKey, item] of hub.pending)
         if (pendingKey === key || completionSuperseded(hub, item.data))
           hub.pending.delete(pendingKey);
       revokeConsumedWake(hub);
       refreshStatus(hub);
     },
-    consume(ctx: ExtensionContext, kind: QuietUpdate['kind'], id: string, through?: number) {
+    consume(ctx: ExtensionContext, kind: QuietUpdate["kind"], id: string, through?: number) {
       const hub = hubFor(ctx);
       const key = `${kind}:${id}`;
       // Job callers consume only terminal reads/reap, never running status.
@@ -1831,12 +1831,12 @@ export function installQuietState(pi: ExtensionAPI, delayMs = 1000) {
       // this race, and must not cause a delayed wake after the tool returned.
       const item =
         hub.pending.get(key) ??
-        (kind === 'job' && !hub.receipts.has(key)
+        (kind === "job" && !hub.receipts.has(key)
           ? toItem({ kind, id, completion: true })
           : undefined);
       const coveredByThrough =
         through === undefined || (item?.data.through_sequence ?? 0) <= through;
-      if (item && coveredByThrough && appendReceipt(hub, item, 'consumed')) hub.pending.delete(key);
+      if (item && coveredByThrough && appendReceipt(hub, item, "consumed")) hub.pending.delete(key);
       revokeConsumedWake(hub);
       refreshStatus(hub);
     },
@@ -1848,29 +1848,29 @@ export function installQuietState(pi: ExtensionAPI, delayMs = 1000) {
 // ---------------------------------------------------------------------------
 
 const RECEIPT_NOT_PERSISTED =
-  'Parent notification receipt could not be persisted; preserve the finding for your final report';
+  "Parent notification receipt could not be persisted; preserve the finding for your final report";
 
 /** Only `message` (short, printable) and an optional boolean `requires_guidance`. */
 function validNotificationParams(params: any): boolean {
   if (!params) return false;
-  if (Object.keys(params).some((key) => !['message', 'requires_guidance'].includes(key)))
+  if (Object.keys(params).some((key) => !["message", "requires_guidance"].includes(key)))
     return false;
   const message = params.message;
   if (
-    typeof message !== 'string' ||
+    typeof message !== "string" ||
     !message.trim() ||
     message.length > 1000 ||
     Buffer.byteLength(message) > 2000 ||
     /[\u0000-\u0008\u000b\u000c\u000e-\u001f\u007f]/.test(message)
   )
     return false;
-  return params.requires_guidance === undefined || typeof params.requires_guidance === 'boolean';
+  return params.requires_guidance === undefined || typeof params.requires_guidance === "boolean";
 }
 /** Stable ID per child tool call, so a retried call is deduplicated. */
 function notificationId(childId: string, toolCallId: string): string {
-  return createHash('sha256')
-    .update(childId + '\0' + toolCallId)
-    .digest('hex')
+  return createHash("sha256")
+    .update(childId + "\0" + toolCallId)
+    .digest("hex")
     .slice(0, 24);
 }
 function recentNotificationCount(entries: any[], childId: string): number {
@@ -1881,15 +1881,15 @@ function recentNotificationCount(entries: any[], childId: string): number {
 /** Persist a new notification and its receipt; guidance requests are also queued. */
 function retainNotification(hub: Hub, data: QuietUpdate, childId: string, entries: any[]): void {
   if (hub.pending.size >= MAX_PENDING)
-    throw new Error('Parent notification queue is full; retain the finding and retry later');
+    throw new Error("Parent notification queue is full; retain the finding and retry later");
   if (recentNotificationCount(entries, childId) >= 5)
-    throw new Error('Notification rate limit: at most five per minute per child; batch findings');
+    throw new Error("Notification rate limit: at most five per minute per child; batch findings");
   hub.pi!.appendEntry(NOTIFICATION_CUSTOM, { at: Date.now(), update: data });
   const item = toItem(data);
   if (data.requires_guidance === true) {
-    if (!appendReceipt(hub, item, 'queued')) throw new Error(RECEIPT_NOT_PERSISTED);
+    if (!appendReceipt(hub, item, "queued")) throw new Error(RECEIPT_NOT_PERSISTED);
     hub.pending.set(item.key, item);
-  } else if (!appendReceipt(hub, item, 'recorded')) throw new Error(RECEIPT_NOT_PERSISTED);
+  } else if (!appendReceipt(hub, item, "recorded")) throw new Error(RECEIPT_NOT_PERSISTED);
 }
 
 /** Identity is supplied by the owning RPC launch, never by child parameters. */
@@ -1901,36 +1901,36 @@ export function notifyParent(
 ) {
   if (!validNotificationParams(params))
     throw new Error(
-      'Invalid parent notification: concise message (1000 characters/2000 bytes) and optional requires_guidance boolean only',
+      "Invalid parent notification: concise message (1000 characters/2000 bytes) and optional requires_guidance boolean only",
     );
   if (!CHILD_ID_PATTERN.test(childId) || !toolCallId || toolCallId.length > 256)
-    throw new Error('Invalid notification identity');
+    throw new Error("Invalid notification identity");
   const hub = hubs().get(ownerSessionId);
   if (!hub?.pi || !hub.ctx || session(hub.ctx) !== ownerSessionId || disabled(hub))
     throw new Error(
-      'Parent notification service is unavailable; preserve the finding for your final report',
+      "Parent notification service is unavailable; preserve the finding for your final report",
     );
   const id = notificationId(childId, toolCallId);
   const data: QuietUpdate = {
-    kind: 'notification',
+    kind: "notification",
     id,
     child_id: childId,
     message: params.message.trim(),
     requires_guidance: params.requires_guidance === true,
   };
   const entries = (hub.ctx.sessionManager.getBranch?.() ?? []).filter(
-    (e: any) => e.type === 'custom' && e.customType === NOTIFICATION_CUSTOM,
+    (e: any) => e.type === "custom" && e.customType === NOTIFICATION_CUSTOM,
   );
   const previous = entries.find((e: any) => e.data?.update?.id === id);
   if (
-    previous?.type === 'custom' &&
+    previous?.type === "custom" &&
     revision((previous.data as { update: QuietUpdate }).update) !== revision(data)
   )
-    throw new Error('Notification ID was reused with different contents');
+    throw new Error("Notification ID was reused with different contents");
   if (!previous) retainNotification(hub, data, childId, entries);
   schedule(hub, 1000);
   return {
-    content: [{ type: 'text', text: 'Queued for the parent; no reply yet.' }],
+    content: [{ type: "text", text: "Queued for the parent; no reply yet." }],
     details: { notification_id: id, accepted: true, requires_guidance: data.requires_guidance },
   };
 }

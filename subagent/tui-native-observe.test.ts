@@ -10,56 +10,153 @@ import { TuiNativeManager } from "./tui-native.ts";
 
 test("task lookup after disk reload selects highest attempt, not random group ID order", async () => {
   const root = await mkdtemp(join(tmpdir(), "pi-resume-order-"));
-  const manager: any = new TuiNativeManager(root, () => "native", () => false, 16);
+  const manager: any = new TuiNativeManager(
+    root,
+    () => "native",
+    () => false,
+    16,
+  );
   const taskId = `subagent-task-${"a".repeat(24)}`;
   const children: any[] = [];
   try {
     // Lexical disk order places the original attempt last, as in the incident.
-    for (const [digit, attempt] of [["1", 3], ["5", 2], ["9", 1]] as const) {
+    for (const [digit, attempt] of [
+      ["1", 3],
+      ["5", 2],
+      ["9", 1],
+    ] as const) {
       const groupId = `subagent-job-${digit.repeat(24)}`;
       const directory = join(root, "workers", digit.repeat(24));
-      const child = { childId: `subagent-child-${digit.repeat(24)}`, taskId, attempt, directory,
-        operatorCapability: "a".repeat(64), state: "completed", spec: { task: "Worktree UI" } };
+      const child = {
+        childId: `subagent-child-${digit.repeat(24)}`,
+        taskId,
+        attempt,
+        directory,
+        operatorCapability: "a".repeat(64),
+        state: "completed",
+        spec: { task: "Worktree UI" },
+      };
       children.push(child);
       atomicPrivateJson(join(root, "groups", `${groupId}.json`), {
-        version: 1, id: groupId, owner: "parent", children: [child],
+        version: 1,
+        id: groupId,
+        owner: "parent",
+        children: [child],
       });
     }
-    const restored: any = new TuiNativeManager(root, () => "native", () => false, 16);
+    const restored: any = new TuiNativeManager(
+      root,
+      () => "native",
+      () => false,
+      16,
+    );
     assert.equal(restored.byChild("parent", taskId).child.attempt, 3);
-    assert.equal(restored.byChild("parent", children[2].childId).child.attempt, 1, "explicit child lookup remains exact");
+    assert.equal(
+      restored.byChild("parent", children[2].childId).child.attempt,
+      1,
+      "explicit child lookup remains exact",
+    );
     assert.throws(() => restored.byChild("foreign", taskId), /different Pi session/);
     // The existing claim guard remains strict; the selected successor clears it.
-    const identity = { ownerSessionId: "parent", taskId, groupId: "old-group", childId: children[0].childId,
-      attempt: 3, runtimeId: "old-runtime", workerEpoch: "old-epoch" };
+    const identity = {
+      ownerSessionId: "parent",
+      taskId,
+      groupId: "old-group",
+      childId: children[0].childId,
+      attempt: 3,
+      runtimeId: "old-runtime",
+      workerEpoch: "old-epoch",
+    };
     const names = new TaskNameStore(children[0].directory, identity);
     await names.claim("Worktree UI");
     const selected = restored.byChild("parent", taskId).child;
-    const successor = { ...identity, attempt: selected.attempt + 1, childId: "new-child", runtimeId: "new-runtime", workerEpoch: "new-epoch" };
-    await assert.rejects(new TaskNameStore(children[0].directory, { ...successor, attempt: 3 }).claim("Worktree UI"), /competing attempt/);
-    assert.equal((await new TaskNameStore(children[0].directory, successor).claim("Worktree UI")).attempt, 4);
+    const successor = {
+      ...identity,
+      attempt: selected.attempt + 1,
+      childId: "new-child",
+      runtimeId: "new-runtime",
+      workerEpoch: "new-epoch",
+    };
+    await assert.rejects(
+      new TaskNameStore(children[0].directory, { ...successor, attempt: 3 }).claim("Worktree UI"),
+      /competing attempt/,
+    );
+    assert.equal(
+      (await new TaskNameStore(children[0].directory, successor).claim("Worktree UI")).attempt,
+      4,
+    );
     await restored.shutdown(false);
-  } finally { await manager.shutdown(false); await rm(root, { recursive: true, force: true }); }
+  } finally {
+    await manager.shutdown(false);
+    await rm(root, { recursive: true, force: true });
+  }
 });
 
 test("read-only native task snapshot/report avoids refresh and excludes private artifact fields", async () => {
   const root = await mkdtemp(join(tmpdir(), "pi-readonly-task-"));
-  const manager: any = new TuiNativeManager(root, () => "native", () => true, 16);
+  const manager: any = new TuiNativeManager(
+    root,
+    () => "native",
+    () => true,
+    16,
+  );
   const directory = join(root, "workers", "a".repeat(24));
   const store = new TuiWorkerStore(directory, true);
-  const manifest: any = { protocol: 1, ownerSessionId: "parent", taskId: `subagent-task-${"a".repeat(24)}`, runtimeId: "runtime-public", groupId: `subagent-job-${"b".repeat(24)}`,
-    childId: `subagent-child-${"c".repeat(24)}`, attempt: 2, workerEpoch: "d".repeat(32), controlToken: "e".repeat(64),
-    controlSocket: join(directory, "control.sock"), sessionFile: join(directory, "session.jsonl"), launchMode: "none", presentation: "background",
-    placement: { socketPath: "/tmp/tmux", serverEpoch: "1:2", sessionId: "$1", windowId: "@1", paneId: "%1", ownershipNonce: "f".repeat(64) } };
+  const manifest: any = {
+    protocol: 1,
+    ownerSessionId: "parent",
+    taskId: `subagent-task-${"a".repeat(24)}`,
+    runtimeId: "runtime-public",
+    groupId: `subagent-job-${"b".repeat(24)}`,
+    childId: `subagent-child-${"c".repeat(24)}`,
+    attempt: 2,
+    workerEpoch: "d".repeat(32),
+    controlToken: "e".repeat(64),
+    controlSocket: join(directory, "control.sock"),
+    sessionFile: join(directory, "session.jsonl"),
+    launchMode: "none",
+    presentation: "background",
+    placement: {
+      socketPath: "/tmp/tmux",
+      serverEpoch: "1:2",
+      sessionId: "$1",
+      windowId: "@1",
+      paneId: "%1",
+      ownershipNonce: "f".repeat(64),
+    },
+  };
   store.writeManifest(manifest);
-  const report = store.report(9, { sessionFile: "/secret/session.jsonl", timestamp: "2026-01-02T03:04:05.000Z", contextTokens: 100, assistant: { content: [
-    { type: "toolCall", id: "private-call", name: "bash", arguments: { command: "secret" } },
-    { type: "text", text: "Final answer 🌍" },
-  ] } });
+  const report = store.report(9, {
+    sessionFile: "/secret/session.jsonl",
+    timestamp: "2026-01-02T03:04:05.000Z",
+    contextTokens: 100,
+    assistant: {
+      content: [
+        { type: "toolCall", id: "private-call", name: "bash", arguments: { command: "secret" } },
+        { type: "text", text: "Final answer 🌍" },
+      ],
+    },
+  });
   manager.owner = "parent";
-  const child: any = { childId: manifest.childId, taskId: manifest.taskId, attempt: 2, directory, report, spec: { task: "Review feature" }, state: "completed", lastOutcome: undefined };
-  manager.groups.set(manifest.groupId, { id: manifest.groupId, owner: "parent", createdAt: "2026-01-01T00:00:00.000Z", children: [child] });
-  manager.refresh = async () => { throw new Error("read-only call must not refresh"); };
+  const child: any = {
+    childId: manifest.childId,
+    taskId: manifest.taskId,
+    attempt: 2,
+    directory,
+    report,
+    spec: { task: "Review feature" },
+    state: "completed",
+    lastOutcome: undefined,
+  };
+  manager.groups.set(manifest.groupId, {
+    id: manifest.groupId,
+    owner: "parent",
+    createdAt: "2026-01-01T00:00:00.000Z",
+    children: [child],
+  });
+  manager.refresh = async () => {
+    throw new Error("read-only call must not refresh");
+  };
   try {
     const tasks = manager.readonlyTaskList("parent");
     assert.equal(tasks.length, 1);
@@ -75,162 +172,433 @@ test("read-only native task snapshot/report avoids refresh and excludes private 
     assert.equal(renamedTasks[0].taskId, tasks[0].taskId);
     assert.equal(renamedTasks[0].runtimeId, tasks[0].runtimeId);
     assert.equal(renamedTasks[0].attempt, 2);
-    await new TaskNameStore(join(root, "workers", "new-attempt"), { ...manifest, attempt: 3, runtimeId: "new-runtime", workerEpoch: "new-epoch" }).claim("Do Not Replace");
-    assert.equal(manager.readonlyTaskList("parent")[0].title, "User Parser Name", "retained attempt shares stable canonical name");
+    await new TaskNameStore(join(root, "workers", "new-attempt"), {
+      ...manifest,
+      attempt: 3,
+      runtimeId: "new-runtime",
+      workerEpoch: "new-epoch",
+    }).claim("Do Not Replace");
+    assert.equal(
+      manager.readonlyTaskList("parent")[0].title,
+      "User Parser Name",
+      "retained attempt shares stable canonical name",
+    );
     assert.equal(JSON.stringify(tasks).includes("controlToken"), false);
     const answer = manager.readonlyTaskReport("parent", manifest.taskId, 48 * 1024);
     assert.equal(answer.text, "Final answer 🌍");
     assert.equal(answer.lastUpdated, "2026-01-02T03:04:05.000Z");
-    for (const privateValue of ["/secret/session.jsonl", "private-call", "secret", "contextTokens"]) assert.equal(answer.text.includes(privateValue), false);
+    for (const privateValue of ["/secret/session.jsonl", "private-call", "secret", "contextTokens"])
+      assert.equal(answer.text.includes(privateValue), false);
     const clipped = manager.readonlyTaskReport("parent", manifest.taskId, 13);
     assert.equal(clipped.text, "Final answer ");
     assert.equal(clipped.truncated, true);
     assert.equal(Buffer.from(clipped.text).toString("utf8").includes("�"), false);
     assert.throws(() => manager.readonlyTaskList("foreign"), /another Pi session/);
-  } finally { await manager.shutdown(false); await rm(root, { recursive: true, force: true }); }
+  } finally {
+    await manager.shutdown(false);
+    await rm(root, { recursive: true, force: true });
+  }
 });
 
 test("direct human turn clears old outcome; aborted assistant cancels chain instead of launching successor", async () => {
   const root = await mkdtemp(join(tmpdir(), "pi-observe-"));
-  const manager: any = new TuiNativeManager(root, () => "native", () => true, 16);
+  const manager: any = new TuiNativeManager(
+    root,
+    () => "native",
+    () => true,
+    16,
+  );
   const directory = join(root, "workers", "a".repeat(24));
   const store = new TuiWorkerStore(directory, true);
-  const manifest: any = { protocol: 1, ownerSessionId: "parent", taskId: "task", runtimeId: "runtime", groupId: `subagent-job-${"a".repeat(24)}`,
-    childId: `subagent-child-${"b".repeat(24)}`, attempt: 1, workerEpoch: "c".repeat(32), controlToken: "d".repeat(64),
-    controlSocket: join(directory, "control.sock"), sessionFile: join(directory, "session.jsonl"), launchMode: "none", presentation: "background",
-    placement: { socketPath: "/tmp/tmux", serverEpoch: "1:2", sessionId: "$1", windowId: "@1", paneId: "%1", ownershipNonce: "e".repeat(64) } };
+  const manifest: any = {
+    protocol: 1,
+    ownerSessionId: "parent",
+    taskId: "task",
+    runtimeId: "runtime",
+    groupId: `subagent-job-${"a".repeat(24)}`,
+    childId: `subagent-child-${"b".repeat(24)}`,
+    attempt: 1,
+    workerEpoch: "c".repeat(32),
+    controlToken: "d".repeat(64),
+    controlSocket: join(directory, "control.sock"),
+    sessionFile: join(directory, "session.jsonl"),
+    launchMode: "none",
+    presentation: "background",
+    placement: {
+      socketPath: "/tmp/tmux",
+      serverEpoch: "1:2",
+      sessionId: "$1",
+      windowId: "@1",
+      paneId: "%1",
+      ownershipNonce: "e".repeat(64),
+    },
+  };
   store.writeManifest(manifest);
   let jobCalls = 0;
-  const server = new TuiWorkerServer(store, { isIdle: () => true, send() {}, abort() {}, shutdown() {},
-    jobs: async () => { jobCalls++; return { content: [{ type: "text", text: "local jobs" }], details: { jobs: [] } }; } });
-  const child = { childId: manifest.childId, taskId: manifest.taskId, directory, spec: { task: "first" }, state: "running", started: true, notifiedSequence: 0 };
-  const next = { childId: `subagent-child-${"f".repeat(24)}`, taskId: "next", directory: join(root, "workers", "f".repeat(24)), spec: { task: "next" }, state: "pending", notifiedSequence: 0 };
-  const group = { id: manifest.groupId, owner: "parent", background: true, mode: "chain", launchMode: "none", caller: manifest.placement, children: [child, next] };
+  const server = new TuiWorkerServer(store, {
+    isIdle: () => true,
+    send() {},
+    abort() {},
+    shutdown() {},
+    jobs: async () => {
+      jobCalls++;
+      return { content: [{ type: "text", text: "local jobs" }], details: { jobs: [] } };
+    },
+  });
+  const child = {
+    childId: manifest.childId,
+    taskId: manifest.taskId,
+    directory,
+    spec: { task: "first" },
+    state: "running",
+    started: true,
+    notifiedSequence: 0,
+  };
+  const next = {
+    childId: `subagent-child-${"f".repeat(24)}`,
+    taskId: "next",
+    directory: join(root, "workers", "f".repeat(24)),
+    spec: { task: "next" },
+    state: "pending",
+    notifiedSequence: 0,
+  };
+  const group = {
+    id: manifest.groupId,
+    owner: "parent",
+    background: true,
+    mode: "chain",
+    launchMode: "none",
+    caller: manifest.placement,
+    children: [child, next],
+  };
   const notifications: any[] = [];
-  manager.notify = (update: any) => { notifications.push(update); return true; };
+  manager.notify = (update: any) => {
+    notifications.push(update);
+    return true;
+  };
   let launches = 0;
   manager.tmux.resolveCaller = async () => manifest.placement;
-  manager.tmux.launch = async () => { launches++; throw new Error("Must not advance"); };
+  manager.tmux.launch = async () => {
+    launches++;
+    throw new Error("Must not advance");
+  };
   manager.groups.set(group.id, group);
   try {
     const groupFile = join(root, "groups", `${group.id}.json`);
     let durableWrites = 0;
-    manager.persistenceWriter = (file: string, value: unknown) => { durableWrites++; atomicPrivateJson(file, value); };
+    manager.persistenceWriter = (file: string, value: unknown) => {
+      durableWrites++;
+      atomicPrivateJson(file, value);
+    };
     await manager.refresh("parent");
     assert.equal(durableWrites, 1, "first observation must persist the group");
     await manager.refresh("parent");
     assert.equal(durableWrites, 1, "unchanged refresh rewrote durable state");
-    const restored = new TuiNativeManager(root, () => "native", () => true, 16) as any;
-    restored.persistenceWriter = (file: string, value: unknown) => { durableWrites++; atomicPrivateJson(file, value); };
+    const restored = new TuiNativeManager(
+      root,
+      () => "native",
+      () => true,
+      16,
+    ) as any;
+    restored.persistenceWriter = (file: string, value: unknown) => {
+      durableWrites++;
+      atomicPrivateJson(file, value);
+    };
     await restored.refresh("parent");
     assert.equal(durableWrites, 1, "unchanged reload rewrote durable state");
     await restored.shutdown(false);
     child.report = "transition";
     await manager.refresh("parent");
     assert.equal(durableWrites, 2, "changed transition was not persisted");
-    await server.start(); server.running(true);
-    await server.outcome({ version: 1, state: "delivered", summary: "Done", acceptance: [{ criterion: "fix", status: "passed", evidence: "test" }], artifacts: [], remaining: [] });
-    await manager.refresh('parent');
-    assert.equal(notifications.filter(u=>u.completion).length,0,'outcome woke parent before settlement');
+    await server.start();
+    server.running(true);
+    await server.outcome({
+      version: 1,
+      state: "delivered",
+      summary: "Done",
+      acceptance: [{ criterion: "fix", status: "passed", evidence: "test" }],
+      artifacts: [],
+      remaining: [],
+    });
+    await manager.refresh("parent");
+    assert.equal(
+      notifications.filter((u) => u.completion).length,
+      0,
+      "outcome woke parent before settlement",
+    );
     server.settled({ assistant: { stopReason: "stop" } });
     await manager.observe(group, child);
     assert.equal((child as any).lastOutcome.state, "delivered");
-    server.running(true); await manager.observe(group, child);
+    server.running(true);
+    await manager.observe(group, child);
     assert.equal((child as any).lastOutcome, undefined);
     assert.equal((child as any).report, undefined);
     server.settled({ assistant: { stopReason: "aborted" } });
     await manager.refresh("parent");
-    assert.equal(child.state, "cancelled"); assert.equal(next.state, "skipped"); assert.equal(launches, 0);
-    assert.equal(notifications.filter(u=>u.completion&&u.child_id===child.childId).length,1,'replayed old settlement or missed cancellation');
-    const completion = notifications.find(u=>u.completion&&u.child_id===child.childId);
-    assert.equal(completion.state,'cancelled'); assert.equal(completion.job_id,group.id);
-    await manager.refresh('parent');
-    assert.equal(notifications.filter(u=>u.completion&&u.child_id===child.childId).length,1,'duplicate terminal snapshot wake');
+    assert.equal(child.state, "cancelled");
+    assert.equal(next.state, "skipped");
+    assert.equal(launches, 0);
+    assert.equal(
+      notifications.filter((u) => u.completion && u.child_id === child.childId).length,
+      1,
+      "replayed old settlement or missed cancellation",
+    );
+    const completion = notifications.find((u) => u.completion && u.child_id === child.childId);
+    assert.equal(completion.state, "cancelled");
+    assert.equal(completion.job_id, group.id);
+    await manager.refresh("parent");
+    assert.equal(
+      notifications.filter((u) => u.completion && u.child_id === child.childId).length,
+      1,
+      "duplicate terminal snapshot wake",
+    );
     assert.equal(manager.publicGroup(group).status, "cancelled");
-    assert.equal((await manager.jobs("parent", "task", { action: "list" })).content[0].text, "local jobs");
-    await assert.rejects(manager.jobs("foreign", "task", { action: "list" }), /different Pi session/);
-    await assert.rejects(manager.jobs("parent", "task", { action: "start", command: "false" }), /Unsupported/);
+    assert.equal(
+      (await manager.jobs("parent", "task", { action: "list" })).content[0].text,
+      "local jobs",
+    );
+    await assert.rejects(
+      manager.jobs("foreign", "task", { action: "list" }),
+      /different Pi session/,
+    );
+    await assert.rejects(
+      manager.jobs("parent", "task", { action: "start", command: "false" }),
+      /Unsupported/,
+    );
     (child as any).reaped = true;
     await assert.rejects(manager.jobs("parent", "task", { action: "list" }), /reaped/);
     assert.equal(jobCalls, 1);
     (child as any).reaped = false;
-    server.running(true);await manager.observe(group,child);
+    server.running(true);
+    await manager.observe(group, child);
     await server.close();
     manager.tmux.inspect = async () => ({ dead: true });
-    await manager.refresh('parent');
-    assert.equal(child.state,'lost');
-    assert.equal(notifications.filter(u=>u.completion&&u.state==='lost').length,1,'worker crash without settled event failed to notify');
-  } finally { await server.close(); await manager.shutdown(false); await rm(root, { recursive: true, force: true }); }
+    await manager.refresh("parent");
+    assert.equal(child.state, "lost");
+    assert.equal(
+      notifications.filter((u) => u.completion && u.state === "lost").length,
+      1,
+      "worker crash without settled event failed to notify",
+    );
+  } finally {
+    await server.close();
+    await manager.shutdown(false);
+    await rm(root, { recursive: true, force: true });
+  }
 });
 
 test("native idle request notifies parent, appears in status, and resolves only matching request", async () => {
   const root = await mkdtemp(join(tmpdir(), "pi-idle-notify-"));
-  const manager: any = new TuiNativeManager(root, () => "native", () => true, 16);
+  const manager: any = new TuiNativeManager(
+    root,
+    () => "native",
+    () => true,
+    16,
+  );
   const directory = join(root, "workers", "a".repeat(24));
   const store = new TuiWorkerStore(directory, true);
-  const manifest: any = { protocol: 1, ownerSessionId: "parent", taskId: `subagent-task-${"a".repeat(24)}`, runtimeId: "runtime", groupId: `subagent-job-${"b".repeat(24)}`,
-    childId: `subagent-child-${"c".repeat(24)}`, attempt: 1, workerEpoch: "d".repeat(32), controlToken: "e".repeat(64), controlSocket: join(directory, "control.sock"),
-    sessionFile: join(directory, "session.jsonl"), launchMode: "none", presentation: "background", placement: { socketPath: "/tmp/tmux", serverEpoch: "1:2", sessionId: "$1", windowId: "@1", paneId: "%1", ownershipNonce: "f".repeat(64) } };
+  const manifest: any = {
+    protocol: 1,
+    ownerSessionId: "parent",
+    taskId: `subagent-task-${"a".repeat(24)}`,
+    runtimeId: "runtime",
+    groupId: `subagent-job-${"b".repeat(24)}`,
+    childId: `subagent-child-${"c".repeat(24)}`,
+    attempt: 1,
+    workerEpoch: "d".repeat(32),
+    controlToken: "e".repeat(64),
+    controlSocket: join(directory, "control.sock"),
+    sessionFile: join(directory, "session.jsonl"),
+    launchMode: "none",
+    presentation: "background",
+    placement: {
+      socketPath: "/tmp/tmux",
+      serverEpoch: "1:2",
+      sessionId: "$1",
+      windowId: "@1",
+      paneId: "%1",
+      ownershipNonce: "f".repeat(64),
+    },
+  };
   store.writeManifest(manifest);
-  const worker = new TuiWorkerServer(store, { isIdle: () => true, send() {}, abort() {}, shutdown() {} });
-  const child: any = { childId: manifest.childId, taskId: manifest.taskId, attempt: 1, directory, spec: { task: "idle warning" }, state: "running", started: true, notifiedSequence: 0 };
-  const group: any = { id: manifest.groupId, owner: "parent", background: true, mode: "single", launchMode: "none", caller: manifest.placement, children: [child] };
+  const worker = new TuiWorkerServer(store, {
+    isIdle: () => true,
+    send() {},
+    abort() {},
+    shutdown() {},
+  });
+  const child: any = {
+    childId: manifest.childId,
+    taskId: manifest.taskId,
+    attempt: 1,
+    directory,
+    spec: { task: "idle warning" },
+    state: "running",
+    started: true,
+    notifiedSequence: 0,
+  };
+  const group: any = {
+    id: manifest.groupId,
+    owner: "parent",
+    background: true,
+    mode: "single",
+    launchMode: "none",
+    caller: manifest.placement,
+    children: [child],
+  };
   const notifications: any[] = [];
-  manager.owner = "parent"; manager.notify = (update: any) => (notifications.push(update), true); manager.groups.set(group.id, group);
+  manager.owner = "parent";
+  manager.notify = (update: any) => (notifications.push(update), true);
+  manager.groups.set(group.id, group);
   try {
     await worker.start();
     const names = new TaskNameStore(directory, manifest);
     await names.claim("Original Review");
     await names.rename("Renamed Review", 1, "pi");
-    const pending = worker.requestIdleDecision({ model: "provider/model", idleMinutes: 31, contextPercent: 86 });
+    const pending = worker.requestIdleDecision({
+      model: "provider/model",
+      idleMinutes: 31,
+      contextPercent: 86,
+    });
     void pending.catch(() => undefined);
     await manager.observe(group, child, true);
-    assert.equal(notifications.length, 0, "ancestor observation cannot route the parent's decision");
+    assert.equal(
+      notifications.length,
+      0,
+      "ancestor observation cannot route the parent's decision",
+    );
     await manager.observe(group, child);
     await manager.observe(group, child);
-    const guidance = notifications.filter(item => item.requires_guidance === true);
+    const guidance = notifications.filter((item) => item.requires_guidance === true);
     assert.equal(guidance.length, 1);
     assert.equal(guidance[0].displayName, "Renamed Review");
     assert.equal(manager.publicGroup(group).children[0].displayName, "Renamed Review");
     assert.match(guidance[0].message, /provider\/model.*31m.*86%/);
     assert.ok(guidance[0].message.includes(`worker_epoch=${manifest.workerEpoch}`));
     assert.equal(manager.publicGroup(group).children[0].idle_decision.model, "provider/model");
-    assert.equal(manager.publicGroup(group).children[0].idle_decision.workerEpoch, manifest.workerEpoch);
-    const result = await manager.operation({ operation: "idle_decision", child_id: child.childId, request_id: (worker as any).idleDecisions.keys().next().value, worker_epoch: manifest.workerEpoch, choice: "ignore" }, "parent");
+    assert.equal(
+      manager.publicGroup(group).children[0].idle_decision.workerEpoch,
+      manifest.workerEpoch,
+    );
+    const result = await manager.operation(
+      {
+        operation: "idle_decision",
+        child_id: child.childId,
+        request_id: (worker as any).idleDecisions.keys().next().value,
+        worker_epoch: manifest.workerEpoch,
+        choice: "ignore",
+      },
+      "parent",
+    );
     assert.equal(result.details.operation, "idle_decision");
     assert.equal(await pending, "ignore");
     assert.equal(manager.publicGroup(group).children[0].idle_decision, undefined);
-    await assert.rejects(manager.operation({ operation: "idle_decision", child_id: child.childId, request_id: "idle:" + "0".repeat(32), choice: "cancel" }, "parent"), /stale|pending/);
-  } finally { await worker.close(); await manager.shutdown(false); await rm(root, { recursive: true, force: true }); }
+    await assert.rejects(
+      manager.operation(
+        {
+          operation: "idle_decision",
+          child_id: child.childId,
+          request_id: "idle:" + "0".repeat(32),
+          choice: "cancel",
+        },
+        "parent",
+      ),
+      /stale|pending/,
+    );
+  } finally {
+    await worker.close();
+    await manager.shutdown(false);
+    await rm(root, { recursive: true, force: true });
+  }
 });
 
 test("selected result observes fresh worker status without global refresh and respects abort", async () => {
   const root = await mkdtemp(join(tmpdir(), "pi-result-fast-"));
-  const manager: any = new TuiNativeManager(root, () => "native", () => true, 16);
+  const manager: any = new TuiNativeManager(
+    root,
+    () => "native",
+    () => true,
+    16,
+  );
   const directory = join(root, "workers", "a".repeat(24));
   const store = new TuiWorkerStore(directory, true);
-  const manifest: any = { protocol: 1, ownerSessionId: "parent", taskId: "task", runtimeId: "runtime", groupId: `subagent-job-${"a".repeat(24)}`,
-    childId: `subagent-child-${"b".repeat(24)}`, attempt: 1, workerEpoch: "c".repeat(32), controlToken: "d".repeat(64),
-    controlSocket: join(directory, "control.sock"), sessionFile: join(directory, "session.jsonl"), launchMode: "none", presentation: "background",
-    placement: { socketPath: "/tmp/tmux", serverEpoch: "1:2", sessionId: "$1", windowId: "@1", paneId: "%1", ownershipNonce: "e".repeat(64) } };
+  const manifest: any = {
+    protocol: 1,
+    ownerSessionId: "parent",
+    taskId: "task",
+    runtimeId: "runtime",
+    groupId: `subagent-job-${"a".repeat(24)}`,
+    childId: `subagent-child-${"b".repeat(24)}`,
+    attempt: 1,
+    workerEpoch: "c".repeat(32),
+    controlToken: "d".repeat(64),
+    controlSocket: join(directory, "control.sock"),
+    sessionFile: join(directory, "session.jsonl"),
+    launchMode: "none",
+    presentation: "background",
+    placement: {
+      socketPath: "/tmp/tmux",
+      serverEpoch: "1:2",
+      sessionId: "$1",
+      windowId: "@1",
+      paneId: "%1",
+      ownershipNonce: "e".repeat(64),
+    },
+  };
   store.writeManifest(manifest);
-  const oldReport = store.report(1, { assistant: { stopReason: "stop", content: [{ type: "text", text: "old answer" }] } });
-  const child: any = { childId: manifest.childId, taskId: manifest.taskId, directory, report: oldReport, state: "completed", spec: { task: "work" }, started: true, notifiedSequence: 0, operatorCapability: "f".repeat(64) };
-  const group: any = { id: manifest.groupId, owner: "parent", background: true, mode: "parallel", launchMode: "none", caller: manifest.placement, children: [child] };
-  manager.owner = "parent"; manager.groups.set(group.id, group);
+  const oldReport = store.report(1, {
+    assistant: { stopReason: "stop", content: [{ type: "text", text: "old answer" }] },
+  });
+  const child: any = {
+    childId: manifest.childId,
+    taskId: manifest.taskId,
+    directory,
+    report: oldReport,
+    state: "completed",
+    spec: { task: "work" },
+    started: true,
+    notifiedSequence: 0,
+    operatorCapability: "f".repeat(64),
+  };
+  const group: any = {
+    id: manifest.groupId,
+    owner: "parent",
+    background: true,
+    mode: "parallel",
+    launchMode: "none",
+    caller: manifest.placement,
+    children: [child],
+  };
+  manager.owner = "parent";
+  manager.groups.set(group.id, group);
   // Worker protocol server provides real bounded status RPCs.
-  const worker = new TuiWorkerServer(store, { isIdle: () => true, send() {}, abort() {}, shutdown() {} });
+  const worker = new TuiWorkerServer(store, {
+    isIdle: () => true,
+    send() {},
+    abort() {},
+    shutdown() {},
+  });
   try {
     await worker.start();
     worker.running(true);
     // Default job_id child, numeric child selector, and explicit child_id all bypass a stuck global refresh.
     manager.refreshFlight = new Promise(() => {});
     let result = await manager.operation({ operation: "result", job_id: group.id }, "parent");
-    assert.match(result.content[0].text, /not ready/i, "active newer human turn must not return cached report");
-    worker.running(false); worker.settled({ error: "new failure", assistant: { stopReason: "error", content: [{ type: "text", text: "new answer" }] } });
+    assert.match(
+      result.content[0].text,
+      /not ready/i,
+      "active newer human turn must not return cached report",
+    );
+    worker.running(false);
+    worker.settled({
+      error: "new failure",
+      assistant: { stopReason: "error", content: [{ type: "text", text: "new answer" }] },
+    });
     // The scheduler still knows only the old report; direct status must find the
     // new artifact without refreshing or mutating that shared snapshot.
-    manager.refresh = async () => { throw new Error("result waited for global refresh"); };
+    manager.refresh = async () => {
+      throw new Error("result waited for global refresh");
+    };
     result = await manager.operation({ operation: "result", job_id: group.id, child: 1 }, "parent");
     assert.match(result.content[0].text, /new answer/);
     assert.match(result.content[0].text, /new failure/);
@@ -243,13 +611,21 @@ test("selected result observes fresh worker status without global refresh and re
     const snapshot = (worker as any).snapshot.bind(worker);
     (worker as any).snapshot = () => ({ ...snapshot(), lastReport: undefined });
     result = await manager.operation({ operation: "result", child_id: child.childId }, "parent");
-    assert.match(result.content[0].text, /not ready/i, "empty current report substituted an old result");
+    assert.match(
+      result.content[0].text,
+      /not ready/i,
+      "empty current report substituted an old result",
+    );
     (worker as any).snapshot = snapshot;
 
     // Abort in-flight observation propagates to the worker RPC.
     manager.tmux.inspect = async () => ({ dead: false });
     const controller = new AbortController();
-    const pending = manager.operation({ operation: "result", child_id: child.childId }, "parent", controller.signal);
+    const pending = manager.operation(
+      { operation: "result", child_id: child.childId },
+      "parent",
+      controller.signal,
+    );
     controller.abort();
     await assert.rejects(pending, /cancel|abort/i);
     await worker.close();
@@ -257,91 +633,266 @@ test("selected result observes fresh worker status without global refresh and re
     assert.equal(result.details.retained, true);
     assert.match(result.content[0].text, /retained result may be stale/);
     assert.match(result.content[0].text, /old answer/);
-  } finally { manager.refreshFlight = undefined; await worker.close(); await manager.shutdown(false); await rm(root, { recursive: true, force: true }); }
+  } finally {
+    manager.refreshFlight = undefined;
+    await worker.close();
+    await manager.shutdown(false);
+    await rm(root, { recursive: true, force: true });
+  }
 });
 
 test("native resume compacts only measured high context or an explicit request", async () => {
   const root = await mkdtemp(join(tmpdir(), "pi-resume-compact-failure-"));
-  const manager: any = new TuiNativeManager(root, () => "native", () => true, 16);
+  const manager: any = new TuiNativeManager(
+    root,
+    () => "native",
+    () => true,
+    16,
+  );
   const directory = join(root, "workers", "a".repeat(24));
   const store = new TuiWorkerStore(directory, true);
-  const manifest: any = { protocol: 1, ownerSessionId: "parent", taskId: "task", runtimeId: "runtime", groupId: `subagent-job-${"a".repeat(24)}`,
-    childId: `subagent-child-${"b".repeat(24)}`, attempt: 1, workerEpoch: "c".repeat(32), controlToken: "d".repeat(64),
-    controlSocket: join(directory, "control.sock"), sessionFile: join(directory, "session.jsonl"), launchMode: "none", presentation: "background",
-    placement: { socketPath: "/tmp/tmux", serverEpoch: "1:2", sessionId: "$1", windowId: "@1", paneId: "%1", ownershipNonce: "e".repeat(64) } };
+  const manifest: any = {
+    protocol: 1,
+    ownerSessionId: "parent",
+    taskId: "task",
+    runtimeId: "runtime",
+    groupId: `subagent-job-${"a".repeat(24)}`,
+    childId: `subagent-child-${"b".repeat(24)}`,
+    attempt: 1,
+    workerEpoch: "c".repeat(32),
+    controlToken: "d".repeat(64),
+    controlSocket: join(directory, "control.sock"),
+    sessionFile: join(directory, "session.jsonl"),
+    launchMode: "none",
+    presentation: "background",
+    placement: {
+      socketPath: "/tmp/tmux",
+      serverEpoch: "1:2",
+      sessionId: "$1",
+      windowId: "@1",
+      paneId: "%1",
+      ownershipNonce: "e".repeat(64),
+    },
+  };
   store.writeManifest(manifest);
-  let failCompaction = true, compactions = 0, sends = 0;
+  let failCompaction = true,
+    compactions = 0,
+    sends = 0;
   const worker = new TuiWorkerServer(store, {
-    isIdle: () => true, send() { sends++; }, abort() {}, shutdown() {},
-    async compact() { compactions++; if (failCompaction) throw new Error("Compaction provider temporarily unavailable"); },
+    isIdle: () => true,
+    send() {
+      sends++;
+    },
+    abort() {},
+    shutdown() {},
+    async compact() {
+      compactions++;
+      if (failCompaction) throw new Error("Compaction provider temporarily unavailable");
+    },
   });
-  const child: any = { childId: manifest.childId, taskId: manifest.taskId, directory, state: "completed", spec: { task: "work" }, started: true, notifiedSequence: 0, operatorCapability: "f".repeat(64) };
-  const group: any = { id: manifest.groupId, owner: "parent", background: true, mode: "single", launchMode: "none", caller: manifest.placement, children: [child] };
-  manager.owner = "parent"; manager.groups.set(group.id, group);
+  const child: any = {
+    childId: manifest.childId,
+    taskId: manifest.taskId,
+    directory,
+    state: "completed",
+    spec: { task: "work" },
+    started: true,
+    notifiedSequence: 0,
+    operatorCapability: "f".repeat(64),
+  };
+  const group: any = {
+    id: manifest.groupId,
+    owner: "parent",
+    background: true,
+    mode: "single",
+    launchMode: "none",
+    caller: manifest.placement,
+    children: [child],
+  };
+  manager.owner = "parent";
+  manager.groups.set(group.id, group);
   manager.tmux.inspect = async () => ({ dead: false });
   try {
     await worker.start();
     const settle = (tokens: number) => {
-      worker.outcome({ version: 1, state: "checkpointed", summary: "Saved milestone", acceptance: [], artifacts: [], remaining: ["continue"], next_action: "Continue" });
-      worker.settled({ contextTokens: tokens, contextWindow: 1_000_000,
-        assistant: { stopReason: "stop", content: [{ type: "text", text: "Retained milestone" }] } });
+      worker.outcome({
+        version: 1,
+        state: "checkpointed",
+        summary: "Saved milestone",
+        acceptance: [],
+        artifacts: [],
+        remaining: ["continue"],
+        next_action: "Continue",
+      });
+      worker.settled({
+        contextTokens: tokens,
+        contextWindow: 1_000_000,
+        assistant: { stopReason: "stop", content: [{ type: "text", text: "Retained milestone" }] },
+      });
     };
     settle(50_000);
     const originalReport = worker.state.lastReport;
-    await assert.rejects(manager.operation({ operation: "resume", task_id: child.taskId, compact: true, message: "Continue" }, "parent"), /Resume compaction failed:.*Compaction provider temporarily unavailable/);
-    assert.equal(compactions, 1); assert.equal(sends, 0, "failed compaction dispatched a continuation");
+    await assert.rejects(
+      manager.operation(
+        { operation: "resume", task_id: child.taskId, compact: true, message: "Continue" },
+        "parent",
+      ),
+      /Resume compaction failed:.*Compaction provider temporarily unavailable/,
+    );
+    assert.equal(compactions, 1);
+    assert.equal(sends, 0, "failed compaction dispatched a continuation");
     assert.equal(worker.state.active, false);
     assert.equal(worker.state.lastReport, originalReport);
     const status = await manager.operation({ operation: "status", job_id: group.id }, "parent");
-    assert.equal(status.details.group.children[0].status, "completed", "parent still sees idle child as running");
+    assert.equal(
+      status.details.group.children[0].status,
+      "completed",
+      "parent still sees idle child as running",
+    );
     assert.equal(status.details.group.children[0].task_outcome.state, "checkpointed");
-    await manager.operation({ operation: "resume", task_id: child.taskId, message: "Continue low-context milestone" }, "parent");
+    await manager.operation(
+      { operation: "resume", task_id: child.taskId, message: "Continue low-context milestone" },
+      "parent",
+    );
     assert.equal(compactions, 1, "checkpoint label forced compaction at 5% usage");
     assert.equal(sends, 1);
     settle(105_228);
-    await manager.operation({ operation: "resume", task_id: child.taskId, compact: false }, "parent");
+    await manager.operation(
+      { operation: "resume", task_id: child.taskId, compact: false },
+      "parent",
+    );
     assert.equal(compactions, 1, "low-context checkpoint could not opt out");
     assert.equal(sends, 2);
     settle(800_000);
-    await assert.rejects(manager.operation({ operation: "resume", task_id: child.taskId, compact: false }, "parent"), /High-context continuation requires compaction/);
+    await assert.rejects(
+      manager.operation({ operation: "resume", task_id: child.taskId, compact: false }, "parent"),
+      /High-context continuation requires compaction/,
+    );
     failCompaction = false;
-    await manager.operation({ operation: "resume", task_id: child.taskId, message: "Measured high-context continuation" }, "parent");
-    assert.equal(compactions, 2); assert.equal(sends, 3);
+    await manager.operation(
+      { operation: "resume", task_id: child.taskId, message: "Measured high-context continuation" },
+      "parent",
+    );
+    assert.equal(compactions, 2);
+    assert.equal(sends, 3);
     settle(50_000);
-    await manager.operation({ operation: "resume", task_id: child.taskId, compact: true, message: "Explicit compaction" }, "parent");
-    assert.equal(compactions, 3); assert.equal(sends, 4);
-  } finally { await worker.close(); await manager.shutdown(false); await rm(root, { recursive: true, force: true }); }
+    await manager.operation(
+      { operation: "resume", task_id: child.taskId, compact: true, message: "Explicit compaction" },
+      "parent",
+    );
+    assert.equal(compactions, 3);
+    assert.equal(sends, 4);
+  } finally {
+    await worker.close();
+    await manager.shutdown(false);
+    await rm(root, { recursive: true, force: true });
+  }
 });
 
 test("native refresh coalesces callers behind one slow scan", async () => {
   const root = await mkdtemp(join(tmpdir(), "pi-refresh-singleflight-"));
-  const manager: any = new TuiNativeManager(root, () => "native", () => true, 16);
-  let release!: () => void; let scans = 0;
-  manager.serial = (run: any) => { scans++; return new Promise<void>(resolve => { release = () => { void run().then(resolve); }; }); };
+  const manager: any = new TuiNativeManager(
+    root,
+    () => "native",
+    () => true,
+    16,
+  );
+  let release!: () => void;
+  let scans = 0;
+  manager.serial = (run: any) => {
+    scans++;
+    return new Promise<void>((resolve) => {
+      release = () => {
+        void run().then(resolve);
+      };
+    });
+  };
   try {
-    const first = manager.refresh("parent"), second = manager.refresh("parent"), third = manager.refresh("parent");
+    const first = manager.refresh("parent"),
+      second = manager.refresh("parent"),
+      third = manager.refresh("parent");
     assert.equal(scans, 1, "poll bursts queued multiple global scans");
-    release(); await Promise.all([first, second, third]);
+    release();
+    await Promise.all([first, second, third]);
     assert.equal(scans, 1);
-  } finally { await manager.shutdown(false); await rm(root, { recursive: true, force: true }); }
+  } finally {
+    await manager.shutdown(false);
+    await rm(root, { recursive: true, force: true });
+  }
 });
 
 test("authority loss is a failed native result, including old tool-only reports", async () => {
   const root = await mkdtemp(join(tmpdir(), "pi-failed-report-"));
-  const manager: any = new TuiNativeManager(root, () => "native", () => true, 16);
+  const manager: any = new TuiNativeManager(
+    root,
+    () => "native",
+    () => true,
+    16,
+  );
   const directory = join(root, "workers", "a".repeat(24));
   const store = new TuiWorkerStore(directory, true);
-  const manifest: any = { protocol: 1, ownerSessionId: "parent", taskId: "task", runtimeId: "runtime", groupId: `subagent-job-${"a".repeat(24)}`,
-    childId: `subagent-child-${"b".repeat(24)}`, attempt: 1, workerEpoch: "c".repeat(32), controlToken: "d".repeat(64),
-    controlSocket: join(directory, "control.sock"), sessionFile: join(directory, "session.jsonl"), launchMode: "none", presentation: "background",
-    placement: { socketPath: "/tmp/tmux", serverEpoch: "1:2", sessionId: "$1", windowId: "@1", paneId: "%1", ownershipNonce: "e".repeat(64) } };
+  const manifest: any = {
+    protocol: 1,
+    ownerSessionId: "parent",
+    taskId: "task",
+    runtimeId: "runtime",
+    groupId: `subagent-job-${"a".repeat(24)}`,
+    childId: `subagent-child-${"b".repeat(24)}`,
+    attempt: 1,
+    workerEpoch: "c".repeat(32),
+    controlToken: "d".repeat(64),
+    controlSocket: join(directory, "control.sock"),
+    sessionFile: join(directory, "session.jsonl"),
+    launchMode: "none",
+    presentation: "background",
+    placement: {
+      socketPath: "/tmp/tmux",
+      serverEpoch: "1:2",
+      sessionId: "$1",
+      windowId: "@1",
+      paneId: "%1",
+      ownershipNonce: "e".repeat(64),
+    },
+  };
   store.writeManifest(manifest);
   let available = false;
-  const server = new TuiWorkerServer(store, { isIdle: () => true, canRun: () => available, send() {}, abort() {}, shutdown() {} });
-  const child: any = { childId: manifest.childId, taskId: manifest.taskId, directory, spec: { task: "work" }, state: "running", started: true, notifiedSequence: 0 };
-  const group: any = { id: manifest.groupId, owner: "parent", background: true, mode: "single", launchMode: "none", caller: manifest.placement, children: [child] };
+  const server = new TuiWorkerServer(store, {
+    isIdle: () => true,
+    canRun: () => available,
+    send() {},
+    abort() {},
+    shutdown() {},
+  });
+  const child: any = {
+    childId: manifest.childId,
+    taskId: manifest.taskId,
+    directory,
+    spec: { task: "work" },
+    state: "running",
+    started: true,
+    notifiedSequence: 0,
+  };
+  const group: any = {
+    id: manifest.groupId,
+    owner: "parent",
+    background: true,
+    mode: "single",
+    launchMode: "none",
+    caller: manifest.placement,
+    children: [child],
+  };
   manager.groups.set(group.id, group);
-  const assistant = { role: "assistant", stopReason: "toolUse", content: [{ type: "toolCall", name: "subagent", arguments: { operation: "yield", job_id: `subagent-job-${"f".repeat(24)}` } }] };
+  const assistant = {
+    role: "assistant",
+    stopReason: "toolUse",
+    content: [
+      {
+        type: "toolCall",
+        name: "subagent",
+        arguments: { operation: "yield", job_id: `subagent-job-${"f".repeat(24)}` },
+      },
+    ],
+  };
   try {
     await server.start();
     for (const error of [undefined, "Worker command authority unavailable at settlement"]) {
@@ -352,22 +903,31 @@ test("authority loss is a failed native result, including old tool-only reports"
       assert.match(child.error, /authority unavailable/i);
       assert.equal(manager.publicGroup(group).status, "failed");
       const result = await manager.operation({ operation: "result", job_id: group.id }, "parent");
-      assert.match(result.content[0].text, /authority unavailable/i, "failed worker returned an empty answer");
+      assert.match(
+        result.content[0].text,
+        /authority unavailable/i,
+        "failed worker returned an empty answer",
+      );
     }
     // A recovered live authority must not erase a retained execution failure.
     available = true;
     await manager.observe(group, child);
     assert.equal(child.state, "failed");
     const notifications: any[] = [];
-    manager.notify = (update: any) => { notifications.push(update); return true; };
-    group.background = false; group.guidanceYielded = true;
+    manager.notify = (update: any) => {
+      notifications.push(update);
+      return true;
+    };
+    group.background = false;
+    group.guidanceYielded = true;
     group.parentOwnerToken = manager.processToken(process.pid);
     // Yielding a foreground turn while descendants run is idle, not completion.
-    server.running(true); server.settled({ assistant });
+    server.running(true);
+    server.settled({ assistant });
     await manager.refresh("parent");
     assert.equal(child.state, "waiting");
     assert.equal(child.error, undefined);
-    assert.equal(notifications.filter(u => u.completion).length, 0);
+    assert.equal(notifications.filter((u) => u.completion).length, 0);
     assert.equal(manager.publicGroup(group).status, "waiting");
     const idleResult = await manager.operation({ operation: "result", job_id: group.id }, "parent");
     assert.match(idleResult.content[0].text, /task completion has not been reported/);
@@ -376,65 +936,148 @@ test("authority loss is a failed native result, including old tool-only reports"
     (server as any).snapshot = () => ({ ...snapshot(), workerEpoch: "f".repeat(32) });
     await manager.observe(group, child);
     assert.match(child.observationError, /identity mismatch/);
-    assert.equal(notifications.filter(u => u.completion).length, 0);
+    assert.equal(notifications.filter((u) => u.completion).length, 0);
     (server as any).snapshot = snapshot;
     await manager.refresh("parent");
-    const restored: any = new TuiNativeManager(root, () => "native", () => true, 16);
+    const restored: any = new TuiNativeManager(
+      root,
+      () => "native",
+      () => true,
+      16,
+    );
     restored.notify = manager.notify;
     await restored.refresh("parent");
-    assert.equal(notifications.filter(u => u.completion).length, 0, "reload promoted idle toolUse to completion");
+    assert.equal(
+      notifications.filter((u) => u.completion).length,
+      0,
+      "reload promoted idle toolUse to completion",
+    );
     await restored.shutdown(false);
     // A later human followup clears old evidence; a tool-only delivered outcome
     // settles legitimately and has a useful report without assistant prose.
     server.running(true);
-    await server.outcome({ version: 1, state: "delivered", summary: "Validated the fix.",
-      acceptance: [{ criterion: "fix", status: "passed", evidence: "test" }], artifacts: [], remaining: [] });
+    await server.outcome({
+      version: 1,
+      state: "delivered",
+      summary: "Validated the fix.",
+      acceptance: [{ criterion: "fix", status: "passed", evidence: "test" }],
+      artifacts: [],
+      remaining: [],
+    });
     server.settled({ assistant });
     await manager.refresh("parent");
     assert.equal(child.state, "completed");
-    assert.equal(notifications.filter(u => u.completion).length, 1);
+    assert.equal(notifications.filter((u) => u.completion).length, 1);
     manager.owner = "parent";
     assert.match(manager.readonlyTaskReport("parent", child.taskId).text, /Validated the fix/);
     await manager.refresh("parent");
-    const reloaded: any = new TuiNativeManager(root, () => "native", () => true, 16);
+    const reloaded: any = new TuiNativeManager(
+      root,
+      () => "native",
+      () => true,
+      16,
+    );
     reloaded.notify = manager.notify;
     await reloaded.refresh("parent");
-    assert.equal(notifications.filter(u => u.completion).length, 1, "terminal receipt duplicated across reload");
+    assert.equal(
+      notifications.filter((u) => u.completion).length,
+      1,
+      "terminal receipt duplicated across reload",
+    );
     await reloaded.shutdown(false);
     // New user activity supersedes that delivery; late tool-only reports cannot
     // reuse its outcome. Explicit errors must still wake exactly once.
-    server.running(true); server.settled({ assistant });
+    server.running(true);
+    server.settled({ assistant });
     await manager.refresh("parent");
     assert.equal(child.state, "waiting");
     assert.equal(child.lastOutcome, undefined);
-    assert.equal(notifications.filter(u => u.completion).length, 1);
-    server.running(true); server.settled({ assistant, error: "Explicit execution failure" });
-    await manager.refresh("parent"); await manager.refresh("parent");
-    assert.equal(notifications.filter(u => u.completion && u.state === "failed").length, 1);
-  } finally { await server.close(); await manager.shutdown(false); await rm(root, { recursive: true, force: true }); }
+    assert.equal(notifications.filter((u) => u.completion).length, 1);
+    server.running(true);
+    server.settled({ assistant, error: "Explicit execution failure" });
+    await manager.refresh("parent");
+    await manager.refresh("parent");
+    assert.equal(notifications.filter((u) => u.completion && u.state === "failed").length, 1);
+  } finally {
+    await server.close();
+    await manager.shutdown(false);
+    await rm(root, { recursive: true, force: true });
+  }
 });
 
 test("worker observation failure preserves the original launch failure and exposes its own diagnostic", async () => {
   const root = await mkdtemp(join(tmpdir(), "pi-observe-launch-failure-"));
-  const manager: any = new TuiNativeManager(root, () => "native", () => true, 16);
+  const manager: any = new TuiNativeManager(
+    root,
+    () => "native",
+    () => true,
+    16,
+  );
   const directory = join(root, "workers", "a".repeat(24));
   const store = new TuiWorkerStore(directory, true);
-  const manifest: any = { protocol: 1, ownerSessionId: "parent", taskId: "task", runtimeId: "runtime", groupId: `subagent-job-${"a".repeat(24)}`,
-    childId: `subagent-child-${"b".repeat(24)}`, attempt: 1, workerEpoch: "c".repeat(32), controlToken: "d".repeat(64),
-    controlSocket: join(directory, "control.sock"), sessionFile: join(directory, "session.jsonl"), launchMode: "none", presentation: "background",
-    placement: { socketPath: "/tmp/tmux", serverEpoch: "1:2", sessionId: "$1", windowId: "@1", paneId: "%1", ownershipNonce: "e".repeat(64) } };
+  const manifest: any = {
+    protocol: 1,
+    ownerSessionId: "parent",
+    taskId: "task",
+    runtimeId: "runtime",
+    groupId: `subagent-job-${"a".repeat(24)}`,
+    childId: `subagent-child-${"b".repeat(24)}`,
+    attempt: 1,
+    workerEpoch: "c".repeat(32),
+    controlToken: "d".repeat(64),
+    controlSocket: join(directory, "control.sock"),
+    sessionFile: join(directory, "session.jsonl"),
+    launchMode: "none",
+    presentation: "background",
+    placement: {
+      socketPath: "/tmp/tmux",
+      serverEpoch: "1:2",
+      sessionId: "$1",
+      windowId: "@1",
+      paneId: "%1",
+      ownershipNonce: "e".repeat(64),
+    },
+  };
   store.writeManifest(manifest);
   const launchFailure = "Worker startup timeout: pane did not become ready";
-  const child: any = { childId: manifest.childId, taskId: manifest.taskId, directory, spec: { task: "work" }, state: "failed", error: launchFailure, started: false, notifiedSequence: 0 };
-  const group: any = { id: manifest.groupId, owner: "parent", background: true, mode: "single", launchMode: "none", caller: manifest.placement, children: [child] };
+  const child: any = {
+    childId: manifest.childId,
+    taskId: manifest.taskId,
+    directory,
+    spec: { task: "work" },
+    state: "failed",
+    error: launchFailure,
+    started: false,
+    notifiedSequence: 0,
+  };
+  const group: any = {
+    id: manifest.groupId,
+    owner: "parent",
+    background: true,
+    mode: "single",
+    launchMode: "none",
+    caller: manifest.placement,
+    children: [child],
+  };
   manager.groups.set(group.id, group);
   try {
     await manager.observe(group, child);
     const status = manager.publicGroup(group).children[0];
-    assert.equal(child.state, "failed", "observer failure must not change the worker lifecycle state");
-    assert.equal(child.error, launchFailure, "observer failure must not replace the causal startup failure");
+    assert.equal(
+      child.state,
+      "failed",
+      "observer failure must not change the worker lifecycle state",
+    );
+    assert.equal(
+      child.error,
+      launchFailure,
+      "observer failure must not replace the causal startup failure",
+    );
     assert.match(status.error, /startup timeout/);
     assert.match(status.observation_error, /unavailable|connect|socket/i);
     assert.match(manager.text(group), /startup timeout.*observation unavailable/i);
-  } finally { await manager.shutdown(false); await rm(root, { recursive: true, force: true }); }
+  } finally {
+    await manager.shutdown(false);
+    await rm(root, { recursive: true, force: true });
+  }
 });

@@ -59,7 +59,8 @@ export function parseModelSelector(selector: string): ParsedSelector {
     if (!body) throw new Error(`Invalid model selector: ${selector}`);
     return isModelTier(body) ? { tier: body, thinking } : { id: body, thinking };
   }
-  const provider = body.slice(0, slash), id = body.slice(slash + 1);
+  const provider = body.slice(0, slash),
+    id = body.slice(slash + 1);
   if (!provider || !id) {
     throw new Error(`Model selector needs a provider and model ID: ${selector}`);
   }
@@ -107,7 +108,7 @@ export function tierModel(tiers: ModelTierTable, provider: string, tier: ModelTi
   if (!model) {
     throw new Error(
       `No ${tier} model is configured for provider ${provider}; ` +
-      `set programs.pi.modelTiers.${provider}.${tier} (or model-tiers.json)`,
+        `set programs.pi.modelTiers.${provider}.${tier} (or model-tiers.json)`,
     );
   }
   return model;

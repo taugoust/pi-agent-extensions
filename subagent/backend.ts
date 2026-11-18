@@ -29,27 +29,42 @@ export function selectSubagentBackend(
 ): AdaptiveSubagentBackend {
   let state: AdaptiveSupervisorState | undefined;
   try {
-    state = bridge && typeof bridge.getSupervisorState !== "function"
-      ? { configured: true, active: false }
-      : bridge?.getSupervisorState?.();
+    state =
+      bridge && typeof bridge.getSupervisorState !== "function"
+        ? { configured: true, active: false }
+        : bridge?.getSupervisorState?.();
   } catch {
     state = { configured: true, active: false };
   }
   const disposition = agentSHRuntimeDisposition(startup, state);
-  const adapter = bridge?.subagentAdapter as { execute?: unknown; detailsFailed?: unknown; renderCall?: unknown; renderResult?: unknown } | undefined;
-  const adapterValid = typeof adapter?.execute === "function" && typeof adapter.detailsFailed === "function" && typeof adapter.renderCall === "function" && typeof adapter.renderResult === "function";
+  const adapter = bridge?.subagentAdapter as
+    | { execute?: unknown; detailsFailed?: unknown; renderCall?: unknown; renderResult?: unknown }
+    | undefined;
+  const adapterValid =
+    typeof adapter?.execute === "function" &&
+    typeof adapter.detailsFailed === "function" &&
+    typeof adapter.renderCall === "function" &&
+    typeof adapter.renderResult === "function";
   if (disposition.kind === "full" && adapterValid) return { kind: "agentsh" };
   if (disposition.kind === "native" || disposition.kind === "guard-only") return { kind: "native" };
 
-  const detail = state?.lastError ? `: ${state.lastError}` : state?.status ? ` (${state.status})` : "";
-  return { kind: "unavailable", message: `AgentSH is configured but its subagent supervisor is unavailable${detail}; native fallback is disabled` };
+  const detail = state?.lastError
+    ? `: ${state.lastError}`
+    : state?.status
+      ? ` (${state.status})`
+      : "";
+  return {
+    kind: "unavailable",
+    message: `AgentSH is configured but its subagent supervisor is unavailable${detail}; native fallback is disabled`,
+  };
 }
 
 export function adaptiveDispositionError(params: Record<string, unknown>): string | undefined {
   const hasAction = typeof params.action === "string" && params.action.trim() !== "";
   const hasDraftID = typeof params.draft_id === "string" && params.draft_id.trim() !== "";
   if (hasAction !== hasDraftID) return "Draft disposition requires both action and draft_id";
-  if ((hasAction || hasDraftID) && params.mode !== "draft") return "Draft disposition requires mode=draft";
+  if ((hasAction || hasDraftID) && params.mode !== "draft")
+    return "Draft disposition requires mode=draft";
   return undefined;
 }
 

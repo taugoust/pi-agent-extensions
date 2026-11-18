@@ -1,9 +1,14 @@
+import { spawn, spawnSync, type ChildProcessWithoutNullStreams } from "node:child_process";
 import {
-  spawn,
-  spawnSync,
-  type ChildProcessWithoutNullStreams,
-} from "node:child_process";
-import { readFileSync, mkdtempSync, openSync, closeSync, readSync, writeSync, rmSync, constants } from "node:fs";
+  readFileSync,
+  mkdtempSync,
+  openSync,
+  closeSync,
+  readSync,
+  writeSync,
+  rmSync,
+  constants,
+} from "node:fs";
 import { tmpdir } from "node:os";
 import { basename, join } from "node:path";
 import {
@@ -105,14 +110,24 @@ export type NativeSubagentRpcDiagnostics = {
   contextWindow?: number;
   contextTokensAfterCompaction?: number;
   rawExit?: NativeSubagentRpcExit;
-  trace: Array<{ event: string; elapsedMs: number; streaming: boolean; settledVersion: number; closingInput: boolean; terminationRequested: boolean }>;
+  trace: Array<{
+    event: string;
+    elapsedMs: number;
+    streaming: boolean;
+    settledVersion: number;
+    closingInput: boolean;
+    terminationRequested: boolean;
+  }>;
 };
 
 export type NativeSubagentRpcOptions = {
   process: ChildProcessWithoutNullStreams;
   onEvent(event: JsonObject): void;
   onJobRequest?(request: { toolCallId: string; params: any }, signal: AbortSignal): Promise<any>;
-  onParentNotification?(request: { toolCallId: string; params: any }, signal: AbortSignal): Promise<any>;
+  onParentNotification?(
+    request: { toolCallId: string; params: any },
+    signal: AbortSignal,
+  ): Promise<any>;
   terminateProcess(): void;
   /** Test override. Production control prompts have a 24-hour hard bound. */
   controlTimeoutMs?: number;
@@ -160,7 +175,9 @@ function boundedProtocolError(value: unknown): string {
 }
 
 function abortError(signal: AbortSignal): Error {
-  return signal.reason instanceof Error ? signal.reason : new Error("Subagent child prompt cancelled");
+  return signal.reason instanceof Error
+    ? signal.reason
+    : new Error("Subagent child prompt cancelled");
 }
 
 function raceSignal<T>(promise: Promise<T>, signal?: AbortSignal): Promise<T> {
@@ -185,7 +202,11 @@ function raceSignal<T>(promise: Promise<T>, signal?: AbortSignal): Promise<T> {
   });
 }
 
-function linuxProcessGroup(pid: number): { parentPid: number; processGroup: number; session: number } {
+function linuxProcessGroup(pid: number): {
+  parentPid: number;
+  processGroup: number;
+  session: number;
+} {
   const stat = readFileSync(`/proc/${pid}/stat`, "utf8");
   const close = stat.lastIndexOf(")");
   if (close < 0) throw new Error("could not parse native subagent process identity");
@@ -213,7 +234,9 @@ export function spawnNativeSubagentProcess(
 ): NativeSubagentProcess {
   const termGraceMs = options.termGraceMs ?? NATIVE_PROCESS_TERM_GRACE_MS;
   if (!Number.isSafeInteger(termGraceMs) || termGraceMs < 1 || termGraceMs > 60_000) {
-    throw new Error("native subagent termination grace must be an integer between 1 and 60000 milliseconds");
+    throw new Error(
+      "native subagent termination grace must be an integer between 1 and 60000 milliseconds",
+    );
   }
 
   if (process.platform === "win32") {
@@ -230,17 +253,22 @@ export function spawnNativeSubagentProcess(
       terminate() {
         if (terminating) return;
         terminating = true;
-        try { child.kill("SIGTERM"); } catch {}
+        try {
+          child.kill("SIGTERM");
+        } catch {}
         setTimeout(() => {
           if (child.exitCode === null && child.signalCode === null) {
-            try { child.kill("SIGKILL"); } catch {}
+            try {
+              child.kill("SIGKILL");
+            } catch {}
           }
         }, termGraceMs).unref?.();
       },
     };
   }
 
-  if (!options.shellPath) throw new Error("native subagent process-group launch requires a POSIX shell");
+  if (!options.shellPath)
+    throw new Error("native subagent process-group launch requires a POSIX shell");
   if (!options.fifoPath) throw new Error("native subagent process-group launch requires mkfifo");
   // Bun's extra-stdio wrappers can close reused descriptors when a previous
   // ChildProcess is collected. Never give this lifetime-critical channel to
@@ -251,31 +279,47 @@ export function spawnNativeSubagentProcess(
   // Guarded resolution can turn mkfifo into the coreutils multicall binary.
   // Use an explicit argument rather than relying on argv0 surviving launchers.
   const fifoArgs = basename(options.fifoPath) === "coreutils" ? ["--coreutils-prog=mkfifo"] : [];
-  const fifo = spawnSync(options.fifoPath, [...fifoArgs, "-m", "600", controlPath], { timeout: 5000, stdio: ["ignore", "ignore", "pipe"], maxBuffer: 4096 });
+  const fifo = spawnSync(options.fifoPath, [...fifoArgs, "-m", "600", controlPath], {
+    timeout: 5000,
+    stdio: ["ignore", "ignore", "pipe"],
+    maxBuffer: 4096,
+  });
   if (fifo.error || fifo.status !== 0) {
     rmSync(channelDir, { recursive: true, force: true });
-    throw new Error(`could not create native subagent process-group control FIFO: ${fifo.error?.message ?? `exit=${fifo.status} signal=${fifo.signal} ${String(fifo.stderr ?? "").slice(0, 512)}`}`);
+    throw new Error(
+      `could not create native subagent process-group control FIFO: ${fifo.error?.message ?? `exit=${fifo.status} signal=${fifo.signal} ${String(fifo.stderr ?? "").slice(0, 512)}`}`,
+    );
   }
   let controlFd: number;
-  try { controlFd = openSync(controlPath, constants.O_RDWR); }
-  catch (error) { rmSync(channelDir, { recursive: true, force: true }); throw error; }
+  try {
+    controlFd = openSync(controlPath, constants.O_RDWR);
+  } catch (error) {
+    rmSync(channelDir, { recursive: true, force: true });
+    throw error;
+  }
   let child: ChildProcessWithoutNullStreams;
-  try { child = spawn(options.shellPath, [
-    "-c",
-    POSIX_PROCESS_GROUP_WRAPPER,
-    "pi-subagent-process-group",
-    String(termGraceMs / 1000),
-    controlPath,
-    readyPath,
-    command,
-    ...args,
-  ], {
-    cwd: options.cwd,
-    env: options.env,
-    shell: false,
-    detached: true,
-    stdio: ["pipe", "pipe", "pipe"],
-  }); } catch (error) {
+  try {
+    child = spawn(
+      options.shellPath,
+      [
+        "-c",
+        POSIX_PROCESS_GROUP_WRAPPER,
+        "pi-subagent-process-group",
+        String(termGraceMs / 1000),
+        controlPath,
+        readyPath,
+        command,
+        ...args,
+      ],
+      {
+        cwd: options.cwd,
+        env: options.env,
+        shell: false,
+        detached: true,
+        stdio: ["pipe", "pipe", "pipe"],
+      },
+    );
+  } catch (error) {
     closeSync(controlFd);
     rmSync(channelDir, { recursive: true, force: true });
     throw error;
@@ -286,7 +330,10 @@ export function spawnNativeSubagentProcess(
   const ready = new Promise<void>((resolve, reject) => {
     let settled = false;
     let poll: ReturnType<typeof setInterval> | undefined;
-    const timer = setTimeout(() => finish(new Error("native subagent process-group anchor did not start in time")), PROCESS_GROUP_ANCHOR_TIMEOUT_MS);
+    const timer = setTimeout(
+      () => finish(new Error("native subagent process-group anchor did not start in time")),
+      PROCESS_GROUP_ANCHOR_TIMEOUT_MS,
+    );
     timer.unref?.();
     const cleanup = () => {
       clearTimeout(timer);
@@ -315,9 +362,16 @@ export function spawnNativeSubagentProcess(
         try {
           const leader = linuxProcessGroup(child.pid);
           const anchor = linuxProcessGroup(anchorPid);
-          if (leader.processGroup !== child.pid || leader.session !== child.pid
-            || anchor.parentPid !== child.pid || anchor.processGroup !== child.pid || anchor.session !== child.pid) {
-            throw new Error("native subagent process-group anchor does not belong to its launched group");
+          if (
+            leader.processGroup !== child.pid ||
+            leader.session !== child.pid ||
+            anchor.parentPid !== child.pid ||
+            anchor.processGroup !== child.pid ||
+            anchor.session !== child.pid
+          ) {
+            throw new Error(
+              "native subagent process-group anchor does not belong to its launched group",
+            );
           }
         } catch (error) {
           finish(asError(error));
@@ -328,20 +382,31 @@ export function spawnNativeSubagentProcess(
     };
     const readIdentity = () => {
       try {
-        const fd = openSync(readyPath, constants.O_RDONLY | constants.O_NONBLOCK | constants.O_NOFOLLOW);
+        const fd = openSync(
+          readyPath,
+          constants.O_RDONLY | constants.O_NONBLOCK | constants.O_NOFOLLOW,
+        );
         const bytes = Buffer.alloc(65);
         let size: number;
-        try { size = readSync(fd, bytes, 0, bytes.length, 0); }
-        finally { closeSync(fd); }
-        if (size > 64) { finish(new Error("native subagent process-group anchor identity is oversized")); return; }
+        try {
+          size = readSync(fd, bytes, 0, bytes.length, 0);
+        } finally {
+          closeSync(fd);
+        }
+        if (size > 64) {
+          finish(new Error("native subagent process-group anchor identity is oversized"));
+          return;
+        }
         const buffer = bytes.subarray(0, size).toString("utf8");
         if (buffer.endsWith("\n")) verify(buffer.slice(0, -1));
       } catch (error) {
         if ((error as NodeJS.ErrnoException).code !== "ENOENT") finish(asError(error));
       }
     };
-    const onError = (error: Error) => finish(new Error(`native subagent process-group launch failed: ${error.message}`));
-    const onExit = () => finish(new Error("native subagent exited before its process-group anchor was ready"));
+    const onError = (error: Error) =>
+      finish(new Error(`native subagent process-group launch failed: ${error.message}`));
+    const onExit = () =>
+      finish(new Error("native subagent exited before its process-group anchor was ready"));
     child.once("error", onError);
     child.once("exit", onExit);
     poll = setInterval(readIdentity, 10);
@@ -354,9 +419,15 @@ export function spawnNativeSubagentProcess(
   const finishControl = (action: "complete" | "terminate"): Promise<void> => {
     if (controlFinished) return Promise.resolve();
     controlFinished = true;
-    try { writeSync(controlFd, `${action}\n`); }
-    catch { /* EOF also instructs the anchor to clean up its owned group. */ }
-    finally { try { closeSync(controlFd); } catch {} }
+    try {
+      writeSync(controlFd, `${action}\n`);
+    } catch {
+      /* EOF also instructs the anchor to clean up its owned group. */
+    } finally {
+      try {
+        closeSync(controlFd);
+      } catch {}
+    }
     return Promise.resolve();
   };
 
@@ -365,7 +436,9 @@ export function spawnNativeSubagentProcess(
   });
   child.once("close", () => {
     void finishControl("complete");
-    try { rmSync(channelDir, { recursive: true, force: true }); } catch {}
+    try {
+      rmSync(channelDir, { recursive: true, force: true });
+    } catch {}
   });
 
   return {
@@ -385,7 +458,9 @@ export function spawnNativeSubagentProcess(
           try {
             process.kill(-child.pid!, "SIGTERM");
           } catch {
-            try { child.kill("SIGTERM"); } catch {}
+            try {
+              child.kill("SIGTERM");
+            } catch {}
           }
         },
         async () => {
@@ -393,7 +468,9 @@ export function spawnNativeSubagentProcess(
           // could have been reused as an unrelated process-group identity.
           // Close the private marker pipe so an unverified anchor cannot leak.
           await finishControl("complete");
-          try { child.kill("SIGTERM"); } catch {}
+          try {
+            child.kill("SIGTERM");
+          } catch {}
         },
       );
     },
@@ -449,12 +526,23 @@ export class NativeSubagentRpcSession implements NativeSubagentControlHandle {
   private contextTokensAfterCompaction?: number;
 
   get diagnostics(): NativeSubagentRpcDiagnostics {
-    return { contextWindow: this.contextWindow, contextTokensAfterCompaction: this.contextTokensAfterCompaction, rawExit: this.rawExit && { ...this.rawExit }, trace: this.lifecycleTrace.map((entry) => ({ ...entry })) };
+    return {
+      contextWindow: this.contextWindow,
+      contextTokensAfterCompaction: this.contextTokensAfterCompaction,
+      rawExit: this.rawExit && { ...this.rawExit },
+      trace: this.lifecycleTrace.map((entry) => ({ ...entry })),
+    };
   }
 
   private trace(event: string): void {
-    this.lifecycleTrace.push({ event, elapsedMs: Date.now() - this.startedAt, streaming: this.streaming,
-      settledVersion: this.settledVersion, closingInput: this.closingInput, terminationRequested: this.terminationRequested });
+    this.lifecycleTrace.push({
+      event,
+      elapsedMs: Date.now() - this.startedAt,
+      streaming: this.streaming,
+      settledVersion: this.settledVersion,
+      closingInput: this.closingInput,
+      terminationRequested: this.terminationRequested,
+    });
     if (this.lifecycleTrace.length > 64) this.lifecycleTrace.shift();
   }
 
@@ -465,11 +553,18 @@ export class NativeSubagentRpcSession implements NativeSubagentControlHandle {
     this.onParentNotification = options.onParentNotification;
     this.terminateProcess = options.terminateProcess;
     this.controlTimeoutMs = options.controlTimeoutMs ?? MAX_NATIVE_SUBAGENT_CONTROL_MS;
-    if (!Number.isSafeInteger(this.controlTimeoutMs) || this.controlTimeoutMs < 1
-      || this.controlTimeoutMs > MAX_NATIVE_SUBAGENT_CONTROL_MS) {
-      throw new Error("native subagent control timeout must be an integer between 1 millisecond and 24 hours");
+    if (
+      !Number.isSafeInteger(this.controlTimeoutMs) ||
+      this.controlTimeoutMs < 1 ||
+      this.controlTimeoutMs > MAX_NATIVE_SUBAGENT_CONTROL_MS
+    ) {
+      throw new Error(
+        "native subagent control timeout must be an integer between 1 millisecond and 24 hours",
+      );
     }
-    this.exitPromise = new Promise((resolve) => { this.resolveExit = resolve; });
+    this.exitPromise = new Promise((resolve) => {
+      this.resolveExit = resolve;
+    });
 
     this.proc.stdout.on("data", (chunk: Buffer | string) => this.receive(chunk));
     this.proc.stdout.on("end", () => this.finishStdout());
@@ -483,7 +578,9 @@ export class NativeSubagentRpcSession implements NativeSubagentControlHandle {
         this.fail(new Error(`native subagent RPC stdin failed: ${error.message}`));
       }
     });
-    this.proc.on("error", (error) => this.fail(new Error(`native subagent process failed: ${error.message}`)));
+    this.proc.on("error", (error) =>
+      this.fail(new Error(`native subagent process failed: ${error.message}`)),
+    );
     this.proc.on("exit", (code, signal) => {
       this.rawExit = { code, signal };
       this.trace("process_exit");
@@ -498,13 +595,15 @@ export class NativeSubagentRpcSession implements NativeSubagentControlHandle {
   }
 
   isActive(): boolean {
-    return !this.workflowMode
-      && !this.closed
-      && !this.closingInput
-      && !this.fatal
-      && !this.terminationRequested
-      && !this.initialPromptHandled
-      && (this.settledVersion === 0 || this.streaming || this.controlReservations > 0);
+    return (
+      !this.workflowMode &&
+      !this.closed &&
+      !this.closingInput &&
+      !this.fatal &&
+      !this.terminationRequested &&
+      !this.initialPromptHandled &&
+      (this.settledVersion === 0 || this.streaming || this.controlReservations > 0)
+    );
   }
 
   /** Dedicated goal workers are bootstrapped through a separate structured
@@ -513,7 +612,8 @@ export class NativeSubagentRpcSession implements NativeSubagentControlHandle {
    * The owner must pause the goal and terminate the process group explicitly.
    */
   async startWorkflow(bootstrap: () => Promise<void>): Promise<NativeSubagentRpcExit> {
-    if (this.initialPromptSent) throw new Error("native subagent RPC execution was already started");
+    if (this.initialPromptSent)
+      throw new Error("native subagent RPC execution was already started");
     this.initialPromptSent = true;
     this.workflowMode = true;
     this.notifyChange();
@@ -540,16 +640,27 @@ export class NativeSubagentRpcSession implements NativeSubagentControlHandle {
     return await this.exitPromise;
   }
 
-  async start(initialMessage: string, compactBeforePrompt = false, requireCompaction = false): Promise<NativeSubagentRpcExit> {
-    if (this.initialPromptSent) throw new Error("native subagent RPC initial prompt was already sent");
+  async start(
+    initialMessage: string,
+    compactBeforePrompt = false,
+    requireCompaction = false,
+  ): Promise<NativeSubagentRpcExit> {
+    if (this.initialPromptSent)
+      throw new Error("native subagent RPC initial prompt was already sent");
     this.initialPromptSent = true;
     this.notifyChange();
     const collector = this.armCollector("initial");
     try {
       if (compactBeforePrompt) {
-        try { await this.sendCommand("compact", {}, undefined, 5 * 60 * 1000); }
-        catch (error) {
-          if (requireCompaction || asError(error).message !== "native subagent RPC compact failed: Nothing to compact (session too small)") throw error;
+        try {
+          await this.sendCommand("compact", {}, undefined, 5 * 60 * 1000);
+        } catch (error) {
+          if (
+            requireCompaction ||
+            asError(error).message !==
+              "native subagent RPC compact failed: Nothing to compact (session too small)"
+          )
+            throw error;
           this.trace("compaction_skipped_small_session");
         }
       }
@@ -577,12 +688,18 @@ export class NativeSubagentRpcSession implements NativeSubagentControlHandle {
       this.terminateProcess();
     } catch (error) {
       if (!this.fatal) {
-        this.fatal = new Error(`could not terminate native subagent RPC process: ${boundedProtocolError(error)}`);
+        this.fatal = new Error(
+          `could not terminate native subagent RPC process: ${boundedProtocolError(error)}`,
+        );
       }
     }
   }
 
-  async acceptPrompt(mode: SubagentControlMode, message: string, signal?: AbortSignal): Promise<SubagentControlResult> {
+  async acceptPrompt(
+    mode: SubagentControlMode,
+    message: string,
+    signal?: AbortSignal,
+  ): Promise<SubagentControlResult> {
     return await this.control(mode, message, signal, undefined, false);
   }
 
@@ -595,11 +712,19 @@ export class NativeSubagentRpcSession implements NativeSubagentControlHandle {
   ): Promise<SubagentControlResult> {
     if (signal?.aborted) throw abortError(signal);
     if (!this.isActive()) {
-      throw new SubagentControlError("inactive", "The native subagent child is no longer active", "native");
+      throw new SubagentControlError(
+        "inactive",
+        "The native subagent child is no longer active",
+        "native",
+      );
     }
 
     if (!waitForResponse && this.controlReservations > 0) {
-      throw new SubagentControlError("busy", "Another child control request is in progress; this prompt was not sent. Continue supervising rather than waiting on that request.", "native");
+      throw new SubagentControlError(
+        "busy",
+        "Another child control request is in progress; this prompt was not sent. Continue supervising rather than waiting on that request.",
+        "native",
+      );
     }
 
     // Events have no originating prompt ID. Reserve the channel immediately,
@@ -607,8 +732,13 @@ export class NativeSubagentRpcSession implements NativeSubagentControlHandle {
     this.controlReservations += 1;
     const preceding = this.controlTail;
     let release!: () => void;
-    const completed = new Promise<void>((resolve) => { release = resolve; });
-    this.controlTail = preceding.then(() => completed, () => completed);
+    const completed = new Promise<void>((resolve) => {
+      release = resolve;
+    });
+    this.controlTail = preceding.then(
+      () => completed,
+      () => completed,
+    );
 
     const internal = (async () => {
       // Cancellation may withdraw a command while it is still waiting for this
@@ -623,12 +753,19 @@ export class NativeSubagentRpcSession implements NativeSubagentControlHandle {
         if (mode === "interrupt") await this.abortCurrentRun();
         await this.sendCommand("prompt", {
           message,
-          ...(mode === "interrupt" ? {} : { streamingBehavior: mode === "steer" ? "steer" : "followUp" }),
+          ...(mode === "interrupt"
+            ? {}
+            : { streamingBehavior: mode === "steer" ? "steer" : "followUp" }),
         });
-        return { accepted: true, text: "Child prompt accepted; not waiting for the child to finish. Acceptance does not mean the message has been processed. Continue supervising and use status/output/result or bounded waits for progress." };
+        return {
+          accepted: true,
+          text: "Child prompt accepted; not waiting for the child to finish. Acceptance does not mean the message has been processed. Continue supervising and use status/output/result or bounded waits for progress.",
+        };
       }
       const guardedUpdate = onUpdate
-        ? (text: string) => { if (!signal?.aborted) onUpdate(text); }
+        ? (text: string) => {
+            if (!signal?.aborted) onUpdate(text);
+          }
         : undefined;
       if (mode === "interrupt") return await this.interruptAndPrompt(message, guardedUpdate);
       return await this.promptCurrentRun(mode, message, guardedUpdate);
@@ -667,16 +804,26 @@ export class NativeSubagentRpcSession implements NativeSubagentControlHandle {
   }
 
   private requireOpenControlChannel(): void {
-    if (this.workflowMode) throw new SubagentControlError("capability", "Dedicated goal workers accept only structured workflow control", "native");
+    if (this.workflowMode)
+      throw new SubagentControlError(
+        "capability",
+        "Dedicated goal workers accept only structured workflow control",
+        "native",
+      );
     if (this.fatal) throw this.fatal;
     if (this.closed || this.closingInput || this.terminationRequested) {
-      throw new SubagentControlError("inactive", "The native subagent child is no longer active", "native");
+      throw new SubagentControlError(
+        "inactive",
+        "The native subagent child is no longer active",
+        "native",
+      );
     }
   }
 
   private async waitForInitialRun(signal?: AbortSignal): Promise<void> {
-    const ready = () => this.initialPromptAccepted
-      && (this.settledVersion > 0 || (this.streaming && this.userMessageCount > 0));
+    const ready = () =>
+      this.initialPromptAccepted &&
+      (this.settledVersion > 0 || (this.streaming && this.userMessageCount > 0));
     const handled = () => this.initialPromptAccepted && this.initialPromptHandled;
     if (!ready() && !handled()) await this.waitFor(() => ready() || handled(), signal);
     if (handled()) {
@@ -697,10 +844,14 @@ export class NativeSubagentRpcSession implements NativeSubagentControlHandle {
     try {
       // Unlike the dedicated queue commands, prompt also starts a fresh run if
       // the previous one settles before Pi reads this frame.
-      const receipt = await this.sendCommand("prompt", {
-        message,
-        streamingBehavior: mode === "steer" ? "steer" : "followUp",
-      }, collector);
+      const receipt = await this.sendCommand(
+        "prompt",
+        {
+          message,
+          streamingBehavior: mode === "steer" ? "steer" : "followUp",
+        },
+        collector,
+      );
       return await this.finishAcceptedPrompt(collector, receipt);
     } finally {
       if (this.controlCollector === collector) this.controlCollector = undefined;
@@ -766,8 +917,13 @@ export class NativeSubagentRpcSession implements NativeSubagentControlHandle {
     _receipt: CommandReceipt,
   ): Promise<"delivered" | "handled"> {
     const state = (await this.sendCommand("get_state", {})).response.data;
-    if (Number.isSafeInteger(state?.model?.contextWindow) && state.model.contextWindow > 0) this.contextWindow = state.model.contextWindow;
-    if (!state || typeof state.isStreaming !== "boolean" || !Number.isSafeInteger(state.pendingMessageCount)) {
+    if (Number.isSafeInteger(state?.model?.contextWindow) && state.model.contextWindow > 0)
+      this.contextWindow = state.model.contextWindow;
+    if (
+      !state ||
+      typeof state.isStreaming !== "boolean" ||
+      !Number.isSafeInteger(state.pendingMessageCount)
+    ) {
       const error = new Error("native subagent RPC get_state returned invalid prompt state");
       this.fail(error);
       throw error;
@@ -776,7 +932,9 @@ export class NativeSubagentRpcSession implements NativeSubagentControlHandle {
     if (collector.deliveredAfterOrdinal !== undefined) return "delivered";
     if (collector.queueTarget) {
       if (!state.isStreaming) {
-        const error = new Error("native subagent RPC accepted a queued prompt after the child became idle");
+        const error = new Error(
+          "native subagent RPC accepted a queued prompt after the child became idle",
+        );
         this.fail(error);
         throw error;
       }
@@ -795,7 +953,9 @@ export class NativeSubagentRpcSession implements NativeSubagentControlHandle {
       return "handled";
     }
 
-    const error = new Error("native subagent RPC reported a running accepted prompt without a delivery boundary");
+    const error = new Error(
+      "native subagent RPC reported a running accepted prompt without a delivery boundary",
+    );
     this.fail(error);
     throw error;
   }
@@ -829,7 +989,13 @@ export class NativeSubagentRpcSession implements NativeSubagentControlHandle {
     if (predicate()) return Promise.resolve();
     if (this.fatal) return Promise.reject(this.fatal);
     if (this.closed || this.terminationRequested) {
-      return Promise.reject(new SubagentControlError("inactive", "The native subagent child is no longer active", "native"));
+      return Promise.reject(
+        new SubagentControlError(
+          "inactive",
+          "The native subagent child is no longer active",
+          "native",
+        ),
+      );
     }
     if (signal?.aborted) return Promise.reject(abortError(signal));
 
@@ -843,7 +1009,13 @@ export class NativeSubagentRpcSession implements NativeSubagentControlHandle {
           reject(this.fatal);
         } else if (this.closed || this.terminationRequested) {
           cleanup();
-          reject(new SubagentControlError("inactive", "The native subagent child is no longer active", "native"));
+          reject(
+            new SubagentControlError(
+              "inactive",
+              "The native subagent child is no longer active",
+              "native",
+            ),
+          );
         }
       };
       const abort = () => {
@@ -876,7 +1048,9 @@ export class NativeSubagentRpcSession implements NativeSubagentControlHandle {
     try {
       decoded = typeof chunk === "string" ? chunk : this.decoder.decode(chunk, { stream: true });
     } catch (error) {
-      this.fail(new Error(`native subagent RPC stdout is not valid UTF-8: ${boundedProtocolError(error)}`));
+      this.fail(
+        new Error(`native subagent RPC stdout is not valid UTF-8: ${boundedProtocolError(error)}`),
+      );
       return;
     }
     this.buffer += decoded;
@@ -914,7 +1088,9 @@ export class NativeSubagentRpcSession implements NativeSubagentControlHandle {
     try {
       this.buffer += this.decoder.decode();
     } catch (error) {
-      this.fail(new Error(`native subagent RPC stdout is not valid UTF-8: ${boundedProtocolError(error)}`));
+      this.fail(
+        new Error(`native subagent RPC stdout is not valid UTF-8: ${boundedProtocolError(error)}`),
+      );
       return;
     }
     if (this.buffer.length > 0) {
@@ -932,10 +1108,13 @@ export class NativeSubagentRpcSession implements NativeSubagentControlHandle {
     let event: JsonObject;
     try {
       const parsed = JSON.parse(line) as unknown;
-      if (!parsed || typeof parsed !== "object" || Array.isArray(parsed)) throw new Error("frame is not an object");
+      if (!parsed || typeof parsed !== "object" || Array.isArray(parsed))
+        throw new Error("frame is not an object");
       event = parsed as JsonObject;
     } catch (error) {
-      this.fail(new Error(`native subagent RPC returned malformed JSON: ${boundedProtocolError(error)}`));
+      this.fail(
+        new Error(`native subagent RPC returned malformed JSON: ${boundedProtocolError(error)}`),
+      );
       return;
     }
 
@@ -949,7 +1128,11 @@ export class NativeSubagentRpcSession implements NativeSubagentControlHandle {
       return;
     }
 
-    if (event.type === "compaction_end" && Number.isSafeInteger(event.result?.estimatedTokensAfter) && event.result.estimatedTokensAfter >= 0) {
+    if (
+      event.type === "compaction_end" &&
+      Number.isSafeInteger(event.result?.estimatedTokensAfter) &&
+      event.result.estimatedTokensAfter >= 0
+    ) {
       this.contextTokensAfterCompaction = event.result.estimatedTokensAfter;
     }
     if (event.type === "agent_start") {
@@ -958,7 +1141,22 @@ export class NativeSubagentRpcSession implements NativeSubagentControlHandle {
       this.streaming = false;
       this.settledVersion += 1;
     }
-    if (["agent_start", "agent_end", "agent_settled", "message_start", "message_end", "turn_start", "turn_end", "compaction_start", "compaction_end", "auto_retry_start", "auto_retry_end", "extension_error"].includes(event.type)) {
+    if (
+      [
+        "agent_start",
+        "agent_end",
+        "agent_settled",
+        "message_start",
+        "message_end",
+        "turn_start",
+        "turn_end",
+        "compaction_start",
+        "compaction_end",
+        "auto_retry_start",
+        "auto_retry_end",
+        "extension_error",
+      ].includes(event.type)
+    ) {
       this.trace(event.type);
     }
     try {
@@ -981,9 +1179,13 @@ export class NativeSubagentRpcSession implements NativeSubagentControlHandle {
       return;
     }
 
-    if (event.type === "agent_start" && collector
-      && sequence > collector.dispatchSequence
-      && !collector.queueCandidate && !collector.queueTarget) {
+    if (
+      event.type === "agent_start" &&
+      collector &&
+      sequence > collector.dispatchSequence &&
+      !collector.queueCandidate &&
+      !collector.queueTarget
+    ) {
       this.markCollectorDelivered(collector);
     }
 
@@ -1009,7 +1211,10 @@ export class NativeSubagentRpcSession implements NativeSubagentControlHandle {
       const index = Number.isSafeInteger(delta?.contentIndex) ? delta.contentIndex : 0;
       if (delta?.type === "text_start") this.activeAssistantTexts.set(index, "");
       else if (delta?.type === "text_delta") {
-        this.activeAssistantTexts.set(index, (this.activeAssistantTexts.get(index) ?? "") + String(delta.delta ?? ""));
+        this.activeAssistantTexts.set(
+          index,
+          (this.activeAssistantTexts.get(index) ?? "") + String(delta.delta ?? ""),
+        );
       } else if (delta?.type === "text_end" && typeof delta.content === "string") {
         this.activeAssistantTexts.set(index, delta.content);
       }
@@ -1046,11 +1251,12 @@ export class NativeSubagentRpcSession implements NativeSubagentControlHandle {
       followUp: Array.isArray(event.followUp) ? event.followUp.length : 0,
     };
     if (collector && sequence > collector.dispatchSequence) {
-      const kind = collector.mode === "steer"
-        ? "steering"
-        : collector.mode === "follow_up"
-          ? "followUp"
-          : undefined;
+      const kind =
+        collector.mode === "steer"
+          ? "steering"
+          : collector.mode === "follow_up"
+            ? "followUp"
+            : undefined;
       if (kind) {
         const previousLength = this.queueLengths[kind];
         const nextLength = next[kind];
@@ -1108,13 +1314,19 @@ export class NativeSubagentRpcSession implements NativeSubagentControlHandle {
     this.pendingCommands.delete(id);
     clearTimeout(pending.timer);
     if (response.command !== pending.command) {
-      const error = new Error(`native subagent RPC response command mismatch for ${pending.command}`);
+      const error = new Error(
+        `native subagent RPC response command mismatch for ${pending.command}`,
+      );
       pending.reject(error);
       this.fail(error);
       return;
     }
     if (response.success !== true) {
-      pending.reject(new Error(`native subagent RPC ${pending.command} failed: ${String(response.error ?? "unknown error")}`));
+      pending.reject(
+        new Error(
+          `native subagent RPC ${pending.command} failed: ${String(response.error ?? "unknown error")}`,
+        ),
+      );
     } else {
       if (pending.collector) {
         pending.collector.acceptedSequence = sequence;
@@ -1133,7 +1345,10 @@ export class NativeSubagentRpcSession implements NativeSubagentControlHandle {
       this.fail(new Error("native subagent RPC returned an invalid extension UI request ID"));
       return;
     }
-    if (method === "input" && ["pi-parent-background-job-v1", "pi-parent-notification-v1"].includes(request.title)) {
+    if (
+      method === "input" &&
+      ["pi-parent-background-job-v1", "pi-parent-notification-v1"].includes(request.title)
+    ) {
       if (this.serviceIds.has(id) || this.serviceIds.size >= 4096 || this.serviceRequests >= 16) {
         this.fail(new Error("native child job request replay or capacity exceeded"));
         return;
@@ -1143,31 +1358,56 @@ export class NativeSubagentRpcSession implements NativeSubagentControlHandle {
       void (async () => {
         let result: any;
         try {
-          const handler = request.title === "pi-parent-notification-v1" ? this.onParentNotification : this.onJobRequest;
+          const handler =
+            request.title === "pi-parent-notification-v1"
+              ? this.onParentNotification
+              : this.onJobRequest;
           if (!handler) throw new Error("Requested parent service is unavailable for this child");
-          if (typeof request.placeholder !== "string" || Buffer.byteLength(request.placeholder) > 48 * 1024) throw new Error("Invalid child job request");
+          if (
+            typeof request.placeholder !== "string" ||
+            Buffer.byteLength(request.placeholder) > 48 * 1024
+          )
+            throw new Error("Invalid child job request");
           const value = JSON.parse(request.placeholder);
-          if (!value || Object.keys(value).some(k => !["toolCallId", "params"].includes(k)) || typeof value.toolCallId !== "string" || !value.toolCallId || value.toolCallId.length > 256) throw new Error("Invalid child job envelope");
+          if (
+            !value ||
+            Object.keys(value).some((k) => !["toolCallId", "params"].includes(k)) ||
+            typeof value.toolCallId !== "string" ||
+            !value.toolCallId ||
+            value.toolCallId.length > 256
+          )
+            throw new Error("Invalid child job envelope");
           result = await handler(value, this.serviceAbort.signal);
-        } catch (error) { result = { error: boundedProtocolError(error) }; }
-        finally { this.serviceRequests--; }
+        } catch (error) {
+          result = { error: boundedProtocolError(error) };
+        } finally {
+          this.serviceRequests--;
+        }
         if (this.closed || this.terminationRequested) return;
         let value = JSON.stringify(result);
-        if (Buffer.byteLength(value) > 60 * 1024) value = JSON.stringify({ error: "Parent job response exceeded its bounded size; request fewer output lines" });
+        if (Buffer.byteLength(value) > 60 * 1024)
+          value = JSON.stringify({
+            error: "Parent job response exceeded its bounded size; request fewer output lines",
+          });
         await this.writeFrame({ type: "extension_ui_response", id, value });
-      })().catch(error => this.fail(asError(error)));
+      })().catch((error) => this.fail(asError(error)));
       return;
     }
     if (FIRE_AND_FORGET_UI_METHODS.has(method)) return;
     if (!DIALOG_UI_METHODS.has(method)) {
-      this.fail(new Error(`native subagent RPC requested unsupported extension UI method: ${method || "<missing>"}`));
+      this.fail(
+        new Error(
+          `native subagent RPC requested unsupported extension UI method: ${method || "<missing>"}`,
+        ),
+      );
       return;
     }
 
     // RPC reports ctx.hasUI=true. Native children have no independent user
     // authority, so every dialog must receive an explicit fail-closed answer.
-    void this.writeFrame({ type: "extension_ui_response", id, cancelled: true })
-      .catch((error) => this.fail(asError(error)));
+    void this.writeFrame({ type: "extension_ui_response", id, cancelled: true }).catch((error) =>
+      this.fail(asError(error)),
+    );
   }
 
   private sendCommand(
@@ -1177,7 +1417,9 @@ export class NativeSubagentRpcSession implements NativeSubagentControlHandle {
     timeoutMs = RPC_COMMAND_TIMEOUT_MS,
   ): Promise<CommandReceipt> {
     if (this.closed || this.closingInput || this.fatal || this.terminationRequested) {
-      return Promise.reject(this.fatal ?? new Error("native subagent RPC control channel is closed"));
+      return Promise.reject(
+        this.fatal ?? new Error("native subagent RPC control channel is closed"),
+      );
     }
     const id = `parent-${process.pid}-${++this.commandNumber}`;
     return new Promise<CommandReceipt>((resolve, reject) => {
@@ -1190,7 +1432,7 @@ export class NativeSubagentRpcSession implements NativeSubagentControlHandle {
         this.fail(error);
       }, timeoutMs);
       timer.unref?.();
-        this.pendingCommands.set(id, { command, collector, resolve, reject, timer });
+      this.pendingCommands.set(id, { command, collector, resolve, reject, timer });
       if (collector) {
         collector.dispatchSequence = this.frameSequence;
         collector.dispatchStreaming = this.streaming;
@@ -1200,7 +1442,9 @@ export class NativeSubagentRpcSession implements NativeSubagentControlHandle {
         if (!pending) return;
         this.pendingCommands.delete(id);
         clearTimeout(pending.timer);
-        const failure = new Error(`native subagent RPC ${command} write failed: ${boundedProtocolError(error)}`);
+        const failure = new Error(
+          `native subagent RPC ${command} write failed: ${boundedProtocolError(error)}`,
+        );
         pending.reject(failure);
         this.fail(failure);
       });
@@ -1219,7 +1463,7 @@ export class NativeSubagentRpcSession implements NativeSubagentControlHandle {
     }
     return new Promise<void>((resolve, reject) => {
       try {
-        this.proc.stdin.write(frame, (error?: Error | null) => error ? reject(error) : resolve());
+        this.proc.stdin.write(frame, (error?: Error | null) => (error ? reject(error) : resolve()));
       } catch (error) {
         reject(error);
       }
@@ -1227,21 +1471,26 @@ export class NativeSubagentRpcSession implements NativeSubagentControlHandle {
   }
 
   private maybeCloseInput(): void {
-    if (this.closed
-      || this.closingInput
-      || this.fatal
-      || this.terminationRequested
-      || (this.settledVersion === 0 && !this.initialPromptHandled)
-      || this.streaming
-      || this.controlReservations > 0
-      || this.pendingCommands.size > 0
-      || !this.initialPromptAccepted) return;
+    if (
+      this.closed ||
+      this.closingInput ||
+      this.fatal ||
+      this.terminationRequested ||
+      (this.settledVersion === 0 && !this.initialPromptHandled) ||
+      this.streaming ||
+      this.controlReservations > 0 ||
+      this.pendingCommands.size > 0 ||
+      !this.initialPromptAccepted
+    )
+      return;
     this.closingInput = true;
     this.trace("stdin_end");
     try {
       this.proc.stdin.end();
     } catch (error) {
-      this.fail(new Error(`native subagent RPC stdin close failed: ${boundedProtocolError(error)}`));
+      this.fail(
+        new Error(`native subagent RPC stdin close failed: ${boundedProtocolError(error)}`),
+      );
       return;
     }
     this.shutdownTimer = setTimeout(() => {

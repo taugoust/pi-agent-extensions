@@ -12,9 +12,11 @@ function registry(): BashCommandTransformRegistry {
   const root = globalThis as Record<string, unknown>;
   const existing = root[REGISTRY_KEY] as BashCommandTransformRegistry | undefined;
   if (existing !== undefined) {
-    if (existing?.protocol !== 1
-      || !(existing.transforms instanceof Map)
-      || !(existing.applied instanceof WeakSet)) {
+    if (
+      existing?.protocol !== 1 ||
+      !(existing.transforms instanceof Map) ||
+      !(existing.applied instanceof WeakSet)
+    ) {
       throw new Error("Bash command transform registry is malformed");
     }
     return existing;

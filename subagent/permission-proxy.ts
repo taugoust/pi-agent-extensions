@@ -21,8 +21,19 @@ const HANDSHAKE_TIMEOUT_MS = 10_000;
 const REQUEST_TIMEOUT_MS = 5 * 60 * 1000;
 
 type JsonObject = Record<string, unknown>;
-type Claim = { protocol: 1; socketPath: string; token: string; subagentId: string; client?: ParentPermissionClient; error?: Error };
-type Waiter = { resolve(value: JsonObject): void; reject(error: Error): void; timer: ReturnType<typeof setTimeout> };
+type Claim = {
+  protocol: 1;
+  socketPath: string;
+  token: string;
+  subagentId: string;
+  client?: ParentPermissionClient;
+  error?: Error;
+};
+type Waiter = {
+  resolve(value: JsonObject): void;
+  reject(error: Error): void;
+  timer: ReturnType<typeof setTimeout>;
+};
 
 function asError(error: unknown): Error {
   return error instanceof Error ? error : new Error(String(error));
@@ -34,8 +45,11 @@ function boundedError(error: unknown): string {
   if (bytes.length <= SUBAGENT_PERMISSION_MAX_REASON_BYTES) return value;
   let end = SUBAGENT_PERMISSION_MAX_REASON_BYTES;
   while (end > 0) {
-    try { return new TextDecoder("utf-8", { fatal: true }).decode(bytes.subarray(0, end)); }
-    catch { end -= 1; }
+    try {
+      return new TextDecoder("utf-8", { fatal: true }).decode(bytes.subarray(0, end));
+    } catch {
+      end -= 1;
+    }
   }
   return "permission relay error";
 }
@@ -68,8 +82,12 @@ function claimEnvironment(): Claim | undefined {
 const inheritedClaim = claimEnvironment();
 
 function requiredString(value: unknown, name: string, maximum: number, allowEmpty = false): string {
-  if (typeof value !== "string" || (!allowEmpty && value.length === 0)) throw new Error(`invalid ${name}`);
-  if (Buffer.from(value, "utf8").toString("utf8") !== value || Buffer.byteLength(value, "utf8") > maximum) {
+  if (typeof value !== "string" || (!allowEmpty && value.length === 0))
+    throw new Error(`invalid ${name}`);
+  if (
+    Buffer.from(value, "utf8").toString("utf8") !== value ||
+    Buffer.byteLength(value, "utf8") > maximum
+  ) {
     throw new Error(`invalid ${name}`);
   }
   return value;
@@ -77,13 +95,20 @@ function requiredString(value: unknown, name: string, maximum: number, allowEmpt
 
 function exactKeys(value: JsonObject, required: readonly string[]): void {
   const allowed = new Set(required);
-  for (const key of Object.keys(value)) if (!allowed.has(key)) throw new Error(`unexpected field ${key}`);
-  for (const key of required) if (!Object.prototype.hasOwnProperty.call(value, key)) throw new Error(`missing field ${key}`);
+  for (const key of Object.keys(value))
+    if (!allowed.has(key)) throw new Error(`unexpected field ${key}`);
+  for (const key of required)
+    if (!Object.prototype.hasOwnProperty.call(value, key)) throw new Error(`missing field ${key}`);
 }
 
 function validateClaim(claim: Claim): void {
-  if (process.platform !== "linux") throw new Error("guarded native subagents currently require Linux");
-  if (!isAbsolute(claim.socketPath) || claim.socketPath.includes("\0") || Buffer.byteLength(claim.socketPath, "utf8") > 4096) {
+  if (process.platform !== "linux")
+    throw new Error("guarded native subagents currently require Linux");
+  if (
+    !isAbsolute(claim.socketPath) ||
+    claim.socketPath.includes("\0") ||
+    Buffer.byteLength(claim.socketPath, "utf8") > 4096
+  ) {
     throw new Error("invalid parent permission relay socket");
   }
   if (!/^[0-9a-f]{64}$/.test(claim.token)) throw new Error("invalid parent permission relay token");
@@ -106,12 +131,15 @@ class ParentPermissionClient {
     // Keep this authority channel referenced for the RPC child's full lifetime;
     // session_shutdown closes it explicitly after the parent closes RPC stdin.
     this.socket.on("data", (chunk: Buffer) => this.receive(Buffer.from(chunk)));
-    this.socket.on("error", (error) => this.fail(new Error(`parent permission relay transport failed: ${error.message}`)));
+    this.socket.on("error", (error) =>
+      this.fail(new Error(`parent permission relay transport failed: ${error.message}`)),
+    );
     this.socket.on("end", () => {
       if (!this.closing) this.fail(new Error("parent permission relay reached unexpected EOF"));
     });
     this.socket.on("close", () => {
-      if (!this.fatal && !this.closing) this.fail(new Error("parent permission relay closed unexpectedly"));
+      if (!this.fatal && !this.closing)
+        this.fail(new Error("parent permission relay closed unexpectedly"));
     });
   }
 
@@ -125,12 +153,18 @@ class ParentPermissionClient {
     return this.readyPromise;
   }
 
-  authorize(request: { command: string; cwd: string; toolCallId: string }, signal?: AbortSignal): Promise<{ allowed: boolean; reason: string; fatal: boolean }> {
+  authorize(
+    request: { command: string; cwd: string; toolCallId: string },
+    signal?: AbortSignal,
+  ): Promise<{ allowed: boolean; reason: string; fatal: boolean }> {
     const operation = this.tail.then(async () => {
       await this.initialize();
       return await this.authorizeOnce(request, signal);
     });
-    this.tail = operation.then(() => undefined, () => undefined);
+    this.tail = operation.then(
+      () => undefined,
+      () => undefined,
+    );
     return operation;
   }
 
@@ -148,19 +182,32 @@ class ParentPermissionClient {
   }
 
   private async initializeOnce(): Promise<void> {
-    const response = await this.exchange({
-      v: SUBAGENT_PERMISSION_PROTOCOL_VERSION,
-      type: "hello",
-      token: this.claim.token,
-      subagent_id: this.claim.subagentId,
-      pid: process.pid,
-    }, HANDSHAKE_TIMEOUT_MS);
+    const response = await this.exchange(
+      {
+        v: SUBAGENT_PERMISSION_PROTOCOL_VERSION,
+        type: "hello",
+        token: this.claim.token,
+        subagent_id: this.claim.subagentId,
+        pid: process.pid,
+      },
+      HANDSHAKE_TIMEOUT_MS,
+    );
     exactKeys(response, ["v", "type", "service", "tools"]);
-    if (response.v !== SUBAGENT_PERMISSION_PROTOCOL_VERSION || response.type !== "hello" || response.service !== "pi-subagent-permission-relay"
-      || !Array.isArray(response.tools) || response.tools.length > SUBAGENT_PERMISSION_MAX_TOOLS
-      || new Set(response.tools).size !== response.tools.length
-      || response.tools.some((tool) => typeof tool !== "string"
-        || !SUBAGENT_PERMISSION_NATIVE_TOOLS.includes(tool as typeof SUBAGENT_PERMISSION_NATIVE_TOOLS[number]))) {
+    if (
+      response.v !== SUBAGENT_PERMISSION_PROTOCOL_VERSION ||
+      response.type !== "hello" ||
+      response.service !== "pi-subagent-permission-relay" ||
+      !Array.isArray(response.tools) ||
+      response.tools.length > SUBAGENT_PERMISSION_MAX_TOOLS ||
+      new Set(response.tools).size !== response.tools.length ||
+      response.tools.some(
+        (tool) =>
+          typeof tool !== "string" ||
+          !SUBAGENT_PERMISSION_NATIVE_TOOLS.includes(
+            tool as (typeof SUBAGENT_PERMISSION_NATIVE_TOOLS)[number],
+          ),
+      )
+    ) {
       throw new Error("parent permission relay returned an invalid hello");
     }
   }
@@ -170,11 +217,21 @@ class ParentPermissionClient {
     signal?: AbortSignal,
   ): Promise<{ allowed: boolean; reason: string; fatal: boolean }> {
     if (this.fatal) throw this.fatal;
-    if (signal?.aborted) return { allowed: false, reason: "native subagent tool call was aborted", fatal: false };
-    if (this.requestNumber >= SUBAGENT_PERMISSION_MAX_REQUESTS) throw new Error("parent permission relay request limit exceeded");
-    const command = requiredString(request.command, "command", SUBAGENT_PERMISSION_MAX_COMMAND_BYTES);
+    if (signal?.aborted)
+      return { allowed: false, reason: "native subagent tool call was aborted", fatal: false };
+    if (this.requestNumber >= SUBAGENT_PERMISSION_MAX_REQUESTS)
+      throw new Error("parent permission relay request limit exceeded");
+    const command = requiredString(
+      request.command,
+      "command",
+      SUBAGENT_PERMISSION_MAX_COMMAND_BYTES,
+    );
     const cwd = requiredString(request.cwd, "cwd", SUBAGENT_PERMISSION_MAX_CWD_BYTES, true);
-    const toolCallId = requiredString(request.toolCallId, "tool call id", SUBAGENT_PERMISSION_MAX_ID_BYTES);
+    const toolCallId = requiredString(
+      request.toolCallId,
+      "tool call id",
+      SUBAGENT_PERMISSION_MAX_ID_BYTES,
+    );
     const id = `child-${process.pid}-${++this.requestNumber}`;
 
     let abort: (() => void) | undefined;
@@ -185,22 +242,35 @@ class ParentPermissionClient {
       signal.addEventListener("abort", abort, { once: true });
     }
     try {
-      const response = await this.exchange({
-        v: SUBAGENT_PERMISSION_PROTOCOL_VERSION,
-        type: "authorize",
-        id,
-        kind: "bash",
-        command,
-        cwd,
-        tool_call_id: toolCallId,
-      }, REQUEST_TIMEOUT_MS);
+      const response = await this.exchange(
+        {
+          v: SUBAGENT_PERMISSION_PROTOCOL_VERSION,
+          type: "authorize",
+          id,
+          kind: "bash",
+          command,
+          cwd,
+          tool_call_id: toolCallId,
+        },
+        REQUEST_TIMEOUT_MS,
+      );
       exactKeys(response, ["v", "type", "id", "allowed", "reason", "fatal"]);
-      if (response.v !== SUBAGENT_PERMISSION_PROTOCOL_VERSION || response.type !== "decision" || response.id !== id
-        || typeof response.allowed !== "boolean" || typeof response.fatal !== "boolean") {
+      if (
+        response.v !== SUBAGENT_PERMISSION_PROTOCOL_VERSION ||
+        response.type !== "decision" ||
+        response.id !== id ||
+        typeof response.allowed !== "boolean" ||
+        typeof response.fatal !== "boolean"
+      ) {
         throw new Error("parent permission relay returned an invalid decision");
       }
-      const reason = requiredString(response.reason, "decision reason", SUBAGENT_PERMISSION_MAX_REASON_BYTES);
-      if (signal?.aborted) return { allowed: false, reason: "native subagent tool call was aborted", fatal: false };
+      const reason = requiredString(
+        response.reason,
+        "decision reason",
+        SUBAGENT_PERMISSION_MAX_REASON_BYTES,
+      );
+      if (signal?.aborted)
+        return { allowed: false, reason: "native subagent tool call was aborted", fatal: false };
       return { allowed: response.allowed, reason, fatal: response.fatal };
     } finally {
       if (abort) signal!.removeEventListener("abort", abort);
@@ -217,10 +287,11 @@ class ParentPermissionClient {
   private async write(message: JsonObject): Promise<void> {
     if (this.fatal) throw this.fatal;
     const frame = Buffer.from(`${JSON.stringify(message)}\n`, "utf8");
-    if (frame.length - 1 > SUBAGENT_PERMISSION_MAX_FRAME_BYTES) throw new Error("parent permission relay request is oversized");
+    if (frame.length - 1 > SUBAGENT_PERMISSION_MAX_FRAME_BYTES)
+      throw new Error("parent permission relay request is oversized");
     await new Promise<void>((resolve, reject) => {
       try {
-        this.socket.write(frame, (error?: Error | null) => error ? reject(error) : resolve());
+        this.socket.write(frame, (error?: Error | null) => (error ? reject(error) : resolve()));
       } catch (error) {
         reject(error);
       }
@@ -229,7 +300,8 @@ class ParentPermissionClient {
 
   private read(timeoutMs: number): Promise<JsonObject> {
     if (this.fatal) return Promise.reject(this.fatal);
-    if (this.waiter) return Promise.reject(new Error("parent permission relay has a concurrent read"));
+    if (this.waiter)
+      return Promise.reject(new Error("parent permission relay has a concurrent read"));
     return new Promise<JsonObject>((resolve, reject) => {
       const timer = setTimeout(() => {
         const error = new Error("parent permission relay timed out");
@@ -253,7 +325,11 @@ class ParentPermissionClient {
     this.buffer = Buffer.concat([this.buffer, chunk]);
     const newline = this.buffer.indexOf(0x0a);
     if (newline < 0) return;
-    if (newline === 0 || newline > SUBAGENT_PERMISSION_MAX_FRAME_BYTES || newline !== this.buffer.length - 1) {
+    if (
+      newline === 0 ||
+      newline > SUBAGENT_PERMISSION_MAX_FRAME_BYTES ||
+      newline !== this.buffer.length - 1
+    ) {
       this.fail(new Error("parent permission relay returned an invalid frame boundary"));
       return;
     }
@@ -262,9 +338,12 @@ class ParentPermissionClient {
     let value: unknown;
     try {
       value = JSON.parse(new TextDecoder("utf-8", { fatal: true }).decode(frame));
-      if (!value || typeof value !== "object" || Array.isArray(value)) throw new Error("response is not an object");
+      if (!value || typeof value !== "object" || Array.isArray(value))
+        throw new Error("response is not an object");
     } catch (error) {
-      this.fail(new Error(`parent permission relay returned malformed JSON: ${boundedError(error)}`));
+      this.fail(
+        new Error(`parent permission relay returned malformed JSON: ${boundedError(error)}`),
+      );
       return;
     }
     const waiter = this.waiter;
@@ -321,7 +400,8 @@ export default function nativeSubagentPermissionProxy(pi: ExtensionAPI) {
     ...bashTool,
     name: SUBAGENT_PERMISSION_BASH_TOOL,
     label: "bash (parent-approved)",
-    description: "Execute a Bash command after authorization by the parent AgentSH Permission Gate.",
+    description:
+      "Execute a Bash command after authorization by the parent AgentSH Permission Gate.",
     async execute(
       toolCallId: string,
       params: Parameters<typeof bashTool.execute>[1],
@@ -334,15 +414,23 @@ export default function nativeSubagentPermissionProxy(pi: ExtensionAPI) {
         await initialize();
         command = requiredString(params.command, "command", SUBAGENT_PERMISSION_MAX_COMMAND_BYTES);
         const id = requiredString(toolCallId, "tool call id", SUBAGENT_PERMISSION_MAX_ID_BYTES);
-        const result = await relayClient(inheritedClaim).authorize({
-          command,
-          cwd: childCwd,
-          toolCallId: id,
-        }, signal);
+        const result = await relayClient(inheritedClaim).authorize(
+          {
+            command,
+            cwd: childCwd,
+            toolCallId: id,
+          },
+          signal,
+        );
         if (!result.allowed) {
           if (result.fatal) throw new Error(result.reason);
           return {
-            content: [{ type: "text" as const, text: `Blocked by parent AgentSH Permission Gate (${result.reason})` }],
+            content: [
+              {
+                type: "text" as const,
+                text: `Blocked by parent AgentSH Permission Gate (${result.reason})`,
+              },
+            ],
             details: { permissionGate: signal?.aborted ? "aborted" : "denied" },
           };
         }
@@ -372,6 +460,8 @@ export default function nativeSubagentPermissionProxy(pi: ExtensionAPI) {
   });
 
   pi.on("session_shutdown", async () => {
-    try { await inheritedClaim.client?.close(); } catch {}
+    try {
+      await inheritedClaim.client?.close();
+    } catch {}
   });
 }

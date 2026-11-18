@@ -47,7 +47,8 @@ interface RuntimeOptions {
 }
 
 const DEFAULT_FILE_OPERATIONS: SettingsFileOperations = {
-  write: (path, data) => writeFile(path, data, { encoding: "utf8", flag: "wx", mode: 0o600 }).then(() => undefined),
+  write: (path, data) =>
+    writeFile(path, data, { encoding: "utf8", flag: "wx", mode: 0o600 }).then(() => undefined),
   rename,
 };
 
@@ -55,7 +56,10 @@ export function settingsFilePath(): string {
   return join(getAgentDir(), SETTINGS_FILE);
 }
 
-export function defaultWorktreeRoot(home = homedir(), platform: NodeJS.Platform = process.platform): string {
+export function defaultWorktreeRoot(
+  home = homedir(),
+  platform: NodeJS.Platform = process.platform,
+): string {
   return platformPath(platform).join(home, ".worktrees");
 }
 
@@ -100,7 +104,8 @@ function declarativeWorktreeRoot(home: string, platform: NodeJS.Platform): strin
   if (defaults === undefined) return defaultWorktreeRoot(home, platform);
   if (!isRecord(defaults)) throw new Error("defaults/workflows.json: worktree must be an object");
   if (!Object.hasOwn(defaults, "worktreeRoot")) return defaultWorktreeRoot(home, platform);
-  if (typeof defaults.worktreeRoot !== "string") throw new Error("defaults/workflows.json: worktreeRoot must be a string");
+  if (typeof defaults.worktreeRoot !== "string")
+    throw new Error("defaults/workflows.json: worktreeRoot must be a string");
   return resolveWorktreeRoot(defaults.worktreeRoot, home, platform);
 }
 
@@ -112,7 +117,9 @@ export async function loadWorktreeSettings(
   let fallback = defaultWorktreeRoot(home, platform);
   try {
     fallback = declarativeWorktreeRoot(home, platform);
-  } catch (error) { return invalid(path, fallback, `defaults/workflows.json: ${formatError(error)}`); }
+  } catch (error) {
+    return invalid(path, fallback, `defaults/workflows.json: ${formatError(error)}`);
+  }
   let text: string;
   try {
     const stats = await lstat(path);
@@ -186,12 +193,15 @@ export async function saveWorktreeSettings(
   }
 }
 
-export function createWorktreeSettingsRuntime(options: RuntimeOptions = {}): WorktreeSettingsRuntime {
+export function createWorktreeSettingsRuntime(
+  options: RuntimeOptions = {},
+): WorktreeSettingsRuntime {
   const home = options.home ?? homedir();
   const platform = options.platform ?? process.platform;
   let resolvedPath: string | undefined;
   const getPath = () => {
-    resolvedPath ??= typeof options.path === "function" ? options.path() : (options.path ?? settingsFilePath());
+    resolvedPath ??=
+      typeof options.path === "function" ? options.path() : (options.path ?? settingsFilePath());
     return resolvedPath;
   };
   let operationQueue = Promise.resolve();
@@ -240,7 +250,12 @@ export function createWorktreeSettingsRuntime(options: RuntimeOptions = {}): Wor
           state = { ...state, warning: latest.warning, canSave: false };
           throw new Error(`Fix the pi-worktree settings file at ${getPath()} before changing it.`);
         }
-        await saveWorktreeSettings(latest.document ?? {}, configuredRoot, getPath(), options.operations);
+        await saveWorktreeSettings(
+          latest.document ?? {},
+          configuredRoot,
+          getPath(),
+          options.operations,
+        );
         state = {
           effectiveRoot,
           source: configuredRoot === undefined ? "default" : "user",

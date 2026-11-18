@@ -1,6 +1,15 @@
 const MAX_OBJECTIVE_LENGTH = 4_000;
 
-const REMOVED_QUEUE_COMMANDS = new Set(["add", "prioritize", "drop-last", "skip", "push", "unshift", "pop", "shift"]);
+const REMOVED_QUEUE_COMMANDS = new Set([
+  "add",
+  "prioritize",
+  "drop-last",
+  "skip",
+  "push",
+  "unshift",
+  "pop",
+  "shift",
+]);
 
 export interface CommandResult {
   kind: "start" | "pause" | "resume" | "clear" | "show" | "edit";
@@ -58,7 +67,8 @@ export function parseCommand(args: string): CommandResult | string {
   const [first, ...rest] = tokens;
   if (first === "pause") return rest.length === 0 ? { kind: "pause" } : "Usage: /goal pause";
   if (first === "resume") return rest.length === 0 ? { kind: "resume" } : "Usage: /goal resume";
-  if (first === "clear" || first === "stop") return rest.length === 0 ? { kind: "clear" } : "Usage: /goal clear";
+  if (first === "clear" || first === "stop")
+    return rest.length === 0 ? { kind: "clear" } : "Usage: /goal clear";
   if (first === "status") return rest.length === 0 ? { kind: "show" } : "Usage: /goal status";
   if (first === "edit") return parseObjective("edit", rest);
 
@@ -122,7 +132,8 @@ export function parseTokenBudget(value: string): number | undefined {
   if (!match) return undefined;
   const amount = Number(match[1]);
   if (!Number.isFinite(amount) || amount <= 0) return undefined;
-  const multiplier = match[2]?.toLowerCase() === "m" ? 1_000_000 : match[2]?.toLowerCase() === "k" ? 1_000 : 1;
+  const multiplier =
+    match[2]?.toLowerCase() === "m" ? 1_000_000 : match[2]?.toLowerCase() === "k" ? 1_000 : 1;
   return normalizeTokenBudget(Math.floor(amount * multiplier));
 }
 

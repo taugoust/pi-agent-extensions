@@ -59,9 +59,7 @@ type SelectionContext = RoutingContext & {
 
 type Environment = Record<string, string>;
 
-export function validateSubagentRoutingSelection(
-  value: unknown,
-): SubagentRoutingSelection | null {
+export function validateSubagentRoutingSelection(value: unknown): SubagentRoutingSelection | null {
   if (value === null) return null;
   // Reuse the session routing validation for the provider and account fields.
   const profile = validateRoutingProfile({

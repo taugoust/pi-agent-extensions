@@ -35,7 +35,15 @@ export type ReadonlyDetail<T> = {
 
 export type ReadonlyJob = {
   jobId: string;
-  status: "starting" | "running" | "completed" | "failed" | "cancelled" | "lost" | "unavailable" | "unknown";
+  status:
+    | "starting"
+    | "running"
+    | "completed"
+    | "failed"
+    | "cancelled"
+    | "lost"
+    | "unavailable"
+    | "unknown";
   name?: string;
   createdAt: string;
   updatedAt: string | null;
@@ -62,7 +70,16 @@ export type ReadonlySubagentTask = {
   groupId: string;
   runtimeId: string | null;
   attempt: number;
-  status: "pending" | "running" | "waiting" | "completed" | "failed" | "cancelled" | "skipped" | "lost" | "unknown";
+  status:
+    | "pending"
+    | "running"
+    | "waiting"
+    | "completed"
+    | "failed"
+    | "cancelled"
+    | "skipped"
+    | "lost"
+    | "unknown";
   /** Pane cleanup lifecycle, independent of task execution status. */
   reaped?: boolean;
   title: string;
@@ -78,7 +95,16 @@ export type ReadonlySubagentTask = {
 export type ReadonlyTaskCheck = {
   command: string;
   /** Last result, or "not-run" before verification first runs. */
-  status: "not-run" | "checking" | "passed" | "failed" | "unavailable" | "interrupted" | "cancelled" | "timed-out" | "stale";
+  status:
+    | "not-run"
+    | "checking"
+    | "passed"
+    | "failed"
+    | "unavailable"
+    | "interrupted"
+    | "cancelled"
+    | "timed-out"
+    | "stale";
   exitCode: number | null;
   finishedAt: string | null;
 };
@@ -100,26 +126,116 @@ export type ReadonlyTaskReport = {
 export type HarnessReadOnlyJobs = {
   protocol: typeof HARNESS_READONLY_PROTOCOL;
   sessionId: string;
-  list(input: { sessionId: string; limit?: number; cursor?: string }): Promise<ReadonlyPage<ReadonlyJob>>;
-  output(input: { sessionId: string; jobId: string; maxBytes?: number }): Promise<ReadonlyDetail<ReadonlyJobOutput>>;
+  list(input: {
+    sessionId: string;
+    limit?: number;
+    cursor?: string;
+  }): Promise<ReadonlyPage<ReadonlyJob>>;
+  output(input: {
+    sessionId: string;
+    jobId: string;
+    maxBytes?: number;
+  }): Promise<ReadonlyDetail<ReadonlyJobOutput>>;
 };
 
 export type HarnessReadOnlySubagents = {
   protocol: typeof HARNESS_READONLY_PROTOCOL;
   sessionId: string;
-  list(input: { sessionId: string; limit?: number; cursor?: string }): Promise<ReadonlyPage<ReadonlySubagentTask>>;
-  report(input: { sessionId: string; taskId: string; maxBytes?: number }): Promise<ReadonlyDetail<ReadonlyTaskReport>>;
+  list(input: {
+    sessionId: string;
+    limit?: number;
+    cursor?: string;
+  }): Promise<ReadonlyPage<ReadonlySubagentTask>>;
+  report(input: {
+    sessionId: string;
+    taskId: string;
+    maxBytes?: number;
+  }): Promise<ReadonlyDetail<ReadonlyTaskReport>>;
   /** Internal bridge linkage only; the returned file reference is owner-validated and is not a public RPC route. */
-  sessionSource?(input: { sessionId: string; taskId: string; childId: string; attempt: number; runtimeId?: string | null }): Promise<{
-    taskId: string; childId: string; groupId: string; attempt: number; runtimeId: string | null;
-    sessionFile: string; status: "running" | "completed" | "failed" | "cancelled" | "lost"; reaped?: boolean; title?: string; cwd?: string;
+  sessionSource?(input: {
+    sessionId: string;
+    taskId: string;
+    childId: string;
+    attempt: number;
+    runtimeId?: string | null;
+  }): Promise<{
+    taskId: string;
+    childId: string;
+    groupId: string;
+    attempt: number;
+    runtimeId: string | null;
+    sessionFile: string;
+    status: "running" | "completed" | "failed" | "cancelled" | "lost";
+    reaped?: boolean;
+    title?: string;
+    cwd?: string;
   }>;
-  independentSource?(input: { sessionId: string; taskId: string; childId: string; attempt: number; runtimeId: string | null }): Promise<unknown>;
-  conversation?(input: { sessionId: string; taskId: string; childId: string; attempt: number; runtimeId: string | null; cursor?: number }): Promise<ReadonlyDetail<{
-    taskId: string; childId: string; groupId: string; attempt: number; runtimeId: string | null;
-    messages: Array<{ id: string; role: "user" | "assistant" | "tool" | "parent"; text: string; truncated?: boolean; parts?: Array<{ type: "text"; text: string } | { type: "toolCall"; id: string; name: string; arguments: unknown; toolArguments?: ToolPresentationArguments; status?: "completed" | "failed" | "unknown"; result?: string; toolPresentation?: ToolPresentation; resultFormat?: "text" }>; toolPresentation?: ToolPresentation; resultFormat?: "text"; toolCallId?: string; toolName?: string; status?: "completed" | "failed" | "unknown" }>;
-    truncated: boolean; lastUpdated: string; nextCursor?: number; execution?: "running" | "completed" | "failed" | "cancelled" | "lost"; liveText?: string; liveSequence?: number; liveEvents?: Array<{ sequence: number; kind: "tool_start" | "tool_end"; toolCallId: string; name: string; status?: "running" | "completed" | "failed"; arguments?: unknown; toolArguments?: ToolPresentationArguments; result?: string; toolPresentation?: ToolPresentation; resultFormat?: "text" }>;
-  }>>;
+  independentSource?(input: {
+    sessionId: string;
+    taskId: string;
+    childId: string;
+    attempt: number;
+    runtimeId: string | null;
+  }): Promise<unknown>;
+  conversation?(input: {
+    sessionId: string;
+    taskId: string;
+    childId: string;
+    attempt: number;
+    runtimeId: string | null;
+    cursor?: number;
+  }): Promise<
+    ReadonlyDetail<{
+      taskId: string;
+      childId: string;
+      groupId: string;
+      attempt: number;
+      runtimeId: string | null;
+      messages: Array<{
+        id: string;
+        role: "user" | "assistant" | "tool" | "parent";
+        text: string;
+        truncated?: boolean;
+        parts?: Array<
+          | { type: "text"; text: string }
+          | {
+              type: "toolCall";
+              id: string;
+              name: string;
+              arguments: unknown;
+              toolArguments?: ToolPresentationArguments;
+              status?: "completed" | "failed" | "unknown";
+              result?: string;
+              toolPresentation?: ToolPresentation;
+              resultFormat?: "text";
+            }
+        >;
+        toolPresentation?: ToolPresentation;
+        resultFormat?: "text";
+        toolCallId?: string;
+        toolName?: string;
+        status?: "completed" | "failed" | "unknown";
+      }>;
+      truncated: boolean;
+      lastUpdated: string;
+      nextCursor?: number;
+      execution?: "running" | "completed" | "failed" | "cancelled" | "lost";
+      liveText?: string;
+      liveSequence?: number;
+      liveEvents?: Array<{
+        sequence: number;
+        kind: "tool_start" | "tool_end";
+        toolCallId: string;
+        name: string;
+        status?: "running" | "completed" | "failed";
+        arguments?: unknown;
+        toolArguments?: ToolPresentationArguments;
+        result?: string;
+        toolPresentation?: ToolPresentation;
+        resultFormat?: "text";
+      }>;
+    }>
+  >;
 };
 
 /** Lifetime-owned registry published by the supplying extensions. */
@@ -135,20 +251,35 @@ export function harnessReadOnlyRegistry(): HarnessReadOnlyRegistry | undefined {
   return value;
 }
 
-export function truncateUtf8(text: string, maxBytes: number, fromEnd = false): { text: string; truncated: boolean } {
+export function truncateUtf8(
+  text: string,
+  maxBytes: number,
+  fromEnd = false,
+): { text: string; truncated: boolean } {
   const bytes = Buffer.from(text, "utf8");
   if (bytes.length <= maxBytes) return { text, truncated: false };
   let selected = fromEnd ? bytes.subarray(-maxBytes) : bytes.subarray(0, maxBytes);
   let decoded = "";
   while (selected.length) {
-    try { decoded = new TextDecoder("utf-8", { fatal: true }).decode(selected); break; }
-    catch { selected = fromEnd ? selected.subarray(1) : selected.subarray(0, -1); }
+    try {
+      decoded = new TextDecoder("utf-8", { fatal: true }).decode(selected);
+      break;
+    } catch {
+      selected = fromEnd ? selected.subarray(1) : selected.subarray(0, -1);
+    }
   }
   return { text: decoded, truncated: true };
 }
 
-export function assertReadonlySession(service: { protocol: number; sessionId: string }, sessionId: string): void {
-  if (service.protocol !== HARNESS_READONLY_PROTOCOL || !sessionId || service.sessionId !== sessionId) {
+export function assertReadonlySession(
+  service: { protocol: number; sessionId: string },
+  sessionId: string,
+): void {
+  if (
+    service.protocol !== HARNESS_READONLY_PROTOCOL ||
+    !sessionId ||
+    service.sessionId !== sessionId
+  ) {
     throw new Error("Read-only harness service is unavailable for this Pi session");
   }
 }

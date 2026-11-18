@@ -31,11 +31,13 @@ interface CropRect {
 }
 
 function sanitizeName(value: string): string {
-  return value
-    .replace(/\.[^.]*$/, "")
-    .replace(/[^A-Za-z0-9._-]+/g, "-")
-    .replace(/^-+|-+$/g, "")
-    .slice(0, 80) || "pdf";
+  return (
+    value
+      .replace(/\.[^.]*$/, "")
+      .replace(/[^A-Za-z0-9._-]+/g, "-")
+      .replace(/^-+|-+$/g, "")
+      .slice(0, 80) || "pdf"
+  );
 }
 
 function padPage(page: number): string {
@@ -56,11 +58,10 @@ async function getImageDimensions(
   imagePath: string,
   signal?: AbortSignal,
 ): Promise<{ width: number; height: number }> {
-  const { stdout } = await backend.exec(
-    "magick",
-    ["identify", "-format", "%w %h", imagePath],
-    { signal, timeoutMs: 30_000 },
-  );
+  const { stdout } = await backend.exec("magick", ["identify", "-format", "%w %h", imagePath], {
+    signal,
+    timeoutMs: 30_000,
+  });
   const [width, height] = stdout.trim().split(/\s+/).map(Number);
   if (!Number.isFinite(width) || !Number.isFinite(height)) {
     throw new Error(`Could not determine image dimensions for ${imagePath}`);
@@ -287,13 +288,33 @@ export default function pdfExtension(pi: ExtensionAPI) {
     parameters: Type.Object({
       pdfPath: Type.String({ description: "Path to the PDF file in the active workspace" }),
       pages: Type.String({ description: "Pages to render, e.g. '1', '1-3', or '1,3,5-7'" }),
-      outputDir: Type.String({ description: "Directory where rendered page images and sidecars will be written" }),
-      dpi: Type.Optional(Type.Number({ description: `Render DPI (default: ${DEFAULT_RENDER_DPI})` })),
-      prefix: Type.Optional(Type.String({ description: "Optional filename prefix (default: PDF basename)" })),
-      attachImages: Type.Optional(Type.Boolean({ description: "Return rendered images directly to the LLM when they are small enough" })),
-      maxAttachBytes: Type.Optional(Type.Number({ description: `Maximum bytes per attached image (default: ${DEFAULT_MAX_ATTACH_BYTES})` })),
-      overwrite: Type.Optional(Type.Boolean({ description: "Overwrite existing output files (default: false)" })),
-      timeoutMs: Type.Optional(Type.Number({ description: `Timeout per page in milliseconds (default: ${DEFAULT_TIMEOUT_MS})` })),
+      outputDir: Type.String({
+        description: "Directory where rendered page images and sidecars will be written",
+      }),
+      dpi: Type.Optional(
+        Type.Number({ description: `Render DPI (default: ${DEFAULT_RENDER_DPI})` }),
+      ),
+      prefix: Type.Optional(
+        Type.String({ description: "Optional filename prefix (default: PDF basename)" }),
+      ),
+      attachImages: Type.Optional(
+        Type.Boolean({
+          description: "Return rendered images directly to the LLM when they are small enough",
+        }),
+      ),
+      maxAttachBytes: Type.Optional(
+        Type.Number({
+          description: `Maximum bytes per attached image (default: ${DEFAULT_MAX_ATTACH_BYTES})`,
+        }),
+      ),
+      overwrite: Type.Optional(
+        Type.Boolean({ description: "Overwrite existing output files (default: false)" }),
+      ),
+      timeoutMs: Type.Optional(
+        Type.Number({
+          description: `Timeout per page in milliseconds (default: ${DEFAULT_TIMEOUT_MS})`,
+        }),
+      ),
     }),
     async execute(toolCallId, params, signal, onUpdate, ctx) {
       const backend = backendFor(ctx.cwd, toolCallId, "pdf_render_pages");
@@ -322,8 +343,10 @@ export default function pdfExtension(pi: ExtensionAPI) {
         const outputBase = join(outputDir, `${prefix}-page-${padPage(page)}`);
         const outputPath = `${outputBase}.png`;
         const metadataPath = sidecarPath(outputPath);
-        if (!params.overwrite && await backend.exists(outputPath, signal)) {
-          throw new Error(`Output already exists: ${outputPath}. Set overwrite=true to replace it.`);
+        if (!params.overwrite && (await backend.exists(outputPath, signal))) {
+          throw new Error(
+            `Output already exists: ${outputPath}. Set overwrite=true to replace it.`,
+          );
         }
 
         onUpdate?.({ content: [{ type: "text", text: `Rendering page ${page} → ${outputPath}` }] });
@@ -398,20 +421,38 @@ export default function pdfExtension(pi: ExtensionAPI) {
     description:
       "Crop a rectangular pixel region from a rendered PDF page or other workspace image. Writes a normal image plus a JSON sidecar.",
     parameters: Type.Object({
-      sourceImagePath: Type.String({ description: "Path to the source image in the active workspace" }),
+      sourceImagePath: Type.String({
+        description: "Path to the source image in the active workspace",
+      }),
       crop: Type.Object({
         x: Type.Number({ description: "Left coordinate in pixels" }),
         y: Type.Number({ description: "Top coordinate in pixels" }),
         width: Type.Number({ description: "Crop width in pixels" }),
         height: Type.Number({ description: "Crop height in pixels" }),
       }),
-      outputPath: Type.Optional(Type.String({ description: "Exact output image path. If omitted, outputDir is required." })),
-      outputDir: Type.Optional(Type.String({ description: "Directory for generated crop when outputPath is omitted" })),
-      label: Type.Optional(Type.String({ description: "Optional crop label used in generated filename and metadata" })),
-      attachImage: Type.Optional(Type.Boolean({ description: "Return cropped image directly to the LLM when small enough" })),
-      maxAttachBytes: Type.Optional(Type.Number({ description: `Maximum bytes for attached image (default: ${DEFAULT_MAX_ATTACH_BYTES})` })),
-      overwrite: Type.Optional(Type.Boolean({ description: "Overwrite existing output file (default: false)" })),
-      timeoutMs: Type.Optional(Type.Number({ description: `Timeout in milliseconds (default: ${DEFAULT_TIMEOUT_MS})` })),
+      outputPath: Type.Optional(
+        Type.String({ description: "Exact output image path. If omitted, outputDir is required." }),
+      ),
+      outputDir: Type.Optional(
+        Type.String({ description: "Directory for generated crop when outputPath is omitted" }),
+      ),
+      label: Type.Optional(
+        Type.String({ description: "Optional crop label used in generated filename and metadata" }),
+      ),
+      attachImage: Type.Optional(
+        Type.Boolean({ description: "Return cropped image directly to the LLM when small enough" }),
+      ),
+      maxAttachBytes: Type.Optional(
+        Type.Number({
+          description: `Maximum bytes for attached image (default: ${DEFAULT_MAX_ATTACH_BYTES})`,
+        }),
+      ),
+      overwrite: Type.Optional(
+        Type.Boolean({ description: "Overwrite existing output file (default: false)" }),
+      ),
+      timeoutMs: Type.Optional(
+        Type.Number({ description: `Timeout in milliseconds (default: ${DEFAULT_TIMEOUT_MS})` }),
+      ),
     }),
     async execute(toolCallId, params, signal, _onUpdate, ctx) {
       const backend = backendFor(ctx.cwd, toolCallId, "pdf_crop_image");
@@ -419,7 +460,8 @@ export default function pdfExtension(pi: ExtensionAPI) {
       await backend.requireReadableFile(sourceImagePath, "sourceImagePath", signal);
       const crop = params.crop as CropRect;
       for (const [key, value] of Object.entries(crop)) {
-        if (!Number.isFinite(value) || value < 0) throw new Error(`crop.${key} must be a non-negative number.`);
+        if (!Number.isFinite(value) || value < 0)
+          throw new Error(`crop.${key} must be a non-negative number.`);
       }
       if (crop.width <= 0 || crop.height <= 0) {
         throw new Error("crop.width and crop.height must be positive.");
@@ -436,12 +478,15 @@ export default function pdfExtension(pi: ExtensionAPI) {
           : undefined;
       if (!outputPath) throw new Error("Either outputPath or outputDir is required.");
       await backend.mkdir(dirname(outputPath), signal);
-      if (!params.overwrite && await backend.exists(outputPath, signal)) {
+      if (!params.overwrite && (await backend.exists(outputPath, signal))) {
         throw new Error(`Output already exists: ${outputPath}. Set overwrite=true to replace it.`);
       }
 
       const sourceDimensions = await getImageDimensions(backend, sourceImagePath, signal);
-      if (crop.x + crop.width > sourceDimensions.width || crop.y + crop.height > sourceDimensions.height) {
+      if (
+        crop.x + crop.width > sourceDimensions.width ||
+        crop.y + crop.height > sourceDimensions.height
+      ) {
         throw new Error(
           `Crop rectangle ${crop.width}x${crop.height}+${crop.x}+${crop.y} exceeds source dimensions ${sourceDimensions.width}x${sourceDimensions.height}.`,
         );
@@ -500,38 +545,70 @@ export default function pdfExtension(pi: ExtensionAPI) {
       "Extract text from selected pages of a PDF using Poppler pdftotext in the active local or AgentSH workspace. Supports plain, layout-preserving, raw, and bbox modes.",
     parameters: Type.Object({
       pdfPath: Type.String({ description: "Path to the PDF file in the active workspace" }),
-      pages: Type.Optional(Type.String({ description: "Optional pages to extract, e.g. '1', '1-3', or '1,3,5-7'. pdftotext receives the min/max range." })),
-      mode: Type.Optional(
-        Type.Union([
-          Type.Literal("plain"),
-          Type.Literal("layout"),
-          Type.Literal("raw"),
-          Type.Literal("bbox"),
-          Type.Literal("bbox-layout"),
-        ], { description: "Extraction mode (default: plain)" }),
+      pages: Type.Optional(
+        Type.String({
+          description:
+            "Optional pages to extract, e.g. '1', '1-3', or '1,3,5-7'. pdftotext receives the min/max range.",
+        }),
       ),
-      outputPath: Type.Optional(Type.String({ description: "Optional file path to write extracted text/XML. If omitted, text is returned." })),
-      maxChars: Type.Optional(Type.Number({ description: `Maximum characters returned when outputPath is omitted (default: ${DEFAULT_MAX_TEXT_CHARS})` })),
-      timeoutMs: Type.Optional(Type.Number({ description: `Timeout in milliseconds (default: ${DEFAULT_TIMEOUT_MS})` })),
+      mode: Type.Optional(
+        Type.Union(
+          [
+            Type.Literal("plain"),
+            Type.Literal("layout"),
+            Type.Literal("raw"),
+            Type.Literal("bbox"),
+            Type.Literal("bbox-layout"),
+          ],
+          { description: "Extraction mode (default: plain)" },
+        ),
+      ),
+      outputPath: Type.Optional(
+        Type.String({
+          description:
+            "Optional file path to write extracted text/XML. If omitted, text is returned.",
+        }),
+      ),
+      maxChars: Type.Optional(
+        Type.Number({
+          description: `Maximum characters returned when outputPath is omitted (default: ${DEFAULT_MAX_TEXT_CHARS})`,
+        }),
+      ),
+      timeoutMs: Type.Optional(
+        Type.Number({ description: `Timeout in milliseconds (default: ${DEFAULT_TIMEOUT_MS})` }),
+      ),
     }),
     async execute(toolCallId, params, signal, _onUpdate, ctx) {
       const backend = backendFor(ctx.cwd, toolCallId, "pdf_extract_text");
       const pdfPath = backend.resolvePath(params.pdfPath, "pdfPath");
       await backend.requireReadableFile(pdfPath, "pdfPath", signal);
-      const outputPath = params.outputPath ? backend.resolvePath(params.outputPath, "outputPath") : undefined;
+      const outputPath = params.outputPath
+        ? backend.resolvePath(params.outputPath, "outputPath")
+        : undefined;
       if (outputPath) await backend.mkdir(dirname(outputPath), signal);
 
       let selectedPages: number[] | undefined;
       if (params.pages) {
-        const info = await backend.exec("pdfinfo", [pdfPath], { signal, timeoutMs: params.timeoutMs });
+        const info = await backend.exec("pdfinfo", [pdfPath], {
+          signal,
+          timeoutMs: params.timeoutMs,
+        });
         const parsedInfo = parsePdfInfo(info.stdout);
-        selectedPages = parsePageSpec(params.pages, typeof parsedInfo.pages === "number" ? parsedInfo.pages : undefined);
+        selectedPages = parsePageSpec(
+          params.pages,
+          typeof parsedInfo.pages === "number" ? parsedInfo.pages : undefined,
+        );
       }
 
       const mode = params.mode ?? "plain";
       const args: string[] = [];
       if (selectedPages && selectedPages.length > 0) {
-        args.push("-f", String(Math.min(...selectedPages)), "-l", String(Math.max(...selectedPages)));
+        args.push(
+          "-f",
+          String(Math.min(...selectedPages)),
+          "-l",
+          String(Math.max(...selectedPages)),
+        );
       }
       if (mode === "layout") args.push("-layout");
       if (mode === "raw") args.push("-raw");
@@ -579,9 +656,7 @@ export default function pdfExtension(pi: ExtensionAPI) {
         content: [
           {
             type: "text",
-            text: notices.length > 0
-              ? text.slice(0, limit) + `\n\n[${notices.join("; ")}]`
-              : text,
+            text: notices.length > 0 ? text.slice(0, limit) + `\n\n[${notices.join("; ")}]` : text,
           },
         ],
         details: {
@@ -602,16 +677,32 @@ export default function pdfExtension(pi: ExtensionAPI) {
       "Extract embedded bitmap images from a PDF in the active local or AgentSH workspace using Poppler pdfimages. This complements page rendering and is useful when figures are embedded raster assets.",
     parameters: Type.Object({
       pdfPath: Type.String({ description: "Path to the PDF file in the active workspace" }),
-      outputDir: Type.String({ description: "Directory where extracted images and sidecar metadata will be written" }),
-      pages: Type.Optional(Type.String({ description: "Optional pages to extract, e.g. '1', '1-3', or '1,3,5-7'. pdfimages receives the min/max range." })),
-      prefix: Type.Optional(Type.String({ description: "Optional filename prefix (default: PDF basename + '-image')" })),
-      format: Type.Optional(
-        Type.Union([Type.Literal("all"), Type.Literal("png"), Type.Literal("native")], {
-          description: "Extraction format: all preserves native where possible, png converts to PNG, native uses pdfimages defaults (default: all)",
+      outputDir: Type.String({
+        description: "Directory where extracted images and sidecar metadata will be written",
+      }),
+      pages: Type.Optional(
+        Type.String({
+          description:
+            "Optional pages to extract, e.g. '1', '1-3', or '1,3,5-7'. pdfimages receives the min/max range.",
         }),
       ),
-      overwrite: Type.Optional(Type.Boolean({ description: "Allow outputs with the same prefix to already exist (default: false)" })),
-      timeoutMs: Type.Optional(Type.Number({ description: `Timeout in milliseconds (default: ${DEFAULT_TIMEOUT_MS})` })),
+      prefix: Type.Optional(
+        Type.String({ description: "Optional filename prefix (default: PDF basename + '-image')" }),
+      ),
+      format: Type.Optional(
+        Type.Union([Type.Literal("all"), Type.Literal("png"), Type.Literal("native")], {
+          description:
+            "Extraction format: all preserves native where possible, png converts to PNG, native uses pdfimages defaults (default: all)",
+        }),
+      ),
+      overwrite: Type.Optional(
+        Type.Boolean({
+          description: "Allow outputs with the same prefix to already exist (default: false)",
+        }),
+      ),
+      timeoutMs: Type.Optional(
+        Type.Number({ description: `Timeout in milliseconds (default: ${DEFAULT_TIMEOUT_MS})` }),
+      ),
     }),
     async execute(toolCallId, params, signal, _onUpdate, ctx) {
       const backend = backendFor(ctx.cwd, toolCallId, "pdf_extract_images");
@@ -625,23 +716,38 @@ export default function pdfExtension(pi: ExtensionAPI) {
         : `${sanitizeName(basename(pdfPath))}-image`;
       const outputPrefix = join(outputDir, prefix);
       if (!params.overwrite) {
-        const existing = (await backend.readdir(outputDir, signal)).filter((entry) => entry.startsWith(`${prefix}-`));
+        const existing = (await backend.readdir(outputDir, signal)).filter((entry) =>
+          entry.startsWith(`${prefix}-`),
+        );
         if (existing.length > 0) {
-          throw new Error(`Output files with prefix ${prefix}- already exist in ${outputDir}. Set overwrite=true or choose a different prefix.`);
+          throw new Error(
+            `Output files with prefix ${prefix}- already exist in ${outputDir}. Set overwrite=true or choose a different prefix.`,
+          );
         }
       }
 
       let selectedPages: number[] | undefined;
       if (params.pages) {
-        const info = await backend.exec("pdfinfo", [pdfPath], { signal, timeoutMs: params.timeoutMs });
+        const info = await backend.exec("pdfinfo", [pdfPath], {
+          signal,
+          timeoutMs: params.timeoutMs,
+        });
         const parsedInfo = parsePdfInfo(info.stdout);
-        selectedPages = parsePageSpec(params.pages, typeof parsedInfo.pages === "number" ? parsedInfo.pages : undefined);
+        selectedPages = parsePageSpec(
+          params.pages,
+          typeof parsedInfo.pages === "number" ? parsedInfo.pages : undefined,
+        );
       }
 
       const before = new Set(await backend.readdir(outputDir, signal));
       const args: string[] = [];
       if (selectedPages && selectedPages.length > 0) {
-        args.push("-f", String(Math.min(...selectedPages)), "-l", String(Math.max(...selectedPages)));
+        args.push(
+          "-f",
+          String(Math.min(...selectedPages)),
+          "-l",
+          String(Math.max(...selectedPages)),
+        );
       }
       const format = params.format ?? "all";
       if (format === "all") args.push("-all");
@@ -650,7 +756,9 @@ export default function pdfExtension(pi: ExtensionAPI) {
       await backend.exec("pdfimages", args, { signal, timeoutMs: params.timeoutMs });
       const after = await backend.readdir(outputDir, signal);
       const generatedNames = after
-        .filter((entry) => entry.startsWith(`${prefix}-`) && (params.overwrite || !before.has(entry)))
+        .filter(
+          (entry) => entry.startsWith(`${prefix}-`) && (params.overwrite || !before.has(entry)),
+        )
         .sort();
       const version = await getPopplerVersion(backend, "pdfimages", signal);
       const imageMagickVersion = await getImageMagickVersion(backend, signal);
@@ -661,10 +769,15 @@ export default function pdfExtension(pi: ExtensionAPI) {
         try {
           dimensions = await getImageDimensions(backend, imagePath, signal);
         } catch (error) {
-          if (signal?.aborted || (error instanceof Error && error.name === "AbortError")) throw error;
+          if (signal?.aborted || (error instanceof Error && error.name === "AbortError"))
+            throw error;
           dimensions = undefined;
         }
-        images.push({ imagePath, dimensions, format: extname(imagePath).replace(/^\./, "") || undefined });
+        images.push({
+          imagePath,
+          dimensions,
+          format: extname(imagePath).replace(/^\./, "") || undefined,
+        });
       }
       const metadata = {
         kind: "pdf-extracted-images",

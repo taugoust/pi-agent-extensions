@@ -60,7 +60,9 @@ export function setAccountSelection(
   return defineOwn(selections, providerId, accountName);
 }
 
-export function cloneAccountSelections(selections: ProviderAccountSelections): ProviderAccountSelections {
+export function cloneAccountSelections(
+  selections: ProviderAccountSelections,
+): ProviderAccountSelections {
   return defineOwnMap(selections);
 }
 

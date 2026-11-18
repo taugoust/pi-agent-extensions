@@ -12,7 +12,13 @@ export type SubagentProtocolFinalResponse = {
 };
 
 export type SubagentProtocolDiagnostic = {
-  kind: "malformed_line" | "invalid_event" | "oversized_line" | "duplicate_done" | "event_after_done" | "aborted";
+  kind:
+    | "malformed_line"
+    | "invalid_event"
+    | "oversized_line"
+    | "duplicate_done"
+    | "event_after_done"
+    | "aborted";
   event?: string;
   bytes?: number;
   cause?: string;
@@ -73,7 +79,10 @@ export function createSubagentProtocolState(): SubagentProtocolState {
   };
 }
 
-function processSubagentProtocolLine(state: SubagentProtocolState, line: string): SubagentProtocolMessage[] {
+function processSubagentProtocolLine(
+  state: SubagentProtocolState,
+  line: string,
+): SubagentProtocolMessage[] {
   const trimmed = line.trim();
   if (!trimmed) return [];
   const bytes = byteLength(trimmed);
@@ -125,7 +134,10 @@ function processSubagentProtocolLine(state: SubagentProtocolState, line: string)
   return [message as SubagentProtocolMessage];
 }
 
-export function appendSubagentProtocolChunk(state: SubagentProtocolState, chunk: string | Uint8Array): SubagentProtocolMessage[] {
+export function appendSubagentProtocolChunk(
+  state: SubagentProtocolState,
+  chunk: string | Uint8Array,
+): SubagentProtocolMessage[] {
   if (state.closed || !chunk || (typeof chunk !== "string" && chunk.byteLength === 0)) return [];
   const decoded = appendUtf8LineChunk(state.buffer, state.decoder, chunk);
   state.decoder = decoded.decoder;
@@ -149,7 +161,9 @@ export function appendSubagentProtocolChunk(state: SubagentProtocolState, chunk:
   return events;
 }
 
-export function finishSubagentProtocolStream(state: SubagentProtocolState): SubagentProtocolFinishResult {
+export function finishSubagentProtocolStream(
+  state: SubagentProtocolState,
+): SubagentProtocolFinishResult {
   if (state.closed) return { events: [], finalResponse: state.finalResponse, error: state.error };
   state.closed = true;
   const decoded = flushUtf8LineChunk(state.buffer, state.decoder);
@@ -164,7 +178,10 @@ export function finishSubagentProtocolStream(state: SubagentProtocolState): Suba
   return { events, finalResponse: state.finalResponse, error: state.error };
 }
 
-export function abortSubagentProtocolStream(state: SubagentProtocolState, cause: string): SubagentProtocolFinishResult {
+export function abortSubagentProtocolStream(
+  state: SubagentProtocolState,
+  cause: string,
+): SubagentProtocolFinishResult {
   if (!state.closed) {
     state.closed = true;
     state.buffer = "";

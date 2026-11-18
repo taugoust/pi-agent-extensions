@@ -41,7 +41,10 @@ export function normalizeGoalSettings(value: unknown): GoalSettings | undefined 
   if (typeof value !== "object" || value === null || Array.isArray(value)) return undefined;
 
   const rpcValue = Object.hasOwn(value, "rpc") ? Reflect.get(value, "rpc") : undefined;
-  if (rpcValue !== undefined && (typeof rpcValue !== "object" || rpcValue === null || Array.isArray(rpcValue))) {
+  if (
+    rpcValue !== undefined &&
+    (typeof rpcValue !== "object" || rpcValue === null || Array.isArray(rpcValue))
+  ) {
     return undefined;
   }
   const rpcEnabled =
@@ -81,7 +84,10 @@ export function normalizeGoalSettings(value: unknown): GoalSettings | undefined 
   };
 }
 
-function normalizeContinuationLimit(value: unknown, fallback: ContinuationLimit): ContinuationLimit | undefined {
+function normalizeContinuationLimit(
+  value: unknown,
+  fallback: ContinuationLimit,
+): ContinuationLimit | undefined {
   if (value === undefined) return fallback;
   if (value === null) return null;
   return typeof value === "number" && Number.isSafeInteger(value) && value > 0 ? value : undefined;
@@ -125,7 +131,10 @@ export function saveGoalSettings(
     2,
   )}\n`;
   const fs = { mkdirSync, writeFileSync, renameSync, rmSync, ...overrides };
-  const temporaryPath = join(dirname(settingsPath), `.${basename(settingsPath)}.${randomUUID()}.tmp`);
+  const temporaryPath = join(
+    dirname(settingsPath),
+    `.${basename(settingsPath)}.${randomUUID()}.tmp`,
+  );
   try {
     fs.mkdirSync(dirname(settingsPath), { recursive: true });
     fs.writeFileSync(temporaryPath, document, { encoding: "utf8", flag: "wx" });
@@ -139,7 +148,9 @@ export function saveGoalSettings(
   }
 }
 
-export function readGoalSettings(settingsPath = join(getAgentDir(), GOAL_SETTINGS_FILE)): GoalSettingsLoadResult {
+export function readGoalSettings(
+  settingsPath = join(getAgentDir(), GOAL_SETTINGS_FILE),
+): GoalSettingsLoadResult {
   let contents: string;
   try {
     contents = readFileSync(settingsPath, "utf8");
@@ -148,7 +159,8 @@ export function readGoalSettings(settingsPath = join(getAgentDir(), GOAL_SETTING
       try {
         if (readExtensionDefaults("workflows").goal !== undefined) {
           const settings = normalizeGoalSettings(withExtensionDefaults("workflows", {}, "goal"));
-          return settings ? { kind: "loaded", settings, legacyExperimentalGoals: false }
+          return settings
+            ? { kind: "loaded", settings, legacyExperimentalGoals: false }
             : { kind: "invalid", reason: "Invalid defaults/workflows.json goal settings" };
         }
         return { kind: "missing", legacyExperimentalGoals: false };
@@ -176,7 +188,9 @@ function hasLegacyExperimentalGoals(value: unknown) {
 }
 
 function ownRecord(value: unknown): Record<string, unknown> | undefined {
-  return value && typeof value === "object" && !Array.isArray(value) ? (value as Record<string, unknown>) : undefined;
+  return value && typeof value === "object" && !Array.isArray(value)
+    ? (value as Record<string, unknown>)
+    : undefined;
 }
 
 function isNodeError(error: unknown): error is NodeJS.ErrnoException {

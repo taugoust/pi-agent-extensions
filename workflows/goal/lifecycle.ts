@@ -72,7 +72,8 @@ export function registerGoalLifecycle(
     runtime.clearTerminalDetails();
     const settingsResult = readGoalSettings(options.settingsPath);
     const loaded = loadGoalStateFromSession(ctx);
-    runtime.settings = settingsResult.kind === "loaded" ? settingsResult.settings : DEFAULT_GOAL_SETTINGS;
+    runtime.settings =
+      settingsResult.kind === "loaded" ? settingsResult.settings : DEFAULT_GOAL_SETTINGS;
     runtime.settingsLoadIssue = settingsResult.kind === "invalid" ? settingsResult : undefined;
     runtime.activeGoal = undefined;
     runtime.legacyQueueState = loaded.legacyQueueState;
@@ -81,7 +82,11 @@ export function registerGoalLifecycle(
     runController.bindSession(ctx);
 
     if (settingsResult.kind === "invalid") {
-      notifyTerminal(ctx.ui, `pi-goal settings ignored: ${settingsResult.reason}. Using default settings.`, "warning");
+      notifyTerminal(
+        ctx.ui,
+        `pi-goal settings ignored: ${settingsResult.reason}. Using default settings.`,
+        "warning",
+      );
     }
     if (runtime.legacyExperimentalGoalsSetting && !runtime.legacyQueueState) {
       notifyTerminal(ctx.ui, REMOVED_QUEUE_SETTING_WARNING, "warning");
@@ -101,9 +106,10 @@ export function registerGoalLifecycle(
         runtime.recordGoalUsage(restoredGoal, ctx, false);
         restoredGoal.tokensUsed = Math.max(loaded.goal.tokensUsed, restoredGoal.tokensUsed);
       }
-      runtime.activeGoal = restoredGoal.status === "active"
-        ? transitionGoal(restoredGoal, "paused")
-        : { ...restoredGoal, waiting: undefined };
+      runtime.activeGoal =
+        restoredGoal.status === "active"
+          ? transitionGoal(restoredGoal, "paused")
+          : { ...restoredGoal, waiting: undefined };
       runtime.persistGoal(runtime.activeGoal);
       runtime.ensureInactiveGoalContextContract(ctx);
       runtime.updateStatus(ctx, runtime.activeGoal);
@@ -194,7 +200,10 @@ export function registerGoalLifecycle(
         const restored = nextGoalInstance(loaded.goal);
         // Revisions also fence task callbacks, whose API deliberately does not
         // require an activation token. Never reuse a pre-navigation revision.
-        restored.revision = Math.max(restored.revision ?? 0, previousGoal?.id === restored.id ? (previousGoal.revision ?? 0) : 0);
+        restored.revision = Math.max(
+          restored.revision ?? 0,
+          previousGoal?.id === restored.id ? (previousGoal.revision ?? 0) : 0,
+        );
         // Keep accounting, safety counters, task IDs and stopped states intact.
         const paused = restored.status === "active" ? transitionGoal(restored, "paused") : restored;
         runtime.persistGoal(paused);
@@ -210,7 +219,11 @@ export function registerGoalLifecycle(
       // an association or continuing execution from the previously viewed branch.
       runtime.activeGoal = undefined;
       runtime.blockStaleGoalToolCalls();
-      notifyTerminal(ctx.ui, `Goal branch restore failed: ${error instanceof Error ? error.message : String(error)}`, "warning");
+      notifyTerminal(
+        ctx.ui,
+        `Goal branch restore failed: ${error instanceof Error ? error.message : String(error)}`,
+        "warning",
+      );
     }
   });
 
@@ -269,7 +282,11 @@ export function registerGoalLifecycle(
     }
 
     const restoredState = loadGoalStateFromSession(ctx);
-    if (restoredState.goal?.id === runtime.activeGoal.id && (restoredState.goal.activationId ?? restoredState.goal.id) === (runtime.activeGoal.activationId ?? runtime.activeGoal.id)) {
+    if (
+      restoredState.goal?.id === runtime.activeGoal.id &&
+      (restoredState.goal.activationId ?? restoredState.goal.id) ===
+        (runtime.activeGoal.activationId ?? runtime.activeGoal.id)
+    ) {
       runtime.activeGoal = restoredState.goal;
     }
     const usageRecorded = runtime.recordGoalUsage(runtime.activeGoal, ctx);
@@ -355,7 +372,11 @@ export function registerGoalLifecycle(
           return;
         }
         const goalId = runtime.markContinuationStarted(prompt);
-        if (!goalId || runtime.activeGoal?.id !== goalId || !runtime.ownsWorkflow(runtime.activeGoal)) {
+        if (
+          !goalId ||
+          runtime.activeGoal?.id !== goalId ||
+          !runtime.ownsWorkflow(runtime.activeGoal)
+        ) {
           abortCurrentTurn(ctx);
           return;
         }
@@ -363,9 +384,11 @@ export function registerGoalLifecycle(
         return;
       }
       if (runtime.isActiveBudgetWrapUpMessage(message)) return;
-      if (runtime.activeGoal?.waiting) runtime.clearGoalWait(ctx, runtime.activeGoal.id, {
-        reason: "custom_message", customType: String(Reflect.get(message, "customType") ?? "").slice(0, 128),
-      });
+      if (runtime.activeGoal?.waiting)
+        runtime.clearGoalWait(ctx, runtime.activeGoal.id, {
+          reason: "custom_message",
+          customType: String(Reflect.get(message, "customType") ?? "").slice(0, 128),
+        });
       if (runtime.guardAbortGoalId === runtime.activeGoal?.id) {
         runtime.guardAbortGoalId = undefined;
       }
@@ -375,7 +398,9 @@ export function registerGoalLifecycle(
     if (message.role !== "user") return;
     const prompt = Array.isArray(message.content)
       ? message.content
-          .filter((part) => part && typeof part === "object" && Reflect.get(part, "type") === "text")
+          .filter(
+            (part) => part && typeof part === "object" && Reflect.get(part, "type") === "text",
+          )
           .map((part) => Reflect.get(part as object, "text"))
           .filter((text): text is string => typeof text === "string")
           .join("\n")
@@ -386,7 +411,12 @@ export function registerGoalLifecycle(
     const ownedPromptBoundary = runtime.hasOwnedPromptBoundary(prompt);
     const queuedNonGoalInput = runtime.consumeQueuedNonGoalInput(prompt, !ownedPromptBoundary);
     if (!ownedPrompt) {
-      if (!ownedPromptBoundary && !extractGoalPromptMarker(prompt) && !extractContinuationMarker(prompt) && runtime.activeGoal?.waiting) {
+      if (
+        !ownedPromptBoundary &&
+        !extractGoalPromptMarker(prompt) &&
+        !extractContinuationMarker(prompt) &&
+        runtime.activeGoal?.waiting
+      ) {
         runtime.clearGoalWait(ctx, runtime.activeGoal.id, { reason: "user_input" });
       }
       if (queuedNonGoalInput?.behavior === "followUp") {
@@ -394,11 +424,17 @@ export function registerGoalLifecycle(
       }
       return;
     }
-    if (runtime.activeGoal?.id !== ownedPrompt.goalId || !runtime.ownsWorkflow(runtime.activeGoal)) {
+    if (
+      runtime.activeGoal?.id !== ownedPrompt.goalId ||
+      !runtime.ownsWorkflow(runtime.activeGoal)
+    ) {
       return;
     }
     if (runtime.agentRunGoalId !== undefined && runtime.agentRunGoalId !== ownedPrompt.goalId) {
-      runtime.activeGoal.baselineTokens = Math.max(0, currentTokenTotal(ctx) - runtime.activeGoal.tokensUsed);
+      runtime.activeGoal.baselineTokens = Math.max(
+        0,
+        currentTokenTotal(ctx) - runtime.activeGoal.tokensUsed,
+      );
     }
     runtime.beginAgentRun(ownedPrompt.goalId, "manual");
     if (ownedPrompt.resetSafetyEpoch) {
@@ -410,7 +446,9 @@ export function registerGoalLifecycle(
 
   pi.on("context", (event, ctx) => {
     if (!sessionActive) return;
-    const keptMessages = event.messages.filter((message) => runtime.keepBudgetWrapUpMessage(message));
+    const keptMessages = event.messages.filter((message) =>
+      runtime.keepBudgetWrapUpMessage(message),
+    );
     const hasGoalContractHistory =
       keptMessages.some(isGoalContextContract) || runtime.hasGoalContextContractHistory(ctx);
     const messages =
@@ -419,7 +457,10 @@ export function registerGoalLifecycle(
         : hasGoalContractHistory
           ? reconcileInactiveGoalContextContract(keptMessages)
           : keptMessages;
-    if (runtime.activeGoal?.status === "paused" && runtime.guardAbortGoalId === runtime.activeGoal.id) {
+    if (
+      runtime.activeGoal?.status === "paused" &&
+      runtime.guardAbortGoalId === runtime.activeGoal.id
+    ) {
       // A current custom follow-up clears the guard at message_start. Otherwise,
       // context transformation aborts before the provider adapter receives the signal.
       abortCurrentTurn(ctx);
@@ -507,7 +548,9 @@ export function registerGoalLifecycle(
     if (runtime.guardAbortGoalId) runtime.guardAbortGoalId = undefined;
     const goalPrompt = runtime.consumeOwnedGoalPrompt(prompt);
     const goalPromptGoalId = goalPrompt?.goalId;
-    const continuationGoalId = goalPromptGoalId ? undefined : runtime.markContinuationStarted(prompt);
+    const continuationGoalId = goalPromptGoalId
+      ? undefined
+      : runtime.markContinuationStarted(prompt);
     if (
       customContinuation &&
       (!continuationGoalId ||
@@ -519,7 +562,11 @@ export function registerGoalLifecycle(
     }
     const ownedPromptGoalId = goalPromptGoalId ?? continuationGoalId;
     const ownedPromptBoundary = runtime.hasOwnedPromptBoundary(prompt);
-    if (!ownedPromptGoalId && !ownedPromptBoundary && (extractGoalPromptMarker(prompt) || extractContinuationMarker(prompt))) {
+    if (
+      !ownedPromptGoalId &&
+      !ownedPromptBoundary &&
+      (extractGoalPromptMarker(prompt) || extractContinuationMarker(prompt))
+    ) {
       runtime.beginAgentRun(null, undefined);
       return abortCurrentTurn(ctx);
     }
@@ -548,7 +595,8 @@ export function registerGoalLifecycle(
       queuedNonGoalInput?.behavior !== "steer"
     ) {
       runtime.clearStaleGoalToolCallBlock();
-      if (runtime.activeGoal?.waiting) runtime.clearGoalWait(ctx, runtime.activeGoal.id, { reason: "user_input" });
+      if (runtime.activeGoal?.waiting)
+        runtime.clearGoalWait(ctx, runtime.activeGoal.id, { reason: "user_input" });
     }
     if (!ownedPromptGoalId && !ownedPromptBoundary) {
       runtime.supersedeOwnedInputCollision(prompt);
@@ -595,7 +643,11 @@ export function registerGoalLifecycle(
   pi.on("agent_start", (_event, _ctx) => {
     if (!sessionActive) return;
     const activeGoal = runtime.activeGoal;
-    if (activeGoal && runtime.guardAbortGoalId === activeGoal.id && activeGoal.status === "paused") {
+    if (
+      activeGoal &&
+      runtime.guardAbortGoalId === activeGoal.id &&
+      activeGoal.status === "paused"
+    ) {
       if (runtime.consumeQueuedNonGoalFollowUpForAgentStart()) {
         runtime.guardAbortGoalId = undefined;
         runtime.clearStaleGoalToolCallBlock();
@@ -626,9 +678,17 @@ export function registerGoalLifecycle(
     const run = runtime.finishAgentRun();
     if (run.goalId === null) return;
     if (!runtime.canRecordGoalUsage() && !runtime.hasActiveBudgetWrapUp()) return;
-    if (run.goalId && (run.goalId !== runtime.activeGoal?.id || run.activationId !== (runtime.activeGoal?.activationId ?? runtime.activeGoal?.id))) return;
+    if (
+      run.goalId &&
+      (run.goalId !== runtime.activeGoal?.id ||
+        run.activationId !== (runtime.activeGoal?.activationId ?? runtime.activeGoal?.id))
+    )
+      return;
     if (!runtime.activeGoal) return;
-    if (runtime.activeGoal.status === "budget_limited" && runtime.budgetWrapUp?.goalId === runtime.activeGoal.id) {
+    if (
+      runtime.activeGoal.status === "budget_limited" &&
+      runtime.budgetWrapUp?.goalId === runtime.activeGoal.id
+    ) {
       runtime.recordGoalUsage(runtime.activeGoal, ctx);
       runtime.persistGoal(runtime.activeGoal);
       runtime.updateStatus(ctx, runtime.activeGoal);
@@ -732,7 +792,8 @@ export function registerGoalLifecycle(
     runtime.clearGoalRecovery();
     runtime.clearStaleGoalToolCallBlock();
     if (resetSafetyEpoch) runtime.clearBudgetWrapUp();
-    const activeGoalId = runtime.activeGoal?.status === "active" ? runtime.activeGoal.id : undefined;
+    const activeGoalId =
+      runtime.activeGoal?.status === "active" ? runtime.activeGoal.id : undefined;
     runtime.beginAgentRun(activeGoalId ?? null, activeGoalId ? "manual" : undefined);
     if (resetSafetyEpoch && activeGoalId) runtime.resetActiveSafetyEpoch(ctx);
   }
@@ -751,9 +812,15 @@ export function registerGoalLifecycle(
     });
     if (!stoppedGoal) return;
 
-    const details = assistant.errorMessage ? ` (${truncateNotification(assistant.errorMessage)})` : "";
+    const details = assistant.errorMessage
+      ? ` (${truncateNotification(assistant.errorMessage)})`
+      : "";
     if (status === "paused") {
-      notifyTerminal(ctx.ui, `Goal paused after interruption${details}. Run /goal resume to continue.`, "warning");
+      notifyTerminal(
+        ctx.ui,
+        `Goal paused after interruption${details}. Run /goal resume to continue.`,
+        "warning",
+      );
       return;
     }
     if (status === "usage_limited") {

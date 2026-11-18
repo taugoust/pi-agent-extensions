@@ -1,12 +1,26 @@
 import { randomBytes } from "node:crypto";
-import { MAX_READONLY_SNAPSHOT_BYTES, privateEvidenceDirectory as privateDirectory, type JobOwner } from "../shared/readonly-job-ancestry.ts";
-import type { JobPlacement } from '../shared/background-job.ts';
+import {
+  MAX_READONLY_SNAPSHOT_BYTES,
+  privateEvidenceDirectory as privateDirectory,
+  type JobOwner,
+} from "../shared/readonly-job-ancestry.ts";
+import type { JobPlacement } from "../shared/background-job.ts";
 import { constants, writeFileSync } from "node:fs";
 import { access, lstat, open, readFile, realpath, writeFile } from "node:fs/promises";
 import { delimiter, isAbsolute, join, relative } from "node:path";
 import { processStartToken, type JobProcessBackend } from "./tmux.ts";
 import { JobStore } from "./store.ts";
-import { inspectPane, capturePane, claimPane, cancelPane, reapPane, signalPane, requireSamePane, requireAvailablePane, PaneGoneError } from './external-pane.ts';
+import {
+  inspectPane,
+  capturePane,
+  claimPane,
+  cancelPane,
+  reapPane,
+  signalPane,
+  requireSamePane,
+  requireAvailablePane,
+  PaneGoneError,
+} from "./external-pane.ts";
 import {
   JOB_SCHEMA_VERSION,
   type JobMetadata,
@@ -35,7 +49,12 @@ export type StartRequest = {
   placement?: JobPlacement;
 };
 
-function result(status: JobResult["status"], exitCode: number | null, reason?: string, signal?: string): JobResult {
+function result(
+  status: JobResult["status"],
+  exitCode: number | null,
+  reason?: string,
+  signal?: string,
+): JobResult {
   return {
     schemaVersion: JOB_SCHEMA_VERSION,
     status,
@@ -70,7 +89,10 @@ function sleep(milliseconds: number, signal?: AbortSignal): Promise<void> {
 }
 
 function sanitizeJobName(name: string): string {
-  return name.replace(/[\x00-\x1f\x7f-\x9f]/g, " ").replace(/\s+/g, " ").trim();
+  return name
+    .replace(/[\x00-\x1f\x7f-\x9f]/g, " ")
+    .replace(/\s+/g, " ")
+    .trim();
 }
 
 export function sanitizeOutput(text: string): string {
@@ -106,11 +128,15 @@ export function snapshotEnvironment(environment: NodeJS.ProcessEnv = process.env
     entries.push(Buffer.from(`${name}=${value}\0`, "utf8"));
   }
   const bytes = Buffer.concat(entries);
-  if (bytes.length > MAX_ENVIRONMENT_BYTES) throw new Error("Background job environment exceeds 1 MiB");
+  if (bytes.length > MAX_ENVIRONMENT_BYTES)
+    throw new Error("Background job environment exceeds 1 MiB");
   return bytes;
 }
 
-export async function resolveExecutable(name: string, environment: NodeJS.ProcessEnv = process.env): Promise<string> {
+export async function resolveExecutable(
+  name: string,
+  environment: NodeJS.ProcessEnv = process.env,
+): Promise<string> {
   if (isAbsolute(name)) {
     await access(name, constants.X_OK);
     return await realpath(name);
@@ -118,14 +144,20 @@ export async function resolveExecutable(name: string, environment: NodeJS.Proces
   for (const directory of (environment.PATH ?? "").split(delimiter)) {
     if (!directory) continue;
     const candidate = join(directory, name);
-    try { await access(candidate, constants.X_OK); return await realpath(candidate); } catch {}
+    try {
+      await access(candidate, constants.X_OK);
+      return await realpath(candidate);
+    } catch {}
   }
   throw new Error(`Required executable not found in PATH: ${name}`);
 }
 
 export class BackgroundJobManager {
-  private readonly paneCaptureAt = new Map<string,number>();
-  constructor(readonly store: JobStore, readonly backend: JobProcessBackend) {}
+  private readonly paneCaptureAt = new Map<string, number>();
+  constructor(
+    readonly store: JobStore,
+    readonly backend: JobProcessBackend,
+  ) {}
 
   async start(request: StartRequest, signal?: AbortSignal): Promise<JobRecord> {
     if (signal?.aborted) throw abortError();
@@ -146,9 +178,19 @@ export class BackgroundJobManager {
     return await this.store.withLock(async () => {
       const records = await this.list(1000, false);
       await this.prune(records);
-      const active = records.filter((record) => !record.metadata.observed && !record.metadata.pane && !record.metadata.infrastructure && (record.status === "starting" || record.status === "running"));
-      if (!request.infrastructure && active.length >= MAX_RUNNING) throw new Error(`Background job limit reached (${MAX_RUNNING} running)`);
-      if (!request.infrastructure && active.filter((record) => record.metadata.cwd === cwd).length >= MAX_RUNNING_PER_CWD) {
+      const active = records.filter(
+        (record) =>
+          !record.metadata.observed &&
+          !record.metadata.pane &&
+          !record.metadata.infrastructure &&
+          (record.status === "starting" || record.status === "running"),
+      );
+      if (!request.infrastructure && active.length >= MAX_RUNNING)
+        throw new Error(`Background job limit reached (${MAX_RUNNING} running)`);
+      if (
+        !request.infrastructure &&
+        active.filter((record) => record.metadata.cwd === cwd).length >= MAX_RUNNING_PER_CWD
+      ) {
         throw new Error(`Background job limit reached for ${cwd} (${MAX_RUNNING_PER_CWD} running)`);
       }
 
@@ -173,7 +215,9 @@ export class BackgroundJobManager {
       let acceptingAbort = true;
       const onAbort = () => {
         if (!acceptingAbort) return;
-        try { writeFileSync(cancelPath, "start aborted\n", { mode: 0o600, flag: "wx" }); } catch {}
+        try {
+          writeFileSync(cancelPath, "start aborted\n", { mode: 0o600, flag: "wx" });
+        } catch {}
       };
       signal?.addEventListener("abort", onAbort, { once: true });
       try {
@@ -183,33 +227,72 @@ export class BackgroundJobManager {
           await this.store.publishResult(id, cancelled);
           throw abortError();
         }
-        const launch = await this.backend.launch(id, cwd, this.store.jobDir(id), shell, {placement: request.placement, infrastructure: request.infrastructure, name: metadata.name});
+        const launch = await this.backend.launch(id, cwd, this.store.jobDir(id), shell, {
+          placement: request.placement,
+          infrastructure: request.infrastructure,
+          name: metadata.name,
+        });
         await this.store.writeLaunch(id, launch);
         const cancelled = await this.store.readResult(id);
-        if (cancelled || signal?.aborted || await this.store.exists(join(this.store.jobDir(id), "cancel-requested"))) {
+        if (
+          cancelled ||
+          signal?.aborted ||
+          (await this.store.exists(join(this.store.jobDir(id), "cancel-requested")))
+        ) {
           await this.backend.kill(id, launch).catch(() => undefined);
           await Promise.all([
-            import("node:fs/promises").then(({ rm }) => rm(this.store.path(id, "environment"), { force: true })).catch(() => undefined),
-            import("node:fs/promises").then(({ rm }) => rm(this.store.path(id, "command"), { force: true })).catch(() => undefined),
+            import("node:fs/promises")
+              .then(({ rm }) => rm(this.store.path(id, "environment"), { force: true }))
+              .catch(() => undefined),
+            import("node:fs/promises")
+              .then(({ rm }) => rm(this.store.path(id, "command"), { force: true }))
+              .catch(() => undefined),
           ]);
-          if (!cancelled) await this.store.publishResult(id, result("cancelled", null, "start was cancelled during launch", "SIGTERM"));
+          if (!cancelled)
+            await this.store.publishResult(
+              id,
+              result("cancelled", null, "start was cancelled during launch", "SIGTERM"),
+            );
           if (signal?.aborted) throw abortError();
           return await this.get(id);
         }
-        await writeFile(join(this.store.jobDir(id), "launch-ready"), "ready\n", { mode: 0o600, flag: "wx" });
-        if (signal?.aborted || await this.store.exists(join(this.store.jobDir(id), "cancel-requested"))) {
+        await writeFile(join(this.store.jobDir(id), "launch-ready"), "ready\n", {
+          mode: 0o600,
+          flag: "wx",
+        });
+        if (
+          signal?.aborted ||
+          (await this.store.exists(join(this.store.jobDir(id), "cancel-requested")))
+        ) {
           await this.backend.kill(id, launch).catch(() => undefined);
-          await this.store.publishResult(id, result("cancelled", null, "start was cancelled as its launch gate opened", "SIGTERM"));
+          await this.store.publishResult(
+            id,
+            result("cancelled", null, "start was cancelled as its launch gate opened", "SIGTERM"),
+          );
           if (signal?.aborted) throw abortError();
           return await this.get(id);
         }
         return { metadata, launch, status: "running" };
       } catch (error) {
         await Promise.all([
-          import("node:fs/promises").then(({ rm }) => rm(this.store.path(id, "environment"), { force: true })).catch(() => undefined),
-          import("node:fs/promises").then(({ rm }) => rm(this.store.path(id, "command"), { force: true })).catch(() => undefined),
+          import("node:fs/promises")
+            .then(({ rm }) => rm(this.store.path(id, "environment"), { force: true }))
+            .catch(() => undefined),
+          import("node:fs/promises")
+            .then(({ rm }) => rm(this.store.path(id, "command"), { force: true }))
+            .catch(() => undefined),
         ]);
-        await this.store.publishResult(id, result("failed", 125, `launch failed: ${error instanceof Error ? error.message : String(error)}`.slice(0, 1024)));
+        await this.store.publishResult(
+          id,
+          result(
+            "failed",
+            125,
+            `launch failed: ${error instanceof Error ? error.message : String(error)}`.slice(
+              0,
+              1024,
+            ),
+          ),
+        );
         throw error;
       } finally {
         acceptingAbort = false;
@@ -222,115 +305,265 @@ export class BackgroundJobManager {
     const identity = await this.store.readProcess(id);
     if (!identity) return undefined;
     try {
-      return await processStartToken(identity.pid) === identity.startToken ? { pid: identity.pid } : undefined;
-    } catch { return undefined; }
+      return (await processStartToken(identity.pid)) === identity.startToken
+        ? { pid: identity.pid }
+        : undefined;
+    } catch {
+      return undefined;
+    }
   }
 
   private async signalCommandProcess(id: string, signal: NodeJS.Signals): Promise<boolean> {
     const processIdentity = await this.commandProcess(id);
     if (!processIdentity) return false;
-    try { process.kill(-processIdentity.pid, signal); return true; }
-    catch { return false; }
+    try {
+      process.kill(-processIdentity.pid, signal);
+      return true;
+    } catch {
+      return false;
+    }
   }
 
-  async adoptPane(request:{paneId:string;socket?:string;logPath?:string;cwd:string;sessionId:string;childId?:string;name?:string}):Promise<JobRecord> {
-    if(!request.sessionId||Buffer.byteLength(request.sessionId)>512||request.name!==undefined&&(!request.name.trim()||Buffer.byteLength(request.name)>80))throw new Error('Invalid pane adoption owner/name');
-    const tmux=await resolveExecutable('tmux');
-    const pane=await inspectPane(tmux,request.paneId,request.socket);
-    const cwd=await realpath(request.cwd);
-    const currentSocket=process.env.TMUX?.split(',')[0];
-    if(process.env.TMUX_PANE===pane.identity.paneId&&currentSocket&&await realpath(currentSocket).catch(()=>currentSocket)===pane.identity.socket)throw new Error('Cannot adopt the pane hosting this Pi session');
+  async adoptPane(request: {
+    paneId: string;
+    socket?: string;
+    logPath?: string;
+    cwd: string;
+    sessionId: string;
+    childId?: string;
+    name?: string;
+  }): Promise<JobRecord> {
+    if (
+      !request.sessionId ||
+      Buffer.byteLength(request.sessionId) > 512 ||
+      (request.name !== undefined && (!request.name.trim() || Buffer.byteLength(request.name) > 80))
+    )
+      throw new Error("Invalid pane adoption owner/name");
+    const tmux = await resolveExecutable("tmux");
+    const pane = await inspectPane(tmux, request.paneId, request.socket);
+    const cwd = await realpath(request.cwd);
+    const currentSocket = process.env.TMUX?.split(",")[0];
+    if (
+      process.env.TMUX_PANE === pane.identity.paneId &&
+      currentSocket &&
+      (await realpath(currentSocket).catch(() => currentSocket)) === pane.identity.socket
+    )
+      throw new Error("Cannot adopt the pane hosting this Pi session");
     await requireAvailablePane(pane);
-    const within=(value:string)=>{const rel=relative(cwd,value);if(rel==='..'||rel.startsWith('../')||isAbsolute(rel))throw new Error('Pane and optional log must be within the delegated cwd');};
+    const within = (value: string) => {
+      const rel = relative(cwd, value);
+      if (rel === ".." || rel.startsWith("../") || isAbsolute(rel))
+        throw new Error("Pane and optional log must be within the delegated cwd");
+    };
     // Keep ownership transfer from racing global expiry of a native pane that
     // already has a retained record. Lock order matches start/prune.
-    return await this.store.withLock(() => this.store.withRetentionLock(async()=>{
-      const records=await this.list(1000);
-      const existing=records.find(r=>r.metadata.pane?.socket===pane.identity.socket&&r.metadata.pane?.paneId===pane.identity.paneId)
-        ?? records.find(r=>(r.launch?.socketPath??this.store.socketPath)===pane.identity.socket&&r.launch?.paneId===pane.identity.paneId&&r.launch.panePid===pane.identity.panePid);
-      if(existing?.metadata.pane)requireSamePane(existing.metadata.pane,pane);
-      else if(existing?.launch&&!pane.dead&&existing.launch.paneStartToken!==pane.identity.paneToken)throw new PaneGoneError('Saved native pane process identity changed');
-      within(await realpath(pane.cwd||existing?.metadata.cwd||''));
-      if(existing){
-        let liveOwner:string|undefined;try{liveOwner=await processStartToken(existing.metadata.ownerPid);}catch{}
-        if(existing.metadata.ownerPid!==process.pid&&liveOwner&&(!existing.metadata.ownerToken||liveOwner===existing.metadata.ownerToken))throw new Error('Pane is managed by another live Pi session');
-        if(request.childId&&existing.metadata.sessionId===request.sessionId&&existing.metadata.childId!==request.childId)throw new Error('Pane belongs to another task in this session');
-        if(existing.metadata.sessionId===request.sessionId&&existing.metadata.ownerPid===process.pid)return existing;
-        const metadata={...existing.metadata,sessionId:request.sessionId,childId:request.childId,ownerPid:process.pid,ownerToken:await processStartToken(process.pid)};
-        if(metadata.pane)metadata.pane=await claimPane(tmux,pane,randomBytes(16).toString('hex'));
-        await this.store.replaceMetadata(metadata);
-        return await this.get(metadata.id);
-      }
-      let observed:JobMetadata['observed'];
-      if(request.logPath){const logPath=await realpath(request.logPath);within(logPath);const info=await lstat(logPath);if(!info.isFile()||info.uid!==process.getuid?.())throw new Error('Log must be a same-user regular file');observed={pid:pane.identity.panePid,startToken:pane.identity.paneToken??'(ended pane)',logPath,logDevice:info.dev,logInode:info.ino};}
-      const id=`job-${randomBytes(12).toString('hex')}`;
-      const identity=await claimPane(tmux,pane,randomBytes(16).toString('hex'));
-      const metadata:JobMetadata={schemaVersion:1,id,name:request.name??`Tmux pane ${pane.identity.paneId}`,command:`(adopted tmux pane ${pane.identity.paneId})`,shell:'(existing)',cwd,createdAt:new Date().toISOString(),ownerPid:process.pid,ownerToken:await processStartToken(process.pid),sessionId:request.sessionId,childId:request.childId,pane:identity,observed};
-      await this.store.create(metadata,'',Buffer.alloc(0));
-      return await this.get(id);
-    }));
+    return await this.store.withLock(() =>
+      this.store.withRetentionLock(async () => {
+        const records = await this.list(1000);
+        const existing =
+          records.find(
+            (r) =>
+              r.metadata.pane?.socket === pane.identity.socket &&
+              r.metadata.pane?.paneId === pane.identity.paneId,
+          ) ??
+          records.find(
+            (r) =>
+              (r.launch?.socketPath ?? this.store.socketPath) === pane.identity.socket &&
+              r.launch?.paneId === pane.identity.paneId &&
+              r.launch.panePid === pane.identity.panePid,
+          );
+        if (existing?.metadata.pane) requireSamePane(existing.metadata.pane, pane);
+        else if (
+          existing?.launch &&
+          !pane.dead &&
+          existing.launch.paneStartToken !== pane.identity.paneToken
+        )
+          throw new PaneGoneError("Saved native pane process identity changed");
+        within(await realpath(pane.cwd || existing?.metadata.cwd || ""));
+        if (existing) {
+          let liveOwner: string | undefined;
+          try {
+            liveOwner = await processStartToken(existing.metadata.ownerPid);
+          } catch {}
+          if (
+            existing.metadata.ownerPid !== process.pid &&
+            liveOwner &&
+            (!existing.metadata.ownerToken || liveOwner === existing.metadata.ownerToken)
+          )
+            throw new Error("Pane is managed by another live Pi session");
+          if (
+            request.childId &&
+            existing.metadata.sessionId === request.sessionId &&
+            existing.metadata.childId !== request.childId
+          )
+            throw new Error("Pane belongs to another task in this session");
+          if (
+            existing.metadata.sessionId === request.sessionId &&
+            existing.metadata.ownerPid === process.pid
+          )
+            return existing;
+          const metadata = {
+            ...existing.metadata,
+            sessionId: request.sessionId,
+            childId: request.childId,
+            ownerPid: process.pid,
+            ownerToken: await processStartToken(process.pid),
+          };
+          if (metadata.pane)
+            metadata.pane = await claimPane(tmux, pane, randomBytes(16).toString("hex"));
+          await this.store.replaceMetadata(metadata);
+          return await this.get(metadata.id);
+        }
+        let observed: JobMetadata["observed"];
+        if (request.logPath) {
+          const logPath = await realpath(request.logPath);
+          within(logPath);
+          const info = await lstat(logPath);
+          if (!info.isFile() || info.uid !== process.getuid?.())
+            throw new Error("Log must be a same-user regular file");
+          observed = {
+            pid: pane.identity.panePid,
+            startToken: pane.identity.paneToken ?? "(ended pane)",
+            logPath,
+            logDevice: info.dev,
+            logInode: info.ino,
+          };
+        }
+        const id = `job-${randomBytes(12).toString("hex")}`;
+        const identity = await claimPane(tmux, pane, randomBytes(16).toString("hex"));
+        const metadata: JobMetadata = {
+          schemaVersion: 1,
+          id,
+          name: request.name ?? `Tmux pane ${pane.identity.paneId}`,
+          command: `(adopted tmux pane ${pane.identity.paneId})`,
+          shell: "(existing)",
+          cwd,
+          createdAt: new Date().toISOString(),
+          ownerPid: process.pid,
+          ownerToken: await processStartToken(process.pid),
+          sessionId: request.sessionId,
+          childId: request.childId,
+          pane: identity,
+          observed,
+        };
+        await this.store.create(metadata, "", Buffer.alloc(0));
+        return await this.get(id);
+      }),
+    );
   }
 
-  private async cachePane(metadata:JobMetadata,tmux:string):Promise<void>{
-    if(!metadata.pane||Date.now()-(this.paneCaptureAt.get(metadata.id)??0)<2000)return;
-    this.paneCaptureAt.set(metadata.id,Date.now());
-    const text=boundedTail(await capturePane(tmux,metadata.pane)).text;
-    await writeFile(this.store.path(metadata.id,'output.log'),text,{mode:0o600});
+  private async cachePane(metadata: JobMetadata, tmux: string): Promise<void> {
+    if (!metadata.pane || Date.now() - (this.paneCaptureAt.get(metadata.id) ?? 0) < 2000) return;
+    this.paneCaptureAt.set(metadata.id, Date.now());
+    const text = boundedTail(await capturePane(tmux, metadata.pane)).text;
+    await writeFile(this.store.path(metadata.id, "output.log"), text, { mode: 0o600 });
   }
 
-  async adopt(request: { pid: number; logPath: string; cwd: string; sessionId: string; childId?: string; name?: string }): Promise<JobRecord> {
-    if (process.platform !== "linux" || !Number.isSafeInteger(request.pid) || request.pid < 1) throw new Error("adopt requires a Linux process identity");
+  async adopt(request: {
+    pid: number;
+    logPath: string;
+    cwd: string;
+    sessionId: string;
+    childId?: string;
+    name?: string;
+  }): Promise<JobRecord> {
+    if (process.platform !== "linux" || !Number.isSafeInteger(request.pid) || request.pid < 1)
+      throw new Error("adopt requires a Linux process identity");
     const cwd = await realpath(request.cwd);
     const logPath = await realpath(request.logPath);
     const processCwd = await realpath(`/proc/${request.pid}/cwd`);
     for (const candidate of [logPath, processCwd]) {
       const rel = relative(cwd, candidate);
-      if (rel === ".." || rel.startsWith("../") || isAbsolute(rel)) throw new Error("Adopted process and log must be within the delegated cwd");
+      if (rel === ".." || rel.startsWith("../") || isAbsolute(rel))
+        throw new Error("Adopted process and log must be within the delegated cwd");
     }
     const owner = await lstat(`/proc/${request.pid}`);
     const log = await lstat(logPath);
-    if (owner.uid !== process.getuid?.() || log.uid !== process.getuid?.() || !log.isFile()) throw new Error("Adoption requires same-user process and regular log");
+    if (owner.uid !== process.getuid?.() || log.uid !== process.getuid?.() || !log.isFile())
+      throw new Error("Adoption requires same-user process and regular log");
     const startToken = await processStartToken(request.pid);
     return await this.store.withLock(async () => {
       const records = await this.list(1000);
-      const existing = records.find(r => r.metadata.sessionId === request.sessionId && r.metadata.childId === request.childId && r.metadata.observed?.pid === request.pid && r.metadata.observed?.startToken === startToken && r.metadata.observed?.logPath === logPath);
+      const existing = records.find(
+        (r) =>
+          r.metadata.sessionId === request.sessionId &&
+          r.metadata.childId === request.childId &&
+          r.metadata.observed?.pid === request.pid &&
+          r.metadata.observed?.startToken === startToken &&
+          r.metadata.observed?.logPath === logPath,
+      );
       if (existing) return existing;
-      const metadata: JobMetadata = { schemaVersion: 1, id: `job-${randomBytes(12).toString("hex")}`, name: request.name,
-        command: "(adopted process; observation only)", shell: "", cwd, createdAt: new Date().toISOString(), ownerPid: process.pid,
-        sessionId: request.sessionId, childId: request.childId,
-        observed: { pid: request.pid, startToken, logPath, logDevice: log.dev, logInode: log.ino } };
+      const metadata: JobMetadata = {
+        schemaVersion: 1,
+        id: `job-${randomBytes(12).toString("hex")}`,
+        name: request.name,
+        command: "(adopted process; observation only)",
+        shell: "",
+        cwd,
+        createdAt: new Date().toISOString(),
+        ownerPid: process.pid,
+        sessionId: request.sessionId,
+        childId: request.childId,
+        observed: { pid: request.pid, startToken, logPath, logDevice: log.dev, logInode: log.ino },
+      };
       // shell remains nonempty for compatibility with the existing metadata schema.
       metadata.shell = "(external)";
-      if (await processStartToken(request.pid) !== startToken) throw new Error("Process identity changed during adoption");
+      if ((await processStartToken(request.pid)) !== startToken)
+        throw new Error("Process identity changed during adoption");
       await this.store.create(metadata, "", Buffer.alloc(0));
       return { metadata, status: "running" };
     });
   }
 
-  async get(id: string, reconcile = true, authorize?: (metadata: JobMetadata) => void): Promise<JobRecord> {
+  async get(
+    id: string,
+    reconcile = true,
+    authorize?: (metadata: JobMetadata) => void,
+  ): Promise<JobRecord> {
     const metadata = await this.store.readMetadata(id);
     authorize?.(metadata);
     const terminal = await this.store.readResult(id);
     const launch = await this.store.readLaunch(id);
     if (terminal) return { metadata, launch, result: terminal, status: terminal.status };
-    if(metadata.pane){
-      try{
-        const tmux=await resolveExecutable('tmux');const pane=await inspectPane(tmux,metadata.pane.paneId,metadata.pane.socket);requireSamePane(metadata.pane,pane);
-        let observationError:string|undefined;
-        if (reconcile) { try{await this.cachePane(metadata,tmux);}catch(e){observationError=String(e);} }
-        if(!pane.dead)return {metadata,status:'running',observationError};
-        const ended=result(pane.exitCode===undefined?'lost':pane.exitCode===0?'completed':'failed',pane.exitCode??null,'Adopted pane root process finished; task delivery is a separate outcome');
-        if(reconcile)await this.store.publishResult(id,ended);return {metadata,result:ended,status:ended.status};
-      }catch(error){
-        if(!(error instanceof PaneGoneError))return {metadata,status:'unavailable',observationError:String(error)};
-        const lost=result('lost',null,String(error));if(reconcile)await this.store.publishResult(id,lost);return {metadata,result:lost,status:'lost'};
+    if (metadata.pane) {
+      try {
+        const tmux = await resolveExecutable("tmux");
+        const pane = await inspectPane(tmux, metadata.pane.paneId, metadata.pane.socket);
+        requireSamePane(metadata.pane, pane);
+        let observationError: string | undefined;
+        if (reconcile) {
+          try {
+            await this.cachePane(metadata, tmux);
+          } catch (e) {
+            observationError = String(e);
+          }
+        }
+        if (!pane.dead) return { metadata, status: "running", observationError };
+        const ended = result(
+          pane.exitCode === undefined ? "lost" : pane.exitCode === 0 ? "completed" : "failed",
+          pane.exitCode ?? null,
+          "Adopted pane root process finished; task delivery is a separate outcome",
+        );
+        if (reconcile) await this.store.publishResult(id, ended);
+        return { metadata, result: ended, status: ended.status };
+      } catch (error) {
+        if (!(error instanceof PaneGoneError))
+          return { metadata, status: "unavailable", observationError: String(error) };
+        const lost = result("lost", null, String(error));
+        if (reconcile) await this.store.publishResult(id, lost);
+        return { metadata, result: lost, status: "lost" };
       }
     }
     if (metadata.observed) {
       try {
-        if (await processStartToken(metadata.observed.pid) === metadata.observed.startToken) return { metadata, status: "running" };
+        if ((await processStartToken(metadata.observed.pid)) === metadata.observed.startToken)
+          return { metadata, status: "running" };
       } catch {}
-      const ended = result("lost", null, "Observed process ended or changed identity; exit status is unavailable (not a success assertion)");
+      const ended = result(
+        "lost",
+        null,
+        "Observed process ended or changed identity; exit status is unavailable (not a success assertion)",
+      );
       if (reconcile) await this.store.publishResult(id, ended);
       return { metadata, result: ended, status: "lost" };
     }
@@ -338,7 +571,7 @@ export class BackgroundJobManager {
       if (reconcile && Date.now() - Date.parse(metadata.createdAt) > STARTING_GRACE_MS) {
         const lost = result("lost", null, "launch metadata was never published");
         await this.store.publishResult(id, lost);
-        return { metadata, result: await this.store.readResult(id) ?? lost, status: "lost" };
+        return { metadata, result: (await this.store.readResult(id)) ?? lost, status: "lost" };
       }
       return { metadata, status: "starting" };
     }
@@ -349,14 +582,21 @@ export class BackgroundJobManager {
     if (lateResult) return { metadata, launch, result: lateResult, status: lateResult.status };
     if (await this.commandProcess(id)) return { metadata, launch, status: "running" };
     if (!reconcile) return { metadata, launch, status: "lost" };
-    const lost = result("lost", null, pane.dead ? "tmux pane exited without a result" : "owned tmux pane is missing or has a different process identity");
+    const lost = result(
+      "lost",
+      null,
+      pane.dead
+        ? "tmux pane exited without a result"
+        : "owned tmux pane is missing or has a different process identity",
+    );
     await this.store.publishResult(id, lost);
-    const final = await this.store.readResult(id) ?? lost;
+    const final = (await this.store.readResult(id)) ?? lost;
     return { metadata, launch, result: final, status: final.status };
   }
 
   async list(limit = 50, reconcile = true): Promise<JobRecord[]> {
-    if (!Number.isSafeInteger(limit) || limit < 1 || limit > 1000) throw new Error("List limit must be between 1 and 1000");
+    if (!Number.isSafeInteger(limit) || limit < 1 || limit > 1000)
+      throw new Error("List limit must be between 1 and 1000");
     const ids = await this.store.listIds();
     // Retained jobs are unbounded. Serial filesystem/tmux probes made the
     // quota scan inside start's state lock exceed its 5s acquisition deadline
@@ -364,108 +604,191 @@ export class BackgroundJobManager {
     // avoid flooding the filesystem or spawning one tmux client per record.
     const scanned: (JobRecord | undefined)[] = new Array(ids.length);
     let next = 0;
-    await Promise.all(Array.from({ length: Math.min(8, ids.length) }, async () => {
-      while (next < ids.length) {
-        const index = next++;
-        try { scanned[index] = await this.get(ids[index], reconcile); } catch {}
-      }
-    }));
+    await Promise.all(
+      Array.from({ length: Math.min(8, ids.length) }, async () => {
+        while (next < ids.length) {
+          const index = next++;
+          try {
+            scanned[index] = await this.get(ids[index], reconcile);
+          } catch {}
+        }
+      }),
+    );
     const records = scanned.filter((record): record is JobRecord => record !== undefined);
     records.sort((a, b) => b.metadata.createdAt.localeCompare(a.metadata.createdAt));
     return records.slice(0, limit);
   }
 
   async listReadOnly(sessionId: string, limit = 50): Promise<JobRecord[]> {
-    if (!sessionId || !Number.isSafeInteger(limit) || limit < 1 || limit > 1000) throw new Error("Invalid read-only list scope or limit");
+    if (!sessionId || !Number.isSafeInteger(limit) || limit < 1 || limit > 1000)
+      throw new Error("Invalid read-only list scope or limit");
     const ids = await this.store.listIdsReadOnly();
     // Establish ownership from metadata before any pane/process observation.
     const owned: Array<{ id: string; createdAt: string }> = [];
     for (const id of ids) {
       try {
         const metadata = await this.store.readMetadata(id);
-        if (metadata.sessionId === sessionId && !metadata.childId && !metadata.infrastructure) owned.push({ id, createdAt: metadata.createdAt });
-      } catch { /* Invalid retained records cannot authorize observation. */ }
+        if (metadata.sessionId === sessionId && !metadata.childId && !metadata.infrastructure)
+          owned.push({ id, createdAt: metadata.createdAt });
+      } catch {
+        /* Invalid retained records cannot authorize observation. */
+      }
     }
     owned.sort((a, b) => b.createdAt.localeCompare(a.createdAt));
-    const ownedIds = owned.slice(0, limit).map(record => record.id);
+    const ownedIds = owned.slice(0, limit).map((record) => record.id);
     const scanned: (JobRecord | undefined)[] = new Array(ownedIds.length);
     let next = 0;
-    await Promise.all(Array.from({ length: Math.min(8, ownedIds.length) }, async () => {
-      while (next < ownedIds.length) {
-        const index = next++;
-        try { scanned[index] = await this.get(ownedIds[index], false); } catch {}
-      }
-    }));
-    const records = scanned.filter((record): record is JobRecord => record !== undefined
-      && record.metadata.sessionId === sessionId && !record.metadata.childId && !record.metadata.infrastructure);
+    await Promise.all(
+      Array.from({ length: Math.min(8, ownedIds.length) }, async () => {
+        while (next < ownedIds.length) {
+          const index = next++;
+          try {
+            scanned[index] = await this.get(ownedIds[index], false);
+          } catch {}
+        }
+      }),
+    );
+    const records = scanned.filter(
+      (record): record is JobRecord =>
+        record !== undefined &&
+        record.metadata.sessionId === sessionId &&
+        !record.metadata.childId &&
+        !record.metadata.infrastructure,
+    );
     records.sort((a, b) => b.metadata.createdAt.localeCompare(a.metadata.createdAt));
     return records.slice(0, limit);
   }
 
-  async listReadOnlyOwners(owners: JobOwner[], maxBytes = MAX_READONLY_SNAPSHOT_BYTES): Promise<JobRecord[]> {
-    if (!Number.isSafeInteger(maxBytes) || maxBytes < 1 || maxBytes > MAX_READONLY_SNAPSHOT_BYTES) throw new Error("Invalid read-only jobs byte bound");
+  async listReadOnlyOwners(
+    owners: JobOwner[],
+    maxBytes = MAX_READONLY_SNAPSHOT_BYTES,
+  ): Promise<JobRecord[]> {
+    if (!Number.isSafeInteger(maxBytes) || maxBytes < 1 || maxBytes > MAX_READONLY_SNAPSHOT_BYTES)
+      throw new Error("Invalid read-only jobs byte bound");
     let ids: string[];
     try {
       privateDirectory(this.store.jobsRoot);
       ids = await this.store.listIdsReadOnly();
-    } catch (error) { if ((error as NodeJS.ErrnoException).code === "ENOENT") return []; throw error; }
+    } catch (error) {
+      if ((error as NodeJS.ErrnoException).code === "ENOENT") return [];
+      throw error;
+    }
     if (ids.length > 20000) throw new Error("Read-only jobs capacity exceeded");
     const records: JobRecord[] = [];
-    const scope = new Set(owners.map(owner => JSON.stringify([owner.sessionId, owner.childId ?? null])));
-    const owned = (metadata: JobMetadata) => !metadata.infrastructure && scope.has(JSON.stringify([metadata.sessionId, metadata.childId ?? null]));
-    let next = 0, bytes = 0, capacityExceeded = false;
-    await Promise.all(Array.from({ length: Math.min(8, ids.length) }, async () => {
-      while (next < ids.length && !capacityExceeded) {
-        const id = ids[next++]!;
-        try {
-          privateDirectory(this.store.jobDir(id));
-          const metadata = await this.store.readMetadata(id);
-          if (metadata.id !== id || !owned(metadata)) continue;
-          bytes += Buffer.byteLength(JSON.stringify(metadata));
-          if (bytes > maxBytes) { capacityExceeded = true; continue; }
-          const record = await this.get(id, false, current => {
-            if (current.id !== id || !owned(current) || JSON.stringify(current) !== JSON.stringify(metadata)) throw new Error("Read-only job ownership changed before observation");
-          });
-          const current = await this.store.readMetadata(id);
-          if (owned(record.metadata) && owned(current) && JSON.stringify(current) === JSON.stringify(metadata)
-            && JSON.stringify(record.metadata) === JSON.stringify(metadata)) {
-            bytes += Buffer.byteLength(JSON.stringify(record.result ?? null));
-            if (bytes > maxBytes) { capacityExceeded = true; continue; }
-            // Lists do not retain launch/control identities or backend diagnostics.
-            records.push({ metadata: record.metadata, status: record.status, ...(record.result ? { result: record.result } : {}) });
+    const scope = new Set(
+      owners.map((owner) => JSON.stringify([owner.sessionId, owner.childId ?? null])),
+    );
+    const owned = (metadata: JobMetadata) =>
+      !metadata.infrastructure &&
+      scope.has(JSON.stringify([metadata.sessionId, metadata.childId ?? null]));
+    let next = 0,
+      bytes = 0,
+      capacityExceeded = false;
+    await Promise.all(
+      Array.from({ length: Math.min(8, ids.length) }, async () => {
+        while (next < ids.length && !capacityExceeded) {
+          const id = ids[next++]!;
+          try {
+            privateDirectory(this.store.jobDir(id));
+            const metadata = await this.store.readMetadata(id);
+            if (metadata.id !== id || !owned(metadata)) continue;
+            bytes += Buffer.byteLength(JSON.stringify(metadata));
+            if (bytes > maxBytes) {
+              capacityExceeded = true;
+              continue;
+            }
+            const record = await this.get(id, false, (current) => {
+              if (
+                current.id !== id ||
+                !owned(current) ||
+                JSON.stringify(current) !== JSON.stringify(metadata)
+              )
+                throw new Error("Read-only job ownership changed before observation");
+            });
+            const current = await this.store.readMetadata(id);
+            if (
+              owned(record.metadata) &&
+              owned(current) &&
+              JSON.stringify(current) === JSON.stringify(metadata) &&
+              JSON.stringify(record.metadata) === JSON.stringify(metadata)
+            ) {
+              bytes += Buffer.byteLength(JSON.stringify(record.result ?? null));
+              if (bytes > maxBytes) {
+                capacityExceeded = true;
+                continue;
+              }
+              // Lists do not retain launch/control identities or backend diagnostics.
+              records.push({
+                metadata: record.metadata,
+                status: record.status,
+                ...(record.result ? { result: record.result } : {}),
+              });
+            }
+          } catch {
+            /* Missing or invalid job metadata grants no observation authority. */
           }
-        } catch { /* Missing or invalid job metadata grants no observation authority. */ }
-      }
-    }));
+        }
+      }),
+    );
     if (capacityExceeded) throw new Error("Read-only jobs snapshot byte capacity exceeded");
-    return records.sort((a, b) => b.metadata.createdAt.localeCompare(a.metadata.createdAt) || a.metadata.id.localeCompare(b.metadata.id));
+    return records.sort(
+      (a, b) =>
+        b.metadata.createdAt.localeCompare(a.metadata.createdAt) ||
+        a.metadata.id.localeCompare(b.metadata.id),
+    );
   }
 
-  async streamOutput(id: string): Promise<{ available: boolean; stdout: string; stderr: string; stdout_truncated?: true; stderr_truncated?: true }> {
+  async streamOutput(id: string): Promise<{
+    available: boolean;
+    stdout: string;
+    stderr: string;
+    stdout_truncated?: true;
+    stderr_truncated?: true;
+  }> {
     const record = await this.get(id, false);
-    if (record.metadata.observed || record.metadata.pane || !record.launch) return { available: false, stdout: "", stderr: "" };
+    if (record.metadata.observed || record.metadata.pane || !record.launch)
+      return { available: false, stdout: "", stderr: "" };
     const readStream = async (name: "stdout.log" | "stderr.log") => {
       try {
         const path = this.store.path(id, name);
         const info = await lstat(path);
-        if (!info.isFile() || info.isSymbolicLink() || info.size > 1024 * 1024) return { available: false as const, text: "" };
+        if (!info.isFile() || info.isSymbolicLink() || info.size > 1024 * 1024)
+          return { available: false as const, text: "" };
         const file = await open(path, constants.O_RDONLY | constants.O_NOFOLLOW);
         try {
           const current = await file.stat();
-          if (!current.isFile() || current.size > 1024 * 1024) return { available: false as const, text: "" };
-          const limit = 16 * 1024, offset = Math.max(0, current.size - limit);
+          if (!current.isFile() || current.size > 1024 * 1024)
+            return { available: false as const, text: "" };
+          const limit = 16 * 1024,
+            offset = Math.max(0, current.size - limit);
           const buffer = Buffer.alloc(Math.min(current.size, limit));
           const { bytesRead } = await file.read(buffer, 0, buffer.length, offset);
           let start = 0;
           if (offset > 0) while (start < bytesRead && (buffer[start]! & 0xc0) === 0x80) start++;
-          return { available: true as const, text: buffer.subarray(start, bytesRead).toString("utf8"), truncated: offset > 0 };
-        } finally { await file.close(); }
-      } catch { return { available: false as const, text: "" }; }
+          return {
+            available: true as const,
+            text: buffer.subarray(start, bytesRead).toString("utf8"),
+            truncated: offset > 0,
+          };
+        } finally {
+          await file.close();
+        }
+      } catch {
+        return { available: false as const, text: "" };
+      }
     };
-    const [stdout, stderr] = await Promise.all([readStream("stdout.log"), readStream("stderr.log")]);
+    const [stdout, stderr] = await Promise.all([
+      readStream("stdout.log"),
+      readStream("stderr.log"),
+    ]);
     return stdout.available && stderr.available
-      ? { available: true, stdout: stdout.text, stderr: stderr.text,
-          ...(stdout.truncated ? { stdout_truncated: true as const } : {}), ...(stderr.truncated ? { stderr_truncated: true as const } : {}) }
+      ? {
+          available: true,
+          stdout: stdout.text,
+          stderr: stderr.text,
+          ...(stdout.truncated ? { stdout_truncated: true as const } : {}),
+          ...(stderr.truncated ? { stderr_truncated: true as const } : {}),
+        }
       : { available: false, stdout: "", stderr: "" };
   }
 
@@ -474,41 +797,75 @@ export class BackgroundJobManager {
   }
 
   /** Read existing output without result reconciliation or notification writes. */
-  async outputReadOnly(id: string, authorize?: (metadata: JobMetadata) => void): Promise<OutputSnapshot> {
+  async outputReadOnly(
+    id: string,
+    authorize?: (metadata: JobMetadata) => void,
+  ): Promise<OutputSnapshot> {
     privateDirectory(this.store.jobDir(id));
     return await this.readOutput(id, false, authorize);
   }
 
-  private async readOutput(id: string, notify: boolean, authorize?: (metadata: JobMetadata) => void): Promise<OutputSnapshot> {
+  private async readOutput(
+    id: string,
+    notify: boolean,
+    authorize?: (metadata: JobMetadata) => void,
+  ): Promise<OutputSnapshot> {
     const record = await this.get(id, notify, authorize);
     if (record.metadata.observed) {
       const observed = record.metadata.observed;
-      const fd = await open(observed.logPath, constants.O_RDONLY | constants.O_NOFOLLOW | constants.O_NONBLOCK);
+      const fd = await open(
+        observed.logPath,
+        constants.O_RDONLY | constants.O_NOFOLLOW | constants.O_NONBLOCK,
+      );
       try {
         const info = await fd.stat();
-        if (!info.isFile() || info.dev !== observed.logDevice || info.ino !== observed.logInode) throw new Error("Adopted log identity changed; re-adopt explicitly");
+        if (!info.isFile() || info.dev !== observed.logDevice || info.ino !== observed.logInode)
+          throw new Error("Adopted log identity changed; re-adopt explicitly");
         const bytes = Buffer.alloc(Math.min(info.size, 64 * 1024));
-        const { bytesRead } = await fd.read(bytes, 0, bytes.length, Math.max(0, info.size - bytes.length));
+        const { bytesRead } = await fd.read(
+          bytes,
+          0,
+          bytes.length,
+          Math.max(0, info.size - bytes.length),
+        );
         const bounded = boundedTail(bytes.subarray(0, bytesRead).toString("utf8"));
-        return { ...bounded, truncated: bounded.truncated || info.size > bytes.length, source: "log" };
-      } finally { await fd.close(); }
+        return {
+          ...bounded,
+          truncated: bounded.truncated || info.size > bytes.length,
+          source: "log",
+        };
+      } finally {
+        await fd.close();
+      }
     }
     let raw = "";
     let source: OutputSnapshot["source"] = "none";
     const snapshotWasTerminal = Boolean(record.result);
     try {
       const outputPath = this.store.path(id, "output.log");
-      const fd = await open(outputPath, constants.O_RDONLY | constants.O_NOFOLLOW | constants.O_NONBLOCK);
+      const fd = await open(
+        outputPath,
+        constants.O_RDONLY | constants.O_NOFOLLOW | constants.O_NONBLOCK,
+      );
       try {
         const info = await fd.stat();
-        if (!info.isFile() || (info.mode & 0o077) || (process.getuid && info.uid !== process.getuid())) throw new Error("Background job output is not a private regular file");
-        if (info.size > 1024 * 1024) throw new Error("Background job output exceeds its persistent 1 MiB bound");
+        if (
+          !info.isFile() ||
+          info.mode & 0o077 ||
+          (process.getuid && info.uid !== process.getuid())
+        )
+          throw new Error("Background job output is not a private regular file");
+        if (info.size > 1024 * 1024)
+          throw new Error("Background job output exceeds its persistent 1 MiB bound");
         const bytes = Buffer.alloc(1024 * 1024 + 1);
         const { bytesRead } = await fd.read(bytes, 0, bytes.length, 0);
-        if (bytesRead > 1024 * 1024) throw new Error("Background job output exceeds its persistent 1 MiB bound");
+        if (bytesRead > 1024 * 1024)
+          throw new Error("Background job output exceeds its persistent 1 MiB bound");
         raw = bytes.subarray(0, bytesRead).toString("utf8");
         source = "log";
-      } finally { await fd.close(); }
+      } finally {
+        await fd.close();
+      }
     } catch (error) {
       if ((error as NodeJS.ErrnoException).code !== "ENOENT") throw error;
     }
@@ -521,14 +878,23 @@ export class BackgroundJobManager {
       await this.store.markNotified(id);
       // The snapshot must have started in terminal state. Completion during a
       // running read does not authorize disposal of output we may not have seen.
-      if (record.launch && !record.metadata.pane && !record.metadata.infrastructure && !record.metadata.verification) {
+      if (
+        record.launch &&
+        !record.metadata.pane &&
+        !record.metadata.infrastructure &&
+        !record.metadata.verification
+      ) {
         await this.store.markRetrieved(id);
       }
     }
     return { ...bounded, source };
   }
 
-  async wait(id: string, timeoutMs = 1000, signal?: AbortSignal): Promise<{ record: JobRecord; timedOut: boolean }> {
+  async wait(
+    id: string,
+    timeoutMs = 1000,
+    signal?: AbortSignal,
+  ): Promise<{ record: JobRecord; timedOut: boolean }> {
     if (!Number.isSafeInteger(timeoutMs) || timeoutMs < 0 || timeoutMs > MAX_WAIT_MS) {
       throw new Error(`Wait timeout must be an integer between 0 and ${MAX_WAIT_MS}ms`);
     }
@@ -548,11 +914,17 @@ export class BackgroundJobManager {
 
   async signal(id: string, signal: "SIGINT" | "SIGTERM"): Promise<JobRecord> {
     const record = await this.get(id);
-    if(record.metadata.pane){await signalPane(await resolveExecutable('tmux'),record.metadata.pane,signal);return await this.get(id);}
-    if (record.metadata.observed) throw new Error("Adopted jobs are observation-only; no signal authority was acquired");
-    if (record.status !== "running" || !record.launch) throw new Error(`Background job ${id} is not running`);
-    try { await this.backend.signal(id, record.launch, signal); }
-    catch (error) {
+    if (record.metadata.pane) {
+      await signalPane(await resolveExecutable("tmux"), record.metadata.pane, signal);
+      return await this.get(id);
+    }
+    if (record.metadata.observed)
+      throw new Error("Adopted jobs are observation-only; no signal authority was acquired");
+    if (record.status !== "running" || !record.launch)
+      throw new Error(`Background job ${id} is not running`);
+    try {
+      await this.backend.signal(id, record.launch, signal);
+    } catch (error) {
       if (!(await this.signalCommandProcess(id, signal))) throw error;
     }
     return record;
@@ -560,32 +932,47 @@ export class BackgroundJobManager {
 
   async cancel(id: string): Promise<JobRecord> {
     const record = await this.get(id);
-    if(record.metadata.pane){
-      if(record.result)return record;
-      const tmux=await resolveExecutable('tmux');await this.cachePane(record.metadata,tmux).catch(()=>undefined);
-      await cancelPane(tmux,record.metadata.pane);
-      await this.store.publishResult(id,result('cancelled',null,'The adopted tmux pane was cancelled and retained for inspection; explicit reap closes it. Independently detached work is outside that pane'));
+    if (record.metadata.pane) {
+      if (record.result) return record;
+      const tmux = await resolveExecutable("tmux");
+      await this.cachePane(record.metadata, tmux).catch(() => undefined);
+      await cancelPane(tmux, record.metadata.pane);
+      await this.store.publishResult(
+        id,
+        result(
+          "cancelled",
+          null,
+          "The adopted tmux pane was cancelled and retained for inspection; explicit reap closes it. Independently detached work is outside that pane",
+        ),
+      );
       return await this.get(id);
     }
-    if (record.metadata.observed) throw new Error("Adopted jobs are observation-only; no cancellation authority was acquired");
+    if (record.metadata.observed)
+      throw new Error("Adopted jobs are observation-only; no cancellation authority was acquired");
     if (record.result) {
-      if (record.status === "lost" && await this.commandProcess(id)) {
+      if (record.status === "lost" && (await this.commandProcess(id))) {
         await this.signalCommandProcess(id, "SIGKILL");
-        if (await this.commandProcess(id)) throw new Error(`Failed to terminate lost background job ${id}`);
+        if (await this.commandProcess(id))
+          throw new Error(`Failed to terminate lost background job ${id}`);
       }
       return record;
     }
     try {
       const marker = await open(join(this.store.jobDir(id), "cancel-requested"), "wx", 0o600);
       await marker.close();
-    } catch (error) { if ((error as NodeJS.ErrnoException).code !== "EEXIST") throw error; }
+    } catch (error) {
+      if ((error as NodeJS.ErrnoException).code !== "EEXIST") throw error;
+    }
     if (!record.launch) {
       const cancelled = result("cancelled", null, "cancelled before launch", "SIGTERM");
       await this.store.publishResult(id, cancelled);
       return await this.get(id);
     }
-    try { await this.backend.signal(id, record.launch, "SIGTERM"); }
-    catch { await this.signalCommandProcess(id, "SIGTERM"); }
+    try {
+      await this.backend.signal(id, record.launch, "SIGTERM");
+    } catch {
+      await this.signalCommandProcess(id, "SIGTERM");
+    }
     const deadline = Date.now() + 2000;
     while (Date.now() < deadline) {
       const terminal = await this.store.readResult(id);
@@ -595,7 +982,10 @@ export class BackgroundJobManager {
     await this.signalCommandProcess(id, "SIGKILL");
     await this.backend.kill(id, record.launch).catch(() => undefined);
     if (await this.commandProcess(id)) throw new Error(`Failed to terminate background job ${id}`);
-    await this.store.publishResult(id, result("cancelled", null, "cancelled by background_job", "SIGKILL"));
+    await this.store.publishResult(
+      id,
+      result("cancelled", null, "cancelled by background_job", "SIGKILL"),
+    );
     return await this.get(id);
   }
 
@@ -606,43 +996,79 @@ export class BackgroundJobManager {
     const cutoff = Date.now() - 7 * 24 * 60 * 60 * 1000;
     // Disposable watcher services must never evict real jobs. Keep every recent
     // user job and every unread outcome, regardless of infrastructure churn.
-    const infrastructure = terminal.filter(record => record.metadata.infrastructure);
-    const expired = infrastructure.filter((record, index) => index >= 20 || Date.parse(record.result!.finishedAt) < cutoff);
+    const infrastructure = terminal.filter((record) => record.metadata.infrastructure);
+    const expired = infrastructure.filter(
+      (record, index) => index >= 20 || Date.parse(record.result!.finishedAt) < cutoff,
+    );
     // User jobs are handled only by retrieval-based expiry, never quota/age pruning.
     for (const record of expired) {
-      try { await this.reap(record.metadata.id); } catch { /* retain on uncertain identity */ }
+      try {
+        await this.reap(record.metadata.id);
+      } catch {
+        /* retain on uncertain identity */
+      }
     }
   }
 
   /** Fail closed even on unreadable foreign metadata: ownership cannot safely
    * be established then. Unlike list(), never truncate or silently skip errors. */
-  async sessionInventory(sessionId: string, assertAvailable: () => void = () => {}): Promise<JobRecord[]> {
+  async sessionInventory(
+    sessionId: string,
+    assertAvailable: () => void = () => {},
+  ): Promise<JobRecord[]> {
     const records: JobRecord[] = [];
     for (const id of await this.store.listIds()) {
       assertAvailable();
       const metadata = await this.store.readMetadata(id);
       if (metadata.sessionId !== sessionId) continue;
       const record = await this.get(id);
-      if (record.metadata.sessionId !== sessionId) throw new Error(`Background job ${id} changed owner during cleanup`);
+      if (record.metadata.sessionId !== sessionId)
+        throw new Error(`Background job ${id} changed owner during cleanup`);
       records.push(record);
     }
     return records;
   }
 
   /** Caller must reserve local creators, including watch recovery, throughout. */
-  async reapSession(sessionId: string, preserve: (records: unknown) => Promise<void>, assertAvailable: () => void = () => {}): Promise<void> {
+  async reapSession(
+    sessionId: string,
+    preserve: (records: unknown) => Promise<void>,
+    assertAvailable: () => void = () => {},
+  ): Promise<void> {
     // Global expiry in another Pi session must not delete records between our
     // inventory and durable preservation. Use the same cross-process lock.
-    return await this.store.withRetentionLock(() => this.reapSessionLocked(sessionId, preserve, assertAvailable));
+    return await this.store.withRetentionLock(() =>
+      this.reapSessionLocked(sessionId, preserve, assertAvailable),
+    );
   }
 
-  private async reapSessionLocked(sessionId: string, preserve: (records: unknown) => Promise<void>, assertAvailable: () => void): Promise<void> {
+  private async reapSessionLocked(
+    sessionId: string,
+    preserve: (records: unknown) => Promise<void>,
+    assertAvailable: () => void,
+  ): Promise<void> {
     assertAvailable();
     const records = await this.sessionInventory(sessionId, assertAvailable);
-    const blocked = records.filter(record => !record.result || record.status === 'running' || record.status === 'starting' || record.metadata.pane || record.metadata.observed);
-    const ids = (records: JobRecord[]) => records.slice(0, 100).map(record => record.metadata.id).join(', ')
-      + (records.length > 100 ? `; ${records.length - 100} more (${records.length} total); inspect the child job inventory` : '');
-    if (blocked.length) throw new Error(`Cannot prepare worker reap: active/starting or adopted background jobs: ${ids(blocked)}`);
+    const blocked = records.filter(
+      (record) =>
+        !record.result ||
+        record.status === "running" ||
+        record.status === "starting" ||
+        record.metadata.pane ||
+        record.metadata.observed,
+    );
+    const ids = (records: JobRecord[]) =>
+      records
+        .slice(0, 100)
+        .map((record) => record.metadata.id)
+        .join(", ") +
+      (records.length > 100
+        ? `; ${records.length - 100} more (${records.length} total); inspect the child job inventory`
+        : "");
+    if (blocked.length)
+      throw new Error(
+        `Cannot prepare worker reap: active/starting or adopted background jobs: ${ids(blocked)}`,
+      );
     let remaining = 256 * 1024;
     const jobs = [];
     for (const record of records) {
@@ -653,9 +1079,15 @@ export class BackgroundJobManager {
       let start = Math.max(0, bytes.length - budget);
       // Keep the final errors, without splitting a UTF-8 code point.
       while (start < bytes.length && (bytes[start] & 0xc0) === 0x80) start++;
-      const output = bytes.subarray(start).toString('utf8');
+      const output = bytes.subarray(start).toString("utf8");
       remaining -= bytes.length - start;
-      jobs.push({ metadata: record.metadata, status: record.status, result: record.result, output, outputTruncated: snapshot.truncated || bytes.length > budget });
+      jobs.push({
+        metadata: record.metadata,
+        status: record.status,
+        result: record.result,
+        output,
+        outputTruncated: snapshot.truncated || bytes.length > budget,
+      });
     }
     assertAvailable();
     await preserve({ jobs });
@@ -663,13 +1095,19 @@ export class BackgroundJobManager {
       assertAvailable();
       const current = await this.get(record.metadata.id);
       assertAvailable();
-      if (current.metadata.sessionId !== sessionId || current.metadata.pane || current.metadata.observed) throw new Error(`Background job ${record.metadata.id} changed owner during cleanup`);
+      if (
+        current.metadata.sessionId !== sessionId ||
+        current.metadata.pane ||
+        current.metadata.observed
+      )
+        throw new Error(`Background job ${record.metadata.id} changed owner during cleanup`);
       await this.reapLocked(record.metadata.id);
     }
     assertAvailable();
     const remainingJobs = await this.sessionInventory(sessionId, assertAvailable);
     assertAvailable();
-    if (remainingJobs.length) throw new Error(`Background jobs remain after cleanup: ${ids(remainingJobs)}`);
+    if (remainingJobs.length)
+      throw new Error(`Background jobs remain after cleanup: ${ids(remainingJobs)}`);
   }
 
   async reapExpired(id: string, now: number, retentionMs: number): Promise<void> {
@@ -679,7 +1117,15 @@ export class BackgroundJobManager {
     if (candidate === undefined || now - candidate < retentionMs) return;
     await this.store.withRetentionLock(async () => {
       const record = await this.get(id);
-      if (!record.result || !record.launch || record.metadata.infrastructure || record.metadata.verification || record.metadata.observed || record.metadata.pane) return;
+      if (
+        !record.result ||
+        !record.launch ||
+        record.metadata.infrastructure ||
+        record.metadata.verification ||
+        record.metadata.observed ||
+        record.metadata.pane
+      )
+        return;
       const retrieved = await this.store.readRetrieved(id);
       if (retrieved === undefined || now - retrieved < retentionMs) return;
       await this.reapLocked(id);
@@ -705,21 +1151,26 @@ export class BackgroundJobManager {
     const record = await this.get(id);
     if (!record.result) {
       const cancelling = await this.store.exists(join(this.store.jobDir(id), "cancel-requested"));
-      throw new Error(cancelling
-        ? `Background job ${id} is still being cancelled; reap it again once it has stopped`
-        : `Background job ${id} is still running; cancel it before reaping`);
+      throw new Error(
+        cancelling
+          ? `Background job ${id} is still being cancelled; reap it again once it has stopped`
+          : `Background job ${id} is still running; cancel it before reaping`,
+      );
     }
-    if (await this.commandProcess(id)) throw new Error(`Background job ${id} command is still running; cancel it first`);
-    if (record.metadata.pane) await reapPane(await resolveExecutable('tmux'), record.metadata.pane);
+    if (await this.commandProcess(id))
+      throw new Error(`Background job ${id} command is still running; cancel it first`);
+    if (record.metadata.pane) await reapPane(await resolveExecutable("tmux"), record.metadata.pane);
     if (record.launch) {
-      if (!this.backend.reap) throw new Error('Backend does not support explicit pane reap');
+      if (!this.backend.reap) throw new Error("Backend does not support explicit pane reap");
       await this.backend.reap(id, record.launch);
     }
     await this.store.remove(id);
   }
 
   // Compatibility for explicit UI removal only; never called by read/ack.
-  async remove(id: string): Promise<void> { await this.reap(id); }
+  async remove(id: string): Promise<void> {
+    await this.reap(id);
+  }
 }
 
 /** In-process exclusion: enter/reserve run before callers' first await. */
@@ -729,7 +1180,8 @@ export class ReapReservation {
   private resolveIdle?: () => void;
 
   enter(): () => void {
-    if (this.reserved) throw new Error('Background job cleanup is reserved; new operations are unavailable');
+    if (this.reserved)
+      throw new Error("Background job cleanup is reserved; new operations are unavailable");
     this.operations++;
     let released = false;
     return () => {
@@ -742,16 +1194,27 @@ export class ReapReservation {
   }
 
   async prepare(cleanup: () => Promise<void>, timeoutMs = 20_000): Promise<() => void> {
-    if (this.reserved) throw new Error('Background job cleanup is already reserved');
+    if (this.reserved) throw new Error("Background job cleanup is already reserved");
     this.reserved = true;
     let released = false;
-    const idle = new Promise<void>(resolve => { this.resolveIdle = resolve; });
+    const idle = new Promise<void>((resolve) => {
+      this.resolveIdle = resolve;
+    });
     let timer: ReturnType<typeof setTimeout> | undefined;
-    const release = () => { if (!released) { released = true; this.reserved = false; } };
+    const release = () => {
+      if (!released) {
+        released = true;
+        this.reserved = false;
+      }
+    };
     try {
       if (this.operations) {
         const timeout = new Promise<never>((_, reject) => {
-          timer = setTimeout(() => reject(new Error('Background job operations did not finish before cleanup deadline')), timeoutMs);
+          timer = setTimeout(
+            () =>
+              reject(new Error("Background job operations did not finish before cleanup deadline")),
+            timeoutMs,
+          );
         });
         await Promise.race([idle, timeout]);
       }
@@ -759,8 +1222,10 @@ export class ReapReservation {
       this.resolveIdle = undefined;
       await cleanup();
       return release;
-    } catch (error) { release(); throw error; }
-    finally {
+    } catch (error) {
+      release();
+      throw error;
+    } finally {
       if (timer !== undefined) clearTimeout(timer);
       this.resolveIdle = undefined;
     }

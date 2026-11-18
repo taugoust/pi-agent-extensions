@@ -1,6 +1,14 @@
 export const ASSISTANT_METADATA_MODES = ["off", "compact", "expanded"] as const;
 export const ASSISTANT_STOP_REASONS = ["stop", "toolUse", "length", "error", "aborted"] as const;
-export const STAMP_THINKING_LEVELS = ["off", "minimal", "low", "medium", "high", "xhigh", "max"] as const;
+export const STAMP_THINKING_LEVELS = [
+  "off",
+  "minimal",
+  "low",
+  "medium",
+  "high",
+  "xhigh",
+  "max",
+] as const;
 
 export type StampAssistantMetadataMode = (typeof ASSISTANT_METADATA_MODES)[number];
 export type AssistantStopReason = (typeof ASSISTANT_STOP_REASONS)[number];
@@ -158,13 +166,22 @@ export function formatAssistantMetadataLines(
     return [];
   }
   const costSinceUserLine =
-    costSinceUserData === undefined ? undefined : formatAssistantCostSinceUserLine(costSinceUserData);
+    costSinceUserData === undefined
+      ? undefined
+      : formatAssistantCostSinceUserLine(costSinceUserData);
   if (mode === "off" || !isAssistantMetadataData(metadata)) {
     return costSinceUserLine === undefined ? [] : [costSinceUserLine];
   }
   const lines =
     mode === "compact"
-      ? [formatCompactMetadata(metadata, thinkingLevel, showCompactAbnormalOutcome, costSinceUserData)]
+      ? [
+          formatCompactMetadata(
+            metadata,
+            thinkingLevel,
+            showCompactAbnormalOutcome,
+            costSinceUserData,
+          ),
+        ]
       : formatExpandedMetadata(metadata, thinkingLevel, costSinceUserData);
   if (!debug) return lines;
   if (metadata.responseId) lines.push(`debug · response id ${metadata.responseId}`);
@@ -218,11 +235,16 @@ export { sanitizeTerminalText } from "../shared/terminal-text.ts";
 
 function normalizePersistedMetadataText(value: string): string {
   return [...value]
-    .map((character) => (isUnsafeTerminalCodePoint(character.codePointAt(0) ?? 0) ? " " : character))
+    .map((character) =>
+      isUnsafeTerminalCodePoint(character.codePointAt(0) ?? 0) ? " " : character,
+    )
     .join("");
 }
 
-export function sanitizeMetadataText(value: unknown, maximumLength = MAX_METADATA_TEXT_LENGTH): string | undefined {
+export function sanitizeMetadataText(
+  value: unknown,
+  maximumLength = MAX_METADATA_TEXT_LENGTH,
+): string | undefined {
   if (typeof value !== "string" || maximumLength < 1) return undefined;
   const safe = normalizePersistedMetadataText(value).replace(/\s+/gu, " ").trim();
   if (!safe) return undefined;
@@ -242,7 +264,9 @@ function captureUsage(value: unknown): AssistantStampUsageData | undefined {
   return Object.keys(usage).length > 0 ? usage : undefined;
 }
 
-function captureDiagnostics(value: unknown): Pick<AssistantMetadataData, "diagnosticCount" | "diagnostics"> {
+function captureDiagnostics(
+  value: unknown,
+): Pick<AssistantMetadataData, "diagnosticCount" | "diagnostics"> {
   if (!Array.isArray(value) || value.length === 0) return {};
   const diagnostics: AssistantStampDiagnosticSummary[] = [];
   const inspections = Math.min(value.length, MAX_DIAGNOSTIC_INSPECTIONS);
@@ -284,7 +308,9 @@ function formatCompactMetadata(
   const cost = costSinceUserData?.estimatedCost ?? metadata.usage?.estimatedCost;
   const abnormalStopReason =
     showCompactAbnormalOutcome &&
-    (metadata.stopReason === "length" || metadata.stopReason === "error" || metadata.stopReason === "aborted")
+    (metadata.stopReason === "length" ||
+      metadata.stopReason === "error" ||
+      metadata.stopReason === "aborted")
       ? metadata.stopReason
       : undefined;
   return [
@@ -293,7 +319,9 @@ function formatCompactMetadata(
     abnormalStopReason === undefined ? undefined : `stop ${abnormalStopReason}`,
     tokens === undefined ? undefined : `${formatInteger(tokens)} tok`,
     cost === undefined ? undefined : `est ${formatCost(cost)}`,
-    costSinceUserData === undefined ? undefined : `since user ${formatCost(costSinceUserData.costSinceUser)}`,
+    costSinceUserData === undefined
+      ? undefined
+      : `since user ${formatCost(costSinceUserData.costSinceUser)}`,
   ]
     .filter((part): part is string => part !== undefined)
     .join(" · ");
@@ -329,7 +357,9 @@ function formatExpandedMetadata(
     usage.cacheWrite === undefined ? undefined : `cache write ${formatInteger(usage.cacheWrite)}`,
     usage.totalTokens === undefined ? undefined : `total ${formatInteger(usage.totalTokens)}`,
     estimatedCost === undefined ? undefined : `est cost ${formatCost(estimatedCost)}`,
-    costSinceUserData === undefined ? undefined : `since user ${formatCost(costSinceUserData.costSinceUser)}`,
+    costSinceUserData === undefined
+      ? undefined
+      : `since user ${formatCost(costSinceUserData.costSinceUser)}`,
   ]
     .filter((part): part is string => part !== undefined)
     .join(" · ");
@@ -337,7 +367,9 @@ function formatExpandedMetadata(
 }
 
 function formatInteger(value: number): string {
-  return new Intl.NumberFormat("en-US", { maximumFractionDigits: 0, useGrouping: true }).format(value);
+  return new Intl.NumberFormat("en-US", { maximumFractionDigits: 0, useGrouping: true }).format(
+    value,
+  );
 }
 
 function formatCost(value: number): string {
@@ -375,7 +407,9 @@ function isDiagnosticSummary(value: unknown): value is AssistantStampDiagnosticS
 
 function isSafeMetadataText(value: unknown): value is string {
   return (
-    typeof value === "string" && [...value].length <= MAX_METADATA_TEXT_LENGTH && sanitizeMetadataText(value) === value
+    typeof value === "string" &&
+    [...value].length <= MAX_METADATA_TEXT_LENGTH &&
+    sanitizeMetadataText(value) === value
   );
 }
 
@@ -412,9 +446,13 @@ function isAssistantCostSinceUserData(value: unknown): value is AssistantCostSin
   );
 }
 
-function formatAssistantCostSinceUserLine(costSinceUserData: Readonly<AssistantCostSinceUserData>): string {
+function formatAssistantCostSinceUserLine(
+  costSinceUserData: Readonly<AssistantCostSinceUserData>,
+): string {
   return [
-    costSinceUserData.estimatedCost === undefined ? undefined : `est ${formatCost(costSinceUserData.estimatedCost)}`,
+    costSinceUserData.estimatedCost === undefined
+      ? undefined
+      : `est ${formatCost(costSinceUserData.estimatedCost)}`,
     `since user ${formatCost(costSinceUserData.costSinceUser)}`,
   ]
     .filter((part): part is string => part !== undefined)

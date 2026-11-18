@@ -87,7 +87,9 @@ function fixture(t: any) {
     start,
     resolve,
     command,
-    switchSession: () => { sessionId = "another"; },
+    switchSession: () => {
+      sessionId = "another";
+    },
   };
 }
 
@@ -159,12 +161,14 @@ test("the selection survives a reload and follows the active branch", async (t) 
   const after = await second.getSnapshot({ sessionId: "parent" });
   assert.equal(after.selection, null);
   assert(after.revision > reloaded.revision);
-  await assert.rejects(second.set({
-    expectedSessionId: reloaded.sessionId,
-    expectedServiceEpoch: reloaded.serviceEpoch,
-    expectedRevision: reloaded.revision,
-    selection: null,
-  }));
+  await assert.rejects(
+    second.set({
+      expectedSessionId: reloaded.sessionId,
+      expectedServiceEpoch: reloaded.serviceEpoch,
+      expectedRevision: reloaded.revision,
+      selection: null,
+    }),
+  );
 
   f.switchSession();
   await assert.rejects(second.getSnapshot({ sessionId: "parent" }));
@@ -274,7 +278,10 @@ test("a slow account lookup cannot overwrite a newer choice", async (t) => {
   const service = await f.start();
   let finishLookup!: Function;
   globals.__paeAccountControlsV1 = {
-    getSnapshot: () => new Promise((resolve) => { finishLookup = resolve; }),
+    getSnapshot: () =>
+      new Promise((resolve) => {
+        finishLookup = resolve;
+      }),
   };
 
   const pending = set(service, { providerId: CODEX, accountId: "alpha" });

@@ -14,12 +14,22 @@
  * An empty SOURCE means no configured root, never the current directory.
  */
 import { randomUUID } from "node:crypto";
-import { closeSync, constants, fstatSync, openSync, readFileSync, readSync, realpathSync } from "node:fs";
+import {
+  closeSync,
+  constants,
+  fstatSync,
+  openSync,
+  readFileSync,
+  readSync,
+  realpathSync,
+} from "node:fs";
 import { lstat, mkdir, rename, rm, writeFile } from "node:fs/promises";
 import { dirname, join, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 
-const manifest = JSON.parse(readFileSync(new URL("./extension-config-manifest.json", import.meta.url), "utf8"));
+const manifest = JSON.parse(
+  readFileSync(new URL("./extension-config-manifest.json", import.meta.url), "utf8"),
+);
 const paths = [
   ...manifest.defaults.map((name) => {
     if (!/^[a-z][a-z0-9-]*$/.test(name)) throw new Error("Invalid defaults manifest name");
@@ -34,18 +44,27 @@ for (const path of paths) {
 }
 
 function canonicalPath(path) {
-  try { return realpathSync(path); }
-  catch (error) { if (error.code === "ENOENT") return resolve(path); throw error; }
+  try {
+    return realpathSync(path);
+  } catch (error) {
+    if (error.code === "ENOENT") return resolve(path);
+    throw error;
+  }
 }
 
 function readObject(path) {
   let descriptor;
-  try { descriptor = openSync(path, constants.O_RDONLY | (constants.O_NONBLOCK ?? 0)); }
-  catch (error) { if (error.code === "ENOENT") return undefined; throw error; }
+  try {
+    descriptor = openSync(path, constants.O_RDONLY | (constants.O_NONBLOCK ?? 0));
+  } catch (error) {
+    if (error.code === "ENOENT") return undefined;
+    throw error;
+  }
   try {
     const limit = 64 * 1024;
     const stats = fstatSync(descriptor);
-    if (!stats.isFile() || stats.size > limit) throw new Error("expected regular JSON file, at most 64 KiB");
+    if (!stats.isFile() || stats.size > limit)
+      throw new Error("expected regular JSON file, at most 64 KiB");
     const buffer = Buffer.alloc(limit + 1);
     let offset = 0;
     while (offset < buffer.length) {
@@ -54,20 +73,32 @@ function readObject(path) {
       offset += count;
     }
     if (offset > limit) throw new Error("JSON file exceeds 64 KiB");
-    const object = JSON.parse(new TextDecoder("utf-8", { fatal: true }).decode(buffer.subarray(0, offset)));
-    if (object === null || typeof object !== "object" || Array.isArray(object)) throw new Error("expected JSON object");
+    const object = JSON.parse(
+      new TextDecoder("utf-8", { fatal: true }).decode(buffer.subarray(0, offset)),
+    );
+    if (object === null || typeof object !== "object" || Array.isArray(object))
+      throw new Error("expected JSON object");
     const contents = `${JSON.stringify(object)}\n`;
     if (Buffer.byteLength(contents) > limit) throw new Error("serialized JSON exceeds 64 KiB");
     return contents;
-  } catch (error) { throw new Error(`${path}: ${error.message}`); }
-  finally { closeSync(descriptor); }
+  } catch (error) {
+    throw new Error(`${path}: ${error.message}`);
+  } finally {
+    closeSync(descriptor);
+  }
 }
 
 async function assertDirectory(path) {
   const stats = await lstat(path);
-  if (!stats.isDirectory() || stats.isSymbolicLink() || (stats.mode & 0o022)
-    || (typeof process.getuid === "function" && stats.uid !== process.getuid())) {
-    throw new Error(`${path}: destination must be an owned nonsymlink directory without group/other write access`);
+  if (
+    !stats.isDirectory() ||
+    stats.isSymbolicLink() ||
+    stats.mode & 0o022 ||
+    (typeof process.getuid === "function" && stats.uid !== process.getuid())
+  ) {
+    throw new Error(
+      `${path}: destination must be an owned nonsymlink directory without group/other write access`,
+    );
   }
 }
 
@@ -76,12 +107,16 @@ async function destinationParent(root, relative, create) {
   for (const component of dirname(relative).split("/")) {
     if (component === ".") continue;
     directory = join(directory, component);
-    try { await assertDirectory(directory); }
-    catch (error) {
+    try {
+      await assertDirectory(directory);
+    } catch (error) {
       if (error.code !== "ENOENT") throw error;
       if (!create) return undefined;
-      try { await mkdir(directory, { mode: 0o700 }); }
-      catch (error) { if (error.code !== "EEXIST") throw error; }
+      try {
+        await mkdir(directory, { mode: 0o700 });
+      } catch (error) {
+        if (error.code !== "EEXIST") throw error;
+      }
       await assertDirectory(directory);
     }
   }
@@ -93,7 +128,10 @@ export async function snapshotExtensionSettings(source, destination) {
   const sourceRoot = source === "" ? undefined : canonicalPath(source);
   if (sourceRoot !== undefined && sourceRoot === canonicalPath(destination)) return;
   // Validate all source documents before changing any destination settings.
-  const snapshot = paths.map((path) => [path, sourceRoot === undefined ? undefined : readObject(join(sourceRoot, path))]);
+  const snapshot = paths.map((path) => [
+    path,
+    sourceRoot === undefined ? undefined : readObject(join(sourceRoot, path)),
+  ]);
   await mkdir(destination, { recursive: true, mode: 0o700 });
   const destinationRoot = realpathSync(destination);
   if (sourceRoot === destinationRoot) return;
@@ -110,7 +148,9 @@ export async function snapshotExtensionSettings(source, destination) {
     try {
       await writeFile(temporary, contents, { flag: "wx", mode: 0o600 });
       await rename(temporary, target); // Replaces a destination symlink, never follows it.
-    } finally { await rm(temporary, { force: true }); }
+    } finally {
+      await rm(temporary, { force: true });
+    }
   }
 }
 

@@ -24,7 +24,10 @@ export type OAuthCredentialReadinessSource = {
   waitForCredential(data: unknown): void;
 };
 
-export function registerOAuthCredentialSource(pi: ExtensionAPI, sources: Iterable<OAuthCredentialSource>): void {
+export function registerOAuthCredentialSource(
+  pi: ExtensionAPI,
+  sources: Iterable<OAuthCredentialSource>,
+): void {
   pi.events.on(OAUTH_CREDENTIAL_SOURCE_CHANNEL, (data) => {
     for (const source of sources) source.offerCredential(data);
   });
@@ -52,7 +55,9 @@ export function parseCredentialRequest(data: unknown): OAuthCredentialSourceRequ
   }
 }
 
-export function parseCredentialReadinessRequest(data: unknown): OAuthCredentialReadinessRequest | undefined {
+export function parseCredentialReadinessRequest(
+  data: unknown,
+): OAuthCredentialReadinessRequest | undefined {
   try {
     if (!data || typeof data !== "object" || Array.isArray(data)) return undefined;
     const request = data as Partial<OAuthCredentialReadinessRequest>;

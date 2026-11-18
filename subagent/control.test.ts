@@ -30,7 +30,10 @@ assert.notEqual(nativeChild.childId, agentSHChild.childId);
 
 reserveSubagentChildren(sessionId, "native", [nativeChild]);
 reserveSubagentChildren(sessionId, "agentsh", [agentSHChild]);
-assert.deepEqual(subagentChildControlState(sessionId, nativeChild.childId), { backend: "native", state: "pending" });
+assert.deepEqual(subagentChildControlState(sessionId, nativeChild.childId), {
+  backend: "native",
+  state: "pending",
+});
 await assert.rejects(
   controlSubagentChild(sessionId, agentSHChild.childId, "steer", "hello"),
   (error: any) => error?.code === "capability" && /agentsh backend/.test(error.message),
@@ -40,22 +43,45 @@ let active = true;
 const calls: unknown[][] = [];
 const handle = {
   isActive: () => active,
-  async control(mode: string, message: string, _signal?: AbortSignal, onUpdate?: (text: string) => void) {
+  async control(
+    mode: string,
+    message: string,
+    _signal?: AbortSignal,
+    onUpdate?: (text: string) => void,
+  ) {
     calls.push([mode, message]);
     onUpdate?.("streamed response");
     return { text: "complete response" };
   },
 };
 bindNativeSubagentControl(sessionId, nativeChild.childId, handle);
-assert.deepEqual(subagentChildControlState(sessionId, nativeChild.childId), { backend: "native", state: "active" });
+assert.deepEqual(subagentChildControlState(sessionId, nativeChild.childId), {
+  backend: "native",
+  state: "active",
+});
 await assert.rejects(
-  controlSubagentChild(sessionId, nativeChild.childId, "steer", "must not block on old handle", undefined, undefined, false),
+  controlSubagentChild(
+    sessionId,
+    nativeChild.childId,
+    "steer",
+    "must not block on old handle",
+    undefined,
+    undefined,
+    false,
+  ),
   (error: any) => error.code === "capability",
 );
 assert.deepEqual(calls, [], "legacy control was silently invoked for a non-blocking prompt");
 const updates: string[] = [];
 assert.deepEqual(
-  await controlSubagentChild(sessionId, nativeChild.childId, "follow_up", "more detail", undefined, (text) => updates.push(text)),
+  await controlSubagentChild(
+    sessionId,
+    nativeChild.childId,
+    "follow_up",
+    "more detail",
+    undefined,
+    (text) => updates.push(text),
+  ),
   { text: "complete response" },
 );
 assert.deepEqual(calls, [["follow_up", "more detail"]]);
@@ -65,7 +91,11 @@ await assert.rejects(
   controlSubagentChild(`${sessionId}-foreign`, nativeChild.childId, "steer", "probe"),
   (error: any) => error?.code === "ownership" && /different Pi session/.test(error.message),
 );
-assert.deepEqual(calls, [["follow_up", "more detail"]], "foreign-session request reached the child handle");
+assert.deepEqual(
+  calls,
+  [["follow_up", "more detail"]],
+  "foreign-session request reached the child handle",
+);
 
 // A replacement extension module must discover the exact same process-owned handle.
 const reloaded = await import(`./control.js?reload=${Date.now()}`);
@@ -81,7 +111,10 @@ await assert.rejects(
   (error: any) => error?.code === "inactive",
 );
 completeSubagentChildren(sessionId, [nativeChild, agentSHChild]);
-assert.deepEqual(subagentChildControlState(sessionId, nativeChild.childId), { backend: "native", state: "terminal" });
+assert.deepEqual(subagentChildControlState(sessionId, nativeChild.childId), {
+  backend: "native",
+  state: "terminal",
+});
 assert.throws(
   () => bindNativeSubagentControl(sessionId, nativeChild.childId, handle),
   /cannot bind terminal native subagent child/,
@@ -91,13 +124,19 @@ await assert.rejects(
   (error: any) => error?.code === "inactive" && /terminal/.test(error.message),
 );
 const rollbackChild: SubagentChildIdentity = {
-  childId: createSubagentChildId(), child: 1, label: "rollback",
+  childId: createSubagentChildId(),
+  child: 1,
+  label: "rollback",
 };
 assert.throws(
   () => reserveSubagentChildren(sessionId, "native", [rollbackChild, nativeChild]),
   /identity collision/,
 );
-assert.equal(subagentChildControlState(sessionId, rollbackChild.childId), undefined, "failed reservation leaked an earlier child identity");
+assert.equal(
+  subagentChildControlState(sessionId, rollbackChild.childId),
+  undefined,
+  "failed reservation leaked an earlier child identity",
+);
 removeSubagentControlSession(sessionId);
 assert.equal(subagentChildControlState(sessionId, nativeChild.childId), undefined);
 

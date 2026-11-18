@@ -1,13 +1,6 @@
 import { execFile } from "node:child_process";
 import { constants as fsConstants } from "node:fs";
-import {
-  access,
-  mkdir,
-  readFile,
-  readdir,
-  stat,
-  writeFile,
-} from "node:fs/promises";
+import { access, mkdir, readFile, readdir, stat, writeFile } from "node:fs/promises";
 import { resolve } from "node:path";
 import {
   agentSHRuntimeDisposition,
@@ -118,11 +111,7 @@ class NativePdfBackend implements PdfBackend {
     return resolve(this.cwd, validatePath(inputPath, label));
   }
 
-  exec(
-    command: string,
-    args: string[],
-    options: ExecOptions = {},
-  ): Promise<PdfExecResult> {
+  exec(command: string, args: string[], options: ExecOptions = {}): Promise<PdfExecResult> {
     const timeoutMs = timeoutMilliseconds(options.timeoutMs);
     return new Promise((resolvePromise, reject) => {
       execFile(
@@ -209,7 +198,11 @@ class NativePdfBackend implements PdfBackend {
     await writeFile(path, content, { encoding: "utf8", signal });
   }
 
-  async readAttachment(path: string, maxBytes: number, signal?: AbortSignal): Promise<PdfAttachmentRead> {
+  async readAttachment(
+    path: string,
+    maxBytes: number,
+    signal?: AbortSignal,
+  ): Promise<PdfAttachmentRead> {
     const limit = validateAttachmentLimit(maxBytes);
     throwIfAborted(signal);
     const info = await stat(path);
@@ -254,12 +247,7 @@ class AgentSHPdfBackend implements PdfBackend {
   readonly #api: AgentSHPiAPI;
   readonly #actor: AgentSHActor;
 
-  constructor(
-    api: AgentSHPiAPI,
-    controlPlaneCwd: string,
-    toolCallId: string,
-    toolName: string,
-  ) {
+  constructor(api: AgentSHPiAPI, controlPlaneCwd: string, toolCallId: string, toolName: string) {
     this.#api = api;
     this.cwd = api.toSupervisorPath(".", controlPlaneCwd);
     this.#actor = {
@@ -286,8 +274,11 @@ class AgentSHPdfBackend implements PdfBackend {
         { signal: options.signal },
       );
     } catch (error) {
-      if (options.signal?.aborted || (error instanceof Error && error.name === "AbortError")) throw error;
-      throw new Error(`AgentSH PDF command failed: ${command}\n${asError(error).message}`, { cause: error });
+      if (options.signal?.aborted || (error instanceof Error && error.name === "AbortError"))
+        throw error;
+      throw new Error(`AgentSH PDF command failed: ${command}\n${asError(error).message}`, {
+        cause: error,
+      });
     }
   }
 
@@ -320,7 +311,8 @@ class AgentSHPdfBackend implements PdfBackend {
       stdout,
       stderr,
       stdoutTruncated: resultWasTruncated(result),
-      stdoutTotalBytes: numericField(result.stdout_total_bytes) ?? numericField(result.stdoutTotalBytes),
+      stdoutTotalBytes:
+        numericField(result.stdout_total_bytes) ?? numericField(result.stdoutTotalBytes),
     };
   }
 
@@ -335,9 +327,12 @@ class AgentSHPdfBackend implements PdfBackend {
       });
     } catch (error) {
       if (signal?.aborted || (error instanceof Error && error.name === "AbortError")) throw error;
-      throw new Error(`${label} is not readable through the AgentSH supervisor: ${path}\n${asError(error).message}`, {
-        cause: error,
-      });
+      throw new Error(
+        `${label} is not readable through the AgentSH supervisor: ${path}\n${asError(error).message}`,
+        {
+          cause: error,
+        },
+      );
     }
   }
 
@@ -360,8 +355,8 @@ class AgentSHPdfBackend implements PdfBackend {
     const quoted = shellQuote(path);
     const script = [
       `dir=${quoted}`,
-      "for entry in \"$dir\"/* \"$dir\"/.[!.]* \"$dir\"/..?*; do",
-      "  if [ -e \"$entry\" ] || [ -L \"$entry\" ]; then",
+      'for entry in "$dir"/* "$dir"/.[!.]* "$dir"/..?*; do',
+      '  if [ -e "$entry" ] || [ -L "$entry" ]; then',
       "    printf '%s\\0' \"${entry##*/}\"",
       "  fi",
       "done",
@@ -372,7 +367,9 @@ class AgentSHPdfBackend implements PdfBackend {
       throw new Error(`AgentSH could not list PDF output directory (${exitCode}): ${path}`);
     }
     if (resultWasTruncated(result)) {
-      throw new Error(`AgentSH truncated the directory listing for ${path}; use a narrower output directory.`);
+      throw new Error(
+        `AgentSH truncated the directory listing for ${path}; use a narrower output directory.`,
+      );
     }
     const stdout = typeof result.stdout === "string" ? result.stdout : "";
     return stdout.split("\0").filter(Boolean);
@@ -386,7 +383,11 @@ class AgentSHPdfBackend implements PdfBackend {
     });
   }
 
-  async readAttachment(path: string, maxBytes: number, signal?: AbortSignal): Promise<PdfAttachmentRead> {
+  async readAttachment(
+    path: string,
+    maxBytes: number,
+    signal?: AbortSignal,
+  ): Promise<PdfAttachmentRead> {
     const requestedLimit = validateAttachmentLimit(maxBytes);
     const effectiveLimit = Math.min(requestedLimit, AGENTSH_MAX_FILE_BYTES);
     const result = await this.#api.readFile(path, {
@@ -406,11 +407,12 @@ function decodeAgentSHAttachment(
   requestedLimit: number,
   effectiveLimit: number,
 ): PdfAttachmentRead {
-  const content = typeof result.content === "string"
-    ? result.content
-    : typeof result.base64 === "string"
-      ? result.base64
-      : undefined;
+  const content =
+    typeof result.content === "string"
+      ? result.content
+      : typeof result.base64 === "string"
+        ? result.base64
+        : undefined;
   const encoding = typeof result.encoding === "string" ? result.encoding.toLowerCase() : undefined;
   let data: string | undefined;
   let decodedSize: number | undefined;
@@ -423,7 +425,9 @@ function decodeAgentSHAttachment(
       data = bytes.toString("base64");
       decodedSize = bytes.length;
     } else {
-      throw new Error(`AgentSH returned unsupported ${encoding} encoding for image attachment ${path}.`);
+      throw new Error(
+        `AgentSH returned unsupported ${encoding} encoding for image attachment ${path}.`,
+      );
     }
   }
 
@@ -444,7 +448,9 @@ function decodeAgentSHAttachment(
       size,
       skippedReason:
         `Image could not be attached because AgentSH's bounded read returned at most ${reportedCap} bytes` +
-        (requestedLimit > AGENTSH_MAX_FILE_BYTES ? ` (requested maxAttachBytes=${requestedLimit})` : "") +
+        (requestedLimit > AGENTSH_MAX_FILE_BYTES
+          ? ` (requested maxAttachBytes=${requestedLimit})`
+          : "") +
         ".",
     };
   }
@@ -475,9 +481,7 @@ export function createPdfBackend(
   const api = sharedAgentSHAPI();
   let state: AgentSHRuntimeState | undefined;
   try {
-    state = publishedAPI && !api
-      ? { configured: true, active: false }
-      : api?.getSupervisorState();
+    state = publishedAPI && !api ? { configured: true, active: false } : api?.getSupervisorState();
   } catch {
     state = { configured: true, active: false };
   }

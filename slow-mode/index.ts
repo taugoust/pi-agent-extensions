@@ -23,16 +23,17 @@
  * In non-interactive mode (no UI), slow mode is a no-op.
  */
 
-import { readExtensionDefaults, readPreferenceDocument, mergeExtensionSettings } from "../shared/extension-defaults.js";
+import {
+  readExtensionDefaults,
+  readPreferenceDocument,
+  mergeExtensionSettings,
+} from "../shared/extension-defaults.js";
 import { getAgentDir } from "@earendil-works/pi-coding-agent";
 import { mkdirSync, mkdtempSync, writeFileSync, unlinkSync, rmSync, readFileSync } from "node:fs";
 import { execFileSync } from "node:child_process";
 import { homedir, tmpdir } from "node:os";
 import { basename, join, resolve, relative, extname, isAbsolute } from "node:path";
-import type {
-  ExtensionAPI,
-  ExtensionContext,
-} from "@mariozechner/pi-coding-agent";
+import type { ExtensionAPI, ExtensionContext } from "@mariozechner/pi-coding-agent";
 import { truncateToWidth } from "@mariozechner/pi-tui";
 
 const PASEO_REMOTE_UI_KEY = "__piPaseoRemoteUiV1";
@@ -69,7 +70,9 @@ function paseoRemoteSelect(
     if (!bridge.isConnected()) return null;
     if (typeof bridge.selectMirrored === "function") {
       const mirroredOptions = options.filter((option) => option !== "Review in terminal");
-      return Promise.resolve(bridge.selectMirrored(title, mirroredOptions, localSelect, { signal })).catch(() => undefined);
+      return Promise.resolve(
+        bridge.selectMirrored(title, mirroredOptions, localSelect, { signal }),
+      ).catch(() => undefined);
     }
     return Promise.resolve(bridge.select(title, options, { signal })).catch(() => undefined);
   } catch {
@@ -102,8 +105,10 @@ function buildRemoteReview(
 
 export default function slowMode(pi: ExtensionAPI) {
   // State: whether slow mode is currently enabled
-  const settings = mergeExtensionSettings(readExtensionDefaults("slow-mode"),
-    readPreferenceDocument(join(getAgentDir(), "slow-mode.json")));
+  const settings = mergeExtensionSettings(
+    readExtensionDefaults("slow-mode"),
+    readPreferenceDocument(join(getAgentDir(), "slow-mode.json")),
+  );
   if (settings.enabledByDefault !== undefined && typeof settings.enabledByDefault !== "boolean") {
     throw new Error("Invalid slow-mode enabledByDefault preference");
   }
@@ -113,20 +118,30 @@ export default function slowMode(pi: ExtensionAPI) {
   const control = {
     version: 1,
     status(sessionId: string) {
-      if (!controlContext || controlContext.sessionManager.getSessionId() !== sessionId) throw new Error("Stale review context");
-      return { sessionId, enabled, available: controlContext.hasUI && controlContext.mode === "tui" };
+      if (!controlContext || controlContext.sessionManager.getSessionId() !== sessionId)
+        throw new Error("Stale review context");
+      return {
+        sessionId,
+        enabled,
+        available: controlContext.hasUI && controlContext.mode === "tui",
+      };
     },
     setEnabled(sessionId: string, value: boolean) {
-      if (typeof value !== "boolean" || !this.status(sessionId).available) throw new Error("Review control unavailable");
+      if (typeof value !== "boolean" || !this.status(sessionId).available)
+        throw new Error("Review control unavailable");
       enabled = value;
-      controlContext!.ui.setStatus("slow-mode", enabled ? controlContext!.ui.theme.fg("warning", "slow ■") : undefined);
+      controlContext!.ui.setStatus(
+        "slow-mode",
+        enabled ? controlContext!.ui.theme.fg("warning", "slow ■") : undefined,
+      );
       return this.status(sessionId);
     },
   };
   pi.on("session_start", (_event, ctx) => {
     controlContext = ctx;
     (globalThis as any)[controlKey] = control;
-    if (ctx.hasUI) ctx.ui.setStatus("slow-mode", enabled ? ctx.ui.theme.fg("warning", "slow ■") : undefined);
+    if (ctx.hasUI)
+      ctx.ui.setStatus("slow-mode", enabled ? ctx.ui.theme.fg("warning", "slow ■") : undefined);
   });
 
   // Track tool calls where content was edited
@@ -211,14 +226,11 @@ export default function slowMode(pi: ExtensionAPI) {
     editedCalls.delete(event.toolCallId);
 
     // Calculate diff stats
-    const originalLines = edited.original.split('\n').length;
-    const editedLines = edited.edited.split('\n').length;
+    const originalLines = edited.original.split("\n").length;
+    const editedLines = edited.edited.split("\n").length;
     const lineDiff = editedLines - originalLines;
-    const lineDiffText = lineDiff > 0 
-      ? `+${lineDiff} lines` 
-      : lineDiff < 0 
-      ? `${lineDiff} lines` 
-      : 'same line count';
+    const lineDiffText =
+      lineDiff > 0 ? `+${lineDiff} lines` : lineDiff < 0 ? `${lineDiff} lines` : "same line count";
 
     // Add a note to the result indicating content was edited
     const note = {
@@ -308,17 +320,15 @@ export default function slowMode(pi: ExtensionAPI) {
    * same way as the real edit tool.
    */
   function normalizeForFuzzyMatch(text: string): string {
-    return (
-      text
-        .normalize("NFKC")
-        .split("\n")
-        .map((line) => line.trimEnd())
-        .join("\n")
-        .replace(/[\u2018\u2019\u201A\u201B]/g, "'")
-        .replace(/[\u201C\u201D\u201E\u201F]/g, '"')
-        .replace(/[\u2010\u2011\u2012\u2013\u2014\u2015\u2212]/g, "-")
-        .replace(/[\u00A0\u2002-\u200A\u202F\u205F\u3000]/g, " ")
-    );
+    return text
+      .normalize("NFKC")
+      .split("\n")
+      .map((line) => line.trimEnd())
+      .join("\n")
+      .replace(/[\u2018\u2019\u201A\u201B]/g, "'")
+      .replace(/[\u201C\u201D\u201E\u201F]/g, '"')
+      .replace(/[\u2010\u2011\u2012\u2013\u2014\u2015\u2212]/g, "-")
+      .replace(/[\u00A0\u2002-\u200A\u202F\u205F\u3000]/g, " ");
   }
 
   function countOccurrences(content: string, oldText: string): number {
@@ -408,7 +418,9 @@ export default function slowMode(pi: ExtensionAPI) {
       }
     }
 
-    const baseContent = normalizedEdits.some((edit) => findEditMatch(normalizedContent, edit.oldText).usedFuzzyMatch)
+    const baseContent = normalizedEdits.some(
+      (edit) => findEditMatch(normalizedContent, edit.oldText).usedFuzzyMatch,
+    )
       ? normalizeForFuzzyMatch(normalizedContent)
       : normalizedContent;
 
@@ -454,7 +466,7 @@ export default function slowMode(pi: ExtensionAPI) {
       if (previous.matchIndex + previous.matchLength > current.matchIndex) {
         throw new Error(
           `edits[${previous.editIndex}] and edits[${current.editIndex}] overlap in ${path}. ` +
-          "Merge them into one edit or target disjoint regions.",
+            "Merge them into one edit or target disjoint regions.",
         );
       }
     }
@@ -581,8 +593,7 @@ export default function slowMode(pi: ExtensionAPI) {
     let approved = false;
     let rejectionReason = "";
 
-    reviewLoop:
-    while (true) {
+    reviewLoop: while (true) {
       const currentOldText = readFileSync(oldPath, "utf-8");
       const currentNewText = readFileSync(newPath, "utf-8");
       const diff = generateUnifiedDiff(displayPath, currentOldText, currentNewText);
@@ -644,13 +655,13 @@ export default function slowMode(pi: ExtensionAPI) {
    * Options for the review UI component
    */
   interface ReviewOptions {
-    operation: "WRITE" | "EDIT";   // Type of change being reviewed
-    filePath: string;               // Relative path to the file
-    stagePath: string;              // Path to staged file (for writes and as fallback)
-    body: string;                   // Content to display (file content or diff)
-    oldPath?: string;               // Staged old file (edits only)
-    newPath?: string;               // Staged new file (edits only)
-    allowEdit?: boolean;            // Allow editing in external editor (default: false)
+    operation: "WRITE" | "EDIT"; // Type of change being reviewed
+    filePath: string; // Relative path to the file
+    stagePath: string; // Path to staged file (for writes and as fallback)
+    body: string; // Content to display (file content or diff)
+    oldPath?: string; // Staged old file (edits only)
+    newPath?: string; // Staged new file (edits only)
+    allowEdit?: boolean; // Allow editing in external editor (default: false)
   }
 
   /**
@@ -687,7 +698,12 @@ export default function slowMode(pi: ExtensionAPI) {
         localCompleted = !signal.aborted;
         return localOutcome === null ? "Approve" : "Reject";
       };
-      const remoteChoice = paseoRemoteSelect(remoteReview.title, remoteReview.options, localSelect, ctx.signal);
+      const remoteChoice = paseoRemoteSelect(
+        remoteReview.title,
+        remoteReview.options,
+        localSelect,
+        ctx.signal,
+      );
       if (remoteChoice !== null) {
         const choice = await remoteChoice;
         if (localCompleted) return localOutcome;
@@ -750,7 +766,7 @@ export default function slowMode(pi: ExtensionAPI) {
        * Open staged files in external viewer/editor
        * For edits: opens nvim/vim diff
        * For writes: opens file in $VISUAL/$EDITOR
-       * 
+       *
        * If allowEdit is true, reloads content after editing.
        */
       function openExternal() {
@@ -760,7 +776,7 @@ export default function slowMode(pi: ExtensionAPI) {
           } else {
             openExternalFile(opts.stagePath);
           }
-          
+
           // If editing is allowed, reload and display the updated content
           if (opts.allowEdit) {
             try {
@@ -914,11 +930,8 @@ export default function slowMode(pi: ExtensionAPI) {
         lines.push("");
 
         // Scrollable content/diff window
-        const visible = bodyLines.slice(
-          scrollOffset,
-          scrollOffset + maxVisible,
-        );
-        
+        const visible = bodyLines.slice(scrollOffset, scrollOffset + maxVisible);
+
         for (const line of visible) {
           if (opts.operation === "EDIT") {
             // Manual syntax highlighting for unified diff format
@@ -965,7 +978,10 @@ export default function slowMode(pi: ExtensionAPI) {
         } else {
           const ctrlOHint = opts.allowEdit ? "Ctrl+O edit externally" : "Ctrl+O view externally";
           add(
-            theme.fg("dim", ` Enter approve • Esc reject with reason • ${ctrlOHint} • j/k u/d gg/G scroll`),
+            theme.fg(
+              "dim",
+              ` Enter approve • Esc reject with reason • ${ctrlOHint} • j/k u/d gg/G scroll`,
+            ),
           );
         }
 
@@ -993,10 +1009,10 @@ export default function slowMode(pi: ExtensionAPI) {
    * Options for the edit review UI (diff-specific)
    */
   interface EditReviewOptions {
-    filePath: string;               // Relative path to the file
-    body: string;                   // Unified diff content to display
-    oldPath: string;                // Staged old file
-    newPath: string;                // Staged new file
+    filePath: string; // Relative path to the file
+    body: string; // Unified diff content to display
+    oldPath: string; // Staged old file
+    newPath: string; // Staged new file
   }
 
   /**
@@ -1023,13 +1039,25 @@ export default function slowMode(pi: ExtensionAPI) {
     const remoteReview = buildRemoteReview("EDIT", opts.filePath, opts.body);
     if (!terminalOnly) {
       let localCompleted = false;
-      let localOutcome: "approve" | "edit" | { type: "reject"; reason: string } = { type: "reject", reason: "" };
+      let localOutcome: "approve" | "edit" | { type: "reject"; reason: string } = {
+        type: "reject",
+        reason: "",
+      };
       const localSelect = async (signal: AbortSignal) => {
         localOutcome = await showEditReview(ctx, opts, true, signal);
         localCompleted = !signal.aborted;
-        return localOutcome === "approve" ? "Approve" : localOutcome === "edit" ? "Review in terminal" : "Reject";
+        return localOutcome === "approve"
+          ? "Approve"
+          : localOutcome === "edit"
+            ? "Review in terminal"
+            : "Reject";
       };
-      const remoteChoice = paseoRemoteSelect(remoteReview.title, remoteReview.options, localSelect, ctx.signal);
+      const remoteChoice = paseoRemoteSelect(
+        remoteReview.title,
+        remoteReview.options,
+        localSelect,
+        ctx.signal,
+      );
       if (remoteChoice !== null) {
         const choice = await remoteChoice;
         if (localCompleted) return localOutcome;
@@ -1040,191 +1068,201 @@ export default function slowMode(pi: ExtensionAPI) {
 
     const { matchesKey, Key } = await import("@mariozechner/pi-tui");
 
-    return ctx.ui.custom<"approve" | "edit" | { type: "reject"; reason: string }>((tui, theme, _kb, done) => {
-      const abort = () => done({ type: "reject", reason: "" });
-      dialogSignal.addEventListener("abort", abort, { once: true });
-      // Scroll state
-      let scrollOffset = 0;
-      let cachedLines: string[] | undefined;
+    return ctx.ui.custom<"approve" | "edit" | { type: "reject"; reason: string }>(
+      (tui, theme, _kb, done) => {
+        const abort = () => done({ type: "reject", reason: "" });
+        dialogSignal.addEventListener("abort", abort, { once: true });
+        // Scroll state
+        let scrollOffset = 0;
+        let cachedLines: string[] | undefined;
 
-      // Whether the user is currently typing a rejection reason
-      let typing = false;
-      let reasonBuffer = "";
+        // Whether the user is currently typing a rejection reason
+        let typing = false;
+        let reasonBuffer = "";
 
-      // Content split into lines for scrolling
-      const bodyLines = opts.body.split("\n");
+        // Content split into lines for scrolling
+        const bodyLines = opts.body.split("\n");
 
-      // Max visible content lines — adapt to terminal height (see showReview).
-      const maxVisible = Math.max(3, tui.terminal.rows - 16);
-      let maxScroll = Math.max(0, bodyLines.length - maxVisible);
+        // Max visible content lines — adapt to terminal height (see showReview).
+        const maxVisible = Math.max(3, tui.terminal.rows - 16);
+        let maxScroll = Math.max(0, bodyLines.length - maxVisible);
 
-      // Track last 'g' press for gg binding
-      let lastGPress = 0;
+        // Track last 'g' press for gg binding
+        let lastGPress = 0;
 
-      function clampScroll(offset: number) {
-        scrollOffset = Math.max(0, Math.min(maxScroll, offset));
-      }
+        function clampScroll(offset: number) {
+          scrollOffset = Math.max(0, Math.min(maxScroll, offset));
+        }
 
-      function refresh() {
-        cachedLines = undefined;
-        tui.requestRender();
-      }
+        function refresh() {
+          cachedLines = undefined;
+          tui.requestRender();
+        }
 
-      function handleInput(data: string) {
-        // While typing a rejection reason
-        if (typing) {
+        function handleInput(data: string) {
+          // While typing a rejection reason
+          if (typing) {
+            if (matchesKey(data, Key.enter)) {
+              done({ type: "reject", reason: reasonBuffer });
+              return;
+            }
+            if (matchesKey(data, Key.escape)) {
+              // Cancel — go back to reviewing
+              typing = false;
+              reasonBuffer = "";
+              refresh();
+              return;
+            }
+            if (data === "\x7f" || data === "\b") {
+              reasonBuffer = reasonBuffer.slice(0, -1);
+              refresh();
+              return;
+            }
+            if (data.length === 1 && data.charCodeAt(0) >= 32) {
+              reasonBuffer += data;
+              refresh();
+              return;
+            }
+            return;
+          }
+
+          // Approve
           if (matchesKey(data, Key.enter)) {
-            done({ type: "reject", reason: reasonBuffer });
+            done("approve");
             return;
           }
+
+          // Enter rejection-reason prompt
           if (matchesKey(data, Key.escape)) {
-            // Cancel — go back to reviewing
-            typing = false;
-            reasonBuffer = "";
+            typing = true;
             refresh();
             return;
           }
-          if (data === "\x7f" || data === "\b") {
-            reasonBuffer = reasonBuffer.slice(0, -1);
+
+          // Edit: open just the new file in the user's editor
+          if (matchesKey(data, Key.ctrl("e"))) {
+            done("edit");
+            return;
+          }
+
+          // View diff externally (read-only)
+          if (matchesKey(data, Key.ctrl("o"))) {
+            try {
+              openExternalDiff(opts.oldPath, opts.newPath, opts.filePath);
+            } catch {
+              // External viewer failed — stay in inline review
+            }
             refresh();
             return;
           }
-          if (data.length === 1 && data.charCodeAt(0) >= 32) {
-            reasonBuffer += data;
+
+          // Vim-style navigation
+          if (data === "k" || matchesKey(data, Key.up)) {
+            clampScroll(scrollOffset - 1);
             refresh();
             return;
           }
-          return;
-        }
-
-        // Approve
-        if (matchesKey(data, Key.enter)) {
-          done("approve");
-          return;
-        }
-
-        // Enter rejection-reason prompt
-        if (matchesKey(data, Key.escape)) {
-          typing = true;
-          refresh();
-          return;
-        }
-
-        // Edit: open just the new file in the user's editor
-        if (matchesKey(data, Key.ctrl("e"))) {
-          done("edit");
-          return;
-        }
-
-        // View diff externally (read-only)
-        if (matchesKey(data, Key.ctrl("o"))) {
-          try {
-            openExternalDiff(opts.oldPath, opts.newPath, opts.filePath);
-          } catch {
-            // External viewer failed — stay in inline review
-          }
-          refresh();
-          return;
-        }
-
-        // Vim-style navigation
-        if (data === "k" || matchesKey(data, Key.up)) {
-          clampScroll(scrollOffset - 1);
-          refresh();
-          return;
-        }
-        if (data === "j" || matchesKey(data, Key.down)) {
-          clampScroll(scrollOffset + 1);
-          refresh();
-          return;
-        }
-        if (data === "u" || matchesKey(data, Key.pageUp)) {
-          clampScroll(scrollOffset - 15);
-          refresh();
-          return;
-        }
-        if (data === "d" || matchesKey(data, Key.pageDown)) {
-          clampScroll(scrollOffset + 15);
-          refresh();
-          return;
-        }
-        if (data === "g") {
-          const now = Date.now();
-          if (now - lastGPress < 500) {
-            scrollOffset = 0;
+          if (data === "j" || matchesKey(data, Key.down)) {
+            clampScroll(scrollOffset + 1);
             refresh();
-            lastGPress = 0;
+            return;
+          }
+          if (data === "u" || matchesKey(data, Key.pageUp)) {
+            clampScroll(scrollOffset - 15);
+            refresh();
+            return;
+          }
+          if (data === "d" || matchesKey(data, Key.pageDown)) {
+            clampScroll(scrollOffset + 15);
+            refresh();
+            return;
+          }
+          if (data === "g") {
+            const now = Date.now();
+            if (now - lastGPress < 500) {
+              scrollOffset = 0;
+              refresh();
+              lastGPress = 0;
+            } else {
+              lastGPress = now;
+            }
+            return;
+          }
+          if (data === "G") {
+            scrollOffset = maxScroll;
+            refresh();
+            return;
+          }
+        }
+
+        function render(width: number): string[] {
+          if (cachedLines) return cachedLines;
+
+          const lines: string[] = [];
+          const add = (s: string) => lines.push(truncateToWidth(s, width));
+
+          add(theme.fg("accent", "─".repeat(width)));
+          add(theme.fg("accent", " EDIT (diff)"));
+          add(` ${theme.fg("accent", opts.filePath)}`);
+          lines.push("");
+
+          // Scrollable diff window with syntax highlighting
+          const visible = bodyLines.slice(scrollOffset, scrollOffset + maxVisible);
+
+          for (const line of visible) {
+            // Manual syntax highlighting for unified diff format
+            if (line.startsWith("---") || line.startsWith("+++")) {
+              add(` ${theme.fg("dim", line)}`);
+            } else if (line.startsWith("@@")) {
+              add(` ${theme.fg("accent", line)}`);
+            } else if (line.startsWith("+")) {
+              add(` ${theme.fg("success", line)}`);
+            } else if (line.startsWith("-")) {
+              add(` ${theme.fg("error", line)}`);
+            } else {
+              add(` ${theme.fg("text", line)}`);
+            }
+          }
+
+          if (bodyLines.length > maxVisible) {
+            const total = bodyLines.length;
+            const end = Math.min(scrollOffset + maxVisible, total);
+            add(
+              theme.fg(
+                "dim",
+                ` (lines ${scrollOffset + 1}–${end} of ${total} — ↑↓/PgUp/PgDn to scroll)`,
+              ),
+            );
+          }
+
+          lines.push("");
+          if (typing) {
+            add(theme.fg("warning", ` Reject — type a reason and press Enter, or Esc to cancel:`));
+            add(theme.fg("text", ` > ${reasonBuffer}▌`));
           } else {
-            lastGPress = now;
+            add(
+              theme.fg(
+                "dim",
+                ` Enter approve • Esc reject with reason • Ctrl+E edit • Ctrl+O view diff • j/k u/d gg/G scroll`,
+              ),
+            );
           }
-          return;
-        }
-        if (data === "G") {
-          scrollOffset = maxScroll;
-          refresh();
-          return;
-        }
-      }
+          add(theme.fg("accent", "─".repeat(width)));
 
-      function render(width: number): string[] {
-        if (cachedLines) return cachedLines;
-
-        const lines: string[] = [];
-        const add = (s: string) => lines.push(truncateToWidth(s, width));
-
-        add(theme.fg("accent", "─".repeat(width)));
-        add(theme.fg("accent", " EDIT (diff)"));
-        add(` ${theme.fg("accent", opts.filePath)}`);
-        lines.push("");
-
-        // Scrollable diff window with syntax highlighting
-        const visible = bodyLines.slice(scrollOffset, scrollOffset + maxVisible);
-        
-        for (const line of visible) {
-          // Manual syntax highlighting for unified diff format
-          if (line.startsWith("---") || line.startsWith("+++")) {
-            add(` ${theme.fg("dim", line)}`);
-          } else if (line.startsWith("@@")) {
-            add(` ${theme.fg("accent", line)}`);
-          } else if (line.startsWith("+")) {
-            add(` ${theme.fg("success", line)}`);
-          } else if (line.startsWith("-")) {
-            add(` ${theme.fg("error", line)}`);
-          } else {
-            add(` ${theme.fg("text", line)}`);
-          }
+          cachedLines = lines;
+          return lines;
         }
 
-        if (bodyLines.length > maxVisible) {
-          const total = bodyLines.length;
-          const end = Math.min(scrollOffset + maxVisible, total);
-          add(
-            theme.fg("dim", ` (lines ${scrollOffset + 1}–${end} of ${total} — ↑↓/PgUp/PgDn to scroll)`),
-          );
-        }
-
-        lines.push("");
-        if (typing) {
-          add(theme.fg("warning", ` Reject — type a reason and press Enter, or Esc to cancel:`));
-          add(theme.fg("text", ` > ${reasonBuffer}▌`));
-        } else {
-          add(
-            theme.fg("dim", ` Enter approve • Esc reject with reason • Ctrl+E edit • Ctrl+O view diff • j/k u/d gg/G scroll`),
-          );
-        }
-        add(theme.fg("accent", "─".repeat(width)));
-
-        cachedLines = lines;
-        return lines;
-      }
-
-      return {
-        render,
-        invalidate: () => { cachedLines = undefined; },
-        handleInput,
-        dispose: () => dialogSignal.removeEventListener("abort", abort),
-      };
-    });
+        return {
+          render,
+          invalidate: () => {
+            cachedLines = undefined;
+          },
+          handleInput,
+          dispose: () => dialogSignal.removeEventListener("abort", abort),
+        };
+      },
+    );
   }
 
   ////----------------------------------------
@@ -1333,9 +1371,7 @@ export default function slowMode(pi: ExtensionAPI) {
     out.push(`+++ b/${filePath}`);
 
     for (const hunk of hunks) {
-      out.push(
-        `@@ -${hunk.oldStart},${hunk.oldCount} +${hunk.newStart},${hunk.newCount} @@`,
-      );
+      out.push(`@@ -${hunk.oldStart},${hunk.oldCount} +${hunk.newStart},${hunk.newCount} @@`);
       for (const line of hunk.lines) {
         out.push(line);
       }
@@ -1376,8 +1412,7 @@ export default function slowMode(pi: ExtensionAPI) {
     // Store each V snapshot to reconstruct the path
     const trace: Int32Array[] = [];
 
-    outer:
-    for (let d = 0; d <= max; d++) {
+    outer: for (let d = 0; d <= max; d++) {
       // Save current state before modification
       trace.push(v.slice());
 
@@ -1457,11 +1492,11 @@ export default function slowMode(pi: ExtensionAPI) {
    * A hunk in a unified diff.
    */
   interface Hunk {
-    oldStart: number;  // 1-based start line in old file
-    oldCount: number;  // number of old-file lines in hunk
-    newStart: number;  // 1-based start line in new file
-    newCount: number;  // number of new-file lines in hunk
-    lines: string[];   // prefixed lines (" ", "+", "-")
+    oldStart: number; // 1-based start line in old file
+    oldCount: number; // number of old-file lines in hunk
+    newStart: number; // 1-based start line in new file
+    newCount: number; // number of new-file lines in hunk
+    lines: string[]; // prefixed lines (" ", "+", "-")
   }
 
   /**

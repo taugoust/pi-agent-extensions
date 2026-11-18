@@ -18,15 +18,26 @@ const toVirtual = (value: string) => {
 }
 
 {
-  const result = normalizeSupervisorSubagentCwds({ task: "review", cwd: `${real}/src` }, real, toVirtual);
+  const result = normalizeSupervisorSubagentCwds(
+    { task: "review", cwd: `${real}/src` },
+    real,
+    toVirtual,
+  );
   assert.equal(result.parentCwd, "/workspace/src");
   assert.equal(result.params.cwd, "/workspace/src");
 }
 
 {
-  const result = normalizeSupervisorSubagentCwds({
-    tasks: [{ task: "one", cwd: "src" }, { task: "two", cwd: `${work}/tests` }],
-  }, real, toVirtual);
+  const result = normalizeSupervisorSubagentCwds(
+    {
+      tasks: [
+        { task: "one", cwd: "src" },
+        { task: "two", cwd: `${work}/tests` },
+      ],
+    },
+    real,
+    toVirtual,
+  );
   assert.equal(result.parentCwd, "/workspace");
   assert.deepEqual(result.params.tasks, [
     { task: "one", cwd: "/workspace/src" },
@@ -35,10 +46,14 @@ const toVirtual = (value: string) => {
 }
 
 {
-  const result = normalizeSupervisorSubagentCwds({
-    cwd: "packages/app",
-    chain: [{ task: "one", cwd: "src" }, { task: "two" }],
-  }, real, toVirtual);
+  const result = normalizeSupervisorSubagentCwds(
+    {
+      cwd: "packages/app",
+      chain: [{ task: "one", cwd: "src" }, { task: "two" }],
+    },
+    real,
+    toVirtual,
+  );
   assert.equal(result.parentCwd, "/workspace/packages/app");
   assert.deepEqual(result.params.chain, [
     { task: "one", cwd: "/workspace/packages/app/src" },

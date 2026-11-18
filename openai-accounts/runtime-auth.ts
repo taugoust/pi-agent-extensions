@@ -5,7 +5,11 @@ import type { ExtensionAPI, ExtensionContext } from "@earendil-works/pi-coding-a
 import type { StoredCredential } from "./account-store.js";
 import type { AccountActivationErrorCode } from "./accounts-protocol.js";
 import { EffectiveAuthConflictError, verifyModelApiKeyAuth } from "./model-auth-verification.js";
-import { type AccountProviderAdapter, type AccountProviderId, resolveProviderOAuth } from "./oauth.js";
+import {
+  type AccountProviderAdapter,
+  type AccountProviderId,
+  resolveProviderOAuth,
+} from "./oauth.js";
 import { cloneOAuthCredential, parseCredentialRequest } from "./oauth-credential-source.js";
 
 export const RUNTIME_FAIL_CLOSED_API_KEY = "pi-accounts-auth-failed";
@@ -14,7 +18,11 @@ const REFRESH_SKEW_MS = 5 * 60 * 1000;
 const SHUTDOWN_CATALOG_REFRESH_TIMEOUT_MS = 3_000;
 
 type RuntimeAuthStorage = {
-  setRuntimeApiKey(provider: string, apiKey: string, options?: { signal?: AbortSignal }): void | Promise<void>;
+  setRuntimeApiKey(
+    provider: string,
+    apiKey: string,
+    options?: { signal?: AbortSignal },
+  ): void | Promise<void>;
   removeRuntimeApiKey(provider: string, options?: { signal?: AbortSignal }): void | Promise<void>;
 };
 
@@ -51,7 +59,10 @@ type ActiveCredentialOffer = {
 };
 
 export type RuntimeAccountStore = {
-  readProviderAsync(providerId: AccountProviderId, signal?: AbortSignal): Promise<ProviderAccountState>;
+  readProviderAsync(
+    providerId: AccountProviderId,
+    signal?: AbortSignal,
+  ): Promise<ProviderAccountState>;
   updateProviderAsync(
     providerId: AccountProviderId,
     mutator: (state: ProviderAccountState) => Promise<ProviderAccountState>,
@@ -91,7 +102,7 @@ export class RuntimeAuthCoordinator {
   }
 
   private oauth(ctx: ExtensionContext): ReturnType<typeof resolveProviderOAuth> {
-    return this.providerOAuth ??= resolveProviderOAuth(this.provider, ctx);
+    return (this.providerOAuth ??= resolveProviderOAuth(this.provider, ctx));
   }
 
   async ensureActive(
@@ -105,7 +116,9 @@ export class RuntimeAuthCoordinator {
     const operation = this.overlay.beginOperation();
     const runtimeOverride = this.controller.begin(ctx);
     const operationSignal = this.beginRefreshOperation();
-    const refreshSignal = ownerSignal ? AbortSignal.any([operationSignal, ownerSignal]) : operationSignal;
+    const refreshSignal = ownerSignal
+      ? AbortSignal.any([operationSignal, ownerSignal])
+      : operationSignal;
     let state: ProviderAccountState;
     try {
       refreshSignal.throwIfAborted();
@@ -170,7 +183,11 @@ export class RuntimeAuthCoordinator {
             const latestCredential = getOwnCredential(latest.accounts, active);
             if (!latestCredential) return latest;
             credential = latestCredential;
-            if (latestCredential.type !== "oauth" || latestCredential.expires > now + REFRESH_SKEW_MS) return latest;
+            if (
+              latestCredential.type !== "oauth" ||
+              latestCredential.expires > now + REFRESH_SKEW_MS
+            )
+              return latest;
             try {
               refreshSignal.throwIfAborted();
               const refreshed = await this.oauth(ctx).refresh(latestCredential, refreshSignal);
@@ -206,7 +223,12 @@ export class RuntimeAuthCoordinator {
         );
       }
       if (refreshError !== undefined) {
-        const selection = await this.selectedCredentialMatches(store, active, credential, refreshSignal);
+        const selection = await this.selectedCredentialMatches(
+          store,
+          active,
+          credential,
+          refreshSignal,
+        );
         if (selection.error !== undefined) {
           return this.failClosed(
             ctx,
@@ -240,7 +262,8 @@ export class RuntimeAuthCoordinator {
     let runtimeApiKey: string;
     try {
       if (credential.type === "api_key") {
-        if (!this.provider.supportsApiKey) throw new Error(`${this.provider.displayName} does not support API keys.`);
+        if (!this.provider.supportsApiKey)
+          throw new Error(`${this.provider.displayName} does not support API keys.`);
         auth = { apiKey: credential.key };
         runtimeApiKey = credential.key;
       } else {
@@ -250,7 +273,12 @@ export class RuntimeAuthCoordinator {
         runtimeApiKey = validated.runtimeApiKey;
       }
     } catch (error) {
-      const selection = await this.selectedCredentialMatches(store, active, credential, refreshSignal);
+      const selection = await this.selectedCredentialMatches(
+        store,
+        active,
+        credential,
+        refreshSignal,
+      );
       if (selection.error !== undefined) {
         return this.failClosed(
           ctx,
@@ -268,12 +296,33 @@ export class RuntimeAuthCoordinator {
         }
         return this.ensureActive(ctx, store, active, now, ownerSignal);
       }
-      return this.failClosed(ctx, operation, runtimeOverride, active, error, credential, "authentication_failed");
+      return this.failClosed(
+        ctx,
+        operation,
+        runtimeOverride,
+        active,
+        error,
+        credential,
+        "authentication_failed",
+      );
     }
 
-    const selection = await this.selectedCredentialMatches(store, active, credential, refreshSignal);
+    const selection = await this.selectedCredentialMatches(
+      store,
+      active,
+      credential,
+      refreshSignal,
+    );
     if (selection.error !== undefined) {
-      return this.failClosed(ctx, operation, runtimeOverride, active, selection.error, credential, "store_unavailable");
+      return this.failClosed(
+        ctx,
+        operation,
+        runtimeOverride,
+        active,
+        selection.error,
+        credential,
+        "store_unavailable",
+      );
     }
     if (!selection.matches) {
       if (!this.overlay.isCurrent(operation)) {
@@ -288,7 +337,12 @@ export class RuntimeAuthCoordinator {
       if (!this.overlay.apply(ctx, operation, auth, availableModelIds)) {
         return { status: "inactive", providerId: this.provider.id };
       }
-      const applied = await this.controller.apply(ctx, runtimeOverride, runtimeApiKey, refreshSignal);
+      const applied = await this.controller.apply(
+        ctx,
+        runtimeOverride,
+        runtimeApiKey,
+        refreshSignal,
+      );
       if (applied === "stale") return { status: "inactive", providerId: this.provider.id };
       if (applied === "unavailable") {
         throw new Error(`Pi did not retain the runtime ${this.provider.displayName} credential.`);
@@ -304,7 +358,12 @@ export class RuntimeAuthCoordinator {
       if (!this.overlay.isCurrent(operation)) {
         return { status: "inactive", providerId: this.provider.id };
       }
-      const refreshedSelection = await this.selectedCredentialMatches(store, active, credential, refreshSignal);
+      const refreshedSelection = await this.selectedCredentialMatches(
+        store,
+        active,
+        credential,
+        refreshSignal,
+      );
       if (refreshedSelection.error !== undefined) {
         return this.failClosed(
           ctx,
@@ -326,13 +385,20 @@ export class RuntimeAuthCoordinator {
       await this.verifyOverlay(ctx, auth, refreshSignal, availableModelIds);
       refreshSignal.throwIfAborted();
       if (auth.apiKey !== undefined) {
-        await verifyModelApiKeyAuth(ctx, this.provider, auth.apiKey, refreshSignal, availableModelIds);
+        await verifyModelApiKeyAuth(
+          ctx,
+          this.provider,
+          auth.apiKey,
+          refreshSignal,
+          availableModelIds,
+        );
         refreshSignal.throwIfAborted();
       }
       if (!this.overlay.isCurrent(operation)) {
         return { status: "inactive", providerId: this.provider.id };
       }
-      const credentialClone = credential.type === "api_key" ? { ...credential } : cloneOAuthCredential(credential);
+      const credentialClone =
+        credential.type === "api_key" ? { ...credential } : cloneOAuthCredential(credential);
       if (!credentialClone) {
         throw new Error(`${this.provider.displayName} credential could not be cloned safely.`);
       }
@@ -352,7 +418,9 @@ export class RuntimeAuthCoordinator {
         active,
         error,
         credential,
-        error instanceof EffectiveAuthConflictError ? "effective_auth_conflict" : "activation_failed",
+        error instanceof EffectiveAuthConflictError
+          ? "effective_auth_conflict"
+          : "activation_failed",
       );
     }
   }
@@ -371,17 +439,24 @@ export class RuntimeAuthCoordinator {
       pending.accountName !== result.accountName ||
       !this.overlay.isCurrent(pending.operation)
     ) {
-      throw new Error(`${this.provider.displayName} could not identify the credential applied to this session.`);
+      throw new Error(
+        `${this.provider.displayName} could not identify the credential applied to this session.`,
+      );
     }
     return `${pending.accountName}:${credentialSecret(pending.credential)}`;
   }
 
-  publishCredentialOffer(ctx: ExtensionContext, result: EnsureActiveProviderAuthResult, activeIdentity: string): void {
+  publishCredentialOffer(
+    ctx: ExtensionContext,
+    result: EnsureActiveProviderAuthResult,
+    activeIdentity: string,
+  ): void {
     this.activeCredentialOffer = undefined;
     const pending = this.pendingCredentialOffer;
     this.pendingCredentialOffer = undefined;
     if (result.status !== "active" || !pending) return;
-    if (pending.session !== ctx.sessionManager || pending.accountName !== result.accountName) return;
+    if (pending.session !== ctx.sessionManager || pending.accountName !== result.accountName)
+      return;
     if (!this.overlay.isCurrent(pending.operation)) return;
     if (activeIdentity !== `${pending.accountName}:${credentialSecret(pending.credential)}`) return;
     if (pending.credential.type !== "oauth") return;
@@ -415,7 +490,11 @@ export class RuntimeAuthCoordinator {
     return this.refreshController.signal;
   }
 
-  private async restoreDefault(ctx: ExtensionContext, operation: number, signal: AbortSignal): Promise<void> {
+  private async restoreDefault(
+    ctx: ExtensionContext,
+    operation: number,
+    signal: AbortSignal,
+  ): Promise<void> {
     signal.throwIfAborted();
     await this.controller.clear(ctx, signal);
     signal.throwIfAborted();
@@ -451,10 +530,13 @@ export class RuntimeAuthCoordinator {
   }
 
   private async rebindRefreshedModel(ctx: ExtensionContext, operation: number): Promise<void> {
-    if (!this.provider.refreshModelCatalogAfterAuth || ctx.model?.provider !== this.provider.id) return;
+    if (!this.provider.refreshModelCatalogAfterAuth || ctx.model?.provider !== this.provider.id)
+      return;
     const refreshed = ctx.modelRegistry.find(this.provider.id, ctx.model.id);
     if (!refreshed) {
-      throw new Error(`${this.provider.displayName} model ${ctx.model.id} is unavailable after catalog refresh.`);
+      throw new Error(
+        `${this.provider.displayName} model ${ctx.model.id} is unavailable after catalog refresh.`,
+      );
     }
     if (sameModelDefinition(ctx.model, refreshed)) return;
     if (!this.overlay.isCurrent(operation)) return;
@@ -497,7 +579,10 @@ export class RuntimeAuthCoordinator {
       if (restoreDefaultCatalog && this.catalogAuthIdentity !== undefined) {
         await this.refreshModelCatalog(
           ctx,
-          AbortSignal.any([this.refreshController.signal, AbortSignal.timeout(SHUTDOWN_CATALOG_REFRESH_TIMEOUT_MS)]),
+          AbortSignal.any([
+            this.refreshController.signal,
+            AbortSignal.timeout(SHUTDOWN_CATALOG_REFRESH_TIMEOUT_MS),
+          ]),
           "default",
         );
       }
@@ -522,13 +607,26 @@ export class RuntimeAuthCoordinator {
     this.clearCredentialOffer();
     let suffix = "";
     try {
-      this.overlay.apply(ctx, operation, {}, credential ? safelyReadAvailableModelIds(credential) : undefined);
+      this.overlay.apply(
+        ctx,
+        operation,
+        {},
+        credential ? safelyReadAvailableModelIds(credential) : undefined,
+      );
     } catch {
       suffix = " Pi could not apply the fail-closed provider overlay.";
     }
     try {
-      const failClosedSignal = AbortSignal.any([this.refreshController.signal, AbortSignal.timeout(5_000)]);
-      const applied = await this.controller.apply(ctx, runtimeOverride, this.failClosedApiKey, failClosedSignal);
+      const failClosedSignal = AbortSignal.any([
+        this.refreshController.signal,
+        AbortSignal.timeout(5_000),
+      ]);
+      const applied = await this.controller.apply(
+        ctx,
+        runtimeOverride,
+        this.failClosedApiKey,
+        failClosedSignal,
+      );
       if (applied === "stale") return { status: "inactive", providerId: this.provider.id };
       if (applied === "unavailable") suffix += " Pi did not accept the fail-closed credential.";
     } catch {
@@ -589,7 +687,9 @@ export class RuntimeAuthCoordinator {
       const model = findProviderModel(ctx, this.provider.id, candidate.id);
       if (!model) continue;
       if (auth.baseUrl && model.baseUrl !== auth.baseUrl) {
-        throw new EffectiveAuthConflictError(`Pi did not apply the runtime ${this.provider.displayName} endpoint.`);
+        throw new EffectiveAuthConflictError(
+          `Pi did not apply the runtime ${this.provider.displayName} endpoint.`,
+        );
       }
       if (!auth.headers) continue;
       const resolved = await getApiKeyAndHeaders(ctx, model);
@@ -602,10 +702,14 @@ export class RuntimeAuthCoordinator {
           ([header]) => header.toLowerCase() === name.toLowerCase(),
         );
         if (value !== null && (matches.length !== 1 || matches[0]?.[1] !== value)) {
-          throw new EffectiveAuthConflictError(`Pi did not apply the runtime ${this.provider.displayName} headers.`);
+          throw new EffectiveAuthConflictError(
+            `Pi did not apply the runtime ${this.provider.displayName} headers.`,
+          );
         }
         if (value === null && matches.length > 0) {
-          throw new EffectiveAuthConflictError(`Pi did not remove the runtime ${this.provider.displayName} header.`);
+          throw new EffectiveAuthConflictError(
+            `Pi did not remove the runtime ${this.provider.displayName} header.`,
+          );
         }
       }
     }
@@ -633,7 +737,12 @@ class RuntimeProviderOverlay {
     return generation === this.generation;
   }
 
-  apply(ctx: ExtensionContext, generation: number, auth: ModelAuth, availableModelIds?: readonly string[]): boolean {
+  apply(
+    ctx: ExtensionContext,
+    generation: number,
+    auth: ModelAuth,
+    availableModelIds?: readonly string[],
+  ): boolean {
     if (generation !== this.generation) return false;
     const needsOverlay =
       this.provider.requiresApiKeyBridge ||
@@ -678,7 +787,10 @@ class RuntimeProviderOverlay {
     this.reset();
   }
 
-  private buildConfig(auth: ModelAuth, availableModelIds?: readonly string[]): RuntimeProviderConfig {
+  private buildConfig(
+    auth: ModelAuth,
+    availableModelIds?: readonly string[],
+  ): RuntimeProviderConfig {
     const next: RuntimeProviderConfig = { ...(this.previous ?? {}) };
     if (this.provider.requiresApiKeyBridge) next.apiKey = this.fallbackApiKey;
     if (auth.baseUrl) next.baseUrl = auth.baseUrl;
@@ -741,7 +853,9 @@ class RuntimeApiKeyController {
     const matches = await waitWithSignal(this.matches(ctx, apiKey), signal);
     if (matches !== false) return "applied";
     if (!(await this.set(snapshot, apiKey, true, signal))) return "stale";
-    return (await waitWithSignal(this.matches(ctx, apiKey), signal)) === false ? "unavailable" : "applied";
+    return (await waitWithSignal(this.matches(ctx, apiKey), signal)) === false
+      ? "unavailable"
+      : "applied";
   }
 
   invalidate(ctx: ExtensionContext): void {
@@ -779,8 +893,14 @@ class RuntimeApiKeyController {
     }
   }
 
-  private async set(snapshot: RuntimeOverrideSnapshot | undefined, apiKey: string, force = false, signal = AbortSignal.timeout(30_000)): Promise<boolean> {
-    if (!snapshot) throw new Error("This Pi version does not expose runtime provider authentication.");
+  private async set(
+    snapshot: RuntimeOverrideSnapshot | undefined,
+    apiKey: string,
+    force = false,
+    signal = AbortSignal.timeout(30_000),
+  ): Promise<boolean> {
+    if (!snapshot)
+      throw new Error("This Pi version does not expose runtime provider authentication.");
     const { generation, state, target } = snapshot;
     const mutation = enqueueMutation(state, async () => {
       signal.throwIfAborted();
@@ -826,7 +946,10 @@ function replaceModelDefinition(target: object, source: object): void {
   }
 }
 
-function readProviderModels(ctx: ExtensionContext, providerId: string): NonNullable<RuntimeProviderConfig["models"]> {
+function readProviderModels(
+  ctx: ExtensionContext,
+  providerId: string,
+): NonNullable<RuntimeProviderConfig["models"]> {
   const registry = ctx.modelRegistry as unknown as {
     getAll?: () => readonly Record<string, unknown>[];
   };
@@ -860,7 +983,10 @@ function readHeader(
   return undefined;
 }
 
-function hasHeader(headers: ProviderHeaders | Record<string, string> | undefined, name: string): boolean {
+function hasHeader(
+  headers: ProviderHeaders | Record<string, string> | undefined,
+  name: string,
+): boolean {
   const expected = name.toLowerCase();
   return Object.keys(headers ?? {}).some((candidate) => candidate.toLowerCase() === expected);
 }
@@ -923,10 +1049,18 @@ function validateModelAuth(
     : [];
   if (auth.apiKey !== undefined) {
     if (typeof auth.apiKey !== "string" || !auth.apiKey || existingAuthorization.length > 0) {
-      throw new Error(`${providerName} OAuth returned conflicting API-key and Authorization authentication.`);
+      throw new Error(
+        `${providerName} OAuth returned conflicting API-key and Authorization authentication.`,
+      );
     }
     const { apiKey, ...authWithoutApiKey } = auth;
-    auth = { ...authWithoutApiKey, headers: { ...(isRecord(auth.headers) ? auth.headers : {}), Authorization: `Bearer ${apiKey}` } };
+    auth = {
+      ...authWithoutApiKey,
+      headers: {
+        ...(isRecord(auth.headers) ? auth.headers : {}),
+        Authorization: `Bearer ${apiKey}`,
+      },
+    };
   }
   const authorizationHeaders = isRecord(auth.headers)
     ? Object.entries(auth.headers).filter(([name]) => name.toLowerCase() === "authorization")
@@ -969,7 +1103,10 @@ function findProviderModel(
   modelId: string,
 ): { provider: string; id: string; baseUrl?: string } | undefined {
   const registry = ctx.modelRegistry as unknown as {
-    find?: (provider: string, id: string) => { provider: string; id: string; baseUrl?: string } | undefined;
+    find?: (
+      provider: string,
+      id: string,
+    ) => { provider: string; id: string; baseUrl?: string } | undefined;
   };
   return typeof registry.find === "function" ? registry.find(providerId, modelId) : undefined;
 }
@@ -977,13 +1114,21 @@ function findProviderModel(
 async function getApiKeyAndHeaders(
   ctx: ExtensionContext,
   model: { provider: string; id: string; baseUrl?: string },
-): Promise<{ ok: true; apiKey?: string; headers?: ProviderHeaders } | { ok: false; error: string } | undefined> {
+): Promise<
+  | { ok: true; apiKey?: string; headers?: ProviderHeaders }
+  | { ok: false; error: string }
+  | undefined
+> {
   const registry = ctx.modelRegistry as unknown as {
     getApiKeyAndHeaders?: (
       candidate: unknown,
-    ) => Promise<{ ok: true; apiKey?: string; headers?: ProviderHeaders } | { ok: false; error: string }>;
+    ) => Promise<
+      { ok: true; apiKey?: string; headers?: ProviderHeaders } | { ok: false; error: string }
+    >;
   };
-  return typeof registry.getApiKeyAndHeaders === "function" ? registry.getApiKeyAndHeaders(model) : undefined;
+  return typeof registry.getApiKeyAndHeaders === "function"
+    ? registry.getApiKeyAndHeaders(model)
+    : undefined;
 }
 
 function defineOwn(
@@ -1001,11 +1146,17 @@ function defineOwn(
   return next;
 }
 
-function getOwnCredential(accounts: Record<string, StoredCredential>, name: string): StoredCredential | undefined {
+function getOwnCredential(
+  accounts: Record<string, StoredCredential>,
+  name: string,
+): StoredCredential | undefined {
   return Object.hasOwn(accounts, name) ? accounts[name] : undefined;
 }
 
-function getRegisteredProviderConfig(ctx: ExtensionContext, providerId: string): RuntimeProviderConfig | undefined {
+function getRegisteredProviderConfig(
+  ctx: ExtensionContext,
+  providerId: string,
+): RuntimeProviderConfig | undefined {
   const registry = ctx.modelRegistry as unknown as {
     getRegisteredProviderConfig?: (provider: string) => RuntimeProviderConfig | undefined;
     registeredProviders?: Map<string, RuntimeProviderConfig>;
@@ -1013,7 +1164,9 @@ function getRegisteredProviderConfig(ctx: ExtensionContext, providerId: string):
   if (typeof registry.getRegisteredProviderConfig === "function") {
     return registry.getRegisteredProviderConfig(providerId);
   }
-  return registry.registeredProviders instanceof Map ? registry.registeredProviders.get(providerId) : undefined;
+  return registry.registeredProviders instanceof Map
+    ? registry.registeredProviders.get(providerId)
+    : undefined;
 }
 
 function shallowConfigEqual(
@@ -1025,7 +1178,10 @@ function shallowConfigEqual(
   const keys = new Set([...Object.keys(left), ...Object.keys(right)]);
   for (const key of keys) {
     if (
-      !Object.is((left as unknown as Record<string, unknown>)[key], (right as unknown as Record<string, unknown>)[key])
+      !Object.is(
+        (left as unknown as Record<string, unknown>)[key],
+        (right as unknown as Record<string, unknown>)[key],
+      )
     )
       return false;
   }
@@ -1034,17 +1190,32 @@ function shallowConfigEqual(
 
 function waitWithSignal<T>(promise: Promise<T>, signal?: AbortSignal): Promise<T> {
   if (!signal) return promise;
-  if (signal.aborted) return Promise.reject(signal.reason instanceof Error ? signal.reason : new DOMException("The operation was aborted", "AbortError"));
+  if (signal.aborted)
+    return Promise.reject(
+      signal.reason instanceof Error
+        ? signal.reason
+        : new DOMException("The operation was aborted", "AbortError"),
+    );
   return new Promise<T>((resolve, reject) => {
     const cleanup = () => signal.removeEventListener("abort", onAbort);
     const onAbort = () => {
       cleanup();
-      reject(signal.reason instanceof Error ? signal.reason : new DOMException("The operation was aborted", "AbortError"));
+      reject(
+        signal.reason instanceof Error
+          ? signal.reason
+          : new DOMException("The operation was aborted", "AbortError"),
+      );
     };
     signal.addEventListener("abort", onAbort, { once: true });
     promise.then(
-      (value) => { cleanup(); resolve(value); },
-      (error) => { cleanup(); reject(error); },
+      (value) => {
+        cleanup();
+        resolve(value);
+      },
+      (error) => {
+        cleanup();
+        reject(error);
+      },
     );
   });
 }
@@ -1102,10 +1273,15 @@ function redactCredentialError(error: unknown, credential: StoredCredential): st
 
 export function redactTokenText(text: string, exactSecrets: readonly string[] = []): string {
   const secrets = [...new Set(exactSecrets.filter(Boolean))].sort((a, b) => b.length - a.length);
-  const exact = secrets.length ? new RegExp(secrets.map((secret) => escapeRegExp(secret)).join("|"), "g") : undefined;
+  const exact = secrets.length
+    ? new RegExp(secrets.map((secret) => escapeRegExp(secret)).join("|"), "g")
+    : undefined;
   return (exact ? text.replace(exact, "<redacted>") : text)
     .replace(/Bearer\s+[A-Za-z0-9._~+/=-]+/gi, "Bearer <redacted>")
-    .replace(/"(access|refresh|access_token|refresh_token|token)"\s*:\s*"[^"]+"/gi, '"$1":"<redacted>"')
+    .replace(
+      /"(access|refresh|access_token|refresh_token|token)"\s*:\s*"[^"]+"/gi,
+      '"$1":"<redacted>"',
+    )
     .replace(/\b(access|refresh)[_-][A-Za-z0-9._~+/=-]+/gi, "$1-<redacted>");
 }
 

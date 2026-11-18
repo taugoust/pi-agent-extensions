@@ -4,7 +4,15 @@ declare module "proper-lockfile" {
     realpath?: boolean;
     stale?: number;
     update?: number;
-    retries?: number | { retries?: number; factor?: number; minTimeout?: number; maxTimeout?: number; randomize?: boolean };
+    retries?:
+      | number
+      | {
+          retries?: number;
+          factor?: number;
+          minTimeout?: number;
+          maxTimeout?: number;
+          randomize?: boolean;
+        };
     onCompromised?: (error: Error) => void;
   }
   const lockfile: {

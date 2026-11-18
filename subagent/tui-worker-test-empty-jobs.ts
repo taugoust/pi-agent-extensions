@@ -5,14 +5,16 @@ import type { ExtensionAPI } from "@mariozechner/pi-coding-agent";
 export default function emptyJobsFixture(pi: ExtensionAPI): void {
   pi.on("session_start", (_event, ctx) => {
     (globalThis as any).__paeLocalSubagentControllerV1 = {
-      protocol: 1, sessionId: ctx.sessionManager.getSessionId(),
+      protocol: 1,
+      sessionId: ctx.sessionManager.getSessionId(),
       async prepareReap(preserve: (report: unknown) => Promise<void>) {
         await preserve({ groups: [], fixture: "no subagent extension installed" });
         return () => {};
       },
     };
     (globalThis as any).__paeLocalJobControllerV1 = {
-      protocol: 1, sessionId: ctx.sessionManager.getSessionId(),
+      protocol: 1,
+      sessionId: ctx.sessionManager.getSessionId(),
       async prepareReap(preserve: (report: unknown) => Promise<void>) {
         await preserve({ jobs: [], fixture: "no job extension installed" });
         return () => {};

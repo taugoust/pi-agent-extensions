@@ -3,217 +3,548 @@ import { test } from "node:test";
 import { mkdtemp, rm, readFile, readdir, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { GuidanceBroker, guidanceTarget, requestGuidance, guidanceLaunchEnvironment, GUIDANCE_ENV, validateGuidanceInput } from "./guidance.ts";
+import {
+  GuidanceBroker,
+  guidanceTarget,
+  requestGuidance,
+  guidanceLaunchEnvironment,
+  GUIDANCE_ENV,
+  validateGuidanceInput,
+} from "./guidance.ts";
 import type { GuidanceRecord, GuidanceInput } from "./guidance.ts";
 
-const input: GuidanceInput = { kind: "guidance", prompt: "Which existing helper implements the assigned parser?", context: "Implementation only; no new product preference." };
-const human: GuidanceInput = { kind: "human", questionnaire: { kind: "questionnaire", questions: [{ id: "preference", prompt: "Which output style do you prefer?", allowOther: false, options: [{ value: "compact", label: "Compact" }] }] } };
-const humanAnswer = { kind: "questionnaire" as const, cancelled: false, answers: [{ id: "preference", value: "compact", wasCustom: false }] };
-const identity = (ownerSessionId: string, n = 1) => ({ ownerSessionId, taskId: `task-${n}`, childId: `child-${n}`, attempt: 1, workerEpoch: `worker-${n}` });
+const input: GuidanceInput = {
+  kind: "guidance",
+  prompt: "Which existing helper implements the assigned parser?",
+  context: "Implementation only; no new product preference.",
+};
+const human: GuidanceInput = {
+  kind: "human",
+  questionnaire: {
+    kind: "questionnaire",
+    questions: [
+      {
+        id: "preference",
+        prompt: "Which output style do you prefer?",
+        allowOther: false,
+        options: [{ value: "compact", label: "Compact" }],
+      },
+    ],
+  },
+};
+const humanAnswer = {
+  kind: "questionnaire" as const,
+  cancelled: false,
+  answers: [{ id: "preference", value: "compact", wasCustom: false }],
+};
+const identity = (ownerSessionId: string, n = 1) => ({
+  ownerSessionId,
+  taskId: `task-${n}`,
+  childId: `child-${n}`,
+  attempt: 1,
+  workerEpoch: `worker-${n}`,
+});
 function inbox() {
-  const buffered: GuidanceRecord[] = []; const waiters: Array<(record: GuidanceRecord) => void> = [];
-  return { notify(record: GuidanceRecord) { const waiter = waiters.shift(); if (waiter) waiter(record); else buffered.push(record); }, next() { return buffered.length ? Promise.resolve(buffered.shift()!) : new Promise<GuidanceRecord>(resolve => waiters.push(resolve)); }, buffered };
+  const buffered: GuidanceRecord[] = [];
+  const waiters: Array<(record: GuidanceRecord) => void> = [];
+  return {
+    notify(record: GuidanceRecord) {
+      const waiter = waiters.shift();
+      if (waiter) waiter(record);
+      else buffered.push(record);
+    },
+    next() {
+      return buffered.length
+        ? Promise.resolve(buffered.shift()!)
+        : new Promise<GuidanceRecord>((resolve) => waiters.push(resolve));
+    },
+    buffered,
+  };
 }
 async function fixture(t: any, owner = "root", upstream?: any) {
-  const root = await mkdtemp(join(tmpdir(), "guidance-test-")), notices = inbox();
-  const broker = new GuidanceBroker(owner, root, notices.notify, upstream); await broker.start();
-  t.after(async () => { await broker.close(); await rm(root, { recursive: true, force: true }); });
+  const root = await mkdtemp(join(tmpdir(), "guidance-test-")),
+    notices = inbox();
+  const broker = new GuidanceBroker(owner, root, notices.notify, upstream);
+  await broker.start();
+  t.after(async () => {
+    await broker.close();
+    await rm(root, { recursive: true, force: true });
+  });
   return { broker, root, notices };
 }
 
-test("terminal history rolls out of the bounded hot journal without a lifetime quota or replay", async t => {
-  const root = await mkdtemp(join(tmpdir(), 'guidance-history-')), notices = inbox(), archived = new Map<string,GuidanceRecord>();
-  const broker = new GuidanceBroker('history-owner',root,notices.notify,undefined,{archive(record){archived.set(record.requestId,record);},hasRequest(id){return archived.has(id);}});await broker.start();
-  t.after(async()=>{await broker.close();await rm(root,{recursive:true,force:true});});
-  const firstBinding=broker.bind(identity('history-owner',1));
-  const firstPromise=requestGuidance(firstBinding,'runtime-one',input);const first=await notices.next();
-  for(let n=0;n<1023;n++)broker.records.push({...first,requestId:'past-'+n,status:'answered'});
-  const secondBinding=broker.bind(identity('history-owner',2));
-  const secondPromise=requestGuidance(secondBinding,'runtime-two',input);const second=await notices.next();
-  assert.ok(broker.records.length<=1024);assert.equal(archived.size,128);assert.ok(broker.pendingNotifications().some(r=>r.requestId===first.requestId),'rollover evicted a live waiter');
-  await assert.rejects(requestGuidance(secondBinding,'runtime-two',input,undefined,'past-0'),/already recorded/);
-  for(const record of [first,second])broker.reply(guidanceTarget(record),'answer-'+record.requestId,{kind:'guidance',guidance:'Continue the assigned implementation.'});
-  await Promise.all([firstPromise,secondPromise]);
+test("terminal history rolls out of the bounded hot journal without a lifetime quota or replay", async (t) => {
+  const root = await mkdtemp(join(tmpdir(), "guidance-history-")),
+    notices = inbox(),
+    archived = new Map<string, GuidanceRecord>();
+  const broker = new GuidanceBroker("history-owner", root, notices.notify, undefined, {
+    archive(record) {
+      archived.set(record.requestId, record);
+    },
+    hasRequest(id) {
+      return archived.has(id);
+    },
+  });
+  await broker.start();
+  t.after(async () => {
+    await broker.close();
+    await rm(root, { recursive: true, force: true });
+  });
+  const firstBinding = broker.bind(identity("history-owner", 1));
+  const firstPromise = requestGuidance(firstBinding, "runtime-one", input);
+  const first = await notices.next();
+  for (let n = 0; n < 1023; n++)
+    broker.records.push({ ...first, requestId: "past-" + n, status: "answered" });
+  const secondBinding = broker.bind(identity("history-owner", 2));
+  const secondPromise = requestGuidance(secondBinding, "runtime-two", input);
+  const second = await notices.next();
+  assert.ok(broker.records.length <= 1024);
+  assert.equal(archived.size, 128);
+  assert.ok(
+    broker.pendingNotifications().some((r) => r.requestId === first.requestId),
+    "rollover evicted a live waiter",
+  );
+  await assert.rejects(
+    requestGuidance(secondBinding, "runtime-two", input, undefined, "past-0"),
+    /already recorded/,
+  );
+  for (const record of [first, second])
+    broker.reply(guidanceTarget(record), "answer-" + record.requestId, {
+      kind: "guidance",
+      guidance: "Continue the assigned implementation.",
+    });
+  await Promise.all([firstPromise, secondPromise]);
 });
 
-test("byte-bound rollover retires enough terminal history in one request rather than introducing a lifetime byte quota", async t => {
-  const root=await mkdtemp(join(tmpdir(),'guidance-history-bytes-')),notices=inbox(),archived=new Set<string>();
-  const broker=new GuidanceBroker('history-bytes',root,notices.notify,undefined,{archive(record){archived.add(record.requestId);},hasRequest(id){return archived.has(id);}});await broker.start();
-  t.after(async()=>{await broker.close();await rm(root,{recursive:true,force:true});});
-  const one=broker.bind(identity('history-bytes',1)),pending=requestGuidance(one,'runtime',input),first=await notices.next();
-  for(let n=0;n<1023;n++)broker.records.push({...first,requestId:'byte-old-'+n,status:'answered',...(n>=512?{input:{kind:'guidance',prompt:'History',context:'x'.repeat(8192)},receipt:{replyId:'historic',fingerprint:'historic',at:'2020-01-01',answer:{kind:'guidance',guidance:'y'.repeat(8192)}}}: {})});
-  const two=broker.bind(identity('history-bytes',2)),next=requestGuidance(two,'second-runtime',input),second=await notices.next();
-  assert.ok(archived.size>128);assert.ok(Buffer.byteLength(JSON.stringify(broker.records))<8*1024*1024);
-  for(const record of [first,second])broker.reply(guidanceTarget(record),'reply-'+record.requestId,{kind:'guidance',guidance:'Continue.'});await Promise.all([pending,next]);
+test("byte-bound rollover retires enough terminal history in one request rather than introducing a lifetime byte quota", async (t) => {
+  const root = await mkdtemp(join(tmpdir(), "guidance-history-bytes-")),
+    notices = inbox(),
+    archived = new Set<string>();
+  const broker = new GuidanceBroker("history-bytes", root, notices.notify, undefined, {
+    archive(record) {
+      archived.add(record.requestId);
+    },
+    hasRequest(id) {
+      return archived.has(id);
+    },
+  });
+  await broker.start();
+  t.after(async () => {
+    await broker.close();
+    await rm(root, { recursive: true, force: true });
+  });
+  const one = broker.bind(identity("history-bytes", 1)),
+    pending = requestGuidance(one, "runtime", input),
+    first = await notices.next();
+  for (let n = 0; n < 1023; n++)
+    broker.records.push({
+      ...first,
+      requestId: "byte-old-" + n,
+      status: "answered",
+      ...(n >= 512
+        ? {
+            input: { kind: "guidance", prompt: "History", context: "x".repeat(8192) },
+            receipt: {
+              replyId: "historic",
+              fingerprint: "historic",
+              at: "2020-01-01",
+              answer: { kind: "guidance", guidance: "y".repeat(8192) },
+            },
+          }
+        : {}),
+    });
+  const two = broker.bind(identity("history-bytes", 2)),
+    next = requestGuidance(two, "second-runtime", input),
+    second = await notices.next();
+  assert.ok(archived.size > 128);
+  assert.ok(Buffer.byteLength(JSON.stringify(broker.records)) < 8 * 1024 * 1024);
+  for (const record of [first, second])
+    broker.reply(guidanceTarget(record), "reply-" + record.requestId, {
+      kind: "guidance",
+      guidance: "Continue.",
+    });
+  await Promise.all([pending, next]);
 });
 
-test("history persistence failure reports backpressure without discarding an existing waiter", async t => {
-  const root=await mkdtemp(join(tmpdir(),'guidance-history-failure-')),notices=inbox();let fail=true;const archived=new Set<string>();
-  const broker=new GuidanceBroker('archive-failure',root,notices.notify,undefined,{archive(record){if(fail)throw Error('history storage unavailable');archived.add(record.requestId);},hasRequest(id){return archived.has(id);}});await broker.start();
-  t.after(async()=>{await broker.close();await rm(root,{recursive:true,force:true});});
-  const one=broker.bind(identity('archive-failure',1)),pending=requestGuidance(one,'runtime',input);const first=await notices.next();
-  for(let n=0;n<1023;n++)broker.records.push({...first,requestId:'old-'+n,status:'cancelled'});
-  const two=broker.bind(identity('archive-failure',2));await assert.rejects(requestGuidance(two,'second-runtime',input),/history storage unavailable/);
-  assert.equal(broker.records.length,1024);assert.equal(broker.pendingNotifications().length,1);
-  fail=false;const retry=requestGuidance(two,'second-runtime',input),second=await notices.next();
-  for(const record of [first,second])broker.reply(guidanceTarget(record),'reply-'+record.requestId,{kind:'guidance',guidance:'Continue.'});await Promise.all([pending,retry]);
+test("history persistence failure reports backpressure without discarding an existing waiter", async (t) => {
+  const root = await mkdtemp(join(tmpdir(), "guidance-history-failure-")),
+    notices = inbox();
+  let fail = true;
+  const archived = new Set<string>();
+  const broker = new GuidanceBroker("archive-failure", root, notices.notify, undefined, {
+    archive(record) {
+      if (fail) throw Error("history storage unavailable");
+      archived.add(record.requestId);
+    },
+    hasRequest(id) {
+      return archived.has(id);
+    },
+  });
+  await broker.start();
+  t.after(async () => {
+    await broker.close();
+    await rm(root, { recursive: true, force: true });
+  });
+  const one = broker.bind(identity("archive-failure", 1)),
+    pending = requestGuidance(one, "runtime", input);
+  const first = await notices.next();
+  for (let n = 0; n < 1023; n++)
+    broker.records.push({ ...first, requestId: "old-" + n, status: "cancelled" });
+  const two = broker.bind(identity("archive-failure", 2));
+  await assert.rejects(
+    requestGuidance(two, "second-runtime", input),
+    /history storage unavailable/,
+  );
+  assert.equal(broker.records.length, 1024);
+  assert.equal(broker.pendingNotifications().length, 1);
+  fail = false;
+  const retry = requestGuidance(two, "second-runtime", input),
+    second = await notices.next();
+  for (const record of [first, second])
+    broker.reply(guidanceTarget(record), "reply-" + record.requestId, {
+      kind: "guidance",
+      guidance: "Continue.",
+    });
+  await Promise.all([pending, retry]);
 });
 
-test("actual waiter awaits exact owner reply; request/receipt durable before notification/resolution", async t => {
-  const { broker, root, notices } = await fixture(t); const binding = broker.bind(identity("root"));
+test("actual waiter awaits exact owner reply; request/receipt durable before notification/resolution", async (t) => {
+  const { broker, root, notices } = await fixture(t);
+  const binding = broker.bind(identity("root"));
   let resolved = false;
-  const promise = requestGuidance(binding, "process-1", input).then(answer => { resolved = true; return answer; });
-  const record = await notices.next(); assert.equal(resolved, false);
-  const files = await import("node:fs/promises").then(fs => fs.readdir(root));
+  const promise = requestGuidance(binding, "process-1", input).then((answer) => {
+    resolved = true;
+    return answer;
+  });
+  const record = await notices.next();
+  assert.equal(resolved, false);
+  const files = await import("node:fs/promises").then((fs) => fs.readdir(root));
   const journal = join(root, files[0], "guidance.json");
   assert.equal(JSON.parse(await readFile(journal, "utf8")).records[0].status, "pending");
-  const target = guidanceTarget(record), answer = { kind: "guidance" as const, guidance: "Use parseExisting; retain the current grammar." };
+  const target = guidanceTarget(record),
+    answer = {
+      kind: "guidance" as const,
+      guidance: "Use parseExisting; retain the current grammar.",
+    };
   const receipt = broker.reply(target, "reply-1", answer);
   assert.equal(receipt.status, "answered");
   assert.equal(JSON.parse(await readFile(journal, "utf8")).records[0].receipt.replyId, "reply-1");
   assert.deepEqual(await promise, answer);
   assert.deepEqual(broker.reply(target, "reply-1", answer), receipt);
-  assert.throws(() => broker.reply(target, "reply-1", { ...answer, guidance: "Different" }), /Conflicting/);
+  assert.throws(
+    () => broker.reply(target, "reply-1", { ...answer, guidance: "Different" }),
+    /Conflicting/,
+  );
   assert.throws(() => broker.reply(target, "reply-2", answer), /Conflicting/);
 });
 
-test("two-level ordinary guidance resolves both waiters without human interaction", async t => {
-  const top = await fixture(t), parentBinding = top.broker.bind(identity("root"));
-  const middle = await fixture(t, "middle", Object.assign((value: GuidanceInput, signal?: AbortSignal, requestId?: string) => requestGuidance(parentBinding, "middle-runtime", value, signal, requestId), { scope: parentBinding.scope }));
+test("two-level ordinary guidance resolves both waiters without human interaction", async (t) => {
+  const top = await fixture(t),
+    parentBinding = top.broker.bind(identity("root"));
+  const middle = await fixture(
+    t,
+    "middle",
+    Object.assign(
+      (value: GuidanceInput, signal?: AbortSignal, requestId?: string) =>
+        requestGuidance(parentBinding, "middle-runtime", value, signal, requestId),
+      { scope: parentBinding.scope },
+    ),
+  );
   const child = middle.broker.bind(identity("middle", 2));
   const waiting = requestGuidance(child, "child-runtime", input);
-  const local = await middle.notices.next(); assert.equal(top.notices.buffered.length, 0, "ordinary work first routes only to direct parent");
+  const local = await middle.notices.next();
+  assert.equal(top.notices.buffered.length, 0, "ordinary work first routes only to direct parent");
   const forwarding = middle.broker.forward(guidanceTarget(local));
-  const escalated = await top.notices.next(); assert.equal(escalated.input.kind, "guidance");
-  assert.deepEqual(middle.broker.list()[0].forwarded, { requestId: escalated.requestId, scope: parentBinding.scope });
-  const answer = { kind: "guidance" as const, guidance: "Reuse the existing parser; this is within the delegated assignment." };
+  const escalated = await top.notices.next();
+  assert.equal(escalated.input.kind, "guidance");
+  assert.deepEqual(middle.broker.list()[0].forwarded, {
+    requestId: escalated.requestId,
+    scope: parentBinding.scope,
+  });
+  const answer = {
+    kind: "guidance" as const,
+    guidance: "Reuse the existing parser; this is within the delegated assignment.",
+  };
   top.broker.reply(guidanceTarget(escalated), "top-reply", answer);
-  await forwarding; assert.deepEqual(await waiting, answer);
+  await forwarding;
+  assert.deepEqual(await waiting, answer);
   assert.equal(middle.broker.list()[0].status, "answered");
 });
 
-test("genuine human question automatically reaches only top level and returns exact human result", async t => {
-  const top = await fixture(t), parentBinding = top.broker.bind(identity("root"));
-  const middle = await fixture(t, "middle", Object.assign((value: GuidanceInput, signal?: AbortSignal, requestId?: string) => requestGuidance(parentBinding, "middle-runtime", value, signal, requestId), { scope: parentBinding.scope }));
-  const waiting = requestGuidance(middle.broker.bind(identity("middle", 2)), "child-runtime", human);
-  const escalated = await top.notices.next(); assert.equal(escalated.input.kind, "human"); assert.equal(middle.notices.buffered.length, 0);
-  assert.throws(() => top.broker.reply(guidanceTarget(escalated), "model-answer", { kind: "guidance", guidance: "compact" }), /Human decision/);
-  await assert.rejects(middle.broker.askHuman(guidanceTarget(middle.broker.list()[0]), async () => humanAnswer), /top-level/);
+test("genuine human question automatically reaches only top level and returns exact human result", async (t) => {
+  const top = await fixture(t),
+    parentBinding = top.broker.bind(identity("root"));
+  const middle = await fixture(
+    t,
+    "middle",
+    Object.assign(
+      (value: GuidanceInput, signal?: AbortSignal, requestId?: string) =>
+        requestGuidance(parentBinding, "middle-runtime", value, signal, requestId),
+      { scope: parentBinding.scope },
+    ),
+  );
+  const waiting = requestGuidance(
+    middle.broker.bind(identity("middle", 2)),
+    "child-runtime",
+    human,
+  );
+  const escalated = await top.notices.next();
+  assert.equal(escalated.input.kind, "human");
+  assert.equal(middle.notices.buffered.length, 0);
+  assert.throws(
+    () =>
+      top.broker.reply(guidanceTarget(escalated), "model-answer", {
+        kind: "guidance",
+        guidance: "compact",
+      }),
+    /Human decision/,
+  );
+  await assert.rejects(
+    middle.broker.askHuman(guidanceTarget(middle.broker.list()[0]), async () => humanAnswer),
+    /top-level/,
+  );
   let asked = 0;
-  await top.broker.askHuman(guidanceTarget(escalated), async value => { asked++; assert.deepEqual(value, human.questionnaire); return humanAnswer; });
-  assert.deepEqual(await waiting, { kind: "human", answer: humanAnswer }); assert.equal(asked, 1);
+  await top.broker.askHuman(guidanceTarget(escalated), async (value) => {
+    asked++;
+    assert.deepEqual(value, human.questionnaire);
+    return humanAnswer;
+  });
+  assert.deepEqual(await waiting, { kind: "human", answer: humanAnswer });
+  assert.equal(asked, 1);
 });
 
-test("exact session/task/child/attempt/epochs/goal/request/revision fencing", async t => {
-  const { broker, notices } = await fixture(t); const binding = broker.bind({ ...identity("root"), goalId: "goal-1" });
-  const waiting = requestGuidance(binding, "worker-runtime", input); const record = await notices.next(), target = guidanceTarget(record);
+test("exact session/task/child/attempt/epochs/goal/request/revision fencing", async (t) => {
+  const { broker, notices } = await fixture(t);
+  const binding = broker.bind({ ...identity("root"), goalId: "goal-1" });
+  const waiting = requestGuidance(binding, "worker-runtime", input);
+  const record = await notices.next(),
+    target = guidanceTarget(record);
   const answer = { kind: "guidance" as const, guidance: "Use existing implementation" };
-  for (const key of ["ownerSessionId", "ownerRuntimeEpoch", "taskId", "childId", "workerEpoch", "goalId", "requestId", "workerRuntimeEpoch"] as const) assert.throws(() => broker.reply({ ...target, [key]: "foreign" }, "reply", answer), /identity/);
+  for (const key of [
+    "ownerSessionId",
+    "ownerRuntimeEpoch",
+    "taskId",
+    "childId",
+    "workerEpoch",
+    "goalId",
+    "requestId",
+    "workerRuntimeEpoch",
+  ] as const)
+    assert.throws(() => broker.reply({ ...target, [key]: "foreign" }, "reply", answer), /identity/);
   assert.throws(() => broker.reply({ ...target, attempt: 2 }, "reply", answer), /identity/);
-  assert.throws(() => broker.reply({ ...target, expectedRevision: 2 }, "reply", answer), /revision/);
-  assert.throws(() => broker.reply({ ...target, permission: true } as any, "reply", answer), /Unexpected/);
-  for (const scope of [{ ...binding.scope, childId: "foreign" }, { ...binding.scope, ownerRuntimeEpoch: "old" }]) await assert.rejects(requestGuidance({ ...binding, scope }, "worker-runtime", input), /scope/);
-  broker.reply(target, "good", answer); await waiting;
+  assert.throws(
+    () => broker.reply({ ...target, expectedRevision: 2 }, "reply", answer),
+    /revision/,
+  );
+  assert.throws(
+    () => broker.reply({ ...target, permission: true } as any, "reply", answer),
+    /Unexpected/,
+  );
+  for (const scope of [
+    { ...binding.scope, childId: "foreign" },
+    { ...binding.scope, ownerRuntimeEpoch: "old" },
+  ])
+    await assert.rejects(requestGuidance({ ...binding, scope }, "worker-runtime", input), /scope/);
+  broker.reply(target, "good", answer);
+  await waiting;
 });
 
-test("permission payloads and model-supplied human answers never enter guidance", async t => {
-  const { broker, notices } = await fixture(t); const waiting = requestGuidance(broker.bind(identity("root")), "worker-runtime", input); const record = await notices.next();
-  for (const value of [{ kind: "permission", value: "allow" }, { ...input, permission: "approve" }, { kind: "human", questionnaire: { kind: "permission", title: "Allow", options: ["yes"] } }]) assert.throws(() => validateGuidanceInput(value as any), /permission|Unexpected/);
-  for (const answer of [{ kind: "human", answer: humanAnswer }, { kind: "guidance", guidance: "ok", approved: true }]) assert.throws(() => broker.reply(guidanceTarget(record), "reply", answer as any), /Unexpected/);
-  broker.reply(guidanceTarget(record), "good", { kind: "guidance", guidance: "No permission granted" }); await waiting;
+test("permission payloads and model-supplied human answers never enter guidance", async (t) => {
+  const { broker, notices } = await fixture(t);
+  const waiting = requestGuidance(broker.bind(identity("root")), "worker-runtime", input);
+  const record = await notices.next();
+  for (const value of [
+    { kind: "permission", value: "allow" },
+    { ...input, permission: "approve" },
+    { kind: "human", questionnaire: { kind: "permission", title: "Allow", options: ["yes"] } },
+  ])
+    assert.throws(() => validateGuidanceInput(value as any), /permission|Unexpected/);
+  for (const answer of [
+    { kind: "human", answer: humanAnswer },
+    { kind: "guidance", guidance: "ok", approved: true },
+  ])
+    assert.throws(() => broker.reply(guidanceTarget(record), "reply", answer as any), /Unexpected/);
+  broker.reply(guidanceTarget(record), "good", {
+    kind: "guidance",
+    guidance: "No permission granted",
+  });
+  await waiting;
 });
 
-test("explicit abort retains cancelled state and rejects stale answers", async t => {
-  const { broker, notices } = await fixture(t), controller = new AbortController();
-  const waiting = requestGuidance(broker.bind(identity("root")), "worker-runtime", input, controller.signal); const record = await notices.next();
-  controller.abort(); await assert.rejects(waiting, /cancelled/);
+test("explicit abort retains cancelled state and rejects stale answers", async (t) => {
+  const { broker, notices } = await fixture(t),
+    controller = new AbortController();
+  const waiting = requestGuidance(
+    broker.bind(identity("root")),
+    "worker-runtime",
+    input,
+    controller.signal,
+  );
+  const record = await notices.next();
+  controller.abort();
+  await assert.rejects(waiting, /cancelled/);
   // Socket-close callbacks execute on the next event-loop iteration, not sleeps.
-  for (let i = 0; i < 20 && broker.list()[0].status === "pending"; i++) await new Promise(resolve => setImmediate(resolve));
+  for (let i = 0; i < 20 && broker.list()[0].status === "pending"; i++)
+    await new Promise((resolve) => setImmediate(resolve));
   assert.equal(broker.list()[0].status, "cancelled");
-  assert.throws(() => broker.reply(guidanceTarget(record), "late", { kind: "guidance", guidance: "late" }), /revision|unavailable/);
+  assert.throws(
+    () => broker.reply(guidanceTarget(record), "late", { kind: "guidance", guidance: "late" }),
+    /revision|unavailable/,
+  );
 });
 
-test("parent replacement, worker restart, attempt replacement, absent owner never replay", async t => {
-  const { broker, root, notices } = await fixture(t); const binding = broker.bind(identity("root"));
-  const waiting = requestGuidance(binding, "runtime-1", input); const record = await notices.next();
+test("parent replacement, worker restart, attempt replacement, absent owner never replay", async (t) => {
+  const { broker, root, notices } = await fixture(t);
+  const binding = broker.bind(identity("root"));
+  const waiting = requestGuidance(binding, "runtime-1", input);
+  const record = await notices.next();
   await assert.rejects(requestGuidance(binding, "runtime-2", input), /runtime replaced/);
   const replaced = broker.bind({ ...identity("root"), attempt: 2, workerEpoch: "new-worker" });
-  await assert.rejects(waiting, /attempt replaced/); assert.equal(broker.list()[0].status, "cancelled");
+  await assert.rejects(waiting, /attempt replaced/);
+  assert.equal(broker.list()[0].status, "cancelled");
   await assert.rejects(requestGuidance(binding, "runtime-1", input), /scope/);
-  const second = requestGuidance(replaced, "runtime-2", input); await notices.next();
-  const rejected = assert.rejects(second, /closed|unavailable/); await broker.close(); await rejected;
-  const restored = new GuidanceBroker("root", root); await restored.start();
+  const second = requestGuidance(replaced, "runtime-2", input);
+  await notices.next();
+  const rejected = assert.rejects(second, /closed|unavailable/);
+  await broker.close();
+  await rejected;
+  const restored = new GuidanceBroker("root", root);
+  await restored.start();
   assert.equal(restored.list().at(-1)?.status, "unavailable");
-  assert.throws(() => restored.reply(guidanceTarget(record), "old-owner", { kind: "guidance", guidance: "old" }), /identity/);
+  assert.throws(
+    () =>
+      restored.reply(guidanceTarget(record), "old-owner", { kind: "guidance", guidance: "old" }),
+    /identity/,
+  );
   await assert.rejects(requestGuidance(replaced, "runtime-2", input), /ENOENT|unavailable/);
   await restored.close();
 });
 
-test("crash-retained pending records become unavailable without recreating promises", async t => {
+test("crash-retained pending records become unavailable without recreating promises", async (t) => {
   const { broker, root, notices } = await fixture(t);
-  const waiting = requestGuidance(broker.bind(identity("root")), "runtime", input); const record = await notices.next();
+  const waiting = requestGuidance(broker.bind(identity("root")), "runtime", input);
+  const record = await notices.next();
   const journal = join(root, (await readdir(root))[0], "guidance.json");
   const beforeCrash = await readFile(journal, "utf8");
-  const rejected = assert.rejects(waiting, /closed|unavailable/); await broker.close(); await rejected;
+  const rejected = assert.rejects(waiting, /closed|unavailable/);
+  await broker.close();
+  await rejected;
   // Reproduce the last fsynced image from before abrupt owner death.
   await writeFile(journal, beforeCrash, { mode: 0o600 });
-  const recovered = new GuidanceBroker("root", root); await recovered.start();
+  const recovered = new GuidanceBroker("root", root);
+  await recovered.start();
   assert.equal(recovered.list()[0].status, "unavailable");
   assert.equal(JSON.parse(await readFile(journal, "utf8")).records[0].status, "unavailable");
-  assert.throws(() => recovered.reply(guidanceTarget(record), "stale", { kind: "guidance", guidance: "no replay" }), /identity/);
+  assert.throws(
+    () =>
+      recovered.reply(guidanceTarget(record), "stale", { kind: "guidance", guidance: "no replay" }),
+    /identity/,
+  );
   await recovered.close();
 });
 
-test("failed receipt persistence cannot resolve/replay the waiter", async t => {
+test("failed receipt persistence cannot resolve/replay the waiter", async (t) => {
   const { broker, notices } = await fixture(t);
-  const waiting = requestGuidance(broker.bind(identity("root")), "runtime", input); const record = await notices.next();
+  const waiting = requestGuidance(broker.bind(identity("root")), "runtime", input);
+  const record = await notices.next();
   const persist = (broker as any).persist.bind(broker);
-  (broker as any).persist = () => { throw new Error("fixture fsync failed"); };
+  (broker as any).persist = () => {
+    throw new Error("fixture fsync failed");
+  };
   const rejected = assert.rejects(waiting, /unavailable/);
-  assert.throws(() => broker.reply(guidanceTarget(record), "reply", { kind: "guidance", guidance: "not delivered" }), /fsync/);
-  await rejected; assert.equal(broker.list()[0].status, "unavailable");
-  assert.throws(() => broker.reply(guidanceTarget(record), "reply", { kind: "guidance", guidance: "not delivered" }), /receipt unavailable/);
+  assert.throws(
+    () =>
+      broker.reply(guidanceTarget(record), "reply", {
+        kind: "guidance",
+        guidance: "not delivered",
+      }),
+    /fsync/,
+  );
+  await rejected;
+  assert.equal(broker.list()[0].status, "unavailable");
+  assert.throws(
+    () =>
+      broker.reply(guidanceTarget(record), "reply", {
+        kind: "guidance",
+        guidance: "not delivered",
+      }),
+    /receipt unavailable/,
+  );
   (broker as any).persist = persist;
 });
 
-test("concurrent human invocation is single-flight; no human result replay on failure", async t => {
+test("concurrent human invocation is single-flight; no human result replay on failure", async (t) => {
   const { broker, notices } = await fixture(t);
-  const waiting = requestGuidance(broker.bind(identity("root")), "runtime", human); const record = await notices.next();
+  const waiting = requestGuidance(broker.bind(identity("root")), "runtime", human);
+  const record = await notices.next();
   let answer!: (value: typeof humanAnswer) => void;
-  const first = broker.askHuman(guidanceTarget(record), async () => await new Promise(resolve => { answer = resolve; }));
-  await assert.rejects(broker.askHuman(guidanceTarget(record), async () => humanAnswer), /already in flight/);
-  answer(humanAnswer); await first; assert.equal((await waiting).kind, "human");
-  await assert.rejects(broker.askHuman(guidanceTarget(record), async () => humanAnswer), /pending waiter/);
+  const first = broker.askHuman(
+    guidanceTarget(record),
+    async () =>
+      await new Promise((resolve) => {
+        answer = resolve;
+      }),
+  );
+  await assert.rejects(
+    broker.askHuman(guidanceTarget(record), async () => humanAnswer),
+    /already in flight/,
+  );
+  answer(humanAnswer);
+  await first;
+  assert.equal((await waiting).kind, "human");
+  await assert.rejects(
+    broker.askHuman(guidanceTarget(record), async () => humanAnswer),
+    /pending waiter/,
+  );
 });
 
-test("another live owner cannot overwrite the journal or invalidate its pending waiter", async t => {
+test("another live owner cannot overwrite the journal or invalidate its pending waiter", async (t) => {
   const { broker, notices, root } = await fixture(t);
-  const waiting = requestGuidance(broker.bind(identity("root")), "runtime", input); const record = await notices.next();
+  const waiting = requestGuidance(broker.bind(identity("root")), "runtime", input);
+  const record = await notices.next();
   assert.throws(() => new GuidanceBroker("root", root), /Another live runtime/);
   assert.equal(broker.list()[0].status, "pending");
-  broker.reply(guidanceTarget(record), "reply", { kind: "guidance", guidance: "exact owner" }); await waiting;
+  broker.reply(guidanceTarget(record), "reply", { kind: "guidance", guidance: "exact owner" });
+  await waiting;
 });
 
-test("launch binding registry explicitly fences absent owner instead of inheriting ancestor capability", async t => {
-  assert.deepEqual(JSON.parse(guidanceLaunchEnvironment(identity("absent"))[GUIDANCE_ENV]), { unavailable: true });
+test("launch binding registry explicitly fences absent owner instead of inheriting ancestor capability", async (t) => {
+  assert.deepEqual(JSON.parse(guidanceLaunchEnvironment(identity("absent"))[GUIDANCE_ENV]), {
+    unavailable: true,
+  });
   const { broker } = await fixture(t);
   const env = guidanceLaunchEnvironment({ ...identity("root"), goalId: "goal-1" });
-  const binding = JSON.parse(env[GUIDANCE_ENV]); assert.equal(binding.scope.ownerRuntimeEpoch, broker.epoch); assert.equal(binding.scope.goalId, "goal-1");
+  const binding = JSON.parse(env[GUIDANCE_ENV]);
+  assert.equal(binding.scope.ownerRuntimeEpoch, broker.epoch);
+  assert.equal(binding.scope.goalId, "goal-1");
 });
 
-test("closing the owner while it is still starting rejects start instead of hanging", async t => {
-  const settledWithin = (promise: Promise<unknown>, ms: number) => Promise.race([
-    promise.then(() => "resolved", () => "rejected"),
-    new Promise(resolve => setTimeout(() => resolve("pending"), ms)),
-  ]);
+test("closing the owner while it is still starting rejects start instead of hanging", async (t) => {
+  const settledWithin = (promise: Promise<unknown>, ms: number) =>
+    Promise.race([
+      promise.then(
+        () => "resolved",
+        () => "rejected",
+      ),
+      new Promise((resolve) => setTimeout(() => resolve("pending"), ms)),
+    ]);
   for (const closeAt of ["before start", "during listen"] as const) {
     const root = await mkdtemp(join(tmpdir(), "guidance-close-start-"));
     t.after(() => rm(root, { recursive: true, force: true }));
     const broker = new GuidanceBroker(`close-${closeAt.replace(" ", "-")}`, root);
     let starting: Promise<void>;
-    if (closeAt === "before start") { await broker.close(); starting = broker.start(); }
-    else { starting = broker.start(); await broker.close(); }
-    assert.equal(await settledWithin(starting, 2000), "rejected", `start ${closeAt} did not reject`);
+    if (closeAt === "before start") {
+      await broker.close();
+      starting = broker.start();
+    } else {
+      starting = broker.start();
+      await broker.close();
+    }
+    assert.equal(
+      await settledWithin(starting, 2000),
+      "rejected",
+      `start ${closeAt} did not reject`,
+    );
     await assert.rejects(starting, /closed during startup/);
     assert.throws(() => broker.bind(identity(broker.ownerSessionId)), /unavailable/);
   }

@@ -60,45 +60,86 @@ export function parsePrRef(input: string): { repo: string; number: number; ref: 
 /** The exact command line the merge gate runs for a PR. */
 export function checkCommand(ref: string, requireGreenCi = true): string[] {
   const { repo, number } = parsePrRef(ref);
-  return ["forge-pr", "-R", repo, "check", String(number), ...(requireGreenCi ? ["--ci-green"] : [])];
+  return [
+    "forge-pr",
+    "-R",
+    repo,
+    "check",
+    String(number),
+    ...(requireGreenCi ? ["--ci-green"] : []),
+  ];
 }
 
 export function gateResult(ref: string, check: PrCheck): GoalCheck {
-  const detail = check.verdict === "closed" ? "Closed without merging"
-    : check.verdict === "failed" ? "CI failed"
-    : check.verdict === "pending" ? (check.ci === "pending" ? "CI running" : "Not merged yet")
-    : undefined;
-  return { command: checkCommand(ref).join(" "), verdict: check.verdict, ...(detail ? { detail } : {}), at: Date.now() };
+  const detail =
+    check.verdict === "closed"
+      ? "Closed without merging"
+      : check.verdict === "failed"
+        ? "CI failed"
+        : check.verdict === "pending"
+          ? check.ci === "pending"
+            ? "CI running"
+            : "Not merged yet"
+          : undefined;
+  return {
+    command: checkCommand(ref).join(" "),
+    verdict: check.verdict,
+    ...(detail ? { detail } : {}),
+    at: Date.now(),
+  };
 }
 
 /** Validate stored gate results. Bad entries are dropped. */
 export function normalizeGoalChecks(value: unknown): GoalCheck[] | undefined {
   if (!Array.isArray(value)) return undefined;
-  return value.filter((check): check is GoalCheck => !!check && typeof check === "object"
-    && typeof check.command === "string" && check.command.length <= 1024
-    && ["ok", "pending", "failed", "closed"].includes(check.verdict)
-    && (check.detail === undefined || typeof check.detail === "string")
-    && Number.isFinite(check.at)).slice(0, MAX_GOAL_PRS);
+  return value
+    .filter(
+      (check): check is GoalCheck =>
+        !!check &&
+        typeof check === "object" &&
+        typeof check.command === "string" &&
+        check.command.length <= 1024 &&
+        ["ok", "pending", "failed", "closed"].includes(check.verdict) &&
+        (check.detail === undefined || typeof check.detail === "string") &&
+        Number.isFinite(check.at),
+    )
+    .slice(0, MAX_GOAL_PRS);
 }
 
 /** Run `forge-pr check` once. Fails if forge-pr is missing or prints no verdict. */
-export function checkPr(ref: string, requireGreenCi: boolean, signal?: AbortSignal): Promise<PrCheck> {
+export function checkPr(
+  ref: string,
+  requireGreenCi: boolean,
+  signal?: AbortSignal,
+): Promise<PrCheck> {
   const args = checkCommand(ref, requireGreenCi).slice(1);
   return new Promise((resolve, reject) => {
-    execFile(forgePrBin(), args, { timeout: CHECK_TIMEOUT_MS, signal, maxBuffer: 1 << 20 }, (error, stdout, stderr) => {
-      if (error && !stdout.trim()) {
-        const missing = (error as NodeJS.ErrnoException).code === "ENOENT";
-        reject(new Error(missing ? "forge-pr is not installed" : `forge-pr check failed: ${stderr.trim() || error.message}`));
-        return;
-      }
-      try {
-        const result = JSON.parse(stdout) as PrCheck;
-        if (!["ok", "pending", "failed", "closed"].includes(result.verdict)) throw new Error("no verdict");
-        resolve(result);
-      } catch {
-        reject(new Error(`forge-pr check printed no verdict: ${stdout.trim().slice(0, 200)}`));
-      }
-    });
+    execFile(
+      forgePrBin(),
+      args,
+      { timeout: CHECK_TIMEOUT_MS, signal, maxBuffer: 1 << 20 },
+      (error, stdout, stderr) => {
+        if (error && !stdout.trim()) {
+          const missing = (error as NodeJS.ErrnoException).code === "ENOENT";
+          reject(
+            new Error(
+              missing
+                ? "forge-pr is not installed"
+                : `forge-pr check failed: ${stderr.trim() || error.message}`,
+            ),
+          );
+          return;
+        }
+        try {
+          const result = JSON.parse(stdout) as PrCheck;
+          if (!["ok", "pending", "failed", "closed"].includes(result.verdict))
+            throw new Error("no verdict");
+          resolve(result);
+        } catch {
+          reject(new Error(`forge-pr check printed no verdict: ${stdout.trim().slice(0, 200)}`));
+        }
+      },
+    );
   });
 }
 
@@ -117,17 +158,24 @@ export function prFromCheck(ref: string, check: PrCheck, previous?: GoalPr): Goa
 /** How a watch event changes a PR's stored state, if at all. */
 export function applyPrEvent(pr: GoalPr, event: PrEvent): GoalPr | undefined {
   switch (event.event) {
-    case "merged": return { ...pr, state: "merged", checkedAt: Date.now() };
-    case "closed": return { ...pr, state: "closed", checkedAt: Date.now() };
-    case "ci-green": return { ...pr, ci: "green", checkedAt: Date.now() };
-    case "ci-failed": return { ...pr, ci: "failed", checkedAt: Date.now() };
-    case "push": return { ...pr, ci: "pending", checkedAt: Date.now() };
-    default: return undefined;
+    case "merged":
+      return { ...pr, state: "merged", checkedAt: Date.now() };
+    case "closed":
+      return { ...pr, state: "closed", checkedAt: Date.now() };
+    case "ci-green":
+      return { ...pr, ci: "green", checkedAt: Date.now() };
+    case "ci-failed":
+      return { ...pr, ci: "failed", checkedAt: Date.now() };
+    case "push":
+      return { ...pr, ci: "pending", checkedAt: Date.now() };
+    default:
+      return undefined;
   }
 }
 
 /** Events worth waking the goal for. `watching` and `error` are not. */
-export const isWakeEvent = (event: PrEvent) => event.event !== "watching" && event.event !== "error";
+export const isWakeEvent = (event: PrEvent) =>
+  event.event !== "watching" && event.event !== "error";
 
 /** One `forge-pr watch` process per open PR of a waiting goal. The goal runtime
  * calls `sync` whenever the goal changes, so watchers start and stop with the wait. */
@@ -159,33 +207,45 @@ export class PrWatchers {
 
   private start(ref: string) {
     const { repo, number } = parsePrRef(ref);
-    const child = spawn(forgePrBin(), ["-R", repo, "watch", String(number)], { stdio: ["ignore", "pipe", "ignore"] });
+    const child = spawn(forgePrBin(), ["-R", repo, "watch", String(number)], {
+      stdio: ["ignore", "pipe", "ignore"],
+    });
     this.running.set(ref, child);
     const forget = () => {
       if (this.running.get(ref) === child) this.running.delete(ref);
     };
     child.on("error", forget);
     child.on("exit", forget);
-    createInterface({ input: child.stdout! }).on("line", line => {
+    createInterface({ input: child.stdout! }).on("line", (line) => {
       let event: PrEvent;
-      try { event = JSON.parse(line); } catch { return; }
-      if (this.running.get(ref) === child && event && typeof event.event === "string") this.onEvent(ref, event);
+      try {
+        event = JSON.parse(line);
+      } catch {
+        return;
+      }
+      if (this.running.get(ref) === child && event && typeof event.event === "string")
+        this.onEvent(ref, event);
     });
   }
 }
 
 /** The PRs a waiting goal should be watching: the open ones. */
 export function openPrRefs(prs: readonly GoalPr[] | undefined): string[] {
-  return (prs ?? []).filter(pr => pr.state === "open").map(pr => pr.ref);
+  return (prs ?? []).filter((pr) => pr.state === "open").map((pr) => pr.ref);
 }
 
 /** Validate PRs loaded from a goal record. Bad entries are dropped. */
 export function normalizeGoalPrs(value: unknown): GoalPr[] | undefined {
   if (!Array.isArray(value)) return undefined;
-  const prs = value.filter((pr): pr is GoalPr => !!pr && typeof pr === "object"
-    && typeof pr.ref === "string" && typeof pr.url === "string"
-    && ["open", "merged", "closed"].includes(pr.state)
-    && (pr.ci === null || ["green", "pending", "failed"].includes(pr.ci))
-    && Number.isFinite(pr.checkedAt));
+  const prs = value.filter(
+    (pr): pr is GoalPr =>
+      !!pr &&
+      typeof pr === "object" &&
+      typeof pr.ref === "string" &&
+      typeof pr.url === "string" &&
+      ["open", "merged", "closed"].includes(pr.state) &&
+      (pr.ci === null || ["green", "pending", "failed"].includes(pr.ci)) &&
+      Number.isFinite(pr.checkedAt),
+  );
   return prs.slice(0, MAX_GOAL_PRS);
 }

@@ -24,37 +24,72 @@ export default function rootTest(pi: ExtensionAPI) {
   let guidanceTool: any;
   let goalTool: any;
   const commands = new Map<string, any>();
-  const proxy = new Proxy(pi, { get(target, property) {
-    if (property === "registerTool") return (value: any) => { if (value.name === "subagent") tool = value; if (value.name === "guidance") guidanceTool = value; if (value.name === "goal_manage") goalTool = value; return target.registerTool(value); };
-    if (property === "registerCommand") return (name: string, value: any) => { commands.set(name, value); return target.registerCommand(name, value); };
-    const value = Reflect.get(target, property); return typeof value === "function" ? value.bind(target) : value;
-  } });
+  const proxy = new Proxy(pi, {
+    get(target, property) {
+      if (property === "registerTool")
+        return (value: any) => {
+          if (value.name === "subagent") tool = value;
+          if (value.name === "guidance") guidanceTool = value;
+          if (value.name === "goal_manage") goalTool = value;
+          return target.registerTool(value);
+        };
+      if (property === "registerCommand")
+        return (name: string, value: any) => {
+          commands.set(name, value);
+          return target.registerCommand(name, value);
+        };
+      const value = Reflect.get(target, property);
+      return typeof value === "function" ? value.bind(target) : value;
+    },
+  });
   subagent(proxy);
   progress(proxy);
   workflows(proxy);
   pi.on("session_start", async (_event, ctx) => {
     if (ctx.hasUI) ctx.ui.setStatus("root-test-ready", "ROOT_FIXTURE_READY");
-    if (!process.env.PI_TUI_WORKER_MANIFEST) await writeFile(`${process.env.PI_TUI_ROOT_RESULT}.epoch`, JSON.stringify({ pid: process.pid, at: Date.now(), session: ctx.sessionManager.getSessionId() }));
+    if (!process.env.PI_TUI_WORKER_MANIFEST)
+      await writeFile(
+        `${process.env.PI_TUI_ROOT_RESULT}.epoch`,
+        JSON.stringify({
+          pid: process.pid,
+          at: Date.now(),
+          session: ctx.sessionManager.getSessionId(),
+        }),
+      );
   });
   const output = process.env.PI_TUI_ROOT_RESULT!;
   const backgroundFile = `${output}.background`;
-  const sleep = (ms: number) => new Promise(resolve => setTimeout(resolve, ms));
-  const register = (name: string, work: (ctx: any) => Promise<unknown>) => pi.registerCommand(name, {
-    description: "Deterministic root tool integration test",
-    handler: async (_args, ctx) => {
-      try { await writeFile(output, JSON.stringify({ ok: true, result: await work(ctx) })); }
-      catch (error) { await writeFile(output, JSON.stringify({ ok: false, error: String(error), stack: (error as Error).stack })); }
-    },
-  });
+  const sleep = (ms: number) => new Promise((resolve) => setTimeout(resolve, ms));
+  const register = (name: string, work: (ctx: any) => Promise<unknown>) =>
+    pi.registerCommand(name, {
+      description: "Deterministic root tool integration test",
+      handler: async (_args, ctx) => {
+        try {
+          await writeFile(output, JSON.stringify({ ok: true, result: await work(ctx) }));
+        } catch (error) {
+          await writeFile(
+            output,
+            JSON.stringify({ ok: false, error: String(error), stack: (error as Error).stack }),
+          );
+        }
+      },
+    });
   let sequence = 0;
-  const execute = (ctx: any, params: any) => tool.execute(`root-test-${++sequence}`, params, undefined, undefined, ctx);
-  const manifestFor = (group: any, index = 0) => new TuiWorkerStore(dirname(group.children[index].runtime.sessionFile)).readManifest();
+  const execute = (ctx: any, params: any) =>
+    tool.execute(`root-test-${++sequence}`, params, undefined, undefined, ctx);
+  const manifestFor = (group: any, index = 0) =>
+    new TuiWorkerStore(dirname(group.children[index].runtime.sessionFile)).readManifest();
   // Test-only polling: public yield never blocks for a lifecycle transition.
   const terminalSnapshot = async (ctx: any, job: string) => {
     const deadline = Date.now() + 60_000;
     while (true) {
       const value = await execute(ctx, { operation: "status", job_id: job });
-      if (["completed", "failed", "cancelled"].includes(value.details.group?.status ?? value.details.status)) return value;
+      if (
+        ["completed", "failed", "cancelled"].includes(
+          value.details.group?.status ?? value.details.status,
+        )
+      )
+        return value;
       assert.ok(Date.now() < deadline, `Timed out observing ${job}`);
       await sleep(100);
     }
@@ -64,108 +99,248 @@ export default function rootTest(pi: ExtensionAPI) {
     assert.equal(value.details.group.status, "completed", JSON.stringify(value));
     return value.details.group;
   };
-  register("tui-root-automatic-worktrees", async ctx => {
+  register("tui-root-automatic-worktrees", async (ctx) => {
     const repo = join(dirname(output), "automatic-worktree-repository");
-    await mkdir(repo); await writeFile(join(repo, "tracked"), "preserved source\n");
+    await mkdir(repo);
+    await writeFile(join(repo, "tracked"), "preserved source\n");
     await worktreeGit(["init", "-b", "main"], repo);
     await worktreeGit(["config", "user.email", "fixture@example.invalid"], repo);
     await worktreeGit(["config", "user.name", "Fixture"], repo);
-    await worktreeGit(["add", "."], repo); await worktreeGit(["commit", "-m", "offline fixture"], repo);
-    await writeFile(join(getAgentDir(), "pi-worktree.json"), JSON.stringify({ worktreeRoot: join(dirname(output), "automatic-worktrees") }));
+    await worktreeGit(["add", "."], repo);
+    await worktreeGit(["commit", "-m", "offline fixture"], repo);
+    await writeFile(
+      join(getAgentDir(), "pi-worktree.json"),
+      JSON.stringify({ worktreeRoot: join(dirname(output), "automatic-worktrees") }),
+    );
     for (const reuse of [false, true]) {
-      const prior = new Set((await ownedWorktrees()).map(row => row.taskId));
-      const launched = await execute(ctx, { agent: "coordinator", task: "AUTOMATIC_WORKTREE_COORDINATOR_FIXTURE", cwd: repo,
-        ...(reuse ? { worktree: {} } : {}), background: true, acceptance: ["Spawn, read and normally reap a non-Goal ordinary worker using authenticated parent automatic-worktree defaults"] });
-      const group = await wait(ctx, launched.details.job_id), m = manifestFor(group);
+      const prior = new Set((await ownedWorktrees()).map((row) => row.taskId));
+      const launched = await execute(ctx, {
+        agent: "coordinator",
+        task: "AUTOMATIC_WORKTREE_COORDINATOR_FIXTURE",
+        cwd: repo,
+        ...(reuse ? { worktree: {} } : {}),
+        background: true,
+        acceptance: [
+          "Spawn, read and normally reap a non-Goal ordinary worker using authenticated parent automatic-worktree defaults",
+        ],
+      });
+      const group = await wait(ctx, launched.details.job_id),
+        m = manifestFor(group);
       assert.equal(m.automaticWorktrees, true);
       const result = await execute(ctx, { operation: "result", job_id: launched.details.job_id });
       assert.match(result.content[0].text, /AUTOMATIC_WORKTREE_NESTED_REAP_COMPLETE/);
-      const records = (await ownedWorktrees()).filter(row => !prior.has(row.taskId));
+      const records = (await ownedWorktrees()).filter((row) => !prior.has(row.taskId));
       assert.equal(records.length, 1, "nested owned-cwd reuse must not copy a second snapshot");
       if (reuse) {
         assert.equal(records[0].ownerSessionId, ctx.sessionManager.getSessionId());
         assert.equal(records[0].borrowers?.length, 1);
-        assert.equal(records[0].borrowers?.[0].released, true, "nested normal worker reap releases its exact borrower attachment");
+        assert.equal(
+          records[0].borrowers?.[0].released,
+          true,
+          "nested normal worker reap releases its exact borrower attachment",
+        );
       } else {
-        assert.notEqual(records[0].ownerSessionId, ctx.sessionManager.getSessionId(), "ordinary parent must not isolate the coordinator root automatically");
-        assert.equal(records[0].released, true, "nested ordinary worker reap retains its created tree");
+        assert.notEqual(
+          records[0].ownerSessionId,
+          ctx.sessionManager.getSessionId(),
+          "ordinary parent must not isolate the coordinator root automatically",
+        );
+        assert.equal(
+          records[0].released,
+          true,
+          "nested ordinary worker reap retains its created tree",
+        );
       }
       assert.ok((await lstat(records[0].path)).isDirectory());
       await execute(ctx, { operation: "reap", job_id: launched.details.job_id });
       await assert.rejects(lstat(records[0].path), { code: "ENOENT" });
       assert.ok((await worktreeGit(["rev-parse", records[0].branch], repo)).trim());
     }
-    const optional = await execute(ctx, { task: "Ordinary optional cleanup fixture", cwd: repo, worktree: {}, background: true,
-      model: "harness-test/mock:off", acceptance: ["Explicit parent cleanup removes the isolated ordinary worker checkout"] });
-    const optionalGroup = await wait(ctx, optional.details.job_id), optionalPath = optionalGroup.children[0].worktree.path;
-    await execute(ctx, { operation: "reap", job_id: optional.details.job_id, cleanup_worktree: true });
+    const optional = await execute(ctx, {
+      task: "Ordinary optional cleanup fixture",
+      cwd: repo,
+      worktree: {},
+      background: true,
+      model: "harness-test/mock:off",
+      acceptance: ["Explicit parent cleanup removes the isolated ordinary worker checkout"],
+    });
+    const optionalGroup = await wait(ctx, optional.details.job_id),
+      optionalPath = optionalGroup.children[0].worktree.path;
+    await execute(ctx, {
+      operation: "reap",
+      job_id: optional.details.job_id,
+      cleanup_worktree: true,
+    });
     await assert.rejects(lstat(optionalPath), { code: "ENOENT" });
     assert.equal(await worktreeGit(["status", "--porcelain"], repo), "");
     assert.equal((await worktreeGit(["branch", "--show-current"], repo)).trim(), "main");
-    return { automaticNonGoalProvision: true, authenticatedNestedReuse: true, optionalParentCleanup: true, sourceUnchanged: true };
+    return {
+      automaticNonGoalProvision: true,
+      authenticatedNestedReuse: true,
+      optionalParentCleanup: true,
+      sourceUnchanged: true,
+    };
   });
   const answerHeadlessInteraction = async (ctx: any, marker: string, answer: any, kind: string) => {
-    const pendingRun = tool.execute(`root-test-interaction-${marker}-${Date.now()}`, { displayName: canonicalSubagentName(marker), task: marker, model: "harness-test/mock:off", acceptance: ["The requested typed interaction is answered and the worker completes"] }, undefined, undefined, ctx);
+    const pendingRun = tool.execute(
+      `root-test-interaction-${marker}-${Date.now()}`,
+      {
+        displayName: canonicalSubagentName(marker),
+        task: marker,
+        model: "harness-test/mock:off",
+        acceptance: ["The requested typed interaction is answered and the worker completes"],
+      },
+      undefined,
+      undefined,
+      ctx,
+    );
     void pendingRun.catch(() => undefined);
     const service = (globalThis as any)[FOREGROUND_TASKS_KEY];
     const deadline = Date.now() + 30_000;
     let target: any, interaction: any;
     while (Date.now() < deadline) {
-      const listed = await service.execute({ sessionId: service.sessionId, epoch: service.epoch, operation: "list" });
+      const listed = await service.execute({
+        sessionId: service.sessionId,
+        epoch: service.epoch,
+        operation: "list",
+      });
       const task = listed.tasks?.find((item: any) => item.title === canonicalSubagentName(marker));
       if (task) {
         target = { taskId: task.taskId, childId: task.childId, workerEpoch: task.workerEpoch };
-        const view = await service.execute({ sessionId: service.sessionId, epoch: service.epoch, operation: "view", target });
+        const view = await service.execute({
+          sessionId: service.sessionId,
+          epoch: service.epoch,
+          operation: "view",
+          target,
+        });
         interaction = view.view?.interactions?.find((item: any) => item.request.kind === kind);
         // Human questionnaires now route through the owning coordinator broker,
         // not the legacy worker-local panel interaction lane. Permission consent
         // must still use its existing authenticated worker interaction below.
         if (!interaction && kind === "questionnaire") {
-          const listedGuidance = await guidanceTool.execute(`root-guidance-list-${++sequence}`, { operation: "list", limit: 4 }, undefined, undefined, ctx);
+          const listedGuidance = await guidanceTool.execute(
+            `root-guidance-list-${++sequence}`,
+            { operation: "list", limit: 4 },
+            undefined,
+            undefined,
+            ctx,
+          );
           const records = JSON.parse(listedGuidance.content[0].text).records;
-          const request = records.find((record: any) => record.childId === target.childId && record.workerEpoch === target.workerEpoch && record.status === "pending" && record.input.kind === "human");
-          if (request) interaction = { id: request.requestId, request: request.input.questionnaire, guidanceHandle: request.handle };
+          const request = records.find(
+            (record: any) =>
+              record.childId === target.childId &&
+              record.workerEpoch === target.workerEpoch &&
+              record.status === "pending" &&
+              record.input.kind === "human",
+          );
+          if (request)
+            interaction = {
+              id: request.requestId,
+              request: request.input.questionnaire,
+              guidanceHandle: request.handle,
+            };
         }
         if (interaction) break;
       }
       await sleep(100);
     }
     if (!interaction) {
-      const finalList = await service.execute({ sessionId: service.sessionId, epoch: service.epoch, operation: "list" });
+      const finalList = await service.execute({
+        sessionId: service.sessionId,
+        epoch: service.epoch,
+        operation: "list",
+      });
       const finalTask = finalList.tasks?.find((item: any) => item.childId === target?.childId);
-      const finalView = target ? await service.execute({ sessionId: service.sessionId, epoch: service.epoch, operation: "view", target }) : undefined;
-      const worker = target ? discoverTuiWorkers(join(process.env.PI_TUI_WORKER_STATE_ROOT!, "workers"), ctx.sessionManager.getSessionId())
-        .find(item => item.childId === target.childId) : undefined;
-      const diagnostic: any = { finalTask, interactions: finalView?.view?.interactions,
-        messages: finalView?.view?.messages?.slice(-8), worker: worker && { workerEpoch: worker.workerEpoch, runtimePid: worker.runtimePid, execution: worker.execution } };
+      const finalView = target
+        ? await service.execute({
+            sessionId: service.sessionId,
+            epoch: service.epoch,
+            operation: "view",
+            target,
+          })
+        : undefined;
+      const worker = target
+        ? discoverTuiWorkers(
+            join(process.env.PI_TUI_WORKER_STATE_ROOT!, "workers"),
+            ctx.sessionManager.getSessionId(),
+          ).find((item) => item.childId === target.childId)
+        : undefined;
+      const diagnostic: any = {
+        finalTask,
+        interactions: finalView?.view?.interactions,
+        messages: finalView?.view?.messages?.slice(-8),
+        worker: worker && {
+          workerEpoch: worker.workerEpoch,
+          runtimePid: worker.runtimePid,
+          execution: worker.execution,
+        },
+      };
       if (worker) {
         const store = new TuiWorkerStore(dirname(worker.sessionFile));
-        try { diagnostic.status = await callTuiWorker(worker, { operation: "status" }); } catch (error) { diagnostic.statusError = String(error); }
-        try { diagnostic.workerState = store.readState(false); } catch (error) { diagnostic.workerStateError = String(error); }
-        try { diagnostic.stderr = store.readRpcLogTail("stderr", 12 * 1024); } catch (error) { diagnostic.stderrError = String(error); }
-        try { diagnostic.stdout = store.readRpcLogTail("stdout", 12 * 1024).split("\\n").slice(-20).join("\\n"); } catch (error) { diagnostic.stdoutError = String(error); }
+        try {
+          diagnostic.status = await callTuiWorker(worker, { operation: "status" });
+        } catch (error) {
+          diagnostic.statusError = String(error);
+        }
+        try {
+          diagnostic.workerState = store.readState(false);
+        } catch (error) {
+          diagnostic.workerStateError = String(error);
+        }
+        try {
+          diagnostic.stderr = store.readRpcLogTail("stderr", 12 * 1024);
+        } catch (error) {
+          diagnostic.stderrError = String(error);
+        }
+        try {
+          diagnostic.stdout = store
+            .readRpcLogTail("stdout", 12 * 1024)
+            .split("\\n")
+            .slice(-20)
+            .join("\\n");
+        } catch (error) {
+          diagnostic.stdoutError = String(error);
+        }
       }
-      throw new Error(`Headless ${kind} adapter did not publish its typed pending request: ${JSON.stringify(diagnostic).slice(0, 20_000)}`);
+      throw new Error(
+        `Headless ${kind} adapter did not publish its typed pending request: ${JSON.stringify(diagnostic).slice(0, 20_000)}`,
+      );
     }
     if (interaction.guidanceHandle) {
       // Test-only deterministic human UI adapter. Exercise the actual broker's
       // human operation; never submit a model reply as a human/permission answer.
       let asked = false;
-      const humanContext = new Proxy(ctx, { get(original, property) {
-        if (property === "executeTool") return async (name: string, input: any) => {
-          assert.equal(name, "questionnaire");
-          assert.deepEqual(input.questions, interaction.request.questions);
-          asked = true;
-          return { isError: false, result: { details: answer } };
-        };
-        const value = Reflect.get(original, property);
-        return typeof value === "function" ? value.bind(original) : value;
-      } });
-      await guidanceTool.execute(`root-human-answer-${++sequence}`, { operation: "human", handle: interaction.guidanceHandle }, undefined, undefined, humanContext);
+      const humanContext = new Proxy(ctx, {
+        get(original, property) {
+          if (property === "executeTool")
+            return async (name: string, input: any) => {
+              assert.equal(name, "questionnaire");
+              assert.deepEqual(input.questions, interaction.request.questions);
+              asked = true;
+              return { isError: false, result: { details: answer } };
+            };
+          const value = Reflect.get(original, property);
+          return typeof value === "function" ? value.bind(original) : value;
+        },
+      });
+      await guidanceTool.execute(
+        `root-human-answer-${++sequence}`,
+        { operation: "human", handle: interaction.guidanceHandle },
+        undefined,
+        undefined,
+        humanContext,
+      );
       assert.equal(asked, true, "human guidance must invoke the top-level questionnaire adapter");
     } else {
-      const receipt = await service.execute({ sessionId: service.sessionId, epoch: service.epoch, operation: "respond",
-        target, requestId: `root-answer-${marker}`, interactionId: interaction.id, answer });
+      const receipt = await service.execute({
+        sessionId: service.sessionId,
+        epoch: service.epoch,
+        operation: "respond",
+        target,
+        requestId: `root-answer-${marker}`,
+        interactionId: interaction.id,
+        answer,
+      });
       assert.equal(receipt.accepted, true, JSON.stringify(receipt));
     }
     const initialResult = await pendingRun;
@@ -176,10 +351,18 @@ export default function rootTest(pi: ExtensionAPI) {
     if (initialResult.details.guidance_waiting) {
       const completionDeadline = Date.now() + 30_000;
       for (;;) {
-        const listed = await service.execute({ sessionId: service.sessionId, epoch: service.epoch, operation: "list" });
+        const listed = await service.execute({
+          sessionId: service.sessionId,
+          epoch: service.epoch,
+          operation: "list",
+        });
         const task = listed.tasks?.find((item: any) => item.childId === target.childId);
-        if (task && ["completed", "failed", "cancelled", "lost", "reaped"].includes(task.status)) break;
-        assert.ok(Date.now() < completionDeadline, "Headless worker did not finish after its human questionnaire was answered");
+        if (task && ["completed", "failed", "cancelled", "lost", "reaped"].includes(task.status))
+          break;
+        assert.ok(
+          Date.now() < completionDeadline,
+          "Headless worker did not finish after its human questionnaire was answered",
+        );
         await sleep(100);
       }
       result = await execute(ctx, { operation: "result", job_id: initialResult.details.job_id });
@@ -187,97 +370,243 @@ export default function rootTest(pi: ExtensionAPI) {
     assert.equal(result.details.group.status, "completed", JSON.stringify(result));
     return result;
   };
-  const goalCall = async (ctx: any, params: any) => JSON.parse((await goalTool.execute(`goal-fixture-${++sequence}`, params, undefined, undefined, ctx)).content[0].text);
+  const goalCall = async (ctx: any, params: any) =>
+    JSON.parse(
+      (await goalTool.execute(`goal-fixture-${++sequence}`, params, undefined, undefined, ctx))
+        .content[0].text,
+    );
   const goalState = async (ctx: any, id: string, predicate: (goal: any) => boolean) => {
     const deadline = Date.now() + 30_000;
-    while (Date.now() < deadline) { const state = await goalCall(ctx, { scope: "saved", action: "status", goal_id: id }); if (predicate(state.goal)) return state.goal; await sleep(100); }
+    while (Date.now() < deadline) {
+      const state = await goalCall(ctx, { scope: "saved", action: "status", goal_id: id });
+      if (predicate(state.goal)) return state.goal;
+      await sleep(100);
+    }
     throw new Error("Managed Goal lifecycle observation timed out");
   };
-  register("tui-root-goal-start", async ctx => {
+  register("tui-root-goal-start", async (ctx) => {
     await goalCall(ctx, { scope: "saved", action: "list" });
-    const created = await goalCall(ctx, { scope: "saved", action: "create", objective: "MANAGED_GOAL_FIXTURE", steps: [{ text: "Verify normal managed Goal lifecycle", status: "pending" }] });
-    assert.equal(created.goal.status, "paused"); assert.equal(created.goal.child, null);
-    const parent = await goalTool.execute("root-goal-unaffected", { action: "status" }, undefined, undefined, ctx);
-    assert.equal(parent.details.goal, null, "Saved creation must not activate the parent's current Goal");
-    const started = await goalCall(ctx, { scope: "saved", action: "start", goal_id: created.goal.id });
+    const created = await goalCall(ctx, {
+      scope: "saved",
+      action: "create",
+      objective: "MANAGED_GOAL_FIXTURE",
+      steps: [{ text: "Verify normal managed Goal lifecycle", status: "pending" }],
+    });
+    assert.equal(created.goal.status, "paused");
+    assert.equal(created.goal.child, null);
+    const parent = await goalTool.execute(
+      "root-goal-unaffected",
+      { action: "status" },
+      undefined,
+      undefined,
+      ctx,
+    );
+    assert.equal(
+      parent.details.goal,
+      null,
+      "Saved creation must not activate the parent's current Goal",
+    );
+    const started = await goalCall(ctx, {
+      scope: "saved",
+      action: "start",
+      goal_id: created.goal.id,
+    });
     const group = await execute(ctx, { operation: "status", job_id: started.goal.child.jobId });
     assert.equal(group.details.group.children[0].task_id, started.goal.child.taskId);
     assert.equal(group.details.group.children[0].runtime.execution, "tmux");
-    const dashboard = await (globalThis as any)[HARNESS_READONLY_KEY].subagents.list({ sessionId: ctx.sessionManager.getSessionId(), limit: 50 });
-    assert.ok(dashboard.items.some((item: any) => item.taskId === started.goal.child.taskId && item.childId === started.goal.child.childId), "Goal coordinator missing from the ordinary Agents inventory");
-    await goalState(ctx, created.goal.id, goal => goal.status === "active" && !!goal.waiting);
-    await writeFile(`${output}.goal`, JSON.stringify({ id: created.goal.id, child: started.goal.child }));
+    const dashboard = await (globalThis as any)[HARNESS_READONLY_KEY].subagents.list({
+      sessionId: ctx.sessionManager.getSessionId(),
+      limit: 50,
+    });
+    assert.ok(
+      dashboard.items.some(
+        (item: any) =>
+          item.taskId === started.goal.child.taskId && item.childId === started.goal.child.childId,
+      ),
+      "Goal coordinator missing from the ordinary Agents inventory",
+    );
+    await goalState(ctx, created.goal.id, (goal) => goal.status === "active" && !!goal.waiting);
+    await writeFile(
+      `${output}.goal`,
+      JSON.stringify({ id: created.goal.id, child: started.goal.child }),
+    );
     return { goal: true, child: started.goal.child };
   });
-  register("tui-root-goal-check", async ctx => {
+  register("tui-root-goal-check", async (ctx) => {
     const saved = JSON.parse(await readFile(`${output}.goal`, "utf8"));
-    let state = await goalState(ctx, saved.id, goal => goal.status === "active");
-    assert.deepEqual(state.child, saved.child, "Parent reload must recover the same normal task, not start another");
-    const dashboard = await (globalThis as any)[HARNESS_READONLY_KEY].subagents.list({ sessionId: ctx.sessionManager.getSessionId(), limit: 50 });
-    assert.ok(dashboard.items.some((item: any) => item.taskId === saved.child.taskId), "Reload lost normal Agents visibility");
-    await execute(ctx, { operation: "prompt", child_id: state.child.childId, message: "STEER_MANAGED_GOAL" });
+    let state = await goalState(ctx, saved.id, (goal) => goal.status === "active");
+    assert.deepEqual(
+      state.child,
+      saved.child,
+      "Parent reload must recover the same normal task, not start another",
+    );
+    const dashboard = await (globalThis as any)[HARNESS_READONLY_KEY].subagents.list({
+      sessionId: ctx.sessionManager.getSessionId(),
+      limit: 50,
+    });
+    assert.ok(
+      dashboard.items.some((item: any) => item.taskId === saved.child.taskId),
+      "Reload lost normal Agents visibility",
+    );
+    await execute(ctx, {
+      operation: "prompt",
+      child_id: state.child.childId,
+      message: "STEER_MANAGED_GOAL",
+    });
     const group = await execute(ctx, { operation: "status", job_id: state.child.jobId });
     const manifest = manifestFor(group.details.group);
     const deadline = Date.now() + 30_000;
-    while (!(await readFile(manifest.sessionFile, "utf8")).includes("MANAGED_STEER_ACK")) { assert.ok(Date.now() < deadline, "Normal agent steering was not delivered"); await sleep(100); }
-    state = await goalState(ctx, saved.id, goal => !!goal.waiting);
+    while (!(await readFile(manifest.sessionFile, "utf8")).includes("MANAGED_STEER_ACK")) {
+      assert.ok(Date.now() < deadline, "Normal agent steering was not delivered");
+      await sleep(100);
+    }
+    state = await goalState(ctx, saved.id, (goal) => !!goal.waiting);
     const paused = await goalCall(ctx, { scope: "saved", action: "pause", goal_id: saved.id });
     assert.equal(paused.goal.status, "paused");
     const resumed = await goalCall(ctx, { scope: "saved", action: "resume", goal_id: saved.id });
     assert.equal(resumed.goal.child.taskId, saved.child.taskId);
-    await goalState(ctx, saved.id, goal => goal.status === "active" && !!goal.waiting);
-    await execute(ctx, { operation: "prompt", child_id: resumed.goal.child.childId, message: "FINISH_MANAGED_GOAL" });
-    const completed = await goalState(ctx, saved.id, goal => goal.status === "complete");
+    await goalState(ctx, saved.id, (goal) => goal.status === "active" && !!goal.waiting);
+    await execute(ctx, {
+      operation: "prompt",
+      child_id: resumed.goal.child.childId,
+      message: "FINISH_MANAGED_GOAL",
+    });
+    const completed = await goalState(ctx, saved.id, (goal) => goal.status === "complete");
     assert.ok(completed.tasks.every((task: any) => task.status === "completed"));
     const final = await wait(ctx, resumed.goal.child.jobId);
     assert.equal(final.children[0].task_outcome.state, "delivered");
     await execute(ctx, { operation: "reap", job_id: resumed.goal.child.jobId });
-    return { managedGoal: true, ordinarySteering: true, reloadRebound: true, sameTask: true, completed: true };
+    return {
+      managedGoal: true,
+      ordinarySteering: true,
+      reloadRebound: true,
+      sameTask: true,
+      completed: true,
+    };
   });
-  register("tui-root-verification", async ctx => {
+  register("tui-root-verification", async (ctx) => {
     const permission = (globalThis as any).__PAE_PERMISSION_GATE_OPERATOR_V1__;
     permission?.applyMode(ctx.sessionManager.getSessionId(), false);
     const cwd = join(dirname(output), "verification-cwd");
     await mkdir(cwd, { mode: 0o700 });
     for (const code of [0, 7]) {
-      const launched = await execute(ctx, { task: "REPORT_OUTCOME", acceptance: ["fixture"], model: "harness-test/mock:off", background: true,
-        cwd, tools: ["read", "bash"], verification: [{ command: `printf 'verified literal stdout\\n'; printf 'verified literal stderr\\n' >&2; exit ${code}`, timeoutMs: 20000 }] });
+      const launched = await execute(ctx, {
+        task: "REPORT_OUTCOME",
+        acceptance: ["fixture"],
+        model: "harness-test/mock:off",
+        background: true,
+        cwd,
+        tools: ["read", "bash"],
+        verification: [
+          {
+            command: `printf 'verified literal stdout\\n'; printf 'verified literal stderr\\n' >&2; exit ${code}`,
+            timeoutMs: 20000,
+          },
+        ],
+      });
       const result = await terminalSnapshot(ctx, launched.details.job_id);
       const child = result.details.group.children[0];
-      assert.equal(child.verification.status, permission ? code === 0 ? "passed" : "failed" : "unavailable", JSON.stringify(result));
+      assert.equal(
+        child.verification.status,
+        permission ? (code === 0 ? "passed" : "failed") : "unavailable",
+        JSON.stringify(result),
+      );
       assert.equal(child.accepted_delivery, !!permission && code === 0, JSON.stringify(result));
-      const evidence = await execute(ctx, { operation: "result", child_id: child.child_id, diagnostics: true });
+      const evidence = await execute(ctx, {
+        operation: "result",
+        child_id: child.child_id,
+        diagnostics: true,
+      });
       assert.equal(evidence.details.failed, !permission || code !== 0);
       assert.equal(typeof evidence.content[0].text, "string");
-      assert.ok(!evidence.content[0].text.trimStart().startsWith("{"), "diagnostics must remain human-readable");
+      assert.ok(
+        !evidence.content[0].text.trimStart().startsWith("{"),
+        "diagnostics must remain human-readable",
+      );
       const raw = { runtimeVerification: evidence.details.verification };
       if (permission) {
         assert.equal(raw.runtimeVerification.runs[0].exitCode, code);
         assert.equal(raw.runtimeVerification.runs[0].stdout, "verified literal stdout\n");
         assert.equal(raw.runtimeVerification.runs[0].stderr, "verified literal stderr\n");
-        const jobs = await (await import("./tui-worker-client.ts")).callTuiWorker(manifestFor(result.details.group), { operation: "jobs", params: { action: "list" } });
-        assert.equal((jobs.data as any)?.details?.jobs?.length, 0, "verification left a child-local supervised job behind");
+        const jobs = await (
+          await import("./tui-worker-client.ts")
+        ).callTuiWorker(manifestFor(result.details.group), {
+          operation: "jobs",
+          params: { action: "list" },
+        });
+        assert.equal(
+          (jobs.data as any)?.details?.jobs?.length,
+          0,
+          "verification left a child-local supervised job behind",
+        );
         if (code === 0) {
-          const manifest = manifestFor(result.details.group), store = new TuiWorkerStore(dirname(manifest.sessionFile));
-          const beforeReload = store.readState().sequence, placement = manifest.placement!;
-          await promisify(execFile)("tmux", ["-S", placement.socketPath, "send-keys", "-t", placement.paneId, "-l", "/reload"]);
-          await promisify(execFile)("tmux", ["-S", placement.socketPath, "send-keys", "-t", placement.paneId, "Enter"]);
+          const manifest = manifestFor(result.details.group),
+            store = new TuiWorkerStore(dirname(manifest.sessionFile));
+          const beforeReload = store.readState().sequence,
+            placement = manifest.placement!;
+          await promisify(execFile)("tmux", [
+            "-S",
+            placement.socketPath,
+            "send-keys",
+            "-t",
+            placement.paneId,
+            "-l",
+            "/reload",
+          ]);
+          await promisify(execFile)("tmux", [
+            "-S",
+            placement.socketPath,
+            "send-keys",
+            "-t",
+            placement.paneId,
+            "Enter",
+          ]);
           const deadline = Date.now() + 20000;
-          while (Date.now() < deadline && !store.readState().events.some(event => event.kind === "ready" && event.sequence > beforeReload)) await sleep(100);
-          const restored = await execute(ctx, { operation: "status", job_id: launched.details.job_id });
-          assert.equal(restored.details.group.children[0].verification.status, "interrupted", JSON.stringify(restored));
+          while (
+            Date.now() < deadline &&
+            !store
+              .readState()
+              .events.some((event) => event.kind === "ready" && event.sequence > beforeReload)
+          )
+            await sleep(100);
+          const restored = await execute(ctx, {
+            operation: "status",
+            job_id: launched.details.job_id,
+          });
+          assert.equal(
+            restored.details.group.children[0].verification.status,
+            "interrupted",
+            JSON.stringify(restored),
+          );
           assert.equal(restored.details.group.children[0].accepted_delivery, false);
-          assert.equal(store.readState().verification?.runs[0].jobId, raw.runtimeVerification.runs[0].jobId, "reload replayed a verification dispatch");
+          assert.equal(
+            store.readState().verification?.runs[0].jobId,
+            raw.runtimeVerification.runs[0].jobId,
+            "reload replayed a verification dispatch",
+          );
           assert.equal(store.readState().verification?.runs[0].stdout, "verified literal stdout\n");
         }
       }
-      const bypassReason = code === 0 && permission ? undefined : "fixture intentionally exercises failed or unavailable verification";
-      await execute(ctx, { operation: "reap", job_id: launched.details.job_id,
-        ...(bypassReason ? { force: true, reason: bypassReason } : {}) });
+      const bypassReason =
+        code === 0 && permission
+          ? undefined
+          : "fixture intentionally exercises failed or unavailable verification";
+      await execute(ctx, {
+        operation: "reap",
+        job_id: launched.details.job_id,
+        ...(bypassReason ? { force: true, reason: bypassReason } : {}),
+      });
     }
     // Exercise the actual parent verify operation independently of delivery.
-    const idle = await execute(ctx, { task: "Idle verification boundary", acceptance: ["fixture"], model: "harness-test/mock:off", background: true,
-      cwd, tools: ["read", "bash"], verification: [{ command: "printf 'standalone verification\\n'", timeoutMs: 20000 }] });
+    const idle = await execute(ctx, {
+      task: "Idle verification boundary",
+      acceptance: ["fixture"],
+      model: "harness-test/mock:off",
+      background: true,
+      cwd,
+      tools: ["read", "bash"],
+      verification: [{ command: "printf 'standalone verification\\n'", timeoutMs: 20000 }],
+    });
     const idleDeadline = Date.now() + 30_000;
     let idleResult: any;
     for (;;) {
@@ -287,43 +616,93 @@ export default function rootTest(pi: ExtensionAPI) {
       await sleep(100);
     }
     const idleChild = idleResult.details.group.children[0];
-    assert.equal(idleResult.details.group.status, "waiting", "unreported idle waits for guidance rather than failing final verification");
+    assert.equal(
+      idleResult.details.group.status,
+      "waiting",
+      "unreported idle waits for guidance rather than failing final verification",
+    );
     assert.equal(idleChild.verification.runs.length, 0, "idle must not dispatch verification");
     assert.equal(idleChild.accepted_delivery, false);
     const standalone = await execute(ctx, { operation: "verify", child_id: idleChild.child_id });
-    assert.equal(standalone.details.results[0].verification.status, permission ? "passed" : "unavailable", JSON.stringify(standalone));
-    assert.equal(standalone.details.results[0].accepted_delivery, false, "standalone checks must not fabricate delivery");
+    assert.equal(
+      standalone.details.results[0].verification.status,
+      permission ? "passed" : "unavailable",
+      JSON.stringify(standalone),
+    );
+    assert.equal(
+      standalone.details.results[0].accepted_delivery,
+      false,
+      "standalone checks must not fabricate delivery",
+    );
     assert.notEqual(standalone.details.pending, true, "verify must await the actual verdict");
     await execute(ctx, { operation: "cancel", job_id: idle.details.job_id });
-    await execute(ctx, { operation: "reap", job_id: idle.details.job_id,
-      ...(!permission ? { force: true, reason: "fixture standalone verification has no permission backend" } : {}) });
-    const readonly = await execute(ctx, { task: "REPORT_OUTCOME", acceptance: ["fixture"], model: "harness-test/mock:off", background: true,
-      cwd, tools: ["read"], verification: [{ command: "printf MUST_NOT_RUN", timeoutMs: 20000 }] });
+    await execute(ctx, {
+      operation: "reap",
+      job_id: idle.details.job_id,
+      ...(!permission
+        ? { force: true, reason: "fixture standalone verification has no permission backend" }
+        : {}),
+    });
+    const readonly = await execute(ctx, {
+      task: "REPORT_OUTCOME",
+      acceptance: ["fixture"],
+      model: "harness-test/mock:off",
+      background: true,
+      cwd,
+      tools: ["read"],
+      verification: [{ command: "printf MUST_NOT_RUN", timeoutMs: 20000 }],
+    });
     const denied = await terminalSnapshot(ctx, readonly.details.job_id);
     assert.equal(denied.details.group.children[0].verification.status, "unavailable");
     assert.equal(denied.details.group.children[0].accepted_delivery, false);
-    await execute(ctx, { operation: "reap", job_id: readonly.details.job_id, force: true,
-      reason: "fixture intentionally exercises unavailable verification" });
+    await execute(ctx, {
+      operation: "reap",
+      job_id: readonly.details.job_id,
+      force: true,
+      reason: "fixture intentionally exercises unavailable verification",
+    });
     return { nativeManager: true, realPermissionGate: !!permission };
   });
-  register("tui-root-background", async ctx => {
+  register("tui-root-background", async (ctx) => {
     pi.setSessionName("tui-root-test");
     const gate = (globalThis as any).__PAE_PERMISSION_GATE_OPERATOR_V1__;
     gate?.applyMode(ctx.sessionManager.getSessionId(), false);
-    const paneSnapshot = async () => (await promisify(execFile)("tmux", ["list-panes", "-a", "-F", "#{pane_id}"])).stdout.trim().split("\n").filter(Boolean).sort();
+    const paneSnapshot = async () =>
+      (await promisify(execFile)("tmux", ["list-panes", "-a", "-F", "#{pane_id}"])).stdout
+        .trim()
+        .split("\n")
+        .filter(Boolean)
+        .sort();
     const panesBeforeHeadless = await paneSnapshot();
-    const foreground = await execute(ctx, { task: "REPORT_OUTCOME", model: "harness-test/mock:off", acceptance: ["fixture"] });
+    const foreground = await execute(ctx, {
+      task: "REPORT_OUTCOME",
+      model: "harness-test/mock:off",
+      acceptance: ["fixture"],
+    });
     assert.equal(foreground.details.group.status, "completed", JSON.stringify(foreground));
     const foregroundId = foreground.details.group.children[0].task_id;
-    const headless = discoverTuiWorkers(join(process.env.PI_TUI_WORKER_STATE_ROOT!, "workers"), ctx.sessionManager.getSessionId())
-      .find(worker => worker.taskId === foregroundId)!;
+    const headless = discoverTuiWorkers(
+      join(process.env.PI_TUI_WORKER_STATE_ROOT!, "workers"),
+      ctx.sessionManager.getSessionId(),
+    ).find((worker) => worker.taskId === foregroundId)!;
     assert.ok(headless, "default foreground launch did not commit a discoverable worker");
     assert.equal(headless.execution, "rpc-headless");
     assert.equal(headless.presentation, "headless-foreground");
-    assert.equal(Object.hasOwn(headless, "placement"), false, "headless manifest fabricated tmux placement");
+    assert.equal(
+      Object.hasOwn(headless, "placement"),
+      false,
+      "headless manifest fabricated tmux placement",
+    );
     assert.equal((await lstat(headless.fifoPath!)).isFIFO(), true);
-    assert.ok(headless.runtimePid && headless.runtimeProcessToken, "worker-ready handshake must authenticate the actual Pi PID");
-    assert.equal(await readlink(`/proc/${headless.runtimePid}/fd/0`), headless.fifoPath, "child Pi did not retain its own FIFO stdin descriptor");
+    assert.ok(
+      headless.runtimePid && headless.runtimeProcessToken,
+      "worker-ready handshake must authenticate the actual Pi PID",
+    );
+    assert.equal(
+      await readlink(`/proc/${headless.runtimePid}/fd/0`),
+      headless.fifoPath,
+      "child Pi did not retain its own FIFO stdin descriptor",
+    );
     assert.equal(await processIdentity(headless.runtimePid!), headless.runtimeProcessToken);
     const workerDirectory = dirname(headless.sessionFile);
     const runtimePolicy = await readFile(join(workerDirectory, "system-prompt.txt"), "utf8");
@@ -331,359 +710,891 @@ export default function rootTest(pi: ExtensionAPI) {
     assert.match(runtimePolicy, /harness-user-control/);
     for (const name of ["rpc.stdout.log", "rpc.stderr.log"]) {
       const log = await lstat(join(workerDirectory, name));
-      assert.equal((log.mode & 0o077), 0, "RPC diagnostics must remain private");
+      assert.equal(log.mode & 0o077, 0, "RPC diagnostics must remain private");
       assert.ok(log.size <= 512 * 1024, "RPC diagnostics must be byte-bounded");
     }
-    const childEnvironment = (await readFile(`/proc/${headless.runtimePid}/environ`)).toString("utf8").split("\0");
-    assert.ok(!childEnvironment.some(entry => entry.startsWith("TMUX=") || entry.startsWith("TMUX_PANE=")), "headless worker inherited tmux targeting");
-    assert.equal(childEnvironment.find(entry => entry.startsWith("PI_PASEO_BRIDGE_NO_IMPORT=")), "PI_PASEO_BRIDGE_NO_IMPORT=1");
+    const childEnvironment = (await readFile(`/proc/${headless.runtimePid}/environ`))
+      .toString("utf8")
+      .split("\0");
+    assert.ok(
+      !childEnvironment.some(
+        (entry) => entry.startsWith("TMUX=") || entry.startsWith("TMUX_PANE="),
+      ),
+      "headless worker inherited tmux targeting",
+    );
+    assert.equal(
+      childEnvironment.find((entry) => entry.startsWith("PI_PASEO_BRIDGE_NO_IMPORT=")),
+      "PI_PASEO_BRIDGE_NO_IMPORT=1",
+    );
     // The immutable guarded launcher may add its own bridge defaults after
     // inherited variables have been removed. Those are not parent identity.
-    const launcherBridgeDefaults = process.env.PI_TUI_WORKER_LAUNCH_MODE === "guard-only"
-      ? new Set(["PI_PASEO_BRIDGE_DEBUG=0", "PI_PASEO_BRIDGE_DEFAULT_AUTO_CONNECT=1", "PI_PASEO_BRIDGE_GENERATE_TITLES=1", "PI_PASEO_BRIDGE_IMPORT_SESSIONS=1"])
-      : new Set<string>();
-    assert.ok(!childEnvironment.some(entry => /^PI_PASEO_(?!BRIDGE_NO_IMPORT=)/.test(entry) && !launcherBridgeDefaults.has(entry)), "parent Paseo identity/force/control variables leaked into worker");
-    assert.equal(process.env.PI_PASEO_EXISTING_AGENT_ID, "malicious-parent-agent", "headless launch mutated parent Paseo binding");
+    const launcherBridgeDefaults =
+      process.env.PI_TUI_WORKER_LAUNCH_MODE === "guard-only"
+        ? new Set([
+            "PI_PASEO_BRIDGE_DEBUG=0",
+            "PI_PASEO_BRIDGE_DEFAULT_AUTO_CONNECT=1",
+            "PI_PASEO_BRIDGE_GENERATE_TITLES=1",
+            "PI_PASEO_BRIDGE_IMPORT_SESSIONS=1",
+          ])
+        : new Set<string>();
+    assert.ok(
+      !childEnvironment.some(
+        (entry) =>
+          /^PI_PASEO_(?!BRIDGE_NO_IMPORT=)/.test(entry) && !launcherBridgeDefaults.has(entry),
+      ),
+      "parent Paseo identity/force/control variables leaked into worker",
+    );
+    assert.equal(
+      process.env.PI_PASEO_EXISTING_AGENT_ID,
+      "malicious-parent-agent",
+      "headless launch mutated parent Paseo binding",
+    );
     // Public launch API must reject missing/empty requirements without a worker.
-    const workersBeforeInvalid = discoverTuiWorkers(join(process.env.PI_TUI_WORKER_STATE_ROOT!, "workers"), ctx.sessionManager.getSessionId()).length;
+    const workersBeforeInvalid = discoverTuiWorkers(
+      join(process.env.PI_TUI_WORKER_STATE_ROOT!, "workers"),
+      ctx.sessionManager.getSessionId(),
+    ).length;
     for (const acceptance of [undefined, []]) {
       const invalid = { task: "MUST_NOT_LAUNCH", acceptance, model: "harness-test/mock:off" };
       await assert.rejects(() => execute(ctx, invalid), /requires acceptance/);
-      for (const shape of ["tasks", "chain"]) await assert.rejects(() => execute(ctx, { [shape]: [
-        { task: "VALID_BUT_MUST_NOT_LAUNCH", acceptance: ["No worker starts when another item is invalid"], model: "harness-test/mock:off" }, invalid], background: true }), /requires acceptance/);
+      for (const shape of ["tasks", "chain"])
+        await assert.rejects(
+          () =>
+            execute(ctx, {
+              [shape]: [
+                {
+                  task: "VALID_BUT_MUST_NOT_LAUNCH",
+                  acceptance: ["No worker starts when another item is invalid"],
+                  model: "harness-test/mock:off",
+                },
+                invalid,
+              ],
+              background: true,
+            }),
+          /requires acceptance/,
+        );
     }
-    assert.equal(discoverTuiWorkers(join(process.env.PI_TUI_WORKER_STATE_ROOT!, "workers"), ctx.sessionManager.getSessionId()).length, workersBeforeInvalid);
+    assert.equal(
+      discoverTuiWorkers(
+        join(process.env.PI_TUI_WORKER_STATE_ROOT!, "workers"),
+        ctx.sessionManager.getSessionId(),
+      ).length,
+      workersBeforeInvalid,
+    );
     for (const background of [false, true]) {
-      const launched = await execute(ctx, { task: `AUTO_ROUTINE ${background ? "AUTO_REPEAT" : ""}`,
-        model: "harness-test/mock:off", acceptance: ["Routine continuation runs once"], background });
+      const launched = await execute(ctx, {
+        task: `AUTO_ROUTINE ${background ? "AUTO_REPEAT" : ""}`,
+        model: "harness-test/mock:off",
+        acceptance: ["Routine continuation runs once"],
+        background,
+      });
       const group = background ? await wait(ctx, launched.details.job_id) : launched.details.group;
-      const autoWorker = discoverTuiWorkers(join(process.env.PI_TUI_WORKER_STATE_ROOT!, "workers"), ctx.sessionManager.getSessionId())
-        .find(worker => worker.taskId === group.children[0].task_id)!;
+      const autoWorker = discoverTuiWorkers(
+        join(process.env.PI_TUI_WORKER_STATE_ROOT!, "workers"),
+        ctx.sessionManager.getSessionId(),
+      ).find((worker) => worker.taskId === group.children[0].task_id)!;
       const autoStore = new TuiWorkerStore(dirname(autoWorker.sessionFile));
       const state = autoStore.readState();
-      assert.equal(state.autoContinuation?.used, true, `real Pi did not request the bounded continuation: ${JSON.stringify({state, stdout: background ? undefined : autoStore.readRpcLogTail("stdout", 24000), transcript: await readFile(autoWorker.sessionFile, "utf8")}).slice(-30000)}`);
-      assert.equal(state.events.filter(event => event.kind === "settled").length, 1, "intermediate partial emitted completion");
-      const session = (await readFile(autoWorker.sessionFile, "utf8")).split("\n").filter(Boolean).map(line => JSON.parse(line));
-      assert.equal(session.filter(entry => entry.type === "custom_message" && entry.customType === "harness-auto-continuation").length, 1);
+      assert.equal(
+        state.autoContinuation?.used,
+        true,
+        `real Pi did not request the bounded continuation: ${JSON.stringify({ state, stdout: background ? undefined : autoStore.readRpcLogTail("stdout", 24000), transcript: await readFile(autoWorker.sessionFile, "utf8") }).slice(-30000)}`,
+      );
+      assert.equal(
+        state.events.filter((event) => event.kind === "settled").length,
+        1,
+        "intermediate partial emitted completion",
+      );
+      const session = (await readFile(autoWorker.sessionFile, "utf8"))
+        .split("\n")
+        .filter(Boolean)
+        .map((line) => JSON.parse(line));
+      assert.equal(
+        session.filter(
+          (entry) =>
+            entry.type === "custom_message" && entry.customType === "harness-auto-continuation",
+        ).length,
+        1,
+      );
       const finalOutcome = JSON.parse(await readFile(state.lastOutcome!, "utf8"));
       assert.equal(finalOutcome.state, background ? "partial" : "delivered");
       assert.deepEqual(autoWorker.acceptance, ["Routine continuation runs once"]);
       if (background) {
         const beforeReload = state.sequence;
         const placement = autoWorker.placement!;
-        await promisify(execFile)("tmux", ["-S", placement.socketPath, "send-keys", "-t", placement.paneId, "-l", "/reload"]);
-        await promisify(execFile)("tmux", ["-S", placement.socketPath, "send-keys", "-t", placement.paneId, "Enter"]);
+        await promisify(execFile)("tmux", [
+          "-S",
+          placement.socketPath,
+          "send-keys",
+          "-t",
+          placement.paneId,
+          "-l",
+          "/reload",
+        ]);
+        await promisify(execFile)("tmux", [
+          "-S",
+          placement.socketPath,
+          "send-keys",
+          "-t",
+          placement.paneId,
+          "Enter",
+        ]);
         const deadline = Date.now() + 30_000;
-        while (Date.now() < deadline && !autoStore.readState().events.some(event => event.kind === "ready" && event.sequence > beforeReload)) await sleep(100);
+        while (
+          Date.now() < deadline &&
+          !autoStore
+            .readState()
+            .events.some((event) => event.kind === "ready" && event.sequence > beforeReload)
+        )
+          await sleep(100);
         const reloaded = autoStore.readState();
-        assert.ok(reloaded.events.some(event => event.kind === "ready" && event.sequence > beforeReload), "actual worker extension reload did not complete");
-        assert.equal(reloaded.autoContinuation?.used, true, "worker reload replenished consumed budget");
-        assert.equal(reloaded.events.filter(event => event.kind === "settled").length, 1, "reload duplicated final settlement");
+        assert.ok(
+          reloaded.events.some((event) => event.kind === "ready" && event.sequence > beforeReload),
+          "actual worker extension reload did not complete",
+        );
+        assert.equal(
+          reloaded.autoContinuation?.used,
+          true,
+          "worker reload replenished consumed budget",
+        );
+        assert.equal(
+          reloaded.events.filter((event) => event.kind === "settled").length,
+          1,
+          "reload duplicated final settlement",
+        );
         assert.equal(reloaded.lastOutcome, state.lastOutcome);
       }
       await execute(ctx, { operation: "reap", job_id: launched.details.job_id });
     }
-    const paused = await execute(ctx, { task: "PAUSE_BEFORE_TASK_OUTCOME", model: "harness-test/mock:off", background: true, acceptance: ["Cancellation does not record the incomplete streamed outcome"] });
+    const paused = await execute(ctx, {
+      task: "PAUSE_BEFORE_TASK_OUTCOME",
+      model: "harness-test/mock:off",
+      background: true,
+      acceptance: ["Cancellation does not record the incomplete streamed outcome"],
+    });
     const pauseDeadline = Date.now() + 30_000;
     let pausedWorker: any, pausedState: any, pausedMarker: any;
     while (Date.now() < pauseDeadline) {
-      const group = (await execute(ctx, { operation: "status", job_id: paused.details.job_id })).details.group;
+      const group = (await execute(ctx, { operation: "status", job_id: paused.details.job_id }))
+        .details.group;
       const child = group.children?.[0];
       if (child?.task_id) {
-        pausedWorker = discoverTuiWorkers(join(process.env.PI_TUI_WORKER_STATE_ROOT!, "workers"), ctx.sessionManager.getSessionId())
-          .find(item => item.taskId === child.task_id);
+        pausedWorker = discoverTuiWorkers(
+          join(process.env.PI_TUI_WORKER_STATE_ROOT!, "workers"),
+          ctx.sessionManager.getSessionId(),
+        ).find((item) => item.taskId === child.task_id);
         if (pausedWorker) {
           pausedState = await callTuiWorker(pausedWorker, { operation: "status" });
-          try { pausedMarker = JSON.parse(await readFile(`${dirname(pausedWorker.sessionFile)}/manifest.json.paused-stream.json`, "utf8")); } catch {}
+          try {
+            pausedMarker = JSON.parse(
+              await readFile(
+                `${dirname(pausedWorker.sessionFile)}/manifest.json.paused-stream.json`,
+                "utf8",
+              ),
+            );
+          } catch {}
           if (pausedState.data?.active && pausedMarker?.emitted === true) break;
         }
       }
       await sleep(100);
     }
-    assert.ok(pausedWorker && pausedState?.data?.active && pausedMarker?.emitted === true,
-      `paused provider never emitted its partial tool call while active: ${JSON.stringify({ launched: paused.details, pausedWorker, pausedState, pausedMarker }).slice(0, 4000)}`);
-    assert.equal(pausedMarker.toolName, "task_outcome", "fixture marker must attest to the exact partial task_outcome call");
+    assert.ok(
+      pausedWorker && pausedState?.data?.active && pausedMarker?.emitted === true,
+      `paused provider never emitted its partial tool call while active: ${JSON.stringify({ launched: paused.details, pausedWorker, pausedState, pausedMarker }).slice(0, 4000)}`,
+    );
+    assert.equal(
+      pausedMarker.toolName,
+      "task_outcome",
+      "fixture marker must attest to the exact partial task_outcome call",
+    );
     assert.equal(pausedMarker.toolCallId, "fixture-paused-outcome");
-    assert.equal(pausedState.data.lastOutcome, undefined, "partial tool call was falsely recorded as an outcome");
+    assert.equal(
+      pausedState.data.lastOutcome,
+      undefined,
+      "partial tool call was falsely recorded as an outcome",
+    );
     assert.equal(pausedState.data.phase, "running");
     const abortStarted = Date.now();
     const cancelled = await execute(ctx, { operation: "cancel", job_id: paused.details.job_id });
     assert.equal(cancelled.details.group.status, "cancelled", JSON.stringify(cancelled));
-    assert.ok(Date.now() - abortStarted < 10_000, "abort/control did not respond promptly to paused stream");
+    assert.ok(
+      Date.now() - abortStarted < 10_000,
+      "abort/control did not respond promptly to paused stream",
+    );
     const pausedFinal = await callTuiWorker(pausedWorker, { operation: "status" });
     assert.equal(pausedFinal.data?.lastOutcome, undefined, "abort fabricated a successful outcome");
-    assert.ok(!new TuiWorkerStore(dirname(pausedWorker.sessionFile)).readState().events.some((event: any) => event.kind === "outcome"), "task_outcome ran before model stream completed");
+    assert.ok(
+      !new TuiWorkerStore(dirname(pausedWorker.sessionFile))
+        .readState()
+        .events.some((event: any) => event.kind === "outcome"),
+      "task_outcome ran before model stream completed",
+    );
     await execute(ctx, { operation: "reap", job_id: paused.details.job_id });
 
     const foregroundState = await callTuiWorker(headless, { operation: "status" });
     assert.equal((foregroundState.data as any).active, false);
     assert.ok((foregroundState.data as any).lastReport);
     const service = (globalThis as any)[FOREGROUND_TASKS_KEY];
-    const page = await service.execute({ sessionId: service.sessionId, epoch: service.epoch, operation: "list" });
+    const page = await service.execute({
+      sessionId: service.sessionId,
+      epoch: service.epoch,
+      operation: "list",
+    });
     assert.equal(page.state, "available");
     const headlessTask = page.tasks.find((task: any) => task.taskId === foregroundId)!;
     assert.ok(headlessTask);
-    const view = await service.execute({ sessionId: service.sessionId, epoch: service.epoch, operation: "view",
-      target: { taskId: headlessTask.taskId, childId: headlessTask.childId, workerEpoch: headlessTask.workerEpoch } });
+    const view = await service.execute({
+      sessionId: service.sessionId,
+      epoch: service.epoch,
+      operation: "view",
+      target: {
+        taskId: headlessTask.taskId,
+        childId: headlessTask.childId,
+        workerEpoch: headlessTask.workerEpoch,
+      },
+    });
     assert.equal(view.state, "available", JSON.stringify(view));
-    assert.ok(view.view.messages.some((message: any) => message.role === "assistant"), JSON.stringify(view));
+    assert.ok(
+      view.view.messages.some((message: any) => message.role === "assistant"),
+      JSON.stringify(view),
+    );
     const readonlyService = (globalThis as any)[HARNESS_READONLY_KEY]?.subagents;
     assert.ok(readonlyService, "root read-only dashboard service was not installed");
-    const groupRecordPath = join(process.env.PI_TUI_WORKER_STATE_ROOT!, "headless-groups", `${foreground.details.job_id}.json`);
+    const groupRecordPath = join(
+      process.env.PI_TUI_WORKER_STATE_ROOT!,
+      "headless-groups",
+      `${foreground.details.job_id}.json`,
+    );
     const groupRecordBefore = await readFile(groupRecordPath, "utf8");
-    const readonlyPage = await readonlyService.list({ sessionId: ctx.sessionManager.getSessionId(), limit: 50 });
+    const readonlyPage = await readonlyService.list({
+      sessionId: ctx.sessionManager.getSessionId(),
+      limit: 50,
+    });
     assert.ok(readonlyPage.items.some((item: any) => item.taskId === foregroundId));
-    const readonlyReport = await readonlyService.report({ sessionId: ctx.sessionManager.getSessionId(), taskId: foregroundId });
+    const readonlyReport = await readonlyService.report({
+      sessionId: ctx.sessionManager.getSessionId(),
+      taskId: foregroundId,
+    });
     assert.equal(readonlyReport.state, "available");
     assert.equal(readonlyReport.item.stale, true);
     assert.doesNotMatch(readonlyReport.item.text, /session\.jsonl|control\.sock/);
-    assert.equal(await readFile(groupRecordPath, "utf8"), groupRecordBefore, "read-only Paseo snapshot reconciled/wrote headless state");
-    const resultPage1 = await execute(ctx, { operation: "result", job_id: foreground.details.job_id, child: 1, offset: 0, limit: 8 });
+    assert.equal(
+      await readFile(groupRecordPath, "utf8"),
+      groupRecordBefore,
+      "read-only Paseo snapshot reconciled/wrote headless state",
+    );
+    const resultPage1 = await execute(ctx, {
+      operation: "result",
+      job_id: foreground.details.job_id,
+      child: 1,
+      offset: 0,
+      limit: 8,
+    });
     assert.equal(resultPage1.details.offset, 0);
     assert.equal(resultPage1.details.next_offset, 8);
     assert.equal(resultPage1.details.complete, false);
-    const resultPage2 = await execute(ctx, { operation: "result", job_id: foreground.details.job_id, child: 1, offset: 8, limit: 8 });
+    const resultPage2 = await execute(ctx, {
+      operation: "result",
+      job_id: foreground.details.job_id,
+      child: 1,
+      offset: 8,
+      limit: 8,
+    });
     assert.equal(resultPage2.details.offset, 8);
     assert.ok(resultPage2.content[0].text.length > 0);
-    const childOnlyResult = await execute(ctx, { operation: "result", child_id: headlessTask.childId, offset: 0, limit: 8 });
+    const childOnlyResult = await execute(ctx, {
+      operation: "result",
+      child_id: headlessTask.childId,
+      offset: 0,
+      limit: 8,
+    });
     assert.equal(childOnlyResult.details.child_id, headlessTask.childId);
-    await assert.rejects(execute(ctx, { operation: "result", job_id: foreground.details.job_id, child_id: `subagent-child-${"f".repeat(24)}` }), /child_id does not belong/i);
-    const promptRequest = { sessionId: service.sessionId, epoch: service.epoch, operation: "prompt",
-      target: { taskId: headlessTask.taskId, childId: headlessTask.childId, workerEpoch: headlessTask.workerEpoch },
-      requestId: "root-panel-followup", message: "User panel follow-up" };
+    await assert.rejects(
+      execute(ctx, {
+        operation: "result",
+        job_id: foreground.details.job_id,
+        child_id: `subagent-child-${"f".repeat(24)}`,
+      }),
+      /child_id does not belong/i,
+    );
+    const promptRequest = {
+      sessionId: service.sessionId,
+      epoch: service.epoch,
+      operation: "prompt",
+      target: {
+        taskId: headlessTask.taskId,
+        childId: headlessTask.childId,
+        workerEpoch: headlessTask.workerEpoch,
+      },
+      requestId: "root-panel-followup",
+      message: "User panel follow-up",
+    };
     const promptReceipt = await service.execute(promptRequest);
     assert.equal(promptReceipt.accepted, true, JSON.stringify(promptReceipt));
-    assert.deepEqual(await service.execute(promptRequest), promptReceipt, "replayed parent prompt must be idempotent");
+    assert.deepEqual(
+      await service.execute(promptRequest),
+      promptReceipt,
+      "replayed parent prompt must be idempotent",
+    );
     const followupDeadline = Date.now() + 20_000;
     let followupStatus: any;
     while (Date.now() < followupDeadline) {
       followupStatus = await callTuiWorker(headless, { operation: "status" });
-      if (followupStatus.ok && !(followupStatus.data as any).active && (followupStatus.data as any).lastReport !== (foregroundState.data as any).lastReport) break;
+      if (
+        followupStatus.ok &&
+        !(followupStatus.data as any).active &&
+        (followupStatus.data as any).lastReport !== (foregroundState.data as any).lastReport
+      )
+        break;
       await sleep(100);
     }
-    assert.notEqual((followupStatus.data as any).lastReport, (foregroundState.data as any).lastReport, "parent follow-up did not run in retained Pi session");
-    const refreshedView = await service.execute({ sessionId: service.sessionId, epoch: service.epoch, operation: "view",
-      target: { taskId: headlessTask.taskId, childId: headlessTask.childId, workerEpoch: headlessTask.workerEpoch } });
+    assert.notEqual(
+      (followupStatus.data as any).lastReport,
+      (foregroundState.data as any).lastReport,
+      "parent follow-up did not run in retained Pi session",
+    );
+    const refreshedView = await service.execute({
+      sessionId: service.sessionId,
+      epoch: service.epoch,
+      operation: "view",
+      target: {
+        taskId: headlessTask.taskId,
+        childId: headlessTask.childId,
+        workerEpoch: headlessTask.workerEpoch,
+      },
+    });
     assert.equal(refreshedView.state, "available");
-    assert.ok(refreshedView.view.messages.some((message: any) => message.role === "user" && message.text.includes("Direct user instruction from Paseo")),
-      "trusted panel input must be retained with user origin");
+    assert.ok(
+      refreshedView.view.messages.some(
+        (message: any) =>
+          message.role === "user" && message.text.includes("Direct user instruction from Paseo"),
+      ),
+      "trusted panel input must be retained with user origin",
+    );
     // Model-facing control accepts the same group+child identity pair returned
     // by the harness; bad assertions/launch overrides must not deliver or restart.
-    await assert.rejects(execute(ctx, { operation: "prompt", child_id: headlessTask.childId,
-      job_id: `subagent-job-${"f".repeat(24)}`, message: "MUST_NOT_DELIVER" }), /does not belong/i);
-    await assert.rejects(execute(ctx, { operation: "resume", task_id: foregroundId,
-      model: "harness-test/mock:off", background: true, task: "MUST_NOT_RELAUNCH" }), /unsupported fields: model, background, task/);
-    const groupedPrompt = await execute(ctx, { operation: "prompt", child_id: headlessTask.childId,
-      job_id: foreground.details.job_id, message: "Group-asserted parent follow-up", wait_for_response: true });
+    await assert.rejects(
+      execute(ctx, {
+        operation: "prompt",
+        child_id: headlessTask.childId,
+        job_id: `subagent-job-${"f".repeat(24)}`,
+        message: "MUST_NOT_DELIVER",
+      }),
+      /does not belong/i,
+    );
+    await assert.rejects(
+      execute(ctx, {
+        operation: "resume",
+        task_id: foregroundId,
+        model: "harness-test/mock:off",
+        background: true,
+        task: "MUST_NOT_RELAUNCH",
+      }),
+      /unsupported fields: model, background, task/,
+    );
+    const groupedPrompt = await execute(ctx, {
+      operation: "prompt",
+      child_id: headlessTask.childId,
+      job_id: foreground.details.job_id,
+      message: "Group-asserted parent follow-up",
+      wait_for_response: true,
+    });
     assert.equal(groupedPrompt.details.job_id, foreground.details.job_id);
     assert.equal(groupedPrompt.details.child_id, headlessTask.childId);
-    assert.equal((await callTuiWorker(headless, { operation: "status" }) as any).data.pid, (foregroundState.data as any).pid);
+    assert.equal(
+      ((await callTuiWorker(headless, { operation: "status" })) as any).data.pid,
+      (foregroundState.data as any).pid,
+    );
     await execute(ctx, { operation: "reap", job_id: foreground.details.job_id });
-    const questionnaire = await answerHeadlessInteraction(ctx, "ASK_QUESTIONNAIRE", { kind: "questionnaire", cancelled: false,
-      answers: [{ id: "continue", value: "yes", wasCustom: false }] }, "questionnaire");
+    const questionnaire = await answerHeadlessInteraction(
+      ctx,
+      "ASK_QUESTIONNAIRE",
+      {
+        kind: "questionnaire",
+        cancelled: false,
+        answers: [{ id: "continue", value: "yes", wasCustom: false }],
+      },
+      "questionnaire",
+    );
     assert.equal(questionnaire.details.group.status, "completed");
     await execute(ctx, { operation: "reap", job_id: questionnaire.details.group.job_id });
     if (gate) {
       gate.applyMode(ctx.sessionManager.getSessionId(), true);
-      const permission = await answerHeadlessInteraction(ctx, "ASK_GUARDED_PERMISSION", { kind: "permission", cancelled: false, value: "Allow" }, "permission");
+      const permission = await answerHeadlessInteraction(
+        ctx,
+        "ASK_GUARDED_PERMISSION",
+        { kind: "permission", cancelled: false, value: "Allow" },
+        "permission",
+      );
       assert.equal(permission.details.group.status, "completed", JSON.stringify(permission));
-      const permissionManifest = discoverTuiWorkers(join(process.env.PI_TUI_WORKER_STATE_ROOT!, "workers"), ctx.sessionManager.getSessionId())
-        .find(worker => worker.taskId === permission.details.group.children[0].task_id)!;
-      assert.match(await readFile(permissionManifest.sessionFile, "utf8"), /guarded-panel-approval/);
-      assert.equal((await lstat(process.env.PI_TUI_ROOT_PERMISSION_FILE!)).mode & 0o777, 0o777,
-        "the dangerous command must execute only after the structured permission interaction is approved");
+      const permissionManifest = discoverTuiWorkers(
+        join(process.env.PI_TUI_WORKER_STATE_ROOT!, "workers"),
+        ctx.sessionManager.getSessionId(),
+      ).find((worker) => worker.taskId === permission.details.group.children[0].task_id)!;
+      assert.match(
+        await readFile(permissionManifest.sessionFile, "utf8"),
+        /guarded-panel-approval/,
+      );
+      assert.equal(
+        (await lstat(process.env.PI_TUI_ROOT_PERMISSION_FILE!)).mode & 0o777,
+        0o777,
+        "the dangerous command must execute only after the structured permission interaction is approved",
+      );
       await execute(ctx, { operation: "reap", job_id: permission.details.group.job_id });
       gate.applyMode(ctx.sessionManager.getSessionId(), false);
     }
-    assert.deepEqual(await paneSnapshot(), panesBeforeHeadless, "headless foreground launch changed tmux topology");
-    const headlessResume = await execute(ctx, { operation: "resume", task_id: foregroundId, message: "Continue the retained headless session." });
+    assert.deepEqual(
+      await paneSnapshot(),
+      panesBeforeHeadless,
+      "headless foreground launch changed tmux topology",
+    );
+    const headlessResume = await execute(ctx, {
+      operation: "resume",
+      task_id: foregroundId,
+      message: "Continue the retained headless session.",
+    });
     assert.equal(headlessResume.details.group.children[0].task_id, foregroundId);
     assert.equal(headlessResume.details.group.children[0].attempt, 2);
     await execute(ctx, { operation: "reap", job_id: headlessResume.details.job_id });
-    const concurrentResume = execute(ctx, { operation: "resume", task_id: foregroundId, message: "One successor attempt only." });
+    const concurrentResume = execute(ctx, {
+      operation: "resume",
+      task_id: foregroundId,
+      message: "One successor attempt only.",
+    });
     await sleep(25);
-    await assert.rejects(execute(ctx, { operation: "resume", task_id: foregroundId, message: "Duplicate successor attempt." }), /resume is already in progress/i);
+    await assert.rejects(
+      execute(ctx, {
+        operation: "resume",
+        task_id: foregroundId,
+        message: "Duplicate successor attempt.",
+      }),
+      /resume is already in progress/i,
+    );
     const headlessAttempt3 = await concurrentResume;
     assert.equal(headlessAttempt3.details.group.children[0].attempt, 3);
     await execute(ctx, { operation: "reap", job_id: headlessAttempt3.details.job_id });
     process.env.PI_TUI_TEST_HEADLESS_START_DELAY_MS = "2000";
-    const startupStop = tool.execute(`root-test-startup-stop-${Date.now()}`, { displayName: "Startup Stop", task: "STARTUP_STOP_SENTINEL", model: "harness-test/mock:off", acceptance: ["Stop before startup prevents the initial task from running"] }, undefined, undefined, ctx);
+    const startupStop = tool.execute(
+      `root-test-startup-stop-${Date.now()}`,
+      {
+        displayName: "Startup Stop",
+        task: "STARTUP_STOP_SENTINEL",
+        model: "harness-test/mock:off",
+        acceptance: ["Stop before startup prevents the initial task from running"],
+      },
+      undefined,
+      undefined,
+      ctx,
+    );
     void startupStop.catch(() => undefined);
     let delayedTask: any;
     const delayedDeadline = Date.now() + 10_000;
     while (Date.now() < delayedDeadline) {
-      const page = await service.execute({ sessionId: service.sessionId, epoch: service.epoch, operation: "list" });
+      const page = await service.execute({
+        sessionId: service.sessionId,
+        epoch: service.epoch,
+        operation: "list",
+      });
       delayedTask = page.tasks?.find((task: any) => task.title === "Startup Stop");
       if (delayedTask?.canStop) break;
       await sleep(50);
     }
     assert.ok(delayedTask?.canStop, "delayed launcher did not expose a safe startup Stop");
-    assert.equal(delayedTask.canPrompt, false, "user prompt must remain disabled before initial prompt acceptance");
-    const startupStopped = await service.execute({ sessionId: service.sessionId, epoch: service.epoch, operation: "stop",
-      target: { taskId: delayedTask.taskId, childId: delayedTask.childId, workerEpoch: delayedTask.workerEpoch }, requestId: "stop-before-first-prompt" });
+    assert.equal(
+      delayedTask.canPrompt,
+      false,
+      "user prompt must remain disabled before initial prompt acceptance",
+    );
+    const startupStopped = await service.execute({
+      sessionId: service.sessionId,
+      epoch: service.epoch,
+      operation: "stop",
+      target: {
+        taskId: delayedTask.taskId,
+        childId: delayedTask.childId,
+        workerEpoch: delayedTask.workerEpoch,
+      },
+      requestId: "stop-before-first-prompt",
+    });
     assert.equal(startupStopped.accepted, true, JSON.stringify(startupStopped));
     delete process.env.PI_TUI_TEST_HEADLESS_START_DELAY_MS;
     const startupResult = await startupStop;
     assert.equal(startupResult.details.group.children[0].status, "cancelled");
-    const startupManifest = discoverTuiWorkers(join(process.env.PI_TUI_WORKER_STATE_ROOT!, "workers"), ctx.sessionManager.getSessionId())
-      .find(worker => worker.childId === delayedTask.childId)!;
+    const startupManifest = discoverTuiWorkers(
+      join(process.env.PI_TUI_WORKER_STATE_ROOT!, "workers"),
+      ctx.sessionManager.getSessionId(),
+    ).find((worker) => worker.childId === delayedTask.childId)!;
     assert.ok(startupManifest);
     const startupTranscript = await readFile(startupManifest.sessionFile, "utf8");
-    assert.doesNotMatch(startupTranscript, /STARTUP_STOP_SENTINEL/, "accepted startup Stop must prevent initial task dispatch");
+    assert.doesNotMatch(
+      startupTranscript,
+      /STARTUP_STOP_SENTINEL/,
+      "accepted startup Stop must prevent initial task dispatch",
+    );
     const startupState = new TuiWorkerStore(dirname(startupManifest.sessionFile)).readState(false);
     assert.equal(startupState.sealed, true);
     assert.ok(startupState.jobCleanup);
     let orphanFailure: string | undefined;
-    const orphanTask = tool.execute(`root-test-owner-loss-${Date.now()}`, { displayName: "Owner Loss", task: "WAIT_FOR_PARENT OWNER_LOSS_HEADLESS", model: "harness-test/mock:off", acceptance: ["Owner loss safely terminates the headless worker"] }, undefined, undefined, ctx);
-    void orphanTask.catch(error => { orphanFailure = String(error); });
+    const orphanTask = tool.execute(
+      `root-test-owner-loss-${Date.now()}`,
+      {
+        displayName: "Owner Loss",
+        task: "WAIT_FOR_PARENT OWNER_LOSS_HEADLESS",
+        model: "harness-test/mock:off",
+        acceptance: ["Owner loss safely terminates the headless worker"],
+      },
+      undefined,
+      undefined,
+      ctx,
+    );
+    void orphanTask.catch((error) => {
+      orphanFailure = String(error);
+    });
     let orphanManifest: TuiWorkerManifest | undefined;
     let orphanStatusError: string | undefined;
     const orphanDeadline = Date.now() + 30_000;
     while (Date.now() < orphanDeadline) {
-      const tasks = await service.execute({ sessionId: service.sessionId, epoch: service.epoch, operation: "list" });
+      const tasks = await service.execute({
+        sessionId: service.sessionId,
+        epoch: service.epoch,
+        operation: "list",
+      });
       const child = tasks.tasks?.find((task: any) => task.title === "Owner Loss");
-      if (child) orphanManifest = discoverTuiWorkers(join(process.env.PI_TUI_WORKER_STATE_ROOT!, "workers"), ctx.sessionManager.getSessionId()).find(worker => worker.childId === child.childId);
+      if (child)
+        orphanManifest = discoverTuiWorkers(
+          join(process.env.PI_TUI_WORKER_STATE_ROOT!, "workers"),
+          ctx.sessionManager.getSessionId(),
+        ).find((worker) => worker.childId === child.childId);
       if (orphanManifest) {
         try {
           const status = await callTuiWorker(orphanManifest, { operation: "status" });
           if (status.ok && (status.data as any).active) break;
-        } catch (error) { orphanStatusError = String(error); }
+        } catch (error) {
+          orphanStatusError = String(error);
+        }
       }
       await sleep(100);
     }
-    assert.ok(orphanManifest, `could not discover owner-bound headless helper: ${orphanFailure ?? "pending"}`);
+    assert.ok(
+      orphanManifest,
+      `could not discover owner-bound headless helper: ${orphanFailure ?? "pending"}`,
+    );
     const activeOrphan = await callTuiWorker(orphanManifest, { operation: "status" });
-    assert.equal(activeOrphan.ok && (activeOrphan.data as any).active, true, `owner-loss helper was not active before parent termination: ${orphanStatusError ?? JSON.stringify(activeOrphan)}`);
-    const orphanTaskDto = (await service.execute({ sessionId: service.sessionId, epoch: service.epoch, operation: "list" })).tasks
-      .find((task: any) => task.childId === orphanManifest!.childId)!;
-    const orphanTarget = { taskId: orphanTaskDto.taskId, childId: orphanTaskDto.childId, workerEpoch: orphanTaskDto.workerEpoch };
-    const queuedBeforeStop = await service.execute({ sessionId: service.sessionId, epoch: service.epoch, operation: "prompt",
-      target: orphanTarget, requestId: "queued-before-stop", message: "STOP_QUEUE_SENTINEL must not run after Stop" });
+    assert.equal(
+      activeOrphan.ok && (activeOrphan.data as any).active,
+      true,
+      `owner-loss helper was not active before parent termination: ${orphanStatusError ?? JSON.stringify(activeOrphan)}`,
+    );
+    const orphanTaskDto = (
+      await service.execute({
+        sessionId: service.sessionId,
+        epoch: service.epoch,
+        operation: "list",
+      })
+    ).tasks.find((task: any) => task.childId === orphanManifest!.childId)!;
+    const orphanTarget = {
+      taskId: orphanTaskDto.taskId,
+      childId: orphanTaskDto.childId,
+      workerEpoch: orphanTaskDto.workerEpoch,
+    };
+    const queuedBeforeStop = await service.execute({
+      sessionId: service.sessionId,
+      epoch: service.epoch,
+      operation: "prompt",
+      target: orphanTarget,
+      requestId: "queued-before-stop",
+      message: "STOP_QUEUE_SENTINEL must not run after Stop",
+    });
     assert.equal(queuedBeforeStop.accepted, true, JSON.stringify(queuedBeforeStop));
-    const stopped = await service.execute({ sessionId: service.sessionId, epoch: service.epoch, operation: "stop",
-      target: orphanTarget, requestId: "stop-without-reap" });
+    const stopped = await service.execute({
+      sessionId: service.sessionId,
+      epoch: service.epoch,
+      operation: "stop",
+      target: orphanTarget,
+      requestId: "stop-without-reap",
+    });
     assert.equal(stopped.accepted, true, JSON.stringify(stopped));
     const orphanStore = new TuiWorkerStore(dirname(orphanManifest.sessionFile));
-    assert.equal(orphanStore.readState(false).sealed, false, "human Stop must not implicitly seal/reap");
-    assert.equal(await processIdentity(orphanManifest.runtimePid!), orphanManifest.runtimeProcessToken, "human Stop must keep Pi alive");
+    assert.equal(
+      orphanStore.readState(false).sealed,
+      false,
+      "human Stop must not implicitly seal/reap",
+    );
+    assert.equal(
+      await processIdentity(orphanManifest.runtimePid!),
+      orphanManifest.runtimeProcessToken,
+      "human Stop must keep Pi alive",
+    );
     const stoppedStatus = await callTuiWorker(orphanManifest, { operation: "status" });
-    assert.equal((stoppedStatus.data as any).active, false, "Stop must not return while the Pi run is still active");
+    assert.equal(
+      (stoppedStatus.data as any).active,
+      false,
+      "Stop must not return while the Pi run is still active",
+    );
     await sleep(8500);
     const afterStopSettled = await callTuiWorker(orphanManifest, { operation: "status" });
-    assert.equal((afterStopSettled.data as any).active, false, "cleared queued work restarted after Stop");
-    assert.equal((afterStopSettled.data as any).lastReport, (stoppedStatus.data as any).lastReport, "queued pre-Stop instruction ran after cancellation");
-    const afterStopView = await service.execute({ sessionId: service.sessionId, epoch: service.epoch, operation: "view", target: orphanTarget });
+    assert.equal(
+      (afterStopSettled.data as any).active,
+      false,
+      "cleared queued work restarted after Stop",
+    );
+    assert.equal(
+      (afterStopSettled.data as any).lastReport,
+      (stoppedStatus.data as any).lastReport,
+      "queued pre-Stop instruction ran after cancellation",
+    );
+    const afterStopView = await service.execute({
+      sessionId: service.sessionId,
+      epoch: service.epoch,
+      operation: "view",
+      target: orphanTarget,
+    });
     assert.equal(afterStopView.state, "available", JSON.stringify(afterStopView));
-    const resumedUserInput = await service.execute({ sessionId: service.sessionId, epoch: service.epoch, operation: "prompt",
-      target: orphanTarget, requestId: "panel-after-stop", message: "WAIT_FOR_PARENT OWNER_LOSS_HEADLESS after Stop" });
+    const resumedUserInput = await service.execute({
+      sessionId: service.sessionId,
+      epoch: service.epoch,
+      operation: "prompt",
+      target: orphanTarget,
+      requestId: "panel-after-stop",
+      message: "WAIT_FOR_PARENT OWNER_LOSS_HEADLESS after Stop",
+    });
     assert.equal(resumedUserInput.accepted, true, JSON.stringify(resumedUserInput));
     const activeAgainDeadline = Date.now() + 10_000;
     while (Date.now() < activeAgainDeadline) {
-      const current = await callTuiWorker(orphanManifest, { operation: "status" }).catch(() => undefined);
+      const current = await callTuiWorker(orphanManifest, { operation: "status" }).catch(
+        () => undefined,
+      );
       if (current?.ok && (current.data as any).active) break;
       await sleep(100);
     }
-    assert.ok((await callTuiWorker(orphanManifest, { operation: "status" })).data?.active, "trusted user prompt after Stop must run");
-    const started = await execute(ctx, { task: "WAIT_FOR_PARENT", model: "harness-test/mock:off", background: true, acceptance: ["The worker survives parent reload and accepts explicit follow-up"] });
+    assert.ok(
+      (await callTuiWorker(orphanManifest, { operation: "status" })).data?.active,
+      "trusted user prompt after Stop must run",
+    );
+    const started = await execute(ctx, {
+      task: "WAIT_FOR_PARENT",
+      model: "harness-test/mock:off",
+      background: true,
+      acceptance: ["The worker survives parent reload and accepts explicit follow-up"],
+    });
     const deadline = Date.now() + 30_000;
     let group: any;
     while (Date.now() < deadline) {
-      group = (await execute(ctx, { operation: "status", job_id: started.details.job_id })).details.group;
+      group = (await execute(ctx, { operation: "status", job_id: started.details.job_id })).details
+        .group;
       if (group.children[0].runtime && group.children[0].status === "running") break;
       await sleep(100);
     }
     const manifest = manifestFor(group);
     const status = await callTuiWorker(manifest, { operation: "status" });
     assert.ok(status.ok);
-    const saved = { rootPid: process.pid, job: started.details.job_id, childPid: (status.data as any).pid, sessionId: ctx.sessionManager.getSessionId(),
-      headlessPid: orphanManifest.runtimePid, headlessToken: orphanManifest.runtimeProcessToken, headlessEpoch: orphanManifest.workerEpoch,
-      questionnaireChildId: questionnaire.details.group.children[0].child_id };
+    const saved = {
+      rootPid: process.pid,
+      job: started.details.job_id,
+      childPid: (status.data as any).pid,
+      sessionId: ctx.sessionManager.getSessionId(),
+      headlessPid: orphanManifest.runtimePid,
+      headlessToken: orphanManifest.runtimeProcessToken,
+      headlessEpoch: orphanManifest.workerEpoch,
+      questionnaireChildId: questionnaire.details.group.children[0].child_id,
+    };
     await writeFile(backgroundFile, JSON.stringify(saved));
     return saved;
   });
-  register("tui-root-check", async ctx => {
+  register("tui-root-check", async (ctx) => {
     const saved = JSON.parse(await readFile(backgroundFile, "utf8"));
     assert.equal(saved.sessionId, ctx.sessionManager.getSessionId());
-    const ownerLost = discoverTuiWorkers(join(process.env.PI_TUI_WORKER_STATE_ROOT!, "workers"), saved.sessionId)
-      .find(worker => worker.workerEpoch === saved.headlessEpoch);
+    const ownerLost = discoverTuiWorkers(
+      join(process.env.PI_TUI_WORKER_STATE_ROOT!, "workers"),
+      saved.sessionId,
+    ).find((worker) => worker.workerEpoch === saved.headlessEpoch);
     assert.ok(ownerLost, "owner-loss headless worker manifest was not retained");
     const ownerLostState = new TuiWorkerStore(dirname(ownerLost.sessionFile)).readState();
-    assert.equal(ownerLostState.sealed, true, "owner-loss helper exited without a durable cleanup seal");
+    assert.equal(
+      ownerLostState.sealed,
+      true,
+      "owner-loss helper exited without a durable cleanup seal",
+    );
     assert.equal(ownerLostState.jobCleanup?.workerEpoch, saved.headlessEpoch);
     let group = (await execute(ctx, { operation: "status", job_id: saved.job })).details.group;
     assert.notEqual(group.children[0].status, "lost");
     const survivor = manifestFor(group);
-    assert.equal((await callTuiWorker(survivor, { operation: "status" }) as any).data.pid, saved.childPid);
+    assert.equal(
+      ((await callTuiWorker(survivor, { operation: "status" })) as any).data.pid,
+      saved.childPid,
+    );
     await wait(ctx, saved.job);
     // Exercise the actual root tasks merge, not only the native manager DTO.
     // This is an unlaunched terminal inventory row; no nested worker is spawned.
     const nestedId = `subagent-job-${"d".repeat(24)}`;
     const nestedPath = join(process.env.PI_TUI_WORKER_STATE_ROOT!, "groups", `${nestedId}.json`);
-    const retained = JSON.parse(await readFile(join(process.env.PI_TUI_WORKER_STATE_ROOT!, "groups", `${saved.job}.json`), "utf8"));
-    const childSession = JSON.parse((await readFile(survivor.sessionFile, "utf8")).split("\n")[0]).id;
-    atomicPrivateJson(nestedPath, { ...retained, id: nestedId, owner: childSession,
-      children: [{ ...retained.children[0], childId: `subagent-child-${"d".repeat(24)}`, taskId: `subagent-task-${"d".repeat(24)}`,
-        directory: join(process.env.PI_TUI_WORKER_STATE_ROOT!, "workers", "d".repeat(24)),
-        spec: { task: "NESTED_TASK_RENDER_FIXTURE", cwd: ctx.cwd }, state: "cancelled", started: false, reaped: false, report: undefined }] });
+    const retained = JSON.parse(
+      await readFile(
+        join(process.env.PI_TUI_WORKER_STATE_ROOT!, "groups", `${saved.job}.json`),
+        "utf8",
+      ),
+    );
+    const childSession = JSON.parse(
+      (await readFile(survivor.sessionFile, "utf8")).split("\n")[0],
+    ).id;
+    atomicPrivateJson(nestedPath, {
+      ...retained,
+      id: nestedId,
+      owner: childSession,
+      children: [
+        {
+          ...retained.children[0],
+          childId: `subagent-child-${"d".repeat(24)}`,
+          taskId: `subagent-task-${"d".repeat(24)}`,
+          directory: join(process.env.PI_TUI_WORKER_STATE_ROOT!, "workers", "d".repeat(24)),
+          spec: { task: "NESTED_TASK_RENDER_FIXTURE", cwd: ctx.cwd },
+          state: "cancelled",
+          started: false,
+          reaped: false,
+          report: undefined,
+        },
+      ],
+    });
     try {
       const tasks = await execute(ctx, { operation: "tasks" });
       assert.ok(tasks.details.descendants.some((nested: any) => nested.job_id === nestedId));
       assert.match(tasks.content[0].text, /Descendant · cancelled · NESTED_TASK_RENDER_FIXTURE/);
       assert.match(tasks.content[0].text, new RegExp(nestedId));
-    } finally { await rm(nestedPath); }
+    } finally {
+      await rm(nestedPath);
+    }
     // Resume a still-live idle task preserves the exact Pi process.
-    await execute(ctx, { operation: "resume", task_id: group.children[0].task_id, message: "Continue briefly", compact: false });
-    assert.equal((await callTuiWorker(survivor, { operation: "status" }) as any).data.pid, saved.childPid);
+    await execute(ctx, {
+      operation: "resume",
+      task_id: group.children[0].task_id,
+      message: "Continue briefly",
+      compact: false,
+    });
+    assert.equal(
+      ((await callTuiWorker(survivor, { operation: "status" })) as any).data.pid,
+      saved.childPid,
+    );
     await wait(ctx, saved.job);
     await execute(ctx, { operation: "reap", job_id: saved.job });
     // Explicit resume after verified reap opens a new owned attempt from session.
-    const resumed = await execute(ctx, { operation: "resume", task_id: group.children[0].task_id, message: "Continue after retained attempt", compact: false });
+    const resumed = await execute(ctx, {
+      operation: "resume",
+      task_id: group.children[0].task_id,
+      message: "Continue after retained attempt",
+      compact: false,
+    });
     const resumedGroup = await wait(ctx, resumed.details.job_id);
     assert.equal(resumedGroup.children[0].task_id, group.children[0].task_id);
     assert.equal(resumedGroup.children[0].attempt, 2);
-    assert.notEqual((await callTuiWorker(manifestFor(resumedGroup), { operation: "status" }) as any).data.pid, saved.childPid);
+    assert.notEqual(
+      ((await callTuiWorker(manifestFor(resumedGroup), { operation: "status" })) as any).data.pid,
+      saved.childPid,
+    );
     await execute(ctx, { operation: "reap", job_id: resumed.details.job_id });
     // An explicit compact of this tiny session is a safe no-op. Its subsequent
     // low-context checkpoint resume must continue normally, retaining history
     // without leaving the worker's activity reservation latched.
-    const small = await execute(ctx, { task: "CHECKPOINT_SMALL", model: "harness-test/mock:off", background: true, acceptance: ["A small checkpoint resumes without duplicate compaction"] });
+    const small = await execute(ctx, {
+      task: "CHECKPOINT_SMALL",
+      model: "harness-test/mock:off",
+      background: true,
+      acceptance: ["A small checkpoint resumes without duplicate compaction"],
+    });
     const smallGroup = await wait(ctx, small.details.job_id);
     assert.equal(smallGroup.children[0].task_outcome?.state, "checkpointed");
     const smallWorker = manifestFor(smallGroup);
-    const smallBefore = (await callTuiWorker(smallWorker, { operation: "status" }) as any).data;
+    const smallBefore = ((await callTuiWorker(smallWorker, { operation: "status" })) as any).data;
     const smallTranscript = await readFile(smallWorker.sessionFile, "utf8");
     const smallNoOp = await callTuiWorker(smallWorker, { operation: "compact" });
     assert.ok(smallNoOp.ok, JSON.stringify(smallNoOp));
     assert.deepEqual(smallNoOp.data, { compaction: "not-needed", reason: "nothing-to-compact" });
-    await execute(ctx, { operation: "resume", task_id: smallGroup.children[0].task_id, message: "Continue after the small checkpoint" });
+    await execute(ctx, {
+      operation: "resume",
+      task_id: smallGroup.children[0].task_id,
+      message: "Continue after the small checkpoint",
+    });
     const smallResumed = await wait(ctx, small.details.job_id);
-    const smallAfter = (await callTuiWorker(smallWorker, { operation: "status" }) as any).data;
+    const smallAfter = ((await callTuiWorker(smallWorker, { operation: "status" })) as any).data;
     assert.equal(smallAfter.pid, smallBefore.pid);
     assert.equal(smallAfter.active, false);
     assert.notEqual(smallAfter.lastReport, smallBefore.lastReport);
     assert.equal(smallResumed.children[0].task_outcome, undefined);
     const retainedTranscript = await readFile(smallWorker.sessionFile, "utf8");
-    assert.ok(retainedTranscript.startsWith(smallTranscript), "small compaction rewrote retained session history");
+    assert.ok(
+      retainedTranscript.startsWith(smallTranscript),
+      "small compaction rewrote retained session history",
+    );
     assert.match(retainedTranscript, /Continue after the small checkpoint/);
-    assert.equal(retainedTranscript.split("\n").filter(Boolean).map(line => JSON.parse(line)).some(entry => entry.type === "compaction"), false, "small-session no-op unexpectedly compacted context");
+    assert.equal(
+      retainedTranscript
+        .split("\n")
+        .filter(Boolean)
+        .map((line) => JSON.parse(line))
+        .some((entry) => entry.type === "compaction"),
+      false,
+      "small-session no-op unexpectedly compacted context",
+    );
     await execute(ctx, { operation: "reap", job_id: small.details.job_id });
     // Real root yield inventory covers native and legacy groups without waiting.
-    const nativeWait = await execute(ctx, { task: "WAIT_FOR_PARENT mixed waits", model: "harness-test/mock:off", background: true, acceptance: ["Mixed backend waits retain the same live worker"] });
-    const legacyManager = sharedBackgroundSubagentManager(join(getAgentDir(), "state", "background-subagents-v1"));
+    const nativeWait = await execute(ctx, {
+      task: "WAIT_FOR_PARENT mixed waits",
+      model: "harness-test/mock:off",
+      background: true,
+      acceptance: ["Mixed backend waits retain the same live worker"],
+    });
+    const legacyManager = sharedBackgroundSubagentManager(
+      join(getAgentDir(), "state", "background-subagents-v1"),
+    );
     let finishLegacy!: (value: any) => void;
-    const legacy = await legacyManager.start({ sessionId: ctx.sessionManager.getSessionId(), backend: "agentsh", mode: "single", summary: "Deterministic legacy wait fixture", children: [{ label: "legacy fixture" }] }, () => new Promise(resolve => { finishLegacy = resolve; }));
+    const legacy = await legacyManager.start(
+      {
+        sessionId: ctx.sessionManager.getSessionId(),
+        backend: "agentsh",
+        mode: "single",
+        summary: "Deterministic legacy wait fixture",
+        children: [{ label: "legacy fixture" }],
+      },
+      () =>
+        new Promise((resolve) => {
+          finishLegacy = resolve;
+        }),
+    );
     const inventory = await execute(ctx, { operation: "list", limit: 50 });
-    assert.ok(inventory.details.legacy_groups?.some((g: any) => g.job_id === legacy.id), JSON.stringify({ inventory, agentDir: getAgentDir(), roots: [...((globalThis as any).__paeBackgroundSubagentManagersV4?.keys() ?? [])] }));
+    assert.ok(
+      inventory.details.legacy_groups?.some((g: any) => g.job_id === legacy.id),
+      JSON.stringify({
+        inventory,
+        agentDir: getAgentDir(),
+        roots: [...((globalThis as any).__paeBackgroundSubagentManagersV4?.keys() ?? [])],
+      }),
+    );
     const yielded = await execute(ctx, { operation: "yield" });
     assert.equal(yielded.terminate, true);
-    assert.ok(yielded.details.groups.some((g: any) => g.job_id === legacy.id && g.status === "running"));
+    assert.ok(
+      yielded.details.groups.some((g: any) => g.job_id === legacy.id && g.status === "running"),
+    );
     assert.ok(yielded.details.groups.some((g: any) => g.job_id === nativeWait.details.job_id));
     finishLegacy({ text: "legacy completed", failed: false });
     let finishSecond!: (value: any) => void;
-    const second = await legacyManager.start({ sessionId: ctx.sessionManager.getSessionId(), backend: "agentsh", mode: "single", summary: "Second legacy fixture", children: [{ label: "second" }] }, () => new Promise(resolve => { finishSecond = resolve; }));
+    const second = await legacyManager.start(
+      {
+        sessionId: ctx.sessionManager.getSessionId(),
+        backend: "agentsh",
+        mode: "single",
+        summary: "Second legacy fixture",
+        children: [{ label: "second" }],
+      },
+      () =>
+        new Promise((resolve) => {
+          finishSecond = resolve;
+        }),
+    );
     const mixed = await execute(ctx, { operation: "yield", job_id: second.id });
     assert.equal(mixed.terminate, true);
-    assert.deepEqual(mixed.details.groups.map((g: any) => g.job_id), [second.id]);
+    assert.deepEqual(
+      mixed.details.groups.map((g: any) => g.job_id),
+      [second.id],
+    );
     for (const operation of ["wait", "wait_group", "wait_any", "wait_all"]) {
       await assert.rejects(execute(ctx, { operation }), /Unknown background subagent operation/);
     }
@@ -692,70 +1603,182 @@ export default function rootTest(pi: ExtensionAPI) {
     await execute(ctx, { operation: "reap", job_id: nativeWait.details.job_id });
     const gate = (globalThis as any).__PAE_PERMISSION_GATE_OPERATOR_V1__;
     gate?.applyMode(ctx.sessionManager.getSessionId(), false);
-    const localJobs = await execute(ctx, { task: "RUN_LOCAL_JOB", model: "harness-test/mock:off", background: true, acceptance: ["Child-local jobs remain inspectable and clean up on reap"] });
+    const localJobs = await execute(ctx, {
+      task: "RUN_LOCAL_JOB",
+      model: "harness-test/mock:off",
+      background: true,
+      acceptance: ["Child-local jobs remain inspectable and clean up on reap"],
+    });
     const jobsGroup = await wait(ctx, localJobs.details.job_id);
     const jobsWorker = manifestFor(jobsGroup);
-    const beforeJobs = (await callTuiWorker(jobsWorker, { operation: "status" }) as any).data;
+    const beforeJobs = ((await callTuiWorker(jobsWorker, { operation: "status" })) as any).data;
     const localPid = beforeJobs.pid;
-    const listJobs = await callTuiWorker(jobsWorker, { operation: "jobs", params: { action: "list" } });
+    const listJobs = await callTuiWorker(jobsWorker, {
+      operation: "jobs",
+      params: { action: "list" },
+    });
     assert.ok(listJobs.ok, JSON.stringify(listJobs));
     const ownedJobs = (listJobs as any).data.details.jobs;
     assert.equal(ownedJobs.length, 1, JSON.stringify(listJobs));
     const job = ownedJobs[0].job_id;
-    const output = await callTuiWorker(jobsWorker, { operation: "jobs", params: { action: "output", job_id: job } });
+    const output = await callTuiWorker(jobsWorker, {
+      operation: "jobs",
+      params: { action: "output", job_id: job },
+    });
     assert.match((output as any).data.content[0].text, /child-job-marker/);
     // Parent-local controller must not access a child's job, even by known ID.
     const rootController = (globalThis as any).__paeLocalJobControllerV1;
-    await assert.rejects(rootController.execute("foreign-job", { action: "output", job_id: job }), /different|own|session/i);
-    await assert.rejects(rootController.execute("no-start", { action: "start", command: "false" }), /existing jobs/);
-    assert.equal((await callTuiWorker({ ...jobsWorker, ownerSessionId: "foreign-parent" }, { operation: "jobs", params: { action: "list" } })).ok, false);
-    await assert.rejects(execute(ctx, { operation: "reap", job_id: localJobs.details.job_id }), error => {
-      assert.match(String(error), new RegExp(job));
-      return true;
-    });
-    assert.equal((await callTuiWorker(jobsWorker, { operation: "status" }) as any).data.pid, localPid,
-      "active-job refusal must retain the authenticated child controller");
-    assert.ok((await callTuiWorker(jobsWorker, { operation: "jobs", params: { action: "cancel", job_id: job } })).ok);
-    const jobDone = await callTuiWorker(jobsWorker, { operation: "jobs", params: { action: "yield", job_id: job } }, { timeoutMs: 10_000 });
+    await assert.rejects(
+      rootController.execute("foreign-job", { action: "output", job_id: job }),
+      /different|own|session/i,
+    );
+    await assert.rejects(
+      rootController.execute("no-start", { action: "start", command: "false" }),
+      /existing jobs/,
+    );
+    assert.equal(
+      (
+        await callTuiWorker(
+          { ...jobsWorker, ownerSessionId: "foreign-parent" },
+          { operation: "jobs", params: { action: "list" } },
+        )
+      ).ok,
+      false,
+    );
+    await assert.rejects(
+      execute(ctx, { operation: "reap", job_id: localJobs.details.job_id }),
+      (error) => {
+        assert.match(String(error), new RegExp(job));
+        return true;
+      },
+    );
+    assert.equal(
+      ((await callTuiWorker(jobsWorker, { operation: "status" })) as any).data.pid,
+      localPid,
+      "active-job refusal must retain the authenticated child controller",
+    );
+    assert.ok(
+      (
+        await callTuiWorker(jobsWorker, {
+          operation: "jobs",
+          params: { action: "cancel", job_id: job },
+        })
+      ).ok,
+    );
+    const jobDone = await callTuiWorker(
+      jobsWorker,
+      { operation: "jobs", params: { action: "yield", job_id: job } },
+      { timeoutMs: 10_000 },
+    );
     assert.equal((jobDone as any).data.details.jobs[0].status, "cancelled");
-    const afterJobs = (await callTuiWorker(jobsWorker, { operation: "status" }) as any).data;
+    const afterJobs = ((await callTuiWorker(jobsWorker, { operation: "status" })) as any).data;
     assert.equal(afterJobs.pid, localPid);
-    assert.equal(afterJobs.sequence, beforeJobs.sequence, "Job controls must not start a model turn");
+    assert.equal(
+      afterJobs.sequence,
+      beforeJobs.sequence,
+      "Job controls must not start a model turn",
+    );
     await execute(ctx, { operation: "reap", job_id: localJobs.details.job_id });
     const cleanup = new TuiWorkerStore(dirname(jobsWorker.sessionFile)).readState().jobCleanup;
     assert.ok(cleanup, "parent reap must retain the child-local job cleanup receipt");
     assert.match(await readFile(cleanup.artifact, "utf8"), /child-job-marker/);
-    const panes = (await promisify(execFile)("tmux", ["-S", jobsWorker.placement.socketPath, "list-panes", "-a", "-F", "#{pane_id}"])).stdout.split("\n");
-    assert.ok(!panes.includes(ownedJobs[0].pane_id), "parent reap left the child-owned job pane orphaned");
-    const parallel = await execute(ctx, { tasks: [
-      { task: "ASSERT_READ_ONLY", model: "harness-test/mock:off", tools: ["read"], acceptance: ["Only read and harness reporting tools are exposed"] },
-      { task: `${gate ? "RUN GUARDED CHECK " : ""}REPORT_OUTCOME`, model: "harness-test/mock:off", acceptance: ["fixture"] },
-    ], background: true });
+    const panes = (
+      await promisify(execFile)("tmux", [
+        "-S",
+        jobsWorker.placement.socketPath,
+        "list-panes",
+        "-a",
+        "-F",
+        "#{pane_id}",
+      ])
+    ).stdout.split("\n");
+    assert.ok(
+      !panes.includes(ownedJobs[0].pane_id),
+      "parent reap left the child-owned job pane orphaned",
+    );
+    const parallel = await execute(ctx, {
+      tasks: [
+        {
+          task: "ASSERT_READ_ONLY",
+          model: "harness-test/mock:off",
+          tools: ["read"],
+          acceptance: ["Only read and harness reporting tools are exposed"],
+        },
+        {
+          task: `${gate ? "RUN GUARDED CHECK " : ""}REPORT_OUTCOME`,
+          model: "harness-test/mock:off",
+          acceptance: ["fixture"],
+        },
+      ],
+      background: true,
+    });
     const parallelGroup = await wait(ctx, parallel.details.job_id);
-    assert.equal(parallelGroup.children[0].runtime.placement.windowId, parallelGroup.children[1].runtime.placement.windowId);
-    const readOnly = await execute(ctx, { operation: "result", job_id: parallel.details.job_id, child: 1 });
+    assert.equal(
+      parallelGroup.children[0].runtime.placement.windowId,
+      parallelGroup.children[1].runtime.placement.windowId,
+    );
+    const readOnly = await execute(ctx, {
+      operation: "result",
+      job_id: parallel.details.job_id,
+      child: 1,
+    });
     assert.match(readOnly.content[0].text, /^TOOLS:/);
     const exposedReadOnlyTools = readOnly.content[0].text.slice("TOOLS:".length).split(",");
-    for (const required of ["read", "notify_parent", "task_outcome"]) assert.ok(exposedReadOnlyTools.includes(required));
-    assert.ok(exposedReadOnlyTools.every((name: string) => ["read", "notify_parent", "task_outcome", "verify", "request_guidance", "guidance"].includes(name)),
-      "read-only workers may expose only read plus harness reporting/verification/guidance tools");
+    for (const required of ["read", "notify_parent", "task_outcome"])
+      assert.ok(exposedReadOnlyTools.includes(required));
+    assert.ok(
+      exposedReadOnlyTools.every((name: string) =>
+        [
+          "read",
+          "notify_parent",
+          "task_outcome",
+          "verify",
+          "request_guidance",
+          "guidance",
+        ].includes(name),
+      ),
+      "read-only workers may expose only read plus harness reporting/verification/guidance tools",
+    );
     assert.equal(parallelGroup.children[1].task_outcome?.state, "delivered");
     if (gate) {
       const guarded = manifestFor(parallelGroup, 1);
       const transcript = await readFile(guarded.sessionFile, "utf8");
       assert.match(transcript, /guard-ok/);
-      assert.equal((await callTuiWorker(guarded, { operation: "status" }) as any).data.permissionPromptsEnabled, false);
+      assert.equal(
+        ((await callTuiWorker(guarded, { operation: "status" })) as any).data
+          .permissionPromptsEnabled,
+        false,
+      );
       gate.applyMode(ctx.sessionManager.getSessionId(), true);
       const deadline = Date.now() + 5000;
-      while ((await callTuiWorker(guarded, { operation: "status" }) as any).data.permissionPromptsEnabled !== true && Date.now() < deadline) await sleep(100);
-      assert.equal((await callTuiWorker(guarded, { operation: "status" }) as any).data.permissionPromptsEnabled, true);
+      while (
+        ((await callTuiWorker(guarded, { operation: "status" })) as any).data
+          .permissionPromptsEnabled !== true &&
+        Date.now() < deadline
+      )
+        await sleep(100);
+      assert.equal(
+        ((await callTuiWorker(guarded, { operation: "status" })) as any).data
+          .permissionPromptsEnabled,
+        true,
+      );
     }
     // A real direct human turn invalidates the previous model-reported outcome.
     const human = manifestFor(parallelGroup, 1);
-    const keys = async (m: any, ...args: string[]) => promisify(execFile)("tmux", ["-S", m.placement.socketPath, "send-keys", "-t", m.placement.paneId, ...args]);
-    await keys(human, "-l", "WAIT_FOR_PARENT direct human scope change"); await keys(human, "Enter");
+    const keys = async (m: any, ...args: string[]) =>
+      promisify(execFile)("tmux", [
+        "-S",
+        m.placement.socketPath,
+        "send-keys",
+        "-t",
+        m.placement.paneId,
+        ...args,
+      ]);
+    await keys(human, "-l", "WAIT_FOR_PARENT direct human scope change");
+    await keys(human, "Enter");
     await sleep(400);
-    const direct = (await execute(ctx, { operation: "status", job_id: parallel.details.job_id })).details.group;
+    const direct = (await execute(ctx, { operation: "status", job_id: parallel.details.job_id }))
+      .details.group;
     assert.equal(direct.children[1].status, "running");
     assert.equal(direct.children[1].task_outcome, undefined);
     await keys(human, "Escape");
@@ -763,51 +1786,128 @@ export default function rootTest(pi: ExtensionAPI) {
     assert.equal(stopped.children[1].status, "cancelled");
     await execute(ctx, { operation: "reap", job_id: parallel.details.job_id });
     // Esc on the first chain step must not advance to the next assignment.
-    const cancelledChain = await execute(ctx, { chain: [
-      { task: "WAIT_FOR_PARENT human Esc", model: "harness-test/mock:off", acceptance: ["Human Escape cancels the active chain step"] },
-      { task: "Must never start", model: "harness-test/mock:off", acceptance: ["The cancelled chain never starts this step"] },
-    ], background: true });
-    const waiting = (await execute(ctx, { operation: "status", job_id: cancelledChain.details.job_id })).details.group;
-    await sleep(400); await keys(manifestFor(waiting), "Escape");
+    const cancelledChain = await execute(ctx, {
+      chain: [
+        {
+          task: "WAIT_FOR_PARENT human Esc",
+          model: "harness-test/mock:off",
+          acceptance: ["Human Escape cancels the active chain step"],
+        },
+        {
+          task: "Must never start",
+          model: "harness-test/mock:off",
+          acceptance: ["The cancelled chain never starts this step"],
+        },
+      ],
+      background: true,
+    });
+    const waiting = (
+      await execute(ctx, { operation: "status", job_id: cancelledChain.details.job_id })
+    ).details.group;
+    await sleep(400);
+    await keys(manifestFor(waiting), "Escape");
     const cancelled = (await terminalSnapshot(ctx, cancelledChain.details.job_id)).details.group;
     assert.equal(cancelled.children[0].status, "cancelled");
     assert.equal(cancelled.children[1].status, "skipped");
     assert.equal(cancelled.children[1].runtime, undefined);
     await execute(ctx, { operation: "reap", job_id: cancelledChain.details.job_id });
-    const chain = await execute(ctx, { chain: [
-      { task: "First chain step", model: "harness-test/mock:off", acceptance: ["First step completes before second step starts"] },
-      { task: "Second chain step uses {previous}", model: "harness-test/mock:off", acceptance: ["Previous result is substituted into the second step"] },
-    ], background: true });
+    const chain = await execute(ctx, {
+      chain: [
+        {
+          task: "First chain step",
+          model: "harness-test/mock:off",
+          acceptance: ["First step completes before second step starts"],
+        },
+        {
+          task: "Second chain step uses {previous}",
+          model: "harness-test/mock:off",
+          acceptance: ["Previous result is substituted into the second step"],
+        },
+      ],
+      background: true,
+    });
     const chainGroup = await wait(ctx, chain.details.job_id);
-    assert.equal(chainGroup.children[0].runtime.placement.windowId, chainGroup.children[1].runtime.placement.windowId);
-    assert.match(await readFile(chainGroup.children[1].runtime.sessionFile, "utf8"), /Second chain step uses Deterministic/);
+    assert.equal(
+      chainGroup.children[0].runtime.placement.windowId,
+      chainGroup.children[1].runtime.placement.windowId,
+    );
+    assert.match(
+      await readFile(chainGroup.children[1].runtime.sessionFile, "utf8"),
+      /Second chain step uses Deterministic/,
+    );
     await execute(ctx, { operation: "reap", job_id: chain.details.job_id });
     // Default foreground is headless and cannot be promoted into a background TUI group.
     let foregroundJobId: string | undefined;
-    const foreground = tool.execute(`root-test-headless-promote-${Date.now()}`, { task: "WAIT_FOR_PARENT foreground", model: "harness-test/mock:off", acceptance: ["Headless foreground work remains controllable without a pane"] }, undefined,
-      (partial: any) => { foregroundJobId = partial.details?.job_id ?? foregroundJobId; }, ctx);
+    const foreground = tool.execute(
+      `root-test-headless-promote-${Date.now()}`,
+      {
+        task: "WAIT_FOR_PARENT foreground",
+        model: "harness-test/mock:off",
+        acceptance: ["Headless foreground work remains controllable without a pane"],
+      },
+      undefined,
+      (partial: any) => {
+        foregroundJobId = partial.details?.job_id ?? foregroundJobId;
+      },
+      ctx,
+    );
     const foregroundDeadline = Date.now() + 10_000;
     while (!foregroundJobId && Date.now() < foregroundDeadline) await sleep(50);
     assert.ok(foregroundJobId, "headless foreground did not expose its committed group ID");
-    const foregroundTasks = await (globalThis as any)[FOREGROUND_TASKS_KEY].execute({ sessionId: (globalThis as any)[FOREGROUND_TASKS_KEY].sessionId,
-      epoch: (globalThis as any)[FOREGROUND_TASKS_KEY].epoch, operation: "list" });
-    assert.ok(foregroundTasks.tasks.some((task: any) => task.groupId === foregroundJobId), JSON.stringify({ foregroundJobId, foregroundTasks }));
-    await assert.rejects(execute(ctx, { operation: "promote", job_id: foregroundJobId }), /headless foreground workers cannot be promoted/i);
+    const foregroundTasks = await (globalThis as any)[FOREGROUND_TASKS_KEY].execute({
+      sessionId: (globalThis as any)[FOREGROUND_TASKS_KEY].sessionId,
+      epoch: (globalThis as any)[FOREGROUND_TASKS_KEY].epoch,
+      operation: "list",
+    });
+    assert.ok(
+      foregroundTasks.tasks.some((task: any) => task.groupId === foregroundJobId),
+      JSON.stringify({ foregroundJobId, foregroundTasks }),
+    );
+    await assert.rejects(
+      execute(ctx, { operation: "promote", job_id: foregroundJobId }),
+      /headless foreground workers cannot be promoted/i,
+    );
     const stillForeground = await foreground;
     assert.equal(stillForeground.details.group.background, false);
     await execute(ctx, { operation: "reap", job_id: stillForeground.details.job_id });
     const parentSession = await readFile(ctx.sessionManager.getSessionFile()!, "utf8");
     assert.doesNotMatch(parentSession, /tui-subagent-update/);
-    const entries = parentSession.split("\n").filter(Boolean).map(line => JSON.parse(line));
-    const notifications = entries.filter(entry => entry.type === "custom_message" && entry.customType === "harness-state");
+    const entries = parentSession
+      .split("\n")
+      .filter(Boolean)
+      .map((line) => JSON.parse(line));
+    const notifications = entries.filter(
+      (entry) => entry.type === "custom_message" && entry.customType === "harness-state",
+    );
     assert.ok(notifications.length > 0, "background completion must notify the parent");
-    assert.ok(notifications.every(entry => Array.isArray(entry.details?.updates)
-      && entry.details.updates.length > 0
-      && entry.details.updates.every((update: any) => update.kind === "subagent" && update.completion === true
-        || update.kind === "notification" && update.requires_guidance === true
-          && update.child_id === saved.questionnaireChildId && update.message.startsWith("Structured human request "))),
-      `routine child updates must remain quiet; only the fixture's explicit human request may wake: ${JSON.stringify(notifications.map(entry => entry.details?.updates))}`);
-    assert.ok(entries.some(entry => entry.type === "custom" && entry.customType === "harness-state-receipt"));
-    return { rootTool: true, guard: Boolean(gate), survivorPid: saved.childPid, parallel: parallel.details.job_id, chain: chain.details.job_id, resume: resumed.details.job_id };
+    assert.ok(
+      notifications.every(
+        (entry) =>
+          Array.isArray(entry.details?.updates) &&
+          entry.details.updates.length > 0 &&
+          entry.details.updates.every(
+            (update: any) =>
+              (update.kind === "subagent" && update.completion === true) ||
+              (update.kind === "notification" &&
+                update.requires_guidance === true &&
+                update.child_id === saved.questionnaireChildId &&
+                update.message.startsWith("Structured human request ")),
+          ),
+      ),
+      `routine child updates must remain quiet; only the fixture's explicit human request may wake: ${JSON.stringify(notifications.map((entry) => entry.details?.updates))}`,
+    );
+    assert.ok(
+      entries.some(
+        (entry) => entry.type === "custom" && entry.customType === "harness-state-receipt",
+      ),
+    );
+    return {
+      rootTool: true,
+      guard: Boolean(gate),
+      survivorPid: saved.childPid,
+      parallel: parallel.details.job_id,
+      chain: chain.details.job_id,
+      resume: resumed.details.job_id,
+    };
   });
 }

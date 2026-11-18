@@ -9,14 +9,8 @@
  */
 
 import { spawn } from "node:child_process";
-import type {
-  ExtensionAPI,
-  ExtensionContext,
-} from "@mariozechner/pi-coding-agent";
-import {
-  agentSHRuntimeDisposition,
-  classifyAgentSHStartup,
-} from "../shared/agentsh-mode.js";
+import type { ExtensionAPI, ExtensionContext } from "@mariozechner/pi-coding-agent";
+import { agentSHRuntimeDisposition, classifyAgentSHStartup } from "../shared/agentsh-mode.js";
 import type { DirenvRefreshResult } from "../sandbox/api.js";
 
 const DIAGNOSTIC_LIMIT = 500;
@@ -29,9 +23,10 @@ export default function (pi: ExtensionAPI) {
   function runtimeDisposition() {
     const api = globalThis.__AGENTSH_PI__;
     try {
-      const state = api && typeof api.getSupervisorState !== "function"
-        ? { configured: true, active: false }
-        : api?.getSupervisorState?.();
+      const state =
+        api && typeof api.getSupervisorState !== "function"
+          ? { configured: true, active: false }
+          : api?.getSupervisorState?.();
       return agentSHRuntimeDisposition(agentSHStartup, state);
     } catch {
       return agentSHRuntimeDisposition(agentSHStartup, { configured: true, active: false });
@@ -51,7 +46,10 @@ export default function (pi: ExtensionAPI) {
       if (disposition.kind === "full") {
         await runSupervisedDirenv(cwd, ctx);
       } else if (disposition.kind === "unavailable") {
-        reportFailure(ctx, "AgentSH direnv refresh is unavailable; full AgentSH mode will not run direnv in the parent");
+        reportFailure(
+          ctx,
+          "AgentSH direnv refresh is unavailable; full AgentSH mode will not run direnv in the parent",
+        );
       } else {
         await runDirenv(cwd, ctx);
       }
@@ -67,7 +65,10 @@ export default function (pi: ExtensionAPI) {
   async function runSupervisedDirenv(cwd: string, ctx: ExtensionContext) {
     const api = globalThis.__AGENTSH_PI__;
     if (!api?.refreshDirenv) {
-      reportFailure(ctx, "AgentSH direnv refresh is unavailable; supervised mode will not run direnv in the parent");
+      reportFailure(
+        ctx,
+        "AgentSH direnv refresh is unavailable; supervised mode will not run direnv in the parent",
+      );
       return;
     }
 
@@ -93,7 +94,11 @@ export default function (pi: ExtensionAPI) {
         if (ctx.hasUI) ctx.ui.setStatus("direnv", ctx.ui.theme.fg("success", "direnv ✓"));
         return;
       case "not_allowed":
-        reportFailure(ctx, "direnv environment is not allowed; run `direnv allow` through bash in this supervised session", "warning");
+        reportFailure(
+          ctx,
+          "direnv environment is not allowed; run `direnv allow` through bash in this supervised session",
+          "warning",
+        );
         return;
       case "policy_denied":
         reportFailure(ctx, "AgentSH policy denied direnv refresh");
@@ -112,12 +117,19 @@ export default function (pi: ExtensionAPI) {
     }
   }
 
-  function reportFailure(ctx: ExtensionContext, message: string, level: "warning" | "error" = "error") {
+  function reportFailure(
+    ctx: ExtensionContext,
+    message: string,
+    level: "warning" | "error" = "error",
+  ) {
     if (failureReported) return;
     failureReported = true;
     const bounded = message.replace(/[\r\n]+/g, " ").slice(0, DIAGNOSTIC_LIMIT);
     if (ctx.hasUI) {
-      ctx.ui.setStatus("direnv", ctx.ui.theme.fg(level === "warning" ? "warning" : "error", "direnv ✗"));
+      ctx.ui.setStatus(
+        "direnv",
+        ctx.ui.theme.fg(level === "warning" ? "warning" : "error", "direnv ✗"),
+      );
       ctx.ui.notify(bounded, level);
     } else {
       process.stderr.write(`[direnv] ${bounded}\n`);
@@ -139,10 +151,7 @@ export default function (pi: ExtensionAPI) {
       proc.on("close", (code) => {
         if (code !== 0) {
           if (ctx.hasUI) {
-            ctx.ui.setStatus(
-              "direnv",
-              ctx.ui.theme.fg("error", "direnv ✗"),
-            );
+            ctx.ui.setStatus("direnv", ctx.ui.theme.fg("error", "direnv ✗"));
           }
           resolve();
           return;

@@ -123,12 +123,16 @@ export function formatWorktreeStatusCard(
   ];
   if (record.lockedReason !== undefined) {
     baseDetails.push(
-      record.lockedReason ? `Locked: ${safeDisplay(record.lockedReason)}` : "Locked: no reason provided",
+      record.lockedReason
+        ? `Locked: ${safeDisplay(record.lockedReason)}`
+        : "Locked: no reason provided",
     );
   }
   if (record.prunableReason !== undefined) {
     baseDetails.push(
-      record.prunableReason ? `Prunable: ${safeDisplay(record.prunableReason)}` : "Prunable: no reason provided",
+      record.prunableReason
+        ? `Prunable: ${safeDisplay(record.prunableReason)}`
+        : "Prunable: no reason provided",
     );
   }
 
@@ -140,7 +144,11 @@ export function formatWorktreeStatusCard(
       description: path,
       statusText: `${statePrefix}unavailable`,
       searchText: `${label} ${path} ${identity.join(" ")} unavailable ${reason}`,
-      details: [...baseDetails, `Status: ${reason}`, "Snapshot: local Git state; no fetch performed."],
+      details: [
+        ...baseDetails,
+        `Status: ${reason}`,
+        "Snapshot: local Git state; no fetch performed.",
+      ],
     };
   }
 
@@ -178,7 +186,10 @@ export async function loadWorktreeStatusCards(
   signal?: AbortSignal,
   options: LoadStatusOptions = {},
 ): Promise<WorktreeStatusCard[]> {
-  const concurrency = Math.max(1, Math.min(options.concurrency ?? DEFAULT_STATUS_CONCURRENCY, records.length || 1));
+  const concurrency = Math.max(
+    1,
+    Math.min(options.concurrency ?? DEFAULT_STATUS_CONCURRENCY, records.length || 1),
+  );
   const cards = new Array<WorktreeStatusCard>(records.length);
   let nextIndex = 0;
 
@@ -201,7 +212,14 @@ export async function loadWorktreeStatusCards(
       try {
         const status = await runGit(
           pi,
-          ["status", "--porcelain=v2", "--branch", "-z", "--untracked-files=all", "--ignore-submodules=none"],
+          [
+            "status",
+            "--porcelain=v2",
+            "--branch",
+            "-z",
+            "--untracked-files=all",
+            "--ignore-submodules=none",
+          ],
           record.path,
           signal,
         );
@@ -293,7 +311,9 @@ function assertFieldCount(entry: string, minimum: number, kind: string): void {
 
 function formatWorkingState(snapshot: WorktreeStatusSnapshot): string {
   const values = [
-    snapshot.conflicts > 0 ? `${snapshot.conflicts} conflict${snapshot.conflicts === 1 ? "" : "s"}` : undefined,
+    snapshot.conflicts > 0
+      ? `${snapshot.conflicts} conflict${snapshot.conflicts === 1 ? "" : "s"}`
+      : undefined,
     snapshot.staged > 0 ? `${snapshot.staged} staged` : undefined,
     snapshot.unstaged > 0 ? `${snapshot.unstaged} unstaged` : undefined,
     snapshot.untracked > 0 ? `${snapshot.untracked} untracked` : undefined,
@@ -304,7 +324,9 @@ function formatWorkingState(snapshot: WorktreeStatusSnapshot): string {
 function unavailableReason(record: WorktreeRecord): string | undefined {
   if (record.bare) return "Bare worktree cannot be inspected";
   if (record.prunableReason !== undefined) {
-    return record.prunableReason ? `Prunable: ${record.prunableReason}` : "Prunable worktree metadata";
+    return record.prunableReason
+      ? `Prunable: ${record.prunableReason}`
+      : "Prunable worktree metadata";
   }
   if (!existsSync(record.path)) return "Worktree path is missing";
   return undefined;

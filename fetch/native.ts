@@ -3,7 +3,10 @@ import { tmpdir } from "node:os";
 import { dirname, join, resolve, sep } from "node:path";
 import type { FetchTransportResult } from "./backend.js";
 
-async function readResponseBounded(response: Response, maximum: number): Promise<{ body: Buffer; length: number; truncated: boolean }> {
+async function readResponseBounded(
+  response: Response,
+  maximum: number,
+): Promise<{ body: Buffer; length: number; truncated: boolean }> {
   if (!response.body) return { body: Buffer.alloc(0), length: 0, truncated: false };
   const reader = response.body.getReader();
   const chunks: Buffer[] = [];
@@ -50,7 +53,8 @@ async function safeNativeOutputPath(cwd: string, requested: string): Promise<str
       break;
     } catch {
       const parent = dirname(ancestor);
-      if (parent === ancestor) throw new Error("No existing outputPath ancestor could be validated");
+      if (parent === ancestor)
+        throw new Error("No existing outputPath ancestor could be validated");
       ancestor = parent;
     }
   }
@@ -73,10 +77,14 @@ export async function executeNativeFetch(request: {
   cwd: string;
   signal?: AbortSignal;
 }): Promise<FetchTransportResult> {
-  if (request.signal?.aborted) throw request.signal.reason ?? new DOMException("Aborted", "AbortError");
+  if (request.signal?.aborted)
+    throw request.signal.reason ?? new DOMException("Aborted", "AbortError");
   const controller = new AbortController();
   let timedOut = false;
-  const timer = setTimeout(() => { timedOut = true; controller.abort(); }, request.timeoutMs);
+  const timer = setTimeout(() => {
+    timedOut = true;
+    controller.abort();
+  }, request.timeoutMs);
   const onAbort = () => controller.abort();
   request.signal?.addEventListener("abort", onAbort, { once: true });
   try {
@@ -88,7 +96,9 @@ export async function executeNativeFetch(request: {
       redirect: "follow",
     });
     const headers: Record<string, string> = {};
-    response.headers.forEach((value, key) => { headers[key] = value; });
+    response.headers.forEach((value, key) => {
+      headers[key] = value;
+    });
     if (!response.ok) {
       await response.body?.cancel("HTTP error response is not consumed").catch(() => undefined);
       throw new Error(`✗ ${response.status} ${response.statusText}: ${request.url}`);
@@ -96,12 +106,23 @@ export async function executeNativeFetch(request: {
     const body = await readResponseBounded(response, request.maxBodyBytes);
     let outputPath: string | undefined;
     if (request.outputPath) {
-      if (body.truncated) throw new Error(`Response exceeded maxBodyBytes (${request.maxBodyBytes}); output file was not replaced`);
+      if (body.truncated)
+        throw new Error(
+          `Response exceeded maxBodyBytes (${request.maxBodyBytes}); output file was not replaced`,
+        );
       outputPath = await safeNativeOutputPath(request.cwd, request.outputPath);
-      const temporary = join(dirname(outputPath), `.pi-fetch-${process.pid}-${Math.random().toString(36).slice(2)}.tmp`);
+      const temporary = join(
+        dirname(outputPath),
+        `.pi-fetch-${process.pid}-${Math.random().toString(36).slice(2)}.tmp`,
+      );
       try {
-        await writeFile(temporary, body.body, { flag: "wx", mode: 0o600, signal: controller.signal });
-        if (controller.signal.aborted) throw controller.signal.reason ?? new DOMException("Aborted", "AbortError");
+        await writeFile(temporary, body.body, {
+          flag: "wx",
+          mode: 0o600,
+          signal: controller.signal,
+        });
+        if (controller.signal.aborted)
+          throw controller.signal.reason ?? new DOMException("Aborted", "AbortError");
         await rename(temporary, outputPath);
       } finally {
         await rm(temporary, { force: true }).catch(() => undefined);

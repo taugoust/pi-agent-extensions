@@ -1,4 +1,9 @@
-import { type Api, clampThinkingLevel, getSupportedThinkingLevels, type Model } from "@earendil-works/pi-ai";
+import {
+  type Api,
+  clampThinkingLevel,
+  getSupportedThinkingLevels,
+  type Model,
+} from "@earendil-works/pi-ai";
 import type { ExtensionAPI, ExtensionCommandContext } from "@earendil-works/pi-coding-agent";
 import type { MenuContext, RunMenuResult } from "@narumitw/pi-tui-kit";
 import {
@@ -13,7 +18,12 @@ import {
   summarizeBringToMain,
 } from "./bring-to-main.js";
 import { buildConversationContext } from "./conversation-context.js";
-import { bindSessionModelRequest, prepareSessionRoutingRequest, resolveSessionModelSelector, resolveSessionPhysicalModelReference } from "../../shared/session-routing.ts";
+import {
+  bindSessionModelRequest,
+  prepareSessionRoutingRequest,
+  resolveSessionModelSelector,
+  resolveSessionPhysicalModelReference,
+} from "../../shared/session-routing.ts";
 import { type RunBtwFullscreen, runBtwFullscreen } from "./fullscreen-ui.js";
 import { registerBtwMainThreadUpdates } from "./main-thread-updates.js";
 import { pickMainEntry } from "./main-tree-picker.js";
@@ -44,7 +54,10 @@ import {
   type SideThread,
 } from "./side-thread.js";
 import { sanitizeSingleLine } from "./text.js";
-import { type BtwMarkdownTransformers, prepareBtwTranscriptMarkdown } from "./transcript-markdown.js";
+import {
+  type BtwMarkdownTransformers,
+  prepareBtwTranscriptMarkdown,
+} from "./transcript-markdown.js";
 import {
   BtwAnsweringView,
   type BtwThinkingControl,
@@ -80,7 +93,9 @@ type BtwModelRegistry = Pick<ExtensionCommandContext["modelRegistry"], "find" | 
 
 type BtwCompletionRegistry = Pick<ExtensionCommandContext["modelRegistry"], "streamSimple">;
 
-export function createModelRegistryCompleteSimple(modelRegistry: BtwCompletionRegistry): CompleteSimpleFunction {
+export function createModelRegistryCompleteSimple(
+  modelRegistry: BtwCompletionRegistry,
+): CompleteSimpleFunction {
   const completeSimple: CompleteSimpleFunction = async (model, context, options) =>
     modelRegistry.streamSimple(model, context, options).result();
   completeSimple.appliesRequestHeaderTransforms = true;
@@ -118,10 +133,14 @@ export async function resolveBtwModel({
   const reportWarning = (message: string) => warn?.(sanitizeSingleLine(message));
   const availableModels = modelRegistry.getAvailable();
   const isAvailable = (model: Model<Api>): boolean =>
-    availableModels.some((candidate) => candidate.provider === model.provider && candidate.id === model.id);
+    availableModels.some(
+      (candidate) => candidate.provider === model.provider && candidate.id === model.id,
+    );
 
   if (settings.model) {
-    const fallback = currentModel ? `${currentModel.provider}/${currentModel.id}` : "the current model";
+    const fallback = currentModel
+      ? `${currentModel.provider}/${currentModel.id}`
+      : "the current model";
     const reference = parseBtwModelReference(settings.model);
     if (!reference) {
       reportWarning(`pi-btw model ${settings.model} is invalid; falling back to ${fallback}.`);
@@ -135,8 +154,11 @@ export async function resolveBtwModel({
     } else {
       const sameAsCurrent =
         configuredModel === currentModel ||
-        (configuredModel.provider === currentModel?.provider && configuredModel.id === currentModel.id);
-      const fallbackAction = sameAsCurrent ? "no distinct current model is available" : `falling back to ${fallback}`;
+        (configuredModel.provider === currentModel?.provider &&
+          configuredModel.id === currentModel.id);
+      const fallbackAction = sameAsCurrent
+        ? "no distinct current model is available"
+        : `falling back to ${fallback}`;
       reportWarning(`pi-btw model ${settings.model} is unavailable; ${fallbackAction}.`);
       if (sameAsCurrent) return undefined;
     }
@@ -229,7 +251,9 @@ export default function btw(pi: ExtensionAPI, dependencies: BtwExtensionDependen
     [...resumableThreads.values()]
       .reverse()
       .filter((state) => state.thread.turns.length > 0 && state.title)
-      .sort((first, second) => second.updatedAt - first.updatedAt || second.createdAt - first.createdAt)
+      .sort(
+        (first, second) => second.updatedAt - first.updatedAt || second.createdAt - first.createdAt,
+      )
       .map((state) => ({
         id: state.id,
         title: state.title ?? "Untitled side thread",
@@ -245,116 +269,162 @@ export default function btw(pi: ExtensionAPI, dependencies: BtwExtensionDependen
       }
       commandActive = true;
       const operationController = lifecycleController;
-      const commandSignal = ctx.signal ? AbortSignal.any([ctx.signal, operationController.signal]) : operationController.signal;
+      const commandSignal = ctx.signal
+        ? AbortSignal.any([ctx.signal, operationController.signal])
+        : operationController.signal;
       ctx = new Proxy(ctx, {
-        get(target, property) { return property === "signal" ? commandSignal : Reflect.get(target, property, target); },
+        get(target, property) {
+          return property === "signal" ? commandSignal : Reflect.get(target, property, target);
+        },
       });
       try {
-      const sessionId = readBtwSessionId(ctx);
-      const question = args.trim();
-      if (ctx.mode !== "tui") {
-        ctx.ui.notify("/btw requires interactive TUI mode", "error");
-        return;
-      }
+        const sessionId = readBtwSessionId(ctx);
+        const question = args.trim();
+        if (ctx.mode !== "tui") {
+          ctx.ui.notify("/btw requires interactive TUI mode", "error");
+          return;
+        }
 
-      let menuResult: BtwCommandMenuResult = "start";
-      let selectedConversationContext: string | undefined;
-      if (!question) {
-        while (true) {
-          menuResult = await showCommandMenu(pi, ctx, listResumeThreads());
-          if (ctx.signal?.aborted || operationController.signal.aborted || sessionId !== readBtwSessionId(ctx)) return;
-          if (menuResult === "closed") return;
-          if (menuResult !== "tree") break;
+        let menuResult: BtwCommandMenuResult = "start";
+        let selectedConversationContext: string | undefined;
+        if (!question) {
+          while (true) {
+            menuResult = await showCommandMenu(pi, ctx, listResumeThreads());
+            if (
+              ctx.signal?.aborted ||
+              operationController.signal.aborted ||
+              sessionId !== readBtwSessionId(ctx)
+            )
+              return;
+            if (menuResult === "closed") return;
+            if (menuResult !== "tree") break;
 
-          const treeResult = await pickEntry(pi, ctx);
-          if (ctx.signal?.aborted || operationController.signal.aborted || sessionId !== readBtwSessionId(ctx)) return;
-          if (treeResult.kind === "closed") return;
-          if (treeResult.kind === "back") continue;
-          try {
-            if (!ctx.sessionManager.getEntry(treeResult.entryId)) {
-              notifySafely(ctx, "The selected main-thread entry is no longer available", "warning");
-              continue;
+            const treeResult = await pickEntry(pi, ctx);
+            if (
+              ctx.signal?.aborted ||
+              operationController.signal.aborted ||
+              sessionId !== readBtwSessionId(ctx)
+            )
+              return;
+            if (treeResult.kind === "closed") return;
+            if (treeResult.kind === "back") continue;
+            try {
+              if (!ctx.sessionManager.getEntry(treeResult.entryId)) {
+                notifySafely(
+                  ctx,
+                  "The selected main-thread entry is no longer available",
+                  "warning",
+                );
+                continue;
+              }
+              const branch = ctx.sessionManager.getBranch(treeResult.entryId);
+              if (branch.at(-1)?.id !== treeResult.entryId) {
+                notifySafely(
+                  ctx,
+                  "The selected main-thread branch is no longer available",
+                  "warning",
+                );
+                continue;
+              }
+              selectedConversationContext = buildConversationContext(branch);
+              menuResult = "start";
+              break;
+            } catch {
+              return;
             }
-            const branch = ctx.sessionManager.getBranch(treeResult.entryId);
-            if (branch.at(-1)?.id !== treeResult.entryId) {
-              notifySafely(ctx, "The selected main-thread branch is no longer available", "warning");
-              continue;
-            }
-            selectedConversationContext = buildConversationContext(branch);
-            menuResult = "start";
-            break;
-          } catch {
-            return;
           }
         }
-      }
 
-      if (ctx.signal?.aborted || operationController.signal.aborted || sessionId !== readBtwSessionId(ctx)) return;
-      const settings = await loadSettings(ctx);
-      if (ctx.signal?.aborted || operationController.signal.aborted || sessionId !== readBtwSessionId(ctx)) return;
-      const sameAsMainThinkingLevel = settings.thinkingLevel === undefined;
-      const resolution = await resolveModel(settings, ctx);
-      if (ctx.signal?.aborted || operationController.signal.aborted || sessionId !== readBtwSessionId(ctx)) return;
-      if (resolution.kind === "cancelled") {
-        notifySafely(ctx, "Cancelled", "info");
-        return;
-      }
-      if (resolution.kind === "unavailable") {
-        notifySafely(ctx, "No available model for /btw", "error");
-        return;
-      }
-
-      let state = typeof menuResult === "object" ? resumableThreads.get(menuResult.threadId) : undefined;
-      if (typeof menuResult === "object" && !state) {
-        notifySafely(ctx, "The selected /btw side thread is no longer available", "warning");
-        return;
-      }
-      const startingTurnCount = state?.thread.turns.length ?? 0;
-
-      try {
-        await runFullscreen(
-          ctx,
-          (fullscreenCtx) => {
-            if (!state) {
-              const createdAt = Date.now();
-              state = {
-                id: `btw-${nextThreadNumber}`,
-                thread: createSideThread(
-                  selectedConversationContext ?? buildConversationContext(fullscreenCtx.sessionManager.getBranch()),
-                ),
-                thinkingLevel: settings.thinkingLevel ?? pi.getThinkingLevel(),
-                createdAt,
-                updatedAt: createdAt,
-              };
-              nextThreadNumber += 1;
-            }
-            return runThread({
-              initialQuestion: question || undefined,
-              selected: resolution.selected,
-              thinkingLevel: state.thinkingLevel,
-              rememberThinkingLevelChanges: !sameAsMainThinkingLevel && effectiveRememberThinkingLevelChanges(settings),
-              state,
-              ctx: fullscreenCtx,
-            });
-          },
-          {
-            copyOnSelect: effectiveFullscreenCopyOnSelect(settings),
-            layout: effectiveBtwLayout(settings),
-            sidePaneRatio: effectiveBtwSidePaneRatio(settings),
-            persistSidePaneRatio: (ratio, signal) =>
-              updateBtwSettings({ sidePaneRatio: ratio }, { signal }).then(() => undefined),
-            subscribeMainThreadUpdates: (listener) => subscribeMainThreadUpdates(ctx.sessionManager, listener),
-            ...(settings.keybindings ? { keybindings: settings.keybindings } : {}),
-          },
-        );
-      } finally {
-        if (!operationController.signal.aborted && sessionId === readBtwSessionId(ctx) && state?.title && state.thread.turns.length > 0) {
-          if (state.thread.turns.length > startingTurnCount) {
-            resumableThreads.delete(state.id);
-          }
-          resumableThreads.set(state.id, state);
+        if (
+          ctx.signal?.aborted ||
+          operationController.signal.aborted ||
+          sessionId !== readBtwSessionId(ctx)
+        )
+          return;
+        const settings = await loadSettings(ctx);
+        if (
+          ctx.signal?.aborted ||
+          operationController.signal.aborted ||
+          sessionId !== readBtwSessionId(ctx)
+        )
+          return;
+        const sameAsMainThinkingLevel = settings.thinkingLevel === undefined;
+        const resolution = await resolveModel(settings, ctx);
+        if (
+          ctx.signal?.aborted ||
+          operationController.signal.aborted ||
+          sessionId !== readBtwSessionId(ctx)
+        )
+          return;
+        if (resolution.kind === "cancelled") {
+          notifySafely(ctx, "Cancelled", "info");
+          return;
         }
-      }
+        if (resolution.kind === "unavailable") {
+          notifySafely(ctx, "No available model for /btw", "error");
+          return;
+        }
+
+        let state =
+          typeof menuResult === "object" ? resumableThreads.get(menuResult.threadId) : undefined;
+        if (typeof menuResult === "object" && !state) {
+          notifySafely(ctx, "The selected /btw side thread is no longer available", "warning");
+          return;
+        }
+        const startingTurnCount = state?.thread.turns.length ?? 0;
+
+        try {
+          await runFullscreen(
+            ctx,
+            (fullscreenCtx) => {
+              if (!state) {
+                const createdAt = Date.now();
+                state = {
+                  id: `btw-${nextThreadNumber}`,
+                  thread: createSideThread(
+                    selectedConversationContext ??
+                      buildConversationContext(fullscreenCtx.sessionManager.getBranch()),
+                  ),
+                  thinkingLevel: settings.thinkingLevel ?? pi.getThinkingLevel(),
+                  createdAt,
+                  updatedAt: createdAt,
+                };
+                nextThreadNumber += 1;
+              }
+              return runThread({
+                initialQuestion: question || undefined,
+                selected: resolution.selected,
+                thinkingLevel: state.thinkingLevel,
+                rememberThinkingLevelChanges:
+                  !sameAsMainThinkingLevel && effectiveRememberThinkingLevelChanges(settings),
+                state,
+                ctx: fullscreenCtx,
+              });
+            },
+            {
+              copyOnSelect: effectiveFullscreenCopyOnSelect(settings),
+              layout: effectiveBtwLayout(settings),
+              sidePaneRatio: effectiveBtwSidePaneRatio(settings),
+              persistSidePaneRatio: (ratio, signal) =>
+                updateBtwSettings({ sidePaneRatio: ratio }, { signal }).then(() => undefined),
+              subscribeMainThreadUpdates: (listener) =>
+                subscribeMainThreadUpdates(ctx.sessionManager, listener),
+              ...(settings.keybindings ? { keybindings: settings.keybindings } : {}),
+            },
+          );
+        } finally {
+          if (
+            !operationController.signal.aborted &&
+            sessionId === readBtwSessionId(ctx) &&
+            state?.title &&
+            state.thread.turns.length > 0
+          ) {
+            if (state.thread.turns.length > startingTurnCount) {
+              resumableThreads.delete(state.id);
+            }
+            resumableThreads.set(state.id, state);
+          }
+        }
       } finally {
         commandActive = false;
       }
@@ -460,11 +530,15 @@ export async function runBtwThread({
     dependencies.persistThinkingLevel ??
     ((level: BtwThinkingLevel) => updateBtwSettings({ thinkingLevel: level }, { settingsPath }));
   const now = dependencies.now ?? Date.now;
-  const thread = state?.thread ?? createSideThread(buildConversationContext(ctx.sessionManager.getBranch()));
+  const thread =
+    state?.thread ?? createSideThread(buildConversationContext(ctx.sessionManager.getBranch()));
   const thinkingLevels = getSupportedThinkingLevels(selected.model);
   const pendingWrites = new Set<Promise<void>>();
   const steeringQuestions: string[] = [];
-  let activeThinkingLevel = clampThinkingLevel(selected.model, state?.thinkingLevel ?? thinkingLevel);
+  let activeThinkingLevel = clampThinkingLevel(
+    selected.model,
+    state?.thinkingLevel ?? thinkingLevel,
+  );
   if (state) state.thinkingLevel = activeThinkingLevel;
   let pendingQuestion = initialQuestion;
   let composerDraft: string | undefined;
@@ -495,7 +569,13 @@ export async function runBtwThread({
   try {
     while (true) {
       if (!pendingQuestion) {
-        const action = await interact(thread, thread.turns.length > 0, ctx, composerDraft, createThinkingControl());
+        const action = await interact(
+          thread,
+          thread.turns.length > 0,
+          ctx,
+          composerDraft,
+          createThinkingControl(),
+        );
         if (action.kind === "close") return { kind: "closed" };
         if (action.kind === "bringToMain") {
           const choice = await chooseBringToMainAction(thread, ctx);
@@ -595,13 +675,20 @@ export async function chooseBringToMain(
       );
       let selectedQuestion: string | undefined;
       while (true) {
-        const questionResult = await showMenu(ctx, "Start from which question?", questions, selectedQuestion);
+        const questionResult = await showMenu(
+          ctx,
+          "Start from which question?",
+          questions,
+          selectedQuestion,
+        );
         if (questionResult.kind === "close") return { kind: "closed" };
         if (questionResult.kind === "back") break;
         const answeredTurnIndex = questions.indexOf(questionResult.value);
         if (answeredTurnIndex < 0) continue;
         selectedQuestion = questionResult.value;
-        const choice = makeChoice(buildQuickBringToMainSegments(thread.turns, { kind: "from", answeredTurnIndex }));
+        const choice = makeChoice(
+          buildQuickBringToMainSegments(thread.turns, { kind: "from", answeredTurnIndex }),
+        );
         const preview = await showPreview(ctx, choice.draft, choice.summary);
         if (preview.kind === "close") return { kind: "closed" };
         if (preview.kind === "back") continue;
@@ -650,7 +737,10 @@ export async function chooseBringToMain(
   }
 }
 
-type BtwMenuSelectorAction = { kind: "select"; value: string } | { kind: "back" } | { kind: "close" };
+type BtwMenuSelectorAction =
+  | { kind: "select"; value: string }
+  | { kind: "back" }
+  | { kind: "close" };
 
 type BtwBringToMainPreviewAction = { kind: "bring" } | { kind: "back" } | { kind: "close" };
 
@@ -719,7 +809,9 @@ async function showBtwMenu(
       select: async ({ itemId }: { itemId: string }) => {
         const index = Number.parseInt(itemId.slice("option-".length), 10);
         selectedValue = options[index];
-        return selectedValue === undefined ? ({ kind: "stay" } as const) : ({ kind: "close" } as const);
+        return selectedValue === undefined
+          ? ({ kind: "stay" } as const)
+          : ({ kind: "close" } as const);
       },
     },
   });
@@ -747,7 +839,10 @@ export async function loadBringToMainDraft(
   const existing = ctx.ui.getEditorText();
   if (!existing.trim()) {
     ctx.ui.setEditorText(draft);
-    ctx.ui.notify(`Brought ${describeContent()} to the main editor. Review and submit when ready.`, "info");
+    ctx.ui.notify(
+      `Brought ${describeContent()} to the main editor. Review and submit when ready.`,
+      "info",
+    );
     return "loaded";
   }
 
@@ -774,10 +869,11 @@ export async function loadBringToMainDraft(
 
     const current = ctx.ui.getEditorText();
     const characters = [...current].length;
-    const confirmed = await showBtwMenu(ctx, `Replace the current ${characters}-character editor draft?`, [
-      "Back  Keep current editor text",
-      "⚠ Replace current draft  Cannot be undone",
-    ]);
+    const confirmed = await showBtwMenu(
+      ctx,
+      `Replace the current ${characters}-character editor draft?`,
+      ["Back  Keep current editor text", "⚠ Replace current draft  Cannot be undone"],
+    );
     if (confirmed.kind === "close") return "closed";
     if (confirmed.kind === "back" || confirmed.value === "Back  Keep current editor text") continue;
     if (confirmed.value !== "⚠ Replace current draft  Cannot be undone") continue;
@@ -789,7 +885,10 @@ export async function loadBringToMainDraft(
       continue;
     }
     ctx.ui.setEditorText(draft);
-    ctx.ui.notify(`Replaced the main-editor draft with ${describeContent()}. Review and submit when ready.`, "info");
+    ctx.ui.notify(
+      `Replaced the main-editor draft with ${describeContent()}. Review and submit when ready.`,
+      "info",
+    );
     return "loaded";
   }
 }
@@ -818,13 +917,20 @@ export function resolveBtwDispatchModel(
   selected: ResolvedBtwModel,
   routingProfile: Awaited<ReturnType<typeof prepareSessionRoutingRequest>>,
 ): Model<Api> {
-  const roleModelId = selected.model === ctx.model && selected.model.api === "pi-virtual"
-    ? resolveSessionPhysicalModelReference(ctx, routingProfile).id
-    : selected.model.id;
+  const roleModelId =
+    selected.model === ctx.model && selected.model.api === "pi-virtual"
+      ? resolveSessionPhysicalModelReference(ctx, routingProfile).id
+      : selected.model.id;
   const selector = resolveSessionModelSelector(ctx, roleModelId, routingProfile);
   const separator = selector.indexOf("/");
-  const dispatchModel = ctx.modelRegistry.find(selector.slice(0, separator), selector.slice(separator + 1));
-  if (!dispatchModel || dispatchModel.api === "pi-virtual") throw new Error("Selected BTW model is unavailable for the current session provider; no fallback was made.");
+  const dispatchModel = ctx.modelRegistry.find(
+    selector.slice(0, separator),
+    selector.slice(separator + 1),
+  );
+  if (!dispatchModel || dispatchModel.api === "pi-virtual")
+    throw new Error(
+      "Selected BTW model is unavailable for the current session provider; no fallback was made.",
+    );
   return routingProfile ? bindSessionModelRequest(dispatchModel, routingProfile) : dispatchModel;
 }
 
@@ -845,44 +951,46 @@ async function askThreadQuestion(
   } catch (error) {
     return { kind: "error" as const, message: formatError(error) };
   }
-  return ctx.ui.custom<Awaited<ReturnType<typeof completeSideThreadTurn>>>((tui, theme, keybindings, done) => {
-    let settled = false;
-    const view = new BtwAnsweringView(
-      tui,
-      theme,
-      thread.turns,
-      question,
-      () => {
+  return ctx.ui.custom<Awaited<ReturnType<typeof completeSideThreadTurn>>>(
+    (tui, theme, keybindings, done) => {
+      let settled = false;
+      const view = new BtwAnsweringView(
+        tui,
+        theme,
+        thread.turns,
+        question,
+        () => {
+          if (settled) return;
+          settled = true;
+          done({ kind: "aborted" });
+        },
+        thinkingLevel,
+        {
+          markdownTransformers: createMarkdownTransformers(theme),
+          steering: {
+            questions: steering.questions,
+            onSubmit: steering.submit,
+            thinking: { ...steering.thinking, keybindings },
+          },
+        },
+      );
+      completeSideThreadTurn({
+        thread,
+        question,
+        model: dispatchModel,
+        thinkingLevel,
+        signal: view.signal,
+        completeSimple: createModelRegistryCompleteSimple(ctx.modelRegistry),
+        sessionId: readBtwSessionId(ctx),
+      }).then((result) => {
         if (settled) return;
         settled = true;
-        done({ kind: "aborted" });
-      },
-      thinkingLevel,
-      {
-        markdownTransformers: createMarkdownTransformers(theme),
-        steering: {
-          questions: steering.questions,
-          onSubmit: steering.submit,
-          thinking: { ...steering.thinking, keybindings },
-        },
-      },
-    );
-    completeSideThreadTurn({
-      thread,
-      question,
-      model: dispatchModel,
-      thinkingLevel,
-      signal: view.signal,
-      completeSimple: createModelRegistryCompleteSimple(ctx.modelRegistry),
-      sessionId: readBtwSessionId(ctx),
-    }).then((result) => {
-      if (settled) return;
-      settled = true;
-      view.finish();
-      done(result);
-    });
-    return view;
-  });
+        view.finish();
+        done(result);
+      });
+      return view;
+    },
+  );
 }
 
 async function showThreadComposer(
@@ -892,7 +1000,11 @@ async function showThreadComposer(
   initialQuestion: string | undefined,
   thinking: BtwThreadThinkingControl,
 ): Promise<TranscriptPagerAction> {
-  const createMarkdownTransformers = await prepareCurrentTranscriptMarkdown(thread, initialQuestion, ctx);
+  const createMarkdownTransformers = await prepareCurrentTranscriptMarkdown(
+    thread,
+    initialQuestion,
+    ctx,
+  );
   if (!createMarkdownTransformers) return { kind: "close" };
   return ctx.ui.custom<TranscriptPagerAction>(
     (tui, theme, keybindings, done) =>

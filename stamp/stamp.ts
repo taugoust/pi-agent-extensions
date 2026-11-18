@@ -89,14 +89,20 @@ export interface AssistantMessageStampDataV6 {
   costSinceUser: number;
 }
 
-export interface AssistantMessageStampDataV7 extends Omit<AssistantMessageStampDataV6, "version" | "costSinceUser"> {
+export interface AssistantMessageStampDataV7 extends Omit<
+  AssistantMessageStampDataV6,
+  "version" | "costSinceUser"
+> {
   version: 7;
   completedAt: number;
   timeSinceUserMs: number;
   costSinceUser?: number;
 }
 
-export interface AssistantMessageStampDataV8 extends Omit<AssistantMessageStampDataV7, "version" | "timeSinceUserMs"> {
+export interface AssistantMessageStampDataV8 extends Omit<
+  AssistantMessageStampDataV7,
+  "version" | "timeSinceUserMs"
+> {
   version: 8;
   outputTokens: number;
   timeSinceUserMs?: number;
@@ -175,7 +181,14 @@ export function isMessageStampData(value: unknown): value is MessageStampData {
   if (value.version === 3) {
     return (
       value.role === "assistant" &&
-      hasOnlyKeys(value, ["version", "role", "timestamp", "previousTimestamp", "completedAt", "firstContentAt"]) &&
+      hasOnlyKeys(value, [
+        "version",
+        "role",
+        "timestamp",
+        "previousTimestamp",
+        "completedAt",
+        "firstContentAt",
+      ]) &&
       isValidTimestamp(value.completedAt) &&
       value.completedAt >= value.timestamp &&
       (!Object.hasOwn(value, "previousTimestamp") || isValidTimestamp(value.previousTimestamp)) &&
@@ -206,7 +219,8 @@ export function isMessageStampData(value: unknown): value is MessageStampData {
       (value.version !== 8 ||
         (isReportedTokenCount(value.outputTokens) &&
           (value.completedAt as number) > value.timestamp &&
-          (!Object.hasOwn(value, "metadata") || captureCompletedOutputTokens(value.metadata) !== undefined))) &&
+          (!Object.hasOwn(value, "metadata") ||
+            captureCompletedOutputTokens(value.metadata) !== undefined))) &&
       (!(value.version === 7 || Object.hasOwn(value, "timeSinceUserMs")) ||
         (typeof value.timeSinceUserMs === "number" &&
           Number.isFinite(value.timeSinceUserMs) &&
@@ -216,7 +230,8 @@ export function isMessageStampData(value: unknown): value is MessageStampData {
       (Object.hasOwn(value, "costSinceUser")
         ? isAssistantEstimatedCost(value.costSinceUser) &&
           (!Object.hasOwn(value, "estimatedCost") ||
-            (isAssistantEstimatedCost(value.estimatedCost) && value.estimatedCost <= value.costSinceUser))
+            (isAssistantEstimatedCost(value.estimatedCost) &&
+              value.estimatedCost <= value.costSinceUser))
         : value.version !== 6 && !Object.hasOwn(value, "estimatedCost")) &&
       hasValidOptionalAssistantTiming(value, value.timestamp)
     );
@@ -245,7 +260,15 @@ export function isToolStampData(value: unknown): value is ToolStampDataV1 {
     isRecord(value) &&
     value.version === 1 &&
     value.kind === "tool" &&
-    hasOnlyKeys(value, ["version", "kind", "toolCallId", "toolName", "startedAt", "completedAt", "outcome"]) &&
+    hasOnlyKeys(value, [
+      "version",
+      "kind",
+      "toolCallId",
+      "toolName",
+      "startedAt",
+      "completedAt",
+      "outcome",
+    ]) &&
     isSafePersistedText(value.toolCallId) &&
     isSafePersistedText(value.toolName) &&
     isValidTimestamp(value.startedAt) &&
@@ -271,7 +294,11 @@ export function createStampEntryRenderer(
       return dynamicRightAlignedText(
         memoizeStampLines(getSettings, (settings) => {
           if (!settings.toolStamps) return [];
-          const label = formatToolStampLabel(data.toolName, data.completedAt - data.startedAt, data.outcome);
+          const label = formatToolStampLabel(
+            data.toolName,
+            data.completedAt - data.startedAt,
+            data.outcome,
+          );
           if (!label) return [];
           return [
             regularLine(label),
@@ -302,7 +329,9 @@ export function createStampEntryRenderer(
           {
             timestamp: data.timestamp,
             outputTokens,
-            ...(data.version === 7 || data.version === 8 ? { timeSinceUserMs: data.timeSinceUserMs } : {}),
+            ...(data.version === 7 || data.version === 8
+              ? { timeSinceUserMs: data.timeSinceUserMs }
+              : {}),
             ...(data.version === 1 ? {} : { previousTimestamp: data.previousTimestamp }),
             ...(hasAssistantTiming
               ? {
@@ -314,7 +343,9 @@ export function createStampEntryRenderer(
           settings,
         );
         if (!label) return [];
-        const timelineObservations: Array<readonly [StampTimelineBoundary, number]> = [["created", data.timestamp]];
+        const timelineObservations: Array<readonly [StampTimelineBoundary, number]> = [
+          ["created", data.timestamp],
+        ];
         if (hasAssistantTiming && data.firstContentAt !== undefined) {
           timelineObservations.push(["first content", data.firstContentAt]);
         }
@@ -322,14 +353,23 @@ export function createStampEntryRenderer(
           timelineObservations.push(["completed", data.completedAt]);
         }
         const timelineLines =
-          options.expanded && settings.showExactTimeline ? exactTimelineLines(timelineObservations) : [];
+          options.expanded && settings.showExactTimeline
+            ? exactTimelineLines(timelineObservations)
+            : [];
         const metadataLines =
-          data.version === 4 || data.version === 5 || data.version === 6 || data.version === 7 || data.version === 8
+          data.version === 4 ||
+          data.version === 5 ||
+          data.version === 6 ||
+          data.version === 7 ||
+          data.version === 8
             ? formatAssistantMetadataLines(
                 data.metadata,
                 settings.assistantMetadata,
                 options.expanded,
-                (data.version === 5 || data.version === 6 || data.version === 7 || data.version === 8) &&
+                (data.version === 5 ||
+                  data.version === 6 ||
+                  data.version === 7 ||
+                  data.version === 8) &&
                   settings.showThinkingLevel
                   ? data.thinkingLevel
                   : undefined,
@@ -338,7 +378,9 @@ export function createStampEntryRenderer(
                   data.costSinceUser !== undefined &&
                   settings.showCostSinceUser
                   ? {
-                      ...(data.estimatedCost === undefined ? {} : { estimatedCost: data.estimatedCost }),
+                      ...(data.estimatedCost === undefined
+                        ? {}
+                        : { estimatedCost: data.estimatedCost }),
                       costSinceUser: data.costSinceUser,
                     }
                   : undefined,
@@ -389,7 +431,10 @@ function haveSameStampFormatEnvironment(
   );
 }
 
-function haveSameStampSettings(left: Readonly<StampSettings>, right: Readonly<StampSettings>): boolean {
+function haveSameStampSettings(
+  left: Readonly<StampSettings>,
+  right: Readonly<StampSettings>,
+): boolean {
   return (
     left.hourCycle === right.hourCycle &&
     left.showSeconds === right.showSeconds &&
@@ -412,7 +457,9 @@ function regularLine(text: string): RightAlignedLine {
   return { text, exact: false };
 }
 
-function exactTimelineLines(observations: ReadonlyArray<readonly [StampTimelineBoundary, number]>): RightAlignedLine[] {
+function exactTimelineLines(
+  observations: ReadonlyArray<readonly [StampTimelineBoundary, number]>,
+): RightAlignedLine[] {
   return observations.flatMap(([boundary, timestamp]) => {
     const text = formatExactTimelineLine(boundary, timestamp);
     return text ? [{ text, exact: true }] : [];
@@ -472,13 +519,19 @@ function hardWrapExactText(text: string, width: number): string[] {
   return lines;
 }
 
-export default function stampExtension(pi: ExtensionAPI, options: StampExtensionOptions = {}): void {
+export default function stampExtension(
+  pi: ExtensionAPI,
+  options: StampExtensionOptions = {},
+): void {
   const settingsRuntime = options.settingsRuntime ?? createStampSettingsRuntime();
   const now = options.now ?? Date.now;
   let visible = visibleByDefault();
   pi.registerEntryRenderer(
     STAMP_ENTRY_TYPE,
-    createStampEntryRenderer(() => settingsRuntime.get().settings, () => visible),
+    createStampEntryRenderer(
+      () => settingsRuntime.get().settings,
+      () => visible,
+    ),
   );
 
   let generation = 0;
@@ -548,8 +601,11 @@ export default function stampExtension(pi: ExtensionAPI, options: StampExtension
   ): void => {
     const matchingTiming = timing?.timestamp === timestamp ? timing : undefined;
     const settings = settingsRuntime.get().settings;
-    const metadata = settings.assistantMetadata === "off" ? undefined : captureAssistantMetadata(message);
-    const outputTokens = settings.showOutputThroughput ? captureCompletedOutputTokens(message) : undefined;
+    const metadata =
+      settings.assistantMetadata === "off" ? undefined : captureAssistantMetadata(message);
+    const outputTokens = settings.showOutputThroughput
+      ? captureCompletedOutputTokens(message)
+      : undefined;
     const common = {
       role: "assistant" as const,
       timestamp,
@@ -557,7 +613,9 @@ export default function stampExtension(pi: ExtensionAPI, options: StampExtension
       ...(matchingTiming
         ? {
             completedAt: matchingTiming.completedAt,
-            ...(matchingTiming.firstContentAt === undefined ? {} : { firstContentAt: matchingTiming.firstContentAt }),
+            ...(matchingTiming.firstContentAt === undefined
+              ? {}
+              : { firstContentAt: matchingTiming.firstContentAt }),
           }
         : {}),
       ...(metadata === undefined ? {} : { metadata }),
@@ -603,7 +661,9 @@ export default function stampExtension(pi: ExtensionAPI, options: StampExtension
       timestamp,
       ...(lastStampTimestamp === undefined ? {} : { previousTimestamp: lastStampTimestamp }),
       completedAt: matchingTiming.completedAt,
-      ...(matchingTiming.firstContentAt === undefined ? {} : { firstContentAt: matchingTiming.firstContentAt }),
+      ...(matchingTiming.firstContentAt === undefined
+        ? {}
+        : { firstContentAt: matchingTiming.firstContentAt }),
     };
     if (!isMessageStampData(stamp)) {
       appendVersion2Stamp("assistant", timestamp);
@@ -672,7 +732,11 @@ export default function stampExtension(pi: ExtensionAPI, options: StampExtension
     nextUsageEntryIndex = branch.length;
     try {
       const state = await settingsRuntime.reload(controller.signal);
-      if (controller.signal.aborted || currentGeneration !== generation || controller !== sessionController) {
+      if (
+        controller.signal.aborted ||
+        currentGeneration !== generation ||
+        controller !== sessionController
+      ) {
         return;
       }
       if (state.issue && ctx.hasUI) {
@@ -681,7 +745,10 @@ export default function stampExtension(pi: ExtensionAPI, options: StampExtension
     } catch (error) {
       if (controller.signal.aborted) return;
       if (ctx.hasUI) {
-        ctx.ui.notify(`Could not load pi-stamp settings: ${safeTerminalText(formatError(error))}`, "warning");
+        ctx.ui.notify(
+          `Could not load pi-stamp settings: ${safeTerminalText(formatError(error))}`,
+          "warning",
+        );
       }
     }
   });
@@ -747,7 +814,11 @@ export default function stampExtension(pi: ExtensionAPI, options: StampExtension
 
   pi.on("message_start", (event) => {
     flushPendingUsers();
-    if (!tuiSessionActive || event.message.role !== "assistant" || !isValidTimestamp(event.message.timestamp)) {
+    if (
+      !tuiSessionActive ||
+      event.message.role !== "assistant" ||
+      !isValidTimestamp(event.message.timestamp)
+    ) {
       return;
     }
     activeAssistantTiming = { timestamp: event.message.timestamp };
@@ -825,14 +896,19 @@ export default function stampExtension(pi: ExtensionAPI, options: StampExtension
       const settings = settingsRuntime.get().settings;
       const isNonToolUseResponse = event.message.stopReason !== "toolUse";
       const costSinceUserData =
-        settings.showCostSinceUser && isNonToolUseResponse && costSinceUser.valid && costSinceUser.hasReportedCost
+        settings.showCostSinceUser &&
+        isNonToolUseResponse &&
+        costSinceUser.valid &&
+        costSinceUser.hasReportedCost
           ? {
               ...(estimatedCost === undefined ? {} : { estimatedCost }),
               costSinceUser: costSinceUser.total,
             }
           : undefined;
       const timeSinceUserMs =
-        isNonToolUseResponse && timing?.timestamp === event.message.timestamp ? timing.timeSinceUserMs : undefined;
+        isNonToolUseResponse && timing?.timestamp === event.message.timestamp
+          ? timing.timeSinceUserMs
+          : undefined;
       appendAssistantStamp(
         event.message.timestamp,
         timing,
@@ -874,7 +950,10 @@ function emptyCostSinceUserAccumulator(): CostSinceUserAccumulator {
   return { total: 0, hasReportedCost: false, valid: true };
 }
 
-function addReportedCostSinceUser(accumulator: CostSinceUserAccumulator, estimatedCost: number | undefined): void {
+function addReportedCostSinceUser(
+  accumulator: CostSinceUserAccumulator,
+  estimatedCost: number | undefined,
+): void {
   if (estimatedCost === undefined || !accumulator.valid) return;
   const total = accumulator.total + estimatedCost;
   if (!isAssistantEstimatedCost(total)) {
@@ -889,7 +968,12 @@ function costSinceUserFromBranch(entries: readonly unknown[]): CostSinceUserAccu
   let costSinceUserStart = 0;
   for (let index = entries.length - 1; index >= 0; index -= 1) {
     const entry = entries[index];
-    if (isRecord(entry) && entry.type === "message" && isRecord(entry.message) && entry.message.role === "user") {
+    if (
+      isRecord(entry) &&
+      entry.type === "message" &&
+      isRecord(entry.message) &&
+      entry.message.role === "user"
+    ) {
       costSinceUserStart = index + 1;
       break;
     }
@@ -929,11 +1013,18 @@ function addNewUsageCosts(
 function elapsedSinceUser(entries: readonly unknown[], completedAt: number): number | undefined {
   for (let index = entries.length - 1; index >= 0; index -= 1) {
     const entry = entries[index];
-    if (!isRecord(entry) || entry.type !== "message" || !isRecord(entry.message) || entry.message.role !== "user")
+    if (
+      !isRecord(entry) ||
+      entry.type !== "message" ||
+      !isRecord(entry.message) ||
+      entry.message.role !== "user"
+    )
       continue;
     const timestamp = entry.message.timestamp;
     // An invalid latest user is still a reset boundary; never fall back to an older user.
-    return isValidTimestamp(timestamp) && timestamp <= completedAt ? completedAt - timestamp : undefined;
+    return isValidTimestamp(timestamp) && timestamp <= completedAt
+      ? completedAt - timestamp
+      : undefined;
   }
   return undefined;
 }
@@ -953,7 +1044,10 @@ function lastStampTimestampFromBranch(entries: readonly unknown[]): number | und
   return undefined;
 }
 
-function hasValidOptionalAssistantTiming(value: Record<string, unknown>, timestamp: number): boolean {
+function hasValidOptionalAssistantTiming(
+  value: Record<string, unknown>,
+  timestamp: number,
+): boolean {
   if (Object.hasOwn(value, "previousTimestamp") && !isValidTimestamp(value.previousTimestamp)) {
     return false;
   }
@@ -970,7 +1064,11 @@ function hasValidOptionalAssistantTiming(value: Record<string, unknown>, timesta
 
 function isMeaningfulAssistantUpdate(value: unknown): boolean {
   if (!isRecord(value) || typeof value.type !== "string") return false;
-  if (value.type === "text_delta" || value.type === "thinking_delta" || value.type === "toolcall_delta") {
+  if (
+    value.type === "text_delta" ||
+    value.type === "thinking_delta" ||
+    value.type === "toolcall_delta"
+  ) {
     return typeof value.delta === "string" && value.delta.length > 0;
   }
   if (value.type === "text_end" || value.type === "thinking_end") {
@@ -993,7 +1091,9 @@ function isStampRole(value: unknown): value is MessageStampData["role"] {
 }
 
 function isValidTimestamp(value: unknown): value is number {
-  return typeof value === "number" && Number.isFinite(value) && !Number.isNaN(new Date(value).getTime());
+  return (
+    typeof value === "number" && Number.isFinite(value) && !Number.isNaN(new Date(value).getTime())
+  );
 }
 
 function isSafePersistedText(value: unknown): value is string {

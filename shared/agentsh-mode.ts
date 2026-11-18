@@ -52,14 +52,15 @@ export function classifyAgentSHStartup(
   // owner must claim it and fail closed rather than silently enabling legacy mode.
   const permissionGate = own(env, "AGENTSH_PERMISSION_GATE_SOCKET");
 
-  const fullSelected = mockSupervisor
-    || restSupervisor
-    || startSupervisor
-    || value(env, "PI_SUPERVISED") === "1"
-    || value(env, "PI_AUTO") === "1"
-    || value(env, "PI_AGENTSH_REMOTE") === "ssh"
-    || value(env, "PI_AGENTSH_READ_MODE") === "supervised"
-    || value(env, "AGENTSH_CHILD_CAPABILITY") !== "";
+  const fullSelected =
+    mockSupervisor ||
+    restSupervisor ||
+    startSupervisor ||
+    value(env, "PI_SUPERVISED") === "1" ||
+    value(env, "PI_AUTO") === "1" ||
+    value(env, "PI_AGENTSH_REMOTE") === "ssh" ||
+    value(env, "PI_AGENTSH_READ_MODE") === "supervised" ||
+    value(env, "AGENTSH_CHILD_CAPABILITY") !== "";
 
   const protocol: AgentSHStartupProtocol = mockSupervisor
     ? "mock-ndjson"
@@ -72,13 +73,14 @@ export function classifyAgentSHStartup(
           : "";
 
   return {
-    kind: fullSelected && permissionGate
-      ? "conflict"
-      : fullSelected
-        ? "full"
-        : protocol
-          ? "guard-only"
-          : "native",
+    kind:
+      fullSelected && permissionGate
+        ? "conflict"
+        : fullSelected
+          ? "full"
+          : protocol
+            ? "guard-only"
+            : "native",
     protocol,
     startSupervisor,
   };
@@ -91,16 +93,19 @@ export function agentSHSupervisorProtocol(
   return startup.protocol === "permission-gate" ? "" : startup.protocol;
 }
 
-function publishedProtocol(state: AgentSHRuntimeState | null | undefined): AgentSHStartupProtocol | "invalid" {
+function publishedProtocol(
+  state: AgentSHRuntimeState | null | undefined,
+): AgentSHStartupProtocol | "invalid" {
   if (!state) return "";
   if (state.protocol !== undefined) {
     if (
-      state.protocol === ""
-      || state.protocol === "rest"
-      || state.protocol === "mock-ndjson"
-      || state.protocol === "legacy-approval-ui"
-      || state.protocol === "permission-gate"
-    ) return state.protocol;
+      state.protocol === "" ||
+      state.protocol === "rest" ||
+      state.protocol === "mock-ndjson" ||
+      state.protocol === "legacy-approval-ui" ||
+      state.protocol === "permission-gate"
+    )
+      return state.protocol;
     return "invalid";
   }
 
@@ -128,22 +133,30 @@ export function agentSHRuntimeDisposition(
   state?: AgentSHRuntimeState | null,
 ): AgentSHRuntimeDisposition {
   if (state !== undefined && state !== null) {
-    if (typeof state !== "object" || Array.isArray(state)) return { kind: "unavailable", protocol: startup.protocol };
-    if (state.configured !== undefined && typeof state.configured !== "boolean") return { kind: "unavailable", protocol: startup.protocol };
-    if (state.active !== undefined && typeof state.active !== "boolean") return { kind: "unavailable", protocol: startup.protocol };
-    if (state.status !== undefined && typeof state.status !== "string") return { kind: "unavailable", protocol: startup.protocol };
+    if (typeof state !== "object" || Array.isArray(state))
+      return { kind: "unavailable", protocol: startup.protocol };
+    if (state.configured !== undefined && typeof state.configured !== "boolean")
+      return { kind: "unavailable", protocol: startup.protocol };
+    if (state.active !== undefined && typeof state.active !== "boolean")
+      return { kind: "unavailable", protocol: startup.protocol };
+    if (state.status !== undefined && typeof state.status !== "string")
+      return { kind: "unavailable", protocol: startup.protocol };
   }
   const published = publishedProtocol(state);
   if (published === "invalid") return { kind: "unavailable", protocol: "" };
-  const protocolPublished = Boolean(state && Object.prototype.hasOwnProperty.call(state, "protocol"));
+  const protocolPublished = Boolean(
+    state && Object.prototype.hasOwnProperty.call(state, "protocol"),
+  );
   const protocol = published || (!protocolPublished ? startup.protocol : "");
 
   const fullProtocol = protocol === "rest" || protocol === "mock-ndjson";
   const limitedProtocol = protocol === "permission-gate" || protocol === "legacy-approval-ui";
   // configured/active without a protocol is an older full sandbox publication.
-  const untypedFullState = published === "" && (state?.configured === true || state?.active === true);
+  const untypedFullState =
+    published === "" && (state?.configured === true || state?.active === true);
   const legacyFullState = !protocolPublished && startup.protocol === "" && untypedFullState;
-  const fullSelected = startup.kind === "full" || startup.kind === "conflict" || fullProtocol || untypedFullState;
+  const fullSelected =
+    startup.kind === "full" || startup.kind === "conflict" || fullProtocol || untypedFullState;
 
   if (fullSelected) {
     if (limitedProtocol || (!fullProtocol && !legacyFullState) || !runtimeReady(state)) {

@@ -1,4 +1,8 @@
-import { readExtensionDefaults, readPreferenceDocument, mergeExtensionSettings } from "../shared/extension-defaults.js";
+import {
+  readExtensionDefaults,
+  readPreferenceDocument,
+  mergeExtensionSettings,
+} from "../shared/extension-defaults.js";
 import { join } from "node:path";
 import {
   physicalSessionProvider,
@@ -26,19 +30,23 @@ const STANDALONE_PROVIDER = "openai-codex";
 export function readSubagentModelSettings(agentDir: string): SubagentModelSettings {
   let value: unknown;
   try {
-    value = mergeExtensionSettings(readExtensionDefaults("subagent", agentDir),
-      readPreferenceDocument(join(agentDir, "subagent.json")));
+    value = mergeExtensionSettings(
+      readExtensionDefaults("subagent", agentDir),
+      readPreferenceDocument(join(agentDir, "subagent.json")),
+    );
   } catch (error) {
     throw new Error(`Cannot read subagent.json/defaults/subagent.json: ${String(error)}`);
   }
-  if (!value || typeof value !== "object" || Array.isArray(value)) throw new Error("subagent.json must be an object");
+  if (!value || typeof value !== "object" || Array.isArray(value))
+    throw new Error("subagent.json must be an object");
   const settings = { ...defaults, ...value } as SubagentModelSettings;
   for (const key of Object.keys(defaults) as (keyof SubagentModelSettings)[]) {
     if (typeof settings[key] !== "string" || !settings[key].trim() || /\s/.test(settings[key])) {
       throw new Error(`Invalid subagent.json ${key}`);
     }
   }
-  if (!/^(off|minimal|low|medium|high|xhigh|max)$/.test(settings.defaultThinkingLevel)) throw new Error("Invalid subagent.json defaultThinkingLevel");
+  if (!/^(off|minimal|low|medium|high|xhigh|max)$/.test(settings.defaultThinkingLevel))
+    throw new Error("Invalid subagent.json defaultThinkingLevel");
   const { defaultModel, defaultThinkingLevel } = settings;
   return { defaultModel, defaultThinkingLevel };
 }
@@ -55,18 +63,26 @@ export function resolveSubagentModel(
   tiers: ModelTierTable = readModelTiers(),
 ): string {
   const provider = context
-    ? readSubagentRoutingSelection(context)?.providerId
-      ?? physicalSessionProvider(context)
-      ?? snapshot?.providerId
-      ?? resolveSessionProvider(context)
+    ? (readSubagentRoutingSelection(context)?.providerId ??
+      physicalSessionProvider(context) ??
+      snapshot?.providerId ??
+      resolveSessionProvider(context))
     : STANDALONE_PROVIDER;
-  const selected = resolveTierSelector(model ?? settings.defaultModel, provider, tiers,
-    { crossProvider: true, defaultThinking: settings.defaultThinkingLevel });
+  const selected = resolveTierSelector(model ?? settings.defaultModel, provider, tiers, {
+    crossProvider: true,
+    defaultThinking: settings.defaultThinkingLevel,
+  });
   const reference = selected.replace(thinkingSuffix, "");
   const slash = reference.indexOf("/");
   if (context?.modelRegistry) {
-    const physical = context.modelRegistry.find(reference.slice(0, slash), reference.slice(slash + 1));
-    if (!physical || physical.api === "pi-virtual") throw new Error(`Unavailable physical subagent model: ${reference}; no provider/model fallback`);
+    const physical = context.modelRegistry.find(
+      reference.slice(0, slash),
+      reference.slice(slash + 1),
+    );
+    if (!physical || physical.api === "pi-virtual")
+      throw new Error(
+        `Unavailable physical subagent model: ${reference}; no provider/model fallback`,
+      );
   }
   return selected;
 }

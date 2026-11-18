@@ -38,7 +38,11 @@ function fixture() {
   return { root, store: `${store}/`, agent, file, generation, link };
 }
 
-const PATHS = ["settings.json", "extensions/fetch/index.ts", "extensions/subagent/agents/worker.md"];
+const PATHS = [
+  "settings.json",
+  "extensions/fetch/index.ts",
+  "extensions/subagent/agents/worker.md",
+];
 
 test("a deploy that changes a Pi file changes the fingerprint", () => {
   const f = fixture();

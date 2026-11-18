@@ -1,83 +1,171 @@
 import assert from "node:assert/strict";
 import { test } from "node:test";
 import {
-  decodeTuiWorkerRequest, parseTuiWorkerPlacement, parseTuiWorkerRequest,
-  publicTuiWorkerManifest, TUI_WORKER_MAX_FRAME_BYTES,
+  decodeTuiWorkerRequest,
+  parseTuiWorkerPlacement,
+  parseTuiWorkerRequest,
+  publicTuiWorkerManifest,
+  TUI_WORKER_MAX_FRAME_BYTES,
 } from "../shared/tui-worker-protocol.ts";
 import type { TuiWorkerManifest } from "../shared/tui-worker-protocol.ts";
 
 const identity = {
-  protocol: 1, requestId: "request-1", token: "a".repeat(64),
-  ownerSessionId: "parent-session", taskId: "task-1", runtimeId: "runtime-1",
-  groupId: `subagent-job-${"b".repeat(24)}`, childId: `subagent-child-${"c".repeat(24)}`,
-  attempt: 1, workerEpoch: "d".repeat(32),
+  protocol: 1,
+  requestId: "request-1",
+  token: "a".repeat(64),
+  ownerSessionId: "parent-session",
+  taskId: "task-1",
+  runtimeId: "runtime-1",
+  groupId: `subagent-job-${"b".repeat(24)}`,
+  childId: `subagent-child-${"c".repeat(24)}`,
+  attempt: 1,
+  workerEpoch: "d".repeat(32),
 };
 const placement = {
-  socketPath: "/tmp/tmux-1000/default", serverEpoch: "server-1",
-  sessionId: "$1", windowId: "@2", paneId: "%3", ownershipNonce: "e".repeat(64),
+  socketPath: "/tmp/tmux-1000/default",
+  serverEpoch: "server-1",
+  sessionId: "$1",
+  windowId: "@2",
+  paneId: "%3",
+  ownershipNonce: "e".repeat(64),
 };
 
 test("bounded commands preserve model text as data, including slash-looking instructions", () => {
-  const request = { ...identity, operation: "prompt", mode: "steer", message: "/permission-gate off" };
-  const idle = { ...identity, operation: "idle_decision", decisionRequestId: `idle:${"a".repeat(32)}`, choice: "compact" };
+  const request = {
+    ...identity,
+    operation: "prompt",
+    mode: "steer",
+    message: "/permission-gate off",
+  };
+  const idle = {
+    ...identity,
+    operation: "idle_decision",
+    decisionRequestId: `idle:${"a".repeat(32)}`,
+    choice: "compact",
+  };
   assert.equal(parseTuiWorkerRequest(idle as any).operation, "idle_decision");
   assert.throws(() => parseTuiWorkerRequest({ ...idle, choice: "yes" } as any));
   assert.deepEqual(decodeTuiWorkerRequest(Buffer.from(JSON.stringify(request))), request);
   // Protocol deliberately has no operator mode operation or command-dispatch flag.
-  assert.throws(() => parseTuiWorkerRequest({ ...identity, operation: "set_gate_mode", mode: "off" }));
+  assert.throws(() =>
+    parseTuiWorkerRequest({ ...identity, operation: "set_gate_mode", mode: "off" }),
+  );
   assert.throws(() => parseTuiWorkerRequest({ ...request, expandPromptTemplates: true }));
 });
 
 test("rejects malformed, unknown, oversized and non-UTF8 requests", () => {
   const request = { ...identity, operation: "status" };
   for (const mutation of [
-    { protocol: 2 }, { attempt: 0 }, { attempt: 1.5 }, { token: "short" },
-    { childId: "../foreign" }, { workerEpoch: "" }, { requestId: "\n" },
-  ]) assert.throws(() => parseTuiWorkerRequest({ ...request, ...mutation }));
+    { protocol: 2 },
+    { attempt: 0 },
+    { attempt: 1.5 },
+    { token: "short" },
+    { childId: "../foreign" },
+    { workerEpoch: "" },
+    { requestId: "\n" },
+  ])
+    assert.throws(() => parseTuiWorkerRequest({ ...request, ...mutation }));
   assert.throws(() => parseTuiWorkerRequest({ ...request, arbitrary: true }));
   const { token: _token, ...missing } = request;
   assert.throws(() => parseTuiWorkerRequest(missing));
   assert.throws(() => decodeTuiWorkerRequest(Buffer.alloc(TUI_WORKER_MAX_FRAME_BYTES + 1)));
   assert.throws(() => decodeTuiWorkerRequest(Buffer.from([0xff])));
-  assert.throws(() => parseTuiWorkerRequest({ ...identity, operation: "events", afterSequence: -1 }));
-  assert.throws(() => parseTuiWorkerRequest({ ...identity, operation: "prompt", mode: "steer", message: "é".repeat(32769) }));
-  assert.throws(() => parseTuiWorkerRequest({ ...identity, operation: "prompt", mode: "steer", message: "  " }));
+  assert.throws(() =>
+    parseTuiWorkerRequest({ ...identity, operation: "events", afterSequence: -1 }),
+  );
+  assert.throws(() =>
+    parseTuiWorkerRequest({
+      ...identity,
+      operation: "prompt",
+      mode: "steer",
+      message: "é".repeat(32769),
+    }),
+  );
+  assert.throws(() =>
+    parseTuiWorkerRequest({ ...identity, operation: "prompt", mode: "steer", message: "  " }),
+  );
 });
 
 test("placement requires exact server/session/window/pane identities", () => {
   assert.deepEqual(parseTuiWorkerPlacement(placement), placement);
   for (const mutation of [
-    { socketPath: "relative" }, { sessionId: "session-name" }, { windowId: "2" },
-    { paneId: "3" }, { ownershipNonce: "" }, { serverEpoch: "" },
-  ]) assert.throws(() => parseTuiWorkerPlacement({ ...placement, ...mutation }));
-  assert.deepEqual(parseTuiWorkerRequest({ ...identity, operation: "promote", placement }),
-    { ...identity, operation: "promote", placement });
+    { socketPath: "relative" },
+    { sessionId: "session-name" },
+    { windowId: "2" },
+    { paneId: "3" },
+    { ownershipNonce: "" },
+    { serverEpoch: "" },
+  ])
+    assert.throws(() => parseTuiWorkerPlacement({ ...placement, ...mutation }));
+  assert.deepEqual(parseTuiWorkerRequest({ ...identity, operation: "promote", placement }), {
+    ...identity,
+    operation: "promote",
+    placement,
+  });
 });
 
 test("panel user prompts have a separate authenticated origin from parent instructions", () => {
-  const user = parseTuiWorkerRequest({ ...identity, operation: "user_prompt", message: "Direct user correction" });
-  assert.deepEqual(user, { ...identity, operation: "user_prompt", message: "Direct user correction" });
-  assert.throws(() => parseTuiWorkerRequest({ ...identity, operation: "user_prompt", message: "/permission-gate off", mode: "interrupt" }));
+  const user = parseTuiWorkerRequest({
+    ...identity,
+    operation: "user_prompt",
+    message: "Direct user correction",
+  });
+  assert.deepEqual(user, {
+    ...identity,
+    operation: "user_prompt",
+    message: "Direct user correction",
+  });
+  assert.throws(() =>
+    parseTuiWorkerRequest({
+      ...identity,
+      operation: "user_prompt",
+      message: "/permission-gate off",
+      mode: "interrupt",
+    }),
+  );
 });
 
 test("cancel, explicit verify and idle-reap reservation are distinct operations", () => {
   assert.equal(parseTuiWorkerRequest({ ...identity, operation: "cancel" }).operation, "cancel");
   assert.equal(parseTuiWorkerRequest({ ...identity, operation: "verify" }).operation, "verify");
-  assert.equal(parseTuiWorkerRequest({ ...identity, operation: "prepare_reap" }).operation, "prepare_reap");
-  assert.deepEqual(parseTuiWorkerRequest({ ...identity, operation: "prepare_reap", force: true, reason: "retain failed worker" }),
-    { ...identity, operation: "prepare_reap", force: true, reason: "retain failed worker" });
-  assert.deepEqual(parseTuiWorkerRequest({ ...identity, operation: "prepare_reap", force: false }),
-    { ...identity, operation: "prepare_reap", force: false });
-  assert.throws(() => parseTuiWorkerRequest({ ...identity, operation: "prepare_reap", force: true }));
-  assert.throws(() => parseTuiWorkerRequest({ ...identity, operation: "prepare_reap", force: "yes" }));
-  assert.throws(() => parseTuiWorkerRequest({ ...identity, operation: "prepare_reap", force: false, reason: "no" }));
+  assert.equal(
+    parseTuiWorkerRequest({ ...identity, operation: "prepare_reap" }).operation,
+    "prepare_reap",
+  );
+  assert.deepEqual(
+    parseTuiWorkerRequest({
+      ...identity,
+      operation: "prepare_reap",
+      force: true,
+      reason: "retain failed worker",
+    }),
+    { ...identity, operation: "prepare_reap", force: true, reason: "retain failed worker" },
+  );
+  assert.deepEqual(
+    parseTuiWorkerRequest({ ...identity, operation: "prepare_reap", force: false }),
+    { ...identity, operation: "prepare_reap", force: false },
+  );
+  assert.throws(() =>
+    parseTuiWorkerRequest({ ...identity, operation: "prepare_reap", force: true }),
+  );
+  assert.throws(() =>
+    parseTuiWorkerRequest({ ...identity, operation: "prepare_reap", force: "yes" }),
+  );
+  assert.throws(() =>
+    parseTuiWorkerRequest({ ...identity, operation: "prepare_reap", force: false, reason: "no" }),
+  );
 });
 
 test("public discovery strips control capability and clones nested placement", () => {
   const { token, requestId: _requestId, ...ids } = identity;
   const manifest: TuiWorkerManifest = {
-    ...ids, protocol: 1, controlToken: token, controlSocket: "/tmp/worker/control.sock",
-    sessionFile: "/tmp/worker/session.jsonl", placement, presentation: "background",
+    ...ids,
+    protocol: 1,
+    controlToken: token,
+    controlSocket: "/tmp/worker/control.sock",
+    sessionFile: "/tmp/worker/session.jsonl",
+    placement,
+    presentation: "background",
   };
   const exposed = publicTuiWorkerManifest(manifest);
   assert.equal(Object.hasOwn(exposed, "controlToken"), false);

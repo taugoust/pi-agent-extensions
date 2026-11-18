@@ -188,7 +188,13 @@ assert.equal(exportedTypeFixtures.failure.source, "transport");
   assert.equal(bounded?.code?.length, 160);
   assert.equal(bounded?.message?.length, 1000);
   assert.equal(bounded?.policyRule?.length, 240);
-  for (const value of [bounded?.dispatchState, bounded?.failureKind, bounded?.code, bounded?.message, bounded?.policyRule]) {
+  for (const value of [
+    bounded?.dispatchState,
+    bounded?.failureKind,
+    bounded?.code,
+    bounded?.message,
+    bounded?.policyRule,
+  ]) {
     assert.ok(value?.endsWith("…"));
   }
 }
@@ -201,7 +207,9 @@ const semanticCases: Array<{ name: string; result: Record<string, unknown>; expe
   },
   {
     name: "nested typed outcome",
-    result: { exec_response: { result: { outcome: { command_started: true, failure_kind: "child_exit" } } } },
+    result: {
+      exec_response: { result: { outcome: { command_started: true, failure_kind: "child_exit" } } },
+    },
     expected: true,
   },
   {
@@ -254,47 +262,86 @@ const failureTextCases: Array<{
   {
     name: "queue timeout",
     failure: { source: "top-level", failureKind: "queue_timeout", message: "queue deadline" },
-    expected: "Command was not executed: it timed out waiting in the AgentSH execution queue. queue deadline",
+    expected:
+      "Command was not executed: it timed out waiting in the AgentSH execution queue. queue deadline",
   },
   {
     name: "queued cancellation",
-    failure: { source: "top-level", failureKind: "caller_cancellation", commandStarted: false, message: "cancelled" },
+    failure: {
+      source: "top-level",
+      failureKind: "caller_cancellation",
+      commandStarted: false,
+      message: "cancelled",
+    },
     expected: "Command was not executed: the queued request was cancelled. cancelled",
   },
   {
     name: "started cancellation",
-    failure: { source: "top-level", failureKind: "caller_cancellation", commandStarted: true, message: "cancelled" },
+    failure: {
+      source: "top-level",
+      failureKind: "caller_cancellation",
+      commandStarted: true,
+      message: "cancelled",
+    },
     expected: "Command was cancelled after it started. cancelled",
   },
   {
     name: "pre-start command timeout",
-    failure: { source: "top-level", failureKind: "command_timeout", commandStarted: false, message: "deadline" },
+    failure: {
+      source: "top-level",
+      failureKind: "command_timeout",
+      commandStarted: false,
+      message: "deadline",
+    },
     expected: "Command was not executed: its deadline expired before start. deadline",
   },
   {
     name: "started command timeout",
-    failure: { source: "top-level", failureKind: "command_timeout", commandStarted: true, message: "deadline" },
+    failure: {
+      source: "top-level",
+      failureKind: "command_timeout",
+      commandStarted: true,
+      message: "deadline",
+    },
     expected: "Command timed out after it started. deadline",
   },
   {
     name: "policy denial",
-    failure: { source: "top-level", failureKind: "policy_or_approval_denial", code: "E_POLICY_DENIED" },
-    expected: "Command was not executed: AgentSH policy or approval denied it. E_POLICY_DENIED Retrying the command asks the user for approval when policy allows it.",
+    failure: {
+      source: "top-level",
+      failureKind: "policy_or_approval_denial",
+      code: "E_POLICY_DENIED",
+    },
+    expected:
+      "Command was not executed: AgentSH policy or approval denied it. E_POLICY_DENIED Retrying the command asks the user for approval when policy allows it.",
   },
   {
     name: "pre-exec refusal",
-    failure: { source: "top-level", failureKind: "pre_exec_enforcement", commandStarted: false, message: "helper unavailable" },
-    expected: "Command was not executed: AgentSH pre-execution/helper enforcement failed. helper unavailable",
+    failure: {
+      source: "top-level",
+      failureKind: "pre_exec_enforcement",
+      commandStarted: false,
+      message: "helper unavailable",
+    },
+    expected:
+      "Command was not executed: AgentSH pre-execution/helper enforcement failed. helper unavailable",
   },
   {
     name: "contradictory started pre-exec cleanup",
-    failure: { source: "top-level", failureKind: "pre_exec_enforcement", commandStarted: true, message: "cleanup failed" },
-    expected: "Command started, but AgentSH enforcement cleanup failed; side effects may have occurred and the command must not be replayed automatically. cleanup failed",
+    failure: {
+      source: "top-level",
+      failureKind: "pre_exec_enforcement",
+      commandStarted: true,
+      message: "cleanup failed",
+    },
+    expected:
+      "Command started, but AgentSH enforcement cleanup failed; side effects may have occurred and the command must not be replayed automatically. cleanup failed",
   },
   {
     name: "post-start cleanup",
     failure: { source: "top-level", failureKind: "post_start_cleanup", message: "cleanup failed" },
-    expected: "Command started, but AgentSH cleanup failed; side effects may have occurred and the command must not be replayed automatically. cleanup failed",
+    expected:
+      "Command started, but AgentSH cleanup failed; side effects may have occurred and the command must not be replayed automatically. cleanup failed",
   },
   {
     name: "request validation",
@@ -308,7 +355,12 @@ const failureTextCases: Array<{
   },
   {
     name: "child exit with message",
-    failure: { source: "nested", failureKind: "child_exit", code: "E_COMMAND_FAILED", message: "child failed" },
+    failure: {
+      source: "nested",
+      failureKind: "child_exit",
+      code: "E_COMMAND_FAILED",
+      message: "child failed",
+    },
     exitCode: 127,
     expected: "Command exited with code 127: child failed",
   },
@@ -331,7 +383,11 @@ const failureTextCases: Array<{
 ];
 
 for (const testCase of failureTextCases) {
-  assert.equal(execFailureText(testCase.failure, testCase.exitCode ?? 1), testCase.expected, testCase.name);
+  assert.equal(
+    execFailureText(testCase.failure, testCase.exitCode ?? 1),
+    testCase.expected,
+    testCase.name,
+  );
 }
 
 console.log("sandbox exec result checks passed");

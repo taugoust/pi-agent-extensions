@@ -9,7 +9,9 @@ type SubagentParams = Record<string, unknown> & {
   chain?: unknown;
 };
 
-export function canonicalModelReference(model: SubagentModelIdentity | null | undefined): string | undefined {
+export function canonicalModelReference(
+  model: SubagentModelIdentity | null | undefined,
+): string | undefined {
   const provider = typeof model?.provider === "string" ? model.provider.trim() : "";
   const id = typeof model?.id === "string" ? model.id.trim() : "";
   if (!provider || !id) return undefined;
@@ -28,7 +30,10 @@ function inheritItemModel(value: unknown, inheritedModel: string): unknown {
  * one explicitly. This prevents child Pi from silently resolving a different
  * default provider/model (and therefore a different login) than its parent.
  */
-export function inheritSubagentModels(params: SubagentParams, parentModel: SubagentModelIdentity | null | undefined): SubagentParams {
+export function inheritSubagentModels(
+  params: SubagentParams,
+  parentModel: SubagentModelIdentity | null | undefined,
+): SubagentParams {
   const inheritedModel = canonicalModelReference(parentModel);
   if (!inheritedModel) return params;
 

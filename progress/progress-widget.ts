@@ -6,7 +6,11 @@ import type {
   ExtensionContext,
 } from "@earendil-works/pi-coding-agent";
 import { mutateProgress, GOAL_PROGRESS_EVENT } from "../shared/goal-progress.ts";
-import { renderCompletionSummary, renderProgressWidget, sanitizeProgressText } from "./progress-renderer.js";
+import {
+  renderCompletionSummary,
+  renderProgressWidget,
+  sanitizeProgressText,
+} from "./progress-renderer.js";
 import { showProgressSettings } from "./progress-settings-ui.js";
 import {
   allProgressCompleted,
@@ -49,13 +53,18 @@ export interface ProgressWidgetDependencies {
   clearTimeout?: typeof globalThis.clearTimeout;
 }
 
-export default function progressWidgetExtension(pi: ExtensionAPI, dependencies: ProgressWidgetDependencies = {}): void {
+export default function progressWidgetExtension(
+  pi: ExtensionAPI,
+  dependencies: ProgressWidgetDependencies = {},
+): void {
   const readSettings = dependencies.loadSettings ?? loadProgressSettings;
   const writeSettings = dependencies.saveSettings ?? saveProgressSettings;
   const scheduleTimeout = dependencies.setTimeout ?? globalThis.setTimeout;
   const cancelTimeout = dependencies.clearTimeout ?? globalThis.clearTimeout;
   let activeSession: ExtensionContext["sessionManager"] | undefined;
-  let activeWidgetOwner: { sessionManager: ExtensionContext["sessionManager"]; clear(): void } | undefined;
+  let activeWidgetOwner:
+    | { sessionManager: ExtensionContext["sessionManager"]; clear(): void }
+    | undefined;
   let steps: ProgressStep[] = [];
   let settings = cloneDefaultSettings();
   let restoredBoundary: { summaryEpoch: string; content: string } | undefined;
@@ -94,7 +103,9 @@ export default function progressWidgetExtension(pi: ExtensionAPI, dependencies: 
     if (ctx.mode === "rpc") {
       ctx.ui.setWidget(
         WIDGET_KEY,
-        renderProgressWidget(snapshot, ctx.ui.theme, RPC_WIDGET_WIDTH, { settings: widgetSettings }),
+        renderProgressWidget(snapshot, ctx.ui.theme, RPC_WIDGET_WIDTH, {
+          settings: widgetSettings,
+        }),
         WIDGET_OPTIONS,
       );
       return;
@@ -123,7 +134,11 @@ export default function progressWidgetExtension(pi: ExtensionAPI, dependencies: 
 
     const total = steps.length;
     if (ctx.mode === "rpc") {
-      ctx.ui.setWidget(WIDGET_KEY, renderCompletionSummary(total, ctx.ui.theme, RPC_WIDGET_WIDTH), WIDGET_OPTIONS);
+      ctx.ui.setWidget(
+        WIDGET_KEY,
+        renderCompletionSummary(total, ctx.ui.theme, RPC_WIDGET_WIDTH),
+        WIDGET_OPTIONS,
+      );
     } else {
       ctx.ui.setWidget(
         WIDGET_KEY,
@@ -171,7 +186,9 @@ export default function progressWidgetExtension(pi: ExtensionAPI, dependencies: 
       const summary = Array.isArray(args.steps)
         ? (args.steps as unknown[]).filter(
             (step): step is ProgressStep =>
-              typeof step === "object" && step !== null && "status" in step &&
+              typeof step === "object" &&
+              step !== null &&
+              "status" in step &&
               ["pending", "in_progress", "completed", "blocked"].includes(String(step.status)),
           )
         : [];
@@ -179,10 +196,18 @@ export default function progressWidgetExtension(pi: ExtensionAPI, dependencies: 
       const blocked = summary.filter((step) => step.status === "blocked").length;
       const total = Array.isArray(args.steps) ? args.steps.length : 0;
       const remaining = Math.max(0, total - completed - blocked);
-      const counts = [Array.isArray(args.steps) && total === 0 ? "∅ cleared" : `✓ ${completed}/${total} completed`];
+      const counts = [
+        Array.isArray(args.steps) && total === 0
+          ? "∅ cleared"
+          : `✓ ${completed}/${total} completed`,
+      ];
       if (blocked > 0) counts.push(`⊘ ${blocked} blocked`);
       if (remaining > 0) counts.push(`… ${remaining} remaining`);
-      return new Text(theme.fg("toolTitle", theme.bold("update_progress: ")) + counts.join("; "), 0, 0);
+      return new Text(
+        theme.fg("toolTitle", theme.bold("update_progress: ")) + counts.join("; "),
+        0,
+        0,
+      );
     },
     renderResult(result, { isPartial }, theme, context) {
       if (context.isError) {
@@ -202,7 +227,12 @@ export default function progressWidgetExtension(pi: ExtensionAPI, dependencies: 
       }
       const validated = validateProgressMutation({ ...params, request_id: toolCallId });
       const wasComplete = allProgressCompleted(steps);
-      const scoped = mutateProgress(pi, ctx, validated, validated.action === "create" ? validated.token_budget : undefined);
+      const scoped = mutateProgress(
+        pi,
+        ctx,
+        validated,
+        validated.action === "create" ? validated.token_budget : undefined,
+      );
       // A durable retry returns its original receipt, not a rollback of the live UI.
       const nextSteps = reconstructProgress(ctx.sessionManager.getBranch());
       cancelCompletionSummary();
@@ -248,7 +278,10 @@ export default function progressWidgetExtension(pi: ExtensionAPI, dependencies: 
   ): Promise<"back" | "close" | "stale"> => {
     if (signal.aborted || !isCurrent()) return "stale";
     if (ctx.mode !== "tui") {
-      ctx.ui.notify(sanitizeProgressText(`Edit settings manually: ${progressSettingsPath()}; then /reload.`), "info");
+      ctx.ui.notify(
+        sanitizeProgressText(`Edit settings manually: ${progressSettingsPath()}; then /reload.`),
+        "info",
+      );
       return "back";
     }
     return showProgressSettings(ctx, {
@@ -278,8 +311,16 @@ export default function progressWidgetExtension(pi: ExtensionAPI, dependencies: 
     description: "Manage the progress widget",
     getArgumentCompletions: (prefix) => {
       const matches = [
-        { value: "clear", label: "clear", description: "Hide the widget without changing saved progress" },
-        { value: "settings", label: "settings", description: "Configure progress display settings" },
+        {
+          value: "clear",
+          label: "clear",
+          description: "Hide the widget without changing saved progress",
+        },
+        {
+          value: "settings",
+          label: "settings",
+          description: "Configure progress display settings",
+        },
       ].filter((item) => item.value.startsWith(prefix));
       return matches.length > 0 ? matches : null;
     },
@@ -305,7 +346,8 @@ export default function progressWidgetExtension(pi: ExtensionAPI, dependencies: 
       settingsScreenOpen = true;
       const ownerGeneration = generation;
       const ownerSignal = settingsController.signal;
-      const isCurrent = () => ownsSession(ctx) && generation === ownerGeneration && !ownerSignal.aborted;
+      const isCurrent = () =>
+        ownsSession(ctx) && generation === ownerGeneration && !ownerSignal.aborted;
       const task = (async () => {
         if (route === "settings") {
           await openSettings(ctx, ownerSignal, isCurrent);
@@ -319,7 +361,13 @@ export default function progressWidgetExtension(pi: ExtensionAPI, dependencies: 
           getState: () => ({
             settings: cloneSettings(settings),
             settingsPath: progressSettingsPath(),
-            widget: !settings.enabled ? "disabled" : widgetHidden ? "hidden" : steps.length === 0 ? "empty" : "visible",
+            widget: !settings.enabled
+              ? "disabled"
+              : widgetHidden
+                ? "hidden"
+                : steps.length === 0
+                  ? "empty"
+                  : "visible",
             total: steps.length,
             completed: steps.filter((step) => step.status === "completed").length,
             inProgress: steps.filter((step) => step.status === "in_progress").length,
@@ -361,7 +409,11 @@ export default function progressWidgetExtension(pi: ExtensionAPI, dependencies: 
     activeSession = ctx.sessionManager;
     unsubscribeGoalProgress?.();
     unsubscribeGoalProgress = pi.events.on(GOAL_PROGRESS_EVENT, (event: any) => {
-      if (!ownsSession(ctx) || (event?.sessionId && event.sessionId !== ctx.sessionManager.getSessionId())) return;
+      if (
+        !ownsSession(ctx) ||
+        (event?.sessionId && event.sessionId !== ctx.sessionManager.getSessionId())
+      )
+        return;
       cancelCompletionSummary();
       restoreBranchState(ctx);
       widgetHidden = allProgressCompleted(steps);
@@ -385,7 +437,8 @@ export default function progressWidgetExtension(pi: ExtensionAPI, dependencies: 
     try {
       loaded = await readSettings(undefined, ownerController.signal);
     } catch (error) {
-      if (ownerController.signal.aborted || ownerGeneration !== generation || !ownsSession(ctx)) return;
+      if (ownerController.signal.aborted || ownerGeneration !== generation || !ownsSession(ctx))
+        return;
       loaded = {
         kind: "invalid",
         path: "pi-progress.json",
@@ -393,12 +446,15 @@ export default function progressWidgetExtension(pi: ExtensionAPI, dependencies: 
         issue: error instanceof Error ? error.message : String(error),
       };
     }
-    if (ownerController.signal.aborted || ownerGeneration !== generation || !ownsSession(ctx)) return;
+    if (ownerController.signal.aborted || ownerGeneration !== generation || !ownsSession(ctx))
+      return;
     settings = cloneSettings(loaded.settings);
     settingsReady = true;
     if (loaded.kind === "invalid" && ctx.hasUI) {
       ctx.ui.notify(
-        sanitizeProgressText(`Invalid progress settings at ${loaded.path}; using defaults. ${loaded.issue}`),
+        sanitizeProgressText(
+          `Invalid progress settings at ${loaded.path}; using defaults. ${loaded.issue}`,
+        ),
         "warning",
       );
     }

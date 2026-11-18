@@ -290,7 +290,9 @@ const fixture = path.join(root, "fixture.mjs");
 await writeFile(fixture, fixtureSource, { mode: 0o600 });
 
 const processFixture = path.join(root, "process-fixture.mjs");
-await writeFile(processFixture, String.raw`
+await writeFile(
+  processFixture,
+  String.raw`
 import { spawn } from "node:child_process";
 import { readFileSync, writeFileSync } from "node:fs";
 
@@ -317,15 +319,21 @@ if (process.argv[2] === "descendant") {
   process.on("SIGTERM", () => process.exit(0));
   setInterval(() => {}, 1000);
 }
-`, { mode: 0o600 });
+`,
+  { mode: 0o600 },
+);
 
 function createSession(mode: string, controlTimeoutMs?: number, onJobRequest?: any) {
   const proc = spawn(process.execPath, [fixture, mode], { stdio: ["pipe", "pipe", "pipe"] });
   let stderr = "";
-  proc.stderr.on("data", (chunk) => { stderr += chunk.toString(); });
+  proc.stderr.on("data", (chunk) => {
+    stderr += chunk.toString();
+  });
   const events: any[] = [];
   let started!: () => void;
-  const startedPromise = new Promise<void>((resolve) => { started = resolve; });
+  const startedPromise = new Promise<void>((resolve) => {
+    started = resolve;
+  });
   const rpc = new NativeSubagentRpcSession({
     process: proc,
     onJobRequest,
@@ -346,9 +354,14 @@ async function exercise(mode: "steer" | "follow_up" | "interrupt") {
   await session.startedPromise;
   assert.equal(session.rpc.isActive(), true);
   const updates: string[] = [];
-  const controlled = await session.rpc.control(mode, `parent ${mode} message`, undefined, (text) => {
-    if (text) updates.push(text);
-  });
+  const controlled = await session.rpc.control(
+    mode,
+    `parent ${mode} message`,
+    undefined,
+    (text) => {
+      if (text) updates.push(text);
+    },
+  );
   assert.deepEqual(controlled, { text: "controlled \u2028 🌍 answer" });
   const exit = await exited;
   assert.equal(exit.code, 0, session.stderr());
@@ -358,9 +371,16 @@ async function exercise(mode: "steer" | "follow_up" | "interrupt") {
   assert(trace.indexOf("agent_settled") < trace.indexOf("stdin_end"));
   assert(trace.indexOf("stdin_end") < trace.indexOf("stdout_end"));
   assert.equal(trace.at(-1), "process_close");
-  assert(updates.some((text) => text.includes("controlled \u2028 🌍 answer")), `${mode} response did not stream`);
-  assert(updates.every((text) => !text.includes("old response")), `${mode} streamed pre-control assistant text`);
-  const fixtureCommands = session.events.findLast((event) => event.type === "fixture_commands")?.commands ?? [];
+  assert(
+    updates.some((text) => text.includes("controlled \u2028 🌍 answer")),
+    `${mode} response did not stream`,
+  );
+  assert(
+    updates.every((text) => !text.includes("old response")),
+    `${mode} streamed pre-control assistant text`,
+  );
+  const fixtureCommands =
+    session.events.findLast((event) => event.type === "fixture_commands")?.commands ?? [];
   const types = fixtureCommands.map((command: any) => command.type);
   if (mode === "interrupt") {
     assert.deepEqual(types, ["prompt", "extension_ui_response", "clear_queue", "abort", "prompt"]);
@@ -370,13 +390,21 @@ async function exercise(mode: "steer" | "follow_up" | "interrupt") {
     assert.equal(fixtureCommands.at(-1).streamingBehavior, mode === "steer" ? "steer" : "followUp");
     assert.equal(fixtureCommands.at(-1).message, `parent ${mode} message`);
   }
-  assert(!types.includes("steer") && !types.includes("follow_up"), "a dedicated queue command was used");
+  assert(
+    !types.includes("steer") && !types.includes("follow_up"),
+    "a dedicated queue command was used",
+  );
 }
 
-async function waitForEvent(session: ReturnType<typeof createSession>, predicate: (event: any) => boolean, timeoutMs = 1000) {
+async function waitForEvent(
+  session: ReturnType<typeof createSession>,
+  predicate: (event: any) => boolean,
+  timeoutMs = 1000,
+) {
   const deadline = Date.now() + timeoutMs;
   while (!session.events.some(predicate)) {
-    if (Date.now() >= deadline) throw new Error(`timed out waiting for fixture event; stderr: ${session.stderr()}`);
+    if (Date.now() >= deadline)
+      throw new Error(`timed out waiting for fixture event; stderr: ${session.stderr()}`);
     await new Promise((resolve) => setTimeout(resolve, 2));
   }
 }
@@ -399,7 +427,9 @@ async function exerciseSettleRace() {
   const session = createSession("settle-race");
   const exited = session.rpc.start("initial task");
   await session.startedPromise;
-  assert.deepEqual(await session.rpc.control("steer", "race parent message"), { text: "race-safe answer" });
+  assert.deepEqual(await session.rpc.control("steer", "race parent message"), {
+    text: "race-safe answer",
+  });
   assert.equal((await exited).code, 0, session.stderr());
   assert.equal(session.rpc.protocolError, undefined, session.stderr());
 }
@@ -413,12 +443,18 @@ async function exerciseSerialization() {
   assert.deepEqual(await first, { text: "answer:first steer" });
   assert.deepEqual(await second, { text: "answer:second follow_up" });
   assert.equal((await exited).code, 0, session.stderr());
-  const commands = session.events.findLast((event) => event.type === "fixture_commands")?.commands ?? [];
-  assert.deepEqual(commands.filter((command: any) => command.type === "prompt").map((command: any) => [command.message, command.streamingBehavior]), [
-    ["initial task", undefined],
-    ["first steer", "steer"],
-    ["second follow_up", "followUp"],
-  ]);
+  const commands =
+    session.events.findLast((event) => event.type === "fixture_commands")?.commands ?? [];
+  assert.deepEqual(
+    commands
+      .filter((command: any) => command.type === "prompt")
+      .map((command: any) => [command.message, command.streamingBehavior]),
+    [
+      ["initial task", undefined],
+      ["first steer", "steer"],
+      ["second follow_up", "followUp"],
+    ],
+  );
 }
 
 async function exerciseHandledInitialPrompt() {
@@ -442,7 +478,11 @@ async function exerciseControlReservedWhileInitialPromptIsHandled() {
     withTimeout(controlled, "control reservation leaked after the initial prompt was handled", 500),
     /handled its initial prompt without starting an agent run/,
   );
-  const exit = await withTimeout(exited, "reserved control prevented handled-initial shutdown", 500);
+  const exit = await withTimeout(
+    exited,
+    "reserved control prevented handled-initial shutdown",
+    500,
+  );
   assert.equal(exit.code, 0, session.stderr());
   assert.equal(session.rpc.protocolError, undefined, session.stderr());
   assert.equal(session.rpc.isActive(), false);
@@ -458,7 +498,9 @@ async function exerciseHandledControlPrompt() {
       () => ({ completed: true, error: undefined }),
       (error: unknown) => ({ completed: true, error }),
     ),
-    new Promise<{ completed: false; error?: undefined }>((resolve) => setTimeout(() => resolve({ completed: false }), 40)),
+    new Promise<{ completed: false; error?: undefined }>((resolve) =>
+      setTimeout(() => resolve({ completed: false }), 40),
+    ),
   ]);
   assert.equal(early.completed, true, "handled control waited for the unrelated active run");
   if (early.completed) {
@@ -474,13 +516,16 @@ async function exerciseTransformedPrompt() {
   const session = createSession("transform");
   const exited = session.rpc.start("initial task");
   await session.startedPromise;
-  assert.deepEqual(
-    await session.rpc.control("steer", "raw parent text that the child rewrites"),
-    { text: "transformed answer" },
-  );
+  assert.deepEqual(await session.rpc.control("steer", "raw parent text that the child rewrites"), {
+    text: "transformed answer",
+  });
   assert.equal((await exited).code, 0, session.stderr());
-  const delivered = session.events.find((event) => event.type === "message_end" && event.message?.role === "user"
-    && event.message?.content === "rewritten child input");
+  const delivered = session.events.find(
+    (event) =>
+      event.type === "message_end" &&
+      event.message?.role === "user" &&
+      event.message?.content === "rewritten child input",
+  );
   assert(delivered, "fixture did not deliver transformed child input");
 }
 
@@ -490,7 +535,9 @@ async function exerciseCancellationKeepsReservation() {
   await session.startedPromise;
   const controller = new AbortController();
   const updates: string[] = [];
-  const cancelled = session.rpc.control("steer", "cancelled caller", controller.signal, (text) => updates.push(text));
+  const cancelled = session.rpc.control("steer", "cancelled caller", controller.signal, (text) =>
+    updates.push(text),
+  );
   await waitForEvent(session, (event) => event.type === "fixture_control_accepted");
   controller.abort(new Error("caller stopped waiting"));
   await assert.rejects(cancelled, /caller stopped waiting/);
@@ -498,7 +545,9 @@ async function exerciseCancellationKeepsReservation() {
   const second = session.rpc.control("follow_up", "after cancelled caller");
   await new Promise((resolve) => setTimeout(resolve, 25));
   assert.equal(
-    session.events.some((event) => event.type === "fixture_received" && event.message === "after cancelled caller"),
+    session.events.some(
+      (event) => event.type === "fixture_received" && event.message === "after cancelled caller",
+    ),
     false,
     "caller cancellation released the RPC reservation before the dispatched command settled",
   );
@@ -533,24 +582,37 @@ async function exerciseNonBlockingPrompts() {
   await session.startedPromise;
   try {
     for (const mode of ["steer", "follow_up"] as const) {
-      const result = await withTimeout(session.rpc.acceptPrompt(mode, "continue supervising"), "accepted prompt waited for child completion", 500);
+      const result = await withTimeout(
+        session.rpc.acceptPrompt(mode, "continue supervising"),
+        "accepted prompt waited for child completion",
+        500,
+      );
       assert.equal(result.accepted, true);
       assert.equal(session.rpc.isActive(), true);
-      assert(!session.events.some(event => event.type === "agent_settled"));
+      assert(!session.events.some((event) => event.type === "agent_settled"));
     }
     const blocking = session.rpc.control("steer", "explicitly wait for full response");
     // Termination can win before dispatch, during a pending RPC command, or
     // while waiting for the logical run. All must reject, not hang or succeed.
-    const rejected = assert.rejects(blocking, { message: /no longer active|channel is closed|^native subagent RPC process exited$/ });
-    await assert.rejects(session.rpc.acceptPrompt("steer", "do not queue behind a full run"), (error: any) => error.code === "busy");
+    const rejected = assert.rejects(blocking, {
+      message: /no longer active|channel is closed|^native subagent RPC process exited$/,
+    });
+    await assert.rejects(
+      session.rpc.acceptPrompt("steer", "do not queue behind a full run"),
+      (error: any) => error.code === "busy",
+    );
     session.rpc.terminate();
     await rejected;
   } finally {
     session.rpc.terminate();
     await withTimeout(exited, "non-blocking test child did not exit");
     assert.equal(session.rpc.isActive(), false);
-    assert.equal(session.rpc.protocolError, undefined, "deliberate termination became a protocol failure");
-    assert(session.rpc.diagnostics.trace.some(entry => entry.event === "process_close"));
+    assert.equal(
+      session.rpc.protocolError,
+      undefined,
+      "deliberate termination became a protocol failure",
+    );
+    assert(session.rpc.diagnostics.trace.some((entry) => entry.event === "process_close"));
   }
 }
 
@@ -572,7 +634,10 @@ async function exerciseStdoutFailure() {
   await session.startedPromise;
   session.proc.stdout.destroy(new Error("synthetic read-side failure"));
   await withTimeout(exited, "stdout failure did not terminate the native child");
-  assert.match(session.rpc.protocolError?.message ?? "", /RPC stdout failed: synthetic read-side failure/);
+  assert.match(
+    session.rpc.protocolError?.message ?? "",
+    /RPC stdout failed: synthetic read-side failure/,
+  );
 }
 
 async function processStillMatches(pid: number, startToken: string): Promise<boolean> {
@@ -617,12 +682,20 @@ async function exerciseSequentialProcessGroups() {
     termGraceMs: 50,
   };
   await (async () => {
-    const first = spawnNativeSubagentProcess(process.execPath, ["-e", "setTimeout(() => {}, 200)"], options);
+    const first = spawnNativeSubagentProcess(
+      process.execPath,
+      ["-e", "setTimeout(() => {}, 200)"],
+      options,
+    );
     const closed = once(first.process, "close");
     await first.ready;
     assert.deepEqual(await closed, [0, null]);
   })();
-  const next = spawnNativeSubagentProcess(process.execPath, ["-e", "setTimeout(() => {}, 500)"], options);
+  const next = spawnNativeSubagentProcess(
+    process.execPath,
+    ["-e", "setTimeout(() => {}, 500)"],
+    options,
+  );
   const closed = once(next.process, "close");
   await next.ready;
   const gc = setInterval(() => {
@@ -630,39 +703,64 @@ async function exerciseSequentialProcessGroups() {
     (globalThis as any).gc?.();
   }, 10);
   try {
-    assert.deepEqual(await withTimeout(closed, "successive process group did not close", 2000), [0, null],
-      "collecting a completed child closed a later child's control channel");
-  } finally { clearInterval(gc); next.terminate(); }
+    assert.deepEqual(
+      await withTimeout(closed, "successive process group did not close", 2000),
+      [0, null],
+      "collecting a completed child closed a later child's control channel",
+    );
+  } finally {
+    clearInterval(gc);
+    next.terminate();
+  }
 }
 
 async function exerciseProcessGroupEscalation() {
   if (process.platform !== "linux") return;
   const statePath = path.join(root, "descendant.json");
-  const owned = spawnNativeSubagentProcess(process.execPath, [processFixture, "leader", statePath], {
-    shellPath: process.env.TEST_POSIX_SHELL ?? "/bin/sh",
-    fifoPath: process.env.TEST_MKFIFO ?? "/usr/bin/mkfifo",
-    termGraceMs: 500,
-  });
+  const owned = spawnNativeSubagentProcess(
+    process.execPath,
+    [processFixture, "leader", statePath],
+    {
+      shellPath: process.env.TEST_POSIX_SHELL ?? "/bin/sh",
+      fifoPath: process.env.TEST_MKFIFO ?? "/usr/bin/mkfifo",
+      termGraceMs: 500,
+    },
+  );
   await owned.ready;
-  assert.equal(await withTimeout(waitForLine(owned.process.stdout), "process fixture did not become ready"), "descendant-ready");
-  const identity = JSON.parse(await readFile(statePath, "utf8")) as { pid: number; startToken: string };
+  assert.equal(
+    await withTimeout(waitForLine(owned.process.stdout), "process fixture did not become ready"),
+    "descendant-ready",
+  );
+  const identity = JSON.parse(await readFile(statePath, "utf8")) as {
+    pid: number;
+    startToken: string;
+  };
   try {
     const leaderExit = once(owned.process, "exit");
     let closeObserved = false;
-    const groupClose = once(owned.process, "close").then(() => { closeObserved = true; });
+    const groupClose = once(owned.process, "close").then(() => {
+      closeObserved = true;
+    });
     owned.terminate();
     await withTimeout(leaderExit, "TERM-responsive process-group leader did not exit");
     assert.equal(closeObserved, false, "child close was reported before process-group escalation");
-    assert.equal(await processStillMatches(identity.pid, identity.startToken), true, "TERM unexpectedly killed the ignoring descendant");
+    assert.equal(
+      await processStillMatches(identity.pid, identity.startToken),
+      true,
+      "TERM unexpectedly killed the ignoring descendant",
+    );
     const deadline = Date.now() + 2_000;
     while (await processStillMatches(identity.pid, identity.startToken)) {
-      if (Date.now() >= deadline) throw new Error("TERM-ignoring descendant survived process-group escalation");
+      if (Date.now() >= deadline)
+        throw new Error("TERM-ignoring descendant survived process-group escalation");
       await new Promise((resolve) => setTimeout(resolve, 10));
     }
     await withTimeout(groupClose, "process-group close was not reported after escalation");
   } finally {
     if (await processStillMatches(identity.pid, identity.startToken)) {
-      try { process.kill(identity.pid, "SIGKILL"); } catch {}
+      try {
+        process.kill(identity.pid, "SIGKILL");
+      } catch {}
     }
   }
 }
@@ -676,21 +774,31 @@ try {
     workflow.rpc.terminate(new Error("deterministic structured goal shutdown"));
   });
   assert(structuredBootstrap);
-  assert(!workflow.events.some(event => event.type === "agent_start"));
+  assert(!workflow.events.some((event) => event.type === "agent_start"));
   await workflow.rpc.waitForExit();
   let jobRequestSeen = false;
-  const jobSession = createSession("parent-job", undefined, async (request: any, signal: AbortSignal) => {
-    assert.equal(request.params.command, "printf fixture");
-    assert.equal(signal.aborted, false);
-    jobRequestSeen = true;
-    return { content: [{ type: "text", text: "parent-owned job accepted" }] };
-  });
+  const jobSession = createSession(
+    "parent-job",
+    undefined,
+    async (request: any, signal: AbortSignal) => {
+      assert.equal(request.params.command, "printf fixture");
+      assert.equal(signal.aborted, false);
+      jobRequestSeen = true;
+      return { content: [{ type: "text", text: "parent-owned job accepted" }] };
+    },
+  );
   assert.equal((await jobSession.rpc.start("job fixture")).code, 0);
   assert(jobRequestSeen);
-  assert(jobSession.events.some(event => event.message?.content?.[0]?.text === "parent-owned job accepted"));
+  assert(
+    jobSession.events.some(
+      (event) => event.message?.content?.[0]?.text === "parent-owned job accepted",
+    ),
+  );
   const deniedJob = createSession("parent-job");
   assert.equal((await deniedJob.rpc.start("no broker")).code, 0);
-  assert(deniedJob.events.some(event => event.message?.content?.[0]?.text?.includes("unavailable")));
+  assert(
+    deniedJob.events.some((event) => event.message?.content?.[0]?.text?.includes("unavailable")),
+  );
   await exercise("steer");
   await exercise("follow_up");
   await exercise("interrupt");
@@ -699,7 +807,7 @@ try {
   await exerciseHandledInitialPrompt();
   const compacted = createSession("handled-initial");
   assert.equal((await compacted.rpc.start("continue retained task", true)).code, 0);
-  assert(compacted.events.some(event => event.type === "fixture_compacted"));
+  assert(compacted.events.some((event) => event.type === "fixture_compacted"));
   const small = createSession("compact-small");
   assert.equal((await small.rpc.start("small resume", true)).code, 0);
   assert.equal(small.rpc.protocolError, undefined);

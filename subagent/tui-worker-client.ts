@@ -1,33 +1,77 @@
 import net from "node:net";
 import { randomBytes } from "node:crypto";
-import { TUI_WORKER_MAX_FRAME_BYTES, parseTuiWorkerRequest } from "../shared/tui-worker-protocol.ts";
-import type { TuiWorkerManifest, TuiWorkerOperation, TuiWorkerResponse } from "../shared/tui-worker-protocol.ts";
+import {
+  TUI_WORKER_MAX_FRAME_BYTES,
+  parseTuiWorkerRequest,
+} from "../shared/tui-worker-protocol.ts";
+import type {
+  TuiWorkerManifest,
+  TuiWorkerOperation,
+  TuiWorkerResponse,
+} from "../shared/tui-worker-protocol.ts";
 
-export function workerRequest(manifest: TuiWorkerManifest, operation: TuiWorkerOperation, requestId = randomBytes(16).toString("hex")) {
-  return parseTuiWorkerRequest({ protocol: 1, requestId, token: manifest.controlToken,
-    ownerSessionId: manifest.ownerSessionId, taskId: manifest.taskId, runtimeId: manifest.runtimeId,
-    groupId: manifest.groupId, childId: manifest.childId, attempt: manifest.attempt, workerEpoch: manifest.workerEpoch, ...operation });
+export function workerRequest(
+  manifest: TuiWorkerManifest,
+  operation: TuiWorkerOperation,
+  requestId = randomBytes(16).toString("hex"),
+) {
+  return parseTuiWorkerRequest({
+    protocol: 1,
+    requestId,
+    token: manifest.controlToken,
+    ownerSessionId: manifest.ownerSessionId,
+    taskId: manifest.taskId,
+    runtimeId: manifest.runtimeId,
+    groupId: manifest.groupId,
+    childId: manifest.childId,
+    attempt: manifest.attempt,
+    workerEpoch: manifest.workerEpoch,
+    ...operation,
+  });
 }
 
 /** A lost response never retries a mutation implicitly. Retry with the same ID. */
-export async function callTuiWorker(manifest: TuiWorkerManifest, operation: TuiWorkerOperation,
-  options: { requestId?: string; timeoutMs?: number; signal?: AbortSignal } = {}): Promise<TuiWorkerResponse> {
+export async function callTuiWorker(
+  manifest: TuiWorkerManifest,
+  operation: TuiWorkerOperation,
+  options: { requestId?: string; timeoutMs?: number; signal?: AbortSignal } = {},
+): Promise<TuiWorkerResponse> {
   const request = workerRequest(manifest, operation, options.requestId);
   return await exchangeTuiWorker(manifest.controlSocket, request, manifest.workerEpoch, options);
 }
 
 /** Poll the same durable verify receipt until its final verdict or a bounded deadline. */
-export async function awaitTuiWorkerVerification(manifest: TuiWorkerManifest, requestId: string, timeoutMs: number,
-  signal?: AbortSignal): Promise<{ response: TuiWorkerResponse; timedOut: boolean }> {
-  if (!Number.isSafeInteger(timeoutMs) || timeoutMs < 1) throw new Error("Invalid verification wait budget");
+export async function awaitTuiWorkerVerification(
+  manifest: TuiWorkerManifest,
+  requestId: string,
+  timeoutMs: number,
+  signal?: AbortSignal,
+): Promise<{ response: TuiWorkerResponse; timedOut: boolean }> {
+  if (!Number.isSafeInteger(timeoutMs) || timeoutMs < 1)
+    throw new Error("Invalid verification wait budget");
   const deadline = Date.now() + timeoutMs;
-  const delay = (ms: number) => new Promise<void>((resolve, reject) => {
-    if (signal?.aborted) { reject(new Error("Worker verification wait cancelled; checks continue")); return; }
-    const timer = setTimeout(() => { signal?.removeEventListener("abort", abort); resolve(); }, ms);
-    const abort = () => { clearTimeout(timer); signal?.removeEventListener("abort", abort); reject(new Error("Worker verification wait cancelled; checks continue")); };
-    signal?.addEventListener("abort", abort, { once: true });
-  });
-  let response = await callTuiWorker(manifest, { operation: "verify" }, { requestId, timeoutMs: Math.min(5000, timeoutMs), signal });
+  const delay = (ms: number) =>
+    new Promise<void>((resolve, reject) => {
+      if (signal?.aborted) {
+        reject(new Error("Worker verification wait cancelled; checks continue"));
+        return;
+      }
+      const timer = setTimeout(() => {
+        signal?.removeEventListener("abort", abort);
+        resolve();
+      }, ms);
+      const abort = () => {
+        clearTimeout(timer);
+        signal?.removeEventListener("abort", abort);
+        reject(new Error("Worker verification wait cancelled; checks continue"));
+      };
+      signal?.addEventListener("abort", abort, { once: true });
+    });
+  let response = await callTuiWorker(
+    manifest,
+    { operation: "verify" },
+    { requestId, timeoutMs: Math.min(5000, timeoutMs), signal },
+  );
   for (;;) {
     if (!response.ok) return { response, timedOut: false };
     const status = (response.data as any)?.verification?.status;
@@ -37,56 +81,109 @@ export async function awaitTuiWorkerVerification(manifest: TuiWorkerManifest, re
     await delay(Math.min(250, remaining));
     const nextBudget = deadline - Date.now();
     if (nextBudget <= 0) return { response, timedOut: true };
-    response = await callTuiWorker(manifest, { operation: "verify" }, { requestId, timeoutMs: Math.min(5000, nextBudget), signal });
+    response = await callTuiWorker(
+      manifest,
+      { operation: "verify" },
+      { requestId, timeoutMs: Math.min(5000, nextBudget), signal },
+    );
   }
 }
 
-export async function exchangeTuiWorker(socketPath: string, request: { requestId: string }, workerEpoch: string,
-  options: { timeoutMs?: number; signal?: AbortSignal } = {}): Promise<TuiWorkerResponse> {
+export async function exchangeTuiWorker(
+  socketPath: string,
+  request: { requestId: string },
+  workerEpoch: string,
+  options: { timeoutMs?: number; signal?: AbortSignal } = {},
+): Promise<TuiWorkerResponse> {
   const timeoutMs = options.timeoutMs ?? 10_000;
-  if (!Number.isSafeInteger(timeoutMs) || timeoutMs < 1 || timeoutMs > 12 * 60 * 60 * 1000 + 5000) throw new Error("Invalid worker timeout");
-  if (options.signal?.aborted) throw options.signal.reason ?? new Error("Worker observation cancelled");
+  if (!Number.isSafeInteger(timeoutMs) || timeoutMs < 1 || timeoutMs > 12 * 60 * 60 * 1000 + 5000)
+    throw new Error("Invalid worker timeout");
+  if (options.signal?.aborted)
+    throw options.signal.reason ?? new Error("Worker observation cancelled");
   const frame = `${JSON.stringify(request)}\n`;
-  if (Buffer.byteLength(frame) > TUI_WORKER_MAX_FRAME_BYTES) throw new Error("Worker request is oversized");
+  if (Buffer.byteLength(frame) > TUI_WORKER_MAX_FRAME_BYTES)
+    throw new Error("Worker request is oversized");
   return await new Promise((resolve, reject) => {
     const socket = net.createConnection(socketPath);
-    let settled = false, buffer = Buffer.alloc(0);
+    let settled = false,
+      buffer = Buffer.alloc(0);
     const finish = (error?: Error, value?: TuiWorkerResponse) => {
       if (settled) return;
       settled = true;
       clearTimeout(timer);
       options.signal?.removeEventListener("abort", abort);
       socket.destroy();
-      if (error) reject(error); else resolve(value!);
+      if (error) reject(error);
+      else resolve(value!);
     };
     const abort = () => finish(new Error("Worker observation cancelled; execution is unchanged"));
-    const timer = setTimeout(() => finish(new Error("Worker response timeout; dispatch may have been accepted")), timeoutMs);
+    const timer = setTimeout(
+      () => finish(new Error("Worker response timeout; dispatch may have been accepted")),
+      timeoutMs,
+    );
     options.signal?.addEventListener("abort", abort, { once: true });
-    socket.on("error", error => finish(error));
-    socket.on("close", () => finish(new Error("Worker disconnected without receipt; dispatch may have been accepted")));
+    socket.on("error", (error) => finish(error));
+    socket.on("close", () =>
+      finish(new Error("Worker disconnected without receipt; dispatch may have been accepted")),
+    );
     socket.on("connect", () => socket.write(frame));
-    socket.on("data", bytes => {
-      if (typeof bytes === "string") { finish(new Error("Worker response transport unexpectedly decoded text")); return; }
+    socket.on("data", (bytes) => {
+      if (typeof bytes === "string") {
+        finish(new Error("Worker response transport unexpectedly decoded text"));
+        return;
+      }
       buffer = Buffer.concat([buffer, bytes]);
-      if (buffer.length > TUI_WORKER_MAX_FRAME_BYTES) { finish(new Error("Oversized worker response")); return; }
+      if (buffer.length > TUI_WORKER_MAX_FRAME_BYTES) {
+        finish(new Error("Oversized worker response"));
+        return;
+      }
       const newline = buffer.indexOf(10);
       if (newline < 0) return;
       try {
         if (newline !== buffer.length - 1) throw new Error("Unexpected worker response framing");
-        const response = JSON.parse(new TextDecoder("utf-8", { fatal: true }).decode(buffer.subarray(0, newline))) as TuiWorkerResponse;
-        if (response.protocol !== 1 || response.requestId !== request.requestId || response.workerEpoch !== workerEpoch || typeof response.ok !== "boolean") throw new Error("Mismatched worker response");
-        if (response.ok && (!Number.isSafeInteger(response.sequence) || response.sequence < 0 || !["accepted", "applied"].includes(response.receipt))) throw new Error("Invalid worker receipt");
+        const response = JSON.parse(
+          new TextDecoder("utf-8", { fatal: true }).decode(buffer.subarray(0, newline)),
+        ) as TuiWorkerResponse;
+        if (
+          response.protocol !== 1 ||
+          response.requestId !== request.requestId ||
+          response.workerEpoch !== workerEpoch ||
+          typeof response.ok !== "boolean"
+        )
+          throw new Error("Mismatched worker response");
+        if (
+          response.ok &&
+          (!Number.isSafeInteger(response.sequence) ||
+            response.sequence < 0 ||
+            !["accepted", "applied"].includes(response.receipt))
+        )
+          throw new Error("Invalid worker receipt");
         finish(undefined, response);
-      } catch (error) { finish(error as Error); }
+      } catch (error) {
+        finish(error as Error);
+      }
     });
   });
 }
 
 /** Trusted operator caller only. Capability must never flow into model tools. */
-export async function applyTuiWorkerOperatorMode(manifest: TuiWorkerManifest, operatorCapability: string,
-  enabled: boolean, requestId = randomBytes(16).toString("hex")): Promise<TuiWorkerResponse> {
-  return await exchangeTuiWorker(manifest.controlSocket, {
-    operatorProtocol: 1, requestId, workerEpoch: manifest.workerEpoch, ownerSessionId: manifest.ownerSessionId,
-    runtimeId: manifest.runtimeId, operatorCapability, enabled,
-  } as { requestId: string }, manifest.workerEpoch);
+export async function applyTuiWorkerOperatorMode(
+  manifest: TuiWorkerManifest,
+  operatorCapability: string,
+  enabled: boolean,
+  requestId = randomBytes(16).toString("hex"),
+): Promise<TuiWorkerResponse> {
+  return await exchangeTuiWorker(
+    manifest.controlSocket,
+    {
+      operatorProtocol: 1,
+      requestId,
+      workerEpoch: manifest.workerEpoch,
+      ownerSessionId: manifest.ownerSessionId,
+      runtimeId: manifest.runtimeId,
+      operatorCapability,
+      enabled,
+    } as { requestId: string },
+    manifest.workerEpoch,
+  );
 }

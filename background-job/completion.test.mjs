@@ -1,129 +1,242 @@
-import assert from 'node:assert/strict';
-import backgroundJob from './index.js';
-import { BackgroundJobManager } from './manager.js';
-import { JobStore } from './store.js';
-import { WatchManager } from './watch.js';
-import { WATCH_ALERT_PREFIX } from '../shared/quiet-state.js';
+import assert from "node:assert/strict";
+import backgroundJob from "./index.js";
+import { BackgroundJobManager } from "./manager.js";
+import { JobStore } from "./store.js";
+import { WatchManager } from "./watch.js";
+import { WATCH_ALERT_PREFIX } from "../shared/quiet-state.js";
 
 // Exercise the actual producer and tool consumption path without starting processes.
-const pause = (ms = 30) => new Promise(resolve => setTimeout(resolve, ms));
-let records = [], notified = new Set(), poll, deferNotified;
+const pause = (ms = 30) => new Promise((resolve) => setTimeout(resolve, ms));
+let records = [],
+  notified = new Set(),
+  poll,
+  deferNotified;
 JobStore.prototype.initialize = async () => {};
-JobStore.prototype.withRetentionLock = async operation => operation();
+JobStore.prototype.withRetentionLock = async (operation) => operation();
 JobStore.prototype.markRetrieved = async () => {};
 JobStore.prototype.readRetrieved = async () => undefined;
-JobStore.prototype.listIds = async () => records.map(record => record.metadata.id);
-JobStore.prototype.isNotified = async function(id) {
+JobStore.prototype.listIds = async () => records.map((record) => record.metadata.id);
+JobStore.prototype.isNotified = async function (id) {
   const value = notified.has(id);
-  if (deferNotified) { const wait = deferNotified; deferNotified = undefined; await wait; }
+  if (deferNotified) {
+    const wait = deferNotified;
+    deferNotified = undefined;
+    await wait;
+  }
   return value;
 };
-JobStore.prototype.markNotified = async id => { notified.add(id); return true; };
+JobStore.prototype.markNotified = async (id) => {
+  notified.add(id);
+  return true;
+};
 BackgroundJobManager.prototype.list = async () => records;
-BackgroundJobManager.prototype.get = async id => records.find(r => r.metadata.id === id);
-BackgroundJobManager.prototype.output = async () => ({text:'verified output',source:'log',truncated:false});
-BackgroundJobManager.prototype.wait = async () => ({timedOut:false});
-BackgroundJobManager.prototype.cancel = async function(id) { return this.get(id); };
-BackgroundJobManager.prototype.reap = async id => { records = records.filter(r => r.metadata.id !== id); };
+BackgroundJobManager.prototype.get = async (id) => records.find((r) => r.metadata.id === id);
+BackgroundJobManager.prototype.output = async () => ({
+  text: "verified output",
+  source: "log",
+  truncated: false,
+});
+BackgroundJobManager.prototype.wait = async () => ({ timedOut: false });
+BackgroundJobManager.prototype.cancel = async function (id) {
+  return this.get(id);
+};
+BackgroundJobManager.prototype.reap = async (id) => {
+  records = records.filter((r) => r.metadata.id !== id);
+};
 WatchManager.prototype.recover = async () => {};
-WatchManager.prototype.list = async () => [{watch_id:'watch-fixture'}];
-WatchManager.prototype.events = async () => ({events:[{}],status:'completed',next_sequence:1,sequence:1,acknowledged_through:0});
+WatchManager.prototype.list = async () => [{ watch_id: "watch-fixture" }];
+WatchManager.prototype.events = async () => ({
+  events: [{}],
+  status: "completed",
+  next_sequence: 1,
+  sequence: 1,
+  acknowledged_through: 0,
+});
 const originalInterval = globalThis.setInterval;
-globalThis.setInterval = callback => { poll = callback; return {unref(){}}; };
+globalThis.setInterval = (callback) => {
+  poll = callback;
+  return { unref() {} };
+};
 const originalClearInterval = globalThis.clearInterval;
 globalThis.clearInterval = () => {};
-let entries = [], idle = true, queued = false, session = 'completion-owner';
-const ctx = {cwd:process.cwd(),hasUI:false,isIdle:()=>idle,hasPendingMessages:()=>queued,
-  sessionManager:{getSessionId:()=>session,getBranch:()=>entries}};
+let entries = [],
+  idle = true,
+  queued = false,
+  session = "completion-owner";
+const ctx = {
+  cwd: process.cwd(),
+  hasUI: false,
+  isIdle: () => idle,
+  hasPendingMessages: () => queued,
+  sessionManager: { getSessionId: () => session, getBranch: () => entries },
+};
 function harness(failSends = 0) {
-  const handlers = new Map(), messages = []; let tool;
+  const handlers = new Map(),
+    messages = [];
+  let tool;
   backgroundJob({
-    registerTool(value){tool=value;},registerCommand(){},
-    on(name,handler){handlers.set(name,[...(handlers.get(name)??[]),handler]);},
-    appendEntry(customType,data){entries.push({type:'custom',customType,data});},
-    sendMessage(message,options){if(failSends-->0)throw Error('send failed');messages.push({message,options});entries.push({type:'custom_message',...message});},
+    registerTool(value) {
+      tool = value;
+    },
+    registerCommand() {},
+    on(name, handler) {
+      handlers.set(name, [...(handlers.get(name) ?? []), handler]);
+    },
+    appendEntry(customType, data) {
+      entries.push({ type: "custom", customType, data });
+    },
+    sendMessage(message, options) {
+      if (failSends-- > 0) throw Error("send failed");
+      messages.push({ message, options });
+      entries.push({ type: "custom_message", ...message });
+    },
   });
-  return {messages,call:params=>tool.execute('test',params,undefined,undefined,ctx),
-    async emit(name,event={}){for(const handler of handlers.get(name)??[])await handler(event,ctx);}};
+  return {
+    messages,
+    call: (params) => tool.execute("test", params, undefined, undefined, ctx),
+    async emit(name, event = {}) {
+      for (const handler of handlers.get(name) ?? []) await handler(event, ctx);
+    },
+  };
 }
 let counter = 0;
-function record(status='completed', extra={}) {
-  return {status,metadata:{id:`job-${(++counter).toString(16).padStart(24,'0')}`,sessionId:session,createdAt:new Date().toISOString(),command:':',cwd:ctx.cwd,...extra},
-    result: status==='running'?undefined:{status,exitCode:status==='completed'?0:null}};
+function record(status = "completed", extra = {}) {
+  return {
+    status,
+    metadata: {
+      id: `job-${(++counter).toString(16).padStart(24, "0")}`,
+      sessionId: session,
+      createdAt: new Date().toISOString(),
+      command: ":",
+      cwd: ctx.cwd,
+      ...extra,
+    },
+    result:
+      status === "running" ? undefined : { status, exitCode: status === "completed" ? 0 : null },
+  };
 }
 try {
-  let h = harness(); await h.emit('session_start'); await pause();
-  records = ['completed','failed','cancelled','lost'].map(status=>record(status));
-  records.push(record('failed',{infrastructure:true}),record('completed',{sessionId:'foreign'}),record('running'));
-  const allYield = await h.call({action:'yield'});
-  assert.equal(allYield.terminate,true);
-  assert.equal(allYield.details.jobs.length,5,'yield inventory must exclude foreign and infrastructure jobs');
-  assert.equal(notified.size,0,'yield must not acknowledge terminal records');
-  poll(); await pause(1150);
-  assert.equal(h.messages.length,1);
-  assert.deepEqual(h.messages[0].options,{deliverAs:'followUp',triggerTurn:true});
+  let h = harness();
+  await h.emit("session_start");
+  await pause();
+  records = ["completed", "failed", "cancelled", "lost"].map((status) => record(status));
+  records.push(
+    record("failed", { infrastructure: true }),
+    record("completed", { sessionId: "foreign" }),
+    record("running"),
+  );
+  const allYield = await h.call({ action: "yield" });
+  assert.equal(allYield.terminate, true);
+  assert.equal(
+    allYield.details.jobs.length,
+    5,
+    "yield inventory must exclude foreign and infrastructure jobs",
+  );
+  assert.equal(notified.size, 0, "yield must not acknowledge terminal records");
+  poll();
+  await pause(1150);
+  assert.equal(h.messages.length, 1);
+  assert.deepEqual(h.messages[0].options, { deliverAs: "followUp", triggerTurn: true });
   // The fixture watch has one unread event, so its alert joins the first batch.
   const firstUpdates = h.messages[0].message.details.updates;
-  const watchAlerts = firstUpdates.filter(u => u.kind === 'watch');
-  assert.deepEqual(watchAlerts.map(u => [u.id, u.through_sequence]), [['watch-fixture', 1]]);
+  const watchAlerts = firstUpdates.filter((u) => u.kind === "watch");
+  assert.deepEqual(
+    watchAlerts.map((u) => [u.id, u.through_sequence]),
+    [["watch-fixture", 1]],
+  );
   assert.ok(h.messages[0].message.content.startsWith(WATCH_ALERT_PREFIX));
-  const jobStates = firstUpdates.filter(u => u.kind === 'job').map(u => u.state);
-  assert.deepEqual(jobStates, ['completed', 'failed', 'cancelled', 'lost']);
-  assert.match(h.messages[0].message.content,/output/i);
-  assert.match(h.messages[0].message.content,/reap/i);
-  assert.ok(firstUpdates.every(u => u.kind === 'job' || u.kind === 'watch'));
-  poll(); await pause(1150); assert.equal(h.messages.length,1,'repeated polling replayed completion');
-  idle=false; records.push(record()); poll(); await pause(1150);
-  assert.equal(h.messages.length,1,'busy parent received an obsolete-prone completion steer');
-  idle=true; await pause(1150);
-  assert.deepEqual(h.messages[1].options,{deliverAs:'followUp',triggerTurn:true});
+  const jobStates = firstUpdates.filter((u) => u.kind === "job").map((u) => u.state);
+  assert.deepEqual(jobStates, ["completed", "failed", "cancelled", "lost"]);
+  assert.match(h.messages[0].message.content, /output/i);
+  assert.match(h.messages[0].message.content, /reap/i);
+  assert.ok(firstUpdates.every((u) => u.kind === "job" || u.kind === "watch"));
+  poll();
+  await pause(1150);
+  assert.equal(h.messages.length, 1, "repeated polling replayed completion");
+  idle = false;
+  records.push(record());
+  poll();
+  await pause(1150);
+  assert.equal(h.messages.length, 1, "busy parent received an obsolete-prone completion steer");
+  idle = true;
+  await pause(1150);
+  assert.deepEqual(h.messages[1].options, { deliverAs: "followUp", triggerTurn: true });
   // Each existing consuming tool must remove a queued completion before it wakes.
-  for(const action of ['status','output','cancel','list','reap']) {
-    const r=record(); records.push(r); poll(); await pause();
-    await h.call(action==='list'?{action,limit:50}:{action,job_id:r.metadata.id});
-    await pause(1100); assert.equal(h.messages.length,2,`${action} left a delayed wake`);
+  for (const action of ["status", "output", "cancel", "list", "reap"]) {
+    const r = record();
+    records.push(r);
+    poll();
+    await pause();
+    await h.call(action === "list" ? { action, limit: 50 } : { action, job_id: r.metadata.id });
+    await pause(1100);
+    assert.equal(h.messages.length, 2, `${action} left a delayed wake`);
   }
   // Poll's async notified read began before a tool persisted consumption.
-  const raced=record(); records.push(raced);
-  let release; deferNotified=new Promise(resolve=>{release=resolve;});
-  // Isolate the target so it is the first awaited notification check.
-  records=[raced]; poll(); await pause();
-  await h.call({action:'status',job_id:raced.metadata.id}); release(); await pause(1150);
-  assert.equal(h.messages.length,2,'late notified snapshot bypassed consumption tombstone');
-  // Reading a running job is not terminal consumption and must not suppress its finish.
-  const running=record('running'); records=[running];
-  await h.call({action:'status',job_id:running.metadata.id});
-  running.status='completed'; running.result={status:'completed',exitCode:0};
-  poll(); await pause(1150); assert.equal(h.messages.length,3,'running status suppressed completion');
+  const raced = record();
   records.push(raced);
-  await h.emit('session_shutdown',{reason:'reload'});
-  h=harness(); await h.emit('session_start'); await pause(1150);
-  assert.equal(h.messages.length,0,'consumed completion replayed on reload');
+  let release;
+  deferNotified = new Promise((resolve) => {
+    release = resolve;
+  });
+  // Isolate the target so it is the first awaited notification check.
+  records = [raced];
+  poll();
+  await pause();
+  await h.call({ action: "status", job_id: raced.metadata.id });
+  release();
+  await pause(1150);
+  assert.equal(h.messages.length, 2, "late notified snapshot bypassed consumption tombstone");
+  // Reading a running job is not terminal consumption and must not suppress its finish.
+  const running = record("running");
+  records = [running];
+  await h.call({ action: "status", job_id: running.metadata.id });
+  running.status = "completed";
+  running.result = { status: "completed", exitCode: 0 };
+  poll();
+  await pause(1150);
+  assert.equal(h.messages.length, 3, "running status suppressed completion");
+  records.push(raced);
+  await h.emit("session_shutdown", { reason: "reload" });
+  h = harness();
+  await h.emit("session_start");
+  await pause(1150);
+  assert.equal(h.messages.length, 0, "consumed completion replayed on reload");
   // Queued delivery retries survive reload; successful delivery deduplicates thereafter.
-  await h.emit('session_shutdown',{reason:'reload'});
-  records=[record()]; h=harness(1); await h.emit('session_start'); await pause(1150);
-  assert.equal(h.messages.length,0);
-  await h.emit('session_shutdown',{reason:'reload'});
-  h=harness(); await h.emit('session_start'); await pause(1150);
-  assert.equal(h.messages.length,1,'failed send lost on reload');
-  await h.emit('session_shutdown',{reason:'reload'});
-  h=harness(); await h.emit('session_start'); await pause(1150);
-  assert.equal(h.messages.length,0,'delivered completion replayed on reload');
+  await h.emit("session_shutdown", { reason: "reload" });
+  records = [record()];
+  h = harness(1);
+  await h.emit("session_start");
+  await pause(1150);
+  assert.equal(h.messages.length, 0);
+  await h.emit("session_shutdown", { reason: "reload" });
+  h = harness();
+  await h.emit("session_start");
+  await pause(1150);
+  assert.equal(h.messages.length, 1, "failed send lost on reload");
+  await h.emit("session_shutdown", { reason: "reload" });
+  h = harness();
+  await h.emit("session_start");
+  await pause(1150);
+  assert.equal(h.messages.length, 0, "delivered completion replayed on reload");
   // Yield is observation only: never consume completion, retrieve output, or
   // install a second completion producer. Repeated yields still yield one wake.
-  const yielding=record(); records=[yielding];
-  for (let index=0; index<2; index++) {
-    const result=await h.call({action:'yield',job_id:yielding.metadata.id});
-    assert.equal(result.terminate,true);
-    assert.equal(notified.has(yielding.metadata.id),false);
-    assert.equal(JSON.stringify(result.details).includes('accepted_delivery'),false);
+  const yielding = record();
+  records = [yielding];
+  for (let index = 0; index < 2; index++) {
+    const result = await h.call({ action: "yield", job_id: yielding.metadata.id });
+    assert.equal(result.terminate, true);
+    assert.equal(notified.has(yielding.metadata.id), false);
+    assert.equal(JSON.stringify(result.details).includes("accepted_delivery"), false);
   }
-  poll(); await pause(1150);
-  assert.equal(h.messages.length,1,'yield suppressed the existing completion producer');
-  poll(); await pause(1150);
-  assert.equal(h.messages.length,1,'yield introduced duplicate completion wakes');
-  await h.emit('session_shutdown',{reason:'quit'});
-  console.log('background-job completion producer tests passed');
+  poll();
+  await pause(1150);
+  assert.equal(h.messages.length, 1, "yield suppressed the existing completion producer");
+  poll();
+  await pause(1150);
+  assert.equal(h.messages.length, 1, "yield introduced duplicate completion wakes");
+  await h.emit("session_shutdown", { reason: "quit" });
+  console.log("background-job completion producer tests passed");
 } finally {
-  globalThis.setInterval=originalInterval; globalThis.clearInterval=originalClearInterval;
+  globalThis.setInterval = originalInterval;
+  globalThis.clearInterval = originalClearInterval;
 }

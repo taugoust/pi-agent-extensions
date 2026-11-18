@@ -18,12 +18,16 @@ function renderLines(component: any, width = 120): string[] {
 }
 
 {
-  assert.deepEqual(renderLines(renderSubagentCall({ action: "approve", draft_id: "draft-1" }, theme)), [
-    "subagent draft approve",
-    "  draft-1",
+  assert.deepEqual(
+    renderLines(renderSubagentCall({ action: "approve", draft_id: "draft-1" }, theme)),
+    ["subagent draft approve", "  draft-1"],
+  );
+  assert.deepEqual(renderLines(renderSubagentCall({ chain: [{}, {}, {}] }, theme)), [
+    "subagent chain (3 steps)",
   ]);
-  assert.deepEqual(renderLines(renderSubagentCall({ chain: [{}, {}, {}] }, theme)), ["subagent chain (3 steps)"]);
-  assert.deepEqual(renderLines(renderSubagentCall({ tasks: [{}, {}] }, theme)), ["subagent parallel (2 tasks)"]);
+  assert.deepEqual(renderLines(renderSubagentCall({ tasks: [{}, {}] }, theme)), [
+    "subagent parallel (2 tasks)",
+  ]);
   assert.deepEqual(renderLines(renderSubagentCall({ task: "x".repeat(71) }, theme)), [
     "subagent single",
     `  ${"x".repeat(70)}...`,
@@ -31,16 +35,22 @@ function renderLines(component: any, width = 120): string[] {
 }
 
 {
-  assert.equal(formatSubagentUsage({
-    turns: 2,
-    input: 1_500,
-    output: 10_000,
-    cacheRead: 999,
-    cacheWrite: 1_000_000,
-    cost: 0.125,
-    contextTokens: 2_500,
-    contextWindow: 10_000,
-  }, "registry/large"), "2 turns ↑1.5k ↓10k R999 W1.0M $0.1250 ctx:2.5k/10k (25%) registry/large");
+  assert.equal(
+    formatSubagentUsage(
+      {
+        turns: 2,
+        input: 1_500,
+        output: 10_000,
+        cacheRead: 999,
+        cacheWrite: 1_000_000,
+        cost: 0.125,
+        contextTokens: 2_500,
+        contextWindow: 10_000,
+      },
+      "registry/large",
+    ),
+    "2 turns ↑1.5k ↓10k R999 W1.0M $0.1250 ctx:2.5k/10k (25%) registry/large",
+  );
   assert.equal(formatSubagentUsage({ contextTokens: 1_234 }), "ctx:1.2k");
   assert.equal(formatSubagentUsage({}), "");
 }
@@ -55,28 +65,45 @@ function renderLines(component: any, width = 120): string[] {
     usage: { turns: 1, input: 3 },
     model: "registry/small",
   });
-  assert.equal(renderSubagentStream(state), [
-    "[stream started]",
-    "working",
-    "[running read]",
-    "raw diagnostic",
-    "[1 turn ↑3 registry/small]",
-  ].join("\n"));
+  assert.equal(
+    renderSubagentStream(state),
+    [
+      "[stream started]",
+      "working",
+      "[running read]",
+      "raw diagnostic",
+      "[1 turn ↑3 registry/small]",
+    ].join("\n"),
+  );
 }
 
 {
-  assert.equal(subagentDetailsFailed({
-    terminal: { state: "completed", exit_code: 0, termination: "natural", retryable: false },
-    results: [{ exitCode: -1, stopReason: "running" }],
-  }), false);
-  assert.equal(subagentDetailsFailed({
-    terminal: { state: "completed", exit_code: 0, termination: "natural", retryable: false },
-    results: [{
-      exitCode: 1,
-      stopReason: "error",
-      terminal: { state: "failed", failure_kind: "model", exit_code: 1, termination: "natural", retryable: false },
-    }],
-  }), true);
+  assert.equal(
+    subagentDetailsFailed({
+      terminal: { state: "completed", exit_code: 0, termination: "natural", retryable: false },
+      results: [{ exitCode: -1, stopReason: "running" }],
+    }),
+    false,
+  );
+  assert.equal(
+    subagentDetailsFailed({
+      terminal: { state: "completed", exit_code: 0, termination: "natural", retryable: false },
+      results: [
+        {
+          exitCode: 1,
+          stopReason: "error",
+          terminal: {
+            state: "failed",
+            failure_kind: "model",
+            exit_code: 1,
+            termination: "natural",
+            retryable: false,
+          },
+        },
+      ],
+    }),
+    true,
+  );
   assert.equal(subagentDetailsFailed({ error: "parent failure", results: [] }), true);
 }
 
@@ -84,27 +111,42 @@ const singleResult = {
   content: [{ type: "text", text: "parent answer" }],
   details: {
     mode: "single",
-    results: [{
-      label: "child",
-      task: "inspect rendering",
-      exitCode: 0,
-      stopReason: "completed",
-      terminal: { state: "completed", exitCode: 0, termination: "natural", retryable: false },
-      final: "answer",
-      model: "registry/small",
-      tools: ["read"],
-      cwd: "/workspace",
-      messages: [{
-        role: "assistant",
-        content: [
-          { type: "text", text: "answer" },
-          { type: "toolCall", name: "read", arguments: { path: "/tmp/example.ts", offset: 2, limit: 3 } },
+    results: [
+      {
+        label: "child",
+        task: "inspect rendering",
+        exitCode: 0,
+        stopReason: "completed",
+        terminal: { state: "completed", exitCode: 0, termination: "natural", retryable: false },
+        final: "answer",
+        model: "registry/small",
+        tools: ["read"],
+        cwd: "/workspace",
+        messages: [
+          {
+            role: "assistant",
+            content: [
+              { type: "text", text: "answer" },
+              {
+                type: "toolCall",
+                name: "read",
+                arguments: { path: "/tmp/example.ts", offset: 2, limit: 3 },
+              },
+            ],
+          },
         ],
-      }],
-      completedTools: [{ name: "read", args: { path: "/tmp/example.ts" }, isError: false, resultPreview: "preview" }],
-      usage: { turns: 1, input: 10, output: 5 },
-      fullResultPath: "/artifacts/child.md",
-    }],
+        completedTools: [
+          {
+            name: "read",
+            args: { path: "/tmp/example.ts" },
+            isError: false,
+            resultPreview: "preview",
+          },
+        ],
+        usage: { turns: 1, input: 10, output: 5 },
+        fullResultPath: "/artifacts/child.md",
+      },
+    ],
   },
 };
 
@@ -156,7 +198,14 @@ const singleResult = {
           task: "failing task",
           exitCode: 1,
           stopReason: "error",
-          terminal: { state: "failed", failureKind: "model", exitCode: 1, termination: "natural", retryable: false, message: "provider failed" },
+          terminal: {
+            state: "failed",
+            failureKind: "model",
+            exitCode: 1,
+            termination: "natural",
+            retryable: false,
+            message: "provider failed",
+          },
           errorMessage: "provider failed",
           stderrTail: "last stderr",
           artifactError: "artifact unavailable",
@@ -166,7 +215,9 @@ const singleResult = {
       ],
     },
   };
-  const collapsed = renderLines(renderSubagentResult(parallel, { expanded: false }, theme)).join("\n");
+  const collapsed = renderLines(renderSubagentResult(parallel, { expanded: false }, theme)).join(
+    "\n",
+  );
   assert.match(collapsed, /^◐ parallel 1\/2 tasks/);
   assert.match(collapsed, /─── one ✓\nfirst answer/);
   assert.match(collapsed, /─── two ✗\nSubagent failed\./);
@@ -178,7 +229,12 @@ const singleResult = {
 }
 
 {
-  assert.deepEqual(renderLines(renderSubagentResult({ content: [{ type: "text", text: "plain fallback" }] }, {}, theme)), ["plain fallback"]);
+  assert.deepEqual(
+    renderLines(
+      renderSubagentResult({ content: [{ type: "text", text: "plain fallback" }] }, {}, theme),
+    ),
+    ["plain fallback"],
+  );
   assert.deepEqual(renderLines(renderSubagentResult({ content: [] }, {}, theme)), ["(no output)"]);
 }
 
