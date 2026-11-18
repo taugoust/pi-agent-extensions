@@ -7,9 +7,10 @@ import {
   type RoutingProfile,
 } from "../shared/session-routing.ts";
 import { readModelTiers, resolveTierSelector, type ModelTierTable } from "../shared/model-tiers.ts";
+import { readSubagentRoutingSelection } from "../shared/subagent-routing.ts";
 
 export interface SubagentModelSettings {
-  /** A tier, a model ID on the session's provider, or an explicit provider/model. */
+  /** A tier, a model ID on the subagent/session provider, or an explicit provider/model. */
   defaultModel: string;
   defaultThinkingLevel: string;
 }
@@ -43,7 +44,7 @@ export function readSubagentModelSettings(agentDir: string): SubagentModelSettin
 }
 
 /**
- * Tiers and bare model IDs use the session's provider. An explicit provider/model
+ * Tiers and bare model IDs use the subagent setting or session provider. An explicit provider/model
  * is kept, so a session can start workers on another provider.
  */
 export function resolveSubagentModel(
@@ -54,7 +55,7 @@ export function resolveSubagentModel(
   tiers: ModelTierTable = readModelTiers(),
 ): string {
   const provider = context
-    ? physicalSessionProvider(context) ?? snapshot?.providerId ?? resolveSessionProvider(context)
+    ? readSubagentRoutingSelection(context)?.providerId ?? physicalSessionProvider(context) ?? snapshot?.providerId ?? resolveSessionProvider(context)
     : STANDALONE_PROVIDER;
   const selected = resolveTierSelector(model ?? settings.defaultModel, provider, tiers,
     { crossProvider: true, defaultThinking: settings.defaultThinkingLevel });

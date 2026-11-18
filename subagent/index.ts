@@ -22,10 +22,11 @@ import type { Message } from "@mariozechner/pi-ai";
 import type { AgentToolResult, ExtensionAPI } from "@mariozechner/pi-coding-agent";
 import { copyExtensionDefaults } from "../shared/extension-defaults.js";
 import { getAgentDir, getMarkdownTheme, SessionManager } from "@mariozechner/pi-coding-agent";
-import { readSubagentModelSettings, resolveSubagentModel, selectorProvider } from "./config.ts";
+import { readSubagentModelSettings, resolveSubagentModel } from "./config.ts";
+import { readSubagentRoutingSelection, registerSubagentRoutingControls, subagentRoutingEnvironment, SUBAGENT_ROUTING_ENTRY } from "../shared/subagent-routing.ts";
 import { discoverAgentProfiles, resolveAgentProfileLaunch, type AgentProfileScope } from "./profiles.ts";
 import { resolveCoordinatorRole } from "./coordinator-role.ts";
-import { getSessionRoutingProfile, prepareSessionRoutingRequest, readInheritedSessionRoutingProfile, readSessionRoutingProfile, registerSessionRouting, sessionRoutingEnvironment } from "../shared/session-routing.ts";
+import { prepareSessionRoutingRequest, readInheritedSessionRoutingProfile, readSessionRoutingProfile, registerSessionRouting, sessionRoutingEnvironment } from "../shared/session-routing.ts";
 import { applyAutomaticWorktreePolicy } from "../shared/worker-worktree-context.ts";
 import { ownedWorktrees } from "../shared/subagent-worktrees.ts";
 
@@ -99,21 +100,10 @@ const MAX_CONCURRENCY = 4;
 const COLLAPSED_ITEM_COUNT = 10;
 const MAX_TEXT_PREVIEW_BYTES = 50 * 1024;
 const subagentModelSettings = readSubagentModelSettings(getAgentDir());
-const defaultSubagentModel = `${subagentModelSettings.defaultModel}:${subagentModelSettings.defaultThinkingLevel} on the owning session's provider`;
+const defaultSubagentModel = `${subagentModelSettings.defaultModel}:${subagentModelSettings.defaultThinkingLevel}`;
 
-/**
- * Account routing only applies to children on the routed provider. A child on
- * another provider uses that provider's own default login.
- */
 function childRoutingEnvironment(ctx: any, model: string | undefined): Record<string, string> {
-  const provider = selectorProvider(model);
-  if (provider) {
-    // An unready or broken profile still fails closed in sessionRoutingEnvironment.
-    let routed: string | undefined;
-    try { routed = getSessionRoutingProfile(ctx)?.providerId; } catch { routed = undefined; }
-    if (routed !== undefined && routed !== provider) return {};
-  }
-  return sessionRoutingEnvironment(ctx);
+  return subagentRoutingEnvironment(ctx, model, getAgentDir());
 }
 const CONFIG_FILES = ["settings.json", "subagent.json", "models.json", "auth.json", "oauth.json", "AGENTS.md"];
 // Resolve once before the model can mutate replaceable Home Manager symlinks.
@@ -1472,10 +1462,13 @@ function snapshotSubagentExecutionContext(ctx: any): Record<string, unknown> {
       .filter(Boolean),
   );
   const sessionId = stableSessionId(ctx);
+  const subagentSelection = readSubagentRoutingSelection(ctx);
   const snapshot = {
     cwd,
     model,
-    sessionManager: Object.freeze({ getSessionId: () => sessionId }),
+    sessionManager: Object.freeze({ getSessionId: () => sessionId,
+      getBranch: () => [{ type: "custom", customType: SUBAGENT_ROUTING_ENTRY,
+        data: { version: 1, selection: subagentSelection } }] }),
     modelRegistry: Object.freeze({ getAll: () => models,
       find: (provider: string, id: string) => models.find((candidate: any) => candidate?.provider === provider && candidate.id === id) }),
   };
@@ -1707,7 +1700,7 @@ const SubagentItem = Type.Object({
   acceptance: Type.Array(Type.String({minLength:1, maxLength:500}), {minItems:1, maxItems:16, description:"Required for each new task: explicit task-specific, verifiable completion criteria. Preserved verbatim; never inferred from the prompt."}),
   task: Type.String({ description: "Task to delegate to this dynamic subagent" }),
   systemPrompt: Type.Optional(Type.String({ description: "Optional additional system prompt for this subagent" })),
-  model: Type.Optional(Type.String({ description: `Explicit override of the profile/default role model, optionally with :thinking. A tier (cheap, expensive, superintelligence) or bare model ID uses the owning session's provider. provider/model runs on that provider with its default account. Default: ${defaultSubagentModel}.` })),
+  model: Type.Optional(Type.String({ description: `Explicit override of the profile/default role model, optionally with :thinking. Tiers and bare model IDs use the session's subagent provider setting, otherwise its own provider. provider/model overrides the provider and model. Default: ${defaultSubagentModel}.` })),
   tools: Type.Optional(Type.Array(Type.String(), { description: "Optional tool allowlist. With agent, only read/bash/edit/write are supported and overrides may narrow, never widen the profile." })),
   cwd: Type.Optional(Type.String({ description: "Optional working directory for this subagent process" })),
   worktree: SubagentWorktree,
@@ -1748,7 +1741,7 @@ function subagentParams() {
   child: Type.Optional(Type.Integer({ minimum: 1, maximum: 8, description: "Result only, with job_id: one-based child report number (default 1); do not combine with child_id." })),
   task: Type.Optional(Type.String({ description: "Launch only: task to delegate (single mode). For resume continuation instructions use message instead." })),
   systemPrompt: Type.Optional(Type.String({ description: "Launch only: optional additional system prompt (single mode). Resume preserves the saved configuration." })),
-  model: Type.Optional(Type.String({ description: `Launch only: explicit override of the profile/default role model (single mode), optionally with :thinking. A tier (cheap, expensive, superintelligence) or bare model ID uses the owning session's provider. provider/model runs on that provider with its default account. Default: ${defaultSubagentModel}. Resume retains the role model.` })),
+  model: Type.Optional(Type.String({ description: `Launch only: explicit override of the profile/default role model (single mode), optionally with :thinking. Tiers and bare model IDs use the session's subagent provider setting, otherwise its own provider. provider/model overrides the provider and model. Default: ${defaultSubagentModel}. Resume retains the role model.` })),
   tools: Type.Optional(Type.Array(Type.String(), { description: "Launch only: optional tool allowlist (single mode). With agent, only read/bash/edit/write are supported and overrides can only narrow the profile. Not accepted by resume." })),
   cwd: Type.Optional(Type.String({ description: "Launch only: optional working directory (single mode). Not accepted by resume." })),
   worktree: SubagentWorktree,
@@ -1761,6 +1754,7 @@ function subagentParams() {
 }
 
 export default function (pi: ExtensionAPI) {
+  registerSubagentRoutingControls(pi);
   const quietState = installQuietState(pi);
   const guidanceUpdate = (record: import('./guidance.ts').GuidanceRecord): import('../shared/quiet-state.js').QuietUpdate => {
     const {expectedRevision: _revision, ...identity} = guidanceTarget(record);

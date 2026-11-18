@@ -167,7 +167,8 @@ an already attached client), not merely that AgentSH was configured or attempted
 A model tier names a cost level instead of a model ID. Wherever a model is
 configured (subagent defaults, profiles, btw, idle compaction), `cheap`,
 `expensive` or `superintelligence`, optionally with `:thinking`, resolves to that
-tier's model on the session's current provider.
+tier's model on the session's current provider. Subagents and Goal coordinators
+can instead use a per-session subagent provider setting.
 
 | Provider | `cheap` | `expensive` | `superintelligence` |
 | --- | --- | --- | --- |
@@ -984,12 +985,37 @@ Home Manager exposes the same two fields under
 `programs.pi.extensions.subagent`. They apply to single, parallel, and chain
 launches on both backends, including nested children. An explicit task `model`
 takes precedence; append `:medium`, `:high`, etc. to override thinking as well.
-A [tier](#model-tiers) or bare model ID runs on the owning session's provider and
-account. An explicit `provider/model` runs on that provider with its own default
-account, so a Claude session can start Codex workers and the other way round.
-Profiles name tiers too: the coordinator uses `expensive`. Invalid configuration
-is reported rather than silently ignored. Restart Pi or `/reload` after changes;
-existing/resumed children retain their recorded model.
+A [tier](#model-tiers) or bare model ID follows the owning session's provider and
+account unless the session has a subagent provider setting. Set it with
+`/subagent-provider openai-codex [account]`, show it with `/subagent-provider`, or
+restore session-following with `/subagent-provider clear`. Omitting the account
+explicitly selects that provider's default login. Named accounts currently require
+`openai-codex` and the account controls extension. The setting is stored as a
+`pi-subagent-routing-v1` custom entry on the active session branch and survives
+reload/resume. It affects new workers and new Goal coordinators only, not the
+conversation model or running workers. Profiles name tiers too, including the
+coordinator's `expensive` tier. An explicit `provider/model` still wins the model
+and provider choice. Its account uses the configured subagent account when that
+provider matches, otherwise the session account when the session provider matches,
+otherwise that provider's default login.
+
+Paseo can use `globalThis.__paeSubagentRoutingV1` (protocol `1`). The lifetime-owned
+service exposes `sessionId`, `serviceEpoch`, `getSnapshot({ sessionId })`, and
+`set({ expectedSessionId, expectedServiceEpoch, expectedRevision, selection })`.
+Both async methods return `{ protocol, sessionId, serviceEpoch, revision, selection }`.
+`selection` is `null` to follow the session, or `{ providerId, accountId }` with
+`accountId: null` for default authentication. Named account IDs come from the
+existing `__paeAccountControlsV1.getSnapshot` accounts list. `set` rejects stale
+session/epoch/revision and unknown provider/account selections, without changing
+the parent account or making a model call. Refresh the snapshot after a rejection.
+Changes need no reload and can be made while workers run. Credentials are never
+part of this surface. See `shared/subagent-routing.ts` for the typed contract.
+AgentSH groups mixing the configured provider with another provider must be split
+into separate launches because that backend binds one account per request.
+
+Invalid file configuration is reported rather than silently ignored. Restart Pi
+or `/reload` after changing `subagent.json`; existing/resumed children retain
+their recorded model.
 
 Background launches support single, parallel, and chain requests through both
 adaptive backends, with up to sixteen aggregate invocations active at once.
