@@ -1,0 +1,8 @@
+# Formatting-only commits, skipped by git blame.
+# Run once per clone: git config blame.ignoreRevsFile .git-blame-ignore-revs
+
+# Format all JavaScript and TypeScript with oxfmt
+b4f6c6ca1cea9bcf476bf0b758fb1d05b7b948b4
+
+# Format Nix, shell, Markdown and JSON with treefmt
+7452f2b9eb35e2365764b977b1d615984023310c

@@ -7,7 +7,7 @@ This lifecycle applies to ordinary delegation, with or without a Goal. It adds n
 The trusted **spawning parent's** profile controls the default:
 
 - `automaticWorktrees: true` on the bundled `coordinator` enables automatic isolation for the workers it launches, including ordinary workers/scouts.
-- Other profiles and ordinary parents preserve opt-in isolation. Selecting a coordinator *child*, naming an agent coordinator, a prompt, an environment flag, or having a Goal does not enable the parent's policy.
+- Other profiles and ordinary parents preserve opt-in isolation. Selecting a coordinator _child_, naming an agent coordinator, a prompt, an environment flag, or having a Goal does not enable the parent's policy.
 - The resolved boolean is pinned in the private worker manifest and retained spec. The worker extension installs it only after verifying the actual session/manifest binding. Legacy manifests default off. Profile edits affect new launches, not retained attempts.
 - Automatic isolation of the Goal/coordinator launch itself is not added here.
 

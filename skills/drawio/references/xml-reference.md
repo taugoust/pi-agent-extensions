@@ -27,8 +27,8 @@ Your job is to declare the **logical structure** of the diagram — what nodes e
 
 **Rigid grid — use for every XML diagram:**
 
-- Column x = `col_index * 180 + 40`  (col 0 = 40, col 1 = 220, col 2 = 400, …)
-- Row y = `row_index * 120 + 40`     (row 0 = 40, row 1 = 160, row 2 = 280, …)
+- Column x = `col_index * 180 + 40` (col 0 = 40, col 1 = 220, col 2 = 400, …)
+- Row y = `row_index * 120 + 40` (row 0 = 40, row 1 = 160, row 2 = 280, …)
 - Node size: rectangles `140×60`, diamonds `140×80`, circles `60×60`, documents `120×80`, cylinders `100×70`
 
 Pick a `(col, row)` for each node. Don't think about centers, gaps, or overlap — ELK handles routing between rough positions. Slight misalignment is invisible in the result.
@@ -44,6 +44,7 @@ Pick a `(col, row)` for each node. Don't think about centers, gaps, or overlap �
 ## Common styles
 
 **Rounded rectangle:**
+
 ```xml
 <mxCell id="2" value="Label" style="rounded=1;whiteSpace=wrap;html=1;" vertex="1" parent="1">
   <mxGeometry x="100" y="100" width="120" height="60" as="geometry"/>
@@ -51,6 +52,7 @@ Pick a `(col, row)` for each node. Don't think about centers, gaps, or overlap �
 ```
 
 **Diamond (decision):**
+
 ```xml
 <mxCell id="3" value="Condition?" style="rhombus;whiteSpace=wrap;html=1;" vertex="1" parent="1">
   <mxGeometry x="100" y="200" width="120" height="80" as="geometry"/>
@@ -58,6 +60,7 @@ Pick a `(col, row)` for each node. Don't think about centers, gaps, or overlap �
 ```
 
 **Arrow (edge):**
+
 ```xml
 <mxCell id="4" value="" style="edgeStyle=orthogonalEdgeStyle;html=1;" edge="1" source="2" target="3" parent="1">
   <mxGeometry relative="1" as="geometry"/>
@@ -65,6 +68,7 @@ Pick a `(col, row)` for each node. Don't think about centers, gaps, or overlap �
 ```
 
 **Labeled arrow:**
+
 ```xml
 <mxCell id="5" value="Yes" style="edgeStyle=orthogonalEdgeStyle;html=1;" edge="1" source="3" target="6" parent="1">
   <mxGeometry relative="1" as="geometry"/>
@@ -73,26 +77,26 @@ Pick a `(col, row)` for each node. Don't think about centers, gaps, or overlap �
 
 ## Style properties
 
-| Property | Values | Use for |
-|----------|--------|---------|
-| `rounded=1` | 0 or 1 | Rounded corners |
-| `whiteSpace=wrap` | wrap | Text wrapping |
-| `fillColor=#dae8fc` | Hex color | Background color |
-| `strokeColor=#6c8ebf` | Hex color | Border color |
-| `fontColor=#333333` | Hex color | Text color |
-| `shape=cylinder3` | shape name | Database cylinders |
-| `shape=mxgraph.flowchart.document` | shape name | Document shapes |
-| `ellipse` | style keyword | Circles/ovals |
-| `rhombus` | style keyword | Diamonds |
-| `edgeStyle=orthogonalEdgeStyle` | style keyword | Right-angle connectors |
-| `edgeStyle=elbowEdgeStyle` | style keyword | Elbow connectors |
-| `dashed=1` | 0 or 1 | Dashed lines |
-| `swimlane` | style keyword | Swimlane containers |
-| `group` | style keyword | Invisible container (pointerEvents=0) |
-| `container=1` | 0 or 1 | Enable container behavior on any shape |
-| `pointerEvents=0` | 0 or 1 | Prevent container from capturing child connections |
-| `html=1` | 0 or 1 | Enable HTML rendering in labels (required for `<b>`, `<br>`, `<font>`, etc.) |
-| `shape=umlLifeline;perimeter=lifelinePerimeter;size=16` | shape | UML sequence diagram lifeline (size = header height) |
+| Property                                                | Values        | Use for                                                                      |
+| ------------------------------------------------------- | ------------- | ---------------------------------------------------------------------------- |
+| `rounded=1`                                             | 0 or 1        | Rounded corners                                                              |
+| `whiteSpace=wrap`                                       | wrap          | Text wrapping                                                                |
+| `fillColor=#dae8fc`                                     | Hex color     | Background color                                                             |
+| `strokeColor=#6c8ebf`                                   | Hex color     | Border color                                                                 |
+| `fontColor=#333333`                                     | Hex color     | Text color                                                                   |
+| `shape=cylinder3`                                       | shape name    | Database cylinders                                                           |
+| `shape=mxgraph.flowchart.document`                      | shape name    | Document shapes                                                              |
+| `ellipse`                                               | style keyword | Circles/ovals                                                                |
+| `rhombus`                                               | style keyword | Diamonds                                                                     |
+| `edgeStyle=orthogonalEdgeStyle`                         | style keyword | Right-angle connectors                                                       |
+| `edgeStyle=elbowEdgeStyle`                              | style keyword | Elbow connectors                                                             |
+| `dashed=1`                                              | 0 or 1        | Dashed lines                                                                 |
+| `swimlane`                                              | style keyword | Swimlane containers                                                          |
+| `group`                                                 | style keyword | Invisible container (pointerEvents=0)                                        |
+| `container=1`                                           | 0 or 1        | Enable container behavior on any shape                                       |
+| `pointerEvents=0`                                       | 0 or 1        | Prevent container from capturing child connections                           |
+| `html=1`                                                | 0 or 1        | Enable HTML rendering in labels (required for `<b>`, `<br>`, `<font>`, etc.) |
+| `shape=umlLifeline;perimeter=lifelinePerimeter;size=16` | shape         | UML sequence diagram lifeline (size = header height)                         |
 
 ## HTML labels
 
@@ -116,6 +120,7 @@ HTML in attribute values must be **XML-escaped**: `<` → `&lt;`, `>` → `&gt;`
 ## Edges
 
 **CRITICAL: Every edge `mxCell` must contain a `<mxGeometry relative="1" as="geometry" />` child element.** Self-closing edge cells (e.g. `<mxCell ... edge="1" ... />`) are invalid and will not render correctly. Always use the expanded form:
+
 ```xml
 <mxCell id="e1" edge="1" parent="1" source="a" target="b" style="...">
   <mxGeometry relative="1" as="geometry" />
@@ -123,26 +128,28 @@ HTML in attribute values must be **XML-escaped**: `<` → `&lt;`, `>` → `&gt;`
 ```
 
 **Don't hand-route edges.** Just declare `source` and `target`. You do **not** need to:
+
 - Add `<mxPoint>` waypoints
 - Set `exitX` / `exitY` / `entryX` / `entryY`
 - Route around obstacles
 - Worry about edge-vertex collisions or parallel edge spacing
 
-draw.io's built-in router is **basic**: it draws each edge as a straight line or a simple right-angle path between `source` and `target`, with **no awareness of other shapes** — a wire will run straight across any box that sits between its endpoints. That's fine when connected nodes have open space between them. When edges would otherwise cross over shapes, or you want consistently clean orthogonal wires that route *around* the boxes, set **`routing: "libavoid"`** on `create_diagram`; for a full re-layout use **`postLayout: "elk"`** (see **Edge routing & layout passes** below). Both compute the waypoints for you — you never add them by hand either way.
+draw.io's built-in router is **basic**: it draws each edge as a straight line or a simple right-angle path between `source` and `target`, with **no awareness of other shapes** — a wire will run straight across any box that sits between its endpoints. That's fine when connected nodes have open space between them. When edges would otherwise cross over shapes, or you want consistently clean orthogonal wires that route _around_ the boxes, set **`routing: "libavoid"`** on `create_diagram`; for a full re-layout use **`postLayout: "elk"`** (see **Edge routing & layout passes** below). Both compute the waypoints for you — you never add them by hand either way.
 
 **What you still choose: the edge style.** The style determines the overall look (orthogonal angles, curves, straight lines) — the router honors the style family.
 
-| Style | Syntax | Best for |
-|-------|--------|---------|
-| **Orthogonal** | `edgeStyle=orthogonalEdgeStyle` | Flowcharts, architecture, network diagrams, BPMN — any diagram with right-angle connectors |
-| **Straight** | no `edgeStyle` | UML class/sequence diagrams, direct point-to-point connections. For sequence diagram messages use `endSize=6;startSize=6;` to keep arrowheads small |
-| **Entity Relation** | `edgeStyle=entityRelationEdgeStyle` | ER diagrams — creates perpendicular stubs at both ends |
-| **Curved** | `curved=1` | Mind maps, informal diagrams |
-| **Elbow** | `edgeStyle=elbowEdgeStyle;elbow=vertical;` | Rarely needed — `orthogonalEdgeStyle` handles almost all cases; use this only for simple 1-bend linear flows |
+| Style               | Syntax                                     | Best for                                                                                                                                            |
+| ------------------- | ------------------------------------------ | --------------------------------------------------------------------------------------------------------------------------------------------------- |
+| **Orthogonal**      | `edgeStyle=orthogonalEdgeStyle`            | Flowcharts, architecture, network diagrams, BPMN — any diagram with right-angle connectors                                                          |
+| **Straight**        | no `edgeStyle`                             | UML class/sequence diagrams, direct point-to-point connections. For sequence diagram messages use `endSize=6;startSize=6;` to keep arrowheads small |
+| **Entity Relation** | `edgeStyle=entityRelationEdgeStyle`        | ER diagrams — creates perpendicular stubs at both ends                                                                                              |
+| **Curved**          | `curved=1`                                 | Mind maps, informal diagrams                                                                                                                        |
+| **Elbow**           | `edgeStyle=elbowEdgeStyle;elbow=vertical;` | Rarely needed — `orthogonalEdgeStyle` handles almost all cases; use this only for simple 1-bend linear flows                                        |
 
 **Use a consistent edge style within each diagram.** Pick one based on diagram type and apply it to all edges: ER → `entityRelationEdgeStyle`; UML class → straight; mind maps → curved; flowcharts/architecture/network → `orthogonalEdgeStyle`.
 
 **Useful edge style attributes** that apply regardless of routing:
+
 - `rounded=1` — rounded corners at bend points (recommended for orthogonal)
 - `endArrow=classic` / `endArrow=none` — arrow heads
 - `dashed=1` — dashed line
@@ -163,11 +170,11 @@ Set `parent="containerId"` on child cells. Children use **relative coordinates**
 
 ### Container types
 
-| Type | Style | When to use |
-|------|-------|-------------|
-| **Group** (invisible) | `group;` | No visual border needed, container has no connections. Includes `pointerEvents=0` so child connections are not captured |
-| **Swimlane** (titled) | `swimlane;startSize=30;` | Container needs a visible title bar/header, or the container itself has connections |
-| **Custom container** | Add `container=1;pointerEvents=0;` to any shape style | Any shape acting as a container without its own connections |
+| Type                  | Style                                                 | When to use                                                                                                             |
+| --------------------- | ----------------------------------------------------- | ----------------------------------------------------------------------------------------------------------------------- |
+| **Group** (invisible) | `group;`                                              | No visual border needed, container has no connections. Includes `pointerEvents=0` so child connections are not captured |
+| **Swimlane** (titled) | `swimlane;startSize=30;`                              | Container needs a visible title bar/header, or the container itself has connections                                     |
+| **Custom container**  | Add `container=1;pointerEvents=0;` to any shape style | Any shape acting as a container without its own connections                                                             |
 
 ### Key rules
 
@@ -206,6 +213,7 @@ Set `parent="containerId"` on child cells. Children use **relative coordinates**
 Use **flat swimlanes** at `parent="1"`, stacked vertically. One row of nodes per lane.
 
 **Fixed values — do not compute or debate:**
+
 - Lane size: `x=0, y=lane_index*150, width=CANVAS_W, height=150`
 - Lane style: `swimlane;horizontal=0;startSize=110;fillColor=<pastel>;html=1;`
 - Child nodes inside a lane: `parent="<lane_id>"`, `x = 120 + col*180`, `y = 45` (always 45), size 140×60 (or 140×80 for diamonds)
@@ -238,6 +246,7 @@ Do NOT nest lanes inside a pool. Do NOT vary lane heights. Do NOT compute title-
 For diagrams with **nested groupings** — VPC → Availability Zone → EC2 instance, Datacenter → Rack → Server, Region → Environment → Service — use nested swimlanes. This is where the AI most often flattens hierarchy that should be nested. Treat each level as a swimlane container.
 
 **Rules:**
+
 - Every container is a `swimlane` with `startSize=24` (title area at the top).
 - Child cells set `parent="<container_id>"` and use coordinates **relative to their parent** (origin 0,0 is the parent's top-left, below the title).
 - Edges between cells in **different** containers must have `parent="1"` (not a container) — otherwise they render inside the container and get clipped.
@@ -272,6 +281,7 @@ For diagrams with **nested groupings** — VPC → Availability Zone → EC2 ins
 Cross-functional flowcharts show a process across **two axes at once** — actors (rows) and phases (columns). Use drawio's `table` shape, which auto-arranges cells into a grid via `childLayout=tableLayout`. This is the canonical draw.io pattern and is distinct from plain swimlanes (which only group on one axis).
 
 **Structure:**
+
 - Outer container: `shape=table;childLayout=tableLayout;startSize=0;collapsible=0;fillColor=none;`
 - Rows are children of the table: `shape=tableRow;horizontal=0;startSize=0;collapsible=0;`
 - Cells are children of rows — regular vertices, one per (actor, phase) intersection
@@ -338,6 +348,7 @@ Cross-functional flowcharts show a process across **two axes at once** — actor
 ```
 
 **When to use cross-functional tables vs flat swimlanes:**
+
 - Flat swimlanes — one-dimensional (actors only, or phases only). Simpler. Use this when you just need to show who does what in sequence.
 - Cross-functional table — two-dimensional (actors AND phases). Use this when **both** the actor and the process stage matter, and every step belongs to a specific (actor, phase) cell.
 
@@ -448,19 +459,20 @@ When generating diagrams, you generally do not need to specify dark-mode colors 
 
 By default, edges are drawn by draw.io's **built-in router**, which is intentionally basic: each edge is a straight line or a simple right-angle path between its endpoints, with **no obstacle avoidance** — a connector runs straight through any shape lying between its `source` and `target`. There is no server-side post-processing. Two **opt-in** passes on `create_diagram` upgrade this; they are independent and combine freely, run client-side after the diagram renders, and the exported XML (copy/clipboard, "Open in draw.io") reflects the final routed result.
 
-- **`routing: "libavoid"`** (XML only) — obstacle-avoiding orthogonal **edge routing**. Vertices stay exactly where you placed them; only the connectors are recomputed, so they run in clean right-angle segments that route *around* the boxes (and spread apart when parallel) instead of cutting across them. Use it for diagrams you laid out deliberately — architecture, network topology, deployment, swimlanes, UML, floor plans — where you want tidy wires without disturbing your layout.
+- **`routing: "libavoid"`** (XML only) — obstacle-avoiding orthogonal **edge routing**. Vertices stay exactly where you placed them; only the connectors are recomputed, so they run in clean right-angle segments that route _around_ the boxes (and spread apart when parallel) instead of cutting across them. Use it for diagrams you laid out deliberately — architecture, network topology, deployment, swimlanes, UML, floor plans — where you want tidy wires without disturbing your layout.
 - **`postLayout: "elk"`** — a **full re-layout** (ELK `layered` flow). Vertices animate (morph) from your positions to canonical hierarchical positions, and the edges are routed as part of that. Best for flowcharts, process/state diagrams, decision flows, pipelines, and other directional/hierarchical diagrams. (You should rarely hand-write these as XML — prefer Mermaid.) Flow **direction**: on XML set the optional `direction` field (`"vertical"` (default) / `"horizontal"`); on Mermaid it is read from the flowchart code (`flowchart TD/TB` vs `LR/RL`) and `direction` is ignored.
 
 The four combinations:
 
-| `postLayout` | `routing` | Result |
-|---|---|---|
-| — | — | basic built-in router (straight / simple right-angle, no obstacle avoidance); your positions kept |
-| — | `libavoid` | your positions kept; wires re-routed orthogonally *around* the shapes |
-| `elk` | — | ELK places the vertices **and** routes the edges (decent routing built in) |
-| `elk` | `libavoid` | rarely worth it — ELK already routes; only add `libavoid` if ELK's routing specifically comes out poor |
+| `postLayout` | `routing`  | Result                                                                                                 |
+| ------------ | ---------- | ------------------------------------------------------------------------------------------------------ |
+| —            | —          | basic built-in router (straight / simple right-angle, no obstacle avoidance); your positions kept      |
+| —            | `libavoid` | your positions kept; wires re-routed orthogonally _around_ the shapes                                  |
+| `elk`        | —          | ELK places the vertices **and** routes the edges (decent routing built in)                             |
+| `elk`        | `libavoid` | rarely worth it — ELK already routes; only add `libavoid` if ELK's routing specifically comes out poor |
 
 **Pick ONE — they are essentially alternatives, not a stack:**
+
 - **Neither** — fine when connected nodes sit in clear rows/columns with open space between them, so the basic router's straight/right-angle lines won't cross another shape. Simplest and lightest; do this by default for sparse layouts.
 - **`routing: "libavoid"`** — keep your hand-placed layout but clean up the wires: use whenever an edge would otherwise cut across a box, or you want consistently clean orthogonal wires routed around shapes (architecture, network topology, deployment, UML, floor plans — anything densely connected).
 - **`postLayout: "elk"`** — when you want a canonical re-layout (vertices moved). ELK routes the edges itself as part of the layout, so **do not also set `routing`** — the combination is redundant in almost all cases. Add `direction: "horizontal"` for left-to-right flow.
@@ -468,6 +480,7 @@ The four combinations:
 **For Mermaid diagrams: see the `postLayout` parameter description for when to set it.** Complex Mermaid flowcharts (≥ ~20 nodes, ≥ 3 decision diamonds, feedback edges, or ≥ 3 endpoints) need `postLayout: "elk"` because the native parser's layout goes cramped or unbalanced past that threshold — the direction follows the flowchart code, so no `direction` is needed. Simple flowcharts and all non-flowchart Mermaid types (sequence, class, ER, sankey, …) need no `postLayout`.
 
 **When NOT to use (XML):**
+
 - The user has asked for specific positions (swim lanes with exact lanes, architecture diagrams with meaningful spatial arrangement).
 - The diagram relies on containers/grouping where spatial layout encodes information.
 
@@ -480,6 +493,7 @@ XML Schema (XSD): https://github.com/jgraph/drawio-mcp/blob/main/shared/mxfile.x
 ## CRITICAL: XML well-formedness
 
 When generating draw.io XML, the output **must** be well-formed XML:
+
 - **NEVER include ANY XML comments (`<!-- -->`) in the output.** XML comments are strictly forbidden — they waste tokens, can cause parse errors, and serve no purpose in diagram XML.
 - Escape special characters in attribute values: `&amp;`, `&lt;`, `&gt;`, `&quot;`
 - Always use unique `id` values for each `mxCell`

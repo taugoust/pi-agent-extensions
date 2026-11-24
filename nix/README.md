@@ -58,20 +58,20 @@ programs.pi = {
 
 ## Native Pi configuration and ownership
 
-| Option | Default | Meaning |
-| --- | --- | --- |
-| `enable` | `false` | Enable installation and configuration. |
-| `package` | declared `null`; flake's Pi package via `mkDefault` when enabled | Executable added to `home.packages`; explicit `null` disables this. |
-| `agentDir` | `.pi/agent` | Home-relative global agent directory; no `..`. The launcher must respect `PI_CODING_AGENT_DIR`. |
-| `nativeConfigMode` | `"managed"` | `managed` links native files read-only; `mutable` seeds absent files once on activation. |
-| `quietState.enable` | `true` | Emit `defaults/quiet-state.json` with `{ enabled = ...; }`; the runtime environment kill switch remains higher priority. |
-| `settings` | `null` | Native `settings.json` object, including arbitrary supported native settings. |
-| `models` | `null` | Native `models.json` object, including provider/model declarations. |
-| `keybindings` | `null` | Native `keybindings.json` object. |
-| `mcp` | `null` | Native `mcp.json` object; never put literal credentials here. |
-| `extraSkills` | `{}` | Additional skill source directories keyed by safe skill names; recursive resource links under `agentDir/skills`. |
-| `packages` | `[]` | Additive native package declarations: source strings, derivations, or `{ source = ...; ...filters }`. |
-| `contextFiles` | `{}` | Markdown filenames relative to `agentDir`; exactly one of `source` or `text`. |
+| Option              | Default                                                          | Meaning                                                                                                                  |
+| ------------------- | ---------------------------------------------------------------- | ------------------------------------------------------------------------------------------------------------------------ |
+| `enable`            | `false`                                                          | Enable installation and configuration.                                                                                   |
+| `package`           | declared `null`; flake's Pi package via `mkDefault` when enabled | Executable added to `home.packages`; explicit `null` disables this.                                                      |
+| `agentDir`          | `.pi/agent`                                                      | Home-relative global agent directory; no `..`. The launcher must respect `PI_CODING_AGENT_DIR`.                          |
+| `nativeConfigMode`  | `"managed"`                                                      | `managed` links native files read-only; `mutable` seeds absent files once on activation.                                 |
+| `quietState.enable` | `true`                                                           | Emit `defaults/quiet-state.json` with `{ enabled = ...; }`; the runtime environment kill switch remains higher priority. |
+| `settings`          | `null`                                                           | Native `settings.json` object, including arbitrary supported native settings.                                            |
+| `models`            | `null`                                                           | Native `models.json` object, including provider/model declarations.                                                      |
+| `keybindings`       | `null`                                                           | Native `keybindings.json` object.                                                                                        |
+| `mcp`               | `null`                                                           | Native `mcp.json` object; never put literal credentials here.                                                            |
+| `extraSkills`       | `{}`                                                             | Additional skill source directories keyed by safe skill names; recursive resource links under `agentDir/skills`.         |
+| `packages`          | `[]`                                                             | Additive native package declarations: source strings, derivations, or `{ source = ...; ...filters }`.                    |
+| `contextFiles`      | `{}`                                                             | Markdown filenames relative to `agentDir`; exactly one of `source` or `text`.                                            |
 
 `settings.packages` and `packages` concatenate and deduplicate. Derivations are
 converted to absolute store paths, including a filter object's `source`.
@@ -126,10 +126,10 @@ Every registry extension has `extensions.<option>.enable` (default `false`) and
 `extensions.<option>.settings` (default `{}`), a direct JSON object. All existing
 option names remain available. The only aliases are:
 
-| Existing option name | Canonical extension / defaults file |
-| --- | --- |
-| `accounts` | `openai-accounts` / `defaults/openai-accounts.json` |
-| `usage` (legacy) | `openai-usage` / `defaults/openai-usage.json`; installs `accounts` dependency, no `/usage` command. Prefer `accounts.enable`. |
+| Existing option name | Canonical extension / defaults file                                                                                           |
+| -------------------- | ----------------------------------------------------------------------------------------------------------------------------- |
+| `accounts`           | `openai-accounts` / `defaults/openai-accounts.json`                                                                           |
+| `usage` (legacy)     | `openai-usage` / `defaults/openai-usage.json`; installs `accounts` dependency, no `/usage` command. Prefer `accounts.enable`. |
 
 All others use their option name as the canonical name, including
 `openai-fast-mode` (installed source directory `pi-openai-fast-mode`). The full
@@ -137,17 +137,17 @@ registry list is in `extension-registry.nix`; `auto` is included.
 
 Named typed options remain compatible:
 
-| Option under `extensions` | Default |
-| --- | --- |
-| `btw.model` (Paseo only) | `${subagent.defaultProvider}/${subagent.defaultModel}` |
-| `stamp.visibleByDefault` | `false` |
-| `cache-hit-monitor.visibleByDefault` | `false` |
-| `slow-mode.enabledByDefault` | `false` |
-| `idle-context-warning.idleMinutes` | `30` (1–1440) |
-| `idle-context-warning.contextPercent` | `20` (1–100) |
-| `idle-context-warning.cheapCompactionModel` | `"cheap"` |
-| `subagent.defaultModel` | `"cheap"` |
-| `subagent.defaultThinkingLevel` | `"low"` |
+| Option under `extensions`                   | Default                                                |
+| ------------------------------------------- | ------------------------------------------------------ |
+| `btw.model` (Paseo only)                    | `${subagent.defaultProvider}/${subagent.defaultModel}` |
+| `stamp.visibleByDefault`                    | `false`                                                |
+| `cache-hit-monitor.visibleByDefault`        | `false`                                                |
+| `slow-mode.enabledByDefault`                | `false`                                                |
+| `idle-context-warning.idleMinutes`          | `30` (1–1440)                                          |
+| `idle-context-warning.contextPercent`       | `20` (1–100)                                           |
+| `idle-context-warning.cheapCompactionModel` | `"cheap"`                                              |
+| `subagent.defaultModel`                     | `"cheap"`                                              |
+| `subagent.defaultThinkingLevel`             | `"low"`                                                |
 
 Generated defaults recursively merge **named options, then `.settings`**; explicit
 raw settings win. The file contains the resulting object directly, without a

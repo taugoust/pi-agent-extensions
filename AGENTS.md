@@ -10,13 +10,13 @@ This is **pi-agent-extensions** — a collection of [pi](https://github.com/mari
 
 ## Current Extensions
 
-| File | Description |
-|------|-------------|
-| `fetch/` | HTTP request tool — fetches URLs, downloads files, shows curl equivalent |
-| `questionnaire/` | Multi-question tool for LLM-driven user input |
-| `sandbox/` | AgentSH approval relay UI — prompts for AgentSH-owned pending approvals |
-| `slow-mode/` | Review gate for write/edit tool calls — toggle with `/slowmode` |
-| `subagent-finalizer/` | Urgently steers >90%-context subagents to return before compaction |
+| File                  | Description                                                              |
+| --------------------- | ------------------------------------------------------------------------ |
+| `fetch/`              | HTTP request tool — fetches URLs, downloads files, shows curl equivalent |
+| `questionnaire/`      | Multi-question tool for LLM-driven user input                            |
+| `sandbox/`            | AgentSH approval relay UI — prompts for AgentSH-owned pending approvals  |
+| `slow-mode/`          | Review gate for write/edit tool calls — toggle with `/slowmode`          |
+| `subagent-finalizer/` | Urgently steers >90%-context subagents to return before compaction       |
 
 ## Before Implementation
 

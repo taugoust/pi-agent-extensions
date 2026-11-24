@@ -9,11 +9,5 @@
   "semi": true,
   "arrowParens": "always",
   "bracketSameLine": false,
-  "bracketSpacing": true,
-  "ignorePatterns": [
-    "*.lock",
-    "**/*.gen.ts",
-    "**/*.gen.tsx",
-    "btw/candidate-runtime.ts"
-  ]
+  "bracketSpacing": true
 }
