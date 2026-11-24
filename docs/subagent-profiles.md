@@ -14,13 +14,13 @@ Profiles select reusable instructions, a role model/thinking level, and an optio
 
 `agent` selects a profile. `name` remains an independent tmux/display label; setting `name: "scout"` alone does not select the scout profile. Each task still needs concrete `acceptance`; profile instructions never substitute for it. For groups, select `agent` on each item, not on the root.
 
-| Builtin | Purpose | Business tools | Thinking |
-|---|---|---|---|
-| `coordinator` | Coordinates a goal and reviews delegated work (model `gpt-6.1-sol`) | runtime defaults | high |
-| `scout` | Focused codebase reconnaissance, no edits | read, bash, background_job, fetch | low |
-| `worker` | Narrow implementation and validation | read, bash, edit, write, background_job, fetch | high |
-| `reviewer` | Independent review, no edits | read, bash, background_job, fetch | high |
-| `oracle` | Advisory challenge of decisions and assumptions, no edits | read, bash, background_job, fetch | high |
+| Builtin       | Purpose                                                             | Business tools                                 | Thinking |
+| ------------- | ------------------------------------------------------------------- | ---------------------------------------------- | -------- |
+| `coordinator` | Coordinates a goal and reviews delegated work (model `gpt-6.1-sol`) | runtime defaults                               | high     |
+| `scout`       | Focused codebase reconnaissance, no edits                           | read, bash, background_job, fetch              | low      |
+| `worker`      | Narrow implementation and validation                                | read, bash, edit, write, background_job, fetch | high     |
+| `reviewer`    | Independent review, no edits                                        | read, bash, background_job, fetch              | high     |
+| `oracle`      | Advisory challenge of decisions and assumptions, no edits           | read, bash, background_job, fetch              | high     |
 
 Every builtin can run background jobs and fetch pages. Only the worker gets
 `edit` and `write`. Leaving those out is a signal of intent, not a sandbox,
@@ -42,6 +42,7 @@ tools:
   - read
   - bash
 ---
+
 Review the assigned diff for concrete security defects. Do not edit files.
 Return findings with evidence and explain any uncertainty.
 ```
