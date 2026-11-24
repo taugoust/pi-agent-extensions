@@ -54,7 +54,7 @@ done
 manifest='"./extension-config-manifest.json"'
 substituteInPlace "$workdir/src/shared/extension-defaults.ts" \
   --replace-fail "from $manifest;" "from $manifest with { type: \"json\" };"
-printf '%s\n' '{ "type": "module" }' > "$workdir/src/package.json"
+printf '%s\n' '{ "type": "module" }' >"$workdir/src/package.json"
 
 compileSources=(
   subagent/backend.ts
@@ -105,20 +105,20 @@ legacyPi="$workdir/out/node_modules/@mariozechner/pi-coding-agent"
 mkdir -p "$legacyPi"
 printf '%s\n' \
   '{ "name": "@mariozechner/pi-coding-agent", "type": "module", "main": "./index.js" }' \
-  > "$legacyPi/package.json"
+  >"$legacyPi/package.json"
 cp "$fixtureRoot/legacy-pi-stub.mjs" "$legacyPi/index.js"
 
 pi="$workdir/out/node_modules/@earendil-works/pi-coding-agent"
 mkdir -p "$pi"
 printf '%s\n' \
   '{ "name": "@earendil-works/pi-coding-agent", "type": "module", "main": "./index.js" }' \
-  > "$pi/package.json"
+  >"$pi/package.json"
 # Guidance registration needs schema helpers; real-Pi fixtures use the actual SDK.
 piAi="$workdir/out/node_modules/@earendil-works/pi-ai"
 mkdir -p "$piAi"
 printf '%s\n' \
   '{ "name": "@earendil-works/pi-ai", "type": "module", "main": "./index.js" }' \
-  > "$piAi/package.json"
+  >"$piAi/package.json"
 cp "$fixtureRoot/pi-ai-stub.mjs" "$piAi/index.js"
 export PI_SUBAGENT_TEST_AGENT_DIR="$workdir/isolated-agent"
 mkdir -p "$PI_SUBAGENT_TEST_AGENT_DIR"

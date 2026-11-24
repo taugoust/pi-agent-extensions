@@ -29,7 +29,7 @@ test -f "$questionnaireBundle"/questionnaire/paseo.ts
 # This isolated compile has no @types/node package, so declare only the
 # process.env surface used by foreground-tasks.
 printf '%s\n' 'declare const process: { env: Record<string, string | undefined> };' \
-  > "$srcdir/node-globals.d.ts"
+  >"$srcdir/node-globals.d.ts"
 sources=(
   "$srcdir/questionnaire/paseo.ts"
   "$srcdir/questionnaire/timeout.ts"
@@ -50,10 +50,10 @@ tsc --noCheck --skipLibCheck --module nodenext --moduleResolution nodenext \
   --target es2022 --rootDir "$srcdir" --outDir "$outdir" "$srcdir/questionnaire/index.ts"
 mkdir -p "$outdir/node_modules/@mariozechner/pi-tui" "$outdir/node_modules/@sinclair/typebox"
 printf '%s\n' '{"type":"module","main":"index.js"}' \
-  > "$outdir/node_modules/@mariozechner/pi-tui/package.json"
+  >"$outdir/node_modules/@mariozechner/pi-tui/package.json"
 cp "$fixtures/mariozechner-pi-tui.mjs" "$outdir/node_modules/@mariozechner/pi-tui/index.js"
 printf '%s\n' '{"type":"module","main":"index.js"}' \
-  > "$outdir/node_modules/@sinclair/typebox/package.json"
+  >"$outdir/node_modules/@sinclair/typebox/package.json"
 cp "$fixtures/sinclair-typebox.mjs" "$outdir/node_modules/@sinclair/typebox/index.js"
 node "$src"/questionnaire/headless.test.mjs "$outdir"
 tests=(

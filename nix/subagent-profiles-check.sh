@@ -27,5 +27,5 @@ if [ -f "$PROFILE_TEST_LOG" ]; then
 fi
 test "$wait_status" = 0
 test -f "$PROFILE_TEST_RESULT"
-test "$(< "$PROFILE_TEST_RESULT")" = 0
-printf 'Actual offline native profile selection and retained contract checks passed.\n' > "$out"
+test "$(<"$PROFILE_TEST_RESULT")" = 0
+printf 'Actual offline native profile selection and retained contract checks passed.\n' >"$out"

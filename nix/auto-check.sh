@@ -7,7 +7,7 @@ mkdir -p "$srcdir/auto" "$srcdir/sandbox" "$outdir/node_modules/@mariozechner/pi
 cp "$SOURCE_ROOT/auto/index.ts" "$srcdir/auto/index.ts"
 cp "$SOURCE_ROOT/auto/request.ts" "$srcdir/auto/request.ts"
 cp "$SOURCE_ROOT/sandbox/api.ts" "$srcdir/sandbox/api.ts"
-cat > "$outdir/node_modules/@mariozechner/pi-coding-agent/package.json" <<'EOF'
+cat >"$outdir/node_modules/@mariozechner/pi-coding-agent/package.json" <<'EOF'
 { "name": "@mariozechner/pi-coding-agent", "type": "module", "main": "./index.js" }
 EOF
 cp "$FIXTURES/coding-agent.mjs" "$outdir/node_modules/@mariozechner/pi-coding-agent/index.js"

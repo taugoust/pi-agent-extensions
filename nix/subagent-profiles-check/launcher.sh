@@ -14,4 +14,4 @@ export XDG_CACHE_HOME="$HOME/cache"
 export PI_TUI_WORKER_STATE_ROOT="$fixture_root/worker-state"
 export PROFILE_FIXTURE_LOG="$fixture_root/dispatch.jsonl"
 # Explicitly add only the synthetic provider, including for managed Goal workers.
-exec "$pi" "$@" --extension "$fixture" 2>> "$PROFILE_FIXTURE_LOG.stderr"
+exec "$pi" "$@" --extension "$fixture" 2>>"$PROFILE_FIXTURE_LOG.stderr"

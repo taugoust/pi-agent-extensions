@@ -18,14 +18,14 @@ cp "$src"/sandbox/api.ts "$srcdir/sandbox/api.ts"
 cp "$src"/shared/agentsh-mode.ts "$srcdir/shared/agentsh-mode.ts"
 cp "$src"/shared/bash-command-transform.ts "$srcdir/shared/bash-command-transform.ts"
 
-cat > "$outdir/node_modules/@mariozechner/pi-coding-agent/package.json" <<'EOF'
+cat >"$outdir/node_modules/@mariozechner/pi-coding-agent/package.json" <<'EOF'
 { "name": "@mariozechner/pi-coding-agent", "type": "module", "main": "./index.js" }
 EOF
 cp "$fixtures/mariozechner-pi-coding-agent.mjs" \
   "$outdir/node_modules/@mariozechner/pi-coding-agent/index.js"
 
-printf '#!%s\n' "$runtimeShell" > "$workdir/bin/ssh"
-cat "$fixtures/ssh.sh" >> "$workdir/bin/ssh"
+printf '#!%s\n' "$runtimeShell" >"$workdir/bin/ssh"
+cat "$fixtures/ssh.sh" >>"$workdir/bin/ssh"
 chmod +x "$workdir/bin/ssh"
 
 sources=(

@@ -10,6 +10,6 @@ coreutils=$1/bin
   exec "$coreutils/sleep" 30
 ) </dev/null >/dev/null 2>&1 &
 child=$!
-printf '%s\n' "$child" > "$("$coreutils/dirname" "$PI_AGENTSH_LIFECYCLE_STATE")/descendant.pid"
+printf '%s\n' "$child" >"$("$coreutils/dirname" "$PI_AGENTSH_LIFECYCLE_STATE")/descendant.pid"
 trap 'exit 0' TERM
 wait "$child"

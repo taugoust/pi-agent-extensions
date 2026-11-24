@@ -37,7 +37,7 @@ background_sources=(
 copy_sources subagent "${subagent_sources[@]}"
 copy_sources shared "${shared_sources[@]}"
 copy_sources background-job "${background_sources[@]}"
-printf '%s\n' '{"type":"module"}' > "$srcdir/package.json"
+printf '%s\n' '{"type":"module"}' >"$srcdir/package.json"
 
 tsc \
   --rewriteRelativeImportExtensions \
@@ -94,13 +94,13 @@ node "$outdir/background-job/pane.test.mjs"
 
 earendil="$outdir/node_modules/@earendil-works/pi-coding-agent"
 mkdir -p "$earendil"
-printf '%s\n' '{"type":"module","main":"index.js"}' > "$earendil/package.json"
+printf '%s\n' '{"type":"module","main":"index.js"}' >"$earendil/package.json"
 cp "$FIXTURES/earendil-coding-agent.mjs" "$earendil/index.js"
 mkdir -p "$outdir/node_modules/@sinclair/typebox" \
   "$outdir/node_modules/@mariozechner/pi-coding-agent" \
   "$outdir/node_modules/@mariozechner/pi-tui"
 for packageName in @sinclair/typebox @mariozechner/pi-coding-agent @mariozechner/pi-tui; do
-  cat > "$outdir/node_modules/$packageName/package.json" <<EOF
+  cat >"$outdir/node_modules/$packageName/package.json" <<EOF
 { "name": "$packageName", "type": "module", "main": "./index.js" }
 EOF
 done

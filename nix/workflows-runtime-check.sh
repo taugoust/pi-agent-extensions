@@ -60,4 +60,4 @@ timeout 30s node "$probe" "$pi_package/bin/pi" \
 # A normal CLI exit is insufficient: missing registration must fail for the intended reason.
 node "$source_root/nix/workflows-runtime-check/missing-registration.mjs" \
   "$probe" "$pi_package/bin/pi" "$bundle/workflows"
-printf 'Worktree and Goal commands registered in the actual immutable Pi runtime.\n' > "$out"
+printf 'Worktree and Goal commands registered in the actual immutable Pi runtime.\n' >"$out"

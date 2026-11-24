@@ -7,7 +7,7 @@ outdir="$workdir/out"
 mkdir -p "$srcdir" "$outdir"
 
 cp -r "$SOURCE_ROOT/subagent-finalizer" "$srcdir/"
-printf '%s\n' '{"type":"module"}' > "$srcdir/package.json"
+printf '%s\n' '{"type":"module"}' >"$srcdir/package.json"
 
 tsc \
   --noCheck \

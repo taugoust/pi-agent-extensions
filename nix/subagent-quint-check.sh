@@ -5,7 +5,7 @@ source_root=$1
 export HOME="$TMPDIR/home"
 mkdir -p "$HOME" "$TMPDIR/src/subagent" "$TMPDIR/src/tests/quint"
 cd "$TMPDIR/src"
-printf '%s\n' '{ "type": "module" }' > package.json
+printf '%s\n' '{ "type": "module" }' >package.json
 cp "$source_root/subagent/resume.ts" "$source_root/subagent/resume.test.ts" subagent/
 cp "$source_root/tests/quint/"* tests/quint/
 

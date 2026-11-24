@@ -10,7 +10,7 @@ mkdir -p "$PI_CODING_AGENT_DIR" src/progress src/shared \
 cp "$SOURCE_ROOT/progress/settings.ts" "$SOURCE_ROOT/progress/settings.test.ts" src/progress/
 cp "$SOURCE_ROOT/shared/extension-defaults.ts" \
   "$SOURCE_ROOT/shared/extension-config-manifest.json" src/shared/
-cat > src/node_modules/@earendil-works/pi-coding-agent/package.json <<'EOF'
+cat >src/node_modules/@earendil-works/pi-coding-agent/package.json <<'EOF'
 { "name": "@earendil-works/pi-coding-agent", "type": "module", "main": "./index.js" }
 EOF
 # The only stub is the controlled root locator. Re-export the actual pinned
@@ -33,7 +33,7 @@ assert text.count(old) == 1
 path.write_text(text.replace(old, "JSON.stringify(settings, null, 2)"))
 PY
 if bun test --timeout 10000 --test-name-pattern 'saving writes only explicit preferences' \
-  ./mutant/progress/settings.test.ts > mutant.log 2>&1; then
+  ./mutant/progress/settings.test.ts >mutant.log 2>&1; then
   cat mutant.log
   echo 'ERROR: resolved-defaults-persistence mutant survived' >&2
   exit 1

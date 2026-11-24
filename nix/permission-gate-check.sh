@@ -12,7 +12,7 @@ cp "$src"/shared/agentsh-mode.ts "$workdir/src/shared/agentsh-mode.ts"
 cp "$src"/shared/bash-command-transform.ts "$workdir/src/shared/bash-command-transform.ts"
 cp "$src"/shared/subagent-permission.ts "$workdir/src/shared/subagent-permission.ts"
 cp "$src"/shared/foreground-tasks.ts "$workdir/src/shared/foreground-tasks.ts"
-printf '%s\n' '{"type":"module"}' > "$workdir/src/package.json"
+printf '%s\n' '{"type":"module"}' >"$workdir/src/package.json"
 sources=(
   "$workdir/src/permission-gate/index.ts"
   "$workdir/src/permission-gate/settings.ts"

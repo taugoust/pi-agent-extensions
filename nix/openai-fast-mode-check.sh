@@ -21,10 +21,10 @@ python3 "$rpcTest" "$pi/bin/pi" "$bundle/node_modules/pi-openai-fast-mode/src/in
 hm_home="$work/hm-home"
 hm_agent="$hm_home/.pi/agent"
 while IFS= read -r entry; do
-  name=$(jq -r .name <<< "$entry")
-  source_path=$(jq -r .source <<< "$entry")
+  name=$(jq -r .name <<<"$entry")
+  source_path=$(jq -r .source <<<"$entry")
   # Like Home Manager, recursive entries link each file into a writable directory.
-  if [ "$(jq -r .recursive <<< "$entry")" = true ]; then
+  if [ "$(jq -r .recursive <<<"$entry")" = true ]; then
     mkdir -p "$hm_home/$name"
     cp -rs "$source_path/." "$hm_home/$name"
     chmod -R u+w "$hm_home/$name"

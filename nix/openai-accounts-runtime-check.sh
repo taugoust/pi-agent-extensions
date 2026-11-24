@@ -32,9 +32,9 @@ unset PI_SESSION_ROUTING_FILE PI_SESSION_ROUTING_OWNER_SESSION
 unset AGENTSH_SUBAGENT_ID AGENTSH_SUBAGENT_REQUEST_ID
 mkdir -p "$out"
 timeout 90s node fixture/tests/session-routing-native.mjs "$pi_package/bin/pi" \
-  "$PWD/fixture/tests/session-routing-native-fixture.ts" > "$out/native-routing.log" 2>&1 || {
+  "$PWD/fixture/tests/session-routing-native-fixture.ts" >"$out/native-routing.log" 2>&1 || {
   cat "$out/native-routing.log"
   exit 1
 }
 cat "$out/native-routing.log"
-printf 'Account commands and native routing verified in the immutable Pi runtime.\n' > "$out/result"
+printf 'Account commands and native routing verified in the immutable Pi runtime.\n' >"$out/result"

@@ -5,7 +5,7 @@ set -euo pipefail
 workdir="$TMPDIR/agentsh-mode-check"
 mkdir -p "$workdir/src/shared" "$workdir/out"
 cp "$SOURCE_ROOT/shared/agentsh-mode.ts" "$workdir/src/shared/agentsh-mode.ts"
-printf '{"type":"module"}\n' > "$workdir/src/package.json"
+printf '{"type":"module"}\n' >"$workdir/src/package.json"
 
 tsc \
   --noCheck \

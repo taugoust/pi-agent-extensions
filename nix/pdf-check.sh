@@ -12,10 +12,10 @@ for file in "${pdf_sources[@]}"; do
 done
 cp "$SOURCE_ROOT/sandbox/api.ts" "$srcdir/sandbox/api.ts"
 cp "$SOURCE_ROOT/shared/agentsh-mode.ts" "$srcdir/shared/agentsh-mode.ts"
-printf '{"type":"module"}\n' > "$srcdir/package.json"
-printf '{"type":"module"}\n' > "$outdir/package.json"
+printf '{"type":"module"}\n' >"$srcdir/package.json"
+printf '{"type":"module"}\n' >"$outdir/package.json"
 
-cat > "$outdir/node_modules/@sinclair/typebox/package.json" <<'EOF'
+cat >"$outdir/node_modules/@sinclair/typebox/package.json" <<'EOF'
 {
   "name": "@sinclair/typebox",
   "type": "module",

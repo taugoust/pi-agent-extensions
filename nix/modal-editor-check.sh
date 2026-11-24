@@ -12,7 +12,7 @@ mkdir -p \
   "$outdir/node_modules/@mariozechner/pi-coding-agent" \
   "$outdir/node_modules/@mariozechner/pi-tui"
 
-cat > "$outdir/node_modules/@mariozechner/pi-coding-agent/package.json" <<'EOF'
+cat >"$outdir/node_modules/@mariozechner/pi-coding-agent/package.json" <<'EOF'
 {
   "name": "@mariozechner/pi-coding-agent",
   "type": "module",
@@ -22,7 +22,7 @@ EOF
 
 cp "$FIXTURES/coding-agent.mjs" "$outdir/node_modules/@mariozechner/pi-coding-agent/index.js"
 
-cat > "$outdir/node_modules/@mariozechner/pi-tui/package.json" <<'EOF'
+cat >"$outdir/node_modules/@mariozechner/pi-tui/package.json" <<'EOF'
 {
   "name": "@mariozechner/pi-tui",
   "type": "module",

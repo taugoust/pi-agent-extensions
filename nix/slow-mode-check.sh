@@ -14,18 +14,18 @@ cp "$src"/shared/extension-defaults.ts "$src"/shared/extension-config-manifest.j
 substituteInPlace "$srcdir/shared/extension-defaults.ts" \
   --replace-fail 'from "./extension-config-manifest.json";' \
   'from "./extension-config-manifest.json" with { type: "json" };'
-printf '%s\n' '{ "type": "module" }' > "$srcdir/package.json"
+printf '%s\n' '{ "type": "module" }' >"$srcdir/package.json"
 cp "$srcdir/package.json" "$outdir/package.json"
 
 mkdir -p "$outdir/node_modules/@earendil-works/pi-coding-agent"
-cat > "$outdir/node_modules/@earendil-works/pi-coding-agent/package.json" <<'EOF'
+cat >"$outdir/node_modules/@earendil-works/pi-coding-agent/package.json" <<'EOF'
 { "name": "@earendil-works/pi-coding-agent", "type": "module", "main": "./index.js" }
 EOF
 cp "$fixtures/earendil-works-pi-coding-agent.mjs" \
   "$outdir/node_modules/@earendil-works/pi-coding-agent/index.js"
 
 mkdir -p "$outdir/node_modules/@mariozechner/pi-tui"
-cat > "$outdir/node_modules/@mariozechner/pi-tui/package.json" <<'EOF'
+cat >"$outdir/node_modules/@mariozechner/pi-tui/package.json" <<'EOF'
 {
   "name": "@mariozechner/pi-tui",
   "type": "module",

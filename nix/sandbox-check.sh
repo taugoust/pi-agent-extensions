@@ -16,10 +16,10 @@ substituteInPlace "$srcdir/shared/extension-defaults.ts" \
   'from "./extension-config-manifest.json" with { type: "json" };'
 mkdir -p "$outdir/node_modules/@earendil-works"
 ln -s ../@mariozechner/pi-coding-agent "$outdir/node_modules/@earendil-works/pi-coding-agent"
-printf '%s\n' '{"type":"module"}' > "$srcdir/package.json"
+printf '%s\n' '{"type":"module"}' >"$srcdir/package.json"
 
 mkdir -p "$outdir/node_modules/@sinclair/typebox"
-cat > "$outdir/node_modules/@sinclair/typebox/package.json" <<'EOF'
+cat >"$outdir/node_modules/@sinclair/typebox/package.json" <<'EOF'
 {
   "name": "@sinclair/typebox",
   "type": "module",
@@ -32,11 +32,11 @@ cp "$fixtures/sinclair-typebox.mjs" "$outdir/node_modules/@sinclair/typebox/inde
 # pi-ai re-exports typebox's Type; guidance tools import it from there.
 mkdir -p "$outdir/node_modules/@earendil-works/pi-ai"
 printf '%s\n' '{"name":"@earendil-works/pi-ai","type":"module","main":"./index.js"}' \
-  > "$outdir/node_modules/@earendil-works/pi-ai/package.json"
+  >"$outdir/node_modules/@earendil-works/pi-ai/package.json"
 cp "$fixtures/earendil-works-pi-ai.mjs" "$outdir/node_modules/@earendil-works/pi-ai/index.js"
 
 mkdir -p "$outdir/node_modules/@mariozechner/pi-coding-agent"
-cat > "$outdir/node_modules/@mariozechner/pi-coding-agent/package.json" <<'EOF'
+cat >"$outdir/node_modules/@mariozechner/pi-coding-agent/package.json" <<'EOF'
 {
   "name": "@mariozechner/pi-coding-agent",
   "type": "module",
@@ -47,7 +47,7 @@ cp "$fixtures/mariozechner-pi-coding-agent.mjs" \
   "$outdir/node_modules/@mariozechner/pi-coding-agent/index.js"
 
 mkdir -p "$outdir/node_modules/@mariozechner/pi-tui"
-cat > "$outdir/node_modules/@mariozechner/pi-tui/package.json" <<'EOF'
+cat >"$outdir/node_modules/@mariozechner/pi-tui/package.json" <<'EOF'
 {
   "name": "@mariozechner/pi-tui",
   "type": "module",
@@ -115,7 +115,7 @@ node "$outdir/sandbox/workspace-paths.test.js"
 # The background wait fixture runs on its own provider, so give it a cheap tier.
 export PI_TEST_AGENT_DIR="$TMPDIR/background-wait-agent"
 mkdir -p "$PI_TEST_AGENT_DIR"
-printf '%s\n' '{"fixture-provider":{"cheap":"gpt-6-luna"}}' > "$PI_TEST_AGENT_DIR/model-tiers.json"
+printf '%s\n' '{"fixture-provider":{"cheap":"gpt-6-luna"}}' >"$PI_TEST_AGENT_DIR/model-tiers.json"
 node "$outdir/subagent/background-wait.test.js"
 unset PI_TEST_AGENT_DIR
 
