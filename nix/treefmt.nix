@@ -5,7 +5,10 @@
   # oxfmt reads .oxfmtrc.json from the repository root.
   programs.oxfmt.enable = true;
   programs.nixfmt.enable = true;
-  programs.shfmt.enable = true;
+  programs.shfmt = {
+    enable = true;
+    indent_size = 2;
+  };
 
   # Vendored dependencies are kept byte-for-byte.
   settings.global.excludes = [ "**/node_modules/**" ];
