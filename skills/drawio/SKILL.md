@@ -14,7 +14,7 @@ Generate draw.io diagrams as native `.drawio` files. Optionally export to PNG, S
 3. **Handle the requested output format**:
    - `png` / `svg` / `pdf` → locate the draw.io CLI (see [draw.io CLI](#drawio-cli)), export with `--embed-diagram`, then delete the source `.drawio` file. If the CLI is not found, keep the `.drawio` file and tell the user they can install the draw.io desktop app to enable export, or use `url` mode instead, or open the `.drawio` file directly
    - `url` → generate a browser URL from the XML and open it (see [Browser URL output](#browser-url-output)). Keep the `.drawio` file as a persistent local copy
-   - *(no format)* → no extra step; the `.drawio` file is the output
+   - _(no format)_ → no extra step; the `.drawio` file is the output
 4. **Open the result** — the exported file if exported, the browser URL if `url`, or the `.drawio` file otherwise. If the open command fails, print the file path (or URL) so the user can open it manually
 
 ## Choosing the output format
@@ -31,12 +31,12 @@ If no format is mentioned, just write the `.drawio` file and open it in draw.io.
 
 ### Supported export formats
 
-| Format | Embed XML | Notes |
-|--------|-----------|-------|
-| `png` | Yes (`-e`) | Viewable everywhere, editable in draw.io |
-| `svg` | Yes (`-e`) | Scalable, editable in draw.io |
-| `pdf` | Yes (`-e`) | Printable, editable in draw.io |
-| `jpg` | No | Lossy, no embedded XML support |
+| Format | Embed XML  | Notes                                    |
+| ------ | ---------- | ---------------------------------------- |
+| `png`  | Yes (`-e`) | Viewable everywhere, editable in draw.io |
+| `svg`  | Yes (`-e`) | Scalable, editable in draw.io            |
+| `pdf`  | Yes (`-e`) | Printable, editable in draw.io           |
+| `jpg`  | No         | Lossy, no embedded XML support           |
 
 PNG, SVG, and PDF all support `--embed-diagram` — the exported file contains the full diagram XML, so opening it in draw.io recovers the editable diagram.
 
@@ -72,12 +72,12 @@ The URL format matches the MCP Tool Server. Node.js's `zlib.deflateRawSync` and 
 
 ### Opening the URL
 
-| Environment | Command |
-|-------------|---------|
-| macOS | `open "$URL"` |
-| Linux (native) | `xdg-open "$URL"` |
-| WSL2 | Write a temp `.url` file, open via `cmd.exe` (see below) |
-| Windows (native) | Write a temp `.url` file, open via `start` (see below) |
+| Environment      | Command                                                  |
+| ---------------- | -------------------------------------------------------- |
+| macOS            | `open "$URL"`                                            |
+| Linux (native)   | `xdg-open "$URL"`                                        |
+| WSL2             | Write a temp `.url` file, open via `cmd.exe` (see below) |
+| Windows (native) | Write a temp `.url` file, open via `start` (see below)   |
 
 **Why the `.url` workaround on Windows/WSL2?** `cmd.exe`'s `start` command treats `&` as a command separator and strips everything after `#` in URLs. The diagram payload lives in the `#create=...` fragment, so passing the URL directly causes it to be silently lost. A `.url` shortcut file preserves the URL intact.
 
@@ -186,6 +186,7 @@ drawio -x -f <format> -e -b 10 -o <output> <input.drawio>
 ```
 
 Key flags:
+
 - `-x` / `--export`: export mode
 - `-f` / `--format`: output format (png, svg, pdf, jpg)
 - `-e` / `--embed-diagram`: embed diagram XML in the output (PNG, SVG, PDF only)
@@ -199,14 +200,15 @@ Key flags:
 
 ### Opening the result
 
-| Environment | Command |
-|-------------|---------|
-| macOS | `open <file>` |
-| Linux (native) | `xdg-open <file>` |
-| WSL2 | `cmd.exe /c start "" "$(wslpath -w <file>)"` |
-| Windows | `start <file>` |
+| Environment    | Command                                      |
+| -------------- | -------------------------------------------- |
+| macOS          | `open <file>`                                |
+| Linux (native) | `xdg-open <file>`                            |
+| WSL2           | `cmd.exe /c start "" "$(wslpath -w <file>)"` |
+| Windows        | `start <file>`                               |
 
 **WSL2 notes:**
+
 - `wslpath -w <file>` converts a WSL2 path (e.g. `/home/user/diagram.drawio`) to a Windows path (e.g. `C:\Users\...`). This is required because `cmd.exe` cannot resolve `/mnt/c/...` style paths.
 - The empty string `""` after `start` is required to prevent `start` from interpreting the filename as a window title.
 
@@ -256,15 +258,15 @@ When the user asks to base a diagram on existing diagrams from prior work, read 
 
 ## Troubleshooting
 
-| Problem | Cause | Solution |
-|---------|-------|----------|
-| draw.io CLI not found | Desktop app not installed or not on PATH | Keep the `.drawio` file and tell the user to install the draw.io desktop app, use `url` mode instead, or open the file manually |
-| Export produces empty/corrupt file | Invalid XML (e.g. double hyphens in comments, unescaped special characters) | Validate XML well-formedness before writing; see the XML well-formedness section below |
-| Diagram opens but looks blank | Missing root cells `id="0"` and `id="1"` | Ensure the basic mxGraphModel structure is complete |
-| Edges not rendering | Edge mxCell is self-closing (no child mxGeometry element) | Every edge must have `<mxGeometry relative="1" as="geometry" />` as a child element |
-| File won't open after export | Incorrect file path or missing file association | Print the absolute file path so the user can open it manually |
-| Browser opens with empty diagram in `url` mode | `cmd.exe` stripped the `#create=...` fragment | Use the `.url` temp-file workaround on Windows/WSL2 (see [Opening the URL](#opening-the-url)) — never pass the URL directly to `cmd.exe /c start` |
-| URL is too long for the browser | Very large diagram exceeds browser URL length limit | Fall back to writing the `.drawio` file and opening it locally |
+| Problem                                        | Cause                                                                       | Solution                                                                                                                                          |
+| ---------------------------------------------- | --------------------------------------------------------------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------- |
+| draw.io CLI not found                          | Desktop app not installed or not on PATH                                    | Keep the `.drawio` file and tell the user to install the draw.io desktop app, use `url` mode instead, or open the file manually                   |
+| Export produces empty/corrupt file             | Invalid XML (e.g. double hyphens in comments, unescaped special characters) | Validate XML well-formedness before writing; see the XML well-formedness section below                                                            |
+| Diagram opens but looks blank                  | Missing root cells `id="0"` and `id="1"`                                    | Ensure the basic mxGraphModel structure is complete                                                                                               |
+| Edges not rendering                            | Edge mxCell is self-closing (no child mxGeometry element)                   | Every edge must have `<mxGeometry relative="1" as="geometry" />` as a child element                                                               |
+| File won't open after export                   | Incorrect file path or missing file association                             | Print the absolute file path so the user can open it manually                                                                                     |
+| Browser opens with empty diagram in `url` mode | `cmd.exe` stripped the `#create=...` fragment                               | Use the `.url` temp-file workaround on Windows/WSL2 (see [Opening the URL](#opening-the-url)) — never pass the URL directly to `cmd.exe /c start` |
+| URL is too long for the browser                | Very large diagram exceeds browser URL length limit                         | Fall back to writing the `.drawio` file and opening it locally                                                                                    |
 
 ## CRITICAL: XML well-formedness
 

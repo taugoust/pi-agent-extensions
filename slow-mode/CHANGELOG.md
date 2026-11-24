@@ -3,9 +3,10 @@
 ## 2026-02-13 - Manual Editing Support
 
 ### Added
+
 - **Manual editing of staged content**: When reviewing write/edit operations with Ctrl+O, you can now edit the staged files in your external editor
 - **Content update tracking**: The extension tracks which tool calls had their content modified
-- **Visual feedback**: 
+- **Visual feedback**:
   - Notification when edited content is detected: "Using edited content"
   - Note appended to tool results showing content was modified with line diff stats
   - UI hint changes from "view externally" to "edit externally" when editing is enabled
@@ -29,6 +30,7 @@
 ### Why the Snippet Shows Original Content
 
 The collapsed snippet (what you see with "ctrl+o to expand") shows the LLM's original proposal, not your edited version. This is **intentional** because:
+
 - It preserves a record of what the LLM proposed vs. what was actually applied
 - The snippet is rendered before interception happens (technical limitation)
 - You can see the actual content that was written by:

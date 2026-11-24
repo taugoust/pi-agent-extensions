@@ -54,7 +54,7 @@ Choose one of the following methods:
 <summary><b>Method 1: Install via pi Package Manager</b></summary>
 <br>
 
-``` bash
+```bash
 pi install git:github/taugoust/pi-agent-extensions
 ```
 
@@ -73,13 +73,13 @@ This command:
 
 1.  Clone the repository to any directory:
 
-``` bash
+```bash
 git clone https://github.com/taugoust/pi-agent-extensions.git ~/path/to/pi-agent-extensions
 ```
 
 1.  Install dependencies:
 
-``` bash
+```bash
 cd ~/path/to/pi-agent-extensions
 bun install
 # or: pnpm install
@@ -94,11 +94,9 @@ simple regex-based HTML stripping when Readability is unavailable.
 1.  Add the package to pi's configuration by editing
     `~/.pi/agent/settings.json`:
 
-``` json
+```json
 {
-  "packages": [
-    "/absolute/path/to/pi-agent-extensions"
-  ]
+  "packages": ["/absolute/path/to/pi-agent-extensions"]
 }
 ```
 
@@ -112,7 +110,7 @@ This setup loads the extensions selected by the package manifest.
 For selective installation, copy specific extension directories to
 `~/.pi/agent/extensions/`:
 
-``` bash
+```bash
 # Copy only the extensions you want
 cp -r /path/to/pi-agent-extensions/slow-mode ~/.pi/agent/extensions/
 cp -r /path/to/pi-agent-extensions/questionnaire ~/.pi/agent/extensions/
@@ -120,14 +118,14 @@ cp -r /path/to/pi-agent-extensions/questionnaire ~/.pi/agent/extensions/
 
 Or clone directly to the extensions directory:
 
-``` bash
+```bash
 git clone https://github.com/taugoust/pi-agent-extensions.git ~/.pi/agent/extensions/pi-agent-extensions
 ```
 
 **Note:** If an extension has dependencies (e.g., `slow-mode`
 requires the `diff` package), you'll need to install them:
 
-``` bash
+```bash
 cd ~/.pi/agent/extensions/slow-mode
 bun install
 ```
@@ -170,10 +168,10 @@ configured (subagent defaults, profiles, btw, idle compaction), `cheap`,
 tier's model on the session's current provider. Subagents and Goal coordinators
 can instead use a per-session subagent provider setting.
 
-| Provider | `cheap` | `expensive` | `superintelligence` |
-| --- | --- | --- | --- |
-| `openai-codex` | `gpt-6-luna` | `gpt-6.1-sol` | `gpt-6-astra` |
-| `claude-bridge` | `claude-haiku-5-5` | `claude-opus-5-5` | `claude-fable-5-1` |
+| Provider        | `cheap`            | `expensive`       | `superintelligence` |
+| --------------- | ------------------ | ----------------- | ------------------- |
+| `openai-codex`  | `gpt-6-luna`       | `gpt-6.1-sol`     | `gpt-6-astra`       |
+| `claude-bridge` | `claude-haiku-5-5` | `claude-opus-5-5` | `claude-fable-5-1`  |
 
 Override or extend the table with `programs.pi.modelTiers` (written to
 `defaults/model-tiers.json`) or `model-tiers.json` in the agent directory:
@@ -231,7 +229,6 @@ nix shell nixpkgs#bun nixpkgs#typescript --command sh -c '
 node --test idle-context-warning/runtime-integration.mjs
 nix build .#checks.x86_64-linux.idle-context-warning
 ```
-
 
 <details>
 <summary><strong>workflows</strong> - Worktree and opt-in Goal</summary>
@@ -457,7 +454,7 @@ AgentSH rather than setting `AGENTSH_PERMISSION_GATE_SOCKET` manually. AgentSH
 creates the private mode-0700 rendezvous, binds its peer to the launched Pi PID
 on Linux, and removes its path immediately after the one allowed connection.
 
-``` sh
+```sh
 agentsh permission-gate run -- pi
 ```
 
@@ -491,20 +488,22 @@ hit disk.
 
 **Key bindings**:
 
-  Key                                  Action
-  ------------------------------------ ------------------------------
-  `Enter`                   Approve changes
-  `Esc`                     Reject changes
-  `Ctrl+O`                  Open in external diff viewer
-  `j/k` / `↑↓`   Scroll line by line
-  `u/d`                     Scroll half page
-  `gg` / `G`     Jump to top/bottom
+Key Action
+
+---
+
+`Enter` Approve changes
+`Esc` Reject changes
+`Ctrl+O` Open in external diff viewer
+`j/k` / `↑↓` Scroll line by line
+`u/d` Scroll half page
+`gg` / `G` Jump to top/bottom
 
 **What it looks like**:
 
 For edits, opens delta/vim diff viewer by default:
 
-``` example
+```example
 # Delta opens in your terminal showing side-by-side diff
 # After you close delta, you get a confirmation prompt:
 
@@ -515,7 +514,7 @@ Apply changes to air/slow-mode.org?
 
 For writes (or if no external viewer), shows inline TUI diff:
 
-``` example
+```example
 ────────────────────────────────────────────────────────────────
  EDIT (diff)
  slow-mode.ts
@@ -563,7 +562,7 @@ where AgentSH owns enforcement and approval state.
 
 **What it looks like** when a write outside cwd is intercepted:
 
-``` example
+```example
 ⚠️  Write outside working directory:
 
   /home/user/nix-config/home/programs/pi/default.nix
@@ -597,23 +596,25 @@ through nested tmux when every layer uses
 
 **Modes and key bindings**:
 
-  Key                   From     Action
-  --------------------- -------- ------------------------------
-  `Escape`   insert   Switch to normal mode
-  `i`        normal   Switch to insert mode
-  `a`        normal   Append (insert + move right)
-  `h`        normal   Move left
-  `j`        normal   Move down
-  `k`        normal   Move up
-  `l`        normal   Move right
-  `0`        normal   Jump to line start
-  `$`        normal   Jump to line end
-  `x`        normal   Delete character
-  `Escape`   normal   Abort agent (default pi)
+Key From Action
+
+---
+
+`Escape` insert Switch to normal mode
+`i` normal Switch to insert mode
+`a` normal Append (insert + move right)
+`h` normal Move left
+`j` normal Move down
+`k` normal Move up
+`l` normal Move right
+`0` normal Jump to line start
+`$` normal Jump to line end
+`x` normal Delete character
+`Escape` normal Abort agent (default pi)
 
 **What it looks like**:
 
-``` example
+```example
 ────────────────────────────────────────────────────────────────
 > hello world█
 
@@ -656,18 +657,20 @@ multiple-choice questions with tab-based navigation.
 
 **Key bindings**:
 
-  Key                                  Action
-  ------------------------------------ -----------------------
-  `Tab` / `←→`   Navigate between tabs
-  `↑↓`                      Navigate options
-  `Enter`                   Confirm selection
-  `Esc`                     Cancel
+Key Action
+
+---
+
+`Tab` / `←→` Navigate between tabs
+`↑↓` Navigate options
+`Enter` Confirm selection
+`Esc` Cancel
 
 **What it looks like**:
 
 Multi-question flow:
 
-``` example
+```example
 ────────────────────────────────────────────────────────────────
 ← □ Framework  □ TypeScript  □ Styling  ✓ Submit →
 
@@ -687,7 +690,7 @@ Tab/←→ navigate • ↑↓ select • Enter confirm • Esc cancel
 
 After selecting \"React\" and pressing Enter:
 
-``` example
+```example
 ────────────────────────────────────────────────────────────────
 ← ■ Framework  □ TypeScript  □ Styling  ✓ Submit →
 
@@ -702,7 +705,7 @@ Tab/←→ navigate • ↑↓ select • Enter confirm • Esc cancel
 
 Final submit screen shows all answers:
 
-``` example
+```example
 ────────────────────────────────────────────────────────────────
 ← ■ Framework  ■ TypeScript  ■ Styling  ✓ Submit →
 
@@ -762,7 +765,7 @@ HTML stripping when its dependencies are absent.
 
 Tool call display:
 
-``` example
+```example
 fetch GET https://api.example.com/data
 fetch POST https://api.example.com/submit
 fetch GET https://example.com/logo.png → /tmp/logo.png
@@ -770,14 +773,14 @@ fetch GET https://example.com/logo.png → /tmp/logo.png
 
 Collapsed result:
 
-``` example
+```example
 200 OK · 12.3KB
 200 OK · 47.1KB → /tmp/logo.png
 ```
 
 Expanded result (`Ctrl+O`) shows curl equivalent:
 
-``` example
+```example
 $ curl -X POST \
     -H 'Content-Type: application/json' \
     -d '{"query":"test"}' \
@@ -786,7 +789,7 @@ $ curl -X POST \
 
 Errors show with red background:
 
-``` example
+```example
 ✗ 404 Not Found: https://example.com/missing
 ✗ Timed out after 30000ms: https://slow.example.com
 Native fetch outputPath is restricted to /tmp/
@@ -817,7 +820,7 @@ get JSON metadata sidecars.
 
 **Nix usage**:
 
-``` bash
+```bash
 nix shell nixpkgs#poppler_utils nixpkgs#imagemagick
 ```
 
@@ -873,7 +876,7 @@ required for filesystem, process, network, and descendant enforcement.
 
 **Modes**:
 
-``` json
+```json
 { "task": "Review README.md", "tools": ["read"] }
 { "tasks": [{ "task": "Find model code", "tools": ["read", "grep", "find"] }] }
 { "chain": [{ "task": "Find files" }, { "task": "Plan from: {previous}" }] }
@@ -894,17 +897,17 @@ and operation descriptions define the accepted combinations. Omit `operation`
 for a new launch or Draft disposition. Never combine an operation with launch
 options (`task`, `tasks`, `chain`, `model`, `background`, `tools`, `cwd`, etc.).
 
-| Operation | Fields besides `operation` (`?` means optional) |
-|---|---|
-| `profiles` | `agentScope?` (`user`, `project`, `both`) |
-| `resume` | `task_id`, `message?`, `compact?` |
-| `prompt` | `child_id`, `message`, `job_id?`, `control_mode?`, `wait_for_response?` |
-| `list`, `tasks` | `limit?` (1–50) |
-| `status`, `output`, `cancel`, `promote` | `job_id` |
-| `verify` | `job_id?`, `child_id?`; require a worker or group target |
-| `reap` | `job_id`, `force?`, `reason?`; omitted/false is normal gated reap; `force:true` requires a nonblank bypass reason |
-| `yield` | `job_id?` (immediate snapshot; sole tool ends the current run) |
-| `result` | `job_id?`, `child_id?`, `child?`, `offset?`, `limit?`, `diagnostics?`; require `job_id` or `child_id`; never both `child` and `child_id` |
+| Operation                               | Fields besides `operation` (`?` means optional)                                                                                          |
+| --------------------------------------- | ---------------------------------------------------------------------------------------------------------------------------------------- |
+| `profiles`                              | `agentScope?` (`user`, `project`, `both`)                                                                                                |
+| `resume`                                | `task_id`, `message?`, `compact?`                                                                                                        |
+| `prompt`                                | `child_id`, `message`, `job_id?`, `control_mode?`, `wait_for_response?`                                                                  |
+| `list`, `tasks`                         | `limit?` (1–50)                                                                                                                          |
+| `status`, `output`, `cancel`, `promote` | `job_id`                                                                                                                                 |
+| `verify`                                | `job_id?`, `child_id?`; require a worker or group target                                                                                 |
+| `reap`                                  | `job_id`, `force?`, `reason?`; omitted/false is normal gated reap; `force:true` requires a nonblank bypass reason                        |
+| `yield`                                 | `job_id?` (immediate snapshot; sole tool ends the current run)                                                                           |
+| `result`                                | `job_id?`, `child_id?`, `child?`, `offset?`, `limit?`, `diagnostics?`; require `job_id` or `child_id`; never both `child` and `child_id` |
 
 Named profiles are selected with `agent` on a single launch or each parallel/chain item, independently of the tmux `name`. Builtins are `scout`, `worker`, `reviewer`, and `oracle`; `operation: "profiles"` lists the effective catalogue. User and trusted project Markdown definitions can override builtins. Profiles expand into the existing retained model/thinking, instructions and tool contract; they never supply acceptance criteria, grant permissions or pin another provider/account. See [Named subagent profiles](subagent-profiles.md) for supported fields, trust/precedence, narrowing-only tool overrides and examples.
 
@@ -953,6 +956,7 @@ pauses migrate automatically without replaying delivered history. See
 [delivery guarantees, limits and recovery](guidance-notifications.md).
 
 Operator controls (do not cancel builds or workers):
+
 - `/harness-state status` — queue and broker counts, affected routing identities, delivery diagnostics, uncertainty and next retry.
 - `/harness-state dismiss-guidance all` or `/harness-state dismiss-guidance <exact child_id>` — durably consume only pending guidance requests in the explicit scope; completions and routine findings are never dismissed.
 - `/harness-state show` — explicitly display the last 25 retained child notifications.
@@ -1234,7 +1238,12 @@ falling back to an untracked child process.
 An agent can attach any eligible existing pane as a managed background job:
 
 ```json
-{"action":"adopt","pane_id":"%329","tmux_socket":"/run/user/2016/tmux-2016/default","name":"Helios route"}
+{
+  "action": "adopt",
+  "pane_id": "%329",
+  "tmux_socket": "/run/user/2016/tmux-2016/default",
+  "name": "Helios route"
+}
 ```
 
 Only `pane_id` is required when using the current/default tmux server. Registration
@@ -1267,7 +1276,16 @@ Use adoption instead of relaunching an already-running build.
 Persistent monitoring uses `background_job` rather than an LLM polling loop:
 
 ```json
-{"action":"watch","job_id":"job-...","patterns":[{"name":"stage","match":"Starting route"},{"name":"failure","match":"ERROR:"}],"from":"end","poll_ms":2000}
+{
+  "action": "watch",
+  "job_id": "job-...",
+  "patterns": [
+    { "name": "stage", "match": "Starting route" },
+    { "name": "failure", "match": "ERROR:" }
+  ],
+  "from": "end",
+  "poll_ms": 2000
+}
 ```
 
 Instead of a job ID you can give the path of an existing log file inside the
@@ -1539,7 +1557,7 @@ to the canonically selected mock or real REST socket, or starts one with
 
 **Environment**:
 
-``` sh
+```sh
 PI_AGENTSH_MOCK_SUPERVISOR=/path/to/mock.sock         # mock NDJSON mode
 AGENTSH_SESSION_SUPERVISOR=unix:///path/to/supervisor.sock # real Stage 1 REST mode
 AGENTSH_SESSION_ID=session-...                         # recommended with real attach
@@ -1755,7 +1773,7 @@ The extension exposes `globalThis.__AGENTSH_PI__` for owned extensions:
 
 **Run with only the sandbox backend, adaptive subagent, and mock supervisor**:
 
-``` sh
+```sh
 SOCK=${TMPDIR:-/tmp}/pi-agentsh-mock.sock
 nix shell nixpkgs#nodejs --command node sandbox/mock-supervisor.mjs --socket "$SOCK" --fake-approval &
 PI_AGENTSH_MOCK_SUPERVISOR="$SOCK" PI_AGENTSH_READ_MODE=supervised \
@@ -1768,7 +1786,7 @@ The sandbox publishes the backend and the adaptive extension registers the sole
 
 **Manual real-AgentSH Stage 1 run**:
 
-``` sh
+```sh
 PI_AGENTSH_ENABLE=1 \
 PI_AGENTSH_POLICY=pi-autonomous \
 PI_AGENTSH_WORKSPACE_MODE=shadow \
@@ -1781,7 +1799,7 @@ execution when the supervisor has a generic subagent runtime configured.
 
 Or attach to a supervisor started externally:
 
-``` sh
+```sh
 AGENTSH_SESSION_ID=session-... \
 AGENTSH_SESSION_SUPERVISOR=unix:///path/to/sessions/<id>/supervisor.sock \
   pi --no-extensions -e ./sandbox/index.ts -e ./subagent/index.ts
@@ -1789,7 +1807,7 @@ AGENTSH_SESSION_SUPERVISOR=unix:///path/to/sessions/<id>/supervisor.sock \
 
 **Mock-driven protocol check**:
 
-``` sh
+```sh
 nix shell nixpkgs#nodejs --command node sandbox/mock-supervisor-check.mjs
 ```
 
@@ -1875,7 +1893,7 @@ The following resource-selector walkthrough is retained as a **historical UI ill
 
 Example:
 
-``` example
+```example
 ────────────────────────────────────────────────────────────────
 Resource Configuration                     space toggle · esc close
 
@@ -1894,7 +1912,7 @@ Changes are saved to `~/.pi/agent/settings.json` and take
 effect on the next pi session. The actual content of `settings.json`
 would look like below.
 
-``` jsonc
+```jsonc
 {
   "packages": [
     {
@@ -1911,7 +1929,7 @@ would look like below.
 
 After installation, start using pi normally:
 
-``` bash
+```bash
 pi
 ```
 
@@ -1930,7 +1948,7 @@ pi
 
 ## 📁 Structure
 
-``` example
+```example
 ~/.pi/agent/extensions/
 ├── fence/              # Block write/edit outside cwd
 │   └── index.ts
@@ -1975,7 +1993,7 @@ file. pi auto-discovers `*.ts` files and
 
 A minimal extension looks like:
 
-``` typescript
+```typescript
 import type { ExtensionAPI } from "@mariozechner/pi-coding-agent";
 
 export default function (pi: ExtensionAPI) {
@@ -1987,7 +2005,7 @@ export default function (pi: ExtensionAPI) {
 
 **Recommended structure:**
 
-``` example
+```example
 my-extension/
 ├── index.ts           # Extension entrypoint
 ├── package.json       # Optional: if you need dependencies
